@@ -26,3 +26,13 @@ rollStudioToEnd = _PartDesign.rollStudioToEnd
 isStudioRolledBack = _PartDesign.isStudioRolledBack
 studioBarAfter = _PartDesign.studioBarAfter
 moveInStudio = _PartDesign.moveInStudio
+# FreeCAD-CH, ops#640 round 6: Derived
+derivedStudios = _PartDesign.derivedStudios
+studioLabel = _PartDesign.studioLabel
+derivableParts = _PartDesign.derivableParts
+makeDerived = _PartDesign.makeDerived
+editDerived = _PartDesign.editDerived
+deleteDerivedParts = _PartDesign.deleteDerivedParts
+derivedLead = _PartDesign.derivedLead
+derivedMembers = _PartDesign.derivedMembers
+derivedSource = _PartDesign.derivedSource

@@ -58,6 +58,8 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/Derived.h>
+#include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/Studio.h>
@@ -215,10 +217,38 @@ bool isFoldedMerge(const App::DocumentObject* obj)
     return merge && merge->isMerge() && foldedMerge(merge->BaseFeature.getValue()) == merge;
 }
 
+/// Whether obj is a Derived feature's member other than its lead: the lead's row stands for the
+/// feature, as Onshape lists one Derived (ops#640 round 6)
+bool isFoldedDerived(const App::DocumentObject* obj)
+{
+    auto lead = PartDesign::derivedLead(obj);
+    return lead && lead != obj;
+}
+
+/// A Derived feature's lead: its other members, whose status its row shows; else none
+std::vector<PartDesign::FeatureBase*> foldedDerived(const App::DocumentObject* obj)
+{
+    PartDesign::FeatureBase* lead = PartDesign::derivedLead(obj);
+    if (!lead || lead != obj) {
+        return {};
+    }
+    auto members = PartDesign::derivedMembers(lead);
+    members.pop_back();
+    return members;
+}
+
 /// What a row's status shows: a folded Merge's failure, warning or pending compute when its
-/// feature has none of its own, else the feature's
+/// feature has none of its own, else the feature's. A Derived feature's row shows the failure of
+/// any of its parts
 const App::DocumentObject* statusObject(const App::DocumentObject* obj)
 {
+    if (!obj->isError()) {
+        for (auto member : foldedDerived(obj)) {
+            if (member->isError()) {
+                return member;
+            }
+        }
+    }
     const PartDesign::Boolean* merge = foldedMerge(obj);
     if (!merge || obj->isError()) {
         return obj;
@@ -1267,7 +1297,7 @@ void FeaturesView::rebuildFeatures()
     // (ops#640 rank 1)
     std::vector<bool> folded;
     for (auto obj : sequence) {
-        folded.push_back(isFoldedMerge(obj));
+        folded.push_back(isFoldedMerge(obj) || isFoldedDerived(obj));
     }
     const auto shown = static_cast<int>(std::ranges::count(folded, false));
     // The header: the count, and the error icon while some row fails
@@ -1335,6 +1365,9 @@ void FeaturesView::rebuildFeatures()
         std::string extra = body ? body->Label.getValue() : "";
         if (auto merge = foldedMerge(obj)) {
             extra += '\x1e' + rowKey(merge, body && body->holds(merge));
+        }
+        for (auto member : foldedDerived(obj)) {
+            extra += '\x1e' + rowKey(member, false);
         }
         extra += '\x1d' + std::to_string(eyeState(obj));
         if (obj == inEdit) {

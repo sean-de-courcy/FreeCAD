@@ -34,6 +34,8 @@
 #include <Mod/Part/App/BodyBase.h>
 
 #include "Body.h"
+#include "Derived.h"
+#include "FeatureBase.h"
 #include "FeatureBoolean.h"
 #include "FeatureDeletePart.h"
 #include "FeatureSketchBased.h"
@@ -210,6 +212,61 @@ public:
             "refused where a read between Bodies would break. With the studio rolled back, the bar "
             "stays after bar (None: the top; default: the feature it follows). Returns whether "
             "anything changed. No transaction, no recompute."
+        );
+        // FreeCAD-CH (ops#640 round 6): Onshape's Derived inside one document (Derived.h)
+        add_varargs_method(
+            "derivedStudios",
+            &Module::derivedStudios,
+            "derivedStudios(doc) -- The studios of doc that hold a part to derive: the document "
+            "(its top level, Part Studio 1) when it has one, then its App::Parts."
+        );
+        add_varargs_method(
+            "studioLabel",
+            &Module::studioLabel,
+            "studioLabel(studio) -- A studio's name: an App::Part's Label, Part Studio 1 for a "
+            "document (its top level)."
+        );
+        add_varargs_method(
+            "derivableParts",
+            &Module::derivableParts,
+            "derivableParts(studio) -- The parts of the studio a Derived feature can bring in: its "
+            "Bodies with a shape that no Delete part deleted."
+        );
+        add_varargs_method(
+            "makeDerived",
+            &Module::makeDerived,
+            "makeDerived(studio, bodies) -- A Derived feature in the studio (a document: its top "
+            "level) of bodies, parts of one other studio: per part a Body built on a binder of it. "
+            "Returns the lead, whose row stands for the feature. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "editDerived",
+            &Module::editDerived,
+            "editDerived(lead, bodies) -- The Derived feature brings in bodies instead. Returns the "
+            "lead after the edit. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "deleteDerivedParts",
+            &Module::deleteDerivedParts,
+            "deleteDerivedParts(lead) -- Removes what the Derived feature made besides lead: its "
+            "other members, the binders, the Bodies left empty (lead's too: lead is then in no "
+            "Body, for the caller to remove). No transaction, no recompute."
+        );
+        add_varargs_method(
+            "derivedLead",
+            &Module::derivedLead,
+            "derivedLead(obj) -- The lead of obj's Derived feature, or None."
+        );
+        add_varargs_method(
+            "derivedMembers",
+            &Module::derivedMembers,
+            "derivedMembers(lead) -- The members of the Derived feature, lead last."
+        );
+        add_varargs_method(
+            "derivedSource",
+            &Module::derivedSource,
+            "derivedSource(member) -- The part a Derived feature's member copies, or None when it "
+            "is missing."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -780,6 +837,159 @@ private:
             e.setPyException();
             throw Py::Exception();
         }
+    }
+
+    // FreeCAD-CH (ops#640 round 6): Derived (Derived.h)
+    static PyObject* studioObject(App::Document* doc, App::Part* studio)
+    {
+        return studio ? studio->getPyObject() : doc->getPyObject();
+    }
+
+    static PartDesign::FeatureBase* derivedArg(PyObject* obj)
+    {
+        auto lead = freecad_cast<PartDesign::FeatureBase*>(objectArg(obj));
+        if (!lead || !PartDesign::isDerived(lead)) {
+            PyErr_SetString(PyExc_TypeError, "Expected a Derived feature");
+            throw Py::Exception();
+        }
+        return lead;
+    }
+
+    static std::vector<Body*> bodiesArg(PyObject* objects)
+    {
+        std::vector<Body*> bodies;
+        for (auto obj : objectsArg(objects)) {
+            auto body = freecad_cast<Body*>(obj);
+            if (!body) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of bodies");
+                throw Py::Exception();
+            }
+            bodies.push_back(body);
+        }
+        return bodies;
+    }
+
+    Py::Object derivedStudios(const Py::Tuple& args)
+    {
+        PyObject* pDoc;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pDoc)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pDoc, doc, studio);
+        Py::List list;
+        for (auto part : PartDesign::derivedStudios(doc)) {
+            list.append(Py::asObject(studioObject(doc, part)));
+        }
+        return list;
+    }
+
+    Py::Object studioLabel(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pStudio)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        return Py::String(PartDesign::studioLabel(studio));
+    }
+
+    Py::Object derivableParts(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pStudio)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        return objectList(PartDesign::derivableParts(doc, studio));
+    }
+
+    Py::Object makeDerived(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pBodies;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pStudio, &pBodies)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        std::vector<Body*> bodies = bodiesArg(pBodies);
+        try {
+            return Py::asObject(PartDesign::makeDerived(doc, studio, bodies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    Py::Object editDerived(const Py::Tuple& args)
+    {
+        PyObject* pLead;
+        PyObject* pBodies;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pLead, &pBodies)) {
+            throw Py::Exception();
+        }
+        PartDesign::FeatureBase* lead = derivedArg(pLead);
+        std::vector<Body*> bodies = bodiesArg(pBodies);
+        try {
+            return Py::asObject(PartDesign::editDerived(lead, bodies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    Py::Object deleteDerivedParts(const Py::Tuple& args)
+    {
+        PyObject* pLead;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pLead)) {
+            throw Py::Exception();
+        }
+        PartDesign::deleteDerivedParts(derivedArg(pLead));
+        return Py::None();
+    }
+
+    Py::Object derivedLead(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        auto lead = PartDesign::derivedLead(objectArg(pObj));
+        if (!lead) {
+            return Py::None();
+        }
+        return Py::asObject(lead->getPyObject());
+    }
+
+    Py::Object derivedMembers(const Py::Tuple& args)
+    {
+        PyObject* pLead;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pLead)) {
+            throw Py::Exception();
+        }
+        return objectList(PartDesign::derivedMembers(derivedArg(pLead)));
+    }
+
+    Py::Object derivedSource(const Py::Tuple& args)
+    {
+        PyObject* pMember;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pMember)) {
+            throw Py::Exception();
+        }
+        auto source = PartDesign::derivedSource(derivedArg(pMember));
+        if (!source) {
+            return Py::None();
+        }
+        return Py::asObject(source->getPyObject());
     }
 
     Py::Object makeFilletArc(const Py::Tuple& args)

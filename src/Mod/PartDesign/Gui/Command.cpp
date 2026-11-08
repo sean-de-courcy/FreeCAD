@@ -58,6 +58,7 @@
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/Derived.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureGroove.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
@@ -75,6 +76,7 @@
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "SketchWorkflow.h"
+#include "TaskDerived.h"
 #include "TaskDressUpParameters.h"
 #include "TaskFeatureParameters.h"
 #include "TaskFeaturePick.h"
@@ -3803,6 +3805,59 @@ bool CmdPartDesignSplit::isActive()
     return getActiveGuiDocument() && Gui::Selection().size() >= 1;
 }
 
+//===========================================================================
+// PartDesign_Derived (FreeCAD-CH ops#640 round 6, notes/onshape-tabs-design.md 2.5)
+//===========================================================================
+
+DEF_STD_CMD_A(CmdPartDesignDerived)
+
+CmdPartDesignDerived::CmdPartDesignDerived()
+    : Command("PartDesign_Derived")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Derived");
+    sToolTipText = QT_TR_NOOP(
+        "Brings parts of another part studio of this document into this one: each a new part "
+        "that follows its source"
+    );
+    sWhatsThis = "PartDesign_Derived";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_SubShapeBinder";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
+}
+
+void CmdPartDesignDerived::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    App::Document* doc = getActiveGuiDocument() ? getActiveGuiDocument()->getDocument() : nullptr;
+    App::Part* studio = nullptr;
+    if (!doc || !PartDesignGui::activeStudio(doc, studio)) {
+        QMessageBox::information(
+            Gui::getMainWindow(),
+            QObject::tr("Derived"),
+            QObject::tr("The active part isn't in a part studio.")
+        );
+        return;
+    }
+    auto others = PartDesign::derivedStudios(doc);
+    std::erase(others, studio);
+    if (others.empty()) {
+        QMessageBox::information(
+            Gui::getMainWindow(),
+            QObject::tr("Derived"),
+            QObject::tr("No other part studio of this document has a part to derive.")
+        );
+        return;
+    }
+    Gui::Control().showDialog(new PartDesignGui::TaskDlgDerived(doc, studio));
+}
+
+bool CmdPartDesignDerived::isActive()
+{
+    return getActiveGuiDocument() && !Gui::Control().activeDialog();
+}
+
 // Command group for datums =============================================
 
 class CmdPartDesignCompDatums: public Gui::GroupCommand
@@ -4051,6 +4106,7 @@ void CreatePartDesignCommands()
     rcCmdMgr.addCommand(new CmdPartDesignBoolean());
     rcCmdMgr.addCommand(new CmdPartDesignMergeParts());
     rcCmdMgr.addCommand(new CmdPartDesignSplit());
+    rcCmdMgr.addCommand(new CmdPartDesignDerived());
     rcCmdMgr.addCommand(new CmdPartDesignCompDatums());
     rcCmdMgr.addCommand(new CmdPartDesignCompSketches());
     rcCmdMgr.addCommand(new CmdPartDesignToggleSketches());

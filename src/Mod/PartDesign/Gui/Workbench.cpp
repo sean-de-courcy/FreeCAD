@@ -645,6 +645,7 @@ Gui::MenuItem* Workbench::setupMenuBar() const
           << "PartDesign_Boolean"
           << "PartDesign_MergeParts"
           << "PartDesign_Split"
+          << "PartDesign_Derived"
           << "Separator"
           << "Materials_InspectAppearance"
           << "Materials_InspectMaterial"
@@ -717,6 +718,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
           << "PartDesign_Boolean"
           << "PartDesign_Split"
           << "PartDesign_MergeParts"
+          << "PartDesign_Derived"  // Onshape's Derived (ops#640 round 6)
           << "Separator"
           << "PartDesign_CompDatums"
           << "PartDesign_AdditiveHelix"

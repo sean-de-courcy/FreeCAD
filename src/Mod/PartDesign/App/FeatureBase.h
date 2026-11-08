@@ -48,6 +48,12 @@ public:
     /// The source's side (sourceSides()) when the copy was last computed: one entry, none until
     /// the first recompute after BaseFeature is set (FreeCAD-CH ops#322)
     App::PropertyPlacementList SourceFrame;
+    /// A Derived feature's member (FreeCAD-CH ops#640 round 6, Derived.h): its source as
+    /// derivedDescription() names it, kept while the source exists, so the error once it is gone
+    /// names it. Empty for any other base feature
+    App::PropertyString DerivedFrom;
+    /// On a Derived feature's lead: its other members (Derived.h)
+    App::PropertyLinkList DerivedParts;
 
     /**
      * Where the shape execute() takes from BaseFeature lies in this feature's container: its
