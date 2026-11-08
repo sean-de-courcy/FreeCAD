@@ -17,6 +17,7 @@ unlinkSibling = _PartDesign.unlinkSibling
 makeMerge = _PartDesign.makeMerge
 setMergeScope = _PartDesign.setMergeScope
 mergeAfter = _PartDesign.mergeAfter
+consumerOf = _PartDesign.consumerOf
 split = _PartDesign.split
 studioSequence = _PartDesign.studioSequence
 rollStudioTo = _PartDesign.rollStudioTo

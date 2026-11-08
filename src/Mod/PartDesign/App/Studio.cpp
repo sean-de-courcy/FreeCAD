@@ -21,6 +21,7 @@
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
 #include <App/MappedElement.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Mod/Part/App/PartFeature.h>
 
@@ -38,6 +39,7 @@
 #include <gp_Pln.hxx>
 
 #include "Body.h"
+#include "Feature.h"
 #include "FeatureBase.h"
 #include "FeatureMultiTransform.h"
 
@@ -314,6 +316,8 @@ History readHistory(App::Document* doc, App::Part* studio)
     return history;
 }
 
+void retraceReadsOfDeleted(const App::DocumentObject& deleted);
+
 }  // namespace
 
 std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* studio)
@@ -344,6 +348,9 @@ void saveHistoryOrder(const std::vector<App::DocumentObject*>& order)
 
 void registerHistoryImport()
 {
+    // Module start-up's one hook (AppPartDesign.cpp): a delete's re-target too (ops#640 rank 4)
+    App::GetApplication().signalDeletedObject.connect(retraceReadsOfDeleted);
+
     // A copy, a paste or a merged file is new to its studio: listed as the newest, not at its
     // source's place (reviews prlocal632-r1 T3, prlocal632-r1s 1)
     auto forget = [](const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/) {
@@ -660,10 +667,12 @@ struct Retrace
  */
 std::vector<Retrace> retraceRead(App::DocumentObject* reader,
                                  App::DocumentObject* read,
-                                 const std::unordered_set<const App::DocumentObject*>& earlier)
+                                 const std::unordered_set<const App::DocumentObject*>& earlier,
+                                 const Body* body = nullptr)
 {
     std::vector<Retrace> plan;
-    const Body* readBody = Body::findBodyOf(read);
+    // body: read's Body, given when read has just left its Group (a delete, ops#640 rank 4)
+    const Body* readBody = body ? body : Body::findBodyOf(read);
     // Traced on computed shapes only: a touched reader or read could re-pin its other entries to
     // stale elements when the property is written again (review sff13-r1 Sonnet 4)
     auto stale = [](const App::DocumentObject* obj) {
@@ -818,6 +827,65 @@ void writeRetraces(const std::vector<Retrace>& plan)
             }
         }
         list->setValues(std::move(objs), std::move(subs));
+    }
+}
+
+/** A solid feature being deleted (a Fillet): what reads its elements by name (a sketch on the face
+ * it trimmed, a datum on it) reads instead the earlier member of its Body the element comes from,
+ * by a drop's trace (retraceRead()), as Onshape keeps a sketch on the extrude's top face when the
+ * fillet under it goes and moves it with that face afterwards (ops#640 rank 4, hands-on B3-1).
+ * Run from signalDeletedObject, which Document::_removeObject() sends before it breaks the links
+ * to the object, so the links are still there; the delete path has already taken the feature out
+ * of its Body's Group (Body::removeObject()), so the Body is the one of its BaseFeature, and the
+ * earlier members are its BaseFeature chain. Written at the delete, in its transaction: a saved
+ * file computes as before (compat-neutral). Not on an undo, a redo or a rollback, which put the
+ * links back themselves; not for solid features reading it (the Body reroutes those). A reader
+ * whose entries have no such origin (an element the feature made, a projection) loses them as
+ * before.
+ */
+void retraceReadsOfDeleted(const App::DocumentObject& deleted)
+{
+    auto* feature = const_cast<App::DocumentObject*>(&deleted);
+    App::Document* doc = feature->getDocument();
+    if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Restoring)
+        || doc->testStatus(App::Document::Recomputing) || App::GetApplication().isClosingAll()
+        || !Body::isSolidFeature(feature)) {
+        return;
+    }
+    try {
+        App::DocumentObject* base = static_cast<PartDesign::Feature*>(feature)->BaseFeature.getValue();
+        Body* body = Body::findBodyOf(feature);
+        if (!body) {
+            body = Body::findBodyOf(base);
+        }
+        if (!body || !base) {
+            return;
+        }
+        std::unordered_set<const App::DocumentObject*> earlier;
+        for (App::DocumentObject* member = base; member && body->hasObject(member)
+             && earlier.insert(member).second;) {
+            auto* solid = freecad_cast<PartDesign::Feature*>(member);
+            member = solid ? solid->BaseFeature.getValue() : nullptr;
+        }
+        std::vector<Retrace> retraces;
+        std::unordered_set<const App::DocumentObject*> seen;
+        for (App::DocumentObject* reader : feature->getInList()) {
+            if (!reader || reader == feature || !seen.insert(reader).second
+                || reader->testStatus(App::ObjectStatus::Remove) || Body::isSolidFeature(reader)) {
+                continue;
+            }
+            auto plan = retraceRead(reader, feature, earlier, body);
+            retraces.insert(retraces.end(), plan.begin(), plan.end());
+        }
+        writeRetraces(retraces);
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+    }
+    catch (const Standard_Failure& e) {
+        Base::Console().error("Re-targeting what reads %s: %s\n",
+                              feature->getFullName().c_str(),
+                              e.GetMessageString());
     }
 }
 
