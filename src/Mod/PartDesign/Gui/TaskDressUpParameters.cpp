@@ -196,6 +196,22 @@ private:
     std::function<void(const Gui::SelectionChanges&)> picked;
 };
 
+// Whether another part of the dress-up's studio could take its first pick: with its own Body
+// alone, the field arms on that Body as before (ops#640 rank 14)
+bool hasOtherParts(const App::DocumentObject* dressUp)
+{
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(dressUp);
+    if (!body) {
+        return false;
+    }
+    for (PartDesign::Body* other : body->getDocument()->getObjectsOfType<PartDesign::Body>()) {
+        if (other != body && Part::BodyBase::areStudioSiblings(body, other)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Shows the Body's Tip when none of its solid features is shown, so the part isn't left empty
 void showTipIfNoneShown(const PartDesign::Body* body)
 {
@@ -285,13 +301,15 @@ TaskDressUpParameters::TaskDressUpParameters(
     transactionID = DressUpView->getObject()->getDocument()->getBookedTransactionID();
 
     // FreeCAD-CH (ops#640 rank 14): a dress-up made with nothing selected waits for its first
-    // pick, of any part; once it is placed, its dialog comes back with the Base field armed
+    // pick, of any part; once it is placed, its dialog comes back with the Base field armed. With
+    // no other part in its studio its field arms on its own Body as before
     auto dressUp = DressUpView->getObject<PartDesign::DressUp>();
     if (hasMark(armAfterPlacing, dressUp)) {
         forgetMark(armAfterPlacing, dressUp);
         armBaseOnOpen = true;
     }
-    if (hasMark(placedByFirstPick, dressUp) && dressUp->Base.getSubValues().empty()) {
+    if (hasMark(placedByFirstPick, dressUp) && dressUp->Base.getSubValues().empty()
+        && hasOtherParts(dressUp)) {
         startPlacing();
     }
 }
