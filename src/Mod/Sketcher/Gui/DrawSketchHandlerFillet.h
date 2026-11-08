@@ -427,8 +427,36 @@ private:
         const Base::Vector3d onFirst = corner.vertex + corner.dir1 * chamferDistance;
         const Base::Vector3d onSecond = corner.vertex + corner.dir2 * secondDistance;
 
+        // The trimmed lines are the ones tangent to the arc: line1 and line2 themselves, but with
+        // the corner kept fillet() splits them, the corner pieces (construction) keep their ids
+        // and the trimmed parts come after the arc
+        std::vector<int> tangent;
+        for (const auto* constraint : obj->Constraints.getValues()) {
+            if (constraint->Type != Sketcher::Tangent) {
+                continue;
+            }
+            if (constraint->Second == arcId && constraint->First != arcId) {
+                tangent.push_back(constraint->First);
+            }
+            else if (constraint->First == arcId && constraint->Second != arcId) {
+                tangent.push_back(constraint->Second);
+            }
+        }
+
         Gui::cmdAppObjectArgs(obj, "delGeometry(%d)", arcId);
         const int chamferId = chamferLineId - 1;  // after the arc, so one down
+        if (tangent.size() == 2) {
+            for (int& geoId : tangent) {
+                geoId = geoId > arcId ? geoId - 1 : geoId;
+            }
+            auto reach = [&](int geoId, const Base::Vector3d& point) {
+                return std::min((obj->getPoint(geoId, PointPos::start) - point).Length(),
+                                (obj->getPoint(geoId, PointPos::end) - point).Length());
+            };
+            const bool firstIsFirst = reach(tangent[0], onFirst) <= reach(tangent[1], onFirst);
+            line1 = firstIsFirst ? tangent[0] : tangent[1];
+            line2 = firstIsFirst ? tangent[1] : tangent[0];
+        }
 
         const PointPos chamferAtFirst = nearestEnd(obj, chamferId, onFirst);
         const PointPos chamferAtSecond = chamferAtFirst == PointPos::start ? PointPos::end

@@ -59,6 +59,18 @@ class TestSketchCornerSteps(unittest.TestCase):
         self.assert_point(start, *a, places=places)
         self.assert_point(end, *b, places=places)
 
+    def tangent_lines(self, arc_id):
+        """The lines tangent to the arc: the trimmed lines (with the corner kept, fillet() splits
+        the lines, the construction corner pieces keep their ids and the trimmed parts come after
+        the arc), as DrawSketchHandlerFillet::makeChamferUneven finds them"""
+        found = []
+        for c in self.sketch.Constraints:
+            if c.Type == "Tangent" and c.Second == arc_id and c.First != arc_id:
+                found.append(c.First)
+            elif c.Type == "Tangent" and c.First == arc_id and c.Second != arc_id:
+                found.append(c.Second)
+        return found
+
     def test_fillet_with_its_radius_dimension(self):
         highest = self.sketch.GeometryCount - 1
         self.sketch.fillet(0, 1, 3.0, True, True, False)
@@ -71,13 +83,22 @@ class TestSketchCornerSteps(unittest.TestCase):
         self.assertAlmostEqual(arc.Radius, 3.0, places=9)
         self.assert_point(arc.Center, 5, 5)
 
-        # the dimension drives the fillet: radius 4, still tangent to both lines
+        # the dimension drives the fillet: radius 4, still tangent to both lines. The lines are
+        # free (no dimension holds them), so the solver may move them a little: the oracle is the
+        # tangency, not the centre's place
         radius = [i for i, c in enumerate(self.sketch.Constraints) if c.Type == "Radius"][0]
         self.sketch.setDatum(radius, FreeCAD.Units.Quantity("4 mm"))
         self.assertEqual(self.sketch.solve(), 0)
         arc = self.sketch.Geometry[arc_id]
         self.assertAlmostEqual(arc.Radius, 4.0, places=6)
-        self.assert_point(arc.Center, 6, 6)
+        lines = self.tangent_lines(arc_id)
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            start, end = self.line_ends(line)
+            along = (end - start).normalize()
+            offset = arc.Center - start
+            distance = abs(offset.x * along.y - offset.y * along.x)
+            self.assertAlmostEqual(distance, 4.0, places=6)
 
     def test_even_chamfer(self):
         radius, second = chamfer_sizes(3.0, 45.0)
@@ -101,8 +122,16 @@ class TestSketchCornerSteps(unittest.TestCase):
         corner = V(2, 2, 0)
         on_first = V(5, 2, 0)
         on_second = V(2, 2 + second, 0)
+        tangent = self.tangent_lines(arc_id)
+        self.assertEqual(len(tangent), 2)
         self.sketch.delGeometry(arc_id)
         chamfer -= 1
+        tangent = [g - 1 if g > arc_id else g for g in tangent]
+
+        def reach(geo_id, point):
+            return min((p - point).Length for p in self.line_ends(geo_id))
+
+        first, second_line = sorted(tangent, key=lambda g: reach(g, on_first))
 
         def nearest_end(geo_id, point):
             start, end = self.line_ends(geo_id)
@@ -111,18 +140,26 @@ class TestSketchCornerSteps(unittest.TestCase):
         chamfer_at_first = nearest_end(chamfer, on_first)
         chamfer_at_second = 2 if chamfer_at_first == 1 else 1
         self.sketch.addConstraint(
-            Sketcher.Constraint("Coincident", 0, nearest_end(0, corner), chamfer, chamfer_at_first)
+            Sketcher.Constraint(
+                "Coincident", first, nearest_end(first, corner), chamfer, chamfer_at_first
+            )
         )
         self.sketch.addConstraint(
-            Sketcher.Constraint("Coincident", 1, nearest_end(1, corner), chamfer, chamfer_at_second)
+            Sketcher.Constraint(
+                "Coincident",
+                second_line,
+                nearest_end(second_line, corner),
+                chamfer,
+                chamfer_at_second,
+            )
         )
-        self.sketch.moveGeometry(1, nearest_end(1, corner), on_second, False)
+        self.sketch.moveGeometry(second_line, nearest_end(second_line, corner), on_second, False)
         self.assertEqual(self.sketch.solve(), 0)
 
         self.assert_line_between(chamfer, (5, 2), (2, 2 + second), places=5)
         # the lines stay on their lines, trimmed to the chamfer
-        self.assert_line_between(0, (5, 2), (12, 2), places=5)
-        self.assert_line_between(1, (2, 2 + second), (2, 12), places=5)
+        self.assert_line_between(first, (5, 2), (12, 2), places=5)
+        self.assert_line_between(second_line, (2, 2 + second), (2, 12), places=5)
         self.assertEqual(
             [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)], []
         )
