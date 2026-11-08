@@ -411,8 +411,16 @@ void TaskSketchPlane::followPlacement()
     // The editing transform is the sketch's placement under its containers': swap the sketch's
     // own part, so a Body's (or a link's) placement stays in it
     const Base::Placement editing(guiDocument->getEditingTransform());
-    const Base::Placement moved = editing * before.inverse() * now;
-    guiDocument->setEditingTransform(moved.toMatrix());
+    // Gui::Document follows the edited object's Placement itself while the edit's object list
+    // holds it (slotChangedObject, before this slot): composed again, the move went in twice (a
+    // face at z = 5 edited at z = 10). Followed already when the transform is the sketch's global
+    // placement now
+    const Base::Placement global = App::GeoFeature::getGlobalPlacement(sketch);
+    Base::Placement moved = editing;
+    if (!editing.isSame(global, 1e-9)) {
+        moved = editing * before.inverse() * now;
+        guiDocument->setEditingTransform(moved.toMatrix());
+    }
     vp->setGridOrientation(moved.getPosition(), moved.getRotation());
     vp->draw(false, true);
 }
