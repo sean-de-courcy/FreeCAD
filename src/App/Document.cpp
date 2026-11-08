@@ -4893,7 +4893,39 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
     auto continuation = recomputeContinuation();
     std::string why;
     int res = 0;
-    if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
+    // FreeCAD-CH (ops#640 rank 29, F20): an input in error fails it without running, as in a
+    // full recompute (ops#579, decision 253), so a dialog's own recompute keeps the error the
+    // document's gives ("Base links to X, which has an error") instead of clearing it
+    bool inputFailed = false;
+    if (!(continuation && continuation->holds(feature))) {
+        for (auto in : feature->getOutList()) {
+            if (!in->isError()) {
+                continue;
+            }
+            auto verdict = AfterInputFailure::Run;
+            if (continuation && continuation->continuesAfter(in)) {
+                verdict = continuation->decide(in, feature, why);
+            }
+            else if (failedInputText(feature, in, why)) {
+                verdict = AfterInputFailure::Fail;
+            }
+            if (verdict == AfterInputFailure::Fail) {
+                inputFailed = true;
+                break;
+            }
+        }
+        if (!inputFailed && failedReadText(feature, continuation.get(), why)) {
+            inputFailed = true;
+        }
+    }
+    if (inputFailed) {
+        // It doesn't run: its warning goes, as in a recompute (ops#127, ops#391)
+        clearWarning(feature);
+        ReferenceReport::forgetPrintedWarning(feature);
+        d->addRecomputeLog(why, feature);
+        res = 1;
+    }
+    else if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
         // A reference set aside by a reorder fails it here too (ops#127), without its warning
         clearWarning(feature);
         ReferenceReport::forgetPrintedWarning(feature);

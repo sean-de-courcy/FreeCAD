@@ -24,7 +24,9 @@
 
 One field per reference list, armed while it has the focus (no Select button): a pick toggles an
 element, Delete removes the selected entries, Ctrl+Z / Ctrl+Y step through the field's own picks,
-Esc disarms before it cancels. Entries show their state (broken red, guessed yellow) and carry the
+one Esc cancels the dialog, armed or not (ops#640 rank 25, Onshape's R1; decision 23 Q1 (a) had
+the first Esc disarm). Each removable entry has an x that removes it, and the pointer over an
+entry preselects it in the 3D view (ops#640 rank 26). Entries show their state (broken red, guessed yellow) and carry the
 References panel's actions in their context menu; the panel at the top only lists what no field
 shows.
 
@@ -526,9 +528,9 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     # -- T5: Esc --------------------------------------------------------------------------------
 
-    def testEscDisarmsThenCancels(self):
-        """T5: Esc with the field armed disarms it and the dialog stays; the next Esc cancels the
-        dialog, and Base is what it was before the edit."""
+    def testOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the field armed and the focus in it cancels the dialog at
+        once, and Base is what it was before the edit."""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         [second] = BOTTOM_BACK.one(box.Shape)
@@ -538,44 +540,48 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, second)
         self.assertEqual(fillet.Base[1], [first, second])
         self.assertTrue(focus(entries(field)))
-
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
 
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertEqual(fillet.Base[1], [first])
 
-    def testEscInThe3DViewDisarms(self):
-        """T5 from the 3D view: Esc there is the dialog's too; with a field armed it disarms the
-        field and the edit stays."""
+    def testEscInThe3DViewCancels(self):
+        """T5 from the 3D view (ops#640 rank 25): Esc there is the dialog's too; with the field
+        armed it cancels the new fillet at once."""
         box, fillet = self.newFillet()
         [field] = fields()
         self.arm(field, byFocus=True)
-        mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
-        self.views = [
-            w for w in mdi.subWindowList() if w.widget().metaObject().className() == "Gui::View3DInventor"
-        ]
-        self.assertTrue(focus(self.views[0].widget()))
+        [view] = views3D()
+        self.assertTrue(focus(view))
+        self.assertTrue(armed(field), "the 3D view's focus disarmed the field")
         key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
-        pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
-        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+        self.assertTrue(
+            waitFor(lambda: not Gui.Control.activeDialog()), "Esc in the 3D view left the dialog"
+        )
+        pump(0.3)
+        flushDeletes()
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit stays")
+        self.assertIsNone(self.doc.getObject("Fillet"), "Esc left the new fillet")
 
     def escInTheViewFirst(self, field, view):
-        """Arms the field and presses and releases Esc in the view, which disarms it; then arms it
-        again. The view's record of an Esc press it saw starts empty, whatever an earlier test
-        left (a press in the view whose release went elsewhere)."""
-        self.arm(field, byFocus=True)
-        self.assertTrue(focus(view))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
+        """The view's record of an Esc press it saw starts empty, whatever an earlier test left (a
+        press in the view whose release went elsewhere): an Esc pressed in a popup clears it
+        (ops#220's watcher), and its release stays in the popup. Then the field is armed and the
+        view has the focus. (An Esc pressed and released in the view itself cancels the dialog
+        now, ops#640 rank 25.)"""
+        menu = QtWidgets.QMenu(Gui.getMainWindow())
+        menu.addAction("Entry")
+        menu.popup(view.mapToGlobal(view.rect().center()))
+        self.assertTrue(waitFor(lambda: QtWidgets.QApplication.activePopupWidget() is menu))
+        QtTest.QTest.keyClick(menu, QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not menu.isVisible()), "Esc didn't close the popup")
+        menu.deleteLater()
+        pump(0.2)
+        self.assertTrue(Gui.Control.activeDialog(), "the popup's Esc closed the dialog")
         self.arm(field, byFocus=False)
         self.assertTrue(focus(view))
 
@@ -675,8 +681,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testEscHeldInTheViewActsOnce(self):
         """ops#220: Esc pressed and held in the 3D view with a field armed: the repeats (X11's
-        repeated releases included) don't count, so the final release only disarms the field;
-        the dialog and the edit stay."""
+        repeated releases included) don't count, so the dialog stays until the final release,
+        which cancels it (ops#640 rank 25): the new fillet goes, the box stays."""
         box, fillet = self.newFillet()
         [field] = fields()
         [view] = views3D()
@@ -685,11 +691,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         window = Gui.getMainWindow().windowHandle()
         QtTest.QTest.keyPress(window, QtCore.Qt.Key_Escape)
         sendRepeats(["release", "press"] * 3)
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "a repeat of the held Esc closed the dialog")
         QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
-        pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "a held Esc in the 3D view closed the dialog")
-        self.assertFalse(armed(field), "Esc in the 3D view didn't disarm")
-        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+        self.assertTrue(
+            waitFor(lambda: not Gui.Control.activeDialog()), "the release left the dialog open"
+        )
+        pump(0.3)
+        flushDeletes()
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit stays")
+        self.assertIsNone(self.doc.getObject("Fillet"), "the release left the new fillet")
+        self.assertIsNotNone(self.doc.getObject(box.Name))
+        self.assertAlmostEqual(box.Shape.Volume, 1000, places=6)
 
     def testEscPressedInTheViewReleasedElsewhereLeavesNoRecord(self):
         """ops#220: Esc pressed in the 3D view whose release goes elsewhere (the focus moved to a
@@ -746,6 +759,190 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(Gui.Control.activeDialog(), "the release of the other view's Esc closed the dialog")
         self.assertTrue(armed(field), "the release of the other view's Esc disarmed the field")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+
+    # -- ops#640 rank 26: an x beside each pick; the pointer over an entry preselects it --------
+
+    def entryPoint(self, field, row, onX):
+        """A point of the entry `row` in its list's viewport: on its x (the square at the right
+        end of the row) or on its text."""
+        refs = entries(field)
+        rect = refs.visualItemRect(refs.item(row))
+        if onX:
+            return QtCore.QPoint(rect.right() - rect.height() // 2, rect.center().y())
+        return QtCore.QPoint(rect.left() + 4, rect.center().y())
+
+    def clickAt(self, field, point):
+        QtTest.QTest.mouseClick(
+            entries(field).viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, point
+        )
+        pump(0.2)
+
+    def hoverAt(self, field, point):
+        """The pointer moved, no button pressed, to `point` of the list's viewport (sent to it: an
+        off-screen platform may track no cursor); None: the pointer leaves the list."""
+        viewport = entries(field).viewport()
+        if point is None:
+            QtWidgets.QApplication.sendEvent(viewport, QtCore.QEvent(QtCore.QEvent.Leave))
+        else:
+            event = QtGui.QMouseEvent(
+                QtCore.QEvent.MouseMove,
+                QtCore.QPointF(point),
+                QtCore.QPointF(viewport.mapToGlobal(point)),
+                QtCore.Qt.NoButton,
+                QtCore.Qt.NoButton,
+                QtCore.Qt.NoModifier,
+            )
+            QtWidgets.QApplication.sendEvent(viewport, event)
+        pump(0.1)
+
+    def preselected(self):
+        """(object name, element) of the preselection, the element "" for an object whole; None
+        for none."""
+        presel = Gui.Selection.getPreselection()
+        if not presel.ObjectName:
+            return None
+        subs = [sub for sub in presel.SubElementNames if sub]
+        return (presel.ObjectName, subs[0].split(".")[-1] if subs else "")
+
+    def twoEdgeFillet(self):
+        """The box filleted, r = 1, on its top front and bottom back edges, which don't touch:
+        1000 - 2 x 2.146 mm^3; one of them alone, 1000 - 2.146."""
+        box = self.box()
+        [first] = TOP_FRONT.one(box.Shape)
+        [second] = BOTTOM_BACK.one(box.Shape)
+        fillet = self.addFillet(box, [first, second])
+        self.assertAlmostEqual(fillet.Shape.Volume, 1000 - 2 * FILLET_CUT, places=3)
+        return box, fillet, first, second
+
+    def testEntryXRemovesThatEntry(self):
+        """Rank 26: a click on the first entry's x removes that entry alone, the dialog stays,
+        and the fillet is the second edge's; the field's Ctrl+Z brings the first back."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(texts(field), [first, second])
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [second]), fillet.Base)
+        self.assertTrue(Gui.Control.activeDialog(), "the x closed the dialog")
+        self.assertEqual(texts(field), [second])
+        self.assertVolume(fillet, 1000 - FILLET_CUT)
+
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first, second]), fillet.Base)
+        self.assertVolume(fillet, 1000 - 2 * FILLET_CUT)
+
+    def testEntryTextClickKeepsTheEntry(self):
+        """Rank 26: a click on an entry's text, left of its x, removes nothing; it makes the entry
+        current and arms the field, as before."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.clickAt(field, self.entryPoint(field, 1, onX=False))
+        self.assertTrue(waitFor(lambda: armed(field)), "the click didn't arm the field")
+        self.assertEqual(entries(field).currentRow(), 1)
+        self.assertEqual(fillet.Base[1], [first, second])
+        self.assertEqual(texts(field), [first, second])
+
+    def testRequiredWholeProfileHasNoX(self):
+        """Rank 26: a pad's profile whole (required) can't be removed, as Delete can't remove it:
+        a click where its x would be leaves the whole sketch."""
+        pad, sketch, regions = self.regionsPad()
+        [field] = self.edit(pad)
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        pump(0.2)
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        self.assertVolume(pad, WHOLE_SKETCH)
+
+    def testSolidsLastFaceHasNoX(self):
+        """Rank 26 (fix round): the last face of a pad of the solid's top face stays (the solid
+        whole is no profile), so it shows no x: a click where the x would be removes nothing and
+        says nothing; the pad keeps the face, 1200 mm^3."""
+        pad, top = self.solidFaceProfile("PartDesign::Pad", 1200)
+        [field] = self.edit(pad)
+        self.assertEqual(entries(field).count(), 1)
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        pump(0.2)
+        self.assertLink(pad.Profile, self.boxFeature, [top])
+        self.assertEqual(self.statusText(field), "", "the click hit an x that refused")
+        self.assertVolume(pad, 1200)
+
+    def testSetNoteShowsInTheStatusUntilThePick(self):
+        """Rank 13's note (fix round): setNote() shows its text in red in the field's status;
+        the next pick clears it."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        # Q_INVOKABLE: the wrapper is a QWidget's, so through the meta-object
+        QtCore.QMetaObject.invokeMethod(
+            field,
+            "setNote",
+            QtCore.Qt.DirectConnection,
+            QtCore.Q_ARG(str, "Left out of the selection: test"),
+        )
+        pump(0.1)
+        status = field.findChild(QtWidgets.QLabel, "status")
+        self.assertEqual(status.text(), "Left out of the selection: test")
+        self.assertIn("red", status.styleSheet())
+        self.arm(field, byFocus=False)
+        self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
+        self.assertNotEqual(status.text(), "Left out of the selection: test")
+
+    def testPatternOriginalXRemovesTheFeature(self):
+        """Rank 26 on a list of objects: the first bump's x leaves the second alone in the
+        Originals; the pattern adds one copy, 1003 mm^3."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        self.assertVolume(pattern, 1004)
+        [field] = self.edit(pattern)
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        self.assertTrue(
+            waitFor(lambda: self.originalNames(pattern) == [second.Name]),
+            self.originalNames(pattern),
+        )
+        self.assertTrue(Gui.Control.activeDialog(), "the x closed the dialog")
+        self.assertVolume(pattern, 1003)
+
+    def testHoverPreselectsTheEntry(self):
+        """Rank 26: the pointer over an entry preselects its edge of the box, as the 3D view's
+        hover does; over the other entry, that one; out of the list, nothing. Nothing is
+        selected or picked."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        Gui.Selection.clearPreselection()
+        self.hoverAt(field, self.entryPoint(field, 1, onX=False))
+        self.assertEqual(self.preselected(), (box.Name, second))
+        self.hoverAt(field, self.entryPoint(field, 0, onX=False))
+        self.assertEqual(self.preselected(), (box.Name, first))
+        self.hoverAt(field, None)
+        self.assertIsNone(self.preselected())
+        self.assertEqual(selected(self.doc), [])
+        self.assertEqual(fillet.Base[1], [first, second])
+
+    def testHoverWhileArmedPicksNothing(self):
+        """Rank 26 with the field armed: the hover's preselection passes no gate and makes no
+        pick; the entries stay."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.arm(field, byFocus=False)
+        self.hoverAt(field, self.entryPoint(field, 0, onX=False))
+        self.assertEqual(self.preselected(), (box.Name, first))
+        pump(0.2)
+        self.assertEqual(fillet.Base[1], [first, second])
+        self.assertTrue(armed(field))
+        self.hoverAt(field, None)
+        self.assertIsNone(self.preselected())
+
+    def testHoverOverAnOriginalPreselectsTheFeature(self):
+        """Rank 26 on a list of objects: the pointer over an entry preselects that feature
+        whole."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        self.hoverAt(field, self.entryPoint(field, 1, onX=False))
+        self.assertEqual(self.preselected(), (second.Name, ""))
+        self.hoverAt(field, None)
+        self.assertIsNone(self.preselected())
 
     # -- T6: Delete -----------------------------------------------------------------------------
 
@@ -1351,8 +1548,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, self.top)
         self.assertEqual(draft.NeutralPlane[1], [self.top])
 
-    def testDraftEscDisarmsThePlaneThenCancels(self):
-        """T5: Esc disarms the plane field and the dialog stays; the next Esc cancels, and the
+    def testDraftOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the plane field armed cancels the dialog at once, and the
         neutral plane is the bottom again."""
         box, draft = self.draft()
         [faces, plane, line] = self.edit(draft, count=3)
@@ -1360,21 +1557,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, self.top)
         self.assertEqual(draft.NeutralPlane[1], [self.top])
         self.assertTrue(focus(entries(plane)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(plane)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(plane))
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertEqual(draft.NeutralPlane[1], [self.bottom])
 
     def testDraftDisarmedPlaneLeavesNoGate(self):
-        """B4: the neutral plane disarmed (Esc), nothing of its pick stays: a vertex, which its
-        gate refuses, can be selected again, what the field showed is as before, and a face pick
-        leaves NeutralPlane alone."""
+        """B4: the neutral plane disarmed (its `armed` property: Esc cancels the dialog now,
+        ops#640 rank 25), nothing of its pick stays: a vertex, which its gate refuses, can be
+        selected again, what the field showed is as before, and a face pick leaves NeutralPlane
+        alone."""
         box, draft = self.draft()
         [faces, plane, line] = self.edit(draft, count=3)
         shown = (box.ViewObject.Visibility, draft.ViewObject.Visibility)
@@ -1382,9 +1577,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         Gui.Selection.addSelection(self.doc.Name, box.Name, "Vertex1")
         pump(0.1)
         self.assertEqual(selected(self.doc), [], "the armed plane's gate let a vertex through")
-        self.assertTrue(focus(entries(plane)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(plane)), "Esc didn't disarm the field")
+        plane.setProperty("armed", False)
+        self.assertTrue(waitFor(lambda: not armed(plane)), "the field stays armed")
 
         Gui.Selection.addSelection(self.doc.Name, box.Name, "Vertex1")
         pump(0.1)
@@ -1488,8 +1682,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(pad.UpToFace, self.high, [])
         self.assertVolume(pad, 1028)
 
-    def testPadEscDisarmsThenCancels(self):
-        """T5: Esc disarms the face field, the next Esc cancels: UpToFace is the lower plane."""
+    def testPadOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the face field armed cancels at once: UpToFace is the
+        lower plane."""
         box, pad = self.padOnBox()
         # The edit opened as a double click opens it, in a command Cancel aborts (the Pad's panel
         # opens none of its own)
@@ -1499,13 +1694,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(self.high, "")
         self.assertLink(pad.UpToFace, self.high, [])
         self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertLink(pad.UpToFace, self.low, [])
@@ -2051,8 +2243,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pickRegion(sketch, regions["B"])
         self.assertVolume(pad, 500)
 
-    def testProfileEscDisarmsThenCancels(self):
-        """Esc disarms the profile field (10.1), the next Esc cancels: the whole sketch again."""
+    def testProfileOneEscCancels(self):
+        """Esc with the profile field armed cancels at once (ops#640 rank 25; 10.1 had it disarm
+        first): the whole sketch again."""
         pad, sketch, regions = self.regionsPad()
         self.doc.openTransaction("Edit Pad")
         [field] = self.edit(pad)
@@ -2060,13 +2253,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pickRegion(sketch, regions["B"])
         self.assertEqual(pad.Profile[1], [regions["B"]])
         self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.assertEqual(pad.Profile, (sketch, []))
         self.assertVolume(pad, WHOLE_SKETCH)
@@ -4172,9 +4362,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
         self.assertVolume(pattern, 1004)
 
-    def testPatternOriginalsEscDisarmsThenCancels(self):
-        """T5: Esc disarms the field and the dialog stays; the next Esc cancels, and the Originals
-        are what they were before the edit."""
+    def testPatternOriginalsOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the field armed cancels the dialog at once, and the
+        Originals are what they were before the edit."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [first])
         [field] = self.edit(pattern)
@@ -4182,15 +4372,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(second, "")
         self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
         self.assertTrue(focus(entries(field)))
-
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
 
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertEqual(self.originalNames(pattern), [first.Name])
@@ -5247,7 +5433,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testRevolutionFieldsAndVisibility(self):
         """T24: the start reference armed, an angle change keeps it armed (B17); the axis row
-        armed after it, then disarmed (Esc): the base solid (the core) and the revolution are as
+        armed after it, then disarmed (its `armed` property; Esc cancels the dialog now, ops#640
+        rank 25): the base solid (the core) and the revolution are as
         the edit showed them (B16: the second start of a pick took the shown base for the edited
         feature, which stayed hidden). B15 is testReferencesPanelDisarmsTheAxisRow."""
         feature = self.revolution(core=True)
@@ -5269,9 +5456,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
         self.assertFalse(armed(startField))
         self.assertTrue(self.ringSketch.ViewObject.isVisible(), "the profile isn't shown")
-        self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc left the row armed")
+        field.setProperty("armed", False)
+        self.assertTrue(waitFor(lambda: not armed(field)), "the row stays armed")
         self.assertTrue(Gui.Control.activeDialog())
         self.assertEqual(
             self.visibilities(feature, core, self.ringSketch),
@@ -6929,24 +7115,15 @@ class TestReferenceFieldGui(unittest.TestCase):
         )
 
     def testShadingRestoredOnEscIn3DView(self):
-        """Esc in the 3D view disarms the profile field and the dialog stays: the sketch hides
-        again, its regions drawn as saved, and the pad shows as in the dialog."""
-        pad, sketch, regions = self.regionsPad()
-        sketch.ViewObject.Visibility = False
-        saved = sketch.ViewObject.ShapeAppearance[0].Transparency
-        [field] = self.edit(pad)
-        padShown = pad.ViewObject.Visibility
-        self.arm(field, byFocus=False)
-        self.assertTrue(sketch.ViewObject.Visibility)
-        self.assertFalse(pad.ViewObject.Visibility)
-        self.assertTrue(focus(views3D()[0]), "the 3D view doesn't take the focus")
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
-        pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
-        self.assertFalse(sketch.ViewObject.Visibility)
-        self.assertAlmostEqual(self.regionTransparency(sketch), saved, places=5)
-        self.assertEqual(pad.ViewObject.Visibility, padShown)
+        """Esc in the 3D view with the profile field armed cancels the dialog at once (ops#640
+        rank 25; it only disarmed before): the sketch hides again, its regions drawn as saved,
+        and the pad shows as before the edit."""
+
+        def escInTheView():
+            self.assertTrue(focus(views3D()[0]), "the 3D view doesn't take the focus")
+            key(QtCore.Qt.Key_Escape)
+
+        self.shadingRestoredWhenTheEditEnds(escInTheView, editEnds=True, transaction="Edit Pad")
 
     def testRegionWhoseFaceVanished(self):
         """Regions B and the disk listed; the disk's circle deleted from the sketch, so its

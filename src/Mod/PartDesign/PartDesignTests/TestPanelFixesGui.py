@@ -673,13 +673,14 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#410: Pad on a sketch of another document ---------------------------------------------
 
-    def padOnASketchOfAnotherDocument(self, ownSketch, button=None):
+    def padOnASketchOfAnotherDocument(self, ownSketch):
         """Pad, with an active body, on a sketch selected in another document (decision 104: a
-        command's selection holds only the active document's objects, ops#390). Returns the
-        modals shown, the other document's label and, if a pick dialog was left open, the texts
-        of its list (it is closed here). Nothing is added to either document. With `ownSketch`
-        the active document has a sketch of its own, which Pad must not take in its place without
-        a word: the box asks, and `button` (default: the box's accept) answers it."""
+        command's selection holds only the active document's objects, ops#390). Since ops#640
+        rank 13 the Pad starts with no profile, its Profile field armed, and says the sketch is
+        left out (in the field's status, or the status bar): no message box. Returns the modals
+        shown, the other document's label, the new pads' profiles and the notes; the dialog is
+        cancelled here, and nothing is added to either document. With `ownSketch` the active
+        document has a sketch of its own, which Pad must not take in its place."""
         self.body = models.body(self.doc)
         if ownSketch:
             models.sketch(self.doc, "Own", models.rectangle(0, 0, 5, 5), self.body)
@@ -697,91 +698,70 @@ class TestPanelFixesGui(unittest.TestCase):
             group = self.body.Group
             undo = self.doc.UndoNames
             Gui.Selection.addSelection(other.Name, outer.Name)
-            self.answerModals("radioDependent", button)
+            self.answerModals("radioDependent")
             Gui.runCommand("PartDesign_Pad")
+            self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
             pump(0.5)
             self.answering = False
-            picked = None
-            if Gui.Control.activeDialog():
-                pump(0.3)
-                Gui.Control.showTaskView()
-                listWidget = self.widget(QtWidgets.QListWidget, "listWidget")
-                picked = [listWidget.item(i).text() for i in range(listWidget.count())]
+            profiles = [o.Profile for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
+            notes = self.leftOutNotes("fieldProfile")
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+            pump(0.2)
             self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
             self.assertEqual(self.body.Group, group)
             self.assertEqual([o.Name for o in other.Objects], [outer.Name])
-            if picked is None:
-                self.assertIsNone(App.getActiveTransaction())
-                self.assertEqual(self.doc.UndoNames, undo)
-            else:
-                Gui.Control.closeDialog()
-                pump()
-            return list(self.modals), other.Label, picked
+            self.assertIsNone(App.getActiveTransaction())
+            self.assertEqual(self.doc.UndoNames, undo)
+            return list(self.modals), other.Label, profiles, notes
         finally:
             Gui.Selection.clearSelection()
             App.setActiveDocument(self.doc.Name)
             App.closeDocument(other.Name)
 
+    @staticmethod
+    def leftOutNotes(fieldName):
+        """Where a command says what it left out of the selection (ops#640 rank 13): the status
+        of the dialog's field `fieldName` ("fieldProfile"), and the status bar."""
+        texts = TestPanelFixesGui.statusTexts()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        for field in Gui.getMainWindow().findChildren(QtWidgets.QWidget, fieldName):
+            status = field.findChild(QtWidgets.QLabel, "status")
+            if status is not None:
+                texts.append(status.text())
+        return texts
+
     def testPadOnASketchOfAnotherDocumentSaysSo(self):
-        """ops#410 (decision 104), then ops#327 retired: since ops#390 (upstream PR 33716) a
-        command's selection holds only the active document's objects, so a sketch selected in
-        another document is no profile. With no sketch in the active document Pad says so,
-        naming the sketch and its document, and advises a sketch of the active document: "No
-        sketch is available in the document" sent the user looking for one in a document that
-        has none. (Before ops#327 a refused dependent copy, a null, went on as the pad's profile,
-        without a word.)"""
-        modals, label, picked = self.padOnASketchOfAnotherDocument(ownSketch=False)
-        self.assertEqual(
-            modals,
-            [
-                f"QMessageBox: 'Outer' is in the document '{label}', not in the active "
-                "document. Select a sketch of the active document."
-            ],
+        """ops#410 (decision 104), then ops#640 rank 13: a sketch selected in another document is
+        no profile. With no sketch in the active document the Pad starts empty and says so,
+        naming the sketch and its document; no message box (it was one)."""
+        modals, label, profiles, notes = self.padOnASketchOfAnotherDocument(ownSketch=False)
+        self.assertEqual(modals, [])
+        self.assertEqual(profiles, [None])
+        expected = (
+            f"Left out of the selection: 'Outer' is in the document '{label}', not in the active "
+            "document."
         )
-        self.assertIsNone(picked)
+        self.assertTrue(any(expected in t for t in notes), notes)
 
     def testPadOnASketchOfAnotherDocumentDoesNotTakeAnotherSketch(self):
-        """ops#410, PR 360 round 2: as testPadOnASketchOfAnotherDocumentSaysSo, with a sketch in
-        the active document, and Cancel. The command took that sketch as the pad's profile, and
-        no word was said that the selected one was left out; now it asks, and Cancel makes
-        nothing: no pad, no pick dialog."""
-        modals, label, picked = self.padOnASketchOfAnotherDocument(ownSketch=True, button="Cancel")
-        self.assertEqual(
-            modals,
-            [
-                f"QMessageBox: 'Outer' is in the document '{label}', not in the active "
-                f"document. Continue with a sketch of '{self.doc.Label}'?"
-            ],
-        )
-        self.assertIsNone(picked)
-        self.assertEqual(
-            [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
-        )
-
-    def testPadOnASketchOfAnotherDocumentContinuesThroughThePickDialog(self):
-        """ops#410, PR 360 round 2: the same, answered Continue. The command goes on as it did
-        before the selection mattered, but through the pick dialog although the active document
-        has exactly one free sketch, which it takes only when the user picks it."""
-        modals, label, picked = self.padOnASketchOfAnotherDocument(
-            ownSketch=True, button="Continue"
-        )
-        self.assertEqual(len(modals), 1, modals)
-        self.assertIn("Continue with a sketch of", modals[0])
-        self.assertIsNotNone(picked, "no pick dialog")
-        self.assertEqual(len(picked), 1, picked)
-        self.assertIn("Own", picked[0])
-        self.assertEqual(
-            [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
-        )
+        """ops#410, PR 360 round 2, then ops#640 rank 13: with a sketch in the active document the
+        Pad still starts empty: the active document's sketch isn't taken in the selected one's
+        place (it took it without a word, then asked in a message box)."""
+        modals, label, profiles, notes = self.padOnASketchOfAnotherDocument(ownSketch=True)
+        self.assertEqual(modals, [])
+        self.assertEqual(profiles, [None])
+        self.assertTrue(any("'Outer' is in the document" in t for t in notes), notes)
 
     # -- ops#395 1: Pad on a sketch of another body ---------------------------------------------
 
-    def testPadOnASketchOfAnotherBodyIsRefused(self):
+    def testPadOnASketchOfAnotherBodyIsLeftOut(self):
         """ops#395 1 (PR 343 review L3): the dependent profile copy that Pad's code makes for a
         selected sketch outside the active body (a traced shape binder, not computed before the
         pad's recompute) can't be reached: a selection of anything outside the body (and its
-        studio) stops the command first, with a message. Pinned here: a 4 x 5 sketch in a body of
-        another App::Part, selected, Pad asks no copy question, opens no panel and adds nothing."""
+        studio) is no profile. Since ops#640 rank 13 it is left out with a note, never a message
+        box: a 4 x 5 sketch in a body of another App::Part, selected, Pad asks no copy question,
+        opens its panel on a Pad with no profile, and Cancel adds nothing."""
         other = self.otherBody()
         profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 4, 5), other)
         self.body = models.body(self.doc)
@@ -795,18 +775,23 @@ class TestPanelFixesGui(unittest.TestCase):
         Gui.Selection.addSelection(self.doc.Name, profile.Name)
         self.answerModals("radioDependent")
         Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
         pump(0.5)
         self.answering = False
-        self.assertFalse(Gui.Control.activeDialog())
+        self.assertEqual(self.modals, [])
+        [pad] = [o for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
+        self.assertIsNone(pad.Profile)
+        self.assertTrue(self.body.hasObject(pad))
+        notes = self.leftOutNotes("fieldProfile")
+        self.assertTrue(
+            any("Left out of the selection: 'Profile' is not in the active body." in t for t in notes),
+            notes,
+        )
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
         self.assertIsNone(App.getActiveTransaction())
-        self.assertEqual(
-            self.modals,
-            [
-                "QMessageBox: Cannot use selected object. Selected object must belong to the "
-                "active body"
-            ],
-        )
 
     # -- ops#170 1-3: the Pipe's orientation and scaling panels ----------------------------------
 
@@ -3402,15 +3387,18 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
 
     def padOfAFreeSketch(self, sketch):
-        """Pad with nothing selected, and in its pick dialog `sketch` (outside any body), Make
-        independent copy, into self.body; the pad panel closed with OK. Returns the pad and the
-        copy."""
+        """The pick dialog's copy of `sketch` (outside any body), Make independent copy, into
+        self.body, and a 10 long pad of it. Since ops#640 rank 13 Pad with nothing selected
+        opens its panel with the Profile field armed, without the pick dialog: the dialog is
+        reached through Revolve, which keeps it until it has a Profile field (rank 21); its
+        panel is closed with OK (in error: no axis), and the pad is made on the copy. Returns
+        the pad and the copy."""
         Gui.activateWorkbench("PartDesignWorkbench")
         App.setActiveDocument(self.doc.Name)
         Gui.setActiveDocument(self.doc.Name)
         pump(0.2)
         Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
-        Gui.runCommand("PartDesign_Pad")
+        Gui.runCommand("PartDesign_Revolution")
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no pick dialog")
         pump(0.3)
         Gui.Control.showTaskView()
@@ -3429,16 +3417,20 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: taskButton(ok) is not None, 5.0), "no OK")
         taskButton(ok).click()
         self.assertTrue(
-            waitFor(lambda: self.doc.getObject("Pad") is not None, 5.0),
-            f"no pad; modals {self.modals}",
+            waitFor(lambda: self.doc.getObject("Revolution") is not None, 5.0),
+            f"no revolution; modals {self.modals}",
         )
-        pad = self.doc.getObject("Pad")
-        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog(), 5.0), "no pad panel")
+        revolution = self.doc.getObject("Revolution")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog(), 5.0), "no revolution panel")
         pump(0.3)
         self.close(ok=True)
         self.answering = False
         self.assertEqual(self.modals, [])
-        copy = pad.Profile[0]
+        copy = revolution.Profile[0]
+        self.body.removeObject(revolution)
+        self.doc.removeObject(revolution.Name)
+        pad = models.pad(self.body, copy, 10)
+        self.doc.recompute()
         self.assertIsNot(copy, sketch)
         self.assertTrue(self.body.hasObject(copy))
         return pad, copy
@@ -4064,7 +4056,8 @@ class TestPanelFixesGui(unittest.TestCase):
 
     def testMirrorOfABoxAndASketchSaysTheSketchIsLeftOut(self):
         """The box and a sketch selected, then Mirror: the box is the original, and the status
-        bar names the sketch as left out (it said nothing; a sketch alone made a "Whole shape"
+        bar (or, ops#640 rank 13, the Features field's status) names the sketch as left out
+        (it said nothing; a sketch alone made a "Whole shape"
         mirror, the same way. Not tested alone: the new mirror's first recompute then fails, and
         the notification area off screen fails the command, notes/build.md)."""
         box, (sketch, _) = self.activeBodyWithBoxAndSketches()
@@ -4074,10 +4067,8 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
         [mirror] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Mirrored"]
         self.assertEqual(mirror.Originals, [box])
-        self.assertTrue(
-            any("left out of the selection: 'First sketch'." in t for t in self.statusTexts()),
-            self.statusTexts(),
-        )
+        notes = self.leftOutNotes("fieldOriginals")
+        self.assertTrue(any("left out of the selection: 'First sketch'." in t for t in notes), notes)
 
     def testPadOfTwoSketchesSaysWhichIsLeftOut(self):
         """Two sketches selected, then Pad: the first is the profile, and the status bar names

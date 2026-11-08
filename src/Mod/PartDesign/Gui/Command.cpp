@@ -27,7 +27,9 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPushButton>
+#include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
@@ -50,7 +52,10 @@
 #include <Gui/MainWindow.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionObject.h>
+#include <Gui/TaskView/TaskDialog.h>
 #include <Gui/ViewProviderDocumentObject.h>
+#include <Mod/Part/App/Attacher.h>
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -67,6 +72,7 @@
 #include <Mod/PartDesign/App/PartDesignParameter.h>
 
 #include "DlgActiveBody.h"
+#include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "SketchWorkflow.h"
 #include "TaskFeaturePick.h"
@@ -974,6 +980,61 @@ bool importExternalElements(App::PropertyLinkSub& prop, std::vector<App::SubObje
     return false;
 }
 
+// FreeCAD-CH (ops#640, rank 13): the features whose dialog has a Profile field start with no
+// profile and wait for its pick, as Onshape's profile features do. Revolve's, Groove's and Helix's
+// dialogs have no Profile field yet (rank 21): they keep the sketch list until they do
+static bool dialogTakesProfile(const std::string& which)
+{
+    return which == "Pad" || which == "Pocket" || which == "Hole" || which == "AdditiveLoft"
+        || which == "SubtractiveLoft" || which == "AdditivePipe" || which == "SubtractivePipe";
+}
+
+// A face of a solid that isn't planar: an extrude can't take it (ops#640, rank 5; Onshape's
+// Extrude refuses a curved face at pick time, B3-4)
+static bool isCurvedFace(const App::DocumentObject* obj, const std::string& sub)
+{
+    auto feature = freecad_cast<const Part::Feature*>(obj);
+    if (!feature || obj->isDerivedFrom<Part::Part2DObject>() || sub.rfind("Face", 0) != 0) {
+        return false;
+    }
+    try {
+        const Part::TopoShape face(
+            feature->Shape.getShape().getSubShape(sub.c_str(), /*silent=*/true)
+        );
+        return !face.isNull() && !face.isPlanar(Attacher::AttachEnginePlane::planarPrecision());
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// What a new feature left out of the selection, in the status of its open dialog's field for
+// \a property (ops#640, rank 13: never a modal), through ReferenceField::setNote(), else on
+// the status bar
+static void noteLeftOut(const char* property, const QString& note)
+{
+    if (note.isEmpty()) {
+        return;
+    }
+    if (Gui::TaskView::TaskDialog* dlg = Gui::Control().activeDialog()) {
+        for (QWidget* widget : dlg->getDialogContent()) {
+            if (!widget) {
+                continue;
+            }
+            for (auto field : widget->findChildren<PartDesignGui::ReferenceField*>()) {
+                if (field->propertyName() == property) {
+                    field->setNote(note);
+                    return;
+                }
+            }
+        }
+    }
+    Gui::getMainWindow()->showMessage(note, 10000);
+}
+
 
 void prepareProfileBased(
     PartDesign::Body* pcActiveBody,
@@ -1107,6 +1168,31 @@ void prepareProfileBased(
         func(static_cast<Part::Feature*>(feature), Feat);
     };
 
+    // FreeCAD-CH (ops#640, rank 13): no profile yet. The feature is made without one and fails
+    // red until its dialog's Profile field, armed as its first empty field, takes the pick;
+    // \a note says what was left out of the selection
+    auto empty_worker = [=](const QString& note) {
+        std::string FeatName = cmd->getUniqueObjectName(which.c_str(), pcActiveBody);
+        cmd->openCommand(std::string("Make ") + which);
+        FCMD_OBJ_CMD(pcActiveBody, "newObject('PartDesign::" << which << "','" << FeatName << "')");
+        App::DocumentObject* Feat = pcActiveBody->getDocument()->getObject(FeatName.c_str());
+        if (!Feat) {
+            cmd->abortCommand();
+            return;
+        }
+        {
+            // Its missing profile isn't printed as an error while the dialog opens asking for it
+            // (as a Revolve's missing axis, finishWaitingForAxis); the feature keeps its error
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                Feat->getDocument(),
+                true
+            );
+            func(nullptr, Feat);
+        }
+        noteLeftOut("Profile", note);
+    };
+
 
     // in case of subtractive types, check that there is something to subtract from
     if ((which.find("Subtractive") != std::string::npos) || (which.compare("Groove") == 0)
@@ -1130,42 +1216,78 @@ void prepareProfileBased(
 
     // if a profile is selected we can make our life easy and fast
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
+    // FreeCAD-CH (ops#640, rank 13): a selection that can't make the profile is left out and
+    // said in the Profile field's status, never in a modal (it was "Cannot use selected
+    // object"); the feature then starts as with nothing selected
+    bool leftOut = false;
     if (!selection.empty()) {
-        bool onlyAllowed = true;
+        QString refused;
+        const bool extrude = which == "Pad" || which == "Pocket";
         for (const auto& it : selection) {
             const App::DocumentObject* obj = it.getObject();
-            if (PartDesign::Body::findBodyOf(obj) == pcActiveBody) {
+            if (!obj) {
                 continue;
             }
-            // the selected objects must belong to the body, or (FreeCAD-CH, ops#325) to another
-            // part of its studio
-            if (!PartDesignGui::isStudioSelection(pcActiveBody, obj)) {
-                onlyAllowed = false;
-                break;
-            }
-            // the first pick is the profile (another part's face may be a first feature's too,
-            // ops#325 2a); the others are sections or a spine
+            const QString label = QString::fromUtf8(obj->Label.getValue());
             const std::vector<std::string>& subs = it.getSubNames();
-            const char* sub = subs.empty() ? "" : subs.front().c_str();
-            if (&it == &selection.front()
-                && !PartDesign::ProfileBased::isStudioProfile(pcActiveBody, obj, sub)) {
-                onlyAllowed = false;
+            const std::string sub = subs.empty() ? std::string() : subs.front();
+            const bool first = &it == &selection.front();
+            if (PartDesign::Body::findBodyOf(obj) != pcActiveBody) {
+                // the selected objects must belong to the body, or (FreeCAD-CH, ops#325) to
+                // another part of its studio; the first pick is the profile (another part's face
+                // may be a first feature's too, ops#325 2a), the others are sections or a spine
+                if (!PartDesignGui::isStudioSelection(pcActiveBody, obj)
+                    || (first
+                        && !PartDesign::ProfileBased::isStudioProfile(pcActiveBody, obj, sub.c_str()))) {
+                    refused = QObject::tr("'%1' is not in the active body").arg(label);
+                    break;
+                }
+            }
+            if (!first) {
+                continue;
+            }
+            // an origin plane or another object without a shape makes no profile (it made no
+            // feature, without a word: PR 255 review L2)
+            if (!obj->isDerivedFrom<Part::Feature>()) {
+                refused = QObject::tr("'%1' can't be a profile").arg(label);
+                break;
+            }
+            // of a solid an extrude takes planar faces only (rank 5; hands-on B-2: an edge
+            // selected is left out, Onshape's Extrude opening with its field empty)
+            for (const auto& element : subs) {
+                if (!extrude || obj->isDerivedFrom<Part::Part2DObject>()) {
+                    break;
+                }
+                if (element.rfind("Face", 0) != 0) {
+                    refused = QObject::tr("'%1' %2 is not a face")
+                                  .arg(label, QString::fromStdString(element));
+                    break;
+                }
+                if (isCurvedFace(obj, element)) {
+                    refused = QObject::tr("'%1' %2 is not planar")
+                                  .arg(label, QString::fromStdString(element));
+                    break;
+                }
+            }
+            if (!refused.isEmpty()) {
                 break;
             }
         }
-        if (!onlyAllowed) {
-            QMessageBox msgBox(Gui::getMainWindow());
-            msgBox.setText(
-                QObject::tr("Cannot use selected object. Selected object must belong to the active body")
-            );
-            msgBox.setInformativeText(
-                QObject::tr("Consider using a shape binder or a base feature to reference external geometry in a body")
-            );
-            msgBox.setStandardButtons(QMessageBox::Ok);
-            msgBox.setDefaultButton(QMessageBox::Ok);
-            msgBox.exec();
+        if (!refused.isEmpty()) {
+            const QString note = QObject::tr("Left out of the selection: %1.").arg(refused);
+            if (dialogTakesProfile(which)) {
+                empty_worker(note);
+                return;
+            }
+            // No Profile field yet (Revolve, Groove, Helix): the sketch is chosen as with
+            // nothing selected
+            Gui::getMainWindow()->showMessage(note, 10000);
+            Gui::Selection().clearSelection();
+            leftOut = true;
         }
-        else {
+    }
+    if (!selection.empty() && !leftOut) {
+        {
             // The first object's elements make the profile; a loft takes the other picks as
             // sections, a pipe a second pick's edges as its spine. Say which picks are left out
             // (ops#252: they were dropped without a word)
@@ -1222,6 +1344,29 @@ void prepareProfileBased(
     }
 
     // no face profile was selected, do the extended sketch logic
+
+    // FreeCAD-CH (ops#640, rank 13): with nothing selected the dialog opens with its Profile
+    // field armed, as Onshape's do: no sketch list (TaskFeaturePick), no "No sketch" modal, and
+    // a sketch selected in another document is left out with a note (it was a modal, ops#410)
+    if (dialogTakesProfile(which)) {
+        QString note;
+        for (App::DocumentObject* obj : cmd->getSelection().getObjectsOfType(
+                 Part::Part2DObject::getClassTypeId(),
+                 "*"
+             )) {
+            if (obj->getDocument() != cmd->getDocument()) {
+                note = QObject::tr("Left out of the selection: '%1' is in the document '%2', not "
+                                   "in the active document.")
+                           .arg(
+                               QString::fromUtf8(obj->Label.getValue()),
+                               QString::fromUtf8(obj->getDocument()->Label.getValue())
+                           );
+                break;
+            }
+        }
+        empty_worker(note);
+        return;
+    }
 
     bool bNoSketchWasSelected = false;
     // FreeCAD-CH (ops#410): the user chose to go on although a sketch of another document is
@@ -2561,11 +2706,19 @@ void prepareTransformed(
 )
 {
     std::string FeatName = cmd->getUniqueObjectName(which.c_str(), pcActiveBody);
+    // FreeCAD-CH (ops#640, rank 13): Mirror and the patterns with nothing selected stay in
+    // Features mode, their Features field armed for the first pick, as Onshape's open; Scale and
+    // Multi-Transform still transform the whole shape
+    const bool waitsForFeatures
+        = which == "Mirrored" || which == "LinearPattern" || which == "PolarPattern";
 
     auto worker = [=](std::vector<App::DocumentObject*> features) {
         std::string msg("Make ");
         msg += which;
         cmd->openCommand(msg.c_str());
+        // The solid it follows, before it is inserted (a transform without originals isn't a
+        // solid feature, so the Tip stays there until it is set below)
+        auto previous = freecad_cast<Part::Feature*>(pcActiveBody->Tip.getValue());
         FCMD_OBJ_CMD(pcActiveBody, "newObject('PartDesign::" << which << "','" << FeatName << "')");
         // FIXME: There seems to be kind of a race condition here, leading to sporadic errors like
         // Exception (Thu Sep  6 11:52:01 2012): 'App.Document' object has no attribute 'Mirrored'
@@ -2574,7 +2727,14 @@ void prepareTransformed(
 
         auto Feat = pcActiveBody->getDocument()->getObject(FeatName.c_str());
 
-        if (features.empty()) {
+        if (features.empty() && waitsForFeatures) {
+            // Nothing to transform yet: it shows the solid before it (a transform without
+            // originals keeps its shape, as Multi-Transform's start does) until the pick
+            if (previous && previous != Feat) {
+                FCMD_OBJ_CMD(Feat, "Shape = " << Gui::Command::getObjectCmd(previous) << ".Shape");
+            }
+        }
+        else if (features.empty()) {
             FCMD_OBJ_CMD(Feat, "TransformMode = \"Whole shape\"");
         }
         else {
@@ -2600,40 +2760,36 @@ void prepareTransformed(
         PartDesign::Feature::getClassTypeId()
     );
 
-    PartDesign::Body* activeBody = PartDesignGui::getBody(true);
-    for (auto feature : features) {
-        if (activeBody != PartDesignGui::getBodyFor(feature, false)) {
-            QMessageBox::warning(
-                Gui::getMainWindow(),
-                QObject::tr("Selection is not in the active body"),
-                QObject::tr("Select only one feature in an active body.")
-            );
-            return;
-        }
-    }
     // Say which picks the transform leaves out, once its panel is open (ops#252: a sketch alone
-    // made a "Whole shape" transform without a word)
+    // made a "Whole shape" transform without a word). FreeCAD-CH (ops#640, rank 13): a feature
+    // of another body is left out too, said in the Features field's status: it was a modal
+    PartDesign::Body* activeBody = PartDesignGui::getBody(true);
     QStringList dropped;
     for (const auto& sel : cmd->getSelection().getSelectionEx()) {
         const App::DocumentObject* obj = sel.getObject();
-        if (obj && !obj->isDerivedFrom<PartDesign::Feature>()) {
+        if (obj
+            && (!obj->isDerivedFrom<PartDesign::Feature>()
+                || activeBody != PartDesignGui::getBodyFor(obj, false))) {
             dropped << QStringLiteral("'%1'").arg(QString::fromUtf8(obj->Label.getValue()));
         }
     }
+    std::erase_if(features, [activeBody](App::DocumentObject* feature) {
+        return activeBody != PartDesignGui::getBodyFor(feature, false);
+    });
 
     worker(features);
 
     if (!dropped.isEmpty()) {
         const QString list = dropped.join(QStringLiteral(", "));
-        Gui::getMainWindow()->showMessage(
-            features.empty()
-                ? QObject::tr("A transform takes PartDesign features; left out of the selection: "
-                              "%1. It transforms the whole shape instead.")
+        noteLeftOut(
+            "Originals",
+            features.empty() && !waitsForFeatures
+                ? QObject::tr("A transform takes features of the active body; left out of the "
+                              "selection: %1. It transforms the whole shape instead.")
                       .arg(list)
-                : QObject::tr("A transform takes PartDesign features; left out of the selection: "
-                              "%1.")
-                      .arg(list),
-            10000
+                : QObject::tr("A transform takes features of the active body; left out of the "
+                              "selection: %1.")
+                      .arg(list)
         );
     }
 }

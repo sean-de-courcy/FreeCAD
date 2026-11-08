@@ -64,8 +64,12 @@ class ReferenceFieldGroup;
  * picks come from. While it is armed, its gate lets through only what it takes, its target is
  * shown, and its entries are coloured on the target (the current one in a second colour, never
  * through the selection). A pick of an element that is in the list removes it, one that isn't
- * adds it. Esc, another input of the dialog, the References panel's selection and a gate put in
- * its place disarm it.
+ * adds it. Another input of the dialog, the References panel's selection and a gate put in its
+ * place disarm it. Esc doesn't: armed or not, it cancels the dialog at once, as Onshape's (ops#640
+ * rank 25; decision 23 Q1 (a) had the first Esc disarm).
+ *
+ * Each removable entry shows an x after its text, which removes it; the pointer over an entry
+ * preselects its element in the 3D view (ops#640 rank 26).
  *
  * Each entry shows its state: exact, guessed (yellow) or broken (red), from the owner's slots and
  * reference rows (App::ReferenceReport::slotsOf, App::referenceRows). Its context menu has Remove
@@ -260,6 +264,9 @@ public:
 
     /// Removes the selected entries.
     void removeSelected();
+    /// Shows \a text in red in the field's status until the next pick, as a refused pick's
+    /// message does (a new feature's left-out preselection, ops#640 rank 13).
+    Q_INVOKABLE void setNote(const QString& text);
     /// Kind::Sections: moves the current section up (\a step -1) or down (+1), one write.
     void moveCurrent(int step);
     /// The field's own undo and redo of its changes.
@@ -390,6 +397,8 @@ private:
     /// A profile of a solid's faces whose last element \a stored would take out: refused, with
     /// a message (the solid whole is no profile).
     bool refusesLastElement(const std::vector<std::string>& stored);
+    /// Whether \a stored would take out such a profile's last element (no message).
+    bool keepsLastElement(const std::vector<std::string>& stored) const;
 
     void updateLook();
     void highlight(bool on, const std::string& extra = std::string());
@@ -405,6 +414,19 @@ private:
     void fillUseMenu(QMenu* menu, const App::ReferenceRow& row);
     void runAction(const std::string& command);
     void startRepick(int index);
+    /// Whether the entry of \a index (its IndexRole) can be removed, so it shows an x: not a
+    /// required profile's whole object, nor a single reference that can't be empty.
+    bool isRemovable(int index) const;
+    /// Removes the entries of \a indexes (by slot; a list of sections' by position).
+    void removeEntries(std::vector<int> indexes);
+    /// The object and element (empty: the object whole) the entry \a item stands for; false for
+    /// none (a missing element).
+    bool entryElement(const QListWidgetItem* item,
+                      App::DocumentObject*& obj,
+                      std::string& sub) const;
+    /// The entry under the pointer, preselected in the 3D view as Onshape highlights a hovered
+    /// pick (ops#640 rank 26); null takes this field's preselection away.
+    void hoverEntry(const QListWidgetItem* item);
 
     App::DocumentObjectT ownerT;
     std::string propertyNameStr;
@@ -441,6 +463,10 @@ private:
     /// The objects whose elements are coloured (a list of sections colours several).
     std::vector<App::DocumentObjectT> highlightedTargets;
     QString message;
+    /// What hoverEntry() preselected, while hovering.
+    App::DocumentObjectT hoverObject;
+    std::string hoverSub;
+    bool hovering = false;
 };
 
 /** The reference fields of one dialog (TaskDlgFeatureParameters): one armed at a time; a field

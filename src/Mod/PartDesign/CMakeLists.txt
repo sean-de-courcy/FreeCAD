@@ -117,6 +117,8 @@ if(BUILD_GUI)
         PartDesignTests/TestToolbarsGui.py
         PartDesignTests/TestContextMenuGui.py
         PartDesignTests/TestMergeScopeGui.py
+        PartDesignTests/TestPickFirstGui.py
+        PartDesignTests/TestEscCancelsGui.py
     )
 endif(BUILD_GUI)
 
