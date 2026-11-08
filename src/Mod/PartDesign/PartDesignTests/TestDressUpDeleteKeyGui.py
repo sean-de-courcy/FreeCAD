@@ -314,6 +314,41 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
             modalGuard.stop()
         self.assertEqual(modals, [], "Std_Delete asked")
 
+    def testARefusedEditLeavesNoUndoStep(self):
+        """Journey J7: the box deleted, its fillet is broken; a double click on the fillet says
+        it can't be edited and opens nothing. The "Edit Fillet" command it opened was left open
+        and became an undo step, so the first Undo after the delete did nothing visible. Now the
+        undo stack is as after the delete, and one Undo brings the box back."""
+        fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
+        self.doc.openTransaction("Delete")
+        self.doc.removeObject(self.box.Name)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        names = self.doc.UndoNames
+        modals = []
+
+        def closeModal():
+            modal = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(modal, QtWidgets.QMessageBox):
+                modals.append(modal.text())
+                modal.accept()
+
+        guard = QtCore.QTimer()
+        guard.timeout.connect(closeModal)
+        guard.start(50)
+        try:
+            fillet.ViewObject.doubleClicked()
+            pump(0.3)
+        finally:
+            guard.stop()
+        self.assertEqual(len(modals), 1, "the broken fillet's refusal")
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertEqual(self.doc.UndoNames, names)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Box"), "one Undo didn't bring the box back")
+
     def deleteRefusedInView(self, view=0):
         """Delete with the focus in a 3D view while the feature's dialog is open: refused
         (ops#640, the step lock; Onshape: no Delete of other rows with a dialog open). Std_Delete

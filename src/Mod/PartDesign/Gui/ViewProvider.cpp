@@ -114,6 +114,12 @@ bool ViewProvider::doubleClicked()
             return true;
         }
         Gui::cmdSetEdit(pcObject, Gui::Application::Instance->getUserEditMode());
+        // FreeCAD-CH (ops#640, journey J7): a refused edit (a dress-up whose base is gone says
+        // so and opens nothing) left its "Edit" command open, and it became an undo step: the
+        // first Undo after a delete then did nothing visible. Nothing in edit: nothing to keep
+        if (!getDocument()->getInEdit()) {
+            getDocument()->abortCommand();
+        }
     }
     catch (const Base::Exception&) {
         getDocument()->abortCommand();
