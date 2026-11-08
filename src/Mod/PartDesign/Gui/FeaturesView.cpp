@@ -1339,9 +1339,11 @@ void FeaturesView::rebuildFeatures()
         item->setData(Qt::UserRole, QByteArray(obj->getNameInDocument()));
         item->setData(FeatureList::DefaultRole, QVariant());
         item->setData(FeatureList::EyeRole, eyeState(obj));
-        // Below the bar the icon is dimmed, not marked (ops#640 rank 34): Onshape greys the row
-        QIcon icon = statusIcon(obj, false);
-        if (status != obj) {
+        // Below the bar the icon is dimmed, not marked (ops#640 rank 34): Onshape greys the row,
+        // an error's mark too, as nothing below the bar is evaluated (round 6, J2) [guess]
+        auto rowVp = isBelow ? viewProviderOf(obj) : nullptr;
+        QIcon icon = rowVp ? rowVp->getIcon() : statusIcon(obj, false);
+        if (status != obj && !isBelow) {
             const char* overlay = status->isError() ? "overlay_error"
                 : status->isWarning()               ? "overlay_warning"
                                                     : "overlay_recompute";
@@ -1362,10 +1364,10 @@ void FeaturesView::rebuildFeatures()
         QFont font = statusFont(features->font(), obj, isBelow);
         font.setBold(obj == inEdit);
         item->setFont(font);
-        QVariant foreground = statusForeground(status);
-        if (isBelow && !foreground.isValid()) {
-            foreground = QBrush(features->palette().color(QPalette::Disabled, QPalette::Text));
-        }
+        // Grey below the bar, not an error's red or a warning's orange (round 6, J2)
+        QVariant foreground = isBelow
+            ? QVariant(QBrush(features->palette().color(QPalette::Disabled, QPalette::Text)))
+            : statusForeground(status);
         item->setData(Qt::ForegroundRole, foreground);
         QString tip = rowToolTip(obj, body);
         if (status != obj) {
@@ -1500,7 +1502,8 @@ void FeaturesView::rebuildParts()
         }
         item->setData(0, Qt::UserRole, QByteArray(obj->getNameInDocument()));
         item->setIcon(0, statusIcon(obj, held));
-        item->setFont(0, statusFont(parts->font(), obj, held));
+        // Not italic while rolled back: a part in the list exists at the bar (round 6, J22)
+        item->setFont(0, statusFont(parts->font(), obj, false));
         item->setData(0, Qt::ForegroundRole, statusForeground(obj));
         item->setToolTip(0, rowToolTip(obj, nullptr));
         auto vp = viewProviderOf(obj);

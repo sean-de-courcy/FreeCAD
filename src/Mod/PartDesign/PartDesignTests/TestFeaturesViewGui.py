@@ -1014,6 +1014,31 @@ class TestFeaturesViewGui(unittest.TestCase):
         )
         self.assertNotEqual(self.item("SkN").foreground().color(), grey)
 
+    def testAFailedRowBelowTheBarIsGreyAndThePartsNotItalic(self):
+        """Round 6 (journeys J2, J22): Pocket1 failing (no length) is red; rolled back above it,
+        its row is grey like the other rows below the bar, not red (nothing below the bar is
+        evaluated [guess]), and the Parts rows aren't italic."""
+        grey = self.list.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        red = QtGui.QColor(0xD0, 0x30, 0x30)
+        self.pocket1.Type = "Length"
+        self.pocket1.Length = 0
+        self.doc.recompute()
+        self.assertIn("Invalid", self.pocket1.State)
+        self.assertTrue(waitFor(lambda: self.item("Pocket1").foreground().color() == red))
+        PartDesign.rollStudioTo(self.doc, self.box)
+        self.doc.recompute()
+        self.assertTrue(
+            waitFor(lambda: self.rows() == ["SkA", "PadA", "Box", "|", "SkB", "Pocket1", "PocketB"]),
+            self.rows(),
+        )
+        self.assertIn("Invalid", self.pocket1.State)
+        self.assertEqual(self.item("Pocket1").foreground().color(), grey)
+        self.assertTrue(self.item("Pocket1").font().italic())
+        self.assertTrue(self.parts.topLevelItemCount() > 0)
+        for i in range(self.parts.topLevelItemCount()):
+            item = self.parts.topLevelItem(i)
+            self.assertFalse(item.font(0).italic(), item.text(0))
+
     def testDefaultGeometryRows(self):
         """Rank 33: Onshape's default geometry at the top (Origin, Top, Front, Right): not in the
         history (a bar dropped among them is at the top), not renamed; the eye of the Top plane
