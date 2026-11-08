@@ -71,6 +71,7 @@ FEATURES = [
     "PartDesign_Boolean",
     "PartDesign_Split",
     "PartDesign_MergeParts",
+    "PartDesign_Derived",  # Onshape's Derived (ops#640 round 6)
     SEP,
     "PartDesign_CompDatums",
     "PartDesign_AdditiveHelix",

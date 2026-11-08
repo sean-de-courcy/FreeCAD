@@ -204,6 +204,8 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskBooleanParameters.h
     TaskSplitParameters.cpp
     TaskSplitParameters.h
+    TaskDerived.cpp
+    TaskDerived.h
     TaskPrimitiveParameters.h
     TaskPrimitiveParameters.cpp
     TaskPipeParameters.ui

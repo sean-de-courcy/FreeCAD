@@ -92,6 +92,7 @@ from PartDesignTests.TestRegenerateGui import TestRegenerateGui  # FreeCAD-CH, o
 from PartDesignTests.TestDressUpAnyPartGui import TestDressUpAnyPartGui  # FreeCAD-CH, ops#640 rank 14
 from PartDesignTests.TestOperationSwitchGui import TestOperationSwitchGui  # FreeCAD-CH, ops#640 round 5
 from PartDesignTests.TestOperationSwitchGui import TestMergedSwitchGui  # FreeCAD-CH, ops#640 round 5
+from PartDesignTests.TestDerivedGui import TestDerivedGui  # FreeCAD-CH, ops#640 round 6
 
 
 # timer runs this class in order to access modal dialog

@@ -100,6 +100,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestSplitParts.py
     PartDesignTests/TestRegenerate.py
     PartDesignTests/TestOnshapeEndTypes.py
+    PartDesignTests/TestDerived.py
 )
 
 if(BUILD_GUI)
@@ -141,6 +142,7 @@ if(BUILD_GUI)
         PartDesignTests/TestRegenerateGui.py
         PartDesignTests/TestDressUpAnyPartGui.py
         PartDesignTests/TestOperationSwitchGui.py
+        PartDesignTests/TestDerivedGui.py
     )
 endif(BUILD_GUI)
 
