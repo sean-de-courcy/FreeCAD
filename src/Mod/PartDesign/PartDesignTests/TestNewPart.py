@@ -545,6 +545,41 @@ class TestNewPart(unittest.TestCase):
         for face in slanted:
             self.assertLess(face.BoundBox.ZMax, 1 + 1e-6)
 
+    def testNewPartRefusesADraftWithItsNeutralPlaneOnTheBoss(self):
+        """Fix review F1: a draft of 2 degrees on the enclosure's four sides right after the boss,
+        its neutral plane the bottom face picked on the boss: the move would reroute its Base but
+        leave the neutral plane on the boss in the other part, so New part is refused, naming the
+        draft, and nothing changes (loud, where Onshape keeps the draft; debt)."""
+        body, base, lidSk = self.enclosure()
+        bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
+        bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        bossSk.MapMode = "FlatFace"
+        rect(bossSk, 10, 10, 30, 30)
+        boss = pad(body, "Boss", bossSk, 5)
+        self.doc.recompute()
+        sides = []
+        bottom = None
+        for i, face in enumerate(boss.Shape.Faces, 1):
+            bb = face.BoundBox
+            if abs(bb.ZMin) < 1e-6 and abs(bb.ZMax - 10) < 1e-6:
+                sides.append(f"Face{i}")
+            elif abs(bb.ZMax) < 1e-6:
+                bottom = f"Face{i}"
+        self.assertEqual(len(sides), 4)
+        self.assertIsNotNone(bottom)
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (boss, sides)
+        draft.NeutralPlane = (boss, [bottom])
+        draft.Angle = 2
+        self.doc.recompute()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.assertEqual(PartDesign.newPartRefusal(boss), "'Draft' uses 'Boss', which would go to the new part")
+        names = sorted(o.Name for o in self.doc.Objects)
+        with self.assertRaises(ValueError):
+            PartDesign.newPartFrom(boss)
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertIs(body.Tip, draft)
+
     def testNewPartRefusesWhatCantBeToldApart(self):
         """A pad on the fillet's top (its sketch on that face) would stay with the enclosure and
         change: refused, naming the sketch, and nothing changes. A first solid with features after

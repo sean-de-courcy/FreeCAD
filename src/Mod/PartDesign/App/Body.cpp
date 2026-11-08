@@ -769,6 +769,41 @@ std::string quotedLabels(const std::vector<App::DocumentObject*>& objects)
     return text;
 }
 
+/** FreeCAD-CH (ops#640, review R5-2 and its fix review F1/F2): a dress-up's Base, when it is the
+ * dress-up's own BaseFeature and the move's reroute can carry it (DressUp::onBaseFeatureRerouted
+ * relinks Base by its mapped names): nothing else of the dress-up links that object (a Draft's
+ * NeutralPlane or PullDirection on it would stay behind, the reroute relinks Base only), and every
+ * reference has a mapped name (one without would fall back to its index on the other shape: a
+ * silent wrong edge). Otherwise nullptr: the link check refuses as before. */
+App::DocumentObject* chainBaseOf(App::DocumentObject* obj)
+{
+    auto dressUp = freecad_cast<DressUp*>(obj);
+    App::DocumentObject* base = dressUp ? dressUp->Base.getValue() : nullptr;
+    if (!base || base != dressUp->BaseFeature.getValue()) {
+        return nullptr;
+    }
+    const auto& shadows = dressUp->Base.getShadowSubs();
+    if (shadows.size() != dressUp->Base.getSubValues(false).size()
+        || std::ranges::any_of(shadows, [](const auto& shadow) { return shadow.newName.empty(); })) {
+        return nullptr;
+    }
+    std::vector<App::Property*> props;
+    obj->getPropertyList(props);
+    for (App::Property* prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        if (!link || prop == &dressUp->Base || prop == &dressUp->BaseFeature
+            || prop == &dressUp->_Body) {
+            continue;
+        }
+        std::vector<App::DocumentObject*> targets;
+        link->getLinks(targets, false);
+        if (std::ranges::find(targets, base) != targets.end()) {
+            return nullptr;
+        }
+    }
+    return base;
+}
+
 struct NewPartPlan
 {
     /// What goes to the new part, in the Body's order: the sketch, the feature, what follows
@@ -989,11 +1024,7 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
         // Its links: what goes links only what goes (the feature's sketch: below); what stays
         // links nothing that goes. A dress-up's Base on its own BaseFeature is the chain's link:
         // the move reroutes it with its references (Body::rerouteBase, review R5-2)
-        auto chainDressUp = freecad_cast<DressUp*>(obj);
-        App::DocumentObject* chainBase = chainDressUp
-                && chainDressUp->Base.getValue() == chainDressUp->BaseFeature.getValue()
-            ? chainDressUp->Base.getValue()
-            : nullptr;
+        App::DocumentObject* chainBase = chainBaseOf(obj);
         for (App::DocumentObject* target : linksOf(obj)) {
             if (chainBase && target == chainBase) {
                 continue;
@@ -1119,6 +1150,25 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
     }
     for (App::DocumentObject* obj : plan.moved) {
         part->addObject(obj);
+    }
+    // A dress-up whose Base the reroute couldn't carry keeps it in the other part, while it
+    // computes on its new BaseFeature: cleared, so it fails until it is re-picked, never on the
+    // other shape's element of the same index (fix review F2)
+    for (Body* each : {body, part}) {
+        for (App::DocumentObject* member : each->Group.getValues()) {
+            auto dressUp = freecad_cast<DressUp*>(member);
+            App::DocumentObject* base = dressUp ? dressUp->Base.getValue() : nullptr;
+            if (base && base != dressUp->BaseFeature.getValue() && findBodyOf(base) != each) {
+                Base::Console().warning("%s: New part couldn't carry its references to %s; "
+                                        "re-pick them\n",
+                                        dressUp->Label.getValue(),
+                                        base->Label.getValue());
+                dressUp->Base.setValue(nullptr);
+                if (!dressUp->BaseFeature.getValue()) {
+                    each->setBaseProperty(dressUp);
+                }
+            }
+        }
     }
     // Onshape's New has no merge scope (ops#640 rank 1): the feature is its new part's first solid
     if (auto addSub = freecad_cast<FeatureAddSub*>(feature)) {
