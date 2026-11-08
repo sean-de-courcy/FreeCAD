@@ -464,10 +464,17 @@ class TestSketchFilletFieldsGui(SketchToolsTestCase):
         self.flush_gui(50)
         self.assertAlmostEqual(FreeCAD.ParamGet(TOOLS).GetFloat("ChamferAngle"), 30.0, places=6)
 
+    def arcs(self):
+        return [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)]
+
     def test_a_vertex_fillet_has_the_radius_typed_and_a_radius_dimension(self):
+        """Hands-on C-4: the corner picked is previewed (nothing made yet); Enter makes it."""
         self.set_param(TOOLS, "Float", "FilletRadius", 3.0)
         self.start_tool("Sketcher_CreateFillet")
         self.corner_click()
+        self.assertEqual(self.arcs(), [], "the fillet was made before Enter (Onshape previews it)")
+        self.key_click(self.viewport, QtCore.Qt.Key_Return)
+        self.flush_gui(150)
         arcs = [
             (i, g) for i, g in enumerate(self.sketch.Geometry) if isinstance(g, Part.ArcOfCircle)
         ]
@@ -482,6 +489,27 @@ class TestSketchFilletFieldsGui(SketchToolsTestCase):
         self.assertAlmostEqual(radius.Value, 3.0, places=6)
         self.assertTrue(self.sketch.getDriving(radius_index))
         self.assertEqual(self.sketch.solve(), 0)
+
+    def test_a_click_makes_the_previewed_fillet(self):
+        """After the corner's preview, a click makes it too, at the radius typed. [guess]: hands-on
+        C-4 observed Enter only; whether Onshape's click makes the previewed fillet is not known."""
+        self.set_param(TOOLS, "Float", "FilletRadius", 3.0)
+        self.start_tool("Sketcher_CreateFillet")
+        self.corner_click()
+        self.assertEqual(self.arcs(), [])
+        self.click_at(6, 6)
+        arcs = self.arcs()
+        self.assertEqual(len(arcs), 1, "Expected one fillet arc")
+        self.assertAlmostEqual(arcs[0].Radius, 3.0, places=6)
+
+    def test_esc_drops_the_previewed_fillet(self):
+        """Esc after the corner's preview makes nothing."""
+        self.set_param(TOOLS, "Float", "FilletRadius", 3.0)
+        self.start_tool("Sketcher_CreateFillet")
+        self.corner_click()
+        self.key_click(self.viewport, QtCore.Qt.Key_Escape)
+        self.flush_gui(150)
+        self.assertEqual(self.arcs(), [])
 
     def test_an_even_chamfer_has_the_distance_typed(self):
         self.set_param(TOOLS, "Float", "ChamferDistance", 3.0)
