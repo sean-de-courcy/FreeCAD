@@ -27,7 +27,9 @@
 #include "Workbench.h"
 #include <Base/Console.h>
 #include <Gui/Application.h>
+#include <Gui/Command.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/WorkbenchManager.h>
 #include <Mod/Sketcher/App/Constraint.h>
 
@@ -732,6 +734,21 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
            << "Sketcher_ConstrainMidpoint"
            << "Sketcher_ConstrainSymmetric"
            << "Sketcher_ConstrainBlock";
+
+    // FreeCAD-CH (ops#640, rank 73, gap W7): under Onshape's keymap the sketch toolbar ends with
+    // Extrude and Revolve [guess: at its end]; from the sketch in edit they accept it and open with
+    // it as their profile, as their keys Shift+E and Shift+W do (PartDesign's Command.cpp, ops#194).
+    // Only once Part Design's commands exist: a toolbar built before is completed at the next
+    // activation of the workbench, which every sketch edit from Part Design is.
+    if (Gui::ForkKeymap::isOnshape()) {
+        Gui::CommandManager& commands = Gui::Application::Instance->commandManager();
+        if (commands.getCommandByName("PartDesign_Pad")
+            && commands.getCommandByName("PartDesign_Revolution")) {
+            sketch << "Separator"
+                   << "PartDesign_Pad"
+                   << "PartDesign_Revolution";
+        }
+    }
 }
 
 void addSketcherWorkbenchSketchActions(Gui::MenuItem& sketch)

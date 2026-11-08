@@ -60,6 +60,7 @@ if(BUILD_GUI)
           SketcherTests/TestSketchHelpersGui.py
           SketcherTests/TestSketchOnshapeToolsGui.py
           SketcherTests/TestSketchRound3Gui.py
+          SketcherTests/TestSketchRound4Gui.py
     )
 endif(BUILD_GUI)
 

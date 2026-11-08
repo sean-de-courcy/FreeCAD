@@ -24,7 +24,9 @@
 
 #include <FCConfig.h>
 
+#include <algorithm>
 #include <memory>
+#include <set>
 
 #include <QApplication>
 #include <QClipboard>
@@ -1169,9 +1171,159 @@ CmdSketcherSymmetry::CmdSketcherSymmetry()
     eType = ForEdit;
 }
 
+namespace
+{
+/* FreeCAD-CH (ops#640, rank 48, gap S22): Onshape's sketch Mirror starts with nothing selected:
+ * pick the mirror line (a line of the sketch, a projected model line or an axis), then each entity
+ * to mirror, which is mirrored at its pick with its Symmetric constraints [guess: the line first,
+ * an entity mirrored per pick]. A curve's end or centre picks its curve. Esc or a right click ends
+ * the tool; the sketch stays open.
+ */
+class DrawSketchHandlerMirrorPick: public DrawSketchHandler
+{
+public:
+    void mouseMove(SnapManager::SnapHandle /*snapHandle*/) override
+    {}
+
+    bool pressButton(Base::Vector2d /*pos*/) override
+    {
+        return true;
+    }
+
+    bool releaseButton(Base::Vector2d /*pos*/) override
+    {
+        if (refGeoId == Sketcher::GeoEnum::GeoUndef) {
+            pickMirrorLine();
+        }
+        else {
+            pickEntity();
+        }
+        return true;
+    }
+
+    std::list<Gui::InputHint> getToolHints() const override
+    {
+        using enum Gui::InputHint::UserInput;
+        if (refGeoId == Sketcher::GeoEnum::GeoUndef) {
+            return {{QObject::tr("%1 pick the mirror line", "Sketcher Mirror: hint"), {MouseLeft}}};
+        }
+        return {
+            {QObject::tr("%1 pick an entity to mirror", "Sketcher Mirror: hint"), {MouseLeft}},
+            {QObject::tr("%1 end", "Sketcher Mirror: hint"), {KeyEscape}},
+        };
+    }
+
+private:
+    std::string getToolName() const override
+    {
+        return "DSH_MirrorPick";
+    }
+
+    QString getCrosshairCursorSVGName() const override
+    {
+        return QStringLiteral("Sketcher_Pointer_Create_Symmetry");
+    }
+
+    void pickMirrorLine()
+    {
+        const Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        const int cross = getPreselectCross();
+        const int geoId = getPreselectCurve();
+        if (cross == 1) {
+            refGeoId = Sketcher::GeoEnum::HAxis;
+        }
+        else if (cross == 2) {
+            refGeoId = Sketcher::GeoEnum::VAxis;
+        }
+        else if ((geoId >= 0 || geoId <= Sketcher::GeoEnum::RefExt)
+                 && isLineSegment(*obj->getGeometry(geoId))) {
+            refGeoId = geoId;
+        }
+        else {
+            return;
+        }
+        updateHint();
+    }
+
+    /// the sketch geometry under the cursor: a curve, or the curve or point a vertex is of
+    int pickedGeometry() const
+    {
+        int geoId = getPreselectCurve();
+        if (geoId < 0) {  // none (-1), or a projected curve, which isn't mirrored
+            const int vertex = getPreselectPoint();
+            if (vertex >= 0) {
+                Sketcher::PointPos pos {};
+                sketchgui->getSketchObject()->getGeoVertexIndex(vertex, geoId, pos);
+            }
+        }
+        return geoId;
+    }
+
+    void pickEntity()
+    {
+        Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        const int geoId = pickedGeometry();
+        // only the sketch's own geometry, each once; not the line, not a copy this tool made
+        if (geoId < 0 || geoId == refGeoId || done.contains(geoId)) {
+            return;
+        }
+        const Part::Geometry* geo = obj->getGeometry(geoId);
+        if (!geo || GeometryFacade::isInternalAligned(geo)) {
+            return;
+        }
+        // a conic's or B-spline's internal geometry goes with it, as getListOfSelectedGeoIds() adds it
+        std::vector<int> geoIds {geoId};
+        for (const auto* constr : obj->Constraints.getValues()) {
+            if (constr->Type == Sketcher::InternalAlignment && constr->Second == geoId
+                && std::ranges::find(geoIds, constr->First) == geoIds.end()) {
+                geoIds.push_back(constr->First);
+            }
+        }
+
+        const int highestBefore = obj->getHighestCurveIndex();
+        try {
+            openCommand(QT_TRANSLATE_NOOP("Command", "Mirror geometry"));
+            obj->addSymmetric(geoIds, refGeoId, Sketcher::PointPos::none, true);
+            commitCommand();
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+            abortCommand();
+            Gui::NotifyError(
+                sketchgui,
+                QT_TRANSLATE_NOOP("Notifications", "Error"),
+                QT_TRANSLATE_NOOP("Notifications", "Failed to create symmetry")
+            );
+        }
+        tryAutoRecomputeIfNotSolve(obj);
+
+        done.insert(geoIds.begin(), geoIds.end());
+        for (int i = highestBefore + 1; i <= obj->getHighestCurveIndex(); ++i) {
+            done.insert(i);
+        }
+    }
+
+    int refGeoId = Sketcher::GeoEnum::GeoUndef;
+    std::set<int> done;  // mirrored, or made by the mirroring
+};
+}  // namespace
+
 void CmdSketcherSymmetry::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+
+    // FreeCAD-CH (ops#640, rank 48): Onshape's Mirror with nothing of the sketch selected waits
+    // for the mirror line, then the entities
+    if (Gui::ForkKeymap::isOnshape()) {
+        std::vector<Gui::SelectionObject> selection
+            = getSelection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId());
+        if (selection.empty() || (selection.size() == 1 && selection[0].getSubNames().empty())) {
+            getSelection().clearSelection();
+            ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerMirrorPick>());
+            return;
+        }
+    }
+
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -1182,6 +1334,10 @@ void CmdSketcherSymmetry::activated(int iMsg)
 
 bool CmdSketcherSymmetry::isActive()
 {
+    // FreeCAD-CH (ops#640, rank 48): under Onshape's keymap the tool starts without a selection
+    if (Gui::ForkKeymap::isOnshape()) {
+        return isCommandActive(getActiveGuiDocument());
+    }
     return isCommandNeedingGeometryActive(getActiveGuiDocument());
 }
 
