@@ -5325,7 +5325,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         axisSketch.addGeometry(models.polyline([(0, 5), (0, -1)]), False)
         self.doc.recompute()
 
-        self.edit(feature, count=1)
+        # The guessed axis's row and, since rank 21, the Profile field shown with it
+        self.edit(feature, count=2)
         combo = self.axisCombo()
         self.assertFalse(
             any("?" in combo.itemText(i) for i in range(combo.count())),
@@ -5395,6 +5396,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.edit(feature, count=0)
         update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
         update.setChecked(False)
+        settle()
+        # A full turn opens with Full revolve, which hides the end type and the angle (rank 21,
+        # Onshape's): off, with the view not updated, the shape stays the full ring
+        full = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxFullRevolve")
+        full.setChecked(False)
         settle()
         field = findField("fieldUpToFace")
         # Hidden or not by the panel (run alone, the first panel sits in the hidden overlay)
@@ -5670,7 +5676,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         axisSketch.deleteAllGeometry()
         axisSketch.addGeometry(models.polyline([(0, 5), (0, -1)]), False)
         self.doc.recompute()
-        self.edit(feature, count=1)
+        # The guessed axis's row and, since rank 21, the Profile field shown with it
+        self.edit(feature, count=2)
         field = findField("fieldReferenceAxis")
         self.arm(field, byFocus=True)
         [panel] = [

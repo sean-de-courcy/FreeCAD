@@ -1899,7 +1899,15 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         self.assertWaitsForTheAxis(revolution)
         self.chooseAxis("Vertical sketch axis")
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
-        self.assertFalse(self.axisField().property("missing"))
+        # A choice of the axis box hides the field (ReferenceCombo::refresh): the box shows it
+        self.assertTrue(
+            waitFor(lambda: self.axisField() is None or not self.axisField().property("missing")),
+            "the axis field stays missing",
+        )
+        [box] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "axis") if c.isVisible()
+        ]
+        self.assertEqual(box.currentText(), "Vertical sketch axis")
         ok = QtWidgets.QDialogButtonBox.Ok
         self.assertTrue(
             waitFor(lambda: "pick a line or an edge" not in taskButton(ok).toolTip().lower()),
@@ -1940,6 +1948,12 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         undos = len(self.doc.UndoNames)
         revolution = self.featurePanel("PartDesign_Revolution")
         self.assertWaitsForTheAxis(revolution)
+        # A full turn shows no angle (rank 21, as Onshape's Full revolve): the value field to
+        # press Enter in comes with Full revolve off
+        full = self.visible(QtWidgets.QCheckBox, "checkBoxFullRevolve")
+        self.assertIsNotNone(full, "no Full revolve box")
+        full.setChecked(False)
+        pump(0.3)
         angle = self.visible(QtWidgets.QWidget, "revolveAngle")
         self.assertIsNotNone(angle, "no angle field")
         angle.setFocus(QtCore.Qt.OtherFocusReason)
