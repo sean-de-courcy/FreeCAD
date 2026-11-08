@@ -5,7 +5,9 @@ the feature.
 
 Rank 73 (gap W7): under Onshape's keymap the sketch toolbar ends with Extrude and Revolve, which
 accept the sketch in edit and open with it as their profile. Rank 48 (gap S22): the sketch Mirror
-starts with nothing selected: the mirror line, then each entity, mirrored at its pick.
+starts with nothing selected: the mirror line, then each entity, mirrored at its pick. Rank 18's
+second slice (gap S17): drawing snaps to another part of the studio, never to one that depends on
+the sketch.
 
 Designed geometry only: round 3's 20 x 10 x 5 box and a sketch at z 5 above it (Round3GuiCase).
 Expected positions are computed: a mirror about the line x = 10 takes (x, y) to (20 - x, y)."""
@@ -244,3 +246,76 @@ class TestSketchMirrorToolFirstGui(Round3GuiCase):
         self.sketch.solve()
         self.assert_line_mirrored(self.sketch.Geometry[1], self.sketch.Geometry[4])
         self.assertEqual(self.symmetric().count((1, 4, 0)), 2, self.symmetric())
+
+
+class TestSketchOtherPartSnapGui(Round3GuiCase):
+    """Rank 18's second slice (gap S17): while drawing, a point also snaps to the vertices and
+    edges of another part of the studio (another Body's Tip) and links them, as Onshape infers
+    onto any part made before the sketch; never onto a part that depends on the sketch (a cycle),
+    nor onto a hidden one. Here the sketch is in a second Body, on XY at z 5: the box is the
+    first Body's."""
+
+    def setUp(self):
+        super().setUp()
+        self.doc.removeObject(self.sketch.Name)
+        self.body2 = self.doc.addObject("PartDesign::Body", "Body001")
+        xy = self.body2.Origin.OriginFeatures[3]
+        self.sketch = self.body2.newObject("Sketcher::SketchObject", "Sketch2")
+        self.sketch.AttachmentSupport = [(xy, "")]
+        self.sketch.MapMode = "FlatFace"
+        self.sketch.AttachmentOffset = FreeCAD.Placement(V(0, 0, 5), FreeCAD.Rotation())
+        self.doc.recompute()
+
+    def external_coincident(self, geo, pos):
+        for c in self.sketch.Constraints:
+            if c.Type != "Coincident":
+                continue
+            if (c.First == geo and c.FirstPos == pos and c.Second <= -3) or (
+                c.Second == geo and c.SecondPos == pos and c.First <= -3
+            ):
+                return c
+        return None
+
+    def test_a_line_started_near_another_part_s_corner_snaps_and_links_it(self):
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(20.04, 9.97), (12, 4)])
+        start = self.world(self.sketch.Geometry[0].StartPoint)
+        self.assertLess((start - V(20, 10, 5)).Length, 1e-6, "The start snapped to the corner")
+        self.assertIn(("Pad", self.pad_vertex_at(V(20, 10, 5))), self.links(), self.describe())
+        self.assertIsNotNone(self.external_coincident(0, 1), self.describe())
+
+    def test_a_hidden_part_is_not_snapped_to(self):
+        self.body.Visibility = False
+        self.doc.recompute()
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(20.04, 9.97), (12, 4)])
+        self.assertEqual(self.links(), [], self.describe())
+
+    def test_a_part_that_depends_on_the_sketch_is_not_snapped_to(self):
+        # the sketch's one line (index 0), away from everything; a third Body's 4 x 2 box at
+        # x 2..6, y 12..14, z 0..5, whose sketch links that line: its part depends on the sketch
+        self.sketch.addGeometry(Part.LineSegment(V(-4, -3, 0), V(-2, -3, 0)))
+        self.doc.recompute()
+        body3 = self.doc.addObject("PartDesign::Body", "Body002")
+        profile = body3.newObject("Sketcher::SketchObject", "Profile3")
+        profile.AttachmentSupport = [(body3.Origin.OriginFeatures[3], "")]
+        profile.MapMode = "FlatFace"
+        corners = [V(2, 12, 0), V(6, 12, 0), V(6, 14, 0), V(2, 14, 0)]
+        for i in range(4):
+            profile.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            profile.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        profile.addExternal(self.sketch.Name, "Edge1")
+        self.doc.recompute()
+        pad3 = body3.newObject("PartDesign::Pad", "Pad3")
+        pad3.Profile = profile
+        pad3.Length = 5.0
+        self.doc.recompute()
+        self.assertTrue(pad3.isValid(), pad3.getStatusString())
+        self.assertIn(self.sketch, pad3.OutListRecursive, "Expected the third part to use the sketch")
+
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(6.04, 13.97), (9, 17)])
+        self.assertEqual(self.links(), [], self.describe())
+        start = self.world(self.sketch.Geometry[1].StartPoint)
+        self.assertGreater((start - V(6, 14, 5)).Length, 1e-3, "No snap to the dependent part")

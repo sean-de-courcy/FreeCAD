@@ -47,6 +47,7 @@
 #include <Base/Placement.h>
 #include <Gui/Command.h>
 #include <Gui/CommandT.h>
+#include <Mod/Part/App/BodyBase.h>
 #include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
@@ -133,11 +134,11 @@ double sweep(double from, double angle)
     return delta;
 }
 
-/** the objects whose shapes the sketch snaps to: the support (without datums and the origin)
- * and, in a Body, the solid feature before the sketch (the part as the sketch sees it, so a sketch
- * on a plane reaches the part's edges in that plane). Both come before the sketch: a link to them
- * makes no cycle. A Body's solid features are told by their BaseFeature property (Sketcher can't
- * link PartDesign).
+/** the objects whose shapes the sketch snaps to: the support (without datums and the origin),
+ * in a Body the solid feature before the sketch (the part as the sketch sees it, so a sketch on a
+ * plane reaches the part's edges in that plane), and the other shown Bodies' Tips it may link.
+ * All come before the sketch: a link to them makes no cycle. A Body's solid features are told by
+ * their BaseFeature property (Sketcher can't link PartDesign).
  */
 std::vector<App::DocumentObject*> snapSources(const Sketcher::SketchObject* sketch)
 {
@@ -172,6 +173,27 @@ std::vector<App::DocumentObject*> snapSources(const Sketcher::SketchObject* sket
         auto* document = sketch->getDocument();
         if (previousSolid && document && sketch->isExternalAllowed(document, previousSolid)) {
             take(previousSolid);
+        }
+    }
+
+    // FreeCAD-CH (ops#640, rank 18, second slice): the other parts of the sketch's studio, each
+    // by its Body's Tip (the part as it is), when shown and when the sketch may link it:
+    // isExternalAllowed() takes only a Body of the same studio and refuses a cycle, so a part
+    // that depends on the sketch (made after it) is left out, as Onshape's sketch sees only the
+    // parts made before it
+    auto* ownBody = Part::BodyBase::findBodyOf(sketch);
+    auto* document = sketch->getDocument();
+    if (ownBody && document) {
+        for (auto* object : document->getObjectsOfType(Part::BodyBase::getClassTypeId())) {
+            auto* body = static_cast<Part::BodyBase*>(object);
+            if (body == ownBody || !body->Visibility.getValue()) {
+                continue;
+            }
+            App::DocumentObject* tip = body->Tip.getValue();
+            if (tip && !tip->isDerivedFrom<Part::Part2DObject>()
+                && sketch->isExternalAllowed(document, tip)) {
+                take(tip);
+            }
         }
     }
     return sources;
