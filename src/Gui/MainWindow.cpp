@@ -97,6 +97,7 @@
 #include "DockWindowManager.h"
 #include "DownloadManager.h"
 #include "FileDialog.h"
+#include "ForkKeymap.h"  // FreeCAD-CH (ops#640, rank 58)
 #include "InputHintWidget.h"
 #include "MenuManager.h"
 #include "ModuleIO.h"
@@ -713,6 +714,98 @@ static void setupVariablesView(QWidget* parent, const std::string& hiddenDockWin
     }
 }
 
+namespace
+{
+// FreeCAD-CH (ops#640, rank 58): Onshape's modes under the Onshape keymap. A tab there is a Part
+// Studio, an Assembly or a Drawing, and the toolbar follows it. Here three buttons switch the
+// workbench, and make the active document's assembly or drawing when it has none (and a document
+// when none is open). The workbench list stays in View > Workbench.
+struct StudioMode
+{
+    const char* label;
+    const char* workbench;
+    const char* alsoWorkbench;  // another workbench shown as this mode, or nullptr
+    const char* type;           // the object the mode needs in the document, or nullptr
+    const char* command;        // the command that makes it
+};
+
+const StudioMode studioModes[] = {
+    {QT_TRANSLATE_NOOP("Gui::MainWindow", "Part Studio"),
+     "PartDesignWorkbench",
+     "SketcherWorkbench",
+     nullptr,
+     nullptr},
+    {QT_TRANSLATE_NOOP("Gui::MainWindow", "Assembly"),
+     "AssemblyWorkbench",
+     nullptr,
+     "Assembly::AssemblyObject",
+     "Assembly_CreateAssembly"},
+    {QT_TRANSLATE_NOOP("Gui::MainWindow", "Drawing"),
+     "TechDrawWorkbench",
+     nullptr,
+     "TechDraw::DrawPage",
+     "TechDraw_PageDefault"},
+};
+
+void activateMode(const StudioMode& mode)
+{
+    CommandManager& commands = Application::Instance->commandManager();
+    if (!App::GetApplication().getActiveDocument()) {
+        commands.runCommandByName("Std_New");
+    }
+    // activateWorkbench() also returns false when the workbench is active already: what counts
+    // is the workbench active afterwards
+    Application::Instance->activateWorkbench(mode.workbench);
+    Workbench* active = WorkbenchManager::instance()->active();
+    if (!active || active->name() != mode.workbench || !mode.type) {
+        return;
+    }
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    Base::Type type = Base::Type::fromName(mode.type);
+    if (doc && !type.isBad() && doc->getObjectsOfType(type).empty()) {
+        commands.runCommandByName(mode.command);
+    }
+}
+
+/// The modes toolbar: a plain QToolBar, which ToolBarManager (it manages Gui::ToolBar only)
+/// leaves alone when the workbench changes. Shown under the Onshape keymap only.
+void setupModeToolBar(MainWindow* mw)
+{
+    auto bar = new QToolBar(mw);
+    bar->setObjectName(QStringLiteral("FreeCADCH_Modes"));
+    bar->setWindowTitle(QApplication::translate("Gui::MainWindow", "Modes"));
+    bar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    auto group = new QActionGroup(bar);
+    group->setExclusionPolicy(QActionGroup::ExclusionPolicy::ExclusiveOptional);
+    for (const StudioMode& mode : studioModes) {
+        QAction* action = bar->addAction(QApplication::translate("Gui::MainWindow", mode.label));
+        action->setObjectName(QString::fromLatin1(mode.workbench));
+        action->setCheckable(true);
+        group->addAction(action);
+        const StudioMode* target = &mode;
+        QObject::connect(action, &QAction::triggered, mw, [target, action] {
+            activateMode(*target);
+            // checked again when the workbench was already active (no workbenchActivated)
+            Workbench* active = WorkbenchManager::instance()->active();
+            action->setChecked(active && active->name() == target->workbench);
+        });
+    }
+    mw->addToolBar(Qt::TopToolBarArea, bar);
+    bar->setVisible(ForkKeymap::isOnshape());
+    QObject::connect(mw, &MainWindow::workbenchActivated, bar, [bar, group](const QString& name) {
+        bar->setVisible(ForkKeymap::isOnshape());
+        const QList<QAction*> actions = group->actions();
+        for (int i = 0; i < actions.size(); ++i) {
+            const StudioMode& mode = studioModes[i];
+            actions[i]->setChecked(
+                name == QLatin1String(mode.workbench)
+                || (mode.alsoWorkbench && name == QLatin1String(mode.alsoWorkbench))
+            );
+        }
+    });
+}
+}  // namespace
+
 void MainWindow::setupDockWindows()
 {
     // Report view must be created before PythonConsole!
@@ -721,6 +814,7 @@ void MainWindow::setupDockWindows()
     setupSelectionView();
     setupVariablesView(this, d->hiddenDockWindows);  // FreeCAD-CH (ops#152)
     setupTaskView();
+    setupModeToolBar(this);  // FreeCAD-CH (ops#640, rank 58): not a dock, but made once here
 
     initDockWindows(false);
 
