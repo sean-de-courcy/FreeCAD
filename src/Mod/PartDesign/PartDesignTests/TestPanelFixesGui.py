@@ -3125,8 +3125,9 @@ class TestPanelFixesGui(unittest.TestCase):
         The independent copy keeps the box's place: OK closes, and the copy's edge is the box's,
         from (5, 5, 10) to (5, 5, 20). With 7801f7c453's makeCopy the Pipe panel stopped on Edge1
         ("would name another element on a copy"); Placement has no group, so it was never
-        skipped with the Attachment group (PR 224 review L1)."""
-        other = models.body(self.doc)
+        skipped with the Attachment group (PR 224 review L1). The other body is in its own App::Part
+        (otherBody): a top-level sibling's edge is linked directly (ops#634)."""
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Placement.Base = V(5, 5, 10)
         self.body = models.body(self.doc)
