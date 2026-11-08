@@ -532,7 +532,8 @@ class TestResultBoxGui(ResultBoxGuiCase):
     def testNewPartIsRefusedForAUsedFeature(self):
         """F1 (ops#640): the lid pad, which a pad on its top uses, edited with no other part in
         the document: the box is there, on Add to Enclosure, with New part disabled and the reason
-        as its tooltip. The base, the enclosure's first solid, is on New part, touching no other
+        as its tooltip: the top pad's sketch is on the lid, and the pad would stay in the enclosure
+        (round 5 moves only what works on the lid's own material, TestOperationSwitchGui). The base, the enclosure's first solid, is on New part, touching no other
         part: Add, Remove and Intersect are all offered, with no reason; chosen, each has an
         empty merge scope and goes red, "No merge scope selected", as Onshape's (ops#640 rank 3a,
         hands-on checks R7(a) and R8; TestMergeScopeGui covers the red row)."""
@@ -554,7 +555,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.assertEqual(combo.currentText(), "Add to Enclosure")
         model = combo.model()
         self.assertFalse(model.flags(model.index(0, 0)) & QtCore.Qt.ItemIsEnabled)
-        self.assertIn("tip that nothing uses", combo.itemData(0, QtCore.Qt.ToolTipRole))
+        self.assertIn("'TopSk' uses 'Lid'", combo.itemData(0, QtCore.Qt.ToolTipRole))
         self.close(ok=False)
         self.doc.openTransaction("Edit Base")
         Gui.getDocument(self.doc.Name).setEdit(self.base.Name)
@@ -1798,8 +1799,9 @@ class TestOperationRefusalGui(ResultBoxGuiCase):
         self.assertAddRowsRefused(lid, "which add to part would remove")
 
     def testAMergeAfterTheFeature(self):
-        """The lid pad merged with Panel (the Merge right after it): Remove and Intersect are
-        refused until the Merge goes; New part too (the pad isn't the tip any more)."""
+        """The lid pad merged with Panel (the Merge right after it, nothing built on it): every row
+        is offered, as Onshape's (hands-on B5-4: the switch drops the Merge, ops#640 round 5;
+        TestMergedSwitchGui)."""
         self.enclosure()
         lid = pad(self.body, "Lid", self.lidSk, 10)
         self.doc.recompute()
@@ -1810,17 +1812,14 @@ class TestOperationRefusalGui(ResultBoxGuiCase):
         combo = self.openEdit(lid)
         self.assertEqual(combo.currentText(), "Add to Enclosure")
         rows = self.rows(combo)
-        self.assertFalse(rows[0][0], rows)
-        self.assertIn("tip that nothing uses", rows[0][1])
-        self.assertTrue(rows[1][0], rows)
-        for enabled, tip in rows[2:]:
-            self.assertFalse(enabled, rows)
-            self.assertEqual(tip, "Merged with Panel: delete the Merge first")
+        for enabled, tip in rows:
+            self.assertTrue(enabled, rows)
+            self.assertEqual(tip, "", rows)
 
     def testACutWithSiblings(self):
-        """A pocket of the lid sketch, 20 deep, with a sibling in Below: New part is refused (it
-        cuts other parts too), Add is offered. A sketch on the sibling's cut face uses it: Add is
-        refused too, naming the user."""
+        """A pocket of the lid sketch, 20 deep, with a sibling in Below: New part and Add are
+        offered (the switch drops the sibling, ops#640 round 5). A sketch on the sibling's cut face
+        uses it: both are refused, naming the user."""
         self.enclosure()
         below = self.part("Below", (0, 0, 40, 40), -10)
         pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
@@ -1832,8 +1831,7 @@ class TestOperationRefusalGui(ResultBoxGuiCase):
         combo = self.openEdit(pocket)
         self.assertEqual(combo.currentText(), "Remove from Enclosure")
         rows = self.rows(combo)
-        self.assertFalse(rows[0][0], rows)
-        self.assertEqual(rows[0][1], "Cuts other parts too: untick them first")
+        self.assertTrue(rows[0][0], rows)
         self.assertTrue(rows[1][0], rows)
         self.close(ok=False)
         userSk = below.newObject("Sketcher::SketchObject", "UserSk")
@@ -1844,8 +1842,9 @@ class TestOperationRefusalGui(ResultBoxGuiCase):
         self.assertTrue(userSk.isValid(), userSk.getStatusString())
         combo = self.openEdit(pocket)
         rows = self.rows(combo)
-        self.assertFalse(rows[1][0], rows)
-        self.assertIn("is used by UserSk", rows[1][1])
+        for row in rows[:2]:
+            self.assertFalse(row[0], rows)
+            self.assertIn("is used by UserSk", row[1])
 
 
 class TestOkInErrorGui(ResultBoxGuiCase):

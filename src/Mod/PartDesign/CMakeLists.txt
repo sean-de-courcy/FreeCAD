@@ -140,6 +140,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPatternDefaultsGui.py
         PartDesignTests/TestRegenerateGui.py
         PartDesignTests/TestDressUpAnyPartGui.py
+        PartDesignTests/TestOperationSwitchGui.py
     )
 endif(BUILD_GUI)
 

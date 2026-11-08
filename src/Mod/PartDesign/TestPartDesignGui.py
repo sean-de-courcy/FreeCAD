@@ -90,6 +90,8 @@ from PartDesignTests.TestRevolveFieldsGui import TestOperationRowGui  # FreeCAD-
 from PartDesignTests.TestPatternDefaultsGui import TestPatternDefaultsGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestRegenerateGui import TestRegenerateGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDressUpAnyPartGui import TestDressUpAnyPartGui  # FreeCAD-CH, ops#640 rank 14
+from PartDesignTests.TestOperationSwitchGui import TestOperationSwitchGui  # FreeCAD-CH, ops#640 round 5
+from PartDesignTests.TestOperationSwitchGui import TestMergedSwitchGui  # FreeCAD-CH, ops#640 round 5
 
 
 # timer runs this class in order to access modal dialog

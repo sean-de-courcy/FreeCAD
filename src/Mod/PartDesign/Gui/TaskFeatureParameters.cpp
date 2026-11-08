@@ -27,6 +27,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <optional>
 #include <vector>
 
 #include <QAbstractSpinBox>
@@ -87,6 +88,15 @@ namespace Gui
 /// FreeCAD-CH (ops#640): defined and explained in Gui/Document.cpp (not in Document.h)
 GuiExport bool editStartedUnchanged(const App::Document* doc);
 }  // namespace Gui
+
+namespace PartDesign
+{
+/// FreeCAD-CH (ops#640 round 5): defined and explained in PartDesign/App/Body.cpp (no header
+/// names them): why New part is refused for a feature (what follows it can't be told apart), and
+/// why its Merge can't go for a Remove or an Intersect (something builds on it)
+PartDesignExport std::string newPartRefusal(const App::DocumentObject* feature, bool ignoreMerge);
+PartDesignExport std::string mergeGoesRefusal(const App::DocumentObject* feature);
+}  // namespace PartDesign
 
 using namespace PartDesignGui;
 using namespace Gui;
@@ -253,11 +263,37 @@ struct NewPartMove
     App::DocumentObjectT feature;
     App::DocumentObjectT from;  // the Body it was in
     App::DocumentObjectT part;  // the new Body
-    App::DocumentObjectT sketch;  // its profile, when that moved too
-    App::DocumentObjectT sketchAfter;  // the member before the sketch in `from`, if any
+    // What went to the new part (its profile, the feature, what follows it: ops#640 round 5), in
+    // the order of `from`, and `from`'s members and Tip before the move
+    std::vector<App::DocumentObjectT> moved;
+    std::vector<App::DocumentObjectT> fromGroup;
+    App::DocumentObjectT fromTip;
 };
 // One per feature: each document can have its dialog open (PR 303 round 1)
 std::vector<NewPartMove> newPartMoves;
+// The merge scope a merged Add had when its open dialog switched it away from Add (ops#640 round
+// 5, hands-on B5-3 and B5-4): Onshape keeps the scope while the Extrude is New, a Remove or an
+// Intersect, and Add merges it again. Kept across the dialog's restarts, forgotten when it closes
+std::vector<std::pair<App::DocumentObjectT, std::vector<App::DocumentObjectT>>> scopesWas;
+
+const std::vector<App::DocumentObjectT>* scopeWas(const App::DocumentObject* feature)
+{
+    auto it = std::ranges::find_if(scopesWas, [feature](const auto& entry) {
+        return feature && entry.first.getObject() == feature;
+    });
+    return it != scopesWas.end() ? &it->second : nullptr;
+}
+
+void forgetScopeWas(const App::DocumentObjectT& featureT)
+{
+    std::erase_if(scopesWas, [&featureT](const auto& entry) { return entry.first == featureT; });
+}
+
+void rememberScope(const App::DocumentObjectT& featureT, std::vector<App::DocumentObjectT> parts)
+{
+    forgetScopeWas(featureT);
+    scopesWas.emplace_back(featureT, std::move(parts));
+}
 // The features whose direction the user flipped in their open dialog (ops#640 H4): the dialog's
 // session, kept across its restarts as the moves are, forgotten when it closes
 std::vector<App::DocumentObjectT> reversedTouched;
@@ -1009,10 +1045,11 @@ bool hasStudioSiblings(const PartDesign::Body* body)
     return false;
 }
 
-// Why New part isn't offered for an additive feature; empty when it is. newPartFrom's rule (a
-// feature that something uses would reroute the next solid, the design's critic, point 9), and a
-// transaction that Cancel aborts
-QString newPartRefusal(PartDesign::FeatureAddSub* feature)
+// Why New part isn't offered for an additive feature; empty when it is. newPartFrom's rule
+// (PartDesign::newPartRefusal: the later features that work on its material go along, one that
+// can't be told apart refuses, ops#640 round 5), and a transaction that Cancel aborts. With
+// `ignoreMerge`, its Merge counts as gone (the user unticked the whole scope)
+QString newPartRefusal(PartDesign::FeatureAddSub* feature, bool ignoreMerge = false)
 {
     auto body = PartDesign::Body::findBodyOf(feature);
     if (!body) {
@@ -1021,15 +1058,11 @@ QString newPartRefusal(PartDesign::FeatureAddSub* feature)
     if (!hasOpenTransaction(feature->getDocument())) {
         return QObject::tr("New part needs a dialog that Cancel can undo");
     }
-    bool used = std::ranges::any_of(feature->getInList(), [body](App::DocumentObject* user) {
-        return user != body;
-    });
-    if (body->Tip.getValue() != feature || used) {
-        return QObject::tr(
-            "Only the feature being created, or a tip that nothing uses, can go to a new part"
-        );
+    QString why = QString::fromStdString(PartDesign::newPartRefusal(feature, ignoreMerge));
+    if (!why.isEmpty()) {
+        why[0] = why[0].toUpper();
     }
-    return {};
+    return why;
 }
 
 // Ends the edit of the feature, runs `change`, and edits the feature again in its Body, all in
@@ -1072,6 +1105,7 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
     if (!Gui::Control().activeDialog(doc)) {
         forgetMove(featureT);
         forgetReversedTouched(featureT);
+        forgetScopeWas(featureT);
     }
 }
 
@@ -1096,16 +1130,11 @@ void newPartMove(const App::DocumentObjectT& featureT)
     if (!from) {
         return;
     }
-    App::DocumentObject* sketch = nullptr;
-    App::DocumentObject* sketchAfter = nullptr;
-    if (auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature)) {
-        sketch = profileBased->Profile.getValue();
-        const auto& group = from->Group.getValues();
-        auto it = std::ranges::find(group, sketch);
-        if (it != group.end() && it != group.begin()) {
-            sketchAfter = *(it - 1);
-        }
+    std::vector<App::DocumentObjectT> fromGroup;
+    for (App::DocumentObject* obj : from->Group.getValues()) {
+        fromGroup.emplace_back(obj);
     }
+    App::DocumentObjectT fromTip(from->Tip.getValue());
     Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
     Gui::Command::doCommand(
         Gui::Command::Doc,
@@ -1120,12 +1149,15 @@ void newPartMove(const App::DocumentObjectT& featureT)
         .feature = featureT,
         .from = App::DocumentObjectT(from),
         .part = App::DocumentObjectT(part),
-        .sketch = {},
-        .sketchAfter = {},
+        .moved = {},
+        .fromGroup = fromGroup,
+        .fromTip = fromTip,
     };
-    if (sketch && part->hasObject(sketch)) {
-        move.sketch = sketch;
-        move.sketchAfter = sketchAfter;
+    for (const App::DocumentObjectT& objT : fromGroup) {
+        App::DocumentObject* obj = objT.getObject();
+        if (obj && part->hasObject(obj)) {
+            move.moved.push_back(objT);
+        }
     }
     forgetMove(featureT);
     newPartMoves.push_back(move);
@@ -1137,7 +1169,9 @@ void newPartMove(const App::DocumentObjectT& featureT)
     showTipIfNoneShown(from);
 }
 
-// Add to's move back of what this dialog's New part moved, inside a restart of the edit
+// Add to's move back of what this dialog's New part moved, inside a restart of the edit: each
+// where it was in `from`, in order (the chain reroutes through each, Body::insertObject), and
+// `from`'s Tip as it was
 void backMove(const App::DocumentObjectT& featureT)
 {
     NewPartMove* found = findMove(featureT.getObject());
@@ -1158,16 +1192,49 @@ void backMove(const App::DocumentObjectT& featureT)
     auto run = [](const std::string& line) {
         Gui::Command::doCommand(Gui::Command::Doc, "%s", line.c_str());
     };
-    run(cmd(part) + ".removeObject(" + cmd(feature) + ")");
-    App::DocumentObject* sketch = move.sketch.getObject();
-    if (sketch && part->hasObject(sketch)) {
-        run(cmd(part) + ".removeObject(" + cmd(sketch) + ")");
-        // where it was (relinked to this Body's origin on insert)
-        App::DocumentObject* after = move.sketchAfter.getObject();
-        std::string target = after && from->hasObject(after) ? cmd(after) : "None";
-        run(cmd(from) + ".insertObject(" + cmd(sketch) + ", " + target + ", True)");
+    std::vector<App::DocumentObject*> back;
+    for (const App::DocumentObjectT& objT : move.moved) {
+        App::DocumentObject* obj = objT.getObject();
+        if (obj && part->hasObject(obj)) {
+            back.push_back(obj);
+        }
     }
-    run(cmd(from) + ".addObject(" + cmd(feature) + ")");
+    for (auto it = back.rbegin(); it != back.rend(); ++it) {
+        run(cmd(part) + ".removeObject(" + cmd(*it) + ")");
+    }
+    for (App::DocumentObject* obj : back) {
+        // after the nearest member before it that is in `from` again (relinked to its origin on
+        // insert)
+        App::DocumentObject* after = nullptr;
+        for (const App::DocumentObjectT& memberT : move.fromGroup) {
+            App::DocumentObject* member = memberT.getObject();
+            if (member == obj) {
+                break;
+            }
+            const auto& group = from->Group.getValues();
+            if (member && std::ranges::find(group, member) != group.end()) {
+                after = member;
+            }
+        }
+        run(cmd(from) + ".insertObject(" + cmd(obj) + ", " + (after ? cmd(after) : std::string("None"))
+            + ", True)");
+    }
+    App::DocumentObject* tip = move.fromTip.getObject();
+    const auto& members = from->Group.getValues();
+    if (tip && std::ranges::find(members, tip) != members.end() && from->Tip.getValue() != tip) {
+        run(cmd(from) + ".Tip = " + cmd(tip));
+    }
+    // The part shows its Tip alone again, as Body::addObject() did for the feature
+    if (tip && std::ranges::find(members, tip) != members.end()) {
+        for (App::DocumentObject* obj : members) {
+            if (obj != tip && obj->isDerivedFrom<PartDesign::Feature>() && obj->Visibility.getValue()) {
+                obj->Visibility.setValue(false);
+            }
+        }
+        if (!tip->Visibility.getValue()) {
+            tip->Visibility.setValue(true);
+        }
+    }
     // the new Body, empty now, goes with its origin
     if (part->Group.getValues().empty()) {
         run(
@@ -1302,6 +1369,7 @@ TaskResultParameters::~TaskResultParameters()
         forgetMove(featureT);
         forgetReversedTouched(featureT);
         forgetOpeningAwaited(featureT);
+        forgetScopeWas(featureT);
     }
 }
 
@@ -1485,10 +1553,18 @@ PartDesign::Boolean* mergeAfter(PartDesign::FeatureAddSub* feature)
 // list or the merge list that goes with it. Leaving a cut drops its siblings; a new part's
 // feature goes to its target first; the tool flips between adding and cutting when its
 // direction, not a face, ends it (Onshape flips the arrow for Remove: the tool goes into the
-// material)
-void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
+// material).
+// A merged Add leaving Add drops its Merge (the merged parts are parts again, whole) and keeps its
+// scope, `scope` (the ticked parts; null: what the Merge merges), for the dialog: a Remove or an
+// Intersect then cuts those parts too (siblings), as Onshape's (hands-on B5-4), and Add merges them
+// again (B5-3), as a cut's siblings do (ops#640 round 5)
+void switchOperation(
+    const App::DocumentObjectT& featureT,
+    const QString& key,
+    const std::optional<std::vector<App::DocumentObjectT>>& scope
+)
 {
-    restartEdit(featureT, [&featureT, &key]() {
+    restartEdit(featureT, [&featureT, &key, &scope]() {
         auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
         if (!feature) {
             return;
@@ -1497,14 +1573,42 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
         auto run = [](const std::string& line) {
             Gui::Command::doCommand(Gui::Command::Doc, "%s", line.c_str());
         };
+        auto list = [](const std::vector<App::DocumentObjectT>& parts) {
+            std::string text;
+            for (const App::DocumentObjectT& partT : parts) {
+                if (App::DocumentObject* part = partT.getObject()) {
+                    text += (text.empty() ? "" : ", ") + Gui::Command::getObjectCmd(part);
+                }
+            }
+            return text;
+        };
         const std::string obj = Gui::Command::getObjectCmd(feature);
         run("import PartDesign");
+        if (was == QStringLiteral("add") && key != QStringLiteral("add")) {
+            if (PartDesign::Boolean* merge = mergeAfter(feature)) {
+                std::vector<App::DocumentObjectT> parts;
+                if (scope) {
+                    parts = *scope;
+                }
+                else {
+                    for (App::DocumentObject* part : merge->mergedBodies()) {
+                        parts.emplace_back(part);
+                    }
+                }
+                rememberScope(featureT, parts);
+                run("PartDesign.setMergeScope(" + obj + ", [])");
+            }
+        }
         if (isSubtractive(was) && !isSubtractive(key) && !feature->getSiblings().empty()) {
             std::vector<App::DocumentObjectT> parts;
             for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
                 if (PartDesign::Body* part = PartDesign::Body::findBodyOf(sibling)) {
                     parts.emplace_back(part);
                 }
+            }
+            // The scope the dialog keeps is the cut's latest
+            if (scopeWas(feature)) {
+                rememberScope(featureT, parts);
             }
             run("PartDesign.makeSiblings(" + obj + ", [])");
             // Each part a sibling left shows its own result now: OK purges the document's touched
@@ -1576,7 +1680,40 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
                  && !feature->MergeWithAll.getValue()) {
             run(obj + ".EmptyMergeScope = True");
         }
+        // The scope it kept: Add merges it again, a Remove or an Intersect cuts it too. A part gone
+        // or merged elsewhere meanwhile is left out; a refusal leaves the feature on its own part
+        const std::vector<App::DocumentObjectT>* kept = scopeWas(feature);
+        if (kept && !first && !isMoved(feature) && key != QStringLiteral("new")) {
+            std::vector<App::DocumentObjectT> parts;
+            PartDesign::Body* own = PartDesign::Body::findBodyOf(feature);
+            for (const App::DocumentObjectT& partT : *kept) {
+                auto part = freecad_cast<PartDesign::Body*>(partT.getObject());
+                if (part && part != own && !PartDesign::Boolean::mergeOf(part)
+                    && Part::BodyBase::areStudioSiblings(own, part)) {
+                    parts.emplace_back(part);
+                }
+            }
+            const bool adding = key == QStringLiteral("add");
+            if (adding) {
+                forgetScopeWas(featureT);
+            }
+            if (!parts.empty() && (adding ? !mergeAfter(feature) : feature->getSiblings().empty())) {
+                try {
+                    run(std::string(adding ? "PartDesign.setMergeScope(" : "PartDesign.makeSiblings(")
+                        + obj + ", [" + list(parts) + "])");
+                }
+                catch (const Base::Exception& e) {
+                    e.reportException();
+                }
+            }
+        }
         feature->recomputeFeature();
+        // What it merges or cuts besides its own part computes now (OK purges the touched objects)
+        for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
+            if (PartDesign::Body* part = PartDesign::Body::findBodyOf(sibling)) {
+                part->recomputeFeature(/*recursive=*/true);
+            }
+        }
     });
 }
 
@@ -1830,16 +1967,6 @@ void TaskResultParameters::addOperationRow()
     );
     combo->setCurrentIndex(combo->findData(operation));
 
-    auto refuse = [this](const QString& key, const QString& why) {
-        const int index = combo->findData(key);
-        if (why.isEmpty() || index < 0 || index == combo->currentIndex()) {
-            return;
-        }
-        if (auto model = qobject_cast<QStandardItemModel*>(combo->model())) {
-            model->item(index)->setEnabled(false);
-        }
-        combo->setItemData(index, why, Qt::ToolTipRole);
-    };
     if (App::DocumentObject* primary = primaryOf(feature)) {
         combo->setEnabled(false);  // bound to the primary's
         addFollowsNote(primary);
@@ -1848,37 +1975,11 @@ void TaskResultParameters::addOperationRow()
     if (isNew) {
         const QString why = addToPartRefusal(feature, target);
         for (const char* key : {"add", "Subtraction", "Common"}) {
-            refuse(QString::fromLatin1(key), why);
+            refuseRow(QString::fromLatin1(key), why);
         }
         return;  // a new part merges nothing (Onshape's New has no merge scope)
     }
-    // New part: newPartFrom's rule; a cut through other parts drops them first. A first solid
-    // stays where it is
-    if (!firstWithScope) {
-        refuse(
-            QStringLiteral("new"),
-            feature->getSiblings().empty() ? newPartRefusal(feature)
-                                           : tr("Cuts other parts too: untick them first")
-        );
-    }
-    if (PartDesign::Boolean* merge = mergeAfter(feature)) {
-        QStringList merged;
-        for (App::DocumentObject* part : merge->mergedBodies()) {
-            merged << partLabel(part);
-        }
-        const QString why =
-            tr("Merged with %1: delete the Merge first").arg(merged.join(QStringLiteral(", ")));
-        refuse(QStringLiteral("Subtraction"), why);
-        refuse(QStringLiteral("Common"), why);
-    }
-    for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
-        if (App::DocumentObject* user = PartDesign::FeatureAddSub::siblingUser(sibling)) {
-            refuse(
-                QStringLiteral("add"),
-                tr("Its cut %1 is used by %2").arg(partLabel(sibling), partLabel(user))
-            );
-        }
-    }
+    refuseOperations();
     if (!body || PartDesign::Boolean::mergeOf(body)) {
         return;
     }
@@ -1893,6 +1994,71 @@ void TaskResultParameters::addOperationRow()
     }
 }
 
+void TaskResultParameters::refuseRow(const QString& key, const QString& why)
+{
+    const int index = combo->findData(key);
+    if (why.isEmpty() || index < 0 || index == combo->currentIndex()) {
+        return;
+    }
+    if (auto model = qobject_cast<QStandardItemModel*>(combo->model())) {
+        model->item(index)->setEnabled(false);
+    }
+    combo->setItemData(index, why, Qt::ToolTipRole);
+}
+
+void TaskResultParameters::refuseOperations()
+{
+    auto feature = getObject<PartDesign::FeatureAddSub>();
+    if (!feature || !combo || primaryOf(feature) || operation == QStringLiteral("new")) {
+        return;
+    }
+    // Every row offered, then the refusals as the document stands
+    auto model = qobject_cast<QStandardItemModel*>(combo->model());
+    for (int i = 0; i < combo->count(); ++i) {
+        if (model) {
+            model->item(i)->setEnabled(true);
+        }
+        combo->setItemData(i, QVariant(), Qt::ToolTipRole);
+    }
+    PartDesign::Boolean* merge = mergeAfter(feature);
+    // The whole merge scope unticked (Merge with all off): the Merge goes at OK, so what builds on
+    // it builds on the feature, and the rows are refused as without it (ops#640 round 5)
+    bool unmerged = merge && mergeParts && !(mergeWithAll && mergeWithAll->isChecked());
+    for (int i = 0; unmerged && i < mergeParts->count(); ++i) {
+        unmerged = mergeParts->item(i)->checkState() != Qt::Checked;
+    }
+    // New part: newPartFrom's rule, what follows the feature going along (ops#640 round 5); a cut
+    // through other parts drops them first, unless something uses one. A first solid stays where
+    // it is
+    const bool firstWithScope = isFirstSolid(feature);
+    if (!firstWithScope) {
+        QString why;
+        for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
+            if (App::DocumentObject* user = PartDesign::FeatureAddSub::siblingUser(sibling)) {
+                why = tr("Its cut %1 is used by %2").arg(partLabel(sibling), partLabel(user));
+                break;
+            }
+        }
+        refuseRow(QStringLiteral("new"), why.isEmpty() ? newPartRefusal(feature, unmerged) : why);
+    }
+    // Remove and Intersect drop the Merge (hands-on B5-4), unless something builds on it
+    if (merge && !unmerged) {
+        QString why = QString::fromStdString(PartDesign::mergeGoesRefusal(feature));
+        if (!why.isEmpty()) {
+            why[0] = why[0].toUpper();
+        }
+        refuseRow(QStringLiteral("Subtraction"), why);
+        refuseRow(QStringLiteral("Common"), why);
+    }
+    for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
+        if (App::DocumentObject* user = PartDesign::FeatureAddSub::siblingUser(sibling)) {
+            refuseRow(
+                QStringLiteral("add"),
+                tr("Its cut %1 is used by %2").arg(partLabel(sibling), partLabel(user))
+            );
+        }
+    }
+}
 
 void TaskResultParameters::addPartsList()
 {
@@ -2026,6 +2192,10 @@ void TaskResultParameters::addMergeList()
             }
         }
         updateMergeNotes();
+        // Unticking the whole scope frees the rows its Merge held, at once (ops#640 round 5)
+        if (hasOperationRow(feature)) {
+            refuseOperations();
+        }
     });
     // Onshape shows the scope only while Merge with all is off
     const bool all = mergeWithAll && mergeWithAll->isChecked();
@@ -2080,6 +2250,9 @@ void TaskResultParameters::onMergeWithAll(bool checked)
         mergeParts->setVisible(!checked);
     }
     updateMergeNotes();
+    if (hasOperationRow(feature)) {
+        refuseOperations();
+    }
     // At once, as Onshape's: an Add whose scope is empty is healthy with it (a new part, R8) and
     // red without it (OK writes it again, for the macro)
     if (feature->MergeWithAll.getValue() != checked) {
@@ -2231,7 +2404,21 @@ void TaskResultParameters::onResultChanged(int index)
         App::DocumentObjectT target(feature);
         QPointer<TaskResultParameters> box(this);
         const QString was = operation;
-        QTimer::singleShot(0, qApp, [box, target, what, was]() {
+        // The merge scope as the box has it (the ticks; with Merge with all, what the Merge merges)
+        std::optional<std::vector<App::DocumentObjectT>> scope;
+        if (mergeParts && !(mergeWithAll && mergeWithAll->isChecked())) {
+            scope.emplace();
+            for (int i = 0; i < mergeParts->count(); ++i) {
+                QListWidgetItem* item = mergeParts->item(i);
+                App::DocumentObject* other = feature->getDocument()->getObject(
+                    item->data(Qt::UserRole).toString().toLatin1().constData()
+                );
+                if (other && item->checkState() == Qt::Checked) {
+                    scope->emplace_back(other);
+                }
+            }
+        }
+        QTimer::singleShot(0, qApp, [box, target, what, was, scope]() {
             if (!isEditing(box.data(), target)) {
                 if (box) {
                     QSignalBlocker block(box->combo);
@@ -2240,7 +2427,7 @@ void TaskResultParameters::onResultChanged(int index)
                 }
                 return;
             }
-            switchOperation(target, what);
+            switchOperation(target, what, scope);
         });
         return;
     }

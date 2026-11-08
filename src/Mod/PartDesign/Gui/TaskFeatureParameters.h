@@ -242,6 +242,11 @@ private:
     void onResultChanged(int index);
     /// A Pad's or a Pocket's rows: New part, Add, Remove, Intersect (ops#640)
     void addOperationRow();
+    /// The operation row's refusals as the document and the box stand: each row offered, then
+    /// greyed with its reason. Again when the merge scope's ticks change (ops#640 round 5)
+    void refuseOperations();
+    /// Greys the row `key` (not the current one) with `why` as its tooltip; empty: offered
+    void refuseRow(const QString& key, const QString& why);
     void addPartsList();
     void addMergeList();
     /// The plain line for touching parts left out of the merge scope
