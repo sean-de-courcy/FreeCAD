@@ -128,6 +128,7 @@
 #include "Camera.h"
 #include "Command.h"
 #include "Control.h"
+#include "DocumentTabBar.h"
 #include "Document.h"
 #include "GLPainter.h"
 #include "RubberbandOverlay.h"
@@ -1569,6 +1570,10 @@ bool View3DInventorViewer::containsViewProvider(const ViewProvider* vp) const
 /// adds an ViewProvider to the view, e.g. from a feature
 void View3DInventorViewer::addViewProvider(ViewProvider* pcProvider)
 {
+    // FreeCAD-CH (ops#640, rank 59): a typed tab's view shows only the tab's objects
+    if (!DocumentTabs::accepts(this, pcProvider)) {
+        return;
+    }
     SoSeparator* root = pcProvider->getRoot();
 
     if (root) {

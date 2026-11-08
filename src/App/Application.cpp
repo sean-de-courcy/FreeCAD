@@ -125,6 +125,7 @@
 #include "DocumentObjectGroup.h"
 #include "DocumentObjectGroupPy.h"
 #include "DocumentObserver.h"
+#include "DocumentTabs.h"
 #include "DocumentPy.h"
 #include "DocumentSettingsPy.h"
 #include "ExpressionParser.h"
@@ -613,6 +614,11 @@ void Application::setupPythonTypes()
 
     Py_INCREF(pUnitsModule);
     PyModule_AddObject(pAppModule, "Units", pUnitsModule);
+
+    // FreeCAD-CH (ops#640, rank 59): the typed tabs' registry, FreeCAD.DocumentTabs
+    PyObject* pTabsModule = App::DocumentTabs::initModule();
+    Py_INCREF(pTabsModule);
+    PyModule_AddObject(pAppModule, "DocumentTabs", pTabsModule);
 
     Base::ProgressIndicatorPy::init_type();
     Base::InterpreterSingleton::addType(Base::ProgressIndicatorPy::type_object(),

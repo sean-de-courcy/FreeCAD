@@ -212,6 +212,7 @@ SET(Document_CPP_SRCS
     LinkBaseExtensionPyImp.cpp
     VarSet.cpp
     VarSetCopy.cpp
+    DocumentTabs.cpp
     VariableLookup.cpp
     License.h
 )
@@ -264,6 +265,7 @@ SET(Document_HPP_SRCS
     VarSet.h
     VarSetCopy.h
     VariableChoice.h
+    DocumentTabs.h
     VariableLookup.h
     Link.h
 )

@@ -64,6 +64,7 @@
 #include "Application.h"
 #include "Command.h"
 #include "Control.h"
+#include "DocumentTabBar.h"
 #include "FileDialog.h"
 #include "MainWindow.h"
 #include "MDIView.h"
@@ -913,6 +914,8 @@ Document::~Document()
 bool Document::setEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
 {
     try {
+        // FreeCAD-CH (ops#640, rank 59): an object of another typed tab is edited in its tab
+        DocumentTabs::beforeEdit(this, p);
         return trySetEdit(p, ModNum, subname);
     }
     catch (const Base::Exception& e) {
@@ -2938,6 +2941,9 @@ MDIView* Document::createView(const Base::Type& typeId, CreateViewMode mode)
             view3D->getViewer()->removeViewProvider(getViewProvider(obj));
         }
 
+        // FreeCAD-CH (ops#640, rank 59): under the Onshape keymap the view is a typed tab's
+        DocumentTabs::viewCreated(this, view3D);
+
         // When cloning the view, don't increment the window counter as the old view will be deleted
         // shortly after.
         if (mode != CreateViewMode::Clone) {
@@ -3743,6 +3749,8 @@ void Document::undo(int iSteps)
         }
         return;
     }
+    // FreeCAD-CH (ops#640, rank 59): a step made in another typed tab is undone in that tab
+    DocumentTabs::beforeUndo(this, true);
     Base::FlagToggler<> flag(d->_isTransacting);
 
     // FreeCAD-CH (ops#640, regen-plan item 7): a step is one transaction, or a closed sketch
@@ -3771,6 +3779,7 @@ void Document::redo(int iSteps)
         }
         return;
     }
+    DocumentTabs::beforeUndo(this, false);  // FreeCAD-CH (ops#640, rank 59): as undo()
     Base::FlagToggler<> flag(d->_isTransacting);
 
     const int transactions = d->transactionsOfSteps(false, iSteps);  // FreeCAD-CH: as undo()
@@ -3933,7 +3942,8 @@ void Document::toggleInSceneGraph(ViewProvider* vp)
                 scenegraph->removeChild(idx);
             }
         }
-        else {
+        // FreeCAD-CH (ops#640, rank 59): not into a typed tab's view that doesn't show it
+        else if (DocumentTabs::accepts(activeView->getViewer(), vp)) {
             // Do a deep search of the scene because the root node
             // isn't necessarily a top-level node when claimed by
             // another view provider.

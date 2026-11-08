@@ -80,6 +80,7 @@
 #include "Dialogs/DlgAbout.h"
 #include "PreferencePages/DlgSettingsCacheDirectory.h"
 #include "DocumentPy.h"
+#include "DocumentTabBar.h"
 #include "DocumentRecovery.h"
 #include "EditableDatumLabelPy.h"
 #include "EditorView.h"
@@ -636,6 +637,11 @@ Application::Application(bool GUIenabled)
 
         // PySide additions
         PyModule_AddObject(module, "PySideUic", Base::Interpreter().addModule(new PySideUicModule));
+
+        // FreeCAD-CH (ops#640, rank 59): the typed tabs, FreeCADGui.DocumentTabs
+        PyObject* tabsModule = DocumentTabs::pythonModule();
+        Py_INCREF(tabsModule);
+        PyModule_AddObject(module, "DocumentTabs", tabsModule);
 
         ExpressionBindingPy::init_type();
         Base::Interpreter().addType(ExpressionBindingPy::type_object(),
