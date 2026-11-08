@@ -539,6 +539,27 @@ private:
 
 }  // namespace
 
+App::DocumentObject* TaskFeaturePick::copySketchIntoBody(
+    App::DocumentObject* sketch,
+    App::DocumentObject* body,
+    QString* refusal
+)
+{
+    auto activeBody = freecad_cast<PartDesign::Body*>(body);
+    if (!activeBody || !sketch) {
+        return nullptr;
+    }
+    App::DocumentObject* copy = makeCopy(sketch, "", /*independent=*/true, activeBody, refusal);
+    if (!copy) {
+        return nullptr;
+    }
+    activeBody->addObject(copy);
+    if (auto* copied = freecad_cast<Sketcher::SketchObject*>(copy)) {
+        attachInPlace(copied, activeBody);
+    }
+    return copy;
+}
+
 App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,

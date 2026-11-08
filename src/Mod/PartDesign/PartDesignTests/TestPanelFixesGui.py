@@ -3388,65 +3388,44 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
 
     def padOfAFreeSketch(self, sketch):
-        """The pick dialog's copy of `sketch` (outside any body), Make independent copy, into
-        self.body, and a 10 long pad of it. Since ops#640 rank 13 Pad with nothing selected
-        opens its panel with the Profile field armed, without the pick dialog: the dialog is
-        reached through Revolve, which keeps it until it has a Profile field (rank 21); its
-        panel is closed with OK (in error: no axis), and the pad is made on the copy. Returns
-        the pad and the copy."""
+        """`sketch` (outside any body) selected, then Pad with self.body active. Since ops#640 (the
+        hub's decision: Onshape reads any sketch of the studio) the command takes it, with no
+        modal, as the pick dialog's Make independent copy did: an independent copy into the body,
+        the pad's profile (the pick dialog is reached by no command since ranks 13 and 21). The
+        pad's panel, 10 long, is closed with OK. Returns the pad and the copy."""
         Gui.activateWorkbench("PartDesignWorkbench")
         App.setActiveDocument(self.doc.Name)
         Gui.setActiveDocument(self.doc.Name)
         pump(0.2)
         Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
-        Gui.runCommand("PartDesign_Revolution")
-        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no pick dialog")
-        pump(0.3)
-        Gui.Control.showTaskView()
-        self.widget(QtWidgets.QCheckBox, "checkOtherPart").setChecked(True)
-        listWidget = self.widget(QtWidgets.QListWidget, "listWidget")
-        [item] = [
-            listWidget.item(i)
-            for i in range(listWidget.count())
-            if listWidget.item(i).text().startswith("Free ")
-        ]
-        self.assertFalse(item.isHidden())
-        item.setSelected(True)
-        self.assertTrue(self.widget(QtWidgets.QRadioButton, "radioIndependent").isChecked())
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, sketch.Name)
+        before = {o.Name for o in self.doc.Objects}
         self.answerModals()
-        ok = QtWidgets.QDialogButtonBox.Ok
-        self.assertTrue(waitFor(lambda: taskButton(ok) is not None, 5.0), "no OK")
-        taskButton(ok).click()
-        self.assertTrue(
-            waitFor(lambda: self.doc.getObject("Revolution") is not None, 5.0),
-            f"no revolution; modals {self.modals}",
-        )
-        revolution = self.doc.getObject("Revolution")
-        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog(), 5.0), "no revolution panel")
+        Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog(), 5.0), "no pad panel")
         pump(0.3)
+        made = [o for o in self.doc.Objects if o.Name not in before]
+        pads = [o for o in made if o.isDerivedFrom("PartDesign::Pad")]
+        self.assertEqual(len(pads), 1, [o.Name for o in made])
+        [pad] = pads
+        self.assertAlmostEqual(pad.Length.Value, 10, places=6)
         self.close(ok=True)
         self.answering = False
         self.assertEqual(self.modals, [])
-        copy = revolution.Profile[0]
-        self.body.removeObject(revolution)
-        self.doc.removeObject(revolution.Name)
-        pad = models.pad(self.body, copy, 10)
+        self.assertIsNotNone(pad.Profile, "the pad took no profile")
+        copy = pad.Profile[0]
         self.doc.recompute()
         self.assertIsNot(copy, sketch)
         self.assertTrue(self.body.hasObject(copy))
         return pad, copy
 
-    @unittest.skip(
-        "ops#640 ranks 13 and 21: no command opens the pick dialog's list any more (every profile "
-        "feature opens with its Profile field armed), and a selected sketch outside the active "
-        "body is left out of the selection with a note: the copy choices this checks are reached "
-        "by no path"
-    )
     def testPadOfASketchCopiedIntoARotatedBody(self):
-        """ops#245: Pad with nothing selected, and in its pick dialog a sketch outside any body
-        (a 10 x 10 square at (2, 3, 5), turned 15 degrees about Z), Make independent copy, into a
-        body turned 30 degrees about X. fixSketchSupport threw ("Sketch plane cannot be
-        migrated"), and the dialog's worker called front() on the empty list. The copy is
+        """ops#245: a sketch outside any body (a 10 x 10 square at (2, 3, 5), turned 15 degrees
+        about Z), selected, then Pad (its independent copy, since ops#640 made by the command:
+        padOfAFreeSketch), into a body turned 30 degrees about X. fixSketchSupport threw
+        ("Sketch plane cannot be migrated"), and the dialog's worker called front() on the empty
+        list. The copy is
         attached to the body's XY plane with an offset that keeps it where the sketch is
         (decision 40; fixSketchSupport also dropped the offset and turn in the plane), and the pad
         is 10 x 10 x 10 on it."""
@@ -3467,16 +3446,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
 
-    @unittest.skip(
-        "ops#640 ranks 13 and 21: no command opens the pick dialog's list any more (every profile "
-        "feature opens with its Profile field armed), and a selected sketch outside the active "
-        "body is left out of the selection with a note: the copy choices this checks are reached "
-        "by no path"
-    )
     def testPadOfAnXZSketchCopiedIntoABody(self):
         """ops#244 L6: a 10 x 10 square sketch outside any body on XZ, moved by (2, 3, 5) and
-        turned in its plane, Pad through the pick dialog, Make independent copy: the copy is
-        attached to the body's XZ plane (it was XY, with a 90 degree offset), where the sketch
+        turned in its plane, selected, then Pad (its independent copy: padOfAFreeSketch): the copy
+        is attached to the body's XZ plane (it was XY, with a 90 degree offset), where the sketch
         is."""
         sketch = models.sketch(
             self.doc,

@@ -1116,6 +1116,20 @@ static void noteLeftOut(const char* property, const QString& note)
     Gui::getMainWindow()->showMessage(note, 10000);
 }
 
+// FreeCAD-CH (ops#640, the hub's decision): a sketch outside any Body, in the studio of the
+// feature's Body (the same App::Part, or both outside any), is a profile: Onshape reads any sketch
+// of the studio. The feature takes it through an independent copy into its Body, attached where
+// the sketch is (the pick dialog's Make independent copy, which no command opens any more)
+static bool isFreeStudioSketch(const PartDesign::Body* body, const App::DocumentObject* obj)
+{
+    App::Part* studio = nullptr;
+    if (!body || !obj || !obj->isDerivedFrom<Part::Part2DObject>()
+        || obj->getDocument() != body->getDocument() || Part::BodyBase::bodyOfObject(obj)
+        || !Part::BodyBase::studioOf(body, studio)) {
+        return false;
+    }
+    return App::Part::getPartOfObject(obj, /*recursive=*/true) == studio;
+}
 
 void prepareProfileBased(
     PartDesign::Body* pcActiveBody,
@@ -1156,6 +1170,28 @@ void prepareProfileBased(
         std::string FeatName = cmd->getUniqueObjectName(which.c_str(), pcActiveBody);
 
         cmd->openCommand(std::string("Make ") + which);
+
+        // A sketch outside any Body: its copy in the Body, made in the feature's step, before it
+        if (isFreeStudioSketch(pcActiveBody, feature)) {
+            QString refusal;
+            App::DocumentObject* copy = PartDesignGui::TaskFeaturePick::copySketchIntoBody(
+                feature,
+                pcActiveBody,
+                &refusal
+            );
+            if (!copy) {
+                cmd->abortCommand();
+                Gui::getMainWindow()->showMessage(
+                    refusal.isEmpty()
+                        ? QObject::tr("'%1' can't be copied into the body")
+                              .arg(QString::fromUtf8(feature->Label.getValue()))
+                        : refusal,
+                    10000
+                );
+                return;
+            }
+            feature = copy;
+        }
 
         FCMD_OBJ_CMD(pcActiveBody, "newObject('PartDesign::" << which << "','" << FeatName << "')");
         auto Feat = pcActiveBody->getDocument()->getObject(FeatName.c_str());
@@ -1343,10 +1379,12 @@ void prepareProfileBased(
             const std::vector<std::string>& subs = it.getSubNames();
             const std::string sub = subs.empty() ? std::string() : subs.front();
             const bool first = &it == &selection.front();
-            if (PartDesign::Body::findBodyOf(obj) != pcActiveBody) {
+            if (PartDesign::Body::findBodyOf(obj) != pcActiveBody
+                && !(first && isFreeStudioSketch(pcActiveBody, obj))) {
                 // the selected objects must belong to the body, or (FreeCAD-CH, ops#325) to
                 // another part of its studio; the first pick is the profile (another part's face
-                // may be a first feature's too, ops#325 2a), the others are sections or a spine
+                // may be a first feature's too, ops#325 2a), the others are sections or a spine;
+                // a first pick may be a sketch outside any Body of the studio (ops#640)
                 if (!PartDesignGui::isStudioSelection(pcActiveBody, obj)
                     || (first
                         && !PartDesign::ProfileBased::isStudioProfile(pcActiveBody, obj, sub.c_str()))) {
