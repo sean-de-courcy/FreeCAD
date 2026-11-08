@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <cmath>
 
 #include <Precision.hxx>
 
@@ -200,10 +201,23 @@ bool BodyBase::areStudioSiblings(const BodyBase* one, const BodyBase* other)
     }
     // Bodies placed apart don't share an origin: every reader takes the target's geometry in the
     // owner's frame, so the reference would land elsewhere, silently. Until the one-origin check
-    // (session 1b), such a pick goes through the copy, which places it right (ops#325)
+    // (session 1b), such a pick goes through the copy, which places it right (ops#325). The turn
+    // is measured as an angle, to Precision::Angular (as ShapeBinder::samePlace): Placement::isSame
+    // compares quaternions to Confusion, which let a turn of 0.01 degrees through, 0.017 mm off at
+    // 100 mm (ops#640)
     try {
-        if (!App::GeoFeature::getGlobalPlacement(one)
-                 .isSame(App::GeoFeature::getGlobalPlacement(other), Precision::Confusion())) {
+        const Base::Placement onePlacement = App::GeoFeature::getGlobalPlacement(one);
+        const Base::Placement otherPlacement = App::GeoFeature::getGlobalPlacement(other);
+        if (!onePlacement.getPosition().IsEqual(otherPlacement.getPosition(),
+                                                Precision::Confusion())) {
+            return false;
+        }
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        double w = 0;
+        (onePlacement.getRotation().inverse() * otherPlacement.getRotation()).getValue(x, y, z, w);
+        if (2 * std::sqrt(x * x + y * y + z * z) > Precision::Angular()) {
             return false;
         }
     }
