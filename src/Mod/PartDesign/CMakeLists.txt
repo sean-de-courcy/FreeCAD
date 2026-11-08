@@ -122,6 +122,7 @@ if(BUILD_GUI)
         PartDesignTests/TestEscCancelsGui.py
         PartDesignTests/TestSketchPlaneGui.py
         PartDesignTests/TestDialogFlowGui.py
+        PartDesignTests/TestRevolveFieldsGui.py
     )
 endif(BUILD_GUI)
 

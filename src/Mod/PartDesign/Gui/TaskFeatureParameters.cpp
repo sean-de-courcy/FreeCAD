@@ -59,6 +59,10 @@
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
+#include <Mod/PartDesign/App/FeatureHelix.h>
+#include <Mod/PartDesign/App/FeatureLoft.h>
+#include <Mod/PartDesign/App/FeaturePipe.h>
+#include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
@@ -510,11 +514,17 @@ QString partLabel(const App::DocumentObject* body)
     return body ? QString::fromUtf8(body->Label.getValue()) : QString();
 }
 
-// A Pad or a Pocket in a body: the operation row, New part / Add / Remove / Intersect, at its
-// creation and at every edit, as Onshape's Extrude (FreeCAD-CH ops#640)
+// A Pad, Pocket, Revolution, Groove, Loft, Pipe or Helix in a body: the operation row, New part /
+// Add / Remove / Intersect, at its creation and at every edit, as Onshape's Extrude, Revolve,
+// Loft, Sweep and Helix (FreeCAD-CH ops#640, rank 20)
 bool hasOperationRow(const App::DocumentObject* feature)
 {
-    return feature && feature->isDerivedFrom<PartDesign::FeatureExtrude>()
+    return feature
+        && (feature->isDerivedFrom<PartDesign::FeatureExtrude>()
+            || feature->isDerivedFrom<PartDesign::Revolved>()
+            || feature->isDerivedFrom<PartDesign::Loft>()
+            || feature->isDerivedFrom<PartDesign::Pipe>()
+            || feature->isDerivedFrom<PartDesign::Helix>())
         && PartDesign::Body::findBodyOf(feature);
 }
 }  // namespace
@@ -774,7 +784,7 @@ PartDesign::Boolean* mergeAfter(PartDesign::FeatureAddSub* feature)
 void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
 {
     restartEdit(featureT, [&featureT, &key]() {
-        auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
+        auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
         if (!feature) {
             return;
         }
@@ -826,13 +836,20 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
         }
         // every end bound to the direction flips (Onshape: Blind, Through all, Up to next); a face
         // or a shape fixes the side itself. Intersect flips as Remove does. Not once the user
-        // flipped it in this dialog: Onshape then keeps the user's direction (R5, ops#640 H4)
-        const std::string type = feature->Type.getValueAsString();
-        const bool directionBound = type == "Length" || type == "ThroughAll" || type == "UpToLast"
-            || type == "UpToFirst";
-        if (isSubtractive(was) != isSubtractive(key) && directionBound
+        // flipped it in this dialog: Onshape then keeps the user's direction (R5, ops#640 H4).
+        // Revolution and Groove pair like Pad and Pocket (each class's suggested direction adds,
+        // or cuts); a Loft, Sweep or Helix changes only the Operation (rank 20)
+        auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature);
+        auto typeProp = dynamic_cast<App::PropertyEnumeration*>(feature->getPropertyByName("Type"));
+        const bool pairs = feature->isDerivedFrom<PartDesign::FeatureExtrude>()
+            || feature->isDerivedFrom<PartDesign::Revolved>();
+        const char* typeName = pairs && typeProp ? typeProp->getValueAsString() : nullptr;
+        const std::string type = typeName ? typeName : "";
+        const bool directionBound = type == "Length" || type == "Angle" || type == "ThroughAll"
+            || type == "UpToLast" || type == "UpToFirst";
+        if (isSubtractive(was) != isSubtractive(key) && directionBound && profileBased
             && !isReversedTouched(feature)) {
-            run(obj + ".Reversed = " + (feature->Reversed.getValue() ? "False" : "True"));
+            run(obj + ".Reversed = " + (profileBased->Reversed.getValue() ? "False" : "True"));
         }
         // Its part's first solid: New is the same feature with no scope; an Add, a Remove or an
         // Intersect has an empty scope, red until a part is picked (ops#640 rank 3a)
@@ -927,7 +944,7 @@ OpeningMove openingMove(PartDesign::FeatureAddSub* feature)
 // to: a refused Add stays New
 void runOpeningMove(const App::DocumentObjectT& featureT)
 {
-    auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
+    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
     if (!feature) {
         return;
     }
@@ -1345,7 +1362,7 @@ void TaskResultParameters::onScopePicked(const QString& part)
 
 void TaskResultParameters::updateTouches()
 {
-    auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
+    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
     if (!feature) {
         return;
     }
@@ -1372,7 +1389,7 @@ void TaskResultParameters::slotChangedObject(
     const App::Property& Prop
 )
 {
-    auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
+    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
     if (touchTimer && feature && Obj.getObject() == feature && &Prop == &feature->AddSubShape) {
         touchTimer->start();  // debounced: once the preview settles
     }

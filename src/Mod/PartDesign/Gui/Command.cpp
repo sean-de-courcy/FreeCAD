@@ -990,11 +990,46 @@ bool importExternalElements(App::PropertyLinkSub& prop, std::vector<App::SubObje
 
 // FreeCAD-CH (ops#640, rank 13): the features whose dialog has a Profile field start with no
 // profile and wait for its pick, as Onshape's profile features do. Revolve's, Groove's and Helix's
-// dialogs have no Profile field yet (rank 21): they keep the sketch list until they do
+// dialogs have one since rank 21
 static bool dialogTakesProfile(const std::string& which)
 {
     return which == "Pad" || which == "Pocket" || which == "Hole" || which == "AdditiveLoft"
-        || which == "SubtractiveLoft" || which == "AdditivePipe" || which == "SubtractivePipe";
+        || which == "SubtractiveLoft" || which == "AdditivePipe" || which == "SubtractivePipe"
+        || which == "Revolution" || which == "Groove" || which == "AdditiveHelix"
+        || which == "SubtractiveHelix";
+}
+
+// A line a Revolve, Groove or Helix takes as its axis (ops#640, rank 21): an origin axis or a datum
+// line (\a sub ''), or one straight edge of a shape, a sketch's included (\a sub its name)
+static bool isAxisPick(const App::DocumentObject* obj, const std::vector<std::string>& subs, std::string& sub)
+{
+    if (!obj) {
+        return false;
+    }
+    if (obj->isDerivedFrom<App::Line>() || obj->isDerivedFrom<PartDesign::Line>()) {
+        sub.clear();
+        return true;
+    }
+    auto feature = freecad_cast<const Part::Feature*>(obj);
+    if (!feature || subs.size() != 1 || subs.front().rfind("Edge", 0) != 0) {
+        return false;
+    }
+    try {
+        const Part::TopoShape edge(
+            feature->Shape.getShape().getSubShape(subs.front().c_str(), /*silent=*/true)
+        );
+        if (edge.isNull() || !edge.isLinearEdge()) {
+            return false;
+        }
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    sub = subs.front();
+    return true;
 }
 
 // A face of a solid that isn't planar: an extrude can't take it (ops#640, rank 5; Onshape's
@@ -1051,6 +1086,23 @@ void prepareProfileBased(
     std::function<void(Part::Feature*, App::DocumentObject*)> func
 )
 {
+    // FreeCAD-CH (ops#640, rank 21): a line selected after the profile, or alone, is a Revolve's,
+    // Groove's or Helix's axis, as Onshape's Revolve keeps it. Written before the worker runs; the
+    // workers keep an axis already set
+    const bool takesAxis = which == "Revolution" || which == "Groove" || which == "AdditiveHelix"
+        || which == "SubtractiveHelix";
+    auto keptAxis = std::make_shared<std::pair<App::DocumentObjectT, std::string>>();
+    auto writeKeptAxis = [keptAxis](App::DocumentObject* Feat) {
+        App::DocumentObject* axis = keptAxis->first.getObject();
+        if (axis && Feat && Feat->getPropertyByName("ReferenceAxis")) {
+            FCMD_OBJ_CMD(
+                Feat,
+                "ReferenceAxis = (" << Gui::Command::getObjectCmd(axis) << ",['"
+                                    << keptAxis->second << "'])"
+            );
+        }
+    };
+
     auto base_worker = [=](App::DocumentObject* feature, const std::vector<std::string>& subs) {
         if (!feature || !feature->isDerivedFrom<Part::Feature>()) {
             return;
@@ -1173,6 +1225,7 @@ void prepareProfileBased(
             runProfileCmdWithSubs();
         }
 
+        writeKeptAxis(Feat);
         func(static_cast<Part::Feature*>(feature), Feat);
     };
 
@@ -1196,6 +1249,7 @@ void prepareProfileBased(
                 Feat->getDocument(),
                 true
             );
+            writeKeptAxis(Feat);
             func(nullptr, Feat);
         }
         noteLeftOut("Profile", note);
@@ -1228,6 +1282,33 @@ void prepareProfileBased(
     // said in the Profile field's status, never in a modal (it was "Cannot use selected
     // object"); the feature then starts as with nothing selected
     bool leftOut = false;
+    // The selection entry kept as the axis (rank 21): one after the first, or the only one when it
+    // is no sketch (hands-on B-2: a sketch selected is the profile). Alone, it opens the dialog with
+    // no profile, its Profile field armed and the axis set
+    std::size_t axisEntry = selection.size();
+    if (takesAxis) {
+        for (std::size_t index = 0; index < selection.size(); ++index) {
+            const App::DocumentObject* obj = selection[index].getObject();
+            if (index == 0
+                && (selection.size() != 1 || !obj || obj->isDerivedFrom<Part::Part2DObject>())) {
+                continue;
+            }
+            std::string sub;
+            if (obj
+                && (PartDesign::Body::findBodyOf(obj) == pcActiveBody
+                    || PartDesignGui::isStudioSelection(pcActiveBody, obj))
+                && isAxisPick(obj, selection[index].getSubNames(), sub)) {
+                keptAxis->first = App::DocumentObjectT(obj);
+                keptAxis->second = sub;
+                axisEntry = index;
+                break;
+            }
+        }
+        if (axisEntry == 0) {
+            empty_worker(QString());
+            return;
+        }
+    }
     if (!selection.empty()) {
         QString refused;
         const bool extrude = which == "Pad" || which == "Pocket";
@@ -1287,8 +1368,8 @@ void prepareProfileBased(
                 empty_worker(note);
                 return;
             }
-            // No Profile field yet (Revolve, Groove, Helix): the sketch is chosen as with
-            // nothing selected
+            // A command whose dialog has no Profile field (none since rank 21): the sketch is
+            // chosen as with nothing selected
             Gui::getMainWindow()->showMessage(note, 10000);
             Gui::Selection().clearSelection();
             leftOut = true;
@@ -1311,6 +1392,9 @@ void prepareProfileBased(
                     continue;
                 }
                 const QString label = QString::fromUtf8(obj->Label.getValue());
+                if (index == axisEntry) {
+                    continue;  // the axis, kept (rank 21)
+                }
                 if (index >= used) {
                     dropped << QStringLiteral("'%1'").arg(label);
                     continue;
@@ -2168,7 +2252,13 @@ void CmdPartDesignAdditiveHelix::activated(int iMsg)
         // specific parameters for helix
         Gui::Command::updateActive();
 
-        if (sketch->isDerivedFrom<Part::Part2DObject>()) {
+        // a preselected axis is kept (FreeCAD-CH ops#640, rank 21); with no profile yet (its
+        // dialog's Profile field armed) the axis is the origin's Y
+        auto setAxis = dynamic_cast<App::PropertyLinkSub*>(Feat->getPropertyByName("ReferenceAxis"));
+        if (setAxis && setAxis->getValue()) {
+            // kept
+        }
+        else if (sketch && sketch->isDerivedFrom<Part::Part2DObject>()) {
             FCMD_OBJ_CMD(Feat, "ReferenceAxis = (" << getObjectCmd(sketch) << ",['V_Axis'])");
         }
         else {
@@ -2243,7 +2333,13 @@ void CmdPartDesignSubtractiveHelix::activated(int iMsg)
         // specific parameters for helix
         Gui::Command::updateActive();
 
-        if (sketch->isDerivedFrom<Part::Part2DObject>()) {
+        // a preselected axis is kept (FreeCAD-CH ops#640, rank 21); with no profile yet (its
+        // dialog's Profile field armed) the axis is the origin's Y
+        auto setAxis = dynamic_cast<App::PropertyLinkSub*>(Feat->getPropertyByName("ReferenceAxis"));
+        if (setAxis && setAxis->getValue()) {
+            // kept
+        }
+        else if (sketch && sketch->isDerivedFrom<Part::Part2DObject>()) {
             FCMD_OBJ_CMD(Feat, "ReferenceAxis = (" << getObjectCmd(sketch) << ",['V_Axis'])");
         }
         else {
