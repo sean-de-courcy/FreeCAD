@@ -68,6 +68,7 @@
 #include <Base/Converter.h>
 #include <Base/ServiceProvider.h>
 #include <Base/Vector3D.h>
+#include <Base/Writer.h>  // FreeCAD-CH (ops#640): the Cancel's check
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
@@ -127,8 +128,35 @@ using namespace SketcherGui;
 using namespace Sketcher;
 namespace sp = std::placeholders;
 
+namespace Gui
+{
+/// FreeCAD-CH (ops#640, hands-on B5-5): defined and explained in Gui/Document.cpp (not in
+/// Document.h): undoes the open sketch session, or returns -1 having done nothing
+GuiExport int undoOpenSketchSession(const App::Document* doc);
+}  // namespace Gui
+
 namespace
 {
+/** FreeCAD-CH (ops#640, hands-on B5-5): what a Cancel that undid the edit's transactions checks,
+ * as it was when the edit started: the constraints, the external links and the number of
+ * elements. Not the geometry's coordinates: the edit's own solve (setEdit) and the undo's
+ * (onUndoRedoFinished) may rewrite them, and the solve gives them again from the constraints. */
+std::string cancelCheckOf(Sketcher::SketchObject* sketch)
+{
+    Base::StringWriter writer;
+    sketch->Constraints.Save(writer);
+    sketch->ExternalGeometry.Save(writer);
+    writer.Stream() << sketch->Geometry.getSize() << ' ' << sketch->ExternalGeo.getSize();
+    return writer.getString();
+}
+
+/// The check of each sketch in edit, taken when its edit started (no member: no header change)
+std::map<const ViewProviderSketch*, std::string>& cancelChecks()
+{
+    static std::map<const ViewProviderSketch*, std::string> checks;
+    return checks;
+}
+
 bool isFiniteVector(const SbVec3f& vector)
 {
     return std::isfinite(vector[0]) && std::isfinite(vector[1]) && std::isfinite(vector[2]);
@@ -4427,6 +4455,7 @@ bool ViewProviderSketch::setEdit(int ModNum)
     sketchBackup.clear();
     getObject()->dumpToStream(sketchBackup, 0);
     sketchBackup.seekg(0);
+    cancelChecks()[this] = cancelCheckOf(getSketchObject());  // FreeCAD-CH (ops#640, B5-5)
 
     // When double-clicking on the item for this sketch the
     // object unsets and sets its edit mode without closing
@@ -4811,9 +4840,38 @@ void ViewProviderSketch::unsetEdit(int ModNum)
         listener.reset();
     }
 
+    // FreeCAD-CH (ops#640, hands-on B5-5): the check taken when the edit started
+    std::string cancelCheck;
+    if (auto check = cancelChecks().find(this); check != cancelChecks().end()) {
+        cancelCheck = std::move(check->second);
+        cancelChecks().erase(check);
+    }
+
     if (isInEditMode()) {
         if (sketchHandler) {
             deactivateHandler();
+        }
+
+        // FreeCAD-CH (ops#640, hands-on B5-5): Onshape's Cancel of a sketch edit leaves no
+        // history entry, and Ctrl+Z then undoes the step before the edit. The edit's own
+        // transactions are undone while its session is still open (Gui/Document.cpp), as the
+        // sketch's Ctrl+Z steps them, its views still up; the Redo stack loses them. A new
+        // sketch's Cancel removes it (TaskDlgEditSketch::removeNewSketch, its own step): the
+        // restore below, as before. So is a Cancel the undo can't do exactly, or one the undo
+        // didn't bring back to the edit's start (a change outside the transactions).
+        bool cancelUndone = false;
+        bool cancelChanged = false;
+        if (editingCancelled && !cancelCheck.empty()) {
+            const TaskDlgEditSketch* dlg = TaskDlgEditSketch::ofSketchView(this);
+            if (dlg && !dlg->isNewSketch()) {
+                const int undone = Gui::undoOpenSketchSession(getDocument()->getDocument());
+                cancelUndone = undone >= 0 && cancelCheckOf(getSketchObject()) == cancelCheck;
+                cancelChanged = undone > 0;
+                if (cancelUndone && undone == 0) {
+                    // nothing changed: touched only by the edit's own solve, as the restore does
+                    getSketchObject()->purgeTouched();
+                }
+            }
         }
 
         editCoinManager = nullptr;
@@ -4821,13 +4879,24 @@ void ViewProviderSketch::unsetEdit(int ModNum)
         preselection.reset();
         selection.reset();
 
-        if (editingCancelled) {
+        if (editingCancelled && !cancelUndone) {
+            cancelChanged = cancelChanged
+                || (!cancelCheck.empty() && cancelCheckOf(getSketchObject()) != cancelCheck);
             App::AutoTransaction trans(getDocument()->getDocument(), "Cancel sketch editing");
             // Restore the object as it was when edit is set.
             getObject()->restoreFromStream(sketchBackup);
             getSketchObject()->purgeTouched();
         }
-        else {
+        if (editingCancelled && cancelChanged) {
+            // Onshape's toast "Sketch 2 has been canceled." (its Restore link: not here). Once
+            // the close is done: a recompute's progress bar clears the message when it ends
+            const QString text =
+                tr("%1 has been canceled").arg(QString::fromUtf8(getObject()->Label.getValue()));
+            QTimer::singleShot(0, Gui::getMainWindow(), [text]() {
+                Gui::getMainWindow()->showMessage(text, 5000);
+            });
+        }
+        if (!editingCancelled) {
             App::AutoTransaction trans(getDocument()->getDocument(), "Sketch recompute");
             try {
                 // and update the sketch

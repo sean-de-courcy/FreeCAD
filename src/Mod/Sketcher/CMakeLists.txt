@@ -61,6 +61,7 @@ if(BUILD_GUI)
           SketcherTests/TestSketchOnshapeToolsGui.py
           SketcherTests/TestSketchRound3Gui.py
           SketcherTests/TestSketchRound4Gui.py
+          SketcherTests/TestSketchCancelGui.py
     )
 endif(BUILD_GUI)
 
