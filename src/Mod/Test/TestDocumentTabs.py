@@ -307,3 +307,51 @@ class TestDocumentTabs(unittest.TestCase):
         self.assertIsNone(self.doc.getObject("Box"))
         self.assertIsNotNone(self.doc.getObject("Part"))
         self.assertEqual([name for name, _kind in self.kinds()], ["Part", "VarSet"])
+
+    # -- round 6 fixes (ops#640) -------------------------------------------------------------------
+
+    def testImplicitStudioLabelIsUnique(self):
+        """R6T-7: after Std_New's App::Part "Part Studio 1", solids an import (or a macro) puts at
+        the top level are the implicit "Part Studio 2", not a second "Part Studio 1"."""
+        part = self.doc.addObject("App::Part", "Part")
+        part.Label = "Part Studio 1"
+        self.doc.addObject("Part::Box", "Box")
+        self.doc.recompute()
+        self.assertEqual(Tabs.label(self.doc, "*"), "Part Studio 2")
+        labels = sorted(label for _name, _kind, label in Tabs.tabs(self.doc))
+        self.assertEqual(labels, ["Part Studio 1", "Part Studio 2"])
+        self.assertEqual(Tabs.nextLabel(self.doc, "Part Studio"), "Part Studio 3")
+
+    def testNamedImplicitStudioStaysWhenEmptied(self):
+        """R6T-12: an implicit studio whose label the registry holds (renamed, or shown in the GUI)
+        stays a tab when its solids go, as Onshape keeps an empty Part Studio; deleting the tab
+        forgets it."""
+        self.model(assembly=False, page=False)
+        Tabs.setImplicitLabel(self.doc, "Base")
+        self.doc.removeObject("Box")
+        self.doc.getObject("Body").removeObjectsFromDocument()
+        self.doc.removeObject("Body")
+        self.assertIsNone(self.doc.getObject("Body"))
+        self.assertTrue(Tabs.hasImplicitStudio(self.doc))
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertEqual(Tabs.label(self.doc, "*"), "Base")
+        Tabs.removeTab(self.doc, "*")
+        self.assertFalse(Tabs.hasImplicitStudio(self.doc))
+        self.assertNotIn("*", [name for name, _kind in self.kinds()])
+
+    def testLinkArrayElementsAreNoImplicitContent(self):
+        """R6T-9: a link array in Part Studio 2 doesn't make its elements top-level solids of the
+        implicit studio."""
+        studio = self.doc.addObject("App::Part", "Part")
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        studio.addObject(body)
+        box(self.doc, body)
+        array = self.doc.addObject("App::Link", "Array")
+        studio.addObject(array)
+        array.LinkedObject = body
+        array.ElementCount = 3
+        array.ShowElement = True
+        self.doc.recompute()
+        self.assertEqual(len(array.ElementList), 3)
+        self.assertFalse(Tabs.hasImplicitStudio(self.doc))
+        self.assertEqual(self.kinds(), [("Part", "PartStudio")])

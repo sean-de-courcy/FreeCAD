@@ -1109,6 +1109,12 @@ void SketchWorkflow::tryCreateSketch()
     requestSelection.findSupport();
 }
 
+// FreeCAD-CH (R6T-1): Utils.cpp's, the Bodies of the view's typed tab
+namespace PartDesignGui
+{
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+}
+
 std::tuple<bool, PartDesign::Body*> SketchWorkflow::shouldCreateBody()
 {
     auto shouldMakeBody {false};
@@ -1124,7 +1130,9 @@ std::tuple<bool, PartDesign::Body*> SketchWorkflow::shouldCreateBody()
         pdBody->Placement.setValue(xLink->Placement.getValue());
     }
     if (!pdBody) {
-        if (appdocument->countObjectsOfType<PartDesign::Body>() == 0) {
+        // FreeCAD-CH (R6T-1): under the typed tabs a sketch in a studio with no part makes one
+        // there, as Onshape's sketch in an empty Part Studio does
+        if (PartDesignGui::tabBodies(appdocument, nullptr).empty()) {
             shouldMakeBody = true;
         }
         else {

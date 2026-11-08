@@ -35,9 +35,12 @@
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Part.h>
+#include <App/DocumentTabs.h>
 #include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
+#include <Gui/Document.h>
+#include <Gui/DocumentTabBar.h>
 #include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
@@ -150,6 +153,35 @@ QString mergedBodyRefusal(const PartDesign::Body* body)
 }
 }  // namespace
 
+// FreeCAD-CH (ops#640 round 6, R6T-1): the Bodies a command may take as its part. Under the
+// typed tabs only those of the tab @p view shows (the document's active view when null), as a
+// command in an Onshape Part Studio sees only that studio's parts; else all of the document's.
+// Declared where it is used (no header names it)
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view)
+{
+    std::vector<App::DocumentObject*> bodies;
+    if (!doc) {
+        return bodies;
+    }
+    bodies = doc->getObjectsOfType(PartDesign::Body::getClassTypeId());
+    if (!Gui::DocumentTabs::isOn()) {
+        return bodies;
+    }
+    if (!view) {
+        auto gdoc = Gui::Application::Instance->getDocument(doc);
+        view = gdoc ? gdoc->getActiveView() : nullptr;
+    }
+    const std::string tab = view ? Gui::DocumentTabs::tabOfView(view) : std::string();
+    if (tab.empty()) {
+        return bodies;
+    }
+    std::erase_if(bodies, [&tab](const App::DocumentObject* body) {
+        return App::DocumentTabs::tabNameOf(body) != tab;
+    });
+    return bodies;
+}
+
 /*!
  * \brief Return active body or show a warning message.
  * If \a autoActivate is true (the default) then if there is
@@ -171,12 +203,13 @@ PartDesign::Body* getBody(
 
     if (activeView) {
         auto doc = activeView->getAppDocument();
-        bool singleBodyDocument = doc->countObjectsOfType<PartDesign::Body>() == 1;
+        // FreeCAD-CH (R6T-1): under the typed tabs, the single Body of the view's tab
+        const auto bodies = tabBodies(doc, activeView);
+        bool singleBodyDocument = bodies.size() == 1;
         if (assertModern) {
             activeBody = activeView->getActiveObject<PartDesign::Body*>(PDBODYKEY, topParent, subname);
 
             if (!activeBody && singleBodyDocument && autoActivate) {
-                auto bodies = doc->getObjectsOfType(PartDesign::Body::getClassTypeId());
                 App::DocumentObject* body = nullptr;
                 if (bodies.size() == 1) {
                     body = bodies[0];
@@ -328,7 +361,20 @@ PartDesign::Body* makeBody(App::Document* doc)
 
     auto body = dynamic_cast<PartDesign::Body*>(doc->getObject(bodyName.c_str()));
     if (body) {
-        // The callers put it in the active studio
+        // FreeCAD-CH (R6T-1): under the typed tabs a new part is made in the tab's studio (the
+        // view's active App::Part, set by the tab), whatever the caller; else the callers put it
+        // in the active studio
+        if (Gui::DocumentTabs::isOn()) {
+            Gui::MDIView* view = Gui::Application::Instance->activeView();
+            auto studio = view ? view->getActiveObject<App::Part*>(PARTKEY) : nullptr;
+            if (studio && studio->getDocument() == doc && !studio->hasObject(body)) {
+                Gui::cmdAppObjectArgs(
+                    studio,
+                    "addObject(%s)",
+                    Gui::Command::getObjectCmd(body).c_str()
+                );
+            }
+        }
         nameNewPart(body, getActivePart());
         makeBodyActive(body, doc);
     }

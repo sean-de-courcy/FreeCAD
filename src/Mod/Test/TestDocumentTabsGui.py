@@ -455,3 +455,285 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertEqual(len(bodies), 1)
         self.assertEqual(bodies[0].getParentGeoFeatureGroup(), parts[0])
         self.assertNotIn("Create Part Studio", doc.UndoNames)
+
+    # -- round 6 fixes (ops#640) -------------------------------------------------------------------
+
+    def stdNew(self):
+        """Std_New under the Onshape keymap: the new document (closed in tearDown)."""
+        before = set(App.listDocuments())
+        Gui.runCommand("Std_New")
+        pump(0.3)
+        added = [n for n in App.listDocuments() if n not in before]
+        self.assertEqual(len(added), 1)
+        self.docs.append(added[0])
+        return App.getDocument(added[0])
+
+    def visibleWidget(self, name):
+        found = [w for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, name) if w.isVisible()]
+        return found[0] if found else None
+
+    def treeItem(self, obj):
+        """The tree holding obj's item (found by its label), and the item."""
+        from PySide import QtCore
+
+        for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+            if tree.metaObject().className() != "Gui::TreeWidget":
+                continue
+            items = tree.findItems(obj.Label, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive)
+            if items:
+                return tree, items[0]
+        self.fail(f"{obj.Label} isn't in the tree")
+
+    def testSketchInANewStudioMakesItsOwnPart(self):
+        """R6T-1: Std_New in Part Design (Part Studio 1 with its "Part 1", here a 10 mm box), then
+        "+" > Create Part Studio and New Sketch: the sketch is in a new Body of Part Studio 2, as
+        Onshape's sketch in an empty studio makes a part there, not in Part Studio 1's Body; the
+        tab stays Part Studio 2. A 10 mm pad on a 10 x 10 rectangle in it is 1000 mm^3; Part
+        Studio 1 is unchanged."""
+        Gui.activateWorkbench("PartDesignWorkbench")
+        doc = self.stdNew()
+        [part1] = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Body")]
+        feature = part1.newObject("PartDesign::AdditiveBox", "Box")
+        feature.Length = feature.Width = feature.Height = 10
+        doc.recompute()
+        self.assertAlmostEqual(part1.Shape.Volume, 1000, 6)
+        group1 = [o.Name for o in part1.Group]
+        name = GuiTabs.create(doc, "PartStudio")
+        pump(0.3)
+        self.assertEqual(GuiTabs.activeTab(doc), name)
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(0.5)
+        sketches = [o for o in doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(len(sketches), 1, [o.Name for o in doc.Objects])
+        sketch = sketches[0]
+        body = sketch.getParentGeoFeatureGroup()
+        self.assertTrue(body.isDerivedFrom("PartDesign::Body"), body.Name)
+        self.assertIsNot(body, part1)
+        self.assertEqual(body.getParentGeoFeatureGroup(), doc.getObject(name))
+        self.assertEqual(GuiTabs.activeTab(doc), name)
+        gdoc = Gui.getDocument(doc.Name)
+        self.assertEqual(GuiTabs.tabOfView(gdoc.ActiveView), name)
+        if gdoc.getInEdit():
+            gdoc.resetEdit()
+            pump(0.3)
+        [plane] = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        sketch.AttachmentSupport = [(plane, "")]
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(rectangle(0, 0, 10, 10), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 1000, 6)
+        self.assertEqual([o.Name for o in part1.Group], group1)
+        self.assertAlmostEqual(part1.Shape.Volume, 1000, 6)
+
+    def testNestedPartBodyIsInItsTabsStudio(self):
+        """R6T-2: one tab is one studio. Std_Part in Part Studio 2's tab makes a Part Studio tab
+        (a top-level App::Part "Part Studio 3", made active), not an App::Part nested in Part
+        Studio 2 whose Bodies would be drawn there but missing from its lists; a Body made there
+        is in that studio and its tab."""
+        self.model(assembly=False)
+        self.switch("Part")
+        before = {o.Name for o in self.doc.Objects}
+        Gui.runCommand("Std_Part")
+        pump(0.3)
+        parts = [o for o in self.doc.Objects if o.Name not in before and o.TypeId == "App::Part"]
+        self.assertEqual(len(parts), 1)
+        studio = parts[0]
+        self.assertIsNone(studio.getParentGeoFeatureGroup())
+        self.assertEqual(studio.Label, "Part Studio 3")
+        self.assertEqual(GuiTabs.activeTab(self.doc), studio.Name)
+        before = {o.Name for o in self.doc.Objects}
+        Gui.runCommand("PartDesign_Body")
+        pump(0.3)
+        if Gui.Control.activeDialog():
+            Gui.Control.closeDialog()
+            pump(0.2)
+        bodies = [
+            o for o in self.doc.Objects if o.Name not in before and o.isDerivedFrom("PartDesign::Body")
+        ]
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0].getParentGeoFeatureGroup(), studio)
+        self.assertEqual(Tabs.tabOf(bodies[0]), studio.Name)
+
+    def testEditInAnotherTabWithADialogOpen(self):
+        """R6T-3: with the Pad's dialog open in Part Studio 1 (its length changed to 12), editing
+        Part Studio 2's cylinder accepts the Pad first, then switches: the Pad's step is Part
+        Studio 1's, so its undo from Part Studio 2 switches back there."""
+        objects = self.model(assembly=False)
+        pad = objects["pad"]
+        self.switch("*")
+        Gui.ActiveDocument.setEdit(pad.Name)
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog())
+        field = self.visibleWidget("lengthEdit")
+        self.assertIsNotNone(field, "no length field")
+        field.setProperty("rawValue", 12.0)
+        pump(0.2)
+        Gui.ActiveDocument.setEdit(objects["cylinder"].Name)
+        pump(0.3)
+        self.assertAlmostEqual(pad.Length.Value, 12, 6)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+        self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Part")
+        Gui.ActiveDocument.resetEdit()
+        pump(0.3)
+        undo()
+        self.assertEqual(GuiTabs.activeTab(self.doc), "*")
+        self.assertAlmostEqual(pad.Length.Value, 10, 6)
+
+    def testKeymapSwitchShowsEverything(self):
+        """R6T-4: switching to FreeCAD's keymap at runtime (Preferences > General) shows every
+        object in every view, with no bars; switching back filters the views by tab again."""
+        self.model()
+        view2 = self.switch("Part")
+        group = App.ParamGet("User parameter:BaseApp/Preferences/General")
+        saved = group.GetString("Keymap") if "Keymap" in group.GetStrings() else None
+        everything = {"Body", "Pad", "Part", "Body001", "Cylinder", "Assembly"}
+        mw = Gui.getMainWindow()
+        try:
+            group.SetString("Keymap", "FreeCAD")
+            pump(0.5)
+            self.assertFalse(GuiTabs.isOn())
+            self.assertTrue(everything <= shown(view2), shown(view2))
+            self.assertEqual(GuiTabs.tabOfView(view2), "")
+            self.assertFalse(mw.findChild(QtWidgets.QToolBar, "FreeCADCH_TypedTabs").isVisible())
+        finally:
+            if saved is None:
+                group.RemString("Keymap")
+            else:
+                group.SetString("Keymap", saved)
+            pump(0.5)
+        self.assertTrue(GuiTabs.isOn())
+        view = Gui.ActiveDocument.ActiveView
+        tab = GuiTabs.tabOfView(view)
+        self.assertTrue(tab, "the view has no tab again")
+        self.assertEqual(GuiTabs.activeTab(self.doc), tab)
+        self.assertFalse(everything <= shown(view), shown(view))
+        self.assertTrue(mw.findChild(QtWidgets.QToolBar, "FreeCADCH_TypedTabs").isVisible())
+
+    def testTreeSelectionOpensTheObjectsTab(self):
+        """R6T-5: from the assembly's tab (in edit), selecting Part Studio 2's Body in the tree
+        (SyncView) opens Part Studio 2's tab as the bar does: Part Design's toolbar, the assembly
+        out of edit, the selection kept. With a dialog open there, selecting Part Studio 1's Body
+        leaves the tab as it is."""
+        objects = self.model()
+        group = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
+        saved = group.GetBool("SyncView", True)
+        group.SetBool("SyncView", True)
+        try:
+            self.switch("Assembly")
+            self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
+            widget, item = self.treeItem(objects["body2"])
+            widget.clearSelection()
+            widget.setCurrentItem(item)
+            pump(0.5)
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Part")
+            self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+            self.assertIsNone(Gui.ActiveDocument.getInEdit())
+            self.assertIn(objects["body2"], Gui.Selection.getSelection())
+
+            Gui.ActiveDocument.setEdit(objects["cylinder"].Name)
+            pump(0.3)
+            self.assertTrue(Gui.Control.activeDialog())
+            widget, item = self.treeItem(objects["body1"])
+            widget.setCurrentItem(item)
+            pump(0.5)
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Part")
+            Gui.ActiveDocument.resetEdit()
+            pump(0.2)
+        finally:
+            group.SetBool("SyncView", saved)
+
+    def testImplicitStudioLabelIsUnique(self):
+        """R6T-7: after Std_New (its App::Part "Part Studio 1"), a solid a macro or an import puts at
+        the top level is the implicit "Part Studio 2" in the bar, not a second "Part Studio 1"."""
+        doc = self.stdNew()
+        doc.addObject("Part::Box", "Box")
+        doc.recompute()
+        pump(0.3)
+        self.assertEqual(Tabs.label(doc, "*"), "Part Studio 2")
+        self.assertEqual(sorted(self.barTexts()), ["Part Studio 1", "Part Studio 2"])
+
+    def testEmptiedImplicitStudioKeepsItsTab(self):
+        """R6T-12: Part Studio 1 (the top level) shown, then emptied: its tab and view stay, as
+        Onshape keeps an empty Part Studio; the undo brings the Body back into that view."""
+        self.model(assembly=False)
+        self.switch("*")
+        Gui.ActiveDocument.openCommand("Delete the Body")
+        for name in ("Pad", "Profile"):
+            self.doc.removeObject(name)
+        self.doc.getObject("Body").removeObjectsFromDocument()
+        self.doc.removeObject("Body")
+        Gui.ActiveDocument.commitCommand()
+        GuiTabs.reconcile(self.doc)
+        pump(0.3)
+        self.assertIn("*", [n for n, _k, _l in Tabs.tabs(self.doc)])
+        self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2"])
+        self.assertIsNotNone(GuiTabs.viewOf(self.doc, "*"))
+        undo()
+        pump(0.3)
+        self.assertIsNotNone(self.doc.getObject("Body"))
+        self.assertIn("Body", shown(GuiTabs.viewOf(self.doc, "*")))
+
+    def testUndoBesideAnOpenDialogShowsTheTab(self):
+        """R6T-10: with a dialog open that doesn't lock the history (a script's task panel), Ctrl+Z
+        of a step made in Part Studio 2 still shows Part Studio 2, so the undo isn't unseen."""
+        objects = self.model(assembly=False)
+        cylinder = objects["cylinder"]
+        self.switch("Part")
+        Gui.ActiveDocument.openCommand("Cylinder height")
+        cylinder.Height = 30
+        Gui.ActiveDocument.commitCommand()
+        self.doc.recompute()
+        self.switch("*")
+
+        class Panel:
+            def __init__(self):
+                self.form = QtWidgets.QWidget()
+
+            def accept(self):
+                return True
+
+            def reject(self):
+                return True
+
+        Gui.Control.showDialog(Panel())
+        pump(0.2)
+        try:
+            undo()
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+            self.assertAlmostEqual(cylinder.Height.Value, 20, 6)
+        finally:
+            Gui.Control.closeDialog()
+            pump(0.2)
+
+    def testReusedNameIsNoVariableStudio(self):
+        """R6T-8: a Variable Studio deleted, a new VarSet made with its name (a script) isn't a
+        Variable Studio: the mark kept for the delete's undo isn't inherited."""
+        name = GuiTabs.create(self.doc, "VariableStudio")
+        pump(0.2)
+        self.doc.removeObject(name)
+        variables = self.doc.addObject("App::VarSet", name)
+        self.assertEqual(variables.Name, name)
+        self.assertFalse(Tabs.isVariableStudio(variables))
+        self.assertNotIn(name, [n for n, _k, _l in Tabs.tabs(self.doc)])
+
+    def testEditThroughAnAssemblyLinkStaysInTheAssembly(self):
+        """R6T-11: the cylinder edited through the assembly's link (selected there) is edited in
+        the assembly's tab, by the path's top object, not in Part Studio 2's view with the
+        assembly's path."""
+        objects = self.model()
+        link = objects["assembly"].newObject("App::Link", "Link")
+        link.LinkedObject = objects["body2"]
+        self.doc.recompute()
+        self.switch("Assembly")
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "Assembly", "Link.Cylinder.")
+        Gui.ActiveDocument.setEdit(objects["cylinder"].Name)
+        pump(0.3)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+        self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Assembly")

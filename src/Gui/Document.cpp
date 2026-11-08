@@ -914,8 +914,6 @@ Document::~Document()
 bool Document::setEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
 {
     try {
-        // FreeCAD-CH (ops#640, rank 59): an object of another typed tab is edited in its tab
-        DocumentTabs::beforeEdit(this, p);
         return trySetEdit(p, ModNum, subname);
     }
     catch (const Base::Exception& e) {
@@ -1035,6 +1033,14 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     // Moving resetIfEditing() after ParentFinder ensures we resolve the parent context correctly
     // using the current selection before closing the previous edit.
     resetIfEditing();
+
+    // FreeCAD-CH (ops#640, rank 59; R6T-3, R6T-11): an object of another typed tab is edited in
+    // its tab's view, switched to only now (the held step's dialog accepted, so its step stays
+    // its own tab's) and by the edited path's top object (a sketch edited through an assembly's
+    // link stays in the assembly); refused beside another open dialog
+    if (!DocumentTabs::beforeEdit(this, vp)) {
+        return false;
+    }
 
     d->throwIfNotInMap(obj, getDocument());
 
@@ -3334,6 +3340,11 @@ MDIView* Document::setActiveView(const ViewProviderDocumentObject* vp, Base::Typ
                     MDIView* active = getActiveView();
                     if (active && active->containsViewProvider(vp)) {
                         view = active;
+                    }
+                    // FreeCAD-CH (ops#640, R6T-5): under the typed tabs the object's own tab's
+                    // view, not the document's first 3D view (maybe another tab's)
+                    else if (MDIView* tabView = DocumentTabs::viewOfObject(this, obj)) {
+                        view = tabView;
                     }
                     else {
                         typeId = View3DInventor::getClassTypeId();

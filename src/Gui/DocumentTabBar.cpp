@@ -51,8 +51,13 @@
 #include <App/DocumentObjectPy.h>
 #include <App/DocumentPy.h>
 #include <App/DocumentTabs.h>
+#include <App/GeoFeature.h>
+#include <App/Link.h>
+#include <App/VarSet.h>
 #include <Base/Console.h>
 #include <Base/Interpreter.h>
+#include <Base/Parameter.h>
+#include <Base/Tools.h>
 
 #include "DocumentTabBar.h"
 #include "ActiveObjectList.h"
@@ -111,15 +116,20 @@ bool dialogBlocks(std::string* refusal)
     return true;
 }
 
-class Controller: public QObject
+class Controller: public QObject, public ParameterGrp::ObserverType
 {
 public:
     explicit Controller(MainWindow* mw);
+    ~Controller() override;
 
     static Controller* instance()
     {
         return self;
     }
+
+    /// The keymap preference: ShortcutManager's reload() may run after this, so it is read later
+    void OnChange(Base::Subject<const char*>& caller, const char* reason) override;
+    void keymapChanged();
 
     void schedule(const App::Document* doc);
     void reconcile(App::Document* doc);
@@ -134,7 +144,10 @@ public:
         std::string* refusal
     );
     MDIView* showTab(App::Document* doc, const AppTabs::Tab& tab);
+    MDIView* viewForTab(App::Document* doc, const AppTabs::Tab& tab);
+    bool beforeEdit(Gui::Document* gdoc, App::DocumentObject* obj);
     void setTag(MDIView* view, const std::string& tag);
+    void keepImplicit(App::Document* doc);
     void refilter(MDIView* view);
     MDIView* viewOf(App::Document* doc, const std::string& name) const;
 
@@ -149,12 +162,16 @@ public:
     );
 
     void beforeUndo(Gui::Document* gdoc, bool undo);
+    void message(const std::string& text);
 
     std::string pendingTab;  // the tab of the view createView() is making
     const App::Document* pendingDoc = nullptr;
 
 private:
+    void leave(Gui::Document* gdoc);
+    void arrive(App::Document* doc, const AppTabs::Tab& tab);
     void onViewActivated(QMdiSubWindow* window);
+    void activatedElsewhere(App::Document* doc, const std::string& before, const std::string& tag);
     void onCommit(const App::Document& doc);
     void onDeleteDocument(const App::Document& doc);
     void onTabClicked(int index);
@@ -163,16 +180,18 @@ private:
     void onDocumentClose(int index);
     void renameInteractive(int index);
     void deleteInteractive(int index);
-    void message(const std::string& text);
 
     static Controller* self;
     MainWindow* mw;
+    bool wasOn = false;
+    bool arriving = false;
     QToolBar* strip;
     QTabBar* documents;
     QToolBar* bar;
     QTabBar* typed;
     QTimer timer;
     std::set<const App::Document*> dirty;
+    std::set<const App::Document*> closing;  // their views go: an activation meanwhile is no switch
     std::map<const App::Document*, std::string> active;
     std::map<const App::Document*, std::map<int, std::string>> steps;
     struct PageView
@@ -192,6 +211,7 @@ Controller::Controller(MainWindow* mw)
     , mw(mw)
 {
     self = this;
+    wasOn = isOn();
     timer.setSingleShot(true);
     timer.setInterval(0);
     connect(&timer, &QTimer::timeout, this, [this] {
@@ -275,7 +295,15 @@ Controller::Controller(MainWindow* mw)
 
     auto& app = App::GetApplication();
     connections.emplace_back(app.signalNewObject.connect([this](const App::DocumentObject& obj) {
-        schedule(obj.getDocument());
+        // A Variable Studio's mark outlives its VarSet (for the delete's undo); a new VarSet that
+        // reuses the name isn't one (R6T-8)
+        App::Document* doc = obj.getDocument();
+        if (doc && obj.getTypeId() == App::VarSet::getClassTypeId()
+            && !doc->isPerformingTransaction() && !doc->testStatus(App::Document::Restoring)
+            && !doc->testStatus(App::Document::Importing) && AppTabs::isVariableStudio(&obj)) {
+            AppTabs::setVariableStudio(const_cast<App::DocumentObject*>(&obj), false);
+        }
+        schedule(doc);
     }));
     connections.emplace_back(
         app.signalDeletedObject.connect([this](const App::DocumentObject& obj) {
@@ -305,8 +333,19 @@ Controller::Controller(MainWindow* mw)
         })
     );
     connections.emplace_back(app.signalNewDocument.connect([this](const App::Document& doc, bool) {
+        closing.erase(&doc);  // a new document where a closed one was
         schedule(&doc);
     }));
+    // Before the GUI document deletes its views: the next view activated while they go (another
+    // tab's) must not reset or start an edit of the closing document
+    connections.emplace_back(
+        Application::Instance->signalDeleteDocument.connect([this](const Gui::Document& gdoc) {
+            if (App::Document* doc = gdoc.getDocument()) {
+                closing.insert(doc);
+                onDeleteDocument(*doc);
+            }
+        })
+    );
     connections.emplace_back(app.signalActiveDocument.connect([this](const App::Document& doc) {
         schedule(&doc);
     }));
@@ -319,6 +358,64 @@ Controller::Controller(MainWindow* mw)
     connections.emplace_back(app.signalDeleteDocument.connect([this](const App::Document& doc) {
         onDeleteDocument(doc);
     }));
+    ForkKeymap::preferenceGroup()->Attach(this);
+    applyKeymap();
+}
+
+Controller::~Controller()
+{
+    ForkKeymap::preferenceGroup()->Detach(this);
+    if (self == this) {
+        self = nullptr;
+    }
+}
+
+void Controller::OnChange(Base::Subject<const char*>& /*caller*/, const char* reason)
+{
+    if (!reason || !*reason || std::strcmp(reason, "Keymap") == 0) {
+        QTimer::singleShot(0, this, [this] { keymapChanged(); });
+    }
+}
+
+void Controller::keymapChanged()
+{
+    // A switch at runtime (Preferences > General): FreeCAD's keymap shows every object in every
+    // view and no bars; Onshape's tags and filters the open views again (R6T-4)
+    const bool on = isOn();
+    if (on == wasOn) {
+        return;
+    }
+    wasOn = on;
+    for (auto doc : App::GetApplication().getDocuments()) {
+        auto gdoc = Application::Instance->getDocument(doc);
+        if (!gdoc) {
+            continue;
+        }
+        if (on) {
+            // The untagged views take the 3D tabs in order (reconcile()); the active one's is the
+            // active tab
+            active.erase(doc);
+            reconcile(doc);
+            const std::string tag = tagOf(gdoc->getActiveView());
+            if (!tag.empty()) {
+                active[doc] = tag;
+            }
+            continue;
+        }
+        for (auto view : gdoc->getMDIViewsOfType(View3DInventor::getClassTypeId())) {
+            if (auto view3d = qobject_cast<View3DInventor*>(view)) {
+                view3d->setProperty(tabProperty, QVariant());
+                view3d->getViewer()->setProperty(tabProperty, QVariant());
+                refilter(view3d);
+            }
+        }
+    }
+    if (!on) {
+        dirty.clear();
+        active.clear();
+        steps.clear();
+        pageViews.clear();
+    }
     applyKeymap();
 }
 
@@ -347,7 +444,7 @@ void Controller::applyKeymap()
 
 void Controller::schedule(const App::Document* doc)
 {
-    if (!isOn() || !doc) {
+    if (!isOn() || !doc || closing.count(doc)) {
         return;
     }
     dirty.insert(doc);
@@ -452,6 +549,23 @@ void Controller::setTag(MDIView* view, const std::string& tag)
     if (doc && !active.count(doc)) {
         active[doc] = tag;
     }
+    if (doc && tag == AppTabs::implicitName()) {
+        keepImplicit(doc);
+    }
+}
+
+void Controller::keepImplicit(App::Document* doc)
+{
+    // The implicit studio shown with something in it stays a tab when emptied, as Onshape keeps
+    // an empty Part Studio (R6T-12): its label goes to the registry. Not while empty: Std_New's
+    // first view shows the empty document before its App::Part studio is made
+    if (!doc || AppTabs::hasImplicitLabel(doc) || !AppTabs::hasImplicitStudio(doc)) {
+        return;
+    }
+    const AppTabs::Tab implicit {AppTabs::Kind::PartStudio, nullptr};
+    if (!AppTabs::members(doc, implicit).empty()) {
+        AppTabs::setImplicitLabel(doc, AppTabs::implicitLabel(doc));
+    }
 }
 
 void Controller::reconcile(App::Document* doc)
@@ -479,6 +593,9 @@ void Controller::reconcile(App::Document* doc)
         const std::string tag = tagOf(view);
         if (!tag.empty() && names.count(tag)) {
             refilter(view);
+            if (tag == AppTabs::implicitName()) {
+                keepImplicit(doc);
+            }
             continue;
         }
         // Its tab is gone (deleted, or the implicit studio emptied): another tab with no view, or
@@ -598,25 +715,116 @@ void Controller::onViewActivated(QMdiSubWindow* window)
     }
     auto view = qobject_cast<MDIView*>(window->widget());
     App::Document* doc = view ? view->getAppDocument() : nullptr;
-    if (!doc) {
+    if (!doc || closing.count(doc)) {
         return;
     }
     const std::string tag = tagOf(view);
     if (!tag.empty()) {
-        active[doc] = tag;
+        const std::string before = activeTab(doc);
+        if (before.empty() || before == tag || arriving) {
+            active[doc] = tag;
+        }
+        else {
+            activatedElsewhere(doc, before, tag);
+        }
     }
     else {
         auto page = pageViews.find(view);
         if (page != pageViews.end() && page->second.view) {
             active[doc] = page->second.name;
         }
+        else if (auto gdoc = Application::Instance->getDocument(doc)) {
+            // A page opened otherwise than by its tab (the tree): its Drawing tab's view
+            for (const auto& tab : AppTabs::tabs(doc)) {
+                auto vp = tab.kind == AppTabs::Kind::Drawing ? gdoc->getViewProvider(tab.object)
+                                                             : nullptr;
+                if (vp && vp->getMDIView() == view) {
+                    pageViews[view] = {QPointer<MDIView>(view), doc, tab.name()};
+                    active[doc] = tab.name();
+                    break;
+                }
+            }
+        }
     }
     timer.start();
 }
 
+void Controller::activatedElsewhere(
+    App::Document* doc,
+    const std::string& before,
+    const std::string& tag
+)
+{
+    // A tab's view brought up otherwise than by the bar (the tree's selection or double-click,
+    // Ctrl+Tab, a closed view): the bar's rules, the selection kept (R6T-5). With a dialog open
+    // the view before comes back, once the activation is over, unless an edit took the tab since
+    std::string refusal;
+    if (viewOf(doc, before) && dialogBlocks(&refusal)) {
+        message(refusal);
+        const std::string docName = doc->getName();
+        QTimer::singleShot(0, this, [this, docName, before] {
+            App::Document* current = App::GetApplication().getDocument(docName.c_str());
+            if (!current || activeTab(current) != before) {
+                return;
+            }
+            MDIView* back = viewOf(current, before);
+            if (back && getMainWindow()->activeWindow() != back) {
+                getMainWindow()->setActiveWindow(back);
+            }
+        });
+        return;
+    }
+    active[doc] = tag;
+    AppTabs::Tab tab {};
+    auto gdoc = Application::Instance->getDocument(doc);
+    if (gdoc && AppTabs::findTab(doc, tag, tab)) {
+        leave(gdoc);
+        arrive(doc, tab);
+    }
+}
+
+void Controller::leave(Gui::Document* gdoc)
+{
+    // Leaving a tab ends its edit (an active assembly)
+    if (gdoc->getInEdit()) {
+        gdoc->resetEdit();
+    }
+}
+
+void Controller::arrive(App::Document* doc, const AppTabs::Tab& tab)
+{
+    auto gdoc = Application::Instance->getDocument(doc);
+    if (!gdoc || arriving) {
+        return;
+    }
+    Base::FlagToggler<> flag(arriving);
+    Workbench* workbench = WorkbenchManager::instance()->active();
+    const std::string current = workbench ? workbench->name() : std::string();
+    switch (tab.kind) {
+        case AppTabs::Kind::PartStudio:
+            if (current != "PartDesignWorkbench" && current != "SketcherWorkbench") {
+                Application::Instance->activateWorkbench("PartDesignWorkbench");
+            }
+            break;
+        case AppTabs::Kind::Assembly:
+            Application::Instance->activateWorkbench("AssemblyWorkbench");
+            if (!gdoc->getInEdit()) {
+                if (auto vp = gdoc->getViewProvider(tab.object)) {
+                    gdoc->setEdit(vp);
+                }
+            }
+            break;
+        case AppTabs::Kind::Drawing:
+            Application::Instance->activateWorkbench("TechDrawWorkbench");
+            break;
+        case AppTabs::Kind::VariableStudio:
+            break;
+    }
+}
+
 void Controller::onCommit(const App::Document& doc)
 {
-    if (!isOn()) {
+    if (!isOn() || closing.count(&doc)) {
         return;
     }
     // The tab active at the commit, once per step (an empty commit that follows keeps the step's)
@@ -643,8 +851,10 @@ void Controller::beforeUndo(Gui::Document* gdoc, bool undo)
         return;
     }
     AppTabs::Tab tab {};
-    if (AppTabs::findTab(doc, step->second, tab)) {
-        switchTo(doc, step->second, true, nullptr);
+    if (AppTabs::findTab(doc, step->second, tab) && !switchTo(doc, step->second, true, nullptr)) {
+        // A dialog that doesn't lock the history (an assembly joint's, Std_Placement) refuses
+        // the switch: the step's tab is shown anyway, so the undo isn't unseen (R6T-10)
+        showTab(doc, tab);
     }
 }
 
@@ -656,14 +866,9 @@ MDIView* Controller::showTab(App::Document* doc, const AppTabs::Tab& tab)
     }
     const std::string name = tab.name();
     if (is3DKind(tab.kind)) {
-        MDIView* view = viewOf(doc, name);
-        if (!view) {
-            pendingDoc = doc;
-            pendingTab = name;
-            view = gdoc->createView(View3DInventor::getClassTypeId());
-            pendingDoc = nullptr;
-            pendingTab.clear();
-        }
+        // The tab is the active one before its view is: the activation brings no side effects
+        active[doc] = name;
+        MDIView* view = viewForTab(doc, tab);
         if (view) {
             getMainWindow()->setActiveWindow(view);
         }
@@ -697,6 +902,46 @@ MDIView* Controller::showTab(App::Document* doc, const AppTabs::Tab& tab)
     return nullptr;
 }
 
+MDIView* Controller::viewForTab(App::Document* doc, const AppTabs::Tab& tab)
+{
+    auto gdoc = Application::Instance->getDocument(doc);
+    if (!gdoc || !is3DKind(tab.kind)) {
+        return nullptr;
+    }
+    const std::string name = tab.name();
+    MDIView* view = viewOf(doc, name);
+    if (!view) {
+        pendingDoc = doc;
+        pendingTab = name;
+        view = gdoc->createView(View3DInventor::getClassTypeId());
+        pendingDoc = nullptr;
+        pendingTab.clear();
+    }
+    return view;
+}
+
+bool Controller::beforeEdit(Gui::Document* gdoc, App::DocumentObject* obj)
+{
+    App::Document* doc = gdoc->getDocument();
+    const std::string name = AppTabs::tabNameOf(obj);
+    AppTabs::Tab tab {};
+    if (!AppTabs::findTab(doc, name, tab) || !is3DKind(tab.kind)) {
+        return true;
+    }
+    if (activeTab(doc) == name && tabOfView(gdoc->getActiveView()) == name) {
+        return true;
+    }
+    // Called once the edit will start (the held step's dialog accepted, the edit before reset):
+    // a dialog still open is another command's (R6T-3)
+    std::string refusal;
+    if (dialogBlocks(&refusal)) {
+        message(refusal);
+        return false;
+    }
+    showTab(doc, tab);
+    return true;
+}
+
 bool Controller::switchTo(
     App::Document* doc,
     const std::string& name,
@@ -720,10 +965,7 @@ bool Controller::switchTo(
         if (dialogBlocks(refusal)) {
             return false;
         }
-        // Leaving a tab ends its edit (an active assembly)
-        if (gdoc->getInEdit()) {
-            gdoc->resetEdit();
-        }
+        leave(gdoc);
         Selection().clearSelection();
     }
     if (App::GetApplication().getActiveDocument() != doc) {
@@ -731,28 +973,7 @@ bool Controller::switchTo(
     }
     showTab(doc, tab);
     if (sideEffects) {
-        Workbench* workbench = WorkbenchManager::instance()->active();
-        const std::string current = workbench ? workbench->name() : std::string();
-        switch (tab.kind) {
-            case AppTabs::Kind::PartStudio:
-                if (current != "PartDesignWorkbench" && current != "SketcherWorkbench") {
-                    Application::Instance->activateWorkbench("PartDesignWorkbench");
-                }
-                break;
-            case AppTabs::Kind::Assembly:
-                Application::Instance->activateWorkbench("AssemblyWorkbench");
-                if (!gdoc->getInEdit()) {
-                    if (auto vp = gdoc->getViewProvider(tab.object)) {
-                        gdoc->setEdit(vp);
-                    }
-                }
-                break;
-            case AppTabs::Kind::Drawing:
-                Application::Instance->activateWorkbench("TechDrawWorkbench");
-                break;
-            case AppTabs::Kind::VariableStudio:
-                break;
-        }
+        arrive(doc, tab);
     }
     timer.start();
     return true;
@@ -1258,6 +1479,9 @@ bool DocumentTabs::isOn()
 
 bool DocumentTabs::accepts(const View3DInventorViewer* viewer, const ViewProvider* vp)
 {
+    if (!isOn()) {
+        return true;  // FreeCAD's keymap: every view shows everything (R6T-4)
+    }
     const std::string tag = viewer ? tagOf(viewer) : std::string();
     if (tag.empty()) {
         return true;
@@ -1315,24 +1539,35 @@ void DocumentTabs::beforeUndo(Gui::Document* gdoc, bool undo)
     }
 }
 
-void DocumentTabs::beforeEdit(Gui::Document* gdoc, ViewProvider* vp)
+bool DocumentTabs::beforeEdit(Gui::Document* gdoc, ViewProvider* vp)
 {
     Controller* ctl = Controller::instance();
     auto vpd = dynamic_cast<ViewProviderDocumentObject*>(vp);
     App::DocumentObject* obj = vpd ? vpd->getObject() : nullptr;
     if (!isOn() || !ctl || !gdoc || !obj || !obj->isAttachedToDocument()) {
-        return;
+        return true;
+    }
+    return ctl->beforeEdit(gdoc, obj);
+}
+
+MDIView* DocumentTabs::viewOfObject(Gui::Document* gdoc, const App::DocumentObject* obj)
+{
+    Controller* ctl = Controller::instance();
+    if (!isOn() || !ctl || !gdoc || !obj || !obj->isAttachedToDocument()
+        || obj->getDocument() != gdoc->getDocument()) {
+        return nullptr;
     }
     App::Document* doc = gdoc->getDocument();
-    const std::string name = AppTabs::tabNameOf(obj);
+    const bool solid = obj->isDerivedFrom<App::GeoFeature>()
+        || obj->hasExtension(App::LinkBaseExtension::getExtensionClassTypeId())
+        || AppTabs::isTabObject(obj);
     AppTabs::Tab tab {};
-    if (!AppTabs::findTab(doc, name, tab) || !is3DKind(tab.kind)) {
-        return;
+    if (solid && AppTabs::findTab(doc, AppTabs::tabNameOf(obj), tab) && is3DKind(tab.kind)) {
+        return ctl->viewForTab(doc, tab);
     }
-    const std::string current = tabOfView(gdoc->getActiveView());
-    if (current != name) {
-        ctl->showTab(doc, tab);
-    }
+    // Not shown in a 3D tab (a variable set, a spreadsheet): the tab stays
+    MDIView* current = gdoc->getActiveView();
+    return qobject_cast<View3DInventor*>(current) && !tagOf(current).empty() ? current : nullptr;
 }
 
 void DocumentTabs::newDocumentStudio(App::Document* doc)
