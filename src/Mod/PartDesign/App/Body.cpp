@@ -906,15 +906,18 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
                     own = own && onTool && !touches(element, before);
                     apart = apart && !onTool;
                 }
-                if (base && goes(base) && own) {
+                // Review R5-2: by its elements, whatever its Base is (a feature in between, or
+                // the moved feature itself): the reroute carries the Base link's names (Feature::
+                // relinkToMatchingSubelements), or the dress-up fails naming the reference
+                if (own) {
                     go = true;
                 }
-                else if (!(base && goes(base)) && apart) {
+                else if (apart) {
                     go = false;
                 }
                 else {
-                    plan.refusal = quotedLabel(obj) + " works on " + quotedLabel(feature)
-                        + "'s material and on the rest of " + quotedLabel(body)
+                    plan.refusal = quotedLabel(obj) + " works on both " + quotedLabel(feature)
+                        + "'s material and the rest of " + quotedLabel(body)
                         + ", or on what can't be told apart";
                     return plan;
                 }
@@ -984,8 +987,17 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
             }
         }
         // Its links: what goes links only what goes (the feature's sketch: below); what stays
-        // links nothing that goes
+        // links nothing that goes. A dress-up's Base on its own BaseFeature is the chain's link:
+        // the move reroutes it with its references (Body::rerouteBase, review R5-2)
+        auto chainDressUp = freecad_cast<DressUp*>(obj);
+        App::DocumentObject* chainBase = chainDressUp
+                && chainDressUp->Base.getValue() == chainDressUp->BaseFeature.getValue()
+            ? chainDressUp->Base.getValue()
+            : nullptr;
         for (App::DocumentObject* target : linksOf(obj)) {
+            if (chainBase && target == chainBase) {
+                continue;
+            }
             if (go && !goes(target) && !isOrigin(target) && target != profile
                 && (isLater(target) || body->hasObject(target)) && target != body) {
                 plan.refusal = quotedLabel(obj) + " uses " + quotedLabel(target) + ", which stays in "

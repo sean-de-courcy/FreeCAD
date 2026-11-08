@@ -457,6 +457,94 @@ class TestNewPart(unittest.TestCase):
         self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
         self.assertAlmostEqual(part.Shape.Volume, 2000 - self.FILLET, places=3)
 
+    def testNewPartTakesALaterFilletAlong(self):
+        """Review R5-2 (a): a pocket 5 x 5 x 5 in the enclosure's corner between the boss and a
+        fillet on the boss's top edges (the fillet's Base the pocket): the fillet's edges are the
+        boss's own, so it goes to the new part after the boss; the pocket stays, on the base."""
+        body, base, lidSk = self.enclosure()
+        bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
+        bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        bossSk.MapMode = "FlatFace"
+        rect(bossSk, 10, 10, 30, 30)
+        boss = pad(body, "Boss", bossSk, 5)
+        cornerSk = body.newObject("Sketcher::SketchObject", "CornerSk")
+        cornerSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        cornerSk.MapMode = "FlatFace"
+        rect(cornerSk, 0, 0, 5, 5)
+        corner = body.newObject("PartDesign::Pocket", "Corner")
+        corner.Profile = cornerSk
+        corner.Length = 5
+        self.doc.recompute()
+        edges = [
+            f"Edge{i}"
+            for i, edge in enumerate(corner.Shape.Edges, 1)
+            if all(abs(v.Point.z - 15) < 1e-6 for v in edge.Vertexes)
+        ]
+        self.assertEqual(len(edges), 4)
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (corner, edges)
+        fillet.Radius = 1
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(PartDesign.newPartRefusal(boss), "")
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        self.assertEqual(part.Group, [bossSk, boss, fillet])
+        self.assertIs(body.Tip, corner)
+        self.assertIs(corner.BaseFeature, base)
+        self.assertIs(fillet.BaseFeature, boss)
+        self.assertIs(fillet.Base[0], boss)
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(body.Shape.Volume, 16000 - 125, places=3)
+        self.assertAlmostEqual(part.Shape.Volume, 2000 - self.FILLET, places=3)
+        # the rounds on the boss's top edges: every curved face between z = 14 and 15
+        for face in part.Shape.Faces:
+            if face.Surface.TypeId != "Part::GeomPlane":
+                self.assertGreater(face.BoundBox.ZMin, 14 - 1e-6)
+                self.assertLess(face.BoundBox.ZMax, 15 + 1e-6)
+
+    def testNewPartLeavesAChamferOnTheRest(self):
+        """Review R5-2 (b): a chamfer of 1 mm on the enclosure's bottom edges right after the boss
+        (its Base the boss): none of its edges touches the boss, so it stays with the enclosure,
+        on the base (Onshape keeps it on Part 1); the new part is the bare boss."""
+        body, base, lidSk = self.enclosure()
+        bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
+        bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        bossSk.MapMode = "FlatFace"
+        rect(bossSk, 10, 10, 30, 30)
+        boss = pad(body, "Boss", bossSk, 5)
+        self.doc.recompute()
+        edges = [
+            f"Edge{i}"
+            for i, edge in enumerate(boss.Shape.Edges, 1)
+            if all(abs(v.Point.z) < 1e-6 for v in edge.Vertexes)
+        ]
+        self.assertEqual(len(edges), 4)
+        chamfer = body.newObject("PartDesign::Chamfer", "Bottom")
+        chamfer.Base = (boss, edges)
+        chamfer.Size = 1
+        self.doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        before = body.Shape.Volume
+        self.assertEqual(PartDesign.newPartRefusal(boss), "")
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        self.assertEqual(part.Group, [bossSk, boss])
+        self.assertIs(body.Tip, chamfer)
+        self.assertIs(chamfer.BaseFeature, base)
+        self.assertIs(chamfer.Base[0], base)
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(part.Shape.Volume, 2000, places=3)
+        self.assertAlmostEqual(body.Shape.Volume, before - 2000, places=3)
+        # the bevels on the bottom edges: every slanted face between z = 0 and 1
+        slanted = [
+            face for face in body.Shape.Faces
+            if abs(abs(face.normalAt(0, 0).z) - 1) > 1e-6 and abs(face.normalAt(0, 0).z) > 1e-6
+        ]
+        self.assertEqual(len(slanted), 4)
+        for face in slanted:
+            self.assertLess(face.BoundBox.ZMax, 1 + 1e-6)
+
     def testNewPartRefusesWhatCantBeToldApart(self):
         """A pad on the fillet's top (its sketch on that face) would stay with the enclosure and
         change: refused, naming the sketch, and nothing changes. A first solid with features after

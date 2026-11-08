@@ -9022,8 +9022,19 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
             obj->_removeBackLinkProp(getName(), owner);
         }
         _Deps.erase(it);
-        // FreeCAD-CH (ops#640 round 5): the property-level entries for obj go too, as obj does
-        std::erase_if(_PropDeps, [obj](const auto& entry) { return entry.first.second == obj; });
+        // FreeCAD-CH (ops#640 round 5): the property-level entries for obj go too, as obj does,
+        // with obj's back links to them (review R5-1: erased alone, they left obj an edge to the
+        // owner that outlived it, and a later recompute of obj followed it into freed memory)
+        for (auto entry = _PropDeps.begin(); entry != _PropDeps.end();) {
+            if (entry->first.second != obj) {
+                ++entry;
+                continue;
+            }
+            if (!entry->second && obj->getDocument() == owner->getDocument()) {
+                obj->_removeBackLinkProp(getName(), owner, entry->first.first.c_str());
+            }
+            entry = _PropDeps.erase(entry);
+        }
         onRemoveDep(obj);
         hasSetValue();
         return;

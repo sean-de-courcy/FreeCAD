@@ -463,6 +463,33 @@ class FineGrainedRecomputeCases(unittest.TestCase):
         self.Doc.removeObject(cube2.Name)
         self.Doc.removeObject(cube1.Name)
 
+    @finegrained((True, False))
+    def testDeleteUndoLeavesOneEdge(self):
+        """FreeCAD-CH (ops#640, review R5-1): deleting what an expression uses, then undoing,
+        leaves one property-level edge to the expression's owner, not two; removing the owner for
+        good then leaves none (an edge left behind pointed at the freed owner)."""
+        doc = self.Doc
+        doc.UndoMode = 1
+        varSet = doc.addObject("App::VarSet", "Vars")
+        varSet.addProperty("App::PropertyLength", "Len")
+        varSet.Len = 5
+        box = doc.addObject("Part::Box", "Owner")
+        box.setExpression("Length", "Vars.Len")
+        doc.recompute()
+        self.assertEqual(len(varSet.InListProp), 1)
+        doc.openTransaction("Delete")
+        doc.removeObject("Vars")
+        doc.commitTransaction()
+        doc.undo()
+        varSet = doc.getObject("Vars")
+        doc.recompute()
+        self.assertEqual(len(varSet.InListProp), 1)
+        doc.UndoMode = 0
+        doc.removeObject("Owner")
+        self.assertEqual(varSet.InListProp, [])
+        varSet.Len = 7
+        doc.recompute()
+
     @finegrained((True,))
     def testInputProperty(self):
         # References to input properties of dependent objects only works in

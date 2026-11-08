@@ -223,9 +223,10 @@ class TestOperationSwitchGui(OperationSwitchCase):
         for text in ROWS[2:]:
             self.assertOffered(text)
 
-    def testAFilletOnTheEnclosureIsRefused(self):
-        """A fillet on the enclosure's bottom edges right after the boss (its Base the boss): its
-        edges aren't the boss's own, so New part stays greyed, naming it."""
+    def testAFilletOnTheEnclosureStays(self):
+        """A fillet on the enclosure's bottom edges right after the boss (its Base the boss): none
+        of its edges touches the boss, so New part is offered, and the fillet stays with the
+        enclosure on the base (review R5-2; Onshape keeps it on Part 1)."""
         self.enclosure()
         bossSk = self.body.newObject("Sketcher::SketchObject", "BossSk")
         bossSk.AttachmentSupport = [(self.base, faceAt(self.base, 10))]
@@ -243,14 +244,19 @@ class TestOperationSwitchGui(OperationSwitchCase):
         fillet.Radius = 1
         self.doc.recompute()
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        before = self.body.Shape.Volume
         self.openEdit(boss)
-        self.assertRefused("New part", "'Bottom' works on 'Boss''s material and on the rest")
-        self.assertEqual(
-            PartDesign.newPartRefusal(boss),
-            "'Bottom' works on 'Boss''s material and on the rest of 'Enclosure', or on what can't "
-            "be told apart",
-        )
-
+        self.assertOffered("New part")
+        self.choose("New part")
+        [part] = self.bodiesBut(self.body)
+        self.assertEqual(part.Group, [bossSk, boss])
+        self.assertIs(fillet.BaseFeature, self.base)
+        self.assertIs(self.body.Tip, fillet)
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(part.Shape.Volume, 2000, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, before - 2000, places=3)
 
 class TestMergedSwitchGui(OperationSwitchCase):
     def mergedSlot(self, later=False):
