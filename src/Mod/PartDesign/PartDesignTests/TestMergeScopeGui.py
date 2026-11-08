@@ -58,10 +58,13 @@ class TestMergeScopeGui(ResultBoxGuiCase):
         """The lid pad's box: Merge with all, unticked, and the scope list (Panel touched first,
         then Far), nothing ticked. Merge with all ticked: the list hides. OK: Panel, which the
         tool touches, is merged in an accepted Merge right after the pad (no Warning); Far is
-        not; MergeWithAll is stored. One undo step takes it all back."""
+        not; MergeWithAll is stored. One undo step takes it all back. The lid pad is edited: made
+        by the command it would open as New, as it touches two parts (hands-on check A-1)."""
         self.parts()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
         before = sorted(o.Name for o in self.doc.Objects)
-        lid = self.featurePanel("PartDesign_Pad")
+        self.openEdit(lid)
         box = self.mergeWithAll()
         self.assertIsNotNone(box, "no Merge with all")
         self.assertFalse(box.isChecked())
@@ -85,9 +88,11 @@ class TestMergeScopeGui(ResultBoxGuiCase):
 
     def testATickMergesWithNoWarning(self):
         """Merge with all off, Panel ticked, OK: merged (MERGED), the Merge accepted, no
-        Warning; MergeWithAll stays off."""
+        Warning; MergeWithAll stays off. The lid pad is edited (A-1: the command opens it New)."""
         self.parts()
-        lid = self.featurePanel("PartDesign_Pad")
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        self.openEdit(lid)
         self.mergeList().item(0).setCheckState(QtCore.Qt.Checked)
         self.close(ok=True)
         merge = PartDesign.mergeAfter(lid)

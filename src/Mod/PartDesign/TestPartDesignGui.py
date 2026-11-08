@@ -73,6 +73,10 @@ from PartDesignTests.TestMergeScopeGui import TestMergeScopeListGui  # FreeCAD-C
 from PartDesignTests.TestPickFirstGui import TestPickFirstGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestEscCancelsGui import TestEscCancelsGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSketchPlaneGui import TestSketchPlaneGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestOpeningOperationGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestDialogKeysGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestAnotherToolGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestStudioPlanesStayGui  # FreeCAD-CH, ops#640
 
 
 # timer runs this class in order to access modal dialog

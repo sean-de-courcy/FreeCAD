@@ -27,7 +27,10 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 #include <QPointer>
 #include <fastsignals/connection.h>
 #include <App/DocumentObserver.h>
@@ -219,6 +222,19 @@ public:
     /// closes; before it, the switch flips it (Onshape's Extrude, hands-on check R5, ops#640 H4)
     static void noteReversedTouched(App::DocumentObject* feature);
 
+    /// Hands-on check A-1 (ops#640): a new Extrude opens as Onshape's. Add when its tool touches
+    /// exactly one part, that part its scope (the feature moves into it, PartDesign.addToPart);
+    /// else New, a part of its own (PartDesign.newPartFrom). A cut, a feature in error or one
+    /// whose row or scope was chosen stays. For the command, before the dialog opens, inside
+    /// its transaction
+    static void applyOpeningOperation(App::DocumentObject* feature);
+    /// The command made @p feature with no profile: its first profile (profileTaken) decides
+    /// where it opens, unless a row is chosen first
+    static void awaitOpeningOperation(App::DocumentObject* feature);
+    /// The Profile field of @p feature's open dialog took a pick: a feature awaiting its opening
+    /// operation gets it, once, in a restart of the edit after the pick
+    static void profileTaken(App::DocumentObject* feature);
+
     /// The touch tests done, by the two shapes: the distance is slow on B-splines (design 2.3)
     struct TouchCache;
 
@@ -281,6 +297,16 @@ public:
     /// (missingRequired); OK stays enabled (ops#640 H1).
     void modifyStandardButtons(QDialogButtonBox* box) override;
 
+    /// FreeCAD-CH (ops#640 rank 24, hands-on F2): whether the dialog holds any input, for a tool
+    /// started while it is open. Onshape commits a dialog with any input, even in error, and
+    /// drops an empty one silently. An edit of an existing feature always has input; a new
+    /// feature's dialog has once a reference field holds an entry (a preselection too) or a
+    /// property of the feature differs from the dialog's opening. Invokable by name
+    /// (QMetaObject::invokeMethod), so Gui's commands need no PartDesign header.
+    Q_INVOKABLE bool hasInput() const;
+    /// The command made @p feature for the dialog it opens next (hasInput).
+    static void noteCreated(App::DocumentObject* feature);
+
     template<typename T = PartDesignGui::ViewProvider>
     T* getViewObject() const
     {
@@ -320,6 +346,10 @@ protected:
     }
     /// OK's tooltip, as missingRequired() says; called when the feature changes.
     void updateOkButton();
+    /// FreeCAD-CH (ops#640 rank 36, hands-on B-4): the first parameter box's title is the
+    /// feature's name, red while the feature is in error; renamed in the lists only. Called
+    /// after the feature changes or recomputes.
+    void updateTitle();
 
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none
@@ -339,6 +369,15 @@ private:
     /// OK's tooltip is missingRequired()'s hint
     bool showingHint = false;
     fastsignals::scoped_connection requiredConnection;
+    /// The command made the feature for this dialog (noteCreated), and the feature's properties
+    /// as the dialog opened (hasInput)
+    bool created = false;
+    std::vector<std::pair<std::string, std::unique_ptr<App::Property>>> openingValues;
+    /// The box whose title is the feature's name (updateTitle), and its updates
+    QPointer<QWidget> titleBox;
+    bool titlePending = false;
+    fastsignals::scoped_connection titleChanged;
+    fastsignals::scoped_connection titleRecomputed;
 };
 
 }  // namespace PartDesignGui

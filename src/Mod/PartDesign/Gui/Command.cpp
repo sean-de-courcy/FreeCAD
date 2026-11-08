@@ -75,6 +75,7 @@
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "SketchWorkflow.h"
+#include "TaskFeatureParameters.h"
 #include "TaskFeaturePick.h"
 #include "TaskShapeBinder.h"
 #include "Utils.h"
@@ -753,7 +754,14 @@ static void finishFeature(
         cmd->copyVisual(feature, "DisplayMode", obj);
     }
 
-    PartDesignGui::setEdit(feature, activeBody);
+    // A tool started while its dialog is open drops it when the user gave it nothing (rank 24, F2)
+    PartDesignGui::TaskDlgFeatureParameters::noteCreated(feature);
+    // The feature's own Body: a new Extrude may have gone to another part (hands-on check A-1)
+    PartDesign::Body* featureBody = PartDesign::Body::findBodyOf(feature);
+    PartDesignGui::setEdit(
+        feature,
+        featureBody && featureBody != activeBody ? featureBody : activeBody
+    );
     cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
 }
 
@@ -1672,7 +1680,7 @@ void prepareProfileBased(Gui::Command* cmd, const std::string& which, double len
         return;
     }
 
-    auto worker = [cmd, length](Part::Feature* profile, App::DocumentObject* Feat) {
+    auto worker = [cmd, length, which](Part::Feature* profile, App::DocumentObject* Feat) {
         if (!Feat) {
             return;
         }
@@ -1689,6 +1697,17 @@ void prepareProfileBased(Gui::Command* cmd, const std::string& which, double len
                 Feat,
                 str << "ReferenceAxis = (" << Gui::Command::getObjectCmd(sketch) << ",['N_Axis'])"
             );
+        }
+
+        // FreeCAD-CH (ops#640, hands-on check A-1): a new Extrude opens as Onshape's, Add with
+        // the one part its tool touches, else New. With no profile yet, its first one decides
+        if (which == "Pad") {
+            if (profile) {
+                PartDesignGui::TaskResultParameters::applyOpeningOperation(Feat);
+            }
+            else {
+                PartDesignGui::TaskResultParameters::awaitOpeningOperation(Feat);
+            }
         }
 
         finishProfileBased(cmd, sketch, Feat);

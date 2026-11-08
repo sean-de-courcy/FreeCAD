@@ -120,6 +120,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPickFirstGui.py
         PartDesignTests/TestEscCancelsGui.py
         PartDesignTests/TestSketchPlaneGui.py
+        PartDesignTests/TestDialogFlowGui.py
     )
 endif(BUILD_GUI)
 

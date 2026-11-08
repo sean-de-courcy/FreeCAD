@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <vector>
@@ -40,6 +41,7 @@
 #include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QTimer>
+#include <QToolButton>
 
 
 #include <App/AutoTransaction.h>
@@ -59,6 +61,7 @@
 #include <Mod/PartDesign/App/FeatureExtrude.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/Part/App/PropertyTopoShape.h>
 
 #include "ui_TaskPreviewParameters.h"
 
@@ -253,6 +256,21 @@ bool isReversedTouched(const App::DocumentObject* feature)
 void forgetReversedTouched(const App::DocumentObjectT& featureT)
 {
     std::erase(reversedTouched, featureT);
+}
+// The new Extrudes the command made with no profile: their first profile decides where they open
+// (hands-on check A-1, TaskResultParameters::profileTaken), unless the user chose a row first
+std::vector<App::DocumentObjectT> openingAwaited;
+
+bool isOpeningAwaited(const App::DocumentObject* feature)
+{
+    return feature && std::ranges::any_of(openingAwaited, [feature](const auto& awaited) {
+        return awaited.getObject() == feature;
+    });
+}
+
+void forgetOpeningAwaited(const App::DocumentObjectT& featureT)
+{
+    std::erase(openingAwaited, featureT);
 }
 // The edit restarts: the box that goes keeps the move for the box that comes
 bool restartingEdit = false;
@@ -568,6 +586,7 @@ TaskResultParameters::~TaskResultParameters()
     if (!restartingEdit) {
         forgetMove(featureT);
         forgetReversedTouched(featureT);
+        forgetOpeningAwaited(featureT);
     }
 }
 
@@ -838,7 +857,168 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
         feature->recomputeFeature();
     });
 }
+
+// FreeCAD-CH (ops#640, hands-on check A-1): a new Extrude opens as Onshape's does. Add, with the
+// one part its tool touches as its scope (a sketch on that part's face, or on a plane overlapping
+// only that part); else New, a part of its own (touching nothing, or two parts or more)
+// Where A-1 puts the feature: nowhere else (an Add to its own part, or New already), a new part,
+// and/or into another part
+struct OpeningMove
+{
+    bool toNewPart = false;
+    PartDesign::Body* into = nullptr;
+};
+
+OpeningMove openingMove(PartDesign::FeatureAddSub* feature)
+{
+    OpeningMove move;
+    PartDesign::Body* body = feature ? PartDesign::Body::findBodyOf(feature) : nullptr;
+    // An Add as the command made it: not a cut, not a sibling, not moved, no scope chosen; a
+    // feature in error (no profile, a failed shape) stays where it is
+    if (!body || !hasOperationRow(feature)
+        || feature->getAddSubType() != PartDesign::FeatureAddSub::Type::Additive
+        || feature->getBooleanOperation() != PartDesign::FeatureAddSub::BooleanOperation::Union
+        || feature->MergeWithAll.getValue() || feature->EmptyMergeScope.getValue()
+        || TaskResultParameters::primaryOf(feature) || isMoved(feature) || !feature->isValid()
+        || feature->AddSubShape.getShape().isNull()) {
+        return move;
+    }
+    TaskResultParameters::TouchCache cache;
+    const bool first = isFirstSolid(feature);
+    // Its own part: the solid before it, placed as toolTouches places a part
+    int touched = 0;
+    bool own = false;
+    if (!first) {
+        auto before = freecad_cast<Part::Feature*>(body->getPrevSolidFeature(feature));
+        if (!before) {
+            own = true;  // a BaseFeature alone: can't tell, so it stays an Add
+        }
+        else {
+            Part::TopoShape tool = feature->AddSubShape.getShape();
+            Part::TopoShape shape = before->Shape.getShape();
+            tool.setPlacement(feature->globalPlacement());
+            shape.setPlacement(before->globalPlacement());
+            own = !shape.isNull()
+                && PartDesign::FeatureAddSub::shapesTouch(tool.getShape(), shape.getShape());
+        }
+        touched += own ? 1 : 0;
+    }
+    PartDesign::Body* other = nullptr;
+    for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+        auto part = static_cast<PartDesign::Body*>(obj);
+        if (part != body && Part::BodyBase::areStudioSiblings(body, part)
+            && !PartDesign::Boolean::mergeOf(part) && toolTouches(feature, part, cache)) {
+            other = part;
+            ++touched;
+        }
+    }
+    if (touched == 1 && own) {
+        return move;  // Add, its own part the scope
+    }
+    move.toNewPart = !first;
+    if (touched == 1) {
+        move.into = other;  // Add, that part the scope
+    }
+    return move;
+}
+
+// Runs A-1's move, as commands in the open transaction: New part (PartDesign.newPartFrom), then
+// Add to the touched part (PartDesign.addToPart). A move refused leaves the feature where it got
+// to: a refused Add stays New
+void runOpeningMove(const App::DocumentObjectT& featureT)
+{
+    auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
+    if (!feature) {
+        return;
+    }
+    const OpeningMove move = openingMove(feature);
+    if (!move.toNewPart && !move.into) {
+        return;
+    }
+    App::DocumentObjectT intoT(move.into);
+    App::DocumentObjectT fromT(PartDesign::Body::findBodyOf(feature));
+    const std::string obj = Gui::Command::getObjectCmd(feature);
+    Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+    if (move.toNewPart) {
+        if (!newPartRefusal(feature).isEmpty()) {
+            return;
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.newPartFrom(%s)", obj.c_str());
+    }
+    auto into = freecad_cast<PartDesign::Body*>(intoT.getObject());
+    if (into && PartDesign::Body::addToPartRefusal(feature, into).empty()) {
+        Gui::Command::doCommand(
+            Gui::Command::Doc,
+            "PartDesign.addToPart(%s, %s)",
+            obj.c_str(),
+            Gui::Command::getObjectCmd(into).c_str()
+        );
+    }
+    feature->recomputeFeature();
+    // The part it left (when it had solids, it stays) shows its own result, as newPartMove's
+    auto from = freecad_cast<PartDesign::Body*>(fromT.getObject());
+    if (from && from != PartDesign::Body::findBodyOf(feature)) {
+        from->recomputeFeature(/*recursive=*/true);
+        showTipIfNoneShown(from);
+    }
+}
 }  // namespace
+
+void TaskResultParameters::applyOpeningOperation(App::DocumentObject* feature)
+{
+    if (!feature) {
+        return;
+    }
+    try {
+        runOpeningMove(App::DocumentObjectT(feature));
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+    }
+}
+
+void TaskResultParameters::awaitOpeningOperation(App::DocumentObject* feature)
+{
+    if (hasOperationRow(feature) && !isOpeningAwaited(feature)) {
+        openingAwaited.emplace_back(feature);
+    }
+}
+
+void TaskResultParameters::profileTaken(App::DocumentObject* feature)
+{
+    if (!isOpeningAwaited(feature)) {
+        return;
+    }
+    App::DocumentObjectT target(feature);
+    // The first profile decides it, once: the field's next pick is the user's
+    forgetOpeningAwaited(target);
+    auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(feature);
+    const OpeningMove move = openingMove(addSub);
+    if (!move.toNewPart && !move.into) {
+        return;
+    }
+    // The move restarts the edit, which closes the dialog whose field took the pick: after the
+    // pick, from the event loop, while the dialog is still open in its transaction
+    Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog(feature->getDocument());
+    QWidget* box = nullptr;
+    if (dialog) {
+        for (QWidget* widget : dialog->getDialogContent()) {
+            if (qobject_cast<TaskResultParameters*>(widget)) {
+                box = widget;
+            }
+        }
+    }
+    if (!box) {
+        return;
+    }
+    QPointer<QWidget> boxPtr(box);
+    QTimer::singleShot(0, qApp, [boxPtr, target]() {
+        if (!isEditing(boxPtr.data(), target)) {
+            return;
+        }
+        restartEdit(target, [&target]() { runOpeningMove(target); });
+    });
+}
 
 void TaskResultParameters::addOperationRow()
 {
@@ -1165,7 +1345,7 @@ void TaskResultParameters::onScopePicked(const QString& part)
 
 void TaskResultParameters::updateTouches()
 {
-    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
+    auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
     if (!feature) {
         return;
     }
@@ -1192,7 +1372,7 @@ void TaskResultParameters::slotChangedObject(
     const App::Property& Prop
 )
 {
-    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
+    auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
     if (touchTimer && feature && Obj.getObject() == feature && &Prop == &feature->AddSubShape) {
         touchTimer->start();  // debounced: once the preview settles
     }
@@ -1256,6 +1436,8 @@ void TaskResultParameters::onResultChanged(int index)
         if (what == operation) {
             return;
         }
+        // The user's row: A-1's opening operation no longer waits for the profile
+        forgetOpeningAwaited(featureT);
         // Add, a new part's feature touching no other part: its merge scope is empty, red, unless
         // Merge with all, which keeps it a new part (hands-on check R8; ops#640 H2 and rank 3a).
         // The restart shows the scope either way (switchOperation)
@@ -1413,12 +1595,87 @@ void TaskResultParameters::apply()
 /*********************************************************************
  *                            Task Dialog                            *
  *********************************************************************/
+namespace
+{
+// The features a command made for the dialog it opens next (TaskDlgFeatureParameters::hasInput)
+std::vector<App::DocumentObjectT> createdForDialog;
+
+// A property the user gives (a value, a link, a choice): not a result, not the view's
+bool isInputProperty(const App::Property* prop)
+{
+    if (!prop || (prop->getType() & (App::Prop_Output | App::Prop_Transient)) != 0
+        || prop->isDerivedFrom<Part::PropertyPartShape>()) {
+        return false;
+    }
+    // A profile-based feature writes its Placement at each compute; Visibility is the view's
+    const char* name = prop->getName();
+    return name && std::strcmp(name, "Placement") != 0 && std::strcmp(name, "Visibility") != 0;
+}
+
+// A property's value against its copy from the dialog's opening. Links compare by their targets
+// and old-style subnames: PropertyLinkBase::isSame says no whenever both are links
+bool sameValue(const App::Property& now, const App::Property& then)
+{
+    auto nowLink = dynamic_cast<const App::PropertyLinkBase*>(&now);
+    auto thenLink = dynamic_cast<const App::PropertyLinkBase*>(&then);
+    if (nowLink && thenLink) {
+        std::vector<App::DocumentObject*> nowObjs;
+        std::vector<App::DocumentObject*> thenObjs;
+        std::vector<std::string> nowSubs;
+        std::vector<std::string> thenSubs;
+        nowLink->getLinks(nowObjs, /*all=*/true, &nowSubs, /*newStyle=*/false);
+        thenLink->getLinks(thenObjs, /*all=*/true, &thenSubs, /*newStyle=*/false);
+        return nowObjs == thenObjs && nowSubs == thenSubs;
+    }
+    return now.isSame(then);
+}
+}  // namespace
+
+void TaskDlgFeatureParameters::noteCreated(App::DocumentObject* feature)
+{
+    std::erase_if(createdForDialog, [](const App::DocumentObjectT& made) {
+        return !made.getObject();
+    });
+    if (feature && std::ranges::find(createdForDialog, App::DocumentObjectT(feature))
+            == createdForDialog.end()) {
+        createdForDialog.emplace_back(feature);
+    }
+}
+
+bool TaskDlgFeatureParameters::hasInput() const
+{
+    App::DocumentObject* feature = getObject();
+    if (!created || !feature) {
+        return true;  // an edit, or a dialog this check can't tell: committed, as before
+    }
+    for (const ReferenceField* field : fieldGroup->fields()) {
+        if (field && !field->entries().empty()) {
+            return true;
+        }
+    }
+    for (const auto& [name, value] : openingValues) {
+        App::Property* now = feature->getPropertyByName(name.c_str());
+        if (!now || !sameValue(*now, *value)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 TaskDlgFeatureParameters::TaskDlgFeatureParameters(PartDesignGui::ViewProvider* vp)
     : preview(new TaskPreviewParameters(vp))
     , fieldGroup(new ReferenceFieldGroup(this))
     , vp(vp)
 {
     assert(vp);
+    // Made by the command for this dialog: hasInput() compares with the opening
+    if (App::DocumentObject* made = vp->getObject()) {
+        auto it = std::ranges::find(createdForDialog, App::DocumentObjectT(made));
+        if (it != createdForDialog.end()) {
+            createdForDialog.erase(it);
+            created = true;
+        }
+    }
     // The feature's references that need the user, at the top of its dialog (ops#127). The
     // subclasses add their panels after this one.
     App::DocumentObject* feature = vp->getObject();
@@ -1453,6 +1710,45 @@ void TaskDlgFeatureParameters::open()
         });
     }
     fieldGroup->armFirstEmpty();
+    // A new feature's values as the dialog opens: what the user gives from here is its input
+    if (App::DocumentObject* feature = created ? getObject() : nullptr) {
+        std::vector<App::Property*> props;
+        feature->getPropertyList(props);
+        for (App::Property* prop : props) {
+            // A property that can't copy itself can't tell a change: left out
+            std::unique_ptr<App::Property> copy(isInputProperty(prop) ? prop->Copy() : nullptr);
+            if (copy) {
+                openingValues.emplace_back(prop->getName(), std::move(copy));
+            }
+        }
+    }
+    // The first parameter box's title is the feature's name, red while it is in error, as
+    // Onshape's dialog title (ops#640 rank 36, hands-on B-4: no rename in the dialog)
+    forEachParameters([this](TaskFeatureParameters* param) {
+        if (!titleBox && !qobject_cast<TaskResultParameters*>(param)) {
+            titleBox = param;
+        }
+    });
+    if (App::DocumentObject* feature = titleBox ? getObject() : nullptr) {
+        App::DocumentObjectT featureT(feature);
+        auto schedule = [this, featureT](const App::DocumentObject& obj) {
+            if (&obj != featureT.getObject() || titlePending) {
+                return;
+            }
+            titlePending = true;
+            QTimer::singleShot(0, this, [this]() {
+                titlePending = false;
+                updateTitle();
+            });
+        };
+        titleChanged = feature->getDocument()->signalChangedObject.connect(
+            [schedule](const App::DocumentObject& obj, const App::Property&) { schedule(obj); }
+        );
+        titleRecomputed = feature->getDocument()->signalRecomputedObject.connect(
+            [schedule](const App::DocumentObject& obj) { schedule(obj); }
+        );
+        updateTitle();
+    }
     // A sibling follows its primary: only the Result box, with Unlink, is editable (ops#325)
     if (TaskResultParameters::primaryOf(getObject())) {
         forEachParameters([](TaskFeatureParameters* param) {
@@ -1481,6 +1777,28 @@ void TaskDlgFeatureParameters::modifyStandardButtons(QDialogButtonBox* box)
     );
     // Once the box is decorated: TaskEditControl::decorateButtons sets its tooltip after this call
     QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+}
+
+void TaskDlgFeatureParameters::updateTitle()
+{
+    auto box = qobject_cast<Gui::TaskView::TaskBox*>(titleBox.data());
+    App::DocumentObject* feature = getObject();
+    if (!box || !feature || !feature->isAttachedToDocument()) {
+        return;
+    }
+    const QString name = QString::fromUtf8(feature->Label.getValue());
+    if (box->headerText() != name) {
+        box->setHeaderText(name);
+    }
+    // The header's title button (QSint's ActionLabel); hovering shows the name, as Onshape's
+    const bool invalid = !feature->isValid();
+    for (QToolButton* title : box->findChildren<QToolButton*>()) {
+        if (title->text() == name) {
+            title->setStyleSheet(invalid ? QStringLiteral("color: #d32f2f;") : QString());
+            title->setToolTip(name);
+            title->setProperty("featureInError", invalid);
+        }
+    }
 }
 
 void TaskDlgFeatureParameters::updateOkButton()
