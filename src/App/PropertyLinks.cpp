@@ -9022,6 +9022,8 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
             obj->_removeBackLinkProp(getName(), owner);
         }
         _Deps.erase(it);
+        // FreeCAD-CH (ops#640 round 5): the property-level entries for obj go too, as obj does
+        std::erase_if(_PropDeps, [obj](const auto& entry) { return entry.first.second == obj; });
         onRemoveDep(obj);
         hasSetValue();
         return;
@@ -9037,8 +9039,21 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
         onBreakLink(key);
         if (!v.second && key->getDocument() == owner->getDocument()) {
             key->_removeBackLink(owner);
+            key->_removeBackLinkProp(getName(), owner);
         }
     }
+    // FreeCAD-CH (ops#640 round 5): and the property-level back links updateDepsProp added (the
+    // fine-grained recompute's): left behind, an owner created and deleted in one transaction is
+    // freed, and the next recompute of what it linked followed the edge into freed memory (a
+    // cut's sibling made and dropped in one dialog)
+    for (const auto& [entry, hidden] : _PropDeps) {
+        DocumentObject* key = entry.second;
+        if (!hidden && key && key->isAttachedToDocument()
+            && key->getDocument() == owner->getDocument()) {
+            key->_removeBackLinkProp(getName(), owner, entry.first.c_str());
+        }
+    }
+    _PropDeps.clear();
     _XLinks.clear();
     _Deps.clear();
 }
