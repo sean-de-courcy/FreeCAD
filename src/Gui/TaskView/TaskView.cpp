@@ -34,6 +34,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -124,6 +125,32 @@ void updateUnresolvedBlock()
         ok->setProperty(unresolvedBlocksOk, false);
         ok->setEnabled(true);
     }
+}
+
+/// FreeCAD-CH (ops#640, J21 A0): Esc discards a value typed in the focused field of the task
+/// view and not committed yet. The field (the spin box, not its line edit) loses its focus with
+/// its signals blocked, so its focus-out commits nothing; the popup reason keeps QuantitySpinBox
+/// from binding a typed #name. Other focus (a button, a list, the 3D view) is left alone.
+void discardTypedValue(QWidget* view, QWidget* focus)
+{
+    if (!focus || !view || !view->isAncestorOf(focus)) {
+        return;
+    }
+    QWidget* field = focus;
+    for (QWidget* w = focus; w && w != view; w = w->parentWidget()) {
+        if (qobject_cast<QAbstractSpinBox*>(w)) {
+            field = w;
+            break;
+        }
+    }
+    if (!qobject_cast<QAbstractSpinBox*>(field) && !qobject_cast<QLineEdit*>(field)) {
+        return;
+    }
+    const QSignalBlocker blockField(field);
+    auto spin = qobject_cast<QAbstractSpinBox*>(field);
+    QLineEdit* line = spin ? spin->findChild<QLineEdit*>() : nullptr;
+    const QSignalBlocker blockLine(line);
+    view->setFocus(Qt::PopupFocusReason);
 }
 
 /** FreeCAD-CH (ops#640, rank 38): Enter in the graphics area with a dialog open goes to the task
@@ -732,6 +759,13 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
             }
         }
         else if (ke->key() == Qt::Key_Escape && active->ActiveDialog->isEscapeButtonEnabled()) {
+            // FreeCAD-CH (ops#640, journey J21 A0): a value typed in the focused field and not
+            // committed yet is discarded, as Onshape's Esc discards it. Cancel ran with the field
+            // still focused, and the field's focus-out at the dialog's close committed the typed
+            // value after the reject restored the old one (into the previous undo step). The
+            // field gives up its focus first with its signals blocked; the popup reason keeps
+            // QuantitySpinBox from binding a typed #name
+            discardTypedValue(this, QApplication::focusWidget());
             // get only the buttons of the button box
             QDialogButtonBox* box = active->ActiveCtrl->standardButtons();
             QList<QAbstractButton*> list = box->buttons();

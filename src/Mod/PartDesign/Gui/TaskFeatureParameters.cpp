@@ -59,6 +59,7 @@
 #include <Gui/InputHint.h>
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/MainWindow.h>
+#include <Gui/TaskView/TaskView.h>
 #include <Gui/BitmapFactory.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
@@ -851,8 +852,25 @@ void DialogHistory::refresh()
             || !Gui::Control().activeDialog(doc)) {
             return;
         }
-        Base::FlagToggler<> own(historyRestart);
-        restartEdit(featureT, []() {});
+        // FreeCAD-CH (ops#640, journey J1 G1): the rebuilt panel puts the cursor in its first
+        // field, so the next Ctrl+Y went to that field's text redo. A focus outside the panel
+        // (the 3D view, where Ctrl+Z was pressed) is given back once the panel is up
+        QPointer<QWidget> focus = QApplication::focusWidget();
+        Gui::TaskView::TaskView* panel = Gui::Control().taskPanel();
+        if (focus && panel && panel->isAncestorOf(focus)) {
+            focus = nullptr;  // a field of the old panel: it goes with the rebuild
+        }
+        {
+            Base::FlagToggler<> own(historyRestart);
+            restartEdit(featureT, []() {});
+        }
+        if (focus) {
+            QTimer::singleShot(0, focus, [focus]() {
+                if (focus) {
+                    focus->setFocus(Qt::OtherFocusReason);
+                }
+            });
+        }
     });
 }
 

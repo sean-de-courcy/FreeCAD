@@ -234,6 +234,32 @@ class TestEscCancelsGui(unittest.TestCase):
         key(QtCore.Qt.Key_Escape)
         self.assertPadAsBefore(pad)
 
+    def testEscDiscardsATypedValueNotCommittedYet(self):
+        """Journey J21 A0: an edit of a Pad 5 long, 12 typed in its length field with no Tab or
+        Enter, one Esc there: the Pad is 5 long again, 500 mm^3, and no later event commits the
+        typed 12 (the field's focus-out at the dialog's close did, into the previous step)."""
+        sketch = self.square()
+        pad = models.pad(self.body, sketch, 5)
+        self.doc.recompute()
+        self.doc.openTransaction("Edit Pad")
+        Gui.getDocument(self.doc.Name).setEdit(pad.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad dialog")
+        settle()
+        length = self.lengthField()
+        self.assertTrue(focus(length), "the length field doesn't take the focus")
+        line = length.findChild(QtWidgets.QLineEdit)
+        line.selectAll()
+        for ch in "12":
+            key(getattr(QtCore.Qt, "Key_" + ch))
+        pump(0.2)
+        self.assertIn("12", line.text())
+        self.assertAlmostEqual(pad.Length.Value, 5, places=6)
+        key(QtCore.Qt.Key_Escape)
+        self.assertPadAsBefore(pad)
+        pump(0.5)
+        self.doc.recompute()
+        self.assertAlmostEqual(pad.Length.Value, 5, places=6, msg="the typed 12 came back")
+
     def testEscCancelsAnEdit(self):
         """An edit of a Pad 5 long, the length set to 7; one Esc in the length field: the Pad is
         5 long again, 500 mm^3 (hands-on B-3)."""
