@@ -1099,10 +1099,59 @@ public:
         openCommand(QT_TRANSLATE_NOOP("Command", "Add sketch polyline"));
     }
 
+    /** FreeCAD-CH (ops#640, rank 41): a press on the last segment's end may start Onshape's
+     * click-drag from the end, which makes a tangent arc. releaseButton() decides: dragged away,
+     * the arc ends where released; released where pressed, the press counts as an ordinary one.
+     */
+    bool pressButton(Base::Vector2d onSketchPos) override
+    {
+        if (state() == SelectMode::SeekSecond && !geoEltIds.empty() && isAtLastEnd(onSketchPos)) {
+            tangentArcDrag = true;
+            tangentArcDragSwitched = false;
+            tangentArcDragPress = onSketchPos;
+            return true;
+        }
+        return DrawSketchHandlerPolyLineBase::pressButton(onSketchPos);
+    }
+
+    bool releaseButton(Base::Vector2d onSketchPos) override
+    {
+        if (tangentArcDrag) {
+            tangentArcDrag = false;
+            const bool dragged = tangentArcDragSwitched;
+            tangentArcDragSwitched = false;
+            // the press, replayed: at the release point (the arc's end) when dragged. It may end
+            // the polyline and delete this handler, so nothing after it.
+            return DrawSketchHandlerPolyLineBase::pressButton(
+                dragged ? onSketchPos : tangentArcDragPress
+            );
+        }
+        return DrawSketchHandlerPolyLineBase::releaseButton(onSketchPos);
+    }
+
+    /// FreeCAD-CH (ops#640, rank 41): Shift+A, Onshape's key for a tangent arc from the last
+    /// segment's end; again goes back to a line. (A alone starts the Arc tool, a shortcut.)
+    void registerPressedKey(bool pressed, int key) override
+    {
+        const Qt::KeyboardModifiers modifiers = QApplication::keyboardModifiers();
+        if (state() == SelectMode::SeekSecond && key == SoKeyboardEvent::A && pressed
+            && !geoEltIds.empty() && modifiers.testFlag(Qt::ShiftModifier)
+            && !modifiers.testFlag(Qt::ControlModifier) && !modifiers.testFlag(Qt::AltModifier)) {
+            toggleTangentArc();
+            auto snapHandle = std::make_unique<SnapManager::SnapHandle>(nullptr, prevCursorPos);
+            mouseMove(*snapHandle);
+            return;
+        }
+        DrawSketchHandlerPolyLineBase::registerPressedKey(pressed, key);
+    }
+
 private:
     void updateDataAndDrawToPosition(Base::Vector2d onSketchPos) override
     {
         prevCursorPos = onSketchPos;
+        if (state() == SelectMode::SeekSecond) {
+            updateTangentArcGesture(onSketchPos);  // FreeCAD-CH (ops#640, rank 41)
+        }
 
         switch (state()) {
             case SelectMode::SeekFirst: {
@@ -1174,6 +1223,7 @@ private:
         };
         const Gui::InputHint filletHint {tr("%1 toggle fillet"), {toolKey(KeyF)}};
         const Gui::InputHint undoHint {tr("%1 undo last point"), {toolKey(KeyR)}};
+        const Gui::InputHint tangentArcHint {tr("%1 tangent arc"), {{ModifierShift, KeyA}}};
 
         return Gui::lookupHints<SelectMode>(
             state(),
@@ -1191,6 +1241,7 @@ private:
                          switchModeHint,
                          filletHint,
                          undoHint,
+                         tangentArcHint,
                      }},
             });
     }
@@ -1328,6 +1379,13 @@ private:
             points.push_back(toVector2d(p3d));
             calculatePreviousDirectionAngle();
 
+            // FreeCAD-CH (ops#640, rank 41): after a gesture's tangent arc the Line goes on with
+            // lines, as Onshape's does
+            if (tangentArc) {
+                tangentArc = false;
+                setConstructionMethod(ConstructionMethod::Line);
+            }
+
             if (!isClosed) {
                 setAngleSnapping(true, getLastPoint());
                 resetSeekSecond = true;
@@ -1449,6 +1507,11 @@ private:
         pos = PointPos::end;
 
         capturedDirection = Base::Vector2d(0.0, 0.0);
+
+        tangentArc = false;
+        tangentArcDrag = false;
+        tangentArcDragSwitched = false;
+        tangentArcGesture = TangentArcGesture::Leaving;
 
         toolWidgetManager.resetControls();
 
@@ -1587,6 +1650,101 @@ private:
 
     // Direction tracking to check once OVP is locked
     Base::Vector2d capturedDirection;
+
+    // FreeCAD-CH (ops#640, rank 41): Onshape's tangent arc from the last segment's end, by
+    // Shift+A, a click-drag from the end, or (preference TangentArcByHover, a guess, C-3: off by
+    // default) back on the end and away again. The arc is one segment; the Line goes on with lines.
+    bool tangentArc = false;  // the Arc method is a gesture's
+    enum class TangentArcGesture
+    {
+        Leaving,  // still at the end just clicked
+        Away,
+        Back  // back on the end: leaving it switches line and tangent arc
+    };
+    TangentArcGesture tangentArcGesture = TangentArcGesture::Leaving;
+    Base::Vector2d tangentArcGestureEnd;
+    bool tangentArcDrag = false;  // a press on the end, not released yet
+    bool tangentArcDragSwitched = false;
+    Base::Vector2d tangentArcDragPress;
+    bool tangentArcHover = App::GetApplication()
+                               .GetParameterGroupByPath(
+                                   "User parameter:BaseApp/Preferences/Mod/Sketcher/Tools"
+                               )
+                               ->GetBool("TangentArcByHover", false);
+
+    // the gestures' sizes, from the sketcher's view scale (as the legacy polyline's)
+    double tangentArcBackRadius() const
+    {
+        return 0.25 * sketchgui->getScaleFactor();  // NOLINT
+    }
+    double tangentArcAwayRadius() const
+    {
+        return 0.75 * sketchgui->getScaleFactor();  // NOLINT
+    }
+    bool isAtLastEnd(Base::Vector2d onSketchPos) const
+    {
+        return !points.empty() && (onSketchPos - points.back()).Length() < tangentArcBackRadius();
+    }
+
+    /// the next segment becomes a tangent arc from the last end, or a gesture's arc a line again
+    void toggleTangentArc()
+    {
+        if (constructionMethod() == ConstructionMethod::Line) {
+            tangentArc = true;
+            setConstructionMethod(ConstructionMethod::Arc);
+        }
+        else {
+            tangentArc = false;
+            resetEdge = true;
+            setConstructionMethod(ConstructionMethod::Line);
+        }
+    }
+
+    void updateTangentArcGesture(Base::Vector2d onSketchPos)
+    {
+        if (geoEltIds.empty() || points.empty()) {
+            return;
+        }
+        const Base::Vector2d end = points.back();
+        if (!(end == tangentArcGestureEnd)) {
+            tangentArcGestureEnd = end;
+            tangentArcGesture = TangentArcGesture::Leaving;
+        }
+        const double distance = (onSketchPos - end).Length();
+        // (the state changes before a toggle: setConstructionMethod() redraws through here)
+        if (tangentArcDrag) {
+            // the click-drag from the end: once away from it, the segment is a tangent arc
+            if (!tangentArcDragSwitched && distance > tangentArcAwayRadius()) {
+                tangentArcDragSwitched = true;
+                tangentArcGesture = TangentArcGesture::Away;
+                if (constructionMethod() == ConstructionMethod::Line) {
+                    toggleTangentArc();
+                }
+            }
+            return;
+        }
+        if (!tangentArcHover) {
+            return;
+        }
+        switch (tangentArcGesture) {
+            case TangentArcGesture::Leaving:
+                if (distance > tangentArcAwayRadius()) {
+                    tangentArcGesture = TangentArcGesture::Away;
+                }
+                break;
+            case TangentArcGesture::Away:
+                if (distance < tangentArcBackRadius()) {
+                    tangentArcGesture = TangentArcGesture::Back;
+                }
+                break;
+            case TangentArcGesture::Back:
+                if (distance > tangentArcAwayRadius()) {
+                    tangentArcGesture = TangentArcGesture::Away;
+                    toggleTangentArc();
+                }
+                break;
+        }
+    }
 
     Base::Vector2d getLastPoint()
     {
@@ -1730,7 +1888,12 @@ private:
             );
         }
         else {
-            if (resetEdge) {
+            if (tangentArc) {
+                // FreeCAD-CH (ops#640, rank 41): a gesture's arc goes on tangent, forwards
+                resetEdge = false;
+                angleToPrevious = pi;
+            }
+            else if (resetEdge) {
                 resetEdge = false;
 
                 // We check the direction of the first mouse move to determine tangent or

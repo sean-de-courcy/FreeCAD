@@ -199,6 +199,9 @@ private:
         toolWidgetManager.onConstructionMethodChanged();
     }
 
+protected:
+    // FreeCAD-CH (ops#640, rank 41): protected, so a handler can add keys of its own and pass the
+    // rest on (DrawSketchHandlerPolyLine's Shift+A)
     void registerPressedKey(bool pressed, int key) override
     {
         DSDefaultHandler::registerPressedKey(pressed, key);
