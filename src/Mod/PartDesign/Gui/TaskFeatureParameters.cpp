@@ -35,6 +35,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -45,12 +46,14 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
+#include <QStatusBar>
 #include <QTimer>
 #include <QToolButton>
 
 
 #include <App/AutoTransaction.h>
 #include <App/DocumentObserver.h>
+#include <App/Part.h>
 #include <App/PropertyStandard.h>
 #include <Base/Tools.h>
 #include <Gui/Application.h>
@@ -80,6 +83,7 @@
 #include "TaskFeatureParameters.h"
 #include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
+#include "TaskTransformedParameters.h"
 #include "Utils.h"
 #include "ViewProviderBody.h"
 
@@ -97,6 +101,13 @@ namespace PartDesign
 PartDesignExport std::string newPartRefusal(const App::DocumentObject* feature, bool ignoreMerge);
 PartDesignExport std::string mergeGoesRefusal(const App::DocumentObject* feature);
 }  // namespace PartDesign
+
+namespace PartDesignGui
+{
+/// FreeCAD-CH (ops#640 round 6, J22): defined and explained in Utils.cpp (no header names it):
+/// Onshape's "Part N" for a new part, under its keymap
+void nameNewPart(PartDesign::Body* body, App::Part* studioHint);
+}  // namespace PartDesignGui
 
 using namespace PartDesignGui;
 using namespace Gui;
@@ -1145,6 +1156,7 @@ void newPartMove(const App::DocumentObjectT& featureT)
     if (!part || part == from) {
         return;
     }
+    nameNewPart(part, nullptr);
     NewPartMove move {
         .feature = featureT,
         .from = App::DocumentObjectT(from),
@@ -1270,6 +1282,9 @@ bool isEditing(const QWidget* box, const App::DocumentObjectT& featureT)
     return std::ranges::find(content, box) != content.end();
 }
 
+// An operation row's own tooltip, the part it acts on, kept while a refusal's shows instead
+constexpr int PartTipRole = Qt::UserRole + 1;
+
 QString partLabel(const App::DocumentObject* body)
 {
     return body ? QString::fromUtf8(body->Label.getValue()) : QString();
@@ -1322,8 +1337,10 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
     }
     else if (feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive) {
         App::DocumentObject* from = movedFrom(feature);
-        combo->addItem(tr("Add to %1").arg(partLabel(from ? from : body)), QStringLiteral("add"));
-        combo->addItem(tr("New part"), QStringLiteral("new"));
+        // Onshape's words, the part in the tooltip (ops#640 round 6, J2/J9)
+        combo->addItem(tr("Add"), QStringLiteral("add"));
+        combo->setItemData(0, tr("Add to %1").arg(partLabel(from ? from : body)), Qt::ToolTipRole);
+        combo->addItem(tr("New"), QStringLiteral("new"));
         if (from) {
             combo->setCurrentIndex(1);
         }
@@ -1339,8 +1356,10 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
         }
     }
     else {
-        combo->addItem(tr("Remove from %1").arg(partLabel(body)), QStringLiteral("Subtraction"));
-        combo->addItem(tr("Intersect with %1").arg(partLabel(body)), QStringLiteral("Common"));
+        combo->addItem(tr("Remove"), QStringLiteral("Subtraction"));
+        combo->setItemData(0, tr("Remove from %1").arg(partLabel(body)), Qt::ToolTipRole);
+        combo->addItem(tr("Intersect"), QStringLiteral("Common"));
+        combo->setItemData(1, tr("Intersect with %1").arg(partLabel(body)), Qt::ToolTipRole);
         bool common = feature->getBooleanOperation()
             == PartDesign::FeatureAddSub::BooleanOperation::Common;
         combo->setCurrentIndex(common ? 1 : 0);
@@ -1861,6 +1880,7 @@ void runOpeningMove(const App::DocumentObjectT& featureT)
             return;
         }
         Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.newPartFrom(%s)", obj.c_str());
+        nameNewPart(PartDesign::Body::findBodyOf(feature), nullptr);
     }
     auto into = freecad_cast<PartDesign::Body*>(intoT.getObject());
     if (into && PartDesign::Body::addToPartRefusal(feature, into).empty()) {
@@ -1952,19 +1972,25 @@ void TaskResultParameters::addOperationRow()
     const bool firstWithScope = !isNew && isFirstSolid(feature);
     // A new part's feature names the part it would go to; the others their own
     PartDesign::Body* target = isNew ? operationTarget(feature) : firstWithScope ? nullptr : body;
-    combo->addItem(tr("New part"), QStringLiteral("new"));
-    combo->addItem(
-        target ? tr("Add to %1").arg(partLabel(target)) : tr("Add"),
-        QStringLiteral("add")
-    );
-    combo->addItem(
-        target ? tr("Remove from %1").arg(partLabel(target)) : tr("Remove"),
-        QStringLiteral("Subtraction")
-    );
-    combo->addItem(
-        target ? tr("Intersect with %1").arg(partLabel(target)) : tr("Intersect"),
-        QStringLiteral("Common")
-    );
+    // Onshape's words on every dialog (ops#640 round 6, J2/J9 N5); the part they act on is in
+    // the tooltip (a refused row's tooltip says why instead)
+    combo->addItem(tr("New"), QStringLiteral("new"));
+    combo->addItem(tr("Add"), QStringLiteral("add"));
+    combo->addItem(tr("Remove"), QStringLiteral("Subtraction"));
+    combo->addItem(tr("Intersect"), QStringLiteral("Common"));
+    if (target) {
+        const QString part = partLabel(target);
+        const QString tips[] = {
+            QString(),
+            tr("Add to %1").arg(part),
+            tr("Remove from %1").arg(part),
+            tr("Intersect with %1").arg(part),
+        };
+        for (int i = 1; i < 4; ++i) {
+            combo->setItemData(i, tips[i], Qt::ToolTipRole);
+            combo->setItemData(i, tips[i], PartTipRole);  // refuseOperations restores it
+        }
+    }
     combo->setCurrentIndex(combo->findData(operation));
 
     if (App::DocumentObject* primary = primaryOf(feature)) {
@@ -2018,7 +2044,7 @@ void TaskResultParameters::refuseOperations()
         if (model) {
             model->item(i)->setEnabled(true);
         }
-        combo->setItemData(i, QVariant(), Qt::ToolTipRole);
+        combo->setItemData(i, combo->itemData(i, PartTipRole), Qt::ToolTipRole);
     }
     PartDesign::Boolean* merge = mergeAfter(feature);
     // The whole merge scope unticked (Merge with all off): the Merge goes at OK, so what builds on
@@ -2678,9 +2704,35 @@ TaskDlgFeatureParameters::TaskDlgFeatureParameters(PartDesignGui::ViewProvider* 
     attachDialogHistory(this, feature);
 }
 
+namespace
+{
+// A preview failure's warning (FeatureAddSub::updatePreviewShape) stays in the status bar after
+// its dialog: it goes with the dialog (ops#640 round 6, J2)
+void clearPreviewFailureStatus()
+{
+    Gui::MainWindow* main = Gui::getMainWindow();
+    QStatusBar* bar = main ? main->statusBar() : nullptr;
+    if (!bar) {
+        return;
+    }
+    const QString prefix = QCoreApplication::translate(
+                               "PartDesign::FeatureAddSub",
+                               "Failure while computing removed volume preview: %1"
+    )
+                               .arg(QString())
+                               .trimmed();
+    if (!prefix.isEmpty() && bar->currentMessage().startsWith(prefix)) {
+        bar->clearMessage();
+        // The status colour and level too, as the message's own timeout does
+        QMetaObject::invokeMethod(main, "clearStatus");
+    }
+}
+}  // namespace
+
 TaskDlgFeatureParameters::~TaskDlgFeatureParameters()
 {
     detachDialogHistory(this);
+    clearPreviewFailureStatus();
 }
 
 void TaskDlgFeatureParameters::open()
@@ -2713,12 +2765,27 @@ void TaskDlgFeatureParameters::open()
         }
     }
     // The first parameter box's title is the feature's name, red while it is in error, as
-    // Onshape's dialog title (ops#640 rank 36, hands-on B-4: no rename in the dialog)
+    // Onshape's dialog title (ops#640 rank 36, hands-on B-4: no rename in the dialog). The
+    // operation row's box when it is on top (round 6, J9); a pattern's or a mirror's box, which
+    // isn't a TaskFeatureParameters (round 6, J16 N1)
+    for (QWidget* wgt : Content) {
+        if (wgt != references) {
+            if (qobject_cast<TaskResultParameters*>(wgt)) {
+                titleBox = wgt;
+            }
+            break;
+        }
+    }
     forEachParameters([this](TaskFeatureParameters* param) {
         if (!titleBox && !qobject_cast<TaskResultParameters*>(param)) {
             titleBox = param;
         }
     });
+    for (QWidget* wgt : Content) {
+        if (!titleBox && qobject_cast<TaskTransformedParameters*>(wgt)) {
+            titleBox = wgt;
+        }
+    }
     if (App::DocumentObject* feature = titleBox ? getObject() : nullptr) {
         App::DocumentObjectT featureT(feature);
         auto schedule = [this, featureT](const App::DocumentObject& obj) {
@@ -2826,9 +2893,21 @@ std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
 
 void TaskDlgFeatureParameters::addResultBox()
 {
-    if (TaskResultParameters::hasRows(getObject())) {
-        Content.push_back(new TaskResultParameters(vp));
+    if (!TaskResultParameters::hasRows(getObject())) {
+        return;
     }
+    auto box = new TaskResultParameters(vp);
+    // The operation row first, above the fields, as Onshape's Extrude, Revolve, Loft, Sweep and
+    // Helix (ops#640 round 6, J9); below the references panel, which comes before any parameter
+    if (hasOperationRow(getObject())) {
+        auto at = Content.begin();
+        if (references && !Content.empty() && Content.front() == references) {
+            ++at;
+        }
+        Content.insert(at, box);
+        return;
+    }
+    Content.push_back(box);
 }
 
 void TaskDlgFeatureParameters::referencesRepaired()
@@ -2844,9 +2923,14 @@ void TaskDlgFeatureParameters::referenceSelectionTaken()
 
 void TaskDlgFeatureParameters::forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn)
 {
-    for (QWidget* wgt : Content) {
-        if (auto param = qobject_cast<TaskFeatureParameters*>(wgt)) {
-            fn(param);
+    // The Result box last, wherever it is shown (an operation row is on top, addResultBox): what
+    // it writes follows the other boxes' values (a sibling's sync at OK)
+    for (bool result : {false, true}) {
+        for (QWidget* wgt : Content) {
+            auto param = qobject_cast<TaskFeatureParameters*>(wgt);
+            if (param && (qobject_cast<TaskResultParameters*>(wgt) != nullptr) == result) {
+                fn(param);
+            }
         }
     }
 }
@@ -2862,17 +2946,12 @@ bool TaskDlgFeatureParameters::accept()
         references->stopPick();
     }
     try {
-        // Iterate over parameter dialogs and apply all parameters from them
-        for (QWidget* wgt : Content) {
-            TaskFeatureParameters* param = qobject_cast<TaskFeatureParameters*>(wgt);
-            if (!param) {
-                continue;
-            }
-
+        // Iterate over parameter dialogs and apply all parameters from them, the Result box last
+        forEachParameters([&isUpdateBlocked](TaskFeatureParameters* param) {
             param->saveHistory();
             param->apply();
             isUpdateBlocked |= param->isUpdateBlocked();
-        }
+        });
         // Make sure the feature is what we are expecting
         // Should be fine but you never know...
         if (!feature->isDerivedFrom<PartDesign::Feature>()) {

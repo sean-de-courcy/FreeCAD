@@ -119,9 +119,9 @@ class TestOperationSwitchGui(OperationSwitchCase):
         bossSk, boss, fillet = self.bossWithFillet()
         self.openEdit(boss)
         self.assertEqual(self.items(self.combo()), ROWS)
-        self.assertEqual(self.combo().currentText(), "Add to Enclosure")
-        self.assertOffered("New part")
-        self.choose("New part")
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertOffered("New")
+        self.choose("New")
         [part] = self.bodiesBut(self.body)
         self.assertEqual(part.Group, [bossSk, boss, fillet])
         self.assertIs(part.Tip, fillet)
@@ -150,8 +150,8 @@ class TestOperationSwitchGui(OperationSwitchCase):
         bossSk, boss, fillet = self.bossWithFillet()
         group = self.body.Group
         self.openEdit(boss)
-        self.choose("New part")
-        self.choose("Add to Enclosure")
+        self.choose("New")
+        self.choose("Add")
         self.assertEqual(self.body.Group, group)
         self.assertEqual(self.bodiesBut(self.body), [])
         self.assertIs(self.body.Tip, fillet)
@@ -170,7 +170,7 @@ class TestOperationSwitchGui(OperationSwitchCase):
         bossSk, boss, fillet = self.bossWithFillet()
         group = self.body.Group
         self.openEdit(boss)
-        self.choose("New part")
+        self.choose("New")
         self.close(ok=False)
         self.doc.recompute()
         self.assertEqual(self.body.Group, group)
@@ -194,8 +194,8 @@ class TestOperationSwitchGui(OperationSwitchCase):
         self.doc.recompute()
         self.assertAlmostEqual(self.body.Shape.Volume, WITH_BOSS - 125, places=3)
         self.openEdit(boss)
-        self.assertOffered("New part")
-        self.choose("New part")
+        self.assertOffered("New")
+        self.choose("New")
         [part] = self.bodiesBut(self.body)
         self.assertEqual(part.Group, [bossSk, boss, fillet])
         self.assertIs(corner.BaseFeature, self.base)
@@ -219,7 +219,7 @@ class TestOperationSwitchGui(OperationSwitchCase):
         self.doc.recompute()
         self.assertValid()
         self.openEdit(boss)
-        self.assertRefused("New part", "'TopSk' uses 'Fillet'")
+        self.assertRefused("New", "'TopSk' uses 'Fillet'")
         for text in ROWS[2:]:
             self.assertOffered(text)
 
@@ -244,7 +244,7 @@ class TestOperationSwitchGui(OperationSwitchCase):
         self.doc.recompute()
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.openEdit(boss)
-        self.assertRefused("New part", "'Bottom' works on 'Boss''s material and on the rest")
+        self.assertRefused("New", "'Bottom' works on 'Boss''s material and on the rest")
         self.assertEqual(
             PartDesign.newPartRefusal(boss),
             "'Bottom' works on 'Boss''s material and on the rest of 'Enclosure', or on what can't "
@@ -285,10 +285,10 @@ class TestMergedSwitchGui(OperationSwitchCase):
         slot = self.mergedSlot()
         mergeName = self.merge.Name
         self.openEdit(slot)
-        self.assertEqual(self.combo().currentText(), "Add to Enclosure")
-        for text in ("New part", "Remove from Enclosure", "Intersect with Enclosure"):
+        self.assertEqual(self.combo().currentText(), "Add")
+        for text in ("New", "Remove", "Intersect"):
             self.assertOffered(text)
-        self.choose("Remove from Enclosure")
+        self.choose("Remove")
         self.assertIsNone(self.doc.getObject(mergeName))
         self.assertIsNone(self.right.MergedInto)
         self.assertEqual(slot.Operation, "Subtraction")
@@ -300,7 +300,7 @@ class TestMergedSwitchGui(OperationSwitchCase):
         self.doc.recompute()
         self.assertAlmostEqual(self.body.Shape.Volume, 16000 - HALF, places=3)
         self.assertAlmostEqual(self.right.Shape.Volume, 16000 - HALF, places=3)
-        self.choose("New part")
+        self.choose("New")
         self.assertEqual(PartDesign.siblingsOf(slot), [])
         [part] = self.bodiesBut(self.body, self.right)
         self.assertIs(slot.getParentGeoFeatureGroup(), part)
@@ -324,10 +324,10 @@ class TestMergedSwitchGui(OperationSwitchCase):
         enclosure, merging Right again (the scope kept while it was New). OK: 36000."""
         slot = self.mergedSlot()
         self.openEdit(slot)
-        self.choose("New part")
+        self.choose("New")
         self.assertIsNone(PartDesign.mergeAfter(slot))
         self.assertIsNone(self.right.MergedInto)
-        self.choose("Add to Enclosure")
+        self.choose("Add")
         self.assertEqual(self.bodiesBut(self.body, self.right), [])
         merge = PartDesign.mergeAfter(slot)
         self.assertIsNotNone(merge)
@@ -344,7 +344,7 @@ class TestMergedSwitchGui(OperationSwitchCase):
         shares with the slot's tool (turned down into them): HALF each."""
         slot = self.mergedSlot()
         self.openEdit(slot)
-        self.choose("Intersect with Enclosure")
+        self.choose("Intersect")
         self.close(ok=True)
         self.doc.recompute()
         self.assertValid()
@@ -359,15 +359,15 @@ class TestMergedSwitchGui(OperationSwitchCase):
         slot = self.mergedSlot(later=True)
         self.openEdit(slot)
         why = "'Corner' builds on 'Merge'"
-        for text in ("New part", "Remove from Enclosure", "Intersect with Enclosure"):
+        for text in ("New", "Remove", "Intersect"):
             self.assertRefused(text, why)
         merge = self.visible(QtWidgets.QListWidget, "mergeList")
         self.assertIsNotNone(merge)
         merge.item(0).setCheckState(QtCore.Qt.Unchecked)
         pump(0.2)
-        for text in ("New part", "Remove from Enclosure", "Intersect with Enclosure"):
+        for text in ("New", "Remove", "Intersect"):
             self.assertOffered(text)
-        self.choose("New part")
+        self.choose("New")
         [part] = self.bodiesBut(self.body, self.right)
         self.assertIs(slot.getParentGeoFeatureGroup(), part)
         self.assertIs(self.corner.BaseFeature, self.base)
