@@ -62,8 +62,10 @@ PartDesignExport void saveInsertAtBar(App::Document* doc,
 /** Drags rows (members of one Body of the studio, rows of studioSequence()) to after the row
  * after (null: the top) in the studio's history (design 3.3), and saves the new order.
  * - Inside their Body the rows go after its last other row at or above the drop (before its first
- *   when there is none) through Body::reorderObject(): with the inputs only they use, re-targeted,
- *   and parked when they go above what they need.
+ *   when there is none) through Body::reorderObject(): the rows alone (a feature's sketch stays
+ *   where it is, as Onshape's drag, ops#640 rank 31), re-targeted, and parked when they go above
+ *   what they need. A drop that puts a solid feature above a sketch or datum of its Body it uses,
+ *   or one of those below it, is refused.
  * - A drop that puts a row above a member of another Body it reads, or below one that reads it, is
  *   refused with both named.
  * - With the studio rolled back, the bar stays after the row bar (hinted; null: the top), else

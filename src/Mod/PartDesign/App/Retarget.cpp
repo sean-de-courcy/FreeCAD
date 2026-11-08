@@ -1725,7 +1725,20 @@ struct Plan
 /// The reorders writing their plan on this thread (reorderWriting())
 thread_local int reorderWrites = 0;
 
+/// The OnlyGivenObjects alive on this thread
+thread_local int onlyGiven = 0;
+
 }  // namespace
+
+OnlyGivenObjects::OnlyGivenObjects()
+{
+    ++onlyGiven;
+}
+
+OnlyGivenObjects::~OnlyGivenObjects()
+{
+    --onlyGiven;
+}
 
 bool reorderWriting()
 {
@@ -1774,10 +1787,10 @@ void reorderBody(Body& body,
     }
 
     // 2. Carried inputs: the non-solid members before a moved solid, up to the previous solid,
-    // that only it (or another carried member) uses
+    // that only it (or another carried member) uses; none under OnlyGivenObjects
     std::set<App::DocumentObject*> movedSet(requested);
     for (auto obj : objs) {
-        if (!Body::isSolidFeature(obj)) {
+        if (onlyGiven > 0 || !Body::isSolidFeature(obj)) {
             continue;
         }
         std::size_t pos = position(obj);

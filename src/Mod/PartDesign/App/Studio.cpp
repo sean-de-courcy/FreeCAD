@@ -42,6 +42,7 @@
 #include "Feature.h"
 #include "FeatureBase.h"
 #include "FeatureMultiTransform.h"
+#include "Retarget.h"
 
 namespace PartDesign
 {
@@ -426,55 +427,37 @@ void saveInsertAtBar(App::Document* doc,
 namespace
 {
 
-/// The members reorderBody() carries with the solids of objs moved next to target (its step 2):
-/// the non-solid members before a moved solid, up to the solid before it, that only moved members
-/// use
-std::unordered_set<const App::DocumentObject*> carriedBy(const Body& body,
-                                                         const std::vector<App::DocumentObject*>& objs,
-                                                         const App::DocumentObject* target)
-{
-    const auto& group = body.Group.getValues();
-    std::unordered_set<const App::DocumentObject*> moved(objs.begin(), objs.end());
-    for (auto obj : objs) {
-        if (!Body::isSolidFeature(obj)) {
-            continue;
-        }
-        auto pos = static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
-        for (bool grew = true; grew;) {
-            grew = false;
-            for (std::size_t i = std::min(pos, group.size()); i-- > 0;) {
-                auto member = group[i];
-                if (Body::isSolidFeature(member)) {
-                    break;
-                }
-                if (member == target || moved.count(member)) {
-                    continue;
-                }
-                bool onlyMoved = true;
-                bool used = false;
-                for (auto user : member->getInList()) {
-                    if (user == &body || !body.hasObject(user)) {
-                        continue;
-                    }
-                    used = true;
-                    if (!moved.count(user)) {
-                        onlyMoved = false;
-                        break;
-                    }
-                }
-                if (used && onlyMoved) {
-                    moved.insert(member);
-                    grew = true;
-                }
-            }
-        }
-    }
-    return moved;
-}
-
 std::string labelOf(const App::DocumentObject* obj)
 {
     return obj ? obj->Label.getValue() : "";
+}
+
+/// Refuses a drop that puts a solid feature of a Body above a sketch, datum or other non-solid
+/// member of the Body it uses (its profile), or such a member below its user, when one of the two
+/// is dragged (moved). rows: the Body's rows in the planned order. Onshape moves only the dragged
+/// feature, so its sketch can't follow it (ops#640 rank 31, blind test F31)
+void refuseAboveOwnInputs(const std::vector<App::DocumentObject*>& rows,
+                          const std::unordered_set<const App::DocumentObject*>& moved)
+{
+    std::unordered_map<const App::DocumentObject*, std::size_t> place;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        place.emplace(rows[i], i);
+    }
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        App::DocumentObject* user = rows[i];
+        if (!Body::isSolidFeature(user)) {
+            continue;
+        }
+        for (App::DocumentObject* input : user->getOutList()) {
+            auto it = place.find(input);
+            if (it == place.end() || it->second < i || Body::isSolidFeature(input)
+                || (moved.count(user) == 0 && moved.count(input) == 0)) {
+                continue;
+            }
+            throw Base::ValueError("'" + labelOf(user) + "' uses '" + labelOf(input)
+                                   + "', which would come after it: drag them together");
+        }
+    }
 }
 
 /// A read between Bodies that a drop breaks: reader would read read, a later member
@@ -1005,17 +988,12 @@ bool moveInStudio(App::Document* doc,
     std::ranges::copy_if(own, std::back_inserter(objs), [&requested](auto obj) {
         return requested.count(obj) > 0;
     });
-    // What the reorder carries moves with them (rows only: a MultiTransform's step has none)
-    std::unordered_set<const App::DocumentObject*> moved = requested;
+    // Only the dragged rows move: a feature's sketch stays where it is, its plane untouched
+    // (Onshape, ops#640 rank 31, blind test F31). Above a sketch or datum of its part it uses,
+    // the drop is refused
+    const std::unordered_set<const App::DocumentObject*> moved = requested;
     if (groupMoves) {
-        for (auto obj : carriedBy(*body, objs, target)) {
-            if (history.laneOf.count(obj)) {
-                moved.insert(obj);
-            }
-        }
-        lanePlan = groupPlan(moved, target, targetAfter);
-        // With them the Group stays as it is (a Pad dropped next to its sketch)
-        groupMoves = lanePlan != own;
+        refuseAboveOwnInputs(lanePlan, moved);
     }
     std::vector<App::DocumentObject*> block;
     std::ranges::copy_if(own, std::back_inserter(block), [&moved](auto obj) { return moved.count(obj) > 0; });
@@ -1097,7 +1075,10 @@ bool moveInStudio(App::Document* doc,
     writeRetraces(retraces);
     App::DocumentObject* oldTip = body->Tip.getValue();
     if (groupMoves) {
-        body->reorderObject(objs, target, targetAfter);
+        {
+            OnlyGivenObjects onlyRows;
+            body->reorderObject(objs, target, targetAfter);
+        }
         if (rowsOf(body) != lanePlan) {
             throw Base::RuntimeError("The reorder carried other features than planned: undo it");
         }
