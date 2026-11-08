@@ -361,9 +361,9 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2"])
 
     def testCreateAssemblyAndVariableStudio(self):
-        """"+" > Create Assembly: a root assembly, its tab active, in edit. A second one is refused
-        while upstream's one-assembly rule is on (a document with two crashes after it is closed,
-        with or without the tabs). A Variable Studio is a marked VarSet "Variable Studio 1"."""
+        """"+" > Create Assembly: a root assembly "Assembly 1", its tab active, in edit. A second
+        one is "Assembly 2", at the root too, as Onshape's several assemblies (ops#651). A Variable
+        Studio is a marked VarSet "Variable Studio 1"."""
         self.model(assembly=False)
         first = GuiTabs.create(self.doc, "Assembly")
         pump(0.3)
@@ -371,9 +371,13 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertEqual(GuiTabs.activeTab(self.doc), first)
         self.assertEqual(self.doc.getObject(first).getParentGeoFeatureGroup(), None)
         self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
-        self.assertEqual(GuiTabs.create(self.doc, "Assembly"), "")
-        kinds = [k for _n, k, _l in Tabs.tabs(self.doc)]
-        self.assertEqual(kinds.count("Assembly"), 1, Tabs.tabs(self.doc))
+        second = GuiTabs.create(self.doc, "Assembly")
+        pump(0.3)
+        self.assertTrue(second)
+        self.assertEqual(GuiTabs.activeTab(self.doc), second)
+        self.assertEqual(self.doc.getObject(second).getParentGeoFeatureGroup(), None)
+        labels = [l for _n, k, l in Tabs.tabs(self.doc) if k == "Assembly"]
+        self.assertEqual(labels, ["Assembly 1", "Assembly 2"], Tabs.tabs(self.doc))
         name = GuiTabs.create(self.doc, "VariableStudio")
         pump(0.2)
         variables = self.doc.getObject(name)

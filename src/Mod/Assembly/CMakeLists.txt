@@ -65,6 +65,8 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestOnshapeJointsGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
+    AssemblyTests/TestOnshapeAssemblies.py
+    AssemblyTests/TestOnshapeAssembliesGui.py
     AssemblyTests/mocks/__init__.py
     AssemblyTests/mocks/MockGui.py
 )

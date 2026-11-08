@@ -796,24 +796,8 @@ std::string Controller::create(App::Document* doc, const std::string& kind)
         name = obj->getNameInDocument();
     }
     else if (kind == "Assembly") {
-        // One root assembly per document, as upstream's EnforceOneAssemblyRule (on by default):
-        // a document with two crashes after it is closed, with or without the tabs (ops#640
-        // round 6), so Onshape's several assemblies wait for that fix
-        auto assemblyPrefs = App::GetApplication().GetParameterGroupByPath(
-            "User parameter:BaseApp/Preferences/Mod/Assembly"
-        );
-        const bool oneRule = assemblyPrefs->GetBool("EnforceOneAssemblyRule", true);
-        const auto existing = AppTabs::tabs(doc);
-        if (oneRule
-            && std::any_of(existing.begin(), existing.end(), [](const AppTabs::Tab& t) {
-                   return t.kind == AppTabs::Kind::Assembly;
-               })) {
-            message(
-                QApplication::translate("DocumentTabs", "This document has its assembly already")
-                    .toStdString()
-            );
-            return {};
-        }
+        // Any number of assemblies, as Onshape's (ops#651; Assembly_CreateAssembly lifts upstream's
+        // one-assembly rule under the Onshape keymap, the only one with tabs)
         if (gdoc->getInEdit()) {
             gdoc->resetEdit();  // an open assembly would take the new one in
         }

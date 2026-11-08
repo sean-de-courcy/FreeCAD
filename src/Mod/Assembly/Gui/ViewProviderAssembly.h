@@ -287,6 +287,8 @@ private:
 
     void highlightJointElements(App::DocumentObject* joint);
     void clearJointElementHighlight();
+    /// Drops the connections setEdit() makes (FreeCAD-CH, ops#651)
+    void disconnectEditSignals();
 
     void applyIsolationRecursively(
         App::DocumentObject* current,

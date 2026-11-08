@@ -129,7 +129,7 @@ ViewProviderAssembly::ViewProviderAssembly()
 ViewProviderAssembly::~ViewProviderAssembly()
 {
     m_preTransactionConn.disconnect();
-    QObject::disconnect(workbenchConnection);
+    disconnectEditSignals();
 
     updateTaskPanel(false);
 };
@@ -302,6 +302,12 @@ bool ViewProviderAssembly::setEdit(int mode)
 
         updateTaskPanel(true);
 
+        // FreeCAD-CH (ops#651): an assembly enters edit again each time its tab is activated, and
+        // a document may hold several. A connection left from an earlier edit would outlive this
+        // view provider and call it after its document is closed ("Illegal storage access" at the
+        // next workbench switch), so the edit's connections are always made afresh
+        disconnectEditSignals();
+
         auto* assembly = getObject<AssemblyObject>();
         connectSolverUpdate = assembly->signalSolverUpdate.connect([this] {
             UpdateSolverInformation();
@@ -339,6 +345,9 @@ void ViewProviderAssembly::unsetEdit(int mode)
         unsetDragger();
         detachSelection();
 
+        // Before the early return below: a document being closed has no active view (ops#651)
+        disconnectEditSignals();
+
         // Check if the view is still active before trying to deactivate the assembly.
         auto activeView = getDocument()->getActiveView();
         if (!activeView) {
@@ -358,12 +367,17 @@ void ViewProviderAssembly::unsetEdit(int mode)
 
         updateTaskPanel(false);
 
-        connectSolverUpdate.disconnect();
-        connectActivatedVP.disconnect();
-
         return;
     }
     ViewProviderPart::unsetEdit(mode);
+}
+
+void ViewProviderAssembly::disconnectEditSignals()
+{
+    QObject::disconnect(workbenchConnection);
+    workbenchConnection = {};
+    connectSolverUpdate.disconnect();
+    connectActivatedVP.disconnect();
 }
 
 void ViewProviderAssembly::slotActivatedVP(const Gui::ViewProviderDocumentObject* vp, const char* name)

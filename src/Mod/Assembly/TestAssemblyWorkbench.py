@@ -37,6 +37,7 @@ from AssemblyTests.TestVariantLinks import (
     TestVariantTopologyChanged,
     TestRetargetCheckSaved,
 )
+from AssemblyTests.TestOnshapeAssemblies import TestSeveralAssemblies  # FreeCAD-CH, ops#640
 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestCore else False
@@ -51,3 +52,4 @@ True if TestLinkTargetReopened else False
 True if TestVariantLinkRecompute else False
 True if TestVariantTopologyChanged else False
 True if TestRetargetCheckSaved else False
+True if TestSeveralAssemblies else False
