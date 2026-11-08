@@ -85,6 +85,8 @@ namespace PartDesignGui
 {
 // Utils.cpp's (no header names it): the Bodies of the view's typed tab (R6T-1)
 std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+// Utils.cpp's: true (refused, said why) when a new part would be made outside a Part Studio tab
+bool refuseNewPartOutsideStudio(App::Document* doc);
 }
 
 void CmdPrimtiveCompAdditive::activated(int iMsg)
@@ -117,12 +119,18 @@ void CmdPrimtiveCompAdditive::activated(int iMsg)
 
     std::string shapeType(primitiveIntToName(iMsg));
 
+    // FreeCAD-CH (ops#640): no new part outside a Part Studio tab (an Assembly's)
+    if (shouldMakeBody && PartDesignGui::refuseNewPartOutsideStudio(doc)) {
+        return;
+    }
+
     openCommand("Make additive " + shapeType);
     if (shouldMakeBody) {
         pcActiveBody = PartDesignGui::makeBody(doc);
     }
 
     if (!pcActiveBody) {
+        abortCommand();  // FreeCAD-CH: the command opened above isn't left open
         return;
     }
 

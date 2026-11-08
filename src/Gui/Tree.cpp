@@ -67,6 +67,7 @@
 #include "Command.h"
 #include "Control.h"
 #include "Document.h"
+#include "DocumentTabBar.h"
 #include "ExpressionCompleter.h"
 #include "ForkKeymap.h"
 #include "Macro.h"
@@ -2847,7 +2848,22 @@ void TreeWidget::mouseDoubleClickEvent(QMouseEvent* event)
             Gui::Document* guidoc = objitem->getOwnerDocument()->document();
             App::Document* appdoc = guidoc->getDocument();
 
-            guidoc->setActiveView(vp);
+            // FreeCAD-CH (ops#640, F6-1): under the typed tabs the view of the item's top parent,
+            // as the selection's (updateItemSelection): an item under an assembly's link stays in
+            // the assembly's tab
+            ViewProviderDocumentObject* viewVp = vp;
+            if (DocumentTabs::isOn()) {
+                std::ostringstream unused;
+                App::DocumentObject* topParent = nullptr;
+                objitem->getSubName(unused, topParent);
+                if (auto top = topParent ? freecad_cast<ViewProviderDocumentObject*>(
+                                               Application::Instance->getViewProvider(topParent)
+                                           )
+                                         : nullptr) {
+                    viewVp = top;
+                }
+            }
+            guidoc->setActiveView(viewVp);
             auto manager = Application::Instance->macroManager();
             auto lines = manager->getLines();
 
@@ -6572,6 +6588,17 @@ void DocumentItem::updateItemSelection(DocumentObjectItem* item)
                 item2->setSelected(false);
                 item2->setCheckState(false);
             }
+            return;
+        }
+    }
+    // FreeCAD-CH (ops#640, F6-1): under the typed tabs the view follows the selected path's top
+    // object (obj, now): an item reached through the active tab's object (Assembly > Link >
+    // Cylinder) stays in that tab, where the child's own tab (its studio) was activated
+    if (DocumentTabs::isOn() && obj != vobj->getObject()) {
+        if (auto top = freecad_cast<ViewProviderDocumentObject*>(
+                Application::Instance->getViewProvider(obj)
+            )) {
+            getTree()->syncView(top);
             return;
         }
     }
