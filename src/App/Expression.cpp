@@ -37,6 +37,7 @@
 #include <boost/math/special_functions/trunc.hpp>
 
 #include <numbers>
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <stack>
@@ -3998,6 +3999,182 @@ std::string rewriteVariableRefs(const App::DocumentObject* owner, const char* bu
     return out;
 }
 
+// FreeCAD-CH (ops#640, rank 56): a literal fraction in front of a unit is one quantity, as
+// Onshape reads it: `3/4 in` is three quarters of an inch. The grammar binds a unit to the number
+// just before it (NUM_AND_UNIT), which made it 3 / (4 in). `NUM / NUM UNIT` is rewritten to
+// `(NUM UNIT / NUM)` in front of the lexer, so the stored text (`3 in / 4`) reads the same way
+// back. Only when the numerator starts an operand: at the start, or after `(`, `[`, `,`, `;`,
+// `+`, `-`, `*`, `%`, `?`, `:` or a comparison. Not after `/` or `^` (`1/3/4 in`, `2^3/4 in`), a
+// name, a number, a `)` or a `.`; never inside `<<...>>`. The unit is one the lexer reads as a
+// unit (`in`, `mm`, `"`, `'`, `°`), with its `^ [-]n` if any.
+
+// The length of the number literal at s[i] as Expression.l reads one ({DIGIT}*[.,]{DIGIT}+{EXPO}?
+// or {DIGIT}+{EXPO}?), or 0.
+std::size_t numberLength(const std::string& s, std::size_t i)
+{
+    auto digit = [&s](std::size_t k) {
+        return k < s.size() && s[k] >= '0' && s[k] <= '9';
+    };
+    std::size_t j = i;
+    while (digit(j)) {
+        ++j;
+    }
+    if (j < s.size() && (s[j] == '.' || s[j] == ',') && digit(j + 1)) {
+        ++j;
+        while (digit(j)) {
+            ++j;
+        }
+    }
+    else if (j == i) {
+        return 0;
+    }
+    if (j < s.size() && (s[j] == 'e' || s[j] == 'E')) {
+        std::size_t k = j + 1;
+        if (k < s.size() && (s[k] == '+' || s[k] == '-')) {
+            ++k;
+        }
+        if (digit(k)) {
+            while (digit(k)) {
+                ++k;
+            }
+            j = k;
+        }
+    }
+    return j - i;
+}
+
+std::size_t skipBlanks(const std::string& s, std::size_t i)
+{
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    return i;
+}
+
+// The end of the unit starting at s[i] (with a following `^ [-]n`), or npos if none starts there.
+std::size_t unitEnd(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) {
+        return std::string::npos;
+    }
+    std::size_t j = std::string::npos;
+    auto [cp, len] = codePointAt(s, i);
+    if (cp == '"' || cp == '\'' || cp == 0xB0 || cp == 0x2032 || cp == 0x2033) {
+        j = i + len;
+    }
+    else if (isIdentifierStart(cp)) {
+        j = i + len;
+        while (j < s.size()) {
+            auto [cp2, len2] = codePointAt(s, j);
+            if (!isIdentifierPart(cp2)) {
+                break;
+            }
+            j += len2;
+        }
+        if (!App::ExpressionParser::isTokenAUnit(s.substr(i, j - i))) {
+            return std::string::npos;
+        }
+    }
+    else {
+        return std::string::npos;
+    }
+    // `in^2`, `mm^-1`
+    std::size_t k = skipBlanks(s, j);
+    if (k < s.size() && s[k] == '^') {
+        k = skipBlanks(s, k + 1);
+        if (k < s.size() && s[k] == '-') {
+            k = skipBlanks(s, k + 1);
+        }
+        std::size_t n = numberLength(s, k);
+        if (n > 0 && s.find_first_not_of("0123456789", k) >= k + n) {
+            j = k + n;
+        }
+    }
+    return j;
+}
+
+std::string rewriteLiteralFractions(const std::string& s)
+{
+    if (s.find('/') == std::string::npos) {
+        return s;
+    }
+    std::string out;
+    out.reserve(s.size() + 8);
+    // Whether an operand may start here: a numerator is taken only then.
+    bool operandStart = true;
+    std::size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            out += c;
+            ++i;
+            continue;
+        }
+        if (c == '<' && i + 1 < s.size() && s[i + 1] == '<') {
+            std::size_t end = stringEnd(s, i);
+            if (end != std::string::npos) {
+                out.append(s, i, end - i);
+                operandStart = false;
+                i = end;
+                continue;
+            }
+            out += "<<";
+            operandStart = false;
+            i += 2;
+            continue;
+        }
+        if (std::size_t n = numberLength(s, i); n > 0) {
+            if (operandStart) {
+                // numerator / denominator unit
+                std::size_t slash = skipBlanks(s, i + n);
+                if (slash < s.size() && s[slash] == '/') {
+                    std::size_t den = skipBlanks(s, slash + 1);
+                    std::size_t m = numberLength(s, den);
+                    if (m > 0) {
+                        std::size_t unit = skipBlanks(s, den + m);
+                        std::size_t end = unitEnd(s, unit);
+                        if (end != std::string::npos) {
+                            out += '(';
+                            out.append(s, i, n);
+                            out += ' ';
+                            out.append(s, unit, end - unit);
+                            out += " / ";
+                            out.append(s, den, m);
+                            out += ')';
+                            operandStart = false;
+                            i = end;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out.append(s, i, n);
+            operandStart = false;
+            i += n;
+            continue;
+        }
+        auto [cp, len] = codePointAt(s, i);
+        if (isIdentifierPart(cp)) {
+            std::size_t j = i + len;
+            while (j < s.size()) {
+                auto [cp2, len2] = codePointAt(s, j);
+                if (!isIdentifierPart(cp2)) {
+                    break;
+                }
+                j += len2;
+            }
+            out.append(s, i, j - i);
+            operandStart = false;
+            i = j;
+            continue;
+        }
+        out.append(s, i, len);
+        operandStart = len == 1 && std::strchr("([,;+-*%?:=<>!", c) != nullptr;
+        i += len;
+    }
+    return out;
+}
+
 // FreeCAD-CH (ops#320): a character the lexer had to drop makes the expression an error.
 void throwIfUnmatched(const char* original)
 {
@@ -4034,7 +4211,8 @@ void throwIfUnmatched(const char* original)
 ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, const char* buffer)
 {
     // FreeCAD-CH (ops#152): `#name` to its full path; the rewritten text is what gets parsed.
-    const std::string rewritten = rewriteVariableRefs(owner, buffer);
+    // FreeCAD-CH (ops#640, rank 56): then `3/4 in` to `(3 in / 4)`.
+    const std::string rewritten = rewriteLiteralFractions(rewriteVariableRefs(owner, buffer));
     const char* original = buffer;
     buffer = rewritten.c_str();
 

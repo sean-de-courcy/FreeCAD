@@ -40,6 +40,7 @@ SET(Test_SRCS
     TestVariablesOnshape.py
     TestVariablesCopies.py
     TestExpressionUnits.py
+    TestLiteralFractions.py
     TestNotificationArea.py
     TestPropertyEditorGui.py
     TestVariablesGui.py
