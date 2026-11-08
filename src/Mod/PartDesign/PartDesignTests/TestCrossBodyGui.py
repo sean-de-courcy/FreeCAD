@@ -1448,9 +1448,11 @@ class TestOperationRowGui(ResultBoxGuiCase):
         )
         self.chooseMode("To last")
         self.assertEqual(pocket.Type, "UpToLast")
-        self.assertAlmostEqual(self.body.Shape.Volume, 11500, places=3)
-        self.assertTrue(self.body.Shape.isInside(V(15, 15, 7.5), 1e-6, True))
-        self.assertFalse(self.body.Shape.isInside(V(15, 15, 2.5), 1e-6, True))
+        # The panel recomputes the feature alone: during the edit the Body's Shape is the one of
+        # the last document recompute, and the result is the tip's, the pocket's own Shape
+        self.assertAlmostEqual(pocket.Shape.Volume, 11500, places=3)
+        self.assertTrue(pocket.Shape.isInside(V(15, 15, 7.5), 1e-6, True))
+        self.assertFalse(pocket.Shape.isInside(V(15, 15, 2.5), 1e-6, True))
         self.choose("Add to Enclosure")
         self.assertEqual(pocket.Operation, "Union")
         self.assertEqual(pocket.Type, "UpToLast")
@@ -1970,9 +1972,9 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
 
     def testARevolutionWithItsAxisIsNotWaiting(self):
         """The axis row is required now, but only an empty one waits: a Revolution of the lid
-        sketch, a quarter turn about its V axis, made from Python, opens with the axis row not
-        armed, and OK keeps the axis. Onshape's Revolve dialog on a finished revolve waits for
-        nothing."""
+        sketch, a quarter turn about its V axis, made from Python, opens with the axis box on
+        Vertical sketch axis and the axis row under it hidden and not armed, and OK keeps the
+        axis. Onshape's Revolve dialog on a finished revolve waits for nothing."""
         self.enclosure()
         revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
         revolution.Profile = self.lidSk
@@ -1982,9 +1984,18 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         revolution.ViewObject.doubleClicked()
         self.waitForPanel()
-        field = self.axisField()
-        self.assertIsNotNone(field, "no axis row")
+        # An axis among the box's entries shows in the box (ReferenceCombo::refresh): the row
+        # stays hidden, so it is looked up whatever its visibility
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        fields = Gui.getMainWindow().findChildren(QtWidgets.QWidget, "fieldReferenceAxis")
+        self.assertEqual(len(fields), 1, "not one axis row")
+        field = fields[0]
         self.assertFalse(field.property("armed"))
+        self.assertFalse(field.property("missing"), "the axis row is shown missing")
+        self.assertIsNone(self.axisField(), "the axis row shows with the axis in the box")
+        box = self.visible(QtWidgets.QComboBox, "axis")
+        self.assertIsNotNone(box, "no axis box")
+        self.assertEqual(box.currentText(), "Vertical sketch axis")
         pump(0.1)
         self.assertTrue(taskButton(QtWidgets.QDialogButtonBox.Ok).isEnabled(), "OK is disabled")
         self.close(ok=True)

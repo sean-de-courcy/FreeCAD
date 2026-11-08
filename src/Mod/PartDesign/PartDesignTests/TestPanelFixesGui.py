@@ -1198,7 +1198,9 @@ class TestPanelFixesGui(unittest.TestCase):
         """OK answered Make independent copy shows a message box with text and leaves the panel
         open, with the edit's transaction still open and no new object left (round 2 of PR 219:
         the stop aborted the whole edit under the open panel). edit=False: the panel is open
-        already. ok: the OK button, found earlier (the panel is hidden)."""
+        already. ok: the OK button, found earlier (the panel is hidden). Only the copy step
+        still stops (a copy that doesn't recompute, a reference a copy can't keep): a pipe that
+        fails after it is committed in error (assertOkCommitsInError)."""
         if edit:
             self.edit(pipe, transaction)
         objects = self.doc.Objects
@@ -1214,6 +1216,35 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
         self.assertNotEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction ended")
         self.assertEqual([o for o in self.doc.Objects if o not in objects], [])
+
+    def assertOkCommitsInError(self, pipe, text, copy=True):
+        """OK (answering the copy dialog, if it comes, with Make independent copy) commits a pipe
+        that fails, as Onshape's check does and as the other feature dialogs' OK does (F7 of the
+        blind test, ops#640; TestCrossBodyGui.TestOkInErrorGui): no message box, the panel
+        closes, the pipe stays in error saying why (text), and the edit is one undo step, ended.
+        Before ops#640 OK stopped with the panel open (ops#243). copy: the pipe has a spine
+        outside the body, so the copy dialog comes. Returns the copies the commit made (the
+        objects named Copy*). Needs self.undos, the undo count before the edit."""
+        self.answerModals()
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), self.modals)
+        self.answering = False
+        pump(0.2)
+        self.assertEqual(self.modals, ["DlgReference"] if copy else [])
+        self.assertFalse(pipe.isValid())
+        self.assertIn(text, pipe.getStatusString())
+        self.assertEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction is open")
+        self.assertEqual(self.doc.UndoCount, self.undos + 1, self.doc.UndoNames)
+        return [o for o in self.doc.Objects if o.Name.startswith("Copy")]
+
+    def assertCopyCommitted(self, pipe, copies):
+        """One copy, in the body, is the pipe's spine (Edge1 and Edge2). Open question for the hub
+        (ops#640): a commit in error keeps the copy its OK made, as a valid commit does; the edit
+        is committed as it is."""
+        self.assertEqual(len(copies), 1, [o.Name for o in copies])
+        self.assertIs(pipe.Spine[0], copies[0])
+        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
+        self.assertTrue(self.body.hasObject(copies[0]))
 
     def staleOuterSpine(self):
         """The Rod's spine as a sketch "Outer" beside the body, recomputed, then its first line
@@ -1404,21 +1435,27 @@ class TestPanelFixesGui(unittest.TestCase):
             self.assertAlmostEqual(got, want, places=6, msg=box)
         self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
-    def testPipeCopyAbortedWithThePipe(self):
-        """ops#234 (PR 211 review), ops#243: the profile is open (three sides of the square), so
-        the pipe fails. OK copies the spine from outside the body, recomputes it, then fails on
-        the pipe (Input Error): the copy is gone, the spine is the original again, the body is as
-        before, and the panel and the edit's transaction are still open."""
+    def testPipeCopyCommittedWithThePipeInError(self):
+        """ops#234 (PR 211 review), ops#243, ops#640: the profile is open (three sides of the
+        square), so the pipe fails. OK copies the spine from outside the body, recomputes it, and
+        commits the pipe in error with the copy as its spine, in the body (until ops#640 OK
+        stopped and dropped the copy). One undo restores the original spine and the body, with no
+        copy left."""
         pipe = self.rod(spineInBody=False)
         self.openProfile()
         self.doc.recompute()
         self.assertFalse(pipe.isValid())
         before = self.body.Group
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
-        self.assertIsNone(self.doc.getObject("CopySpine"))
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertCopyCommitted(pipe, copies)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.body.Group, before)
+        self.assertEqual(self.doc.UndoCount, self.undos)
 
     def openProfile(self):
         """The Rod's profile as three sides of its square: the pipe fails."""
@@ -1437,13 +1474,12 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         return outer
 
-    def failAfterTheCopy(self):
-        """ops#243 (PR 219 verification P1): in the edit of the Rod (spine in the body) the spine
-        is picked again on a sketch beside the body and the profile opened. OK (Make independent
-        copy) copies the spine, and the pipe then fails: only the copy step is undone. The copy is
-        gone, the spine is the picked one again, the panel and the edit's transaction are open
-        (the abort undid the whole edit under the open panel, and OK again committed the old
-        spine, outside undo)."""
+    def commitAfterTheCopy(self):
+        """ops#243 (PR 219 verification P1), ops#640: in the edit of the Rod (spine in the body)
+        the spine is picked again on a sketch beside the body and the profile opened. OK (Make
+        independent copy) copies the spine, and the pipe then fails: it is committed in error with
+        the copy as its spine (until ops#640 OK undid the copy step and stopped with the panel
+        open)."""
         pipe = self.rod()
         self.doc.recompute()
         outer = self.outerSpine()
@@ -1452,31 +1488,35 @@ class TestPanelFixesGui(unittest.TestCase):
         self.edit(pipe)
         pipe.Spine = (outer, ["Edge1", "Edge2"])
         self.openProfile()
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
-        self.assertIs(pipe.Spine[0], outer)
-        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
-        self.assertEqual(self.body.Group, self.before)
-        return pipe, outer
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertCopyCommitted(pipe, copies)
+        return pipe, copies[0]
 
-    def testPipeRecomputeFailureThenRetry(self):
-        """ops#243: after failAfterTheCopy the profile is closed again and OK pressed again: one
-        copy, the pipe sweeps it (V = 120), and the edit is one transaction: one undo removes the
-        copy and restores the spine and the profile."""
-        pipe, outer = self.failAfterTheCopy()
+    def testPipeCommittedInErrorThenRepaired(self):
+        """ops#243, ops#640: after commitAfterTheCopy the pipe is edited again, the profile closed
+        and OK pressed: no copy dialog (the spine is the copy, in the body), the pipe sweeps the
+        copy (V = 120), and each edit is one undo step: the first undo opens the profile again,
+        the second removes the copy and restores the spine and the profile."""
+        pipe, copy = self.commitAfterTheCopy()
+        self.edit(pipe)
         self.closeProfile()
         self.modals = []
         self.answerModals()
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), self.modals)
         self.answering = False
-        self.assertEqual(self.modals, ["DlgReference"])
-        copies = [o for o in self.doc.Objects if o.Name.startswith("Copy")]
-        self.assertEqual(len(copies), 1, [o.Name for o in copies])
-        self.assertIs(pipe.Spine[0], copies[0])
-        self.assertTrue(self.body.hasObject(copies[0]))
+        pump(0.2)
+        self.assertEqual(self.modals, [])
+        self.assertEqual([o for o in self.doc.Objects if o.Name.startswith("Copy")], [copy])
+        self.assertIs(pipe.Spine[0], copy)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
-        self.assertEqual(self.doc.UndoCount, self.undos + 1)
+        self.assertEqual(self.doc.UndoCount, self.undos + 2, self.doc.UndoNames)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.profile.Shape.Edges), 3)
+        self.assertIs(pipe.Spine[0], copy)
+        self.assertFalse(pipe.isValid())
         self.doc.undo()
         self.doc.recompute()
         self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
@@ -1485,11 +1525,12 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(len(self.profile.Shape.Edges), 4)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
-    def testPipeRecomputeFailureThenCancel(self):
-        """ops#243: after failAfterTheCopy, Cancel restores the state from before the edit: the
-        spine in the body, the closed profile, no copy, nothing to undo."""
-        pipe, outer = self.failAfterTheCopy()
-        self.close(ok=False)
+    def testPipeCommittedInErrorThenUndone(self):
+        """ops#243, ops#640: after commitAfterTheCopy one undo restores the state from before the
+        edit (as Cancel did while OK stopped): the spine in the body, the closed profile, no copy,
+        nothing more to undo."""
+        pipe, copy = self.commitAfterTheCopy()
+        self.doc.undo()
         self.doc.recompute()
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
@@ -1502,67 +1543,59 @@ class TestPanelFixesGui(unittest.TestCase):
     def visible(self, obj):
         return obj.ViewObject.Visibility
 
-    def testPipeRecomputeFailureWithoutCopyKeepsTheEdit(self):
-        """ops#253 (PR 226 review L1 and test gap): the Rod (all in the body), its spine and
-        profile hidden, as after the pipe's creation; in the edit the profile is opened, so OK
-        fails on the pipe with no copy step: the message says the edit is still open (no word
-        of a copy), the panel and the edit's transaction stay open, and the spine and profile are
-        still shown (they went back to hidden under the open panel). Cancel restores the closed
-        profile and hides them again, with nothing to undo."""
+    def testPipeCommittedInErrorWithoutCopy(self):
+        """ops#253, ops#640: the Rod (all in the body), its spine and profile hidden, as after the
+        pipe's creation; the edit shows them, and in it the profile is opened. OK commits the
+        pipe in error with no copy dialog and no copy, and hides the spine and profile again, as
+        a valid OK does (Onshape accepts a failing feature red with its sketch hidden; until
+        ops#640 OK stopped with the panel open and them shown). One undo restores the closed
+        profile."""
         pipe = self.rod()
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.spine.ViewObject.Visibility = False
         self.profile.ViewObject.Visibility = False
-        undos = self.doc.UndoCount
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
         self.assertTrue(self.visible(self.spine))
         self.assertTrue(self.visible(self.profile))
         self.openProfile()
-        self.answerModals()
-        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
-        self.assertTrue(waitFor(lambda: len(self.modals) >= 1, 5.0), self.modals)
-        self.answering = False
-        pump(0.2)
-        self.assertEqual(len(self.modals), 1, self.modals)
-        self.assertIn("Wire is not closed.", self.modals[0])
-        self.assertIn("The edit is still open.", self.modals[0])
-        self.assertNotIn("copy", self.modals[0])
-        self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
-        self.assertNotEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction ended")
-        self.assertTrue(self.visible(self.spine), "the spine went back to hidden")
-        self.assertTrue(self.visible(self.profile), "the profile went back to hidden")
-        self.close(ok=False)
-        self.doc.recompute()
-        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertEqual(self.assertOkCommitsInError(pipe, "Wire is not closed.", copy=False), [])
+        self.assertIs(pipe.Spine[0], self.spine)
         self.assertFalse(self.visible(self.spine))
         self.assertFalse(self.visible(self.profile))
-        self.assertEqual(self.doc.UndoCount, undos)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertEqual(self.doc.UndoCount, self.undos)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
-    def testPipeCopyStopShowsTheSpine(self):
-        """ops#253 (PR 226 review L1): as failAfterTheCopy with the Rod's spine and profile
-        hidden: after the stop the picked spine and the profile are shown."""
+    def testPipeCopyCommittedInErrorIsHidden(self):
+        """ops#253 (PR 226 review L1), ops#640: as commitAfterTheCopy with the Rod's spine and
+        profile and the outside sketch hidden: the edit shows the picked sketch and the profile,
+        and the commit in error hides them again, as a valid OK does; the copy, the pipe's spine
+        now, is hidden too (until ops#640 OK stopped, and the panel had to show them)."""
         pipe = self.rod()
         self.doc.recompute()
         outer = self.outerSpine()
         self.spine.ViewObject.Visibility = False
         self.profile.ViewObject.Visibility = False
         outer.ViewObject.Visibility = False
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
         pipe.Spine = (outer, ["Edge1", "Edge2"])
         self.openProfile()
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
-        self.assertIs(pipe.Spine[0], outer)
-        self.assertTrue(self.visible(outer), "the spine is hidden under the open panel")
-        self.assertTrue(self.visible(self.profile), "the profile is hidden under the open panel")
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertCopyCommitted(pipe, copies)
+        hidden = [(o.Name, self.visible(o)) for o in (outer, copies[0], self.profile, self.spine)]
+        self.assertEqual(hidden, [(name, False) for name, _ in hidden])
 
-    def testPipeRecomputeFailureRestoresTheSpinesGuess(self):
-        """ops#253 (PR 226 review test gap): the spine outside the body is found again by
+    def testPipeCommittedInErrorUndoRestoresTheSpinesGuess(self):
+        """ops#253 (PR 226 review test gap), ops#640: the spine outside the body is found again by
         geometry (testPipeCopyKeepsTheSpinesGuess), and the profile is opened in the edit. OK
-        copies the spine, then fails on the pipe: the restored spine is the original with its
-        guess. With the profile closed again the pipe recomputes with the same warning and
-        report entries."""
+        copies the spine and commits the pipe in error; the copy keeps the guess's report
+        entries, as a valid OK does. One undo restores the original spine with its guess: with
+        the profile closed again the pipe recomputes with the same warning and report entries."""
         pipe = self.rod(spineInBody=False)
         self.doc.recompute()
         self.spine.deleteAllGeometry()
@@ -1572,9 +1605,16 @@ class TestPanelFixesGui(unittest.TestCase):
         subs = pipe.Spine[1]
         report = [(r["property"], r["index"]) for r in App.getReferenceReport(pipe)]
         self.assertEqual({prop for prop, _ in report}, {"Spine"})
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
         self.openProfile()
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertEqual(len(copies), 1, [o.Name for o in copies])
+        self.assertIs(pipe.Spine[0], copies[0])
+        self.assertEqual(pipe.Spine[1], subs)
+        self.assertEqual([(r["property"], r["index"]) for r in App.getReferenceReport(pipe)], report)
+        self.doc.undo()
+        self.doc.recompute()
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(pipe.Spine[1], subs)
         self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])

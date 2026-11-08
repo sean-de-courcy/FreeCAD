@@ -46,6 +46,7 @@ from PySide import QtCore, QtWidgets
 from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
+from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
 
 ONSHAPE = "Gui::OnshapeNavigationStyle"  # the pack's and the code's default since ops#640
 
@@ -112,16 +113,19 @@ def pump(seconds=0.3):
 
 
 def taskButton(which):
-    """The task panel's OK or Cancel button."""
-    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
-        button = box.button(which)
-        if button is None or not button.isVisible():
+    """The task panel's OK or Cancel button (dead wrappers: TestExpressionFieldsGui.liveButtonBoxes)."""
+    for box in liveButtonBoxes():
+        try:
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        except RuntimeError:  # a box (or a parent) deleted under its wrapper: not the panel's
             continue
-        parent = box.parentWidget()
-        while parent is not None:
-            if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                return button
-            parent = parent.parentWidget()
     return None
 
 

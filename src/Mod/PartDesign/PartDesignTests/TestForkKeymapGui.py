@@ -53,6 +53,8 @@ import Part
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
 
+from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
+
 KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap
 SHORTCUTS = "User parameter:BaseApp/Preferences/Shortcut"
 
@@ -344,15 +346,19 @@ def drawStyles():
 
 
 def taskButton(which):
-    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
-        button = box.button(which)
-        if button is None or not button.isVisible():
+    """The task panel's OK or Cancel button (dead wrappers: TestExpressionFieldsGui.liveButtonBoxes)."""
+    for box in liveButtonBoxes():
+        try:
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        except RuntimeError:  # a box (or a parent) deleted under its wrapper: not the panel's
             continue
-        parent = box.parentWidget()
-        while parent is not None:
-            if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                return button
-            parent = parent.parentWidget()
     return None
 
 
@@ -1097,7 +1103,9 @@ class TestForkKeymapGui(unittest.TestCase):
             Gui.activateWorkbench("PartDesignWorkbench")
             pump()
 
-    def editAndPress(self, key, typeName):
+    def editAndPress(self, key, typeName, before_ok=None):
+        """Shift+`key` in sketch edit makes a `typeName` on the sketch and opens its panel;
+        `before_ok(feature)` does what the panel needs (a Revolve's axis), then OK commits it."""
         self.editSketch()
         self.press(key, QtCore.Qt.ShiftModifier)
         self.assertTrue(
@@ -1112,19 +1120,47 @@ class TestForkKeymapGui(unittest.TestCase):
         # the Tasks dock can sit in a hidden overlay (notes/build.md, "Task-panel GUI tests")
         Gui.Control.showTaskView()
         self.assertTrue(waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok) is not None))
+        if before_ok is not None:
+            before_ok(feature)
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         pump()
         self.doc.recompute()
         self.assertTrue(feature.isValid())
         self.assertGreater(feature.Shape.Volume, 0)
 
+    def chooseAxis(self, text):
+        """The visible axis box's entry chosen as a user does (ReferenceCombo takes activated;
+        TestCrossBodyGui.chooseAxis)."""
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        boxes = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "axis") if c.isVisible()
+        ]
+        self.assertEqual(len(boxes), 1, "no single visible axis box")
+        box = boxes[0]
+        index = box.findText(text)
+        self.assertGreaterEqual(index, 0, [box.itemText(i) for i in range(box.count())])
+        box.setCurrentIndex(index)
+        box.activated.emit(index)
+        pump(0.3)
+
     def testShiftEInSketchClosesItAndPads(self):
         """In sketch edit, Shift+E closes the sketch and pads it, as Onshape's extrude does."""
         self.editAndPress(QtCore.Qt.Key_E, "PartDesign::Pad")
 
     def testShiftWInSketchClosesItAndRevolves(self):
-        """In sketch edit, Shift+W closes the sketch and revolves it."""
-        self.editAndPress(QtCore.Qt.Key_W, "PartDesign::Revolution")
+        """In sketch edit, Shift+W closes the sketch and revolves it. The Revolve opens waiting
+        for its axis, as Onshape's does (notes/onshape-experiment.md section 6; OK with none
+        commits it in error): the sketch's V axis, clear of setUp's square (x 5 to 15), is
+        picked before OK."""
+
+        def pickTheAxis(feature):
+            self.assertIsNone(feature.ReferenceAxis, "the Revolve opened with an axis")
+            self.chooseAxis("Vertical sketch axis")
+            self.assertIsNotNone(feature.ReferenceAxis, "the axis box set no axis")
+            self.assertEqual(feature.ReferenceAxis[0], self.sketch)
+            self.assertEqual(feature.ReferenceAxis[1], ["V_Axis"])
+
+        self.editAndPress(QtCore.Qt.Key_W, "PartDesign::Revolution", before_ok=pickTheAxis)
 
     # --- the fork's commands (PR B)
 
