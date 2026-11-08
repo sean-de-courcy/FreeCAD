@@ -761,8 +761,10 @@ void activateMode(const StudioMode& mode)
         return;
     }
     App::Document* doc = App::GetApplication().getActiveDocument();
+    // An unknown type is a module not loaded yet (the Assembly App types come with its first
+    // object, not with the workbench): no such object in the document either
     Base::Type type = Base::Type::fromName(mode.type);
-    if (doc && !type.isBad() && doc->getObjectsOfType(type).empty()) {
+    if (doc && (type.isBad() || doc->getObjectsOfType(type).empty())) {
         commands.runCommandByName(mode.command);
     }
 }
