@@ -48,6 +48,8 @@ class TestOnshapeJointsGui(unittest.TestCase):
         self.doc = App.newDocument("OnshapeJointsGui")
         Gui.activateWorkbench("AssemblyWorkbench")
         self.assembly = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
+        # as Assembly_CreateAssembly makes it: the joint code reads a Type-less one as a Part
+        self.assembly.Type = "Assembly"
         self.jointgroup = self.assembly.newObject("Assembly::JointGroup", "Joints")
         self.a = self.cube("A", App.Vector(0, 0, 0))
         self.b = self.cube("B", App.Vector(40, 0, 0))
