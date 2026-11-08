@@ -35,6 +35,14 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
     TestSketchTangentArcGui,
     TestSketchFilletFieldsGui,
 )
+from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch round 3)
+    TestSketchModelInferenceGui,
+    TestSketchModelInferenceOnFaceGui,
+    TestSketchConflictRefusedGui,
+    TestSketchOverdefinedRedGui,
+    TestSketchOnshapeConstraintsGui,
+    TestSketchOnshapeShapesGui,
+)
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -70,5 +78,11 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
     and TestSketchFilletFieldsGui
     and TestSketchModelFacesGui
     and TestSketchConstraintToolsGui
+    and TestSketchModelInferenceGui
+    and TestSketchModelInferenceOnFaceGui
+    and TestSketchConflictRefusedGui
+    and TestSketchOverdefinedRedGui
+    and TestSketchOnshapeConstraintsGui
+    and TestSketchOnshapeShapesGui
     else False
 )
