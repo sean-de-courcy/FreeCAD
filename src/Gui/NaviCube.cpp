@@ -60,6 +60,7 @@
 #include "Camera.h"
 #include "Command.h"
 #include "Action.h"
+#include "ForkKeymap.h"  // FreeCAD-CH (ops#640, rank 84)
 #include "MainWindow.h"
 #include "Navigation/NavigationAnimation.h"
 #include "Navigation/NavigationStyle.h"
@@ -1128,6 +1129,15 @@ bool NaviCubeImplementation::mouseReleased(short x, short y)
             SbRotation rotation = getFaceRotation(pickId);
             if (pickId == PickId::Backside) {
                 rotation.scaleAngle(pi);
+            }
+            else if (ForkKeymap::isOnshape()) {
+                // FreeCAD-CH (ops#640, rank 84): Onshape's cube arrows turn 15 degrees, 90 with
+                // Shift and 5 with Ctrl, as the keyboard arrows do (View3DSettings.cpp).
+                Qt::KeyboardModifiers modifiers = QApplication::keyboardModifiers();
+                float degrees = modifiers.testFlag(Qt::ShiftModifier) ? 90.0F
+                    : modifiers.testFlag(Qt::ControlModifier)          ? 5.0F
+                                                                       : 15.0F;
+                rotation.scaleAngle(degrees * pi / 180.0F);
             }
             else {
                 rotation.scaleAngle(rotStepAngle);
