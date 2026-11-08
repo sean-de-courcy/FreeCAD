@@ -755,6 +755,14 @@ class TestContextMenuGui(unittest.TestCase):
         self.assertIn(menuText("Std_Delete"), texts(more.actions()))
         self.trigger(actions, "Std_DeletePart")
         self.closePopups()
+        # Its dialog, prefilled with the part: OK (ops#640 rank 30)
+        from PartDesignTests.TestExpressionFieldsGui import taskButton, waitFor
+
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Delete part dialog")
+        Gui.Control.showTaskView()
+        self.assertTrue(waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok) is not None))
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
         self.assertIsNotNone(self.doc.getObject("Body"))
         self.assertIsNotNone(self.doc.getObject("Pad"))
         deletes = [o for o in self.body.Group if o.TypeId == "PartDesign::DeletePart"]

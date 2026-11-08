@@ -206,6 +206,8 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskSplitParameters.h
     TaskDerived.cpp
     TaskDerived.h
+    TaskDeletePart.cpp
+    TaskDeletePart.h
     TaskPrimitiveParameters.h
     TaskPrimitiveParameters.cpp
     TaskPipeParameters.ui
