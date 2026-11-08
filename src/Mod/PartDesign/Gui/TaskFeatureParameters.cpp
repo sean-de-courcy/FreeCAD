@@ -50,6 +50,7 @@
 
 #include <App/AutoTransaction.h>
 #include <App/DocumentObserver.h>
+#include <App/PropertyStandard.h>
 #include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
@@ -2379,6 +2380,18 @@ bool sameValue(const App::Property& now, const App::Property& then)
         nowLink->getLinks(nowObjs, /*all=*/true, &nowSubs, /*newStyle=*/false);
         thenLink->getLinks(thenObjs, /*all=*/true, &thenSubs, /*newStyle=*/false);
         return nowObjs == thenObjs && nowSubs == thenSubs;
+    }
+    // A Length's or an Angle's Copy() is a plain PropertyFloat (an IntegerConstraint's a plain
+    // PropertyInteger), which isSame never takes for the same: compared by value
+    auto nowFloat = dynamic_cast<const App::PropertyFloat*>(&now);
+    auto thenFloat = dynamic_cast<const App::PropertyFloat*>(&then);
+    if (nowFloat && thenFloat) {
+        return nowFloat->getValue() == thenFloat->getValue();
+    }
+    auto nowInteger = dynamic_cast<const App::PropertyInteger*>(&now);
+    auto thenInteger = dynamic_cast<const App::PropertyInteger*>(&then);
+    if (nowInteger && thenInteger) {
+        return nowInteger->getValue() == thenInteger->getValue();
     }
     return now.isSame(then);
 }
