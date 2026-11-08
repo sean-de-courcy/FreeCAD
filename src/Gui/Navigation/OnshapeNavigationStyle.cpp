@@ -22,6 +22,7 @@
  ***************************************************************************/
 
 // FreeCAD-CH (ops#640): Onshape's mouse: right-drag turns about the point under the cursor,
+// freely (a trackball) and Alt+right-drag keeps Z up (a turntable),
 // middle or Ctrl+right pans, the wheel zooms at the cursor, a double middle click fits the model,
 // Shift+right does nothing, and a right click (a jitter within the dead zone allowed) selects
 // the entity under the cursor before it opens the context menu, under the fork's keymap.
@@ -285,7 +286,18 @@ SbBool OnshapeNavigationStyle::processSoEvent(const SoEvent* const ev)
         }
         else if (curmode == NavigationStyle::DRAGGING) {
             this->addToLog(event->getPosition(), event->getTime());
-            this->spin(posn);
+            if (this->altdown) {
+                // Alt+right-drag is Onshape's constrained rotate: a horizontal drag turns about
+                // the world Z axis and a vertical one about the screen's horizontal, so Z stays
+                // vertical on screen. The plain drag keeps the orbit style (free by default).
+                const OrbitStyle style = getOrbitStyle();
+                setOrbitStyle(FreeTurntable);
+                this->spin(posn);
+                setOrbitStyle(style);
+            }
+            else {
+                this->spin(posn);
+            }
             moveCursorPosition();
             processed = true;
         }
