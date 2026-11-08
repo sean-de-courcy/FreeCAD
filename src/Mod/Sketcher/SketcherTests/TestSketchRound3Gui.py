@@ -496,8 +496,10 @@ class TestSketchOnshapeShapesGui(Round3GuiCase):
     def check_one_sided_offset(self, y=3.0):
         lines = self.offset_lines()
         self.assertEqual(len(lines), 1, self.describe())
-        # the distance is the click's (to the pixel); both ends at it: one-sided and parallel
-        self.assertAlmostEqual(lines[0].StartPoint.y, lines[0].EndPoint.y, places=6)
+        # the distance is the click's (to the pixel); both ends at it: one-sided and parallel.
+        # To 1e-5 mm: an end can carry the click's float32 coordinate (3.0125 came back as
+        # 3.0125010013580322), so 6 places failed one test or another by the click's pixel
+        self.assertAlmostEqual(lines[0].StartPoint.y, lines[0].EndPoint.y, places=5)
         self.assertAlmostEqual(lines[0].StartPoint.y, y, delta=self.click_tolerance())
 
     def test_offset_of_a_selected_open_line_is_one_sided(self):
