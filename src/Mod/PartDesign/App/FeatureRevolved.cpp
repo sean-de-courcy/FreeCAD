@@ -102,6 +102,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -132,6 +133,78 @@ const char* Revolved::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", 
 
 namespace
 {
+
+// The point a side up to a vertex goes to (FreeCAD-CH ops#640 rank 21), in global coordinates:
+// the linked vertex (of a part, a sketch or a datum point), or a coordinate system's point. As
+// FeatureExtrude.cpp's, in a revolution's words
+gp_Pnt revolveUpToVertexPoint(const App::PropertyLinkSub& link)
+{
+    App::DocumentObject* ref = link.getValue();
+    if (!ref) {
+        throw Base::ValueError(QT_TRANSLATE_NOOP("Exception", "Select the vertex to revolve up to"));
+    }
+    const auto& subs = link.getSubValues();
+    if (subs.size() > 1) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "The vertex link names several elements; select one vertex")
+        );
+    }
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    App::DocumentObject* element = ref;
+    if (!sub.empty() && ref->getDocument()) {
+        if (auto named = ref->getDocument()->getObject(sub.c_str())) {
+            element = named;
+        }
+    }
+    if (auto point = freecad_cast<App::Point*>(element)) {
+        return Base::convertTo<gp_Pnt>(point->getBasePoint());
+    }
+    const TopoShape shape = Part::Feature::getTopoShape(
+        ref,
+        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform,
+        sub.empty() ? nullptr : sub.c_str()
+    );
+    if (shape.isNull() || shape.hasSubShape(TopAbs_EDGE)
+        || shape.countSubShapes(TopAbs_VERTEX) != 1) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "Up to vertex: the reference isn't a vertex or a point")
+        );
+    }
+    return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
+}
+
+// The angle, in (0, 2 pi), by which `from` turns about `axis` (its sense) until it reaches the
+// half-plane through the axis and `target` (ops#640 rank 21)
+double angleToVertex(const gp_Ax1& axis, const gp_Pnt& from, const gp_Pnt& target)
+{
+    const gp_Vec along(axis.Direction());
+    auto radial = [&](const gp_Pnt& point) {
+        const gp_Vec offset(axis.Location(), point);
+        return offset - along * offset.Dot(along);
+    };
+    const gp_Vec start = radial(from);
+    const gp_Vec end = radial(target);
+    if (end.Magnitude() < Precision::Confusion()) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "The vertex lies on the axis: select a vertex off the axis")
+        );
+    }
+    if (start.Magnitude() < Precision::Confusion()) {
+        throw Base::ValueError("Up to vertex: the profile's centre lies on the axis");
+    }
+    double angle = std::atan2(start.Crossed(end).Dot(along), start.Dot(end));
+    if (angle < 0.0) {
+        angle += 2.0 * std::numbers::pi;
+    }
+    if (angle < Precision::Angular() || angle > 2.0 * std::numbers::pi - Precision::Angular()) {
+        throw Base::ValueError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "The vertex lies in the profile's half-plane: there is nothing to revolve"
+        ));
+    }
+    return angle;
+}
 
 // Whether a side revolves up to a face (up to the first, last or a chosen face): the sweep up to
 // the face (sweepUpToFace())
@@ -2554,13 +2627,52 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // base and the chosen faces, made together, so that the tool's face parts are still the
     // base's for the fuse or cut with it (ops#347). The sweep adds curves on surfaces to the
     // profile's edges too, which are the sketch's stored shape's: the profile is copied as well
+    // Up to part (ops#640 rank 21, Onshape's): the side stops at the first face of the part it
+    // reaches, as Up to next does at the solid before's. The part is UpToFace's object, whole
+    TopoShape partShape1 = makeTopoShape(false);
+    TopoShape partShape2 = makeTopoShape(false);
+    auto partShape = [&](const App::PropertyLinkSub& link) {
+        App::DocumentObject* part = link.getValue();
+        if (!part) {
+            throw Base::ValueError(QT_TRANSLATE_NOOP("Exception", "Select the part to revolve up to"));
+        }
+        TopoShape shape = Part::Feature::getTopoShape(
+            part,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+        );
+        if (shape.isNull() || !shape.hasSubShape(TopAbs_FACE)) {
+            throw Base::ValueError(
+                QT_TRANSLATE_NOOP("Exception", "Up to part: the part has no faces to revolve up to")
+            );
+        }
+        shape.move(invObjLoc);
+        return shape;
+    };
+    const bool part1 = std::strcmp(Type.getValueAsString(), "UpToShape") == 0;
+    const bool part2 = twoSides && std::strcmp(Type2.getValueAsString(), "UpToShape") == 0;
+    if (part1) {
+        partShape1 = partShape(UpToFace);
+        method = RevolMethod::ToFirst;
+    }
+    if (part2) {
+        partShape2 = partShape(UpToFace2);
+        method2 = RevolMethod::ToFirst;
+    }
+    // Each side's solid to go up to the first face of: its part, or the solid before
+    const TopoShape& upToBase1 = part1 ? partShape1 : base;
+    const TopoShape& upToBase2 = part2 ? partShape2 : base;
+
+    // (a part to go up to too: its stored shape, ops#640 rank 21)
     if (revolvesUpToFace(method, revolMode) || (twoSides && revolvesUpToFace(method2, revolMode))) {
-        const std::vector<TopoShape> copies =
-            Part::FilletFallback::makerInputs({base, chosenFace, chosenFace2, sketchshape});
+        const std::vector<TopoShape> copies = Part::FilletFallback::makerInputs(
+            {base, chosenFace, chosenFace2, sketchshape, partShape1, partShape2}
+        );
         base = copies[0];
         chosenFace = copies[1];
         chosenFace2 = copies[2];
         sketchshape = copies[3];
+        partShape1 = copies[4];
+        partShape2 = copies[5];
     }
 
     const gp_Ax1 revolutionAxis(pnt, dir);
@@ -2584,6 +2696,36 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Revolve axis intersects the sketch")
             );
+        }
+    }
+
+    // Up to vertex (FreeCAD-CH ops#640 rank 21, Onshape's): the side ends where the profile
+    // reaches the half-plane through the axis and the vertex, so it is the side by that angle,
+    // in the side's own sense (Flip turns the other way round). Symmetric turns each half the
+    // nearer way, both halves to the vertex's angle. The profile's first face's centre stands
+    // for the profile. Converted here, the side is then built as by an angle
+    const bool vertex1 = std::strcmp(Type.getValueAsString(), "UpToVertex") == 0;
+    const bool vertex2 = twoSides && std::strcmp(Type2.getValueAsString(), "UpToVertex") == 0;
+    if (vertex1 || vertex2) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(sketchshape.getSubShape(TopAbs_FACE, 1), props);
+        const gp_Pnt profileCentre = props.CentreOfMass();
+        auto vertexAngle = [&](const App::PropertyLinkSub& link, const gp_Dir& sense) {
+            gp_Pnt target = revolveUpToVertexPoint(link);
+            target.Transform(invObjLoc.Transformation());
+            return angleToVertex(gp_Ax1(pnt, sense), profileCentre, target);
+        };
+        if (vertex1) {
+            angle = vertexAngle(UpToFace, dir);
+            if (sideType == "Symmetric") {
+                // the total; each half the nearer way round
+                angle = 2.0 * std::min(angle, 2.0 * std::numbers::pi - angle);
+            }
+            method = RevolMethod::Angle;
+        }
+        if (vertex2) {
+            angle2 = vertexAngle(UpToFace2, dir.Reversed());
+            method2 = RevolMethod::Angle;
         }
     }
 
@@ -2681,7 +2823,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 angle,
                 chosenFace,
                 sketchshape.makeElementCopy(),
-                base,
+                upToBase1,
                 pnt,
                 dir,
                 revolMode,
@@ -2695,7 +2837,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 angle2,
                 chosenFace2,
                 secondSideProfile(),
-                base,
+                upToBase2,
                 pnt,
                 dir2,
                 revolMode
@@ -2734,7 +2876,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             };
             for (std::size_t i = 0; i < faces.size(); ++i) {
                 TopoShape upToFace
-                    = getRevolutionUpToFace(method, chosenFace, base, faces[i], axis);
+                    = getRevolutionUpToFace(method, chosenFace, upToBase1, faces[i], axis);
                 TopoShape side = tryToRevolveToFace(upToFace, axis, faces[i].makeElementCopy());
                 if (side.isNull() || side.getShape().IsNull()) {
                     continue;
@@ -2761,7 +2903,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             angle,
             chosenFace,
             sketchshape,
-            base,
+            upToBase1,
             pnt,
             dir,
             revolMode
@@ -3385,11 +3527,15 @@ void Revolved::updateProperties()
     const std::string method = Type.getValueAsString();
     const std::string method2 = Type2.getValueAsString();
 
+    // UpToFace holds the face, the vertex or the part (ops#640 rank 21)
+    auto upToFaceRead = [](const std::string& type) {
+        return type == "UpToFace" || type == "UpToVertex" || type == "UpToShape";
+    };
     bool isAngleEnabled = method == "Angle";
-    bool isUpToFaceEnabled = method == "UpToFace";
+    bool isUpToFaceEnabled = upToFaceRead(method);
     bool isType2Enabled = sideType == "Two sides";
     bool isAngle2Enabled = isType2Enabled && (method2 == "Angle" || isLegacyTwoAngles(method2));
-    bool isUpToFace2Enabled = isType2Enabled && method2 == "UpToFace";
+    bool isUpToFace2Enabled = isType2Enabled && upToFaceRead(method2);
 
     if (isLegacyTwoAngles(method)) {
         isAngleEnabled = true;

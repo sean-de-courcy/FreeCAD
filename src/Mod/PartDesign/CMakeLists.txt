@@ -99,6 +99,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestBooleanRules.py
     PartDesignTests/TestSplitParts.py
     PartDesignTests/TestRegenerate.py
+    PartDesignTests/TestOnshapeEndTypes.py
 )
 
 if(BUILD_GUI)

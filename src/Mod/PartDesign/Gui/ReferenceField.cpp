@@ -1479,7 +1479,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             return false;
         }
         const char* type = role.starts_with("UpToFace") ? "UpToFace" : "UpToShape";
-        return is(second ? "Type2" : "Type", type);
+        const char* sideType = second ? "Type2" : "Type";
+        // Up to vertex holds its vertex in UpToFace (ops#640 rank 22), a revolution's or a
+        // groove's Up to part its part (rank 21)
+        return is(sideType, type)
+            || (role.starts_with("UpToFace")
+                && (is(sideType, "UpToVertex") || (revolved && is(sideType, "UpToShape"))));
     };
     // What the feature links in those roles
     auto roleLinks = [&inUse](App::DocumentObject* obj) {

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """The Extrude dialog's fields in Onshape's order and words (FreeCAD-CH ops#640, rank 22): the end
-types Blind, Up to next, Up to face, Up to part, Through all (Up to last, which Onshape hasn't,
+types Blind, Up to next, Up to face, Up to part, Up to vertex, Through all, a Pocket's too (Up to
+last, which Onshape hasn't,
 hidden unless a feature ends so); Symmetric and Second end position as checkboxes for the Sides
 box; Starting offset as a checkbox for the Start box; a Draft checkbox for the taper; no Recompute
 on change. The saved enums are unchanged. Designed geometry: a 10 x 10 square on XY padded 10.
@@ -10,6 +11,7 @@ from PySide import QtCore, QtWidgets
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import Part
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestCrossBodyGui import ResultBoxGuiCase
@@ -42,18 +44,110 @@ class TestExtrudeFieldsGui(ResultBoxGuiCase):
         return found[0]
 
     def testEndTypesInOnshapesWords(self):
-        """Blind, Up to next, Up to face, Up to part, Through all shown; Up to last listed (the
-        indices are the saved Type's) but hidden and unpickable on a Blind pad."""
+        """Blind, Up to next, Up to face, Up to part, Up to vertex, Through all shown; Up to last
+        listed but hidden and unpickable on a Blind pad."""
         self.plate()
         combo = self.box(QtWidgets.QComboBox, "changeMode")
         self.assertEqual(
             [combo.itemText(i) for i in range(combo.count())],
-            ["Blind", "Up to last", "Up to next", "Up to face", "Up to part", "Through all"],
+            [
+                "Blind",
+                "Up to last",
+                "Up to next",
+                "Up to face",
+                "Up to part",
+                "Up to vertex",
+                "Through all",
+            ],
         )
         self.assertEqual(combo.currentText(), "Blind")
         self.assertTrue(combo.view().isRowHidden(1))
         self.assertFalse(combo.model().item(1).isEnabled())
         self.assertFalse(combo.view().isRowHidden(5))
+        self.assertFalse(combo.view().isRowHidden(6))
+
+    def choose(self, combo, text):
+        index = combo.findText(text)
+        self.assertGreaterEqual(index, 0, text)
+        combo.setCurrentIndex(index)
+        pump(0.3)
+
+    def testUpToVertexPicksAVertex(self):
+        """Up to vertex (ops#640 rank 22): its field shows and arms, the face's stays hidden; a pick
+        of a marker sketch's vertex at z 25 pads the 10 x 10 square up to z 25 (2500); OK keeps
+        Type UpToVertex and the vertex. Blind again hides the field."""
+        self.body = models.body(self.doc)
+        marker = models.sketch(
+            self.doc, "Marker", [Part.LineSegment(App.Vector(20, 0, 0), App.Vector(21, 2, 0))],
+            self.body, z=25,
+        )
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        pad = models.pad(self.body, profile, 10)
+        self.doc.recompute()
+        [vertex] = [
+            "Vertex%d" % (i + 1)
+            for i, v in enumerate(marker.Shape.Vertexes)
+            if v.Point.distanceToPoint(App.Vector(20, 0, 25)) < 1e-7
+        ]
+        pad.ViewObject.doubleClicked()
+        self.waitForPanel()
+        combo = self.box(QtWidgets.QComboBox, "changeMode")
+        self.choose(combo, "Up to vertex")
+        self.assertEqual(pad.Type, "UpToVertex")
+        field = self.box(QtWidgets.QWidget, "fieldUpToVertex")
+        self.assertTrue(waitFor(lambda: field.isVisible() and bool(field.property("armed"))))
+        self.assertIsNone(self.visible(QtWidgets.QWidget, "fieldUpToFace"))
+        Gui.Selection.addSelection(self.doc.Name, marker.Name, vertex)
+        pump(0.3)
+        self.assertIsNotNone(pad.UpToFace)
+        self.assertEqual(pad.UpToFace[0].Name, marker.Name)
+        self.assertEqual([s for s in pad.UpToFace[1] if s], [vertex])
+        self.assertAlmostEqual(pad.Shape.Volume, 2500, places=6)
+        self.close(ok=True)
+        self.assertEqual(pad.Type, "UpToVertex")
+        self.assertEqual(pad.UpToFace[0].Name, marker.Name)
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 2500, places=6)
+        pad.ViewObject.doubleClicked()
+        self.waitForPanel()
+        combo = self.box(QtWidgets.QComboBox, "changeMode")
+        self.assertEqual(combo.currentText(), "Up to vertex")
+        self.choose(combo, "Blind")
+        self.assertIsNone(self.visible(QtWidgets.QWidget, "fieldUpToVertex"))
+        self.close(ok=True)
+        self.assertEqual(pad.Type, "Length")
+        self.assertIsNone(pad.UpToFace)
+
+    def testPocketEndTypesInOnshapesOrder(self):
+        """A Pocket (the older class, rank 22 item 3): Blind, Up to next, Up to face, Up to part, Up
+        to vertex, Through all, Up to last hidden; Through all chosen writes ThroughAll."""
+        self.body = models.body(self.doc)
+        block = models.sketch(self.doc, "Block", models.rectangle(-5, -5, 15, 15), self.body)
+        models.pad(self.body, block, 30, "BlockPad")
+        top = models.sketch(self.doc, "Top", models.rectangle(0, 0, 10, 10), self.body, z=30)
+        pocket = models.pocket(self.body, top, 5)
+        self.doc.recompute()
+        pocket.ViewObject.doubleClicked()
+        self.waitForPanel()
+        combo = self.box(QtWidgets.QComboBox, "changeMode")
+        self.assertEqual(
+            [combo.itemText(i) for i in range(combo.count())],
+            [
+                "Blind",
+                "Up to next",
+                "Up to face",
+                "Up to part",
+                "Up to vertex",
+                "Through all",
+                "Up to last",
+            ],
+        )
+        self.assertTrue(combo.view().isRowHidden(6))
+        self.assertEqual(combo.currentText(), "Blind")
+        self.choose(combo, "Through all")
+        self.assertEqual(pocket.Type, "ThroughAll")
+        self.close(ok=True)
+        self.assertEqual(pocket.Type, "ThroughAll")
 
     def testAnOlderUpToLastStaysShown(self):
         """A pad that ends Up to last (an older file) shows it, and keeps it on OK. On the block:

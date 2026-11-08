@@ -153,6 +153,7 @@ from PartDesignTests.TestFilletDeleteKeepsTheSketch import (  # FreeCAD-CH, ops#
 )
 from PartDesignTests.TestBooleanRules import TestBooleanRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
+from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-CH, ops#640
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

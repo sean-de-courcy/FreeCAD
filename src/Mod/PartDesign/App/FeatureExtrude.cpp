@@ -848,7 +848,8 @@ void FeatureExtrude::updateProperties()
             taperVisible = true;
             localAlongSketchNormal = true;
         }
-        else if (method == "UpToFace") {
+        else if (method == "UpToFace" || method == "UpToVertex") {
+            // up to a vertex: UpToFace holds the vertex (ops#640 rank 22)
             upToFaceEnabled = true;
             localOffset = true;
         }
@@ -1015,6 +1016,46 @@ bool cutMissed(const TopoShape& tool, const TopoShape& base, const TopoShape& re
     const double removed = baseVolume - volumeOf(result);
     const double tolerance = 1e-6 * std::fabs(volumeOf(tool)) + 1e-9 * std::fabs(baseVolume);
     return std::fabs(removed) <= tolerance;
+}
+
+// The point an end up to a vertex goes to (FreeCAD-CH ops#640 rank 22), in global coordinates:
+// the linked vertex (of a part, a sketch or a datum point), or a coordinate system's point
+gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
+{
+    App::DocumentObject* ref = link.getValue();
+    if (!ref) {
+        throw Base::ValueError(QT_TRANSLATE_NOOP("Exception", "Select the vertex to extrude up to"));
+    }
+    const auto& subs = link.getSubValues();
+    if (subs.size() > 1) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "The vertex link names several elements; select one vertex")
+        );
+    }
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    // A coordinate system's or an origin's point, linked through the system (the field's pick)
+    App::DocumentObject* element = ref;
+    if (!sub.empty() && ref->getDocument()) {
+        if (auto named = ref->getDocument()->getObject(sub.c_str())) {
+            element = named;
+        }
+    }
+    if (auto point = freecad_cast<App::Point*>(element)) {
+        return Base::convertTo<gp_Pnt>(point->getBasePoint());
+    }
+    const TopoShape shape = Part::Feature::getTopoShape(
+        ref,
+        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform,
+        sub.empty() ? nullptr : sub.c_str()
+    );
+    if (shape.isNull() || shape.hasSubShape(TopAbs_EDGE)
+        || shape.countSubShapes(TopAbs_VERTEX) != 1) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "Up to vertex: the reference isn't a vertex or a point")
+        );
+    }
+    return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
 }
 }  // namespace
 
@@ -1205,6 +1246,78 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         double taper1 = TaperAngle.getValue();
         double offset1 = Offset.getValue();
 
+        // Side 2 made blind from its vertex: untapered, its offset in its length
+        bool upToVertex2 = false;
+        // Up to vertex (FreeCAD-CH ops#640 rank 22, Onshape's): the end lies on the plane
+        // through the vertex, parallel to the profile plane, plus the offset. A straight
+        // extrusion of a planar profile ends on such a plane whatever its direction, so the side
+        // is the blind one whose length reaches that plane, untapered as a side up to a face is.
+        // One side goes towards the vertex; a side of two, or of a symmetric pair, that can't
+        // reach it fails, as a side up to a face behind it does
+        if (method == "UpToVertex" || (Sidemethod == "Two sides" && method2 == "UpToVertex")) {
+            gp_Dir profileNormal(SketchVector.x, SketchVector.y, SketchVector.z);
+            profileNormal.Transform(invTrsf);
+            const TopoShape profileVertex = startSketch.getSubTopoShape(TopAbs_VERTEX, 1);
+            const gp_Pnt onProfile = BRep_Tool::Pnt(TopoDS::Vertex(profileVertex.getShape()));
+            // The signed length along `along` from the profile to the vertex's plane
+            auto lengthTo = [&](const App::PropertyLinkSub& link, const gp_Dir& along, double offset) {
+                gp_Pnt target = upToVertexPoint(link);
+                target.Transform(invTrsf);
+                const double cosine = gp_Vec(along).Dot(gp_Vec(profileNormal));
+                const double length = gp_Vec(onProfile, target).Dot(gp_Vec(profileNormal)) / cosine;
+                if (std::fabs(length) < Precision::Confusion()) {
+                    throw Base::ValueError(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "The vertex lies on the profile plane: there is nothing to extrude"
+                    ));
+                }
+                return length + (length < 0.0 ? -offset : offset);
+            };
+            auto behindSide = [](int side) {
+                return new App::DocumentObjectExecReturn(
+                    side == 1 ? QT_TRANSLATE_NOOP(
+                                    "Exception",
+                                    "Side 1 can't reach its vertex: the vertex lies behind side 1."
+                                )
+                              : QT_TRANSLATE_NOOP(
+                                    "Exception",
+                                    "Side 2 can't reach its vertex: the vertex lies behind side 2."
+                                )
+                );
+            };
+            if (method == "UpToVertex") {
+                const double length = lengthTo(UpToFace, dir, offset1);
+                if (Sidemethod == "One side") {
+                    if (length < 0.0) {
+                        dir.Reverse();
+                    }
+                    L = std::fabs(length);
+                }
+                else if (Sidemethod == "Symmetric") {
+                    // each half reaches the vertex's plane (Length is the total)
+                    L = 2.0 * std::fabs(length);
+                }
+                else if (length < 0.0) {
+                    return behindSide(1);
+                }
+                else {
+                    L = length;
+                }
+                method = "Length";
+                taper1 = 0.0;
+                offset1 = 0.0;
+            }
+            if (Sidemethod == "Two sides" && method2 == "UpToVertex") {
+                const double length = lengthTo(UpToFace2, dir.Reversed(), Offset2.getValue());
+                if (length < 0.0) {
+                    return behindSide(2);
+                }
+                L2 = length;
+                method2 = "Length";
+                upToVertex2 = true;
+            }
+        }
+
         // A second side is built from the same sketch edges as the first, so the two sides'
         // names would differ only by the duplicate counter, which follows the order of the XOR
         // below (ops#255). In V2 the second side's prism is marked as a copy, as a Revolution's
@@ -1348,8 +1461,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             }
         }
         else if (Sidemethod == "Two sides") {
-            double taper2 = TaperAngle2.getValue();
-            double offset2 = Offset2.getValue();
+            double taper2 = upToVertex2 ? 0.0 : TaperAngle2.getValue();
+            double offset2 = upToVertex2 ? 0.0 : Offset2.getValue();
             gp_Dir dir2 = dir;
             dir2.Reverse();
             bool noTaper = std::fabs(taper1) < Precision::Angular()

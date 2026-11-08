@@ -116,7 +116,8 @@ class TestRevolveFieldsGui(RevolveCase):
 
     def testUntickingFullRevolveGivesBlind30(self):
         """Full revolve unticked: Blind, 30 deg, one side (210 pi / 12 of the tube, its inside
-        half added to the box), the end types Blind / Up to next / Up to face, Symmetric and
+        half added to the box), the end types Blind / Up to next / Up to face / Up to part / Up to
+        vertex, Symmetric and
         Second end position shown. Ticked again: 360, the tube (4000 + 105 pi)."""
         rev = self.model()
         self.edit(rev)
@@ -128,7 +129,9 @@ class TestRevolveFieldsGui(RevolveCase):
         self.assertAlmostEqual(rev.AddSubShape.Volume, 210 * math.pi / 12, places=4)
         mode = widget(QtWidgets.QComboBox, "changeMode")
         self.assertIsNotNone(mode, "no end type")
-        self.assertEqual(visibleItems(mode), ["Blind", "Up to next", "Up to face"])
+        self.assertEqual(
+            visibleItems(mode), ["Blind", "Up to next", "Up to face", "Up to part", "Up to vertex"]
+        )
         self.assertEqual(mode.currentText(), "Blind")
         self.assertIsNotNone(widget(QtWidgets.QCheckBox, "checkBoxSymmetric"))
         self.assertIsNotNone(widget(QtWidgets.QCheckBox, "checkBoxSecondEnd"))
@@ -185,7 +188,60 @@ class TestRevolveFieldsGui(RevolveCase):
         pump(0.3)
         mode = widget(QtWidgets.QComboBox, "changeMode")
         self.assertEqual(mode.itemText(1), "Through all")
-        self.assertEqual(visibleItems(mode), ["Blind", "Up to next", "Up to face"])
+        self.assertEqual(
+            visibleItems(mode), ["Blind", "Up to next", "Up to face", "Up to part", "Up to vertex"]
+        )
+
+    def testUpToVertexAndUpToPart(self):
+        """Up to vertex (ops#640 rank 21): its field shows and arms; a pick of the box's corner
+        (10, 10, 5) revolves the profile 45 degrees about +Z (315 the other way round), 105 per
+        radian; OK keeps it. Up to part shows and arms its own field, the vertex's hidden, and
+        writes UpToShape, dropping the vertex."""
+        rev = self.model()
+        self.edit(rev)
+        self.full().click()
+        pump(0.3)
+        mode = widget(QtWidgets.QComboBox, "changeMode")
+        mode.setCurrentIndex(mode.findText("Up to vertex"))
+        pump(0.3)
+        self.assertEqual(rev.Type, "UpToVertex")
+        field = widget(QtWidgets.QWidget, "fieldUpToVertex")
+        self.assertIsNotNone(field, "no vertex field")
+        self.assertTrue(waitFor(lambda: bool(field.property("armed"))), "not armed")
+        self.assertIsNone(widget(QtWidgets.QWidget, "fieldUpToFace"))
+        base = self.doc.getObject("Base")
+        [corner] = [
+            "Vertex%d" % (i + 1)
+            for i, v in enumerate(base.Shape.Vertexes)
+            if v.Point.distanceToPoint(V(10, 10, 5)) < 1e-7
+        ]
+        Gui.Selection.addSelection(self.doc.Name, base.Name, corner)
+        pump(0.3)
+        self.assertEqual(rev.UpToFace[0].Name, base.Name)
+        self.assertEqual([s for s in rev.UpToFace[1] if s], [corner])
+        degrees = 315 if rev.Reversed else 45
+        self.assertAlmostEqual(
+            rev.AddSubShape.Volume, math.radians(degrees) * 105, places=3
+        )
+        mode.setCurrentIndex(mode.findText("Up to part"))
+        pump(0.3)
+        self.assertEqual(rev.Type, "UpToShape")
+        self.assertIsNone(rev.UpToFace)
+        part = widget(QtWidgets.QWidget, "fieldUpToPart")
+        self.assertIsNotNone(part, "no part field")
+        self.assertTrue(waitFor(lambda: bool(part.property("armed"))), "not armed")
+        self.assertIsNone(widget(QtWidgets.QWidget, "fieldUpToVertex"))
+        mode.setCurrentIndex(mode.findText("Up to vertex"))
+        pump(0.3)
+        Gui.Selection.addSelection(self.doc.Name, base.Name, corner)
+        pump(0.3)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(rev.Type, "UpToVertex")
+        self.assertTrue(rev.isValid(), rev.getStatusString())
+        self.assertAlmostEqual(
+            rev.AddSubShape.Volume, math.radians(degrees) * 105, places=3
+        )
 
     def testStudioPlanesStayAfterTheDialog(self):
         """Rank 52: a part studio made by Std_New shows its planes; a Revolve dialog opened and

@@ -45,9 +45,10 @@ using namespace PartDesign;
 // One end-type list for Pad and Pocket (FreeCAD-CH ops#640: an Extrude switches between Add,
 // Remove and Intersect): the other class's name is appended at the END, never inserted, since
 // Type and Type2 are restored by index. Pad has ThroughAll at 6, Pocket UpToLast at 6.
+// UpToVertex (7, ops#640 rank 22): Onshape's Up to vertex, the vertex in UpToFace; appended too.
 const char* Pad::TypeEnums[]
     = {"Length", "UpToLast", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape", "ThroughAll",
-       nullptr};
+       "UpToVertex", nullptr};
 
 PROPERTY_SOURCE(PartDesign::Pad, PartDesign::FeatureExtrude)
 

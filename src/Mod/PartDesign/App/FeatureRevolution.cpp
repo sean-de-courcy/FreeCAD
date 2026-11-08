@@ -36,8 +36,11 @@ namespace PartDesign
 
 // Note, TwoAngles has been deprecated by the side definition. We keep it hidden so old
 // files can restore and migrate to SideType="Two sides".
+// Onshape's Up to vertex and Up to part (FreeCAD-CH ops#640 rank 21) are appended, never
+// inserted, since Type and Type2 are restored by index: the vertex or the part in UpToFace.
 const char* Revolution::TypeEnums[]
-    = {"Angle", "UpToLast", "UpToFirst", "UpToFace", "?TwoAngles", nullptr};
+    = {"Angle", "UpToLast", "UpToFirst", "UpToFace", "?TwoAngles", "UpToVertex", "UpToShape",
+       nullptr};
 
 const char* Revolution::FuseOrderEnums[] = {"BaseFirst", "FeatureFirst", nullptr};
 
