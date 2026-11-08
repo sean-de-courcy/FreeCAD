@@ -64,7 +64,9 @@ from PartDesignTests.TestStudioPicksGui import TestStudioPicksGui  # FreeCAD-CH,
 from PartDesignTests.TestStudioPicksGui import TestStudioDressUpsGui  # FreeCAD-CH, ops#640 rank 14
 from PartDesignTests.TestOpeningScopeGui import TestOpeningScopeGui  # FreeCAD-CH, ops#640 A-1
 from PartDesignTests.TestExtrudeFieldsGui import TestExtrudeFieldsGui  # FreeCAD-CH, ops#640 rank 22
-from PartDesignTests.TestCrossBodyGui import TestOperationRowGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestCrossBodyGui import (  # FreeCAD-CH, ops#640
+    TestOperationRowGui as TestCrossBodyOperationRowGui,  # TestRevolveFieldsGui has one too
+)
 from PartDesignTests.TestCrossBodyGui import TestOperationRefusalGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestCrossBodyGui import TestOkInErrorGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestCrossBodyGui import TestRevolveAxisGui  # FreeCAD-CH, ops#643
