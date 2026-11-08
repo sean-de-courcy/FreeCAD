@@ -678,7 +678,13 @@ std::vector<Retrace> retraceRead(App::DocumentObject* reader,
     auto stale = [](const App::DocumentObject* obj) {
         return obj->isTouched() || obj->mustExecute() == 1 || obj->isError();
     };
-    if (!readBody || stale(reader) || stale(read)) {
+    // At a delete (body given) read has just left its Body's Group, which changes the frame of
+    // reader's link to it: mustExecute() reads that as a moved container (AttachExtension's link
+    // frames, ops#318) and called every reader stale. The reader's own state is what counts there
+    auto readerStale = [&](const App::DocumentObject* obj) {
+        return body ? obj->isTouched() || obj->isError() : stale(obj);
+    };
+    if (!readBody || readerStale(reader) || stale(read)) {
         return {};
     }
     // The element, read from read's shape, comes from: a member made before reader, where it lies
