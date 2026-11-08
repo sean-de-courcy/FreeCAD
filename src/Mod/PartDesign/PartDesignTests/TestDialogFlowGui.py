@@ -49,11 +49,13 @@ class DialogFlowCase(ResultBoxGuiCase):
 
     def newPad(self, *selection):
         """PartDesign_Pad with the Enclosure active and `selection` selected; the new Pad, its
-        dialog open."""
-        before = {o.Name for o in self.doc.Objects}
+        dialog open. (By object, not name: a dropped pad's name is free again.)"""
+        before = list(self.doc.Objects)
         self.runCommand("PartDesign_Pad", *selection)
         [made] = [
-            o for o in self.doc.Objects if o.Name not in before and o.TypeId == "PartDesign::Pad"
+            o
+            for o in self.doc.Objects
+            if o.TypeId == "PartDesign::Pad" and not any(o is old for old in before)
         ]
         return made
 
@@ -257,20 +259,24 @@ class TestAnotherToolGui(DialogFlowCase):
     def pads(self):
         return [o for o in self.doc.Objects if o.TypeId == "PartDesign::Pad"]
 
+    # The second Pad runs with nothing selected: a selection made while the first dialog is open
+    # goes into its armed Profile field, as Onshape's does (the first dialog then has input)
+
     def testAnEmptyDialogIsDropped(self):
-        """A new pad with nothing given, then Pad on the lid sketch: the empty pad is gone, with
-        no message, and the new pad's dialog is open on the lid sketch."""
+        """A new pad with nothing given, then Pad again: the empty pad is gone, with no message,
+        and the new pad's dialog is open."""
         self.enclosure()
+        before = self.pads()
         empty = self.newPad()
-        name = empty.Name
-        lid = self.newPad(self.lidSk)
-        self.assertIsNone(self.doc.getObject(name), "the empty dialog's pad stayed")
-        self.assertEqual([p.Name for p in self.pads()], [lid.Name])
+        second = self.newPad()
+        # by object: the new pad may take the dropped one's name
+        self.assertFalse(any(o is empty for o in self.doc.Objects), "the empty dialog's pad stayed")
+        self.assertEqual([p.Name for p in self.pads()], [p.Name for p in before] + [second.Name])
         self.assertTrue(Gui.Control.activeDialog())
 
     def testADialogWithInputIsCommittedInError(self):
-        """A new pad with no profile but its length typed (20), then Pad on the lid sketch: the
-        first pad is committed, in error (no profile), 20 long; the new pad's dialog is open."""
+        """A new pad with no profile but its length typed (20), then Pad again: the first pad is
+        committed, in error (no profile), 20 long; the new pad's dialog is open."""
         self.enclosure()
         first = self.newPad()
         length = self.visible(QtWidgets.QWidget, "lengthEdit")
@@ -278,10 +284,11 @@ class TestAnotherToolGui(DialogFlowCase):
         length.setProperty("rawValue", 20.0)
         pump(0.3)
         self.assertAlmostEqual(first.Length.Value, 20.0, places=6)
-        lid = self.newPad(self.lidSk)
+        second = self.newPad()
         self.assertIsNotNone(self.doc.getObject(first.Name), "the dialog with input was dropped")
         self.assertFalse(first.isValid())
-        self.assertNotEqual(first.Name, lid.Name)
+        self.assertAlmostEqual(first.Length.Value, 20.0, places=6)
+        self.assertNotEqual(first.Name, second.Name)
         self.assertTrue(Gui.Control.activeDialog())
 
     def testAPreselectedProfileIsInput(self):
