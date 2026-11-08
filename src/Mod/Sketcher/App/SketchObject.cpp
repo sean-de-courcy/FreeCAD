@@ -339,6 +339,9 @@ short SketchObject::mustExecute() const
 
 App::DocumentObjectExecReturn* SketchObject::execute()
 {
+    // The sketch's normal before the attachment places it again (FreeCAD-CH ops#640 rank 7)
+    const Base::Vector3d normalBefore =
+        Placement.getValue().getRotation().multVec(Base::Vector3d(0, 0, 1));
     try {
         App::DocumentObjectExecReturn* rtn = Part2DObject::execute();// to positionBySupport
         if (rtn != App::DocumentObject::StdReturn)
@@ -347,6 +350,43 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     }
     catch (const Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
+    }
+
+    // FreeCAD-CH (ops#640 rank 7, hands-on B3-2): the attachment turned the sketch over, as a flip
+    // of the extrude whose end cap it sits on does (the normal reversed, X kept, Y reversed). The
+    // model's geometry is then mirrored in the sketch's coordinates, so a side recorded against a
+    // projection of it (a distance or a tangency to a projected edge) is mirrored too: geometry
+    // dimensioned to the face's edges keeps its place on the part, as in Onshape, while geometry
+    // placed by the sketch's own coordinates mirrors with the frame. Before
+    // rebuildExternalGeometry(): a projected line that turned around reads its side back from the
+    // geometry there, as before.
+    if (normalBefore * Placement.getValue().getRotation().multVec(Base::Vector3d(0, 0, 1)) < 0.0) {
+        std::vector<Constraint*> constraints;
+        bool flipped = false;
+        for (const Constraint* constr : Constraints.getValues()) {
+            Constraint* copy = constr->clone();
+            const bool ccw = copy->Orientation.testFlag(ConstraintOrientations::CounterClockwise);
+            const bool cw = copy->Orientation.testFlag(ConstraintOrientations::Clockwise);
+            bool external = false;
+            for (std::size_t i = 0; copy->hasElement(i); ++i) {
+                const int geoId = copy->getElement(i).GeoId;
+                external = external || (geoId <= GeoEnum::RefExt && geoId != GeoEnum::GeoUndef);
+            }
+            if ((copy->Type == Distance || copy->Type == Tangent) && ccw != cw && external) {
+                copy->Orientation.setFlag(ConstraintOrientations::CounterClockwise, cw);
+                copy->Orientation.setFlag(ConstraintOrientations::Clockwise, ccw);
+                flipped = true;
+            }
+            constraints.push_back(copy);
+        }
+        if (flipped) {
+            Constraints.setValues(std::move(constraints));
+        }
+        else {
+            for (Constraint* copy : constraints) {
+                delete copy;
+            }
+        }
     }
 
     // setup and diagnose the sketch
