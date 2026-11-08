@@ -39,6 +39,7 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Document.h>
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 #include <Gui/Inventor/So3DAnnotation.h>
@@ -46,6 +47,7 @@
 #include <Gui/Utilities.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/Gui/ViewProvider.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
@@ -471,6 +473,27 @@ bool ViewProvider::onDelete(const std::vector<std::string>&)
     std::vector<App::DocumentObject*> keepHidden;
     if (!isShow() || previousShown) {
         keepHidden = profileObjects(feature);
+    }
+    // Under the Onshape keymap the deleted feature's sketches reappear, as Onshape's (hands-on:
+    // a deleted pattern original's sketch reappears), the same as after an undo of the
+    // feature's creation (ops#640 round 6, blind test F39). One that another feature still uses
+    // stays hidden; a binder too (Onshape has none)
+    if (Gui::ForkKeymap::isOnshape()) {
+        std::erase_if(keepHidden, [feature](App::DocumentObject* profile) {
+            if (!profile || !profile->isDerivedFrom<Part::Part2DObject>()) {
+                return false;
+            }
+            for (App::DocumentObject* user : profile->getInList()) {
+                if (user == feature || !user->isDerivedFrom<PartDesign::Feature>()) {
+                    continue;
+                }
+                const std::vector<App::DocumentObject*> used = profileObjects(user);
+                if (std::ranges::find(used, profile) != used.end()) {
+                    return false;
+                }
+            }
+            return true;
+        });
     }
 
     // find surrounding features in the tree

@@ -27,10 +27,13 @@
   font and background.
 - Deleting the visible last feature of a Body shows the feature before it (upstream issue 30499),
   also when the deleted feature has a nested sketch. This didn't fail on integration in any
-  variant tried (ops#149): the tests pin it. The left-behind sketch stays hidden (PLAN decision
-  29; upstream's makeChildrenVisible showed it), so only the previous feature shows, as when a
-  feature without a sketch is deleted. The same for a profile that isn't a sketch (a binder) and
-  for a hidden feature. With no previous feature (the Body's only feature), the sketch is shown.
+  variant tried (ops#149): the tests pin it. Under FreeCAD's keymap the left-behind sketch stays
+  hidden (PLAN decision 29; upstream's makeChildrenVisible showed it), so only the previous
+  feature shows, as when a feature without a sketch is deleted; the same for a hidden feature.
+  Under the Onshape keymap (the default) it reappears, as Onshape's, the same as after an undo of
+  the feature's creation; the delete's undo hides it again (ops#640 round 6, blind test F39). A
+  profile that isn't a sketch (a binder) stays hidden under both. With no previous feature (the
+  Body's only feature), the sketch is shown.
 
 Designed model, built by the test: a Body with a 20 x 10 rectangle padded 10, and a second
 rectangle (5..15 x 2..8) on the pad's top plane (z = 10) padded 5. The second sketch is the
@@ -48,6 +51,7 @@ from PySide import QtCore, QtGui, QtWidgets
 from PartDesignTests.TestExpressionFieldsGui import pump, rectangleSketch, taskButton, waitFor
 
 EDIT_COLOR_DEFAULT = 11272191  # TreeEditColor's default, 0x00ABFFFF
+KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap (ForkKeymap)
 
 
 def editColor():
@@ -295,7 +299,45 @@ class TestTreeItemsGui(unittest.TestCase):
         self.assertShown(self.pad)
         sketch = self.doc.getObject("Sketch001")
         self.assertIn(sketch, self.body.Group, "the left-behind sketch stays in the Body")
-        self.assertFalse(sketch.Visibility, "the left-behind sketch is shown")
+        self.assertTrue(sketch.Visibility, "the left-behind sketch doesn't reappear (Onshape)")
+
+    def testUndoOfTheDeleteHidesTheSketchAgain(self):
+        """F39: deleted, the pad's sketch reappears; one undo brings the pad back, shown, with
+        its sketch hidden as before the delete; redo shows the sketch again."""
+        self.doc.UndoMode = 1
+        pad2 = self.addSecondPad()
+        sketch = self.doc.getObject("Sketch001")
+        self.assertFalse(sketch.Visibility)
+        self.delete(pad2)
+        self.assertTrue(sketch.Visibility, "the left-behind sketch doesn't reappear")
+        self.doc.undo()
+        pump()
+        pad2 = self.doc.getObject("Pad001")
+        self.assertIsNotNone(pad2, "the undo didn't bring the pad back")
+        self.assertShown(pad2)
+        self.assertFalse(sketch.Visibility, "the sketch stays shown after the delete's undo")
+        self.doc.redo()
+        pump()
+        self.assertIsNone(self.doc.getObject("Pad001"))
+        self.assertTrue(sketch.Visibility, "the sketch isn't shown after the redo")
+
+    def testFreeCADKeymapKeepsTheLeftBehindSketchHidden(self):
+        """Under FreeCAD's keymap, PLAN decision 29: the deleted pad's sketch stays hidden."""
+        group = App.ParamGet(KEYMAP)
+        saved = group.GetString("Keymap") if "Keymap" in group.GetStrings() else None
+        group.SetString("Keymap", "FreeCAD")
+        pump(0.1)
+        try:
+            pad2 = self.addSecondPad()
+            self.delete(pad2)
+        finally:
+            if saved is None:
+                group.RemString("Keymap")
+            else:
+                group.SetString("Keymap", saved)
+            pump(0.1)
+        self.assertShown(self.pad)
+        self.assertFalse(self.doc.getObject("Sketch001").Visibility, "the left-behind sketch is shown")
 
     def testDeletingLastFeatureWithoutSketchShowsPrevious(self):
         """The reference: a feature with no nested sketch."""
@@ -319,9 +361,10 @@ class TestTreeItemsGui(unittest.TestCase):
         self.assertNotIn("Pad", [o.Name for o in self.doc.Objects])
         self.assertShown(self.sketch)
 
-    def testDeletingAHiddenFeatureLeavesItsSketchHidden(self):
-        """A hidden feature's deletion changes nothing on screen: its sketch stays hidden and the
-        shown feature stays shown."""
+    def testDeletingAHiddenFeatureShowsItsSketch(self):
+        """A hidden feature's deletion: the shown feature stays shown and, under the Onshape
+        keymap, its sketch reappears (Onshape has no hidden features: its sketch reappears
+        whichever part is shown; round 6, F39)."""
         pad2 = self.addSecondPad()
         pad2.ViewObject.Visibility = False
         self.pad.ViewObject.Visibility = True
@@ -329,7 +372,7 @@ class TestTreeItemsGui(unittest.TestCase):
         self.delete(pad2)
         self.assertNotIn("Pad001", [o.Name for o in self.doc.Objects])
         sketch = self.doc.getObject("Sketch001")
-        self.assertFalse(sketch.Visibility, "the hidden feature's sketch is shown")
+        self.assertTrue(sketch.Visibility, "the hidden feature's sketch doesn't reappear")
         self.assertShown(self.pad)
 
     def testDeletingAFeatureOnABinderKeepsTheBinderHidden(self):
