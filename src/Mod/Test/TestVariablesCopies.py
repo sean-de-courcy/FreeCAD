@@ -1704,13 +1704,52 @@ class TestVariablesClashes(FreeCADSource):
         self.assertAlmostEqual(self.user("#Width").Len.Value, 100, places=9)
 
     def test_detach_keeps_choice(self):
-        """Detach clears the source's bindings but not the choice of what `#Width` means."""
+        """Detach clears the source's bindings but not the record of what `#Width` meant; the
+        detached set is a local one, though (review R6-6): with the document's own Width as well,
+        `#Width` is ambiguous among two local sets, which no choice settles, and new expressions
+        write the full path."""
         self.local(Width=7)
         copy = copies.import_studios(self.doc, [self.export("Studio A", STUDIO)],
                                      clashes=copies.IMPORT).copies[0]
+        self.assertEqual(expression(self.user("#Width"), "Len"), "Studio_A.Width")
+        self.doc.removeObject("Box")
         copies.detach(copy)
         self.assertEqual(copy.Bindings, {"#Width": "Studio_A.Width"})
+        self.assertEqual(copies.local_holders(self.doc, "Width"),
+                         ["Variables.Width", "Studio_A.Width"])
+        self.assertAmbiguous()
+
+    def test_import_warns_on_a_detached_copys_name(self):
+        """Review R6-6: a detached copy's variables are local ones. Importing a file that defines
+        Width, which a detached copy (Studio A, detached) defines: the plan lists the clash with
+        the detached set as the local one; "Use import" makes `#Width` the new copy's (5 mm),
+        "Use local" the detached set's (10 mm); an import with nothing chosen leaves it
+        ambiguous, as beside any local set."""
+        old = copies.import_studios(self.doc, [self.export("Studio A", STUDIO)]).copies[0]
+        copies.detach(old)
+        self.assertEqual(copies.copies_defining(self.doc, "Width"), [])
+        path = self.export("Studio B", [entry(variable("LENGTH", "Width", "5 mm"))])
+        plan = copies.plan_import(self.doc, [path])
+        self.assertTrue(plan.ok, plan.report())
+        self.assertEqual(plan.clashes, {"Width": ["Studio_A.Width"]})
+        self.assertEqual(plan.clash_paths, {"Width": ["Studio_B.Width"]})
+        self.assertTrue(any("#Width stays ambiguous" in w for w in plan.warnings), plan.warnings)
+        new = copies.import_studios(self.doc, [path], clashes=copies.IMPORT).copies[0]
+        self.assertEqual(new.Bindings, {"#Width": "Studio_B.Width"})
+        self.assertAlmostEqual(self.user("#Width").Len.Value, 5, places=9)
+        self.assertEqual(expression(self.user("#Width"), "Len"), "Studio_B.Width")
+        self.doc.removeObject("Box")
+        self.doc.removeObject(new.Name)
+        self.doc.recompute()
+        new = copies.import_studios(self.doc, [path], clashes=copies.LOCAL).copies[0]
+        self.assertEqual(new.Bindings, {"#Width": "Studio_A.Width"})
         self.assertEqual(expression(self.user("#Width"), "Len"), "Studio_A.Width")
+        self.assertAlmostEqual(self.user("#Width").Len.Value, 10, places=9)
+        self.doc.removeObject("Box")
+        self.doc.removeObject(new.Name)
+        self.doc.recompute()
+        copies.import_studios(self.doc, [path])
+        self.assertAmbiguous()
 
 
 class TestVariablesPaths(unittest.TestCase):

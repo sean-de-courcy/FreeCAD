@@ -577,9 +577,10 @@ bool askNameClash(
     std::vector<const App::VarSetCopy*> found;
     for (const auto& ref : App::VariableLookup::find(doc, name)) {
         auto copy = freecad_cast<const App::VarSetCopy*>(ref.holder);
-        if (!copy) {
-            // Another local set (or a sheet alias) has the name: `#name` is ambiguous among the
-            // document's own, and no choice of a copy's can settle that.
+        if (!copy || !copy->isAttached()) {
+            // Another local set (or a sheet alias, or a detached copy: review R6-6) has the name:
+            // `#name` is ambiguous among the document's own, and no choice of a copy's can settle
+            // that.
             return true;
         }
         if (copy != target) {
