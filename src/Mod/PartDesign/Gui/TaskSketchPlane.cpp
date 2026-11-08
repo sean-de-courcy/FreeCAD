@@ -40,6 +40,7 @@
 #include <Gui/Control.h>
 #include <Gui/Document.h>
 #include <Gui/ForkKeymap.h>
+#include <Gui/MainWindow.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderCoordinateSystem.h>
 #include <Mod/Part/App/AttachExtension.h>
@@ -272,8 +273,18 @@ bool TaskSketchPlane::needsPlane() const
 
 void TaskSketchPlane::updatePickBanner()
 {
+    const bool waiting = needsPlane();
     if (pickBanner) {
-        pickBanner->setVisible(needsPlane());
+        pickBanner->setVisible(waiting);
+    }
+    // Onshape greys the sketch toolbar until the plane is picked (hands-on C-1)
+    auto dlg = SketcherGui::TaskDlgEditSketch::ofSketchView(sketchViewProvider());
+    if (dlg && dlg->areToolsBlocked() != waiting) {
+        dlg->setToolsBlocked(waiting);
+        // queued: this runs from a document observer, mid-property-change
+        if (Gui::MainWindow* mainWindow = Gui::getMainWindow()) {
+            mainWindow->updateActions(/*delay*/ true);
+        }
     }
 }
 

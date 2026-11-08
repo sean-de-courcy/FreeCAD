@@ -26,6 +26,7 @@
 
 #include <fastsignals/signal.h>
 
+#include <App/DocumentObserver.h>
 #include <Gui/TaskView/TaskDialog.h>
 
 #include "TaskSketcherConstraints.h"
@@ -92,6 +93,35 @@ public:
     /// True once a module has added one (PartDesignGui, when it is loaded).
     static bool hasContentFactories();
 
+    /** FreeCAD-CH (ops#640, hands-on R1): the sketch was made for this dialog (New Sketch, with
+     * Onshape's keymap). Cancel removes it, as Onshape's cancel of a new sketch does, in its own
+     * undo step (Ctrl+Z brings it back, as Onshape's Restore); so does OK while it still has no
+     * plane and nothing in it.
+     */
+    void setNewSketch(bool on)
+    {
+        newSketch = on;
+    }
+    bool isNewSketch() const
+    {
+        return newSketch;
+    }
+    /** FreeCAD-CH (ops#640, hands-on C-1): the sketch tools are greyed (isCommandActive) while the
+     * sketch waits for its plane (PartDesign's Sketch plane box sets it).
+     */
+    void setToolsBlocked(bool on)
+    {
+        toolsBlocked = on;
+    }
+    bool areToolsBlocked() const
+    {
+        return toolsBlocked;
+    }
+    /// The sketch dialog open now on \a view, or null.
+    static TaskDlgEditSketch* ofSketchView(const ViewProviderSketch* view);
+    /// Removes a cancelled new sketch, in its own undo step ("Cancel New Sketch").
+    static void removeNewSketch(const App::DocumentObjectT& sketch);
+
 protected:
     void slotUndoDocument(const App::Document&);
     void slotRedoDocument(const App::Document&);
@@ -111,6 +141,8 @@ protected:
 private:
     Connection connectionToolSettings;
     bool isEscapeAction {false};
+    bool newSketch {false};
+    bool toolsBlocked {false};
 };
 
 

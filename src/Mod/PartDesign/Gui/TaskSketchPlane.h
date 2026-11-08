@@ -58,9 +58,10 @@ class ReferenceField;
  * - The field disarms after a pick, with Esc in it, and when a sketch tool starts; the sketch's
  *   own model picks come back then.
  * - A new sketch with no plane yet (New Sketch with nothing selected, hands-on C-1): the field is
- *   armed, a blue "Select a sketch plane" line shows, and a sketch tool started before a pick is
- *   cancelled, as Onshape greys its sketch tools until a plane is picked. The Body's planes are
- *   shown for the pick, and hidden again when the dialog closes if they weren't shown before.
+ *   armed, a blue "Select a sketch plane" line shows, and the sketch tools are greyed until a
+ *   pick, as Onshape's are (TaskDlgEditSketch::setToolsBlocked); a tool started anyway is
+ *   cancelled. The Body's planes are shown for the pick, and hidden again when the dialog closes
+ *   if they weren't shown before.
  */
 class TaskSketchPlane: public Gui::TaskView::TaskBox, public App::DocumentObserver
 {

@@ -470,6 +470,98 @@ class TestSketchPlaneGui(unittest.TestCase):
         self.assertEqual(seen, [], "Attach Sketch opened a list")
         self.assertTrue(field.property("armed"))
 
+    # -- round 2: a new sketch's Cancel and its greyed tools ---------------------------------------
+
+    def newSketchOn(self, plane=None):
+        """PartDesign_NewSketch with `plane` selected (or nothing); returns the new sketch, in edit."""
+        before = {o.Name for o in self.doc.Objects}
+        Gui.Selection.clearSelection()
+        if plane is not None:
+            self.pick(plane)
+        seen = []
+        QtCore.QTimer.singleShot(2000, lambda: closeModals(seen))
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(1.0)
+        self.assertEqual(seen, [], "a modal dialog opened")
+        sketches = [
+            o
+            for o in self.doc.Objects
+            if o.Name not in before and o.isDerivedFrom("Sketcher::SketchObject")
+        ]
+        self.assertEqual(len(sketches), 1, sketches)
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "the new sketch isn't in edit")
+        return sketches[0]
+
+    def cancelDialog(self):
+        dialog = Gui.Control.activeTaskDialog()
+        self.assertIsNotNone(dialog, "no sketch dialog")
+        dialog.reject()
+        pump(0.5)
+
+    def testCancelRemovesANewSketch(self):
+        """Onshape's cancel of a new sketch removes it (hands-on R1): New Sketch on the selected XZ
+        plane, a line drawn, Cancel: the sketch is gone, in its own undo step (Ctrl+Z brings it
+        back, as Onshape's "Restore")."""
+        import Part
+
+        sketch = self.newSketchOn(self.xz)
+        name = sketch.Name
+        sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))
+        pump(0.2)
+        self.cancelDialog()
+        self.assertFalse(Gui.ActiveDocument.getInEdit())
+        self.assertIsNone(self.doc.getObject(name), "the cancelled new sketch stayed")
+        self.assertNotIn(name, [o.Name for o in self.body.Group])
+        self.doc.undo()
+        pump(0.3)
+        self.assertIsNotNone(self.doc.getObject(name), "Ctrl+Z didn't bring the sketch back")
+
+    def testCancelOfANewSketchWithNothingDrawnRemovesIt(self):
+        """New Sketch with nothing selected, Cancel before a pick: no sketch is left."""
+        sketch = self.newSketchOn()
+        name = sketch.Name
+        self.cancelDialog()
+        self.assertIsNone(self.doc.getObject(name), "the cancelled new sketch stayed")
+
+    def testOkOnANewSketchWithNoPlaneRemovesIt(self):
+        """New Sketch with nothing selected, OK before a pick: nothing could be drawn, so the
+        sketch goes as a cancelled one does."""
+        sketch = self.newSketchOn()
+        name = sketch.Name
+        dialog = Gui.Control.activeTaskDialog()
+        dialog.accept()
+        pump(0.5)
+        self.assertIsNone(self.doc.getObject(name), "the empty sketch with no plane stayed")
+
+    def testCancelKeepsAnExistingSketch(self):
+        """Cancel on a sketch that was there before the edit keeps it (and its circle)."""
+        sketch = self.circleSketch()
+        self.openSketch(sketch)
+        self.cancelDialog()
+        self.assertIsNotNone(self.doc.getObject(sketch.Name))
+        self.assertEqual(len(sketch.Geometry), 1)
+
+    def testOkKeepsANewSketchOnAPlane(self):
+        """OK on a new sketch on the XZ plane keeps it, even empty (only Cancel removes it)."""
+        sketch = self.newSketchOn(self.xz)
+        name = sketch.Name
+        Gui.Control.activeTaskDialog().accept()
+        pump(0.5)
+        self.assertIsNotNone(self.doc.getObject(name))
+
+    def testTheSketchToolsAreGreyedUntilAPlane(self):
+        """Onshape greys the sketch toolbar until the plane is picked (hands-on C-1): with a new
+        sketch with no plane, Line and Circle are inactive; after the XZ pick they are active."""
+        self.newSketchOn()
+        line = Gui.Command.get("Sketcher_CreateLine")
+        circle = Gui.Command.get("Sketcher_CreateCircle")
+        self.assertFalse(line.isActive(), "Line is active before a plane is picked")
+        self.assertFalse(circle.isActive(), "Circle is active before a plane is picked")
+        self.pick(self.xz)
+        pump(0.3)
+        self.assertTrue(line.isActive(), "Line stayed greyed after the pick")
+        self.assertTrue(circle.isActive(), "Circle stayed greyed after the pick")
+
 
 if __name__ == "__main__":
     unittest.main()
