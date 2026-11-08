@@ -187,6 +187,7 @@ TaskHelixParameters::TaskHelixParameters(PartDesignGui::ViewProviderHelix* Helix
             fillAxisCombo(true);
             recomputeFeature();
             updateUI();
+            TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
         };
         auto field = new ReferenceField(getObject(), "Profile", profile, write, proxy);
         *self = field;

@@ -886,10 +886,68 @@ struct OpeningMove
     PartDesign::Body* into = nullptr;
 };
 
+// FreeCAD-CH (ops#640, round 3 of A-1): a new Remove (a Pocket, a Groove, a subtractive Loft,
+// Sweep or Helix) opens with its own part as its scope when its tool overlaps it, else in the one
+// other part its tool overlaps (moved there). Overlapping no part it stays in its own, a healthy
+// no-op with round 2's 'do not intersect' note, as Onshape's Remove that misses (hands-on R7b,
+// Batch 4 A-2'a); overlapping two other parts or more it stays too (not seen in Onshape: the cheap
+// call, no new Body made for it, the scope picked by hand)
+OpeningMove removeOpeningMove(PartDesign::FeatureAddSub* feature, PartDesign::Body* body)
+{
+    OpeningMove move;
+    // A Remove as the command made it: not a sibling, none made yet, not moved, no scope chosen;
+    // a tool not made (no profile or axis yet) waits
+    if (feature->getBooleanOperation() != PartDesign::FeatureAddSub::BooleanOperation::Subtraction
+        || feature->MergeWithAll.getValue() || feature->EmptyMergeScope.getValue()
+        || TaskResultParameters::primaryOf(feature) || !feature->getSiblings().empty()
+        || isMoved(feature) || feature->AddSubShape.getShape().isNull()) {
+        return move;
+    }
+    TaskResultParameters::TouchCache cache;
+    const bool first = isFirstSolid(feature);
+    bool own = false;
+    if (!first) {
+        auto before = freecad_cast<Part::Feature*>(body->getPrevSolidFeature(feature));
+        if (!before) {
+            return move;  // a BaseFeature alone: can't tell, so it stays
+        }
+        Part::TopoShape tool = feature->AddSubShape.getShape();
+        Part::TopoShape shape = before->Shape.getShape();
+        tool.setPlacement(feature->globalPlacement());
+        shape.setPlacement(before->globalPlacement());
+        own = !shape.isNull()
+            && PartDesign::FeatureAddSub::shapesTouch(tool.getShape(), shape.getShape());
+    }
+    if (own) {
+        return move;  // its own part the scope
+    }
+    PartDesign::Body* other = nullptr;
+    int touched = 0;
+    for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+        auto part = static_cast<PartDesign::Body*>(obj);
+        if (part != body && Part::BodyBase::areStudioSiblings(body, part)
+            && !PartDesign::Boolean::mergeOf(part) && toolTouches(feature, part, cache)) {
+            other = part;
+            ++touched;
+        }
+    }
+    // Out of its part, which it doesn't overlap, into the one other part it overlaps
+    if (touched != 1) {
+        return move;
+    }
+    move.toNewPart = !first;
+    move.into = other;
+    return move;
+}
+
 OpeningMove openingMove(PartDesign::FeatureAddSub* feature)
 {
     OpeningMove move;
     PartDesign::Body* body = feature ? PartDesign::Body::findBodyOf(feature) : nullptr;
+    if (body && hasOperationRow(feature)
+        && feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive) {
+        return removeOpeningMove(feature, body);
+    }
     // An Add as the command made it: not a cut, not a sibling, not moved, no scope chosen; a
     // feature in error (no profile, a failed shape) stays where it is
     if (!body || !hasOperationRow(feature)
@@ -1007,9 +1065,14 @@ void TaskResultParameters::profileTaken(App::DocumentObject* feature)
         return;
     }
     App::DocumentObjectT target(feature);
-    // The first profile decides it, once: the field's next pick is the user's
-    forgetOpeningAwaited(target);
     auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(feature);
+    // A tool not made yet (a Revolve still waiting for its axis, a Sweep for its path, a profile
+    // that failed) decides nothing: the pick that makes it does (FreeCAD-CH ops#640)
+    if (!addSub || addSub->AddSubShape.getShape().isNull()) {
+        return;
+    }
+    // The first tool decides it, once: the field's next pick is the user's
+    forgetOpeningAwaited(target);
     const OpeningMove move = openingMove(addSub);
     if (!move.toNewPart && !move.into) {
         return;

@@ -372,6 +372,7 @@ void TaskPipeParameters::createFields()
         }
         shown.show(obj);
         recomputeFeature();
+        TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
     };
     profileField = new ReferenceField(getObject(), "Profile", profile, writeProfile, proxy);
     *profileSelf = profileField;
@@ -389,6 +390,7 @@ void TaskPipeParameters::createFields()
         }
         shown.show(obj);
         recomputeFeature();
+        TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
     };
     spineField = new ReferenceField(getObject(), "Spine", spine, writeSpine, proxy);
     *spineSelf = spineField;
@@ -1099,6 +1101,7 @@ void TaskPipeScaling::createSectionsField()
             shown.show(section.first);
         }
         recomputeFeature();
+        TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
     };
     sectionsField = new ReferenceField(
         getObject(),

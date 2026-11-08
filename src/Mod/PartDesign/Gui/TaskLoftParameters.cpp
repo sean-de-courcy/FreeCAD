@@ -176,6 +176,7 @@ void TaskLoftParameters::createFields()
         }
         shown.show(obj);
         recomputeFeature();
+        TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
     };
     profileField = new ReferenceField(getObject(), "Profile", profile, writeProfile, proxy);
     *profileSelf = profileField;
@@ -211,6 +212,7 @@ void TaskLoftParameters::createFields()
         }
         recomputeFeature();
         updateUI();
+        TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
     };
     sectionsField = new ReferenceField(
         getObject(),

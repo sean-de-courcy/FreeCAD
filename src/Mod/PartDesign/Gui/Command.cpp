@@ -1286,25 +1286,9 @@ void prepareProfileBased(
     };
 
 
-    // in case of subtractive types, check that there is something to subtract from
-    if ((which.find("Subtractive") != std::string::npos) || (which.compare("Groove") == 0)
-        || (which.compare("Pocket") == 0)) {
-
-        if (!pcActiveBody->isSolid()) {
-            QMessageBox msgBox(Gui::getMainWindow());
-            msgBox.setText(
-                QObject::tr("Cannot use this command as there is no solid to subtract from.")
-            );
-            msgBox.setInformativeText(
-                QObject::tr("Ensure that the body contains a feature before attempting a subtractive command.")
-            );
-            msgBox.setStandardButtons(QMessageBox::Ok);
-            msgBox.setDefaultButton(QMessageBox::Ok);
-            msgBox.exec();
-            return;
-        }
-    }
-
+    // FreeCAD-CH (ops#640, round 3): a subtractive feature with nothing to subtract from is made
+    // and fails red, 'No merge scope selected', as Onshape's Remove with an empty scope, unless
+    // its tool overlaps a part it then opens in (openAsOnshape); there was a modal
 
     // if a profile is selected we can make our life easy and fast
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
@@ -1786,6 +1770,31 @@ static void finishWaitingForAxis(
     doc->setStatus(App::Document::IgnoreErrorOnRecompute, false);
 }
 
+// FreeCAD-CH (ops#640, round 3 of hands-on check A-1): a new Revolve, Loft, Sweep or Helix opens
+// as Onshape's, as an Extrude does: an Add with the one part its tool touches, else New; a Remove
+// in its own part, or in the one other part its tool overlaps instead. With no tool yet (no axis, no
+// path, no section) the pick that makes it decides (TaskResultParameters::profileTaken).
+//  recompute: the feature isn't computed with its last parameters yet
+static void openAsOnshape(App::DocumentObject* feature, bool recompute)
+{
+    auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(feature);
+    if (!addSub) {
+        return;
+    }
+    auto axis = dynamic_cast<App::PropertyLinkSub*>(feature->getPropertyByName("ReferenceAxis"));
+    const bool waitsForAxis = addSub->isDerivedFrom<PartDesign::Revolved>() && axis
+        && !axis->getValue();
+    if (recompute && !waitsForAxis) {
+        Gui::Command::updateActive();
+    }
+    if (!waitsForAxis && !addSub->AddSubShape.getShape().isNull()) {
+        PartDesignGui::TaskResultParameters::applyOpeningOperation(feature);
+    }
+    else {
+        PartDesignGui::TaskResultParameters::awaitOpeningOperation(feature);
+    }
+}
+
 void prepareProfileBased(Gui::Command* cmd, const std::string& which, double length)
 {
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
@@ -1815,7 +1824,8 @@ void prepareProfileBased(Gui::Command* cmd, const std::string& which, double len
 
         // FreeCAD-CH (ops#640, hands-on check A-1): a new Extrude opens as Onshape's, Add with
         // the one part its tool touches, else New. With no profile yet, its first one decides
-        if (which == "Pad") {
+        // A Remove (Pocket) opens with the part its tool overlaps (round 3)
+        if (which == "Pad" || which == "Pocket") {
             if (profile) {
                 PartDesignGui::TaskResultParameters::applyOpeningOperation(Feat);
             }
@@ -1977,6 +1987,8 @@ void CmdPartDesignRevolution::activated(int iMsg)
         // ops#643, the user's report 12); the pick turns it the way the axis suggests
         // (TaskRevolutionParameters::writeAxis)
         FCMD_OBJ_CMD(Feat, "Angle = 360.0");
+        // where it opens: now with a kept axis, else at the axis pick (ops#640, round 3)
+        openAsOnshape(Feat, /*recompute = */ true);
 
         finishWaitingForAxis(cmd, sketch, Feat);
     };
@@ -2026,6 +2038,8 @@ void CmdPartDesignGroove::activated(int iMsg)
 
         // No axis yet, as for a Revolution (FreeCAD-CH ops#643)
         FCMD_OBJ_CMD(Feat, "Angle = 360.0");
+        // where it opens: now with a kept axis, else at the axis pick (ops#640, round 3)
+        openAsOnshape(Feat, /*recompute = */ true);
 
         finishWaitingForAxis(cmd, sketch, Feat);
     };
@@ -2076,6 +2090,7 @@ void CmdPartDesignAdditivePipe::activated(int iMsg)
 
         // specific parameters for pipe
         Gui::Command::updateActive();
+        openAsOnshape(Feat, /*recompute = */ false);  // ops#640, round 3
 
         finishProfileBased(cmd, sketch, Feat);
     };
@@ -2127,6 +2142,7 @@ void CmdPartDesignSubtractivePipe::activated(int iMsg)
 
         // specific parameters for pipe
         Gui::Command::updateActive();
+        openAsOnshape(Feat, /*recompute = */ false);  // ops#640, round 3
 
         finishProfileBased(cmd, sketch, Feat);
     };
@@ -2177,6 +2193,7 @@ void CmdPartDesignAdditiveLoft::activated(int iMsg)
 
         // specific parameters for pipe
         Gui::Command::updateActive();
+        openAsOnshape(Feat, /*recompute = */ false);  // ops#640, round 3
 
         finishProfileBased(cmd, sketch, Feat);
     };
@@ -2226,6 +2243,7 @@ void CmdPartDesignSubtractiveLoft::activated(int iMsg)
 
         // specific parameters for pipe
         Gui::Command::updateActive();
+        openAsOnshape(Feat, /*recompute = */ false);  // ops#640, round 3
 
         finishProfileBased(cmd, sketch, Feat);
     };
@@ -2300,6 +2318,7 @@ void CmdPartDesignAdditiveHelix::activated(int iMsg)
                 "ReferenceAxis = (" << getObjectCmd(pcActiveBody->getOrigin()->getY()) << ",[''])"
             );
         }
+        openAsOnshape(Feat, /*recompute = */ true);  // ops#640, round 3
 
         finishProfileBased(cmd, sketch, Feat);
 
@@ -2381,6 +2400,7 @@ void CmdPartDesignSubtractiveHelix::activated(int iMsg)
                 "ReferenceAxis = (" << getObjectCmd(pcActiveBody->getOrigin()->getY()) << ",[''])"
             );
         }
+        openAsOnshape(Feat, /*recompute = */ true);  // ops#640, round 3
 
         finishProfileBased(cmd, sketch, Feat);
     };
