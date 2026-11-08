@@ -25,6 +25,7 @@
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <xercesc/util/XMLException.hpp>
 #include <xercesc/util/XMLString.hpp>
+#include <algorithm>
 #include <sstream>
 #include <QApplication>
 #include <QByteArray>
@@ -32,6 +33,7 @@
 #include <QKeySequence>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QWidget>
 
 #include <boost/algorithm/string/replace.hpp>
 
@@ -518,6 +520,20 @@ bool Command::acceptOpenDialog(App::Document* locked) const
         return true;
     }
     if (Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog(locked)) {
+        // FreeCAD-CH (ops#640, review check-r3 (3)): a field showing an unresolved #name has
+        // disabled the dialog's OK (TaskView.cpp, hands-on F10), so the next tool doesn't accept
+        // it either: the command is refused with its message, the dialog stays as it is
+        for (const QWidget* content : dialog->getDialogContent()) {
+            if (!content) {
+                continue;
+            }
+            const QList<QWidget*> fields = content->findChildren<QWidget*>();
+            if (std::ranges::any_of(fields, [](const QWidget* field) {
+                    return field->property("unresolvedVariable").toBool();
+                })) {
+                return false;
+            }
+        }
         // FreeCAD-CH (ops#640 rank 24, hands-on F2): Onshape's next tool commits a dialog with
         // any input, even in error, and drops an empty new one silently. A dialog that can tell
         // (PartDesign's TaskDlgFeatureParameters::hasInput, invoked by name: no PartDesign header

@@ -306,6 +306,17 @@ class TestSketchConflictRefusedGui(Round3GuiCase):
         for length in self.lengths():
             self.assertAlmostEqual(length, 10.0, places=6)
 
+    def test_redo_does_not_bring_a_refused_constraint_back(self):
+        """Review check-r3 (1): the refusal undid the command and left it on the Redo stack, so
+        Ctrl+Y put the conflict back. As in Onshape, a refused constraint is no step at all."""
+        self.constrain("Sketcher_ConstrainPerpendicular", "Edge1", "Edge2")
+        self.assertEqual(self.doc.RedoCount, 0, self.doc.RedoNames)
+        FreeCADGui.runCommand("Std_Redo")
+        self.flush_gui(300)
+        self.assertEqual(
+            [c.Type for c in self.sketch.Constraints], ["Horizontal", "Horizontal"], self.describe()
+        )
+
     def test_a_constraint_that_fits_is_kept(self):
         """Control: an Equal between the two lines holds without collapsing anything."""
         self.constrain("Sketcher_ConstrainEqual", "Edge1", "Edge2")

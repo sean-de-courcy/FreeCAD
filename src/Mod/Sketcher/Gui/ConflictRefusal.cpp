@@ -32,6 +32,7 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/Transactions.h>
 #include <Base/Exception.h>
 #include <Gui/Application.h>
 #include <Gui/Document.h>
@@ -143,6 +144,14 @@ void refuse(App::Document* document, const std::string& sketchName, int tid, int
             document->openTransaction("Remove conflicting constraint");
             sketch->delConstraint(index);
             document->commitTransaction();
+        }
+        else {
+            // the undo left the refused command on the Redo stack (Ctrl+Y brought the conflict
+            // back): an empty transaction opened at once clears it, and its abort leaves no step
+            if (document->openTransaction("Refuse conflicting constraint") != 0) {
+                App::Transaction::openPendingTransaction(*document);
+                document->abortTransaction();
+            }
         }
     }
     else {

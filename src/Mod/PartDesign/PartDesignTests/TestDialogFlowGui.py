@@ -291,6 +291,30 @@ class TestAnotherToolGui(DialogFlowCase):
         self.assertNotEqual(first.Name, second.Name)
         self.assertTrue(Gui.Control.activeDialog())
 
+    def testADialogWithAnUnresolvedNameIsNotAccepted(self):
+        """Review check-r3 (3): a field showing an unresolved #name has disabled the dialog's OK
+        (hands-on F10), so Pad again doesn't accept the open dialog either: the Pad is refused
+        and the first pad's dialog stays open. (The field's mark is set as QuantitySpinBox sets
+        it; TestVariableFieldsGui types the name.)"""
+        self.enclosure()
+        first = self.newPad()
+        length = self.visible(QtWidgets.QWidget, "lengthEdit")
+        self.assertIsNotNone(length, "no length field")
+        length.setProperty("unresolvedVariable", True)
+        pump(0.3)
+        before = list(self.doc.Objects)
+        self.runCommand("PartDesign_Pad")
+        self.assertEqual(
+            [o.Name for o in self.doc.Objects if not any(o is old for old in before)],
+            [],
+            "Pad ran over a dialog whose OK an unresolved #name disabled",
+        )
+        self.assertIsNotNone(self.doc.getObject(first.Name))
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertTrue(self.doc.isStepLocked(), "the first pad's step ended")
+        length.setProperty("unresolvedVariable", False)
+        pump(0.3)
+
     def testAPreselectedProfileIsInput(self):
         """The lid pad's dialog (its profile preselected, nothing else given), then Pad with
         nothing selected: the lid pad is committed (the Enclosure 25000)."""
