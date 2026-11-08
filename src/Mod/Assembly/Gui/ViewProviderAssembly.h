@@ -300,6 +300,8 @@ private:
 
     // A QPointer: the task panel deletes its contextual panels when its dialog closes (ops#640)
     QPointer<TaskAssemblyMessages> taskSolver;
+    // The document taskSolver joined, set with it: removeContextualPanel()'s key (R7A-1)
+    App::Document* taskSolverDoc = nullptr;
 
     QMetaObject::Connection workbenchConnection;
     QMetaObject::Connection taskViewConnection;

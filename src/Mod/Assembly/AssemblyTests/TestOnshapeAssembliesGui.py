@@ -6,7 +6,10 @@
 #   was closed: each entry into edit (each switch to an assembly's tab) left a connection to the
 #   view provider behind, called at the next workbench switch after the provider was gone.
 # - A joint whose face is gone is red in the tree and named in the solver panel (gaps A10, A11).
-# - Insert lists this document's Part Studios first, each insertable whole (gap A16).
+# - Insert lists this document's Part Studios first, an App::Part studio insertable whole (gap
+#   A16); an old file's implicit studio inserts part by part (R7A-3); a studio that uses the
+#   assembly isn't offered (R7A-2).
+# - A deleted assembly's view provider outlives its object at the document's close (R7A-1).
 # Designed geometry: 10 mm cubes, a notched box, a cylinder; see each class.
 
 import math
@@ -174,6 +177,47 @@ class TestSeveralAssembliesGui(AssembliesGuiBase):
             Gui.activateWorkbench("TechDrawWorkbench")
             pump(0.2)
 
+    def testDeleteAssemblyThenCloseDocument(self):
+        """R7A-1: an assembly put in edit with a joint dialog open beside it (its "Solver
+        messages" panel joined), then deleted in one step as Std_Delete does (its joint group
+        first), then the document closed: the step's objects go before their view providers, and
+        the assembly's provider must not read its object then. FreeCAD keeps running: a new
+        document's 10 mm box after the workbench switches (designed: the two-cube assembly)."""
+        import CommandCreateJoint
+
+        doc = self.newDocument("DeleteAssemblyGui")
+        asm, _cubes, _joint = self.assembly(doc, "Assembly", "Assembly 1")
+        gdoc = Gui.getDocument(doc.Name)
+        Gui.activateWorkbench("AssemblyWorkbench")
+        gdoc.setEdit(asm.Name)
+        self.assertTrue(waitFor(lambda: gdoc.getInEdit() is not None))
+        CommandCreateJoint.activateJoint(0)
+        self.assertTrue(waitFor(lambda: JointObject.activeTask is not None), "no joint dialog")
+        pump(0.3)
+        JointObject.activeTask.reject()
+        if Gui.Control.activeDialog():
+            Gui.Control.closeDialog()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        gdoc.resetEdit()
+        pump(0.2)
+
+        doc.openTransaction("Delete")
+        joints = asm.getObject("Joints")
+        joints.removeObjectsFromDocument()
+        doc.removeObject(joints.Name)
+        doc.removeObject(asm.Name)
+        doc.commitTransaction()
+        pump(0.2)
+        self.assertIsNone(doc.getObject("Assembly"))
+        App.closeDocument(doc.Name)
+        pump(0.3)
+        self.cycleWorkbenches()
+        other = self.newDocument("DeleteAssemblyAfter")
+        other.addObject("Part::Box", "Box")
+        other.recompute()
+        self.cycleWorkbenches()
+        self.assertAlmostEqual(other.getObject("Box").Shape.Volume, 1000, 6)
+
 
 RED = (0xD0, 0x30, 0x30)  # the Features list's error colour
 
@@ -287,10 +331,11 @@ class TestJointErrorsGui(AssembliesGuiBase):
 
 
 class TestInsertStudioGui(AssembliesGuiBase):
-    """Insert lists this document's Part Studios first, by tab name, each insertable whole
-    (Onshape's "Insert entire Part Studio", gap A16). Designed model: Part Studio 1 (the top
-    level) two 10 mm boxes, the second Body at x = 20; Part Studio 2 (an App::Part) a cylinder
-    r 5, h 20; an assembly."""
+    """Insert lists this document's Part Studios first, by tab name, an App::Part studio
+    insertable whole (Onshape's "Insert entire Part Studio", gap A16); the implicit studio of an
+    old file is a heading, its parts inserted one by one (R7A-3). Designed model: Part Studio 1
+    (the top level) two 10 mm boxes, the second Body at x = 20; Part Studio 2 (an App::Part) a
+    cylinder r 5, h 20; an assembly."""
 
     def model(self):
         doc = self.newDocument("InsertStudioGui")
@@ -353,21 +398,18 @@ class TestInsertStudioGui(AssembliesGuiBase):
         links = [o for o in asm.Group if o.TypeId == "App::Link"]
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0].LinkedObject, studio)
-        # Part Studio 1 whole: a link per part, their poses kept, one rigid group
+        # Part Studio 1 is a heading (R7A-3): a click inserts nothing; its Body inserts alone
+        self.assertIsNone(rows[0].data(0, QtCore.Qt.UserRole))
         panel.onItemClicked(rows[0])
         pump(0.2)
+        self.assertEqual(len([o for o in asm.Group if o.TypeId == "App::Link"]), 1)
+        panel.onItemClicked(self.children(rows[0])[0])
+        pump(0.2)
         links = [o for o in asm.Group if o.TypeId == "App::Link"]
-        self.assertEqual(len(links), 3)
-        first, second = links[1], links[2]
-        self.assertEqual(
-            (first.LinkedObject.Name, second.LinkedObject.Name), ("Body", "Body001")
-        )
-        offset = second.Shape.BoundBox.XMin - first.Shape.BoundBox.XMin
-        self.assertAlmostEqual(offset, 20, 6)
+        self.assertEqual(len(links), 2)
+        self.assertEqual(links[1].LinkedObject.Name, "Body")
         groups = [o for o in asm.InListRecursive + asm.OutListRecursive if hasattr(o, "ObjectsToRigidGroup")]
-        self.assertEqual(len(groups), 1, groups)
-        self.assertEqual(groups[0].Label, "Part Studio 1")
-        self.assertEqual({o.Name for o in groups[0].ObjectsToRigidGroup}, {first.Name, second.Name})
+        self.assertEqual(groups, [], "no rigid group")
         self.assertTrue(panel.accept())
         Gui.Control.closeDialog()
         pump(0.2)
@@ -375,7 +417,47 @@ class TestInsertStudioGui(AssembliesGuiBase):
         self.cylinder.Radius = 6
         doc.recompute()
         self.assertAlmostEqual(links[0].Shape.Volume, math.pi * 36 * 20, 3)
-        self.assertAlmostEqual(first.Shape.Volume + second.Shape.Volume, 2000, 6)
+        self.assertAlmostEqual(links[1].Shape.Volume, 1000, 6)
+
+    def test_studio_using_assembly_not_offered(self):
+        """R7A-2: Part Studio 3 (an App::Part) holds a Body on a SubShapeBinder of the assembly's
+        cube face: inserting it would close a cycle, so neither the studio nor its Body is
+        offered (Insert skips what uses the assembly); Part Studio 2 still is."""
+        if not tabsOn():
+            self.skipTest("the typed tabs are on under the Onshape keymap only")
+        doc, studio, asm = self.model()
+        cube = asm.newObject("Part::Box", "AsmCube")
+        cube.Length = cube.Width = cube.Height = 10
+        user = doc.addObject("App::Part", "Part001")
+        user.Label = "Part Studio 3"
+        body = doc.addObject("PartDesign::Body", "UserBody")
+        user.addObject(body)
+        binder = body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(asm, ("AsmCube.Face6",))]
+        doc.recompute()
+        pump(0.2)
+        self.assertIn(user, asm.InListRecursive)
+        panel = self.openInsert(doc, asm)
+        top = panel.form.partList.topLevelItem(0)
+        rows = {r.text(0): r for r in self.children(top)}
+        self.assertIn("Part Studio 2", rows)
+        self.assertIs(rows["Part Studio 2"].data(0, QtCore.Qt.UserRole), studio)
+        offered = []
+
+        def walk(item):
+            for child in self.children(item):
+                data = child.data(0, QtCore.Qt.UserRole)
+                if data is not None:
+                    offered.append(data.Name)
+                walk(child)
+
+        walk(top)
+        for name in ("Part001", "UserBody", "Binder"):
+            self.assertNotIn(name, offered)
+        if "Part Studio 3" in rows:
+            self.assertIsNone(rows["Part Studio 3"].data(0, QtCore.Qt.UserRole))
+        Gui.Control.closeDialog()
+        pump(0.2)
 
 
 if __name__ == "__main__":

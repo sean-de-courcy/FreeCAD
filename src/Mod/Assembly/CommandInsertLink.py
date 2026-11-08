@@ -53,20 +53,11 @@ tooltip = QT_TRANSLATE_NOOP(
 
 # FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio's tab name (App::DocumentTabs)
 IMPLICIT_STUDIO = UtilsAssembly.IMPLICIT_STUDIO
-implicitStudioParts = UtilsAssembly.implicitStudioParts
 
 
 def typedTabsOn():
     """Whether the typed tabs are on (the Onshape keymap, Gui::DocumentTabs::isOn)."""
     return hasattr(Gui, "DocumentTabs") and Gui.DocumentTabs.isOn() and hasattr(App, "DocumentTabs")
-
-
-class ImplicitStudio:
-    """The insert list's row for the implicit Part Studio (the document's top level)."""
-
-    def __init__(self, doc, label):
-        self.Document = doc
-        self.Label = label
 
 
 class CommandGroupInsert:
@@ -326,9 +317,14 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         Studio"), its parts below it; then the other root objects (assemblies...) as before.
 
         A studio that is an App::Part inserts as one link, which follows the studio. The implicit
-        studio (the top level, "Part Studio 1") inserts a link per part, held together by a rigid
-        group [guess: one rigid instance, as near as it gets without a container; a part added
-        to the studio later is not added to the instance]."""
+        studio (the top level, "Part Studio 1" of an old file) is a heading only: its parts insert
+        one by one, as before round 7 (R7A-3: a rigid group of per-part links wouldn't follow the
+        parts added, deleted or moved later, as Onshape's whole-studio instance does; debt).
+
+        A studio that uses the assembly (a part on a binder of the assembly's face) is not offered
+        whole, as Insert skips such an object (R7A-2): the link would close a cycle. A heading with
+        nothing left to insert below it is dropped."""
+        users = self.assembly.InListRecursive
         listed = set()
         for name, kind, label in App.DocumentTabs.tabs(doc):
             if kind != "PartStudio":
@@ -338,16 +334,20 @@ class TaskAssemblyInsertLink(QtCore.QObject):
             if name == IMPLICIT_STUDIO:
                 members = [obj for obj in rootObjects if App.DocumentTabs.tabOf(obj) == name]
                 studioItem.setIcon(0, QIcon(":/icons/PartDesign_Body.svg"))
-                if implicitStudioParts(doc):
-                    studioItem.setData(0, QtCore.Qt.UserRole, ImplicitStudio(doc, label))
                 process_objects(members, studioItem)
                 listed.update(obj.Name for obj in members)
             else:
                 studio = doc.getObject(name)
                 studioItem.setIcon(0, studio.ViewObject.Icon)
-                studioItem.setData(0, QtCore.Qt.UserRole, studio)
+                usesAssembly = studio in users or any(
+                    obj in users for obj in studio.ViewObject.claimChildrenRecursive()
+                )
+                if not usesAssembly:
+                    studioItem.setData(0, QtCore.Qt.UserRole, studio)
                 process_objects(studio.ViewObject.claimChildren(), studioItem)
                 listed.add(name)
+            if studioItem.childCount() == 0 and not studioItem.data(0, QtCore.Qt.UserRole):
+                docItem.removeChild(studioItem)
         process_objects([obj for obj in rootObjects if obj.Name not in listed], docItem)
 
     def adjustTreeWidgetSize(self):
@@ -463,36 +463,10 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 print(selectedPart.Document.Name)
                 documentItem.setText(0, f"{newDocName}.FCStd")"""
 
-        if isinstance(selectedPart, ImplicitStudio):
-            self.insertImplicitStudio(selectedPart, item)
-            return
         self.insertLink(selectedPart, item)
 
-    def insertImplicitStudio(self, studio, item):
-        """FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio as one rigid instance:
-        a link per part, each keeping its pose in the studio relative to the first (the studio's
-        origin goes where a single part's would), all in one rigid group named after the studio.
-        Cancel or a right click on the row takes them out, as for a single insert."""
-        parts = implicitStudioParts(studio.Document)
-        if not parts:
-            return
-        first = self.insertLink(parts[0], item)
-        base = App.Placement(first.Placement.Base, App.Rotation())
-        first.Placement = base.multiply(parts[0].Placement)
-        links = [first]
-        for part in parts[1:]:
-            links.append(self.insertLink(part, item, base.multiply(part.Placement)))
-        if len(links) > 1:
-            group = CommandCreateJoint.createJointRigidGroupJoint(links)
-            if group is not None:
-                group.Label = studio.Label
-        Gui.Selection.clearSelection()
-        for link in links:
-            Gui.Selection.addSelection(self.doc.Name, link.Name, "")
-
-    def insertLink(self, selectedPart, item, placement=None):
-        """Inserts a link to selectedPart for the list's row item and returns it. A placement
-        given (a studio's later parts) places it there, with no offset of its own."""
+    def insertLink(self, selectedPart, item):
+        """Inserts a link to selectedPart for the list's row item and returns it."""
         if selectedPart.isDerivedFrom("Assembly::AssemblyObject"):
             objType = "Assembly::AssemblyLink"
         else:
@@ -515,12 +489,6 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         insertionDict["addedObject"] = addedObject
         self.insertionStack.append(insertionDict)
         self.increment_counter(item)
-
-        if placement is not None:
-            insertionDict["translation"] = App.Vector()
-            addedObject.Placement = placement
-            item.setSelected(False)
-            return addedObject
 
         translation = App.Vector()
         resetThreshold = (screenCorner - screenCenter).Length * 0.1
