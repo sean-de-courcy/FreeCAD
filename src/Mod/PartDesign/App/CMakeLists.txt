@@ -30,6 +30,8 @@ SET(Features_SRCS
     Body.h
     Studio.cpp
     Studio.h
+    Derived.cpp
+    Derived.h
     ContainerMoves.cpp
     ContainerMoves.h
     FeatureBase.h
