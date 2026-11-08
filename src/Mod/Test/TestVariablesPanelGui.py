@@ -1681,3 +1681,222 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertIn("copy", error.text())
         dialog.reject()
         dockOf(view).hide()
+
+
+# The panel's roles on a copy's header (src/Gui/VariablesView.cpp, ops#640 round 5)
+CopyStateRole = QtCore.Qt.UserRole + 20
+CopyMessageRole = QtCore.Qt.UserRole + 21
+
+
+class TestVariablesRefreshGui(unittest.TestCase):
+    """A copy's state in the panel, the Refresh preview, Locate and "Copy from FreeCAD file..."
+    (ops#317 PRs G2 and F, ops#640 round 5; notes/variables-studio.md 3.2-3.4, section 6 G-4).
+    Every source is made up here."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesRefreshGui")
+        self.doc = App.newDocument("TestVariablesRefreshGui")
+        self.doc.UndoMode = 1
+        self.other = App.newDocument("TestVariablesRefreshGuiOther")
+        self.path = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        from freecad.variables import copies
+
+        self.copy = copies.import_studios(self.doc, [self.path]).copies[0]
+        self.view = panel()
+        self.dock = dockOf(self.view)
+        self.dock.show()
+        Gui.setActiveDocument(self.doc.Name)
+        self.tree = self.view.findChild(QtWidgets.QTreeView, "variablesTree")
+        self.model = self.tree.model()
+        self.assertTrue(waitFor(lambda: self.model.rowCount() == 1))
+
+    def tearDown(self):
+        from freecad.variables import copies, importgui
+
+        copies._check_hook = None
+        for dialog in list(importgui._open):
+            if shiboken6.isValid(dialog):
+                dialog.reject()
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                widget.reject()
+        pump(0.1)
+        for name in (self.doc.Name, self.other.Name):
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        self.dock.hide()
+        pump(0.1)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def rewrite(self, variables):
+        writeExport(self.folder, "Studio B", variables)
+        later = os.stat(self.path).st_mtime + 10
+        os.utime(self.path, (later, later))
+
+    def recheck(self):
+        """Another document active and back: the panel rebuilds and checks the states again."""
+        Gui.setActiveDocument(self.other.Name)
+        pump(0.2)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.3)
+
+    def header(self):
+        return self.model.index(0, 0)
+
+    def action(self, name):
+        found = self.view.findChildren(QtGui.QAction, name)
+        self.assertTrue(found, name)
+        return found[0]
+
+    def planDialog(self):
+        from freecad.variables import importgui
+
+        self.assertTrue(waitFor(lambda: importgui._open and importgui._open[-1].isVisible()),
+                        "no dialog")
+        return importgui._open[-1]
+
+    def apply(self, dialog):
+        button = dialog.findChild(QtWidgets.QPushButton, "apply")
+        self.assertTrue(button.isEnabled(),
+                        dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
+        QtCore.QTimer.singleShot(0, button.click)
+        self.assertTrue(waitFor(lambda: dialog.result is not None))
+        pump(0.3)
+        return dialog.result
+
+    def test_states(self):
+        """G-4. The header of an attached copy shows its state: up to date (the label alone),
+        out of date after the JSON changed on disk, not found once it is gone; the message is
+        its tooltip and a role."""
+        self.assertEqual(self.model.data(self.header()), "Studio B")
+        self.assertEqual(self.model.data(self.header(), CopyStateRole), "up to date")
+        self.assertIn("Up to date with Studio B.json",
+                      self.model.data(self.header(), QtCore.Qt.ToolTipRole))
+        self.rewrite([("LENGTH", "Gap", "4 mm")])
+        self.recheck()
+        self.assertEqual(self.model.data(self.header()), "Studio B (out of date)")
+        self.assertEqual(self.model.data(self.header(), CopyStateRole), "out of date")
+        self.assertIn("changed since the last Refresh",
+                      self.model.data(self.header(), CopyMessageRole))
+        os.remove(self.path)
+        self.recheck()
+        self.assertEqual(self.model.data(self.header()), "Studio B (source not found)")
+        self.assertIn("Locate", self.model.data(self.header(), CopyMessageRole))
+
+    def test_actions_enabled(self):
+        """Refresh and Locate need an attached copy's row; Copy from FreeCAD file a document."""
+        self.tree.setCurrentIndex(self.model.index(0, NAME, self.header()))
+        pump(0.1)
+        self.assertTrue(self.action("refreshCopy").isEnabled())
+        self.assertTrue(self.action("locateSource").isEnabled())
+        self.assertTrue(self.action("copyFromFreeCAD").isEnabled())
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyLength", "Plain")
+        self.doc.recompute()
+        pump(0.3)
+        for row in range(self.model.rowCount()):
+            if self.model.data(self.model.index(row, 0)) == "Variables":
+                self.tree.setCurrentIndex(self.model.index(row, 0))
+        pump(0.1)
+        self.assertFalse(self.action("refreshCopy").isEnabled())
+
+    def test_refresh_preview(self):
+        """The panel's Refresh shows the preview (the summary, each change); its Refresh button
+        applies it as one undo step and the header is up to date again."""
+        self.rewrite([("LENGTH", "Gap", "4 mm"), ("LENGTH", "Rail", "#Gap * 2")])
+        self.recheck()
+        self.tree.setCurrentIndex(self.header())
+        pump(0.1)
+        undo = self.doc.UndoCount
+        self.action("refreshCopy").trigger()
+        dialog = self.planDialog()
+        self.assertEqual(dialog.findChild(QtWidgets.QLabel, "summary").text(),
+                         "Added 1, changed 1")
+        report = dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText()
+        self.assertIn("Added: Rail", report)
+        self.assertIn("Changed: Gap", report)
+        self.apply(dialog)
+        self.assertAlmostEqual(self.copy.Gap.Value, 4)
+        self.assertAlmostEqual(self.copy.Rail.Value, 8)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertTrue(waitFor(
+            lambda: self.model.data(self.model.index(0, 0), CopyStateRole) == "up to date"))
+
+    def test_refresh_choice(self):
+        """A variable added at the source using a name nothing defines: Refresh waits for a
+        choice; Skip lets it go on."""
+        self.rewrite([("LENGTH", "Gap", "3 mm"), ("LENGTH", "Far", "#Missing * 2")])
+        from freecad.variables import importgui
+
+        dialog = importgui.refresh(self.copy)
+        pump(0.1)
+        button = dialog.findChild(QtWidgets.QPushButton, "apply")
+        self.assertFalse(button.isEnabled())
+        choice = dialog.findChild(QtWidgets.QComboBox, "choice_Missing")
+        self.assertIsNotNone(choice)
+        choice.setCurrentIndex(choice.findData("skip"))
+        pump(0.05)
+        self.apply(dialog)
+        self.assertNotIn("Far", self.copy.PropertiesList)
+        self.assertEqual(self.copy.Skipped, ["Missing"])
+
+    def test_orphan_flag(self):
+        """A variable removed at the source that User still uses stays as an orphan, flagged in
+        its row's Source column (design 3.4, D2)."""
+        user = self.doc.addObject("App::VarSet", "User")
+        user.addProperty("App::PropertyDistance", "Len")
+        user.setExpression("Len", "Studio_B.Gap * 2")
+        self.doc.recompute()
+        self.rewrite([("LENGTH", "Other", "1 mm")])
+        from freecad.variables import copies
+
+        copies.refresh(self.copy)
+        pump(0.3)
+        self.recheck()
+        found = None
+        for row in range(self.model.rowCount(self.header())):
+            if self.model.data(self.model.index(row, NAME, self.header())) == "Gap":
+                found = self.model.data(self.model.index(row, SOURCE, self.header()))
+        self.assertEqual(found, "Studio B: removed at the source; used by User")
+
+    def test_locate(self):
+        """Locate to a renamed copy of the file: the preview, then the copy follows that file."""
+        moved = os.path.join(self.folder, "Studio B moved.json")
+        shutil.copy(self.path, moved)
+        os.remove(self.path)
+        from freecad.variables import importgui
+
+        dialog = importgui.locate(self.copy, moved)
+        self.apply(dialog)
+        self.assertEqual(self.copy.SourcePath, os.path.abspath(moved).replace(os.sep, "/"))
+        self.recheck()
+        self.assertEqual(self.model.data(self.model.index(0, 0), CopyStateRole), "up to date")
+
+    def test_copy_from_freecad_file(self):
+        """Copy from FreeCAD file: a saved document's VarSet, read without opening it; the dialog
+        offers its saved value for a reference outside the set, and Copy makes the copy."""
+        source = App.newDocument("TestVariablesRefreshGuiSource")
+        dims = source.addObject("App::VarSet", "Dims")
+        dims.addProperty("App::PropertyLength", "L")
+        dims.L = 40
+        master = source.addObject("App::VarSet", "Master")
+        master.addProperty("App::PropertyDistance", "Depth")
+        master.setExpression("Depth", "Dims.L / 2")
+        source.recompute()
+        path = os.path.join(self.folder, "Master.FCStd")
+        source.saveAs(path)
+        App.closeDocument(source.Name)
+        from freecad.variables import importgui
+
+        dialog = importgui.copy_from_file(self.doc, path, "Master")
+        pump(0.1)
+        self.assertFalse(dialog.findChild(QtWidgets.QPushButton, "apply").isEnabled())
+        choice = dialog.findChild(QtWidgets.QComboBox, "choice_Dims.L")
+        self.assertIsNotNone(choice)
+        choice.setCurrentIndex(choice.findData("freeze"))
+        pump(0.05)
+        copy = self.apply(dialog)
+        self.assertEqual(copy.SourceKind, "FreeCAD document")
+        self.assertAlmostEqual(copy.Depth.Value, 20)
+        self.assertNotIn(path.replace(os.sep, "/"),
+                         [d.FileName for d in App.listDocuments().values()])

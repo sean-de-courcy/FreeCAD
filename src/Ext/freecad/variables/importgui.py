@@ -30,6 +30,11 @@ variable refused or caught in a cycle between the copies, and the report of
 enabled only when nothing stands in the way; it runs `copies.import_studios()` with the choices,
 as one undo step. File > Import ("Onshape variables (.json)", `freecad.variables.importer`) and
 the Variables panel's "Import variables..." open it.
+
+The panel's "Refresh...", "Locate..." and "Copy variables from a FreeCAD file..." open a
+`PlanDialog` (ops#317 PRs G2 and F, ops#640 round 5): the preview of what the Refresh or the
+copy does (sections 3.3 and 3.4), the same choices for the names the source uses but doesn't
+define, and its button to apply it as one undo step.
 """
 
 import os
@@ -38,7 +43,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtWidgets
 
-from freecad.variables import copies
+from freecad.variables import copies, onshape
 
 translate = App.Qt.translate
 
@@ -413,3 +418,368 @@ def run(doc=None, paths=None, close_on_cancel=False):
     dialog.finished.connect(finished)
     dialog.open()
     return dialog
+
+
+# --- Refresh, Locate, and copies of a FreeCAD file's variables (ops#317 PRs G2, F; ops#640) ----
+
+FCSTD_FILTER = "FreeCAD documents (*.FCStd)"
+FREEZE = "freeze"
+
+
+class PlanDialog(QtWidgets.QDialog):
+    """The preview of a Refresh (notes/variables-studio.md 3.4), or of a copy of a FreeCAD file's
+    VarSet (3.3), with a choice for each name the source uses but doesn't define (2.6: a document
+    variable, never preselected; a value; the value saved in the file, for a FreeCAD source;
+    skip), a provider for a name several copies define, a Switch box for a binding a copy could
+    now provide, and a Skip box for each refused variable. Its button is enabled only when
+    nothing stands in the way, and applies it as one undo step.
+
+    @a planner(choices) gives the plan (copies.RefreshPlan), @a applier(choices) applies it."""
+
+    def __init__(self, doc, title, planner, applier, button, default_units=False, exclude=None,
+                 parent=None):
+        super().__init__(parent or Gui.getMainWindow())
+        self.doc = doc
+        self.planner = planner
+        self.applier = applier
+        self.exclude = exclude  # a copy's own variables aren't offered to it
+        self.result = None
+        self.plan = None
+        self.setObjectName("variablesPlanDialog")
+        self.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.summary = QtWidgets.QLabel(self)
+        self.summary.setObjectName("summary")
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+
+        self.unresolvedBox = QtWidgets.QGroupBox(
+            translate("Variables", "Names the source uses but doesn't define"), self)
+        self.unresolvedGrid = QtWidgets.QGridLayout(self.unresolvedBox)
+        layout.addWidget(self.unresolvedBox)
+        self.providersBox = QtWidgets.QGroupBox(
+            translate("Variables", "Names several copies define"), self)
+        self.providersGrid = QtWidgets.QGridLayout(self.providersBox)
+        layout.addWidget(self.providersBox)
+        self.switchBox = QtWidgets.QGroupBox(
+            translate("Variables", "Bindings another copy could provide"), self)
+        self.switchLayout = QtWidgets.QVBoxLayout(self.switchBox)
+        layout.addWidget(self.switchBox)
+        self.skipsBox = QtWidgets.QGroupBox(
+            translate("Variables", "Variables that can't be copied as they are"), self)
+        self.skipsLayout = QtWidgets.QVBoxLayout(self.skipsBox)
+        layout.addWidget(self.skipsBox)
+
+        self.defaultUnits = {}
+        if default_units:
+            units = QtWidgets.QHBoxLayout()
+            units.addWidget(QtWidgets.QLabel(
+                translate("Variables", "Default units of the Onshape document (for values "
+                          "without a unit; read back from the copy when not set):"), self))
+            for onshape_type, symbols in DEFAULT_UNITS:
+                combo = QtWidgets.QComboBox(self)
+                combo.setObjectName(f"defaultUnit_{onshape_type}")
+                combo.addItem(translate("Variables", "{}: as before").format(
+                    translate("Variables", dict(TYPES)[onshape_type])), None)
+                for symbol in symbols:
+                    combo.addItem(symbol, symbol)
+                combo.currentIndexChanged.connect(lambda _i: self.update())
+                units.addWidget(combo)
+                self.defaultUnits[onshape_type] = combo
+            units.addStretch()
+            layout.addLayout(units)
+
+        self.report = QtWidgets.QPlainTextEdit(self)
+        self.report.setObjectName("report")
+        self.report.setReadOnly(True)
+        layout.addWidget(self.report)
+        self.buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, self)
+        self.applyButton = self.buttons.button(QtWidgets.QDialogButtonBox.Ok)
+        self.applyButton.setText(button)
+        self.applyButton.setObjectName("apply")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self.rows = {}  # name -> (choice, variable, type, value) widgets
+        self.providers = {}  # name -> its provider combo
+        self.switches = {}  # name -> its Switch box
+        self.skips = {}  # variable name -> its Skip box
+        self.resize(640, 520)
+        self.update()
+
+    def addRow(self, name, users, frozen):
+        box = self.unresolvedBox
+        row = len(self.rows)
+        label = QtWidgets.QLabel(
+            translate("Variables", "{} (used by {})").format(name, ", ".join(users) or "-"), box)
+        choice = QtWidgets.QComboBox(box)
+        choice.setObjectName(f"choice_{name}")
+        choice.addItem(translate("Variables", "Choose..."), None)
+        choice.addItem(translate("Variables", "Use a document variable"), USE)
+        choice.addItem(translate("Variables", "Enter a value"), VALUE)
+        if frozen is not None:
+            choice.addItem(translate("Variables", "Use its saved value ({})").format(frozen),
+                           FREEZE)
+        choice.addItem(translate("Variables", "Skip"), SKIP)
+        variable = QtWidgets.QComboBox(box)
+        variable.setObjectName(f"variable_{name}")
+        variable.addItem(translate("Variables", "Choose a variable..."), None)
+        short = name.rsplit(".", 1)[-1]
+        for path in document_variables(self.doc, short):
+            if self.exclude is None or not path.startswith(self.exclude + "."):
+                variable.addItem(path, path)
+        kind = QtWidgets.QComboBox(box)
+        kind.setObjectName(f"type_{name}")
+        for onshape_type, text in TYPES:
+            kind.addItem(translate("Variables", text), onshape_type)
+        value = QtWidgets.QLineEdit(box)
+        value.setObjectName(f"value_{name}")
+        value.setPlaceholderText(translate("Variables", "a value, e.g. 7 mm"))
+        for widget, column in ((label, 0), (choice, 1), (variable, 2), (kind, 3), (value, 4)):
+            self.unresolvedGrid.addWidget(widget, row, column)
+        choice.currentIndexChanged.connect(lambda _i: self.update())
+        variable.currentIndexChanged.connect(lambda _i: self.update())
+        kind.currentIndexChanged.connect(lambda _i: self.update())
+        value.textChanged.connect(lambda _t: self.update())
+        self.rows[name] = (choice, variable, kind, value)
+
+    def choices(self):
+        """The choice arguments of copies.plan_refresh() / plan_copy() the widgets give."""
+        bindings, values, skip, freeze, providers, switch = {}, {}, [], [], {}, []
+        for name, (choice, variable, kind, value) in self.rows.items():
+            what = choice.currentData()
+            variable.setVisible(what == USE)
+            kind.setVisible(what == VALUE)
+            value.setVisible(what == VALUE)
+            if what == USE and variable.currentData():
+                bindings[name] = variable.currentData()
+            elif what == VALUE and value.text().strip():
+                values[name] = (kind.currentData(), value.text().strip())
+            elif what == FREEZE:
+                freeze.append(name)
+            elif what == SKIP:
+                skip.append(name)
+        for name, combo in self.providers.items():
+            if combo.currentData() is not None:
+                providers[name] = combo.currentData()
+        for name, box in self.switches.items():
+            if box.isChecked():
+                switch.append(name)
+        for name, box in self.skips.items():
+            if box.isChecked():
+                skip.append(name)
+        result = {"bindings": bindings, "values": values, "skip": skip, "freeze": freeze,
+                  "providers": providers, "switch": switch}
+        units = {kind: combo.currentData() for kind, combo in self.defaultUnits.items()
+                 if combo.currentData()}
+        if units:
+            result["default_units"] = units
+        return result
+
+    def sync(self):
+        """Rows for what the plan asks about (kept once made, so a choice stays visible)."""
+        for name, users in sorted(self.plan.unresolved.items()):
+            if name not in self.rows:
+                self.addRow(name, users, self.plan.freezable.get(name))
+        self.unresolvedBox.setVisible(bool(self.rows))
+        for name, names in sorted(self.plan.ambiguous.items()):
+            if name in self.providers:
+                continue
+            row = len(self.providers)
+            label = QtWidgets.QLabel(
+                translate("Variables", "#{} is defined by several copies; it comes from").format(
+                    name), self.providersBox)
+            combo = QtWidgets.QComboBox(self.providersBox)
+            combo.setObjectName(f"provider_{name}")
+            combo.addItem(translate("Variables", "Choose..."), None)
+            for copy_name in names:
+                obj = self.doc.getObject(copy_name)
+                combo.addItem(obj.Label if obj is not None else copy_name, copy_name)
+            combo.currentIndexChanged.connect(lambda _i: self.update())
+            self.providersGrid.addWidget(label, row, 0)
+            self.providersGrid.addWidget(combo, row, 1)
+            self.providers[name] = combo
+        self.providersBox.setVisible(bool(self.providers))
+        for name, (bound, where) in sorted(self.plan.switchable.items()):
+            if name in self.switches:
+                continue
+            box = QtWidgets.QCheckBox(
+                translate("Variables", "Switch #{} from {} to {}").format(name, bound, where),
+                self.switchBox)
+            box.setObjectName(f"switch_{name}")
+            box.toggled.connect(lambda _on: self.update())
+            self.switchLayout.addWidget(box)
+            self.switches[name] = box
+        self.switchBox.setVisible(bool(self.switches))
+        for name, why in self.plan.refused:
+            if name in self.skips:
+                continue
+            box = QtWidgets.QCheckBox(translate("Variables", "Skip {} ({})").format(name, why),
+                                      self.skipsBox)
+            box.setObjectName(f"skip_{name}")
+            box.setToolTip(why)
+            box.toggled.connect(lambda _on: self.update())
+            self.skipsLayout.addWidget(box)
+            self.skips[name] = box
+        self.skipsBox.setVisible(bool(self.skips))
+
+    def update(self):
+        try:
+            self.plan = self.planner(self.choices())
+        except Exception as e:  # noqa: BLE001 (a source that can't be read is shown)
+            self.plan = None
+            self.summary.setText(str(e))
+            self.report.setPlainText(str(e))
+            self.applyButton.setEnabled(False)
+            return
+        self.sync()
+        if self.plan.copy is not None:
+            self.summary.setText(self.plan.summary())
+        else:
+            self.summary.setText(translate("Variables", "{} variables to copy").format(
+                len(self.plan.targets)))
+        self.report.setPlainText(self.plan.report())
+        self.applyButton.setEnabled(self.plan.ok)
+
+    def accept(self):
+        try:
+            self.result = self.applier(self.choices())
+        except Exception as e:  # noqa: BLE001 (nothing was changed; any failure is shown)
+            QtWidgets.QMessageBox.critical(self, self.windowTitle(), str(e))
+            self.update()
+            return
+        super().accept()
+
+
+def _keep(dialog):
+    """Shows @a dialog (not waited for), kept until it closes, then deleted."""
+    dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+    _open.append(dialog)
+
+    def finished(_result):
+        if dialog in _open:
+            _open.remove(dialog)
+
+    dialog.finished.connect(finished)
+    dialog.open()
+    return dialog
+
+
+def refresh(copy, path=None, entry=None, varset=None):
+    """The Refresh preview of @a copy (or Locate: from @a path, with @a entry or @a varset); its
+    Refresh button applies it as one undo step. Returns the dialog (shown, not waited for)."""
+
+    def planner(choices):
+        return copies.plan_refresh(copy, path, entry=entry, varset=varset, **choices)
+
+    def applier(choices):
+        plan = copies.refresh(copy, path, entry=entry, varset=varset, **choices)
+        App.Console.PrintMessage(translate("Variables", "Refreshed {}: {}").format(
+            copy.Label, plan.summary()) + "\n")
+        return plan
+
+    title = translate("Variables", "Refresh {}").format(copy.Label)
+    return _keep(PlanDialog(copy.Document, title, planner, applier,
+                            translate("Variables", "Refresh"),
+                            default_units=copy.SourceKind == copies.JSON_KIND,
+                            exclude=copy.Name))
+
+
+def _pick(title, label, items, current=0):
+    """One of @a items (texts) by its index, or None; asks only when there are several."""
+    if len(items) == 1:
+        return 0
+    text, ok = QtWidgets.QInputDialog.getItem(Gui.getMainWindow(), title, label, items,
+                                              max(0, min(current, len(items) - 1)), False)
+    if not ok:
+        return None
+    return items.index(text)
+
+
+def _varset(path, title, current=None):
+    """The internal name of a VarSet of the saved document @a path, chosen if it has several."""
+    try:
+        sets = copies.fcstd_varsets(path)
+    except (OSError, copies.SourceError) as e:
+        QtWidgets.QMessageBox.critical(Gui.getMainWindow(), title,
+                                       f"{os.path.basename(path)} can't be read: {e}")
+        return None
+    if not sets:
+        QtWidgets.QMessageBox.critical(Gui.getMainWindow(), title, translate(
+            "Variables", "{} has no VarSet").format(os.path.basename(path)))
+        return None
+    items = [translate("Variables", "{} ({}, {} variables)").format(label, name, count)
+             for name, label, count in sets]
+    names = [name for name, _label, _count in sets]
+    index = _pick(title, translate("Variables", "VarSet:"), items,
+                  names.index(current) if current in names else 0)
+    return None if index is None else names[index]
+
+
+def locate(copy, path=None, entry=None, varset=None):
+    """Locate...: points @a copy at another file (asked for when @a path is None), and an entry
+    (JSON) or a VarSet (FreeCAD) in it, then shows the Refresh preview for it."""
+    title = translate("Variables", "Locate the source of {}").format(copy.Label)
+    json_source = copy.SourceKind == copies.JSON_KIND
+    if path is None:
+        start = os.path.dirname(copy.SourcePath) if copy.SourcePath else ""
+        path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            Gui.getMainWindow(), title, start, FILTER if json_source else FCSTD_FILTER)
+        if not path:
+            return None
+    if json_source and entry is None:
+        try:
+            entries = onshape.read_export(path)
+        except (OSError, onshape.ExportError) as e:
+            QtWidgets.QMessageBox.critical(Gui.getMainWindow(), title,
+                                           f"{os.path.basename(path)} can't be read: {e}")
+            return None
+        items = [translate("Variables", "Studio entry {} ({} variables)").format(
+            i + 1, len(e.variables)) for i, e in enumerate(entries)]
+        if not items:
+            return None
+        try:
+            current = int(copy.SourceObject)
+        except ValueError:
+            current = 0
+        entry = _pick(title, translate("Variables", "Studio entry:"), items, current)
+        if entry is None:
+            return None
+    if not json_source and varset is None:
+        varset = _varset(path, title, copy.SourceObject)
+        if varset is None:
+            return None
+    return refresh(copy, path, entry=entry, varset=varset)
+
+
+def copy_from_file(doc=None, path=None, varset=None):
+    """"Copy variables from a FreeCAD file...": a saved document (asked for when @a path is
+    None) and a VarSet in it (asked for when it has several), read from the file without opening
+    it; the dialog shows what will be copied and the choices, its Copy button makes the copy
+    (section 3.3). Returns the dialog, or None."""
+    title = translate("Variables", "Copy variables from a FreeCAD file")
+    if path is None:
+        path, _filter = QtWidgets.QFileDialog.getOpenFileName(Gui.getMainWindow(), title, "",
+                                                              FCSTD_FILTER)
+        if not path:
+            return None
+    if varset is None:
+        varset = _varset(path, title)
+        if varset is None:
+            return None
+    if doc is None:
+        doc = App.ActiveDocument or App.newDocument()
+
+    def planner(choices):
+        return copies.plan_copy(doc, path, varset, **choices)
+
+    def applier(choices):
+        copy = copies.copy_from_fcstd(doc, path, varset, **choices)
+        App.Console.PrintMessage(translate("Variables", "Copied {} from {}").format(
+            copy.Label, os.path.basename(path)) + "\n")
+        return copy
+
+    title = translate("Variables", "Copy variables from {}").format(os.path.basename(path))
+    return _keep(PlanDialog(doc, title, planner, applier, translate("Variables", "Copy")))

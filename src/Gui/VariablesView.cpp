@@ -31,11 +31,13 @@
 #include <vector>
 
 #include <QAction>
+#include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -424,6 +426,79 @@ bool isEditableSet(const App::DocumentObject* obj)
     return obj && obj->isDerivedFrom<App::VarSet>() && !(copy && copy->isAttached());
 }
 
+/// FreeCAD-CH (ops#317 PR G2, ops#640 round 5): a copy's source state, as
+/// freecad.variables.copies.panel_state() gives it (notes/variables-studio.md 3.2): the state, its
+/// message, a tooltip, and the flag of each orphan (a variable removed at the source but still used).
+struct CopyState
+{
+    QString state;
+    QString message;
+    QString tip;
+    std::map<std::string, QString> orphans;
+};
+
+/// Roles on a copy's header item, read by the tests: its state and its message.
+constexpr int CopyStateRole = Qt::UserRole + 20;
+constexpr int CopyMessageRole = Qt::UserRole + 21;
+
+CopyState copyState(const App::DocumentObject* copy)
+{
+    CopyState result;
+    Base::PyGILStateLocker lock;
+    try {
+        PyObject* raw = PyImport_ImportModule("freecad.variables.copies");
+        if (!raw) {
+            throw Py::Exception();
+        }
+        Py::Module module(raw, true);
+        Py::Callable function(module.getAttr("panel_state"));
+        Py::Tuple args(1);
+        args.setItem(0, Py::Object(const_cast<App::DocumentObject*>(copy)->getPyObject(), true));
+        Py::Tuple values(function.apply(args));
+        result.state = QString::fromStdString(Py::String(values[0]).as_std_string("utf-8"));
+        result.message = QString::fromStdString(Py::String(values[1]).as_std_string("utf-8"));
+        result.tip = QString::fromStdString(Py::String(values[2]).as_std_string("utf-8"));
+        Py::Dict orphans(values[3]);
+        for (const auto& key : orphans.keys()) {
+            result.orphans[Py::String(key).as_std_string("utf-8")] = QString::fromStdString(
+                Py::String(orphans[key]).as_std_string("utf-8")
+            );
+        }
+    }
+    catch (Py::Exception&) {
+        Base::PyException e;  // the panel shows the copy without its state; the error is reported
+        e.reportException();
+    }
+    return result;
+}
+
+/// The words a copy's header adds to its label for a state other than "up to date".
+QString stateWords(const QString& state)
+{
+    if (state == QLatin1String("out of date")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "out of date");
+    }
+    if (state == QLatin1String("not found")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "source not found");
+    }
+    if (state == QLatin1String("unreadable")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "source unreadable");
+    }
+    if (state == QLatin1String("other stamp")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "can't compare");
+    }
+    if (state == QLatin1String("two sources")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "two sources");
+    }
+    return {};
+}
+
+/// Whether @a doc has copies (App::VarSetCopy): only then do focus and saves rebuild the panel.
+bool hasCopies(const App::Document* doc)
+{
+    return doc && !doc->getObjectsOfType(App::VarSetCopy::getClassTypeId()).empty();
+}
+
 /// FreeCAD-CH (ops#640, rank 55): the application property through which a field's "New
 /// variable..." hands the Add dialog the typed name and the field's value (a QStringList; set
 /// around a run of Std_AddVariable by QuantitySpinBox.cpp and ExpressionCompleter.cpp).
@@ -570,6 +645,29 @@ void VariablesModel::addHolderRows(
     header->setData(docName, DocumentRole);
     header->setData(holderName, HolderRole);
     header->setToolTip(QString::fromLatin1(holder->getNameInDocument()));
+    // FreeCAD-CH (ops#317 PR G2, ops#640 round 5): an attached copy's header says whether its
+    // source changed since the last Refresh (design section 3.2); its orphans are flagged.
+    CopyState state;
+    auto copy = freecad_cast<const App::VarSetCopy*>(holder);
+    if (copy && copy->isAttached()) {
+        state = copyState(holder);
+        header->setData(state.state, CopyStateRole);
+        header->setData(state.message, CopyMessageRole);
+        QString words = stateWords(state.state);
+        if (!words.isEmpty()) {
+            header->setText(tr("%1 (%2)").arg(label, words));
+            header->setForeground(
+                state.state == QLatin1String("out of date") ? QColor(0xc0, 0x70, 0x00)
+                                                            : QColor(Qt::red)
+            );
+        }
+        QStringList tip {state.message};
+        if (!state.tip.isEmpty()) {
+            tip << state.tip;
+        }
+        tip << QString::fromLatin1(holder->getNameInDocument());
+        header->setToolTip(tip.join(QLatin1Char('\n')));
+    }
     QList<QStandardItem*> headerRow {header};
     for (int column = 1; column < ColumnCount; ++column) {
         auto item = new QStandardItem();
@@ -643,6 +741,15 @@ void VariablesModel::addHolderRows(
         if (holder->isError() && !expression.isEmpty()) {
             valueItem->setForeground(Qt::red);
             valueItem->setToolTip(QString::fromUtf8(holder->getStatusString()));
+        }
+        auto orphan = state.orphans.find(name);
+        if (orphan != state.orphans.end()) {
+            // Removed at the source but still used (design section 3.4, D2): frozen, flagged.
+            sourceItem->setText(tr("%1: %2").arg(label, orphan->second));
+            nameItem->setForeground(Qt::gray);
+            for (auto item : row) {
+                item->setToolTip(tr("%1: %2").arg(varName, orphan->second));
+            }
         }
         header->appendRow(row);
     }
@@ -1137,6 +1244,56 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     importAction->setToolTip(
         tr("Import Onshape variable studio exports (.json) as read-only copies")
     );
+    // FreeCAD-CH (ops#317 PRs G2 and F, ops#640 round 5): a VarSet of a saved FreeCAD file as a
+    // copy, and a copy's Refresh and Locate, each through freecad.variables.importgui's preview.
+    // An object's and a document's internal names are identifiers, safe in the code.
+    auto runGui = [this](const std::string& call) {
+        std::string code = "from freecad.variables import importgui\nimportgui." + call + "\n";
+        try {
+            Base::Interpreter().runString(code.c_str());
+        }
+        catch (const Base::Exception& e) {
+            showMessage(QString::fromUtf8(e.what()), true);
+        }
+    };
+    auto currentCopy = [this]() -> App::VarSetCopy* {
+        auto copy = freecad_cast<App::VarSetCopy*>(VariablesModel::holder(tree->currentIndex()));
+        return copy && copy->isAttached() ? copy : nullptr;
+    };
+    auto copyCall = [](const char* function, const App::VarSetCopy* copy) {
+        return std::string(function) + "(FreeCAD.getDocument(\"" + copy->getDocument()->getName()
+            + "\").getObject(\"" + copy->getNameInDocument() + "\"))";
+    };
+    QAction* copyAction = toolBar->addAction(tr("Copy from FreeCAD file..."), this, [this, runGui] {
+        if (App::Document* doc = currentDocument()) {
+            runGui("copy_from_file(FreeCAD.getDocument(\"" + std::string(doc->getName()) + "\"))");
+        }
+    });
+    copyAction->setObjectName(QStringLiteral("copyFromFreeCAD"));
+    copyAction->setToolTip(
+        tr("Copy a VarSet of a saved FreeCAD document as a read-only copy, read from the file")
+    );
+    QAction* refreshAction = toolBar->addAction(
+        tr("Refresh..."),
+        this,
+        [runGui, currentCopy, copyCall] {
+            if (App::VarSetCopy* copy = currentCopy()) {
+                runGui(copyCall("refresh", copy));
+            }
+        }
+    );
+    refreshAction->setObjectName(QStringLiteral("refreshCopy"));
+    refreshAction->setToolTip(
+        tr("Read the selected copy's source again: a preview, then the changes as one undo step")
+    );
+    auto locateAction = new QAction(tr("Locate source..."), this);
+    locateAction->setObjectName(QStringLiteral("locateSource"));
+    locateAction->setToolTip(tr("Point the selected copy at another source file, then Refresh"));
+    connect(locateAction, &QAction::triggered, this, [runGui, currentCopy, copyCall] {
+        if (App::VarSetCopy* copy = currentCopy()) {
+            runGui(copyCall("locate", copy));
+        }
+    });
     layout->addWidget(toolBar);
     // In the context menu only
     describeAction = new QAction(tr("Edit description..."), this);
@@ -1163,6 +1320,9 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     tree->addAction(usesAction);
     tree->addAction(describeAction);
     tree->addAction(importAction);
+    tree->addAction(copyAction);
+    tree->addAction(refreshAction);
+    tree->addAction(locateAction);
     layout->addWidget(tree);
 
     hint = new QLabel(tr("Add a variable, or type #name in any expression."), this);
@@ -1232,6 +1392,46 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     connections.emplace_back(app.signalRecomputed.connect([this](const App::Document&) {
         scheduleRebuild();
     }));
+    // FreeCAD-CH (ops#317 PR G2, ops#640 round 5): a copy's source may have changed while FreeCAD
+    // was in the background (an Onshape re-export) or been saved here: the states are checked
+    // again (a stat first, the file read only when it changed). Before a document is saved, its
+    // copies' relative source paths are rewritten for the file it is saved to (Save As too).
+    connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState s) {
+        if (s == Qt::ApplicationActive && hasCopies(currentDocument())) {
+            scheduleRebuild();
+        }
+    });
+    connections.emplace_back(app.signalFinishSaveDocument.connect(
+        [this](const App::Document&, const std::string&) {
+            if (hasCopies(currentDocument())) {
+                scheduleRebuild();
+            }
+        }
+    ));
+    connections.emplace_back(app.signalStartSaveDocument.connect(
+        [](const App::Document& doc, const std::string& file) {
+            if (!hasCopies(&doc)) {
+                return;
+            }
+            Base::PyGILStateLocker lock;
+            try {
+                PyObject* raw = PyImport_ImportModule("freecad.variables.copies");
+                if (!raw) {
+                    throw Py::Exception();
+                }
+                Py::Module module(raw, true);
+                Py::Callable function(module.getAttr("before_save"));
+                Py::Tuple args(2);
+                args.setItem(0, Py::Object(const_cast<App::Document&>(doc).getPyObject(), true));
+                args.setItem(1, Py::String(file));
+                function.apply(args);
+            }
+            catch (Py::Exception&) {
+                Base::PyException e;  // a save doesn't fail for it
+                e.reportException();
+            }
+        }
+    ));
     // FreeCAD-CH (ops#640, hands-on D-1): a variable made inside a dialog's transaction stays when
     // the dialog is cancelled, as in Onshape. The abort took it back: it is made again, in its own
     // transaction, after the abort (the signal comes while the document is rolling back).
@@ -1474,6 +1674,17 @@ void VariablesView::updateActions()
         && VariablesModel::kind(current) != VariablesModel::HeaderKind;
     addAction->setEnabled(currentDocument() != nullptr);
     importAction->setEnabled(currentDocument() != nullptr);
+    // A copy's Refresh and Locate (ops#317 PR G2): on an attached copy's header or variable.
+    auto copy = freecad_cast<App::VarSetCopy*>(VariablesModel::holder(current));
+    bool attached = copy && copy->isAttached();
+    for (const char* name : {"refreshCopy", "locateSource"}) {
+        if (auto action = findChild<QAction*>(QString::fromLatin1(name))) {
+            action->setEnabled(attached);
+        }
+    }
+    if (auto action = findChild<QAction*>(QStringLiteral("copyFromFreeCAD"))) {
+        action->setEnabled(currentDocument() != nullptr);
+    }
     // A copy's variable can't be deleted or described while the copy is attached (ops#317).
     bool readOnly = VariablesModel::isReadOnly(current);
     deleteAction->setEnabled(variable && !readOnly);
