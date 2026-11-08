@@ -13,12 +13,14 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/DocumentTabs.h>
 #include <App/Part.h>
 #include <Base/Exception.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
 #include <Gui/Document.h>
+#include <Gui/DocumentTabBar.h>
 #include <Gui/MDIView.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Mod/Part/App/BodyBase.h>
@@ -55,6 +57,21 @@ bool PartDesignGui::activeStudio(App::Document* doc, App::Part*& studio)
     App::Part* part = nullptr;
     if (auto view = Gui::Application::Instance->activeView();
         view && view->getGuiDocument() && view->getGuiDocument()->getDocument() == doc) {
+        // FreeCAD-CH (ops#640, R6T-1): under the typed tabs, the studio of the view's tab
+        const std::string tab = Gui::DocumentTabs::tabOfView(view);
+        if (!tab.empty()) {
+            if (tab == App::DocumentTabs::implicitName()) {
+                return true;
+            }
+            App::DocumentObject* tabObject = doc->getObject(tab.c_str());
+            App::DocumentTabs::Kind kind {};
+            if (!App::DocumentTabs::isTabObject(tabObject, &kind)
+                || kind != App::DocumentTabs::Kind::PartStudio) {
+                return false;
+            }
+            studio = static_cast<App::Part*>(tabObject);
+            return true;
+        }
         body = view->getActiveObject<PartDesign::Body*>(PDBODYKEY);
         part = view->getActiveObject<App::Part*>(PARTKEY);
     }

@@ -32,6 +32,7 @@ using PyObject = struct _object;
 namespace App
 {
 class Document;
+class DocumentObject;
 }
 
 namespace Gui
@@ -72,8 +73,16 @@ GuiExport void viewCreated(Gui::Document* doc, MDIView* view);
 /// Gui::Document::undo()/redo(): shows the tab the next step was made in
 GuiExport void beforeUndo(Gui::Document* doc, bool undo);
 
-/// Gui::Document::setEdit(): an object of another tab is edited in its own tab's view
-GuiExport void beforeEdit(Gui::Document* doc, ViewProvider* vp);
+/** Gui::Document::trySetEdit(), once the edit will start: an object of another tab (by its top
+ * parent, @p vp) is edited in its own tab's view; false (the edit refused, the status bar says
+ * why) when that takes a switch while another dialog is open
+ */
+GuiExport bool beforeEdit(Gui::Document* doc, ViewProvider* vp);
+
+/** Gui::Document::setActiveView(): the view to show @p obj in, its 3D tab's (made when it has
+ * none), or the active tab's view for an object no 3D tab shows; nullptr when the tabs are off
+ */
+GuiExport MDIView* viewOfObject(Gui::Document* doc, const App::DocumentObject* obj);
 
 /// Std_New: a new document's first Part Studio, an App::Part "Part Studio 1" (design T2-a)
 GuiExport void newDocumentStudio(App::Document* doc);

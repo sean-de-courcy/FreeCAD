@@ -1521,9 +1521,27 @@ void View3DInventorViewer::onSelectionChanged(const SelectionChanges& reason)
         case SelectionChanges::SetSelection:
         case SelectionChanges::AddSelection:
         case SelectionChanges::RmvSelection:
-        case SelectionChanges::ClrSelection:
-            inventorSelection->checkGroupOnTop(Reason);
+        case SelectionChanges::ClrSelection: {
+            // FreeCAD-CH (ops#640, R6T-6): a typed tab's view draws no on-top highlight of
+            // another tab's object (the tree's hover or selection)
+            SelectionChanges onTop(Reason);
+            if ((onTop.Type == SelectionChanges::AddSelection
+                 || onTop.Type == SelectionChanges::SetSelection
+                 || onTop.Type == SelectionChanges::SetPreselect)
+                && onTop.pObjectName && *onTop.pObjectName) {
+                App::DocumentObject* obj
+                    = getDocument()->getDocument()->getObject(onTop.pObjectName);
+                ViewProvider* vp = obj ? getDocument()->getViewProvider(obj) : nullptr;
+                if (vp && !DocumentTabs::accepts(this, vp)) {
+                    if (onTop.Type != SelectionChanges::SetSelection) {
+                        break;
+                    }
+                    onTop.Type = SelectionChanges::ClrSelection;
+                }
+            }
+            inventorSelection->checkGroupOnTop(onTop);
             break;
+        }
         case SelectionChanges::SetPreselectSignal:
             break;
         default:

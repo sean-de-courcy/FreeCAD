@@ -84,8 +84,8 @@ AppExport DocumentObject* tabOf(const DocumentObject* obj);
 /// The tab name of tabOf(@p obj): its internal name, or "*"
 AppExport std::string tabNameOf(const DocumentObject* obj);
 
-/// Whether the implicit studio is a tab: the top level holds a 3D object of no other tab, or no
-/// other Part Studio exists
+/// Whether the implicit studio is a tab: the top level holds a 3D object of no other tab, no
+/// other Part Studio exists, or the registry holds its label (named or shown once)
 AppExport bool hasImplicitStudio(const Document* doc);
 
 /// The document's tabs, in order
@@ -97,8 +97,12 @@ AppExport bool findTab(const Document* doc, const std::string& name, Tab& tab);
 /// The tab's name in the bar: the object's Label, the registry's label for the implicit studio
 AppExport std::string label(const Document* doc, const Tab& tab);
 
+/// The implicit studio's label: the registry's, else the lowest "Part Studio N" no tab object has
 AppExport std::string implicitLabel(const Document* doc);
+/// Stores the implicit studio's label; from then on it is a tab even when empty, until deleted
 AppExport void setImplicitLabel(Document* doc, const std::string& label);
+/// Whether the registry holds the implicit studio's label
+AppExport bool hasImplicitLabel(const Document* doc);
 
 /// The stored order (as written, stale names included)
 AppExport std::vector<std::string> order(const Document* doc);

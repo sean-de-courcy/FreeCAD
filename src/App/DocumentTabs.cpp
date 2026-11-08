@@ -171,6 +171,10 @@ bool isImplicitContent(const DocumentObject* obj)
     if (obj->isDerivedFrom<Origin>() || obj->isDerivedFrom<DatumElement>()) {
         return false;
     }
+    // A link array's elements are its link's, not top-level solids of their own (R6T-9)
+    if (obj->isDerivedFrom<LinkElement>()) {
+        return false;
+    }
     return obj->isDerivedFrom<GeoFeature>()
         || obj->hasExtension(LinkBaseExtension::getExtensionClassTypeId());
 }
@@ -298,6 +302,11 @@ bool DocumentTabs::hasImplicitStudio(const Document* doc)
     if (!doc) {
         return false;
     }
+    // Once named or shown, it stays a tab when emptied, as Onshape keeps an empty Part Studio
+    // (R6T-12); deleting the tab forgets it (removeTab())
+    if (readRegistry(doc).hasImplicit) {
+        return true;
+    }
     bool otherStudio = false;
     for (auto obj : doc->getObjects()) {
         if (isImplicitContent(obj)) {
@@ -360,8 +369,30 @@ std::string DocumentTabs::label(const Document* doc, const Tab& tab)
 std::string DocumentTabs::implicitLabel(const Document* doc)
 {
     const Registry registry = readRegistry(doc);
-    return registry.hasImplicit && !registry.implicit.empty() ? registry.implicit
-                                                              : std::string("Part Studio 1");
+    if (registry.hasImplicit && !registry.implicit.empty()) {
+        return registry.implicit;
+    }
+    // The lowest "Part Studio N" no tab object is named (R6T-7): after Std_New's App::Part "Part
+    // Studio 1", an import's top-level solids are "Part Studio 2"
+    std::set<std::string> labels;
+    if (doc) {
+        for (auto obj : doc->getObjects()) {
+            if (isTabObject(obj)) {
+                labels.insert(obj->Label.getValue());
+            }
+        }
+    }
+    for (int i = 1;; ++i) {
+        std::string candidate = "Part Studio " + std::to_string(i);
+        if (!labels.count(candidate)) {
+            return candidate;
+        }
+    }
+}
+
+bool DocumentTabs::hasImplicitLabel(const Document* doc)
+{
+    return readRegistry(doc).hasImplicit;
 }
 
 void DocumentTabs::setImplicitLabel(Document* doc, const std::string& label)
@@ -493,6 +524,13 @@ void DocumentTabs::removeTab(Document* doc, const Tab& tab)
         roots.emplace_back(tab.object->getNameInDocument());
     }
     else {
+        // The implicit studio's tab goes with its contents (hasImplicitStudio())
+        Registry registry = readRegistry(doc);
+        if (registry.hasImplicit) {
+            registry.hasImplicit = false;
+            registry.implicit.clear();
+            writeRegistry(doc, registry);
+        }
         for (auto obj : doc->getObjects()) {
             if (isImplicitContent(obj)) {
                 roots.emplace_back(obj->getNameInDocument());

@@ -51,6 +51,14 @@ class TestDerivedGui(unittest.TestCase):
         self.studio2 = self.doc.addObject("App::Part", "Studio2")
         self.studio2.Label = "Part Studio 2"
         self.doc.recompute()
+        # Under the typed tabs a Derived is made in the tab you are in (Onshape): Part Studio 2's
+        # tab is opened, which makes its App::Part the view's active part; under FreeCAD's keymap
+        # the one view's active part is set
+        tabs = getattr(Gui, "DocumentTabs", None)
+        if tabs is not None and tabs.isOn():
+            done, refusal = tabs.switchTo(self.doc, self.studio2.Name)
+            self.assertTrue(done, refusal)
+            pump(0.2)
         view = Gui.getDocument(self.doc.Name).ActiveView
         view.setActiveObject("pdbody", None)
         view.setActiveObject("part", self.studio2)

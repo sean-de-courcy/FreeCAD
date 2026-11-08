@@ -81,6 +81,12 @@ CmdPrimtiveCompAdditive::CmdPrimtiveCompAdditive()
     eType = ForEdit | AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
+namespace PartDesignGui
+{
+// Utils.cpp's (no header names it): the Bodies of the view's typed tab (R6T-1)
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+}
+
 void CmdPrimtiveCompAdditive::activated(int iMsg)
 {
     App::Document* doc = getDocument();
@@ -92,7 +98,7 @@ void CmdPrimtiveCompAdditive::activated(int iMsg)
 
     auto shouldMakeBody(false);
     if (!pcActiveBody) {
-        if (doc->getObjectsOfType(PartDesign::Body::getClassTypeId()).empty()) {
+        if (PartDesignGui::tabBodies(doc, nullptr).empty()) {  // FreeCAD-CH (R6T-1)
             shouldMakeBody = true;
         }
         else {

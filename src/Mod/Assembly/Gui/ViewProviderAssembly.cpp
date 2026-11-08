@@ -325,6 +325,11 @@ bool ViewProviderAssembly::setEdit(int mode)
             )
         );
 
+        // FreeCAD-CH (ops#640, round 6 fixes): one connection per edit. A second setEdit (the
+        // typed tabs' switches, an edit restored after a sketch's) overwrote the handle, and the
+        // lost connection called a deleted view provider at the next workbench switch once the
+        // document was closed
+        QObject::disconnect(workbenchConnection);
         workbenchConnection = QObject::connect(
             Gui::getMainWindow(),
             &Gui::MainWindow::workbenchActivated,
