@@ -357,6 +357,7 @@ TaskHoleParameters::TaskHoleParameters(ViewProviderHole* HoleView, QWidget* pare
     ui->StartOffset->bind(pcHole->StartOffset);
     ui->StartOffset->setToolTip(tr("Offset from the profile or selected start reference"));
     updateStartUI();
+    updateDepthUI();
 
     setCutDiagram();
 
@@ -753,6 +754,16 @@ void TaskHoleParameters::depthChanged(int index)
         return;
     }
     hole->DepthType.setValue(index);
+    updateDepthUI();
+    // An entity to pick: its field arms, once it shows (rank 23)
+    if (index == UpToEntity && !hole->UpToFace.getValue()) {
+        QTimer::singleShot(0, upToFaceField, [field = QPointer<ReferenceField>(upToFaceField)]() {
+            if (field && field->isVisible()) {
+                field->setArmed(true);
+                field->list()->setFocus(Qt::OtherFocusReason);
+            }
+        });
+    }
     recomputeFeature();
     // enabling must be handled after recompute
     bool DepthisDimension = (std::string(hole->DepthType.getValueAsString()) == "Dimension");
@@ -1144,6 +1155,7 @@ void TaskHoleParameters::changedObject(const App::Document&, const App::Property
     else if (&Prop == &hole->DepthType) {
         ui->DepthType->setEnabled(true);
         updateComboBox(ui->DepthType, hole->DepthType.getValue());
+        updateDepthUI();
     }
     else if (&Prop == &hole->Depth) {
         ui->Depth->setEnabled(true);
@@ -1234,7 +1246,8 @@ void TaskHoleParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/
 void TaskHoleParameters::updateStartUI()
 {
     const auto type = static_cast<StartTypeIndex>(ui->StartType->currentIndex());
-    const bool hasOffset = type != ProfilePlane;
+    // Start from part has no offset, as Onshape's (rank 23)
+    const bool hasOffset = type == Offset || type == Reference;
     const bool hasReference = type == Reference;
 
     ui->labelStartOffset->setVisible(hasOffset);
@@ -1243,6 +1256,19 @@ void TaskHoleParameters::updateStartUI()
     startField->setRequired(hasReference);
     if (!hasReference) {
         startField->setArmed(false);
+    }
+}
+
+void TaskHoleParameters::updateDepthUI()
+{
+    if (!upToFaceField) {
+        return;
+    }
+    const bool upToEntity = ui->DepthType->currentIndex() == UpToEntity;
+    upToFaceField->setVisible(upToEntity);
+    upToFaceField->setRequired(upToEntity);
+    if (!upToEntity) {
+        upToFaceField->setArmed(false);
     }
 }
 
@@ -1312,11 +1338,29 @@ void TaskHoleParameters::createFields()
     *startSelf = startField;
     startField->takePlaceOf(ui->startReferenceFieldPlaceholder);
     connect(startField, &ReferenceField::picked, this, [this]() { setGizmoPositions(); });
+
+    // The entity of Up to entity, shown for that termination only: a face or a plane, as a
+    // pad's up-to face (rank 23)
+    ReferenceField::Options upTo = faceFieldOptions(tr("Up to entity"), baseSolid, true);
+    auto upToSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeUpTo = [this, upToSelf](App::DocumentObject* obj,
+                                      const std::vector<std::string>& subs) {
+        if (*upToSelf) {
+            (*upToSelf)->assign(obj, subs);
+        }
+        recomputeFeature();
+        setGizmoPositions();
+    };
+    upToFaceField = new ReferenceField(getObject(), "UpToFace", upTo, writeUpTo, proxy);
+    *upToSelf = upToFaceField;
+    upToFaceField->takePlaceOf(ui->upToFaceFieldPlaceholder);
+    connect(upToFaceField, &ReferenceField::picked, this, [this]() { setGizmoPositions(); });
+    updateDepthUI();
 }
 
 std::vector<ReferenceField*> TaskHoleParameters::referenceFields() const
 {
-    return {positionsField, startField};
+    return {positionsField, startField, upToFaceField};
 }
 
 bool TaskHoleParameters::fitBaseProfileType(App::DocumentObject* obj,
@@ -1734,7 +1778,8 @@ void TaskHoleParameters::setGizmoPositions()
     }
     gizmoContainer->visible = true;
 
-    const bool hasStartOffset = std::strcmp(hole->StartType.getValueAsString(), "Profile plane") != 0;
+    const bool hasStartOffset = std::strcmp(hole->StartType.getValueAsString(), "Offset") == 0
+        || std::strcmp(hole->StartType.getValueAsString(), "Reference") == 0;
     try {
         const double effectiveStartOffset = hole->getStartOffset();
         startOffsetGizmo->Gizmo::setDraggerPlacement(
