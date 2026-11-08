@@ -29,8 +29,16 @@
 
 #include <Precision.hxx>
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include <Inventor/SbString.h>
+
 #include <App/Application.h>
+#include <Base/Quantity.h>
 #include <Base/Tools.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Notifications.h>
 #include <Gui/Selection/SelectionFilter.h>
 #include <Gui/Command.h>
@@ -39,6 +47,7 @@
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "DrawSketchHandler.h"
+#include "SketchEnterTarget.h"
 #include "Utils.h"
 #include "ViewProviderSketch.h"
 
@@ -132,7 +141,7 @@ using DSHFilletControllerBase = DSHFilletController::ControllerBase;
 
 using DrawSketchHandlerFilletBase = DrawSketchControllableHandler<DSHFilletController>;
 
-class DrawSketchHandlerFillet: public DrawSketchHandlerFilletBase
+class DrawSketchHandlerFillet: public DrawSketchHandlerFilletBase, public SketchEnterTarget
 {
     Q_DECLARE_TR_FUNCTIONS(SketcherGui::DrawSketchHandlerFillet)
 
@@ -161,6 +170,29 @@ public:
         Gui::Selection().rmvSelectionGate();
     }
 
+    /// FreeCAD-CH (ops#640, hands-on C-4): a corner picked, its fillet previewed, waiting for
+    /// Enter (or a click) to be made
+    bool hasPendingFillet() const
+    {
+        return pendingVertex;
+    }
+    /// Enter (ViewProviderSketch::keyPressed): the previewed fillet is made. The handler may be
+    /// gone after it (not in continuous mode): the caller touches it no more.
+    void createPendingFillet()
+    {
+        if (pendingVertex && !isState(SelectMode::End)) {
+            setState(SelectMode::End);
+        }
+    }
+    bool takesEnter() const override
+    {
+        return hasPendingFillet();
+    }
+    void enterPressed() override
+    {
+        createPendingFillet();
+    }
+
     /// FreeCAD-CH (ops#640, rank 42): where the fillet and chamfer sizes typed are kept
     static ParameterGrp::handle sizesGroup()
     {
@@ -179,6 +211,11 @@ private:
                 firstPos = onSketchPos;
             } break;
             case SelectMode::SeekSecond: {
+                // FreeCAD-CH (ops#640, C-4): the picked corner's fillet stays previewed
+                if (pendingVertex) {
+                    drawPendingFillet();
+                    break;
+                }
                 geoId2 = getPreselectCurve();
                 secondPos = onSketchPos;
             } break;
@@ -475,6 +512,103 @@ private:
         }
     }
 
+    void onReset() override
+    {
+        pendingVertex = false;
+        toolWidgetManager.resetControls();
+    }
+
+    /** FreeCAD-CH (ops#640, hands-on C-4): Onshape's fillet previews a picked corner, with the
+     * radius label, and makes it on Enter (or a click); Onshape's keymap only. A chamfer, and any
+     * corner that isn't two lines, is made at the click as before.
+     */
+    bool previewsCorner(int vertex) const
+    {
+        LineCorner corner;
+        return Gui::ForkKeymap::isOnshape() && constructionMethod() == ConstructionMethod::Fillet
+            && vertexCorner(vertex, corner);
+    }
+
+    /// The corner of two lines at the sketch vertex \a vertex (as the fillet at a point takes it)
+    bool vertexCorner(int vertex, LineCorner& corner) const
+    {
+        if (vertex < 0) {
+            return false;
+        }
+        SketchObject* obj = sketchgui->getSketchObject();
+        int geoId = GeoEnum::GeoUndef;
+        PointPos posId = PointPos::none;
+        obj->getGeoVertexIndex(vertex, geoId, posId);
+        if (posId != PointPos::start && posId != PointPos::end) {
+            return false;
+        }
+        std::vector<int> geoIds;
+        std::vector<PointPos> posIds;
+        obj->getDirectlyCoincidentPoints(geoId, posId, geoIds, posIds);
+        geoIds = obj->chooseFilletsEdges(geoIds);
+        if (geoIds.size() != 2 || posIds.size() < 2 || geoIds[0] < 0 || geoIds[1] < 0) {
+            return false;
+        }
+        const Part::Geometry* geo1 = obj->getGeometry(geoIds[0]);
+        const Part::Geometry* geo2 = obj->getGeometry(geoIds[1]);
+        if (!geo1 || !geo2 || !isLineSegment(*geo1) || !isLineSegment(*geo2)) {
+            return false;
+        }
+        corner = cornerAtEnds(
+            static_cast<const Part::GeomLineSegment*>(geo1),
+            posIds[0],
+            static_cast<const Part::GeomLineSegment*>(geo2),
+            posIds[1]
+        );
+        const double alpha = corner.valid ? corner.dir1.GetAngle(corner.dir2) : 0.0;
+        return corner.valid && alpha > Precision::Angular()
+            && alpha < std::numbers::pi - Precision::Angular();
+    }
+
+    /// The previewed fillet's arc and its "R..." label: the radius field's (the last typed), or
+    /// the size from the click where the field is 0 or too large for the lines (as made)
+    void drawPendingFillet()
+    {
+        LineCorner corner;
+        if (!vertexCorner(vtId, corner)) {
+            clearEdit();
+            return;
+        }
+        const double pi = std::numbers::pi;
+        const double alpha = corner.dir1.GetAngle(corner.dir2);
+        const double reach = std::min(corner.reach1, corner.reach2);
+        const double guess = reach * 0.2 * std::sin(alpha / 2);  // upstream's, at a point
+        double radius = filletRadius > Precision::Confusion() ? filletRadius : guess;
+        if (radius / std::tan(alpha / 2) > reach + Precision::Confusion()) {
+            radius = guess;
+        }
+        const double tangentAt = radius / std::tan(alpha / 2);
+        Base::Vector3d bisector = corner.dir1 + corner.dir2;
+        bisector.Normalize();
+        const Base::Vector3d centre = corner.vertex + bisector * (radius / std::sin(alpha / 2));
+        const Base::Vector3d end1 = corner.vertex + corner.dir1 * tangentAt;
+        const Base::Vector3d end2 = corner.vertex + corner.dir2 * tangentAt;
+        const double start = std::atan2(end1.y - centre.y, end1.x - centre.x);
+        double sweep = std::atan2(end2.y - centre.y, end2.x - centre.x) - start;
+        while (sweep > pi) {
+            sweep -= 2 * pi;
+        }
+        while (sweep < -pi) {
+            sweep += 2 * pi;
+        }
+        constexpr int segments = 24;
+        std::vector<Base::Vector2d> arc;
+        arc.reserve(segments + 1);
+        for (int i = 0; i <= segments; ++i) {
+            const double angle = start + sweep * i / segments;
+            arc.emplace_back(centre.x + radius * std::cos(angle), centre.y + radius * std::sin(angle));
+        }
+        drawEdit(arc);
+        const std::string label =
+            "R" + Base::Quantity(radius, Base::Unit::Length).getUserString();
+        setPositionText(Base::Vector2d(centre.x, centre.y), SbString(label.c_str()));
+    }
+
     void executeCommands() override
     {
         SketchObject* obj = sketchgui->getSketchObject();
@@ -748,7 +882,13 @@ private:
         this->updateDataAndDrawToPosition(onSketchPos);
         if (canGoToNextMode()) {
             if (state() == SelectMode::SeekFirst) {
-                if (vtId != -1) {
+                if (vtId != -1 && previewsCorner(vtId)) {
+                    // FreeCAD-CH (ops#640, C-4): previewed first; Enter or a click makes it
+                    pendingVertex = true;
+                    moveToNextMode();
+                    drawPendingFillet();
+                }
+                else if (vtId != -1) {
                     setState(SelectMode::End);
                 }
                 else {
@@ -770,6 +910,11 @@ private:
                 moveToNextMode();
             }
         }
+        else if (pendingVertex && state() == SelectMode::SeekSecond) {
+            // FreeCAD-CH (ops#640, C-4): a click makes the previewed fillet, as Enter does
+            setState(SelectMode::End);
+            return;  // the handler may be gone (not in continuous mode)
+        }
         updateHint();
     }
 
@@ -778,6 +923,8 @@ private:
     bool preserveCorner;
     int vtId, geoId1, geoId2;
     Base::Vector2d firstPos, secondPos;
+    /// FreeCAD-CH (ops#640, C-4): vtId's fillet is previewed, waiting for Enter or a click
+    bool pendingVertex = false;
 
     // FreeCAD-CH (ops#640, rank 42): the fields' sizes (0: the size from the click, upstream's).
     // Before a size is typed: Onshape's fillet opens at 0.25 in (hands-on C-4); in millimetres,
@@ -801,6 +948,11 @@ public:
             .message = tr("%1 toggle preserve corner"),
             .sequences = {toolKey(KeyU)}
         };
+
+        // FreeCAD-CH (ops#640, C-4): the previewed corner
+        if (pendingVertex) {
+            return {{tr("%1 create fillet"), {KeyReturn}}, {tr("%1 create fillet"), {MouseLeft}}};
+        }
 
         return Gui::lookupHints<SelectMode>(
             state(),

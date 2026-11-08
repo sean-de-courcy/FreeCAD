@@ -244,6 +244,25 @@ class TestSketchSlopedLineDimensionGui(SketchToolsTestCase):
         self.assertEqual(kind, "DistanceX")
         self.assertAlmostEqual(abs(value), 12.0, places=6)
 
+    def test_two_points_beside_the_span_give_the_vertical(self):
+        """Onshape's two endpoints with the cursor right of the span: vertical, 5 (C-2)."""
+        kind, value = self.dimension_with_cursor_at(["Vertex1", "Vertex2"], 15, 2.5)
+        self.assertEqual(kind, "DistanceY")
+        self.assertAlmostEqual(abs(value), 5.0, places=6)
+
+    def test_two_points_across_the_line_give_the_aligned_length(self):
+        """Onshape's two endpoints with the cursor in the band perpendicular to the line (here
+        up and left of the span, (-2, 6): its projection on the line falls between the ends):
+        the aligned length, 13 (C-2).
+
+        These three two-point cases are the observed ones, and upstream's rectangular zones give
+        them. They do not prove the zones match Onshape's regions everywhere: Onshape's aligned
+        region is the band perpendicular to the line, upstream's the bounding box's diagonals, so
+        for a sloped line some cursor places differ (rare, not chased: decision 276)."""
+        kind, value = self.dimension_with_cursor_at(["Vertex1", "Vertex2"], -2, 6)
+        self.assertEqual(kind, "Distance")
+        self.assertAlmostEqual(value, 13.0, places=6)
+
 
 class TestSketchTangentArcGui(SketchToolsTestCase):
     """Rank 41. A chain from (1, 1) to (9, 1), then a tangent arc to (9, 9): centre (9, 5),
@@ -445,10 +464,17 @@ class TestSketchFilletFieldsGui(SketchToolsTestCase):
         self.flush_gui(50)
         self.assertAlmostEqual(FreeCAD.ParamGet(TOOLS).GetFloat("ChamferAngle"), 30.0, places=6)
 
+    def arcs(self):
+        return [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)]
+
     def test_a_vertex_fillet_has_the_radius_typed_and_a_radius_dimension(self):
+        """Hands-on C-4: the corner picked is previewed (nothing made yet); Enter makes it."""
         self.set_param(TOOLS, "Float", "FilletRadius", 3.0)
         self.start_tool("Sketcher_CreateFillet")
         self.corner_click()
+        self.assertEqual(self.arcs(), [], "the fillet was made before Enter (Onshape previews it)")
+        self.key_click(self.viewport, QtCore.Qt.Key_Return)
+        self.flush_gui(150)
         arcs = [
             (i, g) for i, g in enumerate(self.sketch.Geometry) if isinstance(g, Part.ArcOfCircle)
         ]
@@ -463,6 +489,27 @@ class TestSketchFilletFieldsGui(SketchToolsTestCase):
         self.assertAlmostEqual(radius.Value, 3.0, places=6)
         self.assertTrue(self.sketch.getDriving(radius_index))
         self.assertEqual(self.sketch.solve(), 0)
+
+    def test_a_click_makes_the_previewed_fillet(self):
+        """After the corner's preview, a click makes it too, at the radius typed. [guess]: hands-on
+        C-4 observed Enter only; whether Onshape's click makes the previewed fillet is not known."""
+        self.set_param(TOOLS, "Float", "FilletRadius", 3.0)
+        self.start_tool("Sketcher_CreateFillet")
+        self.corner_click()
+        self.assertEqual(self.arcs(), [])
+        self.click_at(6, 6)
+        arcs = self.arcs()
+        self.assertEqual(len(arcs), 1, "Expected one fillet arc")
+        self.assertAlmostEqual(arcs[0].Radius, 3.0, places=6)
+
+    def test_esc_drops_the_previewed_fillet(self):
+        """Esc after the corner's preview makes nothing."""
+        self.set_param(TOOLS, "Float", "FilletRadius", 3.0)
+        self.start_tool("Sketcher_CreateFillet")
+        self.corner_click()
+        self.key_click(self.viewport, QtCore.Qt.Key_Escape)
+        self.flush_gui(150)
+        self.assertEqual(self.arcs(), [])
 
     def test_an_even_chamfer_has_the_distance_typed(self):
         self.set_param(TOOLS, "Float", "ChamferDistance", 3.0)

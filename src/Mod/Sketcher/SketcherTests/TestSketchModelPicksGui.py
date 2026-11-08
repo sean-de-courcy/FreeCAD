@@ -283,11 +283,17 @@ class ModelPicksGuiCase(SketcherGuiTestCase):
 class TestSketchModelPicksGui(ModelPicksGuiCase):
     def test_plain_edit_takes_model_edges_and_vertices_not_faces(self):
         """In plain edit mode a model edge and vertex can be selected beside a sketch element;
-        a model face can't (the gate)."""
+        a model face parallel to the sketch plane (the box's top) can't (the gate; ops#640 rank 19
+        lets a perpendicular face through: TestSketchModelFacesGui)."""
         self.start_edit()
         edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
         vertex = self.vertex_at(self.pad, V(20, 10, 5))
-        self.select((self.sketch, "Edge1"), (self.pad, edge), (self.pad, vertex), (self.pad, "Face1"))
+        top = None
+        for i, face in enumerate(self.pad.Shape.Faces):
+            if abs(face.BoundBox.ZMin - 5) < TOL and abs(face.BoundBox.ZMax - 5) < TOL:
+                top = "Face%d" % (i + 1)
+        self.assertIsNotNone(top)
+        self.select((self.sketch, "Edge1"), (self.pad, edge), (self.pad, vertex), (self.pad, top))
         self.assertEqual(
             self.selected(), {("Sketch", "Edge1"), ("Pad", edge), ("Pad", vertex)}
         )

@@ -477,7 +477,8 @@ inline void SketcherAddWorkbenchConstraints<Gui::MenuItem>(Gui::MenuItem& cons)
         cons << "Sketcher_ConstrainCoincident"
              << "Sketcher_ConstrainPointOnObject";
     }
-    cons << "Sketcher_ConstrainHorVer"
+    cons << "Sketcher_ConstrainConcentric"  // FreeCAD-CH (ops#640, rank 44)
+         << "Sketcher_ConstrainHorVer"
          << "Sketcher_ConstrainHorizontal"
          << "Sketcher_ConstrainVertical"
          << "Sketcher_ConstrainParallel"
@@ -713,6 +714,8 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
         sketch << "Sketcher_ConstrainCoincident"
                << "Sketcher_ConstrainPointOnObject";
     }
+    // FreeCAD-CH (ops#640, rank 44): Onshape's Concentric beside Coincident
+    sketch << "Sketcher_ConstrainConcentric";
     if (hGrp->GetBool("AutoHorVer", true)) {
         sketch << "Sketcher_CompHorVer";
     }

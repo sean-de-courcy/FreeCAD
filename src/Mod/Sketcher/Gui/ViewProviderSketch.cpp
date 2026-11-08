@@ -95,6 +95,7 @@
 #include "DrawSketchHandler.h"
 #include "DrawSketchHandlerDragAutoConstraint.h"
 #include "DrawSketchHandlerExternal.h"  // FreeCAD-CH (ops#634): ModelPickSelection
+#include "SketchEnterTarget.h"  // FreeCAD-CH (ops#640): the Fillet tool's Enter
 #include "EditDatumDialog.h"
 #include "EditTextDialog.h"
 #include "EditModeCoinManager.h"
@@ -1275,6 +1276,21 @@ bool ViewProviderSketch::keyPressed(bool pressed, int key)
                 return viewProviderParameters.handleEscapeButton;
             }
             return false;
+        } break;
+        case SoKeyboardEvent::RETURN:  // ENTER is the same key
+        case SoKeyboardEvent::PAD_ENTER: {
+            // FreeCAD-CH (ops#640, hands-on C-4): a tool waiting for Enter (the Fillet tool's
+            // previewed corner) takes it; it may be gone after it
+            if (isInEditMode() && sketchHandler) {
+                auto* target = dynamic_cast<SketchEnterTarget*>(sketchHandler.get());
+                if (target && target->takesEnter()) {
+                    if (pressed) {
+                        target->enterPressed();
+                    }
+                    return true;
+                }
+                sketchHandler->registerPressedKey(pressed, key);
+            }
         } break;
         default: {
             if (isInEditMode() && sketchHandler)

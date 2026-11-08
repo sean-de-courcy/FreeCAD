@@ -1199,6 +1199,8 @@ public:
 
     bool allow(App::Document* document, App::DocumentObject* pObj, const char* sSubName) override
     {
+        // FreeCAD-CH (ops#640): no earlier refusal's reason shows for this one
+        this->notAllowedReason = "";
         if (pObj != sketch) {
             if (Base::Tools::isNullOrEmpty(sSubName)) {
                 return false;
@@ -1209,6 +1211,13 @@ public:
                  && allowedSelTypes & (SelExternalEdge | SelExternalArc))
                 || (element.starts_with("Vertex") && element.size() > 6
                     && allowedSelTypes & SelVertex)) {
+                return ExternalSelection::allow(document, pObj, sSubName);
+            }
+            // FreeCAD-CH (ops#640, rank 19): a planar face perpendicular to the sketch plane is
+            // its trace on the plane, a line. Another face is refused without a reason: Onshape's
+            // words are the Dimension tool's (DimensionExternalSelection)
+            if (isFaceElement(sSubName) && allowedSelTypes & SelExternalEdge
+                && isFaceTakenBySketch(static_cast<Sketcher::SketchObject*>(sketch), pObj, sSubName)) {
                 return ExternalSelection::allow(document, pObj, sSubName);
             }
             return false;
@@ -1251,6 +1260,8 @@ public:
 
     bool allow(App::Document* document, App::DocumentObject* object, const char* subName) override
     {
+        // FreeCAD-CH (ops#640): no earlier refusal's reason shows for this one
+        this->notAllowedReason = "";
         if (object == sketch) {
             if (Base::Tools::isNullOrEmpty(subName)) {
                 return false;
@@ -1268,8 +1279,16 @@ public:
         }
 
         const std::string element(subName);
-        if ((!element.starts_with("Edge") || element.size() <= 4)
-            && (!element.starts_with("Vertex") || element.size() <= 6)) {
+        // FreeCAD-CH (ops#640, rank 19): a planar face perpendicular to the sketch plane, as
+        // Onshape's Dimension takes it (F4); a parallel one is refused with Onshape's words (C-6)
+        if (isFaceElement(subName)) {
+            if (!isFaceTakenBySketch(static_cast<Sketcher::SketchObject*>(sketch), object, subName)) {
+                this->notAllowedReason = refusedFaceReason();
+                return false;
+            }
+        }
+        else if ((!element.starts_with("Edge") || element.size() <= 4)
+                 && (!element.starts_with("Vertex") || element.size() <= 6)) {
             return false;
         }
 
@@ -1391,8 +1410,11 @@ public:
                 continue;
             }
             const std::string_view element(sel.SubName);
+            // FreeCAD-CH (ops#640, rank 19): plain edit mode's gate let a face through only when
+            // the sketch takes it (perpendicular to its plane)
             if (!(element.starts_with("Edge") && element.size() > 4)
-                && !(element.starts_with("Vertex") && element.size() > 6)) {
+                && !(element.starts_with("Vertex") && element.size() > 6)
+                && !isFaceTakenBySketch(sketch, sel.pObject, sel.SubName)) {
                 return;
             }
             modelPicks = true;
@@ -1673,7 +1695,9 @@ public:
         }
 
         const std::string subName(msg.pSubName);
-        const bool isEdge = subName.starts_with("Edge") && subName.size() > 4;
+        // FreeCAD-CH (ops#640, rank 19): a face the gate let through is its trace, a line: an edge
+        const bool isEdge = (subName.starts_with("Edge") && subName.size() > 4)
+            || isFaceElement(msg.pSubName);
         const bool isVertex = subName.starts_with("Vertex") && subName.size() > 6;
         if (!isEdge && !isVertex) {
             return false;
@@ -2714,7 +2738,9 @@ public:
         }
 
         const std::string subName(msg.pSubName);
-        const bool isEdge = subName.starts_with("Edge") && subName.size() > 4;
+        // FreeCAD-CH (ops#640, rank 19): a face the gate let through is its trace, a line: an edge
+        const bool isEdge = (subName.starts_with("Edge") && subName.size() > 4)
+            || isFaceElement(msg.pSubName);
         const bool isVertex = subName.starts_with("Vertex") && subName.size() > 6;
         if (!isEdge && !isVertex) {
             return false;
@@ -5395,6 +5421,52 @@ void CmdSketcherConstrainBlock::applyConstraint(std::vector<SelIdPair>& selSeq, 
 
 // ======================================================================================
 
+namespace
+{
+// FreeCAD-CH (ops#640, rank 44): Onshape's Coincident on two lines makes them collinear (hands-on
+// C-5). FreeCAD's tangency of two lines is that collinearity.
+bool isSketchLine(SketchObject* obj, int geoId)
+{
+    const Part::Geometry* geometry = obj->getGeometry(geoId);
+    return geometry && geometry->is<Part::GeomLineSegment>();
+}
+
+/// Each line after the first collinear with the first, in one "Add collinear constraint" step;
+/// false when none can be (two fixed lines: the warning, and no step opened, so a model pick's
+/// booking is left to ModelPickBooking).
+bool makeLinesCollinear(Gui::Command* cmd, SketchObject* obj, const std::vector<int>& lines)
+{
+    std::vector<int> others;
+    bool fixedPair = false;
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        if (lines[i] == lines[0]) {
+            continue;
+        }
+        if (areBothPointsOrSegmentsFixed(obj, lines[0], lines[i])) {
+            fixedPair = true;
+            continue;
+        }
+        others.push_back(lines[i]);
+    }
+    if (fixedPair) {
+        showNoConstraintBetweenFixedGeometry(obj);
+    }
+    if (others.empty()) {
+        return false;
+    }
+    cmd->openCommand(QT_TRANSLATE_NOOP("Command", "Add collinear constraint"));
+    for (int other : others) {
+        Gui::cmdAppObjectArgs(obj,
+                              "addConstraint(Sketcher.Constraint('Tangent',%d,%d))",
+                              lines[0],
+                              other);
+    }
+    cmd->commitCommand();
+    tryAutoRecompute(obj);
+    return true;
+}
+}  // namespace
+
 class CmdSketcherConstrainCoincidentUnified : public CmdSketcherConstraint
 {
 public:
@@ -5417,6 +5489,11 @@ protected:
     void onActivated(CoincicenceType type);
     void activatedCoincident(SketchObject* obj, std::vector<SelIdPair> points, std::vector<SelIdPair> curves);
     void activatedPointOnObject(SketchObject* obj, std::vector<SelIdPair> points, std::vector<SelIdPair> curves);
+    /// FreeCAD-CH (ops#640, rank 44): Onshape's Concentric: circles, arcs or ellipses about one
+    /// centre, or about a point (their centres coincident with it)
+    void activatedConcentric(SketchObject* obj, std::vector<SelIdPair> points, std::vector<SelIdPair> curves);
+    /// the two picks of the Concentric tool: a conic's centre on the other's centre or on a point
+    void applyConstraintConcentric(std::vector<SelIdPair>& selSeq);
 
     void applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex) override;
     void applyConstraintCoincident(std::vector<SelIdPair>& selSeq, int seqIndex);
@@ -5687,6 +5764,20 @@ void CmdSketcherConstrainCoincidentUnified::activatedPointOnObject(SketchObject*
 
 void CmdSketcherConstrainCoincidentUnified::activatedCoincident(SketchObject* obj, std::vector<SelIdPair> points, std::vector<SelIdPair> curves)
 {
+    // FreeCAD-CH (ops#640, rank 44): lines (the axes too) are made collinear, as in Onshape
+    if (points.empty() && curves.size() >= 2
+        && std::ranges::all_of(curves, [obj](const SelIdPair& curve) {
+               return isSketchLine(obj, curve.GeoId);
+           })) {
+        std::vector<int> lines;
+        for (const auto& curve : curves) {
+            lines.push_back(curve.GeoId);
+        }
+        makeLinesCollinear(this, obj, lines);
+        getSelection().clearSelection();
+        return;
+    }
+
     bool allConicsEdges = true;// If user selects only conics (circle, ellipse, arc, arcOfEllipse)
                                // then we make concentric constraint.
     for (auto& curve : curves) {
@@ -5873,6 +5964,11 @@ void CmdSketcherConstrainCoincidentUnified::applyConstraintCoincident(std::vecto
     case 1:// {SelEdge, SelEdge}
     case 2:// {SelEdge, SelExternalEdge}
     case 3:// {SelExternalEdge, SelEdge}
+        // FreeCAD-CH (ops#640, rank 44): two lines are made collinear, as in Onshape
+        if (isSketchLine(Obj, GeoId1) && isSketchLine(Obj, GeoId2)) {
+            makeLinesCollinear(this, Obj, {GeoId1, GeoId2});
+            return;
+        }
         // Concentric for circles, ellipse, arc, arcofEllipse only.
         if (!isGeoConcentricCompatible(Obj->getGeometry(GeoId1))
             || !isGeoConcentricCompatible(Obj->getGeometry(GeoId2))) {
@@ -5989,6 +6085,167 @@ void CmdSketcherConstrainCoincident::activated(int iMsg)
 void CmdSketcherConstrainCoincident::applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex)
 {
     applyConstraintCoincident(selSeq, seqIndex);
+}
+
+void CmdSketcherConstrainCoincidentUnified::activatedConcentric(SketchObject* obj, std::vector<SelIdPair> points, std::vector<SelIdPair> curves)
+{
+    const bool conics = !curves.empty()
+        && std::ranges::all_of(curves, [obj](const SelIdPair& curve) {
+               return isGeoConcentricCompatible(obj->getGeometry(curve.GeoId));
+           });
+    if (!conics || points.size() > 1 || curves.size() + points.size() < 2) {
+        Gui::TranslatedUserWarning(
+            obj,
+            QObject::tr("Wrong selection"),
+            QObject::tr("Select two or more circles, arcs or ellipses, or one of them and a point, "
+                        "for a concentric constraint."));
+        return;
+    }
+    // The point first: the conics' centres go to it (hands-on C-5: the circle moved)
+    std::vector<SelIdPair> picks = points;
+    for (auto curve : curves) {
+        curve.PosId = Sketcher::PointPos::mid;
+        picks.push_back(curve);
+    }
+
+    bool added = false;
+    bool fixedPair = false;
+    openCommand(QT_TRANSLATE_NOOP("Command", "Add concentric constraint"));
+    for (std::size_t i = 1; i < picks.size(); ++i) {
+        if (areBothPointsOrSegmentsFixed(obj, picks[0].GeoId, picks[i].GeoId)) {
+            showNoConstraintBetweenFixedGeometry(obj);
+            fixedPair = true;
+            continue;
+        }
+        if (isCoincidentSelectionValid(obj, picks[0].GeoId, picks[0].PosId, picks[i].GeoId, picks[i].PosId)) {
+            Gui::cmdAppObjectArgs(obj,
+                "addConstraint(Sketcher.Constraint('Coincident',%d,%d,%d,%d))",
+                picks[0].GeoId,
+                static_cast<int>(picks[0].PosId),
+                picks[i].GeoId,
+                static_cast<int>(picks[i].PosId));
+            added = true;
+        }
+    }
+    if (added) {
+        commitCommand();
+    }
+    else {
+        abortCommand();
+        // the centres already coincide, or the point is the conic's own (its centre or an arc's
+        // end): say so rather than do nothing silently (a fixed pair has its own warning)
+        if (!fixedPair) {
+            Gui::TranslatedUserWarning(
+                obj,
+                QObject::tr("Wrong selection"),
+                QObject::tr("No concentric constraint was added: the centres already coincide, or "
+                            "the point belongs to the same circle, arc or ellipse."));
+        }
+    }
+    tryAutoRecompute(obj);
+    getSelection().clearSelection();
+}
+
+void CmdSketcherConstrainCoincidentUnified::applyConstraintConcentric(std::vector<SelIdPair>& selSeq)
+{
+    SketcherGui::ViewProviderSketch* sketchgui =
+        static_cast<SketcherGui::ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+    Sketcher::SketchObject* Obj = sketchgui->getSketchObject();
+    std::vector<SelIdPair> points;
+    std::vector<SelIdPair> curves;
+    for (const auto& pick : selSeq) {
+        (pick.PosId == Sketcher::PointPos::none ? curves : points).push_back(pick);
+    }
+    activatedConcentric(Obj, points, curves);
+}
+
+// ======================================================================================
+
+/// FreeCAD-CH (ops#640, rank 44): Onshape's Concentric (Shift+O), for a point and a circle (the
+/// circle's centre goes to the point, hands-on C-5) or for two circles, arcs or ellipses.
+class CmdSketcherConstrainConcentric: public CmdSketcherConstrainCoincidentUnified
+{
+public:
+    CmdSketcherConstrainConcentric();
+    ~CmdSketcherConstrainConcentric() override
+    {}
+    const char* className() const override
+    {
+        return "CmdSketcherConstrainConcentric";
+    }
+
+protected:
+    void activated(int iMsg) override;
+    void applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex) override;
+};
+
+CmdSketcherConstrainConcentric::CmdSketcherConstrainConcentric()
+    : CmdSketcherConstrainCoincidentUnified("Sketcher_ConstrainConcentric")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Concentric Constraint");
+    sToolTipText = QT_TR_NOOP("Constrains the selected circles, arcs or ellipses to share a centre, "
+                              "or puts their centre on the selected point");
+    sWhatsThis = "Sketcher_ConstrainConcentric";
+    sStatusTip = sToolTipText;
+    sPixmap = "Constraint_Concentric";
+    // Onshape's key; no FreeCAD command has it
+    sAccel = "Shift+O";
+    eType = ForEdit;
+
+    allowedSelSequences = {{SelVertexOrRoot, SelEdge},
+                           {SelEdge, SelVertexOrRoot},
+                           {SelVertex, SelExternalEdge},
+                           {SelExternalEdge, SelVertex},
+                           {SelEdge, SelEdge},
+                           {SelEdge, SelExternalEdge},
+                           {SelExternalEdge, SelEdge}};
+}
+
+void CmdSketcherConstrainConcentric::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
+    std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
+    if (selection.size() != 1
+        || !selection[0].isObjectTypeOf(Sketcher::SketchObject::getClassTypeId())) {
+        // as Coincident: the continuous tool, unless the preference turns it off
+        ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
+            "User parameter:BaseApp/Preferences/Mod/Sketcher");
+        if (hGrp->GetBool("ContinuousConstraintMode", true)) {
+            ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerGenConstraint>(this));
+            getSelection().clearSelection();
+        }
+        else {
+            Gui::TranslatedUserWarning(
+                getActiveGuiDocument(),
+                QObject::tr("Wrong selection"),
+                QObject::tr("Select two or more circles, arcs or ellipses, or one of them and a "
+                            "point, for a concentric constraint."));
+        }
+        return;
+    }
+    auto* Obj = static_cast<Sketcher::SketchObject*>(selection[0].getObject());
+    std::vector<SelIdPair> points;
+    std::vector<SelIdPair> curves;
+    for (const std::string& name : selection[0].getSubNames()) {
+        SelIdPair id;
+        getIdsFromName(name, Obj, id.GeoId, id.PosId);
+        if (isEdge(id.GeoId, id.PosId)) {
+            curves.push_back(id);
+        }
+        else if (isVertex(id.GeoId, id.PosId)) {
+            points.push_back(id);
+        }
+    }
+    activatedConcentric(Obj, points, curves);
+}
+
+void CmdSketcherConstrainConcentric::applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex)
+{
+    Q_UNUSED(seqIndex);
+    applyConstraintConcentric(selSeq);
 }
 
 // ======================================================================================
@@ -12559,6 +12816,7 @@ void CreateSketcherCommandsConstraints()
     rcCmdMgr.addCommand(new CmdSketcherConstrainBlock());
     rcCmdMgr.addCommand(new CmdSketcherConstrainCoincidentUnified());
     rcCmdMgr.addCommand(new CmdSketcherConstrainCoincident());
+    rcCmdMgr.addCommand(new CmdSketcherConstrainConcentric());  // FreeCAD-CH (ops#640)
     rcCmdMgr.addCommand(new CmdSketcherDimension());
     rcCmdMgr.addCommand(new CmdSketcherConstrainParallel());
     rcCmdMgr.addCommand(new CmdSketcherConstrainPerpendicular());

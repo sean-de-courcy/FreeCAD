@@ -64,6 +64,7 @@ SET(SketcherGui_SRCS
     DrawSketchHandlerDragAutoConstraint.h
     DrawSketchHandlerDragAutoConstraint.cpp
     DrawSketchHandlerFillet.h
+    SketchEnterTarget.h
     DrawSketchHandlerTranslate.h
     DrawSketchHandlerTrimming.h
     DrawSketchHandlerExtend.h

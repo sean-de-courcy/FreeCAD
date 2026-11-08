@@ -26,7 +26,11 @@
 #include <algorithm>
 #include <vector>
 
+#include <App/Document.h>
+#include <Base/Exception.h>
 #include <Gui/Command.h>
+#include <Gui/Control.h>
+#include <Mod/Sketcher/App/SketchObject.h>
 
 #include "TaskDlgEditSketch.h"
 #include "ViewProviderSketch.h"
@@ -57,6 +61,36 @@ void TaskDlgEditSketch::addContentFactory(ContentFactory factory)
 bool TaskDlgEditSketch::hasContentFactories()
 {
     return !contentFactories().empty();
+}
+
+TaskDlgEditSketch* TaskDlgEditSketch::ofSketchView(const ViewProviderSketch* view)
+{
+    auto dlg = qobject_cast<TaskDlgEditSketch*>(Gui::Control().activeDialog());
+    return dlg && view && dlg->getSketchView() == view ? dlg : nullptr;
+}
+
+void TaskDlgEditSketch::removeNewSketch(const App::DocumentObjectT& sketchT)
+{
+    App::DocumentObject* sketch = sketchT.getObject();
+    if (!sketch || !sketch->isAttachedToDocument()) {
+        return;
+    }
+    App::Document* doc = sketch->getDocument();
+    // Its own step: Ctrl+Z brings the sketch back, as Onshape's "Restore" does
+    doc->openTransaction(QT_TRANSLATE_NOOP("Command", "Cancel New Sketch"));
+    try {
+        Gui::Command::doCommand(
+            Gui::Command::Doc,
+            "App.getDocument('%s').removeObject('%s')",
+            doc->getName(),
+            sketch->getNameInDocument()
+        );
+        doc->commitTransaction();
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+        doc->abortTransaction();
+    }
 }
 
 //**************************************************************************
@@ -164,9 +198,15 @@ bool TaskDlgEditSketch::reject()
 {
     ViewProviderSketch* view = sketchView;
     std::string document = getDocumentName();  // needed because resetEdit() deletes this instance
+    // FreeCAD-CH (ops#640, hands-on R1): Onshape's cancel of a new sketch removes it
+    const bool removeSketch = newSketch;
+    const App::DocumentObjectT sketchT(view->getObject());
     view->editingCancelled = true;
     Gui::Command::doCommand(Gui::Command::Gui, "Gui.getDocument('%s').resetEdit()", document.c_str());
     view->editingCancelled = false;
+    if (removeSketch) {
+        removeNewSketch(sketchT);
+    }
 
     return true;
 }
@@ -174,7 +214,16 @@ bool TaskDlgEditSketch::reject()
 bool TaskDlgEditSketch::accept()
 {
     std::string document = getDocumentName();  // needed because resetEdit() deletes this instance
+    // FreeCAD-CH (ops#640): a new sketch closed while it still waits for its plane, with nothing
+    // in it, goes as a cancelled one does: there was nothing to draw on
+    auto sketch = dynamic_cast<Sketcher::SketchObject*>(sketchView->getObject());
+    const bool removeSketch = newSketch && toolsBlocked && sketch
+        && sketch->Geometry.getSize() == 0 && sketch->Constraints.getSize() == 0;
+    const App::DocumentObjectT sketchT(sketch);
     Gui::Command::doCommand(Gui::Command::Gui, "Gui.getDocument('%s').resetEdit()", document.c_str());
+    if (removeSketch) {
+        removeNewSketch(sketchT);
+    }
     Gui::Command::doCommand(Gui::Command::Doc, "App.getDocument('%s').recompute()", document.c_str());
 
     return true;
@@ -203,6 +252,8 @@ void TaskDlgEditSketch::autoClosedOnResetEdit()
 
 void TaskDlgEditSketch::autoClosedOnClosedView()
 {
+    // FreeCAD-CH (ops#640): the view (or its document) closing is no cancel: the sketch stays
+    newSketch = false;
     // Make sure the edit mode is exited when the view is closed.
     reject();
 }

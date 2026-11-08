@@ -54,6 +54,8 @@ if(BUILD_GUI)
           SketcherTests/TestSketchCommandsGui.py
           SketcherTests/TestSketchToolbarGui.py
           SketcherTests/TestSketchModelPicksGui.py
+          SketcherTests/TestSketchModelFacesGui.py
+          SketcherTests/TestSketchConstraintToolsGui.py
           SketcherTests/TestSketchOnshapeGui.py
           SketcherTests/TestSketchHelpersGui.py
           SketcherTests/TestSketchOnshapeToolsGui.py

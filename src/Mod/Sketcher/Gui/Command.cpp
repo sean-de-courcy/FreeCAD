@@ -446,9 +446,16 @@ void CmdSketcherCancelSketch::activated(int iMsg)
         vp->purgeHandler();
     }
 
+    // FreeCAD-CH (ops#640, hands-on R1): a cancelled new sketch goes, as with the dialog's Cancel
+    TaskDlgEditSketch* dlg = TaskDlgEditSketch::ofSketchView(vp);
+    const bool removeSketch = dlg && dlg->isNewSketch();
+    const App::DocumentObjectT sketchT(vp->getObject());
     vp->editingCancelled = true;
     doCommand(Gui, "Gui.activeDocument().resetEdit()");
     vp->editingCancelled = false;
+    if (removeSketch) {
+        TaskDlgEditSketch::removeNewSketch(sketchT);
+    }
 }
 
 bool CmdSketcherCancelSketch::isActive()

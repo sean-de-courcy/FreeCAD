@@ -47,6 +47,7 @@
 #include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/TopoShape.h>
+#include <Mod/Sketcher/Gui/TaskDlgEditSketch.h>
 #include <Mod/Sketcher/Gui/ViewProviderSketch.h>
 
 #include <App/Document.h>
@@ -113,6 +114,19 @@ void showStudioPlanes(PartDesign::Body* body)
     if (auto* vpo = originViewProvider(body)) {
         vpo->setTemporaryVisibility(Gui::DatumElement::Planes);
         vpo->setPlaneLabelVisibility(true);
+    }
+}
+
+// FreeCAD-CH (ops#640, hands-on R1): the sketch New Sketch just opened is a new one: its dialog's
+// Cancel removes it, as Onshape's cancel of a new sketch does (Onshape's keymap only)
+void markNewSketch(App::DocumentObject* sketch)
+{
+    if (!sketch || !Gui::ForkKeymap::isOnshape()) {
+        return;
+    }
+    auto dlg = qobject_cast<SketcherGui::TaskDlgEditSketch*>(Gui::Control().activeDialog());
+    if (dlg && dlg->getSketchView() && dlg->getSketchView()->getObject() == sketch) {
+        dlg->setNewSketch(true);
     }
 }
 
@@ -326,6 +340,7 @@ public:
         }
         Gui::Command::updateActive();
         PartDesignGui::setEdit(Feat, activeBody);
+        markNewSketch(Feat);
     }
 
 private:
@@ -745,6 +760,7 @@ private:
 
             if (auto* sketchObj = sketchRef.getObject()) {
                 PartDesignGui::setEdit(sketchObj, partDesignBody);
+                markNewSketch(sketchObj);
             }
         };
         auto onReject = [bodyRef = App::DocumentObjectT(activeBody), studioPlanes]() {
@@ -939,6 +955,7 @@ private:
         );
         Gui::Command::updateActive();  // Make sure the AttachmentSupport's Placement property is updated
         PartDesignGui::setEdit(Feat, partDesignBody);
+        markNewSketch(Feat);
     }
 
 private:
@@ -981,6 +998,7 @@ void createSketchToPickPlane(Gui::Document* guidocument, PartDesign::Body* activ
     Gui::Command::updateActive();
     Gui::Selection().clearSelection();
     PartDesignGui::setEdit(sketch, activeBody);
+    markNewSketch(sketch);
     // The box shows the Body's planes for the pick, for the dialog's life when they weren't shown
     // (a new part studio's stay shown, ops#626)
     if (TaskSketchPlane* box = TaskSketchPlane::ofActiveDialog()) {
