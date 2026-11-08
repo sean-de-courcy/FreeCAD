@@ -28,6 +28,7 @@ from AssemblyTests.TestCommandInsertLink import TestCommandInsertLink
 from AssemblyTests.TestCommandCreateView import TestCommandCreateView
 from AssemblyTests.TestSimulationExport import TestSimulationExport
 from AssemblyTests.TestJointRecords import TestJointRecords  # FreeCAD-CH, ops#504
+from AssemblyTests.TestFloatingSolve import TestFloatingSolve  # FreeCAD-CH, ops#640
 from AssemblyTests.TestVariantLinks import (
     TestLinkRetargetJoints,
     TestLinkRetargetProperties,
@@ -43,6 +44,7 @@ True if TestCommandInsertLink else False
 True if TestCommandCreateView else False
 True if TestSimulationExport else False
 True if TestJointRecords else False
+True if TestFloatingSolve else False
 True if TestLinkRetargetJoints else False
 True if TestLinkRetargetProperties else False
 True if TestLinkTargetReopened else False

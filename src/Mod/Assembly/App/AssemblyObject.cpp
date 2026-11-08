@@ -97,6 +97,9 @@ namespace PartApp = Part;
 namespace
 {
 
+// The solver-only joints that hold a floating group of parts in solve() (ops#640, rank 60)
+const std::string floatingAnchorPrefix = "FloatingAnchor-";
+
 struct RotationJointSide
 {
     App::DocumentObject* joint = nullptr;
@@ -329,6 +332,61 @@ int AssemblyObject::solve(bool enableRedo)
 
     std::vector<App::DocumentObject*> joints = getJoints();
 
+    // FreeCAD-CH (ops#640, rank 60; Onshape hands-on E4): no instance has to be fixed before
+    // the joints solve. Each group of parts joined by joints but reached from no grounded part
+    // is held, for this solve only, by the part of its first joint's second pick: the joint
+    // dialog moves the first pick onto the second, so that part stays where it is. Nothing is
+    // saved; dragging such a group still moves it whole (findDragMode's no-solve case).
+    {
+        std::vector<ObjRef> reached;
+        for (auto* obj : groundedObjs) {
+            reached.push_back({obj, nullptr});
+        }
+        for (auto* obj : groundedObjs) {
+            traverseAndMarkConnectedParts(obj, reached, joints);
+        }
+        for (auto* joint : joints) {
+            if (!isJointTypeConnecting(joint)) {
+                continue;
+            }
+            App::DocumentObject* part1 = getMovingPartFromRef(joint, "Reference1");
+            App::DocumentObject* anchor = getMovingPartFromRef(joint, "Reference2");
+            if (!part1 || !anchor || isObjInSetOfObjRefs(anchor, reached)) {
+                continue;
+            }
+            if (auto* rep = getRigidRepresentative(anchor)) {
+                anchor = rep;
+            }
+            // Fix the solver body at its current placement (a bundled or rigid-group member
+            // carries the offset from its body)
+            MbDPartData data = getMbDData(anchor);
+            if (!data.part) {
+                continue;
+            }
+            Base::Placement bodyPlc = getPlacementFromProp(anchor, "Placement")
+                * data.offsetPlc.inverse();
+            std::string markerName1 = "marker-" + floatingAnchorPrefix + anchor->getFullName();
+            auto mbdMarker1 = makeMbdMarker(markerName1, bodyPlc);
+            mbdAssembly->addMarker(mbdMarker1);
+            std::string markerName2 = "FloatingAnchorMarker";
+            Base::Placement identity;
+            auto mbdMarker2 = makeMbdMarker(markerName2, identity);
+            data.part->addMarker(mbdMarker2);
+            auto mbdJoint = CREATE<ASMTFixedJoint>::With();
+            mbdJoint->setName(floatingAnchorPrefix + anchor->getFullName());
+            mbdJoint->setMarkerI("/OndselAssembly/" + mbdMarker1->name);
+            mbdJoint->setMarkerJ("/OndselAssembly/" + data.part->name + "/" + mbdMarker2->name);
+            mbdAssembly->addJoint(mbdJoint);
+
+            groundedObjs.insert(anchor);
+            reached.push_back({anchor, nullptr});
+            traverseAndMarkConnectedParts(anchor, reached, joints);
+            if (!isObjInSetOfObjRefs(part1, reached)) {
+                reached.push_back({part1, nullptr});
+            }
+        }
+    }
+
     removeUnconnectedJoints(joints, groundedObjs);
 
     jointParts(joints);
@@ -413,8 +471,12 @@ void AssemblyObject::updateSolveStatus()
         // Base::Console().warning("jm->name %s\n", jm->name);
         bool isJointRedundant = false;
 
+        // A floating group's holding joint is not the user's: its 6 constraints stay degrees of
+        // freedom, as in Onshape, where an unfixed group keeps them (ops#640, rank 60)
+        const bool isFloatingAnchor = jm->name.find(floatingAnchorPrefix) != std::string::npos;
+
         jm->constraintsDo([&](std::shared_ptr<MbD::Constraint> con) {
-            if (!con) {
+            if (!con || isFloatingAnchor) {
                 return;
             }
 

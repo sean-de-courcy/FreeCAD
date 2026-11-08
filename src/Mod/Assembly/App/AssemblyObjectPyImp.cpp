@@ -22,6 +22,8 @@
  ***************************************************************************/
 
 
+#include <cstring>
+
 // inclusion of the generated files (generated out of AssemblyObject.xml)
 #include "AssemblyObjectPy.h"
 #include "AssemblyObjectPy.cpp"
@@ -34,8 +36,18 @@ std::string AssemblyObjectPy::representation() const
     return {"<Assembly object>"};
 }
 
-PyObject* AssemblyObjectPy::getCustomAttributes(const char* /*attr*/) const
+PyObject* AssemblyObjectPy::getCustomAttributes(const char* attr) const
 {
+    // FreeCAD-CH (ops#640, rank 60): the names of the joints the last solve found redundant, for
+    // the joints' error mark (Onshape's red mate, hands-on E3). A custom attribute, so the
+    // generated interface stays as it is.
+    if (attr && std::strcmp(attr, "RedundantJoints") == 0) {
+        Py::List ret;
+        for (const auto& name : getAssemblyObjectPtr()->getLastRedundant()) {
+            ret.append(Py::String(name));
+        }
+        return Py::new_reference_to(ret);
+    }
     return nullptr;
 }
 

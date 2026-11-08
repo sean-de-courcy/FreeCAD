@@ -9,6 +9,8 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCoreApplication>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeyEvent>
@@ -17,18 +19,23 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <App/Application.h>
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
+#include <App/Origin.h>
+#include <App/OriginGroupExtension.h>
 #include <App/Part.h>
 #include <App/PropertyLinks.h>
 #include <App/SuppressibleExtension.h>
@@ -47,8 +54,10 @@
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/Studio.h>
 
 #include "ViewProviderBody.h"
@@ -292,6 +301,36 @@ const App::DocumentObject* errorCause(const App::DocumentObject* obj)
     return cause;
 }
 
+/** FreeCAD-CH (ops#640 rank 35, blind test F45): obj's status message in the user's words. A
+ * failure passed on from an input reads "Depends on 'Square', which failed", not the recompute's
+ * "ReferenceAxis links to 'Square', which has an error" (a property the user never set); the
+ * tooltip adds the cause's own message (errorCause()). A C++ exception's type or OCCT's raw text
+ * ("BRep_API: command not done", "Standard_ConstructionError") reads as a failed operation
+ */
+QString plainStatus(const App::DocumentObject* obj)
+{
+    const QString text = QString::fromUtf8(obj->getStatusString()).trimmed();
+    static const QRegularExpression passedOn(
+        QStringLiteral(R"(^(?:\w+ links to '(.*)', which has an error|'(.*)' has an error)$)")
+    );
+    if (auto match = passedOn.match(text); match.hasMatch()) {
+        const QString input = match.captured(1).isEmpty() ? match.captured(2) : match.captured(1);
+        return QCoreApplication::translate("PartDesignGui::FeaturesView", "Depends on '%1', which failed")
+            .arg(input);
+    }
+    static const QRegularExpression internal(QStringLiteral(
+        R"(\b(?:BRep\w*API\w*|Standard_\w+|StdFail_\w+|gp_\w+|TopoDS::\w+|Base::\w+|Part::\w+Exception|std::\w+)\b)"
+        R"(|command not done|Unknown C\+\+ exception)"
+    ));
+    if (internal.match(text).hasMatch()) {
+        return QCoreApplication::translate(
+            "PartDesignGui::FeaturesView",
+            "The geometry operation failed: change the inputs or the values"
+        );
+    }
+    return text;
+}
+
 /// The row's tooltip: its name and Body, the message of an error or a warning, and where an error
 /// comes from (errorCause()), as Onshape's hover over a failed feature (blind test F38)
 QString rowToolTip(const App::DocumentObject* obj, const App::DocumentObject* body)
@@ -303,13 +342,10 @@ QString rowToolTip(const App::DocumentObject* obj, const App::DocumentObject* bo
     if (!obj->isError() && !obj->isWarning()) {
         return tip;
     }
-    tip += QStringLiteral("\n") + QString::fromUtf8(obj->getStatusString());
+    tip += QStringLiteral("\n") + plainStatus(obj);
     if (auto cause = obj->isError() ? errorCause(obj) : nullptr) {
         tip += QStringLiteral("\n")
-            + QObject::tr("Caused by '%1': %2").arg(
-                QString::fromUtf8(cause->Label.getValue()),
-                QString::fromUtf8(cause->getStatusString())
-            );
+            + QObject::tr("Caused by '%1': %2").arg(QString::fromUtf8(cause->Label.getValue()), plainStatus(cause));
     }
     return tip;
 }
@@ -415,6 +451,100 @@ int partPieces(const App::DocumentObject* obj)
     return TopoDS_Iterator(shape.getShape()).More() ? 1 : 0;
 }
 
+/** Onshape's default geometry rows at the top of the Features list (ops#640 rank 33): Origin, Top,
+ * Front and Right, of the studio's own Origin (an App::Part's), or at the top level of the first
+ * Body's (each Body has one; they coincide while the Bodies aren't moved)
+ */
+std::vector<std::pair<App::DocumentObject*, QString>> defaultGeometry(App::Document* doc, App::Part* studio)
+{
+    App::DocumentObject* owner = studio;
+    if (!owner) {
+        const auto bodies = PartDesign::studioBodies(doc, nullptr);
+        owner = bodies.empty() ? nullptr : bodies.front();
+    }
+    auto group = owner ? owner->getExtensionByType<App::OriginGroupExtension>(true) : nullptr;
+    auto origin = group ? freecad_cast<App::Origin*>(group->Origin.getValue()) : nullptr;
+    if (!origin) {
+        return {};
+    }
+    std::vector<std::pair<App::DocumentObject*, QString>> rows;
+    auto add = [&rows](App::DocumentObject* obj, const QString& label) {
+        if (obj && obj->isAttachedToDocument()) {
+            rows.emplace_back(obj, label);
+        }
+    };
+    try {
+        add(origin->getOrigin(), FeaturesView::tr("Origin"));
+        add(origin->getXY(), FeaturesView::tr("Top"));
+        add(origin->getXZ(), FeaturesView::tr("Front"));
+        add(origin->getYZ(), FeaturesView::tr("Right"));
+    }
+    catch (const Base::Exception&) {
+        // An Origin missing an element (a damaged file): no default rows
+        return {};
+    }
+    return rows;
+}
+
+/// A row with an eye (ops#640 rank 33): a sketch, a plane (a datum plane, a default plane or the
+/// origin) or a binder, as Onshape's; a solid's visibility follows the bar
+bool hasEye(const App::DocumentObject* obj)
+{
+    return obj
+        && (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<PartDesign::Plane>()
+            || obj->isDerivedFrom<App::Plane>() || obj->isDerivedFrom<App::Point>()
+            || obj->isDerivedFrom<PartDesign::ShapeBinder>()
+            || obj->isDerivedFrom<PartDesign::SubShapeBinder>());
+}
+
+/// Whether obj is shown: a default plane only with its Origin
+bool rowShown(const App::DocumentObject* obj)
+{
+    auto vp = viewProviderOf(obj);
+    if (!vp || !vp->isShow()) {
+        return false;
+    }
+    auto element = freecad_cast<const App::DatumElement*>(obj);
+    auto lcs = element ? element->getLCS() : nullptr;
+    auto lcsVp = lcs ? viewProviderOf(lcs) : nullptr;
+    return !lcsVp || lcsVp->isShow();
+}
+
+/// A row's EyeRole value: 0 none, 1 shown, 2 hidden
+int eyeState(const App::DocumentObject* obj)
+{
+    if (!hasEye(obj)) {
+        return 0;
+    }
+    return rowShown(obj) ? 1 : 2;
+}
+
+/// The filter box's text matches obj: its label or its type, case aside; ":errors" and
+/// ":warnings" its status, the one its row shows (statusObject()) (Onshape's filter, ref-D #23)
+bool matchesFilter(const App::DocumentObject* obj, const App::DocumentObject* status, const QString& filter)
+{
+    const QString text = filter.trimmed();
+    if (text.isEmpty()) {
+        return true;
+    }
+    if (text.compare(QStringLiteral(":errors"), Qt::CaseInsensitive) == 0) {
+        return status->isError();
+    }
+    if (text.compare(QStringLiteral(":warnings"), Qt::CaseInsensitive) == 0) {
+        return status->isWarning();
+    }
+    return QString::fromUtf8(obj->Label.getValue()).contains(text, Qt::CaseInsensitive)
+        || QString::fromLatin1(obj->getTypeId().getName()).contains(text, Qt::CaseInsensitive);
+}
+
+/// The object in edit in doc (its dialog open), or null
+App::DocumentObject* objectInEdit(App::Document* doc)
+{
+    auto gdoc = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
+    auto vp = gdoc ? freecad_cast<Gui::ViewProviderDocumentObject*>(gdoc->getInEdit()) : nullptr;
+    return vp ? vp->getObject() : nullptr;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------- FeatureList
@@ -431,6 +561,12 @@ QListWidgetItem* FeatureList::barItem() const
         }
     }
     return nullptr;
+}
+
+QRect FeatureList::eyeRect(const QRect& row)
+{
+    const int size = std::min(16, row.height());
+    return {row.right() - size - 3, row.center().y() - size / 2, size, size};
 }
 
 int FeatureList::dropRowAt(const QPoint& pos) const
@@ -461,6 +597,13 @@ void FeatureList::mousePressEvent(QMouseEvent* event)
         barMoved = false;
         setCursor(Qt::ClosedHandCursor);
         event->accept();
+        return;
+    }
+    // A click on a row's eye shows or hides its object, leaving the selection (ops#640 rank 33)
+    if (event->button() == Qt::LeftButton && pressed && pressed->data(EyeRole).toInt() != 0
+        && eyeRect(visualItemRect(pressed)).contains(pos)) {
+        event->accept();
+        Q_EMIT eyeClicked(pressed);
         return;
     }
     // A plain press on a row may start a drag of the selected rows (ops#632). On a row of a
@@ -609,6 +752,13 @@ void FeatureBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& op
     auto item = list ? list->item(index.row()) : nullptr;
     if (!item || item->type() != FeatureList::BarType) {
         QStyledItemDelegate::paint(painter, option, index);
+        // The eye of a sketch, plane or binder row (ops#640 rank 33): always while hidden, on
+        // hover while shown, as Onshape's
+        const int eye = item ? item->data(FeatureList::EyeRole).toInt() : 0;
+        if (eye == 2 || (eye == 1 && (option.state & QStyle::State_MouseOver))) {
+            QIcon icon(Gui::BitmapFactory().pixmap(eye == 1 ? "TreeItemVisible" : "TreeItemInvisible"));
+            icon.paint(painter, FeatureList::eyeRect(option.rect));
+        }
         return;
     }
     // As the tree's bar (Tree.cpp, TreeWidgetItemDelegate::paint): a line across the row with a
@@ -661,6 +811,13 @@ FeaturesView::FeaturesView(QWidget* parent)
     title->setObjectName(QStringLiteral("featuresTitle"));
     header->addWidget(title, 1);
     featuresLayout->addLayout(header);
+    // Onshape's filter box (ops#640 rank 33): rows by name or type, ":errors", ":warnings"
+    filterBox = new QLineEdit(featuresBox);
+    filterBox->setObjectName(QStringLiteral("featuresFilter"));
+    filterBox->setPlaceholderText(tr("Filter by name or type"));
+    filterBox->setClearButtonEnabled(true);
+    filterBox->setToolTip(tr("Rows whose name or type contains the text; :errors or :warnings by status"));
+    featuresLayout->addWidget(filterBox);
     features = new FeatureList(featuresBox);
     features->setObjectName(QStringLiteral("featureList"));
     features->setItemDelegate(new FeatureBarDelegate(features));
@@ -736,6 +893,16 @@ FeaturesView::FeaturesView(QWidget* parent)
         pushSelection(objs);
     });
     connect(errorsButton, &QToolButton::toggled, this, &FeaturesView::applyErrorFilter);
+    connect(filterBox, &QLineEdit::textChanged, this, &FeaturesView::applyErrorFilter);
+    connect(features, &FeatureList::eyeClicked, this, [this](QListWidgetItem* item) {
+        toggleRowVisibility(objectOf(item));
+    });
+    // The hover pre-highlights the row's object in the 3D view (ops#640 rank 33)
+    for (QAbstractItemView* view : {static_cast<QAbstractItemView*>(features), static_cast<QAbstractItemView*>(parts)}) {
+        view->setMouseTracking(true);
+        view->viewport()->setMouseTracking(true);
+        view->viewport()->installEventFilter(this);
+    }
     connect(features->itemDelegate(), &QAbstractItemDelegate::closeEditor, this, &FeaturesView::endRename);
     connect(parts->itemDelegate(), &QAbstractItemDelegate::closeEditor, this, &FeaturesView::endRename);
     connect(features, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
@@ -766,6 +933,13 @@ FeaturesView::FeaturesView(QWidget* parent)
 
     auto& app = App::GetApplication();
     connections.emplace_back(app.signalNewObject.connect([this](const App::DocumentObject& obj) {
+        // A new member goes in at the bar (Body::addObject): the bar follows it, not the row it
+        // was last dragged after, or a sketch made there would be listed below it (ops#640 rank
+        // 34, blind test F42)
+        if (obj.getDocument() && documentName == obj.getDocument()->getName()) {
+            barHinted = false;
+            barHint.clear();
+        }
         onObject(obj);
     }));
     connections.emplace_back(app.signalDeletedObject.connect([this](const App::DocumentObject& obj) {
@@ -1057,9 +1231,15 @@ void FeaturesView::rebuildFeatures()
         features->clear();
         featureRows.clear();
         featureNames.clear();
+        editedName.clear();
         return;
     }
     const auto sequence = PartDesign::studioSequence(doc, studio());
+    // Onshape's default geometry at the top (ops#640 rank 33)
+    const auto defaults = defaultGeometry(doc, studio());
+    // The feature being made or edited is highlighted (ops#640 rank 40)
+    App::DocumentObject* inEdit = objectInEdit(doc);
+    editedName = inEdit ? inEdit->getNameInDocument() : "";
     // A Merge its feature's merge scope made has no row: its status shows on the feature's
     // (ops#640 rank 1)
     std::vector<bool> folded;
@@ -1089,7 +1269,6 @@ void FeaturesView::rebuildFeatures()
     // The rows in list order: a member's index in sequence, or -1 for the bar (none in an empty
     // studio)
     std::vector<int> order;
-    std::vector<bool> held;
     std::vector<std::string> rows;
     std::vector<std::string> names;
     for (std::size_t i = 0; i < sequence.size(); ++i) {
@@ -1103,9 +1282,24 @@ void FeaturesView::rebuildFeatures()
     if (barRow >= sequence.size() && !sequence.empty()) {
         order.push_back(-1);
     }
-    for (std::size_t i = 0; i < sequence.size(); ++i) {
-        auto body = PartDesign::Body::findBodyOf(sequence[i]);
-        held.push_back(body && body->holds(sequence[i]));
+    // Every row below the bar is rolled back, greyed with the features it holds: the sketches and
+    // datums waiting there too (ops#640 rank 34, blind test F43). Not a solid its Body doesn't
+    // hold: one Body rolled back from the tree leaves another's later solids computed and shown
+    std::vector<bool> below(sequence.size(), false);
+    bool pastBar = false;
+    for (int index : order) {
+        if (index < 0) {
+            pastBar = true;
+        }
+        else if (pastBar) {
+            const App::DocumentObject* obj = sequence[index];
+            auto body = PartDesign::Body::findBodyOf(obj);
+            below[index] = !(body && PartDesign::Body::isSolidFeature(obj) && !body->holds(obj));
+        }
+    }
+    for (const auto& [obj, label] : defaults) {
+        rows.push_back(rowKey(obj, false, "\x1d" + std::to_string(eyeState(obj))));
+        names.emplace_back(obj->getNameInDocument());
     }
     for (int index : order) {
         if (index < 0) {
@@ -1119,7 +1313,11 @@ void FeaturesView::rebuildFeatures()
         if (auto merge = foldedMerge(obj)) {
             extra += '\x1e' + rowKey(merge, body && body->holds(merge));
         }
-        rows.push_back(rowKey(obj, held[index], extra));
+        extra += '\x1d' + std::to_string(eyeState(obj));
+        if (obj == inEdit) {
+            extra += "\x1d" "edit";
+        }
+        rows.push_back(rowKey(obj, below[index], extra));
         names.emplace_back(obj->getNameInDocument());
     }
     // Unchanged: the rows (and the user's selection anchor in them) stay
@@ -1132,14 +1330,17 @@ void FeaturesView::rebuildFeatures()
     bool inPlace = names == featureNames && features->count() == static_cast<int>(names.size());
     featureRows = rows;
     featureNames = names;
-    auto decorate = [this](QListWidgetItem* item, App::DocumentObject* obj, bool isHeld) {
+    auto decorate = [this, inEdit](QListWidgetItem* item, App::DocumentObject* obj, bool isBelow) {
         auto body = PartDesign::Body::findBodyOf(obj);
         // A folded Merge's status shows here, its icon the feature's (ops#640 rank 1)
         const App::DocumentObject* status = statusObject(obj);
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setText(QString::fromUtf8(obj->Label.getValue()));
         item->setData(Qt::UserRole, QByteArray(obj->getNameInDocument()));
-        QIcon icon = statusIcon(obj, isHeld);
+        item->setData(FeatureList::DefaultRole, QVariant());
+        item->setData(FeatureList::EyeRole, eyeState(obj));
+        // Below the bar the icon is dimmed, not marked (ops#640 rank 34): Onshape greys the row
+        QIcon icon = statusIcon(obj, false);
         if (status != obj) {
             const char* overlay = status->isError() ? "overlay_error"
                 : status->isWarning()               ? "overlay_warning"
@@ -1152,26 +1353,59 @@ void FeaturesView::rebuildFeatures()
                 Gui::BitmapFactoryInst::TopRight
             ));
         }
+        if (isBelow) {
+            icon = QIcon(icon.pixmap(QSize(16, 16), QIcon::Disabled));
+        }
         item->setIcon(icon);
-        item->setFont(statusFont(features->font(), obj, isHeld));
-        item->setData(Qt::ForegroundRole, statusForeground(status));
+        // Greyed and italic below the bar (hands-on F5: "later rows go grey and italic"); the
+        // feature in edit bold (ops#640 rank 40)
+        QFont font = statusFont(features->font(), obj, isBelow);
+        font.setBold(obj == inEdit);
+        item->setFont(font);
+        QVariant foreground = statusForeground(status);
+        if (isBelow && !foreground.isValid()) {
+            foreground = QBrush(features->palette().color(QPalette::Disabled, QPalette::Text));
+        }
+        item->setData(Qt::ForegroundRole, foreground);
         QString tip = rowToolTip(obj, body);
         if (status != obj) {
-            tip += QStringLiteral("\n") + QString::fromUtf8(status->getStatusString());
+            tip += QStringLiteral("\n") + plainStatus(status);
+        }
+        if (obj == inEdit) {
+            tip += QStringLiteral("\n") + tr("In edit");
         }
         item->setToolTip(tip);
     };
+    // A default geometry row: Onshape's name, the object's icon and eye; not renamed or dragged
+    auto decorateDefault = [](QListWidgetItem* item, App::DocumentObject* obj, const QString& label) {
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        item->setText(label);
+        item->setData(Qt::UserRole, QByteArray(obj->getNameInDocument()));
+        item->setData(FeatureList::DefaultRole, true);
+        item->setData(FeatureList::EyeRole, eyeState(obj));
+        auto vp = viewProviderOf(obj);
+        item->setIcon(vp ? vp->getIcon() : QIcon());
+        item->setToolTip(QStringLiteral("%1 (%2)").arg(label, QString::fromUtf8(obj->Label.getValue())));
+    };
+    const int offset = static_cast<int>(defaults.size());
     if (inPlace) {
+        for (int r = 0; r < offset; ++r) {
+            decorateDefault(features->item(r), defaults[r].first, defaults[r].second);
+        }
         for (std::size_t r = 0; r < order.size(); ++r) {
             if (order[r] >= 0) {
-                decorate(features->item(static_cast<int>(r)), sequence[order[r]], held[order[r]]);
+                decorate(features->item(offset + static_cast<int>(r)), sequence[order[r]], below[order[r]]);
             }
         }
+        markDependencies();
         applyErrorFilter();
         return;
     }
     int scroll = features->verticalScrollBar() ? features->verticalScrollBar()->value() : 0;
     features->clear();
+    for (const auto& [obj, label] : defaults) {
+        decorateDefault(new QListWidgetItem(features), obj, label);
+    }
     for (int index : order) {
         if (index < 0) {
             auto bar = new QListWidgetItem(features, FeatureList::BarType);
@@ -1180,7 +1414,7 @@ void FeaturesView::rebuildFeatures()
             bar->setToolTip(tr("Roll-back bar: drag it to roll every body of the part studio back"));
             continue;
         }
-        decorate(new QListWidgetItem(features), sequence[index], held[index]);
+        decorate(new QListWidgetItem(features), sequence[index], below[index]);
     }
     markDependencies();
     applyErrorFilter();
@@ -1192,10 +1426,18 @@ void FeaturesView::rebuildFeatures()
 void FeaturesView::applyErrorFilter()
 {
     bool only = errorsButton->isChecked();
+    const QString filter = filterBox ? filterBox->text() : QString();
+    const bool filtering = only || !filter.trimmed().isEmpty();
     for (int i = 0; i < features->count(); ++i) {
         auto item = features->item(i);
         auto obj = objectOf(item);
-        item->setHidden(only && !(obj && statusObject(obj)->isError()));
+        if (!obj) {
+            // The bar: only in the whole list
+            item->setHidden(filtering);
+            continue;
+        }
+        const App::DocumentObject* status = item->data(FeatureList::DefaultRole).toBool() ? obj : statusObject(obj);
+        item->setHidden((only && !status->isError()) || !matchesFilter(obj, status, filter));
     }
 }
 
@@ -1276,6 +1518,104 @@ App::DocumentObject* FeaturesView::objectOf(const QListWidgetItem* item) const
         return nullptr;
     }
     return doc->getObject(item->data(Qt::UserRole).toByteArray().constData());
+}
+
+App::DocumentObject* FeaturesView::memberOf(const QListWidgetItem* item) const
+{
+    return item && item->data(FeatureList::DefaultRole).toBool() ? nullptr : objectOf(item);
+}
+
+bool FeaturesView::eventFilter(QObject* watched, QEvent* event)
+{
+    const bool overFeatures = watched == features->viewport();
+    if (overFeatures || watched == parts->viewport()) {
+        if (event->type() == QEvent::MouseMove) {
+            auto pos = static_cast<QMouseEvent*>(event)->position().toPoint();
+            // Not while a drag is under way: the rows move under the cursor
+            App::DocumentObject* obj = nullptr;
+            if (overFeatures && !features->isDraggingBar() && !features->isDraggingRows()) {
+                obj = objectOf(features->itemAt(pos));
+            }
+            else if (!overFeatures) {
+                obj = objectOf(parts->itemAt(pos));
+            }
+            preselectRow(obj);
+        }
+        else if (event->type() == QEvent::Leave) {
+            preselectRow(nullptr);
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void FeaturesView::preselectRow(App::DocumentObject* obj)
+{
+    const std::string name = obj ? obj->getNameInDocument() : "";
+    if (name == preselected) {
+        return;
+    }
+    preselected = name;
+    auto doc = document();
+    Gui::Selection().rmvPreselect();
+    if (!obj || !doc || obj->getDocument() != doc) {
+        return;
+    }
+    // As the tree's hover (TreeWidget::onItemEntered): from the top-level object down
+    auto parents = obj->getParents();
+    if (!parents.empty() && parents.front().first) {
+        Gui::Selection().setPreselect(
+            doc->getName(),
+            parents.front().first->getNameInDocument(),
+            parents.front().second.c_str(),
+            0,
+            0,
+            0,
+            Gui::SelectionChanges::MsgSource::TreeView
+        );
+    }
+    else {
+        Gui::Selection()
+            .setPreselect(doc->getName(), obj->getNameInDocument(), "", 0, 0, 0, Gui::SelectionChanges::MsgSource::TreeView);
+    }
+}
+
+void FeaturesView::toggleRowVisibility(App::DocumentObject* obj)
+{
+    auto vp = obj ? viewProviderOf(obj) : nullptr;
+    if (!vp) {
+        return;
+    }
+    // A default plane shows with its Origin: shown alone, the Origin's other elements hidden
+    // first; hidden, the Origin goes too when nothing of it is left shown
+    auto element = freecad_cast<App::DatumElement*>(obj);
+    auto lcs = element ? element->getLCS() : nullptr;
+    auto lcsVp = lcs ? viewProviderOf(lcs) : nullptr;
+    if (!lcsVp) {
+        vp->Gui::ViewProvider::toggleVisibility();
+    }
+    else if (rowShown(obj)) {
+        vp->hide();
+        bool any = std::ranges::any_of(lcs->baseObjects(), [](App::DatumElement* other) {
+            auto otherVp = other ? viewProviderOf(other) : nullptr;
+            return otherVp && otherVp->isShow();
+        });
+        if (!any) {
+            lcsVp->hide();
+        }
+    }
+    else {
+        if (!lcsVp->isShow()) {
+            for (App::DatumElement* other : lcs->baseObjects()) {
+                auto otherVp = other && other != obj ? viewProviderOf(other) : nullptr;
+                if (otherVp && otherVp->isShow()) {
+                    otherVp->hide();
+                }
+            }
+            lcsVp->show();
+        }
+        vp->show();
+    }
+    scheduleRebuild();
 }
 
 App::DocumentObject* FeaturesView::objectOf(const QTreeWidgetItem* item) const
@@ -1420,7 +1760,7 @@ void FeaturesView::rollStudio(App::Document* doc, App::Part* studio, App::Docume
 void FeaturesView::onBarDropped(int row)
 {
     auto doc = document();
-    App::DocumentObject* member = row >= 0 ? objectOf(features->item(row)) : nullptr;
+    App::DocumentObject* member = row >= 0 ? memberOf(features->item(row)) : nullptr;
     // After the last row: the end
     bool toEnd = row >= 0 && row == features->count() - 2;
     barHinted = true;
@@ -1449,13 +1789,13 @@ void FeaturesView::stepBar(int delta)
         if (at == 0) {
             return;
         }
-        member = at >= 2 ? objectOf(features->item(at - 2)) : nullptr;
+        member = at >= 2 ? memberOf(features->item(at - 2)) : nullptr;
     }
     else {
         if (at + 1 >= features->count()) {
             return;
         }
-        member = objectOf(features->item(at + 1));
+        member = memberOf(features->item(at + 1));
         toEnd = at + 1 == features->count() - 1;
     }
     barHinted = !toEnd;
@@ -1484,7 +1824,8 @@ void FeaturesView::onRowsDropped(int row)
     for (int i = 0; i < features->count(); ++i) {
         auto item = features->item(i);
         if (item->isSelected() && item->type() != FeatureList::BarType) {
-            if (auto obj = objectOf(item)) {
+            // A default geometry row stays at the top
+            if (auto obj = memberOf(item)) {
                 rows.push_back(obj);
                 dragged.insert(i);
                 // Its folded Merge goes with it (ops#640 rank 1)
@@ -1517,7 +1858,8 @@ void FeaturesView::onRowsDropped(int row)
             listed.push_back(nullptr);
             continue;
         }
-        listed.push_back(objectOf(item));
+        // A default geometry row is the top: null, as the bar's is, but not the bar
+        listed.push_back(memberOf(item));
     }
     // What each goes after: the last row above it (null: the top)
     auto rowBefore = [&listed](std::size_t end) -> App::DocumentObject* {
@@ -1625,7 +1967,7 @@ void FeaturesView::rollFromMenu(App::DocumentObject* member, bool toEnd)
 
 void FeaturesView::onFeatureDoubleClicked(QListWidgetItem* item)
 {
-    if (auto obj = objectOf(item)) {
+    if (auto obj = memberOf(item)) {
         if (auto vp = viewProviderOf(obj)) {
             vp->doubleClicked();
         }
@@ -1659,6 +2001,18 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
         Gui::Application::Instance->commandManager().runCommandByName(command);
     };
     QMenu menu(this);
+    if (item->data(FeatureList::DefaultRole).toBool()) {
+        // A default geometry row: Show/Hide only, as Onshape's
+        auto show = menu.addAction(tr("Show/Hide"), [self, name]() {
+            auto doc = self ? self->document() : nullptr;
+            if (auto target = doc ? doc->getObject(name.c_str()) : nullptr) {
+                self->toggleRowVisibility(target);
+            }
+        });
+        show->setObjectName(QStringLiteral("featureToggleVisibility"));
+        menu.exec(features->viewport()->mapToGlobal(pos));
+        return;
+    }
     auto edit = menu.addAction(tr("Edit"), [self, name]() {
         auto doc = self ? self->document() : nullptr;
         auto target = doc ? doc->getObject(name.c_str()) : nullptr;
@@ -1774,6 +2128,9 @@ void FeaturesView::markDependencies()
     QColor parent = palette().color(QPalette::Highlight);
     parent.setAlpha(60);
     QColor child(0xc8, 0x78, 0x00, 60);
+    // The feature being made or edited (ops#640 rank 40)
+    QColor edited = palette().color(QPalette::Highlight);
+    edited.setAlpha(35);
     // Not a rename: the rows' data changes
     QScopedValueRollback<bool> quiet(syncing, true);
     for (int i = 0; i < features->count(); ++i) {
@@ -1785,6 +2142,9 @@ void FeaturesView::markDependencies()
         }
         else if (dependencyChildren.count(name)) {
             background = QBrush(child);
+        }
+        else if (!name.empty() && name == editedName && item->type() != FeatureList::BarType) {
+            background = QBrush(edited);
         }
         item->setData(Qt::BackgroundRole, background);
         item->setData(DependencyRole, dependencyParents.count(name) ? 1 : dependencyChildren.count(name) ? 2 : 0);

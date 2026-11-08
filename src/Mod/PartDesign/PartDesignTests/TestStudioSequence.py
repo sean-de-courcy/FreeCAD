@@ -380,13 +380,13 @@ class TestStudioSequence(unittest.TestCase):
         self.assertAlmostEqual(self.body2.Shape.BoundBox.ZMin, 7, places=6)
 
     def testBarWithoutHint(self):
-        """Without a hint the bar sits before the first held row: a Body2 sketch its Body
-        doesn't hold shows above it."""
+        """Without a hint the bar sits above the sketches waiting with the held rows: a sketch
+        whose users are all held is listed below the bar with them (ops#640 rank 34)."""
         self.interleaved()
         PartDesign.rollStudioTo(self.doc, self.box)
-        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkB")
+        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "Box")
         PartDesign.rollStudioTo(self.doc, None)
-        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkA")
+        self.assertIsNone(PartDesign.studioBarAfter(self.doc))
         self.assertIsNone(PartDesign.studioBarAfter(self.doc, None))
         PartDesign.rollStudioToEnd(self.doc)
         self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PocketB")
@@ -486,7 +486,7 @@ class TestHistoryOrder(unittest.TestCase):
         skN = sketch(self.body1, "SkN", (7, 7, 9, 9), z=5)
         padN = self.pad(self.body1, "PadN", skN, 1)
         self.doc.recompute()
-        expected = ["SkA", "PadA", "SkC", "SkA2", "SkN", "PadN", "PadC", "PadA2"]
+        expected = ["SkA", "PadA", "SkN", "PadN", "SkC", "PadC", "SkA2", "PadA2"]
         self.assertEqual(self.order(), expected)
         self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PadN")
         self.assertEqual(self.body1.Tip, padN)
@@ -597,12 +597,12 @@ class TestHistoryOrder(unittest.TestCase):
         self.checkVolumes(500 + 32, 400)
 
     def testTheBarStaysAfterItsRow(self):
-        """Without a bar given, it stays after the row it followed: rows dropped right after that
-        row are below it, and held."""
+        """Without a bar given, it stays after the row it followed (PadA: Body2's sketch waits
+        below it with its Pad, ops#640 rank 34): rows dropped below it are held."""
         self.twoParts()
         PartDesign.rollStudioTo(self.doc, self.padA)
         self.doc.recompute()
-        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkC")
+        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PadA")
         PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.skC)
         self.assertEqual(self.order(), ["SkA", "PadA", "SkC", "SkA2", "PadA2", "PadC"])
         self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), ["PadA", None])

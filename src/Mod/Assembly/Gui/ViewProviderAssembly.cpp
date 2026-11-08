@@ -1811,6 +1811,17 @@ void ViewProviderAssembly::UpdateSolverInformation()
     bool hasRedundancies = assembly->getLastHasRedundancies();
     bool hasMalformed = assembly->getLastHasMalformedConstraints();
 
+    // FreeCAD-CH (ops#640, rank 60; Onshape hands-on E3): a joint the solve found redundant
+    // carries an error mark in the tree (JointObject's getOverlayIcons reads RedundantJoints), so
+    // every joint's icon is redrawn after each solve
+    if (auto* jointGroup = assembly->getJointGroup()) {
+        for (auto* joint : jointGroup->getObjects()) {
+            if (auto* vp = Gui::Application::Instance->getViewProvider(joint)) {
+                vp->signalChangeIcon();
+            }
+        }
+    }
+
     if (assembly->isEmpty()) {
         signalSetUp(QStringLiteral("empty"), tr("Empty Assembly"), QString(), QString());
     }
@@ -1822,9 +1833,10 @@ void ViewProviderAssembly::UpdateSolverInformation()
                     QStringLiteral("(%1)").arg(objListHelper(assembly,
            assembly->getLastConflicting())));*/
         // So for now we report like follows:
+        // Onshape's words for it (hands-on E3: "Mate overdefines the assembly")
         signalSetUp(
             QStringLiteral("conflicting_constraints"),
-            tr("Over-constrained:") + QLatin1String(" "),
+            tr("Joints overdefine the assembly:") + QLatin1String(" "),
             QStringLiteral("#conflicting"),
             QStringLiteral("(%1)").arg(objListHelper(assembly, assembly->getLastRedundant()))
         );

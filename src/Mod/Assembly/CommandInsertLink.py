@@ -469,35 +469,11 @@ class TaskAssemblyInsertLink(QtCore.QObject):
             self.handleFirstInsertion()
 
     def handleFirstInsertion(self):
+        # FreeCAD-CH (ops#640, rank 60; Onshape hands-on E4): the first instance is not fixed and
+        # nothing asks: the joints solve without a grounded part (AssemblyObject::solve). Toggle
+        # Grounded fixes a part; the preference's 'Always' still grounds the first one.
         pref = Preferences.preferences()
-        fixPart = False
-        fixPartPref = pref.GetInt("GroundFirstPart", 0)
-        if fixPartPref == 0:  # unset
-            msgBox = QtWidgets.QMessageBox()
-            msgBox.setWindowTitle("Ground Part?")
-            msgBox.setText(
-                "Do you want to ground the first inserted part automatically?\nYou need at least one grounded part in your assembly."
-            )
-            msgBox.setIcon(QtWidgets.QMessageBox.Question)
-
-            yesButton = msgBox.addButton("Yes", QtWidgets.QMessageBox.YesRole)
-            noButton = msgBox.addButton("No", QtWidgets.QMessageBox.RejectRole)
-            yesAlwaysButton = msgBox.addButton("Always", QtWidgets.QMessageBox.YesRole)
-            noAlwaysButton = msgBox.addButton("Never", QtWidgets.QMessageBox.NoRole)
-
-            msgBox.exec_()
-
-            clickedButton = msgBox.clickedButton()
-            if clickedButton == yesButton:
-                fixPart = True
-            elif clickedButton == yesAlwaysButton:
-                fixPart = True
-                pref.SetInt("GroundFirstPart", 1)
-            elif clickedButton == noAlwaysButton:
-                pref.SetInt("GroundFirstPart", 2)
-
-        elif fixPartPref == 1:  # Yes always
-            fixPart = True
+        fixPart = pref.GetInt("GroundFirstPart", 0) == 1
 
         if fixPart:
             # Create groundedJoint.

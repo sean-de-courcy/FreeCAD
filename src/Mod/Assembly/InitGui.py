@@ -107,6 +107,7 @@ class AssemblyWorkbench(Workbench):
             "Assembly_CreateJointCylindrical",
             "Assembly_CreateJointSlider",
             "Assembly_CreateJointBall",
+            "Assembly_CreateJointPlanar",  # FreeCAD-CH: Onshape's Planar mate (ops#640)
             "Separator",
             "Assembly_CreateJointDistance",
             "Assembly_CreateJointParallel",
@@ -246,6 +247,7 @@ class AssemblyWorkbench(Workbench):
                     "Assembly_CreateJointCylindrical",
                     "Assembly_CreateJointSlider",
                     "Assembly_CreateJointBall",
+                    "Assembly_CreateJointPlanar",
                     "Separator",
                     "Assembly_CreateJointDistance",
                     "Assembly_CreateJointParallel",
@@ -295,7 +297,7 @@ class AssemblyWorkbench(Workbench):
             AssemblyCreateWatcher(),
             AssemblyActivateWatcher(),
             AssemblyInsertWatcher(),
-            AssemblyGroundWatcher(),
+            # FreeCAD-CH (ops#640, rank 60): no grounding step; Onshape asks for no fixed part
             AssemblyJointsWatcher(),
             AssemblyToolsWatcher(),
             AssemblySimulationWatcher(),
@@ -304,3 +306,6 @@ class AssemblyWorkbench(Workbench):
 
 
 Gui.addWorkbench(AssemblyWorkbench())
+
+# FreeCAD-CH (ops#640): the GUI tests
+FreeCAD.__unit_test__ += ["TestAssemblyWorkbenchGui"]

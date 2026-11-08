@@ -31,6 +31,11 @@ namespace App
 class DocumentObject;
 }
 
+namespace PartDesign
+{
+class Body;
+}
+
 namespace PartDesignGui
 {
 
@@ -42,7 +47,7 @@ namespace PartDesignGui
  * scene only (PartDesignGui::ViewProvider::makeTemporaryVisible): no Visibility property changes,
  * so nothing goes into the document, its undo or the saved file. restore(), or the destructor,
  * puts back what it changed, unless the user has changed that object's visibility since.
- * Lists rank 8 (rank 32, the roll-back bar's edit) can use it too.
+ * Lists rank 8 (rank 32, the studio's edit roll-back) uses showBodyAt() for the other Bodies.
  */
 class RollbackView
 {
@@ -54,6 +59,12 @@ public:
 
     /// Shows \a feature's Body rolled back to it; outside a Body nothing changes.
     void rollBackTo(App::DocumentObject* feature);
+    /** FreeCAD-CH (ops#640 rank 32, lists plan 8): shows \a body as it is at its solid feature
+     * \a solid (null: before its first one), for the edit of a member of another Body of its part
+     * studio (Onshape rolls every part back to the feature edited): \a solid is shown, and every
+     * solid of \a body after it that is shown is hidden, in the scene only, as rollBackTo().
+     */
+    void showBodyAt(PartDesign::Body* body, App::DocumentObject* solid);
     /// Puts the scene back as it was.
     void restore();
     /// The solid shown for the roll-back, or null (it was shown already, or there is none).

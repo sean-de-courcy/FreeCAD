@@ -90,6 +90,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDeletePart.py
     PartDesignTests/TestStudio.py
     PartDesignTests/TestStudioSequence.py
+    PartDesignTests/TestBarPlace.py
     PartDesignTests/TestMergeScope.py
     PartDesignTests/TestResultRules.py
     PartDesignTests/TestDatumPlanePoint.py

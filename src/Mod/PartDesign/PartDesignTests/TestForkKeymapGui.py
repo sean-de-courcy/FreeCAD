@@ -241,7 +241,7 @@ FREECAD = {
 
 # Assembly's single letters that are the fork's keys: cleared (decision 31); upstream's
 ASSEMBLY_KEYS = {
-    "Assembly_CreateJointFixed": "F",
+    "Assembly_CreateJointPerpendicular": "M",  # its M goes to the Fixed joint (ops#640 rank 60)
     "Assembly_SolveAssembly": "Z",
     "Assembly_CreateJointScrew": "W",
     "Assembly_CreateJointRigidGroup": "Y",
@@ -1060,7 +1060,8 @@ class TestForkKeymapGui(unittest.TestCase):
     def testFFitsTheViewInAssemblyEdit(self):
         """In assembly edit, F fits the view, not a Fixed joint (Assembly's joints are ForEdit, so
         the tie rule gave them F): Assembly's F, Z, W, Y and the BOM's O are cleared under the
-        fork's keymap, nothing clashes in assembly edit, and the keys are back under FreeCAD's.
+        fork's keymap, M opens the Fixed joint (Onshape's m: Mate) and not Perpendicular, nothing
+        clashes in assembly edit, and the keys are back under FreeCAD's.
         An assembly of two boxes, in edit in the Assembly workbench."""
         if "AssemblyWorkbench" not in Gui.listWorkbenches():
             self.skipTest("no Assembly")
@@ -1078,11 +1079,25 @@ class TestForkKeymapGui(unittest.TestCase):
             self.assertTrue(waitFor(lambda: fixed and all(a.isEnabled() for a in fixed)))
             for name in ASSEMBLY_KEYS:
                 self.assertEqual(toolKey(name), "", name)
+            # Onshape's m opens Mate: M is the Fixed joint's (Fastened), Perpendicular's is cleared
+            self.assertEqual(toolKey("Assembly_CreateJointFixed"), "M")
             with self.watching("Std_ViewFitAll", "Assembly_CreateJointFixed") as fired:
                 self.press(QtCore.Qt.Key_F)
                 self.assertTrue(waitFor(lambda: fired), "F ran nothing")
                 pump(0.4)
             self.assertEqual(fired, ["Std_ViewFitAll"])
+            with self.watching("Assembly_CreateJointFixed", "Assembly_CreateJointPerpendicular") as fired:
+                self.press(QtCore.Qt.Key_M)
+                self.assertTrue(waitFor(lambda: fired), "M ran nothing")
+                pump(0.4)
+            self.assertEqual(fired, ["Assembly_CreateJointFixed"])
+            import JointObject
+
+            if JointObject.activeTask is not None:
+                JointObject.activeTask.reject()
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            pump()
             # the fork's general keys: the sketch's keys meet Assembly's letters only on actions
             # that aren't reachable there (D: the sketch's dimension group, its toolbar hidden),
             # and Assembly's letters meet upstream's own (S and Std_LinkSelectActions' S, G)
@@ -1095,6 +1110,7 @@ class TestForkKeymapGui(unittest.TestCase):
             setKeymap("FreeCAD")
             wrong = [f"{n}: {toolKey(n)!r}" for n, k in ASSEMBLY_KEYS.items() if toolKey(n) != k]
             self.assertEqual(wrong, [], "FreeCAD")
+            self.assertEqual(toolKey("Assembly_CreateJointFixed"), "F")
         finally:
             if Gui.Control.activeDialog():
                 Gui.Control.closeDialog()

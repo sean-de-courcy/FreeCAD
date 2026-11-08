@@ -296,6 +296,50 @@ bool Body::holds(const App::DocumentObject* obj) const
     return held(obj);
 }
 
+bool Body::waitsBelowBar(const App::DocumentObject* obj) const
+{
+    if (!obj || isSolidFeature(obj) || !isRolledBack() || holds(obj)) {
+        return false;
+    }
+    const auto& features = Group.getValues();
+    auto pos = std::find(features.begin(), features.end(), obj);
+    if (pos == features.end()) {
+        return false;
+    }
+    if (App::DocumentObject* bar = effectiveBar()) {
+        auto barPos = std::find(features.begin(), features.end(), bar);
+        if (barPos == features.end() || pos <= barPos) {
+            return false;
+        }
+    }
+    // A cycle of links (possible from Python) counts as live
+    thread_local std::set<const App::DocumentObject*> open;
+    if (!open.insert(obj).second) {
+        return false;
+    }
+    struct Close
+    {
+        const App::DocumentObject* item;
+        ~Close()
+        {
+            open.erase(item);
+        }
+    } close {obj};
+    // Every user is held by its own Body's bar, or waits below it (a datum under a waiting sketch)
+    bool used = false;
+    for (auto user : obj->getInList()) {
+        if (user == this) {
+            continue;
+        }
+        Body* body = findBodyOf(user);
+        if (!body || !(body->holds(user) || body->waitsBelowBar(user))) {
+            return false;
+        }
+        used = true;
+    }
+    return used;
+}
+
 void Body::rollTo(App::DocumentObject* feature)
 {
     if (feature && (!hasObject(feature) || !isSolidFeature(feature))) {
@@ -782,15 +826,43 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
         studioBar = studioBarAfter(history);
     }
 
+    // Rolled back: a member that waits with the held features (waitsBelowBar()), listed after the
+    // studio's bar when there is one: the insert goes before it, as Onshape inserts a new feature
+    // at the bar, above the held rows' sketches (FreeCAD-CH ops#640 rank 34, blind test F42). One
+    // listed above the studio's bar is live there, and the insert goes after it, as before
+    auto waits = [&](App::DocumentObject* obj) {
+        if (obj == feature || !waitsBelowBar(obj)) {
+            return false;
+        }
+        if (!atStudioBar || !studioBar) {
+            return true;
+        }
+        auto barPos = std::ranges::find(history, studioBar);
+        auto pos = std::ranges::find(history, obj);
+        return barPos != history.end() && pos != history.end() && pos > barPos;
+    };
+    const auto& features = Group.getValues();
     App::DocumentObject* next = nullptr;
+    auto from = features.begin();
     if (Tip.getValue()) {
         next = getNextSolidFeature();
+        from = std::ranges::find(features, Tip.getValue());
+        if (from != features.end()) {
+            ++from;
+        }
     }
     else {
         // The bar at the top (ops#127): before the first solid feature
-        const auto& features = Group.getValues();
         auto it = std::find_if(features.begin(), features.end(), isSolidFeature);
         next = it == features.end() ? nullptr : *it;
+    }
+    if (next) {
+        for (auto it = from; it != features.end() && *it != next; ++it) {
+            if (waits(*it)) {
+                next = *it;
+                break;
+            }
+        }
     }
     insertObject(feature, next, /*after = */ false);
     if (atStudioBar) {

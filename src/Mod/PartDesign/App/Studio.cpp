@@ -1233,6 +1233,24 @@ App::DocumentObject* studioBarAfter(const std::vector<App::DocumentObject*>& seq
             }
         }
     }
+    // Without a hint, above the sketches and datums that wait below the bar with the held rows
+    // they are made for (Body::waitsBelowBar()): one place for one state, as Onshape's (ops#640
+    // rank 34, blind test F43). Only after the last solid before the first held row: a live solid
+    // stays above the bar (a sketch made early, or another Body that isn't rolled back), or a drop
+    // without a bar given (moveInStudio()) would roll that Body back
+    std::size_t from = 0;
+    for (std::size_t i = 0; i < first; ++i) {
+        if (Body::isSolidFeature(sequence[i])) {
+            from = i + 1;
+        }
+    }
+    for (std::size_t i = from; i < first; ++i) {
+        auto body = Body::findBodyOf(sequence[i]);
+        if (body && body->waitsBelowBar(sequence[i])) {
+            first = i;
+            break;
+        }
+    }
     return first == 0 ? nullptr : sequence[first - 1];
 }
 

@@ -84,6 +84,34 @@ void RollbackView::rollBackTo(App::DocumentObject* feature)
     }
 }
 
+void RollbackView::showBodyAt(PartDesign::Body* body, App::DocumentObject* solid)
+{
+    restore();
+    if (!body) {
+        return;
+    }
+    // Every solid after solid (each one, at the top) that is still shown goes from the scene
+    bool afterSolid = !solid;
+    for (App::DocumentObject* obj : body->Group.getValues()) {
+        if (obj == solid) {
+            afterSolid = true;
+            continue;
+        }
+        if (!afterSolid || !obj->isDerivedFrom<PartDesign::Feature>()) {
+            continue;
+        }
+        if (auto vp = featureViewProvider(obj); vp && vp->isShow()) {
+            vp->makeTemporaryVisible(false);
+            hidden.emplace_back(obj);
+        }
+    }
+    // The solid it is at comes into the scene
+    if (auto vp = featureViewProvider(solid); vp && !vp->isShow()) {
+        vp->makeTemporaryVisible(true);
+        base = solid;
+    }
+}
+
 void RollbackView::restore()
 {
     // Only what is still as the roll-back left it: an object the user showed or hid since (its

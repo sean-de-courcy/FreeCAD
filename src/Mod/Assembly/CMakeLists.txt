@@ -40,7 +40,7 @@ set(Assembly_Scripts
 )
 
 if(BUILD_GUI)
-    list (APPEND Assembly_Scripts InitGui.py)
+    list (APPEND Assembly_Scripts InitGui.py TestAssemblyWorkbenchGui.py)
 endif(BUILD_GUI)
 
 INSTALL(
@@ -60,7 +60,9 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestCore.py
     AssemblyTests/TestCommandCreateView.py
     AssemblyTests/TestCommandInsertLink.py
+    AssemblyTests/TestFloatingSolve.py
     AssemblyTests/TestJointRecords.py
+    AssemblyTests/TestOnshapeJointsGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
     AssemblyTests/mocks/__init__.py

@@ -323,7 +323,10 @@ const Entry table[] = {
     // always enabled once Assembly has loaded, sketch edit included, where it took the O of
     // Sketcher_Offset (or made it wait the chord timeout). Assembly's other commands are disabled
     // while a task dialog is open (a sketch in edit has one), so their letters meet no fork key.
-    {"Assembly_CreateJointFixed", ""},
+    // Onshape's m opens Mate: the Fixed joint (Fastened) takes M from Perpendicular (ops#640
+    // rank 60)
+    {"Assembly_CreateJointFixed", "M"},
+    {"Assembly_CreateJointPerpendicular", ""},
     {"Assembly_SolveAssembly", ""},
     {"Assembly_CreateJointScrew", ""},
     {"Assembly_CreateJointRigidGroup", ""},

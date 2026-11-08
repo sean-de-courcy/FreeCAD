@@ -1102,6 +1102,17 @@ class Joint:
         return UtilsAssembly.arePlacementZParallel(globalJcsPlc1, globalJcsPlc2)
 
 
+def jointIsRedundant(joint):
+    """True if the assembly's last solve found this joint redundant (FreeCAD-CH, ops#640)."""
+    try:
+        assembly = joint.Proxy.getAssembly(joint)
+    except Exception:
+        return False
+    if assembly is None or getattr(assembly, "Type", "") != "Assembly":
+        return False
+    return joint.Name in getattr(assembly, "RedundantJoints", [])
+
+
 class ViewProviderJoint:
     def __init__(self, vobj):
         """Set this object to the proxy object of the actual view provider"""
@@ -1226,12 +1237,12 @@ class ViewProviderJoint:
 
         overlays = {}
 
-        assembly = self.app_obj.Proxy.getAssembly(self.app_obj)
-        # Assuming Reference1 corresponds to the first part link
-        if hasattr(self.app_obj, "Reference1"):
-            part = UtilsAssembly.getMovingPart(self.app_obj.Reference1)
-            if part is not None and not assembly.isPartConnected(part):
-                overlays[Gui.IconPosition.BottomLeft] = "Part_Detached"
+        # FreeCAD-CH (ops#640, rank 60): a joint between parts no grounded part reaches solves
+        # too (AssemblyObject::solve holds the group), so it no longer gets the detached mark.
+        # A joint the last solve found redundant gets the error mark: Onshape turns such a mate
+        # red, "Mate overdefines the assembly" (hands-on E3).
+        if jointIsRedundant(self.app_obj):
+            overlays[Gui.IconPosition.BottomLeft] = "overlay_error"
 
         return overlays
 
@@ -1720,8 +1731,15 @@ activeTask = None
 
 
 class TaskAssemblyCreateJoint(QtCore.QObject):
-    def __init__(self, jointTypeIndex, jointObj=None, subclass=False):
+    def __init__(self, jointTypeIndex, jointObj=None, subclass=False, jointLabel=None):
         super().__init__()
+
+        # FreeCAD-CH (ops#640, rank 60): the name a new joint takes (Planar for the Planar
+        # command's Distance joint), the OK button (enabled with two picks, Onshape's check,
+        # hands-on E5) and whether OK starts the next joint (Onshape's mate dialog)
+        self.jointLabel = jointLabel
+        self.okButton = None
+        self.keepOpenAfterAccept = not subclass  # also gates the OK button
 
         global activeTask
         activeTask = self
@@ -1790,7 +1808,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         else:
             self.creating = True
-            self.jointName = self.jForm.jointType.currentText().replace(" ", "")
+            self.jointName = self.jointLabel or self.jForm.jointType.currentText().replace(" ", "")
             if self.activeType == "Part":
                 Gui.ActiveDocument.openCommand("Transform")
             else:
@@ -1807,13 +1825,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.distanceSpinbox2.valueChanged.connect(self.onDistance2Changed)
         self.jForm.offsetSpinbox.valueChanged.connect(self.onOffsetChanged)
         self.jForm.rotationSpinbox.valueChanged.connect(self.onRotationChanged)
-        bind = Gui.ExpressionBinding(self.jForm.angleSpinbox).bind(self.joint, "Angle")
-        bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox).bind(self.joint, "Distance")
-        bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox2).bind(self.joint, "Distance2")
-        bind = Gui.ExpressionBinding(self.jForm.offsetSpinbox).bind(self.joint, "Offset2.Base.z")
-        bind = Gui.ExpressionBinding(self.jForm.rotationSpinbox).bind(
-            self.joint, "Offset2.Rotation.Yaw"
-        )
+        self.bindFields()
 
         self.jForm.reverseRotCheckbox.setChecked(self.jType == "Gears")
         self.jForm.reverseRotCheckbox.stateChanged.connect(self.reverseRotToggled)
@@ -1834,10 +1846,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.limitLenMaxSpinbox.valueChanged.connect(self.onLimitLenMaxChanged)
         self.jForm.limitRotMinSpinbox.valueChanged.connect(self.onLimitRotMinChanged)
         self.jForm.limitRotMaxSpinbox.valueChanged.connect(self.onLimitRotMaxChanged)
-        bind = Gui.ExpressionBinding(self.jForm.limitLenMinSpinbox).bind(self.joint, "LengthMin")
-        bind = Gui.ExpressionBinding(self.jForm.limitLenMaxSpinbox).bind(self.joint, "LengthMax")
-        bind = Gui.ExpressionBinding(self.jForm.limitRotMinSpinbox).bind(self.joint, "AngleMin")
-        bind = Gui.ExpressionBinding(self.jForm.limitRotMaxSpinbox).bind(self.joint, "AngleMax")
+        self.bindLimitFields()
 
         self.adaptUi()
 
@@ -1864,11 +1873,76 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         self.addition_rejected = False
 
+    def bindFields(self):
+        bind = Gui.ExpressionBinding(self.jForm.angleSpinbox).bind(self.joint, "Angle")
+        bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox).bind(self.joint, "Distance")
+        bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox2).bind(self.joint, "Distance2")
+        bind = Gui.ExpressionBinding(self.jForm.offsetSpinbox).bind(self.joint, "Offset2.Base.z")
+        bind = Gui.ExpressionBinding(self.jForm.rotationSpinbox).bind(
+            self.joint, "Offset2.Rotation.Yaw"
+        )
+
+    def bindLimitFields(self):
+        bind = Gui.ExpressionBinding(self.jForm.limitLenMinSpinbox).bind(self.joint, "LengthMin")
+        bind = Gui.ExpressionBinding(self.jForm.limitLenMaxSpinbox).bind(self.joint, "LengthMax")
+        bind = Gui.ExpressionBinding(self.jForm.limitRotMinSpinbox).bind(self.joint, "AngleMin")
+        bind = Gui.ExpressionBinding(self.jForm.limitRotMaxSpinbox).bind(self.joint, "AngleMax")
+
+    def modifyStandardButtons(self, box):
+        # Onshape's check stays disabled until both connectors are picked (hands-on E5). Not in
+        # a subclass's dialog: New Part's OK makes the part with fewer picks.
+        if not self.keepOpenAfterAccept:
+            return
+        self.okButton = box.button(QtWidgets.QDialogButtonBox.Ok)
+        self.updateOkButton()
+
+    def updateOkButton(self):
+        if self.okButton is None:
+            return
+        try:
+            self.okButton.setEnabled(len(self.refs) == 2)
+        except RuntimeError:  # the box is gone
+            self.okButton = None
+
+    def startsNextJoint(self):
+        """OK commits a new joint and starts the next one in the same dialog, as Onshape's
+        mate dialog does (its check commits a mate and starts a new one); editing a joint and
+        matching parts close as before."""
+        return self.keepOpenAfterAccept and self.creating and self.activeType == "Assembly"
+
+    def commitAndStartNext(self):
+        self.joint.ViewObject.Proxy.showPreviewJCS(False)
+        self.joint.Visibility = self.visibilityBackup
+        cmds = UtilsAssembly.generatePropertySettings(self.joint)
+        Gui.doCommand(cmds)
+        self.assembly.recompute(True)
+        Gui.ActiveDocument.commitCommand()
+        # The committed joint's solve is no longer the new joint's to undo
+        self.assembly.clearUndo()
+
+        # The next joint, of the same type. The selection is cleared only once the new joint is
+        # the task's, so the committed joint keeps its picks.
+        self.refs = []
+        self.presel_ref = None
+        Gui.ActiveDocument.openCommand("Create " + self.jointName + " Joint")
+        self.createJointObject()
+        self.visibilityBackup = False
+        self.bindFields()
+        self.bindLimitFields()
+        Gui.Selection.clearSelection()
+        self.updateTaskboxFromJoint()
+        self.adaptUi()
+        self.updateOkButton()
+
     def accept(self):
         if len(self.refs) != 2:
             App.Console.PrintWarning(
                 translate("Assembly", "Select 2 elements from 2 separate parts")
             )
+            return False
+
+        if self.startsNextJoint():
+            self.commitAndStartNext()
             return False
 
         self.deactivate()
@@ -1987,6 +2061,15 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
     def onJointTypeChanged(self, index):
         self.jType = JointTypes[self.jForm.jointType.currentIndex()]
         self.joint.Proxy.setJointType(self.joint, self.jType)
+        # FreeCAD-CH (ops#640, rank 60): Planar is a Distance joint; a new one turned into another
+        # type drops the name, and its Offset field, for the type's (the next joint's too)
+        if self.jointLabel and self.jType != "Distance":
+            if self.creating:
+                old = self.jointName
+                self.jointName = self.jForm.jointType.currentText().replace(" ", "")
+                if self.activeType == "Assembly" and self.joint.Label.startswith(old):
+                    self.joint.Label = self.jointName
+            self.jointLabel = None
         self.adaptUi()
 
     def onAngleChanged(self, quantity):
@@ -2059,7 +2142,10 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.distanceLabel.setVisible(needDistance)
         self.jForm.distanceSpinbox.setVisible(needDistance)
         if needDistance:
-            if jType == "Distance":
+            if jType == "Distance" and self.jointLabel == "Planar":
+                # Onshape's Planar mate offsets along Z (FreeCAD-CH, ops#640)
+                self.jForm.distanceLabel.setText(translate("Assembly", "Offset"))
+            elif jType == "Distance":
                 self.jForm.distanceLabel.setText(translate("Assembly", "Distance"))
             elif jType == "Gears" or jType == "Belt":
                 self.jForm.distanceLabel.setText(translate("Assembly", "Radius 1"))
@@ -2252,6 +2338,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
                 sname = sname + "." + element_name
             simplified_names.append(sname)
         self.jForm.featureList.addItems(simplified_names)
+        self.updateOkButton()
 
     def updateLimits(self):
         needLengthLimits = self.jType in JointUsingLimitLength
