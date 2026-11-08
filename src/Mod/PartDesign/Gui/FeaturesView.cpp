@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <set>
 
+#include <TopoDS_Iterator.hxx>
+
 #include <QAction>
 #include <QApplication>
 #include <QHBoxLayout>
@@ -342,6 +344,11 @@ std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* stu
                 return false;
             }
         }
+        // A Boolean's tool with Keep tools off is consumed, as Onshape deletes it (ops#640 rank 28,
+        // B3-3a); a tool a Union left apart stays a part (A-2' b)
+        if (PartDesign::Boolean::consumerOf(body)) {
+            return false;
+        }
         return std::ranges::any_of(body->Group.getValues(), [body](App::DocumentObject* obj) {
             auto feature = freecad_cast<Part::Feature*>(obj);
             return feature && PartDesign::Body::isSolidFeature(obj) && !body->holds(obj) && !obj->isError()
@@ -385,6 +392,27 @@ std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* stu
         }
     }
     return parts;
+}
+
+/// How many Parts rows a part has (ops#640 rank 3b, hands-on A-2' a): a Body has one per solid at
+/// its bar, as Onshape makes a part of each piece a Remove cuts apart (the Body stays one, with
+/// AllowCompound), and none when an Intersect that missed left it empty (A-2' c); anything else,
+/// or a Body with no shape yet, has one
+int partPieces(const App::DocumentObject* obj)
+{
+    auto body = freecad_cast<const PartDesign::Body*>(obj);
+    if (!body) {
+        return 1;
+    }
+    const Part::TopoShape& shape = body->Shape.getShape();
+    if (shape.isNull()) {
+        return 1;
+    }
+    const int solids = shape.countSubShapes(TopAbs_SOLID);
+    if (solids > 0) {
+        return solids;
+    }
+    return TopoDS_Iterator(shape.getShape()).More() ? 1 : 0;
 }
 
 }  // namespace
@@ -1175,16 +1203,27 @@ void FeaturesView::rebuildParts()
         partNames.clear();
         return;
     }
-    const auto objs = studioParts(doc, studio());
+    // One row per piece of a part (partPieces): the second piece of a Body cut in two is a row of
+    // that Body too, "<label> (2)" (ops#640 rank 3b)
+    std::vector<App::DocumentObject*> objs;
+    std::vector<int> pieces;
+    for (auto obj : studioParts(doc, studio())) {
+        for (int piece = 0, count = partPieces(obj); piece < count; ++piece) {
+            objs.push_back(obj);
+            pieces.push_back(piece);
+        }
+    }
     parts->headerItem()->setText(0, tr("Parts (%1)").arg(objs.size()));
     std::vector<std::string> rows;
     std::vector<std::string> names;
-    for (auto obj : objs) {
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        auto obj = objs[i];
         auto body = freecad_cast<PartDesign::Body*>(obj);
         auto vp = viewProviderOf(obj);
         std::string eye = !vp || !vp->canToggleVisibility() ? "" : vp->isShow() ? "v" : "i";
-        rows.push_back(rowKey(obj, body && body->isRolledBack(), eye));
-        names.emplace_back(obj->getNameInDocument());
+        const std::string piece = pieces[i] ? "#" + std::to_string(pieces[i] + 1) : std::string();
+        rows.push_back(rowKey(obj, body && body->isRolledBack(), eye + piece));
+        names.emplace_back(obj->getNameInDocument() + piece);
     }
     if (rows == partRows && parts->topLevelItemCount() == static_cast<int>(rows.size())) {
         return;
@@ -1202,8 +1241,16 @@ void FeaturesView::rebuildParts()
         auto body = freecad_cast<PartDesign::Body*>(obj);
         bool held = body && body->isRolledBack();
         auto item = inPlace ? parts->topLevelItem(static_cast<int>(i)) : new QTreeWidgetItem(parts);
-        item->setFlags(item->flags() | Qt::ItemIsEditable);
-        item->setText(0, QString::fromUtf8(obj->Label.getValue()));
+        // A later piece names its Body: its rename is the first row's
+        const QString label = QString::fromUtf8(obj->Label.getValue());
+        if (pieces[i]) {
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            item->setText(0, tr("%1 (%2)").arg(label).arg(pieces[i] + 1));
+        }
+        else {
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+            item->setText(0, label);
+        }
         item->setData(0, Qt::UserRole, QByteArray(obj->getNameInDocument()));
         item->setIcon(0, statusIcon(obj, held));
         item->setFont(0, statusFont(parts->font(), obj, held));
