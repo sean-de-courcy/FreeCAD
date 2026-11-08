@@ -3850,12 +3850,20 @@ void CmdPartDesignDerived::activated(int iMsg)
         );
         return;
     }
+    // A dialog the step lock doesn't cover (none to accept first) is still open: refused visibly
+    if (Gui::Control().activeDialog()) {
+        Gui::getMainWindow()->showMessage(QObject::tr("Finish the open dialog first"), 5000);
+        return;
+    }
     Gui::Control().showDialog(new PartDesignGui::TaskDlgDerived(doc, studio));
 }
 
 bool CmdPartDesignDerived::isActive()
 {
-    return getActiveGuiDocument() && !Gui::Control().activeDialog();
+    // Another feature's dialog is accepted first (AcceptsOpenDialog, review R6-3); only a Derived
+    // dialog already open greys it
+    return getActiveGuiDocument()
+        && !qobject_cast<PartDesignGui::TaskDlgDerived*>(Gui::Control().activeDialog());
 }
 
 // Command group for datums =============================================

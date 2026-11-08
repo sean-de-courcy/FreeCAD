@@ -23,6 +23,7 @@ from PySide import QtCore, QtWidgets
 
 from PartDesignTests.TestDerived import boxBody
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
+from PartDesignTests.TestStudioSequence import sketch
 
 PARAM = "User parameter:BaseApp/Preferences/Mod/PartDesign"
 BAR = QtWidgets.QListWidgetItem.UserType + 1  # FeatureList::BarType
@@ -229,6 +230,35 @@ class TestDerivedGui(unittest.TestCase):
 
         self.assertTrue(waitFor(red), "the row isn't red")
         self.assertIn("Missing source part: Box (Part Studio 1)", self.featureItem("Derived 1").toolTip())
+
+    def testDerivedAcceptsAnOpenExtrude(self):
+        """Review R6-3: with an Extrude (Pad) dialog open on a sketch of Part Studio 2's Plate,
+        Derived is enabled; run, it accepts the Pad first (the plate is 20 x 10 x 10 mm, 2000
+        mm^3) and opens its own dialog, listing Part Studio 1; while that is open, Derived is
+        greyed. OK makes the Derived feature."""
+        plate = self.doc.addObject("PartDesign::Body", "Plate")
+        self.studio2.addObject(plate)
+        profile = sketch(plate, "PlateSk", (0, 0, 20, 10))
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", plate)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad dialog")
+        pump(0.3)
+        [pad] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Pad"]
+        derived = Gui.Command.get("PartDesign_Derived")
+        self.assertTrue(derived.isActive())
+        Gui.Selection.clearSelection()
+        self.openDialog()
+        self.assertEqual(self.studioItems(), ["Part Studio 1"])
+        self.assertIsNotNone(self.doc.getObject(pad.Name))
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(plate.Shape.Volume, 2000, places=6)
+        self.assertFalse(derived.isActive())
+        self.close(ok=True)
+        self.assertEqual(len(self.leads()), 1)
+        self.assertTrue(derived.isActive())
 
     def testOkWithNothingTickedKeepsTheDialog(self):
         """All parts unticked, OK: the dialog stays with "Choose the parts to derive"; Cancel
