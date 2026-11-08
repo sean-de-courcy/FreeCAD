@@ -4877,19 +4877,21 @@ int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
 
 bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
 {
-    // delete recompute log
-    d->clearRecomputeLog(feature);
-
     // verify that the feature is (active) part of the document
     if (!feature->isAttachedToDocument()) {
         return false;
     }
 
     if (recursive) {
+        // FreeCAD-CH (ops#640): the log is left to recompute(), which keeps the text of a failure
+        // it doesn't re-run (ops#126). Cleared here first, a failed feature with nothing touched
+        // (a dialog's second preview of an empty pattern) kept its error and lost its text: "Error"
         bool hasError = false;
         recompute({feature}, true, &hasError);
         return !hasError;
     }
+    // delete recompute log
+    d->clearRecomputeLog(feature);
     auto continuation = recomputeContinuation();
     std::string why;
     int res = 0;
