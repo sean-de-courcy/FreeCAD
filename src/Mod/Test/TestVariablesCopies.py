@@ -24,7 +24,8 @@ PR E1).
 
 notes/variables-studio.md section 6, "Import" (I-1 to I-6) and R-9; Refresh (R-1 to R-8, PR E2), a
 FreeCAD document as a source (R-10, PR F) and the hierarchy of studios (ops#640 round 5) after
-them. Every export and every source document here is made up,
+them, and the clashes of a local name with an imported one (ops#640, decision 317). Every
+export and every source document here is made up,
 in the structure of an Onshape variable studio export (section 0); expected values are worked out
 by hand from the made-up inputs (1 in = 25.4 mm).
 """
@@ -1475,6 +1476,241 @@ class TestVariablesHierarchy(FreeCADSource):
         copies.refresh(s)
         self.assertEqual(s.Bindings, {"Main.Width": "Main.Width"})
         self.assertAlmostEqual(s.Height.Value, 300, places=9)
+
+
+class TestVariablesClashes(FreeCADSource):
+    """A local variable and an imported one of the same name (ops#640, decision 317): `#name` is
+    ambiguous for new expressions until the user chooses which it means, recorded on the copies
+    (Bindings under `#name`), so a reopened file resolves the same way; existing expressions keep
+    the variables they use. Made-up exports and documents; values by hand."""
+
+    def export(self, name, data):
+        path = os.path.join(self.folder, name + ".json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return path
+
+    def local(self, **values):
+        """The document's own "Variables" set with @a values (name -> mm)."""
+        local = self.doc.addObject("App::VarSet", "Variables")
+        for name, mm in values.items():
+            local.addProperty("App::PropertyDistance", name)
+            setattr(local, name, mm)
+        self.doc.recompute()
+        return local
+
+    def user(self, text, name="Box"):
+        """A VarSet whose Len is @a text; its Len after a recompute (mm)."""
+        obj = self.doc.getObject(name) or self.doc.addObject("App::VarSet", name)
+        if "Len" not in obj.PropertiesList:
+            obj.addProperty("App::PropertyDistance", "Len")
+        obj.setExpression("Len", text)
+        self.doc.recompute()
+        return obj
+
+    def assertAmbiguous(self, name="Width"):
+        with self.assertRaises(Exception) as caught:
+            self.user(f"#{name} * 1", "Probe")
+        self.assertIn("ambiguous", str(caught.exception))
+        if self.doc.getObject("Probe") is not None:
+            self.doc.removeObject("Probe")
+
+    def test_nothing_chosen_as_before(self):
+        """Without a choice, a scripted import goes ahead as before: the plan lists the clash and
+        warns, nothing is recorded, `#Width` is ambiguous for a new expression, and an expression
+        made before the import keeps Variables.Width (7 mm)."""
+        local = self.local(Width=7)
+        before = self.user("#Width * 2")
+        self.assertEqual(expression(before, "Len"), "Variables.Width * 2")
+        path = self.export("Studio A", STUDIO)
+        plan = copies.plan_import(self.doc, [path])
+        self.assertTrue(plan.ok, plan.report())
+        self.assertEqual(plan.clashes, {"Width": ["Variables.Width"]})
+        self.assertEqual(plan.clash_paths, {"Width": ["Studio_A.Width"]})
+        self.assertEqual(plan.chosen, {})
+        self.assertTrue(any("#Width stays ambiguous" in w for w in plan.warnings), plan.warnings)
+        copy = copies.import_studios(self.doc, [path]).copies[0]
+        self.assertEqual(copy.Bindings, {})
+        self.assertAmbiguous()
+        self.doc.recompute()
+        self.assertAlmostEqual(before.Len.Value, 14, places=9)
+        self.assertEqual(local.InList, [before])
+
+    def test_use_import(self):
+        """"Use Studio A.json": the copy records its own Width; `#Width` then means it (10 mm);
+        the expression made before keeps Variables.Width. One undo removes the copy and the
+        choice: `#Width` is the local one again."""
+        self.local(Width=7)
+        before = self.user("#Width * 2")
+        path = self.export("Studio A", STUDIO)
+        copy = copies.import_studios(self.doc, [path], clashes=copies.IMPORT).copies[0]
+        self.assertEqual(copy.Bindings, {"#Width": "Studio_A.Width"})
+        after = self.user("#Width * 2", "After")
+        self.assertEqual(expression(after, "Len"), "Studio_A.Width * 2")
+        self.assertAlmostEqual(after.Len.Value, 20, places=9)
+        self.assertAlmostEqual(before.Len.Value, 14, places=9)
+        self.doc.removeObject("After")
+        self.doc.undo()
+        self.assertIsNone(self.doc.getObject("Studio_A"))
+        again = self.user("#Width * 3", "Again")
+        self.assertEqual(expression(again, "Len"), "Variables.Width * 3")
+
+    def test_use_local(self):
+        """"Use local": `#Width` means Variables.Width (7 mm); the copy's Gap, defined only
+        there, is `#Gap` as before."""
+        self.local(Width=7)
+        path = self.export("Studio A", STUDIO)
+        copy = copies.import_studios(self.doc, [path], clashes=copies.LOCAL).copies[0]
+        self.assertEqual(copy.Bindings, {"#Width": "Variables.Width"})
+        after = self.user("#Width + #Gap")
+        self.assertEqual(expression(after, "Len"), "Variables.Width + Studio_A.Gap")
+        self.assertAlmostEqual(after.Len.Value, 7 + 10 / 3 + 2, places=9)
+
+    def test_pick(self):
+        """"Pick", per name: Width from the file, Gap the local one; a pick that names neither
+        is a problem, and one for a name no local set has only warns."""
+        self.local(Width=7, Gap=1)
+        path = self.export("Studio A", STUDIO)
+        plan = copies.plan_import(self.doc, [path], clashes={"Width": "Nothing.Width"})
+        self.assertFalse(plan.ok)
+        self.assertTrue(any("#Width can't mean Nothing.Width" in p for p in plan.problems),
+                        plan.problems)
+        plan = copies.plan_import(self.doc, [path], clashes={"Tilt": copies.LOCAL})
+        self.assertTrue(any("#Tilt isn't defined by one local set" in w for w in plan.warnings),
+                        plan.warnings)
+        copy = copies.import_studios(self.doc, [path], clashes={
+            "Width": "Studio_A.Width", "Gap": copies.LOCAL}).copies[0]
+        self.assertEqual(copy.Bindings, {"#Width": "Studio_A.Width", "#Gap": "Variables.Gap"})
+        after = self.user("#Width + #Gap")
+        self.assertEqual(expression(after, "Len"), "Studio_A.Width + Variables.Gap")
+        self.assertAlmostEqual(after.Len.Value, 11, places=9)
+
+    def test_saved_and_reopened(self):
+        """The choice is saved with the copy: the reopened file's `#Width` means the same."""
+        self.local(Width=7)
+        path = self.export("Studio A", STUDIO)
+        copies.import_studios(self.doc, [path], clashes=copies.IMPORT)
+        saved = os.path.join(self.folder, "Part.FCStd")
+        self.doc.saveAs(saved)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(saved)
+        after = self.user("#Width * 2")
+        self.assertEqual(expression(after, "Len"), "Studio_A.Width * 2")
+        self.assertAlmostEqual(after.Len.Value, 20, places=9)
+
+    def test_local_after_import(self):
+        """A local Width made after the import, with copies.choose() in its transaction (the
+        panel's add): `#Width` means the local one; one undo takes both back. choose() refuses a
+        path that isn't a variable of that name, and a name no copy defines."""
+        path = self.export("Studio A", STUDIO)
+        copy = copies.import_studios(self.doc, [path]).copies[0]
+        self.doc.openTransaction("Add Width")
+        self.local(Width=7)
+        copies.choose(self.doc, "Width", "Variables.Width")
+        self.doc.commitTransaction()
+        self.assertEqual(copy.Bindings, {"#Width": "Variables.Width"})
+        self.assertEqual(expression(self.user("#Width"), "Len"), "Variables.Width")
+        self.doc.removeObject("Box")
+        self.doc.undo()
+        self.assertEqual(copy.Bindings, {})
+        self.assertIsNone(self.doc.getObject("Variables"))
+        for name, path in (("Width", "Variables.Width"), ("Width", "Studio_A.Gap"),
+                           ("Nothing", "Studio_A.Nothing")):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                copies.choose(self.doc, name, path)
+
+    def test_records_agree(self):
+        """Copies of the name must agree: a second import with "Use import" moves the first
+        copy's record to the new copy; a third copy imported without a choice makes `#Width`
+        ambiguous again."""
+        self.local(Width=7)
+        a = copies.import_studios(self.doc, [self.export("Studio A", STUDIO)],
+                                  clashes=copies.LOCAL).copies[0]
+        b_path = self.export("Studio B", [entry(variable("LENGTH", "Width", "4 mm"))])
+        plan = copies.plan_import(self.doc, [b_path], clashes={"Width": "Studio_A.Width"})
+        self.assertTrue(plan.ok, plan.report())  # another copy of the name can be picked
+        b = copies.import_studios(self.doc, [b_path], clashes=copies.IMPORT).copies[0]
+        self.assertEqual(a.Bindings["#Width"], "Studio_B.Width")
+        self.assertEqual(b.Bindings, {"#Width": "Studio_B.Width"})
+        self.assertAlmostEqual(self.user("#Width").Len.Value, 4, places=9)
+        copies.import_studios(self.doc, [self.export("Studio C", [entry(
+            variable("LENGTH", "Width", "5 mm"))])])
+        self.assertAmbiguous()
+
+    def test_two_local_sets(self):
+        """Two local sets define Width: `#Width` is ambiguous among the document's own already,
+        and no choice of the copy's settles it (a warning; a choice for it isn't used). A choice
+        made between one local set and the copy doesn't cover a second local set made later:
+        `#Width` is ambiguous again."""
+        self.local(Width=7)
+        other = self.doc.addObject("App::VarSet", "Other")
+        other.addProperty("App::PropertyDistance", "Width")
+        other.Width = 8
+        self.doc.recompute()
+        path = self.export("Studio A", STUDIO)
+        plan = copies.plan_import(self.doc, [path], clashes=copies.LOCAL)
+        self.assertTrue(plan.ok, plan.report())
+        self.assertEqual(plan.clashes, {})
+        self.assertTrue(any("#Width is ambiguous here already" in w for w in plan.warnings),
+                        plan.warnings)
+        copy = copies.import_studios(self.doc, [path],
+                                     clashes={"Width": "Other.Width"}).copies[0]
+        self.assertEqual(copy.Bindings, {})
+        self.assertAmbiguous()
+        self.doc.removeObject(copy.Name)
+        self.doc.removeObject("Other")
+        self.doc.recompute()
+        copies.import_studios(self.doc, [path], clashes=copies.LOCAL)
+        self.assertEqual(expression(self.user("#Width"), "Len"), "Variables.Width")
+        self.doc.removeObject("Box")
+        third = self.doc.addObject("App::VarSet", "Third")
+        third.addProperty("App::PropertyDistance", "Width")
+        self.assertAmbiguous()
+
+    def test_refresh_new_clash(self):
+        """A Refresh that brings a name a local set has: the preview lists it; the choice of an
+        earlier name is kept and not asked again; one undo takes the Refresh back with its
+        choice."""
+        self.local(Width=7, Depth=2)
+        path = self.export("Studio A", STUDIO)
+        copy = copies.import_studios(self.doc, [path], clashes=copies.LOCAL).copies[0]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(studio(add=[variable("LENGTH", "Depth", "6 mm")]), f)
+        later = os.stat(path).st_mtime + 10
+        os.utime(path, (later, later))
+        plan = copies.plan_refresh(copy)
+        self.assertTrue(plan.ok, plan.report())
+        self.assertEqual(plan.clashes, {"Depth": ["Variables.Depth"]})
+        copies.refresh(copy, clashes=copies.IMPORT)
+        self.assertEqual(copy.Bindings, {"#Width": "Variables.Width", "#Depth": "Studio_A.Depth"})
+        self.assertEqual(expression(self.user("#Width + #Depth"), "Len"),
+                         "Variables.Width + Studio_A.Depth")
+        self.doc.removeObject("Box")
+        self.doc.undo()
+        self.assertEqual(copy.Bindings, {"#Width": "Variables.Width"})
+        self.assertNotIn("Depth", copy.PropertiesList)
+
+    def test_copy_from_freecad_file(self):
+        """Copy variables from a FreeCAD file whose VarSet defines Width, as the part's own set
+        does: the same choices."""
+        master = self.save("Master", self.master)
+        self.local(Width=7)
+        plan = copies.plan_copy(self.doc, master, "Master")
+        self.assertTrue(plan.ok, plan.report())
+        self.assertEqual(plan.clashes, {"Width": ["Variables.Width"]})
+        self.assertEqual(plan.clash_paths, {"Width": ["Master.Width"]})
+        copy = copies.copy_from_fcstd(self.doc, master, "Master", clashes=copies.IMPORT)
+        self.assertEqual(copy.Bindings, {"#Width": "Master.Width"})
+        self.assertAlmostEqual(self.user("#Width").Len.Value, 100, places=9)
+
+    def test_detach_keeps_choice(self):
+        """Detach clears the source's bindings but not the choice of what `#Width` means."""
+        self.local(Width=7)
+        copy = copies.import_studios(self.doc, [self.export("Studio A", STUDIO)],
+                                     clashes=copies.IMPORT).copies[0]
+        copies.detach(copy)
+        self.assertEqual(copy.Bindings, {"#Width": "Studio_A.Width"})
+        self.assertEqual(expression(self.user("#Width"), "Len"), "Studio_A.Width")
 
 
 class TestVariablesPaths(unittest.TestCase):

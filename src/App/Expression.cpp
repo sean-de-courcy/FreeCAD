@@ -51,6 +51,7 @@
 #include <App/DocumentObject.h>
 #include <App/ObjectIdentifier.h>
 #include <App/PropertyUnits.h>
+#include <App/VariableChoice.h>
 #include <App/VariableLookup.h>
 #include <Base/Interpreter.h>
 #include <Base/MatrixPy.h>
@@ -4019,6 +4020,11 @@ std::string resolveVariable(const App::DocumentObject* owner, const std::string&
         throw ParserError(
             fmt::format("no variable named {} in this document (in expression '{}')", name, buffer)
         );
+    }
+    // FreeCAD-CH (ops#640, decision 317): the variable the user chose for a name a local set and
+    // an imported copy both define (App/VariableChoice.h).
+    if (auto chosen = App::chosenVariableHolder(refs)) {
+        return App::VariableRef {chosen, name}.path();
     }
     if (refs.size() > 1) {
         std::string paths;

@@ -33,6 +33,8 @@
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "VarSet.h"
+#include "VarSetCopy.h"
+#include "VariableChoice.h"
 
 using namespace App;
 
@@ -179,6 +181,45 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
     return {};
 }
 
+const DocumentObject* App::chosenVariableHolder(const std::vector<VariableRef>& refs)
+{
+    // FreeCAD-CH (ops#640, decision 317): VariableChoice.h has the rule.
+    if (refs.size() < 2) {
+        return nullptr;
+    }
+    std::string chosen;
+    int others = 0;  // the sets among refs that aren't copies
+    for (const auto& ref : refs) {
+        auto copy = freecad_cast<const VarSetCopy*>(ref.holder);
+        if (!copy) {
+            ++others;
+            continue;
+        }
+        const auto& records = copy->Bindings.getValues();
+        auto record = records.find("#" + ref.name);
+        if (record == records.end() || record->second.empty()
+            || (!chosen.empty() && record->second != chosen)) {
+            return nullptr;  // a copy without the choice, or two choices
+        }
+        chosen = record->second;
+    }
+    if (chosen.empty()) {
+        return nullptr;  // no copy among them: nothing was chosen
+    }
+    for (const auto& ref : refs) {
+        if (ref.path() != chosen) {
+            continue;
+        }
+        const bool isCopy = freecad_cast<const VarSetCopy*>(ref.holder) != nullptr;
+        // The chosen local set is the only other one; a chosen copy was chosen over one at most.
+        if (isCopy ? others <= 1 : others == 1) {
+            return ref.holder;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
 std::vector<VariableUse> VariableLookup::uses(const Property* prop)
 {
     std::vector<VariableUse> result;
@@ -309,7 +350,12 @@ std::string VariableDisplayScope::shortForm(const DocumentObject* owner, const O
         }
     }
     auto count = counts->second.find(name);
-    if (count == counts->second.end() || count->second != 1) {
+    if (count == counts->second.end() || count->second < 1) {
+        return {};
+    }
+    // FreeCAD-CH (ops#640, decision 317): a name several sets define is shown as `#Name` for the
+    // one the recorded choice makes `#Name` mean (typing it back gives the same path).
+    if (count->second > 1 && chosenVariableHolder(VariableLookup::find(doc, name)) != holder) {
         return {};
     }
     std::pair<std::string, std::string> entry("#" + name, VariableRef {holder, name}.path());

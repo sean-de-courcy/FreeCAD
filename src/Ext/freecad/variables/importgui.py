@@ -26,8 +26,10 @@ can't use with their proposals (editable), each name the files use but don't def
 three choices (a document variable, never preselected; a value; skip), each name several files
 define with the file that provides it, the Onshape document's default units, a Skip box for each
 variable refused or caught in a cycle between the copies, and the report of
-`copies.plan_import()`. Import is
-enabled only when nothing stands in the way; it runs `copies.import_studios()` with the choices,
+`copies.plan_import()`. The names a local set of the document defines too have their own box
+(ops#640, decision 317): which variable `#name` means, "Use <the files>", "Use local", or "Pick"
+per name. Import is
+enabled only when nothing stands in the way and each such name has a choice; it runs `copies.import_studios()` with the choices,
 as one undo step. File > Import ("Onshape variables (.json)", `freecad.variables.importer`) and
 the Variables panel's "Import variables..." open it.
 
@@ -74,6 +76,114 @@ def document_variables(doc, name=None):
                 continue
             found.append((prop != name, obj.Label, prop, f"{obj.Name}.{prop}"))
     return [path for *_key, path in sorted(found)]
+
+
+class ClashBox(QtWidgets.QGroupBox):
+    """The names a local set of the document defines too (ops#640, decision 317): which variable
+    `#name` means in new expressions, for all of them ("Use <source>", "Use local") or per name
+    ("Pick", a choice in each name's row). Nothing is chosen at first: the dialog's button waits
+    for a choice. Existing expressions keep the variables they use."""
+
+    def __init__(self, parent, changed):
+        super().__init__(translate("Variables", "Names this document already defines"), parent)
+        self.setObjectName("clashes")
+        self.changed = changed
+        layout = QtWidgets.QVBoxLayout(self)
+        self.note = QtWidgets.QLabel(self)
+        self.note.setObjectName("clashNote")
+        self.note.setWordWrap(True)
+        layout.addWidget(self.note)
+        buttons = QtWidgets.QHBoxLayout()
+        self.group = QtWidgets.QButtonGroup(self)
+        self.useImport = QtWidgets.QRadioButton(self)
+        self.useImport.setObjectName("useImport")
+        self.useLocal = QtWidgets.QRadioButton(translate("Variables", "Use local"), self)
+        self.useLocal.setObjectName("useLocal")
+        self.pick = QtWidgets.QRadioButton(translate("Variables", "Pick"), self)
+        self.pick.setObjectName("pick")
+        for button in (self.useImport, self.useLocal, self.pick):
+            self.group.addButton(button)
+            buttons.addWidget(button)
+            button.toggled.connect(self.onToggled)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        self.grid = QtWidgets.QGridLayout()
+        layout.addLayout(self.grid)
+        self.rows = {}  # FreeCAD name -> its combo
+        self.setVisible(False)
+
+    def onToggled(self, on):  # not toggled: QGroupBox has that signal
+        if on:
+            self.showRows()
+            self.changed()
+
+    def showRows(self):
+        for row in range(self.grid.rowCount()):
+            for column in range(self.grid.columnCount()):
+                item = self.grid.itemAtPosition(row, column)
+                if item is not None and item.widget() is not None:
+                    item.widget().setVisible(self.pick.isChecked())
+
+    def sync(self, doc, plan, source):
+        """Rows for @a plan's clashes (kept once made, so a choice stays); @a source names what
+        is imported, for the button."""
+        clashes = getattr(plan, "clashes", {}) if plan is not None else {}
+        self.useImport.setText(translate("Variables", "Use {}").format(source))
+        self.note.setText(translate(
+            "Variables", "These names are defined by a local set here too: choose which variable "
+            "#name means in new expressions. Existing expressions keep the variable they use.\n{}"
+        ).format("\n".join(f"#{fc}: {', '.join(paths)}" for fc, paths in sorted(clashes.items()))))
+        for fc in sorted(clashes):
+            if fc in self.rows:
+                continue
+            row = len(self.rows)
+            label = QtWidgets.QLabel(translate("Variables", "#{} means").format(fc), self)
+            combo = QtWidgets.QComboBox(self)
+            combo.setObjectName(f"clash_{fc}")
+            combo.addItem(translate("Variables", "Choose..."), None)
+            for path in clashes[fc]:
+                combo.addItem(translate("Variables", "{} (local)").format(_labelled(doc, path)),
+                              path)
+            for path in plan.clash_paths.get(fc, []):
+                combo.addItem(translate("Variables", "{} ({})").format(fc, source), path)
+            for other in copies.copies_defining(doc, fc):
+                path = f"{other.Name}.{fc}"
+                if combo.findData(path) < 0:
+                    combo.addItem(_labelled(doc, path), path)
+            combo.currentIndexChanged.connect(lambda _i: self.changed())
+            self.grid.addWidget(label, row, 0)
+            self.grid.addWidget(combo, row, 1)
+            self.rows[fc] = combo
+        self.showRows()
+        self.setVisible(bool(clashes))
+
+    def reset(self):
+        """Drops the rows (other files: other names)."""
+        _clear(self.grid)
+        self.rows = {}
+
+    def value(self):
+        """plan_import()'s `clashes`: None until a choice is made."""
+        if self.useImport.isChecked():
+            return copies.IMPORT
+        if self.useLocal.isChecked():
+            return copies.LOCAL
+        if self.pick.isChecked():
+            return {fc: combo.currentData() for fc, combo in self.rows.items()
+                    if combo.currentData() is not None}
+        return None
+
+    def complete(self, plan):
+        """Whether every clash of @a plan has a choice."""
+        clashes = getattr(plan, "clashes", {}) if plan is not None else {}
+        return all(fc in plan.chosen for fc in clashes)
+
+
+def _labelled(doc, path):
+    """`Variables.Width` as the panel names it: the set's label and the variable."""
+    obj_name, _, prop = path.partition(".")
+    obj = doc.getObject(obj_name)
+    return f"{obj.Label}.{prop}" if obj is not None else path
 
 
 class ImportDialog(QtWidgets.QDialog):
@@ -127,6 +237,8 @@ class ImportDialog(QtWidgets.QDialog):
             translate("Variables", "Names several files define"), self)
         self.ambiguousGrid = QtWidgets.QGridLayout(self.ambiguousBox)
         layout.addWidget(self.ambiguousBox)
+        self.clashBox = ClashBox(self, lambda: self.update())
+        layout.addWidget(self.clashBox)
 
         self.skipsBox = QtWidgets.QGroupBox(
             translate("Variables", "Variables that can't be imported as they are"), self)
@@ -213,6 +325,7 @@ class ImportDialog(QtWidgets.QDialog):
             self.addUnresolvedRow(row, name, users)
         self.unresolvedBox.setVisible(bool(self.unresolved))
 
+        self.clashBox.reset()
         _clear(self.ambiguousGrid)
         self.ambiguous = {}
         for row, (name, indexes) in enumerate(sorted(self.base.ambiguous.items())):
@@ -297,7 +410,8 @@ class ImportDialog(QtWidgets.QDialog):
         default_units = {kind: combo.currentData() for kind, combo in self.defaultUnits.items()
                          if combo.currentData()}
         return {"name_map": name_map, "bindings": bindings, "values": values, "skip": skip,
-                "providers": providers, "default_units": default_units}
+                "providers": providers, "default_units": default_units,
+                "clashes": self.clashBox.value()}
 
     def syncNames(self, renames):
         """Makes the names table's rows the names of @a renames (Onshape name -> proposal),
@@ -352,6 +466,8 @@ class ImportDialog(QtWidgets.QDialog):
         # a value for a name FreeCAD can't use gets a row in the names table, as a variable does
         self.syncNames({**self.base.renames, **self.plan.input_renames})
         self.syncSkips()
+        self.clashBox.sync(self.doc, self.plan,
+                           ", ".join(os.path.basename(p) for p in self.paths))
         if not self.paths:
             text = translate("Variables", "Add the Onshape exports to import.")
         else:
@@ -362,7 +478,8 @@ class ImportDialog(QtWidgets.QDialog):
             lines.extend(self.plan.warnings)
             text = "\n".join(lines) or translate("Variables", "Nothing stands in the way.")
         self.report.setPlainText(text)
-        self.importButton.setEnabled(bool(self.paths) and self.plan.ok)
+        self.importButton.setEnabled(bool(self.paths) and self.plan.ok
+                                     and self.clashBox.complete(self.plan))
 
     def accept(self):
         try:
@@ -437,9 +554,10 @@ class PlanDialog(QtWidgets.QDialog):
     @a planner(choices) gives the plan (copies.RefreshPlan), @a applier(choices) applies it."""
 
     def __init__(self, doc, title, planner, applier, button, default_units=False, exclude=None,
-                 parent=None):
+                 parent=None, source=""):
         super().__init__(parent or Gui.getMainWindow())
         self.doc = doc
+        self.source = source  # the source file's name, for the clash box
         self.planner = planner
         self.applier = applier
         self.exclude = exclude  # a copy's own variables aren't offered to it
@@ -465,6 +583,8 @@ class PlanDialog(QtWidgets.QDialog):
             translate("Variables", "Bindings another copy could provide"), self)
         self.switchLayout = QtWidgets.QVBoxLayout(self.switchBox)
         layout.addWidget(self.switchBox)
+        self.clashBox = ClashBox(self, lambda: self.update())
+        layout.addWidget(self.clashBox)
         self.skipsBox = QtWidgets.QGroupBox(
             translate("Variables", "Variables that can't be copied as they are"), self)
         self.skipsLayout = QtWidgets.QVBoxLayout(self.skipsBox)
@@ -571,7 +691,7 @@ class PlanDialog(QtWidgets.QDialog):
             if box.isChecked():
                 skip.append(name)
         result = {"bindings": bindings, "values": values, "skip": skip, "freeze": freeze,
-                  "providers": providers, "switch": switch}
+                  "providers": providers, "switch": switch, "clashes": self.clashBox.value()}
         units = {kind: combo.currentData() for kind, combo in self.defaultUnits.items()
                  if combo.currentData()}
         if units:
@@ -635,13 +755,14 @@ class PlanDialog(QtWidgets.QDialog):
             self.applyButton.setEnabled(False)
             return
         self.sync()
+        self.clashBox.sync(self.doc, self.plan, self.source)
         if self.plan.copy is not None:
             self.summary.setText(self.plan.summary())
         else:
             self.summary.setText(translate("Variables", "{} variables to copy").format(
                 len(self.plan.targets)))
         self.report.setPlainText(self.plan.report())
-        self.applyButton.setEnabled(self.plan.ok)
+        self.applyButton.setEnabled(self.plan.ok and self.clashBox.complete(self.plan))
 
     def accept(self):
         try:
@@ -684,7 +805,8 @@ def refresh(copy, path=None, entry=None, varset=None):
     return _keep(PlanDialog(copy.Document, title, planner, applier,
                             translate("Variables", "Refresh"),
                             default_units=copy.SourceKind == copies.JSON_KIND,
-                            exclude=copy.Name))
+                            exclude=copy.Name,
+                            source=os.path.basename(path or copy.SourcePath) or copy.Label))
 
 
 def _pick(title, label, items, current=0):
@@ -782,4 +904,5 @@ def copy_from_file(doc=None, path=None, varset=None):
         return copy
 
     title = translate("Variables", "Copy variables from {}").format(os.path.basename(path))
-    return _keep(PlanDialog(doc, title, planner, applier, translate("Variables", "Copy")))
+    return _keep(PlanDialog(doc, title, planner, applier, translate("Variables", "Copy"),
+                            source=os.path.basename(path)))

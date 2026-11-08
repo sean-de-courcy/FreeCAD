@@ -263,6 +263,7 @@ SET(Document_HPP_SRCS
     TextDocument.h
     VarSet.h
     VarSetCopy.h
+    VariableChoice.h
     VariableLookup.h
     Link.h
 )

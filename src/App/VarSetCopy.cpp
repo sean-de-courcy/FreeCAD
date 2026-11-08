@@ -109,7 +109,8 @@ VarSetCopy::VarSetCopy()
         (),
         group,
         type,
-        "Names the source uses but doesn't define, and the FreeCAD paths chosen for them"
+        "Names the source uses but doesn't define, and the FreeCAD paths chosen for them; "
+        "#name: the variable #name means when a local set defines the name too"
     );
     ADD_PROPERTY_TYPE(
         Skipped,

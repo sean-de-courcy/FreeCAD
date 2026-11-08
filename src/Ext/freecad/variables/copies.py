@@ -148,6 +148,12 @@ class Plan:
     input_renames: Dict[str, str] = field(default_factory=dict)
     # the edges of a cycle between the copies: (user source, provider source, variable, name)
     cycle: List[Tuple[int, int, str, str]] = field(default_factory=list)
+    # FreeCAD names the copies would define that a local set defines too (decision 317) -> the
+    # local variables' paths; the paths the copies make for them; and, from `clashes`, the path
+    # each name's `#name` is to mean
+    clashes: Dict[str, List[str]] = field(default_factory=dict)
+    clash_paths: Dict[str, List[str]] = field(default_factory=dict)
+    chosen: Dict[str, str] = field(default_factory=dict)
     problems: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -216,7 +222,8 @@ def plan_import(doc, paths: Sequence[str], *,
                 values: Optional[Mapping[str, Tuple[str, str]]] = None,
                 skip: Iterable[str] = (),
                 providers: Optional[Mapping[str, int]] = None,
-                default_units: Optional[Mapping[str, str]] = None) -> Plan:
+                default_units: Optional[Mapping[str, str]] = None,
+                clashes=None) -> Plan:
     """Reads and translates @a paths (Onshape exports) for @a doc and says what stands in the
     way; changes nothing.
 
@@ -227,6 +234,10 @@ def plan_import(doc, paths: Sequence[str], *,
     variables (and the ones that need them) aren't imported. @a providers: a name several
     entries define -> the source index (as in `Plan.sources`) that provides it.
     @a default_units: "LENGTH" / "ANGLE" -> the Onshape document's default unit.
+    @a clashes: what `#name` means for a name a copy would define that a local set defines too
+    (decision 317): IMPORT or LOCAL for every such name, or a dict FreeCAD name -> IMPORT, LOCAL
+    or a path (`Variables.Width`, `Studio_A.Width`: "Pick"). None, or a name left out: nothing
+    is chosen, and `#name` stays ambiguous for new expressions, as before (a warning says so).
     """
     name_map = dict(name_map or {})
     bindings = dict(bindings or {})
@@ -340,6 +351,16 @@ def plan_import(doc, paths: Sequence[str], *,
         plan.problems.append(
             f"The copies would depend on each other ({uses}): a FreeCAD object can't depend on "
             "one that depends on it. Skip one of these variables.")
+    made: Dict[str, List[str]] = {}
+    provided: Dict[str, str] = {}
+    for i, source in enumerate(plan.sources):
+        for var in plan.variables(i):
+            path = f"{source.name}.{var.freecad_name}"
+            made.setdefault(var.freecad_name, []).append(path)
+            if (providers or {}).get(var.name) == i:
+                provided[var.freecad_name] = path
+    _plan_clashes(doc, plan, made, provided, clashes,
+                  {s.name: s.label + " (" + os.path.basename(s.path) + ")" for s in plan.sources})
     return plan
 
 
@@ -514,6 +535,9 @@ def import_studios(doc, paths: Sequence[str], **choices) -> ImportResult:
     try:
         result = _make(doc, plan, created)
         _check(doc, plan, result)
+        made = {copy.Name for copy in result.copies}
+        for fc, path in plan.chosen.items():
+            _record(copies_defining(doc, fc, exclude=made), fc, path)
         for copy in result.copies:
             copy.SourceKind = JSON_KIND  # the variables become read-only
     except BaseException:
@@ -584,6 +608,8 @@ def _make(doc, plan: Plan, created: list) -> ImportResult:
             for ref in onshape.references(onshape.parse(var.variable.expression)):
                 if ref in plan.bindings and not _defined(plan, ref):
                     bindings[ref] = plan.bindings[ref].text
+            if var.freecad_name in plan.chosen:
+                bindings[choice_key(var.freecad_name)] = plan.chosen[var.freecad_name]
         copy.SourcePath = source.path
         copy.SourceRelativePath = _relative(doc, source.path)
         copy.SourceObject = str(source.index)
@@ -676,6 +702,137 @@ def _check(doc, plan: Plan, result: ImportResult):
                     f"computes {_show(got)}")
 
 
+# --- Name clashes between local and imported variables (ops#640, decision 317) -----------------
+#
+# A local variable (a plain VarSet's) and an imported one (a copy's) of the same name make `#name`
+# ambiguous for new expressions: App's parser refuses it ("#Width is ambiguous: ...; write the
+# full path"), the panel and the fields show both by their full paths, and stored expressions,
+# which hold full paths, keep computing what they did. The user chooses which one `#name` means:
+# the choice is recorded on every copy that defines the name, in its Bindings under `#name`, as
+# the chosen variable's path; App reads it there (App/VariableChoice.h) when it parses `#name`
+# and when it shows a reference as `#name`. Existing expressions keep the variables they name.
+
+IMPORT = "import"
+LOCAL = "local"
+
+
+def choice_key(name: str) -> str:
+    """The key under which a copy's Bindings records what `#name` means (a source's own names
+    never start with '#')."""
+    return "#" + name
+
+
+@functools.lru_cache(maxsize=None)
+def _usable(name: str, type_id: str) -> bool:
+    """Whether @a name can be a variable of a @a type_id object (not one of its static
+    properties, and read as a name by expressions)."""
+    return not App.checkVariableName(name, type_id)
+
+
+def _defines(obj, name: str) -> bool:
+    return name in obj.PropertiesList and _usable(name, obj.TypeId)
+
+
+def local_holders(doc, name: str) -> List[str]:
+    """The paths of @a doc's variables named @a name that aren't a copy's, as `#name` finds
+    them: a plain VarSet's (a local variable) or a sheet's alias."""
+    found = []
+    for obj in doc.Objects:
+        if obj.isDerivedFrom("App::VarSet"):
+            if obj.TypeId != COPY_TYPE and _defines(obj, name):
+                found.append(f"{obj.Name}.{name}")
+        elif obj.TypeId == "Spreadsheet::Sheet" and obj.getCellFromAlias(name):
+            found.append(f"{obj.Name}.{name}")
+    return found
+
+
+def copies_defining(doc, name: str, exclude: Iterable[str] = ()) -> list:
+    """The copies of @a doc (attached or detached) that define a variable @a name, but those
+    whose internal names are in @a exclude."""
+    exclude = set(exclude)
+    return [obj for obj in doc.findObjects(COPY_TYPE)
+            if obj.Name not in exclude and _defines(obj, name)]
+
+
+def _record(objs, name: str, path: str):
+    key = choice_key(name)
+    for copy in objs:
+        bindings = dict(copy.Bindings)
+        if bindings.get(key) != path:
+            bindings[key] = path
+            copy.Bindings = bindings  # an output property: doesn't touch the copy
+
+
+def choose(doc, name: str, path: str):
+    """Makes `#name` mean @a path (`Object.name`, internal names) in @a doc's new expressions:
+    records it on every copy that defines @a name. Existing expressions keep the variables they
+    name. Runs in the caller's transaction (the Variables panel's add), so an undo takes it back
+    with what made the clash."""
+    obj_name, _, prop = path.partition(".")
+    holder = doc.getObject(obj_name)
+    if (prop != name or holder is None or not holder.isDerivedFrom("App::VarSet")
+            or not _defines(holder, name)):
+        raise ValueError(f"{path} isn't a variable {name} of {doc.Name}")
+    found = copies_defining(doc, name)
+    if not found:
+        raise ValueError(f"No copy defines {name}: #{name} needs no choice")
+    _record(found, name, path)
+
+
+def _plan_clashes(doc, plan, made: Mapping[str, List[str]], provided: Mapping[str, str],
+                  clashes, labels: Mapping[str, str]):
+    """Fills @a plan's clashes, clash_paths and chosen (and its problems and warnings) for the
+    variables an import, a Refresh or a copy makes: @a made, FreeCAD name -> the paths made for
+    it (several when several files define it, @a provided naming the one `providers` picks).
+    @a clashes is plan_import()'s argument; @a labels names the copies in the warnings."""
+    for fc in sorted(made):
+        local = local_holders(doc, fc)
+        if len(local) == 1:
+            plan.clashes[fc] = local
+            plan.clash_paths[fc] = list(made[fc])
+        elif local:
+            # ambiguous among the document's own already: no choice of the copy's can settle it
+            plan.warnings.append(f"#{fc} is ambiguous here already ({', '.join(local)}) and "
+                                 "stays so: new expressions write the full path")
+    if clashes is None:
+        wanted = {}
+    elif isinstance(clashes, str):
+        wanted = {fc: clashes for fc in plan.clashes}
+    else:
+        wanted = dict(clashes)
+    for fc, choice in sorted(wanted.items()):
+        if fc not in plan.clashes:
+            plan.warnings.append(f"#{fc} isn't defined by one local set: its choice isn't used")
+            continue
+        local, ours = plan.clashes[fc], list(made[fc])
+        if choice == LOCAL:
+            options = local
+        elif choice == IMPORT:
+            options = [provided[fc]] if len(ours) > 1 and fc in provided else ours
+        else:
+            others = [f"{obj.Name}.{fc}" for obj in copies_defining(doc, fc)]
+            candidates = local + ours + [p for p in others if p not in ours]
+            if choice not in candidates:
+                plan.problems.append(f"#{fc} can't mean {choice}: pick one of "
+                                     f"{', '.join(candidates)}")
+                continue
+            options = [choice]
+        if len(options) != 1:
+            plan.problems.append(f"#{fc} is defined by {', '.join(options)}: pick which one "
+                                 f"#{fc} means")
+            continue
+        plan.chosen[fc] = options[0]
+    for fc, local in sorted(plan.clashes.items()):
+        where = ", ".join(labels.get(p.partition(".")[0], p) for p in plan.clash_paths[fc])
+        line = f"#{fc} is defined here by {', '.join(local)} and comes from {where} too: "
+        if fc in plan.chosen:
+            line += f"new expressions' #{fc} means {plan.chosen[fc]}"
+        else:
+            line += (f"#{fc} stays ambiguous for new expressions (they write the full path) "
+                     "until you choose")
+        plan.warnings.append(line + "; existing expressions keep the variable they use")
+
+
 def detach(copy):
     """Turns @a copy into a plain set of variables, editable, with no source, as one undo step
     (section 3.1, Detach). The object keeps its type; refreshing it is no longer possible."""
@@ -684,9 +841,12 @@ def detach(copy):
     doc = copy.Document
     own = doc.getBookedTransactionID() == 0
     # SourceKind last: until it changes, the copy is still attached and read-only.
+    # The choices of what `#name` means (decision 317) stay: they are the document's, not the
+    # source's.
+    records = {key: path for key, path in dict(copy.Bindings).items() if key.startswith("#")}
     cleared = {"SourcePath": "", "SourceRelativePath": "", "SourceObject": "",
                "SourceEntries": 0, "SourceStamp": "", "SourceRefreshed": "",
-               "SourceExpressions": {}, "NameMap": {}, "Bindings": {}, "Skipped": [],
+               "SourceExpressions": {}, "NameMap": {}, "Bindings": records, "Skipped": [],
                "Orphans": [], "SourceKind": DETACHED}
     before = {name: getattr(copy, name) for name in cleared}
     if own:
@@ -1313,6 +1473,10 @@ class RefreshPlan:
     ambiguous: Dict[str, List[str]] = field(default_factory=dict)  # name -> copies defining it
     switchable: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # name -> (bound, copies)
     freezable: Dict[str, str] = field(default_factory=dict)  # FreeCAD: name -> the frozen text
+    # as Plan's (decision 317): names a local set defines too that have no choice on the copy yet
+    clashes: Dict[str, List[str]] = field(default_factory=dict)
+    clash_paths: Dict[str, List[str]] = field(default_factory=dict)
+    chosen: Dict[str, str] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
     problems: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -1400,12 +1564,14 @@ class _Choices:
     providers: Dict[str, str]
     switch: set
     default_units: Dict[str, str]
+    clashes: object = None  # plan_import()'s `clashes`
 
 
 def _choices(name_map=None, bindings=None, values=None, skip=(), freeze=(), providers=None,
-             switch=(), default_units=None) -> _Choices:
+             switch=(), default_units=None, clashes=None) -> _Choices:
     return _Choices(dict(name_map or {}), dict(bindings or {}), dict(values or {}), set(skip),
-                    set(freeze), dict(providers or {}), set(switch), dict(default_units or {}))
+                    set(freeze), dict(providers or {}), set(switch), dict(default_units or {}),
+                    clashes)
 
 
 def plan_refresh(copy, path: Optional[str] = None, *, entry: Optional[int] = None,
@@ -1419,8 +1585,9 @@ def plan_refresh(copy, path: Optional[str] = None, *, entry: Optional[int] = Non
     (a name -> (Onshape type, text): an input variable), `skip` (names), `default_units`; and
     `providers` (a name several other copies define -> the copy's internal name), `switch`
     (bound names to switch to the copy that now defines them), `freeze` (FreeCAD: references
-    whose saved value is used). The copy's Bindings, NameMap and Skipped are kept unless a
-    choice changes them.
+    whose saved value is used), `clashes` (plan_import()'s: for the names a local set defines
+    too, those the copy has no choice for yet). The copy's Bindings, NameMap and Skipped are kept
+    unless a choice changes them.
     """
     if copy.TypeId != COPY_TYPE:
         raise TypeError(f"{copy.Label} isn't a copy")
@@ -1454,6 +1621,11 @@ def plan_refresh(copy, path: Optional[str] = None, *, entry: Optional[int] = Non
         _plan_fcstd(plan, varset if varset is not None else copy.SourceObject, c)
     if plan.stamp:
         _diff(plan)
+    # a name chosen before keeps its choice
+    made = {t.fc_name: [f"{copy.Name}.{t.fc_name}"] for t in plan.targets
+            if choice_key(t.fc_name) not in copy.Bindings}
+    _plan_clashes(doc, plan, made, {}, c.clashes,
+                  {copy.Name: f"{copy.Label} ({os.path.basename(plan.path)})"})
     _list_problems(plan)
     return plan
 
@@ -1482,9 +1654,13 @@ def plan_copy(doc, path: str, varset: str, **choices) -> RefreshPlan:
         plan.problems.append(f"{_native(path)} doesn't exist")
         return plan
     plan.path = _portable(os.path.abspath(path))
-    _plan_fcstd(plan, varset, _choices(**choices))
+    c = _choices(**choices)
+    _plan_fcstd(plan, varset, c)
     if plan.label:
         plan.name = _unique_name(doc, plan.label, ())
+        made = {t.fc_name: [f"{plan.name}.{t.fc_name}"] for t in plan.targets}
+        _plan_clashes(doc, plan, made, {}, c.clashes,
+                      {plan.name: f"{plan.label} ({os.path.basename(plan.path)})"})
     for obj in doc.findObjects(COPY_TYPE):
         if (obj.SourceKind == FCSTD_KIND and obj.SourceObject == varset
                 and _same_file(obj.SourcePath, plan.path)):
@@ -2157,7 +2333,15 @@ def _apply(plan: RefreshPlan, copy):
     copy.SourceRefreshed = _now()
     copy.SourceExpressions = {t.name: t.source_text for t in plan.targets}
     copy.NameMap = {name: fc for name, fc in plan.name_map.items() if name in names}
-    copy.Bindings = dict(plan.binding_texts)
+    # the choices of what `#name` means (decision 317): kept for the names the copy still has,
+    # and the new ones, on the other copies of the name too
+    kept = {t.fc_name for t in plan.targets} | set(plan.orphans)
+    records = {key: path for key, path in dict(copy.Bindings).items()
+               if key.startswith("#") and key[1:] in kept}
+    records.update({choice_key(fc): path for fc, path in plan.chosen.items()})
+    copy.Bindings = {**plan.binding_texts, **records}
+    for fc, path in plan.chosen.items():
+        _record(copies_defining(doc, fc, exclude={copy.Name}), fc, path)
     copy.Skipped = list(plan.skipped_names)
     copy.Orphans = list(plan.orphans)
     doc.recompute()
