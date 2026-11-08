@@ -82,6 +82,16 @@ public:
         return ToolSettings->registerToolWidgetChanged(std::forward<F>(f));
     }
 
+    /** FreeCAD-CH (ops#640): a panel another module puts at the top of the dialog (PartDesign's
+     * Sketch plane box), made for the sketch edited, or null for none. The dialog owns it. A plain
+     * function, so the list holds nothing of the module that registered it at exit.
+     */
+    using ContentFactory = QWidget* (*)(ViewProviderSketch* sketchView);
+    /// Adds \a factory; every dialog made after it asks it for its panel.
+    static void addContentFactory(ContentFactory factory);
+    /// True once a module has added one (PartDesignGui, when it is loaded).
+    static bool hasContentFactories();
+
 protected:
     void slotUndoDocument(const App::Document&);
     void slotRedoDocument(const App::Document&);

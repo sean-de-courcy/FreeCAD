@@ -23,6 +23,9 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <vector>
+
 #include <Gui/Command.h>
 
 #include "TaskDlgEditSketch.h"
@@ -32,6 +35,29 @@
 using namespace SketcherGui;
 
 namespace sp = std::placeholders;
+
+namespace
+{
+// FreeCAD-CH (ops#640): the panels other modules add (TaskDlgEditSketch::addContentFactory)
+std::vector<TaskDlgEditSketch::ContentFactory>& contentFactories()
+{
+    static std::vector<TaskDlgEditSketch::ContentFactory> factories;
+    return factories;
+}
+}  // namespace
+
+void TaskDlgEditSketch::addContentFactory(ContentFactory factory)
+{
+    auto& factories = contentFactories();
+    if (factory && std::ranges::find(factories, factory) == factories.end()) {
+        factories.push_back(factory);
+    }
+}
+
+bool TaskDlgEditSketch::hasContentFactories()
+{
+    return !contentFactories().empty();
+}
 
 //**************************************************************************
 //**************************************************************************
@@ -57,6 +83,14 @@ TaskDlgEditSketch::TaskDlgEditSketch(ViewProviderSketch* sketchView)
     // FreeCAD-CH (ops#640): Esc with no tool running keeps the sketch open, as in Onshape
     setEscapeButtonEnabled(hGrp->GetBool("LeaveSketchWithEscape", false));
     setAutoCloseOnResetEdit(true);
+
+    // FreeCAD-CH (ops#640): other modules' panels first (the Sketch plane box, at the top as in
+    // Onshape's sketch dialog)
+    for (ContentFactory factory : contentFactories()) {
+        if (QWidget* panel = factory(sketchView)) {
+            Content.push_back(panel);
+        }
+    }
 
     Content.push_back(Messages);
     Content.push_back(ToolSettings);
