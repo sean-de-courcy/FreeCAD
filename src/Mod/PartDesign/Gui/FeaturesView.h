@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPointer>
 #include <QToolButton>
@@ -49,6 +50,12 @@ public:
 
     /// The bar row's item type
     static constexpr int BarType = QListWidgetItem::UserType + 1;
+    /// A row's eye (ops#640 rank 33): 0 none, 1 shown, 2 hidden
+    static constexpr int EyeRole = Qt::UserRole + 2;
+    /// A default geometry row (Origin, Top, Front, Right; ops#640 rank 33): true
+    static constexpr int DefaultRole = Qt::UserRole + 3;
+    /// Where a row's eye is drawn and clicked: at the row's right end
+    static QRect eyeRect(const QRect& row);
 
     QListWidgetItem* barItem() const;
     bool isDraggingBar() const
@@ -70,6 +77,8 @@ Q_SIGNALS:
     void rowsDropped(int row);
     /// The selected bar is to move one row up (-1) or down (1): the arrow keys
     void barStepped(int delta);
+    /// A click on a row's eye (EyeRole)
+    void eyeClicked(QListWidgetItem* item);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -149,6 +158,8 @@ public:
 protected:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void showEvent(QShowEvent* event) override;
+    /// The lists' hover: the row's object pre-highlighted in the 3D view (ops#640 rank 33)
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void scheduleRebuild();
@@ -160,6 +171,9 @@ private:
     void syncSelectionFromApp();
     void pushSelection(const std::vector<App::DocumentObject*>& objs);
     App::DocumentObject* objectOf(const QListWidgetItem* item) const;
+    /// The studio member a Features row stands for: null for the bar and the default geometry rows
+    /// (above every feature: the bar or a drop there is at the top)
+    App::DocumentObject* memberOf(const QListWidgetItem* item) const;
     App::DocumentObject* objectOf(const QTreeWidgetItem* item) const;
     void watchDocument(const Gui::Document* gdoc);
     void findStudio();
@@ -174,8 +188,13 @@ private:
     void onPartDoubleClicked(QTreeWidgetItem* item, int column);
     void onPartMenu(const QPoint& pos);
     void rollFromMenu(App::DocumentObject* member, bool toEnd);
-    /// Only the failed rows while the header's error icon is down (Onshape's error filter)
+    /// Only the failed rows while the header's error icon is down (Onshape's error filter), and
+    /// only the rows the filter box matches (ops#640 rank 33)
     void applyErrorFilter();
+    /// Pre-highlights obj in the 3D view (null: none), as the tree's hover does
+    void preselectRow(App::DocumentObject* obj);
+    /// A row's eye: shows or hides obj (a default plane with its Origin)
+    void toggleRowVisibility(App::DocumentObject* obj);
     /// Opens the editor on view's current row (F2, Shift+N, the menus' Rename)
     void renameCurrent(QAbstractItemView* view);
     /// The editor's text as obj's Label, in one undo step "Rename"
@@ -194,6 +213,12 @@ private:
     QTreeWidget* parts = nullptr;
     QLabel* title = nullptr;
     QToolButton* errorsButton = nullptr;
+    /// Onshape's "Filter by name or type" box; ":errors" and ":warnings" filter by status
+    QLineEdit* filterBox = nullptr;
+    /// The object in edit (its row highlighted, ops#640 rank 40), by name, or empty
+    std::string editedName;
+    /// The object the lists' hover pre-highlights, by name, or empty
+    std::string preselected;
     /// A row's name is being edited: rebuilds wait for its commit
     bool renaming = false;
     /// The bar row is selected (for the arrow keys)

@@ -27,6 +27,8 @@ from PartDesignTests.TestStudioSequence import faceAt, sketch
 
 V = App.Vector
 BAR = QtWidgets.QListWidgetItem.UserType + 1  # FeatureList::BarType
+EYE = QtCore.Qt.UserRole + 2  # FeatureList::EyeRole
+DEFAULT = QtCore.Qt.UserRole + 3  # FeatureList::DefaultRole
 
 
 def pump(seconds=0.1):
@@ -137,12 +139,28 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.expected = ["SkA", "PadA", "Box", "SkB", "Pocket1", "PocketB", "|"]
 
     def rows(self):
-        """The rows' labels, the bar as "|"."""
+        """The rows' labels, the bar as "|", without the default geometry rows at the top."""
         out = []
         for i in range(self.list.count()):
             item = self.list.item(i)
+            if item.data(DEFAULT):
+                continue
             out.append("|" if item.type() == BAR else item.text())
         return out
+
+    def defaultRows(self):
+        """The default geometry rows' labels (ops#640 rank 33)."""
+        return [
+            self.list.item(i).text()
+            for i in range(self.list.count())
+            if self.list.item(i).data(DEFAULT)
+        ]
+
+    def barItem(self):
+        for i in range(self.list.count()):
+            if self.list.item(i).type() == BAR:
+                return self.list.item(i)
+        raise AssertionError("no bar row")
 
     def tips(self):
         return [b.Tip.Name if b.Tip else None for b in (self.body1, self.body2)]
@@ -220,7 +238,7 @@ class TestFeaturesViewGui(unittest.TestCase):
     def testRowsInHistoryOrder(self):
         self.assertEqual(self.rows(), self.expected)
         # The tooltip names the row's Body
-        self.assertIn("Body2", self.list.item(2).toolTip())
+        self.assertIn("Body2", self.item("Box").toolTip())
 
     def testDragTheBar(self):
         undo = self.doc.UndoCount
@@ -419,8 +437,8 @@ class TestFeaturesViewGui(unittest.TestCase):
     def testDragSeveralRows(self):
         """Two selected rows dragged together: a click on one of them keeps the selection for the
         drag; rows of two Bodies are refused."""
-        self.list.item(1).setSelected(True)  # PadA
-        self.list.item(2).setSelected(True)  # Box
+        self.item("PadA").setSelected(True)
+        self.item("Box").setSelected(True)
         pump()
         undo = self.doc.UndoCount
         self.dragRowTo("Box", "SkA", below=False)
@@ -844,7 +862,7 @@ class TestFeaturesViewGui(unittest.TestCase):
         mouse(viewport, QtCore.QEvent.MouseButtonPress, point, QtCore.Qt.LeftButton)
         mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
         pump()
-        bar = self.list.item(self.rows().index("|"))
+        bar = self.barItem()
         self.assertTrue(bar.isSelected())
         self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
         undo = self.doc.UndoCount
@@ -867,7 +885,7 @@ class TestFeaturesViewGui(unittest.TestCase):
         mouse(viewport, QtCore.QEvent.MouseButtonPress, point, QtCore.Qt.LeftButton)
         mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
         pump()
-        self.assertFalse(self.list.item(self.rows().index("|")).isSelected())
+        self.assertFalse(self.barItem().isSelected())
 
     def testPartsMenu(self):
         """A right-click on a part opens Onshape's part menu; Hide other parts hides every other
@@ -880,3 +898,211 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertTrue(self.body2.Visibility)
         # The right-clicked row became the selection
         self.assertEqual([i.text(0) for i in self.parts.selectedItems()], ["Body2"])
+
+    # --------------------------------------------- ops#640 round 3 (ranks 32, 33, 34, 35, 40)
+
+    def eyePoint(self, label):
+        """The centre of a row's eye (FeatureList::eyeRect: 16 px, 3 px from the right end)."""
+        rect = self.rowRect(label)
+        size = min(16, rect.height())
+        return QtCore.QPoint(rect.right() - size - 3 + size // 2, rect.center().y())
+
+    def clickEye(self, label):
+        viewport = self.list.viewport()
+        point = self.eyePoint(label)
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, point, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
+        pump(0.2)
+
+    def closeEdit(self):
+        guiDoc = Gui.getDocument(self.doc.Name)
+        if guiDoc.getInEdit():
+            guiDoc.resetEdit()
+            pump(0.3)
+        if Gui.Control.activeDialog():
+            Gui.Control.closeDialog()
+            pump(0.3)
+
+    def testEditRollsEveryPart(self):
+        """Rank 32 (lists plan 8): editing Pocket1 (Body1) rolls Body2 back to it too, as Onshape
+        rolls every part back to the feature edited: PocketB, after Pocket1 in the history, is
+        held and leaves the view, and Box, Body2's solid before it, is shown. Nothing saved
+        changes (the Tips, the Visibility properties). Final shows every part's end result;
+        closing the edit puts everything back."""
+        preview = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+        savedFinal = preview.GetBool("ShowFinal", False)
+        preview.SetBool("ShowFinal", False)
+        try:
+            pocketB = self.pocketB.ViewObject
+            box = self.box.ViewObject
+            self.assertTrue(pocketB.isVisible())
+            self.assertFalse(box.isVisible())
+            Gui.getDocument(self.doc.Name).setEdit(self.pocket1, 0)
+            pump(0.3)
+            self.assertTrue(waitFor(lambda: self.body2.holds(self.pocketB)))
+            self.assertFalse(self.body2.holds(self.box))
+            self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
+            self.assertFalse(pocketB.isVisible())
+            self.assertTrue(box.isVisible())
+            self.assertTrue(self.pocketB.Visibility)
+            self.assertFalse(self.box.Visibility)
+            # The list: the bar right after the feature in edit, Body2's later row below it
+            expected = ["SkA", "PadA", "Box", "SkB", "Pocket1", "|", "PocketB"]
+            self.assertTrue(waitFor(lambda: self.rows() == expected), self.rows())
+            # Final: every part's end result, and back
+            final = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "showFinalCheckBox")
+            self.assertIsNotNone(final)
+            final.setChecked(True)
+            pump(0.3)
+            self.assertFalse(self.body2.holds(self.pocketB))
+            self.assertTrue(pocketB.isVisible())
+            self.assertFalse(box.isVisible())
+            final.setChecked(False)
+            pump(0.3)
+            self.assertTrue(self.body2.holds(self.pocketB))
+            self.assertFalse(pocketB.isVisible())
+            # Closed: as before the edit
+            self.closeEdit()
+            self.assertFalse(self.body2.holds(self.pocketB))
+            self.assertTrue(pocketB.isVisible())
+            self.assertFalse(box.isVisible())
+            self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
+            self.assertTrue(waitFor(lambda: self.rows() == self.expected), self.rows())
+        finally:
+            preview.SetBool("ShowFinal", savedFinal)
+
+    def testEditedRowHighlighted(self):
+        """Rank 40: the feature in edit is highlighted in the list (bold, a tinted background)
+        until its edit closes."""
+        self.assertFalse(self.item("PadA").font().bold())
+        Gui.getDocument(self.doc.Name).setEdit(self.padA, 0)
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: self.item("PadA").font().bold()))
+        self.assertNotEqual(self.item("PadA").background().style(), QtCore.Qt.NoBrush)
+        self.assertFalse(self.item("Box").font().bold())
+        self.closeEdit()
+        self.assertTrue(waitFor(lambda: not self.item("PadA").font().bold()))
+        self.assertEqual(self.item("PadA").background().style(), QtCore.Qt.NoBrush)
+
+    def testRowsBelowTheBarGreyed(self):
+        """Rank 34 (blind test F43): every row below the bar is greyed and italic, the sketch
+        waiting there with the held pockets too; rolled back without a drag, the bar takes the
+        place a drag gives it (one place for one state), above that sketch. A sketch made while
+        rolled back is listed at the bar, live (F42)."""
+        grey = self.list.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        PartDesign.rollStudioTo(self.doc, self.box)
+        self.doc.recompute()
+        self.assertTrue(
+            waitFor(lambda: self.rows() == ["SkA", "PadA", "Box", "|", "SkB", "Pocket1", "PocketB"]),
+            self.rows(),
+        )
+        for label in ("SkB", "Pocket1", "PocketB"):
+            self.assertEqual(self.item(label).foreground().color(), grey, label)
+            self.assertTrue(self.item(label).font().italic(), label)
+        for label in ("SkA", "PadA", "Box"):
+            self.assertNotEqual(self.item(label).foreground().color(), grey, label)
+            self.assertFalse(self.item(label).font().italic(), label)
+        # A new sketch of Body1 goes in at the bar, above the waiting sketch, and stays live
+        sketch(self.body1, "SkN", (30, 0, 34, 4))
+        self.doc.recompute()
+        self.assertTrue(
+            waitFor(lambda: self.rows() == ["SkA", "PadA", "Box", "SkN", "|", "SkB", "Pocket1", "PocketB"]),
+            self.rows(),
+        )
+        self.assertNotEqual(self.item("SkN").foreground().color(), grey)
+
+    def testDefaultGeometryRows(self):
+        """Rank 33: Onshape's default geometry at the top (Origin, Top, Front, Right): not in the
+        history (a bar dropped among them is at the top), not renamed; the eye of the Top plane
+        shows it alone with its Origin, and hides both again."""
+        self.assertTrue(waitFor(lambda: self.defaultRows() == ["Origin", "Top", "Front", "Right"]))
+        origin = self.body1.Origin
+        plane = next(o for o in origin.OriginFeatures if o.Role == "XY_Plane")
+        self.assertFalse(self.item("Top").flags() & QtCore.Qt.ItemIsEditable)
+        self.assertFalse(origin.ViewObject.isVisible())
+        self.assertEqual(self.item("Top").data(EYE), 2)
+        self.clickEye("Top")
+        self.assertTrue(waitFor(lambda: origin.ViewObject.isVisible() and plane.ViewObject.isVisible()))
+        others = [o for o in origin.OriginFeatures if o != plane]
+        self.assertTrue(all(not o.ViewObject.isVisible() for o in others))
+        self.assertTrue(waitFor(lambda: self.item("Top").data(EYE) == 1))
+        self.clickEye("Top")
+        self.assertTrue(waitFor(lambda: not origin.ViewObject.isVisible()))
+        # The bar dragged among them is at the top
+        self.dragBarAfter("Front")
+        self.assertEqual(self.tips(), [None, None])
+
+    def testEyeOnSketchRows(self):
+        """Rank 33: a sketch row has an eye (a solid's has none); a click on it shows or hides the
+        sketch and leaves the selection."""
+        self.assertTrue(waitFor(lambda: self.item("SkA").data(EYE) in (1, 2)))
+        self.assertFalse(self.item("PadA").data(EYE))
+        before = self.skA.Visibility
+        self.clickEye("SkA")
+        self.assertTrue(waitFor(lambda: self.skA.Visibility != before))
+        self.assertEqual(self.list.selectedItems(), [])
+        self.clickEye("SkA")
+        self.assertTrue(waitFor(lambda: self.skA.Visibility == before))
+
+    def testFilterBox(self):
+        """Rank 33: Onshape's filter box: rows by name or type; ':errors' only the failed ones."""
+        box = self.view().findChild(QtWidgets.QLineEdit, "featuresFilter")
+        self.assertIsNotNone(box)
+
+        def shown():
+            return [
+                self.list.item(i).text()
+                for i in range(self.list.count())
+                if not self.list.item(i).isHidden() and self.list.item(i).type() != BAR
+            ]
+
+        box.setText("pocket")
+        pump()
+        self.assertEqual(shown(), ["Pocket1", "PocketB"])
+        box.setText("SketchObject")  # the type: Sketcher::SketchObject
+        pump()
+        self.assertEqual(shown(), ["SkA", "SkB"])
+        box.setText(":errors")
+        pump()
+        self.assertEqual(shown(), [])
+        self.padA.Length = 0
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: "PadA" in shown()))
+        self.assertNotIn("SkA", shown())
+        self.padA.Length = 5
+        self.doc.recompute()
+        box.clear()
+        pump()
+        self.assertTrue(waitFor(lambda: self.rows() == self.expected))
+        self.assertTrue(all(not self.list.item(i).isHidden() for i in range(self.list.count())))
+
+    def testHoverPreselects(self):
+        """Rank 33: the hover over a Features or Parts row pre-highlights its object in the view,
+        as the tree's; leaving the list ends it."""
+        viewport = self.list.viewport()
+        mouse(viewport, QtCore.QEvent.MouseMove, self.rowRect("PadA").center(), QtCore.Qt.NoButton)
+        pump()
+        presel = Gui.Selection.getPreselection()
+        self.assertEqual(presel.ObjectName, "Body1")
+        self.assertIn("PadA", "".join(presel.SubElementNames))
+        QtWidgets.QApplication.sendEvent(viewport, QtCore.QEvent(QtCore.QEvent.Leave))
+        pump()
+        self.assertFalse(Gui.Selection.getPreselection().ObjectName)
+        rect = self.partRect("Body2")
+        mouse(self.parts.viewport(), QtCore.QEvent.MouseMove, rect.center(), QtCore.Qt.NoButton)
+        pump()
+        self.assertEqual(Gui.Selection.getPreselection().ObjectName, "Body2")
+        QtWidgets.QApplication.sendEvent(self.parts.viewport(), QtCore.QEvent(QtCore.QEvent.Leave))
+        pump()
+
+    def testMessagesNameTheCause(self):
+        """Rank 35 (blind test F45): a failure passed on names the failed input in plain words, not
+        the link property ("AttachmentSupport links to ..."), and the cause's own message."""
+        self.padA.Length = 0
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: "Caused by 'PadA'" in self.item("Box").toolTip()))
+        tip = self.item("Box").toolTip()
+        self.assertNotIn("links to", tip)
+        self.assertNotIn("which has an error", tip)
+        self.padA.Length = 5
+        self.doc.recompute()
