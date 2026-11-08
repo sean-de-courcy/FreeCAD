@@ -180,14 +180,16 @@ std::string TaskDlgDeletePart::refusal(const PartDesign::Body* body) const
         return quoted(body) + " is in no part studio";
     }
     // One part studio: the edited row's, or the first listed part's
-    const App::DocumentObject* first = nullptr;
+    const PartDesign::Body* first = nullptr;
     if (auto feature = edited()) {
         first = PartDesign::Body::findBodyOf(feature);
     }
     if (!first && !names.empty()) {
-        first = doc->getObject(names.front().c_str());
+        first = freecad_cast<PartDesign::Body*>(doc->getObject(names.front().c_str()));
     }
-    if (first && first != body && !Part::BodyBase::isInOneStudio(first, body)) {
+    App::Part* firstStudio = nullptr;
+    if (first && first != body
+        && (!Part::BodyBase::studioOf(first, firstStudio) || firstStudio != studio)) {
         return quoted(body) + " is in another part studio";
     }
     PartDesign::DeletePart* deleter = PartDesign::DeletePart::deleterOf(body);
