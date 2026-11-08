@@ -30,6 +30,7 @@
 #include <vector>
 #include <cctype>
 #include <mutex>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QDir>
@@ -106,6 +107,25 @@ struct DocumentP
     bool _editHoldsStep = false;
     /// FreeCAD-CH (ops#640): acceptOpenStep() is accepting the dialog (no re-entry)
     bool _acceptingStep = false;
+    /** FreeCAD-CH (ops#640, regen-plan item 7, hands-on R9, R14): a sketch's edit is a session
+     * that is one undo step once it is closed, as in Onshape. Its transactions stay App's own
+     * (each tool commits one: the sketch's Ctrl+Z steps them one by one); the Gui document
+     * groups them by id: _stepGroupOf maps each transaction opened during the edit, and the one
+     * pending or booked when it started (the "New Sketch" or "Sketch on Face" that made the
+     * sketch: the opener), to the session's key. undo(), redo() and the undo/redo lists then
+     * take a closed session's transactions together. While the session is open they step its
+     * own transactions only (_sessionIds, the opener excepted): Ctrl+Z stops at the sketch's
+     * start, and the sketch stays open. Ids outlive an undo (App's redo transaction keeps the
+     * id), so the grouping holds through undo and redo; ids no stack holds any more are left
+     * in the map, unread. App's own undo() (a script's App.ActiveDocument.undo()) still pops
+     * one transaction. */
+    std::map<int, int> _stepGroupOf;
+    std::map<int, std::string> _stepGroupName;  ///< a closed session's step name, by key
+    int _stepGroupCount = 0;
+    int _session = 0;  ///< the open session's key; 0 when no sketch is in edit
+    int _sessionOpener = 0;
+    std::string _sessionLabel;
+    std::set<int> _sessionIds;
     int _editMode;
     int _editModePrevious;
     ViewProvider* _editViewProvider;
@@ -155,6 +175,7 @@ struct DocumentP
     Connection connectTransactionAppend;
     Connection connectTransactionRemove;
     Connection connectTouchedObject;
+    Connection connectOpenTransaction;  // FreeCAD-CH (ops#640): the sketch session's ids
     std::size_t nameRefSource = 0;  // Data::NameRefCollector::addSource()'s key
     Connection connectChangePropertyEditor;
     AdvancedConnection connectChangeDocument;
@@ -180,6 +201,140 @@ struct DocumentP
         }
 
         return obj;
+    }
+
+    // FreeCAD-CH (ops#640, regen-plan item 7): the sketch session's step (_stepGroupOf)
+
+    /// Whether the edit that just started is a session: a sketch's own edit
+    bool editIsSession() const
+    {
+        const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+        return _editViewProvider && !_editHoldsStep && !sketch.isBad()
+            && _editViewProvider->isDerivedFrom(sketch) && _editMode == ViewProvider::Default;
+    }
+
+    void beginSession()
+    {
+        endSession();
+        _session = ++_stepGroupCount;
+        _sessionIds.clear();
+        // the transaction that made the sketch, still open or booked when the edit starts
+        // (SketchWorkflow, Sketcher_NewSketch): the session's step takes it along, so that one
+        // Ctrl+Z after the close removes the new sketch. A re-edit's opener, if any, holds only
+        // what the edit changed.
+        _sessionOpener = _pcDocument->hasPendingTransaction()
+            ? _pcDocument->getTransactionID(true, 0)
+            : _pcDocument->getBookedTransactionID();
+        if (_sessionOpener != 0) {
+            _stepGroupOf[_sessionOpener] = _session;
+        }
+        auto vpd = freecad_cast<ViewProviderDocumentObject*>(_editViewProvider);
+        _sessionLabel = vpd && vpd->getObject() ? vpd->getObject()->Label.getValue() : "";
+    }
+
+    void endSession()
+    {
+        if (_session == 0) {
+            return;
+        }
+        // The step's name: the opener's ("New Sketch") when it is on the stack, else the edit's
+        std::string name;
+        if (_sessionOpener != 0) {
+            const auto names = _pcDocument->getAvailableUndoNames();
+            for (std::size_t pos = 0; pos < names.size(); ++pos) {
+                if (_pcDocument->getTransactionID(true, static_cast<unsigned>(pos))
+                    == _sessionOpener) {
+                    name = names[pos];
+                    break;
+                }
+            }
+        }
+        if (name.empty()) {
+            name = QObject::tr("Edit %1").arg(QString::fromStdString(_sessionLabel)).toStdString();
+        }
+        _stepGroupName[_session] = name;
+        _session = 0;
+        _sessionOpener = 0;
+        _sessionIds.clear();
+    }
+
+    /// A transaction opened in the document: one of the open session's
+    void slotOpenTransaction(const App::Document& doc)
+    {
+        if (_session == 0) {
+            return;
+        }
+        const int id = doc.getTransactionID(true, 0);
+        if (id != 0 && id != _sessionOpener) {
+            _stepGroupOf[id] = _session;
+            _sessionIds.insert(id);
+        }
+    }
+
+    int groupOf(int id) const
+    {
+        auto it = _stepGroupOf.find(id);
+        return it == _stepGroupOf.end() ? 0 : it->second;
+    }
+
+    /// The number of App transactions, from App's position pos (getTransactionID()), that make
+    /// one step: one, or a closed session's
+    int stepSize(bool undo, unsigned pos) const
+    {
+        const int id = _pcDocument->getTransactionID(undo, pos);
+        if (id == 0) {
+            return 0;
+        }
+        const int group = groupOf(id);
+        if (group == 0 || group == _session) {
+            return 1;
+        }
+        int size = 1;
+        for (;;) {
+            const int next = _pcDocument->getTransactionID(undo, pos + size);
+            if (next == 0 || groupOf(next) != group) {
+                break;
+            }
+            ++size;
+        }
+        return size;
+    }
+
+    /// Whether the transaction at App's position pos is a step here: inside an open session,
+    /// only the session's own transactions are (its start is the floor, hands-on R14)
+    bool isStep(bool undo, unsigned pos) const
+    {
+        const int id = _pcDocument->getTransactionID(undo, pos);
+        return id != 0 && (_session == 0 || _sessionIds.contains(id));
+    }
+
+    /// The number of App transactions that `steps` steps undo or redo
+    int transactionsOfSteps(bool undo, int steps) const
+    {
+        unsigned pos = 0;
+        for (int i = 0; i < steps && isStep(undo, pos); ++i) {
+            pos += static_cast<unsigned>(stepSize(undo, pos));
+        }
+        return static_cast<int>(pos);
+    }
+
+    /// The undo or redo list, one name per step
+    std::vector<std::string> stepNames(bool undo) const
+    {
+        const auto names = undo ? _pcDocument->getAvailableUndoNames()
+                                : _pcDocument->getAvailableRedoNames();
+        std::vector<std::string> steps;
+        unsigned pos = 0;
+        while (pos < names.size() && isStep(undo, pos)) {
+            const int group = groupOf(_pcDocument->getTransactionID(undo, pos));
+            auto named = _stepGroupName.find(group);
+            steps.push_back(
+                group != 0 && group != _session && named != _stepGroupName.end() ? named->second
+                                                                                  : names[pos]
+            );
+            pos += static_cast<unsigned>(std::max(1, stepSize(undo, pos)));
+        }
+        return steps;
     }
 
     void throwIfNotInMap(App::DocumentObject* obj, App::Document* doc) const
@@ -570,6 +725,11 @@ Document::Document(App::Document* pcDocument, Application* app)
     d->connectTransactionRemove = pcDocument->signalTransactionRemove.connect(
         std::bind(&Gui::Document::slotTransactionRemove, this, sp::_1, sp::_2)
     );
+    d->connectOpenTransaction = pcDocument->signalOpenTransaction.connect(
+        [this](const App::Document& doc, const std::string&) {
+            d->slotOpenTransaction(doc);
+        }
+    );
     // NOLINTEND
 
     // A view provider's Python state may hold interned names (an add-on's subname), and
@@ -645,6 +805,7 @@ Document::~Document()
     d->connectTransactionAppend.disconnect();
     d->connectTransactionRemove.disconnect();
     d->connectTouchedObject.disconnect();
+    d->connectOpenTransaction.disconnect();
     d->connectChangePropertyEditor.disconnect();
     d->connectChangeDocument.disconnect();
 
@@ -820,6 +981,10 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     // "Make X" transaction was opened before), the open dialog's step is locked until the edit
     // resets: no undo, redo, implicit commit or other transaction behind the dialog
     holdEditStep(ModNum);
+    // FreeCAD-CH (ops#640, regen-plan item 7): a sketch's edit is a session, one undo step
+    if (d->editIsSession()) {
+        d->beginSession();
+    }
     // FreeCAD-CH (ops#640): and no document regenerates on commit until the edit ends
     updateRegenerationHold();
 
@@ -975,6 +1140,9 @@ void Document::_resetEdit()
     d->_editingObject = nullptr;
     Application::Instance->unsetEditDocument(this);
     updateRegenerationHold();  // FreeCAD-CH (ops#640): as above
+    // FreeCAD-CH (ops#640, regen-plan item 7): the sketch session closes after its last commit
+    // (the close's "Sketch recompute" or "Cancel sketch editing" and the commit above are in it)
+    d->endSession();
 }
 
 ViewProvider* Document::getInEdit(
@@ -3222,16 +3390,57 @@ bool Document::hasPendingCommand() const
     return getDocument()->hasPendingTransaction();
 }
 
+namespace
+{
+/** FreeCAD-CH (ops#640, hands-on R1, R1b): an open feature dialog's own undo history. The
+ * dialog (PartDesignGui::TaskDlgFeatureParameters) keeps it and offers it as two actions among
+ * its children, so that no header of the core names it: triggering one undoes or redoes the
+ * dialog's last edit, its "names" property lists the edits (the newest first) and it is enabled
+ * while there is one. A dialog without them has no history (Ctrl+Z does nothing). */
+QAction* dialogHistoryAction(App::Document* doc, bool undo)
+{
+    TaskView::TaskDialog* dlg = Control().activeDialog(doc);
+    if (!dlg) {
+        return nullptr;
+    }
+    return dlg->findChild<QAction*>(
+        QLatin1String(undo ? "FreeCAD-CH dialog undo" : "FreeCAD-CH dialog redo"),
+        Qt::FindDirectChildrenOnly
+    );
+}
+
+std::vector<std::string> dialogHistoryNames(App::Document* doc, bool undo)
+{
+    std::vector<std::string> names;
+    if (QAction* action = dialogHistoryAction(doc, undo)) {
+        if (action->isEnabled()) {
+            for (const QString& name : action->property("names").toStringList()) {
+                names.push_back(name.toStdString());
+            }
+        }
+    }
+    return names;
+}
+}  // namespace
+
 /// Get a string vector with the 'Undo' actions
 std::vector<std::string> Document::getUndoVector() const
 {
-    return getDocument()->getAvailableUndoNames();
+    // FreeCAD-CH (ops#640): one name per step: an open dialog's own edits (hands-on R1), a closed
+    // sketch session as one, an open one's own transactions only (regen-plan item 7)
+    if (getDocument()->isStepLocked()) {
+        return dialogHistoryNames(getDocument(), true);
+    }
+    return d->stepNames(true);
 }
 
 /// Get a string vector with the 'Redo' actions
 std::vector<std::string> Document::getRedoVector() const
 {
-    return getDocument()->getAvailableRedoNames();
+    if (getDocument()->isStepLocked()) {  // FreeCAD-CH (ops#640): as getUndoVector()
+        return dialogHistoryNames(getDocument(), false);
+    }
+    return d->stepNames(false);
 }
 
 bool Document::checkTransactionID(bool undo, int iSteps)
@@ -3325,19 +3534,29 @@ bool Document::isPerformingTransaction() const
 /// Will UNDO one or more steps
 void Document::undo(int iSteps)
 {
-    // FreeCAD-CH (ops#640): with a feature dialog open, Ctrl+Z does nothing (Onshape; App's
-    // undo() refuses too, this only spares checkTransactionID's prompt)
+    // FreeCAD-CH (ops#640, hands-on R1): with a feature dialog open, Ctrl+Z steps back through
+    // the dialog's own edits and never past its start (App's undo() refuses the dialog's step)
     if (getDocument()->isStepLocked()) {
+        QAction* action = dialogHistoryAction(getDocument(), true);
+        for (int i = 0; action && i < iSteps && action->isEnabled(); i++) {
+            action->trigger();
+        }
         return;
     }
     Base::FlagToggler<> flag(d->_isTransacting);
 
-    if (!checkTransactionID(true, iSteps)) {
+    // FreeCAD-CH (ops#640, regen-plan item 7): a step is one transaction, or a closed sketch
+    // session's; inside an open session one of its own, none past its start
+    const int transactions = d->transactionsOfSteps(true, iSteps);
+    if (!checkTransactionID(true, transactions)) {
         return;
     }
 
-    for (int i = 0; i < iSteps; i++) {
-        getDocument()->undo();
+    // One undo down to the oldest of them (App's undo(id)): the model regenerates once, after
+    // the last, not once per transaction of a closed sketch session
+    const int oldest = getDocument()->getTransactionID(true, static_cast<unsigned>(transactions - 1));
+    if (oldest != 0) {
+        getDocument()->undo(oldest);
     }
     App::GetApplication().signalUndo();
 }
@@ -3346,16 +3565,22 @@ void Document::undo(int iSteps)
 void Document::redo(int iSteps)
 {
     if (getDocument()->isStepLocked()) {  // FreeCAD-CH (ops#640): as undo()
+        QAction* action = dialogHistoryAction(getDocument(), false);
+        for (int i = 0; action && i < iSteps && action->isEnabled(); i++) {
+            action->trigger();
+        }
         return;
     }
     Base::FlagToggler<> flag(d->_isTransacting);
 
-    if (!checkTransactionID(false, iSteps)) {
+    const int transactions = d->transactionsOfSteps(false, iSteps);  // FreeCAD-CH: as undo()
+    if (!checkTransactionID(false, transactions)) {
         return;
     }
 
-    for (int i = 0; i < iSteps; i++) {
-        getDocument()->redo();
+    const int newest = getDocument()->getTransactionID(false, static_cast<unsigned>(transactions - 1));
+    if (newest != 0) {
+        getDocument()->redo(newest);
     }
     App::GetApplication().signalRedo();
 

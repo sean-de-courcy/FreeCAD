@@ -2,16 +2,23 @@
 # SPDX-FileNotice: Part of the FreeCAD project.
 
 """Undo, redo and regeneration in the Gui (FreeCAD-CH ops#640; work/sd03f/regen-design.md
-section 7, plan items 1, 2 and 4).
+section 7, plan items 1, 2, 4 and 7, and round 2's dialog history).
 
-Onshape's behaviour is the bar (decision 276; notes/onshape-experiment.md section 6): with a
-feature dialog open Ctrl+Z does nothing, OK leaves one step, Cancel leaves none and nothing to
-redo; an edit regenerates the model when it is committed, and so do Suppress, the attachment
-editor's OK, undo and redo.
+Onshape's behaviour is the bar (decision 276; notes/onshape-experiment.md section 6, hands-on R1,
+R1b, R9, R14): with a feature dialog open Ctrl+Z steps back through the dialog's own edits and
+never past its start, Ctrl+Y redoes them, OK leaves one step, Cancel leaves none and nothing to
+redo; inside a sketch Ctrl+Z steps its actions and stops at the sketch's start, and a closed
+sketch is one step; an edit regenerates the model when it is committed, and so do Suppress, the
+attachment editor's OK, undo and redo.
 
-- J1 replayed (F6, J1's block, F35): Std_Undo from the 3D view with the block's dialog open is
-  inactive and reverts nothing; OK leaves one step "Edit Block" with nothing pending and the
-  model regenerated; a second dialog's Cancel leaves no Redo entry.
+- J1 replayed (F6, J1's block, F35): Std_Undo from the 3D view with the block's dialog open
+  undoes the dialog's edit inside the dialog, never the step before it; OK leaves one step
+  "Edit Block" with nothing pending and the model regenerated; a second dialog's Cancel leaves
+  no Redo entry.
+- A new Pad's dialog: depth 10 -> 15 -> 20, two Std_Undo give 10 in the dialog, a third does
+  nothing; OK, then one document undo removes the Pad.
+- A new sketch with three lines: Std_Undo inside removes them one at a time and stops at the
+  sketch's start; closed, one Std_Undo removes the sketch, one Std_Redo brings it back whole.
 - With a dialog open, Delete of another row (Std_Delete, the Features list's row menu) and a
   roll-back bar move are refused.
 - Suppress from the Features list's row menu regenerates before the next event (F32); the
@@ -35,7 +42,7 @@ from PySide import QtCore, QtGui, QtWidgets
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
-from PartDesignTests.TestRegenerate import RegenerateModel, total
+from PartDesignTests.TestRegenerate import RegenerateModel, topFace, total
 
 V = App.Vector
 BAR = QtWidgets.QListWidgetItem.UserType + 1  # FeatureList::BarType
@@ -288,27 +295,57 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
 
     # -- item 1: the dialog holds one step (J1, F6, F35) ------------------------------------------
 
-    def testJ1UndoWithTheDialogOpenDoesNothing(self):
-        """J1: the block's dialog open, Length 15 typed (the preview applied), Std_Undo from the
-        view: inactive, and running it changes nothing (the field, the block, the undo names).
-        OK: one step "Edit Block", nothing pending, nothing to recompute, Refresh greyed, the
-        model at 15 mm. A second dialog, Length 20, Std_Undo, Cancel: the block back at 15, no
-        Redo entry (F6: the first Ctrl+Z committed and undid the edit, the second undid Make
-        Fillet; J1:140-143: OK then left Length 15 with no step; F35: Cancel left a Redo entry)."""
+    def lengthField(self):
+        field = visible(QtWidgets.QWidget, "lengthEdit")
+        self.assertIsNotNone(field, "no length field")
+        return field
+
+    def enterLength(self, feature, length):
+        """Types the length and finishes the field (Tab, Enter or a click elsewhere): one edit
+        of the dialog's history. The field has the focus when the dialog opens, and a field's
+        typing is one edit until it finishes."""
+        field = self.setLength(feature, length)
+        field.editingFinished.emit()
+        pump(0.05)
+        return field
+
+    def testJ1UndoWithTheDialogOpenStaysInTheDialog(self):
+        """J1: the block's dialog open, Std_Undo inactive (no edit yet); Length 15 typed (the
+        preview applied): Std_Undo is active and undoes the edit inside the dialog (the field
+        and the block back at 10, the dialog open, Make Fillet kept); a second Std_Undo does
+        nothing; Std_Redo brings 15 back. OK: one step "Edit Block", nothing pending, nothing to
+        recompute, Refresh greyed, the model at 15 mm. A second dialog, Length 20, Std_Undo,
+        Cancel: the block back at 15, no Redo entry (F6: the first Ctrl+Z committed and undid the
+        edit, the second undid Make Fillet; J1:140-143: OK then left Length 15 with no step;
+        F35: Cancel left a Redo entry; hands-on R1: the dialog's own history)."""
         self.openDialog(self.block)
-        field = self.setLength(self.block, 15)
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo is active in a dialog with no edit")
+        self.setLength(self.block, 15)
         pending = self.doc.UndoNames
         self.assertEqual(pending, ["Edit Block", "Make Fillet"])
-        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo is active with the dialog open")
+        self.assertTrue(self.isActive("Std_Undo"), "Std_Undo is inactive after the dialog's edit")
         self.assertFalse(self.isActive("Std_Redo"))
 
         self.runFromView("Std_Undo")
+        pump(0.2)
         self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
-        self.assertAlmostEqual(field.property("rawValue"), 15, places=6)
-        self.assertAlmostEqual(self.block.Length.Value, 15, places=6)
-        self.assertEqual(self.doc.UndoNames, pending)
-        self.assertEqual(self.doc.RedoCount, 0)
+        self.assertAlmostEqual(self.block.Length.Value, 10, places=6)
+        self.assertAlmostEqual(self.lengthField().property("rawValue"), 10, places=6)
         self.assertIsNotNone(self.doc.getObject("Fillet"))
+        self.assertEqual(self.doc.RedoCount, 0)
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo past the dialog's start")
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertIsNotNone(self.doc.getObject("Fillet"), "an undo past the dialog's start")
+        self.assertAlmostEqual(self.block.Length.Value, 10, places=6)
+
+        self.assertTrue(self.isActive("Std_Redo"))
+        self.runFromView("Std_Redo")
+        pump(0.2)
+        self.assertAlmostEqual(self.block.Length.Value, 15, places=6)
+        self.assertAlmostEqual(self.lengthField().property("rawValue"), 15, places=6)
+        self.assertFalse(self.isActive("Std_Redo"))
 
         self.close(OK)
         self.assertEqual(self.doc.UndoNames, ["Edit Block", "Make Fillet"])
@@ -318,8 +355,10 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
         self.assertTrue(self.isActive("Std_Undo"))
 
         self.openDialog(self.block)
-        self.setLength(self.block, 20)
+        self.enterLength(self.block, 20)
+        self.enterLength(self.block, 25)
         self.runFromView("Std_Undo")
+        pump(0.2)
         self.assertAlmostEqual(self.block.Length.Value, 20, places=6)
         self.close(CANCEL)
         self.assertAlmostEqual(self.block.Length.Value, 15, places=6)
@@ -327,6 +366,158 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
         self.assertEqual(self.doc.RedoCount, 0)
         self.assertFalse(self.isActive("Std_Redo"), "a Redo entry after Cancel")
         self.assertRegenerated(total(length=15))
+
+    def testNewPadDialogUndoStepsItsEdits(self):
+        """A new Pad (its "Make Pad" step pending, as PartDesign_Pad leaves it) on a 3 x 3 square
+        on the block's top: depth 10 -> 15 -> 20 in the dialog; two Std_Undo give 15, then 10,
+        with the dialog open; a third is inactive and does nothing (the Pad stays, Make Fillet
+        stays). Std_Redo gives 15, Std_Undo 10 again. OK: the Pad at 10, one step "Make Pad";
+        one Std_Undo removes the Pad (hands-on R1, R1b)."""
+        self.doc.openTransaction("Make PadSketch")
+        sketch = self.sketchOnTop("PadSketch", models.rectangle(14, 3, 17, 6))
+        self.doc.commitTransaction()
+        names = self.doc.UndoNames
+        self.assertEqual(names, ["Make PadSketch", "Make Fillet"])
+        self.doc.openTransaction("Make Pad")
+        pad = models.pad(self.body, sketch, 10, "NewPad")
+        self.doc.recompute()
+        self.activate()
+        Gui.getDocument(self.doc.Name).setEdit(pad.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no dialog for the pad")
+        pump(0.3)
+        Gui.Control.showTaskView()
+        pump(0.05)
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo is active in a dialog with no edit")
+
+        self.enterLength(pad, 15)
+        self.enterLength(pad, 20)
+        for length in (15, 10):
+            self.assertTrue(self.isActive("Std_Undo"), f"Std_Undo inactive before {length}")
+            self.runFromView("Std_Undo")
+            pump(0.2)
+            self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+            self.assertAlmostEqual(pad.Length.Value, length, places=6)
+            self.assertAlmostEqual(self.lengthField().property("rawValue"), length, places=6)
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo past the dialog's start")
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertIsNotNone(self.doc.getObject("NewPad"), "an undo removed the new pad")
+        self.assertIsNotNone(self.doc.getObject("Fillet"), "an undo past the dialog's start")
+        self.assertAlmostEqual(pad.Length.Value, 10, places=6)
+
+        self.runFromView("Std_Redo")
+        pump(0.2)
+        self.assertAlmostEqual(pad.Length.Value, 15, places=6)
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertAlmostEqual(pad.Length.Value, 10, places=6)
+
+        self.close(OK)
+        self.assertEqual(self.doc.UndoNames, ["Make Pad"] + names)
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertAlmostEqual(pad.Length.Value, 10, places=6)
+        self.assertVolume(self.body, total() + 9 * 10)
+
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertIsNone(self.doc.getObject("NewPad"), "one undo left the pad")
+        self.assertEqual(self.doc.UndoNames, names)
+        self.assertVolume(self.body, total())
+
+    # -- item 7: the sketch session is one step (hands-on R9, R14) --------------------------------
+
+    def addLines(self, sketch, points):
+        """Each line in its own transaction, as a sketch tool commits it (Gui::Command's
+        openCommand and commitCommand: App's active transaction)."""
+        import Part
+
+        for a, b in zip(points, points[1:]):
+            App.setActiveTransaction("Add sketch line")
+            sketch.addGeometry(Part.LineSegment(V(*a, 0), V(*b, 0)), False)
+            App.closeActiveTransaction()
+            pump(0.05)
+
+    def testClosedNewSketchIsOneStep(self):
+        """A new sketch on the block's top, its "New Sketch" transaction still open when its edit
+        starts (SketchWorkflow): Std_Undo is inactive and does nothing in the empty sketch; three
+        lines, each its own transaction (a tool's); Std_Undo removes them one at a time, and a
+        fourth does nothing: the sketch stays, in edit; Std_Redo brings them back. Closed: one
+        Std_Undo removes the whole sketch, one Std_Redo brings it back with its three lines."""
+        import Sketcher  # noqa: F401  (the sketch's type)
+
+        names = self.doc.UndoNames
+        self.doc.openTransaction("New Sketch")
+        sketch = self.body.newObject("Sketcher::SketchObject", "NewSketch")
+        sketch.AttachmentSupport = [(self.block, topFace(self.block, 10))]
+        sketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.activate()
+        guiDoc.setEdit(sketch.Name)
+        pump(0.3)
+        self.assertIsNotNone(guiDoc.getInEdit(), "no sketch edit")
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo is active in an empty new sketch")
+        self.runFromView("Std_Undo")
+        self.assertIsNotNone(self.doc.getObject("NewSketch"), "an undo removed the sketch in edit")
+        self.assertIsNotNone(guiDoc.getInEdit(), "the sketch's edit closed")
+
+        self.addLines(sketch, [(14, 3), (17, 3), (17, 6), (14, 6)])
+        self.assertEqual(len(sketch.Geometry), 3)
+        for count in (2, 1, 0):
+            self.assertTrue(self.isActive("Std_Undo"), f"Std_Undo inactive before {count} lines")
+            self.runFromView("Std_Undo")
+            self.assertEqual(len(sketch.Geometry), count)
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo past the sketch's start")
+        self.runFromView("Std_Undo")
+        self.assertIsNotNone(self.doc.getObject("NewSketch"), "an undo removed the sketch in edit")
+        self.assertIsNotNone(guiDoc.getInEdit(), "the sketch's edit closed")
+        self.assertIsNotNone(self.doc.getObject("Fillet"), "an undo past the sketch's start")
+        for count in (1, 2, 3):
+            self.runFromView("Std_Redo")
+            self.assertEqual(len(sketch.Geometry), count)
+
+        guiDoc.resetEdit()
+        pump(0.3)
+        self.assertIsNone(guiDoc.getInEdit())
+        self.assertTrue(self.isActive("Std_Undo"))
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertIsNone(self.doc.getObject("NewSketch"), "one undo left the closed sketch")
+        self.assertEqual(self.doc.UndoNames, names)
+        self.assertIsNotNone(self.doc.getObject("Fillet"))
+        self.runFromView("Std_Redo")
+        pump(0.2)
+        sketch = self.doc.getObject("NewSketch")
+        self.assertIsNotNone(sketch, "one redo didn't bring the sketch back")
+        self.assertEqual(len(sketch.Geometry), 3)
+        self.assertEqual(self.doc.RedoCount, 0)
+
+    def testClosedSketchReEditIsOneStep(self):
+        """A sketch that nothing uses (one line, its own step) edited again, two lines added
+        (two transactions), closed: one Std_Undo removes both and leaves the sketch and the
+        step before."""
+        self.doc.openTransaction("Make FreeSketch")
+        sketch = self.sketchOnTop("FreeSketch", [])
+        self.addLines(sketch, [(2, 15), (6, 15)])
+        self.doc.commitTransaction()
+        names = self.doc.UndoNames
+        self.assertEqual(len(sketch.Geometry), 1)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.activate()
+        guiDoc.setEdit(sketch.Name)
+        pump(0.3)
+        self.assertIsNotNone(guiDoc.getInEdit(), "no sketch edit")
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo past the sketch's start")
+        self.addLines(sketch, [(6, 15), (6, 18), (2, 18)])
+        self.assertEqual(len(sketch.Geometry), 3)
+        guiDoc.resetEdit()
+        pump(0.3)
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertEqual(len(sketch.Geometry), 1, "one undo left a line")
+        self.assertEqual(self.doc.UndoNames, names)
+        self.assertIsNotNone(self.doc.getObject("FreeSketch"))
 
     def testDeleteOfAnotherRowIsRefused(self):
         """The block's dialog open, the fillet selected: Std_Delete is greyed, and neither it nor

@@ -1254,16 +1254,26 @@ StdCmdUndo::StdCmdUndo()
 void StdCmdUndo::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640, hands-on R1): with a feature dialog open, its own edits, in the
+    // dialog's document (the one the step lock found: the active one, or the selection's)
+    if (App::Document* locked = stepLockedDocument()) {
+        if (Gui::Document* guiDoc = getGuiApplication()->getDocument(locked)) {
+            guiDoc->undo(1);
+        }
+        return;
+    }
     //  Application::Instance->slotUndo();
     getGuiApplication()->sendMsgToActiveView("Undo");
 }
 
 bool StdCmdUndo::isActive()
 {
-    // FreeCAD-CH (ops#640): with a feature dialog open Ctrl+Z does nothing and the arrow reads
-    // disabled (Onshape); Ctrl+Z in a field of the dialog stays the field's own text undo
-    if (stepLockedDocument()) {
-        return false;
+    // FreeCAD-CH (ops#640, hands-on R1): with a feature dialog open the arrow lights once the
+    // dialog has edits, and Ctrl+Z steps back through them (Gui::Document::undo()); Ctrl+Z in
+    // a field of the dialog stays the field's own text undo
+    if (App::Document* locked = stepLockedDocument()) {
+        Gui::Document* guiDoc = getGuiApplication()->getDocument(locked);
+        return guiDoc && !guiDoc->getUndoVector().empty();
     }
     return getGuiApplication()->sendHasMsgToActiveView("Undo");
 }
@@ -1304,14 +1314,21 @@ StdCmdRedo::StdCmdRedo()
 void StdCmdRedo::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    if (App::Document* locked = stepLockedDocument()) {  // FreeCAD-CH (ops#640): as Std_Undo
+        if (Gui::Document* guiDoc = getGuiApplication()->getDocument(locked)) {
+            guiDoc->redo(1);
+        }
+        return;
+    }
     //  Application::Instance->slotRedo();
     getGuiApplication()->sendMsgToActiveView("Redo");
 }
 
 bool StdCmdRedo::isActive()
 {
-    if (stepLockedDocument()) {  // FreeCAD-CH (ops#640): as Std_Undo
-        return false;
+    if (App::Document* locked = stepLockedDocument()) {  // FreeCAD-CH (ops#640): as Std_Undo
+        Gui::Document* guiDoc = getGuiApplication()->getDocument(locked);
+        return guiDoc && !guiDoc->getRedoVector().empty();
     }
     return getGuiApplication()->sendHasMsgToActiveView("Redo");
 }

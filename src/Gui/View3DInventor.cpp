@@ -482,13 +482,14 @@ bool View3DInventor::onHasMsg(const char* pMsg) const
         return true;
     }
     else if (strcmp("Undo", pMsg) == 0) {
-        // FreeCAD-CH (ops#640): nothing to undo while a feature dialog holds the step
-        App::Document* doc = getAppDocument();
-        return doc && !doc->isStepLocked() && doc->getAvailableUndos() > 0;
+        // FreeCAD-CH (ops#640): a step to undo: an open feature dialog's own edit, a closed
+        // sketch session, inside an open one its own action (Gui::Document::getUndoVector())
+        Gui::Document* doc = getGuiDocument();
+        return doc && !doc->getUndoVector().empty();
     }
     else if (strcmp("Redo", pMsg) == 0) {
-        App::Document* doc = getAppDocument();
-        return doc && !doc->isStepLocked() && doc->getAvailableRedos() > 0;
+        Gui::Document* doc = getGuiDocument();
+        return doc && !doc->getRedoVector().empty();
     }
     else if (strcmp("Print", pMsg) == 0) {
         return true;
