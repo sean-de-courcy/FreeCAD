@@ -493,6 +493,37 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
     baseField = new ReferenceField(getObject(), "Base", options, write, proxy);
     baseField->takePlaceOf(placeholder);
     connect(baseField, &ReferenceField::picked, this, [this]() { onBaseChanged(); });
+    // Onshape's "Clear missing references": the entries whose element is gone leave the field in
+    // one write, the others stay (FreeCAD-CH ops#640 rank 12, blind test F19)
+    auto clearMissing = new QAction(tr("Clear missing references"), this);
+    clearMissing->setObjectName(QStringLiteral("clearMissingReferences"));
+    connect(clearMissing, &QAction::triggered, this, [this]() {
+        ViewProviderDressUp* view = getDressUpView();
+        if (!view || !baseField) {
+            return;
+        }
+        auto dressUp = view->getObject<PartDesign::DressUp>();
+        const std::vector<std::string> stored = dressUp->Base.getSubValues();
+        const std::vector<std::string> plain = dressUp->Base.getSubValues(false);
+        std::vector<std::string> kept;
+        for (std::size_t i = 0; i < stored.size() && i < plain.size(); ++i) {
+            if (!plain[i].starts_with(Data::MISSING_PREFIX)) {
+                kept.push_back(stored[i]);
+            }
+        }
+        if (kept.size() != stored.size()) {
+            baseField->replaceEntries(kept);
+            onBaseChanged();
+        }
+    });
+    baseField->addMenuAction(clearMissing);
+    // Its base is gone (the feature it was on deleted): the field says so, and the picks it
+    // held went with that feature [guess on the words]
+    auto dressUp = getObject<PartDesign::DressUp>();
+    if (dressUp && !dressUp->getBaseObject(/* silent = */ true)) {
+        baseField->setNote(tr("The feature this one was built on is gone, with the picks on it: "
+                              "pick new ones, or delete this feature."));
+    }
     // The first pick placed the dress-up: the next picks go on adding to the field, once the
     // dialog is open (ops#640 rank 14)
     if (armBaseOnOpen) {
@@ -587,12 +618,17 @@ void TaskDressUpParameters::updateFeature(
 )
 {
     setupTransaction();
+    // With its base gone, the picks are of the solid before it (FreeCAD-CH ops#640 rank 12, F19)
+    App::DocumentObject* base = pcDressUp->Base.getValue();
+    if (!base) {
+        base = getBase();
+    }
     // Through the field, the entries it keeps keep their guess and rejection records
     if (baseField) {
-        baseField->assign(pcDressUp->Base.getValue(), refs);
+        baseField->assign(base, refs);
     }
     else {
-        pcDressUp->Base.setValue(pcDressUp->Base.getValue(), refs);
+        pcDressUp->Base.setValue(base, refs);
     }
     pcDressUp->recomputeFeature();
     hideOnError();
@@ -623,8 +659,8 @@ Part::Feature* TaskDressUpParameters::getBase() const
         // Unlikely but this may throw an exception in case we are started to edit an object which
         // base feature was deleted. This exception will be likely unhandled inside the dialog and
         // pass upper. But an error message inside the report view is better than a SEGFAULT.
-        // Generally this situation should be prevented in ViewProviderDressUp::setEdit()
-        return dressUp->getBaseObject();
+        // FreeCAD-CH (ops#640 rank 12, F19): the dialog opens with no base too; null then
+        return dressUp->getBaseObject(/* silent = */ true);
     }
 
     return nullptr;
@@ -752,6 +788,10 @@ bool TaskDlgDressUpParameters::accept()
     App::DocumentObject* base = dressUp->Base.getValue();
     if (!base) {
         base = parameter->getBase();
+    }
+    // No base at all (the feature it was on is gone): committed as it is, red (ops#640 rank 12)
+    if (!base) {
+        return TaskDlgFeatureParameters::accept();
     }
     // Written only when the dialog changed it: written again with plain names, Base would drop
     // what it keeps per reference, a guess record or a missing element of a partly resolved

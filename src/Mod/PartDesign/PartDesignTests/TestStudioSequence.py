@@ -527,24 +527,79 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertEqual(self.names(self.body2.Group), ["SkC", "PadC"])
         self.checkVolumes(500 + 32, 400)
 
-    def testDropInsideABodyCarriesTheSketch(self):
-        """Body1's boss Pad dragged to the top: Body1's Group puts it first, with its sketch (the
-        reorder carries the inputs only it uses), and the list is the dropped order."""
+    def testDropInsideABodyWithItsSketch(self):
+        """Body1's boss Pad dragged to the top with its sketch: Body1's Group puts them first,
+        and the list is the dropped order. Alone, the Pad would go above its sketch: refused
+        (ops#640 rank 31: a drag moves only the dragged rows), and nothing changes."""
         self.twoParts()
-        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padA2, None))
+        with self.assertRaisesRegex(ValueError, "'PadA2' uses 'SkA2', which would come after it"):
+            PartDesign.moveInStudio(self.doc, self.padA2, None)
+        self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
+        self.assertEqual(self.ranked(), [])
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], None))
         self.assertEqual(self.names(self.body1.Group), ["SkA2", "PadA2", "SkA", "PadA"])
         self.assertEqual(self.order(), ["SkA2", "PadA2", "SkA", "PadA", "SkC", "PadC"])
         self.assertEqual(self.body1.Tip, self.padA)
         self.checkVolumes(500 + 32, 400)
 
     def testDropNextToItsSketch(self):
-        """Body1's boss Pad dragged to after Body1's block, above Body2: its sketch comes along
-        and Body1's Group stays as it is."""
+        """Body1's boss Pad dragged to after Body1's block, above Body2: it would go above its
+        sketch, refused; with its sketch, Body1's Group stays as it is."""
         self.twoParts()
-        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padA2, self.padA))
+        with self.assertRaisesRegex(ValueError, "'PadA2' uses 'SkA2'"):
+            PartDesign.moveInStudio(self.doc, self.padA2, self.padA)
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.padA))
         self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
         self.assertEqual(self.order(), ["SkA", "PadA", "SkA2", "PadA2", "SkC", "PadC"])
         self.checkVolumes(500 + 32, 400)
+
+    def holeBlock(self):
+        """ops#640 rank 31 (blind test F31, J5): Body1's 20x10x5 block; on its top face a boss
+        sketch (4x4 at x 2..6) and a hole sketch (2x2 at x 14..16), then the boss Pad (2 high) and
+        a Pocket through all from the hole sketch, which misses the boss."""
+        doc = self.doc
+        self.body1 = doc.addObject("PartDesign::Body", "Body1")
+        self.base = self.pad(self.body1, "BasePad", sketch(self.body1, "Base", (0, 0, 20, 10)), 5)
+        doc.recompute()
+        top = [(self.base, faceAt(self.base, 5))]
+        self.bossSk = sketch(self.body1, "BossSk", (2, 2, 6, 6), support=top)
+        self.holeSk = sketch(self.body1, "HoleSk", (14, 4, 16, 6), support=top)
+        doc.recompute()
+        self.boss = self.pad(self.body1, "BossPad", self.bossSk, 2)
+        self.pocket = self.body1.newObject("PartDesign::Pocket", "Pocket")
+        self.pocket.Profile = self.holeSk
+        self.pocket.Type = "ThroughAll"
+        doc.recompute()
+        self.assertEqual(self.order(), ["Base", "BasePad", "BossSk", "HoleSk", "BossPad", "Pocket"])
+        self.assertAlmostEqual(self.body1.Shape.Volume, 1000 + 32 - 20, places=3)
+
+    def testADraggedFeatureLeavesItsSketch(self):
+        """The Pocket dragged above the boss Pad moves alone: its sketch stays where it is and
+        its face reference isn't rewritten (before: the sketch came along and was re-attached);
+        the part is the same."""
+        self.holeBlock()
+        support = [(o.Name, subs) for o, subs in self.holeSk.AttachmentSupport]
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.pocket, self.holeSk))
+        self.assertEqual(self.order(), ["Base", "BasePad", "BossSk", "HoleSk", "Pocket", "BossPad"])
+        self.assertEqual(self.names(self.body1.Group), self.order())
+        self.assertEqual([(o.Name, subs) for o, subs in self.holeSk.AttachmentSupport], support)
+        self.assertIs(self.boss.BaseFeature, self.pocket)
+        self.doc.recompute()
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(self.body1.Shape.Volume, 1000 + 32 - 20, places=3)
+
+    def testAFeatureDraggedAboveItsSketchIsRefused(self):
+        """The Pocket dragged above its sketch, or the sketch below the Pocket: refused, naming
+        both, and nothing changes."""
+        self.holeBlock()
+        before = self.order()
+        with self.assertRaisesRegex(ValueError, "'Pocket' uses 'HoleSk', which would come after it"):
+            PartDesign.moveInStudio(self.doc, self.pocket, self.bossSk)
+        with self.assertRaisesRegex(ValueError, "'Pocket' uses 'HoleSk'"):
+            PartDesign.moveInStudio(self.doc, self.holeSk, self.pocket)
+        self.assertEqual(self.order(), before)
+        self.assertEqual(self.names(self.body1.Group), before)
+        self.assertEqual(self.ranked(), [])
 
     def testDropInPlaceChangesNothing(self):
         self.twoParts()
@@ -557,7 +612,7 @@ class TestHistoryOrder(unittest.TestCase):
         self.twoParts()
         count = self.doc.UndoCount
         self.doc.openTransaction("Reorder")
-        PartDesign.moveInStudio(self.doc, self.padA2, None)
+        PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], None)
         self.doc.commitTransaction()
         self.doc.recompute()
         self.assertEqual(self.doc.UndoCount, count + 1)

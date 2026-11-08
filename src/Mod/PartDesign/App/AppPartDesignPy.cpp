@@ -109,6 +109,14 @@ public:
             "rolling above it, or deleting it, brings the part back. Returns it; no recompute."
         );
         add_varargs_method(
+            "removeEmptyPart",
+            &Module::removeEmptyPart,
+            "removeEmptyPart(body) -- A Body of a studio with no solid feature left (its New part "
+            "feature deleted): its sketches and datums go to another Body of the studio where the "
+            "history has them, and the Body is removed. Returns the Body that took them, or None "
+            "when nothing was done; no recompute."
+        );
+        add_varargs_method(
             "makeSiblings",
             &Module::makeSiblings,
             "makeSiblings(feature, bodies) -- Makes the siblings of the subtractive feature the "
@@ -416,6 +424,28 @@ private:
         }
         try {
             return Py::String(Body::addToPartRefusal(objectArg(pObj), body));
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    // FreeCAD-CH (ops#640 rank 30, blind test F50): a deleted New part's empty Body
+    Py::Object removeEmptyPart(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        auto body = freecad_cast<Body*>(objectArg(pObj));
+        if (!body) {
+            PyErr_SetString(PyExc_TypeError, "Expected a PartDesign Body");
+            throw Py::Exception();
+        }
+        try {
+            Body* target = DeletePart::removeEmptyPart(body);
+            return target ? Py::asObject(target->getPyObject()) : Py::None();
         }
         catch (const Base::Exception& e) {
             e.setPyException();

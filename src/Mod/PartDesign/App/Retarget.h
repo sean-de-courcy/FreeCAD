@@ -33,6 +33,19 @@ void reorderBody(Body& body,
                  bool after,
                  const RerouteBase& reroute);
 
+/** While one is alive on this thread, reorderBody() moves only the objects it is given: no input
+ * is carried with them (its step 2). The Features list's drag (moveInStudio()): Onshape moves only
+ * the dragged feature, its sketch stays where it is (FreeCAD-CH ops#640 rank 31, blind test F31)
+ */
+class OnlyGivenObjects
+{
+public:
+    OnlyGivenObjects();
+    ~OnlyGivenObjects();
+    OnlyGivenObjects(const OnlyGivenObjects&) = delete;
+    OnlyGivenObjects& operator=(const OnlyGivenObjects&) = delete;
+};
+
 /// The text an object with a reference set aside by a reorder fails with (N1 3.4 b); false if
 /// it has none
 bool parkedReason(const App::DocumentObject* obj, std::string& why);

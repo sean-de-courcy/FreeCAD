@@ -35,6 +35,7 @@
 #include <Base/Exception.h>
 #include <Base/ServiceProvider.h>
 #include <App/Document.h>
+#include <App/DocumentObserver.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
@@ -47,13 +48,16 @@
 #include <Gui/Utilities.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/Gui/ViewProvider.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
 
 #include "ReferenceField.h"
+#include "TaskDeletePart.h"
 #include "TaskFeatureParameters.h"
+#include "Utils.h"
 #include "StyleParameters.h"
 
 #include "ViewProvider.h"
@@ -107,6 +111,13 @@ void ViewProvider::attach(App::DocumentObject* pcObject)
 
 bool ViewProvider::doubleClicked()
 {
+    // A Delete part row reopens its dialog (FreeCAD-CH ops#640 rank 30, blind test F48)
+    if (auto deleter = getObject<PartDesign::DeletePart>()) {
+        if (!Gui::Control().activeDialog()) {
+            Gui::Control().showDialog(new TaskDlgDeletePart(deleter->getDocument(), {}, deleter));
+        }
+        return true;
+    }
     try {
         QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(getObject()->Label.getValue()));
         // FreeCAD-CH (ops#640): 0 under the step lock means the open dialog stayed (its accept
@@ -518,6 +529,30 @@ bool ViewProvider::onDelete(const std::vector<std::string>&)
     }
 
     makeChildrenVisible(keepHidden);
+
+    // Under the Onshape keymap, the Body of a New part whose last solid feature this was goes
+    // in the same step: its sketch stays, in another part's Body where history has it, as
+    // Onshape's sketch of no part (ops#640 rank 30, blind test F50)
+    auto partBody = freecad_cast<PartDesign::Body*>(body);
+    if (partBody && Gui::ForkKeymap::isOnshape() && !partBody->Tip.getValue()
+        && std::ranges::none_of(partBody->Group.getValues(), [](const App::DocumentObject* obj) {
+               return PartDesign::Body::isSolidFeature(obj);
+           })) {
+        const bool active = PartDesignGui::getBody(false, false) == partBody;
+        App::Document* doc = partBody->getDocument();
+        const auto& members = partBody->Group.getValues();
+        App::DocumentObjectT first(members.empty() ? nullptr : members.front());
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::Command::doCommand(Gui::Command::Doc,
+                                "PartDesign.removeEmptyPart(%s)",
+                                Gui::Command::getObjectCmd(partBody).c_str());
+        // The part that took the sketch is the active one when the removed one was
+        App::DocumentObject* moved = first.getObject();
+        PartDesign::Body* taker = moved ? PartDesign::Body::findBodyOf(moved) : nullptr;
+        if (active && taker && taker != partBody) {
+            PartDesignGui::makeBodyActive(taker, doc);
+        }
+    }
 
     return true;
 }

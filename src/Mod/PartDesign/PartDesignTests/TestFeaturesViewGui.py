@@ -456,10 +456,22 @@ class TestFeaturesViewGui(unittest.TestCase):
     def partRows(self):
         return [self.parts.topLevelItem(i).text(0) for i in range(self.parts.topLevelItemCount())]
 
+    def acceptDeletePart(self):
+        """OK in the Delete part dialog a Delete on a part opens (ops#640 rank 30)."""
+        from PartDesignTests.TestExpressionFieldsGui import taskButton
+
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Delete part dialog")
+        Gui.Control.showTaskView()
+        self.assertTrue(waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok) is not None))
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        pump(0.2)
+
     def testPartFollowsTheHistory(self):
         """ops#635 (report 10): a Body is a part only while a solid feature above its bar makes it.
-        Its new-part Pad deleted from the list, it leaves the Parts list and keeps its sketch; undo
-        brings it back; the bar at the top leaves no part, as in Onshape."""
+        Its new-part Pad deleted from the list, it leaves the Parts list, and its Body goes, the
+        sketch staying in Body1 (ops#640 rank 30, F50); undo brings it back; the bar at the top
+        leaves no part, as in Onshape."""
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
         self.doc.openTransaction("New part")
         skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
@@ -471,19 +483,23 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual([o.Name for o in body3.Group], ["SkC", "PadC"])
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+        name, label = body3.Name, body3.Label
 
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, padC.Name)
         self.assertEqual(self.menuAction("PadC", "featureDelete"), [True])
         self.doc.recompute()
         self.assertIsNone(self.doc.getObject("PadC"))
-        self.assertEqual([o.Name for o in body3.Group], ["SkC"])
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertIs(skC.getParentGeoFeatureGroup(), self.body1)
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]), self.partRows())
         self.assertIn("SkC", self.rows())
 
         self.doc.undo()
         self.doc.recompute()
-        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+        body3 = self.doc.getObject(name)
+        self.assertEqual([o.Name for o in body3.Group], ["SkC", "PadC"])
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", label]))
 
         # The bar at the top: no part exists yet; at the end, all three again
         self.dragBarAfter("SkA")
@@ -505,6 +521,7 @@ class TestFeaturesViewGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, body3.Name)
         Gui.runCommand("Std_Delete")
+        self.acceptDeletePart()
         # The command recomputes (review prs464e2-r1, Sonnet T4, Opus T3)
         self.assertTrue(waitFor(lambda: body3.Shape.isNull() and "Touched" not in body3.State))
         self.assertIsNotNone(self.doc.getObject(body3.Name))
@@ -548,6 +565,7 @@ class TestFeaturesViewGui(unittest.TestCase):
             Gui.Selection.addSelection(self.doc.Name, name)
         Gui.runCommand("Std_Delete")
         pump(0.3)
+        self.acceptDeletePart()
         self.doc.recompute()
         self.assertIsNone(self.doc.getObject(names[1]))
         self.assertIs(self.doc.getObject(names[0]), body3)
@@ -594,11 +612,13 @@ class TestFeaturesViewGui(unittest.TestCase):
         """Review s33e2 F2: Delete on a part deleted already removes the Body with its features."""
         body3 = self.newPart()
         name = body3.Name
-        for _ in range(2):
+        for again in (False, True):
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(self.doc.Name, name)
             Gui.runCommand("Std_Delete")
             pump(0.2)
+            if not again:
+                self.acceptDeletePart()
         self.doc.recompute()
         self.assertIsNone(self.doc.getObject(name))
         self.assertIsNone(self.doc.getObject("PadC"))

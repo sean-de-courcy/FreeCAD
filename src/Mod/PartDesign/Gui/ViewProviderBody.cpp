@@ -48,6 +48,7 @@
 #include <Gui/Command.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/Selection/Selection.h>
@@ -65,6 +66,7 @@
 
 #include "ViewProviderBody.h"
 #include "RollbackView.h"
+#include "TaskDeletePart.h"
 #include "Utils.h"
 #include "ViewProvider.h"
 
@@ -571,6 +573,12 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     bool deleted = body && PartDesign::DeletePart::deleterOf(body);
     if (body && !forced && !everyMember && !deleted && Part::BodyBase::studioOf(body, studio)
         && body->Tip.getValue() && !PartDesign::Boolean::mergeOf(body)) {
+        // Under the Onshape keymap, its dialog, prefilled with the part (with the other parts of
+        // the same Delete): OK makes the feature (ops#640 rank 30, blind test F48)
+        if (Gui::ForkKeymap::isOnshape()) {
+            TaskDlgDeletePart::openFor(body);
+            return false;
+        }
         Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
         Gui::Command::doCommand(
             Gui::Command::Doc,

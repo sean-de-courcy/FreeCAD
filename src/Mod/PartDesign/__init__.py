@@ -12,6 +12,7 @@ newPartRefusal = _PartDesign.newPartRefusal  # FreeCAD-CH, ops#640 round 5
 addToPart = _PartDesign.addToPart
 addToPartRefusal = _PartDesign.addToPartRefusal
 deletePart = _PartDesign.deletePart
+removeEmptyPart = _PartDesign.removeEmptyPart  # FreeCAD-CH, ops#640 rank 30 (F50)
 makeSiblings = _PartDesign.makeSiblings
 siblingsOf = _PartDesign.siblingsOf
 unlinkSibling = _PartDesign.unlinkSibling
