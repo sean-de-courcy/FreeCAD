@@ -172,6 +172,24 @@ bool isListedStep(const Transformed& obj)
     return false;
 }
 
+/// A pattern, mirror or MultiTransform with nothing to transform: red in Onshape's words
+App::DocumentObjectExecReturn* nothingToTransform(const Transformed& obj)
+{
+    if (freecad_cast<const Mirrored*>(&obj)) {
+        return new App::DocumentObjectExecReturn(
+            QT_TRANSLATE_NOOP("Exception", "Select features to mirror.")
+        );
+    }
+    if (freecad_cast<const MultiTransform*>(&obj)) {
+        return new App::DocumentObjectExecReturn(
+            QT_TRANSLATE_NOOP("Exception", "Select features to transform.")
+        );
+    }
+    return new App::DocumentObjectExecReturn(
+        QT_TRANSLATE_NOOP("Exception", "Select features to pattern.")
+    );
+}
+
 }  // namespace
 
 namespace PartDesign
@@ -344,6 +362,50 @@ bool Transformed::isMultiTransformChild() const
     return false;
 }
 
+bool Transformed::isOutOfChain() const
+{
+    if (!isMultiTransformChild()) {
+        // Originals listed, or a whole-shape transform
+        return false;
+    }
+    if (!BaseFeature.getValue()) {
+        // A pattern being filled in, or a step made in a MultiTransform (ops#579, ops#590)
+        return true;
+    }
+    // FreeCAD-CH (ops#640, F3): one that had a place in the chain and whose Originals went (the
+    // original deleted, or emptied in its dialog) stays there and fails, so its base passes
+    // through, unless a MultiTransform lists it as a step: converting a pattern sets the
+    // MultiTransform's Transformations before it empties the pattern's Originals (the steps loop
+    // in onChanged() leaves the chain then). The in-list holds the MultiTransform as soon as its
+    // Transformations are set (PropertyLinkList::setValues), and this is asked only for a
+    // transform with a BaseFeature and nothing to pattern, so the walk is rare
+    const App::DocumentObject* self = this;
+    auto isSelf = [self](const App::DocumentObject* step) {
+        return step == self;
+    };
+    for (auto user : getInList()) {
+        auto multi = freecad_cast<MultiTransform*>(user);
+        if (multi && multi != self
+            && std::ranges::any_of(multi->Transformations.getValues(), isSelf)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Transformed::leaveChain(Body* body)
+{
+    // The solid after it builds on the one before it, as when it is removed (this one no longer
+    // counts as a solid there), and it has no base, as a step made in a MultiTransform has none
+    auto next = freecad_cast<PartDesign::Feature*>(body->getNextSolidFeature(this));
+    if (next && next->BaseFeature.getValue() == this) {
+        body->setBaseProperty(next);
+    }
+    if (BaseFeature.getValue()) {
+        BaseFeature.setValue(nullptr);
+    }
+}
+
 void Transformed::handleChangedPropertyType(
     Base::XMLReader& reader,
     const char* TypeName,
@@ -474,6 +536,12 @@ void Transformed::onChanged(const App::Property* prop)
                     if (step->TransformMode.getValue() != static_cast<long>(Mode::Features)) {
                         step->TransformMode.setValue(static_cast<long>(Mode::Features));
                     }
+                    // One whose Originals were gone already (a pattern of a deleted original,
+                    // still in the chain: ops#640, F3) got no change above to take it out
+                    if (step->BaseFeature.getValue() && step->getFeatureBody() == body
+                        && !Body::isSolidFeature(step)) {
+                        step->leaveChain(body);
+                    }
                 }
             }
             else if (prop == &BaseFeature) {
@@ -496,18 +564,11 @@ void Transformed::onChanged(const App::Property* prop)
                 }
             }
             else {
-                // Out of the chain (a MultiTransform's step, or a pattern of nothing): the solid
-                // after it builds on the one before it, as when it is removed (this one no longer
-                // counts as a solid there), and it has no base, as a step made in a MultiTransform
-                // has none. Converting a pattern makes it the MultiTransform's step after the
+                // Out of the chain (a MultiTransform's step, or a new pattern of nothing; one in
+                // the chain whose Originals went stays a solid feature: isOutOfChain(), ops#640).
+                // Converting a pattern makes it the MultiTransform's step after the
                 // MultiTransform's link rerouted it onto it: its base would be a cycle (ops#590)
-                auto next = freecad_cast<PartDesign::Feature*>(body->getNextSolidFeature(this));
-                if (next && next->BaseFeature.getValue() == this) {
-                    body->setBaseProperty(next);
-                }
-                if (BaseFeature.getValue()) {
-                    BaseFeature.setValue(nullptr);
-                }
+                leaveChain(body);
             }
         }
     }
@@ -517,36 +578,32 @@ void Transformed::onChanged(const App::Property* prop)
 
 App::DocumentObjectExecReturn* Transformed::execute()
 {
-    if (isMultiTransformChild()) {
-        // FreeCAD-CH (ops#640): a MultiTransform's step computes nothing of its own. A pattern or
-        // mirror of nothing is red, as Onshape's is, and stays out of the chain: it contributes
-        // nothing (a reorder's parked Originals have their own message, before this runs)
+    if (isOutOfChain()) {
+        // FreeCAD-CH (ops#640): a MultiTransform's step computes nothing of its own (its
+        // MultiTransform runs it), and a reorder's parked Originals have their own message, before
+        // this runs. A new pattern or mirror with nothing picked is red, as Onshape's is, and stays
+        // out of the chain: it contributes nothing
         if (isListedStep(*this) || hasParkedOriginals(this)) {
             return App::DocumentObject::StdReturn;
         }
-        if (freecad_cast<const Mirrored*>(this)) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Select features to mirror.")
-            );
-        }
-        if (freecad_cast<const LinearPattern*>(this) || freecad_cast<const PolarPattern*>(this)) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Select features to pattern.")
-            );
-        }
-        if (freecad_cast<const MultiTransform*>(this)) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Select features to transform.")
-            );
-        }
-        return App::DocumentObject::StdReturn;
+        return nothingToTransform(*this);
     }
 
     auto const mode = static_cast<Mode>(TransformMode.getValue());
 
+    if (mode == Mode::Features && Originals.getValues().empty()) {
+        // FreeCAD-CH (ops#640, F3): in the chain with nothing to pattern (its original deleted,
+        // or the list emptied in its dialog). It fails, red in Onshape's words as a new one is,
+        // and the failure rule passes its base through: the Body shows the model without the
+        // pattern, and edits above reach it. Returned StdReturn, it kept its last shape, the
+        // deleted original's copies included
+        return nothingToTransform(*this);
+    }
+
     std::vector<DocumentObject*> originals = getOriginals();
 
     if (mode == Mode::Features && originals.empty()) {
+        // Every original suppressed: as upstream
         return App::DocumentObject::StdReturn;
     }
 

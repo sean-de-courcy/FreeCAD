@@ -27,6 +27,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <vector>
 #include <Base/Factory.h>
 #include <Base/Persistence.h>
 #include <App/PropertyContainer.h>
@@ -44,6 +45,7 @@ namespace App
 {
 
 class Document;
+class DocumentObject;
 class Property;
 class Transaction;
 class TransactionObject;
@@ -108,6 +110,27 @@ public:
 
     /// Check if the transaction list is empty.
     bool isEmpty() const;
+
+    /**
+     * @brief Whether this transaction changes an input of the document.
+     *
+     * FreeCAD-CH (ops#640): an object added or removed, a property added, removed, renamed or
+     * moved, a documentation or group changed, or a value changed of a property that isn't a
+     * result (not Output, not Transient, not a shape: PropertyComplexGeoData, which a recompute
+     * rewrites) and isn't the same now as before the transaction (Property::isSame). A
+     * transaction that doesn't is no undo step (Onshape: an unchanged accept leaves none). Call
+     * it before the transaction is applied.
+     */
+    bool changesInputs() const;
+
+    /**
+     * @brief The document objects whose input this transaction changes (as changesInputs()).
+     *
+     * FreeCAD-CH (ops#640): those the regeneration after an undo or redo of it enforces, with
+     * their dependants. Call it before the transaction is applied; the objects may leave the
+     * document when it is (check Document::isIn() before using them).
+     */
+    std::vector<DocumentObject*> inputChangedObjects() const;
 
     /**
      * @brief Check if this object is used in a transaction.
@@ -320,6 +343,22 @@ public:
     unsigned int getMemSize() const override;
     void Save(Base::Writer& writer) const override;
     void Restore(Base::XMLReader& reader) override;
+
+    /// FreeCAD-CH (ops#640): what changesInputs() counts as a change of an input
+    enum class InputCheck
+    {
+        /// only what needs no value read: an object added or removed, a property added,
+        /// removed, renamed or moved, a documentation or group changed
+        Structure,
+        /// as Structure, and a value change of an input property (not a result) that isn't the
+        /// same now as before the transaction (Property::isSame())
+        Values,
+        /// as Structure, and any input property recorded, not compared
+        Recorded
+    };
+    /// FreeCAD-CH (ops#640): whether this entry changes an input of @a obj, its object
+    /// (Transaction::changesInputs(), Transaction::inputChangedObjects())
+    bool changesInputs(const TransactionalObject* obj, InputCheck check) const;
 
     friend class Transaction;
 

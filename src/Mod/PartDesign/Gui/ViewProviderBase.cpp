@@ -53,7 +53,11 @@ bool ViewProviderBase::doubleClicked()
         try {
             std::string Msg("Edit ");
             Msg += base->Label.getValue();
-            getDocument()->openCommand(Msg.c_str());
+            // FreeCAD-CH (ops#640): the open dialog stayed (as ViewProvider::doubleClicked)
+            if (getDocument()->openCommand(Msg.c_str()) == 0
+                && getDocument()->getDocument()->isStepLocked()) {
+                return true;
+            }
             Gui::cmdSetEdit(base, Gui::Application::Instance->getUserEditMode());
         }
         catch (const Base::Exception&) {

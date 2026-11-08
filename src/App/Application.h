@@ -966,6 +966,9 @@ protected:
          */
         TransactionSignaller(bool abort, bool signal);
         ~TransactionSignaller();
+        /// FreeCAD-CH (ops#640): whether a signaller is alive, i.e. a transaction is being closed
+        /// (closeActiveTransaction() inside a document's commit, an implicit one, sees true)
+        static bool isActive();
     private:
         bool abort;
     };

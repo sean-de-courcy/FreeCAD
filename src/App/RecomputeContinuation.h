@@ -49,6 +49,17 @@ public:
     /// Must not throw.
     virtual void afterFailure(DocumentObject* failed) const = 0;
 
+    /// FreeCAD-CH (ops#640, F37): 'stopped' failed without running (a Fail verdict on an input in
+    /// error, or blocked()) and continuesAfter() is false for it: no rule claims it, so its
+    /// dependants fail naming it. The rule may write what the view shows of it (PartDesign: a
+    /// Body stopped on an unclaimed failure of its Tip writes an empty Shape, as Onshape shows no
+    /// part when its base feature fails); its error stays. Called once per stop, before its
+    /// dependants are judged. Must not throw.
+    virtual void afterStop(DocumentObject* stopped) const
+    {
+        (void)stopped;
+    }
+
     /// 'obj' is held: Document::recompute doesn't run it, leaves it touched, and doesn't count it
     /// as touched in Document::mustExecute() (ops#127; PartDesign: what a Body's roll-back bar
     /// holds, and the Body itself while rolled back)

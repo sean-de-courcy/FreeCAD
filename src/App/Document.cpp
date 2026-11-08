@@ -994,6 +994,17 @@ bool Document::checkOnCycle()
 
 bool Document::undo(const int id)
 {
+    // FreeCAD-CH (ops#640): with a feature dialog open its step can't be undone, nor committed
+    // behind it (the preamble below would)
+    if (isStepLocked()) {
+        FC_LOG("Step locked, ignore undo in " << getName());
+        return false;
+    }
+    ++d->undoRedoDepth;
+    Base::ScopeGuard depth([this]() {
+        --d->undoRedoDepth;
+    });
+
     if (id != 0) {
         const auto it = mUndoMap.find(id);
         if (it == mUndoMap.end()) {
@@ -1007,7 +1018,18 @@ bool Document::undo(const int id)
     }
 
     if (d->activeUndoTransaction) {
+        const int pending = d->activeUndoTransaction->getID();
         _commitTransaction(true);
+        if (!mUndoMap.contains(pending)) {
+            // FreeCAD-CH (ops#640): the pending transaction changed no input, and its commit
+            // dropped it (_commitTransaction): undoing it undoes nothing, not the step before
+            if (d->undoRedoDepth == 1) {
+                regenerateAfterTransaction();
+            }
+            // True: the pending transaction was committed (as nothing), no step popped. False
+            // when there is no step at all (also with UndoMaxStackSize 0, which pops at once)
+            return !mUndoTransactions.empty();
+        }
     }
     if (mUndoTransactions.empty()) {
         return false;
@@ -1015,6 +1037,12 @@ bool Document::undo(const int id)
     // redo
     d->activeUndoTransaction = new Transaction(mUndoTransactions.back()->getID());
     d->activeUndoTransaction->Name = mUndoTransactions.back()->Name;
+
+    // FreeCAD-CH (ops#640): what the step changed, for the regeneration below
+    std::vector<DocumentObject*> changed;
+    if (d->regenerateOnCommit) {
+        changed = mUndoTransactions.back()->inputChangedObjects();
+    }
 
     {
         Base::FlagToggler<bool> flag(d->undoing);
@@ -1039,6 +1067,13 @@ bool Document::undo(const int id)
         }
     }
 
+    // FreeCAD-CH (ops#640): the model of the step before, as Onshape shows it; undo(id) once, at
+    // its last step
+    if (d->undoRedoDepth == 1) {
+        enforceChangedForRegeneration(changed);
+        regenerateAfterTransaction();
+    }
+
     signalUndo(*this);  // now signal the undo
     signalBecameStable(*this);
 
@@ -1047,6 +1082,16 @@ bool Document::undo(const int id)
 
 bool Document::redo(const int id)
 {
+    // FreeCAD-CH (ops#640): as undo()
+    if (isStepLocked()) {
+        FC_LOG("Step locked, ignore redo in " << getName());
+        return false;
+    }
+    ++d->undoRedoDepth;
+    Base::ScopeGuard depth([this]() {
+        --d->undoRedoDepth;
+    });
+
     if (id != 0) {
         const auto it = mRedoMap.find(id);
         if (it == mRedoMap.end()) {
@@ -1060,12 +1105,21 @@ bool Document::redo(const int id)
     if (d->activeUndoTransaction) {
         _commitTransaction(true);
     }
-
-    assert(mRedoTransactions.size() != 0);
+    // FreeCAD-CH (ops#640): the Redo stack outlives an open transaction now; committed as a step,
+    // the transaction cleared it
+    if (mRedoTransactions.empty()) {
+        return false;
+    }
 
     // undo
     d->activeUndoTransaction = new Transaction(mRedoTransactions.back()->getID());
     d->activeUndoTransaction->Name = mRedoTransactions.back()->Name;
+
+    // FreeCAD-CH (ops#640): what the step changes, for the regeneration below
+    std::vector<DocumentObject*> changed;
+    if (d->regenerateOnCommit) {
+        changed = mRedoTransactions.back()->inputChangedObjects();
+    }
 
     // do the redo
     {
@@ -1087,6 +1141,12 @@ bool Document::redo(const int id)
             obj->onUndoRedoFinished();
             obj->setStatus(ObjectStatus::PendingTransactionUpdate, false);
         }
+    }
+
+    // FreeCAD-CH (ops#640): as undo()
+    if (d->undoRedoDepth == 1) {
+        enforceChangedForRegeneration(changed);
+        regenerateAfterTransaction();
     }
 
     signalRedo(*this);
@@ -1195,6 +1255,11 @@ int Document::openTransaction(TransactionName name, int tid) // NOLINT
         }
         return 0;
     }
+    // FreeCAD-CH (ops#640): no transaction beside an open dialog's step
+    if (isStepLocked()) {
+        FC_LOG("Step locked, ignore new transaction '" << name.name << "'");
+        return 0;
+    }
     if (isPerformingTransaction() || d->committing) {
         if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
             FC_WARN("Cannot open transaction while transacting");
@@ -1218,6 +1283,17 @@ int Document::_openTransaction(std::string name, int id)
             FC_WARN("Transaction locked, ignore new transaction '" << name << "'");
         }
     }
+    // FreeCAD-CH (ops#640): step-locked, only the booked step opens (an open dialog's first
+    // change), and nothing commits the active one to open another. With no step booked or open
+    // there is nothing to protect: _checkTransaction's "Delete" (recording the removal of an
+    // object that older steps hold) still opens.
+    const bool stepPending = d->bookedTransaction != NullTransaction || d->activeUndoTransaction;
+    if (isStepLocked() && stepPending
+        && (id != d->bookedTransaction
+            || (d->activeUndoTransaction && d->activeUndoTransaction->getID() != id))) {
+        FC_LOG("Step locked, ignore new transaction '" << name << "'");
+        return 0;
+    }
     if (isPerformingTransaction() || d->committing) {
         if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
             FC_WARN("Cannot open transaction while transacting");
@@ -1240,7 +1316,8 @@ int Document::_openTransaction(std::string name, int id)
     if (d->activeUndoTransaction) {
         _commitTransaction(true);
     }
-    _clearRedos();
+    // FreeCAD-CH (ops#640): the Redo stack is cleared when this transaction is committed as a
+    // step (_commitTransaction), not here: an unchanged accept or a Cancel keeps it
 
     // When id == 0, this creates a new id
     // for instance, when there is no global transaction
@@ -1278,6 +1355,17 @@ void Document::renameTransaction(const std::string& name, const int id) const
 }
 int Document::setActiveTransaction(TransactionName name, int tid)
 {
+    // FreeCAD-CH (ops#640): step-locked, only the booked step can be named again; another id,
+    // or a new one, would commit it behind the open dialog. The caller gets no id, so its own
+    // commit (Gui::Command::commitCommand) can't close the step either.
+    if (isStepLocked()) {
+        if (tid != NullTransaction && tid == d->bookedTransaction) {
+            return tid;
+        }
+        FC_LOG("Step locked, ignore transaction '" << name.name << "'");
+        return NullTransaction;
+    }
+
     // Probably a group transaction situation
     if (tid != NullTransaction) {
         if (!GetApplication().transactionIsActive(tid)) {
@@ -1325,6 +1413,75 @@ bool Document::isTransactionLocked() const
 {
     return d->TransactionLock > 0;
 }
+
+void Document::lockStep()
+{
+    d->StepLock++;
+}
+void Document::unlockStep()
+{
+    if (d->StepLock > 0) {
+        d->StepLock--;
+    }
+}
+bool Document::isStepLocked() const
+{
+    return d->StepLock > 0;
+}
+
+void Document::setRegenerateOnCommit(const bool on)
+{
+    d->regenerateOnCommit = on;
+}
+bool Document::regeneratesOnCommit() const
+{
+    return d->regenerateOnCommit;
+}
+
+// FreeCAD-CH (ops#640): after an undo or redo, the objects whose inputs the step changed (still
+// in the document) and their dependants recompute, whatever their touch state: one pass heals
+// them (F34)
+void Document::enforceChangedForRegeneration(const std::vector<DocumentObject*>& changed)
+{
+    for (auto obj : changed) {
+        if (!isIn(obj)) {
+            continue;  // the step took it out: never read through the pointer
+        }
+        obj->enforceRecompute();
+        for (auto inObj : obj->getInList()) {
+            if (inObj && inObj->isAttachedToDocument()) {
+                inObj->enforceRecompute();
+            }
+        }
+    }
+}
+
+bool Document::regenerateAfterTransaction()
+{
+    if (!d->regenerateOnCommit || isPerformingTransaction() || d->committing
+        || testStatus(Document::Recomputing) || testStatus(Document::Restoring)
+        || testStatus(Document::PartialDoc) || GetApplication().isClosingAll()) {
+        return false;
+    }
+    if (!mustExecute()) {
+        return false;
+    }
+    // Synchronous, on the calling thread; opens no transaction: the closed one is gone, and
+    // nothing is booked (_checkTransaction opens nothing), so the Redo stack stays
+    try {
+        recompute();
+    }
+    catch (Base::Exception& e) {
+        e.reportException();
+    }
+    catch (std::exception& e) {
+        FC_ERR("Exception in the regeneration of " << getName() << ": " << e.what());
+    }
+    catch (...) {
+        FC_ERR("Unknown exception in the regeneration of " << getName());
+    }
+    return true;
+}
 bool Document::transacting() const
 {
     return isPerformingTransaction() || d->committing;
@@ -1337,6 +1494,14 @@ void Transaction::openPendingTransaction(Document& doc)
 {
     if (!doc.d->rollback && !globalIsRelabeling && !doc.d->definingTransaction) {
         doc._checkTransaction(nullptr, nullptr, __LINE__);
+        // FreeCAD-CH (ops#640): a step's commit clears the Redo stack now, not the open
+        // (_commitTransaction). The change coming is to an object an undo or redo transaction
+        // holds, so the transaction is a step: cleared at its commit, the Redo stack would free an
+        // object the step records, and its undo would read freed memory. Cleared here, as the
+        // open did before, a redo-held object goes first and its change is skipped (the caller)
+        if (doc.d->activeUndoTransaction) {
+            doc._clearRedos();
+        }
     }
 }
 
@@ -1444,19 +1609,40 @@ bool Document::_commitTransaction(const bool notify)
     d->bookedTransaction = 0;
     bool committed = false;
     if (d->activeUndoTransaction) {
+        // FreeCAD-CH (ops#640): a transaction that changed no input (an unchanged accept of a
+        // feature dialog, whose live preview rewrote only the shapes) is no undo step, as in
+        // Onshape. Kept when another document shares its id: it marks a change there. Only a
+        // step clears the Redo stack (before the committing flag, which _clearRedos refuses).
+        const bool isStep = d->clearingUndos || d->activeUndoTransaction->changesInputs()
+            || transactionSharedElsewhere(d->activeUndoTransaction->getID());
+        if (isStep) {
+            _clearRedos();
+        }
         {
             Base::FlagToggler<> flag(d->committing);
             Application::TransactionSignaller signaller(false, true);
             const int id = d->activeUndoTransaction->getID();
 
-            mUndoTransactions.push_back(d->activeUndoTransaction);
-            d->activeUndoTransaction = nullptr;
+            if (!isStep) {
+                FC_LOG("drop transaction '" << d->activeUndoTransaction->Name
+                                            << "' with no change of an input in " << getName());
+                mUndoMap.erase(id);
+                delete d->activeUndoTransaction;
+                d->activeUndoTransaction = nullptr;
+            }
+            else {
+                mUndoTransactions.push_back(d->activeUndoTransaction);
+                d->activeUndoTransaction = nullptr;
 
-            // check the stack for the limits
-            if (mUndoTransactions.size() > d->UndoMaxStackSize) {
-                mUndoMap.erase(mUndoTransactions.front()->getID());
-                delete mUndoTransactions.front();
-                mUndoTransactions.pop_front();
+                // check the stack for the limits. FreeCAD-CH (ops#640): after a push only, and
+                // down to the limit: the Gui sets it before each commit so that the trim takes
+                // whole steps (a closed sketch session is several transactions; Gui::Document's
+                // DocumentP::updateUndoLimit)
+                while (mUndoTransactions.size() > d->UndoMaxStackSize) {
+                    mUndoMap.erase(mUndoTransactions.front()->getID());
+                    delete mUndoTransactions.front();
+                    mUndoTransactions.pop_front();
+                }
             }
             signalCommitTransaction(*this);
 
@@ -1471,6 +1657,16 @@ bool Document::_commitTransaction(const bool notify)
         signalBecameStable(*this);
     }
     return true;
+}
+
+bool Document::transactionSharedElsewhere(const int id) const
+{
+    for (auto doc : GetApplication().getDocuments()) {
+        if (doc != this && doc->mUndoMap.contains(id)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Document::abortTransaction() const
@@ -1611,6 +1807,9 @@ void Document::clearUndos()
     }
 
     if (d->activeUndoTransaction) {
+        // FreeCAD-CH (ops#640): no no-op test for a transaction about to be discarded; it may
+        // record view providers that are being deleted.
+        Base::FlagToggler<> clearing(d->clearingUndos);
         _commitTransaction(true);
     }
 
@@ -4304,6 +4503,8 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                 bool doRecompute = false;
                 // In error before it runs (ops#579): its dependants failed naming it
                 bool wasError = false;
+                // FreeCAD-CH (ops#640): failed without running (a Fail verdict, or blocked)
+                bool stopped = false;
                 if (obj->mustRecompute()) {
                     doRecompute = true;
                     wasError = obj->isError();
@@ -4340,6 +4541,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         d->addRecomputeLog(why, obj);
                         unmade.push_back(obj);
                         res = 1;
+                        stopped = true;
                     }
                     else if (continuation && continuation->blocked(obj, why)) {
                         // A reference set aside by a reorder (ops#127): it doesn't run either, so
@@ -4349,6 +4551,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         d->addRecomputeLog(why, obj);
                         unmade.push_back(obj);
                         res = 1;
+                        stopped = true;
                     }
                     // Counted when it runs or fails
                     ++objectCount;
@@ -4384,6 +4587,11 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         filter.insert(obj);
                         if (std::find(unmade.begin(), unmade.end(), obj) == unmade.end()) {
                             unmade.push_back(obj);
+                        }
+                        if (stopped && continuation) {
+                            // FreeCAD-CH (ops#640, F37): the rule writes what the view shows
+                            // of it (PartDesign: a stopped Body, nothing)
+                            continuation->afterStop(obj);
                         }
                         failDependantsOutside(obj);
                         if (continuation) {

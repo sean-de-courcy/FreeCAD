@@ -422,6 +422,40 @@ public:
         }
     }
 
+    void afterStop(App::DocumentObject* stopped) const override
+    {
+        // F37 (ops#640): a stopped Body shows no part, as Onshape's failed feature contributes
+        // nothing. Called for a Fail verdict or blocked(), not for a Body whose own execute()
+        // failed. A stopped feature keeps its old output: nothing claimed reads it, and its Body,
+        // stopped through it, shows nothing (in "Through" display ViewProviderBody shows the
+        // Body's empty Shape in place of its members); a sketch or datum isn't a solid
+        auto body = freecad_cast<Body*>(stopped);
+        if (!body) {
+            return;
+        }
+        // Only a Body whose Tip is an unclaimed failure (design D:1, F37: its part is gone, a
+        // first feature with nothing to pass through). A Body stopped through another input with
+        // a claimed or valid Tip (the Bracket that reads a stopped Panel through its Merge,
+        // decision 257) keeps its last shape, as before
+        const App::DocumentObject* tip = body->Tip.getValue();
+        if (!tip || !tip->isError() || continuesAfter(tip)) {
+            return;
+        }
+        try {
+            body->writeStoppedShape();
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+        }
+        catch (Standard_Failure& e) {
+            FC_ERR("Clearing the shape of " << stopped->getFullName()
+                                            << " failed: " << e.GetMessageString());
+        }
+        catch (std::exception& e) {
+            FC_ERR("Clearing the shape of " << stopped->getFullName() << " failed: " << e.what());
+        }
+    }
+
     bool holds(const App::DocumentObject* obj) const override
     {
         // The roll-back bar (ops#127): a Body holds itself while rolled back, and what is after

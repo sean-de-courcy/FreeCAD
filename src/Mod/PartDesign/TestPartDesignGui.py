@@ -82,6 +82,7 @@ from PartDesignTests.TestDialogFlowGui import TestStudioPlanesStayGui  # FreeCAD
 from PartDesignTests.TestRevolveFieldsGui import TestRevolveFieldsGui  # FreeCAD-CH, ops#640 ranks 20, 21, 52
 from PartDesignTests.TestRevolveFieldsGui import TestOperationRowGui  # FreeCAD-CH, ops#640 rank 20
 from PartDesignTests.TestPatternDefaultsGui import TestPatternDefaultsGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestRegenerateGui import TestRegenerateGui  # FreeCAD-CH, ops#640
 
 
 # timer runs this class in order to access modal dialog

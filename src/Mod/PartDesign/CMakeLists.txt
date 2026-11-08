@@ -97,6 +97,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestFilletDeleteKeepsTheSketch.py
     PartDesignTests/TestBooleanRules.py
     PartDesignTests/TestSplitParts.py
+    PartDesignTests/TestRegenerate.py
 )
 
 if(BUILD_GUI)
@@ -132,6 +133,7 @@ if(BUILD_GUI)
         PartDesignTests/TestDialogFlowGui.py
         PartDesignTests/TestRevolveFieldsGui.py
         PartDesignTests/TestPatternDefaultsGui.py
+        PartDesignTests/TestRegenerateGui.py
     )
 endif(BUILD_GUI)
 

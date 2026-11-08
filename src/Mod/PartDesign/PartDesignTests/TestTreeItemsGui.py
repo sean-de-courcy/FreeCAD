@@ -172,6 +172,18 @@ class TestTreeItemsGui(unittest.TestCase):
             timer.stop()
         self.assertEqual(self.dialogs, [], "Std_Delete asked something")
 
+    def deleteRefused(self, obj):
+        """Std_Delete on obj while another feature's dialog is open: refused (ops#640, the step
+        lock; Onshape: with a dialog open the other rows take no Delete). obj stays."""
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, obj.Name)
+        self.assertFalse(
+            Gui.Command.get("Std_Delete").isActive(), "Std_Delete is active with the dialog open"
+        )
+        name = obj.Name
+        self.delete(obj)
+        self.assertIn(name, [o.Name for o in self.doc.Objects], "deleted under the open dialog")
+
     # -- the item in edit ------------------------------------------------------------------------
 
     def testFeatureInEditIsBoldAndColoured(self):
@@ -380,43 +392,44 @@ class TestTreeItemsGui(unittest.TestCase):
         self.assertFalse(top.Visibility, "the edit outside the Body showed the Body's old feature")
 
     def testDeletingTheShownFeatureDuringAnotherEdit(self):
-        """The shown last feature, with its own sketch, deleted while the first Pad is in edit
-        (ops#187 and ops#149 together): Cancel ends the edit without showing the deleted feature,
-        the Pad shows and the deleted feature's sketch stays hidden."""
+        """The shown last feature, with its own sketch, while the first Pad is in edit (ops#187
+        and ops#149 together): its Delete is refused (ops#640; Onshape takes no Delete of another
+        row with a dialog open; it was deleted under the dialog before). Cancel ends the edit
+        showing the Tip, the shown feature, and both sketches stay hidden."""
         pad2 = self.addSecondPad()
         self.assertShown(pad2)
         Gui.getDocument(self.doc.Name).setEdit(self.pad.Name)
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
         pump()
-        self.delete(pad2)
-        self.assertNotIn("Pad001", [o.Name for o in self.doc.Objects])
+        self.deleteRefused(pad2)
         taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
         pump()
-        self.assertEqual(self.body.Tip, self.pad)
-        self.assertShown(self.pad)
+        self.assertEqual(self.body.Tip, pad2)
+        self.assertShown(pad2)
+        self.assertFalse(self.pad.Visibility, "the edited Pad is shown instead of the Tip")
         sketch = self.doc.getObject("Sketch001")
-        self.assertFalse(sketch.Visibility, "the left-behind sketch is shown")
+        self.assertFalse(sketch.Visibility, "the shown feature's sketch is shown")
         self.assertFalse(self.sketch.Visibility, "the Pad's sketch is shown after its edit")
 
     def testCancelAfterDeletingTheShownFeatureDuringALaterEdit(self):
         """Pad, Pad001, Pad002 with Pad002 shown; Pad001 in edit (its panel shows Pad, its base),
-        Pad002 deleted, Cancel: the Tip, Pad001, is shown, not Pad (ops#218 A: the base the edit
-        showed counted as the Body's shown feature, so the model looked rolled back)."""
+        Pad002's Delete refused (ops#640: it was deleted, and ops#218 A showed the new Tip),
+        Cancel: Pad002, still the Tip, is shown, not Pad (the base the edit showed) nor Pad001."""
         pad2 = self.addSecondPad()
         pad3 = self.addPadOnTop("Pad002", "Sketch002", (8, 4, 12, 6), 15, 2)
         self.assertShown(pad3)
         Gui.getDocument(self.doc.Name).setEdit(pad2.Name)
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
         pump()
-        self.delete(pad3)
-        self.assertNotIn("Pad002", [o.Name for o in self.doc.Objects])
+        self.deleteRefused(pad3)
         taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
         pump()
-        self.assertEqual(self.body.Tip, pad2)
-        self.assertShown(pad2)
-        self.assertFalse(self.pad.Visibility, "the Tip's base is shown instead of the Tip")
+        self.assertEqual(self.body.Tip, pad3)
+        self.assertShown(pad3)
+        self.assertFalse(self.pad.Visibility, "the edit's base is shown instead of the Tip")
+        self.assertFalse(pad2.Visibility, "the edited feature is shown instead of the Tip")
 
     def testColorEditKeepsItsFeatureShown(self):
         """A Default edit of Pad while Pad001 is shown remembers Pad001 and shows it again at the
@@ -454,8 +467,9 @@ class TestTreeItemsGui(unittest.TestCase):
 
     def deleteTheShownFeatureWithShowFinal(self, ok):
         """Pad .. Pad003 with Pad003 shown and "Show final result" on: the edit of Pad001 shows
-        Pad001 itself; Pad003 deleted, OK or Cancel: the Tip, Pad002, is shown (ops#218 A, PR 193
-        review: the edited feature counted as the Body's shown feature)."""
+        Pad001 itself; Pad003's Delete refused (ops#640: it was deleted, and the Tip, Pad002,
+        shown: ops#218 A, PR 193 review), OK or Cancel: Pad003, still the Tip, is shown, not the
+        edited feature."""
         group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
         had = group.GetBool("ShowFinal", False)
         group.SetBool("ShowFinal", True)
@@ -467,15 +481,15 @@ class TestTreeItemsGui(unittest.TestCase):
             Gui.getDocument(self.doc.Name).setEdit(pad2.Name)
             self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
             pump()
-            self.delete(pad4)
-            self.assertNotIn("Pad003", [o.Name for o in self.doc.Objects])
+            self.deleteRefused(pad4)
             button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
             taskButton(button).click()
             self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the panel stays")
             pump()
-            self.assertEqual(self.body.Tip, pad3)
-            self.assertShown(pad3)
+            self.assertEqual(self.body.Tip, pad4)
+            self.assertShown(pad4)
             self.assertFalse(pad2.Visibility, "the edited feature is shown instead of the Tip")
+            self.assertFalse(pad3.Visibility)
             self.assertFalse(self.pad.Visibility)
         finally:
             group.SetBool("ShowFinal", had)

@@ -66,6 +66,9 @@ public:
     void onChanged(const App::Property* prop) override;
 
     Gui::ViewProvider* startEditing(int ModNum) override;
+    /// FreeCAD-CH (ops#640): a feature dialog (the default edit) holds one undo step until its
+    /// OK or Cancel, as in Onshape: Gui::Document locks the step while it is open
+    bool editHoldsOneStep(int ModNum) const override;
 
     void setTipIcon(bool onoff);
 

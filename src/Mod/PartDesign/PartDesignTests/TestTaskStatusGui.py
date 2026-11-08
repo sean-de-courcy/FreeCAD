@@ -360,28 +360,67 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertTrue(hidden, f"the label showed {looked:.3f} s after the second failure")
         self.assertTrue(waitFor(banner.isVisible), "the error isn't shown")
 
-    def testLabelFollowsUndoAndRedo(self):
-        """The edited feature failing in a transaction of its own: after undo (and a recompute)
-        the label is gone, after redo (and a recompute) it is back. Undo and redo alone change
-        no status bit, only the recompute does, so this checks the label against the document,
-        not the undo and redo signals (which Python can't isolate)."""
+    def testLabelStaysThroughARefusedUndo(self):
+        """The edited feature failing in its panel, then the App document's undo and redo with
+        the panel open (a script's doc.undo()): both refused (ops#640, the step lock: they would
+        undo the steps before the dialog), so the feature still fails and the label still shows
+        its error; Cancel takes the failure back. Ctrl+Z in the dialog, its own history, is
+        testLabelFollowsTheDialogUndo. (Before the step lock the failure was a transaction of its
+        own under the panel, and the label followed its undo and redo.)"""
         pad = self.plate()
         self.edit(pad)
         banner = self.banner()
-        self.doc.openTransaction("Fail")
         pad.Type = "UpToLast"
-        self.doc.commitTransaction()
         self.doc.recompute()
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)
 
-        self.doc.undo()
+        self.assertFalse(self.doc.undo(), "the document's undo ran under the panel")
         self.doc.recompute()
-        self.assertNotIn("Invalid", pad.State)
-        self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays after undo")
-        self.assertEqual(banner.text(), "")
+        self.assertEqual(pad.Type, "UpToLast")
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+        self.assertFalse(self.doc.redo(), "the document's redo ran under the panel")
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
 
-        self.doc.redo()
+        cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
+        self.assertIsNotNone(cancel, "no Cancel button")
+        cancel.click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
         self.doc.recompute()
+        self.assertEqual(pad.Type, "Length")
+        self.assertNotIn("Invalid", pad.State)
+
+    def testLabelFollowsTheDialogUndo(self):
+        """The edited feature failing in its panel (To last, nothing to reach), then Std_Undo, the
+        dialog's own undo (ops#640, hands-on R1): the type is back at Dimension in the open
+        dialog, the feature computes and the rebuilt panel shows no error; Std_Redo fails it
+        again and the label shows the error."""
+        pad = self.plate()
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        self.edit(pad)
+        pad.Type = "UpToLast"
+        self.doc.recompute()
+        pump(0.1)
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+
+        self.assertTrue(Gui.Command.get("Std_Undo").isActive(), "no edit in the dialog's history")
+        Gui.runCommand("Std_Undo")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertEqual(pad.Type, "Length")
+        self.assertNotIn("Invalid", pad.State)
+        self.assertTrue(
+            waitFor(lambda: not any(b.isVisible() for b in statusBanners())),
+            "the error stays after the dialog's undo",
+        )
+
+        self.assertTrue(Gui.Command.get("Std_Redo").isActive())
+        Gui.runCommand("Std_Redo")
+        pump(0.3)
+        self.assertEqual(pad.Type, "UpToLast")
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)

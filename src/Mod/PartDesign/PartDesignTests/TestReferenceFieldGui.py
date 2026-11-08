@@ -1189,9 +1189,11 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     # -- T20: document undo during the edit ------------------------------------------------------
 
-    def testDocumentUndoRefreshesTheField(self):
-        """T20: a pick, then the document's undo with the dialog open: the field shows Base as
-        the undo left it."""
+    def testDocumentUndoInTheDialogTakesThePickBack(self):
+        """T20, since ops#640 (hands-on R1, R1b: an open dialog has its own undo history, never
+        past its start): a pick, then Std_Undo with the dialog open: the dialog's history takes
+        the pick back, Base and the field (the panels read again) follow, and the dialog stays;
+        a second Std_Undo is inactive (the dialog's start); Std_Redo brings the pick back."""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         [second] = BOTTOM_BACK.one(box.Shape)
@@ -1201,9 +1203,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, second)
         self.assertEqual(texts(field), [first, second])
 
+        self.assertTrue(Gui.Command.get("Std_Undo").isActive(), "Std_Undo inactive in the dialog")
         Gui.runCommand("Std_Undo")
-        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
-        self.assertTrue(waitFor(lambda: texts(field) == [first]), texts(field))
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertEqual(fillet.Base[1], [first])
+        [field] = fields()
+        self.assertEqual(texts(field), [first])
+        self.assertFalse(Gui.Command.get("Std_Undo").isActive(), "Std_Undo past the dialog's start")
+        Gui.runCommand("Std_Redo")
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [first, second])
+        [field] = fields()
+        self.assertEqual(texts(field), [first, second])
 
     # -- PR 140 review round ------------------------------------------------------------------------
 
@@ -1286,9 +1298,12 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(len(fillet.Base[1]), 2)
         self.assertEqual(fillet.Base[1][1], topBack)
 
-    def testDocumentUndoEndsTheFieldUndo(self):
-        """Review 3: two picks, then the document's undo: Base is back to the one edge, and the
-        field's Ctrl+Z has nothing left to write back."""
+    def testDocumentUndoStepsBackOnePickAtATime(self):
+        """Review 3, since ops#640 (hands-on R1b: the dialog's history steps its edits one by
+        one): two picks, then Std_Undo with the dialog open takes the last one back only, a
+        second the first one, and the field follows each time; the field's own Ctrl+Z (focus in
+        the field) still steps back a pick made after them. (Before the step lock the document's
+        undo took both back at once.)"""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         [second] = BOTTOM_BACK.one(box.Shape)
@@ -1299,11 +1314,23 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, second)
         self.pick(box, third)
         Gui.runCommand("Std_Undo")
-        self.assertTrue(waitFor(lambda: texts(field) == [first]), texts(field))
-        self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [first, second])
+        [field] = fields()
+        self.assertEqual(texts(field), [first, second])
+        Gui.runCommand("Std_Undo")
         pump(0.3)
         self.assertEqual(fillet.Base[1], [first])
+        [field] = fields()
+        self.assertEqual(texts(field), [first])
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+
+        self.arm(field, byFocus=False)
+        self.pick(box, third)
+        self.assertEqual(fillet.Base[1], [first, third])
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
         self.assertEqual(texts(field), [first])
 
     def testAddAllEdgesShowsThemAndUndoes(self):
@@ -1343,10 +1370,13 @@ class TestReferenceFieldGui(unittest.TestCase):
         useAll.setChecked(False)
         self.assertTrue(waitFor(lambda: self.listedRows() is None), self.listedRows())
 
-    def testHiddenPanelComesBackOnRefresh(self):
+    def testHiddenPanelComesBackAfterTheUndo(self):
         """Review 6: the second pad with its direction's guess accepted: only the up-to-face is
-        left, in its field, so no References panel. The document's undo takes the acceptance
-        back: the panel comes back with the direction."""
+        left, in its field, so no References panel. Std_Undo with the dialog open, which has no
+        edit, does nothing (ops#640: never past the dialog's start), and the panel stays away; after
+        Cancel the undo takes
+        the acceptance back, and the dialog opened again lists the direction. (Before, the undo
+        ran under the dialog and the panel came back on its refresh.)"""
         pad, second = self.redrawnSecondPad()
         self.doc.openTransaction("Accept")
         App.acceptReference(second, "ReferenceAxis", 0)
@@ -1357,7 +1387,14 @@ class TestReferenceFieldGui(unittest.TestCase):
         [profile, field] = self.edit(second, count=2)
         self.assertIsNone(self.listedRows())
         Gui.runCommand("Std_Undo")
+        pump(0.3)
+        self.assertIsNone(self.listedRows())
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.assertTrue(waitFor(lambda: not fields(), 3.0), "the closed dialog's fields stay")
+        self.assertTrue(self.doc.undo(), "nothing to undo")
         self.doc.recompute()
+        self.edit(second, count=2)
         self.assertTrue(waitFor(lambda: self.listedRows() == ["ReferenceAxis[0]"]), self.listedRows())
 
     # -- ops#162 B1, B3; the other dress-up panels -------------------------------------------------

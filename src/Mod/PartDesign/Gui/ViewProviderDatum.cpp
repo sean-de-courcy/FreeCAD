@@ -310,7 +310,12 @@ bool ViewProviderDatum::doubleClicked()
 
     std::string Msg("Edit ");
     Msg += this->pcObject->Label.getValue();
-    getDocument()->openCommand(Msg.c_str());
+    // FreeCAD-CH (ops#640): 0 under the step lock means a feature dialog stayed open (its
+    // accept failed and showed why): stop, or setEdit would try the accept a second time
+    if (getDocument()->openCommand(Msg.c_str()) == 0
+        && getDocument()->getDocument()->isStepLocked()) {
+        return true;
+    }
 
     Part::Datum* pcDatum = getObject<Part::Datum>();
     PartDesign::Body* activeBody = activeView->getActiveObject<PartDesign::Body*>(PDBODYKEY);
