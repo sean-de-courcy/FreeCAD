@@ -25,6 +25,7 @@
 
 
 #include <algorithm>
+#include <cstring>
 
 #include <QAction>
 #include <QLabel>
@@ -132,7 +133,9 @@ ReferenceField* TaskDraftParameters::createSingleField(QWidget* placeholder,
     options.target = [this]() -> App::DocumentObject* {
         return getBase();
     };
-    options.required = false;
+    // The neutral plane must be picked (the draft fails without one): red while empty, and armed
+    // when the dialog opens on a draft with faces and no plane, as Onshape arms it (rank 17)
+    options.required = std::strcmp(property, "NeutralPlane") == 0;
     options.label = label;
     options.kinds = kinds;
     // Another body's element through the copy or cross-reference question, as before
