@@ -1119,39 +1119,47 @@ class TestOperations(unittest.TestCase):
         self.assertAlmostEqual(body.Shape.Volume, 21000, places=3)
         self.assertValid()
 
-    def mirroredBoss(self, onDatum=None):
+    def mirroredBoss(self, onDatum=None, datumFirst=False):
         """J17's variant B: Part1 40 x 30 x 10 over x -20..20 (12000); a boss 8 x 8 x 5 on its top
         at (-10, 15) (320), its sketch on that face; Mirrored of the boss about the Right plane, or
-        about a datum plane: onDatum "origin" (on the Right plane) or "face" (on Part1's +x side,
-        offset 20 back to x = 0). Returns (body, base, boss sketch, boss, mirror, datum or None);
-        the part is 12640."""
+        about a datum plane: onDatum "origin" (on the Right plane), "face" (on Part1's +x side,
+        offset 20 back to x = 0) or "boss" (the same face picked on the boss's result, which is
+        Part1's material: review R9-1); with datumFirst the plane is made before the boss (R9-4).
+        Returns (body, base, boss sketch, boss, mirror, datum or None); the part is 12640."""
         body = self.doc.addObject("PartDesign::Body", "Part1")
         base = pad(body, "Base", sketch(body, "BaseSk", xyPlane(body), (-20, 0, 20, 30)), 10)
         self.doc.recompute()
+        right = body.Origin.OriginFeatures[5]
+        self.assertEqual(right.Role, "YZ_Plane")
+        boss = None
+
+        def makeDatum():
+            datum = body.newObject("PartDesign::Plane", "DatumPlane")
+            if onDatum == "origin":
+                datum.AttachmentSupport = [(right, "")]
+            else:
+                support = boss if onDatum == "boss" else base
+                [side] = [
+                    f"Face{i}"
+                    for i, face in enumerate(support.Shape.Faces, 1)
+                    if abs(face.normalAt(0, 0).x - 1) < 1e-9 and abs(face.CenterOfMass.x - 20) < 1e-6
+                ]
+                datum.AttachmentSupport = [(support, side)]
+                datum.AttachmentOffset = App.Placement(V(0, 0, -20), App.Rotation())
+            datum.MapMode = "FlatFace"
+            self.doc.recompute()
+            self.assertLess(abs(datum.Placement.Base.x), 1e-6)
+            return datum
+
+        datum = makeDatum() if onDatum and datumFirst else None
         bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
         bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
         bossSk.MapMode = "FlatFace"
         rect(bossSk, -14, 11, -6, 19)
         boss = pad(body, "Boss", bossSk, 5)
         self.doc.recompute()
-        right = body.Origin.OriginFeatures[5]
-        self.assertEqual(right.Role, "YZ_Plane")
-        datum = None
-        if onDatum:
-            datum = body.newObject("PartDesign::Plane", "DatumPlane")
-            if onDatum == "origin":
-                datum.AttachmentSupport = [(right, "")]
-            else:
-                [side] = [
-                    f"Face{i}"
-                    for i, face in enumerate(base.Shape.Faces, 1)
-                    if abs(face.normalAt(0, 0).x - 1) < 1e-9 and abs(face.CenterOfMass.x - 20) < 1e-6
-                ]
-                datum.AttachmentSupport = [(base, side)]
-                datum.AttachmentOffset = App.Placement(V(0, 0, -20), App.Rotation())
-            datum.MapMode = "FlatFace"
-            self.doc.recompute()
-            self.assertLess(abs(datum.Placement.Base.x), 1e-6)
+        if onDatum and not datumFirst:
+            datum = makeDatum()
         mirror = body.newObject("PartDesign::Mirrored", "Mirrored")
         mirror.Originals = [boss]
         mirror.MirrorPlane = (datum or right, [""])
@@ -1225,6 +1233,96 @@ class TestOperations(unittest.TestCase):
         )
         self.assertIs(datum.AttachmentSupport[0][0], body.Origin.OriginFeatures[5])
         self.assertAlmostEqual(body.Shape.Volume, 12640, places=3)
+        self.assertValid()
+
+    def testNewPartTakesADatumMadeFirstAlong(self):
+        """Review R9-4: the datum plane on the Right plane made before the boss (the usual order:
+        the plane, then the Mirror), used only by the mirror: New part takes it along, before the
+        boss's sketch as in Part1 (640; Part1 12000). Add takes them back in that order, and the
+        saved history follows the part's order (R9-5)."""
+        body, base, bossSk, boss, mirror, datum = self.mirroredBoss("origin", datumFirst=True)
+        self.assertEqual(
+            [o.Name for o in body.Group][2:], ["DatumPlane", "BossSk", "Boss", "Mirrored"]
+        )
+        self.assertEqual(PartDesign.newPartRefusal(boss), "")
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        self.assertEqual(part.Group, [datum, bossSk, boss, mirror])
+        self.assertIs(datum.AttachmentSupport[0][0], part.Origin.OriginFeatures[5])
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        self.assertAlmostEqual(body.Shape.Volume, 12000, places=3)
+        self.assertValid()
+        PartDesign.addToPart(boss, body)
+        self.doc.recompute()
+        self.assertEqual(
+            [o.Name for o in body.Group],
+            ["BaseSk", "Base", "DatumPlane", "BossSk", "Boss", "Mirrored"],
+        )
+        self.assertAlmostEqual(body.Shape.Volume, 12640, places=3)
+        self.assertValid()
+
+    def testNewPartKeepsADatumOnTheBossFace(self):
+        """Review R9-1: the datum plane on the +x side face picked on the boss's result, which is
+        Part1's material (the boss was its Tip): it can't go along, and it uses the boss, so New
+        part is refused as before round 9."""
+        body, base, bossSk, boss, mirror, datum = self.mirroredBoss("boss")
+        self.assertIs(datum.AttachmentSupport[0][0], boss)
+        self.assertEqual(
+            PartDesign.newPartRefusal(boss), "'DatumPlane' uses 'Boss', which would go to the new part"
+        )
+
+    def testAddToPartRefusesWhatWouldActOnTheTarget(self):
+        """Reviews R9-2 and R9-3: in the new part, the mirror switched to the whole shape would
+        mirror Part1 too once merged, and a pocket through the boss would cut Part1 too: Add to
+        part refuses each, naming it, and nothing changes."""
+        body, base, bossSk, boss, mirror, datum = self.mirroredBoss()
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        mirror.TransformMode = "Whole shape"
+        self.doc.recompute()
+        self.assertIn("'Mirrored' copies the whole of", PartDesign.addToPartRefusal(boss, body))
+        mirror.TransformMode = "Features"
+        self.doc.recompute()
+        self.assertEqual(PartDesign.addToPartRefusal(boss, body), "")
+        holeSk = sketch(part, "HoleSk", xyPlane(part), (-11, 14, -9, 16))
+        hole = part.newObject("PartDesign::Pocket", "Pocket")
+        hole.Profile = holeSk
+        hole.Type = "ThroughAll"
+        hole.Midplane = True
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        self.assertAlmostEqual(part.Shape.Volume, 640 - 4 * 5, places=3)
+        names = sorted(o.Name for o in self.doc.Objects)
+        self.assertEqual(PartDesign.addToPartRefusal(boss, body), "'Pocket' would cut 'Part1' too")
+        with self.assertRaises(ValueError):
+            PartDesign.addToPart(boss, body)
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+
+    def testAddToPartRanksTheHistoryAsThePartHoldsIt(self):
+        """Review R9-5: the lid sketch drawn, then a corner cut, then the lid pad on the cut; New
+        part, then Add: the sketch now follows the cut in the enclosure, and its saved history rank
+        does too."""
+        body = self.enclosure()
+        cornerSk = sketch(body, "CornerSk", xyPlane(body), (35, 35, 40, 40))
+        corner = body.newObject("PartDesign::Pocket", "Corner")
+        corner.Profile = cornerSk
+        corner.Type = "ThroughAll"
+        corner.Reversed = True
+        self.doc.recompute()
+        lid = pad(body, "Lid", self.lidSk, 5)
+        self.doc.recompute()
+        self.assertEqual(
+            [o.Name for o in body.Group], ["BaseSk", "Base", "LidSk", "CornerSk", "Corner", "Lid"]
+        )
+        PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+        PartDesign.addToPart(lid, body)
+        self.doc.recompute()
+        self.assertEqual(
+            [o.Name for o in body.Group], ["BaseSk", "Base", "CornerSk", "Corner", "LidSk", "Lid"]
+        )
+        self.assertGreater(self.lidSk.HistoryRank, corner.HistoryRank)
+        self.assertLess(self.lidSk.HistoryRank, lid.HistoryRank)
         self.assertValid()
 
     def testNewPartKeepsADatumOnWhatStays(self):

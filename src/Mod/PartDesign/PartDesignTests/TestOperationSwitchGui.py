@@ -111,35 +111,48 @@ class OperationSwitchCase(ResultBoxGuiCase):
         note = self.visible(QtWidgets.QLabel, "refusalNote")
         return note.text() if note is not None else None
 
-    def mirroredBoss(self, onDatum=None):
+    def mirroredBoss(self, onDatum=None, datumFirst=False):
         """J17's variant B: Part1 40 x 30 x 10 over x -20..20 (12000); BossB 8 x 8 x 5 on its top
         at (-10, 15) (320), its sketch on that face; Mirrored of it about the Right plane, or about
-        a datum plane: onDatum "origin" (on the Right plane) or "face" (on Part1's +x side, offset
-        20 back to x = 0). Returns (boss sketch, boss, mirror, datum or None); Part1 is 12640."""
+        a datum plane: onDatum "origin" (on the Right plane), "face" (on Part1's +x side, offset
+        20 back to x = 0) or "boss" (the same face picked on the boss's result, which is Part1's
+        material: review R9-1); with datumFirst the plane is made before the boss. Returns (boss
+        sketch, boss, mirror, datum or None); Part1 is 12640."""
         body = self.doc.addObject("PartDesign::Body", "Part1")
         base = pad(body, "Base", sketch(body, "BaseSk", xyPlane(body), (-20, 0, 20, 30)), 10)
         self.doc.recompute()
+        boss = None
+        right = body.Origin.OriginFeatures[5]
+        datum = None
+
+        def makeDatum():
+            datum = body.newObject("PartDesign::Plane", "DatumPlane")
+            if onDatum == "origin":
+                datum.AttachmentSupport = [(right, "")]
+            else:
+                support = boss if onDatum == "boss" else base
+                [side] = [
+                    f"Face{i}"
+                    for i, face in enumerate(support.Shape.Faces, 1)
+                    if abs(face.normalAt(0, 0).x - 1) < 1e-9 and abs(face.CenterOfMass.x - 20) < 1e-6
+                ]
+                datum.AttachmentSupport = [(support, side)]
+                datum.AttachmentOffset = App.Placement(App.Vector(0, 0, -20), App.Rotation())
+            datum.MapMode = "FlatFace"
+            self.doc.recompute()
+            self.assertLess(abs(datum.Placement.Base.x), 1e-6)
+            return datum
+
+        if onDatum and datumFirst:
+            datum = makeDatum()
         bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
         bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
         bossSk.MapMode = "FlatFace"
         rect(bossSk, -14, 11, -6, 19)
         boss = pad(body, "BossB", bossSk, 5)
         self.doc.recompute()
-        right = body.Origin.OriginFeatures[5]
-        datum = None
-        if onDatum:
-            datum = body.newObject("PartDesign::Plane", "DatumPlane")
-            if onDatum == "origin":
-                datum.AttachmentSupport = [(right, "")]
-            else:
-                [side] = [
-                    f"Face{i}"
-                    for i, face in enumerate(base.Shape.Faces, 1)
-                    if abs(face.normalAt(0, 0).x - 1) < 1e-9 and abs(face.CenterOfMass.x - 20) < 1e-6
-                ]
-                datum.AttachmentSupport = [(base, side)]
-                datum.AttachmentOffset = App.Placement(App.Vector(0, 0, -20), App.Rotation())
-            datum.MapMode = "FlatFace"
+        if onDatum and not datumFirst:
+            datum = makeDatum()
         mirror = body.newObject("PartDesign::Mirrored", "Mirrored")
         mirror.Originals = [boss]
         mirror.MirrorPlane = (datum or right, [""])
@@ -388,6 +401,16 @@ class TestOperationSwitchGui(OperationSwitchCase):
         self.assertIs(datum.AttachmentSupport[0][0], part.Origin.OriginFeatures[5])
         self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 12000, places=3)
+
+    def testADatumOnTheBossFaceKeepsTheRefusalShown(self):
+        """Review R9-1: the datum plane on the +x side face picked on the boss's result (Part1's
+        material): New greyed, the line under the Result row saying why."""
+        bossSk, boss, mirror, datum = self.mirroredBoss("boss")
+        self.assertIs(datum.AttachmentSupport[0][0], boss)
+        self.openEdit(boss)
+        why = "'DatumPlane' uses 'BossB', which would go to the new part"
+        self.assertRefused("New", why)
+        self.assertEqual(self.refusalNote(), "Can't switch to New: " + why)
 
     def testADatumOnWhatStaysKeepsTheRefusalShown(self):
         """J17's refusal, kept and now shown: the mirror about a datum plane on Part1's side face,

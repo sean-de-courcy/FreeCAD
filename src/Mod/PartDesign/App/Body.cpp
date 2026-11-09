@@ -641,6 +641,22 @@ AddToPartPlan planAddToPart(const App::DocumentObject* feature, const Body* body
                 + "; merge the part instead"
             );
         }
+        // What would act on the target's material once merged, where it acted on the part's own
+        // (review R9-2, R9-3): a pattern of the whole shape would copy the target too, a cut after
+        // the feature would cut it too. Onshape's scope for them would differ: refused
+        if (auto pattern = freecad_cast<Transformed*>(obj);
+            pattern
+            && static_cast<Transformed::Mode>(pattern->TransformMode.getValue())
+                == Transformed::Mode::WholeShape) {
+            return refuse(
+                quotedLabel(obj) + " copies the whole of " + quotedLabel(body) + ", so it would copy "
+                + quotedLabel(target) + " too"
+            );
+        }
+        if (auto cut = freecad_cast<FeatureAddSub*>(obj); cut && obj != feature
+            && cut->getBooleanOperation() != FeatureAddSub::BooleanOperation::Union) {
+            return refuse(quotedLabel(obj) + " would cut " + quotedLabel(target) + " too");
+        }
         for (App::DocumentObject* user : usersOf(obj)) {
             if (user == body || moves(user)) {
                 continue;
@@ -976,15 +992,40 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
         return touches(shape, tool);
     };
 
-    // FreeCAD-CH (ops#640 round 9, J17): a datum plane, line or point of the Body that only what
-    // goes uses goes along, where its own attachment can go: on the origin (insertObject relinks
-    // it), on what goes, or on nothing. Onshape's plane is the studio's, so it never holds the
-    // switch; here it moves with its users. Taken tentatively, in order: one that something
-    // staying uses stays after all, and what goes may then not use it (the refusal as before)
+    // FreeCAD-CH (ops#640 round 9, J17): a datum plane, line or point of the Body, before the
+    // feature or after it, that only what goes uses goes along, when its attachment links nothing
+    // but the origin (insertObject relinks it) or another datum that goes. Not one on a feature's
+    // elements, even one that goes (review R9-1: a face of the moving feature's result may be the
+    // rest of the part's material, gone from the new part). Onshape's plane is the studio's, so it
+    // never holds the switch; here it moves with its users. Taken tentatively, in order: one that
+    // something staying uses stays after all, and what follows the feature may then not use it
+    // (the refusal as before; the feature and its sketch keep it across parts, as before)
     std::vector<App::DocumentObject*> tentative;
     auto isTentative = [&](const App::DocumentObject* obj) {
         return std::ranges::find(tentative, obj) != tentative.end();
     };
+    auto datumMayGo = [&](App::DocumentObject* obj) {
+        if (!PartDesign::Feature::isDatum(obj)) {
+            return false;
+        }
+        const std::vector<App::DocumentObject*> users = usersOf(obj);
+        const bool usedInside = std::ranges::any_of(users, [&](const App::DocumentObject* user) {
+            return user != body;
+        }) && std::ranges::all_of(users, [&](const App::DocumentObject* user) {
+            return user == body || body->hasObject(user);
+        });
+        const std::vector<App::DocumentObject*> links = linksOf(obj);
+        return usedInside && std::ranges::all_of(links, [&](const App::DocumentObject* link) {
+            return isOrigin(link) || isTentative(link);
+        });
+    };
+    // Those before the feature (review R9-4: the plane made first, then the Mirror)
+    for (auto it = group.begin(); it != here; ++it) {
+        if (datumMayGo(*it)) {
+            moved.push_back(*it);
+            tentative.push_back(*it);
+        }
+    }
     std::function<std::string(App::DocumentObject*)> keepDatum;
     keepDatum = [&](App::DocumentObject* datum) -> std::string {
         std::erase(moved, datum);
@@ -1001,7 +1042,8 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
         }
         for (App::DocumentObject* obj : moved) {
             const std::vector<App::DocumentObject*> links = linksOf(obj);
-            if (std::ranges::find(links, datum) != links.end()) {
+            if (obj != feature && obj != profile && !isTentative(obj)
+                && std::ranges::find(links, datum) != links.end()) {
                 return quotedLabel(obj) + " uses " + quotedLabel(datum) + ", which stays in "
                     + quotedLabel(body);
             }
@@ -1011,22 +1053,10 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
 
     for (App::DocumentObject* obj : later) {
         bool go = false;
-        if (PartDesign::Feature::isDatum(obj)) {
-            const std::vector<App::DocumentObject*> users = usersOf(obj);
-            const bool usedInside = std::ranges::any_of(users, [&](const App::DocumentObject* user) {
-                return user != body;
-            }) && std::ranges::all_of(users, [&](const App::DocumentObject* user) {
-                return user == body || isLater(user);
-            });
-            const std::vector<App::DocumentObject*> links = linksOf(obj);
-            const bool canGo = std::ranges::all_of(links, [&](const App::DocumentObject* link) {
-                return isOrigin(link) || goes(link);
-            });
-            if (usedInside && canGo) {
-                moved.push_back(obj);
-                tentative.push_back(obj);
-                continue;
-            }
+        if (datumMayGo(obj)) {
+            moved.push_back(obj);
+            tentative.push_back(obj);
+            continue;
         }
         if (Body::isSolidFeature(obj)) {
             if (auto dressUp = freecad_cast<DressUp*>(obj)) {
@@ -1159,25 +1189,6 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
             moved.push_back(obj);
         }
     }
-    // A datum that nothing that goes uses stays (again after each: one that only a datum taken
-    // back used is taken back too)
-    for (bool kept = true; kept;) {
-        kept = false;
-        for (App::DocumentObject* datum : tentative) {
-            const std::vector<App::DocumentObject*> users = usersOf(datum);
-            if (std::ranges::none_of(users, [&](const App::DocumentObject* user) {
-                    return user != body && goes(user);
-                })) {
-                if (std::string why = keepDatum(datum); !why.empty()) {
-                    plan.refusal = why;
-                    return plan;
-                }
-                kept = true;
-                break;
-            }
-        }
-    }
-
     // Nothing outside the Body uses what goes: the feature's siblings (a cut through other parts,
     // dropped by the switch) aside
     for (App::DocumentObject* obj : moved) {
@@ -1214,6 +1225,31 @@ NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
             }
         }
     }
+    // A datum goes only when everything that uses it goes (again after each: one that only a
+    // datum taken back used is taken back too)
+    for (bool kept = true; kept;) {
+        kept = false;
+        for (App::DocumentObject* datum : tentative) {
+            const std::vector<App::DocumentObject*> users = usersOf(datum);
+            if (!std::ranges::all_of(users, [&](const App::DocumentObject* user) {
+                    return user == body || goes(user);
+                })) {
+                if (std::string why = keepDatum(datum); !why.empty()) {
+                    plan.refusal = why;
+                    return plan;
+                }
+                kept = true;
+                break;
+            }
+        }
+    }
+    // In the Body's order: a datum before the feature keeps its place before it
+    auto place = [&group](const App::DocumentObject* obj) {
+        return std::ranges::find(group, obj) - group.begin();
+    };
+    std::ranges::stable_sort(moved, [&](const App::DocumentObject* one, const App::DocumentObject* two) {
+        return place(one) < place(two);
+    });
     plan.moved = moved;
     return plan;
 }
@@ -1369,7 +1405,32 @@ Body* Body::addToPart(App::DocumentObject* feature, Body* target)
             }
         }
     }
-    saveHistoryOrder(plan.sequence);
+    // The history as the target now holds them (review R9-5): the moved members together at the
+    // feature's place, so a member before it (its sketch, drawn before the target's rows) isn't
+    // ranked before the rows it now follows
+    std::vector<App::DocumentObject*> order;
+    std::vector<App::DocumentObject*> block;
+    std::size_t at = 0;
+    bool seen = false;
+    for (App::DocumentObject* obj : plan.sequence) {
+        if (obj == feature) {
+            at = order.size();
+            seen = true;
+        }
+        if (std::ranges::find(plan.moved, obj) == plan.moved.end()) {
+            order.push_back(obj);
+        }
+    }
+    for (App::DocumentObject* obj : plan.moved) {
+        if (std::ranges::find(plan.sequence, obj) != plan.sequence.end()) {
+            block.push_back(obj);
+        }
+    }
+    if (!seen) {
+        at = order.size();
+    }
+    order.insert(order.begin() + static_cast<std::ptrdiff_t>(at), block.begin(), block.end());
+    saveHistoryOrder(order);
     // The Body it left is empty now: it goes, with its origin
     doc->removeObject(body->getNameInDocument());
     return target;
