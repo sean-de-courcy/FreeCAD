@@ -503,6 +503,28 @@ class TestNewPart(unittest.TestCase):
                 self.assertGreater(face.BoundBox.ZMin, 14 - 1e-6)
                 self.assertLess(face.BoundBox.ZMax, 15 + 1e-6)
 
+    def testAFilletedNewPartGoesBack(self):
+        """J8's change of mind: the boss with its fillet made a new part (2000 - FILLET), then
+        added back (round 9): the enclosure holds the sketch, the boss and the fillet where they
+        were, the fillet its Tip on the boss, still on the boss's top edges (16000 + 2000 -
+        FILLET); the new part is gone."""
+        body, base, bossSk, boss, fillet = self.bossWithFillet()
+        group = body.Group
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        partName = part.Name
+        self.assertEqual(PartDesign.addToPartRefusal(boss, body), "")
+        PartDesign.addToPart(boss, body)
+        self.doc.recompute()
+        self.assertEqual(body.Group, group)
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertIs(body.Tip, fillet)
+        self.assertIs(boss.BaseFeature, base)
+        self.assertIs(fillet.BaseFeature, boss)
+        self.assertIs(fillet.Base[0], boss)
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(body.Shape.Volume, 16000 + 2000 - self.FILLET, places=3)
+
     def testNewPartLeavesAChamferOnTheRest(self):
         """Review R5-2 (b): a chamfer of 1 mm on the enclosure's bottom edges right after the boss
         (its Base the boss): none of its edges touches the boss, so it stays with the enclosure,
@@ -1012,9 +1034,9 @@ class TestOperations(unittest.TestCase):
 
     def testAddToPartRefusesWhatItCantTakeBack(self):
         """Refused, with nothing changed: a target in another studio, a rolled-back target, a
-        part holding a second member (a sketch of its own), a feature something else uses (a
-        sketch on the lid's top, and a pad on it: the refusal names a user, "'TopSk' uses 'Lid'"
-        or the pad's)."""
+        member something outside the part uses (a binder of the lid in the enclosure: "'Binder'
+        uses 'Lid'"), a member of the target between the lid and what builds on it in the
+        history (round 9: the move would put it before)."""
         body = self.enclosure()
         lid = pad(body, "Lid", self.lidSk, 5)
         self.doc.recompute()
@@ -1037,18 +1059,194 @@ class TestOperations(unittest.TestCase):
         body.Tip = None
         assertRefused(body)
         body.Tip = self.base
-        looseSk = sketch(part, "LooseSk", xyPlane(part), (0, 0, 5, 5))
+        binder = body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(lid, ("",))]
         self.doc.recompute()
-        assertRefused(body, "holds more than this feature")
-        self.doc.removeObject(looseSk.Name)
+        assertRefused(body, "'Binder' uses 'Lid'")
+        body.removeObject(binder)
+        self.doc.removeObject(binder.Name)
+        self.doc.recompute()
+        self.assertEqual(PartDesign.addToPartRefusal(lid, body), "")
+        # a corner cut in the enclosure, then a pad on the lid's top in the new part
+        cornerSk = sketch(body, "CornerSk", xyPlane(body), (35, 35, 40, 40))
+        corner = body.newObject("PartDesign::Pocket", "Corner")
+        corner.Profile = cornerSk
+        corner.Type = "ThroughAll"
+        corner.Reversed = True
+        self.doc.recompute()
         topSk = part.newObject("Sketcher::SketchObject", "TopSk")
         topSk.AttachmentSupport = [(lid, faceAt(lid, 15))]
         topSk.MapMode = "FlatFace"
         rect(topSk, 0, 0, 10, 10)
         top = pad(part, "Top", topSk, 5)
         self.doc.recompute()
-        assertRefused(body, "uses 'Lid'")
+        assertRefused(body, "'TopSk' comes after 'CornerSk' of 'Enclosure' in the history")
         self.assertIs(part.Tip, top)
+
+    def testAddToPartTakesTheRestOfThePart(self):
+        """Round 9 (journeys J8, J17): the new part's other members follow the lid into the
+        enclosure, in order: a loose sketch on the part's own plane (relinked to the enclosure's)
+        and a pad 10 x 10 x 5 on the lid's top, its sketch on that face. The enclosure is
+        16000 + 4500 + 500, the pad its Tip on the lid; the new part is gone."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 5)
+        self.doc.recompute()
+        part = PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+        looseSk = sketch(part, "LooseSk", xyPlane(part), (0, 0, 5, 5))
+        topSk = part.newObject("Sketcher::SketchObject", "TopSk")
+        topSk.AttachmentSupport = [(lid, faceAt(lid, 15))]
+        topSk.MapMode = "FlatFace"
+        rect(topSk, 0, 0, 10, 10)
+        top = pad(part, "Top", topSk, 5)
+        self.doc.recompute()
+        self.assertAlmostEqual(part.Shape.Volume, 5000, places=3)
+        self.assertEqual(PartDesign.addToPartRefusal(lid, body), "")
+        partName = part.Name
+        PartDesign.addToPart(lid, body)
+        self.doc.recompute()
+        self.assertEqual(
+            [o.Name for o in body.Group],
+            ["BaseSk", "Base", "LidSk", "Lid", "LooseSk", "TopSk", "Top"],
+        )
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertIs(body.Tip, top)
+        self.assertIs(top.BaseFeature, lid)
+        self.assertIs(lid.BaseFeature, self.base)
+        self.assertIs(looseSk.AttachmentSupport[0][0], body.Origin.OriginFeatures[3])
+        self.assertTrue(top.Visibility)
+        self.assertFalse(lid.Visibility)
+        self.assertAlmostEqual(body.Shape.Volume, 21000, places=3)
+        self.assertValid()
+
+    def mirroredBoss(self, onDatum=None):
+        """J17's variant B: Part1 40 x 30 x 10 over x -20..20 (12000); a boss 8 x 8 x 5 on its top
+        at (-10, 15) (320), its sketch on that face; Mirrored of the boss about the Right plane, or
+        about a datum plane: onDatum "origin" (on the Right plane) or "face" (on Part1's +x side,
+        offset 20 back to x = 0). Returns (body, base, boss sketch, boss, mirror, datum or None);
+        the part is 12640."""
+        body = self.doc.addObject("PartDesign::Body", "Part1")
+        base = pad(body, "Base", sketch(body, "BaseSk", xyPlane(body), (-20, 0, 20, 30)), 10)
+        self.doc.recompute()
+        bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
+        bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        bossSk.MapMode = "FlatFace"
+        rect(bossSk, -14, 11, -6, 19)
+        boss = pad(body, "Boss", bossSk, 5)
+        self.doc.recompute()
+        right = body.Origin.OriginFeatures[5]
+        self.assertEqual(right.Role, "YZ_Plane")
+        datum = None
+        if onDatum:
+            datum = body.newObject("PartDesign::Plane", "DatumPlane")
+            if onDatum == "origin":
+                datum.AttachmentSupport = [(right, "")]
+            else:
+                [side] = [
+                    f"Face{i}"
+                    for i, face in enumerate(base.Shape.Faces, 1)
+                    if abs(face.normalAt(0, 0).x - 1) < 1e-9 and abs(face.CenterOfMass.x - 20) < 1e-6
+                ]
+                datum.AttachmentSupport = [(base, side)]
+                datum.AttachmentOffset = App.Placement(V(0, 0, -20), App.Rotation())
+            datum.MapMode = "FlatFace"
+            self.doc.recompute()
+            self.assertLess(abs(datum.Placement.Base.x), 1e-6)
+        mirror = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirror.Originals = [boss]
+        mirror.MirrorPlane = (datum or right, [""])
+        body.Tip = mirror
+        self.doc.recompute()
+        self.assertTrue(mirror.isValid(), mirror.getStatusString())
+        self.assertIs(mirror.BaseFeature, boss)
+        self.assertAlmostEqual(body.Shape.Volume, 12640, places=3)
+        return body, base, bossSk, boss, mirror, datum
+
+    def testAddToPartTakesTheMirrorBack(self):
+        """J17's variant B: the boss made a new part takes the mirror along (640); Add to Part1
+        takes both back in one undo step: Part1 is one part again, the mirror merged, 12000 plus
+        both bosses, its plane Part1's own Right plane. Undo: two parts again."""
+        self.doc.UndoMode = 1
+        body, base, bossSk, boss, mirror, datum = self.mirroredBoss()
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        self.assertEqual(part.Group, [bossSk, boss, mirror])
+        self.assertIs(mirror.MirrorPlane[0], part.Origin.OriginFeatures[5])
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        self.assertAlmostEqual(body.Shape.Volume, 12000, places=3)
+        self.assertEqual(PartDesign.addToPartRefusal(boss, body), "")
+        partName = part.Name
+        self.doc.openTransaction("Add")
+        PartDesign.addToPart(boss, body)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual([o.Name for o in body.Group], ["BaseSk", "Base", "BossSk", "Boss", "Mirrored"])
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertIs(body.Tip, mirror)
+        self.assertIs(boss.BaseFeature, base)
+        self.assertIs(mirror.BaseFeature, boss)
+        self.assertIs(mirror.MirrorPlane[0], body.Origin.OriginFeatures[5])
+        self.assertAlmostEqual(body.Shape.Volume, 12640, places=3)
+        self.assertTrue(body.Shape.isInside(V(10, 15, 12), 1e-6, True), "the mirrored boss")
+        self.assertValid()
+        self.doc.undo()
+        self.doc.recompute()
+        part = self.doc.getObject(partName)
+        self.assertIsNotNone(part)
+        self.assertEqual(part.Group, [bossSk, boss, mirror])
+        self.assertEqual([o.Name for o in body.Group], ["BaseSk", "Base"])
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        self.assertAlmostEqual(body.Shape.Volume, 12000, places=3)
+
+    def testNewPartTakesADatumOnTheOriginAlong(self):
+        """Round 9 item 2: the mirror about a datum plane on Part1's Right plane, which only the
+        mirror uses: New part takes the datum along, on the new part's Right plane (640, Part1
+        12000); a second datum on the origin that nothing uses stays. Add takes them back
+        (12640)."""
+        body, base, bossSk, boss, mirror, datum = self.mirroredBoss("origin")
+        unused = body.newObject("PartDesign::Plane", "Unused")
+        unused.AttachmentSupport = [(body.Origin.OriginFeatures[4], "")]
+        unused.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertEqual(PartDesign.newPartRefusal(boss), "")
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        self.assertEqual(part.Group, [bossSk, boss, datum, mirror])
+        self.assertIs(datum.AttachmentSupport[0][0], part.Origin.OriginFeatures[5])
+        self.assertIn(unused, body.Group)
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        self.assertAlmostEqual(body.Shape.Volume, 12000, places=3)
+        self.assertValid()
+        PartDesign.addToPart(boss, body)
+        self.doc.recompute()
+        self.assertEqual(
+            [o.Name for o in body.Group],
+            ["BaseSk", "Base", "BossSk", "Boss", "DatumPlane", "Mirrored", "Unused"],
+        )
+        self.assertIs(datum.AttachmentSupport[0][0], body.Origin.OriginFeatures[5])
+        self.assertAlmostEqual(body.Shape.Volume, 12640, places=3)
+        self.assertValid()
+
+    def testNewPartKeepsADatumOnWhatStays(self):
+        """J17's refusal, kept: a datum plane on Part1's side face (what stays) can't go along, so
+        the mirror about it can't either: "'Mirrored' uses 'DatumPlane', which stays in 'Part1'".
+        A datum on the origin that a sketch staying in Part1 also uses stays too, with the same
+        refusal."""
+        body, base, bossSk, boss, mirror, datum = self.mirroredBoss("face")
+        self.assertEqual(
+            PartDesign.newPartRefusal(boss), "'Mirrored' uses 'DatumPlane', which stays in 'Part1'"
+        )
+        datum.AttachmentSupport = [(body.Origin.OriginFeatures[5], "")]
+        datum.AttachmentOffset = App.Placement()
+        self.doc.recompute()
+        self.assertEqual(PartDesign.newPartRefusal(boss), "")
+        onDatum = body.newObject("Sketcher::SketchObject", "OnDatum")
+        onDatum.AttachmentSupport = [(datum, "")]
+        onDatum.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertEqual(
+            PartDesign.newPartRefusal(boss), "'Mirrored' uses 'DatumPlane', which stays in 'Part1'"
+        )
 
     def lidPart(self):
         """The lid pad, 10 up, made a part of its own (9000; the enclosure 16000)."""

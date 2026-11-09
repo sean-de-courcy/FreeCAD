@@ -1748,27 +1748,47 @@ class TestOperationRefusalGui(ResultBoxGuiCase):
             self.assertFalse(enabled, rows)
             self.assertTrue(tip, rows)
             self.assertIn(why, tip.lower(), rows)
+        # round 9: the reason shows under the row too
+        note = self.visible(QtWidgets.QLabel, "refusalNote")
+        self.assertIsNotNone(note, "no refusal line")
+        text = note.text().lower()
+        self.assertTrue(text.startswith("can't switch to add, remove or intersect: "), text)
+        self.assertIn(why, text)
         self.close(ok=False)
 
     def testANewPartThatSomethingUses(self):
-        """A sketch on the new part's top uses the lid pad: it can't go into the enclosure."""
+        """A binder of the lid pad in the enclosure uses it from outside its part: it can't go into
+        the enclosure (round 9: what uses it inside its part goes along instead)."""
         self.enclosure()
         lid, part = self.newLid()
+        binder = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(lid, ("",))]
+        self.doc.recompute()
+        self.assertAddRowsRefused(lid, "'binder' uses 'lid'")
+
+    def testANewPartWithMoreFeatures(self):
+        """Round 9 (journeys J8, J17): a second sketch in the new part, on its own plane, and a
+        sketch on the lid's top no longer hold the switch: Add, Remove and Intersect are offered,
+        and Add takes both along into the enclosure (25000); the new part goes."""
+        self.enclosure()
+        lid, part = self.newLid()
+        loose = sketch(part, "LooseSk", xyPlane(part), (0, 0, 5, 5))
         topSk = part.newObject("Sketcher::SketchObject", "TopSk")
         topSk.AttachmentSupport = [(lid, faceAt(lid, 20))]
         topSk.MapMode = "FlatFace"
         rect(topSk, 0, 0, 10, 10)
         self.doc.recompute()
-        self.assertAddRowsRefused(lid, "'topsk' uses 'lid'")
-
-    def testANewPartWithMoreFeatures(self):
-        """A second sketch in the new part, on its own plane: the part holds more than the pad
-        and its sketch, so it is merged, not taken apart."""
-        self.enclosure()
-        lid, part = self.newLid()
-        sketch(part, "LooseSk", xyPlane(part), (0, 0, 5, 5))
+        partName = part.Name
+        combo = self.openEdit(lid)
+        self.assertEqual(combo.currentText(), "New")
+        rows = self.rows(combo)
+        self.assertTrue(all(enabled for enabled, tip in rows), rows)
+        self.choose("Add")
+        self.close(ok=True)
         self.doc.recompute()
-        self.assertAddRowsRefused(lid, "merge it instead")
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertEqual(self.body.Group[-4:], [self.lidSk, lid, loose, topSk])
+        self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
 
     def testARolledBackTarget(self):
         """The enclosure rolled back to its base (a corner cut after it): the lid can't go in
