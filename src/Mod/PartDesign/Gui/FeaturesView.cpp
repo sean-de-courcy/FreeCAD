@@ -3,6 +3,7 @@
 #include "FeaturesView.h"
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 #include <TopoDS_Iterator.hxx>
@@ -26,6 +27,7 @@
 #include <QSplitter>
 #include <QStyle>
 #include <QToolButton>
+#include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 
 #include <App/Application.h>
@@ -33,8 +35,10 @@
 #include <App/Document.h>
 #include <App/DocumentTabs.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentObjectGroup.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
+#include <App/Link.h>
 #include <App/Origin.h>
 #include <App/OriginGroupExtension.h>
 #include <App/Part.h>
@@ -193,11 +197,62 @@ bool editingBodySketch()
     return obj && obj->isDerivedFrom<Part::Part2DObject>() && PartDesign::Body::findBodyOf(obj);
 }
 
+/// FreeCAD-CH (ops#640 round 10, gap A27): under the Onshape keymap the Assembly workbench shows
+/// an Assembly tab's list in the Model panel, as Onshape's assembly list
+bool inAssemblyUnderOnshape()
+{
+    auto wb = Gui::WorkbenchManager::instance()->active();
+    return Gui::ForkKeymap::isOnshape() && wb && wb->name() == "AssemblyWorkbench";
+}
+
+/// The assembly of view's tab, when it is an Assembly tab; else null
+App::DocumentObject* assemblyOfView(const Gui::MDIView* view)
+{
+    App::Document* doc = view ? view->getAppDocument() : nullptr;
+    const std::string tab = doc ? Gui::DocumentTabs::tabOfView(view) : std::string();
+    App::DocumentObject* obj = tab.empty() ? nullptr : doc->getObject(tab.c_str());
+    App::DocumentTabs::Kind kind {};
+    if (obj && App::DocumentTabs::isTabObject(obj, &kind) && kind == App::DocumentTabs::Kind::Assembly) {
+        return obj;
+    }
+    return nullptr;
+}
+
+/// An Assembly tab is the active one, in the Assembly workbench under the Onshape keymap
+bool assemblyTabActive()
+{
+    if (!inAssemblyUnderOnshape()) {
+        return false;
+    }
+    auto gdoc = Gui::Application::Instance->activeDocument();
+    return gdoc && assemblyOfView(gdoc->getActiveView());
+}
+
+/// A row of an assembly's Instances: a part, a link or a subassembly in it; not its groups (the
+/// joints, the views, the snapshots...) nor its datums (mate connectors aren't listed yet)
+bool isInstance(const App::DocumentObject* obj)
+{
+    if (obj->isDerivedFrom<App::DocumentObjectGroup>() || obj->isDerivedFrom<App::LocalCoordinateSystem>()
+        || obj->isDerivedFrom<App::DatumElement>()) {
+        return false;
+    }
+    return obj->isDerivedFrom<App::GeoFeature>()
+        || obj->hasExtension(App::LinkBaseExtension::getExtensionClassTypeId());
+}
+
+/// A joint's own Suppressed (a property of the Python joint, not the suppressible extension)
+bool mateSuppressed(const App::DocumentObject* obj)
+{
+    auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName("Suppressed"));
+    return prop && prop->getValue();
+}
+
 /// The lists stay in the Model panel: in PartDesign, and in the workbench a Body's sketch opened
-/// for its edit, as Onshape keeps its Feature list while a sketch is edited (ops#640)
+/// for its edit, as Onshape keeps its Feature list while a sketch is edited (ops#640); and in an
+/// Assembly tab under the Onshape keymap, its list (round 10)
 bool listsBelong()
 {
-    if (inPartDesign()) {
+    if (inPartDesign() || assemblyTabActive()) {
         return true;
     }
     auto wb = Gui::WorkbenchManager::instance()->active();
@@ -889,6 +944,22 @@ FeaturesView::FeaturesView(QWidget* parent)
     layout->setSpacing(0);
     auto splitter = new QSplitter(Qt::Vertical, this);
     layout->addWidget(splitter);
+    lists = splitter;
+    // FreeCAD-CH (ops#640 round 10, gap A27): an Assembly tab's list in place of the two
+    assemblyList = new QTreeWidget(this);
+    assemblyList->setObjectName(QStringLiteral("assemblyList"));
+    assemblyList->setHeaderHidden(true);
+    // The name, and a fixed instance's pin
+    assemblyList->setColumnCount(2);
+    assemblyList->header()->setStretchLastSection(false);
+    assemblyList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    assemblyList->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    assemblyList->setIconSize(QSize(16, 16));
+    assemblyList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    assemblyList->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    assemblyList->setContextMenuPolicy(Qt::CustomContextMenu);
+    assemblyList->hide();
+    layout->addWidget(assemblyList);
 
     auto featuresBox = new QWidget(splitter);
     auto featuresLayout = new QVBoxLayout(featuresBox);
@@ -997,7 +1068,9 @@ FeaturesView::FeaturesView(QWidget* parent)
         toggleRowVisibility(objectOf(item));
     });
     // The hover pre-highlights the row's object in the 3D view (ops#640 rank 33)
-    for (QAbstractItemView* view : {static_cast<QAbstractItemView*>(features), static_cast<QAbstractItemView*>(parts)}) {
+    for (QAbstractItemView* view : {static_cast<QAbstractItemView*>(features),
+                                    static_cast<QAbstractItemView*>(parts),
+                                    static_cast<QAbstractItemView*>(assemblyList)}) {
         view->setMouseTracking(true);
         view->viewport()->setMouseTracking(true);
         view->viewport()->installEventFilter(this);
@@ -1029,6 +1102,20 @@ FeaturesView::FeaturesView(QWidget* parent)
         }
         pushSelection(objs);
     });
+    connect(assemblyList, &QTreeWidget::itemSelectionChanged, this, [this]() {
+        if (syncing) {
+            return;
+        }
+        std::vector<App::DocumentObject*> objs;
+        for (auto item : assemblyList->selectedItems()) {
+            if (auto obj = objectOf(item)) {
+                objs.push_back(obj);
+            }
+        }
+        pushSelection(objs);
+    });
+    connect(assemblyList, &QTreeWidget::itemDoubleClicked, this, &FeaturesView::onAssemblyDoubleClicked);
+    connect(assemblyList, &QTreeWidget::customContextMenuRequested, this, &FeaturesView::onAssemblyMenu);
 
     auto& app = App::GetApplication();
     connections.emplace_back(app.signalNewObject.connect([this](const App::DocumentObject& obj) {
@@ -1099,32 +1186,71 @@ bool FeaturesView::prefersModelTree()
     return App::GetApplication().GetParameterGroupByPath(paramPath)->GetBool("ShowModelTree", false);
 }
 
+void FeaturesView::placeLists()
+{
+    QSplitter* splitter = modelSplitter();
+    if (registered || !splitter) {
+        return;
+    }
+    QWidget* tree = treePanelOf(splitter);
+    int index = tree ? splitter->indexOf(tree) : 0;
+    QList<int> sizes = splitter->sizes();
+    auto view = new FeaturesView();
+    view->setObjectName(QStringLiteral("FeaturesView"));
+    splitter->insertWidget(index, view);
+    registered = view;
+    // The lists take the tree's room
+    if (index < sizes.size()) {
+        sizes.insert(index, sizes[index]);
+        splitter->setSizes(sizes);
+    }
+}
+
 void FeaturesView::enterPartDesign()
 {
     // Deferred: at start-up the window's saved layout is restored after the workbench activates
     QTimer::singleShot(0, []() {
-        if (!inPartDesign()) {
+        if (!inPartDesign() || !modelSplitter()) {
             return;
         }
-        QSplitter* splitter = modelSplitter();
-        if (!splitter) {
-            return;
-        }
-        if (!registered) {
-            QWidget* tree = treePanelOf(splitter);
-            int index = tree ? splitter->indexOf(tree) : 0;
-            QList<int> sizes = splitter->sizes();
-            auto view = new FeaturesView();
-            view->setObjectName(QStringLiteral("FeaturesView"));
-            splitter->insertWidget(index, view);
-            registered = view;
-            // The lists take the tree's room
-            if (index < sizes.size()) {
-                sizes.insert(index, sizes[index]);
-                splitter->setSizes(sizes);
-            }
-        }
+        placeLists();
         showLists(!prefersModelTree());
+    });
+}
+
+void FeaturesView::followTabs()
+{
+    // Not scoped: the module stays loaded as long as the application
+    Gui::Application::Instance->signalActivateWorkbench.connect([](const char*) { followTab(); });
+    Gui::Application::Instance->signalActivateView.connect([](const Gui::MDIView*) { followTab(); });
+}
+
+void FeaturesView::followTab()
+{
+    // Deferred: a tab's switch activates its view, then its workbench, then puts its assembly in
+    // edit (Gui::DocumentTabs)
+    QTimer::singleShot(0, []() {
+        // The rows follow the workbench too: an Assembly tab lists its assembly in the Assembly
+        // workbench only
+        if (registered) {
+            registered->scheduleRebuild();
+        }
+        if (inPartDesign()) {
+            // PartDesign's activation shows its lists
+            return;
+        }
+        if (!assemblyTabActive()) {
+            if (registered && !listsBelong()) {
+                showLists(false);
+            }
+            return;
+        }
+        if (prefersModelTree()) {
+            showLists(false);
+            return;
+        }
+        placeLists();
+        showLists(true);
     });
 }
 
@@ -1141,10 +1267,10 @@ void FeaturesView::toggleModelTree()
 {
     bool tree = !prefersModelTree();
     App::GetApplication().GetParameterGroupByPath(paramPath)->SetBool("ShowModelTree", tree);
-    if (inPartDesign()) {
+    // An Assembly tab's list goes and comes back with the studios' (ops#640 round 10)
+    if (inPartDesign() || assemblyTabActive()) {
         if (!registered && !tree) {
-            enterPartDesign();
-            return;
+            placeLists();
         }
         showLists(!tree);
     }
@@ -1183,13 +1309,16 @@ void FeaturesView::onDeleteDocument(const Gui::Document& gdoc)
         documentConnections.clear();
         documentName.clear();
         studioName.clear();
+        assemblyName.clear();
         syncing = true;
         features->clear();
         parts->clear();
+        assemblyList->clear();
         featureRows.clear();
         partRows.clear();
         featureNames.clear();
         partNames.clear();
+        assemblyRows.clear();
         syncing = false;
     }
 }
@@ -1270,6 +1399,7 @@ void FeaturesView::showEvent(QShowEvent* event)
 void FeaturesView::findStudio()
 {
     studioName.clear();
+    assemblyName.clear();
     auto doc = document();
     if (!doc) {
         return;
@@ -1287,6 +1417,11 @@ void FeaturesView::findStudio()
         if (tabObject && App::DocumentTabs::isTabObject(tabObject, &kind)
             && kind == App::DocumentTabs::Kind::PartStudio) {
             studioName = tab;
+            return;
+        }
+        // FreeCAD-CH (ops#640 round 10): an Assembly tab lists its assembly
+        if (inAssemblyUnderOnshape() && assemblyOfView(view)) {
+            assemblyName = tab;
             return;
         }
         body = view->getActiveObject<PartDesign::Body*>(PDBODYKEY);
@@ -1324,10 +1459,17 @@ void FeaturesView::rebuild()
     dirty = false;
     findStudio();
     syncing = true;
-    rebuildFeatures();
-    rebuildParts();
+    // An Assembly tab: its list in place of the studio's two (ops#640 round 10)
+    const bool assembly = !assemblyName.empty();
+    lists->setVisible(!assembly);
+    assemblyList->setVisible(assembly);
+    rebuildAssembly();
+    if (!assembly) {
+        rebuildFeatures();
+        rebuildParts();
+    }
     // A selected bar stays selected through a rebuild (its row is new after a move)
-    if (auto bar = barSelected ? features->barItem() : nullptr) {
+    if (auto bar = !assembly && barSelected ? features->barItem() : nullptr) {
         features->setCurrentItem(bar);
         bar->setSelected(true);
     }
@@ -1339,6 +1481,7 @@ void FeaturesView::forceRebuild()
 {
     featureRows.clear();
     partRows.clear();
+    assemblyRows.clear();
     featureNames.clear();
     partNames.clear();
     rebuild();
@@ -1677,7 +1820,16 @@ App::DocumentObject* FeaturesView::memberOf(const QListWidgetItem* item) const
 bool FeaturesView::eventFilter(QObject* watched, QEvent* event)
 {
     const bool overFeatures = watched == features->viewport();
-    if (overFeatures || watched == parts->viewport()) {
+    if (watched == assemblyList->viewport()) {
+        if (event->type() == QEvent::MouseMove) {
+            auto pos = static_cast<QMouseEvent*>(event)->position().toPoint();
+            preselectRow(objectOf(assemblyList->itemAt(pos)));
+        }
+        else if (event->type() == QEvent::Leave) {
+            preselectRow(nullptr);
+        }
+    }
+    else if (overFeatures || watched == parts->viewport()) {
         if (event->type() == QEvent::MouseMove) {
             auto pos = static_cast<QMouseEvent*>(event)->position().toPoint();
             // Not while a drag is under way: the rows move under the cursor
@@ -1846,6 +1998,15 @@ void FeaturesView::syncSelectionFromApp()
     for (int i = 0; i < parts->topLevelItemCount(); ++i) {
         auto item = parts->topLevelItem(i);
         bool want = selected.count(item->data(0, Qt::UserRole).toByteArray().toStdString()) > 0;
+        if (item->isSelected() != want) {
+            item->setSelected(want);
+        }
+    }
+    // The Assembly tab's rows (a header stands for no object)
+    for (QTreeWidgetItemIterator it(assemblyList); *it; ++it) {
+        auto item = *it;
+        const std::string name = item->data(0, Qt::UserRole).toByteArray().toStdString();
+        bool want = !name.empty() && selected.count(name) > 0;
         if (item->isSelected() != want) {
             item->setSelected(want);
         }
@@ -2465,6 +2626,257 @@ void FeaturesView::onPartMenu(const QPoint& pos)
     auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
     remove->setObjectName(QStringLiteral("partDelete"));
     menu.exec(parts->viewport()->mapToGlobal(pos));
+}
+
+// --------------------------------------------------------- the Assembly tab's list (round 10)
+
+namespace
+{
+/// The top-level index of the Mates header in the Assembly tab's list
+constexpr int matesHeader = 1;
+
+/// Whether item is a row under the Mates header
+bool isMateRow(QTreeWidgetItem* item)
+{
+    if (!item || !item->parent()) {
+        return false;
+    }
+    QTreeWidgetItem* top = item;
+    while (top->parent()) {
+        top = top->parent();
+    }
+    return top->treeWidget() && top->treeWidget()->indexOfTopLevelItem(top) == matesHeader;
+}
+}  // namespace
+
+void FeaturesView::rebuildAssembly()
+{
+    auto doc = document();
+    App::DocumentObject* assembly = doc && !assemblyName.empty() ? doc->getObject(assemblyName.c_str())
+                                                                 : nullptr;
+    auto group = assembly ? assembly->getExtensionByType<App::GroupExtension>(true) : nullptr;
+    if (!group) {
+        if (!assemblyRows.empty() || assemblyList->topLevelItemCount() > 0) {
+            assemblyList->clear();
+            assemblyRows.clear();
+        }
+        return;
+    }
+    // Onshape's assembly list (gap A27): the instances, a rigid group's members under it, then the
+    // mates. A rigid group and a grounding are objects of the joint group: the group is listed
+    // with the instances, a grounding as its instance's pin (Onshape fixes an instance, no mate)
+    std::vector<App::DocumentObject*> instances;
+    App::DocumentObject* jointGroup = nullptr;
+    for (auto obj : group->Group.getValues()) {
+        if (!obj || !obj->isAttachedToDocument()) {
+            continue;
+        }
+        if (obj->getTypeId().getName() == std::string_view("Assembly::JointGroup")) {
+            if (!jointGroup) {
+                jointGroup = obj;
+            }
+        }
+        else if (isInstance(obj)) {
+            instances.push_back(obj);
+        }
+    }
+    std::vector<App::DocumentObject*> mates;
+    std::vector<std::pair<App::DocumentObject*, std::vector<App::DocumentObject*>>> rigidGroups;
+    std::set<const App::DocumentObject*> grouped;
+    /// The instances fixed, and the grounding that fixes each
+    std::map<const App::DocumentObject*, App::DocumentObject*> fixed;
+    auto joints = jointGroup ? jointGroup->getExtensionByType<App::GroupExtension>(true) : nullptr;
+    for (auto obj : joints ? joints->Group.getValues() : std::vector<App::DocumentObject*>()) {
+        if (!obj || !obj->isAttachedToDocument()) {
+            continue;
+        }
+        if (auto ground = freecad_cast<App::PropertyLink*>(obj->getPropertyByName("ObjectToGround"))) {
+            if (ground->getValue()) {
+                fixed.emplace(ground->getValue(), obj);
+            }
+            continue;
+        }
+        auto members = freecad_cast<App::PropertyLinkList*>(obj->getPropertyByName("ObjectsToRigidGroup"));
+        if (!members) {
+            mates.push_back(obj);
+            continue;
+        }
+        std::vector<App::DocumentObject*> kept;
+        for (auto member : members->getValues()) {
+            if (member && member->isAttachedToDocument()) {
+                kept.push_back(member);
+                grouped.insert(member);
+            }
+        }
+        rigidGroups.emplace_back(obj, kept);
+    }
+    std::erase_if(instances, [&grouped](const App::DocumentObject* obj) { return grouped.count(obj) > 0; });
+    std::size_t instanceCount = instances.size();
+    for (const auto& rigid : rigidGroups) {
+        instanceCount += rigid.second.size();
+    }
+
+    // What the rows show: unchanged, they stay (with their selection anchor)
+    auto key = [&fixed](const App::DocumentObject* obj, char depth) {
+        return depth + rowKey(obj, false, std::string(mateSuppressed(obj) ? "S" : "") + (fixed.count(obj) ? "F" : ""));
+    };
+    std::vector<std::string> rows;
+    for (auto obj : instances) {
+        rows.push_back(key(obj, '1'));
+    }
+    for (const auto& [rigid, members] : rigidGroups) {
+        rows.push_back(key(rigid, '1'));
+        for (auto member : members) {
+            rows.push_back(key(member, '2'));
+        }
+    }
+    rows.emplace_back("|");
+    for (auto obj : mates) {
+        rows.push_back(key(obj, '1'));
+    }
+    if (rows == assemblyRows && assemblyList->topLevelItemCount() == 2) {
+        return;
+    }
+    assemblyRows = rows;
+    assemblyList->clear();
+    auto header = [this](const QString& text) {
+        auto item = new QTreeWidgetItem(assemblyList, QStringList(text));
+        // Not selectable: a header stands for no object
+        item->setFlags(Qt::ItemIsEnabled);
+        QFont font = assemblyList->font();
+        font.setBold(true);
+        item->setFont(0, font);
+        return item;
+    };
+    auto row = [this, &fixed](QTreeWidgetItem* parent, App::DocumentObject* obj) {
+        auto item = new QTreeWidgetItem(parent, QStringList(QString::fromUtf8(obj->Label.getValue())));
+        item->setData(0, Qt::UserRole, QByteArray(obj->getNameInDocument()));
+        item->setIcon(0, statusIcon(obj, false));
+        const bool suppressed = mateSuppressed(obj);
+        QFont font = statusFont(assemblyList->font(), obj, false);
+        font.setStrikeOut(font.strikeOut() || suppressed);
+        item->setFont(0, font);
+        // A mate in error is red, as the solver panel lists it (a suppressed one isn't solved)
+        item->setData(0, Qt::ForegroundRole, suppressed ? QVariant() : statusForeground(obj));
+        item->setToolTip(0, rowToolTip(obj, nullptr));
+        // A fixed instance: the grounding's pin at the row's end
+        if (auto it = fixed.find(obj); it != fixed.end()) {
+            auto vp = viewProviderOf(it->second);
+            item->setIcon(1, vp ? vp->getIcon() : QIcon());
+            item->setToolTip(1, tr("Fixed"));
+            item->setData(1, Qt::UserRole, QByteArray(it->second->getNameInDocument()));
+        }
+        return item;
+    };
+    auto instancesItem = header(tr("Instances (%1)").arg(instanceCount));
+    for (auto obj : instances) {
+        row(instancesItem, obj);
+    }
+    for (const auto& [rigid, members] : rigidGroups) {
+        auto rigidItem = row(instancesItem, rigid);
+        for (auto member : members) {
+            row(rigidItem, member);
+        }
+    }
+    auto matesItem = header(tr("Mates (%1)").arg(mates.size()));
+    for (auto obj : mates) {
+        row(matesItem, obj);
+    }
+    assemblyList->expandAll();
+}
+
+void FeaturesView::onAssemblyDoubleClicked(QTreeWidgetItem* item, int column)
+{
+    Q_UNUSED(column);
+    // A mate's double-click opens its dialog, as Onshape's (the joint's own double-click)
+    if (!isMateRow(item)) {
+        return;
+    }
+    if (auto obj = objectOf(item)) {
+        if (auto vp = viewProviderOf(obj)) {
+            vp->doubleClicked();
+        }
+    }
+}
+
+void FeaturesView::onAssemblyMenu(const QPoint& pos)
+{
+    auto item = assemblyList->itemAt(pos);
+    App::DocumentObject* obj = objectOf(item);
+    if (!obj) {
+        return;
+    }
+    // The menu acts on the selection: a right-click outside it selects the row alone first
+    if (!item->isSelected()) {
+        assemblyList->clearSelection();
+        item->setSelected(true);
+    }
+    assemblyList->setCurrentItem(item, 0);
+    QPointer<FeaturesView> self(this);
+    auto runByName = [](const char* command) {
+        Gui::Application::Instance->commandManager().runCommandByName(command);
+    };
+    QMenu menu(this);
+    if (isMateRow(item)) {
+        const std::string name = obj->getNameInDocument();
+        auto edit = menu.addAction(tr("Edit"), [self, name]() {
+            auto doc = self ? self->document() : nullptr;
+            auto target = doc ? doc->getObject(name.c_str()) : nullptr;
+            if (auto vp = target ? viewProviderOf(target) : nullptr) {
+                vp->doubleClicked();
+            }
+        });
+        edit->setObjectName(QStringLiteral("mateEdit"));
+        edit->setEnabled(assemblyList->selectedItems().size() <= 1);
+        // The selected mates suppressed, or back, in one undo step, and solved again
+        std::vector<std::string> names;
+        for (auto selected : assemblyList->selectedItems()) {
+            auto mate = isMateRow(selected) ? objectOf(selected) : nullptr;
+            if (mate && freecad_cast<App::PropertyBool*>(mate->getPropertyByName("Suppressed"))) {
+                names.emplace_back(mate->getNameInDocument());
+            }
+        }
+        const bool suppress = !mateSuppressed(obj);
+        auto toggle = menu.addAction(suppress ? tr("Suppress") : tr("Unsuppress"), [self, names, suppress]() {
+            auto doc = self ? self->document() : nullptr;
+            if (!doc || names.empty()) {
+                return;
+            }
+            int tid = doc->openTransaction(
+                suppress ? QT_TRANSLATE_NOOP("Command", "Suppress") : QT_TRANSLATE_NOOP("Command", "Unsuppress")
+            );
+            for (const auto& mateName : names) {
+                auto mate = doc->getObject(mateName.c_str());
+                auto prop = mate ? freecad_cast<App::PropertyBool*>(mate->getPropertyByName("Suppressed"))
+                                 : nullptr;
+                if (prop) {
+                    prop->setValue(suppress);
+                }
+            }
+            doc->recompute();
+            App::GetApplication().commitTransaction(tid);
+        });
+        toggle->setObjectName(QStringLiteral("mateToggleSuppress"));
+        toggle->setEnabled(!names.empty());
+    }
+    else {
+        auto show = menu.addAction(tr("Show/Hide"), [runByName]() { runByName("Std_ToggleVisibility"); });
+        show->setObjectName(QStringLiteral("instanceToggleVisibility"));
+        auto isolate = menu.addAction(tr("Isolate"), [runByName]() { runByName("Std_Isolate"); });
+        isolate->setObjectName(QStringLiteral("instanceIsolate"));
+        // Onshape's Fix and Unfix: the Assembly workbench's grounding
+        auto fix = menu.addAction(tr("Fix/Unfix"), [runByName]() { runByName("Assembly_ToggleGrounded"); });
+        fix->setObjectName(QStringLiteral("instanceToggleFixed"));
+        fix->setEnabled(
+            Gui::Application::Instance->commandManager().getCommandByName("Assembly_ToggleGrounded") != nullptr
+        );
+    }
+    auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
+    fit->setObjectName(QStringLiteral("assemblyZoom"));
+    menu.addSeparator();
+    auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
+    remove->setObjectName(QStringLiteral("assemblyDelete"));
+    menu.exec(assemblyList->viewport()->mapToGlobal(pos));
 }
 
 #include "moc_FeaturesView.cpp"

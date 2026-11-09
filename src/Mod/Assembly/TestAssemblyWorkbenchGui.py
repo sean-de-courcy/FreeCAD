@@ -17,3 +17,7 @@ from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
 True if TestSeveralAssembliesGui else False
 True if TestJointErrorsGui else False
 True if TestInsertStudioGui else False
+
+from AssemblyTests.TestOnshapeAssembliesGui import TestAssemblyListGui  # ops#640 round 10
+
+True if TestAssemblyListGui else False

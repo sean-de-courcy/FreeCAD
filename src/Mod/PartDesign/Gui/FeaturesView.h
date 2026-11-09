@@ -23,6 +23,8 @@
 
 #include <Gui/Selection/Selection.h>
 
+class QSplitter;
+
 namespace App
 {
 class Document;
@@ -134,6 +136,9 @@ public:
     static void toggleModelTree();
     /// The user chose the tree in PartDesign
     static bool prefersModelTree();
+    /// FreeCAD-CH (ops#640 round 10, gap A27): an Assembly tab's list in the Model panel under the
+    /// Onshape keymap (its instances, then its mates), from the module's load on
+    static void followTabs();
 
     /// A Features row's mark from Show dependencies: 1 a parent, 2 a child, 0 none
     static constexpr int DependencyRole = Qt::UserRole + 1;
@@ -162,12 +167,22 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    /// Puts the lists in the Model panel's splitter, in place of its tree (once)
+    static void placeLists();
+    /// After a workbench or a view changed: the assembly's list for an Assembly tab, the tree back
+    /// in the other tabs of a workbench that isn't PartDesign's
+    static void followTab();
+
     void scheduleRebuild();
     void rebuild();
     /// Rebuilds the rows even when what they show is unchanged (after a cancelled or refused drag)
     void forceRebuild();
     void rebuildFeatures();
     void rebuildParts();
+    /// The Assembly tab's list: "Instances" and "Mates" (ops#640 round 10)
+    void rebuildAssembly();
+    void onAssemblyDoubleClicked(QTreeWidgetItem* item, int column);
+    void onAssemblyMenu(const QPoint& pos);
     void syncSelectionFromApp();
     void pushSelection(const std::vector<App::DocumentObject*>& objs);
     App::DocumentObject* objectOf(const QListWidgetItem* item) const;
@@ -211,6 +226,10 @@ private:
 
     FeatureList* features = nullptr;
     QTreeWidget* parts = nullptr;
+    /// The Features and Parts lists' splitter, hidden while the assembly's list shows
+    QSplitter* lists = nullptr;
+    /// The Assembly tab's list (ops#640 round 10)
+    QTreeWidget* assemblyList = nullptr;
     QLabel* title = nullptr;
     QToolButton* errorsButton = nullptr;
     /// Onshape's "Filter by name or type" box; ":errors" and ":warnings" filter by status
@@ -237,10 +256,13 @@ private:
     /// The rows' object names (the bar as "|"): unchanged, a changed row is updated in place
     std::vector<std::string> featureNames;
     std::vector<std::string> partNames;
+    std::vector<std::string> assemblyRows;
 
     /// The shown document and studio, by name (an App::Part's, or empty for the top level)
     std::string documentName;
     std::string studioName;
+    /// The assembly an Assembly tab shows (its list in place of the studio's), or empty
+    std::string assemblyName;
     /// The row the bar was last moved after (barHinted: empty is the top), for studioBarAfter()
     bool barHinted = false;
     std::string barHint;
