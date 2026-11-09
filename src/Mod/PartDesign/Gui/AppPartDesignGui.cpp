@@ -199,8 +199,8 @@ PyMOD_INIT_FUNC(PartDesignGui)
     // its rows' tooltips say (round 8; review R8-8: other objects keep their words)
     Gui::TaskView::setEditStatusText([](const App::DocumentObject* obj, const QString& text) {
         const bool ours = obj
-            && (obj->isDerivedFrom<PartDesign::Feature>()
-                || (obj->isDerivedFrom<Part::Part2DObject>() && PartDesign::Body::findBodyOf(obj)));
+            && (obj->isDerivedFrom<PartDesign::Feature>() || obj->isDerivedFrom<PartDesign::Body>()
+                || PartDesign::Body::findBodyOf(obj));  // datums, binders, sketches in a Body
         return ours && Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text)
                                                     : text;
     });

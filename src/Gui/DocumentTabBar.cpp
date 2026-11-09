@@ -1451,6 +1451,19 @@ void Controller::nameCopiedParts(App::Document* doc, App::DocumentObject* copy)
         if (!body->getTypeId().isDerivedFrom(bodyType)) {
             continue;
         }
+        // Only a default "Part N" label (its copy reads "Part 001"): a Body the user named
+        // ("Lid") keeps its name, as Onshape's duplicate keeps part names (fix review)
+        const std::string prefix = QObject::tr("Part %1").arg(QString()).toUtf8().toStdString();
+        const std::string current = body->Label.getValue();
+        auto isDefault = [&current](const std::string& stem, bool needDigits) {
+            return current.size() >= stem.size() + (needDigits ? 1 : 0)
+                && current.compare(0, stem.size(), stem) == 0
+                && current.find_first_not_of("0123456789", stem.size()) == std::string::npos;
+        };
+        // FreeCAD's own default "Body", "Body001" counts as unnamed too
+        if (!isDefault(prefix, true) && !isDefault("Body", false)) {
+            continue;
+        }
         std::set<std::string> taken;
         for (auto obj : doc->getObjects()) {
             if (obj != body
