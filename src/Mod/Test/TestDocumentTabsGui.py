@@ -970,8 +970,9 @@ class TestDocumentTabsGui(unittest.TestCase):
 
     def testDuplicateFromTheBar(self):
         """The tab menu's Duplicate: Part Studio 2's copy "Part Studio 2 (1)" right of it, made
-        active, its view showing only the copy (the same volume); one undo step removes the copy
-        tab and shows Part Studio 2 again. The implicit studio isn't offered, with the reason."""
+        active, its view showing only the copy (the same volume), its Body named "Part N" (RT-4);
+        one undo step removes the copy tab, its redo shows it again (RT-3). The implicit studio
+        isn't offered, with the reason."""
         objects = self.model(assembly=False)
         self.switch("Part")
         undoCount = self.doc.UndoCount
@@ -992,12 +993,17 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertNotIn(objects["body2"].Name, names)
         self.assertNotIn(objects["body1"].Name, names)
         self.assertAlmostEqual(copyBodies[0].Shape.Volume, objects["body2"].Shape.Volume, 6)
+        self.assertEqual(copyBodies[0].Label, "Part 1")
 
         undo()
         pump(0.3)
         self.assertIsNone(self.doc.getObject(copy))
         self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2"])
-        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+        self.switch("*")
+        redo()
+        pump(0.5)
+        self.assertIsNotNone(self.doc.getObject(copy))
+        self.assertEqual(GuiTabs.activeTab(self.doc), copy)
 
         copy, refusal = GuiTabs.duplicate(self.doc, "*")
         self.assertEqual(copy, "")
@@ -1275,3 +1281,22 @@ class TestDocumentTabsGui(unittest.TestCase):
         undo()
         pump(0.5)
         self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+
+    def testStudioTopForABodyOffItsOrigin(self):
+        """RT-2: a Body placed 7 mm up in Part Studio 2: the Sketch plane field takes the studio's
+        own Top unmapped (attached to it directly), and the sketch lies on it at global z = 0."""
+        doc, studio1, part1, studio2 = self.studiosByStdNewAndPlus()
+        body = doc.addObject("PartDesign::Body", "Offset")
+        studio2.addObject(body)
+        body.Placement.Base = V(0, 0, 7)
+        doc.recompute()
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", body)
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        sketch, modals = self.newSketch(doc, True)
+        self.assertEqual(modals, [])
+        self.assertEqual(sketch.getParentGeoFeatureGroup(), body)
+        top = self.originPlane(studio2, "XY_Plane")
+        self.selectAsTheFeaturesList(doc, top)
+        self.assertOnPlane(sketch, top)
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 0, 9)

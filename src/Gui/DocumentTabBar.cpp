@@ -215,6 +215,7 @@ public:
 
     // Slice 2: the tab menu's Duplicate and Export, the Tab manager, the bar's drag
     std::string duplicate(App::Document* doc, const std::string& name, std::string& refusal);
+    void nameCopiedParts(App::Document* doc, App::DocumentObject* copy);
     bool exportTab(
         App::Document* doc,
         const std::string& name,
@@ -1410,7 +1411,9 @@ std::string Controller::duplicate(App::Document* doc, const std::string& name, s
     gdoc->openCommand(title.c_str());
     std::string copyName;
     try {
-        copyName = AppTabs::duplicate(doc, tab)->getNameInDocument();
+        App::DocumentObject* copy = AppTabs::duplicate(doc, tab);
+        copyName = copy->getNameInDocument();
+        nameCopiedParts(doc, copy);
         doc->recompute();
     }
     catch (const Base::Exception& e) {
@@ -1419,10 +1422,52 @@ std::string Controller::duplicate(App::Document* doc, const std::string& name, s
         return {};
     }
     gdoc->commitCommand();
+    // The step is the copy's: its redo shows the copy (RT-3), as create()'s
+    if (const int id = doc->getTransactionID(true, 0)) {
+        steps[doc][id] = copyName;
+    }
     reconcile(doc);
     switchTo(doc, copyName, true, nullptr);
     timer.start();
     return copyName;
+}
+
+void Controller::nameCopiedParts(App::Document* doc, App::DocumentObject* copy)
+{
+    // RT-4: a studio's copied Bodies are "Part N", the lowest N free, as PartDesign's
+    // nameNewPart() names a new part (the copy's features keep their names). Labels are unique
+    // in a document unless the preference allows duplicates; then N is free in the studio
+    const Base::Type bodyType = Base::Type::fromName("PartDesign::Body");
+    AppTabs::Kind kind {};
+    if (!isOn() || bodyType.isBad() || !AppTabs::isTabObject(copy, &kind)
+        || kind != AppTabs::Kind::PartStudio) {
+        return;
+    }
+    const bool unique = !App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+                             ->GetBool("DuplicateLabels", false);
+    const AppTabs::Tab copyTab {AppTabs::Kind::PartStudio, copy};
+    for (auto body : AppTabs::members(doc, copyTab)) {
+        if (!body->getTypeId().isDerivedFrom(bodyType)) {
+            continue;
+        }
+        std::set<std::string> taken;
+        for (auto obj : doc->getObjects()) {
+            if (obj != body
+                && (unique
+                    || (obj->getTypeId().isDerivedFrom(bodyType)
+                        && AppTabs::tabOf(obj) == copy))) {
+                taken.insert(obj->Label.getValue());
+            }
+        }
+        for (int n = 1;; ++n) {
+            const std::string label = QObject::tr("Part %1").arg(n).toUtf8().toStdString();
+            if (!taken.count(label)) {
+                body->Label.setValue(label);
+                break;
+            }
+        }
+    }
 }
 
 bool Controller::exportTab(
@@ -1485,11 +1530,15 @@ bool Controller::openManager()
 bool Controller::eventFilter(QObject* watched, QEvent* event)
 {
     const auto type = event->type();
-    if ((type == QEvent::ShortcutOverride || type == QEvent::KeyPress) && isOn()
-        && !QApplication::activeModalWidget()) {
+    if ((type == QEvent::ShortcutOverride || type == QEvent::KeyPress) && isOn()) {
         auto key = static_cast<QKeyEvent*>(event);
         const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
-        if (key->key() == Qt::Key_T && modifiers == Qt::AltModifier) {
+        // RT-6: not while a modal or a menu is open, nor with no document shown
+        App::Document* doc = key->key() == Qt::Key_T && modifiers == Qt::AltModifier
+            ? App::GetApplication().getActiveDocument()
+            : nullptr;
+        if (doc && Application::Instance->getDocument(doc) && !QApplication::activeModalWidget()
+            && !QApplication::activePopupWidget()) {
             // The override taken: no shortcut (the Tools menu's mnemonic) sees the key, which
             // then comes as a key press
             if (type == QEvent::ShortcutOverride) {

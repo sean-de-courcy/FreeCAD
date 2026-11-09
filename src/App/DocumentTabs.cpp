@@ -160,7 +160,15 @@ Registry readRegistry(const Document* doc)
 
 void writeRegistry(Document* doc, const Registry& registry)
 {
-    std::string text = "order=" + joinNames(registry.order) + "\nvariables="
+    // RT-5: the order keeps the names of objects that exist (and the implicit studio's "*"); a
+    // tab undone meanwhile goes last on its redo
+    std::vector<std::string> order;
+    for (const auto& name : registry.order) {
+        if (name == implicitName() || doc->getObject(name.c_str())) {
+            order.push_back(name);
+        }
+    }
+    std::string text = "order=" + joinNames(order) + "\nvariables="
         + joinNames(registry.variables);
     if (registry.hasImplicit) {
         std::string label = registry.implicit;
