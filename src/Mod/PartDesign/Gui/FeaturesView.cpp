@@ -37,6 +37,7 @@
 #include <App/DocumentObject.h>
 #include <App/DocumentObjectGroup.h>
 #include <App/GeoFeatureGroupExtension.h>
+#include <App/GeoFeature.h>
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Origin.h>
@@ -2558,7 +2559,8 @@ void FeaturesView::onPartMenu(const QPoint& pos)
         parts->clearSelection();
         item->setSelected(true);
     }
-    parts->setCurrentItem(item, 0);
+    // Current without touching the selection: the menu acts on every selected row (review R10-1)
+    parts->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
     QPointer<FeaturesView> self(this);
     auto runByName = [](const char* command) {
         Gui::Application::Instance->commandManager().runCommandByName(command);
@@ -2811,7 +2813,8 @@ void FeaturesView::onAssemblyMenu(const QPoint& pos)
         assemblyList->clearSelection();
         item->setSelected(true);
     }
-    assemblyList->setCurrentItem(item, 0);
+    // Current without touching the selection: the menu acts on every selected row (review R10-1)
+    assemblyList->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
     QPointer<FeaturesView> self(this);
     auto runByName = [](const char* command) {
         Gui::Application::Instance->commandManager().runCommandByName(command);
@@ -2870,6 +2873,13 @@ void FeaturesView::onAssemblyMenu(const QPoint& pos)
         fix->setEnabled(
             Gui::Application::Instance->commandManager().getCommandByName("Assembly_ToggleGrounded") != nullptr
         );
+        // A rigid group's row is not a part: its Show/Hide, Isolate and Fix would act on the joint
+        // object or do nothing (review R10-6)
+        if (!obj->isDerivedFrom<App::GeoFeature>()) {
+            show->setEnabled(false);
+            isolate->setEnabled(false);
+            fix->setEnabled(false);
+        }
     }
     auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
     fit->setObjectName(QStringLiteral("assemblyZoom"));
