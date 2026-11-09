@@ -129,8 +129,10 @@ TaskSketchPlane::TaskSketchPlane(SketcherGui::ViewProviderSketch* sketchView)
         App::DocumentObject* own = owner.getObject();
         PartDesign::Body* body = own ? PartDesign::Body::findBodyOf(own) : nullptr;
         // Only what the sketch may link as it is: its own Body's (its origin planes included) or
-        // a studio sibling's. Anything else would fail as a link out of the allowed scope
-        if (body && !body->hasObject(obj) && !Part::BodyBase::isInOneStudio(own, obj)) {
+        // a studio sibling's, or the studio's own Top, Front, Right (the field writes the Body's
+        // own plane for it, J1T A). Anything else would fail as a link out of the allowed scope
+        if (body && !body->hasObject(obj) && !Part::BodyBase::isInOneStudio(own, obj)
+            && !Part::BodyBase::studioOriginFeature(own, obj)) {
             why = QT_TR_NOOP("Pick a face or a plane of this part studio.");
             return false;
         }

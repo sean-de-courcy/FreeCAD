@@ -964,3 +964,314 @@ class TestDocumentTabsGui(unittest.TestCase):
         pump(0.3)
         self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
         self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Assembly")
+
+
+    # -- slice 2: Duplicate, Export, the Tab manager, the bar's drag (ops#640 round 8) -------------
+
+    def testDuplicateFromTheBar(self):
+        """The tab menu's Duplicate: Part Studio 2's copy "Part Studio 2 (1)" right of it, made
+        active, its view showing only the copy (the same volume); one undo step removes the copy
+        tab and shows Part Studio 2 again. The implicit studio isn't offered, with the reason."""
+        objects = self.model(assembly=False)
+        self.switch("Part")
+        undoCount = self.doc.UndoCount
+        copy, refusal = GuiTabs.duplicate(self.doc, "Part")
+        pump(0.3)
+        self.assertTrue(copy, refusal)
+        self.assertEqual(self.doc.UndoCount, undoCount + 1)
+        self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2", "Part Studio 2 (1)"])
+        self.assertEqual(GuiTabs.activeTab(self.doc), copy)
+        view = GuiTabs.viewOf(self.doc, copy)
+        self.assertIsNotNone(view)
+        copyBodies = [
+            o for o in self.doc.getObject(copy).Group if o.isDerivedFrom("PartDesign::Body")
+        ]
+        self.assertEqual(len(copyBodies), 1)
+        names = shown(view)
+        self.assertIn(copyBodies[0].Name, names)
+        self.assertNotIn(objects["body2"].Name, names)
+        self.assertNotIn(objects["body1"].Name, names)
+        self.assertAlmostEqual(copyBodies[0].Shape.Volume, objects["body2"].Shape.Volume, 6)
+
+        undo()
+        pump(0.3)
+        self.assertIsNone(self.doc.getObject(copy))
+        self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2"])
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+
+        copy, refusal = GuiTabs.duplicate(self.doc, "*")
+        self.assertEqual(copy, "")
+        self.assertIn("top level", refusal)
+
+    def testExportFromTheBar(self):
+        """The tab menu's Export once the file is chosen (ImportGui's writer): Part Studio 2's
+        cylinder, re-read, has its volume."""
+        import shutil
+        import tempfile
+
+        objects = self.model(assembly=False)
+        folder = tempfile.mkdtemp(prefix="TestDocumentTabsGui")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Part Studio 2.step")
+        done, error = GuiTabs.exportTab(self.doc, "Part", path)
+        self.assertTrue(done, error)
+        self.assertAlmostEqual(Part.read(path).Volume, objects["body2"].Shape.Volume, 3)
+        done, error = GuiTabs.exportTab(self.doc, "VarSetMissing", path)
+        self.assertFalse(done)
+
+    def testDragOnTheBarSavesTheOrder(self):
+        """A tab dragged along the bar: the order is the document's (saved, the document marked
+        modified), not an undo step."""
+        self.model()
+        pump(0.2)
+        undoCount = self.doc.UndoCount
+        Gui.ActiveDocument.Modified = False
+        GuiTabs.moveTab(0, 2)
+        pump(0.3)
+        self.assertEqual(self.barTexts(), ["Part Studio 2", "Assembly", "Part Studio 1"])
+        self.assertEqual([n for n, _k, _l in Tabs.tabs(self.doc)], ["Part", "Assembly", "*"])
+        self.assertEqual(Tabs.order(self.doc), ["Part", "Assembly", "*"])
+        self.assertEqual(self.doc.UndoCount, undoCount)
+        self.assertTrue(Gui.ActiveDocument.Modified)
+
+    def manager(self):
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if widget.objectName() == "FreeCADCH_TabManagerDialog" and widget.isVisible():
+                return widget
+        return None
+
+    def visibleRows(self, tabList):
+        rows = range(tabList.count())
+        return [tabList.item(r).text() for r in rows if not tabList.isRowHidden(r)]
+
+    def testTabManager(self):
+        """Alt+T opens the Tab manager: the tabs, a search, a type filter; a row moved reorders
+        the tabs (saved, no undo step); Enter on a row opens its tab and closes the manager."""
+        from PySide6.QtTest import QTest
+        from PySide import QtCore
+
+        self.model()
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        variables.Label = "Variable Studio 1"
+        Tabs.setVariableStudio(variables)
+        GuiTabs.reconcile(self.doc)
+        self.switch("*")
+        mw = Gui.getMainWindow()
+        QTest.keyClick(mw, QtCore.Qt.Key_T, QtCore.Qt.AltModifier)
+        pump(0.3)
+        dialog = self.manager()
+        self.assertIsNotNone(dialog, "Alt+T opened no Tab manager")
+        search = dialog.findChild(QtWidgets.QLineEdit, "FreeCADCH_TabSearch")
+        typeFilter = dialog.findChild(QtWidgets.QComboBox, "FreeCADCH_TabFilter")
+        tabList = dialog.findChild(QtWidgets.QListWidget, "FreeCADCH_TabList")
+        self.assertEqual(
+            self.visibleRows(tabList),
+            ["Part Studio 1", "Part Studio 2", "Assembly", "Variable Studio 1"],
+        )
+        search.setText("studio 2")
+        pump(0.1)
+        self.assertEqual(self.visibleRows(tabList), ["Part Studio 2"])
+        search.clear()
+        typeFilter.setCurrentIndex(typeFilter.findText("Assemblies"))
+        pump(0.1)
+        self.assertEqual(self.visibleRows(tabList), ["Assembly"])
+        typeFilter.setCurrentIndex(typeFilter.findText("Variable Studios"))
+        pump(0.1)
+        self.assertEqual(self.visibleRows(tabList), ["Variable Studio 1"])
+        typeFilter.setCurrentIndex(0)
+        pump(0.1)
+
+        undoCount = self.doc.UndoCount
+        item = tabList.takeItem(0)
+        tabList.insertItem(2, item)
+        pump(0.3)
+        self.assertEqual(
+            [n for n, _k, _l in Tabs.tabs(self.doc)], ["Part", "Assembly", "*", "VarSet"]
+        )
+        self.assertEqual(
+            self.barTexts(), ["Part Studio 2", "Assembly", "Part Studio 1", "Variable Studio 1"]
+        )
+        self.assertEqual(self.doc.UndoCount, undoCount)
+
+        dialog = self.manager()
+        tabList = dialog.findChild(QtWidgets.QListWidget, "FreeCADCH_TabList")
+        rows = [tabList.item(r).text() for r in range(tabList.count())]
+        tabList.setCurrentRow(rows.index("Part Studio 2"))
+        tabList.setFocus()
+        QTest.keyClick(tabList, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+        self.assertIsNone(self.manager())
+
+    def testTabManagerButton(self):
+        """The bar's leftmost button opens the Tab manager; Enter in its search box opens the
+        first match."""
+        self.model()
+        self.switch("*")
+        button = Gui.getMainWindow().findChild(QtWidgets.QToolButton, "FreeCADCH_TabManager")
+        self.assertTrue(button.isEnabled())
+        button.click()
+        pump(0.3)
+        dialog = self.manager()
+        self.assertIsNotNone(dialog)
+        search = dialog.findChild(QtWidgets.QLineEdit, "FreeCADCH_TabSearch")
+        search.setText("assem")
+        search.returnPressed.emit()
+        pump(0.5)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+        self.assertIsNone(self.manager())
+
+
+    # -- J1T: a studio's Top, Front and Right are sketch planes (ops#640 round 8) ---------------------
+
+    def selectAsTheFeaturesList(self, doc, obj):
+        """A Features list row's selection: from the top-level object down
+        (FeaturesView::pushSelection), as the tree selects."""
+        Gui.Selection.clearSelection()
+        parents = obj.Parents
+        if parents:
+            Gui.Selection.addSelection(doc.Name, parents[0][0].Name, parents[0][1])
+        else:
+            Gui.Selection.addSelection(doc.Name, obj.Name)
+        pump(0.3)
+
+    def originPlane(self, container, role):
+        return [f for f in container.Origin.OriginFeatures if f.Role == role][0]
+
+    def newSketch(self, doc, closeModals):
+        """PartDesign_NewSketch; any modal it shows is recorded and closed, so a regression fails
+        instead of hanging. Returns the new sketch (or None) and the modals' titles."""
+        from PySide import QtCore
+
+        modals = []
+
+        def close():
+            modal = QtWidgets.QApplication.activeModalWidget()
+            if modal is not None:
+                modals.append(modal.windowTitle())
+                modal.reject()
+
+        before = {o.Name for o in doc.Objects}
+        if closeModals:
+            for delay in (800, 1600, 2400):
+                QtCore.QTimer.singleShot(delay, close)
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(2.6 if closeModals else 0.5)
+        new = [
+            o for o in doc.Objects if o.Name not in before and o.isDerivedFrom("Sketcher::SketchObject")
+        ]
+        return (new[0] if new else None), modals
+
+    def endEdit(self, doc):
+        if Gui.Control.activeDialog():
+            Gui.Control.closeDialog()
+        gdoc = Gui.getDocument(doc.Name)
+        if gdoc.getInEdit():
+            gdoc.resetEdit()
+        pump(0.3)
+
+    def assertOnPlane(self, sketch, plane):
+        self.assertEqual(len(sketch.AttachmentSupport), 1, sketch.AttachmentSupport)
+        self.assertEqual(sketch.AttachmentSupport[0][0], plane)
+        self.assertEqual(sketch.MapMode, "FlatFace")
+        sketch.recompute()
+        expected = plane.getGlobalPlacement()
+        self.assertTrue(
+            sketch.getGlobalPlacement().isSame(expected, 1e-9),
+            (sketch.getGlobalPlacement(), expected),
+        )
+
+    def studiosByStdNewAndPlus(self):
+        """Std_New (Part Studio 1 with its "Part 1") and "+" > Create Part Studio (empty)."""
+        Gui.activateWorkbench("PartDesignWorkbench")
+        doc = self.stdNew()
+        [part1] = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Body")]
+        studio1 = part1.getParentGeoFeatureGroup()
+        name = GuiTabs.create(doc, "PartStudio")
+        pump(0.3)
+        self.assertEqual(GuiTabs.activeTab(doc), name)
+        return doc, studio1, part1, doc.getObject(name)
+
+    def testTopRowIsASketchPlane(self):
+        """J1T A: in a new, empty Part Studio, New Sketch with nothing selected makes its "Part N"
+        and waits for a plane; the Features list's Top row (the studio's own XY plane) is taken,
+        written as the Body's own XY plane (the same place). In Part Studio 1 (Std_New) too."""
+        doc, studio1, part1, studio2 = self.studiosByStdNewAndPlus()
+        Gui.Selection.clearSelection()
+        sketch, modals = self.newSketch(doc, True)
+        self.assertEqual(modals, [])
+        self.assertIsNotNone(sketch)
+        body = sketch.getParentGeoFeatureGroup()
+        self.assertEqual(body.getParentGeoFeatureGroup(), studio2)
+        self.assertFalse(sketch.AttachmentSupport)
+        self.selectAsTheFeaturesList(doc, self.originPlane(studio2, "XY_Plane"))
+        self.assertOnPlane(sketch, self.originPlane(body, "XY_Plane"))
+        self.endEdit(doc)
+
+        done, refusal = GuiTabs.switchTo(doc, studio1.Name)
+        self.assertTrue(done, refusal)
+        pump(0.3)
+        Gui.Selection.clearSelection()
+        sketch, modals = self.newSketch(doc, True)
+        self.assertEqual(modals, [])
+        self.assertEqual(sketch.getParentGeoFeatureGroup(), part1)
+        # The studio's Front, picked as an object in the view would be
+        front = self.originPlane(studio1, "XZ_Plane")
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(doc.Name, front.Name)
+        pump(0.3)
+        self.assertOnPlane(sketch, self.originPlane(part1, "XZ_Plane"))
+
+    def testTopSelectedThenNewSketch(self):
+        """J1T B: Top selected first (the Features list's row), then New Sketch: in the empty Part
+        Studio 2, no "Active Body Required" question, a Body "Part N" made there and the sketch on
+        its XY plane; in Part Studio 1, the sketch in "Part 1" on its Front."""
+        doc, studio1, part1, studio2 = self.studiosByStdNewAndPlus()
+        undoCount = doc.UndoCount
+        self.selectAsTheFeaturesList(doc, self.originPlane(studio2, "XY_Plane"))
+        sketch, modals = self.newSketch(doc, True)
+        self.assertEqual(modals, [])
+        self.assertIsNotNone(sketch)
+        body = sketch.getParentGeoFeatureGroup()
+        self.assertTrue(body.isDerivedFrom("PartDesign::Body"))
+        self.assertEqual(body.getParentGeoFeatureGroup(), studio2)
+        self.assertTrue(body.Label.startswith("Part "), body.Label)
+        self.assertOnPlane(sketch, self.originPlane(body, "XY_Plane"))
+        self.assertIsNotNone(Gui.getDocument(doc.Name).getInEdit())
+        self.endEdit(doc)
+        self.assertEqual(doc.UndoCount, undoCount + 1)  # the Body with the sketch, one step
+
+        done, refusal = GuiTabs.switchTo(doc, studio1.Name)
+        self.assertTrue(done, refusal)
+        pump(0.3)
+        self.selectAsTheFeaturesList(doc, self.originPlane(studio1, "XZ_Plane"))
+        sketch, modals = self.newSketch(doc, True)
+        self.assertEqual(modals, [])
+        self.assertEqual(sketch.getParentGeoFeatureGroup(), part1)
+        self.assertOnPlane(sketch, self.originPlane(part1, "XZ_Plane"))
+
+    def testRedoOfCreatePartStudioShowsIt(self):
+        """J1T: the redo of "Create Part Studio" brings the tab back and shows it; the undo of a
+        tab's delete made in that tab too."""
+        self.model(assembly=False)
+        self.switch("*")
+        name = GuiTabs.create(self.doc, "PartStudio")
+        pump(0.2)
+        undo()
+        pump(0.3)
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertNotEqual(GuiTabs.activeTab(self.doc), name)
+        redo()
+        pump(0.5)
+        self.assertIsNotNone(self.doc.getObject(name))
+        self.assertEqual(GuiTabs.activeTab(self.doc), name)
+        self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), name)
+
+        self.switch("Part")  # deleted from its own tab: the step is that tab's
+        done, message, _users = GuiTabs.deleteTab(self.doc, "Part")
+        self.assertTrue(done, message)
+        pump(0.3)
+        self.assertNotEqual(GuiTabs.activeTab(self.doc), "Part")
+        undo()
+        pump(0.5)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
