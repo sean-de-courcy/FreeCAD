@@ -6067,9 +6067,10 @@ namespace
 // The fallback for a shell OCCT refuses because the faces it keeps fall apart once the removed
 // face is gone (BRepOffset_NotConnectedShell; ops#640, F46): a box shelled from a top face with a
 // blind pocket, whose walls and floor reach the box's other faces only through that face. Each
-// group of kept faces bounds a solid together with the removed face's wire it ends on: the outer
-// wire closes the box with its pockets filled, an inner wire closes the pocket's hollow (or a
-// boss standing on the face). Each of those is shelled by OCCT from its closing face, connected
+// group of kept faces bounds a solid together with the removed face's wires it ends on: the
+// outer wire (with the wires of through holes, whose walls join the box's group) closes the box
+// with its pockets filled, an inner wire closes the pocket's hollow (or a boss standing on the
+// face). Each of those is shelled by OCCT from its closing face, connected
 // now (a hollow the other way round, since its material is outside it), and the shell is their
 // union, clipped to the solid inward (bands of neighbouring groups may overlap or reach into a
 // hollow) and kept off it outward. Only one planar removed face is handled; anything else
@@ -6146,20 +6147,21 @@ TopoShape makeThickSolidByGroups(
         if (BRepAdaptor_Surface(removed).GetType() != GeomAbs_Plane) {
             return {};
         }
+        // the wires as the face's surface has them: the outer one counterclockwise
         std::vector<TopoDS_Wire> wires;
-        for (TopExp_Explorer xp(removed, TopAbs_WIRE); xp.More(); xp.Next()) {
+        for (TopExp_Explorer xp(removed.Oriented(TopAbs_FORWARD), TopAbs_WIRE); xp.More(); xp.Next()) {
             wires.push_back(TopoDS::Wire(xp.Current()));
         }
         const auto groups = keptFaceGroups(shape.getShape(), removed);
-        if (wires.size() < 2 || groups.size() != wires.size()) {
+        if (wires.size() < 2 || groups.size() < 2 || groups.size() > wires.size()) {
             return {};
         }
         const TopoDS_Wire outer = BRepTools::OuterWire(removed);
         Handle(Geom_Surface) surface = BRep_Tool::Surface(removed);
-        std::vector<TopoShape> pieces;
-        std::vector<bool> used(groups.size(), false);
+        // Each wire borders one group; a group may own several (a through hole's walls join the
+        // box's group through the bottom, so the hole's wire is the box's too).
+        std::vector<std::vector<TopoDS_Wire>> owned(groups.size());
         for (const auto& wire : wires) {
-            // the group the wire's edges border
             TopTools_IndexedMapOfShape wireEdges;
             TopExp::MapShapes(wire, TopAbs_EDGE, wireEdges);
             int found = -1;
@@ -6180,26 +6182,63 @@ TopoShape makeThickSolidByGroups(
                     found = static_cast<int>(g);
                 }
             }
-            if (found < 0 || used[found]) {
+            if (found < 0) {
                 return {};
             }
-            used[found] = true;
-            const bool isOuter = wire.IsSame(outer);
-            // the closing face: the removed face's plane bounded by this wire alone
-            BRepBuilderAPI_MakeFace mkFace(surface, isOuter ? wire : TopoDS::Wire(wire.Reversed()), true);
-            if (!mkFace.IsDone()) {
+            owned[found].push_back(wire);
+        }
+        // A closing face as the removed face has it, or the other way round
+        auto asRemoved = [&](const TopoDS_Face& face, bool same) {
+            return same == (removed.Orientation() == TopAbs_FORWARD) ? face
+                                                                      : TopoDS::Face(face.Reversed());
+        };
+        std::vector<TopoShape> pieces;
+        for (std::size_t found = 0; found < groups.size(); ++found) {
+            if (owned[found].empty()) {
                 return {};
             }
-            ShapeFix_Face fixFace(mkFace.Face());
-            fixFace.FixOrientation();
-            const TopoDS_Face closing = fixFace.Face();
+            // The closing faces, on the removed face's plane: for the group of the outer wire,
+            // one bounded by it with the group's other wires as holes; for any other group, one
+            // per wire, bounded by it alone.
+            std::vector<TopoDS_Face> closings;
+            bool ownsOuter = false;
+            for (const auto& wire : owned[found]) {
+                ownsOuter = ownsOuter || wire.IsSame(outer);
+            }
+            if (ownsOuter) {
+                BRepBuilderAPI_MakeFace mkFace(surface, outer, true);
+                for (const auto& wire : owned[found]) {
+                    if (!wire.IsSame(outer)) {
+                        mkFace.Add(wire);
+                    }
+                }
+                if (!mkFace.IsDone()) {
+                    return {};
+                }
+                ShapeFix_Face fixFace(mkFace.Face());
+                fixFace.FixOrientation();
+                closings.push_back(asRemoved(fixFace.Face(), true));
+            }
+            else {
+                for (const auto& wire : owned[found]) {
+                    BRepBuilderAPI_MakeFace mkFace(surface, TopoDS::Wire(wire.Reversed()), true);
+                    if (!mkFace.IsDone()) {
+                        return {};
+                    }
+                    ShapeFix_Face fixFace(mkFace.Face());
+                    fixFace.FixOrientation();
+                    closings.push_back(asRemoved(fixFace.Face(), false));
+                }
+            }
             BRep_Builder builder;
             TopoDS_Shell shell;
             builder.MakeShell(shell);
             for (const auto& face : groups[found]) {
                 builder.Add(shell, face);
             }
-            builder.Add(shell, isOuter == (removed.Orientation() == TopAbs_FORWARD) ? closing : TopoDS::Face(closing.Reversed()));
+            for (const auto& closing : closings) {
+                builder.Add(shell, closing);
+            }
             ShapeFix_Solid fixSolid;
             TopoDS_Solid solid = fixSolid.SolidFromShell(shell);
             if (solid.IsNull() || !BRepCheck_Analyzer(solid).IsValid()) {
@@ -6212,12 +6251,14 @@ TopoShape makeThickSolidByGroups(
                 return {};
             }
             const bool hollow = sample.Orientation() != sampleInShape.Orientation();
-            const TopoDS_Face opening = sameFaceIn(solid, closing);
-            if (opening.IsNull()) {
-                return {};
-            }
             TopTools_ListOfShape openings;
-            openings.Append(opening);
+            for (const auto& closing : closings) {
+                const TopoDS_Face opening = sameFaceIn(solid, closing);
+                if (opening.IsNull()) {
+                    return {};
+                }
+                openings.Append(opening);
+            }
             BRepOffsetAPI_MakeThickSolid mkThick;
             mkThick.MakeThickSolidByJoin(
                 solid,

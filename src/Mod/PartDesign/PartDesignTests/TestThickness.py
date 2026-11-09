@@ -179,27 +179,35 @@ class TestThickness(unittest.TestCase):
                 FreeCAD.closeDocument(self.Doc.Name)
                 self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
 
-    def _pocketedBox(self, x0, y0, depth=3.0):
+    def _pocketedBox(self, x0, y0, depth=3.0, hole=False):
         """A 40 x 30 x 10 box with a 6 x 6 blind pocket at (x0, y0) in its top face, and a
-        Thickness removing that top face (it has two wires: the box's and the pocket's)."""
+        Thickness removing that top face (it has two wires: the box's and the pocket's). With
+        <hole>, a through hole of radius 2 at (8, 8) gives the face a third wire."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         box = body.newObject("PartDesign::AdditiveBox", "Box")
         box.Length, box.Width, box.Height = 40, 30, 10
         pocket = body.newObject("PartDesign::SubtractiveBox", "Pocket")
         pocket.Length, pocket.Width, pocket.Height = 6, 6, depth
         pocket.Placement.Base = FreeCAD.Vector(x0, y0, 10 - depth)
+        base = pocket
+        if hole:
+            base = body.newObject("PartDesign::SubtractiveCylinder", "Hole")
+            base.Radius, base.Height = 2, 10
+            base.Placement.Base = FreeCAD.Vector(8, 8, 0)
         self.Doc.recompute()
-        self.assertAlmostEqual(pocket.Shape.Volume, 12000 - 36 * depth, places=6)
+        self.assertAlmostEqual(
+            base.Shape.Volume, 12000 - 36 * depth - (40 * math.pi if hole else 0), places=6
+        )
         top = [
             "Face" + str(i)
-            for i, face in enumerate(pocket.Shape.Faces, 1)
+            for i, face in enumerate(base.Shape.Faces, 1)
             if isinstance(face.Surface, Part.Plane)
             and abs(face.CenterOfMass.z - 10) < 1e-7
-            and len(face.Wires) == 2
+            and len(face.Wires) == (3 if hole else 2)
         ]
         self.assertEqual(len(top), 1)
         thickness = body.newObject("PartDesign::Thickness", "Thickness")
-        thickness.Base = (pocket, top)
+        thickness.Base = (base, top)
         return thickness
 
     @staticmethod
@@ -266,6 +274,53 @@ class TestThickness(unittest.TestCase):
                 wall = x0 - value / 2 if reversed_ else x0 + value / 2
                 self.assertTrue(shape.isInside(FreeCAD.Vector(wall, y0 + 3, 9), 1e-6, False))
                 self.assertFalse(shape.isInside(FreeCAD.Vector(30, 25, 5), 1e-6, False))
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testShellOfAPocketedFaceInASingleSolidBody(self):
+        """With the single-solid rule on, a shell that falls apart (the centred pocket's cup
+        stands free in the open box) fails instead of keeping the box alone; the corner pocket's
+        cup reaches the box's walls at 1 mm, one solid (ops#640, review of F46)."""
+        for (x0, y0), valid in (((17, 12), False), ((2, 2), True)):
+            with self.subTest(pocket=(x0, y0)):
+                thickness = self._pocketedBox(x0, y0)
+                self.Doc.getObject("Body").AllowCompound = False
+                thickness.Value = 1.0
+                self.Doc.recompute()
+                self.assertEqual(thickness.isValid(), valid, thickness.getStatusString())
+                if valid:
+                    self.assertEqual(len(thickness.Shape.Solids), 1)
+                    expected = self._pocketShellVolume(1.0, "Arc")
+                    self.assertLess(abs(thickness.Shape.Volume - expected) / expected, 1e-6)
+                else:
+                    self.assertIn("multiple solids", thickness.getStatusString())
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testShellOfAFaceWithAPocketAndAThroughHole(self):
+        """The removed face has three wires and the kept faces two groups: a through hole's walls
+        join the box's faces through the bottom, so the hole's wire closes the box with the
+        outer one, and the blind pocket's wire its cup (ops#640, review of F46)."""
+        for join in ("Arc", "Intersection"):
+            with self.subTest(join=join):
+                thickness = self._pocketedBox(17, 12, hole=True)
+                thickness.Value = 1.0
+                thickness.Join = join
+                self.Doc.recompute()
+                self.assertTrue(thickness.isValid(), thickness.getStatusString())
+                shape = thickness.Shape
+                self.assertTrue(shape.isValid())
+                # the open box less the hole through its floor, the hole's wall band (radius 2 to
+                # 3, above the floor) and the pocket's cup
+                expected = (
+                    self._pocketShellVolume(1.0, join)
+                    - math.pi * 2**2 * 1
+                    + math.pi * (3**2 - 2**2) * 9
+                )
+                self.assertLess(abs(shape.Volume - expected) / expected, 1e-6)
+                self.assertAlmostEqual(shape.BoundBox.ZMax, 10, places=6)
+                self.assertTrue(shape.isInside(FreeCAD.Vector(8, 10.5, 5), 1e-6, False))
+                self.assertFalse(shape.isInside(FreeCAD.Vector(8, 8, 5), 1e-6, False))
                 FreeCAD.closeDocument(self.Doc.Name)
                 self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
 
