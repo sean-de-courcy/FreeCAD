@@ -19,7 +19,7 @@ import unittest
 import FreeCAD as App
 import FreeCADGui as Gui
 
-from PySide import QtCore, QtWidgets
+from PySide import QtCore, QtGui, QtWidgets
 
 import JointObject
 import UtilsAssembly
@@ -458,6 +458,257 @@ class TestInsertStudioGui(AssembliesGuiBase):
             self.assertIsNone(rows["Part Studio 3"].data(0, QtCore.Qt.UserRole))
         Gui.Control.closeDialog()
         pump(0.2)
+
+
+class TestAssemblyListGui(AssembliesGuiBase):
+    """Round 10 (gap A27): under the Onshape keymap an inserted instance reads "<source> <N>", and
+    an Assembly tab's Model panel lists its instances, then its mates, in place of the Model tree;
+    a studio's tab lists its features again. Designed model: Part Studio 1 (the top level) a 10 mm
+    box "Part 1" notched by a 4 mm cube at its corner; Part Studio 2 (an App::Part) a cylinder
+    r 5, h 20; an assembly with both inserted and a Fixed joint from the notch's face at x = 4 to
+    the cylinder's bottom face."""
+
+    def setUp(self):
+        super().setUp()
+        if not tabsOn() or not onshapeKeymap():
+            self.skipTest("the typed tabs and the list are on under the Onshape keymap only")
+        self.param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        self.savedTree = self.param.GetBool("ShowModelTree", False)
+        # The lists in place of the tree (the other GUI tests run with the tree)
+        self.param.SetBool("ShowModelTree", False)
+        model = Gui.getMainWindow().findChild(QtWidgets.QDockWidget, "Model")
+        if model is not None:
+            model.show()
+
+    def tearDown(self):
+        super().tearDown()
+        self.param.SetBool("ShowModelTree", self.savedTree)
+        pump(0.2)
+
+    def model(self):
+        doc = self.newDocument("AssemblyListGui")
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.Label = "Part 1"
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        notch = body.newObject("PartDesign::SubtractiveBox", "Notch")
+        notch.Length = notch.Width = notch.Height = 4
+        studio = doc.addObject("App::Part", "Part")
+        studio.Label = "Part Studio 2"
+        body2 = doc.addObject("PartDesign::Body", "Body002")
+        studio.addObject(body2)
+        cylinder = body2.newObject("PartDesign::AdditiveCylinder", "Cylinder")
+        cylinder.Radius = 5
+        cylinder.Height = 20
+        asm = doc.addObject("Assembly::AssemblyObject", "Assembly")
+        asm.Type = "Assembly"
+        asm.newObject("Assembly::JointGroup", "Joints")
+        doc.recompute()
+        pump(0.2)
+        self.body, self.box, self.notch, self.body2 = body, box, notch, body2
+        return doc, studio, asm
+
+    def toTab(self, doc, name):
+        done, refusal = Gui.DocumentTabs.switchTo(doc, name)
+        self.assertTrue(done, refusal)
+        pump(0.4)
+
+    def insert(self, doc, asm, picks):
+        """Inserts, through the Insert panel, the rows picks names: "Part 1" (Part Studio 1's
+        Body) or "Part Studio 2" (the studio whole); returns the new links in order."""
+        import CommandInsertLink
+
+        before = set(o.Name for o in asm.Group)
+        panel = CommandInsertLink.TaskAssemblyInsertLink(asm, Gui.activeView())
+        Gui.Control.showDialog(panel)
+        pump(0.2)
+        top = panel.form.partList.topLevelItem(0)
+        rows = {r.text(0): r for r in TestInsertStudioGui.children(top)}
+        for pick in picks:
+            if pick == "Part 1":
+                panel.onItemClicked(TestInsertStudioGui.children(rows["Part Studio 1"])[0])
+            else:
+                panel.onItemClicked(rows[pick])
+            pump(0.1)
+        self.assertTrue(panel.accept())
+        Gui.Control.closeDialog()
+        pump(0.2)
+        return [o for o in asm.Group if o.Name not in before and o.TypeId == "App::Link"]
+
+    @staticmethod
+    def view():
+        return Gui.getMainWindow().findChild(QtWidgets.QWidget, "FeaturesView")
+
+    def assemblyList(self):
+        view = self.view()
+        return view.findChild(QtWidgets.QTreeWidget, "assemblyList") if view else None
+
+    def shown(self):
+        """The Assembly tab's list, once it shows rows: {header: [row texts]}. Read through the
+        model: a rebuild makes the rows anew, and an item's Python wrapper can outlive it."""
+        tree = self.assemblyList()
+        if tree is None or not tree.isVisible():
+            return None
+        model = tree.model()
+        if model.rowCount() != 2:
+            return None
+        found = {}
+        for i in range(2):
+            top = model.index(i, 0)
+            found[top.data()] = [model.index(k, 0, top).data() for k in range(model.rowCount(top))]
+        return found
+
+    def row(self, header, k):
+        """The model index of row k under header 0 (Instances) or 1 (Mates)."""
+        model = self.assemblyList().model()
+        return model.index(k, 0, model.index(header, 0))
+
+    @staticmethod
+    def rgb(index):
+        brush = index.data(QtCore.Qt.ForegroundRole)
+        return brush.color().getRgb()[:3] if brush is not None else None
+
+    def doubleClick(self, index):
+        """A press, a release and a double-click at the row's middle, as the mouse sends them."""
+        tree = self.assemblyList()
+        tree.scrollTo(index)
+        pos = tree.visualRect(index).center()
+        viewport = tree.viewport()
+        for kind in (
+            QtCore.QEvent.MouseButtonPress,
+            QtCore.QEvent.MouseButtonRelease,
+            QtCore.QEvent.MouseButtonDblClick,
+            QtCore.QEvent.MouseButtonRelease,
+        ):
+            pressed = kind != QtCore.QEvent.MouseButtonRelease
+            event = QtGui.QMouseEvent(
+                kind,
+                QtCore.QPointF(pos),
+                QtCore.QPointF(viewport.mapToGlobal(pos)),
+                QtCore.Qt.LeftButton,
+                QtCore.Qt.LeftButton if pressed else QtCore.Qt.NoButton,
+                QtCore.Qt.NoModifier,
+            )
+            QtWidgets.QApplication.sendEvent(viewport, event)
+        pump(0.2)
+
+    def select(self, index):
+        tree = self.assemblyList()
+        tree.selectionModel().select(
+            index, QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows
+        )
+        pump(0.2)
+
+    def notchFace(self):
+        return [
+            f"Face{i}"
+            for i, f in enumerate(self.body.Shape.Faces, 1)
+            if f.Area < 20 and abs(f.CenterOfMass.x - 4) < 1e-6
+        ][0]
+
+    def testInstanceNumbers(self):
+        """Part 1 inserted twice and Part Studio 2 whole: "Part 1 <1>", "Part 1 <2>", "Part
+        Studio 2 <1>"; renamed, an instance's number is free again for the next one."""
+        doc, studio, asm = self.model()
+        self.toTab(doc, asm.Name)
+        links = self.insert(doc, asm, ["Part 1", "Part 1", "Part Studio 2"])
+        self.assertEqual(
+            [link.Label for link in links], ["Part 1 <1>", "Part 1 <2>", "Part Studio 2 <1>"]
+        )
+        self.assertEqual([link.LinkedObject for link in links], [self.body, self.body, studio])
+        links[0].Label = "Housing"
+        again = self.insert(doc, asm, ["Part 1"])
+        self.assertEqual([link.Label for link in again], ["Part 1 <1>"])
+
+    def testListFollowsTheTabs(self):
+        doc, studio, asm = self.model()
+        self.toTab(doc, asm.Name)
+        boxLink, cylLink = self.insert(doc, asm, ["Part 1", "Part Studio 2"])
+        bottom = [
+            f"Face{i}"
+            for i, f in enumerate(self.body2.Shape.Faces, 1)
+            if f.Surface.TypeId == "Part::GeomPlane" and abs(f.CenterOfMass.z) < 1e-6
+        ][0]
+        face = self.notchFace()
+        joint = asm.getObject("Joints").newObject("App::FeaturePython", "Fixed")
+        JointObject.Joint(joint, 0)
+        JointObject.ViewProviderJoint(joint.ViewObject)  # as the joint dialog makes it
+        joint.Proxy.setJointConnectors(
+            joint,
+            [[boxLink, [face, face]], [cylLink, [f"Body002.{bottom}", f"Body002.{bottom}"]]],
+        )
+        joint.Label = "Fastened 1"
+        doc.recompute()
+        pump(0.3)
+        self.assertTrue(joint.isValid(), joint.getStatusString())
+
+        # The Assembly tab: 2 instances, then 1 mate (a grounding is its instance's pin)
+        self.assertTrue(waitFor(lambda: self.shown() is not None), "no assembly list")
+        self.assertTrue(
+            waitFor(
+                lambda: self.shown()
+                == {"Instances (2)": [boxLink.Label, cylLink.Label], "Mates (1)": ["Fastened 1"]}
+            ),
+            self.shown(),
+        )
+        tree = self.assemblyList()
+        partsList = self.view().findChild(QtWidgets.QTreeWidget, "partsList")
+        self.assertFalse(partsList.isVisible(), "the Parts list shows in an Assembly tab")
+        self.assertNotEqual(self.rgb(self.row(1, 0)), RED)
+
+        # A click selects the row's object
+        Gui.Selection.clearSelection()
+        self.select(self.row(0, 1))
+        self.assertEqual([o.Name for o in Gui.Selection.getSelection(doc.Name)], [cylLink.Name])
+        self.select(self.row(1, 0))
+        self.assertEqual([o.Name for o in Gui.Selection.getSelection(doc.Name)], [joint.Name])
+        Gui.Selection.clearSelection()
+        pump(0.1)
+
+        # A double-click on the mate opens its dialog
+        self.doubleClick(self.row(1, 0))
+        self.assertTrue(
+            waitFor(lambda: JointObject.activeTask is not None),
+            ("no joint dialog", Gui.Control.activeDialog(), tree.currentIndex().data()),
+        )
+        pump(0.2)
+        JointObject.activeTask.reject()
+        if Gui.Control.activeDialog():
+            Gui.Control.closeDialog()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        pump(0.2)
+
+        # Part Studio 2's tab: its features, the assembly's list gone; back: the list again
+        self.toTab(doc, studio.Name)
+        features = self.view().findChild(QtWidgets.QListWidget, "featureList")
+        self.assertTrue(
+            waitFor(
+                lambda: features.isVisible()
+                and "Cylinder" in [features.item(i).text() for i in range(features.count())]
+            ),
+            [features.item(i).text() for i in range(features.count())],
+        )
+        self.assertFalse(self.assemblyList().isVisible())
+        self.toTab(doc, asm.Name)
+        self.assertTrue(waitFor(lambda: self.shown() is not None), "no list back in the tab")
+        self.assertFalse(features.isVisible())
+
+        # The notch deleted: the mate's face is gone, its row red with the message
+        doc.openTransaction("Delete the notch")
+        self.body.Tip = self.box
+        doc.removeObject(self.notch.Name)
+        doc.commitTransaction()
+        doc.recompute()
+        pump(0.3)
+        self.assertFalse(joint.isValid())
+
+        def redRow():
+            return self.shown() is not None and self.rgb(self.row(1, 0)) == RED
+
+        self.assertTrue(waitFor(redRow), "the broken mate's row isn't red")
+        tip = self.row(1, 0).data(QtCore.Qt.ToolTipRole)
+        self.assertIn("Fastened 1", tip)
+        self.assertGreater(len(tip.splitlines()), 1, tip)
 
 
 if __name__ == "__main__":

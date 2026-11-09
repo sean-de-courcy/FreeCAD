@@ -39,6 +39,7 @@
 #include <QString>
 
 #include "Workbench.h"
+#include "FeaturesView.h"
 #include "ViewProviderBase.h"
 #include "ViewProviderBody.h"
 #include "ViewProviderBoolean.h"
@@ -204,6 +205,8 @@ PyMOD_INIT_FUNC(PartDesignGui)
         return ours && Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text)
                                                     : text;
     });
+    // FreeCAD-CH (ops#640 round 10): an Assembly tab's list in the Model panel
+    PartDesignGui::FeaturesView::followTabs();
 
     PyMOD_Return(mod);
 }

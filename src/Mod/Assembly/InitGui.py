@@ -127,6 +127,18 @@ class AssemblyWorkbench(Workbench):
             cmdList + cmdListMenuOnly + ["Separator"] + cmdListJoints,
         )
 
+        # FreeCAD-CH (ops#640 round 10, gap A27): under the Onshape keymap an Assembly tab's list
+        # (PartDesign's Features panel) takes the Model tree's place; View > Model Tree brings the
+        # tree back, as in PartDesign
+        general = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/General")
+        if general.GetString("Keymap", "Onshape") != "FreeCAD":
+            try:
+                import PartDesignGui  # the list follows the tabs from its load on
+            except ImportError:
+                pass
+            else:
+                self.appendMenu("&View", ["Separator", "PartDesign_ToggleModelTree"])
+
     def Activated(self):
         # update the translation engine
         FreeCADGui.updateLocale()
