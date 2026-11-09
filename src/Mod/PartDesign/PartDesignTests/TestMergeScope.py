@@ -206,6 +206,20 @@ class TestMergeScope(unittest.TestCase):
         self.assertValid()
         self.assertAlmostEqual(self.far.Shape.Volume, 16000, places=6)
 
+    def testAnEmptyScopeIsSaidBeforeTheRunsFailure(self):
+        """Round 8 (J20): Far's pad as an Add with an empty scope and "Up to next" (UpToFirst),
+        which finds no face with nothing before it: red with "No merge scope selected", not the
+        extrusion's "No faces found in this direction"; Far has no material."""
+        self.model()
+        self.farPad.EmptyMergeScope = True
+        self.farPad.Type = "UpToFirst"
+        self.doc.recompute()
+        self.assertFalse(self.farPad.isValid())
+        self.assertIn(NO_SCOPE, self.farPad.getStatusString())
+        self.assertNotIn("No faces found", self.farPad.getStatusString())
+        self.assertEqual(volume(self.far.Shape), 0)
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
+
     def testAnAddWithItsOwnPartIgnoresTheFlag(self):
         """EmptyMergeScope on a pad with a solid before it in its part: its scope holds its part,
         so it adds there. A 10 x 10 x 5 block on the bracket's top: 16000 + 500, valid."""

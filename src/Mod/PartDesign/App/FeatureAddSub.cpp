@@ -223,9 +223,14 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     // Onshape's does: "No merge scope selected" (ops#640 rank 3a, hands-on checks R7(a) and R8).
     // A cut's scope is empty when nothing comes before it; an Add's only when it says so
     // (EmptyMergeScope), as otherwise it is a new part. The cut keeps F8's words after Onshape's.
+    // An Add's empty scope is said before its own run's failure (round 8, J20: an "Up to next"
+    // with nothing before it read "No faces found in this direction")
     const bool emptyAdd = EmptyMergeScope.getValue() && !MergeWithAll.getValue();
-    if (result == StdReturn && runs && (addSubType == Type::Subtractive || emptyAdd)
+    if ((result == StdReturn || emptyAdd) && runs && (addSubType == Type::Subtractive || emptyAdd)
         && getBaseTopoShape(true).isNull()) {
+        if (result != StdReturn) {
+            delete result;
+        }
         constexpr const char* noScope = "No merge scope selected";
         if (addSubType == Type::Subtractive) {
             const std::string nothing =
