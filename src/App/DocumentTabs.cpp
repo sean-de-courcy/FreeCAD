@@ -77,6 +77,19 @@ bool isDerived(const DocumentObject* obj, Base::Type type)
     return !type.isBad() && obj->getTypeId().isDerivedFrom(type);
 }
 
+// Export leaves sketches and datums out (Part isn't linked by App either)
+Base::Type sketchType()
+{
+    static Base::Type type = Base::Type::BadType;
+    return typeNamed(type, "Part::Part2DObject");
+}
+
+Base::Type datumType()
+{
+    static Base::Type type = Base::Type::BadType;
+    return typeNamed(type, "Part::Datum");
+}
+
 /// The registry, parsed: "order=a,b\nvariables=c,d\nimplicit=<label>"
 struct Registry
 {
@@ -216,6 +229,28 @@ void addWithChildren(
                 addWithChildren(link->getValue(), list, seen);
             }
         }
+    }
+}
+
+/// A Part Studio's part for Export: a visible Body, solid or link; a plain group's parts
+void addParts(DocumentObject* obj, std::vector<DocumentObject*>& list, std::set<DocumentObject*>& seen)
+{
+    if (!obj || !seen.insert(obj).second || obj->isDerivedFrom<Origin>()
+        || obj->isDerivedFrom<DatumElement>() || isDerived(obj, sketchType())
+        || isDerived(obj, datumType()) || obj->isDerivedFrom<LinkElement>()) {
+        return;
+    }
+    const bool isLink = obj->hasExtension(LinkBaseExtension::getExtensionClassTypeId());
+    if (!obj->isDerivedFrom<GeoFeature>() && !isLink) {
+        if (auto group = obj->getExtensionByType<GroupExtension>(true)) {
+            for (auto child : group->Group.getValues()) {
+                addParts(child, list, seen);
+            }
+        }
+        return;
+    }
+    if (obj->Visibility.getValue()) {
+        list.push_back(obj);
     }
 }
 
@@ -554,6 +589,162 @@ void DocumentTabs::removeTab(Document* doc, const Tab& tab)
     }
 }
 
+std::string DocumentTabs::duplicateRefusal(const Document* doc, const Tab& tab)
+{
+    const std::string name = label(doc, tab);
+    if (!tab.object) {
+        // The implicit studio (an older file's top level): no object to copy as a tab
+        return name
+            + " is the document's top level (a file made before tabs): it can't be duplicated";
+    }
+    if (tab.kind == Kind::Drawing || tab.kind == Kind::VariableStudio) {
+        return std::string("A ") + (tab.kind == Kind::Drawing ? "Drawing" : "Variable Studio")
+            + " can't be duplicated yet";
+    }
+    if (tab.kind == Kind::Assembly) {
+        return {};  // its links keep pointing at the same studios
+    }
+    // A Part Studio copies alone: what it uses from outside (a Derived source, another studio's
+    // binder) would stay shared with the original. Onshape copies the reference [guess]; refusing
+    // is the loud boundary. A VarSet (a Variable Studio) is shared by every tab
+    const auto list = members(doc, tab);
+    const std::set<DocumentObject*> inside(list.begin(), list.end());
+    for (auto obj : list) {
+        for (auto used : obj->getOutList()) {
+            if (!used || inside.count(used) || used->isDerivedFrom<VarSet>()) {
+                continue;
+            }
+            std::string where;
+            Tab other {};
+            if (used->isAttachedToDocument()
+                && findTab(used->getDocument(), tabNameOf(used), other)) {
+                where = " (" + label(used->getDocument(), other) + ")";
+            }
+            return name + " uses " + used->Label.getValue() + where
+                + ", which is outside it: it can't be duplicated";
+        }
+    }
+    return {};
+}
+
+std::string DocumentTabs::duplicateLabel(const Document* doc, const Tab& tab)
+{
+    std::set<std::string> labels;
+    for (const auto& other : tabs(doc)) {
+        labels.insert(label(doc, other));
+    }
+    const std::string base = label(doc, tab);
+    for (int i = 1;; ++i) {
+        std::string candidate = base + " (" + std::to_string(i) + ")";
+        if (!labels.count(candidate)) {
+            return candidate;
+        }
+    }
+}
+
+DocumentObject* DocumentTabs::duplicate(Document* doc, const Tab& tab)
+{
+    if (!doc) {
+        throw Base::RuntimeError("No document");
+    }
+    const std::string refusal = duplicateRefusal(doc, tab);
+    if (!refusal.empty()) {
+        throw Base::RuntimeError(refusal);
+    }
+    const std::string copyLabel = duplicateLabel(doc, tab);
+    const std::string original = tab.name();
+    const Base::Type type = tab.object->getTypeId();
+    // The tab object first (members()), then what it holds: one copy, its links remapped to
+    // the copies, links to what isn't copied (a VarSet, an assembly's studios) kept
+    const auto list = members(doc, tab);
+    const auto copies = doc->copyObject(list, false, false);
+    DocumentObject* copy = nullptr;
+    if (copies.size() == list.size()) {
+        copy = copies.front();
+    }
+    else {
+        for (auto candidate : copies) {
+            if (candidate && candidate->getTypeId() == type && isTabObject(candidate)) {
+                copy = candidate;
+                break;
+            }
+        }
+    }
+    if (!copy || !copy->isAttachedToDocument()) {
+        throw Base::RuntimeError("The copy of " + label(doc, tab) + " failed");
+    }
+    copy->Label.setValue(copyLabel);
+    placeAfter(doc, copy->getNameInDocument(), original);
+    return copy;
+}
+
+std::vector<DocumentObject*> DocumentTabs::exportObjects(const Document* doc, const Tab& tab)
+{
+    std::vector<DocumentObject*> list;
+    std::set<DocumentObject*> seen;
+    if (tab.kind == Kind::Assembly && tab.object) {
+        list.push_back(tab.object);
+        return list;
+    }
+    if (tab.kind != Kind::PartStudio || !doc) {
+        return list;
+    }
+    if (tab.object) {
+        if (auto group = tab.object->getExtensionByType<GroupExtension>(true)) {
+            for (auto child : group->Group.getValues()) {
+                addParts(child, list, seen);
+            }
+        }
+        return list;
+    }
+    for (auto obj : doc->getObjects()) {
+        if (isImplicitContent(obj)) {
+            addParts(obj, list, seen);
+        }
+    }
+    return list;
+}
+
+void DocumentTabs::exportTab(
+    const Document* doc,
+    const Tab& tab,
+    const std::string& path,
+    const char* module
+)
+{
+    const auto objects = exportObjects(doc, tab);
+    if (objects.empty()) {
+        throw Base::RuntimeError(
+            tab.kind == Kind::PartStudio || tab.kind == Kind::Assembly
+                ? label(doc, tab) + " has no visible part to export"
+                : std::string("Only a Part Studio or an Assembly exports to STEP")
+        );
+    }
+    Base::PyGILStateLocker lock;
+    try {
+        PyObject* imported = PyImport_ImportModule(module ? module : "Import");
+        if (!imported) {
+            throw Py::Exception();
+        }
+        Py::Module writer(imported, true);
+        Py::Callable exporter(writer.getAttr("export"));
+        Py::List list;
+        for (auto obj : objects) {
+            list.append(Py::asObject(obj->getPyObject()));
+        }
+        Py::Tuple args(2);
+        args.setItem(0, list);
+        args.setItem(1, Py::String(path));
+        Py::Dict kwds;
+        kwds.setItem("exportHidden", Py::False());
+        exporter.apply(args, kwds);
+    }
+    catch (Py::Exception&) {
+        Base::PyException error;
+        throw error;
+    }
+}
+
 // -- Python: FreeCAD.DocumentTabs ---------------------------------------------------------------
 
 namespace
@@ -646,6 +837,34 @@ public:
             "dependents(doc, name) -> objects outside the tab using it"
         );
         add_varargs_method("removeTab", &Module::pyRemoveTab, "removeTab(doc, name)");
+        add_varargs_method(
+            "duplicateRefusal",
+            &Module::pyDuplicateRefusal,
+            "duplicateRefusal(doc, name) -> why the tab can't be duplicated, '' when it can"
+        );
+        add_varargs_method(
+            "duplicateLabel",
+            &Module::pyDuplicateLabel,
+            "duplicateLabel(doc, name) -> the label a copy gets, '<label> (N)'"
+        );
+        add_varargs_method(
+            "duplicate",
+            &Module::pyDuplicate,
+            "duplicate(doc, name) -> the copy's tab name: a copy right of it, not linked to it\n"
+            "(in the caller's transaction); RuntimeError with the refusal"
+        );
+        add_varargs_method(
+            "exportObjects",
+            &Module::pyExportObjects,
+            "exportObjects(doc, name) -> what Export writes: a studio's visible parts, an\n"
+            "assembly"
+        );
+        add_varargs_method(
+            "exportTab",
+            &Module::pyExportTab,
+            "exportTab(doc, name, path, module='Import'): the tab to STEP through\n"
+            "module.export"
+        );
         add_varargs_method(
             "metaKey",
             &Module::pyMetaKey,
@@ -807,6 +1026,72 @@ private:
         }
         Document* doc = documentArg(pyDoc);
         removeTab(doc, tabArg(doc, name));
+        return Py::None();
+    }
+    Py::Object pyDuplicateRefusal(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pyDoc, &name)) {
+            throw Py::Exception();
+        }
+        Document* doc = documentArg(pyDoc);
+        return Py::String(duplicateRefusal(doc, tabArg(doc, name)));
+    }
+    Py::Object pyDuplicateLabel(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pyDoc, &name)) {
+            throw Py::Exception();
+        }
+        Document* doc = documentArg(pyDoc);
+        return Py::String(duplicateLabel(doc, tabArg(doc, name)));
+    }
+    Py::Object pyDuplicate(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pyDoc, &name)) {
+            throw Py::Exception();
+        }
+        Document* doc = documentArg(pyDoc);
+        const Tab tab = tabArg(doc, name);
+        try {
+            return Py::String(duplicate(doc, tab)->getNameInDocument());
+        }
+        catch (const Base::Exception& e) {
+            throw Py::RuntimeError(e.what());
+        }
+    }
+    Py::Object pyExportObjects(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pyDoc, &name)) {
+            throw Py::Exception();
+        }
+        Document* doc = documentArg(pyDoc);
+        return objectList(exportObjects(doc, tabArg(doc, name)));
+    }
+    Py::Object pyExportTab(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        char* path = nullptr;
+        const char* module = "Import";
+        if (!PyArg_ParseTuple(args.ptr(), "Oset|s", &pyDoc, &name, "utf-8", &path, &module)) {
+            throw Py::Exception();
+        }
+        const std::string file(path);
+        PyMem_Free(path);
+        Document* doc = documentArg(pyDoc);
+        try {
+            exportTab(doc, tabArg(doc, name), file, module);
+        }
+        catch (const Base::Exception& e) {
+            throw Py::RuntimeError(e.what());
+        }
         return Py::None();
     }
     Py::Object pyMetaKey(const Py::Tuple& /*args*/)

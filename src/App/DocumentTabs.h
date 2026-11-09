@@ -129,6 +129,38 @@ AppExport std::vector<DocumentObject*> dependents(const Document* doc, const Tab
 /// Removes the tab's members from the document (in the caller's transaction)
 AppExport void removeTab(Document* doc, const Tab& tab);
 
+/** Why the tab can't be duplicated, "" when it can (slice 2): only a Part Studio that is an
+ * App::Part and an Assembly duplicate. A Part Studio that uses an object outside it other than a
+ * VarSet (a Derived source, a binder of another studio) is refused, the object named; an
+ * Assembly's links stay pointing at the same studios
+ */
+AppExport std::string duplicateRefusal(const Document* doc, const Tab& tab);
+
+/** Onshape's "Duplicate": a copy of the tab, not linked to the original, as a new tab right of it
+ * labelled "<label> (N)" (the lowest free N from 1); in the caller's transaction. Returns the new
+ * tab object; throws Base::RuntimeError with duplicateRefusal() where it can't
+ */
+AppExport DocumentObject* duplicate(Document* doc, const Tab& tab);
+
+/// The label duplicate() gives a copy of the tab: "<label> (N)", the lowest N no tab has
+AppExport std::string duplicateLabel(const Document* doc, const Tab& tab);
+
+/** What Export writes for the tab: a Part Studio's visible parts (Bodies, solids and links, not
+ * sketches or datums; through plain groups), an Assembly's object itself; empty for the others
+ */
+AppExport std::vector<DocumentObject*> exportObjects(const Document* doc, const Tab& tab);
+
+/** Onshape's "Export" to STEP: exportObjects() through @p module's export(objects, path,
+ * exportHidden=False), "Import" (headless) or "ImportGui" (the colours too). Throws
+ * Base::Exception when there's nothing to write or the writer fails
+ */
+AppExport void exportTab(
+    const Document* doc,
+    const Tab& tab,
+    const std::string& path,
+    const char* module = "Import"
+);
+
 /// The Python module FreeCAD.DocumentTabs
 AppExport PyObject* initModule();
 

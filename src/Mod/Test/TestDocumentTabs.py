@@ -355,3 +355,176 @@ class TestDocumentTabs(unittest.TestCase):
         self.assertEqual(len(array.ElementList), 3)
         self.assertFalse(Tabs.hasImplicitStudio(self.doc))
         self.assertEqual(self.kinds(), [("Part", "PartStudio")])
+
+
+    # -- slice 2: Duplicate and Export (ops#640 round 8) -------------------------------------------
+
+    def paddedStudio(self, label="Part Studio 2"):
+        """An App::Part studio holding a Body with a 10 x 10 sketch padded 10 mm (1000 mm^3)."""
+        import Part
+
+        doc = self.doc
+        studio = doc.addObject("App::Part", "Part")
+        studio.Label = label
+        body = doc.addObject("PartDesign::Body", "Body")
+        studio.addObject(body)
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        corners = [App.Vector(0, 0, 0), App.Vector(10, 0, 0), App.Vector(10, 10, 0), App.Vector(0, 10, 0)]
+        for p, q in zip(corners, corners[1:] + corners[:1]):
+            sketch.addGeometry(Part.LineSegment(p, q), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 1000, 6)
+        return studio, body, pad
+
+    def duplicateInTransaction(self, name):
+        self.doc.openTransaction("Duplicate")
+        copy = Tabs.duplicate(self.doc, name)
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        return self.doc.getObject(copy)
+
+    def bodyOf(self, studio):
+        bodies = [o for o in studio.Group if o.isDerivedFrom("PartDesign::Body")]
+        self.assertEqual(len(bodies), 1, studio.Group)
+        return bodies[0]
+
+    def testDuplicatePartStudio(self):
+        """Duplicate (design 6): a copy right of the original, "<name> (1)", not linked to it: the
+        same volume; the original's pad 10 -> 15 leaves the copy at 1000 mm^3; one undo step
+        removes the copy tab, the redo brings it back; a second copy is "(2)"."""
+        studio, body, pad = self.paddedStudio()
+        self.doc.addObject("TechDraw::DrawPage", "Page")
+        self.assertEqual(Tabs.duplicateRefusal(self.doc, "Part"), "")
+        self.assertEqual(Tabs.duplicateLabel(self.doc, "Part"), "Part Studio 2 (1)")
+        copy = self.duplicateInTransaction("Part")
+        self.assertEqual(copy.TypeId, "App::Part")
+        self.assertEqual(copy.Label, "Part Studio 2 (1)")
+        self.assertEqual([name for name, _kind in self.kinds()], ["Part", copy.Name, "Page"])
+        copyBody = self.bodyOf(copy)
+        self.assertNotEqual(copyBody, body)
+        self.assertEqual(Tabs.tabOf(copyBody), copy.Name)
+        for feature in copyBody.Group:
+            self.assertEqual(Tabs.tabOf(feature), copy.Name)
+            self.assertNotIn(feature, body.Group)
+        self.assertAlmostEqual(copyBody.Shape.Volume, 1000, 6)
+        self.assertNotEqual(copy.Origin, studio.Origin)
+
+        pad.Length = 15
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 1500, 6)
+        self.assertAlmostEqual(copyBody.Shape.Volume, 1000, 6)
+
+        name = copy.Name
+        self.doc.undo()
+        self.assertNotIn(name, [n for n, _kind in self.kinds()])
+        self.assertIsNone(self.doc.getObject(name))
+        self.doc.redo()
+        self.assertEqual([n for n, _kind in self.kinds()], ["Part", name, "Page"])
+        second = self.duplicateInTransaction("Part")
+        self.assertEqual(second.Label, "Part Studio 2 (2)")
+        self.assertEqual([n for n, _kind in self.kinds()], ["Part", second.Name, name, "Page"])
+
+    def testDuplicateSharesTheVariableStudio(self):
+        """A studio whose pad length is a Variable Studio's variable duplicates; the copy uses the
+        same variable (Onshape's variables are the document's), so a change moves both."""
+        studio, body, pad = self.paddedStudio()
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        Tabs.setVariableStudio(variables)
+        variables.addProperty("App::PropertyLength", "Depth")
+        variables.Depth = 10
+        pad.setExpression("Length", "VarSet.Depth")
+        self.doc.recompute()
+        copy = self.duplicateInTransaction("Part")
+        copyPad = [o for o in self.bodyOf(copy).Group if o.isDerivedFrom("PartDesign::Pad")][0]
+        self.assertEqual(dict(copyPad.ExpressionEngine)["Length"], "VarSet.Depth")
+        variables.Depth = 15
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 1500, 6)
+        self.assertAlmostEqual(self.bodyOf(copy).Shape.Volume, 1500, 6)
+
+    def testDuplicateRefusals(self):
+        """Not offered: the implicit studio (an older file's top level), a Drawing, a Variable
+        Studio, and a Part Studio that uses an object outside it (here a link to the implicit
+        studio's Body, as a Derived source would): the refusal names it, and duplicate() raises
+        it, leaving the document as it was."""
+        objects = self.model(assembly=False)
+        self.assertIn("top level", Tabs.duplicateRefusal(self.doc, "*"))
+        self.assertIn("Drawing", Tabs.duplicateRefusal(self.doc, "Page"))
+        self.assertIn("Variable Studio", Tabs.duplicateRefusal(self.doc, "VarSet"))
+        self.assertEqual(Tabs.duplicateRefusal(self.doc, "Part"), "")
+        link = self.doc.addObject("App::Link", "Derived")
+        objects["studio2"].addObject(link)
+        link.LinkedObject = objects["body1"]
+        self.doc.recompute()
+        refusal = Tabs.duplicateRefusal(self.doc, "Part")
+        self.assertIn("Body", refusal)
+        self.assertIn("Part Studio 1", refusal)
+        names = sorted(o.Name for o in self.doc.Objects)
+        with self.assertRaises(RuntimeError):
+            Tabs.duplicate(self.doc, "Part")
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+
+    def testDuplicateAssembly(self):
+        """An assembly duplicates with its links still pointing at the same studio's Body."""
+        objects = self.model(page=False)
+        link = objects["assembly"].newObject("App::Link", "Link")
+        link.LinkedObject = objects["body2"]
+        self.doc.recompute()
+        self.assertEqual(Tabs.duplicateRefusal(self.doc, "Assembly"), "")
+        copy = self.duplicateInTransaction("Assembly")
+        self.assertEqual(copy.TypeId, "Assembly::AssemblyObject")
+        self.assertEqual(copy.Label, "Assembly (1)")
+        self.assertIsNone(copy.getParentGeoFeatureGroup())
+        links = [o for o in copy.Group if o.isDerivedFrom("App::Link")]
+        self.assertEqual(len(links), 1)
+        self.assertNotEqual(links[0], link)
+        self.assertEqual(links[0].LinkedObject, objects["body2"])
+        self.assertEqual(Tabs.tabOf(links[0]), copy.Name)
+        self.assertIn(copy.Name, [n for n, _kind in self.kinds()])
+        self.assertAlmostEqual(links[0].Shape.Volume, math.pi * 25 * 20, 6)
+
+    def testExportPartStudio(self):
+        """Export writes a studio's visible parts to STEP (not its hidden Body or its sketches):
+        re-read, the file's volume is the visible box's 1000 mm^3. An assembly exports its placed
+        parts."""
+        import Part
+
+        studio, body, pad = self.paddedStudio()
+        hidden = self.doc.addObject("PartDesign::Body", "Hidden")
+        studio.addObject(hidden)
+        cylinder(self.doc, hidden)
+        self.doc.recompute()
+        hidden.Visibility = False
+        self.assertEqual(Tabs.exportObjects(self.doc, "Part"), [body])
+        path = os.path.join(self.folder, "Part Studio 2.step")
+        Tabs.exportTab(self.doc, "Part", path)
+        self.assertTrue(os.path.exists(path))
+        self.assertAlmostEqual(Part.read(path).Volume, 1000, 3)
+
+        asm = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
+        asm.Type = "Assembly"
+        link = asm.newObject("App::Link", "Link")
+        link.LinkedObject = body
+        link.Placement.Base = App.Vector(50, 0, 0)
+        self.doc.recompute()
+        self.assertEqual(Tabs.exportObjects(self.doc, "Assembly"), [asm])
+        path = os.path.join(self.folder, "Assembly.step")
+        Tabs.exportTab(self.doc, "Assembly", path)
+        shape = Part.read(path)
+        self.assertAlmostEqual(shape.Volume, 1000, 3)
+        self.assertAlmostEqual(shape.BoundBox.XMin, 50, 3)
+
+    def testExportRefusals(self):
+        """A page and a Variable Studio don't export to STEP; a studio with nothing visible says
+        so."""
+        self.model(assembly=False)
+        self.assertEqual(Tabs.exportObjects(self.doc, "Page"), [])
+        with self.assertRaises(RuntimeError):
+            Tabs.exportTab(self.doc, "Page", os.path.join(self.folder, "page.step"))
+        self.doc.Body001.Visibility = False
+        with self.assertRaises(RuntimeError) as raised:
+            Tabs.exportTab(self.doc, "Part", os.path.join(self.folder, "empty.step"))
+        self.assertIn("no visible part", str(raised.exception))
