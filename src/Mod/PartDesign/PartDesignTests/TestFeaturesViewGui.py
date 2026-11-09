@@ -857,6 +857,30 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertEqual(names, ["featureRollToEnd"])
         self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
 
+    def testSuppressedRowIsGreyAndNothingIsPending(self):
+        """Round 8 (J13): PadA suppressed: its row's text is grey, as Onshape greys a suppressed
+        row, and still struck through; the features that fail through it (the box on its face)
+        are red, none is touched, and Refresh is grey, as Onshape has no needs-recompute state.
+        Unsuppressed: the row has the palette's colour again and everything computes."""
+        grey = self.list.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        self.assertNotEqual(self.item("PadA").foreground().color(), grey)
+        self.padA.Suppressed = True
+        self.doc.recompute()
+        self.assertTrue(
+            waitFor(lambda: self.item("PadA").foreground().color() == grey),
+            self.item("PadA").foreground().color().name(),
+        )
+        self.assertTrue(self.item("PadA").font().strikeOut())
+        self.assertFalse(self.box.isValid())
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        pump()
+        self.assertFalse(Gui.Command.get("Std_Refresh").isActive(), "Refresh is lit")
+        self.padA.Suppressed = False
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.item("PadA").foreground().color() != grey))
+        self.assertFalse(self.item("PadA").font().strikeOut())
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+
     def testPartsListShowsOnlyExistingParts(self):
         """Onshape lists a part only while its features make it: Body2 with its box suppressed
         makes nothing and isn't listed (blind test F37, report 10); merged into Body1 it isn't

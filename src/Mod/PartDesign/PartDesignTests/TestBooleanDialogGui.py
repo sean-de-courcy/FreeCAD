@@ -12,7 +12,8 @@ the operation is not (a new Boolean opens on Union). OK with Keep tools off cons
 (PartDesign.consumerOf, hidden); a Union of a part apart leaves it a part, with Onshape's info.
 
 TestPartsListGui: the Parts list (FeaturesView) has one row per solid of a Body (a part cut in two
-is two rows, "Bar" and "Bar (2)", the Body one), no row for a consumed tool, and none for a Body an
+is two rows, "Bar" and "Part 1" under the Onshape keymap (round 8, J3; "Bar (2)" under FreeCAD's),
+the Body one), no row for a consumed tool, and none for a Body an
 Intersect that missed left empty.
 
 Designed geometry. The dialog: the enclosure 40 x 40 x 10 (16000), a part Tool 40 x 30 x 10 from
@@ -236,8 +237,9 @@ class TestPartsListGui(unittest.TestCase):
         return boolean
 
     def testAPartCutInTwoHasTwoRows(self):
-        """A-2' a: a cutter through the bar's middle third: two rows, "Bar" and "Bar (2)", one
-        Body still; the cutter deleted: one row again."""
+        """A-2' a: a cutter through the bar's middle third: two rows, "Bar" and "Part 1" (the
+        lowest free "Part N", as Onshape names a split's new part; "Bar (2)" under FreeCAD's
+        keymap), one Body still; the cutter deleted: one row again."""
         self.assertRows(["Bar"])
         bodies = [o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
         cutter = self.bar.newObject("PartDesign::SubtractiveBox", "Cutter")
@@ -246,7 +248,11 @@ class TestPartsListGui(unittest.TestCase):
         cutter.Placement.Base = V(10, -5, -5)
         self.doc.recompute()
         self.assertEqual(len(self.bar.Shape.Solids), 2)
-        self.assertRows(["Bar", "Bar (2)"])
+        onshape = (
+            App.ParamGet("User parameter:BaseApp/Preferences/General").GetString("Keymap", "Onshape")
+            != "FreeCAD"
+        )
+        self.assertRows(["Bar", "Part 1" if onshape else "Bar (2)"])
         self.assertEqual([o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body"], bodies)
         self.bar.removeObject(cutter)
         self.doc.removeObject(cutter.Name)

@@ -48,6 +48,7 @@
 #include <Gui/Document.h>
 #include <Gui/DockWindowManager.h>
 #include <Gui/DocumentTabBar.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/ViewProviderDocumentObject.h>
@@ -58,6 +59,8 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/FeatureChamfer.h>
+#include <Mod/PartDesign/App/FeatureFillet.h>
 #include <Mod/PartDesign/App/Derived.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
@@ -69,6 +72,93 @@
 using namespace PartDesignGui;
 
 QPointer<FeaturesView> FeaturesView::registered;
+
+namespace PartDesignGui
+{
+
+/** FreeCAD-CH (ops#640 rank 35, blind test F45; round 8): obj's status message \a message in the
+ * user's words, as the rows' tooltips show it, and under the Onshape keymap the dialogs' banner
+ * and their reference fields' status line (the report view keeps the technical text). Declared
+ * where it is used (no header names it).
+ *
+ * A failure passed on from an input reads "Depends on 'Square', which failed", not the
+ * recompute's "ReferenceAxis links to 'Square', which has an error" (a property the user never
+ * set); a reference a reorder set aside "Depends on 'Pad', which now comes after 'Pocket'"; a
+ * missing reference "Edge15 is missing", without where it is and its candidates (the field's rows
+ * show those). A C++ exception's type or OCCT's raw text ("BRep_API: command not done",
+ * "Standard_ConstructionError") reads as a failed operation, a fillet's or a chamfer's with what
+ * to try [guess on the words]; an empty dress-up says what to pick; an extrusion's message loses
+ * its "SketchBased: ".
+ */
+QString plainStatusText(const App::DocumentObject* obj, const QString& message);
+QString plainStatusText(const App::DocumentObject* obj, const QString& message)
+{
+    auto tr = [](const char* source) {
+        return QCoreApplication::translate("PartDesignGui::FeaturesView", source);
+    };
+    QString text = message.trimmed();
+    static const QRegularExpression passedOn(
+        QStringLiteral(R"(^(?:\w+ links to '(.*)', which has an error|'(.*)' has an error)$)")
+    );
+    if (auto match = passedOn.match(text); match.hasMatch()) {
+        const QString input = match.captured(1).isEmpty() ? match.captured(2) : match.captured(1);
+        return tr("Depends on '%1', which failed").arg(input);
+    }
+    static const QRegularExpression setAside(
+        QStringLiteral(R"(^\w+ refers to '(.*?)', which (.*)$)")
+    );
+    if (auto match = setAside.match(text); match.hasMatch()) {
+        return tr("Depends on '%1', which %2").arg(match.captured(1), match.captured(2));
+    }
+    const bool fillet = obj && obj->isDerivedFrom<PartDesign::Fillet>();
+    const bool chamfer = obj && obj->isDerivedFrom<PartDesign::Chamfer>();
+    static const QRegularExpression internal(QStringLiteral(
+        R"(\b(?:BRep\w*API\w*|Standard_\w+|StdFail_\w+|gp_\w+|TopoDS::\w+|Base::\w+|Part::\w+Exception|std::\w+)\b)"
+        R"(|command not done|Unknown C\+\+ exception)"
+    ));
+    if (internal.match(text).hasMatch()) {
+        if (fillet) {
+            return tr("The fillet could not be built: try a smaller radius");
+        }
+        if (chamfer) {
+            return tr("The chamfer could not be built: try a smaller size");
+        }
+        return tr("The geometry operation failed: change the inputs or the values");
+    }
+    // Nothing to work on: what to pick
+    if (chamfer && text == QLatin1String("No edges specified")) {
+        return tr("Select edges or faces to chamfer");
+    }
+    if (fillet && text == QLatin1String("Fillet not possible on selected shapes")) {
+        auto feature = static_cast<const PartDesign::Fillet*>(obj);
+        if (feature->Base.getSubValues().empty() && !feature->UseAllEdges.getValue()) {
+            return tr("Select edges or faces to fillet");
+        }
+    }
+    // "Missing edge reference: Edge15 (Base[0], no candidates)", with its ", rejected: ..." or
+    // ", picked for ..."; a reorder's "; it was on 'Pad', ..." after it stays
+    static const QRegularExpression missing(QStringLiteral(
+        R"(Missing \w+ reference: (\w+)(?:, (?:rejected:|picked for) [^(;]*)? \((?:[^()]|\([^()]*\))*\))"
+    ));
+    if (text.contains(missing)) {
+        QString plain;
+        qsizetype at = 0;
+        for (auto it = missing.globalMatch(text); it.hasNext();) {
+            const auto match = it.next();
+            plain += text.mid(at, match.capturedStart() - at);
+            plain += tr("%1 is missing").arg(match.captured(1));
+            at = match.capturedEnd();
+        }
+        return plain + text.mid(at);
+    }
+    const QLatin1String sketchBased("SketchBased: ");
+    if (text.startsWith(sketchBased)) {
+        text = text.mid(sketchBased.size());
+    }
+    return text;
+}
+
+}  // namespace PartDesignGui
 
 namespace
 {
@@ -333,34 +423,11 @@ const App::DocumentObject* errorCause(const App::DocumentObject* obj)
     return cause;
 }
 
-/** FreeCAD-CH (ops#640 rank 35, blind test F45): obj's status message in the user's words. A
- * failure passed on from an input reads "Depends on 'Square', which failed", not the recompute's
- * "ReferenceAxis links to 'Square', which has an error" (a property the user never set); the
- * tooltip adds the cause's own message (errorCause()). A C++ exception's type or OCCT's raw text
- * ("BRep_API: command not done", "Standard_ConstructionError") reads as a failed operation
- */
+/// obj's status message in the user's words (PartDesignGui::plainStatusText()); the tooltip adds
+/// the cause's own message (errorCause())
 QString plainStatus(const App::DocumentObject* obj)
 {
-    const QString text = QString::fromUtf8(obj->getStatusString()).trimmed();
-    static const QRegularExpression passedOn(
-        QStringLiteral(R"(^(?:\w+ links to '(.*)', which has an error|'(.*)' has an error)$)")
-    );
-    if (auto match = passedOn.match(text); match.hasMatch()) {
-        const QString input = match.captured(1).isEmpty() ? match.captured(2) : match.captured(1);
-        return QCoreApplication::translate("PartDesignGui::FeaturesView", "Depends on '%1', which failed")
-            .arg(input);
-    }
-    static const QRegularExpression internal(QStringLiteral(
-        R"(\b(?:BRep\w*API\w*|Standard_\w+|StdFail_\w+|gp_\w+|TopoDS::\w+|Base::\w+|Part::\w+Exception|std::\w+)\b)"
-        R"(|command not done|Unknown C\+\+ exception)"
-    ));
-    if (internal.match(text).hasMatch()) {
-        return QCoreApplication::translate(
-            "PartDesignGui::FeaturesView",
-            "The geometry operation failed: change the inputs or the values"
-        );
-    }
-    return text;
+    return plainStatusText(obj, QString::fromUtf8(obj->getStatusString()));
 }
 
 /// The row's tooltip: its name and Body, the message of an error or a warning, and where an error
@@ -1421,8 +1488,9 @@ void FeaturesView::rebuildFeatures()
         QFont font = statusFont(features->font(), obj, isBelow);
         font.setBold(obj == inEdit);
         item->setFont(font);
-        // Grey below the bar, not an error's red or a warning's orange (round 6, J2)
-        QVariant foreground = isBelow
+        // Grey below the bar, not an error's red or a warning's orange (round 6, J2); grey when
+        // suppressed too, as Onshape greys a suppressed row (round 8, J13) [guess: struck as well]
+        QVariant foreground = isBelow || isSuppressed(obj)
             ? QVariant(QBrush(features->palette().color(QPalette::Disabled, QPalette::Text)))
             : statusForeground(status);
         item->setData(Qt::ForegroundRole, foreground);
@@ -1545,6 +1613,23 @@ void FeaturesView::rebuildParts()
     if (!inPlace) {
         parts->clear();
     }
+    // Under the Onshape keymap a later piece is "Part N", the lowest N no row's name takes, as
+    // Onshape names the part a split makes (round 8, J3); else "<label> (2)"
+    const bool partNumbers = Gui::ForkKeymap::isOnshape();
+    std::set<QString> taken;
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        if (!pieces[i]) {
+            taken.insert(QString::fromUtf8(objs[i]->Label.getValue()));
+        }
+    }
+    auto nextPartName = [&taken]() {
+        for (int n = 1;; ++n) {
+            QString name = tr("Part %1").arg(n);
+            if (taken.insert(name).second) {
+                return name;
+            }
+        }
+    };
     for (std::size_t i = 0; i < objs.size(); ++i) {
         auto obj = objs[i];
         auto body = freecad_cast<PartDesign::Body*>(obj);
@@ -1554,7 +1639,8 @@ void FeaturesView::rebuildParts()
         const QString label = QString::fromUtf8(obj->Label.getValue());
         if (pieces[i]) {
             item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-            item->setText(0, tr("%1 (%2)").arg(label).arg(pieces[i] + 1));
+            item->setText(0, partNumbers ? nextPartName()
+                                         : tr("%1 (%2)").arg(label).arg(pieces[i] + 1));
         }
         else {
             item->setFlags(item->flags() | Qt::ItemIsEditable);

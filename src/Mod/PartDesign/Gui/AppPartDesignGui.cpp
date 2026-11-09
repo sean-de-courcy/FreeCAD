@@ -30,7 +30,10 @@
 #include <Base/Interpreter.h>
 #include <Base/PyObjectBase.h>
 #include <Gui/Application.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Language/Translator.h>
+#include <functional>
+#include <QString>
 
 #include "Workbench.h"
 #include "ViewProviderBase.h"
@@ -65,6 +68,23 @@
 #include "ViewProviderThickness.h"
 #include "ViewProviderTransformed.h"
 
+
+// FreeCAD-CH (ops#640 round 8): declared where they are used (no header names them): the edit
+// status banner's words (TaskView.cpp), and the plain status words (FeaturesView.cpp)
+namespace App
+{
+class DocumentObject;
+}
+namespace Gui::TaskView
+{
+GuiExport void setEditStatusText(
+    std::function<QString(const App::DocumentObject*, const QString&)> text
+);
+}
+namespace PartDesignGui
+{
+QString plainStatusText(const App::DocumentObject* obj, const QString& message);
+}
 
 // use a different name to CreateCommand()
 void CreatePartDesignCommands();
@@ -171,6 +191,11 @@ PyMOD_INIT_FUNC(PartDesignGui)
 
     // add resources and reloads the translators
     loadPartDesignResource();
+
+    // Under the Onshape keymap a dialog's banner says what its rows' tooltips say (round 8)
+    Gui::TaskView::setEditStatusText([](const App::DocumentObject* obj, const QString& text) {
+        return Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text) : text;
+    });
 
     PyMOD_Return(mod);
 }
