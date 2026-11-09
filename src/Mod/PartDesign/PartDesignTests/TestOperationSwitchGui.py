@@ -105,6 +105,64 @@ class OperationSwitchCase(ResultBoxGuiCase):
         self.assertFalse(self.doc.HasPendingTransaction)
         self.assertEqual(len(self.doc.UndoNames), self.undos + 1, self.doc.UndoNames)
 
+    def refusalNote(self):
+        """The text of the line under the Result row that says why rows are greyed (round 9), or
+        None while it is hidden"""
+        note = self.visible(QtWidgets.QLabel, "refusalNote")
+        return note.text() if note is not None else None
+
+    def mirroredBoss(self, onDatum=None, datumFirst=False):
+        """J17's variant B: Part1 40 x 30 x 10 over x -20..20 (12000); BossB 8 x 8 x 5 on its top
+        at (-10, 15) (320), its sketch on that face; Mirrored of it about the Right plane, or about
+        a datum plane: onDatum "origin" (on the Right plane), "face" (on Part1's +x side, offset
+        20 back to x = 0) or "boss" (the same face picked on the boss's result, which is Part1's
+        material: review R9-1); with datumFirst the plane is made before the boss. Returns (boss
+        sketch, boss, mirror, datum or None); Part1 is 12640."""
+        body = self.doc.addObject("PartDesign::Body", "Part1")
+        base = pad(body, "Base", sketch(body, "BaseSk", xyPlane(body), (-20, 0, 20, 30)), 10)
+        self.doc.recompute()
+        boss = None
+        right = body.Origin.OriginFeatures[5]
+        datum = None
+
+        def makeDatum():
+            datum = body.newObject("PartDesign::Plane", "DatumPlane")
+            if onDatum == "origin":
+                datum.AttachmentSupport = [(right, "")]
+            else:
+                support = boss if onDatum == "boss" else base
+                [side] = [
+                    f"Face{i}"
+                    for i, face in enumerate(support.Shape.Faces, 1)
+                    if abs(face.normalAt(0, 0).x - 1) < 1e-9 and abs(face.CenterOfMass.x - 20) < 1e-6
+                ]
+                datum.AttachmentSupport = [(support, side)]
+                datum.AttachmentOffset = App.Placement(App.Vector(0, 0, -20), App.Rotation())
+            datum.MapMode = "FlatFace"
+            self.doc.recompute()
+            self.assertLess(abs(datum.Placement.Base.x), 1e-6)
+            return datum
+
+        if onDatum and datumFirst:
+            datum = makeDatum()
+        bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
+        bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        bossSk.MapMode = "FlatFace"
+        rect(bossSk, -14, 11, -6, 19)
+        boss = pad(body, "BossB", bossSk, 5)
+        self.doc.recompute()
+        if onDatum and not datumFirst:
+            datum = makeDatum()
+        mirror = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirror.Originals = [boss]
+        mirror.MirrorPlane = (datum or right, [""])
+        body.Tip = mirror
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 12640, places=3)
+        self.body, self.base = body, base
+        return bossSk, boss, mirror, datum
+
     def bodiesBut(self, *known):
         names = {b.Name for b in known}
         return [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body" and o.Name not in names]
@@ -259,6 +317,111 @@ class TestOperationSwitchGui(OperationSwitchCase):
         self.assertAlmostEqual(self.body.Shape.Volume, before - 2000, places=3)
 
 
+    def testANewPartWithItsMirrorGoesBackToAdd(self):
+        """J17's variant B (round 9): BossB switched to New takes its mirror along (Part 2, 640).
+        Edited again, Add is offered, no refusal shown; Cancel leaves both parts. Add, OK: one part,
+        the mirror merged (12000 plus both bosses), in one undo step; undo: two parts again."""
+        bossSk, boss, mirror, datum = self.mirroredBoss()
+        self.openEdit(boss)
+        self.choose("New")
+        [part] = self.bodiesBut(self.body)
+        self.assertEqual(part.Group, [bossSk, boss, mirror])
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        partName = part.Name
+        for ok in (False, True):
+            self.openEdit(boss)
+            self.assertEqual(self.combo().currentText(), "New")
+            for text in ROWS[1:]:
+                self.assertOffered(text)
+            self.assertIsNone(self.refusalNote())
+            self.choose("Add")
+            self.assertEqual(self.bodiesBut(self.body), [])
+            self.assertIs(Gui.getDocument(self.doc.Name).getInEdit().Object, boss)
+            self.close(ok=ok)
+            self.doc.recompute()
+            if not ok:
+                self.assertEqual(len(self.doc.UndoNames), self.undos)
+                self.assertEqual(self.doc.getObject(partName).Group, [bossSk, boss, mirror])
+                self.assertEqual([o.Name for o in self.body.Group], ["BaseSk", "Base"])
+        self.assertValid()
+        self.assertOneUndoStep()
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertEqual(
+            [o.Name for o in self.body.Group], ["BaseSk", "Base", "BossSk", "BossB", "Mirrored"]
+        )
+        self.assertIs(self.body.Tip, mirror)
+        self.assertIs(mirror.MirrorPlane[0], self.body.Origin.OriginFeatures[5])
+        self.assertTrue(mirror.Visibility)
+        self.assertAlmostEqual(self.body.Shape.Volume, 12640, places=3)
+        self.doc.undo()
+        self.doc.recompute()
+        part = self.doc.getObject(partName)
+        self.assertIsNotNone(part)
+        self.assertEqual(part.Group, [bossSk, boss, mirror])
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 12000, places=3)
+
+    def testAFilletedNewPartGoesBackToAdd(self):
+        """J8's change of mind (round 9): the boss and its fillet made a new part, then Add in a
+        later edit: the enclosure holds them where they were (WITH_BOSS), the new part gone."""
+        bossSk, boss, fillet = self.bossWithFillet()
+        group = self.body.Group
+        self.openEdit(boss)
+        self.choose("New")
+        [part] = self.bodiesBut(self.body)
+        self.close(ok=True)
+        partName = part.Name
+        self.openEdit(boss)
+        self.assertOffered("Add")
+        self.choose("Add")
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertValid()
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertEqual(self.body.Group, group)
+        self.assertIs(self.body.Tip, fillet)
+        self.assertIs(fillet.BaseFeature, boss)
+        self.assertAlmostEqual(self.body.Shape.Volume, WITH_BOSS, places=3)
+
+    def testADatumOnTheOriginGoesAlong(self):
+        """Round 9 item 2: the mirror about a datum plane on Part1's Right plane: New is offered and
+        takes the datum along (Part 2 is the two bosses, 640; Part1 12000)."""
+        bossSk, boss, mirror, datum = self.mirroredBoss("origin")
+        self.openEdit(boss)
+        self.assertOffered("New")
+        self.assertIsNone(self.refusalNote())
+        self.choose("New")
+        [part] = self.bodiesBut(self.body)
+        self.assertEqual(part.Group, [bossSk, boss, datum, mirror])
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertValid()
+        self.assertIs(datum.AttachmentSupport[0][0], part.Origin.OriginFeatures[5])
+        self.assertAlmostEqual(part.Shape.Volume, 640, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 12000, places=3)
+
+    def testADatumOnTheBossFaceKeepsTheRefusalShown(self):
+        """Review R9-1: the datum plane on the +x side face picked on the boss's result (Part1's
+        material): New greyed, the line under the Result row saying why."""
+        bossSk, boss, mirror, datum = self.mirroredBoss("boss")
+        self.assertIs(datum.AttachmentSupport[0][0], boss)
+        self.openEdit(boss)
+        why = "'DatumPlane' uses 'BossB', which would go to the new part"
+        self.assertRefused("New", why)
+        self.assertEqual(self.refusalNote(), "Can't switch to New: " + why)
+
+    def testADatumOnWhatStaysKeepsTheRefusalShown(self):
+        """J17's refusal, kept and now shown: the mirror about a datum plane on Part1's side face,
+        which stays: New greyed, and the line under the Result row says why (round 9 item 3)."""
+        bossSk, boss, mirror, datum = self.mirroredBoss("face")
+        self.openEdit(boss)
+        why = "'Mirrored' uses 'DatumPlane', which stays in 'Part1'"
+        self.assertRefused("New", why)
+        self.assertEqual(self.refusalNote(), "Can't switch to New: " + why)
+
+
 class TestMergedSwitchGui(OperationSwitchCase):
     def mergedSlot(self, later=False):
         """The enclosure, Right beside it and the slot across them, merging Right (36000). With
@@ -370,10 +533,13 @@ class TestMergedSwitchGui(OperationSwitchCase):
             self.assertRefused(text, why)
         merge = self.visible(QtWidgets.QListWidget, "mergeList")
         self.assertIsNotNone(merge)
+        note = self.refusalNote()
+        self.assertTrue(note.startswith("Can't switch to New, Remove or Intersect: " + why), note)
         merge.item(0).setCheckState(QtCore.Qt.Unchecked)
         pump(0.2)
         for text in ("New", "Remove", "Intersect"):
             self.assertOffered(text)
+        self.assertIsNone(self.refusalNote())
         self.choose("New")
         [part] = self.bodiesBut(self.body, self.right)
         self.assertIs(slot.getParentGeoFeatureGroup(), part)

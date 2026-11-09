@@ -91,9 +91,10 @@ public:
         add_varargs_method(
             "addToPart",
             &Module::addToPart,
-            "addToPart(feature, body) -- newPartFrom the other way: moves feature, the only member "
-            "of its Body besides its Profile sketch, into body, another part of its studio, where "
-            "the studio's history has it, and removes the empty Body. Returns body; no recompute."
+            "addToPart(feature, body) -- newPartFrom the other way: moves feature, its Body's first "
+            "solid, and every other member of that Body (its sketch, what builds on it) in order "
+            "into body, another part of its studio, where the studio's history has the feature, "
+            "and removes the empty Body. Returns body; no recompute."
         );
         add_varargs_method(
             "addToPartRefusal",

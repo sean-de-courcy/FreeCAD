@@ -1329,6 +1329,12 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
     combo->setObjectName(QStringLiteral("resultCombo"));
     layout->addWidget(combo, 1);
     groupLayout()->addWidget(proxy);
+    // FreeCAD-CH (ops#640 round 9): why a row is greyed, under the row (showRefusals)
+    auto* refusals = new QLabel(this);
+    refusals->setObjectName(QStringLiteral("refusalNote"));
+    refusals->setWordWrap(true);
+    refusals->setVisible(false);
+    groupLayout()->addWidget(refusals);
 
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
@@ -1344,11 +1350,8 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
         if (from) {
             combo->setCurrentIndex(1);
         }
-        else if (QString why = newPartRefusal(feature); !why.isEmpty()) {
-            if (auto model = qobject_cast<QStandardItemModel*>(combo->model())) {
-                model->item(1)->setEnabled(false);
-            }
-            combo->setItemData(1, why, Qt::ToolTipRole);
+        else {
+            refuseRow(QStringLiteral("new"), newPartRefusal(feature));
         }
         // Merge with (design 2.5): for a feature in its own part, not one moved to a new part
         if (!from && body && hasStudioSiblings(body) && !PartDesign::Boolean::mergeOf(body)) {
@@ -2020,6 +2023,48 @@ void TaskResultParameters::addOperationRow()
     }
 }
 
+namespace
+{
+// FreeCAD-CH (ops#640 round 9, journeys J8 and J17): the greyed rows of the Result row and why, in
+// the line under it (refusalNote), as the box's other notes: a greyed row's tooltip alone went
+// unseen. Rows refused for one reason share a line: "Can't switch to Add, Remove or Intersect:
+// 'Mirrored' uses 'BossB'"
+void showRefusals(QWidget* box, QComboBox* combo)
+{
+    auto note = box->findChild<QLabel*>(QStringLiteral("refusalNote"));
+    auto model = qobject_cast<QStandardItemModel*>(combo->model());
+    if (!note || !model) {
+        return;
+    }
+    std::vector<std::pair<QString, QStringList>> reasons;
+    for (int i = 0; i < combo->count(); ++i) {
+        const QString why = combo->itemData(i, Qt::ToolTipRole).toString();
+        if (model->item(i)->isEnabled() || why.isEmpty()) {
+            continue;
+        }
+        auto found = std::ranges::find_if(reasons, [&why](const auto& reason) {
+            return reason.first == why;
+        });
+        if (found == reasons.end()) {
+            reasons.emplace_back(why, QStringList {combo->itemText(i)});
+        }
+        else {
+            found->second << combo->itemText(i);
+        }
+    }
+    QStringList lines;
+    for (const auto& [why, rows] : reasons) {
+        const QString list = rows.size() < 2
+            ? rows.first()
+            : TaskResultParameters::tr("%1 or %2")
+                  .arg(rows.mid(0, rows.size() - 1).join(QStringLiteral(", ")), rows.last());
+        lines << TaskResultParameters::tr("Can't switch to %1: %2").arg(list, why);
+    }
+    note->setText(lines.join(QLatin1Char('\n')));
+    note->setVisible(!lines.isEmpty());
+}
+}  // namespace
+
 void TaskResultParameters::refuseRow(const QString& key, const QString& why)
 {
     const int index = combo->findData(key);
@@ -2030,6 +2075,7 @@ void TaskResultParameters::refuseRow(const QString& key, const QString& why)
         model->item(index)->setEnabled(false);
     }
     combo->setItemData(index, why, Qt::ToolTipRole);
+    showRefusals(this, combo);
 }
 
 void TaskResultParameters::refuseOperations()
@@ -2046,6 +2092,7 @@ void TaskResultParameters::refuseOperations()
         }
         combo->setItemData(i, combo->itemData(i, PartTipRole), Qt::ToolTipRole);
     }
+    showRefusals(this, combo);  // none yet; refuseRow shows each
     PartDesign::Boolean* merge = mergeAfter(feature);
     // The whole merge scope unticked (Merge with all off): the Merge goes at OK, so what builds on
     // it builds on the feature, and the rows are refused as without it (ops#640 round 5)
