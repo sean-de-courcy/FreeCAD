@@ -1481,15 +1481,16 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, side)
         self.assertEqual(draft.Base[1], [side])
 
-    def testDraftWithFacesOpensUnarmed(self):
-        """B1 (ops#162): a draft with faces and no pull direction opens with no field armed (the
-        old panel armed on the pull direction's subs, not Base's)."""
+    def testDraftWithFacesOpensWithItsFacesArmed(self):
+        """B1 (ops#162): a draft with faces and no pull direction doesn't arm the pull direction
+        (the old panel armed on the pull direction's subs, not Base's); its faces field is armed,
+        as an edit's first field (round 8, J11)."""
         box, draft = self.draft()
         self.assertEqual(draft.PullDirection, None)
         [faces, plane, line] = self.edit(draft, count=3)
-        pump(0.2)
-        self.assertFalse(armed(faces), "a draft with faces opens armed")
+        self.assertTrue(waitFor(lambda: armed(faces)), "the edit's faces field isn't armed")
         self.assertFalse(armed(line))
+        self.assertFalse(armed(plane))
 
     def testDraftWithoutFacesOpensArmed(self):
         """B1 (ops#162): a draft with a pull direction and no faces opens with its faces field
