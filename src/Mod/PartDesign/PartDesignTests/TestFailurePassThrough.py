@@ -138,10 +138,10 @@ class FailurePassThroughBase:
         return message
 
     def assertStopped(self, obj, *words):
-        """Failed and left touched: a failure no rule claims, or its dependant (ops#579)."""
+        """Failed: a failure no rule claims, or its dependant (ops#579). A dependant stopped
+        without running is no longer left touched (ops#640 round 8, J13: nothing is pending)."""
         self.assertFalse(obj.isValid(), f"{obj.Name} stays valid")
         self.assertIn("Invalid", obj.State)
-        self.assertIn("Touched", obj.State)
         message = obj.getStatusString()
         for word in words:
             self.assertIn(word, message)
@@ -1021,6 +1021,93 @@ class FailurePassThroughBase:
         self.recompute()
         self.assertValid(lead, block, boss, self.body, mirror)
         self.assertBody(BLOCK + BOSS)
+
+    def testSuppressedBaseLeavesNothingPending(self):
+        """Round 8 (J13): the block suppressed under a boss on its side and a 1 mm fillet on the
+        boss's outer top edge (5 long): the boss's sketch loses its face, the boss, the fillet and
+        the Body fail through it, red and not touched, as Onshape has no needs-recompute state;
+        the document has nothing to recompute (Refresh stays grey) and a recompute changes
+        nothing. Unsuppressed, everything computes again: 4000 + 125 - (1 - pi/4) 5."""
+        block = self.block()
+        boss = self.boss(block)
+        self.recompute()
+        # The boss's outer face is the solid's x = max; its top edge there
+        outerX = boss.Shape.BoundBox.XMax
+        outer = {
+            i: e.BoundBox
+            for i, e in enumerate(boss.Shape.Edges, 1)
+            if abs(e.BoundBox.XMin - outerX) < TOL and abs(e.BoundBox.XMax - outerX) < TOL
+        }
+        topZ = max(b.ZMax for b in outer.values())
+        [edge] = [f"Edge{i}" for i, b in outer.items() if b.ZMin > topZ - TOL]
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (boss, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        expected = BLOCK + BOSS - (1 - math.pi / 4) * 5
+        self.assertValid(boss, fillet)
+        self.assertBody(expected)
+
+        block.Suppressed = True
+        self.recompute()
+        sketch = boss.Profile[0]
+        for obj in (sketch, boss, fillet, self.body):
+            self.assertFalse(obj.isValid(), f"{obj.Name} stays valid")
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertFalse(self.doc.mustExecute())
+        messages = [o.getStatusString() for o in (sketch, boss, fillet, self.body)]
+        self.recompute()
+        self.assertEqual([o.getStatusString() for o in (sketch, boss, fillet, self.body)], messages)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+
+        block.Suppressed = False
+        self.recompute()
+        self.assertValid(block, sketch, boss, fillet)
+        self.assertBody(expected)
+
+    def testDeletedSketchPlaneFailsTheSketch(self):
+        """Round 8 (J20, B1): a datum plane 10 above the origin's XY plane, a sketch on it (a
+        circle of radius 3 over the block's middle) and a 5 mm pad from it: 4000 + 45 pi. The
+        plane deleted, the sketch keeps no support; as Onshape's sketch whose plane is gone, it
+        fails saying so (not left where it was), the pad fails through it and contributes
+        nothing: the Body is the block. A second recompute keeps that. Undo of the delete heals."""
+        self.doc.UndoMode = 1
+        block = self.block()
+        [xy] = [f for f in self.body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        plane = self.body.newObject("PartDesign::Plane", "Plane")
+        plane.AttachmentSupport = [(xy, "")]
+        plane.MapMode = "FlatFace"
+        plane.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+        sketch = models.sketch(self.doc, "OnPlane", [models.circle(10, 10, 3)])
+        self.body.addObject(sketch)
+        sketch.AttachmentSupport = [(plane, "")]
+        sketch.MapMode = "FlatFace"
+        pad = models.pad(self.body, sketch, 5, "OnPlanePad")
+        self.recompute()
+        self.assertValid(plane, sketch, pad)
+        self.assertBody(BLOCK + 45 * math.pi)
+
+        self.doc.openTransaction("Delete")
+        self.body.removeObject(plane)
+        self.doc.removeObject(plane.Name)
+        self.doc.commitTransaction()
+        self.assertEqual(sketch.AttachmentSupport, [])
+        self.recompute()
+        self.assertFalse(sketch.isValid(), "the sketch stays valid with its plane gone")
+        self.assertIn("The sketch plane is missing", sketch.getStatusString())
+        self.assertFalse(pad.isValid(), "the pad stays valid on a sketch with no plane")
+        self.assertValid(block)
+        self.assertBody(BLOCK)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertBody(BLOCK)
+
+        self.doc.undo()
+        self.recompute()
+        plane = self.doc.getObject("Plane")
+        self.assertIsNotNone(plane)
+        self.assertValid(plane, sketch, pad)
+        self.assertBody(BLOCK + 45 * math.pi)
 
     def testSuppressedLeadDoesNotHideAFailedFirstPad(self):
         """The lead is a pocket a reorder left at the top, suppressed to get the Body back."""

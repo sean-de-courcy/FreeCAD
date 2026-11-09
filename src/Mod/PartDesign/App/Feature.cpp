@@ -310,12 +310,20 @@ App::DocumentObjectExecReturn* Feature::recompute()
     if (getFeatureBody()) {
         std::string why;
         if (inputInError(this, why)) {
+            // FreeCAD-CH (ops#640 round 8, J13): failed without running, as a document's stop
+            // (Document::recompute()): nothing is pending, and it runs again when its input does
+            purgeTouched();
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
     auto ret = Part::Feature::recompute();
     if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {
         vouchedShape = Shape.getShape().getShape();
+    }
+    else if (ret != App::DocumentObject::StdReturn && getFeatureBody()) {
+        // FreeCAD-CH (ops#640 round 8, J13): it ran and failed, as Onshape's red feature: nothing
+        // is pending (a recompute would fail it again); it runs again when an input changes
+        purgeTouched();
     }
     return ret;
 }

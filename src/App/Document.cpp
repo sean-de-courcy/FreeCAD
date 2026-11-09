@@ -4593,6 +4593,14 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             // of it (PartDesign: a stopped Body, nothing)
                             continuation->afterStop(obj);
                         }
+                        if (stopped) {
+                            // FreeCAD-CH (ops#640 round 8, J13): judged, so nothing is pending:
+                            // as Onshape, which has no needs-recompute state, a recompute
+                            // would only stop it again. It runs again when what stopped it
+                            // changes: a recomputed input enforces its in-list (above, and
+                            // wasError), a reorder's put-back writes its link
+                            obj->purgeTouched();
+                        }
                         failDependantsOutside(obj);
                         if (continuation) {
                             enforcePathReadersPastHeld(obj, *continuation);
