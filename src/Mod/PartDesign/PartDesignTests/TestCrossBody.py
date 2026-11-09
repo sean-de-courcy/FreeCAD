@@ -590,8 +590,9 @@ class TestCrossBody(unittest.TestCase):
         """R2-2: a Pad of length zero on a sketch in another Body placed alike fails for its own
         reason, and the next recompute has nothing to do. Any failed feature that read another
         Body was run on every recompute. As its Body's first solid feature, the Body doesn't
-        continue past it (ops#579, decisions 255 (1) and 257): unclaimed, it stays touched and
-        fails again for its own reason on every recompute."""
+        continue past it (ops#579, decisions 255 (1) and 257): unclaimed, it stays failed for its
+        own reason; it is no longer left touched (ops#640 round 8, J13: as Onshape, nothing is
+        pending), so a recompute has nothing to do."""
         source = self.body("Source")
         sketch = self.sketch(source, "Sk", self.onXY(source), (0, 0, 5, 5))
         body = self.body("Body")
@@ -609,7 +610,8 @@ class TestCrossBody(unittest.TestCase):
         for _ in range(2):
             self.assertFalse(first.isValid())
             self.assertNotIn("placed elsewhere", first.getStatusString())
-            self.assertIn("Touched", first.State)
+            self.assertNotIn("Touched", first.State)
+            self.assertFalse(self.doc.mustExecute())
             self.assertFalse(self.doc.Other.isValid())
             self.doc.recompute()
 
