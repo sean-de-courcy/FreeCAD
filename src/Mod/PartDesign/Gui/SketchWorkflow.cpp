@@ -1013,6 +1013,81 @@ void createSketchToPickPlane(Gui::Document* guidocument, PartDesign::Body* activ
     }
 }
 
+// FreeCAD-CH (ops#640, J1T B): New Sketch with the Part Studio's own Top, Front or Right selected
+// (the Features list's rows, or the plane in the view): the sketch goes on it, in the active Body
+// or, in a studio with no part yet, a new Body there, as Onshape's sketch on Top asks nothing (the
+// stock path asked for an active Body). The Body's own plane stands for the studio's
+// (BodyBase::studioOriginFeature). False, nothing done, for any other selection.
+bool createSketchOnStudioPlane(Gui::Document* guidocument, PartDesign::Body* activeBody)
+{
+    App::Document* appdocument = guidocument->getDocument();
+    const auto selection = Gui::Selection().getSelection(appdocument->getName());
+    if (selection.size() != 1) {
+        return false;
+    }
+    auto plane = freecad_cast<App::Plane*>(selection.front().pObject);
+    App::LocalCoordinateSystem* lcs = plane ? plane->getLCS() : nullptr;
+    if (!lcs) {
+        return false;
+    }
+    App::Part* studio = nullptr;
+    for (auto user : lcs->getInList()) {
+        auto part = freecad_cast<App::Part*>(user);
+        if (part && part->Origin.getValue() == lcs) {
+            studio = part;
+            break;
+        }
+    }
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    if (!studio || (!assembly.isBad() && studio->isDerivedFrom(assembly))) {
+        return false;  // a Body's own plane, or an assembly's: the usual way
+    }
+    App::DocumentObject* own = nullptr;
+    if (activeBody) {
+        own = Part::BodyBase::studioOriginFeature(activeBody, plane);
+        if (!own) {
+            return false;  // another studio's plane, or the Body placed off the studio's origin
+        }
+        guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "New Sketch"));
+    }
+    else {
+        if (PartDesignGui::getActivePart() != studio) {
+            return false;
+        }
+        // Undo takes the Body made for it too
+        guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "New Sketch"));
+        activeBody = PartDesignGui::makeBody(appdocument);
+        if (!activeBody) {
+            guidocument->abortCommand();
+            return true;
+        }
+        studio->addObject(activeBody);
+        own = Part::BodyBase::studioOriginFeature(activeBody, plane);
+        if (!own) {
+            guidocument->abortCommand();
+            return false;
+        }
+    }
+    std::string FeatName = appdocument->getUniqueObjectName("Sketch");
+    FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+    auto sketch = appdocument->getObject(FeatName.c_str());
+    if (!sketch) {
+        guidocument->abortCommand();
+        return true;
+    }
+    FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+    FCMD_OBJ_CMD(sketch, "AttachmentSupport = (" << Gui::Command::getObjectCmd(own) << ",[''])");
+    FCMD_OBJ_CMD(
+        sketch,
+        "MapMode = '" << Attacher::AttachEngine::getModeName(Attacher::mmFlatFace) << "'"
+    );
+    Gui::Command::updateActive();
+    Gui::Selection().clearSelection();
+    PartDesignGui::setEdit(sketch, activeBody);
+    markNewSketch(sketch);
+    return true;
+}
+
 }  // namespace
 
 SketchWorkflow::SketchWorkflow(Gui::Document* document)
@@ -1082,6 +1157,12 @@ void SketchWorkflow::tryCreateSketch()
                              ->GetBool("NewSketchUseAttachmentDialog", false);
 
     bool shiftHeld = QApplication::queryKeyboardModifiers() & Qt::ShiftModifier;
+
+    // FreeCAD-CH (ops#640, J1T B): the studio's own Top, Front or Right selected
+    if (!useAttachment && !shiftHeld && Gui::ForkKeymap::isOnshape()
+        && createSketchOnStudioPlane(guidocument, activeBody)) {
+        return;
+    }
 
     auto filters = getFilters();
     SketchPreselection sketchOnFace {guidocument, activeBody, filters};

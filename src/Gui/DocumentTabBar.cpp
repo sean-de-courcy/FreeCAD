@@ -265,6 +265,8 @@ private:
     std::set<const App::Document*> closing;  // their views go: an activation meanwhile is no switch
     std::map<const App::Document*, std::string> active;
     std::map<const App::Document*, std::map<int, std::string>> steps;
+    std::map<const App::Document*, std::string> showAfter;  // a tab an undo or redo brings back
+    void stepApplied(const App::Document& doc);
     struct PageView
     {
         QPointer<MDIView> view;
@@ -443,6 +445,12 @@ Controller::Controller(MainWindow* mw)
     connections.emplace_back(app.signalDeleteDocument.connect([this](const App::Document& doc) {
         onDeleteDocument(doc);
     }));
+    connections.emplace_back(
+        app.signalUndoDocument.connect([this](const App::Document& doc) { stepApplied(doc); })
+    );
+    connections.emplace_back(
+        app.signalRedoDocument.connect([this](const App::Document& doc) { stepApplied(doc); })
+    );
     ForkKeymap::preferenceGroup()->Attach(this);
     qApp->installEventFilter(this);
     applyKeymap();
@@ -501,6 +509,7 @@ void Controller::keymapChanged()
         dirty.clear();
         active.clear();
         steps.clear();
+        showAfter.clear();
         pageViews.clear();
     }
     applyKeymap();
@@ -543,6 +552,7 @@ void Controller::onDeleteDocument(const App::Document& doc)
     dirty.erase(&doc);
     active.erase(&doc);
     steps.erase(&doc);
+    showAfter.erase(&doc);
     for (auto it = pageViews.begin(); it != pageViews.end();) {
         it = it->second.doc == &doc || !it->second.view ? pageViews.erase(it) : std::next(it);
     }
@@ -931,8 +941,13 @@ bool Controller::beforeUndo(Gui::Document* gdoc, bool undo)
     }
     AppTabs::Tab tab {};
     std::string refusal;
-    if (AppTabs::findTab(doc, step->second, tab)
-        && !switchTo(doc, step->second, true, &refusal)) {
+    if (!AppTabs::findTab(doc, step->second, tab)) {
+        // The step brings its tab back (the redo of "Create Part Studio", the undo of a tab's
+        // delete): shown once it is there (J1T)
+        showAfter[doc] = step->second;
+        return true;
+    }
+    if (!switchTo(doc, step->second, true, &refusal)) {
         // F6-3: a dialog that doesn't lock the history (an assembly joint's, Std_Placement)
         // refuses the switch. Showing the step's tab under the dialog (R6T-10) stranded the user
         // there (every way back refused while the dialog is open): the undo is refused instead
@@ -940,6 +955,27 @@ bool Controller::beforeUndo(Gui::Document* gdoc, bool undo)
         return false;
     }
     return true;
+}
+
+void Controller::stepApplied(const App::Document& doc)
+{
+    auto it = showAfter.find(&doc);
+    if (it == showAfter.end()) {
+        return;
+    }
+    const std::string name = it->second;
+    const std::string docName = doc.getName();
+    showAfter.erase(it);
+    // Once the step's objects have their view providers
+    QTimer::singleShot(0, this, [this, docName, name] {
+        App::Document* current = App::GetApplication().getDocument(docName.c_str());
+        AppTabs::Tab tab {};
+        if (current && isOn() && AppTabs::findTab(current, name, tab)) {
+            reconcile(current);
+            switchTo(current, name, true, nullptr);
+            refreshBars();
+        }
+    });
 }
 
 MDIView* Controller::showTab(App::Document* doc, const AppTabs::Tab& tab)
@@ -1099,6 +1135,10 @@ std::string Controller::create(App::Document* doc, const std::string& kind)
         }
         gdoc->commitCommand();
         name = obj->getNameInDocument();
+        // The step is the new tab's: its redo shows it again (J1T), its undo is made there
+        if (const int id = doc->getTransactionID(true, 0)) {
+            steps[doc][id] = name;
+        }
     }
     else if (kind == "Assembly") {
         // Any number of assemblies, as Onshape's (ops#651; Assembly_CreateAssembly lifts upstream's
@@ -1277,8 +1317,9 @@ void Controller::onTabMenu(const QPoint& pos)
     const bool exportable = found && is3DKind(tab.kind);
     exportAction->setEnabled(exportable);
     exportAction->setToolTip(
-        exportable ? QApplication::translate("DocumentTabs", "Export the tab to STEP")
-                   : QApplication::translate("DocumentTabs", "Only a Part Studio or an Assembly exports")
+        exportable
+            ? QApplication::translate("DocumentTabs", "Export the tab to STEP")
+            : QApplication::translate("DocumentTabs", "Only a Part Studio or an Assembly exports")
     );
     QAction* deleteAction = menu.addAction(QApplication::translate("DocumentTabs", "Delete"));
     QAction* chosen = menu.exec(typed->mapToGlobal(pos));
@@ -1328,7 +1369,10 @@ void Controller::exportInteractive(int index)
         mw,
         QApplication::translate("DocumentTabs", "Export"),
         FileDialog::getWorkingDirectory() + QLatin1Char('/') + base + QStringLiteral(".step"),
-        {FileDialog::Filter(QStringLiteral("STEP"), {QStringLiteral("*.step"), QStringLiteral("*.stp")})}
+        {FileDialog::Filter(
+            QStringLiteral("STEP"),
+            {QStringLiteral("*.step"), QStringLiteral("*.stp")}
+        )}
     );
     if (file.isEmpty()) {
         return;
@@ -1444,7 +1488,8 @@ bool Controller::eventFilter(QObject* watched, QEvent* event)
     if ((type == QEvent::ShortcutOverride || type == QEvent::KeyPress) && isOn()
         && !QApplication::activeModalWidget()) {
         auto key = static_cast<QKeyEvent*>(event);
-        if (key->key() == Qt::Key_T && (key->modifiers() & ~Qt::KeypadModifier) == Qt::AltModifier) {
+        const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
+        if (key->key() == Qt::Key_T && modifiers == Qt::AltModifier) {
             // The override taken: no shortcut (the Tools menu's mnemonic) sees the key, which
             // then comes as a key press
             if (type == QEvent::ShortcutOverride) {

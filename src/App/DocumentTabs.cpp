@@ -233,7 +233,11 @@ void addWithChildren(
 }
 
 /// A Part Studio's part for Export: a visible Body, solid or link; a plain group's parts
-void addParts(DocumentObject* obj, std::vector<DocumentObject*>& list, std::set<DocumentObject*>& seen)
+void addParts(
+    DocumentObject* obj,
+    std::vector<DocumentObject*>& list,
+    std::set<DocumentObject*>& seen
+)
 {
     if (!obj || !seen.insert(obj).second || obj->isDerivedFrom<Origin>()
         || obj->isDerivedFrom<DatumElement>() || isDerived(obj, sketchType())

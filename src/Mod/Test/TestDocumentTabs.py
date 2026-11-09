@@ -369,7 +369,7 @@ class TestDocumentTabs(unittest.TestCase):
         body = doc.addObject("PartDesign::Body", "Body")
         studio.addObject(body)
         sketch = body.newObject("Sketcher::SketchObject", "Sketch")
-        corners = [App.Vector(0, 0, 0), App.Vector(10, 0, 0), App.Vector(10, 10, 0), App.Vector(0, 10, 0)]
+        corners = [App.Vector(x, y, 0) for x, y in ((0, 0), (10, 0), (10, 10), (0, 10))]
         for p, q in zip(corners, corners[1:] + corners[:1]):
             sketch.addGeometry(Part.LineSegment(p, q), False)
         pad = body.newObject("PartDesign::Pad", "Pad")
@@ -528,3 +528,26 @@ class TestDocumentTabs(unittest.TestCase):
         with self.assertRaises(RuntimeError) as raised:
             Tabs.exportTab(self.doc, "Part", os.path.join(self.folder, "empty.step"))
         self.assertIn("no visible part", str(raised.exception))
+
+
+    # -- J1T A: a studio's Top, Front and Right stand for its Body's (ops#640 round 8) ------------
+
+    def testStudioOriginPlaneStandsForTheBodys(self):
+        """The studio's own origin planes map to the Body's own, by role, while the Body sits at
+        the studio's origin; a Body placed apart, or another studio's plane, maps to nothing."""
+        import PartDesign
+
+        studio, body, pad = self.paddedStudio()
+        sketch = body.Group[0]
+        for role in ("XY_Plane", "XZ_Plane", "YZ_Plane", "Z_Axis"):
+            theirs = [f for f in studio.Origin.OriginFeatures if f.Role == role][0]
+            ours = [f for f in body.Origin.OriginFeatures if f.Role == role][0]
+            self.assertEqual(PartDesign.studioOriginFeature(sketch, theirs), ours, role)
+        own = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+        self.assertIsNone(PartDesign.studioOriginFeature(sketch, own))
+        other = self.doc.addObject("App::Part", "Other")
+        otherTop = [f for f in other.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+        self.assertIsNone(PartDesign.studioOriginFeature(sketch, otherTop))
+        top = [f for f in studio.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+        body.Placement.Base = App.Vector(0, 0, 5)
+        self.assertIsNone(PartDesign.studioOriginFeature(sketch, top))
