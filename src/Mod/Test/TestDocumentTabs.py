@@ -170,14 +170,14 @@ class TestDocumentTabs(unittest.TestCase):
         self.assertFalse(Tabs.hasImplicitStudio(self.doc))
 
     def testStaleAndUnlistedNames(self):
-        """A stale name in the stored order is skipped; a tab the order doesn't list comes last,
-        in creation order; the listed ones keep their order."""
+        """A stale name in the stored order is skipped, and not written (RT-5); a tab the order
+        doesn't list comes last, in creation order; the listed ones keep their order."""
         self.model()
         Tabs.setOrder(self.doc, ["VarSet", "Gone", "Part", "*"])
         self.assertEqual(
             [name for name, _kind in self.kinds()], ["VarSet", "Part", "*", "Assembly", "Page"]
         )
-        self.assertEqual(Tabs.order(self.doc), ["VarSet", "Gone", "Part", "*"])
+        self.assertEqual(Tabs.order(self.doc), ["VarSet", "Part", "*"])
 
     def testPlaceAfter(self):
         """A new tab goes right of the active one."""

@@ -33,6 +33,7 @@
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <App/Origin.h>
+#include <App/Part.h>
 #include <Base/Exception.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -59,6 +60,28 @@ using namespace PartDesignGui;
 
 namespace
 {
+
+// The Part Studio's own Top, Front or Right (an origin feature of the App::Part holding @p body):
+// with the Body placed off the studio's origin it isn't mapped to the Body's own, and the sketch
+// attaches to it directly, which recomputes in place (RT-2)
+bool isOwnStudioOrigin(const App::DocumentObject* body, const App::DocumentObject* obj)
+{
+    auto datum = freecad_cast<const App::DatumElement*>(obj);
+    const App::DocumentObject* lcs = datum ? datum->getLCS() : nullptr;
+    if (!lcs || !body) {
+        return false;
+    }
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    for (auto user : lcs->getInList()) {
+        auto part = freecad_cast<App::Part*>(user);
+        if (part && part->Origin.getValue() == lcs
+            && !(!assembly.isBad() && part->isDerivedFrom(assembly))
+            && part->hasObject(body, /*recursive=*/true)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // The sketch dialog asks for the box (TaskDlgEditSketch::addContentFactory): with the Onshape
 // keymap only, so FreeCAD's keymap keeps FreeCAD's sketch dialog
@@ -99,7 +122,8 @@ TaskSketchPlane::TaskSketchPlane(SketcherGui::ViewProviderSketch* sketchView)
     ReferenceField::Options options;
     options.kind = ReferenceField::Kind::SingleElement;
     // Planar faces, origin and datum planes
-    options.flags = AllowSelection::FACE | AllowSelection::PLANAR;
+    // OTHERBODY: the studio's own origin too, unmapped when the Body sits off it (RT-2)
+    options.flags = AllowSelection::FACE | AllowSelection::PLANAR | AllowSelection::OTHERBODY;
     options.label = tr("Sketch plane");
     options.kinds = tr("A plane or a planar face");
     options.required = false;
@@ -132,7 +156,8 @@ TaskSketchPlane::TaskSketchPlane(SketcherGui::ViewProviderSketch* sketchView)
         // a studio sibling's, or the studio's own Top, Front, Right (the field writes the Body's
         // own plane for it, J1T A). Anything else would fail as a link out of the allowed scope
         if (body && !body->hasObject(obj) && !Part::BodyBase::isInOneStudio(own, obj)
-            && !Part::BodyBase::studioOriginFeature(own, obj)) {
+            && !Part::BodyBase::studioOriginFeature(own, obj)
+            && !isOwnStudioOrigin(body, obj)) {
             why = QT_TR_NOOP("Pick a face or a plane of this part studio.");
             return false;
         }

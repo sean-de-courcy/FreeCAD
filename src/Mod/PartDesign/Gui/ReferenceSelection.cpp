@@ -65,6 +65,31 @@ using namespace Gui;
 
 /* TRANSLATOR PartDesignGui::ReferenceSelection.cpp */
 
+namespace
+{
+// FreeCAD-CH (ops#640, RT-2): an origin feature of the Part Studio (an App::Part, not an assembly)
+// holding @p body: a field that takes other bodies' elements (OTHERBODY, the Sketch plane) takes
+// it unmapped when the Body sits off the studio's origin
+bool isOwnStudioOrigin(const App::DocumentObject* body, const App::DocumentObject* obj)
+{
+    auto datum = freecad_cast<const App::DatumElement*>(obj);
+    const App::DocumentObject* lcs = datum ? datum->getLCS() : nullptr;
+    if (!lcs || !body) {
+        return false;
+    }
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    for (auto user : lcs->getInList()) {
+        auto part = freecad_cast<App::Part*>(user);
+        if (part && part->Origin.getValue() == lcs
+            && !(!assembly.isBad() && part->isDerivedFrom(assembly))
+            && part->hasObject(body, /*recursive=*/true)) {
+            return true;
+        }
+    }
+    return false;
+}
+}  // namespace
+
 bool ReferenceSelection::allow(App::Document* pDoc, App::DocumentObject* pObj, const char* sSubName)
 {
     if (!pObj) {
@@ -166,7 +191,9 @@ bool ReferenceSelection::allowOrigin(
                 // FreeCAD-CH (ops#325): another Body's origin in the same studio is the same
                 // plane or axis; the pick is relinked to this Body's own
                 if (body->hasObject(pObj, true)
-                    || Part::BodyBase::studioOriginFeature(body, pObj)) {
+                    || Part::BodyBase::studioOriginFeature(body, pObj)
+                    || (type.testFlag(AllowSelection::OTHERBODY)
+                        && isOwnStudioOrigin(body, pObj))) {
                     return true;
                 }
             }
