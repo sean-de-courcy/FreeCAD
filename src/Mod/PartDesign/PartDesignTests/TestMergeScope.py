@@ -220,6 +220,16 @@ class TestMergeScope(unittest.TestCase):
         self.assertEqual(volume(self.far.Shape), 0)
         self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
 
+    def testAnEmptyScopeKeepsTheRunsOtherFailures(self):
+        """Review R8-4: an Add with an empty scope whose run fails for another reason, a length of
+        zero, keeps the run's words, not "No merge scope selected"."""
+        self.model()
+        self.farPad.EmptyMergeScope = True
+        self.farPad.Length = 0
+        self.doc.recompute()
+        self.assertFalse(self.farPad.isValid())
+        self.assertNotIn(NO_SCOPE, self.farPad.getStatusString())
+
     def testAnAddWithItsOwnPartIgnoresTheFlag(self):
         """EmptyMergeScope on a pad with a solid before it in its part: its scope holds its part,
         so it adds there. A 10 x 10 x 5 block on the bracket's top: 16000 + 500, valid."""
