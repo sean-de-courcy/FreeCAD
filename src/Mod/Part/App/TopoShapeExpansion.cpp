@@ -121,7 +121,9 @@
 #include <ShapeUpgrade_ShellSewing.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
+#include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_Solid.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
 #include <gp.hxx>
 #include <gp_Ax3.hxx>
@@ -6060,6 +6062,213 @@ TopoShape& TopoShape::makeElementOffset2D(
     return makeElementCompound(shapesToReturn, op, outputPolicy);
 }
 
+namespace
+{
+// The fallback for a shell OCCT refuses because the faces it keeps fall apart once the removed
+// face is gone (BRepOffset_NotConnectedShell; ops#640, F46): a box shelled from a top face with a
+// blind pocket, whose walls and floor reach the box's other faces only through that face. Each
+// group of kept faces bounds a solid together with the removed face's wire it ends on: the outer
+// wire closes the box with its pockets filled, an inner wire closes the pocket's hollow (or a
+// boss standing on the face). Each of those is shelled by OCCT from its closing face, connected
+// now (a hollow the other way round, since its material is outside it), and the shell is their
+// union, clipped to the solid inward (bands of neighbouring groups may overlap or reach into a
+// hollow) and kept off it outward. Only one planar removed face is handled; anything else
+// returns a null shape and OCCT's own failure stands.
+
+// The kept faces, grouped by shared edges once <removed> is gone.
+std::vector<std::vector<TopoDS_Face>> keptFaceGroups(const TopoDS_Shape& shape, const TopoDS_Face& removed)
+{
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<int> group(faces.Extent() + 1, -1);
+    std::vector<std::vector<TopoDS_Face>> groups;
+    for (int start = 1; start <= faces.Extent(); ++start) {
+        if (group[start] >= 0 || faces(start).IsSame(removed)) {
+            continue;
+        }
+        const int id = static_cast<int>(groups.size());
+        groups.emplace_back();
+        std::vector<int> stack {start};
+        group[start] = id;
+        while (!stack.empty()) {
+            const TopoDS_Face face = TopoDS::Face(faces(stack.back()));
+            stack.pop_back();
+            groups.back().push_back(face);
+            for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More(); xp.Next()) {
+                const TopTools_ListOfShape* neighbours = edgeFaces.Seek(xp.Current());
+                if (!neighbours) {
+                    continue;
+                }
+                for (TopTools_ListIteratorOfListOfShape it(*neighbours); it.More(); it.Next()) {
+                    const int index = faces.FindIndex(it.Value());
+                    if (index && group[index] < 0 && !it.Value().IsSame(removed)) {
+                        group[index] = id;
+                        stack.push_back(index);
+                    }
+                }
+            }
+        }
+    }
+    return groups;
+}
+
+// The face in <shape> that is the same as <face>, oriented as <shape> has it.
+TopoDS_Face sameFaceIn(const TopoDS_Shape& shape, const TopoDS_Shape& face)
+{
+    for (TopExp_Explorer xp(shape, TopAbs_FACE); xp.More(); xp.Next()) {
+        if (xp.Current().IsSame(face)) {
+            return TopoDS::Face(xp.Current());
+        }
+    }
+    return {};
+}
+
+TopoShape makeThickSolidByGroups(
+    const TopoShape& self,
+    const TopoShape& shape,
+    const TopTools_ListOfShape& remFace,
+    double offset,
+    double tol,
+    bool intersection,
+    bool selfInter,
+    short offsetMode,
+    JoinType join,
+    const char* op
+)
+{
+    try {
+        if (remFace.Extent() != 1) {
+            return {};
+        }
+        const TopoDS_Face removed = TopoDS::Face(remFace.First());
+        if (BRepAdaptor_Surface(removed).GetType() != GeomAbs_Plane) {
+            return {};
+        }
+        std::vector<TopoDS_Wire> wires;
+        for (TopExp_Explorer xp(removed, TopAbs_WIRE); xp.More(); xp.Next()) {
+            wires.push_back(TopoDS::Wire(xp.Current()));
+        }
+        const auto groups = keptFaceGroups(shape.getShape(), removed);
+        if (wires.size() < 2 || groups.size() != wires.size()) {
+            return {};
+        }
+        const TopoDS_Wire outer = BRepTools::OuterWire(removed);
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(removed);
+        std::vector<TopoShape> pieces;
+        std::vector<bool> used(groups.size(), false);
+        for (const auto& wire : wires) {
+            // the group the wire's edges border
+            TopTools_IndexedMapOfShape wireEdges;
+            TopExp::MapShapes(wire, TopAbs_EDGE, wireEdges);
+            int found = -1;
+            for (std::size_t g = 0; g < groups.size(); ++g) {
+                bool touches = false;
+                for (const auto& face : groups[g]) {
+                    for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More() && !touches; xp.Next()) {
+                        touches = wireEdges.Contains(xp.Current());
+                    }
+                    if (touches) {
+                        break;
+                    }
+                }
+                if (touches) {
+                    if (found >= 0) {
+                        return {};  // a wire bordering two groups
+                    }
+                    found = static_cast<int>(g);
+                }
+            }
+            if (found < 0 || used[found]) {
+                return {};
+            }
+            used[found] = true;
+            const bool isOuter = wire.IsSame(outer);
+            // the closing face: the removed face's plane bounded by this wire alone
+            BRepBuilderAPI_MakeFace mkFace(surface, isOuter ? wire : TopoDS::Wire(wire.Reversed()), true);
+            if (!mkFace.IsDone()) {
+                return {};
+            }
+            ShapeFix_Face fixFace(mkFace.Face());
+            fixFace.FixOrientation();
+            const TopoDS_Face closing = fixFace.Face();
+            BRep_Builder builder;
+            TopoDS_Shell shell;
+            builder.MakeShell(shell);
+            for (const auto& face : groups[found]) {
+                builder.Add(shell, face);
+            }
+            builder.Add(shell, isOuter == (removed.Orientation() == TopAbs_FORWARD) ? closing : TopoDS::Face(closing.Reversed()));
+            ShapeFix_Solid fixSolid;
+            TopoDS_Solid solid = fixSolid.SolidFromShell(shell);
+            if (solid.IsNull() || !BRepCheck_Analyzer(solid).IsValid()) {
+                return {};
+            }
+            // a hollow when the group's faces face into the piece, as they faced out of the solid
+            const TopoDS_Face sample = sameFaceIn(solid, groups[found].front());
+            const TopoDS_Face sampleInShape = sameFaceIn(shape.getShape(), groups[found].front());
+            if (sample.IsNull() || sampleInShape.IsNull()) {
+                return {};
+            }
+            const bool hollow = sample.Orientation() != sampleInShape.Orientation();
+            const TopoDS_Face opening = sameFaceIn(solid, closing);
+            if (opening.IsNull()) {
+                return {};
+            }
+            TopTools_ListOfShape openings;
+            openings.Append(opening);
+            BRepOffsetAPI_MakeThickSolid mkThick;
+            mkThick.MakeThickSolidByJoin(
+                solid,
+                openings,
+                hollow ? -offset : offset,
+                tol,
+                BRepOffset_Mode(offsetMode),
+                intersection,
+                selfInter,
+                GeomAbs_JoinType(join)
+            );
+            if (!mkThick.IsDone()) {
+                return {};
+            }
+            TopoShape piece(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+            piece.setShape(solid);
+            piece.mapSubElement(shape);
+            TopoShape band(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+            MapperMaker mapper(mkThick);
+            band.makeShapeWithElementMap(mkThick.Shape(), mapper, {piece}, op);
+            if (!band.hasSubShape(TopAbs_SOLID) || !band.isValid()) {
+                return {};
+            }
+            pieces.push_back(band);
+        }
+        TopoShape bands(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        bands.makeElementFuse(pieces, op);
+        TopoShape result(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        if (offset < 0) {
+            result.makeElementBoolean(Part::OpCodes::Common, {bands, shape}, op);
+        }
+        else {
+            result.makeElementCut({bands, shape}, op);
+        }
+        // The shell may fall apart as the kept faces do: a pocket's cup stands free in the
+        // open box unless its walls reach the box's.
+        if (result.isNull() || !result.hasSubShape(TopAbs_SOLID) || !result.isValid()) {
+            return {};
+        }
+        return result;
+    }
+    catch (Standard_Failure& e) {
+        FC_WARN("thick solid by groups failed: " << e.GetMessageString());
+    }
+    catch (Base::Exception& e) {
+        FC_WARN("thick solid by groups failed: " << e.what());
+    }
+    return {};
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementThickSolid(
     const TopoShape& shape,
     const std::vector<TopoShape>& faces,
@@ -6119,6 +6328,27 @@ TopoShape& TopoShape::makeElementThickSolid(
         selfInter ? Standard_True : Standard_False,
         GeomAbs_JoinType(join)
     );
+    // Only where OCCT refuses for the kept faces falling apart: every shell OCCT builds stays
+    // its own (ops#640, F46).
+    if (!mkThick.IsDone() && mkThick.MakeOffset().Error() == BRepOffset_NotConnectedShell) {
+        TopoShape byGroups = makeThickSolidByGroups(
+            *this,
+            shape,
+            remFace,
+            offset,
+            tol,
+            intersection,
+            selfInter,
+            offsetMode,
+            join,
+            op
+        );
+        if (!byGroups.isNull()) {
+            *this = byGroups;
+            return *this;
+        }
+        // Nothing builds: OCCT's own failure is the one reported.
+    }
     MapperMaker mapper(mkThick);
     return makeShapeWithElementMap(
         canonicalFaceOrder(mkThick.Shape(), mapper, shape),
