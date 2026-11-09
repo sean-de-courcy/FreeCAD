@@ -964,3 +964,152 @@ class TestDocumentTabsGui(unittest.TestCase):
         pump(0.3)
         self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
         self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Assembly")
+
+
+    # -- slice 2: Duplicate, Export, the Tab manager, the bar's drag (ops#640 round 8) -------------
+
+    def testDuplicateFromTheBar(self):
+        """The tab menu's Duplicate: Part Studio 2's copy "Part Studio 2 (1)" right of it, made
+        active, its view showing only the copy (the same volume); one undo step removes the copy
+        tab and shows Part Studio 2 again. The implicit studio isn't offered, with the reason."""
+        objects = self.model(assembly=False)
+        self.switch("Part")
+        undoCount = self.doc.UndoCount
+        copy, refusal = GuiTabs.duplicate(self.doc, "Part")
+        pump(0.3)
+        self.assertTrue(copy, refusal)
+        self.assertEqual(self.doc.UndoCount, undoCount + 1)
+        self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2", "Part Studio 2 (1)"])
+        self.assertEqual(GuiTabs.activeTab(self.doc), copy)
+        view = GuiTabs.viewOf(self.doc, copy)
+        self.assertIsNotNone(view)
+        copyBodies = [o for o in self.doc.getObject(copy).Group if o.isDerivedFrom("PartDesign::Body")]
+        self.assertEqual(len(copyBodies), 1)
+        names = shown(view)
+        self.assertIn(copyBodies[0].Name, names)
+        self.assertNotIn(objects["body2"].Name, names)
+        self.assertNotIn(objects["body1"].Name, names)
+        self.assertAlmostEqual(copyBodies[0].Shape.Volume, objects["body2"].Shape.Volume, 6)
+
+        undo()
+        pump(0.3)
+        self.assertIsNone(self.doc.getObject(copy))
+        self.assertEqual(self.barTexts(), ["Part Studio 1", "Part Studio 2"])
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+
+        copy, refusal = GuiTabs.duplicate(self.doc, "*")
+        self.assertEqual(copy, "")
+        self.assertIn("top level", refusal)
+
+    def testExportFromTheBar(self):
+        """The tab menu's Export once the file is chosen (ImportGui's writer): Part Studio 2's
+        cylinder, re-read, has its volume."""
+        import shutil
+        import tempfile
+
+        objects = self.model(assembly=False)
+        folder = tempfile.mkdtemp(prefix="TestDocumentTabsGui")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Part Studio 2.step")
+        done, error = GuiTabs.exportTab(self.doc, "Part", path)
+        self.assertTrue(done, error)
+        self.assertAlmostEqual(Part.read(path).Volume, objects["body2"].Shape.Volume, 3)
+        done, error = GuiTabs.exportTab(self.doc, "VarSetMissing", path)
+        self.assertFalse(done)
+
+    def testDragOnTheBarSavesTheOrder(self):
+        """A tab dragged along the bar: the order is the document's (saved, the document marked
+        modified), not an undo step."""
+        self.model()
+        pump(0.2)
+        undoCount = self.doc.UndoCount
+        Gui.ActiveDocument.Modified = False
+        GuiTabs.moveTab(0, 2)
+        pump(0.3)
+        self.assertEqual(self.barTexts(), ["Part Studio 2", "Assembly", "Part Studio 1"])
+        self.assertEqual([n for n, _k, _l in Tabs.tabs(self.doc)], ["Part", "Assembly", "*"])
+        self.assertEqual(Tabs.order(self.doc), ["Part", "Assembly", "*"])
+        self.assertEqual(self.doc.UndoCount, undoCount)
+        self.assertTrue(Gui.ActiveDocument.Modified)
+
+    def manager(self):
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if widget.objectName() == "FreeCADCH_TabManagerDialog" and widget.isVisible():
+                return widget
+        return None
+
+    def visibleRows(self, tabList):
+        return [tabList.item(r).text() for r in range(tabList.count()) if not tabList.isRowHidden(r)]
+
+    def testTabManager(self):
+        """Alt+T opens the Tab manager: the tabs, a search, a type filter; a row moved reorders
+        the tabs (saved, no undo step); Enter on a row opens its tab and closes the manager."""
+        from PySide6.QtTest import QTest
+        from PySide import QtCore
+
+        self.model()
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        variables.Label = "Variable Studio 1"
+        Tabs.setVariableStudio(variables)
+        GuiTabs.reconcile(self.doc)
+        self.switch("*")
+        mw = Gui.getMainWindow()
+        QTest.keyClick(mw, QtCore.Qt.Key_T, QtCore.Qt.AltModifier)
+        pump(0.3)
+        dialog = self.manager()
+        self.assertIsNotNone(dialog, "Alt+T opened no Tab manager")
+        search = dialog.findChild(QtWidgets.QLineEdit, "FreeCADCH_TabSearch")
+        typeFilter = dialog.findChild(QtWidgets.QComboBox, "FreeCADCH_TabFilter")
+        tabList = dialog.findChild(QtWidgets.QListWidget, "FreeCADCH_TabList")
+        self.assertEqual(
+            self.visibleRows(tabList),
+            ["Part Studio 1", "Part Studio 2", "Assembly", "Variable Studio 1"],
+        )
+        search.setText("studio 2")
+        pump(0.1)
+        self.assertEqual(self.visibleRows(tabList), ["Part Studio 2"])
+        search.clear()
+        typeFilter.setCurrentIndex(typeFilter.findText("Assemblies"))
+        pump(0.1)
+        self.assertEqual(self.visibleRows(tabList), ["Assembly"])
+        typeFilter.setCurrentIndex(typeFilter.findText("Variable Studios"))
+        pump(0.1)
+        self.assertEqual(self.visibleRows(tabList), ["Variable Studio 1"])
+        typeFilter.setCurrentIndex(0)
+        pump(0.1)
+
+        undoCount = self.doc.UndoCount
+        item = tabList.takeItem(0)
+        tabList.insertItem(2, item)
+        pump(0.3)
+        self.assertEqual([n for n, _k, _l in Tabs.tabs(self.doc)], ["Part", "Assembly", "*", "VarSet"])
+        self.assertEqual(self.barTexts(), ["Part Studio 2", "Assembly", "Part Studio 1", "Variable Studio 1"])
+        self.assertEqual(self.doc.UndoCount, undoCount)
+
+        dialog = self.manager()
+        tabList = dialog.findChild(QtWidgets.QListWidget, "FreeCADCH_TabList")
+        rows = [tabList.item(r).text() for r in range(tabList.count())]
+        tabList.setCurrentRow(rows.index("Part Studio 2"))
+        tabList.setFocus()
+        QTest.keyClick(tabList, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+        self.assertIsNone(self.manager())
+
+    def testTabManagerButton(self):
+        """The bar's leftmost button opens the Tab manager; Enter in its search box opens the
+        first match."""
+        self.model()
+        self.switch("*")
+        button = Gui.getMainWindow().findChild(QtWidgets.QToolButton, "FreeCADCH_TabManager")
+        self.assertTrue(button.isEnabled())
+        button.click()
+        pump(0.3)
+        dialog = self.manager()
+        self.assertIsNotNone(dialog)
+        search = dialog.findChild(QtWidgets.QLineEdit, "FreeCADCH_TabSearch")
+        search.setText("assem")
+        search.returnPressed.emit()
+        pump(0.5)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+        self.assertIsNone(self.manager())

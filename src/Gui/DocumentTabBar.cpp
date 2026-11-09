@@ -29,9 +29,14 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
+#include <QDialog>
 #include <QDockWidget>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QVBoxLayout>
 #include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QMenu>
@@ -67,6 +72,7 @@
 #include "Control.h"
 #include "DockWindowManager.h"
 #include "Document.h"
+#include "FileDialog.h"
 #include "ForkKeymap.h"
 #include "MainWindow.h"
 #include "MDIView.h"
@@ -122,6 +128,43 @@ bool dialogBlocks(std::string* refusal)
     return true;
 }
 
+/// A tab's icon: its object's, the group icon for the implicit studio
+QIcon tabIcon(Gui::Document* gdoc, const AppTabs::Tab& tab)
+{
+    if (auto vp = gdoc && tab.object ? gdoc->getViewProvider(tab.object) : nullptr) {
+        return vp->getIcon();
+    }
+    return BitmapFactory().iconFromTheme("Geofeaturegroup");
+}
+
+/** Onshape's Tab manager (Alt+T, the bar's leftmost button; slice 2): the active document's tabs
+ * with a search box and a type filter. Double-click or Enter opens a tab and closes the manager
+ * [guess]; Enter in the search box opens the first match. A drag reorders the tabs: the order is
+ * the bar's, saved, no undo step. No thumbnails.
+ */
+class TabManager: public QDialog
+{
+public:
+    explicit TabManager(QWidget* parent);
+
+    /// The active document's tabs, the active one current
+    void populate();
+
+private:
+    void applyFilter();
+    void open(QListWidgetItem* item);
+    void openFirst();
+    void scheduleOrder();
+    void saveOrder();
+
+    QLineEdit* search;
+    QComboBox* filter;
+    QListWidget* list;
+    std::string docName;
+    bool populating = false;
+    bool orderPending = false;
+};
+
 class Controller: public QObject, public ParameterGrp::ObserverType
 {
 public:
@@ -170,8 +213,26 @@ public:
     bool beforeUndo(Gui::Document* gdoc, bool undo);
     void message(const std::string& text);
 
+    // Slice 2: the tab menu's Duplicate and Export, the Tab manager, the bar's drag
+    std::string duplicate(App::Document* doc, const std::string& name, std::string& refusal);
+    bool exportTab(
+        App::Document* doc,
+        const std::string& name,
+        const std::string& path,
+        std::string& error
+    );
+    bool openManager();
+    void saveBarOrder();
+
+    /// Alt+T, the Tab manager's key under the Onshape keymap: before the menu bar's mnemonic
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
     std::string pendingTab;  // the tab of the view createView() is making
     const App::Document* pendingDoc = nullptr;
+    QTabBar* typedBar() const
+    {
+        return typed;
+    }
 
 private:
     void leave(Gui::Document* gdoc);
@@ -186,8 +247,11 @@ private:
     void onDocumentClose(int index);
     void renameInteractive(int index);
     void deleteInteractive(int index);
+    void duplicateInteractive(int index);
+    void exportInteractive(int index);
 
     static Controller* self;
+    QPointer<TabManager> manager;
     MainWindow* mw;
     bool wasOn = false;
     bool arriving = false;
@@ -253,12 +317,12 @@ Controller::Controller(MainWindow* mw)
     bar->setObjectName(QStringLiteral("FreeCADCH_TypedTabs"));
     bar->setWindowTitle(QApplication::translate("DocumentTabs", "Tabs"));
     bar->setMovable(false);
-    auto manager = new QToolButton(bar);
-    manager->setObjectName(QStringLiteral("FreeCADCH_TabManager"));
-    manager->setText(QStringLiteral("☰"));
-    manager->setEnabled(false);
-    manager->setToolTip(QApplication::translate("DocumentTabs", "Tab manager (Alt+T): not yet"));
-    bar->addWidget(manager);
+    auto managerButton = new QToolButton(bar);
+    managerButton->setObjectName(QStringLiteral("FreeCADCH_TabManager"));
+    managerButton->setText(QStringLiteral("☰"));
+    managerButton->setToolTip(QApplication::translate("DocumentTabs", "Tab manager (Alt+T)"));
+    connect(managerButton, &QToolButton::clicked, this, [this] { openManager(); });
+    bar->addWidget(managerButton);
     auto plus = new QToolButton(bar);
     plus->setObjectName(QStringLiteral("FreeCADCH_NewTab"));
     plus->setText(QStringLiteral("+"));
@@ -289,8 +353,10 @@ Controller::Controller(MainWindow* mw)
     typed->setExpanding(false);
     typed->setDocumentMode(true);
     typed->setContextMenuPolicy(Qt::CustomContextMenu);
+    typed->setMovable(true);  // a drag reorders the tabs, saved, no undo step [guess]
     bar->addWidget(typed);
     mw->addToolBar(Qt::BottomToolBarArea, bar);
+    connect(typed, &QTabBar::tabMoved, this, [this](int, int) { saveBarOrder(); });
     connect(typed, &QTabBar::tabBarClicked, this, &Controller::onTabClicked);
     connect(typed, &QTabBar::tabBarDoubleClicked, this, &Controller::renameInteractive);
     connect(typed, &QTabBar::customContextMenuRequested, this, &Controller::onTabMenu);
@@ -378,11 +444,13 @@ Controller::Controller(MainWindow* mw)
         onDeleteDocument(doc);
     }));
     ForkKeymap::preferenceGroup()->Attach(this);
+    qApp->installEventFilter(this);
     applyKeymap();
 }
 
 Controller::~Controller()
 {
+    qApp->removeEventFilter(this);
     ForkKeymap::preferenceGroup()->Detach(this);
     if (self == this) {
         self = nullptr;
@@ -703,17 +771,13 @@ void Controller::refreshBars()
         }
         typed->setTabText(index, text);
         typed->setTabData(index, QString::fromStdString(tabs[i].name()));
-        QIcon icon;
-        if (auto vp = tabs[i].object ? gdoc->getViewProvider(tabs[i].object) : nullptr) {
-            icon = vp->getIcon();
-        }
-        else {
-            icon = BitmapFactory().iconFromTheme("Geofeaturegroup");
-        }
-        typed->setTabIcon(index, icon);
+        typed->setTabIcon(index, tabIcon(gdoc, tabs[i]));
         if (tabs[i].name() == current) {
             typed->setCurrentIndex(index);
         }
+    }
+    if (manager && manager->isVisible()) {
+        manager->populate();
     }
 }
 
@@ -1190,16 +1254,209 @@ void Controller::onTabMenu(const QPoint& pos)
     if (index < 0) {
         return;
     }
+    // Onshape's order: Rename, Duplicate, Export, Delete (Properties, Copy to clipboard and Move
+    // to document aren't here)
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    AppTabs::Tab tab {};
+    const bool found = doc
+        && AppTabs::findTab(doc, typed->tabData(index).toString().toStdString(), tab);
     QMenu menu;
+    menu.setToolTipsVisible(true);
     QAction* renameAction = menu.addAction(QApplication::translate("DocumentTabs", "Rename"));
+    QAction* duplicateAction = menu.addAction(QApplication::translate("DocumentTabs", "Duplicate"));
+    duplicateAction->setObjectName(QStringLiteral("FreeCADCH_DuplicateTab"));
+    const std::string refusal = found ? AppTabs::duplicateRefusal(doc, tab) : std::string();
+    duplicateAction->setEnabled(found && refusal.empty());
+    duplicateAction->setToolTip(
+        refusal.empty()
+            ? QApplication::translate("DocumentTabs", "A copy of the tab, not linked to it")
+            : QString::fromStdString(refusal)
+    );
+    QAction* exportAction = menu.addAction(QApplication::translate("DocumentTabs", "Export..."));
+    exportAction->setObjectName(QStringLiteral("FreeCADCH_ExportTab"));
+    const bool exportable = found && is3DKind(tab.kind);
+    exportAction->setEnabled(exportable);
+    exportAction->setToolTip(
+        exportable ? QApplication::translate("DocumentTabs", "Export the tab to STEP")
+                   : QApplication::translate("DocumentTabs", "Only a Part Studio or an Assembly exports")
+    );
     QAction* deleteAction = menu.addAction(QApplication::translate("DocumentTabs", "Delete"));
     QAction* chosen = menu.exec(typed->mapToGlobal(pos));
     if (chosen == renameAction) {
         renameInteractive(index);
     }
+    else if (chosen == duplicateAction) {
+        duplicateInteractive(index);
+    }
+    else if (chosen == exportAction) {
+        exportInteractive(index);
+    }
     else if (chosen == deleteAction) {
         deleteInteractive(index);
     }
+}
+
+void Controller::duplicateInteractive(int index)
+{
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (!doc || index < 0) {
+        return;
+    }
+    std::string refusal;
+    if (duplicate(doc, typed->tabData(index).toString().toStdString(), refusal).empty()) {
+        QMessageBox::information(
+            mw,
+            QApplication::translate("DocumentTabs", "Duplicate"),
+            QString::fromStdString(refusal)
+        );
+    }
+}
+
+void Controller::exportInteractive(int index)
+{
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (!doc || index < 0) {
+        return;
+    }
+    const std::string name = typed->tabData(index).toString().toStdString();
+    // The tab's name as the file name, without the characters a file name can't hold
+    QString base = typed->tabText(index);
+    for (QChar bad : QStringLiteral("\\/:*?\"<>|")) {
+        base.replace(bad, QLatin1Char('_'));
+    }
+    const QString file = FileDialog::getSaveFileName(
+        mw,
+        QApplication::translate("DocumentTabs", "Export"),
+        FileDialog::getWorkingDirectory() + QLatin1Char('/') + base + QStringLiteral(".step"),
+        {FileDialog::Filter(QStringLiteral("STEP"), {QStringLiteral("*.step"), QStringLiteral("*.stp")})}
+    );
+    if (file.isEmpty()) {
+        return;
+    }
+    FileDialog::setWorkingDirectory(file);
+    std::string error;
+    if (!exportTab(doc, name, file.toUtf8().toStdString(), error)) {
+        QMessageBox::warning(
+            mw,
+            QApplication::translate("DocumentTabs", "Export"),
+            QString::fromStdString(error)
+        );
+        return;
+    }
+    message(QApplication::translate("DocumentTabs", "Exported %1").arg(file).toStdString());
+}
+
+std::string Controller::duplicate(App::Document* doc, const std::string& name, std::string& refusal)
+{
+    AppTabs::Tab tab {};
+    auto gdoc = Application::Instance->getDocument(doc);
+    if (!gdoc || !AppTabs::findTab(doc, name, tab)) {
+        refusal = "No such tab";
+        return {};
+    }
+    refusal = AppTabs::duplicateRefusal(doc, tab);
+    if (!refusal.empty() || dialogBlocks(&refusal)) {
+        return {};
+    }
+    if (gdoc->getInEdit()) {
+        gdoc->resetEdit();  // an open assembly: the copy is opened instead
+    }
+    // One undo step; the copy goes right of the original (Meta, outside undo) and is shown
+    const std::string title = "Duplicate " + AppTabs::label(doc, tab);
+    gdoc->openCommand(title.c_str());
+    std::string copyName;
+    try {
+        copyName = AppTabs::duplicate(doc, tab)->getNameInDocument();
+        doc->recompute();
+    }
+    catch (const Base::Exception& e) {
+        gdoc->abortCommand();
+        refusal = e.what();
+        return {};
+    }
+    gdoc->commitCommand();
+    reconcile(doc);
+    switchTo(doc, copyName, true, nullptr);
+    timer.start();
+    return copyName;
+}
+
+bool Controller::exportTab(
+    App::Document* doc,
+    const std::string& name,
+    const std::string& path,
+    std::string& error
+)
+{
+    AppTabs::Tab tab {};
+    if (!doc || !AppTabs::findTab(doc, name, tab)) {
+        error = "No such tab";
+        return false;
+    }
+    try {
+        // ImportGui's writer: the parts' colours too
+        AppTabs::exportTab(doc, tab, path, "ImportGui");
+    }
+    catch (const Base::Exception& e) {
+        error = e.what();
+        return false;
+    }
+    return true;
+}
+
+void Controller::saveBarOrder()
+{
+    // A tab dragged along the bar: its order is the document's, saved with it, not an undo step
+    // (Onshape's tab order isn't one [guess])
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    auto gdoc = doc ? Application::Instance->getDocument(doc) : nullptr;
+    if (!gdoc) {
+        return;
+    }
+    std::vector<std::string> names;
+    for (int i = 0; i < typed->count(); ++i) {
+        names.push_back(typed->tabData(i).toString().toStdString());
+    }
+    AppTabs::setOrder(doc, names);
+    gdoc->setModified(true);
+    timer.start();
+}
+
+bool Controller::openManager()
+{
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (!isOn() || !doc || !Application::Instance->getDocument(doc)) {
+        return false;
+    }
+    if (!manager) {
+        manager = new TabManager(mw);
+    }
+    manager->populate();
+    manager->show();
+    manager->raise();
+    manager->activateWindow();
+    return true;
+}
+
+bool Controller::eventFilter(QObject* watched, QEvent* event)
+{
+    const auto type = event->type();
+    if ((type == QEvent::ShortcutOverride || type == QEvent::KeyPress) && isOn()
+        && !QApplication::activeModalWidget()) {
+        auto key = static_cast<QKeyEvent*>(event);
+        if (key->key() == Qt::Key_T && (key->modifiers() & ~Qt::KeypadModifier) == Qt::AltModifier) {
+            // The override taken: no shortcut (the Tools menu's mnemonic) sees the key, which
+            // then comes as a key press
+            if (type == QEvent::ShortcutOverride) {
+                event->accept();
+            }
+            else if (!key->isAutoRepeat()) {
+                openManager();
+            }
+            return true;
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void Controller::renameInteractive(int index)
@@ -1284,6 +1541,187 @@ void Controller::onDocumentClose(int index)
     }
 }
 
+// -- The Tab manager ----------------------------------------------------------------------------
+
+constexpr int nameRole = Qt::UserRole;
+constexpr int kindRole = Qt::UserRole + 1;
+
+TabManager::TabManager(QWidget* parent)
+    : QDialog(parent)
+{
+    setObjectName(QStringLiteral("FreeCADCH_TabManagerDialog"));
+    setWindowTitle(QApplication::translate("DocumentTabs", "Tab manager"));
+    setAttribute(Qt::WA_DeleteOnClose);
+    setModal(false);
+    auto layout = new QVBoxLayout(this);
+    search = new QLineEdit(this);
+    search->setObjectName(QStringLiteral("FreeCADCH_TabSearch"));
+    search->setPlaceholderText(QApplication::translate("DocumentTabs", "Search tabs"));
+    search->setClearButtonEnabled(true);
+    layout->addWidget(search);
+    filter = new QComboBox(this);
+    filter->setObjectName(QStringLiteral("FreeCADCH_TabFilter"));
+    filter->addItem(QApplication::translate("DocumentTabs", "All tabs"), -1);
+    filter->addItem(
+        QApplication::translate("DocumentTabs", "Part Studios"),
+        static_cast<int>(AppTabs::Kind::PartStudio)
+    );
+    filter->addItem(
+        QApplication::translate("DocumentTabs", "Assemblies"),
+        static_cast<int>(AppTabs::Kind::Assembly)
+    );
+    filter->addItem(
+        QApplication::translate("DocumentTabs", "Drawings"),
+        static_cast<int>(AppTabs::Kind::Drawing)
+    );
+    filter->addItem(
+        QApplication::translate("DocumentTabs", "Variable Studios"),
+        static_cast<int>(AppTabs::Kind::VariableStudio)
+    );
+    layout->addWidget(filter);
+    list = new QListWidget(this);
+    list->setObjectName(QStringLiteral("FreeCADCH_TabList"));
+    list->setDragDropMode(QAbstractItemView::InternalMove);
+    list->setDefaultDropAction(Qt::MoveAction);
+    list->setSelectionMode(QAbstractItemView::SingleSelection);
+    layout->addWidget(list);
+    resize(320, 400);
+
+    connect(search, &QLineEdit::textChanged, this, [this] { applyFilter(); });
+    connect(search, &QLineEdit::returnPressed, this, [this] { openFirst(); });
+    connect(filter, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        applyFilter();
+    });
+    connect(list, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
+        open(item);
+    });
+    // A drag moves a row however the view does it (a move, or a removal and an insertion): the
+    // order is read once it is over
+    auto model = list->model();
+    connect(model, &QAbstractItemModel::rowsMoved, this, [this] { scheduleOrder(); });
+    connect(model, &QAbstractItemModel::rowsInserted, this, [this] { scheduleOrder(); });
+    connect(model, &QAbstractItemModel::rowsRemoved, this, [this] { scheduleOrder(); });
+}
+
+void TabManager::populate()
+{
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    auto gdoc = doc ? Application::Instance->getDocument(doc) : nullptr;
+    Base::FlagToggler<> flag(populating);
+    list->clear();
+    docName = doc ? doc->getName() : "";
+    if (!gdoc) {
+        return;
+    }
+    const std::string current = Gui::DocumentTabs::activeTab(doc);
+    for (const auto& tab : AppTabs::tabs(doc)) {
+        auto item = new QListWidgetItem(
+            tabIcon(gdoc, tab),
+            QString::fromUtf8(AppTabs::label(doc, tab).c_str()),
+            list
+        );
+        item->setData(nameRole, QString::fromStdString(tab.name()));
+        item->setData(kindRole, static_cast<int>(tab.kind));
+        item->setFlags(
+            Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled
+        );  // not a drop target: a drop goes between rows
+        if (tab.name() == current) {
+            list->setCurrentItem(item);
+        }
+    }
+    applyFilter();
+}
+
+void TabManager::applyFilter()
+{
+    const QString text = search->text().trimmed();
+    const int kind = filter->currentData().toInt();
+    QListWidgetItem* firstShown = nullptr;
+    for (int row = 0; row < list->count(); ++row) {
+        QListWidgetItem* item = list->item(row);
+        const bool hidden = (kind >= 0 && item->data(kindRole).toInt() != kind)
+            || (!text.isEmpty() && !item->text().contains(text, Qt::CaseInsensitive));
+        list->setRowHidden(row, hidden);
+        if (!hidden && !firstShown) {
+            firstShown = item;
+        }
+    }
+    QListWidgetItem* current = list->currentItem();
+    if (firstShown && (!current || current->isHidden())) {
+        list->setCurrentItem(firstShown);
+    }
+}
+
+void TabManager::open(QListWidgetItem* item)
+{
+    App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+    Controller* ctl = Controller::instance();
+    if (!item || !doc || !ctl) {
+        return;
+    }
+    std::string refusal;
+    if (!ctl->switchTo(doc, item->data(nameRole).toString().toStdString(), true, &refusal)) {
+        ctl->message(refusal);
+        return;
+    }
+    ctl->refreshBars();
+    close();
+}
+
+void TabManager::openFirst()
+{
+    for (int row = 0; row < list->count(); ++row) {
+        if (!list->isRowHidden(row)) {
+            open(list->item(row));
+            return;
+        }
+    }
+}
+
+void TabManager::scheduleOrder()
+{
+    if (populating || orderPending) {
+        return;
+    }
+    orderPending = true;
+    QTimer::singleShot(0, this, [this] { saveOrder(); });
+}
+
+void TabManager::saveOrder()
+{
+    orderPending = false;
+    App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+    auto gdoc = doc ? Application::Instance->getDocument(doc) : nullptr;
+    if (!gdoc) {
+        return;
+    }
+    std::vector<std::string> names;
+    for (int row = 0; row < list->count(); ++row) {
+        names.push_back(list->item(row)->data(nameRole).toString().toStdString());
+    }
+    // Only a reordering of the same tabs (a drag half over, or the tabs changed meanwhile: read
+    // them again)
+    std::vector<std::string> current;
+    for (const auto& tab : AppTabs::tabs(doc)) {
+        current.push_back(tab.name());
+    }
+    std::vector<std::string> sortedNames = names;
+    std::vector<std::string> sortedCurrent = current;
+    std::sort(sortedNames.begin(), sortedNames.end());
+    std::sort(sortedCurrent.begin(), sortedCurrent.end());
+    if (sortedNames != sortedCurrent) {
+        populate();
+        return;
+    }
+    if (names != current) {
+        AppTabs::setOrder(doc, names);  // the bar's order: saved, no undo step [guess]
+        gdoc->setModified(true);
+        if (auto ctl = Controller::instance()) {
+            ctl->schedule(doc);
+        }
+    }
+}
+
 // -- Python: FreeCADGui.DocumentTabs ------------------------------------------------------------
 
 App::Document* documentArg(PyObject* arg)
@@ -1354,6 +1792,27 @@ public:
             "reconcile",
             &Module::pyReconcile,
             "reconcile(doc): the views and bars, now"
+        );
+        add_varargs_method(
+            "duplicate",
+            &Module::pyDuplicate,
+            "duplicate(doc, name) -> (copy's name, refusal), as the tab menu's Duplicate"
+        );
+        add_varargs_method(
+            "exportTab",
+            &Module::pyExportTab,
+            "exportTab(doc, name, path) -> (written, error), as the tab menu's Export once\n"
+            "the file is chosen"
+        );
+        add_varargs_method(
+            "openManager",
+            &Module::pyOpenManager,
+            "openManager() -> whether the Tab manager opened, as Alt+T"
+        );
+        add_varargs_method(
+            "moveTab",
+            &Module::pyMoveTab,
+            "moveTab(fromIndex, toIndex): a tab dragged along the bar"
         );
         initialize("Onshape's typed tabs in the GUI (FreeCAD-CH)");
     }
@@ -1473,6 +1932,56 @@ private:
         }
         controller().reconcile(documentArg(pyDoc));
         controller().refreshBars();
+        return Py::None();
+    }
+    Py::Object pyDuplicate(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pyDoc, &name)) {
+            throw Py::Exception();
+        }
+        std::string refusal;
+        const std::string copy = controller().duplicate(documentArg(pyDoc), name, refusal);
+        controller().refreshBars();
+        Py::Tuple result(2);
+        result.setItem(0, Py::String(copy));
+        result.setItem(1, Py::String(refusal));
+        return result;
+    }
+    Py::Object pyExportTab(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* name = nullptr;
+        char* path = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Oset", &pyDoc, &name, "utf-8", &path)) {
+            throw Py::Exception();
+        }
+        const std::string file(path);
+        PyMem_Free(path);
+        std::string error;
+        const bool done = controller().exportTab(documentArg(pyDoc), name, file, error);
+        Py::Tuple result(2);
+        result.setItem(0, Py::Boolean(done));
+        result.setItem(1, Py::String(error));
+        return result;
+    }
+    Py::Object pyOpenManager(const Py::Tuple& /*args*/)
+    {
+        return Py::Boolean(controller().openManager());
+    }
+    Py::Object pyMoveTab(const Py::Tuple& args)
+    {
+        int from = 0;
+        int to = 0;
+        if (!PyArg_ParseTuple(args.ptr(), "ii", &from, &to)) {
+            throw Py::Exception();
+        }
+        QTabBar* bar = controller().typedBar();
+        if (from < 0 || to < 0 || from >= bar->count() || to >= bar->count()) {
+            throw Py::IndexError("no such tab on the bar");
+        }
+        bar->moveTab(from, to);  // tabMoved: the order saved, as a drag
         return Py::None();
     }
 };
