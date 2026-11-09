@@ -24,6 +24,8 @@
 
 
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -58,6 +60,8 @@ using namespace Attacher;
 
 namespace
 {
+class KeymapWatch;
+KeymapWatch& keymapWatch();
 std::vector<std::string> EngineEnums = {"Engine 3D", "Engine Plane", "Engine Line", "Engine Point"};
 
 const char* enumToClass(const char* mode)
@@ -282,6 +286,8 @@ void registerContainerWatch()
         return;
     }
     registered = true;
+    // The keymap's observer, made here on the main thread (review R8-6)
+    keymapWatch();
     App::GetApplication().signalNewDocument.connect([](const App::Document& document, bool) {
         std::lock_guard lock(watchedMutex);
         watchRecomputes(const_cast<App::Document*>(&document));
@@ -614,9 +620,46 @@ bool AttachExtension::changeAttacherType(const char* typeName, bool base)
 
 namespace
 {
+/// Whether the Onshape keymap is the active one (the preference Preferences/General/Keymap, the
+/// Gui's ForkKeymap), kept by an observer on the main thread: the recompute's worker reads it,
+/// and ParameterGrp has no lock (review R8-6)
+class KeymapWatch: public ParameterGrp::ObserverType
+{
+public:
+    KeymapWatch()
+        : group(App::GetApplication().GetParameterGroupByPath(
+              "User parameter:BaseApp/Preferences/General"
+          ))
+    {
+        group->Attach(this);
+        read();
+    }
+    void OnChange(Base::Subject<const char*>& /*caller*/, const char* reason) override
+    {
+        if (reason && std::strcmp(reason, "Keymap") == 0) {
+            read();
+        }
+    }
+    void read()
+    {
+        onshape = group->GetASCII("Keymap", "Onshape") != "FreeCAD";
+    }
+    std::atomic<bool> onshape {true};
+
+private:
+    ParameterGrp::handle group;
+};
+
+KeymapWatch& keymapWatch()
+{
+    // Never destroyed: the parameter group may go first at exit
+    static auto* watch = new KeymapWatch();
+    return *watch;
+}
+
 /// An attached object with no support fails (positionBySupport()): one in a Body, under the
-/// Onshape keymap (the preference Preferences/General/Keymap, the Gui's ForkKeymap); a new sketch
-/// waits for its plane deactivated (SketchWorkflow), so only a support taken away comes here
+/// Onshape keymap; a new sketch waits for its plane deactivated (SketchWorkflow), so only a
+/// support taken away comes here
 bool lostSupportFails(const App::DocumentObject* obj)
 {
     if (!obj) {
@@ -630,13 +673,7 @@ bool lostSupportFails(const App::DocumentObject* obj)
         auto group = in ? in->getExtensionByType<App::GroupExtension>(true) : nullptr;
         return group && in->getTypeId().isDerivedFrom(bodyType) && group->hasObject(obj);
     });
-    if (!inBody) {
-        return false;
-    }
-    auto general = App::GetApplication().GetParameterGroupByPath(
-        "User parameter:BaseApp/Preferences/General"
-    );
-    return general->GetASCII("Keymap", "Onshape") != "FreeCAD";
+    return inBody && keymapWatch().onshape.load();
 }
 }  // namespace
 
@@ -852,8 +889,13 @@ void AttachExtension::extensionOnChanged(const App::Property* prop)
                 && std::any_of(subs.begin(), subs.end(), [](const std::string& sub) {
                                             return Data::hasMissingElement(sub.c_str());
                                         });
+            // FreeCAD-CH (ops#640 round 8, review R8-2): nor with its support taken away (a plane
+            // deleted) where that fails it: the recompute says so, nothing to print now
+            const bool lostSupport = MapMode.getValue() != mmDeactivated
+                && AttachmentSupport.getValues().empty()
+                && lostSupportFails(getExtendedObject());
             try {
-                if (!missingSupport) {
+                if (!missingSupport && !lostSupport) {
                     bAttached = positionBySupport();
                 }
             }

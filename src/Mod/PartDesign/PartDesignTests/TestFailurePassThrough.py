@@ -1092,6 +1092,8 @@ class FailurePassThroughBase:
         self.doc.removeObject(plane.Name)
         self.doc.commitTransaction()
         self.assertEqual(sketch.AttachmentSupport, [])
+        # The delete itself doesn't position it and mark it in error; the recompute does (R8-2)
+        self.assertNotIn("Invalid", sketch.State)
         self.recompute()
         self.assertFalse(sketch.isValid(), "the sketch stays valid with its plane gone")
         self.assertIn("The sketch plane is missing", sketch.getStatusString())

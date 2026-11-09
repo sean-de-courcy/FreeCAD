@@ -32,6 +32,9 @@
 #include <Gui/Application.h>
 #include <Gui/ForkKeymap.h>
 #include <Gui/Language/Translator.h>
+#include <Mod/Part/App/Part2DObject.h>
+#include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/Feature.h>
 #include <functional>
 #include <QString>
 
@@ -192,9 +195,14 @@ PyMOD_INIT_FUNC(PartDesignGui)
     // add resources and reloads the translators
     loadPartDesignResource();
 
-    // Under the Onshape keymap a dialog's banner says what its rows' tooltips say (round 8)
+    // Under the Onshape keymap a PartDesign feature's dialog banner, or its sketch's, says what
+    // its rows' tooltips say (round 8; review R8-8: other objects keep their words)
     Gui::TaskView::setEditStatusText([](const App::DocumentObject* obj, const QString& text) {
-        return Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text) : text;
+        const bool ours = obj
+            && (obj->isDerivedFrom<PartDesign::Feature>()
+                || (obj->isDerivedFrom<Part::Part2DObject>() && PartDesign::Body::findBodyOf(obj)));
+        return ours && Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text)
+                                                    : text;
     });
 
     PyMOD_Return(mod);
