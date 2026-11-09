@@ -599,6 +599,63 @@ class BodyReorderBase:
         self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
         self.assertBody(BLOCK + PAD2 - HOLE2)
 
+    def testSketchAloneAboveTheFaceItSitsOn(self):
+        """Round 8 (J5): the hole's sketch alone moved above Pad2, the face it sits on, the hole
+        staying after Pad2. Onshape regenerates its list in order, so the sketch fails at its new
+        place at once, as when the hole moves with it: its support goes to the block, its new
+        base, with a re-target record, the sketch and the hole fail and Pad2 computes. Moved back
+        below Pad2, it heals and the record is gone."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([sketch], block, True)
+        group = self.body.Group
+        self.assertLess(group.index(sketch), group.index(pad2))
+        self.assertGreater(group.index(hole), group.index(pad2))
+        self.assertChain(block, pad2, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, block)
+        self.assertTrue(all(s.startswith("?") for s in subs), subs)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(hole.isValid())
+        self.assertValid(pad2)
+        if self.solver:
+            self.assertIn("it was on 'Pad2'", sketch.getStatusString())
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([sketch], pad2, True)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testSketchAloneAboveEverySolidIsSetAside(self):
+        """Round 8 (J5): the sketch alone moved above the block, with no solid before it to take
+        its support: the support is set aside, the sketch fails saying so (not naming the hole,
+        which still comes after Pad2) and the hole with it; moved back, it heals."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([sketch], block, False)
+        group = self.body.Group
+        self.assertLess(group.index(sketch), group.index(block))
+        self.assertChain(block, pad2, hole)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(hole.isValid())
+        self.assertValid(block, pad2)
+        message = sketch.getStatusString()
+        self.assertIn("refers to 'Pad2'", message)
+        self.assertNotIn(f"'{hole.Label}'", message)
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([sketch], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
     def testMoveAboveAFaceTheBaseHolds(self):
         """The sketch on the block's side face, which Pad2 doesn't touch: moved above Pad2, the
         support is found on the block (the same face) and everything computes; moved back, it is
