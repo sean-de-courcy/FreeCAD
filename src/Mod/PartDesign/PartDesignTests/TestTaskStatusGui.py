@@ -61,6 +61,11 @@ def statusBanners():
     return Gui.getMainWindow().findChildren(QtWidgets.QLabel, "TaskEditStatus")
 
 
+def onshapeKeymap():
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return general.GetString("Keymap", "Onshape") != "FreeCAD"
+
+
 def plainText(label):
     document = QtGui.QTextDocument()
     document.setHtml(label.text())
@@ -124,6 +129,10 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertTrue(text.startswith("Error:"), text)
         status = feature.getStatusString().strip()
         self.assertTrue(status, "the feature has no error text")
+        # Under the Onshape keymap in the rows' tooltips' words (round 8): an extrusion's
+        # "SketchBased: " goes
+        if onshapeKeymap():
+            status = status.removeprefix("SketchBased: ")
         self.assertIn(status, text)
 
     def testWorkingFeatureShowsNothing(self):
@@ -176,6 +185,42 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertIn("Invalid", pocket.State)
         self.edit(pocket)
         self.checkShowsError(pocket)
+
+    def testBannerSaysPlainWords(self):
+        """Round 8 (J3, J5, J12): under the Onshape keymap the banner shows the rows' tooltips'
+        words, the report view keeping the technical text: the pocket up to no face loses its
+        "SketchBased: ", and a hole whose sketch failed "Depends on 'Round', which failed" (not
+        "Profile links to 'Round', which has an error")."""
+        if not onshapeKeymap():
+            self.skipTest("the Onshape keymap's words")
+        self.plate()
+        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), self.body, z=10)
+        pocket = models.pocket(self.body, square, 3)
+        pocket.Type = "UpToFace"
+        self.doc.recompute()
+        self.assertIn("SketchBased: ", pocket.getStatusString())
+        self.edit(pocket)
+        banner = self.banner()
+        self.assertTrue(waitFor(banner.isVisible), "the pocket's error isn't shown")
+        text = plainText(banner)
+        self.assertNotIn("SketchBased", text)
+        self.assertIn(pocket.getStatusString().removeprefix("SketchBased: ").strip(), text)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        pump()
+        # A hole whose sketch fails by itself: two radii in conflict
+        round_ = models.sketch(self.doc, "Round", [models.circle(7, 7, 1)], self.body, z=10)
+        hole = models.pocket(self.body, round_, 3)
+        self.doc.recompute()
+        round_.addConstraint(Sketcher.Constraint("Radius", 0, 1))
+        round_.addConstraint(Sketcher.Constraint("Radius", 0, 2))
+        self.doc.recompute()
+        self.assertFalse(round_.isValid())
+        self.assertIn("links to 'Round', which has an error", hole.getStatusString())
+        self.edit(hole)
+        banner = self.banner()
+        self.assertTrue(waitFor(banner.isVisible), "the hole's error isn't shown")
+        self.assertIn("Depends on 'Round', which failed", plainText(banner))
 
     def testClosedPanelLeavesNoLabel(self):
         pad = self.plate()

@@ -37,6 +37,7 @@
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <functional>
 
 #include <FCConfig.h>
 
@@ -63,8 +64,23 @@
 using namespace Gui::TaskView;
 namespace sp = std::placeholders;
 
+namespace Gui::TaskView
+{
+/// FreeCAD-CH (ops#640 round 8): what the edit status banner says of the edited object's error
+/// or warning text, in a workbench's words (PartDesign: the plain words of its rows' tooltips,
+/// under the Onshape keymap); the text itself while none is set. Declared where it is used (no
+/// header names it)
+using EditStatusText = std::function<QString(const App::DocumentObject*, const QString&)>;
+GuiExport void setEditStatusText(EditStatusText text);
+}  // namespace Gui::TaskView
+
 namespace
 {
+Gui::TaskView::EditStatusText& editStatusText()
+{
+    static Gui::TaskView::EditStatusText text;
+    return text;
+}
 // FreeCAD-CH (ops#640, rank 38): the Enter TaskView::keyPressEvent handles came from the graphics
 // area (GraphicsEnterFilter), wherever the focus is
 bool enterFromGraphics = false;
@@ -342,11 +358,15 @@ private:
         if (obj) {
             // Translated as the tree translates the status text
             const std::string typeName {obj->getTypeId().getName()};
+            auto words = [obj](const QString& text) {
+                const auto& filter = editStatusText();
+                return filter ? filter(obj, text) : text;
+            };
             if (obj->isError()) {
                 const char* text = obj->getDocument()->getErrorDescription(obj);
                 html = format(
                     QCoreApplication::translate("Gui::TaskView::TaskView", "Error:"),
-                    text && *text ? QCoreApplication::translate(typeName.c_str(), text)
+                    text && *text ? words(QCoreApplication::translate(typeName.c_str(), text))
                                   : QCoreApplication::translate(
                                         "Gui::TaskView::TaskView",
                                         "The feature failed to recompute."
@@ -361,7 +381,7 @@ private:
                 const char* text = obj->getWarningDescription();
                 html = format(
                     QCoreApplication::translate("Gui::TaskView::TaskView", "Warning:"),
-                    text ? QCoreApplication::translate(typeName.c_str(), text) : QString()
+                    text ? words(QCoreApplication::translate(typeName.c_str(), text)) : QString()
                 );
                 style = QStringLiteral(
                     "QLabel#TaskEditStatus { background-color: rgba(230, 160, 0, 45);"
@@ -405,6 +425,11 @@ private:
     std::vector<fastsignals::scoped_connection> connections;
 };
 }  // namespace
+
+void Gui::TaskView::setEditStatusText(EditStatusText text)
+{
+    editStatusText() = std::move(text);
+}
 
 
 //**************************************************************************

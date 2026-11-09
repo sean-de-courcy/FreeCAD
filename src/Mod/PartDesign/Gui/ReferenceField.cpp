@@ -85,6 +85,7 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Document.h>
 #include <Gui/Tools.h>
 #include <Gui/View3DInventor.h>
@@ -105,6 +106,12 @@
 #include "ReferenceSelection.h"
 
 using namespace PartDesignGui;
+
+// FreeCAD-CH (ops#640 round 8): the plain status words (FeaturesView.cpp; no header names it)
+namespace PartDesignGui
+{
+QString plainStatusText(const App::DocumentObject* obj, const QString& message);
+}
 
 namespace
 {
@@ -2740,6 +2747,10 @@ void ReferenceField::updateLook()
     if (text.isEmpty() && st != QLatin1String("exact")) {
         if (auto own = owner()) {
             text = QString::fromUtf8(own->getStatusString());
+            // Under the Onshape keymap in the rows' tooltips' words (round 8)
+            if (Gui::ForkKeymap::isOnshape()) {
+                text = plainStatusText(own, text);
+            }
         }
     }
     status->setText(text);

@@ -481,17 +481,71 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertVolume(fillet, 1000 - FILLET_CUT)
         self.assertTrue(armed(field))
 
-    def testCompleteFilletOpensUnarmed(self):
-        """Q2: an edit of a complete fillet arms nothing; a pick then only selects."""
+    def testEditDialogTakesAPickAtOnce(self):
+        """Round 8 (J11; reverses Q2's edit case): an edit of a complete fillet opens with its
+        edges field armed, as Onshape's dialog opens with its first selection field active. The
+        first pick in the 3D view adds its edge (1000 - 2 x 2.146), with no click on the list
+        first; a pick of a listed edge takes it out again, as Onshape toggles it."""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         fillet = self.addFillet(box, [first])
         [field] = self.edit(fillet)
-        pump(0.3)
-        self.assertFalse(armed(field))
+        self.assertTrue(waitFor(lambda: armed(field)), "the edit's edges field isn't armed")
         [second] = BOTTOM_BACK.one(box.Shape)
         self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first, second]), fillet.Base)
+        self.assertEqual(texts(field), [first, second])
+        self.assertVolume(fillet, 1000 - 2 * FILLET_CUT)
+        self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
+        self.assertVolume(fillet, 1000 - FILLET_CUT)
+
+    def testEditedDressUpsOpenArmed(self):
+        """Round 8 (J11): a chamfer's and a thickness's edit arm their field as the fillet's does;
+        a fillet on all its edges, whose field is off, arms nothing and its radius has the focus."""
+        box = self.box()
+        [edgeName] = TOP_FRONT.one(box.Shape)
+        [top] = face("plane", normal=Z, through=(5, 5, 10)).one(box.Shape)
+        for typeId, subs in (("PartDesign::Chamfer", [edgeName]), ("PartDesign::Thickness", [top])):
+            feature = self.body.newObject(typeId, typeId.split("::")[1])
+            feature.Base = (box, subs)
+            self.doc.recompute()
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            [field] = self.edit(feature)
+            self.assertTrue(waitFor(lambda: armed(field)), f"{typeId}: the field isn't armed")
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+            waitFor(lambda: not fields(), 3.0)
+            self.body.removeObject(feature)
+            self.doc.removeObject(feature.Name)
+            self.doc.recompute()
+        fillet = self.addFillet(box, [edgeName])
+        fillet.UseAllEdges = True
+        self.doc.recompute()
+        [field] = self.edit(fillet)
+        pump(0.3)
+        self.assertFalse(armed(field))
+        radius = Gui.getMainWindow().findChild(QtWidgets.QWidget, "filletRadius")
+        self.assertTrue(waitFor(radius.hasFocus), "the radius doesn't have the focus")
+
+    def testClearMissingReferencesArmsTheField(self):
+        """Round 8 (J11): after the row menu's "Clear missing references" the field is armed, as
+        after Re-pick: the next pick adds its edge."""
+        box = self.box()
+        [first] = TOP_FRONT.one(box.Shape)
+        fillet = self.addFillet(box, [first])
+        [field] = self.edit(fillet)
+        radius = Gui.getMainWindow().findChild(QtWidgets.QWidget, "filletRadius")
+        self.assertTrue(focus(radius), "the radius doesn't take the focus")
+        self.assertTrue(waitFor(lambda: not armed(field)), "still armed with the radius focused")
+        action = Gui.getMainWindow().findChild(QtGui.QAction, "clearMissingReferences")
+        self.assertIsNotNone(action)
+        action.trigger()
+        self.assertTrue(waitFor(lambda: armed(field)), "Clear missing references left it unarmed")
         self.assertEqual(fillet.Base[1], [first])
+        [second] = BOTTOM_BACK.one(box.Shape)
+        self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first, second]), fillet.Base)
 
     # -- T3, T4: what disarms and what doesn't --------------------------------------------------
 
@@ -1427,15 +1481,16 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, side)
         self.assertEqual(draft.Base[1], [side])
 
-    def testDraftWithFacesOpensUnarmed(self):
-        """B1 (ops#162): a draft with faces and no pull direction opens with no field armed (the
-        old panel armed on the pull direction's subs, not Base's)."""
+    def testDraftWithFacesOpensWithItsFacesArmed(self):
+        """B1 (ops#162): a draft with faces and no pull direction doesn't arm the pull direction
+        (the old panel armed on the pull direction's subs, not Base's); its faces field is armed,
+        as an edit's first field (round 8, J11)."""
         box, draft = self.draft()
         self.assertEqual(draft.PullDirection, None)
         [faces, plane, line] = self.edit(draft, count=3)
-        pump(0.2)
-        self.assertFalse(armed(faces), "a draft with faces opens armed")
+        self.assertTrue(waitFor(lambda: armed(faces)), "the edit's faces field isn't armed")
         self.assertFalse(armed(line))
+        self.assertFalse(armed(plane))
 
     def testDraftWithoutFacesOpensArmed(self):
         """B1 (ops#162): a draft with a pull direction and no faces opens with its faces field

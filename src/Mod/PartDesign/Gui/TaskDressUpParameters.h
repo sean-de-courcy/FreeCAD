@@ -102,9 +102,10 @@ protected:
     void disarmFields();
 
     ViewProviderDressUp* getDressUpView() const;
-    /// The Base field arms once the dialog is open: the dialog came back after its first pick
-    /// moved the dress-up (notePlacedByFirstPick), and the next picks go on adding to it. A
-    /// subclass gives its first value field the focus only when this is false.
+    /// The Base field arms once the dialog is open: it has entries (an edit, or the dialog came
+    /// back after its first pick moved the dress-up, notePlacedByFirstPick), and the next picks
+    /// go on adding to it. A subclass gives its first value field the focus only when this is
+    /// false, or when the field is disabled.
     bool armsBaseOnOpen() const
     {
         return armBaseOnOpen;

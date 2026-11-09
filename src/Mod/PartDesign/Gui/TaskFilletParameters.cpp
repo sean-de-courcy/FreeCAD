@@ -72,8 +72,9 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
     ui->filletRadius->selectNumber();
     ui->filletRadius->bind(pcFillet->Radius);
     // A new fillet's edges field takes the focus when the dialog opens (Q2), and keeps it
-    // after its first pick placed it (ops#640 rank 14)
-    if (!pcFillet->Base.getSubValues().empty() && !armsBaseOnOpen()) {
+    // after its first pick placed it (ops#640 rank 14) and in an edit (round 8); the radius
+    // takes it while the field is off (Use all edges)
+    if ((!pcFillet->Base.getSubValues().empty() && !armsBaseOnOpen()) || useAllEdges) {
         QMetaObject::invokeMethod(ui->filletRadius, "setFocus", Qt::QueuedConnection);
     }
 
