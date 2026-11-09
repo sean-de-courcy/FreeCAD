@@ -447,6 +447,28 @@ class TestWorkflowGui(unittest.TestCase):
         self.assertIsNotNone(self.doc.getObject("Fillet"))
         self.assertFalse(fillet.isValid())
 
+    def testABrokenThicknessOpensRed(self):
+        """Review R7W-2: as the fillet's, a Thickness whose Pad was deleted opens its dialog red
+        (its gizmos read the base silently), no modal."""
+        thickness = self.body1.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (self.padA, faceAt(self.padA, 5))
+        thickness.Value = 0.5
+        self.doc.recompute()
+        self.assertTrue(thickness.isValid(), thickness.getStatusString())
+        self.assertTrue(waitFor(lambda: "Thickness" in self.rows()), self.rows())
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "PadA")
+        self.assertEqual(self.menuAction("PadA", "featureDelete"), [True])
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("PadA"))
+        self.assertFalse(thickness.isValid())
+        self.assertEqual(self.menuAction("Thickness", "featureEdit"), [True])
+        self.waitDialog("entries")
+        self.assertEqual(self.modals, [])
+        self.assertIn(True, self.titleInError())
+        self.close(ok=True)
+        self.assertIsNotNone(self.doc.getObject("Thickness"))
+
     def testMissingPicksShowAndClear(self):
         """The boss under a fillet deleted: the fillet's dialog opens red with its picks broken in
         the field; Clear missing references takes them out in one write; OK commits it red."""

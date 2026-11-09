@@ -2856,6 +2856,10 @@ void TreeWidget::mouseDoubleClickEvent(QMouseEvent* event)
                 std::ostringstream unused;
                 App::DocumentObject* topParent = nullptr;
                 objitem->getSubName(unused, topParent);
+                // not a plain group's (a studio in a Std_Group is its own tab, review F7-1)
+                if (topParent && topParent->isDerivedFrom<App::DocumentObjectGroup>()) {
+                    topParent = nullptr;
+                }
                 if (auto top = topParent ? freecad_cast<ViewProviderDocumentObject*>(
                                                Application::Instance->getViewProvider(topParent)
                                            )
@@ -6594,7 +6598,9 @@ void DocumentItem::updateItemSelection(DocumentObjectItem* item)
     // FreeCAD-CH (ops#640, F6-1): under the typed tabs the view follows the selected path's top
     // object (obj, now): an item reached through the active tab's object (Assembly > Link >
     // Cylinder) stays in that tab, where the child's own tab (its studio) was activated
-    if (DocumentTabs::isOn() && obj != vobj->getObject()) {
+    // (not a plain group's: a studio kept in a Std_Group is its own tab, review F7-1)
+    if (DocumentTabs::isOn() && obj != vobj->getObject()
+        && !obj->isDerivedFrom<App::DocumentObjectGroup>()) {
         if (auto top = freecad_cast<ViewProviderDocumentObject*>(
                 Application::Instance->getViewProvider(obj)
             )) {

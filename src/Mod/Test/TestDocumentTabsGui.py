@@ -625,6 +625,29 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertFalse(everything <= shown(view), shown(view))
         self.assertTrue(mw.findChild(QtWidgets.QToolBar, "FreeCADCH_TypedTabs").isVisible())
 
+    def testTreeItemInAGroupedStudioSwitchesToItsTab(self):
+        """Review F7-1: Part Studio 2 kept in a plain group (Std_Group, an older file's habit): a
+        tree click on its cylinder from Part Studio 1's tab opens Part Studio 2's tab, the group
+        being no tab of its own."""
+        objects = self.model(assembly=False)
+        group = self.doc.addObject("App::DocumentObjectGroup", "Folder")
+        group.addObject(objects["studio2"])
+        self.doc.recompute()
+        GuiTabs.reconcile(self.doc)
+        pump(0.3)
+        params = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
+        saved = params.GetBool("SyncView", True)
+        params.SetBool("SyncView", True)
+        try:
+            self.switch("*")
+            widget, item = self.treeItem(objects["cylinder"])
+            widget.clearSelection()
+            widget.setCurrentItem(item)
+            pump(0.5)
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Part")
+        finally:
+            params.SetBool("SyncView", saved)
+
     def testTreeSelectionOpensTheObjectsTab(self):
         """R6T-5: from the assembly's tab (in edit), selecting Part Studio 2's Body in the tree
         (SyncView) opens Part Studio 2's tab as the bar does: Part Design's toolbar, the assembly

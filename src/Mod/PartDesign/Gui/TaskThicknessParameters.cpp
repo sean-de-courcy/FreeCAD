@@ -261,7 +261,8 @@ void TaskThicknessParameters::setGizmoPositions()
         gizmoContainer->visible = false;
         return;
     }
-    auto baseShape = thickness->getBaseTopoShape();
+    // silent: a broken Thickness (its base gone) opens red, as the other dress-ups (review R7W-2)
+    auto baseShape = thickness->getBaseTopoShape(true);
     auto shapes = thickness->getContinuousEdges(baseShape);
     auto faces = thickness->getFaces(baseShape);
 

@@ -305,6 +305,25 @@ class TestDeletePart(unittest.TestCase):
         self.assertTrue(sk.Placement.isSame(placement, 1e-9))
         self.assertTrue(sk.isValid())
 
+    def testAPlacedPartsSketchStaysWhereItIs(self):
+        """Review R7W-1: a New part whose Body is placed 50 mm up, emptied: no other Body has its
+        placement, so it stays (its sketch isn't relinked to another frame, where it would move
+        50 mm in the world); its sketch keeps its place."""
+        import FreeCAD as App
+
+        third = self.doc.addObject("PartDesign::Body", "Third")
+        third.Placement = App.Placement(App.Vector(0, 0, 50), App.Rotation())
+        sk = sketch(third, "ThirdSketch", (20, 0, 24, 4))
+        self.pad_(third, "ThirdPad", sk, 2)
+        self.doc.recompute()
+        world = sk.getGlobalPlacement()
+        self.deleteFeature(self.doc.getObject("ThirdPad"))
+        self.assertIsNone(PartDesign.removeEmptyPart(third))
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Third"))
+        self.assertIs(sk.getParentGeoFeatureGroup(), third)
+        self.assertTrue(sk.getGlobalPlacement().isSame(world, 1e-9))
+
     def testAPartWithASolidOrTheOnlyBodyStays(self):
         """A Body with a solid feature, or the studio's only one, isn't removed."""
         self.assertIsNone(PartDesign.removeEmptyPart(self.other))

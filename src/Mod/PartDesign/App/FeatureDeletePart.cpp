@@ -151,6 +151,11 @@ Body* DeletePart::removeEmptyPart(Body* body)
     }
     std::vector<Body*> others = studioBodies(doc, studio);
     std::erase(others, body);
+    // Only a Body placed as this one: relinked to another frame, its sketches would move in the
+    // world without a word (review R7W-1); with none, the empty Body stays, as before
+    std::erase_if(others, [body](const Body* other) {
+        return !other->Placement.getValue().isSame(body->Placement.getValue(), 1e-9);
+    });
     if (others.empty()) {
         return nullptr;
     }
