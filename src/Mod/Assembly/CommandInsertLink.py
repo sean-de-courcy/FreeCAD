@@ -60,6 +60,34 @@ def typedTabsOn():
     return hasattr(Gui, "DocumentTabs") and Gui.DocumentTabs.isOn() and hasattr(App, "DocumentTabs")
 
 
+def onshapeKeymap():
+    """Whether the fork's Onshape keymap is the active one (Gui::ForkKeymap::isOnshape)."""
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return general.GetString("Keymap", "Onshape") != "FreeCAD"
+
+
+def instanceLabel(assembly, source):
+    """FreeCAD-CH (ops#640 round 10, gap A27): Onshape's instance name, "<source> <N>" ("Part 1
+    <1>", "Part 1 <2>", "Part Studio 2 <1>"), N the lowest number no instance of the source in this
+    assembly reads. Labels are unique in a document unless the preference allows duplicates: a
+    number another assembly's instance reads is taken too, where Onshape counts per assembly."""
+    base = source.Label
+    taken = set()
+    pattern = re.compile(re.escape(base) + r" <(\d+)>$")
+    for obj in assembly.Group:
+        match = pattern.match(obj.Label)
+        if match:
+            taken.add(int(match.group(1)))
+    duplicates = App.ParamGet("User parameter:BaseApp/Preferences/Document").GetBool(
+        "DuplicateLabels", False
+    )
+    doc = assembly.Document
+    n = 1
+    while n in taken or (not duplicates and doc.getObjectsByLabel(f"{base} <{n}>")):
+        n += 1
+    return f"{base} <{n}>"
+
+
 class CommandGroupInsert:
     def GetCommands(self):
         return ("Assembly_InsertLink", "Assembly_InsertNewPart")
@@ -482,6 +510,9 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 
         addedObject.LinkedObject = selectedPart
         addedObject.Label = selectedPart.Label  # non-ASCII characters fails with newObject. #12164
+        if onshapeKeymap():
+            # Onshape's instance name (ops#640 round 10)
+            addedObject.Label = instanceLabel(self.assembly, selectedPart)
         addedObject.recompute()
 
         insertionDict = {}
