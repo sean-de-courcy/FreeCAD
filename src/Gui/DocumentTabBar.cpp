@@ -152,7 +152,7 @@ public:
 
 private:
     void applyFilter();
-    void open(QListWidgetItem* item);
+    void openTab(QListWidgetItem* item);
     void openFirst();
     void scheduleOrder();
     void saveOrder();
@@ -1593,7 +1593,7 @@ TabManager::TabManager(QWidget* parent)
         applyFilter();
     });
     connect(list, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
-        open(item);
+        openTab(item);
     });
     // A drag moves a row however the view does it (a move, or a removal and an insertion): the
     // order is read once it is over
@@ -1652,7 +1652,7 @@ void TabManager::applyFilter()
     }
 }
 
-void TabManager::open(QListWidgetItem* item)
+void TabManager::openTab(QListWidgetItem* item)
 {
     App::Document* doc = App::GetApplication().getDocument(docName.c_str());
     Controller* ctl = Controller::instance();
@@ -1672,7 +1672,7 @@ void TabManager::openFirst()
 {
     for (int row = 0; row < list->count(); ++row) {
         if (!list->isRowHidden(row)) {
-            open(list->item(row));
+            openTab(list->item(row));
             return;
         }
     }
