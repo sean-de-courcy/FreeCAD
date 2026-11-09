@@ -319,6 +319,12 @@ TaskDressUpParameters::TaskDressUpParameters(
         && hasOtherParts(dressUp)) {
         startPlacing();
     }
+    // An edit too: Onshape's dialog opens with its first selection field active, so a pick in the
+    // 3D view goes to the list at once (round 8, J11). An empty one arms as the dialog's first
+    // empty field (ReferenceFieldGroup::armFirstEmpty)
+    if (!placing && !dressUp->Base.getSubValues().empty()) {
+        armBaseOnOpen = true;
+    }
 }
 
 // The fields remove their own gates; the first pick's goes here
@@ -515,6 +521,14 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
             baseField->replaceEntries(kept);
             onBaseChanged();
         }
+        // The next pick goes to the field, as after Re-pick (round 8, J11)
+        QPointer<ReferenceField> field(baseField);
+        QTimer::singleShot(0, this, [field]() {
+            if (field && field->isEnabled()) {
+                field->setArmed(true);
+                field->list()->setFocus(Qt::OtherFocusReason);
+            }
+        });
     });
     baseField->addMenuAction(clearMissing);
     // Its base is gone (the feature it was on deleted): the field says so, and the picks it
@@ -524,8 +538,8 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
         baseField->setNote(tr("The feature this one was built on is gone, with the picks on it: "
                               "pick new ones, or delete this feature."));
     }
-    // The first pick placed the dress-up: the next picks go on adding to the field, once the
-    // dialog is open (ops#640 rank 14)
+    // The first pick placed the dress-up, or it is edited: the next picks go on adding to the
+    // field, once the dialog is open (ops#640 rank 14, round 8)
     if (armBaseOnOpen) {
         QPointer<ReferenceField> field(baseField);
         QTimer::singleShot(0, this, [field]() {
