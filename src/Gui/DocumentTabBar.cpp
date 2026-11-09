@@ -77,6 +77,12 @@
 #include "WorkbenchManager.h"
 #include "Selection/Selection.h"
 
+namespace Gui::DocumentTabs
+{
+// F6-3: also declared in Document.cpp, its caller (no header names it)
+bool undoAllowed(Gui::Document* gdoc, bool undo);
+}  // namespace Gui::DocumentTabs
+
 using namespace Gui;
 using Gui::DocumentTabs::accepts;
 using Gui::DocumentTabs::isOn;
@@ -161,7 +167,7 @@ public:
         std::vector<App::DocumentObject*>& users
     );
 
-    void beforeUndo(Gui::Document* gdoc, bool undo);
+    bool beforeUndo(Gui::Document* gdoc, bool undo);
     void message(const std::string& text);
 
     std::string pendingTab;  // the tab of the view createView() is making
@@ -185,6 +191,7 @@ private:
     MainWindow* mw;
     bool wasOn = false;
     bool arriving = false;
+    bool removingTab = false;  // remove()'s deletes, which take the tab away
     QToolBar* strip;
     QTabBar* documents;
     QToolBar* bar;
@@ -307,7 +314,19 @@ Controller::Controller(MainWindow* mw)
     }));
     connections.emplace_back(
         app.signalDeletedObject.connect([this](const App::DocumentObject& obj) {
-            schedule(obj.getDocument());
+            App::Document* doc = obj.getDocument();
+            // F6-2: the user deletes from the implicit studio shown: it keeps its tab when
+            // emptied (R6T-12), its label stored now, while the object is still there; not
+            // for an undo or redo (an undone import), a tab's own delete or a closing document
+            if (isOn() && doc && !removingTab && !closing.count(doc)
+                && !doc->isPerformingTransaction() && !doc->testStatus(App::Document::Restoring)
+                && (obj.isDerivedFrom<App::GeoFeature>()
+                    || obj.hasExtension(App::LinkBaseExtension::getExtensionClassTypeId()))
+                && AppTabs::tabNameOf(&obj) == AppTabs::implicitName()
+                && viewOf(doc, AppTabs::implicitName())) {
+                keepImplicit(doc);
+            }
+            schedule(doc);
         })
     );
     connections.emplace_back(app.signalChangedObject.connect(
@@ -549,16 +568,15 @@ void Controller::setTag(MDIView* view, const std::string& tag)
     if (doc && !active.count(doc)) {
         active[doc] = tag;
     }
-    if (doc && tag == AppTabs::implicitName()) {
-        keepImplicit(doc);
-    }
 }
 
 void Controller::keepImplicit(App::Document* doc)
 {
     // The implicit studio shown with something in it stays a tab when emptied, as Onshape keeps
-    // an empty Part Studio (R6T-12): its label goes to the registry. Not while empty: Std_New's
-    // first view shows the empty document before its App::Part studio is made
+    // an empty Part Studio (R6T-12): its label goes to the registry. Called when the user deletes
+    // from it (F6-2), not when it is shown: a write to Meta on showing marked an old file modified
+    // on open, outside undo. Not while empty: Std_New's first view shows the empty document
+    // before its App::Part studio is made
     if (!doc || AppTabs::hasImplicitLabel(doc) || !AppTabs::hasImplicitStudio(doc)) {
         return;
     }
@@ -593,9 +611,6 @@ void Controller::reconcile(App::Document* doc)
         const std::string tag = tagOf(view);
         if (!tag.empty() && names.count(tag)) {
             refilter(view);
-            if (tag == AppTabs::implicitName()) {
-                keepImplicit(doc);
-            }
             continue;
         }
         // Its tab is gone (deleted, or the implicit studio emptied): another tab with no view, or
@@ -835,27 +850,32 @@ void Controller::onCommit(const App::Document& doc)
     }
 }
 
-void Controller::beforeUndo(Gui::Document* gdoc, bool undo)
+bool Controller::beforeUndo(Gui::Document* gdoc, bool undo)
 {
     App::Document* doc = gdoc ? gdoc->getDocument() : nullptr;
     if (!doc) {
-        return;
+        return true;
     }
     const int id = doc->getTransactionID(undo, 0);
     auto docSteps = steps.find(doc);
     if (id == 0 || docSteps == steps.end()) {
-        return;
+        return true;
     }
     auto step = docSteps->second.find(id);
     if (step == docSteps->second.end() || step->second == activeTab(doc)) {
-        return;
+        return true;
     }
     AppTabs::Tab tab {};
-    if (AppTabs::findTab(doc, step->second, tab) && !switchTo(doc, step->second, true, nullptr)) {
-        // A dialog that doesn't lock the history (an assembly joint's, Std_Placement) refuses
-        // the switch: the step's tab is shown anyway, so the undo isn't unseen (R6T-10)
-        showTab(doc, tab);
+    std::string refusal;
+    if (AppTabs::findTab(doc, step->second, tab)
+        && !switchTo(doc, step->second, true, &refusal)) {
+        // F6-3: a dialog that doesn't lock the history (an assembly joint's, Std_Placement)
+        // refuses the switch. Showing the step's tab under the dialog (R6T-10) stranded the user
+        // there (every way back refused while the dialog is open): the undo is refused instead
+        message(refusal);
+        return false;
     }
+    return true;
 }
 
 MDIView* Controller::showTab(App::Document* doc, const AppTabs::Tab& tab)
@@ -1131,7 +1151,10 @@ bool Controller::remove(
     }
     const std::string title = "Delete " + AppTabs::label(doc, tab);
     gdoc->openCommand(title.c_str());
-    AppTabs::removeTab(doc, tab);
+    {
+        Base::FlagToggler<> flag(removingTab);  // its deletes don't keep the tab (F6-2)
+        AppTabs::removeTab(doc, tab);
+    }
     gdoc->commitCommand();
     reconcile(doc);
     if (wasActive && !next.empty()) {
@@ -1518,9 +1541,18 @@ void DocumentTabs::viewCreated(Gui::Document* gdoc, MDIView* view)
 
 void DocumentTabs::beforeUndo(Gui::Document* gdoc, bool undo)
 {
+    undoAllowed(gdoc, undo);
+}
+
+// F6-3: Gui::Document::undo()/redo()'s, declared there (the header stays as it is): shows the tab
+// the next step was made in; false (the undo refused, the status bar says why) when that takes a
+// switch an open dialog refuses
+bool DocumentTabs::undoAllowed(Gui::Document* gdoc, bool undo)
+{
     if (isOn() && Controller::instance()) {
-        Controller::instance()->beforeUndo(gdoc, undo);
+        return Controller::instance()->beforeUndo(gdoc, undo);
     }
+    return true;
 }
 
 bool DocumentTabs::beforeEdit(Gui::Document* gdoc, ViewProvider* vp)

@@ -82,6 +82,14 @@ def redo():
     pump(0.2)
 
 
+def statusMessage():
+    """The status bar's texts: MainWindow::showMessage writes its action label, not the bar's
+    own message."""
+    bar = Gui.getMainWindow().statusBar()
+    texts = [bar.currentMessage()] + [label.text() for label in bar.findChildren(QtWidgets.QLabel)]
+    return " | ".join(t for t in texts if t)
+
+
 def shown(view):
     """The names of the active document's objects whose view providers' root nodes are in the
     view's scene, at any depth."""
@@ -683,9 +691,11 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertIsNotNone(self.doc.getObject("Body"))
         self.assertIn("Body", shown(GuiTabs.viewOf(self.doc, "*")))
 
-    def testUndoBesideAnOpenDialogShowsTheTab(self):
-        """R6T-10: with a dialog open that doesn't lock the history (a script's task panel), Ctrl+Z
-        of a step made in Part Studio 2 still shows Part Studio 2, so the undo isn't unseen."""
+    def testUndoBesideAnOpenDialogIsRefused(self):
+        """F6-3 (was R6T-10): with a dialog open that doesn't lock the history (a script's task
+        panel), Ctrl+Z of a step made in Part Studio 2 is refused ("Finish or cancel the open
+        dialog first"): showing that tab under the dialog stranded the user there. Once the
+        dialog is closed the undo switches and undoes."""
         objects = self.model(assembly=False)
         cylinder = objects["cylinder"]
         self.switch("Part")
@@ -709,11 +719,62 @@ class TestDocumentTabsGui(unittest.TestCase):
         pump(0.2)
         try:
             undo()
-            self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
-            self.assertAlmostEqual(cylinder.Height.Value, 20, 6)
+            self.assertEqual(GuiTabs.activeTab(self.doc), "*")
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "*")
+            self.assertAlmostEqual(cylinder.Height.Value, 30, 6)
+            self.assertIn("Finish or cancel", statusMessage())
         finally:
             Gui.Control.closeDialog()
             pump(0.2)
+        undo()
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+        self.assertAlmostEqual(cylinder.Height.Value, 20, 6)
+
+    def testUndoBesideAPlacementPanelLeavesTheAssemblyReachable(self):
+        """F6-3: a step made in Part Studio 2 (the cylinder 20 -> 30), then the assembly's tab with
+        Std_Placement's dialog open on its cube (it doesn't lock the history): Ctrl+Z is refused
+        with the reason, the assembly's tab and view stay, the dialog stays open; closed, the undo
+        switches to Part Studio 2 and undoes, and the assembly's tab is reachable again. (A joint
+        dialog holds its own open step, "Create ... Joint", which a Ctrl+Z beside it undoes first,
+        in place.)"""
+        if "AssemblyWorkbench" not in Gui.listWorkbenches():
+            self.skipTest("no Assembly")
+        objects = self.model()
+        cylinder = objects["cylinder"]
+        cube = objects["assembly"].newObject("Part::Box", "AsmCube")
+        cube.Length = cube.Width = cube.Height = 10
+        self.doc.recompute()
+        self.switch("Part")
+        Gui.ActiveDocument.openCommand("Cylinder height")
+        cylinder.Height = 30
+        Gui.ActiveDocument.commitCommand()
+        self.doc.recompute()
+        self.switch("Assembly")
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
+
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "Assembly", "AsmCube.")
+        Gui.runCommand("Std_Placement")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "no placement dialog")
+        try:
+            info = (self.doc.isStepLocked(), self.doc.HasPendingTransaction, self.doc.UndoNames)
+            undo()
+            info += (self.doc.UndoNames, statusMessage())
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly", info)
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Assembly")
+            self.assertAlmostEqual(cylinder.Height.Value, 30, 6)
+            self.assertIn("Finish or cancel", statusMessage(), info)
+            self.assertTrue(Gui.Control.activeDialog(), "the dialog was closed")
+        finally:
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            pump(0.3)
+        undo()
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Part")
+        self.assertAlmostEqual(cylinder.Height.Value, 20, 6)
+        self.switch("Assembly")
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
 
     def testReusedNameIsNoVariableStudio(self):
         """R6T-8: a Variable Studio deleted, a new VarSet made with its name (a script) isn't a
@@ -725,6 +786,145 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertEqual(variables.Name, name)
         self.assertFalse(Tabs.isVariableStudio(variables))
         self.assertNotIn(name, [n for n, _k, _l in Tabs.tabs(self.doc)])
+
+    def linkedItem(self, tree, top, path):
+        """The tree item reached from top by the labels in path, each expanded on the way (a
+        link's children are made when it is expanded)."""
+        item = top
+        for label in path:
+            item.setExpanded(True)
+            pump(0.2)
+            found = None
+            stack = [item.child(i) for i in range(item.childCount())]
+            while stack and found is None:
+                child = stack.pop(0)
+                if child.text(0) == label:
+                    found = child
+                else:
+                    child.setExpanded(True)
+                    stack += [child.child(i) for i in range(child.childCount())]
+            self.assertIsNotNone(found, f"{label} under {item.text(0)}")
+            item = found
+        return item
+
+    def testTreeItemUnderAnAssemblyLinkStaysInTheAssembly(self):
+        """F6-1: from the assembly's tab (in edit, Assembly workbench), the cylinder selected in
+        the tree through the assembly's link (Assembly > Link > Cylinder) leaves the tab, the edit
+        and the workbench as they are (the path's top object is the assembly), where Part Studio
+        2's tab came up with Part Design; double-clicked there, it is edited in the assembly's
+        tab (Part Design's dialog), the Assembly workbench back once it is closed."""
+        from PySide6 import QtTest
+        from PySide import QtCore
+
+        objects = self.model()
+        link = objects["assembly"].newObject("App::Link", "Link")
+        link.LinkedObject = objects["body2"]
+        self.doc.recompute()
+        group = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
+        saved = group.GetBool("SyncView", True)
+        group.SetBool("SyncView", True)
+        try:
+            Gui.activateWorkbench("AssemblyWorkbench")
+            self.switch("Assembly")
+            self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
+            tree, top = self.treeItem(objects["assembly"])
+            item = self.linkedItem(tree, top, ["Link", "Cylinder"])
+            tree.clearSelection()
+            tree.scrollToItem(item)
+            tree.setCurrentItem(item)
+            pump(0.5)
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Assembly")
+            self.assertIsNotNone(Gui.ActiveDocument.getInEdit(), "the assembly left edit")
+            self.assertEqual(Gui.activeWorkbench().name(), "AssemblyWorkbench")
+
+            rect = tree.visualItemRect(item)
+            QtTest.QTest.mouseDClick(tree.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center())
+            pump(0.5)
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+            self.assertEqual(GuiTabs.tabOfView(Gui.ActiveDocument.ActiveView), "Assembly")
+            # The cylinder's dialog is Part Design's (its edit brings Part Design up, as
+            # upstream); closed, the workbench is the assembly's again, the tab unchanged
+            self.assertTrue(Gui.Control.activeDialog(), "the cylinder isn't edited")
+            Gui.Control.closeDialog()
+            pump(0.3)
+            if Gui.ActiveDocument.getInEdit():
+                Gui.ActiveDocument.resetEdit()
+                pump(0.3)
+            self.assertEqual(Gui.activeWorkbench().name(), "AssemblyWorkbench")
+            self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+        finally:
+            group.SetBool("SyncView", saved)
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            pump(0.2)
+
+    def testOpeningATopLevelSolidFileIsNotModified(self):
+        """F6-2: an old file with a top-level solid (its implicit Part Studio 1, a 10 mm box),
+        opened under the Onshape keymap and its tab shown, is not modified and its Meta holds no
+        implicit label: showing a tab stores nothing (closing doesn't ask to save). Deleting the
+        box there stores it: the emptied tab stays (R6T-12)."""
+        import shutil
+        import tempfile
+
+        self.doc.addObject("Part::Box", "Box")
+        self.doc.recompute()
+        meta = dict(self.doc.Meta)
+        meta.pop(Tabs.metaKey(), None)
+        self.doc.Meta = meta
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "TopLevelSolid.FCStd")
+            self.doc.saveAs(path)
+            name = self.doc.Name
+            App.closeDocument(name)
+            pump(0.2)
+            doc = App.openDocument(path)
+            self.docs.append(doc.Name)
+            self.doc = doc
+            pump(0.5)
+            GuiTabs.reconcile(doc)
+            done, refusal = GuiTabs.switchTo(doc, "*")
+            self.assertTrue(done, refusal)
+            pump(0.3)
+            self.assertAlmostEqual(doc.getObject("Box").Shape.Volume, 1000, 6)
+            self.assertNotIn("implicit=", doc.Meta.get(Tabs.metaKey(), ""))
+            self.assertFalse(Gui.getDocument(doc.Name).Modified, "opening marked it modified")
+
+            Gui.getDocument(doc.Name).openCommand("Delete the box")
+            doc.removeObject("Box")
+            Gui.getDocument(doc.Name).commitCommand()
+            GuiTabs.reconcile(doc)
+            pump(0.3)
+            self.assertIn("*", [n for n, _k, _l in Tabs.tabs(doc)])
+            App.closeDocument(doc.Name)
+            pump(0.2)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def testSketchInTheAssemblyTabIsRefused(self):
+        """With the assembly's tab active (in edit), Part Design's New Sketch and a primitive make
+        no top-level Body (a new implicit studio tab, the assembly out of edit): they are refused
+        with "Open a Part Studio tab to sketch", nothing added, no undo step, the tab and the edit
+        kept, as Derived refuses outside a Part Studio."""
+        import PartDesignGui  # noqa: F401 (the commands)
+
+        self.model()
+        self.switch("Assembly")
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
+        before = sorted(o.Name for o in self.doc.Objects)
+        undoCount = self.doc.UndoCount
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(0.3)
+        self.assertIn("Open a Part Studio tab", statusMessage())
+        self.assertFalse(Gui.Control.activeDialog())
+        Gui.runCommand("PartDesign_CompPrimitiveAdditive", 0)
+        pump(0.3)
+        self.assertFalse(Gui.Control.activeDialog())
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+        self.assertEqual(self.doc.UndoCount, undoCount)
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
 
     def testEditThroughAnAssemblyLinkStaysInTheAssembly(self):
         """R6T-11: the cylinder edited through the assembly's link (selected there) is edited in

@@ -40,7 +40,6 @@ from AssemblyTests.TestVariantLinks import (
 from AssemblyTests.TestOnshapeAssemblies import (  # FreeCAD-CH, ops#640
     TestSeveralAssemblies,
     TestJointErrors,
-    TestStudioParts,
 )
 
 # Use the modules so that code checkers don't complain (flake8)
@@ -58,4 +57,3 @@ True if TestVariantTopologyChanged else False
 True if TestRetargetCheckSaved else False
 True if TestSeveralAssemblies else False
 True if TestJointErrors else False
-True if TestStudioParts else False

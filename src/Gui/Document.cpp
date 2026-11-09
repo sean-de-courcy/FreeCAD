@@ -84,6 +84,13 @@ FC_LOG_LEVEL_INIT("Gui", true, true)
 using namespace Gui;
 namespace sp = std::placeholders;
 
+namespace Gui::DocumentTabs
+{
+// FreeCAD-CH (ops#640, F6-3): DocumentTabBar.cpp's (no header names it): shows the tab the next
+// undo or redo step was made in; false when an open dialog refuses that switch (the undo refused)
+bool undoAllowed(Gui::Document* gdoc, bool undo);
+}  // namespace Gui::DocumentTabs
+
 namespace Gui
 {
 
@@ -3760,8 +3767,11 @@ void Document::undo(int iSteps)
         }
         return;
     }
-    // FreeCAD-CH (ops#640, rank 59): a step made in another typed tab is undone in that tab
-    DocumentTabs::beforeUndo(this, true);
+    // FreeCAD-CH (ops#640, rank 59): a step made in another typed tab is undone in that tab;
+    // refused when an open dialog refuses the switch (F6-3)
+    if (!DocumentTabs::undoAllowed(this, true)) {
+        return;
+    }
     Base::FlagToggler<> flag(d->_isTransacting);
 
     // FreeCAD-CH (ops#640, regen-plan item 7): a step is one transaction, or a closed sketch
@@ -3790,7 +3800,9 @@ void Document::redo(int iSteps)
         }
         return;
     }
-    DocumentTabs::beforeUndo(this, false);  // FreeCAD-CH (ops#640, rank 59): as undo()
+    if (!DocumentTabs::undoAllowed(this, false)) {  // FreeCAD-CH (ops#640, rank 59): as undo()
+        return;
+    }
     Base::FlagToggler<> flag(d->_isTransacting);
 
     const int transactions = d->transactionsOfSteps(false, iSteps);  // FreeCAD-CH: as undo()

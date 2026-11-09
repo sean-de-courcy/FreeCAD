@@ -69,6 +69,13 @@
 
 using namespace PartDesignGui;
 
+// FreeCAD-CH (ops#640): Utils.cpp's (no header names it): true (refused, said why) when a new
+// part would be made outside a Part Studio tab
+namespace PartDesignGui
+{
+bool refuseNewPartOutsideStudio(App::Document* doc);
+}
+
 namespace
 {
 struct RejectException
@@ -1060,6 +1067,11 @@ void SketchWorkflow::tryCreateSketch()
     auto shouldMakeBody = std::get<0>(result);
     activeBody = std::get<1>(result);
     if (shouldAbort(shouldMakeBody)) {
+        return;
+    }
+    // FreeCAD-CH (ops#640): no new part outside a Part Studio tab (an Assembly's), refused before
+    // any pick or dialog
+    if (shouldMakeBody && PartDesignGui::refuseNewPartOutsideStudio(appdocument)) {
         return;
     }
 

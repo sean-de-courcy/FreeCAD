@@ -50,14 +50,21 @@ class CommandCreateAssembly:
         pass
 
     def GetResources(self):
+        tooltip = QT_TRANSLATE_NOOP(
+            "Assembly_CreateAssembly",
+            "Creates an assembly object in the current document, or in the current active assembly (if any). Limit of one root assembly per file.",
+        )
+        if onshapeKeymap():
+            # FreeCAD-CH (ops#651): no limit under the Onshape keymap (read at the start)
+            tooltip = QT_TRANSLATE_NOOP(
+                "Assembly_CreateAssembly",
+                "Creates an assembly object in the current document, or in the current active assembly (if any).",
+            )
         return {
             "Pixmap": "Geoassembly",
             "MenuText": QT_TRANSLATE_NOOP("Assembly_CreateAssembly", "New Assembly"),
             "Accel": "A",
-            "ToolTip": QT_TRANSLATE_NOOP(
-                "Assembly_CreateAssembly",
-                "Creates an assembly object in the current document, or in the current active assembly (if any). Limit of one root assembly per file.",
-            ),
+            "ToolTip": tooltip,
             "CmdType": "ForEdit",
         }
 

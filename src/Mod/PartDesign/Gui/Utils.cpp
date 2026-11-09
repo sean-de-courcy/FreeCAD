@@ -338,8 +338,39 @@ void nameNewPart(PartDesign::Body* body, App::Part* studioHint)
     Gui::cmdAppObjectArgs(body, "Label = '%s'", label.c_str());
 }
 
+// FreeCAD-CH (ops#640, r7 fixes): under the typed tabs a new part is made only in a Part Studio
+// tab: with an Assembly tab active, New Sketch or a primitive made a top-level Body (a new implicit
+// studio's tab, the assembly out of edit). True (refused, the status bar says why) when the
+// active view of @p doc shows another kind of tab, as Derived refuses (activeStudio()). Declared
+// where it is used (no header names it)
+bool refuseNewPartOutsideStudio(App::Document* doc);
+bool refuseNewPartOutsideStudio(App::Document* doc)
+{
+    if (!doc || !Gui::DocumentTabs::isOn()) {
+        return false;
+    }
+    auto gdoc = Gui::Application::Instance->getDocument(doc);
+    Gui::MDIView* view = gdoc ? gdoc->getActiveView() : nullptr;
+    const std::string tab = view ? Gui::DocumentTabs::tabOfView(view) : std::string();
+    if (tab.empty() || tab == App::DocumentTabs::implicitName()) {
+        return false;
+    }
+    App::DocumentTabs::Kind kind {};
+    if (App::DocumentTabs::isTabObject(doc->getObject(tab.c_str()), &kind)
+        && kind == App::DocumentTabs::Kind::PartStudio) {
+        return false;
+    }
+    Gui::getMainWindow()->showMessage(QObject::tr("Open a Part Studio tab to sketch"), 5000);
+    return true;
+}
+
 PartDesign::Body* makeBody(App::Document* doc)
 {
+    // FreeCAD-CH: not outside a Part Studio tab (each caller handles a null part)
+    if (refuseNewPartOutsideStudio(doc)) {
+        return nullptr;
+    }
+
     bool allowCompound = PartDesign::PartDesignParameter::instance()->getAllowCompoundDefault();
 
     // This is intended as a convenience when starting a new document.

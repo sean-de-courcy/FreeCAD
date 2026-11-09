@@ -325,11 +325,10 @@ bool ViewProviderAssembly::setEdit(int mode)
             )
         );
 
-        // FreeCAD-CH (ops#640, round 6 fixes): one connection per edit. A second setEdit (the
-        // typed tabs' switches, an edit restored after a sketch's) overwrote the handle, and the
-        // lost connection called a deleted view provider at the next workbench switch once the
-        // document was closed
-        QObject::disconnect(workbenchConnection);
+        // FreeCAD-CH (ops#640, round 6 fixes): one connection per edit (disconnectEditSignals()
+        // above). A second setEdit (the typed tabs' switches, an edit restored after a sketch's)
+        // overwrote the handle, and the lost connection called a deleted view provider at the
+        // next workbench switch once the document was closed
         workbenchConnection = QObject::connect(
             Gui::getMainWindow(),
             &Gui::MainWindow::workbenchActivated,
@@ -1959,19 +1958,30 @@ void ViewProviderAssembly::updateTaskPanel(bool show)
         return;
     }
 
+    // FreeCAD-CH (R7A-1): nothing to do, and the object isn't read. The destructor calls this,
+    // maybe after its object is gone (a deleted assembly's undo step, dropped at the document's
+    // close, deletes the object before its view provider)
+    if (show == !taskSolver.isNull()) {
+        return;
+    }
+
     // FreeCAD-CH (ops#640 round 7): the panel joins the document's task dialog when there is one;
     // made while none is open it would never be shown, so it is made only when it can join
-    App::Document* doc = this->getObject()->getDocument();
-    if (show && !taskSolver) {
+    if (show) {
+        App::Document* doc = this->getObject()->getDocument();
         if (!Gui::Control().activeDialog(doc)) {
             return;
         }
         taskSolver = new TaskAssemblyMessages(this);
+        taskSolverDoc = doc;
         taskView->addContextualPanel(taskSolver, doc);
         UpdateSolverInformation();
     }
-    else if (!show && taskSolver) {
-        taskView->removeContextualPanel(taskSolver, doc);
+    else {
+        // The document it joined, kept when it was added (R7A-1: no getObject() on this path);
+        // the task view's key only, never dereferenced
+        taskView->removeContextualPanel(taskSolver, taskSolverDoc);
         taskSolver = nullptr;
+        taskSolverDoc = nullptr;
     }
 }

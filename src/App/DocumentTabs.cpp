@@ -524,13 +524,6 @@ void DocumentTabs::removeTab(Document* doc, const Tab& tab)
         roots.emplace_back(tab.object->getNameInDocument());
     }
     else {
-        // The implicit studio's tab goes with its contents (hasImplicitStudio())
-        Registry registry = readRegistry(doc);
-        if (registry.hasImplicit) {
-            registry.hasImplicit = false;
-            registry.implicit.clear();
-            writeRegistry(doc, registry);
-        }
         for (auto obj : doc->getObjects()) {
             if (isImplicitContent(obj)) {
                 roots.emplace_back(obj->getNameInDocument());
@@ -547,6 +540,16 @@ void DocumentTabs::removeTab(Document* doc, const Tab& tab)
         }
         if (doc->getObject(name.c_str())) {
             doc->removeObject(name.c_str());
+        }
+    }
+    if (!tab.object) {
+        // The implicit studio's tab goes with its contents (hasImplicitStudio()); forgotten after
+        // the deletes, which may store its label (the GUI keeps a shown studio emptied, F6-2)
+        Registry registry = readRegistry(doc);
+        if (registry.hasImplicit) {
+            registry.hasImplicit = false;
+            registry.implicit.clear();
+            writeRegistry(doc, registry);
         }
     }
 }

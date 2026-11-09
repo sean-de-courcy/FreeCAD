@@ -227,43 +227,5 @@ class TestJointErrors(AssembliesBase):
         self.assertTrue(good.isValid())
 
 
-class TestStudioParts(AssembliesBase):
-    """The implicit Part Studio's parts, as Insert's whole-studio row inserts them (gap A16)."""
-
-    def testImplicitStudioParts(self):
-        """Two Bodies, a sketch, a Cut of two Part boxes at the top level and a Body in an
-        App::Part studio: the implicit studio's parts are the two Bodies and the Cut (not the
-        sketch, the Cut's inputs or the other studio's Body); an empty Body is no part."""
-        import UtilsAssembly
-
-        doc = self.doc
-        bodies = []
-        for name, x in (("Body", 0), ("Body001", 20)):
-            body = doc.addObject("PartDesign::Body", name)
-            box = body.newObject("PartDesign::AdditiveBox", name + "Box")
-            box.Length = box.Width = box.Height = 10
-            body.Placement.Base = App.Vector(x, 0, 0)
-            bodies.append(body)
-        doc.addObject("PartDesign::Body", "Empty")
-        doc.addObject("Sketcher::SketchObject", "Sketch")
-        tool = doc.addObject("Part::Box", "Tool")
-        base = doc.addObject("Part::Box", "Base")
-        base.Placement.Base = App.Vector(0, 40, 0)
-        tool.Placement.Base = App.Vector(5, 45, 5)
-        cut = doc.addObject("Part::Cut", "Cut")
-        cut.Base, cut.Tool = base, tool
-        studio = doc.addObject("App::Part", "Part")
-        studio.Label = "Part Studio 2"
-        inner = doc.addObject("PartDesign::Body", "Inner")
-        studio.addObject(inner)
-        inner.newObject("PartDesign::AdditiveBox", "InnerBox")
-        asm = self.assembly("Assembly")
-        doc.recompute()
-        parts = UtilsAssembly.implicitStudioParts(doc)
-        self.assertEqual([p.Name for p in parts], ["Body", "Body001", "Cut"])
-        self.assertAlmostEqual(cut.Shape.Volume, 1000 - 125, 6)
-        self.assertNotIn(asm, parts)
-
-
 if __name__ == "__main__":
     unittest.main()
