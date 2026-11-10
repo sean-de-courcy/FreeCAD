@@ -50,6 +50,7 @@
 #include <BRepProj_Projection.hxx>
 #include <Extrema_ExtCC.hxx>
 #include <Extrema_POnCurv.hxx>
+#include <Geom_Surface.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
@@ -61,6 +62,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -1575,6 +1577,45 @@ void ProfileBased::getFaceFromLinkSub(TopoDS_Face& upToFace, const App::Property
 }
 
 
+namespace PartDesign
+{
+// Whether an extrusion from `profile` along `dir` up to `upToFace` goes the other way: the line
+// through the profile's centre meets the face only behind, or, missing the face both ways, its
+// surface without limits only behind (FreeCAD-CH P3). Declared where it is used, in
+// FeatureExtrude.cpp too, to keep FeatureSketchBased.h as it is.
+bool upToFaceBehind(const TopoShape& upToFace, const TopoShape& profile, const gp_Dir& dir)
+{
+    // The line through the profile's centre meets the face ahead, or behind
+    if (!Part::findAllFacesCutBy(upToFace, profile, dir).empty()) {
+        return false;
+    }
+    if (!Part::findAllFacesCutBy(upToFace, profile, dir.Reversed()).empty()) {
+        return true;
+    }
+    // It misses the face both ways: a face beside the profile, or smaller than it. The prism goes
+    // up to the face without its limits (makeElementPrismUntil()), and so does Onshape's, so the
+    // side of the face's surface decides (FreeCAD-CH P3, rehearsal round 2). Before, such a side
+    // was reversed: its prism still reached the face, but the offset moved the face back.
+    BRep_Builder builder;
+    TopoDS_Compound unlimited;
+    builder.MakeCompound(unlimited);
+    bool any = false;
+    for (TopExp_Explorer it(upToFace.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(it.Current()));
+        if (surface.IsNull()) {
+            continue;
+        }
+        BRepBuilderAPI_MakeFace mkFace(surface, Precision::Confusion());
+        if (mkFace.IsDone()) {
+            builder.Add(unlimited, mkFace.Face());
+            any = true;
+        }
+    }
+    // A surface the line misses both ways (one parallel to the direction) is reversed, as before
+    return !any || Part::findAllFacesCutBy(TopoShape(unlimited), profile, dir).empty();
+}
+}  // namespace PartDesign
+
 void ProfileBased::getUpToFace(
     TopoShape& upToFace,
     const TopoShape& support,
@@ -1603,7 +1644,7 @@ void ProfileBased::getUpToFace(
         }
         upToFace = (method == "UpToLast" ? it_far->face : it_near->face);
     }
-    else if (Part::findAllFacesCutBy(upToFace, sketchshape, dir).empty()) {
+    else if (upToFaceBehind(upToFace, sketchshape, dir)) {
         dir = -dir;
     }
 
@@ -1678,11 +1719,23 @@ void ProfileBased::getUpToFace(
 
 void ProfileBased::addOffsetToFace(TopoShape& upToFace, const gp_Dir& dir, double offset)
 {
-    // Move the face in the extrusion direction
+    // A plane moves along its normal, turned towards the extrusion direction, as Onshape's offset
+    // of an up-to face does: the end lies `offset` past the plane, slanted or not (FreeCAD-CH P3).
+    // Any other face moves in the extrusion direction.
     // TODO: For non-planar faces, we could consider offsetting the surface
     if (fabs(offset) > Precision::Confusion()) {
+        gp_Vec along(dir);
+        if (upToFace.shapeType(true) == TopAbs_FACE) {
+            BRepAdaptor_Surface adapt(TopoDS::Face(upToFace.getShape()));
+            if (adapt.GetType() == GeomAbs_Plane) {
+                gp_Vec normal(adapt.Plane().Axis().Direction());
+                if (std::fabs(normal.Dot(along)) > Precision::Confusion()) {
+                    along = normal.Dot(along) < 0 ? -normal : normal;
+                }
+            }
+        }
         gp_Trsf mov;
-        mov.SetTranslation(offset * gp_Vec(dir));
+        mov.SetTranslation(offset * along);
         TopLoc_Location loc(mov);
         upToFace.move(loc);
     }

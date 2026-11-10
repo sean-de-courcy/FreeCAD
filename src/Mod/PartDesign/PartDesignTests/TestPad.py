@@ -602,6 +602,30 @@ def revolvedFaceReach(y0, y1, z0, z1, far=False):
     return abs(d.x) * simpson(lambda z: simpson(lambda y: reach(y, z), y0, y1, 16), z0, z1, 8)
 
 
+def upToOffsetFace(doc, slanted, z, x0=4, x1=8):
+    """FreeCAD-CH P3: a 4 mm wide face x `x0`..`x1`, y -2..2, as a Part::Feature, smaller than and off
+    the centre of a 20 x 20 profile centred on the z axis, so that the line through the profile's
+    centre misses it both ways. In the plane z = `z` (`slanted` False), or z = `z` + x / 4 (normal
+    along (-1, 0, 4)). Onshape's extrusion up to such a face goes to its plane, and an offset moves
+    the plane along its normal, `offset` past it."""
+    V = FreeCAD.Vector
+
+    def at(x, y):
+        return V(x, y, z + (x / 4.0 if slanted else 0.0))
+
+    corners = [at(x0, -2), at(x1, -2), at(x1, 2), at(x0, 2)]
+    face = doc.addObject("Part::Feature", "Face")
+    face.Shape = Part.Face(Part.makePolygon(corners + [corners[0]]))
+    return face
+
+
+def upToOffsetReach(slanted, offset):
+    """How far past z = its plane's height at x = 0 the end of P3's extrusion lies, along the
+    extrusion: the plane moved `offset` along its normal, which makes 4 / sqrt(17) with z when
+    slanted"""
+    return offset * math.sqrt(17) / 4 if slanted else offset
+
+
 def squareSketch(body, name, placement, rectangles):
     """A sketch in `body` at `placement` of closed rectangles (x0, y0, x1, y1) in its plane"""
     import Sketcher
@@ -5099,6 +5123,51 @@ class TestPad(unittest.TestCase):
         self.Doc.recompute()
         self.assertSolidVolume(pipe, 40 * math.pi)
         self.assertAlmostEqual(pipe.Shape.BoundBox.ZLength, 10, places=6)
+
+    def testUpToFaceOffsetBesideTheProfile(self):
+        """FreeCAD-CH P3: a 20 x 20 square up to a smaller face, parallel or slanted, off its
+        centre (x 4..8) or on it (x -2..2), in front of the profile (z = 10) or behind it
+        (z = -10), offset by +2 and -2, as Onshape does: the end lies on the face's plane moved
+        `offset` along its normal, away from the profile for +2. Before, the line through the
+        centre missed a face off it, the side was taken as reversed, and the offset moved the face
+        the other way; and a slanted face moved `offset` along the extrusion, not its normal."""
+        cases = [
+            (upTo, slanted, ahead, offset, span)
+            for upTo in ("UpToFace", "UpToShape")
+            for slanted in (False, True)
+            for ahead in (True, False)
+            for offset in (2.0, -2.0)
+            for span in ((4, 8), (-2, 2))
+        ]
+        for upTo, slanted, ahead, offset, span in cases:
+            with self.subTest(upTo=upTo, slanted=slanted, ahead=ahead, offset=offset, span=span):
+                face = upToOffsetFace(self.Doc, slanted, 10.0 if ahead else -10.0, *span)
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Type = upTo
+                if upTo == "UpToFace":
+                    pad.UpToFace = (face, ["Face1"])
+                else:
+                    pad.UpToShape = [(face, ["Face1"])]
+                pad.Offset = offset
+                self.Doc.recompute()
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                # the end's distance from the profile at x = 0, and the plane's rise over
+                # x 0..10 on the far side from the profile
+                reach = 10.0 + upToOffsetReach(slanted, offset)
+                rise = 2.5 if slanted else 0.0
+                box = pad.Shape.BoundBox
+                if ahead:
+                    self.assertAlmostEqual(box.ZMin, 0.0, places=6)
+                    self.assertAlmostEqual(box.ZMax, reach + rise, places=6)
+                else:
+                    self.assertAlmostEqual(box.ZMin, -reach - rise, places=6)
+                    self.assertAlmostEqual(box.ZMax, 0.0, places=6)
+                # the slant's x / 4 averages to 0 over x -10..10
+                self.assertAlmostEqual(pad.Shape.Volume, 400.0 * reach, places=4)
+                self.assertEqual(len(pad.Shape.Solids), 1)
 
     def tearDown(self):
         # closing doc
