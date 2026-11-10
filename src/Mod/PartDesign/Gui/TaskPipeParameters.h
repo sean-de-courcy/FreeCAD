@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "TaskSketchBasedParameters.h"
 #include "ViewProviderPipe.h"
 #include "TaskDressUpParameters.h"
@@ -63,12 +65,17 @@ public:
 
     bool accept();
     void onReferenceSelectionTaken() override;
-    /// The profile and the path (ops#150 W8).
+    /// The profile, the path and its more edges (ops#150 W8).
     std::vector<ReferenceField*> referenceFields() const override;
+    /// Shows the pipe's ProfileControl and ExtendToFullPath, writing nothing
+    void showProfileControl();
+    /// Called after the panel set ProfileControl (which sets Mode): the dialog shows the mode
+    std::function<void()> profileControlSet;
 
 private Q_SLOTS:
-    void onTangentChanged(bool checked);
     void onTransitionChanged(int);
+    void onProfileControlChanged(int);
+    void onExtendToFullPathChanged(bool checked);
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
@@ -84,6 +91,8 @@ private:
     std::unique_ptr<Ui_TaskPipeParameters> ui;
     ReferenceField* profileField = nullptr;
     ReferenceField* spineField = nullptr;
+    /// SpineMore: path edges from other objects
+    ReferenceField* spineMoreField = nullptr;
     friend class TaskDlgPipeParameters;
 };
 
@@ -102,6 +111,10 @@ public:
     void onReferenceSelectionTaken() override;
     /// The auxiliary path, shown in Mode Auxiliary (ops#150 W8).
     std::vector<ReferenceField*> referenceFields() const override;
+    /// Shows the pipe's Mode, writing nothing
+    void showMode();
+    /// Called after the panel set Mode (which makes ProfileControl "Advanced"): the dialog shows it
+    std::function<void()> modeSet;
 
 private Q_SLOTS:
     void onOrientationChanged(int);

@@ -42,6 +42,7 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -73,6 +74,7 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <gp.hxx>
 #include <GProp_GProps.hxx>
+#include <GProp_PEquation.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
@@ -84,6 +86,7 @@
 #include <Law_Function.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -104,6 +107,7 @@
 #include <Base/Reader.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 #include <Mod/Part/App/PipeShellApproximation.h>
+#include <Mod/Part/App/SweepFrenet.h>
 
 #include "FeaturePipe.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
@@ -4264,6 +4268,263 @@ Part::TopoShape profileFirst(
     }
     return reversed;
 }
+
+/// The gap of a path whose edges make several wires: the two nearest ends of different wires (or
+/// free edges). None when it is one wire.
+std::optional<std::pair<gp_Pnt, gp_Pnt>> pathGap(const TopoDS_Shape& path)
+{
+    std::vector<std::vector<gp_Pnt>> ends;
+    for (TopExp_Explorer it(path, TopAbs_WIRE); it.More(); it.Next()) {
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(TopoDS::Wire(it.Current()), first, last);
+        std::vector<gp_Pnt> points;
+        for (const TopoDS_Vertex& vertex : {first, last}) {
+            if (!vertex.IsNull()) {
+                points.push_back(BRep_Tool::Pnt(vertex));
+            }
+        }
+        ends.push_back(points);
+    }
+    for (TopExp_Explorer it(path, TopAbs_EDGE, TopAbs_WIRE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        ends.push_back(
+            {BRep_Tool::Pnt(TopExp::FirstVertex(edge)), BRep_Tool::Pnt(TopExp::LastVertex(edge))}
+        );
+    }
+    std::optional<std::pair<gp_Pnt, gp_Pnt>> gap;
+    double nearest = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < ends.size(); ++i) {
+        for (size_t j = i + 1; j < ends.size(); ++j) {
+            for (const gp_Pnt& a : ends[i]) {
+                for (const gp_Pnt& b : ends[j]) {
+                    if (a.Distance(b) < nearest) {
+                        nearest = a.Distance(b);
+                        gap = std::make_pair(a, b);
+                    }
+                }
+            }
+        }
+    }
+    return gap;
+}
+
+/// Where a profile lies against its path (Onshape's Sweep, notes\sweep-design.md; skeptic c721,
+/// finding 3): the path's point nearest the profile's centre, and whether another point lies as
+/// near
+struct ProfileFoot
+{
+    /// The profile's centre: its wires' centre of mass, by length
+    gp_Pnt centre;
+    /// The path's point nearest it
+    gp_Pnt at;
+    double distance = 0;
+    /// Another point of the path as near, apart from `at`: the foot point is ambiguous
+    std::optional<gp_Pnt> tie;
+    /// The profile's largest extent along the axes
+    double size = 0;
+    /// Whether `at` is an end of the path (always, for a closed path)
+    bool atEnd = true;
+};
+
+/// Equal distances of a tie: rounding noise only (a profile at the centre of an arc is the same
+/// distance from all of it, within 1e-15 mm)
+constexpr double tieTolerance = 10 * Precision::Confusion();
+
+/// Where the profile of \a wires lies against \a path (ProfileFoot)
+ProfileFoot profileFoot(const std::vector<TopoDS_Shape>& wires, const TopoDS_Wire& path)
+{
+    ProfileFoot foot;
+    GProp_GProps lengths;
+    Bnd_Box box;
+    for (const TopoDS_Shape& wire : wires) {
+        GProp_GProps one;
+        BRepGProp::LinearProperties(wire, one);
+        lengths.Add(one);
+        BRepBndLib::Add(wire, box);
+    }
+    foot.centre = lengths.CentreOfMass();
+    if (!box.IsVoid()) {
+        double x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        foot.size = std::max({x1 - x0, y1 - y0, z1 - z0});
+    }
+    // The candidates: every vertex (the ends of an arc about the centre, which is as near
+    // everywhere, among them) and each edge's nearest points
+    std::vector<std::pair<gp_Pnt, double>> candidates;
+    for (TopExp_Explorer it(path, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        for (const TopoDS_Vertex& vertex : {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)}) {
+            const gp_Pnt point = BRep_Tool::Pnt(vertex);
+            candidates.emplace_back(point, point.Distance(foot.centre));
+        }
+        const BRepAdaptor_Curve curve(edge);
+        Extrema_ExtPC extrema(foot.centre, curve);
+        if (extrema.IsDone()) {
+            for (int i = 1; i <= extrema.NbExt(); ++i) {
+                if (extrema.IsMin(i)) {
+                    candidates.emplace_back(
+                        extrema.Point(i).Value(),
+                        std::sqrt(extrema.SquareDistance(i))
+                    );
+                }
+            }
+        }
+    }
+    if (candidates.empty()) {
+        return foot;
+    }
+    auto nearest = candidates.begin();
+    for (auto it = candidates.begin(); it != candidates.end(); ++it) {
+        if (it->second < nearest->second) {
+            nearest = it;
+        }
+    }
+    foot.at = nearest->first;
+    foot.distance = nearest->second;
+    for (const auto& [point, distance] : candidates) {
+        if (distance < foot.distance + tieTolerance && point.Distance(foot.at) > tieTolerance) {
+            foot.tie = point;
+            break;
+        }
+    }
+    if (!BRep_Tool::IsClosed(path)) {
+        if (const std::optional<std::array<gp_Pnt, 2>> ends = wireEnds(path)) {
+            foot.atEnd = foot.at.Distance((*ends)[0]) < tieTolerance
+                || foot.at.Distance((*ends)[1]) < tieTolerance;
+        }
+    }
+    return foot;
+}
+
+/// Whether \a path lies in a plane, or on a line, within a micrometre
+bool isPlanarPath(const TopoDS_Wire& path)
+{
+    const std::vector<gp_Pnt> points = pointsAlong(path);
+    if (points.size() < 4) {
+        return true;
+    }
+    TColgp_Array1OfPnt array(1, static_cast<int>(points.size()));
+    for (size_t i = 0; i < points.size(); ++i) {
+        array.SetValue(static_cast<int>(i) + 1, points[i]);
+    }
+    const GProp_PEquation equation(array, 1e-3);
+    return equation.IsPlanar() || equation.IsLinear() || equation.IsPoint();
+}
+
+/// The largest curvature of \a curve: an arc's, or sampled at least 64 times, 8 times a C2 piece
+double largestCurvature(const BRepAdaptor_Curve& curve)
+{
+    if (curve.GetType() == GeomAbs_Line) {
+        return 0;
+    }
+    if (curve.GetType() == GeomAbs_Circle) {
+        return 1 / curve.Circle().Radius();
+    }
+    const int count = std::clamp(8 * curve.NbIntervals(GeomAbs_C2), 64, 1024);
+    const double first = curve.FirstParameter();
+    const double last = curve.LastParameter();
+    double largest = 0;
+    for (int i = 0; i <= count; ++i) {
+        BRepLProp_CLProps props(curve, first + (last - first) * i / count, 2, Precision::Confusion());
+        if (props.IsTangentDefined()) {
+            largest = std::max(largest, props.Curvature());
+        }
+    }
+    return largest;
+}
+
+/// The folds along the curved edges of \a spine of a section that no corner tilted, for the
+/// sweeps measureCorners doesn't look at ("Right corner", "Round corner", or one edge): where the
+/// path bends tighter than the profile reaches from it, the sweep runs back through itself, a
+/// solid that BRepCheck passes, of negative volume (skeptic c721, finding 1; Onshape refuses a
+/// self-intersecting sweep). Along an arc the section turns about, exact (foldAlongArc); along
+/// another curve, from the section's sampled motion (foldAlongCurve), only where its sharpest
+/// bend reaches the section at all: its curvature times the section's farthest point from the
+/// spine at least 1. \a starts, \a setup, \a binormal: as measureCorners'.
+CornerTilts foldsAlongCurves(
+    const std::vector<TopoDS_Shape>& starts,
+    const TopoDS_Wire& spine,
+    const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup,
+    const std::optional<gp_Dir>& binormal
+)
+{
+    CornerTilts tilts;
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(spine);
+    if (edges.empty() || starts.empty()) {
+        return tilts;
+    }
+    const TopoDS_Wire start = firstWire(starts.front());
+    if (start.IsNull() || !BRep_Tool::IsClosed(start)) {
+        return tilts;
+    }
+    std::vector<gp_Pnt> startPoints;
+    for (const TopoDS_Shape& shape : starts) {
+        for (TopExp_Explorer it(shape, TopAbs_WIRE); it.More(); it.Next()) {
+            const std::vector<gp_Pnt> points = pointsAlong(TopoDS::Wire(it.Current()));
+            startPoints.insert(startPoints.end(), points.begin(), points.end());
+        }
+    }
+    const std::optional<gp_Dir> startNormal = planeNormal(pointsAlong(start));
+    if (!startNormal) {
+        return tilts;
+    }
+    const gp_Pnt spineStart = BRep_Tool::Pnt(TopExp::FirstVertex(edges.front(), true));
+    double reach = 0;
+    for (const gp_Pnt& point : startPoints) {
+        reach = std::max(reach, point.Distance(spineStart));
+    }
+    for (size_t k = 0; k < edges.size(); ++k) {
+        if (isLine(edges[k])) {
+            continue;
+        }
+        const BRepAdaptor_Curve curve(edges[k]);
+        if (largestCurvature(curve) * reach < 1 - 1e-9) {
+            continue;
+        }
+        gp_Trsf motion;
+        if (k > 0) {
+            BRepBuilderAPI_MakeWire upTo;
+            for (size_t i = 0; i < k; ++i) {
+                upTo.Add(edges[i]);
+            }
+            const std::optional<std::vector<gp_Trsf>> motions
+                = motionsAlong(upTo.Wire(), gp_Ax2(spineStart, *startNormal), 2, setup);
+            if (!motions) {
+                continue;
+            }
+            motion = motions->back();
+        }
+        const gp_Dir normal = startNormal->Transformed(motion);
+        std::vector<gp_Pnt> points;
+        for (const gp_Pnt& point : startPoints) {
+            points.push_back(point.Transformed(motion));
+        }
+        const bool arc = curve.GetType() == GeomAbs_Circle;
+        const bool aboutAxis = arc
+            && (!binormal
+                || std::abs(curve.Circle().Axis().Direction().Dot(*binormal))
+                    > std::cos(tiltTolerance));
+        const Reach found = aboutAxis ? foldAlongArc(edges[k], normal, points)
+                                      : foldAlongCurve(edges[k], normal, points, setup, binormal);
+        const gp_Pnt at = BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true));
+        if (found.unchecked > 0 && !tilts.unchecked) {
+            tilts.unchecked = {at, found.unchecked};
+        }
+        if (found.past < Precision::Confusion()) {
+            continue;
+        }
+        const Fold fold {at, arc, false, found.past, found.across};
+        if (found.past > smallFold * found.across) {
+            tilts.folded = fold;
+            return tilts;
+        }
+        if (!tilts.smallFold) {
+            tilts.smallFold = fold;
+        }
+    }
+    return tilts;
+}
 }  // namespace
 
 PipeCapFacing PartDesign::pipeCapsFacing(
@@ -4380,12 +4641,14 @@ const char* Pipe::TransitionEnums[] = {"Transformed", "Right corner", "Round cor
 const char* Pipe::ModeEnums[] = {"Standard", "Fixed", "Frenet", "Auxiliary", "Binormal", nullptr};
 const char* Pipe::TransformEnums[]
     = {"Constant", "Multisection", "Linear", "S-shape", "Interpolation", nullptr};
+const char* Pipe::ProfileControlEnums[] = {"None", "Keep orientation", "Advanced", nullptr};
 
 
 PROPERTY_SOURCE(PartDesign::Pipe, PartDesign::ProfileBased)
 
 Pipe::Pipe()
 {
+    settingMode = true;
     ADD_PROPERTY_TYPE(Sections, (nullptr), "Sweep", App::Prop_None, "List of sections");
     Sections.setValue(nullptr);
     ADD_PROPERTY_TYPE(Spine, (nullptr), "Sweep", App::Prop_None, "Path to sweep along");
@@ -4480,9 +4743,75 @@ Pipe::Pipe()
         App::PropertyType(App::Prop_Output | App::Prop_Hidden),
         "SpineStartNames of EarlierSpineStarts' records, each followed by an empty string"
     );
+    // Onshape's Sweep (notes\sweep-design.md, decision 344)
+    ADD_PROPERTY_TYPE(
+        ProfileControl,
+        (long(0)),
+        "Sweep",
+        App::Prop_None,
+        "How the profile is carried along the path: None (it turns with the path), Keep "
+        "orientation (it keeps its orientation), Advanced (the Mode property decides)"
+    );
+    ADD_PROPERTY_TYPE(
+        ExtendToFullPath,
+        (true),
+        "Sweep",
+        App::Prop_None,
+        "A profile in the middle of the path sweeps both ways along all of it"
+    );
+    ADD_PROPERTY_TYPE(
+        PathReversed,
+        (false),
+        "Sweep",
+        App::Prop_Hidden,
+        "With 'Extend to full path' off, sweep the other way along the path from the profile"
+    );
+    ADD_PROPERTY_TYPE(
+        SpineMore,
+        (nullptr),
+        "Sweep",
+        App::Prop_None,
+        "More path edges, from other objects: joined with the Spine's in any order"
+    );
     Mode.setEnums(ModeEnums);
     Transition.setEnums(TransitionEnums);
     Transformation.setEnums(TransformEnums);
+    ProfileControl.setEnums(ProfileControlEnums);
+    settingMode = false;
+}
+
+void Pipe::onChanged(const App::Property* prop)
+{
+    const App::Document* doc = getDocument();
+    const bool replaying = isRestoring() || (doc && doc->isPerformingTransaction());
+    if (!settingMode && !replaying) {
+        if (prop == &ProfileControl) {
+            // None sweeps in Standard (with Frenet's frame where it is steady off a plane), Keep
+            // orientation in Fixed: a translation, whatever the profile's plane
+            const long mode = ProfileControl.getValue() == 0 ? 0
+                : ProfileControl.getValue() == 1             ? 1
+                                                             : -1;
+            if (mode >= 0 && Mode.getValue() != mode) {
+                settingMode = true;
+                Mode.setValue(mode);
+                settingMode = false;
+            }
+        }
+        else if (prop == &Mode && ProfileControl.getValue() != 2) {
+            settingMode = true;
+            ProfileControl.setValue(long(2));
+            settingMode = false;
+        }
+    }
+    ProfileBased::onChanged(prop);
+}
+
+void Pipe::Restore(Base::XMLReader& reader)
+{
+    settingMode = true;
+    ProfileControl.setValue(long(2));
+    settingMode = false;
+    ProfileBased::Restore(reader);
 }
 
 short Pipe::mustExecute() const
@@ -4497,6 +4826,10 @@ short Pipe::mustExecute() const
         return 1;
     }
     if (Transition.isTouched()) {
+        return 1;
+    }
+    if (ProfileControl.isTouched() || ExtendToFullPath.isTouched() || PathReversed.isTouched()
+        || SpineMore.isTouched()) {
         return 1;
     }
     return ProfileBased::mustExecute();
@@ -4863,8 +5196,52 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
         Part::TopoShape path = makeTopoShape(false);
         const Part::TopoShape& shape = static_cast<Part::Feature*>(spine)->Shape.getShape();
-        buildPipePath(shape, subedge, path);
+        // More path edges from other objects (Onshape picks path edges one by one): joined with
+        // the Spine's in any order. Without them the path is built as before, names and all.
+        std::vector<std::vector<std::string>> moreIdentities;
+        if (SpineMore.getValues().empty()) {
+            buildPipePath(shape, subedge, path);
+        }
+        else {
+            Part::TopoShape piece = makeTopoShape(false);
+            buildPipePath(shape, subedge, piece);
+            std::vector<Part::TopoShape> edges = piece.getSubTopoShapes(TopAbs_EDGE);
+            for (const auto& [object, subs] : SpineMore.getSubListValues()) {
+                if (!(object && object->isDerivedFrom<Part::Feature>())) {
+                    return new App::DocumentObjectExecReturn(
+                        "Pipe: a path object in SpineMore isn't a shape"
+                    );
+                }
+                if (auto missing = missingElements(object, subs); !missing.empty()) {
+                    return new App::DocumentObjectExecReturn(
+                        "Missing element in SpineMore: " + missing
+                    );
+                }
+                const Part::TopoShape& more = static_cast<Part::Feature*>(object)->Shape.getShape();
+                Part::TopoShape morePiece = makeTopoShape(false);
+                buildPipePath(more, subs, morePiece);
+                for (const Part::TopoShape& edge : morePiece.getSubTopoShapes(TopAbs_EDGE)) {
+                    edges.push_back(edge);
+                }
+                moreIdentities.push_back(spineIdentity(object, more, subs));
+            }
+            path = path.makeElementWires(edges);
+        }
         path.move(invObjLoc);
+        // A path whose edges don't all join into one wire: the gap, by the two nearest ends of
+        // different wires (before, OCCT's cast reported "TopoDS::Wire")
+        if (!path.isNull() && path.shapeType() != TopAbs_WIRE) {
+            if (const std::optional<std::pair<gp_Pnt, gp_Pnt>> gap = pathGap(path.getShape())) {
+                const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the path's edges don't meet at {}: the nearest other end is {}, {:.6g} "
+                    "mm away. Join them, or pick edges that meet.",
+                    pointText(gap->first.Transformed(toBody)),
+                    pointText(gap->second.Transformed(toBody)),
+                    gap->first.Distance(gap->second)
+                ));
+            }
+        }
 
         // auxiliary
         Part::TopoShape auxpath = makeTopoShape(false);
@@ -4992,6 +5369,75 @@ App::DocumentObjectExecReturn* Pipe::execute()
             );
         }
 
+        // Onshape's Sweep (notes\sweep-design.md): where one profile lies against the path, and
+        // the frame of ProfileControl "None"
+        frenetForNone = false;
+        if (multisections.empty() && profilePoint.isNull() && !wiresections.empty()
+            && path.shapeType() == TopAbs_WIRE) {
+            std::vector<TopoDS_Shape> profileWires;
+            for (const auto& wires : wiresections) {
+                if (!wires.empty()) {
+                    Part::TopoShape wire = wires.front();
+                    wire.move(invObjLoc);
+                    profileWires.push_back(wire.getShape());
+                }
+            }
+            const TopoDS_Wire spineWire = TopoDS::Wire(path.getShape());
+            const ProfileFoot foot = profileFoot(profileWires, spineWire);
+            const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
+            // Pending Onshape's answer (SW5), loud where the sweep would be degenerate or far off
+            // (skeptic c721, finding 3): a profile at the centre of an arc swept nothing, "valid"
+            if (foot.tie) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the profile's nearest point on the path isn't one place: it lies as near "
+                    "to {} as to {} ({:.6g} mm). Move the profile onto the path, or nearer one "
+                    "place of it.",
+                    pointText(foot.at.Transformed(toBody)),
+                    pointText(foot.tie->Transformed(toBody)),
+                    foot.distance
+                ));
+            }
+            if (foot.distance > foot.size + Precision::Confusion()) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the profile lies {:.6g} mm from the path, farther than its own size "
+                    "({:.6g} mm): the sweep would run far from the path. Move the profile onto the "
+                    "path.",
+                    foot.distance,
+                    foot.size
+                ));
+            }
+            // Which way Onshape sweeps from a profile in the middle with the option off is
+            // pending (SW1): loud until then
+            if (!ExtendToFullPath.getValue() && !foot.atEnd) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: with 'Extend to full path' off, a profile in the middle of the path (at "
+                    "{}) isn't supported yet. Turn 'Extend to full path' on, or split the path at "
+                    "the profile.",
+                    pointText(foot.at.Transformed(toBody))
+                ));
+            }
+            // None off a plane: Frenet's frame where it neither turns over nor jumps (a helix's
+            // profile stays square to its axis; corrected Frenet rolls it), else corrected Frenet.
+            // On a plane both are the same, so planar paths sweep exactly as Standard did.
+            if (ProfileControl.getValue() == 0 && Mode.getValue() == 0
+                && !isPlanarPath(spineWire)) {
+                try {
+                    BRepOffsetAPI_MakePipeShell trial(spineWire);
+                    frenetForNone = Part::SweepFrenet::setMode(
+                                        trial,
+                                        spineWire,
+                                        profileWires,
+                                        true,
+                                        Precision::Confusion()
+                                    )
+                        == Part::SweepFrenet::Mode::Asked;
+                }
+                catch (Standard_Failure&) {
+                    frenetForNone = false;
+                }
+            }
+        }
+
         // A closed spine starts at its stored start, at first its vertex nearest the profile, so
         // the profile's names stay there whichever way its lines are drawn and wherever the
         // profile moves along it (ops#469, startNearest). Not with several sections, which
@@ -5039,7 +5485,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
         std::vector<std::pair<size_t, bool>> readings;
         // A frame turned: far above a rounded coordinate's turn, far below an edit's
         constexpr double turnedBy = 1e-6;
-        const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
+        const std::vector<std::string> spineInput = [&]() {
+            std::vector<std::string> input = spineIdentity(spine, shape, subedge);
+            // SpineMore's objects, each after a "+" with its own name and edges
+            for (const std::vector<std::string>& more : moreIdentities) {
+                input.emplace_back("+");
+                input.insert(input.end(), more.begin(), more.end());
+            }
+            return input;
+        }();
         const std::vector<StartRecord> startRecords = readStartRecords(
             SpineStart,
             SpineStartOf,
@@ -5504,7 +5958,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // corners chooses between the one sweep, the union of pieces and an error (ops#370).
         // Fixed mode never turns the profile; it, Auxiliary and Multisection meet the result
         // gate only.
-        const int mode = Mode.getValue();
+        // ProfileControl "None" with Frenet's frame sweeps and is checked as Frenet mode
+        const int mode = frenetForNone ? 2 : Mode.getValue();
         const bool sheared = Transition.getValue() == 0 && Transformation.getValue() != 1
             && profilePoint.isNull() && (mode == 0 || mode == 2 || mode == 4);
         // "Fixed" with one profile: the spine mustn't turn edge-on to it or past
@@ -5619,6 +6074,19 @@ App::DocumentObjectExecReturn* Pipe::execute()
             const std::string by = small
                 ? fmt::format("by {:.2g} mm of its {:.2g} mm width", fold.reach, fold.across)
                 : fmt::format("by {:.2g} mm", fold.reach);
+            if (!fold.tilted && !fold.arc) {
+                // A curve tighter than the profile reaches from it (foldsAlongCurves)
+                return fmt::format(
+                    "Pipe: the profile folds {}over itself along the curve from {} ({}): the curve "
+                    "bends tighter than the profile reaches from the path{}. Use a gentler curve or "
+                    "a smaller profile{}.",
+                    small ? "slightly " : "",
+                    inPlace(fold.at),
+                    by,
+                    small ? ", and the result may cross itself there" : "",
+                    small ? " to avoid it" : ""
+                );
+            }
             if (!fold.tilted) {
                 return fmt::format(
                     "Pipe: the profile folds {}over itself along the arc from {} ({}): the arc's "
@@ -6057,6 +6525,31 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 warn(text);
             }
         }
+        // One profile in Standard or Frenet mode (ProfileControl None): a path that bends tighter
+        // than the profile reaches from it folds the sweep back through itself, which BRepCheck
+        // and the classifier pass (skeptic c721, finding 1). A small fold warns, as above.
+        if ((mode == 0 || mode == 2) && profilePoint.isNull() && multisections.empty()
+            && !tilts.folded && !sweptStarts.empty()) {
+            const CornerTilts curves
+                = foldsAlongCurves(sweptStarts, TopoDS::Wire(path.getShape()), setup, binormal);
+            if (const auto& fold = curves.folded) {
+                return new App::DocumentObjectExecReturn(foldText(*fold, false));
+            }
+            if (curves.smallFold && !tilts.smallFold) {
+                tilts.smallFold = curves.smallFold;
+            }
+            if (const auto& unchecked = curves.unchecked) {
+                warn(fmt::format(
+                    "Pipe: the curve from {} bends in too many places to check them all for "
+                    "folds: {} stretch{} where the profile could fold over itself {} left "
+                    "unchecked, and the result may cross itself there.",
+                    inPlace(unchecked->first),
+                    unchecked->second,
+                    unchecked->second == 1 ? "" : "es",
+                    unchecked->second == 1 ? "was" : "were"
+                ));
+            }
+        }
 
         Part::TopoShape result = makeTopoShape();
 
@@ -6472,6 +6965,12 @@ void Pipe::setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS
     bool auxiliary = false;
     const Base::Vector3d& bVec = Binormal.getValue();
     switch (Mode.getValue()) {
+        case 0:
+            // ProfileControl "None" off a plane, where Frenet's frame is steady (execute)
+            if (frenetForNone) {
+                mkPipeShell.SetMode(true);
+            }
+            break;
         case 1:
             mkPipeShell.SetMode(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)));
             break;

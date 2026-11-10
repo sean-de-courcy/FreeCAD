@@ -21,6 +21,9 @@
     <widget class="QWidget" name="spineFieldPlaceholder" native="true"/>
    </item>
    <item>
+    <widget class="QWidget" name="spineMoreFieldPlaceholder" native="true"/>
+   </item>
+   <item>
     <layout class="QFormLayout" name="formLayout">
      <property name="fieldGrowthPolicy">
       <enum>QFormLayout::ExpandingFieldsGrow</enum>
@@ -57,12 +60,53 @@
        </item>
       </widget>
      </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="labelProfileControl">
+       <property name="text">
+        <string>Profile control</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QComboBox" name="comboBoxProfileControl">
+       <property name="toolTip">
+        <string>None: the profile turns with the path. Keep orientation: it keeps its orientation. Advanced: the Orientation panel's mode decides.</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>None</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Keep orientation</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Advanced</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="2" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxExtendToFullPath">
+       <property name="text">
+        <string>Extend to full path</string>
+       </property>
+       <property name="toolTip">
+        <string>A profile in the middle of the path sweeps both ways along all of it</string>
+       </property>
+      </widget>
+     </item>
     </layout>
    </item>
   </layout>
  </widget>
  <tabstops>
   <tabstop>comboBoxTransition</tabstop>
+  <tabstop>comboBoxProfileControl</tabstop>
+  <tabstop>checkBoxExtendToFullPath</tabstop>
  </tabstops>
  <resources/>
  <connections/>
