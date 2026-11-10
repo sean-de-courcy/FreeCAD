@@ -652,7 +652,10 @@ bool inputInError(const App::DocumentObject* owner, std::string& why)
     forEachInput(owner, false, [&](const App::Property* prop, const std::vector<InputLink>& links) {
         if (prop == &owner->ExpressionEngine
             || (feature && prop == &feature->BaseFeature
-                && Body::isSolidFeature(feature->BaseFeature.getValue()))) {
+                && Body::isSolidFeature(feature->BaseFeature.getValue()))
+            // FreeCAD-CH ops#654 S2: a studio owner's bases are its parts' solids before it; a
+            // claimed failure among them passed its own base through (Onshape F1)
+            || (feature && prop == &feature->StudioBases)) {
             return false;
         }
         for (const auto& link : links) {

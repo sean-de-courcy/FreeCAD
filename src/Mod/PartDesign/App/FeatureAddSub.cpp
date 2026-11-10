@@ -49,6 +49,8 @@
 #include "FeatureAddSub.h"
 #include "FeaturePy.h"
 #include "FeatureSketchBased.h"
+#include "StudioList.h"
+#include "StudioOwner.h"
 
 #include <Mod/Part/App/Tools.h>
 
@@ -210,9 +212,26 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
+    // FreeCAD-CH ops#654 S2: a studio feature outside every Body computes only its tool, and
+    // fails when its scope resolves to no part at its place, as Onshape's (F2, F3: a pick of a
+    // part gone or absorbed resolves to nothing, ignored beside a valid one)
+    const bool owner = runsAsStudioOwner(this);
+    if (owner && runs && studioScopeOf(this).empty()) {
+        purgeTouched();  // as a failure that ran (Feature::recompute())
+        return new App::DocumentObjectExecReturn("No merge scope selected", this);
+    }
     App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
     if (result == StdReturn && runs) {
         warnIfMissing();
+    }
+    // FreeCAD-CH ops#654 S2: an Add owner's region that touches none of its parts would be dropped
+    // by every step. Onshape makes it a new part (H1a); until P6p it fails the whole feature
+    if (result == StdReturn && runs && owner && addSubType == Type::Additive) {
+        if (std::string why = studioAddLeftover(this); !why.empty()) {
+            AddSubShape.setValue(TopoShape());  // no step applies a part of it
+            purgeTouched();
+            return new App::DocumentObjectExecReturn(why, this);
+        }
     }
     // A subtractive feature with nothing before it cut nothing and returned its tool as material
     // (FreeCAD-CH ops#308 F8: a Body's first Pocket, e.g. on another Body's face, which T1 no
@@ -230,7 +249,7 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     const bool nothingToReach = result != StdReturn && result
         && (result->Why.find("No faces found in this direction") != std::string::npos
             || result->Why.find("Up to face: No face found") != std::string::npos);
-    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs
+    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs && !owner
         && (addSubType == Type::Subtractive || emptyAdd) && getBaseTopoShape(true).isNull()) {
         if (result != StdReturn) {
             delete result;
@@ -247,7 +266,8 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
         }
         return new App::DocumentObjectExecReturn(noScope, this);
     }
-    if (result != StdReturn || booleanOperation != BooleanOperation::Common || Suppressed.getValue()
+    if (result != StdReturn || owner || booleanOperation != BooleanOperation::Common
+        || Suppressed.getValue()
         || (body && body->holds(this))) {
         return result;
     }

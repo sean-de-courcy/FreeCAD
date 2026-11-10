@@ -80,6 +80,45 @@ public:
     /// as the error is: an opened file judges by both.
     App::PropertyBool _FailurePassedThrough;
 
+    /** @name Studio features (FreeCAD-CH ops#654, notes/parts-design.md 10.8,
+     * notes/one-history-design.md 5 and 9). Hidden; read by name (StudioList.h), so that an
+     * owner of another class may carry them as dynamic properties */
+    //@{
+    /// An owner's scope: the part ids (Body::StudioPartId) it acts on, in order (intent: an Add
+    /// keeps the first). Ids, never links: a split part's id stands for all its pieces
+    App::PropertyStringList StudioScope;
+    /// A step's owner (a real dependency: the step applies its tool)
+    App::PropertyLinkGlobal StudioOwner;
+    /// An owner's bases, written by reconcile: each in-scope part's solid just before its step
+    App::PropertyLinkListGlobal StudioBases;
+    //@}
+
+    /// The tag a step's names carry: its studio owner's object ID, 0 (its own) for any other
+    /// feature. The owner is intent and its ID is saved and restored, so a step made again makes
+    /// the same names (format rule 2, notes/stored-tags.md)
+    long namingTag() const
+    {
+        const App::DocumentObject* owner = StudioOwner.getValue();
+        return owner ? owner->getID() : 0;
+    }
+    /** @name Part::Feature's makeTopoShape() with namingTag() for a tag of 0, so that every step
+     * (appliers, dress-ups, Shell, Draft) names its results by its owner (ops#654) */
+    //@{
+    using Part::Feature::makeTopoShape;
+    TopoShape makeTopoShape(bool allowHasher) const
+    {
+        return Part::Feature::makeTopoShape(this, TopoDS_Shape(), namingTag(), allowHasher);
+    }
+    TopoShape makeTopoShape(long tag = 0, bool allowHasher = true) const
+    {
+        return Part::Feature::makeTopoShape(this, TopoDS_Shape(), tag ? tag : namingTag(), allowHasher);
+    }
+    TopoShape makeTopoShape(const TopoDS_Shape& newShape, long tag = 0, bool allowHasher = true) const
+    {
+        return Part::Feature::makeTopoShape(this, newShape, tag ? tag : namingTag(), allowHasher);
+    }
+    //@}
+
     App::DocumentObjectExecReturn* recompute() override;
     bool passesBaseThrough() const override
     {

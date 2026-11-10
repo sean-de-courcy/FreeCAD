@@ -71,6 +71,7 @@
 #include "ViewProviderSketchBased.h"
 #include "ViewProviderThickness.h"
 #include "ViewProviderTransformed.h"
+#include "ViewProviderStudioList.h"
 
 
 // FreeCAD-CH (ops#640 round 8): declared where they are used (no header names them): the edit
@@ -191,6 +192,7 @@ PyMOD_INIT_FUNC(PartDesignGui)
     PartDesignGui::ViewProviderLoft          ::init();
     PartDesignGui::ViewProviderHelix         ::init();
     PartDesignGui::ViewProviderBase          ::init();
+    PartDesignGui::ViewProviderStudioList    ::init();  // FreeCAD-CH ops#654
     // clang-format on
 
     // add resources and reloads the translators

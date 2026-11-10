@@ -101,6 +101,8 @@ Boolean::Boolean()
         static_cast<App::PropertyType>(App::Prop_Output | App::Prop_Hidden),
         "The tools a Union left as they were: they touch nothing it fuses, and stay parts"
     );
+    // FreeCAD-CH ops#654 (P5)
+    ADD_PROPERTY_TYPE(StudioTools, (), "Studio", App::Prop_Hidden, "The tool parts, by part id");
 
     App::GeoFeatureGroupExtension::initExtension(this);
     // Boolean tools are references, not owned coordinate-system children.

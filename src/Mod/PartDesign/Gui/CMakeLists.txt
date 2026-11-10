@@ -59,6 +59,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProvider.cpp
     ViewProvider.h
     ViewProviderBody.cpp
+    ViewProviderStudioList.cpp
+    ViewProviderStudioList.h
     FeaturesView.cpp
     FeaturesView.h
     ViewProviderBody.h
@@ -236,6 +238,8 @@ SET(PartDesignGuiModule_SRCS
     PreCompiled.h
     SketchWorkflow.cpp
     SketchWorkflow.h
+    StudioGui.cpp
+    StudioGui.h
     TaskSketchPlane.cpp
     TaskSketchPlane.h
     StyleParameters.h

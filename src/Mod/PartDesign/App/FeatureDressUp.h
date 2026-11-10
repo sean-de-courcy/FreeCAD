@@ -44,6 +44,10 @@ public:
      */
     App::PropertyLinkSub Base;
     App::PropertyBool SupportTransform;
+    /// A studio dress-up's picks on any parts, resolved (FreeCAD-CH ops#654, P8a)
+    App::PropertyLinkSubList StudioPicks;
+    /// The part id of each of StudioPicks (intent)
+    App::PropertyStringList StudioPickIds;
 
     short mustExecute() const override;
     /// updates the Placement property from the Placement of the BaseFeature

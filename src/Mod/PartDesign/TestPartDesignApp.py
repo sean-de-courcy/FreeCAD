@@ -157,6 +157,18 @@ from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-C
 from PartDesignTests.TestDerived import TestDerived  # FreeCAD-CH, ops#640 round 6
 from PartDesignTests.TestSolidOps import TestThicken, TestScale, TestOffsetSurface, TestSolidOpsExpressions  # FreeCAD-CH, lane solid-ops
 
+# Studio features (FreeCAD-CH, ops#654, ops#655)
+from PartDesignTests.TestStudioList import (
+    TestStudioList,
+    TestStudioListProperty,
+)
+from PartDesignTests.TestApply import TestApply
+from PartDesignTests.TestStudioOwner import TestStudioOwner
+from PartDesignTests.TestStudioHistory import TestStudioHistory
+from PartDesignTests.TestPieces import TestPieces
+from PartDesignTests.TestBooleanScope import TestBooleanScope
+from PartDesignTests.TestStudioPatterns import TestStudioPatterns
+
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus
 from PartDesignTests.Compat.TestCompatRecord import TestCompatRecord  # ops#343

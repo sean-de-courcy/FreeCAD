@@ -71,6 +71,23 @@ Body::Body()
 {
     BaseFeature.setScope(App::LinkScope::Global);
     ADD_PROPERTY_TYPE(AllowCompound, (true), "Base", App::Prop_None, "Allow multiple solids in Body");
+    // FreeCAD-CH ops#654: the part's identity in its studio (StudioList.h)
+    ADD_PROPERTY_TYPE(StudioPartId, (""), "Studio", App::Prop_Hidden, "The part's id in its studio");
+    ADD_PROPERTY_TYPE(StudioParentId,
+                      (""),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The id of the part this one is a piece of");
+    ADD_PROPERTY_TYPE(StudioMadeBy,
+                      (nullptr),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The studio feature or piece record that made this part");
+    ADD_PROPERTY_TYPE(StudioPieceWitness,
+                      (),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "Element names of the parent part that lie on this piece");
 
     _GroupTouched.setStatus(App::Property::Output, true);
     // The roll-back bar is the Tip: moving it doesn't touch the Body (ops#127, R7); onChanged()

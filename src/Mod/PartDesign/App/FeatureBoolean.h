@@ -61,6 +61,8 @@ public:
      * it fuses, so it doesn't fuse them, and they stay parts. Set at each compute
      */
     App::PropertyLinkListHidden SeparateTools;
+    /// A studio Boolean's tool parts, by part id (FreeCAD-CH ops#654, P5)
+    App::PropertyStringList StudioTools;
 
     /** @name methods override feature */
     //@{

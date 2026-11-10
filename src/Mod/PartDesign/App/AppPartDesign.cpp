@@ -65,6 +65,8 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "StudioList.h"
+#include "FeatureApply.h"
 
 
 namespace PartDesign
@@ -180,6 +182,9 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::AdditiveWedge               ::init();
     PartDesign::SubtractiveWedge            ::init();
     PartDesign::FeatureBase                 ::init();
+    // FreeCAD-CH ops#654: studio features
+    PartDesign::StudioList                  ::init();
+    PartDesign::FeatureApply                ::init();
 
     PartDesign::Measure ::initialize();
     // clang-format on

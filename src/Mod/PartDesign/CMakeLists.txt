@@ -104,6 +104,13 @@ set(PartDesign_TestScripts
     PartDesignTests/TestOnshapeEndTypes.py
     PartDesignTests/TestDerived.py
     PartDesignTests/TestSolidOps.py
+    PartDesignTests/TestStudioList.py
+    PartDesignTests/TestApply.py
+    PartDesignTests/TestStudioOwner.py
+    PartDesignTests/TestStudioHistory.py
+    PartDesignTests/TestPieces.py
+    PartDesignTests/TestBooleanScope.py
+    PartDesignTests/TestStudioPatterns.py
 )
 
 if(BUILD_GUI)
@@ -148,6 +155,10 @@ if(BUILD_GUI)
         PartDesignTests/TestOperationSwitchGui.py
         PartDesignTests/TestDerivedGui.py
         PartDesignTests/TestWorkflowGui.py
+        PartDesignTests/TestStudioSketchesShownGui.py
+        PartDesignTests/TestStudioFeatureGui.py
+        PartDesignTests/TestStudioHistoryGui.py
+        PartDesignTests/TestPartsListGui.py
     )
 endif(BUILD_GUI)
 

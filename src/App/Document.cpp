@@ -2242,7 +2242,10 @@ void Document::Save(Base::Writer& writer) const
              << Application::Config()["BuildVersionMajor"] << "."
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << "\" FileVersion=\""
-             << writer.getFileVersion() << "\" StringHasher=\"1\"";
+             << writer.getFileVersion() << "\" StringHasher=\"1\""
+             // The highest object ID ever given (FreeCAD-CH ops#657): a reopened document never
+             // gives a deleted object's ID again, which a stored reference by ID would re-bind to
+             << " LastObjectId=\"" << d->lastObjectId << '"';
     // The fork release of the build that writes it (ops#323). A recovery snapshot of a newer
     // document keeps it newer (writer mode "ForkRecovery", set by RecoverySnapshot.cpp): the
     // recovered document reopens at the original path, and its first save must still ask (PR 293
@@ -2350,6 +2353,9 @@ void Document::Restore(Base::XMLReader& reader)
     else {
         reader.FileVersion = 0;
     }
+    // ops#657: the saved high-water object ID (none before it)
+    const long savedLastObjectId =
+        reader.hasAttribute("LastObjectId") ? reader.getAttribute<long>("LastObjectId") : 0;
     // The naming revision of its references (ops#116): none in files saved before, so 0
     // (an unreadable one is newer, noted below: no migration)
     auto& namingRevision = documentNamingRevisions[this];
@@ -2445,6 +2451,9 @@ void Document::Restore(Base::XMLReader& reader)
     else if (scheme >= 3) {
         // read the feature types
         readObjects(reader);
+        if (savedLastObjectId > d->lastObjectId) {
+            d->lastObjectId = savedLastObjectId;  // ops#657
+        }
 
         // tip object handling. First the whole document has to be read, then we
         // can restore the Tip link out of the TipName Property:
