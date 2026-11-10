@@ -7,6 +7,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPointer>
@@ -56,6 +57,39 @@ std::vector<App::DocumentObjectT>& pendingParts()
     return parts;
 }
 bool openScheduled = false;
+
+// The list's delete key before the window's shortcuts: Std_Delete has the same key, and Qt fires
+// neither of two shortcuts on one key, so the action's own shortcut never took an entry out (as
+// ReferenceField's entry list, ops#652)
+class KeyBeforeTheWindow: public QObject
+{
+public:
+    KeyBeforeTheWindow(QAction* action, QObject* parent)
+        : QObject(parent)
+        , action(action)
+    {}
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress) {
+            return QObject::eventFilter(watched, event);
+        }
+        auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
+        if (!action || !Gui::QtTools::matches(ke, action->shortcut())) {
+            return QObject::eventFilter(watched, event);
+        }
+        if (event->type() == QEvent::ShortcutOverride) {
+            ke->accept();
+        }
+        else {
+            action->trigger();
+        }
+        return true;
+    }
+
+private:
+    QPointer<QAction> action;
+};
 }  // namespace
 
 TaskDlgDeletePart::TaskDlgDeletePart(App::Document* doc,
@@ -83,6 +117,7 @@ TaskDlgDeletePart::TaskDlgDeletePart(App::Document* doc,
     removeCurrent->setShortcut(Gui::QtTools::deleteKeySequence());
     removeCurrent->setShortcutContext(Qt::WidgetShortcut);
     list->addAction(removeCurrent);
+    list->installEventFilter(new KeyBeforeTheWindow(removeCurrent, list));
     connect(removeCurrent, &QAction::triggered, this, [this]() {
         if (QListWidgetItem* item = list->currentItem()) {
             removeName(item->data(Qt::UserRole).toByteArray().toStdString());
