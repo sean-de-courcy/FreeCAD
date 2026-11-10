@@ -73,29 +73,80 @@ Analysis analyse(const std::vector<TopoDS_Face>& cells)
     std::iota(a.group.begin(), a.group.end(), 0);
 
     TopTools_IndexedMapOfShape edges;
-    std::vector<std::vector<int>> outer(n);
     std::vector<std::size_t> wireCount(n, 0);
-    std::set<std::vector<int>> inner;
+    // (cell, its holes' edge sets); a hole is an inner wire that shares no vertex with the cell's
+    // outer wire: a loop touching the outer boundary is no hole (Onshape, PR4)
+    std::vector<std::pair<std::size_t, std::vector<int>>> holes;
     for (std::size_t i = 0; i < n; ++i) {
         const TopoDS_Wire outerWire = BRepTools::OuterWire(cells[i]);
+        TopTools_IndexedMapOfShape outerVertices;
+        TopExp::MapShapes(outerWire, TopAbs_VERTEX, outerVertices);
         for (TopoDS_Iterator it(cells[i]); it.More(); it.Next()) {
             if (it.Value().ShapeType() != TopAbs_WIRE) {
                 continue;
             }
             ++wireCount[i];
             if (it.Value().IsSame(outerWire)) {
-                outer[i] = edgeKey(it.Value(), edges);
+                edgeKey(it.Value(), edges);
+                continue;
             }
-            else {
-                inner.insert(edgeKey(it.Value(), edges));
+            bool touches = false;
+            for (TopExp_Explorer v(it.Value(), TopAbs_VERTEX); v.More() && !touches; v.Next()) {
+                touches = outerVertices.Contains(v.Current());
+            }
+            auto key = edgeKey(it.Value(), edges);
+            if (!touches) {
+                holes.emplace_back(i, std::move(key));
             }
         }
     }
-    // filterInnerLoops: a region whose outer boundary is another region's inner boundary is left
-    // out (a hole, and whatever lies in it)
+    // The cells on each edge (one or two)
+    std::vector<std::vector<std::size_t>> edgeCells(edges.Extent() + 1);
+    std::vector<std::vector<int>> cellEdges(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        TopTools_IndexedMapOfShape own;
+        TopExp::MapShapes(cells[i], TopAbs_EDGE, own);
+        for (int k = 1; k <= own.Extent(); ++k) {
+            const int e = edges.FindIndex(own(k));
+            if (e > 0) {
+                edgeCells[e].push_back(i);
+                cellEdges[i].push_back(e);
+            }
+        }
+    }
+    // filterInnerLoops: every region inside another region's hole is left out, whatever its own
+    // boundary (Onshape, PR1 and PR3): a flood from the hole's sides inwards, across shared sides
+    // other than the hole's
+    std::vector<bool> inside(n, false);
+    for (const auto& [owner, hole] : holes) {
+        std::vector<std::size_t> queue;
+        for (int e : hole) {
+            for (auto c : edgeCells[e]) {
+                if (c != owner && !inside[c]) {
+                    inside[c] = true;
+                    queue.push_back(c);
+                }
+            }
+        }
+        while (!queue.empty()) {
+            const auto c = queue.back();
+            queue.pop_back();
+            for (int e : cellEdges[c]) {
+                if (std::ranges::binary_search(hole, e)) {
+                    continue;
+                }
+                for (auto d : edgeCells[e]) {
+                    if (d != owner && !inside[d]) {
+                        inside[d] = true;
+                        queue.push_back(d);
+                    }
+                }
+            }
+        }
+    }
     bool islands = false;
     for (std::size_t i = 0; i < n; ++i) {
-        a.kept[i] = !inner.contains(outer[i]);
+        a.kept[i] = !inside[i];
         islands = islands || (!a.kept[i] && wireCount[i] > 1);
     }
 

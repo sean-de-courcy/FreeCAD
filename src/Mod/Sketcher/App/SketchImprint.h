@@ -20,10 +20,21 @@ class SketchObject;
 /// sketches have it; sketches saved before keep their regions as they were
 constexpr int ImprintInternalFaceVersion = 3;
 
-/// The edges of faces of the sketch's attachment support objects (datums, origin features and
-/// other sketches left out) that lie in the sketch's plane, as copies in the sketch's own
-/// coordinates, named after the model's edges. Null when there are none, when the sketch's
-/// regions predate the imprint, or when it makes no regions (MakeInternals off).
+/// The edges of the faces the sketch is attached to (AttachmentSupport's faces of model objects:
+/// datums, origin features and other sketches left out) when they lie in the sketch's plane, as
+/// copies in the sketch's own coordinates, named after the model's edges. Null when there are
+/// none, when the sketch's regions predate the imprint, or when it makes no regions (MakeInternals
+/// off). Only that face's edges: another face's or another part's coplanar edges don't split the
+/// sketch's regions, nor does a face under a sketch on a plane (Onshape, notes/onshape-facts.md R4).
 SketcherExport Part::TopoShape imprintEdges(const SketchObject& sketch);
+
+/// The faces of an arrangement of a sketch's curves and its imprint edges that lie in the
+/// regions of the sketch's curves alone: model edges split the sketch's regions and never make one
+/// of their own (Onshape, R4 and R5). sketchEdges: the sketch's own wires, in the arrangement's
+/// coordinates. Returns arrangement itself when every face is kept.
+SketcherExport Part::TopoShape withinSketchRegions(
+    const Part::TopoShape& arrangement,
+    const Part::TopoShape& sketchEdges
+);
 
 }  // namespace Sketcher

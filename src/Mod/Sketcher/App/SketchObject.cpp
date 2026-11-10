@@ -753,7 +753,8 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
                 // The model edges in the sketch's plane bound regions too (Onshape's imprint);
                 // they stay out of the open wires below and out of the sketch's Shape
                 auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
-                if (auto imprint = imprintEdges(*this); !imprint.isNull()) {
+                const auto imprint = imprintEdges(*this);
+                if (!imprint.isNull()) {
                     for (auto& edge : imprint.getSubTopoShapes(TopAbs_EDGE)) {
                         shapes.push_back(std::move(edge));
                     }
@@ -763,6 +764,10 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
                         /*maker*/"Part::FaceMakerBuildFace",
                         /*pln*/nullptr
                 );
+                if (!imprint.isNull()) {
+                    // the model edges split the sketch's regions, and make none of their own
+                    result = withinSketchRegions(result, edges);
+                }
             }
             catch (const Part::NullShapeException&) {
                 // An open-only sketch has no bounded regions, so a null face result is expected.

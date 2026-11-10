@@ -158,15 +158,31 @@ class TestProfileRegions(unittest.TestCase):
         self.assertVolume(self.pad(body, sk), 200, solids=1)
 
     def testWholeSketchLoopTouchingFromInside(self):
-        """A circle of r 5 inside a 20 x 20 square, tangent to its bottom side: OCCT makes the
-        square's region with the circle as its hole, so the circle's region is an inner loop and
-        the whole sketch is the square less the disk. Unverified in Onshape (it may count the
-        touching circle as no hole and give the full square, 400)."""
+        """A circle of r 5 inside a 20 x 20 square, tangent to its bottom side: a loop touching
+        the outer boundary is no inner loop, so the whole sketch is both regions, 400 (Onshape,
+        notes/onshape-facts.md PR4; before: 321.46). The DXF lane's "hole touching the outer
+        boundary pads as a boss" is this case: Onshape fills it too; the face less the hole is a
+        pick of that region."""
         body, sk = self.sketch()
         rect(sk, 0, 0, 20, 20)
         sk.addGeometry(Part.Circle(V(10, 5, 0), V(0, 0, 1), 5), False)
         self.Doc.recompute()
-        self.assertVolume(self.pad(body, sk), 400 - 25 * math.pi)
+        self.assertEqual(len(sk.InternalShape.Faces), 2)
+        self.assertVolume(self.pad(body, sk), 400, solids=1)
+        frame = regionName(sk, 400 - 25 * math.pi)
+        self.assertVolume(self.pad(body, (sk, [frame]), name="Frame"), 400, solids=1)
+
+    def testWholeSketchChordAcrossAHoleKeepsTheHole(self):
+        """A 20 x 20 square, a circle of r 4 at its centre and a line across the circle: the
+        circle's halves lie in the square's hole, so they are left out like the hole itself:
+        400 - 16 pi (Onshape, PR3)."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        sk.addGeometry(Part.LineSegment(V(5, 10, 0), V(15, 10, 0)), False)
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 3)
+        self.assertVolume(self.pad(body, sk), 400 - 16 * math.pi, solids=1)
 
     def testWholeSketchLoopCutByALine(self):
         """A 10 x 10 square crossed by a line at y = 4 running past both sides: two regions,
@@ -308,10 +324,11 @@ class TestProfileRegions(unittest.TestCase):
         self.assertVolume(self.pad(body, (sk, [regionName(sk, 25)])), 25, solids=1)
 
     def testSeveralRegions(self):
-        """The two L regions without the lens: 150 (they touch at two corners only)."""
+        """The two L regions without the lens: 150 in two solids (they touch at two corners
+        only; Onshape PR2: two parts)."""
         body, sk = self.overlapping()
         ls = [regionName(sk, 75, x=c, y=c) for c in (25 / 6.0, 65 / 6.0)]
-        self.assertVolume(self.pad(body, (sk, ls)), 150)
+        self.assertVolume(self.pad(body, (sk, ls)), 150, solids=2)  # Onshape PR2: two parts
 
     def testAdjacentRegionsMakeOneSolid(self):
         body, sk = self.overlapping()
@@ -347,7 +364,8 @@ class TestProfileRegions(unittest.TestCase):
 
     def testPickedRegionThatDisappearsFails(self):
         """The lens picked, then the second square moved clear of the first: the lens is gone
-        and the pad fails loudly, never pads another region."""
+        and the pad fails loudly. Onshape (PR8) stays valid and silently extrudes both squares,
+        the regions bounded by the lens's curves: a deliberate difference, loud over silent."""
         body, sk = self.sketch()
         dimensionedRect(sk, 0, 0, 10, 10)
         d = dimensionedRect(sk, 5, 5, 10, 10)
@@ -370,51 +388,112 @@ class TestProfileRegions(unittest.TestCase):
         _, sk = self.sketch(body, support=[(block, "Face%d" % (top + 1))])
         return body, block, sk
 
-    def testImprintSplitsTheFaceWithALine(self):
-        """A sketch on a 30 x 20 block's top face with one line across it at y = 8: the face's
-        edges bound regions, so there are two, 240 and 360, without projecting anything; the
-        240 strip padded 3 adds 720."""
+    def testImprintSplitsARegionAtTheFaceEdge(self):
+        """A sketch on a 30 x 20 block's top face with a circle of r 5 at (30, 10), over the
+        face's right edge: the face's edge splits the disk into two halves, without projecting
+        anything (Onshape, R4). The half on the face padded 3 adds 3 x 12.5 pi."""
+        body, block, sk = self.blockAndTopSketch()
+        sk.addGeometry(Part.Circle(V(30, 10, 0), V(0, 0, 1), 5), False)
+        self.Doc.recompute()
+        half = 12.5 * math.pi
+        self.assertEqual(
+            sorted(round(f.Area, 6) for f in sk.InternalShape.Faces), [round(half, 6)] * 2
+        )
+        self.assertEqual(len(sk.ExternalGeo), 2)  # nothing projected: the axes only
+        self.assertEqual(len(sk.Shape.Edges), 1)  # nor added to the sketch's geometry
+        onFace = regionName(sk, half, x=30 - 20 / (3 * math.pi))
+        pad = self.pad(body, (sk, [onFace]), length=3)
+        self.assertVolume(pad, 3000 + 3 * half, solids=1)
+
+    def testImprintMakesNoRegionOfItsOwn(self):
+        """A lone line across the face (ends past it): model edges never close a region, so there
+        is none, and the whole sketch stops (Onshape, R4 and PR6b)."""
         body, block, sk = self.blockAndTopSketch()
         sk.addGeometry(Part.LineSegment(V(-5, 8, 0), V(35, 8, 0)), False)
         self.Doc.recompute()
-        self.assertEqual(sorted(round(f.Area, 6) for f in sk.InternalShape.Faces), [240, 360])
-        self.assertEqual(len(sk.ExternalGeo), 2)  # nothing projected: the axes only
-        self.assertEqual(len(sk.Shape.Edges), 1)  # nor added to the sketch's geometry
-        pad = self.pad(body, (sk, [regionName(sk, 240)]), length=3)
-        self.assertVolume(pad, 3000 + 720, solids=1)
+        self.assertEqual(len(sk.InternalShape.Faces), 0)
+        pad = self.pad(body, sk, length=2)
+        self.assertFalse(pad.isValid())
 
     def testImprintDoesNotChangeTheWholeSketch(self):
-        """The same sketch with a circle of r 3 inside the face: the whole sketch is the disk
-        (the face's own region, bounded by model edges only, is not the sketch's)."""
+        """A circle of r 3 inside the face: one region, the disk (not the face less the disk),
+        and the whole sketch is the disk (Onshape, PR6a)."""
         body, block, sk = self.blockAndTopSketch()
         sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 3), False)
         self.Doc.recompute()
-        self.assertEqual(len(sk.InternalShape.Faces), 2)
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
         pad = self.pad(body, sk, length=2)
         self.assertVolume(pad, 3000 + 18 * math.pi, solids=1)
 
-    def testImprintRegionPickedFollowsTheLine(self):
-        """The 240 strip picked, then the line moved to y = 6 by its dimension: the strip is
-        180, the pick follows it (the other region is 420)."""
+    def testImprintWholeSketchIgnoresTheFaceEdge(self):
+        """The circle over the face's edge, padded as a whole sketch: the whole disk (the
+        imprint splits regions to pick, not the whole sketch)."""
         body, block, sk = self.blockAndTopSketch()
-        sk.addGeometry(Part.LineSegment(V(-5, 8, 0), V(35, 8, 0)), False)
-        sk.addConstraint(Sketcher.Constraint("Horizontal", 0))
-        c = sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 1, 8))
+        sk.addGeometry(Part.Circle(V(30, 10, 0), V(0, 0, 1), 5), False)
         self.Doc.recompute()
-        pad = self.pad(body, (sk, [regionName(sk, 240)]), length=3)
-        self.assertVolume(pad, 3720)
-        sk.setDatum(c, FreeCAD.Units.Quantity("6 mm"))
-        self.Doc.recompute()
-        self.assertVolume(pad, 3000 + 540)
+        pad = self.pad(body, sk, length=3)
+        self.assertVolume(pad, 3000 + 3 * 25 * math.pi, solids=1)
 
-    def testImprintIgnoresEdgesOffThePlane(self):
-        """The block's bottom and vertical edges don't bound regions: a circle alone gives the
-        disk and the top face less the disk, nothing else."""
+    def testImprintRegionPickedFollowsTheCircle(self):
+        """The half on the face picked, then the circle's centre moved from x 30 to 28 by its
+        dimension: the part on the face is the disk less the segment past x 30, and the pick
+        follows it."""
         body, block, sk = self.blockAndTopSketch()
-        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 3), False)
+        sk.addGeometry(Part.Circle(V(30, 10, 0), V(0, 0, 1), 5), False)
+        cx = sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 3, 30))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 3, 10))
+        sk.addConstraint(Sketcher.Constraint("Radius", 0, 5))
         self.Doc.recompute()
-        areas = sorted(round(f.Area, 4) for f in sk.InternalShape.Faces)
-        self.assertEqual(areas, sorted([round(9 * math.pi, 4), round(600 - 9 * math.pi, 4)]))
+        half = 12.5 * math.pi
+        pad = self.pad(body, (sk, [regionName(sk, half, x=30 - 20 / (3 * math.pi))]), length=3)
+        self.assertVolume(pad, 3000 + 3 * half)
+        sk.setDatum(cx, FreeCAD.Units.Quantity("28 mm"))
+        self.Doc.recompute()
+        segment = 25 * math.acos(2 / 5) - 2 * math.sqrt(21)
+        self.assertVolume(pad, 3000 + 3 * (25 * math.pi - segment))
+
+    def testImprintOfAHoleInTheFace(self):
+        """The block with a hole of r 4 through it at (10, 10), and a 16 x 16 square around the
+        hole on the top face: two regions, the square less the hole and a disk over the hole,
+        though there is no material there (Onshape, R5)."""
+        body, block, sk = self.blockAndTopSketch()
+        _, hs = self.sketch(body, "HoleSketch")
+        hs.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        pocket = body.newObject("PartDesign::Pocket", "Hole")
+        pocket.Profile = hs
+        pocket.Type = "ThroughAll"
+        pocket.Midplane = True
+        self.Doc.recompute()
+        self.assertAlmostEqual(pocket.Shape.Volume, 3000 - 80 * math.pi, places=4)
+        top = [
+            i
+            for i, f in enumerate(pocket.Shape.Faces)
+            if abs(f.CenterOfMass.z - 5) < TOL and abs(f.BoundBox.ZLength) < TOL
+        ][0]
+        sk.AttachmentSupport = [(pocket, "Face%d" % (top + 1))]
+        rect(sk, 2, 2, 18, 18)
+        self.Doc.recompute()
+        self.assertEqual(
+            sorted(round(f.Area, 4) for f in sk.InternalShape.Faces),
+            sorted([round(256 - 16 * math.pi, 4), round(16 * math.pi, 4)]),
+        )
+
+    def testImprintOnlyFromTheFace(self):
+        """The circle over the edge, on the XY plane moved up to the top face's height: a plane
+        imprints nothing, one region (Onshape, R4)."""
+        body, block, _ = self.blockAndTopSketch()
+        _, sk = self.sketch(body, "OnAPlane")
+        sk.AttachmentOffset = FreeCAD.Placement(V(0, 0, 5), FreeCAD.Rotation())
+        sk.addGeometry(Part.Circle(V(30, 10, 0), V(0, 0, 1), 5), False)
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
+
+    def testImprintOfTheFaceOutline(self):
+        """A rectangle drawn exactly over the 30 x 20 face's boundary: one region, the face."""
+        body, block, sk = self.blockAndTopSketch()
+        rect(sk, 0, 0, 30, 20)
+        self.Doc.recompute()
+        self.assertEqual([round(f.Area, 6) for f in sk.InternalShape.Faces], [600])
 
 
 if __name__ == "__main__":
