@@ -2842,9 +2842,13 @@ void TaskDlgFeatureParameters::open()
                 return;
             }
             titlePending = true;
-            QTimer::singleShot(0, this, [this]() {
+            // Only while the feature is there: a Cancel that aborts its creation deletes it and
+            // its view provider (vp, which getObject() reads) before the dialog goes (ops#654)
+            QTimer::singleShot(0, this, [this, featureT]() {
                 titlePending = false;
-                updateTitle();
+                if (featureT.getObject()) {
+                    updateTitle();
+                }
             });
         };
         titleChanged = feature->getDocument()->signalChangedObject.connect(
@@ -2877,12 +2881,23 @@ void TaskDlgFeatureParameters::modifyStandardButtons(QDialogButtonBox* box)
     requiredConnection = feature->getDocument()->signalChangedObject.connect(
         [this, featureT](const App::DocumentObject& obj, const App::Property&) {
             if (&obj == featureT.getObject()) {
-                QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+                // The rollback of a Cancel changes the feature, then deletes it and its view
+                // provider: the queued update must not read vp then (getObject()), FreeCAD-CH
+                // ops#654 P5 (the Boolean dialog's intermittent "Illegal storage access")
+                QTimer::singleShot(0, this, [this, featureT]() {
+                    if (featureT.getObject()) {
+                        updateOkButton();
+                    }
+                });
             }
         }
     );
     // Once the box is decorated: TaskEditControl::decorateButtons sets its tooltip after this call
-    QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+    QTimer::singleShot(0, this, [this, featureT]() {
+        if (featureT.getObject()) {
+            updateOkButton();
+        }
+    });
 }
 
 void TaskDlgFeatureParameters::updateTitle()
