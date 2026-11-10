@@ -245,7 +245,9 @@ class TestWorkflowGui(unittest.TestCase):
 
     def testThePlatformsDeleteKeyTakesTheCurrentEntryOut(self):
         """The delete key takes the current entry out of the list: on a Mac that key sends
-        Backspace, and fn+delete sends Delete (ops#652). The key pressed is the platform's."""
+        Backspace, which is the shortcut there, as everywhere in FreeCAD (Gui::QtTools::
+        deleteKeySequence(); fn+delete, which sends Delete, isn't, ops#652). The key pressed is the
+        platform's."""
         body3 = self.newPart()
         self.deleteSelected(self.body2.Name, body3.Name)
         self.waitDialog()
