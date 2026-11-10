@@ -1,0 +1,96 @@
+  seed 1 op 13 MISMATCH after: insert F10 Fuse [25, 1, 29, 3] d3 scope ['B'] at 1
+    errors: []
+    B: doc {'steps': [('F9', False), ('F10', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+    B: new {'steps': [('F10', False), ('F9', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+  seed 1 op 14 MISMATCH after: move F9 2->2
+    errors: []
+    B: doc {'steps': [('F9', False), ('F10', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+    B: new {'steps': [('F10', False), ('F9', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+  seed 1 op 15 MISMATCH after: insert F12 Cut [45, 1, 70, 6] d1 scope ['C'] at 2
+    errors: []
+    B: doc {'steps': [('F9', False), ('F10', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+    B: new {'steps': [('F10', False), ('F9', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+  seed 1 op 18 MISMATCH after: undo
+    errors: []
+    B: doc {'steps': [('F9', False), ('F10', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+    B: new {'steps': [('F10', False), ('F9', False)], 'tip': 'base', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+seed 1: 19 ops, mismatches 4, ops {'save,': 1, 'insert': 8, 'undo': 4, 'delete': 2, 'bar': 1, 'suppress': 1, 'move': 1, 'scope': 1}, final {'records': 4, 'objects': 52}
+  seed 2 op 19 MISMATCH after: insert F18 Fuse [25, 2, 29, 4] d4 scope ['B'] at 0
+    errors: []
+    B: doc {'steps': [('F5', False), ('F18', False)], 'tip': 'F18', 'volume': 1032.0, 'area': 648.0, 'solids': 1}
+    B: new {'steps': [('F18', False), ('F5', False)], 'tip': 'F18', 'volume': 1032.0, 'area': 648.0, 'solids': 1}
+  seed 2 op 27 MISMATCH after: insert F21 Cut [8, 4, 33, 6] d2 scope ['A', 'B'] at 0
+    errors: []
+    A: doc {'steps': [('F5', False), ('F21', False)], 'tip': 'F21', 'volume': 992.0, 'area': 608.0, 'solids': 1}
+    A: new {'steps': [('F21', False), ('F5', False)], 'tip': 'F21', 'volume': 992.0, 'area': 608.0, 'solids': 1}
+    B: doc {'steps': [('F5', False), ('F21', False)], 'tip': 'F21', 'volume': 960.0, 'area': 632.0, 'solids': 1}
+    B: new {'steps': [('F21', False), ('F5', False)], 'tip': 'F21', 'volume': 960.0, 'area': 632.0, 'solids': 1}
+  seed 2 op 28 MISMATCH after: insert F22 Cut [25, 2, 33, 4] d1 scope ['B'] at 3
+    errors: []
+    A: doc {'steps': [('F5', False), ('F21', False)], 'tip': 'F21', 'volume': 992.0, 'area': 608.0, 'solids': 1}
+    A: new {'steps': [('F21', False), ('F5', False)], 'tip': 'F21', 'volume': 992.0, 'area': 608.0, 'solids': 1}
+    B: doc {'steps': [('F5', False), ('F21', False), ('F22', False)], 'tip': 'F21', 'volume': 960.0, 'area': 632.0, 'solids': 1}
+    B: new {'steps': [('F21', False), ('F5', False), ('F22', False)], 'tip': 'F21', 'volume': 960.0, 'area': 632.0, 'solids': 1}
+  seed 2 op 29 MISMATCH after: insert F23 Cut [5, 1, 9, 6] d1 scope ['A'] at 1
+    errors: []
+    A: doc {'steps': [('F5', False), ('F21', False), ('F23', False)], 'tip': 'F23', 'volume': 974.0, 'area': 620.0, 'solids': 1}
+    A: new {'steps': [('F21', False), ('F23', False), ('F5', False)], 'tip': 'F23', 'volume': 974.0, 'area': 620.0, 'solids': 1}
+    B: doc {'steps': [('F5', False), ('F21', False), ('F22', False)], 'tip': 'F21', 'volume': 960.0, 'area': 632.0, 'solids': 1}
+    B: new {'steps': [('F21', False), ('F5', False), ('F22', False)], 'tip': 'F21', 'volume': 960.0, 'area': 632.0, 'solids': 1}
+seed 2: 30 ops, mismatches 4, ops {'insert': 8, 'scope': 4, 'bar': 3, 'save,': 2, 'suppress': 5, 'depth': 1, 'delete': 2, 'undo': 3, 'redo': 2}, final {'records': 5, 'objects': 56}
+  seed 3 op 4 MISMATCH after: insert F4 Cut [25, 4, 45, 9] d4 scope ['B', 'C'] at 1
+    errors: []
+    C: doc {'steps': [('F1', False), ('F4', False)], 'tip': 'F1', 'volume': 840.0, 'area': 664.0, 'solids': 1}
+    C: new {'steps': [('F4', False), ('F1', False)], 'tip': 'F1', 'volume': 776.0, 'area': 656.0, 'solids': 1}
+  seed 3 op 6 MISMATCH after: redo
+    errors: []
+    C: doc {'steps': [('F1', False), ('F4', False)], 'tip': 'F1', 'volume': 840.0, 'area': 664.0, 'solids': 1}
+    C: new {'steps': [('F4', False), ('F1', False)], 'tip': 'F1', 'volume': 776.0, 'area': 656.0, 'solids': 1}
+  seed 3 op 7 MISMATCH after: save, close, reopen
+    errors: []
+    C: doc {'steps': [('F1', False), ('F4', False)], 'tip': 'F1', 'volume': 840.0, 'area': 664.0, 'solids': 1}
+    C: new {'steps': [('F4', False), ('F1', False)], 'tip': 'F1', 'volume': 776.0, 'area': 656.0, 'solids': 1}
+  seed 3 op 8 MISMATCH after: depth F1 3
+    errors: []
+    C: doc {'steps': [('F1', False), ('F4', False)], 'tip': 'F1', 'volume': 880.0, 'area': 648.0, 'solids': 1}
+    C: new {'steps': [('F4', False), ('F1', False)], 'tip': 'F1', 'volume': 807.0, 'area': 652.0, 'solids': 1}
+seed 3: 9 ops, mismatches 4, ops {'insert': 3, 'save,': 2, 'bar': 1, 'undo': 1, 'redo': 1, 'depth': 1}, final {'records': 3, 'objects': 50}
+  seed 4 op 1 MISMATCH after: insert F2 Cut [22, 4, 47, 7] d3 scope ['B', 'C'] at 0
+    errors: []
+    C: doc {'steps': [('F1', False), ('F2', False)], 'tip': 'F1', 'volume': 1160.03, 'area': 836.03, 'solids': 1}
+    C: new {'steps': [('F2', False), ('F1', False)], 'tip': 'F1', 'volume': 1097.03, 'area': 878.03, 'solids': 1}
+  seed 4 op 6 MISMATCH after: move F1 0->1
+    errors: []
+    C: doc {'steps': [('F1', False), ('F2', False)], 'tip': 'F1', 'volume': 1080.03, 'area': 748.03, 'solids': 1}
+    C: new {'steps': [('F2', False), ('F1', False)], 'tip': 'F1', 'volume': 1017.03, 'area': 790.03, 'solids': 1}
+  seed 4 op 8 MISMATCH after: move F1 0->1
+    errors: []
+    C: doc {'steps': [('F1', False), ('F2', False)], 'tip': 'F1', 'volume': 1080.03, 'area': 748.03, 'solids': 1}
+    C: new {'steps': [('F2', False), ('F1', False)], 'tip': 'F1', 'volume': 1017.03, 'area': 790.03, 'solids': 1}
+  seed 4 op 9 MISMATCH after: move F1 1->1
+    errors: []
+    C: doc {'steps': [('F1', False), ('F2', False)], 'tip': 'F1', 'volume': 1080.03, 'area': 748.03, 'solids': 1}
+    C: new {'steps': [('F2', False), ('F1', False)], 'tip': 'F1', 'volume': 1017.03, 'area': 790.03, 'solids': 1}
+seed 4: 10 ops, mismatches 4, ops {'insert': 2, 'move': 4, 'save,': 1, 'scope': 1, 'depth': 1, 'undo': 1}, final {'records': 2, 'objects': 48}
+  seed 5 op 18 MISMATCH after: move F8 1->0
+    errors: []
+    A: doc {'steps': [('F4', False), ('F8', False), ('F9', False)], 'tip': 'F9', 'volume': 1012.006, 'area': 678.0, 'solids': 1}
+    A: new {'steps': [('F8', False), ('F4', False), ('F9', False)], 'tip': 'F9', 'volume': 1011.986, 'area': 678.0, 'solids': 1}
+  seed 5 op 19 MISMATCH after: move F6 3->1
+    errors: []
+    A: doc {'steps': [('F4', False), ('F8', False), ('F9', False)], 'tip': 'F9', 'volume': 1012.006, 'area': 678.0, 'solids': 1}
+    A: new {'steps': [('F8', False), ('F4', False), ('F9', False)], 'tip': 'F9', 'volume': 1011.986, 'area': 678.0, 'solids': 1}
+  seed 5 op 20 MISMATCH after: insert F15 Cut [25, 1, 45, 3] d4 scope ['B', 'C'] at 0
+    errors: []
+    A: doc {'steps': [('F4', False), ('F8', False), ('F9', False)], 'tip': 'F9', 'volume': 1012.006, 'area': 678.0, 'solids': 1}
+    A: new {'steps': [('F8', False), ('F4', False), ('F9', False)], 'tip': 'F9', 'volume': 1011.986, 'area': 678.0, 'solids': 1}
+    B: doc {'steps': [('F6', True), ('F15', False)], 'tip': 'F6', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+    B: new {'steps': [('F15', False), ('F6', True)], 'tip': 'F6', 'volume': 960.0, 'area': 640.0, 'solids': 1}
+  seed 5 op 21 MISMATCH after: insert F16 Cut [5, 1, 13, 3] d1 scope ['A'] at 3
+    errors: []
+    A: doc {'steps': [('F4', False), ('F8', False), ('F9', False), ('F16', False)], 'tip': 'F9', 'volume': 1012.006, 'area': 678.0, 'solids': 1}
+    A: new {'steps': [('F8', False), ('F16', False), ('F4', False), ('F9', False)], 'tip': 'F9', 'volume': 1005.98, 'area': 696.0, 'solids': 1}
+    B: doc {'steps': [('F6', True), ('F15', False)], 'tip': 'F6', 'volume': 1000.0, 'area': 600.0, 'solids': 1}
+    B: new {'steps': [('F15', False), ('F6', True)], 'tip': 'F6', 'volume': 960.0, 'area': 640.0, 'solids': 1}
+seed 5: 22 ops, mismatches 4, ops {'insert': 9, 'depth': 1, 'delete': 1, 'save,': 3, 'undo': 3, 'suppress': 1, 'bar': 1, 'scope': 1, 'move': 2}, final {'records': 6, 'objects': 56}
+TOTAL mismatches 20, 6 s

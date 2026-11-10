@@ -1,0 +1,24 @@
+states ['Up-to-date'] ['Up-to-date'] ['Up-to-date'] | Valid
+volumes A B C 910.0 820.0 910.0 want 910 820 910
+B solids 1
+floor names A (leader): [('Face8', 30.0, '_;~ie20f8aofgq9c;1720;XTR;0;F;0;PRJ;_')]
+floor names B (applier): [('Face7', 60.0, '_;~ie20f8aofgq9c;1720;XTR;0;F;0;PRJ;_')]
+floor names C (clone): [('Face7', 30.0, '_;~ie20f8aofgq9c;1722;XTR;0;F;0;PRJ;_')]
+after Length 5: volumes 850.0 700.0 850.0 want 850 700 850
+floor names A: [('Face8', 30.0, '_;~ie20f8aofgq9c;1720;XTR;0;F;0;PRJ;_')]
+floor names B: [('Face7', 60.0, '_;~ie20f8aofgq9c;1720;XTR;0;F;0;PRJ;_')]
+floor names C: [('Face7', 30.0, '_;~ie20f8aofgq9c;1722;XTR;0;F;0;PRJ;_')]
+stable under edit: A True B True C True
+distinct per part (A vs B vs C): False
+undo: B 700.0 want 700
+reopen edit: B 820.0 want 820 ['Up-to-date']
+
+UpToFirst: leader SketchBased: No faces found in this direction | removed A 0.0 | B (applier, the leader's tool) 0.0 Tool links to 'Cut', which has an error | C (clone, its own tool) 0.0 SketchBased: No faces found in this direction
+
+UpToFace: leader Valid | removed A 120.0 | B (applier, the leader's tool) 240.0 Valid | C (clone, its own tool) 120.0 Valid
+  A's cut stops at the roof's underside (z 6): 5x6x4 = 120; the leader's tool on B: 10x6x4 = 240; B through by its own faces would be 600; C 5x6xdepth
+
+merge A into B: Warning: Merged A into B volume 1830.0 want 1830
+  floors in the merged shape: [('Face11', 30.0, '_;~4i5dl6vj0ieds;776;XTR;0;F;0;PRJ;_'), ('Face16', 30.0, '_;~4i5dl6vj0ieds;776;XTR;0;F;1;PRJ;_')]
+
+Hole: A 990.575 B 990.575 want 990.575 | Valid Valid

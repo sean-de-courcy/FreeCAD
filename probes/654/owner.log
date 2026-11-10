@@ -1,0 +1,9 @@
+Length: owner status 'No merge scope selected. Nothing to cut: a subtractive feature needs a solid before it in its Body, or a BaseFeature' | tool volume 360.0 | A 730.0 B 1000.0 | steps ["Tool links to 'Own', which has an error", "Tool links to 'Own', which has an error"]
+ThroughAll: owner status 'Base property not set' | tool volume RuntimeError('shape is invalid') | A 730.0 B 1000.0 | steps ["Tool links to 'Own', which has an error", "Tool links to 'Own', which has an error"]
+UpToFace: owner status 'No merge scope selected. Nothing to cut: a subtractive feature needs a solid before it in its Body, or a BaseFeature' | tool volume 480.0 | A 730.0 B 1000.0 | steps ["Tool links to 'Own', which has an error", "Tool links to 'Own', which has an error"]
+EXCEPTION Traceback (most recent call last):
+  File "D:\CustomFreeCAD/work/standby-a\owner.py", line 34, in <module>
+    own.Type = mode
+    ^^^^^^^^
+ValueError: 'TwoLengths' is not part of the enumeration in own#Own.Type
+

@@ -1,0 +1,31 @@
+seed 1: 80 ops, mismatches 0, ops {'save,': 10, 'insert': 23, 'undo': 13, 'delete': 3, 'bar': 4, 'suppress': 3, 'move': 10, 'scope': 8, 'depth': 5, 'redo': 1}, final {'records': 14, 'objects': 74}
+seed 2: 80 ops, mismatches 0, ops {'insert': 23, 'scope': 10, 'bar': 6, 'save,': 11, 'suppress': 7, 'depth': 9, 'delete': 7, 'undo': 5, 'redo': 2}, final {'records': 14, 'objects': 76}
+seed 3: 80 ops, mismatches 0, ops {'insert': 23, 'save,': 6, 'bar': 9, 'undo': 12, 'redo': 1, 'depth': 11, 'move': 3, 'suppress': 2, 'scope': 8, 'delete': 5}, final {'records': 15, 'objects': 75}
+seed 4: 80 ops, mismatches 0, ops {'insert': 20, 'move': 10, 'save,': 11, 'scope': 11, 'depth': 6, 'undo': 7, 'delete': 6, 'suppress': 6, 'bar': 3}, final {'records': 13, 'objects': 75}
+seed 5: 80 ops, mismatches 0, ops {'insert': 26, 'depth': 10, 'delete': 3, 'save,': 7, 'undo': 5, 'suppress': 5, 'bar': 6, 'scope': 7, 'move': 11}, final {'records': 20, 'objects': 88}
+seed 6: 80 ops, mismatches 0, ops {'insert': 31, 'delete': 9, 'move': 9, 'bar': 4, 'suppress': 4, 'save,': 9, 'depth': 5, 'undo': 6, 'scope': 2, 'redo': 1}, final {'records': 21, 'objects': 89}
+seed 7: 80 ops, mismatches 0, ops {'insert': 19, 'undo': 13, 'depth': 4, 'bar': 7, 'suppress': 7, 'delete': 7, 'move': 5, 'scope': 9, 'redo': 1, 'save,': 8}, final {'records': 6, 'objects': 60}
+seed 8: 80 ops, mismatches 0, ops {'save,': 6, 'insert': 22, 'suppress': 10, 'delete': 7, 'undo': 7, 'depth': 7, 'bar': 7, 'move': 8, 'scope': 6}, final {'records': 15, 'objects': 77}
+seed 9: 80 ops, mismatches 0, ops {'insert': 27, 'undo': 15, 'scope': 5, 'bar': 6, 'save,': 9, 'delete': 3, 'depth': 9, 'move': 2, 'suppress': 4}, final {'records': 16, 'objects': 79}
+seed 10: 80 ops, mismatches 0, ops {'insert': 26, 'delete': 6, 'undo': 5, 'scope': 9, 'move': 7, 'save,': 11, 'depth': 7, 'suppress': 7, 'bar': 2}, final {'records': 18, 'objects': 88}
+seed 11: 80 ops, mismatches 0, ops {'insert': 25, 'undo': 16, 'save,': 8, 'suppress': 7, 'bar': 7, 'delete': 5, 'scope': 6, 'redo': 1, 'depth': 4, 'move': 1}, final {'records': 16, 'objects': 79}
+seed 12: 80 ops, mismatches 0, ops {'insert': 21, 'depth': 9, 'bar': 7, 'move': 7, 'scope': 8, 'undo': 10, 'delete': 4, 'suppress': 4, 'save,': 10}, final {'records': 12, 'objects': 72}
+seed 13: 80 ops, mismatches 0, ops {'insert': 21, 'depth': 7, 'delete': 5, 'bar': 7, 'scope': 5, 'move': 7, 'suppress': 8, 'save,': 14, 'undo': 6}, final {'records': 14, 'objects': 73}
+seed 14: 80 ops, mismatches 0, ops {'save,': 9, 'insert': 16, 'delete': 5, 'bar': 8, 'move': 7, 'undo': 12, 'depth': 6, 'suppress': 8, 'scope': 8, 'redo': 1}, final {'records': 8, 'objects': 62}
+seed 15: 80 ops, mismatches 0, ops {'insert': 16, 'scope': 9, 'depth': 9, 'save,': 11, 'bar': 5, 'suppress': 14, 'undo': 2, 'move': 6, 'delete': 8}, final {'records': 7, 'objects': 60}
+seed 16: 80 ops, mismatches 0, ops {'insert': 23, 'undo': 10, 'move': 6, 'depth': 5, 'bar': 3, 'delete': 5, 'save,': 15, 'suppress': 6, 'redo': 2, 'scope': 5}, final {'records': 12, 'objects': 70}
+seed 17: 80 ops, mismatches 0, ops {'insert': 20, 'depth': 7, 'undo': 5, 'delete': 10, 'bar': 10, 'scope': 5, 'move': 7, 'suppress': 10, 'save,': 5, 'redo': 1}, final {'records': 8, 'objects': 62}
+seed 18: 80 ops, mismatches 0, ops {'save,': 9, 'insert': 18, 'delete': 9, 'move': 8, 'scope': 10, 'suppress': 7, 'bar': 5, 'depth': 7, 'undo': 7}, final {'records': 11, 'objects': 71}
+seed 19: 80 ops, mismatches 0, ops {'insert': 24, 'move': 9, 'undo': 8, 'depth': 3, 'bar': 8, 'suppress': 7, 'save,': 8, 'scope': 5, 'delete': 8}, final {'records': 15, 'objects': 79}
+seed 20: 80 ops, mismatches 0, ops {'insert': 24, 'undo': 15, 'delete': 8, 'save,': 5, 'move': 6, 'scope': 9, 'bar': 5, 'suppress': 3, 'depth': 5}, final {'records': 14, 'objects': 72}
+seed 21: 80 ops, mismatches 0, ops {'save,': 10, 'insert': 20, 'depth': 9, 'delete': 4, 'undo': 8, 'suppress': 11, 'scope': 7, 'move': 5, 'bar': 5, 'redo': 1}, final {'records': 12, 'objects': 74}
+seed 22: 80 ops, mismatches 0, ops {'insert': 22, 'delete': 7, 'bar': 6, 'move': 8, 'depth': 7, 'scope': 6, 'undo': 8, 'save,': 11, 'suppress': 5}, final {'records': 12, 'objects': 76}
+seed 23: 80 ops, mismatches 0, ops {'insert': 19, 'depth': 13, 'save,': 8, 'suppress': 8, 'undo': 6, 'move': 12, 'bar': 5, 'delete': 6, 'scope': 3}, final {'records': 13, 'objects': 71}
+seed 24: 80 ops, mismatches 0, ops {'insert': 24, 'bar': 3, 'move': 9, 'scope': 8, 'depth': 7, 'undo': 6, 'suppress': 8, 'delete': 10, 'save,': 5}, final {'records': 10, 'objects': 66}
+seed 25: 80 ops, mismatches 0, ops {'insert': 28, 'undo': 12, 'delete': 5, 'bar': 6, 'scope': 8, 'save,': 5, 'suppress': 5, 'depth': 5, 'redo': 2, 'move': 4}, final {'records': 17, 'objects': 82}
+seed 26: 80 ops, mismatches 0, ops {'insert': 21, 'delete': 12, 'depth': 7, 'undo': 9, 'bar': 6, 'redo': 2, 'suppress': 5, 'save,': 3, 'scope': 8, 'move': 7}, final {'records': 5, 'objects': 53}
+seed 27: 80 ops, mismatches 0, ops {'insert': 25, 'save,': 10, 'suppress': 9, 'scope': 5, 'undo': 6, 'redo': 2, 'delete': 7, 'bar': 9, 'depth': 3, 'move': 4}, final {'records': 14, 'objects': 75}
+seed 28: 80 ops, mismatches 0, ops {'save,': 11, 'insert': 17, 'delete': 13, 'undo': 8, 'move': 10, 'depth': 6, 'scope': 4, 'bar': 8, 'suppress': 3}, final {'records': 6, 'objects': 55}
+seed 29: 80 ops, mismatches 0, ops {'insert': 23, 'delete': 7, 'undo': 3, 'bar': 5, 'suppress': 3, 'move': 9, 'depth': 5, 'save,': 16, 'scope': 9}, final {'records': 15, 'objects': 77}
+seed 30: 80 ops, mismatches 0, ops {'insert': 21, 'suppress': 6, 'delete': 7, 'undo': 12, 'redo': 1, 'bar': 3, 'move': 6, 'scope': 8, 'save,': 10, 'depth': 6}, final {'records': 10, 'objects': 66}
+TOTAL mismatches 0, 351 s
