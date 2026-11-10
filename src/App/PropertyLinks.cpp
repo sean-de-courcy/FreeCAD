@@ -6500,6 +6500,32 @@ static bool recordsHoldMarks(const PropertyLinkBase* prop, const std::map<long, 
     return true;
 }
 
+namespace
+{
+// The end of a recompute as recordPending() reads it: \a doc's, or, with \a doc null, that of
+// \a recomputed alone. Restored at the scope's end.
+struct RecomputeEndedScope
+{
+    const Document* previous = _RecomputeEnded;
+    const DocumentObject* previousAlone = _RecomputedAlone;
+    RecomputeEndedScope(const Document* doc, const DocumentObject* recomputed)
+    {
+        _RecomputeEnded = doc;
+        _RecomputedAlone = doc ? nullptr : recomputed;
+    }
+    ~RecomputeEndedScope()
+    {
+        _RecomputeEnded = previous;
+        _RecomputedAlone = previousAlone;
+    }
+    RecomputeEndedScope(const RecomputeEndedScope&) = delete;
+    RecomputeEndedScope& operator=(const RecomputeEndedScope&) = delete;
+};
+
+// The marks of \a target's closure now (empty on a dependency cycle).
+std::map<long, long> closureMarks(DocumentObject* target);
+}  // namespace
+
 void App::holdElementReferencesInto(DocumentObject* target)
 {
     const auto& references = PropertyLinkBase::getElementReferences(target);
@@ -6510,6 +6536,75 @@ void App::holdElementReferencesInto(DocumentObject* target)
     // element is measured on the target's last shape, which it still has. Only the others are
     // taken, so a stopped Body costs nothing per recompute while nothing is drawn (decision 263:
     // each recompute took every record into it again, 0.8 s with 160 references)
+    const std::map<long, long> marks = closureMarks(target);
+    std::size_t taken = 0;
+    for (auto prop : references) {
+        if (marks.empty() || !recordsHoldMarks(prop, marks)) {
+            _HeldFingerprints.insert(prop);
+            ++taken;
+        }
+    }
+    if (taken) {
+        FC_LOG(taken << " records into " << target->getFullName()
+                     << " held: in error, its shape not made");
+    }
+}
+
+void App::takeElementReferencesInto(DocumentObject* target)
+{
+    const auto& references = PropertyLinkBase::getElementReferences(target);
+    if (references.empty() || !target->getDocument()) {
+        return;
+    }
+    const std::map<long, long> marks = closureMarks(target);
+    std::vector<PropertyLinkBase*> due;
+    for (auto prop : references) {
+        if (!marks.empty() && recordsHoldMarks(prop, marks)) {
+            continue;
+        }
+        // One that also links an object still to be recomputed would date that one's edit too
+        // early (ops#564): it waits for the end of the recompute, as before
+        std::vector<DocumentObject*> links;
+        prop->getLinks(links, true);
+        const bool waits = std::any_of(links.begin(), links.end(), [target](DocumentObject* o) {
+            return o && o != target && o->isAttachedToDocument() && o->isTouched();
+        });
+        if (!waits) {
+            due.push_back(prop);
+        }
+    }
+    if (due.empty()) {
+        return;
+    }
+    // As at the end of the recompute: target's closure, sorted before it, is made, and what in
+    // it stays touched (a failure) is judged
+    RecomputeEndedScope ended(target->getDocument(), nullptr);
+    std::size_t taken = 0;
+    for (auto prop : due) {
+        // Taking one can destroy a later one, which leaves the references
+        if (!PropertyLinkBase::getElementReferences(target).contains(prop)) {
+            continue;
+        }
+        _HeldFingerprints.erase(prop);
+        try {
+            prop->updateElementFingerprints();
+            ++taken;
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+            FC_ERR("Failed to update the records of " << propertyName(prop));
+        }
+    }
+    if (taken) {
+        FC_LOG(taken << " records into " << target->getFullName()
+                     << " taken before its shape is cleared");
+    }
+}
+
+namespace
+{
+std::map<long, long> closureMarks(DocumentObject* target)
+{
     std::map<long, long> marks;
     try {
         auto closure = target->getOutListRecursive();
@@ -6524,18 +6619,9 @@ void App::holdElementReferencesInto(DocumentObject* target)
         // A dependency cycle: the records have no marks to compare, so all are taken
         marks.clear();
     }
-    std::size_t taken = 0;
-    for (auto prop : references) {
-        if (marks.empty() || !recordsHoldMarks(prop, marks)) {
-            _HeldFingerprints.insert(prop);
-            ++taken;
-        }
-    }
-    if (taken) {
-        FC_LOG(taken << " records into " << target->getFullName()
-                     << " held: in error, its shape not made");
-    }
+    return marks;
 }
+}  // namespace
 
 void App::resolveReregisteredReferences()
 {
@@ -6588,23 +6674,7 @@ void App::updateHeldElementFingerprints(const Document* doc, const DocumentObjec
     }
     // One at a time: taking one can destroy a later one, which leaves the set. One whose target
     // is still to be recomputed puts itself back.
-    struct Ended
-    {
-        const Document* previous = _RecomputeEnded;
-        const DocumentObject* previousAlone = _RecomputedAlone;
-        Ended(const Document* doc, const DocumentObject* recomputed)
-        {
-            _RecomputeEnded = doc;
-            _RecomputedAlone = doc ? nullptr : recomputed;
-        }
-        ~Ended()
-        {
-            _RecomputeEnded = previous;
-            _RecomputedAlone = previousAlone;
-        }
-        Ended(const Ended&) = delete;
-        Ended& operator=(const Ended&) = delete;
-    } ended(doc, recomputed);
+    RecomputeEndedScope ended(doc, recomputed);
     for (auto prop : held) {
         if (_HeldFingerprints.erase(prop) == 0) {
             continue;

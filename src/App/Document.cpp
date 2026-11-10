@@ -4589,6 +4589,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             unmade.push_back(obj);
                         }
                         if (stopped && continuation) {
+                            // FreeCAD-CH (ops#652): the records into it are taken first, as the
+                            // end of the recompute would, while it still has its last shape
+                            takeElementReferencesInto(obj);
                             // FreeCAD-CH (ops#640, F37): the rule writes what the view shows
                             // of it (PartDesign: a stopped Body, nothing)
                             continuation->afterStop(obj);

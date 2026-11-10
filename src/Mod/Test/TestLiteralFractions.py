@@ -27,6 +27,10 @@ to `(N unit / M)` in front of the lexer (App's rewriteLiteralFractions), and Bas
 parser takes the quotient's value. Every expected value is fixed up front: an inch is 25.4 mm.
 """
 
+import itertools
+import math
+import os
+import tempfile
 import unittest
 
 import FreeCAD
@@ -127,6 +131,128 @@ class TestLiteralFractions(unittest.TestCase):
         self.assertAlmostEqual(self.box.Height.Value, 0.75 * INCH, places=9)
         # unchanged: no unit after the denominator
         self.assertEqual(FreeCAD.Units.Quantity("1/mm").Unit, FreeCAD.Units.Quantity("1/m").Unit)
+
+
+def sameValue(a, b):
+    """Whether two evaluated expressions are the same quantity (value and unit) or number."""
+    Quantity = FreeCAD.Units.Quantity
+    if isinstance(a, Quantity) or isinstance(b, Quantity):
+        qa = a if isinstance(a, Quantity) else Quantity(float(a))
+        qb = b if isinstance(b, Quantity) else Quantity(float(b))
+        if qa.Unit != qb.Unit:
+            return False
+        x, y = qa.Value, qb.Value
+    else:
+        x, y = float(a), float(b)
+    return math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-12)
+
+
+class TestStoredTextReadsBack(unittest.TestCase):
+    """The stored text of an expression means what was typed (ops#652).
+
+    The stored text is the expression printed again, and a file reopened reads it through the
+    parser, the fraction rewrite included. `1/(2 mm)` was stored as `1 / 2 mm`, which reads back
+    as (1/2) mm; `(3 mm)^2` as `3 mm ^ 2`, which reads as 3 mm²; and `(2 mm^2)^0.5` as text that
+    doesn't parse. Every case here goes through a spreadsheet cell, whose contents are that text.
+    """
+
+    # Typed forms: a number, a fraction of a unit, quantities, a unit power, a sign
+    ATOMS = ["2", "0.5", "3 mm", "4 in", "2 mm^2", "1.5 s", "1e-3", "1/2 in", "-3 mm"]
+    OPERATORS = ["+", "-", "*", "/", "%", "^"]
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("TestStoredTextReadsBack")
+        self.sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def evaluated(self, text):
+        """The value of @a text, or None where it has none (a unit mismatch, a complex power)."""
+        try:
+            value = self.sheet.evalExpression(text)
+        except Exception:
+            return None
+        return None if isinstance(value, complex) else value
+
+    def stored(self, text):
+        self.sheet.set("A1", "=" + text)
+        return self.sheet.getContents("A1")[1:]
+
+    def problems(self, forms):
+        """Each form whose stored text doesn't read back as the same value, or prints differently."""
+        found = []
+        for text in forms:
+            typed = self.evaluated(text)
+            if typed is None:
+                continue
+            printed = self.stored(text)
+            read = self.evaluated(printed)
+            again = self.stored(printed)
+            if read is None or not sameValue(typed, read) or again != printed:
+                found.append(f"{text!r} stored as {printed!r}: {typed} read back as {read}")
+        return found
+
+    def test_quantity_after_a_slash(self):
+        self.assertEqual(self.stored("1/(2 mm)"), "1 / (2 mm)")
+        self.assertEqual(self.stored("50.8mm * 1/(25.4mm)"), "50.8 mm * 1 / (25.4 mm)")
+        # no number before the slash, no rewrite: the text stays as it was
+        self.assertEqual(self.stored("A2 / 4 mm"), "A2 / 4 mm")
+        self.assertEqual(self.stored("1 mm / 2 mm"), "1 mm / 2 mm")
+        # the fraction typed as one stays one
+        self.assertEqual(self.stored("3/4 in"), "3 in / 4")
+        self.assertEqual(self.problems(["1/(2 mm)", "2 * 2 / (3 mm)", "2 / (1.5 s) * 3 mm"]), [])
+
+    def test_power_of_a_quantity(self):
+        self.assertEqual(self.stored("(3 mm)^2"), "(3 mm) ^ 2")
+        self.assertEqual(self.stored("(2 mm^2)^0.5"), "(2 (mm ^ 2)) ^ 0.5")
+        self.assertEqual(self.stored("(-3 mm)^2"), "(-3 mm) ^ 2")
+        # a unit power stays with the unit, and a number's power is unchanged
+        self.assertEqual(self.stored("3 mm^2"), "3 (mm ^ 2)")
+        self.assertEqual(self.stored("2^3"), "2 ^ 3")
+        self.assertEqual(self.problems(["(3 mm)^2", "(2 mm^2)^0.5", "(-3 mm)^2", "-2^2"]), [])
+
+    def test_saved_and_reopened(self):
+        """The file, not only the text: a Box and a sheet keep their values across a save."""
+        box = self.doc.addObject("Part::Box", "Box")
+        box.setExpression("Length", "1/(2 mm) * 10 mm^2")
+        box.setExpression("Width", "(3 mm)^2 / 1 mm")
+        self.sheet.set("A1", "=1/(2mm)")
+        self.sheet.set("A2", "=50.8mm * 1/(25.4mm)")
+        self.doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "StoredTextReadsBack.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.openDocument(path)
+        self.doc.recompute()
+        box = self.doc.getObject("Box")
+        sheet = self.doc.getObject("Sheet")
+        self.assertNotIn("Invalid", box.State)
+        self.assertAlmostEqual(box.Length.Value, 5.0, places=9)
+        self.assertAlmostEqual(box.Width.Value, 9.0, places=9)
+        self.assertTrue(sameValue(sheet.get("A1"), FreeCAD.Units.Quantity("0.5 1/mm")))
+        self.assertTrue(sameValue(sheet.get("A2"), 2.0))
+
+    def test_generated_pairs(self):
+        """Every `(a) op (b)` of the typed forms, and a sign, a unit after `/`, a reciprocal."""
+        forms = []
+        for a in self.ATOMS:
+            forms += [f"-({a})", f"({a}) / mm", f"1 / ({a})", f"({a}) ^ 2", f"({a}) ^ 0.5"]
+        forms += [
+            f"({a}) {op} ({b})"
+            for a, op, b in itertools.product(self.ATOMS, self.OPERATORS, self.ATOMS)
+        ]
+        self.assertEqual(self.problems(forms), [])
+
+    def test_generated_nesting(self):
+        """Two operators deep, both ways round, over a smaller set of forms."""
+        atoms = ["2", "3 mm", "2 mm^2", "1/2 in", "-3 mm"]
+        forms = []
+        for a, op1, b, op2, c in itertools.product(
+            atoms, self.OPERATORS, atoms, self.OPERATORS, atoms[:3]
+        ):
+            forms += [f"(({a}) {op1} ({b})) {op2} ({c})", f"({a}) {op1} (({b}) {op2} ({c}))"]
+        self.assertEqual(self.problems(forms), [])
 
 
 if __name__ == "__main__":
