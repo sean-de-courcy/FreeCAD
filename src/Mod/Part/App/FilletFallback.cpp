@@ -20,6 +20,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -1485,6 +1486,13 @@ TopoDS_Shape commonOf(const TopoDS_Shape& shape, const TopoDS_Shape& other)
     return common.Shape();
 }
 
+/// Two faces touch: they come within the linear tolerance of each other
+bool touch(const TopoDS_Shape& face, const TopoDS_Shape& other)
+{
+    BRepExtrema_DistShapeShape distance(face, other);
+    return distance.IsDone() && distance.Value() <= 10 * linearTolerance;
+}
+
 double perimeterOf(const TopoDS_Shape& face)
 {
     GProp_GProps props;
@@ -1549,13 +1557,21 @@ bool coincide(const FarSide& a, const FarSide& b)
  *
  * The strips of the two tools at a two-edge corner with unequal dihedral angles overlap on the face
  * that holds both edges by the closed form's parallelogram, and by nothing else.
+ *
+ * Past the limit (ops#640, S3): a cut tool's strip may run off its face, and two cut tools' strips
+ * may overlap or touch, as Onshape's dress-ups do: the result is the base minus the union of the
+ * full tools, trimmed by the base's own faces (notes/onshape-facts.md KP1-KP4, K2A-K2E). Returns
+ * whether that happened (the tools are then "trimmed": their volumes are no longer their closed
+ * forms). A fused tool (a concave edge) that runs off its face or overlaps another is refused:
+ * the air beyond the face has nothing to trim it.
  */
-void checkStrips(
+bool checkStrips(
     const std::vector<Tool>& tools,
     const std::vector<Overlap>& overlaps,
     bool limitOnly
 )
 {
+    bool trimmed = false;
     struct OnFace
     {
         TopoDS_Face face;
@@ -1590,7 +1606,8 @@ void checkStrips(
     bool atLimit = false;
     for (const auto& group : faces) {
         double covered = 0.0;
-        for (const auto* strip : group.strips) {
+        for (size_t k = 0; k < group.strips.size(); ++k) {
+            const auto* strip = group.strips[k];
             if (strip->contacts.empty()) {
                 refuse("a tool has no face on a face next to its edge");
             }
@@ -1598,7 +1615,10 @@ void checkStrips(
                 double area = areaOf(contact);
                 double tolerance = areaToleranceOf(contact, *strip);
                 if (area - areaOf(commonOf(group.face, contact)) > tolerance) {
-                    refuse("a tangent strip runs off its face");
+                    if (!group.owners[k]->cut) {
+                        refuse("a concave dress-up runs past its face");
+                    }
+                    trimmed = true;
                 }
                 covered += area;
             }
@@ -1616,11 +1636,21 @@ void checkStrips(
                         );
                         double area = areaOf(commonOf(mine, theirs));
                         if (expected == 0.0 && area > tolerance) {
-                            refuse("two tangent strips overlap");
+                            if (!group.owners[i]->cut || !group.owners[j]->cut) {
+                                refuse("two tangent strips of a concave dress-up overlap");
+                            }
+                            trimmed = true;
+                        }
+                        // Two bands that meet exactly (their far sides touch): at the limit
+                        if (expected == 0.0 && !atLimit && area <= tolerance && touch(mine, theirs)) {
+                            atLimit = true;
                         }
                         common += area;
                         summedTolerance += tolerance;
                     }
+                }
+                if (expected == 0.0 && trimmed) {
+                    continue;
                 }
                 if (std::abs(common - expected) > summedTolerance) {
                     refuse("two tangent strips at a corner overlap by " + describe(common)
@@ -1651,9 +1681,10 @@ void checkStrips(
             }
         }
     }
-    if (limitOnly && !atLimit) {
+    if (limitOnly && !atLimit && !trimmed) {
         refuse("not at the limit: no new edge lands on an existing one, and no face vanishes");
     }
+    return trimmed;
 }
 
 /// One step of the construction and its history
@@ -1717,13 +1748,14 @@ std::vector<TopoDS_Shape> imagesThrough(
     return current;
 }
 
-/** One Boolean stage, and its checks (5.6, interface point 5). The tools are interior-disjoint but
- * for the overlaps at unequal corners, counted once
+/** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
+ * the caller's: the tools' closed forms less the overlaps at unequal corners, or, for a trimmed
+ * tool, its common part with the shape. The tolerance scales with the tools' closed forms
  */
 TopoDS_Shape applyTools(
     const TopoDS_Shape& shape,
     const std::vector<const Tool*>& tools,
-    double overlaps,
+    double expected,
     bool cut,
     std::vector<Stage>& stages
 )
@@ -1731,10 +1763,10 @@ TopoDS_Shape applyTools(
     TopTools_ListOfShape arguments;
     arguments.Append(shape);
     TopTools_ListOfShape toolShapes;
-    double expected = -overlaps;
+    double scale = 0.0;
     for (const auto* tool : tools) {
         toolShapes.Append(tool->solid);
-        expected += tool->volume;
+        scale += tool->volume;
     }
     std::unique_ptr<BRepAlgoAPI_BooleanOperation> operation;
     if (cut) {
@@ -1758,7 +1790,7 @@ TopoDS_Shape applyTools(
     if (cut) {
         change = -change;
     }
-    if (std::abs(change - expected) > volumeTolerance * expected) {
+    if (std::abs(change - expected) > volumeTolerance * scale) {
         refuse(std::string(cut ? "the cut removed " : "the fuse added ") + describe(change)
                + " instead of " + describe(expected));
     }
@@ -2067,7 +2099,56 @@ TopoDS_Shape constructShape(
     for (const auto& overlap : overlaps) {
         overlapVolume += overlap.volume;
     }
-    checkStrips(tools, overlaps, request.limitOnly);
+    const bool trimmed = checkStrips(tools, overlaps, request.limitOnly);
+    // Past the limit, the cut tools' volumes in the base, by inclusion and exclusion: each tool's
+    // common part with the base, less the pairs' common parts. Measured, not closed forms, but by
+    // other Booleans than the cut's: OCCT 8.0.1's cut by two barely overlapping tori (two rims'
+    // fillets 1.56 on rims 3.1 apart) leaves more than either tool alone does
+    double trimmedVolume = 0.0;
+    if (trimmed) {
+        if (!overlaps.empty()) {
+            refuse("a dress-up past its face at a corner with unequal angles");
+        }
+        std::vector<const Tool*> cutTools;
+        std::vector<TopoDS_Shape> inside;
+        std::vector<Bnd_Box> boxes;
+        for (const auto& tool : tools) {
+            if (!tool.cut) {
+                continue;
+            }
+            cutTools.push_back(&tool);
+            inside.push_back(commonOf(base.getShape(), tool.solid));
+            trimmedVolume += volumeOf(inside.back());
+            boxes.emplace_back();
+            BRepBndLib::Add(tool.solid, boxes.back());
+        }
+        auto overlapTolerance = [&](size_t i, size_t j) {
+            return volumeTolerance * std::min(cutTools[i]->volume, cutTools[j]->volume);
+        };
+        std::vector<std::vector<bool>> pairs(cutTools.size(), std::vector<bool>(cutTools.size()));
+        for (size_t i = 0; i < cutTools.size(); ++i) {
+            for (size_t j = i + 1; j < cutTools.size(); ++j) {
+                if (boxes[i].IsOut(boxes[j])) {
+                    continue;
+                }
+                double both = volumeOf(commonOf(inside[i], cutTools[j]->solid));
+                if (both > overlapTolerance(i, j)) {
+                    pairs[i][j] = true;
+                    trimmedVolume -= both;
+                }
+            }
+        }
+        // Three tools overlapping in one place would be subtracted once too often
+        for (size_t i = 0; i < cutTools.size(); ++i) {
+            for (size_t j = i + 1; j < cutTools.size(); ++j) {
+                for (size_t k = j + 1; k < cutTools.size(); ++k) {
+                    if (pairs[i][j] && pairs[i][k] && pairs[j][k]) {
+                        refuse("three tools of a dress-up past its faces overlap");
+                    }
+                }
+            }
+        }
+    }
 
     // The tools' faces' tolerances before the Booleans, for the check for merged faces: a merge
     // raises those of its images
@@ -2082,15 +2163,53 @@ TopoDS_Shape constructShape(
     std::vector<size_t> toolStage(tools.size(), 0);
     TopoDS_Shape shape = base.getShape();
     for (bool cut : {true, false}) {
+        if (cut && trimmed) {
+            // One cut per tool, each checked against its common part with the shape it cuts
+            for (size_t i = 0; i < tools.size(); ++i) {
+                if (tools[i].cut) {
+                    toolStage[i] = stages.size();
+                    double expected = volumeOf(commonOf(shape, tools[i].solid));
+                    shape = applyTools(shape, {&tools[i]}, expected, true, stages);
+                }
+            }
+            continue;
+        }
         std::vector<const Tool*> group;
+        double expected = cut ? -overlapVolume : 0.0;
         for (size_t i = 0; i < tools.size(); ++i) {
             if (tools[i].cut == cut) {
                 group.push_back(&tools[i]);
                 toolStage[i] = stages.size();
+                expected += tools[i].volume;
             }
         }
         if (!group.empty()) {
-            shape = applyTools(shape, group, cut ? overlapVolume : 0.0, cut, stages);
+            shape = applyTools(shape, group, expected, cut, stages);
+        }
+    }
+    // A trimmed tool may cut the faces next to its edge's faces, which trim it, and nothing beyond
+    if (trimmed) {
+        TopTools_IndexedMapOfShape allowed;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(base.getShape(), TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+        for (const auto& tool : tools) {
+            for (const auto& strip : tool.strips) {
+                allowed.Add(strip.face);
+                for (TopExp_Explorer it(strip.face, TopAbs_EDGE); it.More(); it.Next()) {
+                    if (const auto* next = facesOfEdges.Seek(it.Current())) {
+                        for (const auto& face : *next) {
+                            allowed.Add(face);
+                        }
+                    }
+                }
+            }
+        }
+        for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            auto images = imagesThrough(stages, 0, it.Current());
+            bool kept = images.size() == 1 && images.front().IsSame(it.Current());
+            if (!kept && !allowed.Contains(it.Current())) {
+                refuse("a dress-up past its face cuts a face beyond the faces next to it");
+            }
         }
     }
 
@@ -2200,10 +2319,11 @@ TopoDS_Shape constructShape(
     for (const auto& tool : tools) {
         (tool.cut ? cutVolume : fusedVolume) += tool.volume;
     }
-    cutVolume -= overlapVolume;
+    double scale = cutVolume + fusedVolume;
+    cutVolume = trimmed ? trimmedVolume : cutVolume - overlapVolume;
     double expected = baseVolume - cutVolume + fusedVolume;
     double measured = volumeOf(shape);
-    if (std::abs(measured - expected) > volumeTolerance * (cutVolume + fusedVolume)) {
+    if (std::abs(measured - expected) > volumeTolerance * scale) {
         refuse("the result's volume " + describe(measured) + " differs from its closed form "
                + describe(expected));
     }

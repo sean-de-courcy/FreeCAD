@@ -1919,3 +1919,118 @@ class DressUpCheckLimitsTest(unittest.TestCase):
             wedge = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, 22))
             rights.append(shape.cut(wedge))
         self.assertLess(min(symmetric_difference(chamfer.Shape, right) for right in rights), 1e-6)
+
+
+def plate_with_holes(size, centres, radius=1.45):
+    """A plate of the given size at the origin, with through holes of the radius at the centres
+    (x, y), and the holes' top rims"""
+    length, width, thickness = size
+    plate = Part.makeBox(length, width, thickness)
+    for x, y in centres:
+        plate = plate.cut(Part.makeCylinder(radius, thickness + 2, V(x, y, -1)))
+    rims = [
+        e
+        for e in plate.Edges
+        if e.Curve.TypeId == "Part::GeomCircle"
+        and abs(e.Curve.Radius - radius) < 1e-9
+        and abs(e.Curve.Center.z - thickness) < 1e-9
+    ]
+    return plate, rims
+
+
+def wall_on_base():
+    """A base 20 x 10 x 2 with a wall 1.5 wide and 6 tall on it (x 0..20, y 4.25..5.75, z 2..8),
+    and the wall's top edge at y 4.25"""
+    wall = Part.makeBox(20, 10, 2).fuse(Part.makeBox(20, 1.5, 6, V(0, 4.25, 2))).removeSplitter()
+    return wall, [edge_between(wall, (0, 4.25, 8), (20, 4.25, 8))]
+
+
+class OverflowTest(unittest.TestCase):
+    """Fillets and chamfers past their faces, and bands that meet or overlap (ops#640, S3).
+
+    Onshape builds them all: the result is the base minus the union of the full section tools,
+    trimmed by the base's own faces (notes/onshape-facts.md KP1, KP3, K2A-K2E in the ops repository).
+    The expected volumes and face counts are Onshape's; the closed forms are given where they are
+    short. OCCT 8.0.1 refuses most of these, and so did the exact construction before S3.
+    """
+
+    def assertBuilt(self, shape, volume, faces=None):
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, volume, delta=2e-3)
+        if faces is not None:
+            self.assertEqual(len(shape.Faces), faces)
+
+    def dressUp(self, kind, shape, size, edges):
+        if kind == "Fillet":
+            return shape.makeFillet(size, edges)
+        return shape.makeChamfer(size, edges)
+
+    def testRimsWhoseBandsMeetOrOverlap(self):
+        # K2A, KP2: two holes 6 apart, 3.1 of land between the rims: the bands meet at 1.55
+        plate, rims = plate_with_holes((30, 20, 5), [(12, 10), (18, 10)])
+        for kind, size, volume in (
+            ("Chamfer", 1.55, 2904.260),
+            ("Chamfer", 1.5501, 2904.256),
+            ("Chamfer", 1.56, 2903.825),
+            ("Chamfer", 2.0, 2881.118),
+            ("Fillet", 1.55, 2922.310),
+            ("Fillet", 1.56, 2922.145),
+        ):
+            with self.subTest(kind=kind, size=size):
+                self.assertBuilt(self.dressUp(kind, plate, size, rims), volume, 10)
+
+    def testRimPastTheLandToASide(self):
+        # KP1, K2B: a hole 1.55 from the plate's side: the band runs onto the side face
+        plate, rims = plate_with_holes((20, 20, 5), [(3, 10)])
+        for size, volume in ((1.56, 1951.913), (1.6, 1951.024)):
+            with self.subTest(size=size):
+                self.assertBuilt(self.dressUp("Chamfer", plate, size, rims), volume, 8)
+        plate, rims = plate_with_holes((30, 20, 5), [(3, 10)])
+        self.assertBuilt(self.dressUp("Chamfer", plate, 2.0, rims), 2940.559, 8)
+        self.assertBuilt(self.dressUp("Fillet", plate, 1.6, rims), 2960.735, 8)
+
+    def testRimThroughAThinPlate(self):
+        # K2C: a chamfer deeper than the plate consumes the hole's wall
+        plate, rims = plate_with_holes((20, 20, 1.55), [(10, 10)])
+        for size, volume in ((1.6, 593.823), (2.0, 584.181)):
+            with self.subTest(size=size):
+                self.assertBuilt(self.dressUp("Chamfer", plate, size, rims), volume, 7)
+
+    def testWallTopPastItsWidth(self):
+        # K2D: the top consumed, the band clipped by the far side
+        wall, edges = wall_on_base()
+        for kind, size, volume in (
+            ("Chamfer", 2.0, 20 * (2 - 0.5**2 / 2)),
+            ("Chamfer", 3.0, 20 * (4.5 - 1.5**2 / 2)),
+            ("Fillet", 2.0, 563.042),
+        ):
+            with self.subTest(kind=kind, size=size):
+                self.assertBuilt(self.dressUp(kind, wall, size, edges), volume, 10)
+
+    def testEdgePastItsFace(self):
+        # KP3: a box 10 x 10 x 2, a top edge rounded past the face's height
+        box = Part.makeBox(10, 10, 2)
+        edge = [edge_between(box, (0, 0, 2), (10, 0, 2))]
+        self.assertBuilt(self.dressUp("Fillet", box, 2.1, edge), 190.537, 6)
+
+    def testTwoBandsOverlappingOnOneFace(self):
+        # K2E: both edges of a face 10 high: the chamfers meet in a ridge,
+        # 20 (2 w^2 / 2 - (2 w - 10)^2 / 4)
+        box = Part.makeBox(20, 20, 10)
+        edges = [edge_between(box, (0, 0, 10), (20, 0, 10)), edge_between(box, (0, 0, 0), (20, 0, 0))]
+        for size in (5.5, 6):
+            with self.subTest(size=size):
+                removed = 20 * (size**2 - (2 * size - 10) ** 2 / 4)
+                self.assertBuilt(self.dressUp("Chamfer", box, size, edges), 4000 - removed, 7)
+        for size, volume in ((5.5, 3740.483), (6, 3692.089)):
+            with self.subTest(size=size):
+                self.assertBuilt(self.dressUp("Fillet", box, size, edges), volume, 7)
+
+    def testConcavePastItsFaceFails(self):
+        # Not built yet: a concave round past its face (the rib's top) has no face to trim it.
+        # Onshape clips it at the rib's top; the construction refuses with OCCT's error
+        base = Part.makeBox(40, 20, 10).fuse(Part.makeBox(10, 20, 4, V(15, 0, 10))).removeSplitter()
+        edge = [edge_between(base, (15, 0, 10), (15, 20, 10))]
+        with self.assertRaises(Part.OCCError):
+            base.makeFillet(8, edge)
