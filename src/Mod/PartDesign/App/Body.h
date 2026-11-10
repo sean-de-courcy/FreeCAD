@@ -45,6 +45,20 @@ class PartDesignExport Body: public Part::BodyBase
 public:
     App::PropertyBool AllowCompound;
 
+    /** @name The part's identity in its studio (FreeCAD-CH ops#654, notes/one-history-design.md 9)
+     * Hidden; scopes, tools and picks name parts by StudioPartId, never by a link to the Body */
+    //@{
+    /// The part id: minted when the part is made ("<owner>:<ordinal>" for a New), or the Body's
+    /// name for a Body made before its studio's list existed (adopted)
+    App::PropertyString StudioPartId;
+    /// The id of the part this one is a piece of (a split), or empty
+    App::PropertyString StudioParentId;
+    /// The owner or piece record that made this part, or null
+    App::PropertyLinkHidden StudioMadeBy;
+    /// The piece's witness: element names of the parent that lie on it (P6p)
+    App::PropertyStringList StudioPieceWitness;
+    //@}
+
     /// True if this body feature is active or was active when the document was last closed
     // App::PropertyBool IsActive;
 

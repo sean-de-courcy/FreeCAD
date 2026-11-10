@@ -32,6 +32,9 @@
 #include <unordered_set>
 
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
+#include <Inventor/nodes/SoGroup.h>
+#include <Inventor/nodes/SoSeparator.h>
+#include <Inventor/nodes/SoSwitch.h>
 #include <QApplication>
 #include <QMenu>
 
@@ -39,6 +42,7 @@
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/Origin.h>
+#include <App/Datums.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
 #include <App/VarSet.h>
@@ -53,6 +57,8 @@
 #include <Gui/MDIView.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderDatum.h>
+#include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -206,6 +212,83 @@ bool editStartsFinal(const App::DocumentObject* obj)
                ->GetBool("ShowFinal", false);
 }
 
+/* FreeCAD-CH (ops#654 P3a, report 20, notes/parts-design.md 3.4): in Onshape a part studio's
+ * sketches and planes belong to the studio, so hiding a part leaves them shown. A Body still
+ * claims its sketches and datums (in the tree and in 3D: their selection paths stay
+ * Studio.Body.Sketch.), and while the Body is hidden in a part studio a switch after its mode
+ * switch shows their root nodes: each shows as its own Visibility says, the sketch a feature uses
+ * hidden as before. Gui::ViewProviderDocumentObject picks and highlights a child through it
+ * (shownOutsideSwitch there). Nothing is saved: the switch is rebuilt from the Body's state.
+ */
+constexpr const char* studioShownName = "StudioShown";
+
+/// The switch of the Body's root that shows its sketches and datums while it is hidden, or null
+SoSwitch* studioShownSwitch(SoSeparator* root)
+{
+    for (int i = 0, count = root ? root->getNumChildren() : 0; i < count; ++i) {
+        SoNode* node = root->getChild(i);
+        if (node->isOfType(SoSwitch::getClassTypeId()) && node->getName() == studioShownName) {
+            return static_cast<SoSwitch*>(node);
+        }
+    }
+    return nullptr;
+}
+
+/// A member that belongs to the part studio, not to the part: a sketch, a datum, a coordinate
+/// system (the Body's Origin included)
+bool isStudioOwned(const App::DocumentObject* obj)
+{
+    return obj
+        && (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<Part::Datum>()
+            || obj->isDerivedFrom<App::DatumElement>()
+            || obj->isDerivedFrom<App::LocalCoordinateSystem>());
+}
+
+/// Shows the Body's studio-owned members (isStudioOwned) while the Body is hidden in a part
+/// studio, in "Through" (its members shown one by one); shows none otherwise
+void updateStudioShown(PartDesignGui::ViewProviderBody* vpb)
+{
+    SoSwitch* shown = studioShownSwitch(vpb->getRoot());
+    auto body = vpb->getObject<PartDesign::Body>();
+    if (!shown || shown->getNumChildren() != 1 || !body) {
+        return;
+    }
+    auto group = static_cast<SoGroup*>(shown->getChild(0));
+    std::vector<SoNode*> roots;
+    App::Part* studio = nullptr;
+    Gui::Document* gdoc = vpb->getDocument();
+    if (gdoc && !vpb->isRestoring() && !vpb->Visibility.getValue() && !vpb->isShow()
+        && body->isAttachedToDocument() && !body->isRemoving() && vpb->showsThrough()
+        && Part::BodyBase::studioOf(body, studio)) {
+        std::vector<App::DocumentObject*> members = body->Group.getValues();
+        members.push_back(body->Origin.getValue());
+        for (auto obj : members) {
+            if (!isStudioOwned(obj) || !obj->isAttachedToDocument() || obj->isRemoving()) {
+                continue;
+            }
+            auto vp = gdoc->getViewProvider(obj);
+            if (vp && vp->getRoot()) {
+                roots.push_back(vp->getRoot());
+            }
+        }
+    }
+    // Touch the scene only on a change: each one notifies every view
+    bool same = group->getNumChildren() == static_cast<int>(roots.size());
+    for (int i = 0; same && i < group->getNumChildren(); ++i) {
+        same = group->getChild(i) == roots[i];
+    }
+    if (!same) {
+        Gui::coinRemoveAllChildren(group);
+        for (auto root : roots) {
+            group->addChild(root);
+        }
+    }
+    int which = roots.empty() ? SO_SWITCH_NONE : 0;
+    if (shown->whichChild.getValue() != which) {
+        shown->whichChild = which;
+    }
+}
+
 }  // namespace
 
 PROPERTY_SOURCE_WITH_EXTENSIONS(PartDesignGui::ViewProviderBody, PartGui::ViewProviderPart)
@@ -235,6 +318,14 @@ void ViewProviderBody::attach(App::DocumentObject* pcFeat)
 {
     // call parent attach method
     ViewProviderPart::attach(pcFeat);
+
+    // The sketches and datums shown while the Body is hidden in a part studio (ops#654 P3a,
+    // updateStudioShown): after the mode switch, under the Body's placement
+    auto shown = new SoSwitch();
+    shown->setName(studioShownName);
+    shown->addChild(new SoGroup());
+    shown->whichChild = SO_SWITCH_NONE;
+    pcRoot->addChild(shown);
 
     // set default display mode
     onChanged(&DisplayModeBody);
@@ -362,6 +453,8 @@ void ViewProviderBody::finishRestoring()
     PartGui::ViewProviderPart::finishRestoring();
     // A file saved with a stopped Body (its error and empty Shape saved) opens showing nothing
     updateStoppedDisplay();
+    // A file saved with the Body hidden opens with its studio's sketches and datums shown
+    updateStudioShown(this);
 }
 
 void ViewProviderBody::refreshOverlays()
@@ -637,6 +730,12 @@ void ViewProviderBody::updateData(const App::Property* prop)
     }
 
     PartGui::ViewProviderPart::updateData(prop);
+
+    // A member added or removed, while hidden: before a removed member's view provider goes
+    // (ops#654 P3a)
+    if (prop == &body->Group || prop == &body->Origin) {
+        updateStudioShown(this);
+    }
 }
 
 void ViewProviderBody::onChanged(const App::Property* prop)
@@ -661,6 +760,12 @@ void ViewProviderBody::onChanged(const App::Property* prop)
 
     if (prop == &Transparency) {
         ShapeAppearance.enableNotify(true);
+    }
+
+    // Hidden or shown, or "Through" on or off (applyBodyDisplay touches Visibility): the studio's
+    // sketches and datums stay shown while the Body is hidden (ops#654 P3a)
+    if (prop == &Visibility || prop == &DisplayModeBody) {
+        updateStudioShown(this);
     }
 }
 
@@ -1432,6 +1537,8 @@ void ViewProviderBody::show()
 {
     // Call the base version first to ensure normal behavior
     PartGui::ViewProviderPart::show();
+    // Shown again: its members show through the mode switch, not the studio's switch (ops#654)
+    updateStudioShown(this);
 
     auto* body = static_cast<PartDesign::Body*>(getObject());
 

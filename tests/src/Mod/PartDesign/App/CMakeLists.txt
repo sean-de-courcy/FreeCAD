@@ -12,6 +12,7 @@ add_executable(PartDesign_tests_run
         Revolution.cpp
         GeoFeatureGroupExtension.cpp
         Hole.cpp
+        StudioList.cpp
 )
 
 set(PartDesignTestData_Files

@@ -78,6 +78,16 @@ DressUp::DressUp()
         "If disabled, only the dressed part of the shape is used for patterning."
     );
 
+    // FreeCAD-CH ops#654 (P8a): a studio dress-up's picks
+    ADD_PROPERTY_TYPE(
+        StudioPicks,
+        (nullptr),
+        "Studio",
+        App::Prop_Hidden,
+        "A studio dress-up's picks on any parts, resolved"
+    );
+    ADD_PROPERTY_TYPE(StudioPickIds, (), "Studio", App::Prop_Hidden, "The part id of each pick");
+
     AddSubShape.setStatus(App::Property::Output, true);
     Operation.setStatus(App::Property::Hidden, true);
 }

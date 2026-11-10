@@ -199,6 +199,7 @@ extern bool getPDRefineModelParameter();
 PROPERTY_SOURCE(PartDesign::Transformed, PartDesign::FeatureRefine)
 
 std::array<char const*, 3> transformModeEnums = {"Features", "Whole shape", nullptr};
+std::array<char const*, 3> patternTypeEnums = {"Feature", "Part", nullptr};
 
 Transformed::Transformed()
 {
@@ -208,6 +209,24 @@ Transformed::Transformed()
 
     ADD_PROPERTY(TransformMode, (static_cast<long>(Mode::Features)));
     TransformMode.setEnums(transformModeEnums.data());
+
+    // FreeCAD-CH ops#655 (T1-T3)
+    ADD_PROPERTY_TYPE(PatternType, (0L), "Studio", App::Prop_Hidden, "Pattern features or parts");
+    PatternType.setEnums(patternTypeEnums.data());
+    ADD_PROPERTY_TYPE(
+        Reapply,
+        (false),
+        "Studio",
+        App::Prop_Hidden,
+        "Recompute each original's tool at each instance"
+    );
+    ADD_PROPERTY_TYPE(
+        StudioEntities,
+        (),
+        "Studio",
+        App::Prop_Hidden,
+        "A Part pattern's parts, by part id"
+    );
 }
 
 void Transformed::positionBySupport()

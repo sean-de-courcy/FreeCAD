@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentPy.h>
 #include <App/DocumentObjectPy.h>
@@ -41,6 +42,8 @@
 #include "FeatureSketchBased.h"
 #include "FeatureSplit.h"
 #include "Studio.h"
+#include "StudioEdit.h"
+#include "StudioList.h"
 
 
 namespace PartDesign
@@ -276,6 +279,87 @@ public:
             &Module::derivedSource,
             "derivedSource(member) -- The part a Derived feature's member copies, or None when it "
             "is missing."
+        );
+        // FreeCAD-CH (ops#654): the studio's list, its projection and reconcile
+        add_varargs_method(
+            "studioList",
+            &Module::studioList,
+            "studioList(studio=None, create=False) -- The history list of studio (an App::Part, a "
+            "document for its top level, None for the active document's), or None; with create, "
+            "made (adopted from studioSequence) when missing. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "studioInsert",
+            &Module::studioInsert,
+            "studioInsert(entry, index=-1) -- Puts entry (a studio feature, or a member of a Body) "
+            "into its studio's list at index (-1: at the bar) and reconciles. Returns the list."
+        );
+        add_varargs_method(
+            "studioRemove",
+            &Module::studioRemove,
+            "studioRemove(entry) -- Takes entry out of its list (and out of its Body), deletes its "
+            "steps and reconciles; entry itself is the caller's to delete."
+        );
+        add_varargs_method(
+            "studioMove",
+            &Module::studioMove,
+            "studioMove(entry, index) -- Moves entry to index of its list and reconciles."
+        );
+        add_varargs_method(
+            "studioSetBar",
+            &Module::studioSetBar,
+            "studioSetBar(anyEntry, index) -- Puts the bar of the list anyEntry names (an entry, "
+            "the list, a Body or a studio) before index (-1: the end) and reconciles."
+        );
+        add_varargs_method(
+            "studioSetScope",
+            &Module::studioSetScope,
+            "studioSetScope(owner, bodies) -- Sets the studio feature's scope to the part ids of "
+            "bodies, in order, and reconciles."
+        );
+        add_varargs_method(
+            "studioSetScopeIds",
+            &Module::studioSetScopeIds,
+            "studioSetScopeIds(owner, ids) -- Sets the studio feature's scope to the part ids, in "
+            "order, and reconciles."
+        );
+        add_varargs_method(
+            "studioScopeIds",
+            &Module::studioScopeIds,
+            "studioScopeIds(owner) -- The part ids of the studio feature's scope, in order."
+        );
+        add_varargs_method(
+            "studioScopeOf",
+            &Module::studioScopeOf,
+            "studioScopeOf(owner) -- The Bodies the scope resolves to at the owner's place."
+        );
+        add_varargs_method(
+            "studioPartId",
+            &Module::studioPartId,
+            "studioPartId(body) -- The part id of body (its name until adopted)."
+        );
+        add_varargs_method(
+            "studioSuppress",
+            &Module::studioSuppress,
+            "studioSuppress(entry, on) -- Suppresses or unsuppresses entry and reconciles."
+        );
+        add_varargs_method(
+            "studioReconcile",
+            &Module::studioReconcile,
+            "studioReconcile(list) -- Makes every Body's chain the list's projection: adopts the "
+            "members it doesn't hold, makes, removes and reorders steps, sets their values and "
+            "each Body's Tip. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "studioProject",
+            &Module::studioProject,
+            "studioProject(list) -- The projection: {bodyName: [(entryName, isStep, suppressed, "
+            "held), ...]}; raises with the reasons when the list can't be projected."
+        );
+        add_varargs_method(
+            "studioStepOf",
+            &Module::studioStepOf,
+            "studioStepOf(owner, body) -- The step of the studio feature in body, or None."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -1021,6 +1105,254 @@ private:
             return Py::None();
         }
         return Py::asObject(source->getPyObject());
+    }
+
+    // FreeCAD-CH (ops#654): the studio's list
+    static PartDesign::StudioList* studioListArg(PyObject* obj)
+    {
+        auto list = PyObject_TypeCheck(obj, &(App::DocumentObjectPy::Type))
+            ? freecad_cast<PartDesign::StudioList*>(objectArg(obj))
+            : nullptr;
+        if (!list) {
+            PyErr_SetString(PyExc_TypeError, "Expected a studio list");
+            throw Py::Exception();
+        }
+        return list;
+    }
+
+    static PartDesign::Body* bodyArg(PyObject* obj)
+    {
+        auto body = PyObject_TypeCheck(obj, &(App::DocumentObjectPy::Type))
+            ? freecad_cast<PartDesign::Body*>(objectArg(obj))
+            : nullptr;
+        if (!body) {
+            PyErr_SetString(PyExc_TypeError, "Expected a body");
+            throw Py::Exception();
+        }
+        return body;
+    }
+
+    static App::DocumentObject* entryArg(PyObject* obj)
+    {
+        if (!PyObject_TypeCheck(obj, &(App::DocumentObjectPy::Type))) {
+            PyErr_SetString(PyExc_TypeError, "Expected a document object");
+            throw Py::Exception();
+        }
+        return objectArg(obj);
+    }
+
+    // A list edit's refusal raises ValueError with its reason
+    static Py::Object done(bool ok, const std::string& why)
+    {
+        if (!ok) {
+            throw Py::ValueError(why.empty() ? std::string("Refused") : why);
+        }
+        return Py::None();
+    }
+
+    Py::Object studioList(const Py::Tuple& args)
+    {
+        PyObject* pStudio = Py_None;
+        PyObject* pCreate = Py_False;
+        if (!PyArg_ParseTuple(args.ptr(), "|OO", &pStudio, &pCreate)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        if (pStudio == Py_None) {
+            doc = App::GetApplication().getActiveDocument();
+            if (!doc) {
+                throw Py::ValueError("No active document");
+            }
+        }
+        else {
+            studioArg(pStudio, doc, studio);
+        }
+        auto list = PartDesign::StudioList::of(doc, studio, PyObject_IsTrue(pCreate) == 1);
+        if (!list) {
+            return Py::None();
+        }
+        return Py::asObject(list->getPyObject());
+    }
+
+    Py::Object studioInsert(const Py::Tuple& args)
+    {
+        PyObject* pEntry;
+        int index = -1;
+        if (!PyArg_ParseTuple(args.ptr(), "O|i", &pEntry, &index)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* entry = entryArg(pEntry);
+        std::string why;
+        done(PartDesign::studioInsert(entry, index, &why), why);
+        return Py::asObject(PartDesign::StudioList::holding(entry)->getPyObject());
+    }
+
+    Py::Object studioRemove(const Py::Tuple& args)
+    {
+        PyObject* pEntry;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pEntry)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::studioRemove(entryArg(pEntry), &why), why);
+    }
+
+    Py::Object studioMove(const Py::Tuple& args)
+    {
+        PyObject* pEntry;
+        int index;
+        if (!PyArg_ParseTuple(args.ptr(), "Oi", &pEntry, &index)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::studioMove(entryArg(pEntry), index, &why), why);
+    }
+
+    Py::Object studioSetBar(const Py::Tuple& args)
+    {
+        PyObject* pEntry;
+        int index;
+        if (!PyArg_ParseTuple(args.ptr(), "Oi", &pEntry, &index)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::studioSetBar(entryArg(pEntry), index, &why), why);
+    }
+
+    Py::Object studioSetScope(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pBodies;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pOwner, &pBodies)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* owner = entryArg(pOwner);
+        std::vector<PartDesign::Body*> bodies;
+        Py::Sequence sequence(pBodies);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            bodies.push_back(bodyArg((*it).ptr()));
+        }
+        std::string why;
+        return done(PartDesign::studioSetScope(owner, bodies, &why), why);
+    }
+
+    Py::Object studioSetScopeIds(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pIds;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pOwner, &pIds)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* owner = entryArg(pOwner);
+        std::vector<std::string> ids;
+        Py::Sequence sequence(pIds);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            if (!PyUnicode_Check((*it).ptr())) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of part ids (strings)");
+                throw Py::Exception();
+            }
+            ids.push_back(Py::String(*it).as_std_string("utf-8"));
+        }
+        std::string why;
+        return done(PartDesign::studioSetScopeIds(owner, ids, &why), why);
+    }
+
+    Py::Object studioScopeIds(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pOwner)) {
+            throw Py::Exception();
+        }
+        Py::List list;
+        for (const auto& id : PartDesign::studioScopeIds(entryArg(pOwner))) {
+            list.append(Py::String(id));
+        }
+        return list;
+    }
+
+    Py::Object studioScopeOf(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pOwner)) {
+            throw Py::Exception();
+        }
+        return objectList(PartDesign::studioScopeOf(entryArg(pOwner)));
+    }
+
+    Py::Object studioPartId(const Py::Tuple& args)
+    {
+        PyObject* pBody;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pBody)) {
+            throw Py::Exception();
+        }
+        return Py::String(PartDesign::studioPartId(bodyArg(pBody)));
+    }
+
+    Py::Object studioSuppress(const Py::Tuple& args)
+    {
+        PyObject* pEntry;
+        PyObject* pOn;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pEntry, &pOn)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        const bool on = PyObject_IsTrue(pOn) == 1;
+        return done(PartDesign::studioSuppress(entryArg(pEntry), on, &why), why);
+    }
+
+    Py::Object studioReconcile(const Py::Tuple& args)
+    {
+        PyObject* pList;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pList)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(studioListArg(pList)->reconcile(&why), why);
+    }
+
+    Py::Object studioProject(const Py::Tuple& args)
+    {
+        PyObject* pList;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pList)) {
+            throw Py::Exception();
+        }
+        const auto projection = studioListArg(pList)->project();
+        if (!projection.errors.empty()) {
+            std::string why;
+            for (const auto& error : projection.errors) {
+                why += (why.empty() ? "" : "\n") + error;
+            }
+            throw Py::ValueError(why);
+        }
+        Py::Dict out;
+        for (const auto& [body, chain] : projection.chains) {
+            Py::List slots;
+            for (const auto& slot : chain) {
+                Py::Tuple item(4);
+                item.setItem(0, Py::String(slot.entry->getNameInDocument()));
+                item.setItem(1, Py::Boolean(slot.isStep));
+                item.setItem(2, Py::Boolean(slot.suppressed));
+                item.setItem(3, Py::Boolean(slot.held));
+                slots.append(item);
+            }
+            out.setItem(Py::String(body->getNameInDocument()), slots);
+        }
+        return out;
+    }
+
+    Py::Object studioStepOf(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pBody;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pOwner, &pBody)) {
+            throw Py::Exception();
+        }
+        auto step = PartDesign::StudioList::stepOf(entryArg(pOwner), bodyArg(pBody));
+        if (!step) {
+            return Py::None();
+        }
+        return Py::asObject(step->getPyObject());
     }
 
     Py::Object makeFilletArc(const Py::Tuple& args)

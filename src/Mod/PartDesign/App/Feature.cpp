@@ -166,6 +166,27 @@ Feature::Feature()
                       (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly | App::Prop_Output
                                           | App::Prop_NoRecompute),
                       "The output is the base, passed through after the last recompute failed");
+    // FreeCAD-CH ops#654: studio features (StudioList.h)
+    ADD_PROPERTY_TYPE(StudioScope,
+                      (),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The part ids this studio feature acts on, in order");
+    ADD_PROPERTY_TYPE(StudioOwner,
+                      (nullptr),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The studio feature whose tool this step applies");
+    ADD_PROPERTY_TYPE(StudioBases,
+                      (nullptr),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "Each in-scope part's solid just before this studio feature (reconcile)");
+    ADD_PROPERTY_TYPE(StudioTags,
+                      (),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The naming tag of this studio feature in each part: part id -> tag");
     Placement.setStatus(App::Property::Hidden, true);
     BaseFeature.setStatus(App::Property::Hidden, true);
 

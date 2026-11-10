@@ -56,6 +56,15 @@ public:
     App::PropertyLinkList Originals;
     App::PropertyEnumeration TransformMode;
     App::PropertyBool Refine;
+    /** @name Studio patterns (FreeCAD-CH ops#655, T1-T3) */
+    //@{
+    /// Feature: the originals' tools; Part: the entities are parts (StudioEntities)
+    App::PropertyEnumeration PatternType;
+    /// Recompute each original's tool at each instance (Onshape's Reapply features)
+    App::PropertyBool Reapply;
+    /// A Part pattern's parts, by part id
+    App::PropertyStringList StudioEntities;
+    //@}
 
     /**
      * Returns the BaseFeature property's object(if any) otherwise return first original,

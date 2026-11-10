@@ -80,6 +80,21 @@ public:
     /// as the error is: an opened file judges by both.
     App::PropertyBool _FailurePassedThrough;
 
+    /** @name Studio features (FreeCAD-CH ops#654, notes/parts-design.md 10.8,
+     * notes/one-history-design.md 5 and 9). Hidden; read by name (StudioList.h), so that an
+     * owner of another class may carry them as dynamic properties */
+    //@{
+    /// An owner's scope: the part ids (Body::StudioPartId) it acts on, in order (intent: an Add
+    /// keeps the first). Ids, never links: a split part's id stands for all its pieces
+    App::PropertyStringList StudioScope;
+    /// A step's owner (a real dependency: the step applies its tool)
+    App::PropertyLinkGlobal StudioOwner;
+    /// An owner's bases, written by reconcile: each in-scope part's solid just before its step
+    App::PropertyLinkListGlobal StudioBases;
+    /// An owner's naming tag per part: part id -> tag (decimal), minted once (rule 2)
+    App::PropertyMap StudioTags;
+    //@}
+
     App::DocumentObjectExecReturn* recompute() override;
     bool passesBaseThrough() const override
     {
