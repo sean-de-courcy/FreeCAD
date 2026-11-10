@@ -332,7 +332,9 @@ class Command:
                 body = doc.addObject("PartDesign::Body", "Body")
             obj = F.make_thicken(body, faces, 1.0, 0.0, "Union")
         elif self.kind == "OffsetSurface":
-            if body is None:
+            # A sheet is a part of its own (Onshape: a new surface part): in the active Body it
+            # would replace the solid before it
+            if body is None or body.BaseFeature is not None or any(o.isDerivedFrom("PartDesign::Feature") for o in body.Group):
                 body = doc.addObject("PartDesign::Body", "Body")
             obj = F.make_offset_surface(body, faces, 1.0)
         else:

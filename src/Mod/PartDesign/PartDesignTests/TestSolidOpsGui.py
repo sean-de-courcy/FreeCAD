@@ -102,6 +102,8 @@ class TestSolidOpsGui(unittest.TestCase):
         panel.widgets["Flip"].setChecked(True)
         self.assertTrue(panel.accept())
         feature = panel.obj
+        self.assertNotEqual(feature.getParentGeoFeatureGroup(), self.body)  # a part of its own
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000.0, 3)  # the solid stays
         self.assertAlmostEqual(feature.Shape.BoundBox.ZMin, 7.0, 5)
         self.assertAlmostEqual(feature.Shape.Area, 400.0, 4)
 
