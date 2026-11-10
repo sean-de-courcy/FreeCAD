@@ -813,21 +813,31 @@ class TestDxfReviewCases(unittest.TestCase):
         self.assertTrue(all(y < -0.004 for y in top), top)
 
     def test_gap_and_fit_deviation_measured(self):
-        """A 74-gon of radius 10 whose last vertex falls 0.009 short of the first: the reported
-        deviation is at least the true distance of every original point from the result"""
+        """A 74-gon of radius 10 (sagitta 0.009) whose last vertex falls short of the first: by
+        0.0045 (under half the 0.01 tolerance) it closes and every original point, densely sampled,
+        is within the reported deviation and the tolerance; by 0.009 (the review's case, and the
+        fix review's 0.0095) it stays open and is reported open"""
         n = 74
         pts = [(10 * math.cos(2 * math.pi * k / n), 10 * math.sin(2 * math.pi * k / n)) for k in range(n)]
-        poly = pts + [(pts[0][0] - 0.009, 0.0)]
-        sk, rep = self.insert("".join(_line(p, q) for p, q in zip(poly, poly[1:])), "gapfit.dxf", tolerance=0.01)
-        shp = Part.Compound(sk.Shape.Edges)
-        worst = 0.0
-        for p, q in zip(poly, poly[1:]):
-            for s in (0.0, 0.25, 0.5, 0.75, 1.0):
-                x = V(p[0] + s * (q[0] - p[0]), p[1] + s * (q[1] - p[1]), 0)
-                worst = max(worst, shp.distToShape(Part.Vertex(x))[0])
-        self.assertLessEqual(worst, 0.01 + 1e-9)
-        self.assertGreaterEqual(rep.max_deviation, worst - 1e-9)
-        self.assertTrue(all(w.isClosed() for w in sk.Shape.Wires))
+        for gap in (0.0045, 0.009):
+            poly = pts + [(pts[0][0] - gap, 0.0)]
+            ents = "".join(_line(p, q) for p, q in zip(poly, poly[1:]))
+            sk, rep = self.insert(ents, f"gapfit{gap}.dxf", tolerance=0.01)
+            if gap > 0.005:
+                self.assertEqual(rep.gaps_joined, 0)
+                self.assertEqual(rep.open_ends, 2)
+                continue
+            self.assertEqual(rep.gaps_joined, 1)
+            self.assertTrue(all(w.isClosed() for w in sk.Shape.Wires))
+            shp = Part.Compound(sk.Shape.Edges)
+            worst = 0.0
+            for p, q in zip(poly, poly[1:]):
+                for k in range(17):
+                    s = k / 16.0
+                    x = V(p[0] + s * (q[0] - p[0]), p[1] + s * (q[1] - p[1]), 0)
+                    worst = max(worst, shp.distToShape(Part.Vertex(x))[0])
+            self.assertLessEqual(worst, 0.01 + 1e-9)
+            self.assertGreaterEqual(rep.max_deviation, worst - 1e-9)
 
     def test_unmovable_ends_are_reported_open(self):
         """Two half ellipses whose ends miss by 0.0005: elliptical arcs can't move, so the report
