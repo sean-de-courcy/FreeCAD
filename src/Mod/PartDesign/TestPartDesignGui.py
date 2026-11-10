@@ -40,6 +40,7 @@ from PartDesignTests.TestMaterial import TestMaterial
 from PartDesignTests.TestActiveObject import TestActiveObject
 from PartDesignTests.TestSuppressed import TestSuppressedStrikethrough
 from PartDesignTests.TestPreviewPython import TestPreviewPython
+from PartDesignTests.TestSolidOpsGui import TestSolidOpsGui  # FreeCAD-CH, lane solid-ops
 from PartDesignTests.TestProfileLinkDialog import TestProfileLinkDialog
 from PartDesignTests.TestReferencePickerGui import TestReferencePickerGui
 from PartDesignTests.TestRollBackBarGui import TestRollBackBarGui
