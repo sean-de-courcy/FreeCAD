@@ -212,7 +212,7 @@ std::unordered_set<App::DocumentObject*> patternCopies(const std::vector<App::Do
     return copies;
 }
 
-/// Places the copies of the patterns; how far the farthest moved (mm, a turn counted at 100 mm)
+/// Places the copies of the patterns; how far the farthest point of a copy moved (mm)
 double placePatterns(const std::vector<App::DocumentObject*>& patterns)
 {
     double moved = 0.0;
@@ -1666,15 +1666,14 @@ std::unordered_set<App::DocumentObject*> AssemblyObject::fixGroundedParts()
             continue;
         }
 
+        // Every grounded object (a part bundled onto another's body while dragging too)
         Base::Placement plc = getPlacementFromProp(obj, "Placement");
-        if (getRigidRepresentative(obj)) {
-            MbDPartData data = getMbDData(obj);
-            if (data.part && !fixedBodies.insert(data.part.get()).second) {
-                continue;
-            }
-            if (!data.offsetPlc.isIdentity()) {
-                plc = plc * data.offsetPlc.inverse();
-            }
+        MbDPartData data = getMbDData(obj);
+        if (data.part && !fixedBodies.insert(data.part.get()).second) {
+            continue;
+        }
+        if (!data.offsetPlc.isIdentity()) {
+            plc = plc * data.offsetPlc.inverse();
         }
         std::string str = obj->getFullName();
         fixGroundedPart(obj, plc, str);

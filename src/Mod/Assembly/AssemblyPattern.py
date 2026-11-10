@@ -34,6 +34,19 @@ TOLERANCE = 1e-7
 activePanel = None
 
 
+def reachOf(seed):
+    """How far the seed's shape reaches from its placement's origin (mm; 100 when it has none)"""
+    try:
+        box = seed.Shape.BoundBox
+    except Exception:
+        return 100.0
+    if not box.isValid():
+        return 100.0
+    origin = seed.Placement.Base
+    corners = [App.Vector(x, y, z) for x in (box.XMin, box.XMax) for y in (box.YMin, box.YMax) for z in (box.ZMin, box.ZMax)]
+    return max((c - origin).Length for c in corners)
+
+
 def hasExpression(obj, name):
     """Whether an expression drives obj's property name"""
     return any(path == name for path, _ in obj.ExpressionEngine)
@@ -264,7 +277,7 @@ class InstancePattern:
 
     def placeInstances(self, fp):
         """Places the copies at the pattern's placements; how far the copy that moved most went (mm,
-        a turn counted at 100 mm per radian). Raises when the direction is lost (the solver reports
+        the farthest point of its shape). Raises when the direction is lost (the solver reports
         it; the copies stay where they are)."""
         if fp.Suppressed:
             return 0.0
@@ -273,6 +286,7 @@ class InstancePattern:
         moved = 0.0
         for seed in self.seeds(fp):
             copies = held.get(seed.Name, {})
+            reach = reachOf(seed)
             for i, transform in enumerate(transforms, start=1):
                 copy = copies.get(i)
                 if copy is None:
@@ -280,7 +294,8 @@ class InstancePattern:
                 target = transform.multiply(seed.Placement)
                 if not copy.Placement.isSame(target, TOLERANCE):
                     step = copy.Placement.inverse().multiply(target)
-                    moved = max(moved, step.Base.Length, abs(step.Rotation.Angle) * 100.0)
+                    # The farthest point of the copy moves at most this far
+                    moved = max(moved, step.Base.Length + abs(step.Rotation.Angle) * reach)
                     copy.Placement = target
                     copy.purgeTouched()
         return moved
@@ -322,16 +337,21 @@ class InstancePattern:
         wanted = {(s.Name, i) for s in seeds for i in range(1, count)}
         # The copies are the ones listed and any other link of the assembly that names this pattern
         # its owner: an undo outside the recompute's transaction can bring one back unlisted
-        held = []
-        for copy in list(fp.Instances) + [o for o in assembly.Group if getattr(o, "PatternOwner", None) == fp]:
-            if copy is not None and hasattr(copy, "PatternIndex") and copy not in held:
-                held.append(copy)
+        listed = [c for c in fp.Instances if c is not None and hasattr(c, "PatternIndex")]
+        unlisted = [
+            o for o in assembly.Group if getattr(o, "PatternOwner", None) == fp and o not in listed
+        ]
         keep = {}
         extra = []
-        for copy in held:
+        for copy in listed + unlisted:
             key = (copy.PatternSeed.Name if copy.PatternSeed else "", copy.PatternIndex)
             if key in wanted and key not in keep:
                 keep[key] = copy
+            elif copy in unlisted and key in keep:
+                # A duplicate of a copy (pasted, or copied with its properties): a plain instance of
+                # its own, not the pattern's
+                for name in ("PatternOwner", "PatternSeed", "PatternIndex"):
+                    copy.removeProperty(name)
             else:
                 extra.append(copy)
         # A copy a mate uses isn't removed: the pattern says so and changes nothing (a mate would
@@ -387,6 +407,15 @@ class InstancePattern:
                 raise RuntimeError(
                     translate("Assembly", "{0}: {1} is fixed; a patterned instance follows its seed: unfix it").format(
                         fp.Label, ground.Label
+                    )
+                )
+            # A rigid group with a copy in it would stop holding its other members to the copy when the
+            # pattern moves the copy: said instead
+            grouped = [c for c in (getattr(other, "ObjectsToRigidGroup", None) or []) if c in fp.Instances]
+            if grouped and not getattr(other, "Suppressed", False):
+                raise RuntimeError(
+                    translate("Assembly", "{0}: {1} is in {2}; a patterned instance can't be in a rigid group").format(
+                        fp.Label, grouped[0].Label, other.Label
                     )
                 )
         self.placeInstances(fp)

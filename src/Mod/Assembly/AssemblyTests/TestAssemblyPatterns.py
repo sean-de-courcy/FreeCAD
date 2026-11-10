@@ -477,6 +477,40 @@ class TestAssemblyPatterns(AssemblyTestBase):
         self.assertEqual(self.assembly.solve(), -1)
         self.assertPlacement(self.plate, plate_plc, "the grounded plate")
 
+    def test_rigid_group_with_a_copy(self):
+        """A copy in a rigid group is refused (the group would stop holding its other member to the
+        copy when the pattern moves it, review asm-r1-rigid-group-copy)"""
+        pattern = self.linear(4, 20.0)
+        third = [c for c in pattern.Instances if c.PatternIndex == 3][0]
+        partner = self.instance(self.block, App.Placement(third.Placement.Base + App.Vector(0, 0, 10), App.Rotation()))
+        self.doc.recompute()
+        group = self.jointgroup.newObject("App::FeaturePython", "RigidGroup")
+        JointObject.RigidGroupJoint(group, [third, partner])
+        pattern.Distance = 35.0
+        self.doc.recompute()
+        self.assertIn("Invalid", pattern.State)
+        with self.assertRaisesRegex(RuntimeError, "rigid group"):
+            pattern.Proxy.execute(pattern)
+
+    def test_pasted_copy_is_a_plain_instance(self):
+        """A copy duplicated into the assembly (its pattern properties copied too) stays, a plain
+        instance where it was put, through the pattern's next edit (it was deleted without a word,
+        review asm-r1-pasted-copy)"""
+        pattern = self.linear(3, 20.0)
+        first = [c for c in pattern.Instances if c.PatternIndex == 1][0]
+        twin = self.doc.copyObject(first)
+        self.assembly.addObject(twin)
+        where = App.Placement(App.Vector(0, 100, 50), App.Rotation())
+        twin.Placement = where
+        self.doc.recompute()
+        pattern.Distance = 30.0
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject(twin.Name))
+        self.assertFalse(AssemblyPattern.isPatternCopy(twin))
+        self.assertPlacement(twin, where, "the pasted instance")
+        self.assertNotIn(twin, list(pattern.Instances))
+        self.assertLinear(pattern, self.seed, 3, 30.0, self.plateX())
+
     def test_time_four_patterns_of_thirty(self):
         """4 seeds fastened to the plate, each patterned 30 times (120 copies, 124 instances): the
         recompute that makes them, a distance change and a solve stay well under a second each"""
