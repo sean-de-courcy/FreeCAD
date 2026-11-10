@@ -29,6 +29,8 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchExternalTypes.py
     SketcherTests/TestSketchCarbonCopyElements.py
     SketcherTests/TestSketchCornerSteps.py
+    SketcherTests/TestSketchTrimSplit.py
+    SketcherTests/TestSketchTrimSplitAttacks.py
 )
 
 if(BUILD_GUI)
