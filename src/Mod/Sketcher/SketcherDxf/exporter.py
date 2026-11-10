@@ -107,23 +107,62 @@ def _seg_dev(seg, pt):
     return abs(math.hypot(pt[0] - c[0], pt[1] - c[1]) - r)
 
 
-def _approximate(edge, f, l, tol, depth=0):
+SAMPLES = 32  # points of the curve checked against each arc (each lies within one knot span)
+
+
+def _knots(edge, f, l):
+    """The curve's knots inside (f, l), a periodic curve's in every period the range covers"""
+    c = edge.Curve
+    if not hasattr(c, "getKnots"):
+        return []
+    try:
+        ks = c.getKnots()
+    except Exception:
+        return []
+    shifts = [0.0]
+    if c.isPeriodic():
+        period = c.LastParameter - c.FirstParameter
+        n0 = int(math.floor((f - ks[-1]) / period)) - 1
+        n1 = int(math.ceil((l - ks[0]) / period)) + 1
+        shifts = [n * period for n in range(n0, n1 + 1)]
+    return sorted({k + d for k in ks for d in shifts if f < k + d < l})
+
+
+def _spans(edge, f, l):
+    """[f, l] in four for a closed curve (each arc under a half turn), else whole"""
+    if edge.isClosed():
+        cuts = [f + (l - f) * k / 4.0 for k in range(5)]
+        return list(zip(cuts, cuts[1:]))
+    return [(f, l)]
+
+
+def _samples(knots, f, l):
+    """Parameters at which a piece from f to l is checked: SAMPLES evenly, and a quarter, half and
+    three quarters of every knot span that meets the piece, so that a feature of the curve as
+    narrow as one span can't fall between them unseen"""
+    out = [f + (l - f) * k / SAMPLES for k in range(1, SAMPLES)]
+    cuts = [f] + [k for k in knots if f < k < l] + [l]
+    if len(cuts) > 2:
+        for a, b in zip(cuts, cuts[1:]):
+            out += [a + (b - a) * 0.25, a + (b - a) * 0.5, a + (b - a) * 0.75]
+    return out
+
+
+def _approximate(edge, f, l, tol, knots=(), depth=0):
     """Arcs through the edge's own points from parameter f to l, within tol: [(segment, dev)]"""
     p = _xy(edge.valueAt(f))
     m = _xy(edge.valueAt(0.5 * (f + l)))
     q = _xy(edge.valueAt(l))
     seg = _arc_segment(p, m, q)
     dev = 0.0
-    for k in range(1, 16):
-        if k == 8:
-            continue
-        dev = max(dev, _seg_dev(seg, _xy(edge.valueAt(f + (l - f) * k / 16.0))))
+    for t in _samples(knots, f, l):
+        dev = max(dev, _seg_dev(seg, _xy(edge.valueAt(t))))
     if seg[0] == "A" and abs(seg[5]) > math.pi:
         dev = max(dev, tol * 2.0)  # split arcs over a half turn: better conditioned
-    if dev <= tol or depth > 24:
+    if dev <= tol or depth > 30:
         return [(seg, dev)]
     h = 0.5 * (f + l)
-    return _approximate(edge, f, h, tol, depth + 1) + _approximate(edge, h, l, tol, depth + 1)
+    return _approximate(edge, f, h, tol, knots, depth + 1) + _approximate(edge, h, l, tol, knots, depth + 1)
 
 
 def _edge_segments(edge, forward, tol, rep):
@@ -145,12 +184,10 @@ def _edge_segments(edge, forward, tol, rep):
             return [("A", p, q, ctr, r, sweep)]
         return [("A", q, p, ctr, r, -sweep)]
     rep.approximated += 1
-    if edge.isClosed():
-        parts = []
-        for k in range(4):
-            parts += _approximate(edge, f + (l - f) * k / 4.0, f + (l - f) * (k + 1) / 4.0, tol)
-    else:
-        parts = _approximate(edge, f, l, tol)
+    parts = []
+    knots = _knots(edge, f, l)
+    for a, b in _spans(edge, f, l):
+        parts += _approximate(edge, a, b, tol, knots)
     for _, d in parts:
         rep.max_deviation = max(rep.max_deviation, d)
     segs = [s for s, _ in parts]

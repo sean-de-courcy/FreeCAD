@@ -84,7 +84,9 @@ class _Nodes:
 
 
 def chains(segments, other_ends, join, gap):
-    """Chains of the segments: [(points, closed)], and the number of dangling gaps joined.
+    """Chains of the segments: ([(points, closed, joins)], gaps joined, widest gap). joins lists, for
+    each gap joined into the chain, (kept point, the moved end's original point, the original
+    midpoint of the moved end's segment).
 
     segments: [(p, q)]; other_ends: end points of curves that are not segments (they end chains);
     join: the node tolerance; gap: dangling ends closer than this are joined (0: none)."""
@@ -102,6 +104,7 @@ def chains(segments, other_ends, join, gap):
 
     joined = 0
     widest = 0.0
+    moved = {}  # kept node -> (original point of the end moved onto it, its segment's midpoint)
     if gap > 0.0:
         # join dangling ends pairwise, nearest first, found on a grid of cell `gap`
         dangling = [n for n in range(len(deg)) if deg[n] == 1 and n not in blocked]
@@ -156,6 +159,13 @@ def chains(segments, other_ends, join, gap):
             alias[b] = a
             joined += 1
             widest = max(widest, d)
+            pb = nodes.pos[b]
+            other = [y if x == b else x for x, y in edges if b in (x, y)]
+            mid = pb
+            if other:
+                po = nodes.pos[other[0]]
+                mid = ((pb[0] + po[0]) * 0.5, (pb[1] + po[1]) * 0.5)
+            moved[a] = (pb, mid)
         if alias:
             edges = [(alias.get(a, a), alias.get(b, b)) for a, b in edges]
             edges = [(a, b) for a, b in edges if a != b]
@@ -174,6 +184,9 @@ def chains(segments, other_ends, join, gap):
         return deg[n] == 2 and n not in blocked
 
     out = []
+
+    def _joins(seq):
+        return [(nodes.pos[i],) + moved[i] for i in dict.fromkeys(seq) if i in moved]
 
     def walk(start, k):
         seq = [start]
@@ -197,13 +210,13 @@ def chains(segments, other_ends, join, gap):
         for k in adj[n]:
             if not used[k]:
                 seq = walk(n, k)
-                out.append(([nodes.pos[i] for i in seq], False))
+                out.append(([nodes.pos[i] for i in seq], False, _joins(seq)))
     for k in range(len(edges)):
         if not used[k]:
             start = edges[k][0]
             seq = walk(start, k)
             closed = seq[-1] == seq[0]
-            out.append(([nodes.pos[i] for i in seq], closed))
+            out.append(([nodes.pos[i] for i in seq], closed, _joins(seq)))
     return out, joined, widest
 
 
@@ -562,8 +575,10 @@ def _corners(pts, closed, corner, span):
     return [k for k, _ in out]
 
 
-def fit_chain(pts, closed, tol, corner_deg):
-    """Pieces for a chain of points (closed: pts[-1] is pts[0])"""
+def fit_chain(pts, closed, tol, corner_deg, breaks=()):
+    """Pieces for a chain of points (closed: pts[-1] is pts[0]); breaks: points that must be the
+    ends of pieces (where a gap was joined)"""
+    breaks = set(breaks)
     # drop repeated points
     clean = [pts[0]]
     for p in pts[1:]:
@@ -584,6 +599,8 @@ def fit_chain(pts, closed, tol, corner_deg):
         if m < 3:
             return _fit_run(pts, tol, rmax)
         corners = _corners(ring, True, corner, 5.0 * tol)
+        if breaks:
+            corners = sorted(set(corners) | {k for k in range(m) if ring[k] in breaks})
         if not corners:
             whole = _full_circle(ring, tol)
             if whole is not None:
@@ -606,7 +623,9 @@ def fit_chain(pts, closed, tol, corner_deg):
         for a, b in zip(cut, cut[1:]):
             out += _fit_run(rot[a : b + 1], tol, rmax)
         return out
-    cut = [0] + _corners(pts, False, corner, 5.0 * tol) + [n - 1]
+    inner = set(_corners(pts, False, corner, 5.0 * tol))
+    inner |= {k for k in range(1, n - 1) if pts[k] in breaks}
+    cut = [0] + sorted(inner) + [n - 1]
     out = []
     for a, b in zip(cut, cut[1:]):
         out += _fit_run(pts[a : b + 1], tol, rmax)

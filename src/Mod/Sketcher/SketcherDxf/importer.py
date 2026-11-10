@@ -237,7 +237,11 @@ def geometry(drawing, mm_per_unit, fit=True, tolerance=DEFAULT_TOLERANCE, corner
                 rep.skipped["degenerate ellipse"] = rep.skipped.get("degenerate ellipse", 0) + 1
                 continue
         elif isinstance(it, (reader.Spline, reader.FitSpline)):
-            g = spline_geometry(it)
+            try:
+                g = spline_geometry(it)
+            except Exception:
+                rep.skipped["SPLINE that can't be built"] = rep.skipped.get("SPLINE that can't be built", 0) + 1
+                continue
         elif isinstance(it, reader.Point):
             g = Part.Point(V(it.p[0], it.p[1], 0))
         else:
@@ -253,17 +257,23 @@ def geometry(drawing, mm_per_unit, fit=True, tolerance=DEFAULT_TOLERANCE, corner
         rep.fit = True
         rep.tolerance = tolerance
         join = max(1e-6, tolerance * 1e-3)
-        chains, joined, widest = fitting.chains(segs, other_ends, join, tolerance)
+        # gaps under half the tolerance are joined, and their chains fitted within the other
+        # half: a point of an original segment is then within (gap + the fit's deviation) of the
+        # result, which is what the report says
+        chains, joined, widest = fitting.chains(segs, other_ends, join, 0.5 * tolerance)
         rep.gaps_joined = joined
-        rep.max_deviation = max(rep.max_deviation, widest)
         fitted = []
-        for pts, closed in chains:
-            pieces = fitting.fit_chain(pts, closed, tolerance, corner)
-            fitted.append([pts, closed, pieces, tolerance])
-        _keep_clearance(fitted, corner)
-        for pts, closed, pieces, tol in fitted:
+        for pts, closed, joins in chains:
+            breaks = [j[0] for j in joins]
+            gap = max((math.hypot(j[0][0] - j[1][0], j[0][1] - j[1][1]) for j in joins), default=0.0)
+            t = tolerance - gap if joins else tolerance
+            pieces = fitting.fit_chain(pts, closed, t, corner, breaks)
+            fitted.append([pts, closed, pieces, t, breaks, gap])
+        _keep_clearance(fitted, [g.toShape() for g in geos if not isinstance(g, Part.Point)], corner)
+        for pts, closed, pieces, t, breaks, gap in fitted:
+            dev = max((pc.dev for pc in pieces), default=0.0)
+            rep.max_deviation = max(rep.max_deviation, dev + gap)
             for pc in pieces:
-                rep.max_deviation = max(rep.max_deviation, pc.dev)
                 geos.append(piece_geometry(pc))
     else:
         for p, q in segs:
@@ -360,6 +370,7 @@ def snap_ends(geos, snap):
     for k in range(len(ends)):
         clusters.setdefault(root(k), []).append(k)
     target = {}  # (geo, which) -> new point
+    groups = []  # (members, target point) of the clusters of two or more ends
     open_ends = 0
     for members in clusters.values():
         if len(members) == 1:
@@ -367,6 +378,7 @@ def snap_ends(geos, snap):
             continue
         best = min(members, key=lambda k: (_RANK.get(geos[ends[k][0]].TypeId, 9), k))
         tp = ends[best][2]
+        groups.append((members, tp))
         for k in members:
             i, w, p = ends[k]
             if (p - tp).Length > 0.0:
@@ -386,67 +398,115 @@ def snap_ends(geos, snap):
             if d > 1e-9:  # not the 1e-15 of an arc's ends computed from its angles
                 moved += 1
                 largest = max(largest, d)
+    # an end that could not move (an elliptical arc's) still misses: it and, if nothing else met
+    # it, the target end are open
+    for members, tp in groups:
+        missed = 0
+        for k in members:
+            i, w, _ = ends[k]
+            if (_ends(out[i])[w] - tp).Length > 1e-9:
+                missed += 1
+        if missed:
+            open_ends += missed + (1 if missed == len(members) - 1 else 0)
     return out, moved, largest, open_ends
 
 
-def _keep_clearance(fitted, corner):
-    """Refits chains that the fit brought closer to another than half their original clearance
-    (two loops 0.005 apart, each fitted within 0.01, could touch): with a tolerance of a quarter
-    of the clearance, each pair keeps at least half of it. fitted: [[pts, closed, pieces, tol]]"""
-    if len(fitted) < 2:
+def _keep_clearance(fitted, fixed, corner):
+    """Refits chains whose fit changed how they meet their neighbours (a fitted chain against
+    another, or against a curve of the file):
+    - outlines apart by d >= SNAP that the fit brought closer than d / 2: the fitted ones refitted
+      within d / 4, which keeps at least d / 2 whatever the fit (each stays within its tolerance);
+    - outlines that touch or cross (d < SNAP): refitted once within a quarter of their tolerance
+      when the fitted pair meets at a point farther than ten tolerances from every point where the
+      original pair meets and from the chains' ends (a crossing the drawing already has moves by
+      about the deviation over the crossing's sine; where a chain meets a tangent arc, the fit may
+      cross it near the junction: both are kept as they are).
+    Chains the fit left as their own segments are skipped. fitted: [[pts, closed, pieces, tol,
+    breaks, gap]]; fixed: shapes of the file's other curves."""
+    nf = len(fitted)
+    if nf == 0 or nf + len(fixed) < 2:
         return
 
-    def bbox(pts):
+    def changed(k):
+        return k < nf and any(pc.count > 1 or pc.kind != "line" for pc in fitted[k][2])
+
+    live = [k for k in range(nf) if changed(k)]
+    if not live:
+        return
+
+    def bbox_pts(pts):
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         return min(xs), min(ys), max(xs), max(ys)
 
-    def wire(pieces):
-        return Part.Wire([piece_geometry(pc).toShape() for pc in pieces]) if pieces else None
+    def fit_shape(k):
+        if k < nf:
+            return Part.Compound([piece_geometry(pc).toShape() for pc in fitted[k][2]])
+        return fixed[k - nf]
 
-    boxes = [bbox(f[0]) for f in fitted]
-    # the pairs whose boxes, grown by both tolerances, overlap: a sweep over x
+    def raw(k):
+        if k < nf:
+            return Part.makePolygon([V(p[0], p[1], 0) for p in fitted[k][0]])
+        return fixed[k - nf]
+
+    boxes = [bbox_pts(f[0]) for f in fitted]
+    for sh in fixed:
+        bb = sh.BoundBox
+        boxes.append((bb.XMin, bb.YMin, bb.XMax, bb.YMax))
     grow = 2.0 * max(f[3] for f in fitted)
-    order = sorted(range(len(fitted)), key=lambda k: boxes[k][0])
+    order = sorted(range(len(boxes)), key=lambda k: boxes[k][0])
     pairs = []
     active = []
     for k in order:
         x0 = boxes[k][0]
         active = [o for o in active if boxes[o][2] + grow >= x0]
         for o in active:
-            if boxes[o][1] <= boxes[k][3] + grow and boxes[k][1] <= boxes[o][3] + grow:
+            if (changed(o) or changed(k)) and boxes[o][1] <= boxes[k][3] + grow and boxes[k][1] <= boxes[o][3] + grow:
                 pairs.append((min(o, k), max(o, k)))
         active.append(k)
-    for _ in range(2):
-        changed = False
-        for a, b in pairs:
-            if True:
-                reach = fitted[a][3] + fitted[b][3]
-                wa, wb = wire(fitted[a][2]), wire(fitted[b][2])
-                if wa is None or wb is None:
-                    continue
-                df = wa.distToShape(wb)[0]
-                if df >= reach:
-                    continue  # farther apart than both deviations: the fit can't have made them meet
-                ra = Part.makePolygon([V(p[0], p[1], 0) for p in fitted[a][0]])
-                rb = Part.makePolygon([V(p[0], p[1], 0) for p in fitted[b][0]])
-                draw = ra.distToShape(rb)[0]
-                if df >= 0.5 * draw:
-                    continue
+
+    def refit(k, t):
+        pts, closed, _, tol, breaks, gap = fitted[k]
+        if t >= tol:
+            return
+        fitted[k][2] = fitting.fit_chain(pts, closed, t, corner, breaks) if t > 1e-9 else [
+            fitting.Piece("line", (pts[j], pts[j + 1]), 0.0, 1) for j in range(len(pts) - 1)
+        ]
+        fitted[k][3] = t
+
+    def chain_ends(k):
+        if k >= nf or fitted[k][1]:
+            return []
+        a, b = fitted[k][0][0], fitted[k][0][-1]
+        return [V(a[0], a[1], 0), V(b[0], b[1], 0)]
+
+    retried = set()
+    for a, b in pairs:
+        ta = fitted[a][3] if a < nf else 0.0
+        tb = fitted[b][3] if b < nf else 0.0
+        wa, wb = fit_shape(a), fit_shape(b)
+        df = wa.distToShape(wb)[0]
+        if df >= ta + tb:
+            continue  # farther apart than both deviations: the fit can't have made them meet
+        ra, rb = raw(a), raw(b)
+        draw = ra.distToShape(rb)[0]
+        if draw >= SNAP:
+            if df < 0.5 * draw:
                 for k in (a, b):
-                    t = 0.25 * draw
-                    if t >= fitted[k][3]:
-                        continue
-                    pts, closed = fitted[k][0], fitted[k][1]
-                    if t > 1e-9:
-                        fitted[k][2] = fitting.fit_chain(pts, closed, t, corner)
-                    else:
-                        fitted[k][2] = [fitting.Piece("line", (pts[j], pts[j + 1]), 0.0, 1) for j in range(len(pts) - 1)]
-                        t = 0.0
-                    fitted[k][3] = t
-                    changed = True
-        if not changed:
-            break
+                    if k < nf:
+                        refit(k, 0.25 * draw)
+            continue
+        if (a, b) in retried:
+            continue
+        old = [v.Point for v in ra.section(rb).Vertexes] + chain_ends(a) + chain_ends(b)
+        reach = 10.0 * max(ta, tb)
+        new = [v.Point for v in wa.section(wb).Vertexes]
+        if all(any((p - q).Length <= reach for q in old) for p in new):
+            continue
+        retried.add((a, b))
+        for k in (a, b):
+            if k < nf:
+                refit(k, 0.25 * fitted[k][3])
 
 
 def resolve_units(drawing, units=None):
@@ -468,6 +528,8 @@ def insert(sketch, path, units=None, fit=True, tolerance=DEFAULT_TOLERANCE, corn
 
     units: None for the file's; "mm", "in", ... or millimetres per unit to choose them.
     hold: "block" (one Block constraint per curve) or "free"."""
+    if hold not in ("block", "free"):
+        raise ValueError(f"hold must be 'block' or 'free', not {hold!r}")
     t = time.perf_counter()
     drawing = reader.read(path)
     k, name, from_file = resolve_units(drawing, units)
@@ -486,8 +548,6 @@ def insert(sketch, path, units=None, fit=True, tolerance=DEFAULT_TOLERANCE, corn
             sketch.addConstraint(
                 [_sketcher().Constraint("Block", i) for i in range(first, first + len(geos))]
             )
-        elif hold != "free":
-            raise ValueError(f"hold must be 'block' or 'free', not {hold!r}")
     rep.seconds = time.perf_counter() - t
     return rep
 
