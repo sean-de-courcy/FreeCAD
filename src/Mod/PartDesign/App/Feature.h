@@ -91,8 +91,6 @@ public:
     App::PropertyLinkGlobal StudioOwner;
     /// An owner's bases, written by reconcile: each in-scope part's solid just before its step
     App::PropertyLinkListGlobal StudioBases;
-    /// An owner's naming tag per part: part id -> tag (decimal), minted once (rule 2)
-    App::PropertyMap StudioTags;
     //@}
 
     /// The tag a step's names carry: its studio owner's object ID, 0 (its own) for any other

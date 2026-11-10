@@ -182,11 +182,6 @@ Feature::Feature()
                       "Studio",
                       App::Prop_Hidden,
                       "Each in-scope part's solid just before this studio feature (reconcile)");
-    ADD_PROPERTY_TYPE(StudioTags,
-                      (),
-                      "Studio",
-                      App::Prop_Hidden,
-                      "The naming tag of this studio feature in each part: part id -> tag");
     Placement.setStatus(App::Property::Hidden, true);
     BaseFeature.setStatus(App::Property::Hidden, true);
 
