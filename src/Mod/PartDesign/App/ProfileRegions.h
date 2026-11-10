@@ -6,8 +6,8 @@
 // notes/profile-regions.md). A sketch's regions are the bounded faces of the arrangement of its
 // solid curves (Sketcher's InternalShape, which also takes the model edges in its plane). A
 // feature takes one region, several, or the whole sketch; the whole sketch is every region of the
-// sketch's own curves except those whose outer boundary is another region's inner boundary
-// (Onshape's filterInnerLoops), and adjacent regions make one face.
+// sketch's own curves except those enclosed by curves touching the outer boundary of all the
+// regions nowhere (Onshape's filterInnerLoops), and adjacent regions make one face.
 
 #include <string>
 #include <vector>

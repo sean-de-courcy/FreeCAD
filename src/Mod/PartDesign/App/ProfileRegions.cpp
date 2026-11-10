@@ -5,14 +5,17 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <unordered_map>
 
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <Precision.hxx>
 #include <BRepTools.hxx>
+#include <Geom_Curve.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -47,17 +50,6 @@ struct Analysis
     bool simple = false;
 };
 
-std::vector<int> edgeKey(const TopoDS_Shape& wire, TopTools_IndexedMapOfShape& edges)
-{
-    std::vector<int> key;
-    for (TopExp_Explorer x(wire, TopAbs_EDGE); x.More(); x.Next()) {
-        key.push_back(edges.Add(x.Current()));  // orientation and location aside (IsSame)
-    }
-    std::ranges::sort(key);
-    key.erase(std::unique(key.begin(), key.end()), key.end());
-    return key;
-}
-
 std::size_t findRoot(std::vector<std::size_t>& parent, std::size_t i)
 {
     while (parent[i] != i) {
@@ -77,57 +69,83 @@ Analysis analyse(const std::vector<TopoDS_Face>& cells)
 
     TopTools_IndexedMapOfShape edges;
     std::vector<std::size_t> wireCount(n, 0);
-    // (cell, its holes' edge sets); a hole is an inner wire that shares no vertex with the cell's
-    // outer wire: a loop touching the outer boundary is no hole (Onshape, PR4)
-    std::vector<std::pair<std::size_t, std::vector<int>>> holes;
-    for (std::size_t i = 0; i < n; ++i) {
-        const TopoDS_Wire outerWire = BRepTools::OuterWire(cells[i]);
-        TopTools_IndexedMapOfShape outerVertices;
-        TopExp::MapShapes(outerWire, TopAbs_VERTEX, outerVertices);
-        for (TopoDS_Iterator it(cells[i]); it.More(); it.Next()) {
-            if (it.Value().ShapeType() != TopAbs_WIRE) {
-                continue;
-            }
-            ++wireCount[i];
-            if (it.Value().IsSame(outerWire)) {
-                edgeKey(it.Value(), edges);
-                continue;
-            }
-            bool touches = false;
-            for (TopExp_Explorer v(it.Value(), TopAbs_VERTEX); v.More() && !touches; v.Next()) {
-                touches = outerVertices.Contains(v.Current());
-            }
-            auto key = edgeKey(it.Value(), edges);
-            if (!touches) {
-                holes.emplace_back(i, std::move(key));
-            }
-        }
-    }
-    // The cells on each edge (one or two)
-    std::vector<std::vector<std::size_t>> edgeCells(edges.Extent() + 1);
     std::vector<std::vector<int>> cellEdges(n);
     for (std::size_t i = 0; i < n; ++i) {
+        for (TopoDS_Iterator it(cells[i]); it.More(); it.Next()) {
+            if (it.Value().ShapeType() == TopAbs_WIRE) {
+                ++wireCount[i];
+            }
+        }
         TopTools_IndexedMapOfShape own;
         TopExp::MapShapes(cells[i], TopAbs_EDGE, own);
         for (int k = 1; k <= own.Extent(); ++k) {
-            const int e = edges.FindIndex(own(k));
-            if (e > 0) {
-                edgeCells[e].push_back(i);
-                cellEdges[i].push_back(e);
-            }
+            cellEdges[i].push_back(edges.Add(own(k)));  // orientation and location aside (IsSame)
         }
     }
-    // filterInnerLoops: every region inside another region's hole is left out, whatever its own
-    // boundary (Onshape, PR1 and PR3): a flood from the hole's sides inwards, across shared sides
-    // other than the hole's
-    std::vector<bool> inside(n, false);
-    for (const auto& [owner, hole] : holes) {
+    // The cells on each edge (one or two); an edge on the outer boundary of all the regions is a
+    // side of one cell, once (a dangling edge kept inside a cell is a side twice, or internal)
+    std::vector<std::vector<std::size_t>> edgeCells(edges.Extent() + 1);
+    std::vector<int> sides(edges.Extent() + 1, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (int e : cellEdges[i]) {
+            edgeCells[e].push_back(i);
+        }
+        for (TopExp_Explorer x(cells[i], TopAbs_EDGE); x.More(); x.Next()) {
+            const int e = edges.FindIndex(x.Current());
+            const auto o = x.Current().Orientation();
+            sides[e] += (o == TopAbs_FORWARD || o == TopAbs_REVERSED) ? 1 : 2;
+        }
+    }
+    auto onBoundary = [&](int e) {
+        return sides[e] == 1;
+    };
+
+    // filterInnerLoops (Onshape, PR1-PR4, PRQ1, PRQ2): a curve of the sketch that touches the outer
+    // boundary of all the regions (an edge of it on that boundary, or a point of it on one) bounds
+    // no hole; the cells the other curves enclose are left out, whatever their own boundary. So a
+    // line from side to side through a circle keeps the circle a hole (PRQ1), a circle tangent to
+    // the outer side from inside is no hole (PR4), and a square across a hole's corner is left out
+    // whole, its part in the material too (PRQ2). The cells' edges are pieces of the sketch's
+    // curves, each keeping its curve (BOPAlgo trims it): the curve is the edge's Geom_Curve.
+    std::vector<std::size_t> curveOf(edges.Extent() + 1, 0);
+    {
+        std::unordered_map<const Geom_Curve*, std::size_t> curves;
+        std::size_t curveCount = 0;
+        for (int e = 1; e <= edges.Extent(); ++e) {
+            TopLoc_Location location;
+            double first {}, last {};
+            const Handle(Geom_Curve) c =
+                BRep_Tool::Curve(TopoDS::Edge(edges(e)), location, first, last);
+            if (c.IsNull()) {
+                curveOf[e] = curveCount++;  // no curve: a curve of its own
+                continue;
+            }
+            const auto [it, added] = curves.try_emplace(c.get(), curveCount);
+            curveCount += added ? 1 : 0;
+            curveOf[e] = it->second;
+        }
+        std::vector<bool> touching(curveCount, false);
+        TopTools_IndexedMapOfShape boundaryVertices;
+        for (int e = 1; e <= edges.Extent(); ++e) {
+            if (onBoundary(e)) {
+                touching[curveOf[e]] = true;
+                TopExp::MapShapes(edges(e), TopAbs_VERTEX, boundaryVertices);
+            }
+        }
+        for (int e = 1; e <= edges.Extent(); ++e) {
+            for (TopExp_Explorer v(edges(e), TopAbs_VERTEX); v.More() && !touching[curveOf[e]];
+                 v.Next()) {
+                touching[curveOf[e]] = boundaryVertices.Contains(v.Current());
+            }
+        }
+        // a flood from the outside (the cells on the outer boundary) across the touching curves
+        std::vector<bool> reached(n, false);
         std::vector<std::size_t> queue;
-        for (int e : hole) {
-            for (auto c : edgeCells[e]) {
-                if (c != owner && !inside[c]) {
-                    inside[c] = true;
-                    queue.push_back(c);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (int e : cellEdges[i]) {
+                if (onBoundary(e) && !reached[i]) {
+                    reached[i] = true;
+                    queue.push_back(i);
                 }
             }
         }
@@ -135,21 +153,23 @@ Analysis analyse(const std::vector<TopoDS_Face>& cells)
             const auto c = queue.back();
             queue.pop_back();
             for (int e : cellEdges[c]) {
-                if (std::ranges::binary_search(hole, e)) {
+                if (!touching[curveOf[e]]) {
                     continue;
                 }
                 for (auto d : edgeCells[e]) {
-                    if (d != owner && !inside[d]) {
-                        inside[d] = true;
+                    if (!reached[d]) {
+                        reached[d] = true;
                         queue.push_back(d);
                     }
                 }
             }
         }
+        for (std::size_t i = 0; i < n; ++i) {
+            a.kept[i] = reached[i];
+        }
     }
     bool islands = false;
     for (std::size_t i = 0; i < n; ++i) {
-        a.kept[i] = !inside[i];
         islands = islands || (!a.kept[i] && wireCount[i] > 1);
     }
 

@@ -4,8 +4,8 @@
 # Onshape's rule (notes/profile-regions.md): a sketch's regions are the bounded faces of the
 # arrangement of its solid curves, plus the model edges lying in its plane (imprint). A feature
 # takes one region, several, or the whole sketch; the whole sketch is every region of the
-# sketch's own curves except those whose outer boundary is another region's inner boundary
-# (filterInnerLoops). Every case is designed geometry with a geometric expectation; a Pad of
+# sketch's own curves except those enclosed by curves that touch the outer boundary of all the
+# regions nowhere (filterInnerLoops). Every case is designed geometry with a geometric expectation; a Pad of
 # length 1 on XY has the profile's area as its volume.
 
 import math
@@ -183,6 +183,110 @@ class TestProfileRegions(unittest.TestCase):
         self.Doc.recompute()
         self.assertEqual(len(sk.InternalShape.Faces), 3)
         self.assertVolume(self.pad(body, sk), 400 - 16 * math.pi, solids=1)
+
+    def testWholeSketchLineSideToSideThroughAHoleKeepsTheHole(self):
+        """A 20 x 20 square, a circle of r 4 at its centre and a line y = 10 from side to side:
+        four regions (two halves 200 - 8 pi, two half discs 8 pi). The line cuts the circle into
+        two arcs, each on the outer wire of a half, but the circle touches the outer boundary
+        nowhere, so it is still a hole: 400 - 16 pi, one solid (Onshape, PRQ1; before: 400)."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        sk.addGeometry(Part.LineSegment(V(0, 10, 0), V(20, 10, 0)), False)
+        self.Doc.recompute()
+        self.assertEqual(
+            sorted(round(f.Area, 6) for f in sk.InternalShape.Faces),
+            sorted(round(a, 6) for a in (8 * math.pi, 8 * math.pi, 200 - 8 * math.pi, 200 - 8 * math.pi)),
+        )
+        self.assertVolume(self.pad(body, sk), 400 - 16 * math.pi, solids=1)
+
+    def testWholeSketchSquareAcrossAHoleCornerIsLeftOutWhole(self):
+        """Squares (0,0)-(20,20) and (5,5)-(15,15), and (12,12)-(18,18) across the hole's corner:
+        regions 273, 91, 9 and 27. The third square touches the outer boundary nowhere, so all of
+        it is left out, its part in the material too: 273, one solid (Onshape, PRQ2; before:
+        300, the 27 filled)."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        rect(sk, 5, 5, 15, 15)
+        rect(sk, 12, 12, 18, 18)
+        self.Doc.recompute()
+        self.assertEqual(sorted(round(f.Area, 6) for f in sk.InternalShape.Faces), [9, 27, 91, 273])
+        self.assertVolume(self.pad(body, sk), 273, solids=1)
+
+    def testWholeSketchLineIntoAHoleKeepsTheHole(self):
+        """A 20 x 20 square, a circle of r 4 at its centre and a line from the left side to the
+        circle's centre: the line touches the outer boundary, the circle does not, so the disc
+        (cut by the line's end piece, still one region) is a hole: 400 - 16 pi."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        sk.addGeometry(Part.LineSegment(V(0, 10, 0), V(10, 10, 0)), False)
+        self.Doc.recompute()
+        self.assertVolume(self.pad(body, sk), 400 - 16 * math.pi, solids=1)
+
+    def testWholeSketchCrossThroughAHoleKeepsTheHole(self):
+        """PRQ1 with a second line x = 10 from side to side: eight regions, the hole kept: 400 -
+        16 pi, one solid."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        sk.addGeometry(Part.LineSegment(V(0, 10, 0), V(20, 10, 0)), False)
+        sk.addGeometry(Part.LineSegment(V(10, 0, 0), V(10, 20, 0)), False)
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 8)
+        self.assertVolume(self.pad(body, sk), 400 - 16 * math.pi, solids=1)
+
+    def testWholeSketchHashOfOpenLinesIsAHole(self):
+        """A 20 x 20 square and a hash of four lines (x = 6, 14 from y = 4 to 16; y = 6, 14 from
+        x = 4 to 16), none touching the square: no closed chain of curves, but the lines touch the
+        outer boundary nowhere, so the 8 x 8 centre they close is a hole: 336, one solid
+        (Onshape, PRQ3)."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        for k in (6, 14):
+            sk.addGeometry(Part.LineSegment(V(k, 4, 0), V(k, 16, 0)), False)
+            sk.addGeometry(Part.LineSegment(V(4, k, 0), V(16, k, 0)), False)
+        self.Doc.recompute()
+        self.assertEqual(sorted(round(f.Area, 6) for f in sk.InternalShape.Faces), [64, 336])
+        self.assertVolume(self.pad(body, sk), 336, solids=1)
+
+    def testWholeSketchCircleTangentToALineAcrossIsAHole(self):
+        """A 20 x 20 square, a line x = 10 from side to side and a circle of r 3 at (7, 10)
+        touching the line from the left: the line touches the outer boundary, the circle only the
+        line, so it is a hole: 400 - 9 pi, one solid (Onshape, PRQ4)."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 20, 20)
+        sk.addGeometry(Part.LineSegment(V(10, 0, 0), V(10, 20, 0)), False)
+        sk.addGeometry(Part.Circle(V(7, 10, 0), V(0, 0, 1), 3), False)
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 3)
+        self.assertVolume(self.pad(body, sk), 400 - 9 * math.pi, solids=1)
+
+    def testWholeSketchCircleTangentToASharedSideIsAHole(self):
+        """Two 10 x 10 squares drawn as one chain of seven lines sharing the side x = 10, and a
+        circle of r 3 at (7, 5) touching that side from the left: the shared side touches the outer
+        boundary at its ends, the circle touches it only inside, so it is a hole: 200 - 9 pi
+        (Onshape, PRQ5)."""
+        body, sk = self.sketch()
+        for p, q in (((0, 0), (10, 0)), ((10, 0), (10, 10)), ((10, 10), (0, 10)), ((0, 10), (0, 0)),
+                     ((10, 0), (20, 0)), ((20, 0), (20, 10)), ((20, 10), (10, 10))):
+            sk.addGeometry(Part.LineSegment(V(*p, 0), V(*q, 0)), False)
+        sk.addGeometry(Part.Circle(V(7, 5, 0), V(0, 0, 1), 3), False)
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 3)
+        self.assertVolume(self.pad(body, sk), 200 - 9 * math.pi, solids=1)
+
+    def testWholeSketchGridIsFilled(self):
+        """A 30 x 30 square cut into nine cells by two lines each way, side to side: no curve
+        encloses the centre cell away from the outer boundary, so all nine: 900."""
+        body, sk = self.sketch()
+        rect(sk, 0, 0, 30, 30)
+        for k in (10, 20):
+            sk.addGeometry(Part.LineSegment(V(k, 0, 0), V(k, 30, 0)), False)
+            sk.addGeometry(Part.LineSegment(V(0, k, 0), V(30, k, 0)), False)
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 9)
+        self.assertVolume(self.pad(body, sk), 900, solids=1)
 
     def testWholeSketchLoopCutByALine(self):
         """A 10 x 10 square crossed by a line at y = 4 running past both sides: two regions,

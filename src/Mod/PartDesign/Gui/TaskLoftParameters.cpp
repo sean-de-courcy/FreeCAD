@@ -67,12 +67,13 @@ QString loftTaskTitle(ViewProviderLoft* view)
                                    : TaskLoftParameters::tr("Additive Loft Parameters");
 }
 
-// A sketch is taken whole, unless one of its points is picked: the loft takes the whole sketch for
-// any other element of it (Loft::getSectionShape)
+// A sketch is taken whole, unless one of its points or regions is picked: the loft takes the
+// whole sketch for any other element of it, and a picked region as it is (Loft::getSectionShape)
 std::string sectionElement(App::DocumentObject* obj, const char* sub)
 {
     std::string element = Base::Tools::isNullOrEmpty(sub) ? std::string() : std::string(sub);
-    if (obj && obj->isDerivedFrom<Part::Part2DObject>() && !boost::starts_with(element, "Vertex")) {
+    if (obj && obj->isDerivedFrom<Part::Part2DObject>()
+        && !ReferenceField::keepsSketchElement(element)) {
         element.clear();
     }
     return element;
