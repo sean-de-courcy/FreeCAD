@@ -161,7 +161,8 @@ App::DocumentObjectExecReturn* Thickness::execute()
             TopoShape res = makeTopoShape(false);
             try {
                 if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
-                    solid.Tag = getID();
+                    // a studio step names by its owner (ops#654, notes/stored-tags.md 3 item 2)
+                    solid.Tag = namingTag() ? namingTag() : getID();
                 }
 
                 res = solid.makeElementThickSolid(

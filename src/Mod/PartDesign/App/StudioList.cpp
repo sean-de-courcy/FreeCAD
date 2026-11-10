@@ -25,8 +25,17 @@
 #include "FeatureApply.h"
 #include "FeatureBase.h"
 #include "FeatureMultiTransform.h"
+#include "Retarget.h"
 #include "Studio.h"
 #include "StudioList.h"
+
+namespace App
+{
+// App/DocumentObject.cpp (FreeCAD-CH ops#325): the readers of obj through a subname path, which
+// aren't in obj's in-list (declared where used, as in Body.cpp)
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
+                                                          std::vector<DocumentObject*>* links = nullptr);
+}  // namespace App
 
 using namespace PartDesign;
 
@@ -213,6 +222,75 @@ positionsOf(const std::vector<App::DocumentObject*>& entries)
         }
     }
     return positions;
+}
+
+/// text as a piece of an object name, one to one: letters and digits stay, '_' becomes "__" and
+/// every other byte "_HH" (two upper-case hex digits). So '_' is always followed by '_' or a hex
+/// digit, and "_at_" (a lower-case letter after '_') can separate two pieces unambiguously
+std::string namePiece(const std::string& text)
+{
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : text) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            out += static_cast<char>(c);
+        }
+        else if (c == '_') {
+            out += "__";
+        }
+        else {
+            out += '_';
+            out += hex[c >> 4];
+            out += hex[c & 0xF];
+        }
+    }
+    return out;
+}
+
+/// The objects that read step (in body) beyond the chain: an in-list object linking it by any
+/// property but a Body member's BaseFeature (the next feature of the chain) and an owner's
+/// StudioBases (written by reconcile), and the readers through a subname path. Not the Body, the
+/// step's owner or a list (FreeCAD-CH ops#654, notes/stored-tags.md 3 item 5)
+std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, const Body* body)
+{
+    std::vector<App::DocumentObject*> out;
+    const App::DocumentObject* owner = ownerOfStep(step);
+    auto add = [&out](App::DocumentObject* obj) {
+        if (std::ranges::find(out, obj) == out.end()) {
+            out.push_back(obj);
+        }
+    };
+    for (auto in : step->getInList()) {
+        if (!in || in == body || in == owner || in == step || in->isDerivedFrom<StudioList>()) {
+            continue;
+        }
+        const bool member = body && body->hasObject(in);
+        std::vector<App::Property*> props;
+        in->getPropertyList(props);
+        for (auto prop : props) {
+            auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+            if (!link) {
+                continue;
+            }
+            const char* name = prop->getName();
+            const std::string propName = name ? name : "";
+            if ((member && propName == "BaseFeature") || propName == "StudioBases") {
+                continue;
+            }
+            std::vector<App::DocumentObject*> linked;
+            link->getLinks(linked, /*all=*/true);
+            if (std::ranges::find(linked, step) != linked.end()) {
+                add(in);
+                break;
+            }
+        }
+    }
+    for (auto reader : App::subnamePathReaders(step)) {
+        if (reader && reader != body && reader != owner && !reader->isDerivedFrom<StudioList>()) {
+            add(reader);
+        }
+    }
+    return out;
 }
 
 App::Part* studioOfObject(const App::DocumentObject* obj)
@@ -402,8 +480,17 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
     }
     const auto bodies = studioBodies(doc, studio());
     const std::set<const Body*> inStudio(bodies.begin(), bodies.end());
+    std::map<std::string, const Body*> byId;
     for (auto body : bodies) {
         out.chains[body];
+        // A Body copied alone keeps the original's part id (and its steps the original's owners):
+        // refused loudly until P7a decides what a copy is (parts-design.md 10.6)
+        const std::string id = studioPartId(body);
+        auto [it, added] = byId.emplace(id, body);
+        if (!added) {
+            out.errors.push_back("part id '" + id + "' is held by two parts, " + quoted(it->second)
+                                 + " and " + quoted(body));
+        }
     }
     const auto elsewhere = entriesElsewhere(this);
     const int size = static_cast<int>(entries.size());
@@ -543,8 +630,74 @@ bool StudioList::reconcile(std::string* why)
         }
     }
 
-    // 2. Project; refuse before writing anything
-    const Projection projection = projectEntries(entries, bar);
+    // 2. Project, and plan every write; refuse before writing anything
+    Projection projection = projectEntries(entries, bar);
+    const auto positions = positionsOf(entries);
+    const int size = static_cast<int>(entries.size());
+    const int barAt = bar < 0 || bar > size ? size : bar;
+
+    // Each existing step is reused (its key, (owner, part), is in the projection; the first one
+    // of a key), or unwanted: its owner is gone, out of the list, or no longer acts on the part.
+    // An unwanted step that something reads is kept, suppressed, at its place (a reader of a step
+    // deleted and made again would lose its link, notes/stored-tags.md "In short"); one without
+    // readers is deleted. A step whose part isn't in its owner's scope and whose name isn't the one
+    // made for that part (a Body copied with its steps) is refused, not deleted
+    std::vector<App::DocumentObject*> doomed;
+    std::map<const Body*, std::vector<Feature*>> kept;
+    for (auto body : bodies) {
+        const auto& chain = projection.chains.at(body);
+        std::set<const App::DocumentObject*> wanted;
+        for (const auto& slot : chain) {
+            if (slot.isStep) {
+                wanted.insert(slot.entry);
+            }
+        }
+        std::set<const App::DocumentObject*> seen;
+        for (auto member : body->Group.getValues()) {
+            if (!member || !isStep(member)) {
+                continue;
+            }
+            auto owner = ownerOfStep(member);
+            if (owner && wanted.count(owner) && seen.insert(owner).second) {
+                continue;
+            }
+            if (owner && positions.count(owner) && !wanted.count(owner) && owner->isAttachedToDocument()
+                && stepName(owner, body) != member->getNameInDocument()) {
+                projection.errors.push_back(
+                    quoted(member) + ", a step of " + quoted(owner) + ", is in " + quoted(body)
+                    + " (part id '" + studioPartId(body) + "'), a part its scope doesn't hold, and "
+                    + "wasn't made there (a part copied with its steps?)"
+                );
+                continue;
+            }
+            if (readersOf(member, body).empty()) {
+                doomed.push_back(member);
+            }
+            else {
+                kept[body].push_back(static_cast<Feature*>(member));
+            }
+        }
+    }
+    // The steps to make, under their names; a name another object has is an error, never a
+    // suffix (step names are link anchors, parts-design.md 10.6)
+    std::set<std::string> planned;
+    for (auto body : bodies) {
+        for (const auto& slot : projection.chains.at(body)) {
+            if (!slot.isStep || stepOf(slot.entry, body)) {
+                continue;
+            }
+            const std::string name = stepName(slot.entry, body);
+            auto other = doc->getObject(name.c_str());
+            if ((other && std::ranges::find(doomed, other) == doomed.end())
+                || !planned.insert(name).second) {
+                projection.errors.push_back(
+                    "The step of " + quoted(slot.entry) + " in " + quoted(body) + " must be named '"
+                    + name + "', which " + (other ? quoted(other) : std::string("another step"))
+                    + " has"
+                );
+            }
+        }
+    }
     if (!projection.errors.empty()) {
         std::string text;
         for (const auto& error : projection.errors) {
@@ -562,64 +715,99 @@ bool StudioList::reconcile(std::string* why)
         }
     }
 
-    // 3. Remove the steps whose owner is gone, out of the list, or no longer acts on the part (a
-    // part dropped from a scope loses its step: names come from the owner's tool, so a step made
-    // again later makes the same names, work/standby-f/tags.log); a second step of one key too.
-    // All first, so the names of the steps made below are free
-    for (auto body : bodies) {
-        const auto& chain = projection.chains.at(body);
-        std::set<const App::DocumentObject*> wanted;
-        for (const auto& slot : chain) {
-            if (slot.isStep) {
-                wanted.insert(slot.entry);
-            }
-        }
-        std::set<const App::DocumentObject*> seen;
-        const auto members = body->Group.getValues();
-        for (auto member : members) {
-            if (!member || !isStep(member)) {
-                continue;
-            }
-            auto owner = ownerOfStep(member);
-            if (owner && wanted.count(owner) && seen.insert(owner).second) {
-                continue;
-            }
-            const std::string name = member->getNameInDocument();
+    // 3. Remove the unwanted steps without readers, first, so the names of the steps made below
+    // are free; suppress the kept ones
+    for (auto member : doomed) {
+        const std::string name = member->getNameInDocument();
+        if (Body* body = Body::findBodyOf(member)) {
             body->removeObject(member);
-            doc->removeObject(name.c_str());
+        }
+        doc->removeObject(name.c_str());
+    }
+    for (const auto& [body, steps] : kept) {
+        for (auto step : steps) {
+            if (!step->Suppressed.getValue()) {
+                step->Suppressed.setValue(true);
+            }
         }
     }
 
-    // 4. Make the missing steps and put every Body's chain in the projected order. A member that
-    // isn't in the chain (an anchor) keeps its place; a slot already right after the one before
-    // it isn't touched. Steps move by removeObject() and insertObject(), which keep the
-    // BaseFeature links; native members by reorderObject(), which also re-targets their references
+    // 4. Make the missing steps and put every Body's chain in the projected order: the projected
+    // slots by their entries' places in the list, a kept step at its owner's place (or, its owner
+    // gone from the list, after the member before it). A member that isn't in the chain (an anchor)
+    // keeps its place; a slot already right after the one before it isn't touched. Steps move by
+    // removeObject() and insertObject(), which keep the BaseFeature links; native members by
+    // reorderObject(), which also re-targets their references
+    struct Item
+    {
+        App::DocumentObject* obj;
+        double key;
+        bool held;
+    };
     std::map<const App::DocumentObject*, std::vector<std::pair<Body*, Feature*>>> stepsByOwner;
+    std::map<const Body*, std::vector<Item>> orders;
     for (auto body : bodies) {
         const auto& chain = projection.chains.at(body);
-        std::vector<App::DocumentObject*> wanted;
+        std::vector<Item> items;
         for (const auto& slot : chain) {
+            const auto at = positions.find(slot.entry);
+            const double key = at == positions.end() ? size : at->second;
             if (!slot.isStep) {
-                wanted.push_back(slot.entry);
+                items.push_back({slot.entry, key, slot.held});
                 continue;
             }
             Feature* step = stepOf(slot.entry, body);
             if (!step) {
                 const std::string type = studioStepType(slot.entry);
-                auto obj = doc->addObject(type.c_str(), stepName(slot.entry, body).c_str());
+                const std::string name = stepName(slot.entry, body);
+                auto obj = doc->addObject(type.c_str(), name.c_str());
                 step = freecad_cast<Feature*>(obj);
-                if (!step) {
+                if (!step || name != obj->getNameInDocument()) {
                     if (obj) {
                         doc->removeObject(obj->getNameInDocument());
                     }
-                    return fail(type + " is not a PartDesign feature: no step for "
-                                + quoted(slot.entry));
+                    return fail(type + " is not a PartDesign feature, or its name isn't '" + name
+                                + "': no step for " + quoted(slot.entry));
                 }
                 step->StudioOwner.setValue(slot.entry);
                 step->Visibility.setValue(false);
             }
             stepsByOwner[slot.entry].emplace_back(body, step);
-            wanted.push_back(step);
+            items.push_back({step, key, slot.held});
+        }
+        if (auto found = kept.find(body); found != kept.end()) {
+            const auto group = body->Group.getValues();
+            for (auto step : found->second) {
+                Item item {step, -1.0, false};
+                const auto at = positions.find(ownerOfStep(step));
+                if (at != positions.end()) {
+                    item.key = at->second;
+                    item.held = at->second >= barAt;
+                }
+                else {
+                    // After the projected member before it in the Group
+                    auto here = std::ranges::find(group, step);
+                    while (here != group.begin()) {
+                        --here;
+                        auto before = std::ranges::find_if(items, [here](const Item& i) {
+                            return i.obj == *here;
+                        });
+                        if (before != items.end()) {
+                            item.key = before->key + 0.5;
+                            item.held = before->held;
+                            break;
+                        }
+                    }
+                }
+                items.push_back(item);
+            }
+        }
+        std::ranges::stable_sort(items, {}, &Item::key);
+        orders[body] = items;
+
+        std::vector<App::DocumentObject*> wanted;
+        for (const auto& item : items) {
+            wanted.push_back(item.obj);
         }
         const std::set<const App::DocumentObject*> inChain(wanted.begin(), wanted.end());
         App::DocumentObject* previous = nullptr;
@@ -642,6 +830,9 @@ bool StudioList::reconcile(std::string* why)
             const bool present = std::ranges::find(group, obj) != group.end();
             if (present && !isStep(obj)) {
                 try {
+                    // FreeCAD-CH ops#654 S3: the list places every member, so only obj moves (no
+                    // input carried with it, as the Features list's drag, Retarget.h)
+                    OnlyGivenObjects onlyObj;
                     body->reorderObject({obj}, previous, true);
                 }
                 catch (const Base::Exception& e) {
@@ -663,8 +854,16 @@ bool StudioList::reconcile(std::string* why)
         }
     }
 
-    // 5. The steps' values from their owners; the owners' bases at their place
-    for (const auto& [owner, steps] : stepsByOwner) {
+    // 5. The steps' values from their owners; the owners' bases at their place, in scope order
+    for (auto& [owner, steps] : stepsByOwner) {
+        const auto at = positions.find(owner);
+        const auto scope = resolveScope(studioScopeIds(owner),
+                                        bodies,
+                                        at == positions.end() ? size : at->second,
+                                        positions);
+        std::ranges::stable_sort(steps, {}, [&scope](const std::pair<Body*, Feature*>& step) {
+            return std::ranges::find(scope, step.first) - scope.begin();
+        });
         std::vector<App::DocumentObject*> bases;
         for (const auto& [body, step] : steps) {
             if (step->StudioOwner.getValue() != owner) {
@@ -707,17 +906,14 @@ bool StudioList::reconcile(std::string* why)
         }
     }
 
-    // 6. Each Body's Tip from the bar: its last active solid, else its base feature (or none)
+    // 6. Each Body's Tip from the bar: its last active solid (a kept step included, so a part
+    // dropped from the last feature's scope isn't rolled back by it), else its base feature
     for (auto body : bodies) {
         App::DocumentObject* tip = nullptr;
-        const auto& chain = projection.chains.at(body);
-        for (auto it = chain.rbegin(); it != chain.rend() && !tip; ++it) {
-            if (it->held) {
-                continue;
-            }
-            App::DocumentObject* obj = it->isStep ? stepOf(it->entry, body) : it->entry;
-            if (Body::isSolidFeature(obj)) {
-                tip = obj;
+        const auto& items = orders.at(body);
+        for (auto it = items.rbegin(); it != items.rend() && !tip; ++it) {
+            if (!it->held && Body::isSolidFeature(it->obj)) {
+                tip = it->obj;
             }
         }
         if (!tip) {
@@ -772,7 +968,10 @@ std::vector<Feature*> StudioList::stepsOf(const App::DocumentObject* owner)
 
 std::string StudioList::stepName(const App::DocumentObject* owner, const Body* body)
 {
-    return std::string(owner->getNameInDocument()) + "_" + body->getNameInDocument();
+    // A function of (owner name, part id), one to one (namePiece() and the "_at_" between them):
+    // names are link anchors (sketch attachments, external geometry, Up to faces) and part of the
+    // file format, so a step made again gets the same one (parts-design.md 10.6)
+    return namePiece(owner->getNameInDocument()) + "_at_" + namePiece(studioPartId(body));
 }
 
 bool StudioList::isStep(const App::DocumentObject* obj)
@@ -863,27 +1062,10 @@ void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Bo
     setStudioScopeIds(owner, ids);
 }
 
-long PartDesign::studioTagFor(const App::DocumentObject* owner, const Body* body)
+long PartDesign::studioTagFor(const App::DocumentObject* owner, const Body* /*body*/)
 {
-    if (!owner) {
-        return 0;
-    }
-    if (auto tags = freecad_cast<App::PropertyMap*>(owner->getPropertyByName("StudioTags"))) {
-        const auto& values = tags->getValues();
-        auto it = values.find(studioPartId(body));
-        if (it != values.end()) {
-            try {
-                const long tag = std::stol(it->second);
-                if (tag != 0) {
-                    return tag;
-                }
-            }
-            catch (const std::exception&) {
-                // not a number: the owner's own tag
-            }
-        }
-    }
-    return owner->getID();
+    // The owner's ID, in every part: no stored tags (format rule, parts-design.md 10.6 and 10.10)
+    return owner ? owner->getID() : 0;
 }
 
 std::string PartDesign::studioStepType(const App::DocumentObject* /*owner*/)

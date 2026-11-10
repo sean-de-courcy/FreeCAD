@@ -80,11 +80,15 @@ Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::stri
     }
     const std::string label = std::string("'") + owner->Label.getValue() + "'";
     Part::TopoShape tool;
+    // The frame the tool's own location is in: an owner's AddSubShape is in the owner's frame; a
+    // shape object's Shape carries the object's Placement already, so it is in its container's
+    Base::Placement frame = App::GeoFeature::getGlobalPlacement(owner);
     if (auto addSub = freecad_cast<const FeatureAddSub*>(owner)) {
         tool = addSub->AddSubShape.getShape();
     }
     else if (auto feature = freecad_cast<const Part::Feature*>(owner)) {
         tool = feature->Shape.getShape();
+        frame = frame * feature->Placement.getValue().inverse();
     }
     else {
         return fail(label + " makes no shape to apply");
@@ -92,8 +96,8 @@ Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::stri
     if (tool.isNull()) {
         return fail(label + " has no tool");
     }
-    // In the document's frame: the owner's placement in its studio
-    tool.setPlacement(App::GeoFeature::getGlobalPlacement(owner));
+    // In the document's frame, the tool's own location kept (composed, not replaced)
+    tool.setPlacement(frame * tool.getPlacement());
     return tool;
 }
 

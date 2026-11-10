@@ -52,3 +52,4 @@ studioSuppress = _PartDesign.studioSuppress
 studioReconcile = _PartDesign.studioReconcile
 studioProject = _PartDesign.studioProject
 studioStepOf = _PartDesign.studioStepOf
+studioNewPart = _PartDesign.studioNewPart  # ops#654 S2

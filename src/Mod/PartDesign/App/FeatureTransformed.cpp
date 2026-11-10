@@ -706,8 +706,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
             shapes.emplace_back(makeResultShape(origShape)
                                     .makeElementTransform(origShape, *transformIter, opName.c_str()));
             if (nameInstances) {
+                // a studio step names by its owner (ops#654, notes/stored-tags.md 3 item 2)
                 shapes.back().appendElementSection(
-                    getID(),
+                    namingTag() ? namingTag() : getID(),
                     Part::OpCodes::Transformed,
                     numbers[instance - 1]
                 );

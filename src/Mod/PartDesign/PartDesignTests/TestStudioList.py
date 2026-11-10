@@ -14,11 +14,16 @@
 #
 # The property test: random edits (insert, delete, move, scope, depth, suppress, the bar, undo,
 # redo, save and reopen). After each, the document must equal one built from scratch from its
-# list: each Body's chain in order (steps by owner name), its Tip, volume, area, solid count, the
-# steps in error, and the element names with object IDs written as object names. And the names
-# gate (one-history rule 3, a hard assertion): delete every step, regenerate them all from the
-# list, and every Body's element names are identical. STUDIO_PROP_SEEDS (e.g. "1,2,3") and
-# STUDIO_PROP_OPS set the size for a long run.
+# list (G2, notes/stored-tags.md 4): each Body's chain in order (steps by owner name), its Tip, the
+# state at the bar (the Tip's volume, area, solid count and element names, object IDs written as
+# object names; the from-scratch build makes the owners in the live document's ID order, since
+# names depend on the IDs' order), the steps in error, and the Body's own shape when it isn't
+# rolled back (a rolled-back Body keeps its last complete shape, design R5 of
+# notes/reorder-rollback-design.md, which depends on the history, not on the list). And G1, in the
+# document itself: every active step deleted and made again from the list gives every Tip and
+# active step identical names on the same geometry, and so does aborting that. The control (a
+# step tagged with its own ID, as a step written like Pocket) must fail G1. STUDIO_PROP_SEEDS
+# (e.g. "1,2,3") and STUDIO_PROP_OPS set the size for a long run.
 
 import os
 import random
@@ -31,7 +36,7 @@ import Part
 import PartDesign
 
 from PartDesignTests.Scenarios.harness import Masker
-from PartDesignTests.TestStudio import pad, sketch, xyPlane
+from PartDesignTests.TestStudio import faceAt, pad, sketch, xyPlane
 
 V = App.Vector
 PARTS = (("A", 0), ("B", 20), ("C", 40))
@@ -39,8 +44,21 @@ NATIVES = 6  # each part's sketch and Pad, first in the list
 
 
 # ------------------------------------------------------------------------------------- the model
+def idWidth(doc, width=4):
+    """Moves doc's next object ID up to `width` decimal digits. A document starts its IDs at a
+    random 0-5000 (Document.cpp), and names sort tagged names by their bytes, so an ID of 3 digits
+    sorts after one of 4 that is larger: comparing names across documents (G2) needs IDs of one
+    width in both, as it needs their order."""
+    probe = doc.addObject("App::DocumentObjectGroup", "IdProbe")
+    start = probe.ID
+    doc.removeObject(probe.Name)
+    for _ in range(max(0, 10 ** (width - 1) - start - 1)):
+        doc.removeObject(doc.addObject("App::DocumentObjectGroup", "IdProbe").Name)
+
+
 def newStudio(name, parts=PARTS):
     doc = App.newDocument(name)
+    idWidth(doc)
     doc.UndoMode = 1
     studio = doc.addObject("App::Part", "S")
     for p, x in parts:
@@ -91,6 +109,7 @@ def ownerRecord(box):
     ]
     return dict(
         name=box.Name,
+        id=box.ID,
         rect=rect,
         depth=depth,
         op=op,
@@ -170,6 +189,8 @@ def failedUpToTip(body):
 
 
 def snapshot(doc, names=True):
+    """Each part's chain, Tip and state at the bar (the Tip's shape); the Body's own shape only
+    when it isn't rolled back (rolled back, it keeps its last complete shape: design R5)."""
     out = {}
     masker = Masker(doc) if names else None
     for p, _ in PARTS:
@@ -177,7 +198,8 @@ def snapshot(doc, names=True):
         if body is None:
             continue
         tip = body.Tip
-        shape = body.Shape
+        shape = tip.Shape if tip else Part.Shape()
+        rolled = body.isRolledBack()
         out[p] = dict(
             chain=chainOf(body),
             suppressed=sorted(o.StudioOwner.Name for o in body.Group if isStep(o) and o.Suppressed),
@@ -186,6 +208,8 @@ def snapshot(doc, names=True):
             area=0.0 if shape.isNull() else round(shape.Area, 4),
             solids=0 if shape.isNull() else len(shape.Solids),
             failed=failedUpToTip(body),
+            rolledBack=rolled,
+            body=None if rolled or body.Shape.isNull() else round(body.Shape.Volume, 4),
         )
         if names:
             out[p]["names"] = elementNames(shape, masker)
@@ -202,42 +226,145 @@ def listOf(doc):
     return natives, records, bar
 
 
-def deleteSteps(doc):
+def deleteSteps(doc, active=False):
+    """Deletes every step (with active, only those up to the Tip and not suppressed)."""
     for p, _ in PARTS:
         body = doc.getObject(p)
-        for obj in list(body.Group):
-            if isStep(obj):
-                body.removeObject(obj)
-                doc.removeObject(obj.Name)
+        for obj in activeSteps(body) if active else [o for o in body.Group if isStep(o)]:
+            body.removeObject(obj)
+            doc.removeObject(obj.Name)
 
 
-def fromScratch(natives, records, bar, gate=None):
-    """The document built from scratch from the list: the same parts, the owners appended in the
-    list's order, then the bar. With gate (a list), the names gate runs on it too: every step
-    deleted and regenerated from the list gives identical names; differences go into gate."""
+def activeSteps(body):
+    """The steps up to the Tip, not suppressed (a held or suppressed step's shape isn't
+    recomputed, and nothing reads it until it is active again)."""
+    group = list(body.Group)
+    last = group.index(body.Tip) if body.Tip in group else -1
+    return [o for o in group[: last + 1] if isStep(o) and not o.Suppressed]
+
+
+def plainNames(shape):
+    """Each element's plain mapped name -> its geometry (kind, centre, size): faces, edges and
+    vertices."""
+    out = {}
+    if shape.isNull():
+        return out
+    for kind, items in (("Face", shape.Faces), ("Edge", shape.Edges), ("Vertex", shape.Vertexes)):
+        for i, element in enumerate(items, 1):
+            mapped = shape.getElementMappedName(f"{kind}{i}")
+            mapped = mapped[0] if isinstance(mapped, tuple) else mapped
+            if not mapped:
+                continue
+            point = element.Point if kind == "Vertex" else element.CenterOfMass
+            size = element.Area if kind == "Face" else element.Length if kind == "Edge" else 0
+            key = (kind, *(round(c, 4) for c in point), round(size, 4))
+            out[str(App.expandMappedName(str(mapped)))] = key
+    return out
+
+
+def g1Record(doc):
+    """G1's record: every Tip's and every active step's names with their geometry."""
+    out = {}
+    for p, _ in PARTS:
+        body = doc.getObject(p)
+        out[p] = plainNames(body.Tip.Shape) if body.Tip else {}
+        for step in activeSteps(body):
+            out[f"{step.StudioOwner.Name}@{p}"] = plainNames(step.Shape)
+    return out
+
+
+def g1Differences(before, after):
+    """Names lost, new, or on an element of other geometry (a few of each)."""
+    found = []
+    for key in sorted(set(before) | set(after)):
+        a, b = before.get(key, {}), after.get(key, {})
+        lost = [n for n in a if n not in b]
+        new = [n for n in b if n not in a]
+        moved = [n for n in a if n in b and a[n] != b[n]]
+        if lost or new or moved:
+            sample = [n[:120] for n in (lost + new + moved)[:2]]
+            found.append(f"{key}: lost {len(lost)}, new {len(new)}, moved {len(moved)}: {sample}")
+    return found
+
+
+def gateG1(doc, regenerate=None):
+    """G1 (notes/stored-tags.md 4): in a transaction, every active step deleted and made again by
+    reconcile (then regenerate(doc), the control's hook), recomputed: every Tip's and active step's
+    names come back on the same geometry and none is new; then the transaction is aborted and the
+    names checked again. Returns the differences."""
+    before = g1Record(doc)
+    doc.openTransaction("gate G1")
+    try:
+        deleteSteps(doc, active=True)
+        PartDesign.studioReconcile(studioList(doc))
+        if regenerate:
+            regenerate(doc)
+        doc.recompute()
+        regenerated = g1Record(doc)
+    finally:
+        doc.abortTransaction()
+    doc.recompute()
+    back = g1Record(doc)
+    found = ["regenerated: " + d for d in g1Differences(before, regenerated)]
+    found += ["after abort: " + d for d in g1Differences(before, back)]
+    return found
+
+
+class OwnIdStep:
+    """The control's step: FeatureApply's Boolean and refine in Python, tagged with the step's own
+    object ID (as a C++ step written like Pocket, FeatureExtrude's makeTopoShape())."""
+
+    def __init__(self, obj):
+        obj.Proxy = self
+
+    def execute(self, obj):
+        owner = obj.StudioOwner
+        op = "CUT" if owner.Operation == "Subtraction" else "FUS"
+        obj.Shape = Part.Shape([obj.BaseFeature.Shape, owner.Shape.copy()], op, obj.ID).removeSplitter()
+
+    def dumps(self):
+        return None
+
+    def loads(self, state):
+        return None
+
+
+def ownIdSteps(doc):
+    """Replaces every FeatureApply step with an OwnIdStep at its place (the control)."""
+    for p, _ in PARTS:
+        body = doc.getObject(p)
+        for old in [o for o in body.Group if o.TypeId == "PartDesign::FeatureApply"]:
+            step = doc.addObject("PartDesign::FeaturePython", old.Name + "Own")
+            OwnIdStep(step)
+            step.StudioOwner = old.StudioOwner
+            step.Suppressed = old.Suppressed
+            wasTip = body.Tip == old
+            body.insertObject(step, old, True)
+            body.removeObject(old)
+            doc.removeObject(old.Name)
+            if wasTip:
+                body.Tip = step
+    doc.recompute()
+
+
+def fromScratch(natives, records, bar):
+    """The document built from scratch from the list (G2): the same parts; the owners made in the
+    live document's ID order (names depend on the IDs' order, notes/stored-tags.md 4), then
+    inserted in the list's order; then the bar."""
     doc, studio = newStudio("scratch")
     try:
         lst = studioList(doc)
         assert [e.Name for e in lst.Entries] == natives, ([e.Name for e in lst.Entries], natives)
-        for r in records:
+        for r in sorted(records, key=lambda r: r["id"]):
             box = makeOwner(
                 doc, studio, r["name"], r["rect"], r["depth"], r["op"], r["scope"], r["suppressed"]
             )
             assert box.Name == r["name"], (box.Name, r["name"])
-            PartDesign.studioInsert(box, -1)
+        for r in records:
+            PartDesign.studioInsert(doc.getObject(r["name"]), -1)
         PartDesign.studioSetBar(lst, bar if bar < len(lst.Entries) else -1)
         doc.recompute()
-        snap = snapshot(doc)
-        if gate is not None:
-            before = partNames(doc)
-            deleteSteps(doc)
-            PartDesign.studioReconcile(lst)
-            doc.recompute()
-            after = partNames(doc)
-            for p in before:
-                if before[p] != after[p]:
-                    gate.append((p, sorted(set(before[p]) ^ set(after[p]))[:6]))
-        return snap
+        return snapshot(doc)
     finally:
         App.closeDocument(doc.Name)
 
@@ -351,7 +478,7 @@ class TestStudioList(StudioCase):
             self.assertVolume(p, self.partBox(p).cut(tool).Volume)
         self.assertVolume("C", 1000)
         self.assertIsNone(self.step(f1, "C"))
-        self.assertEqual(self.step(f1, "A").Name, "F1_A")
+        self.assertEqual(self.step(f1, "A").Name, "F1_at_A")
 
     def testLateScopeGoesInOrder(self):
         """c10: a part added late to an early cut's scope gets its step at the cut's place in the
@@ -378,7 +505,7 @@ class TestStudioList(StudioCase):
         self.assertVolume("B", inOrder)
         self.assertVolume("A", self.partBox("A").cut(tool).Volume)
         self.assertEqual(chainOf(b), ["BSk", "BPad", "F1", "BSk2", "BBoss"])
-        self.assertEqual(boss.BaseFeature.Name, "F1_B")
+        self.assertEqual(boss.BaseFeature.Name, "F1_at_B")
         self.assertIs(b.Tip, boss)
 
     def testOneOwnerHasOnePlace(self):
@@ -470,21 +597,39 @@ class TestStudioList(StudioCase):
         self.assertEqual(PartDesign.studioScopeOf(f1), [])
         self.assertIsNone(self.step(f1, "A"))
 
-    def testNamesGate(self):
-        """One-history rule 3 in one document: every step deleted and regenerated from the list
-        gives every Body identical element names."""
+    def gateModel(self):
         self.owner("F1", [5, 2, 25, 8], 2, "Subtraction", ["A", "B"])
         self.owner("F2", [22, 2, 26, 6], 3, "Union", ["B"])
         self.owner("F3", [2, 4, 8, 9], 1, "Subtraction", ["A"])
+        self.owner("F4", [3, 1, 9, 3], 1, "Subtraction", ["A"])
+
+    def testNamesGate(self):
+        """G1 in one document: every active step deleted and made again from the list (new
+        objects, the same names) gives every Tip and active step identical names on the same
+        geometry, and so does the abort."""
+        self.gateModel()
         before = partNames(self.doc)
         ids = self.stepIds()
+        self.assertEqual(gateG1(self.doc), [])
+        self.doc.openTransaction("regenerate")
         deleteSteps(self.doc)
         PartDesign.studioReconcile(self.list)
+        self.doc.commitTransaction()
         self.doc.recompute()
         regenerated = self.stepIds()
         self.assertEqual(sorted(ids), sorted(regenerated))
         self.assertTrue(all(ids[n] != regenerated[n] for n in ids))  # new objects
         self.assertEqual(partNames(self.doc), before)
+
+    def testNamesGateControlFails(self):
+        """The control: steps tagged with their own object ID (a step written like Pocket) change
+        names when made again, and G1 catches it."""
+        self.gateModel()
+        ownIdSteps(self.doc)
+        self.assertTrue(all(o.TypeId == "PartDesign::FeaturePython" for o in activeSteps(self.doc.A)))
+        self.assertTrue(all(o.isValid() for p, _ in PARTS for o in self.doc.getObject(p).Group))
+        found = gateG1(self.doc, regenerate=ownIdSteps)
+        self.assertTrue(any(d.startswith("regenerated: ") for d in found), found)
 
     def testComparisonCatchesAnAppendedStep(self):
         """The control: a step appended at a Body's end (body.addObject, as today's siblings),
@@ -518,6 +663,179 @@ class TestStudioList(StudioCase):
         found = differences(snapshot(self.doc), want)
         self.assertTrue(any(d.startswith("B.chain") for d in found), found)
         self.assertTrue(any(d.startswith("B.volume") for d in found), found)
+
+    # --------------------------------------------------------------------- step names (format)
+    def testStepNameIsOwnerAndPartId(self):
+        """A step's object name is a function of (owner name, part id), one to one: letters and
+        digits kept, '_' doubled, other bytes as _HH, and "_at_" between (part ids have ':')."""
+        d = self.doc.addObject("PartDesign::Body", "D")
+        self.studio.addObject(d)
+        pad(d, "DPad", sketch(d, "DSk", xyPlane(d), (60, 0, 70, 10)), 10)
+        d.StudioPartId = "Sk:1/x_y"
+        self.doc.recompute()
+        f1 = self.owner("F1", [62, 2, 66, 6], 2, "Subtraction", ["Sk:1/x_y", "A"])
+        f2 = self.owner("F_2", [2, 2, 4, 4], 1, "Subtraction", ["A"])
+        self.assertEqual(self.step(f1, "D").Name, "F1_at_Sk_3A1_2Fx__y")
+        self.assertEqual(self.step(f1, "A").Name, "F1_at_A")
+        self.assertEqual(self.step(f2, "A").Name, "F__2_at_A")
+        self.assertTrue(self.step(f1, "D").isValid())
+
+    def testStepNameTakenIsAnError(self):
+        """The name a step must have, taken by another object: reconcile refuses (no suffixed
+        name), and changes nothing."""
+        other = self.doc.addObject("App::DocumentObjectGroup", "F1_at_A")
+        box = makeOwner(self.doc, self.studio, "F1", [2, 2, 4, 4], 2, "Subtraction", ["A", "B"])
+        chains = {p: chainOf(self.doc.getObject(p)) for p, _ in PARTS}
+        self.doc.openTransaction("insert")
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.studioInsert(box, -1)
+        self.doc.abortTransaction()
+        self.assertIn("'F1_at_A'", str(caught.exception))
+        self.assertEqual({p: chainOf(self.doc.getObject(p)) for p, _ in PARTS}, chains)
+        self.assertIs(self.doc.getObject("F1_at_A"), other)
+        self.assertIsNone(self.doc.getObject("F1_at_A001"))
+        self.assertIsNone(self.step(box, "B"))
+
+    # --------------------------------------------------------------------- readers keep a step
+    def testReadStepIsKeptSuppressed(self):
+        """A step something reads (a datum on its cut floor, an Up to face Pocket to that floor)
+        isn't deleted when its part leaves the scope: it stays, suppressed, at its owner's place,
+        and comes back with the same names when the part is added again, its readers' links
+        intact. Deleting a later feature keeps them too. Without readers it is deleted."""
+        f1 = self.owner("F1", [5, 2, 25, 8], 2, "Subtraction", ["A", "B"])  # floor z 8
+        self.owner("F2", [7, 0.5, 9, 1.5], 1, "Subtraction", ["A"])
+        a = self.doc.getObject("A")
+        step = self.step(f1, "A")
+        floor = faceAt(step, 8)
+        datum = a.newObject("PartDesign::Plane", "ADatum")
+        datum.AttachmentSupport = [(step, floor)]
+        datum.MapMode = "FlatFace"
+        pocket = a.newObject("PartDesign::Pocket", "APocket")
+        pocket.Profile = sketch(a, "APSk", xyPlane(a), (1, 3, 4, 7), z=10)
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = (step, [floor])
+        self.doc.openTransaction("adopt")
+        PartDesign.studioReconcile(self.list)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        expected = 1000 - 5 * 6 * 2 - 2 * 1 * 1 - 3 * 4 * 2
+        self.assertVolume("A", expected)
+        self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 8, places=6)
+        names = partNames(self.doc)
+        stepName, stepId = step.Name, step.ID
+
+        def readersIntact():
+            self.assertIs(datum.AttachmentSupport[0][0], step)
+            self.assertIs(pocket.UpToFace[0], step)
+
+        self.doc.openTransaction("drop A")
+        PartDesign.studioSetScopeIds(f1, ["B"])
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertIs(self.step(f1, "A"), step)
+        self.assertTrue(step.Suppressed)
+        self.assertEqual(chainOf(a)[:3], ["ASk", "APad", "F1"])  # at its owner's place
+        readersIntact()
+
+        self.doc.openTransaction("add A")
+        PartDesign.studioSetScopeIds(f1, ["A", "B"])
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertIs(self.step(f1, "A"), step)
+        self.assertEqual((step.Name, step.ID), (stepName, stepId))
+        self.assertFalse(step.Suppressed)
+        readersIntact()
+        self.assertTrue(all(o.isValid() for o in a.Group), [o.Name for o in a.Group if not o.isValid()])
+        self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 8, places=6)
+        self.assertVolume("A", expected)
+        self.assertEqual(partNames(self.doc), names)
+
+        self.doc.openTransaction("delete F2")
+        PartDesign.studioRemove(self.doc.getObject("F2"))
+        self.doc.removeObject("F2")
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        readersIntact()
+        self.assertTrue(all(o.isValid() for o in a.Group), [o.Name for o in a.Group if not o.isValid()])
+        self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 8, places=6)
+        self.assertVolume("A", expected + 2)
+
+        # The readers gone, the dropped step goes too
+        self.doc.openTransaction("drop A, no readers")
+        for obj in (pocket, pocket.Profile[0], datum):
+            name = obj.Name
+            a.removeObject(obj)
+            self.doc.removeObject(name)
+        PartDesign.studioSetScopeIds(f1, ["B"])
+        self.doc.commitTransaction()
+        self.assertIsNone(self.step(f1, "A"))
+        self.assertIsNone(self.doc.getObject(stepName))
+
+    # --------------------------------------------------------------------- copied parts (P7a)
+    def copiedPart(self, partId):
+        """A Body as one copied alone would be: in the studio, its part id given, with a copy of
+        F1's step (the original owner, the copy's name)."""
+        f1 = self.owner("F1", [2, 2, 4, 4], 2, "Subtraction", ["A"])
+        copy = self.doc.addObject("PartDesign::Body", "A001")
+        self.studio.addObject(copy)
+        copy.StudioPartId = partId
+        step = self.doc.addObject("PartDesign::FeatureApply", "F1_at_A001")
+        step.StudioOwner = f1
+        copy.addObject(step)
+        return f1, copy, step
+
+    def everything(self):
+        return (
+            [e.Name for e in self.list.Entries],
+            {b.Name: (chainOf(b), b.Tip.Name if b.Tip else None, b.StudioPartId)
+             for b in self.doc.Objects if b.TypeId == "PartDesign::Body"},
+            sorted(o.Name for o in self.doc.Objects),
+        )
+
+    def testDuplicatePartIdIsRefused(self):
+        """Two parts holding one part id (a Body copied alone): reconcile refuses loudly and
+        changes nothing."""
+        f1, copy, step = self.copiedPart("A")
+        before = self.everything()
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.studioReconcile(self.list)
+        self.assertIn("part id 'A' is held by two parts", str(caught.exception))
+        self.assertEqual(self.everything(), before)
+
+    def testStepOutsideItsOwnersScopeIsRefused(self):
+        """A step in a part its owner's scope doesn't hold, not made there (a copy with a part id
+        of its own): refused loudly, not deleted."""
+        f1, copy, step = self.copiedPart("A2")
+        before = self.everything()
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.studioReconcile(self.list)
+        self.assertIn("'F1_at_A001'", str(caught.exception))
+        self.assertIn("a part its scope doesn't hold", str(caught.exception))
+        self.assertEqual(self.everything(), before)
+        self.assertIs(self.doc.getObject("F1_at_A001"), step)
+
+
+class TestObjectIds(unittest.TestCase):
+    """ops#657: a document saves its highest object ID, so a deleted object's ID is never given
+    again after a save and reopen (a reference naming it would re-bind silently)."""
+
+    def testDeletedLastIdIsNotGivenAgain(self):
+        folder = tempfile.mkdtemp(prefix="studioids")
+        try:
+            doc = App.newDocument("TestStudioListIds")
+            doc.addObject("App::DocumentObjectGroup", "First")
+            last = doc.addObject("App::DocumentObjectGroup", "Last")
+            lastId = last.ID
+            doc.removeObject("Last")
+            path = os.path.join(folder, "ids.FCStd")
+            doc.saveAs(path)
+            App.closeDocument(doc.Name)
+            doc = App.openDocument(path)
+            made = doc.addObject("App::DocumentObjectGroup", "Made")
+            self.assertGreater(made.ID, lastId)
+            App.closeDocument(doc.Name)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 # ------------------------------------------------------------------------------------- random edits
@@ -596,7 +914,6 @@ class TestStudioListProperty(unittest.TestCase):
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
         studioList(doc)
         bad = 0
-        gate = []
         for step in range(nops):
             roll = rng.random()
             if roll < 0.12 and doc.UndoCount:
@@ -622,26 +939,15 @@ class TestStudioListProperty(unittest.TestCase):
                     bad += 1
             doc.recompute()
             got = snapshot(doc)
-            want = fromScratch(*listOf(doc), gate=gate)
+            want = fromScratch(*listOf(doc))
             found = differences(got, want)
-            if gate:
-                found.append(f"names gate: {gate[:2]}")
-                gate.clear()
+            found += ["G1 " + d for d in gateG1(doc)[:4]]
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
                 self.log.extend("    " + d for d in found)
                 if bad > 3:
                     break
-        # The names gate on the edited document itself: its steps deleted and made again
-        if not bad:
-            before = partNames(doc)
-            deleteSteps(doc)
-            PartDesign.studioReconcile(studioList(doc))
-            doc.recompute()
-            if partNames(doc) != before:
-                bad += 1
-                self.log.append(f"seed {seed}: names changed when every step was made again")
         App.closeDocument(doc.Name)
         return bad
 
