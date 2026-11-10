@@ -607,7 +607,8 @@ def upToOffsetFace(doc, slanted, z, x0=4, x1=8):
     the centre of a 20 x 20 profile centred on the z axis, so that the line through the profile's
     centre misses it both ways. In the plane z = `z` (`slanted` False), or z = `z` + x / 4 (normal
     along (-1, 0, 4)). Onshape's extrusion up to such a face goes to its plane, and an offset moves
-    the plane `offset` along the extrusion (the Onshape facts U1 and U2)."""
+    the plane `offset` along the extrusion, back towards the profile for a positive one (the
+    Onshape facts U1 and U2)."""
     V = FreeCAD.Vector
 
     def at(x, y):
@@ -5120,10 +5121,12 @@ class TestPad(unittest.TestCase):
     def testUpToFaceOffsetBesideTheProfile(self):
         """FreeCAD-CH P3: a 20 x 20 square up to a smaller face, parallel or slanted, off its
         centre (x 4..8) or on it (x -2..2), in front of the profile (z = 10) or behind it
-        (z = -10), offset by +2 and -2, as Onshape does: the end lies on the face's plane moved
-        `offset` along the extrusion, away from the profile for +2 (Onshape's "opposite direction").
-        Before, the line through the centre missed a face off it, the side was taken as reversed,
-        and the offset moved the face the other way."""
+        (z = -10), offset by +2 and -2, as Onshape does (the Onshape facts U1 and U2): the end lies
+        on the face's plane moved `offset` along the extrusion, back towards the profile for +2
+        (Onshape's default) and past the face for -2 (its "opposite direction"). UpToFace is
+        verified with Onshape; UpToShape with one face takes the same code path, unverified with
+        Onshape. Before, +2 went past the face; and a face off the centre line was taken as lying
+        behind the profile, which turned the offset round once more."""
         cases = [
             (upTo, slanted, ahead, offset, span)
             for upTo in ("UpToFace", "UpToShape")
@@ -5149,7 +5152,7 @@ class TestPad(unittest.TestCase):
                 self.assertTrue(pad.isValid(), pad.getStatusString())
                 # the end's distance from the profile at x = 0, and the plane's rise over
                 # x 0..10 on the far side from the profile
-                reach = 10.0 + offset
+                reach = 10.0 - offset
                 rise = 2.5 if slanted else 0.0
                 box = pad.Shape.BoundBox
                 if ahead:
@@ -5161,6 +5164,34 @@ class TestPad(unittest.TestCase):
                 # the slant's x / 4 averages to 0 over x -10..10
                 self.assertAlmostEqual(pad.Shape.Volume, 400.0 * reach, places=4)
                 self.assertEqual(len(pad.Shape.Solids), 1)
+
+    def testUpToFirstAndLastOffsetSign(self):
+        """FreeCAD-CH P3: up to first and last take the offset as up to a face does, with Onshape's
+        sign (the same code path; unverified with Onshape): a 20 x 20 square at z = 0 under the
+        base box x, y -15..15, z 10..15. Up to last (z = 15) offset +2 ends at z = 13, 8500; -2
+        at z = 17, 9300. Up to first (z = 10) offset -2 ends at z = 12, 8500."""
+        V = FreeCAD.Vector
+        for upTo, offset, top, volume in (
+            ("UpToLast", 2.0, 15.0, 8500.0),
+            ("UpToLast", -2.0, 17.0, 9300.0),
+            ("UpToFirst", -2.0, 15.0, 8500.0),
+        ):
+            with self.subTest(upTo=upTo, offset=offset):
+                block = self.Doc.addObject("Part::Feature", "Block")
+                block.Shape = Part.makeBox(30, 30, 5, V(-15, -15, 10))
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                base = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+                base.BaseFeature = block
+                sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Type = upTo
+                pad.Offset = offset
+                self.Doc.recompute()
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                self.assertAlmostEqual(pad.Shape.Volume, volume, places=4)
+                self.assertAlmostEqual(pad.Shape.BoundBox.ZMin, 0.0, places=6)
+                self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, top, places=6)
 
     def tearDown(self):
         # closing doc
@@ -5223,12 +5254,12 @@ class TestUpToPlanePlacement(unittest.TestCase):
         self.assertVolume(40)
 
     def testUpToCoordinateSystemPlaneAsShapeWithOffset(self):
-        """A plane alone as the shape is taken as a face, so the offset applies: 1 further, 44
-        (PR 175 review, Low 3)."""
+        """A plane alone as the shape is taken as a face, so the offset applies: 1 short, as
+        Onshape's positive offset (FreeCAD-CH P3), 36 (PR 175 review, Low 3)."""
         self.Pad.Type = "UpToShape"
         self.Pad.UpToShape = [(self.coordinateSystemPlane(), [""])]
         self.Pad.Offset = 1
-        self.assertVolume(44)
+        self.assertVolume(36)
 
     def testUpToOriginXZPlaneAsShape(self):
         """The square turned to face -Y at y = 3, up to the body's XZ origin plane as the shape:

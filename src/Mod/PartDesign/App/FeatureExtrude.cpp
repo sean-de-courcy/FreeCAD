@@ -1829,7 +1829,10 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 
         if (faceCount == 1) {
             getUpToFace(upToShape, base, sketchshape, method, dir);
-            addOffsetToFace(upToShape, dir, offsetVal);
+            // Onshape's sign (FreeCAD-CH P3, the Onshape fact U1; coordinator c720): a positive
+            // offset ends short of the face, back towards the profile, a negative one past it
+            // (Onshape's "opposite direction"). Up to a face, a shape's face, first and last.
+            addOffsetToFace(upToShape, dir, -offsetVal);
         }
         else {
             if (fabs(offsetVal) > Precision::Confusion()) {
