@@ -77,6 +77,7 @@
 #include "FailureContinuation.h"
 #include "FeaturePy.h"
 #include "Body.h"
+#include "FeatureBase.h"
 #include "FeatureBoolean.h"
 #include "FeatureChamfer.h"
 #include "FeatureDeletePart.h"
@@ -591,7 +592,9 @@ std::string checkResult(Feature& feature, bool inputsValid)
         if (!base.IsNull()) {
             builder.Add(both, base);
         }
-        TopoDS_Iterator copies(BRepBuilderAPI_Copy(both, Standard_False, Standard_False).Shape());
+        // Held: an iterator doesn't keep its compound alive (it walks the compound's own list)
+        const TopoDS_Shape copied = BRepBuilderAPI_Copy(both, Standard_False, Standard_False).Shape();
+        TopoDS_Iterator copies(copied);
         check->result = copies.Value();
         if (!base.IsNull()) {
             copies.Next();
@@ -743,9 +746,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // The feature's execute and the check of its result share one deadline (kernel safety S1)
     Part::KernelBudget::Scope budget;
     auto ret = Part::Feature::recompute();
-    // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature
+    // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature. A
+    // BaseFeature builds nothing: the first feature on it checks the base it passes on
     if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
-        && checkingResults()) {
+        && !isDerivedFrom<FeatureBase>() && checkingResults()) {
         std::string why;
         try {
             why = checkResult(*this, booleanInputsValid);

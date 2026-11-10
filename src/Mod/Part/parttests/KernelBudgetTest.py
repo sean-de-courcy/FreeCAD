@@ -6,8 +6,10 @@ A fillet or a boolean on a face with many edges runs for seconds to minutes in O
 could stop it. Now it runs on a worker under the time limit ("GeometryTimeLimit" in
 Mod/Part/General), and a call over it fails its feature with a clear error; the document stays
 consistent (undo, a recompute with a longer limit). Designed models: a plate whose top carries a
-wavy cut of 800 segments (a fillet of its outer edges takes about 1.6 s, a cut by the wavy tool
-about 3 s on the reference machine); the limit in the tests is 0.3 s.
+wavy cut of n segments, and a cut of a plate by the wavy prism of 800 segments (about 2.5 s on the
+reference machine, 2026-11). OCCT's fillet of the plate's outer edges takes about 1.3 s for
+n = 2400 and 3 s for n = 4000, and the feature's work before it about 0.1 s and 0.2 s; the limits
+in the tests sit between the two, with room for a machine twice as fast or slow.
 """
 
 import math
@@ -68,11 +70,11 @@ class KernelBudgetTest(unittest.TestCase):
     def setLimit(self, seconds):
         self.params.SetFloat("GeometryTimeLimit", seconds)
 
-    def lid(self):
+    def lid(self, n):
         doc = FreeCAD.newDocument("KernelBudgetLid")
         self.docs.append(doc)
         base = doc.addObject("Part::Feature", "Lid")
-        base.Shape = Part.makeBox(60, 60, 5).cut(wavy(800, 30, 30, 4.0).extrude(V(0, 0, 2)))
+        base.Shape = Part.makeBox(60, 60, 5).cut(wavy(n, 30, 30, 4.0).extrude(V(0, 0, 2)))
         body = doc.addObject("PartDesign::Body", "Body")
         body.BaseFeature = base
         doc.recompute()
@@ -83,16 +85,16 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertEqual(Part.kernelBudget()["limit"], 60.0)
 
     def testFilletOverTheLimitFails(self):
-        doc, body = self.lid()
+        doc, body = self.lid(2400)
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (body.BaseFeature, outer_top_edges(body.BaseFeature.Shape))
         fillet.Radius = 1.0
-        self.setLimit(0.3)
+        self.setLimit(0.5)
         start = time.perf_counter()
         doc.recompute()
         elapsed = time.perf_counter() - start
         self.assertFalse(fillet.isValid())
-        self.assertIn("took longer than 0.3 s", fillet.getStatusString())
+        self.assertIn("took longer than 0.5 s", fillet.getStatusString())
         self.assertIn("the feature is not built", fillet.getStatusString())
         # It returned at the limit, not when OCCT finished
         self.assertLess(elapsed, 1.2)
@@ -155,17 +157,19 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(cut.Shape.Volume, 1000 - math.pi * 4 * 10 / 4, places=6)
 
     def testAbandonedWorkersDoNotDisturbLaterWork(self):
-        # Five abandoned fillets, then ordinary modelling in the same process
-        doc, body = self.lid()
-        self.setLimit(0.2)
+        # Five fillets stopped at the limit and abandoned, then ordinary modelling in the same
+        # process. The limits climb so that on a slow machine the later ones still start
+        doc, body = self.lid(4000)
         names = outer_top_edges(body.BaseFeature.Shape)
         fillets = []
         for k in range(5):
+            self.setLimit(0.4 + 0.3 * k)
             f = body.newObject("PartDesign::Fillet", "Fillet%d" % k)
             f.Base = (body.BaseFeature, names)
             f.Radius = 1.0
             doc.recompute()
             self.assertFalse(f.isValid())
+            self.assertIn("took longer than", f.getStatusString())
             fillets.append(f)
         self.assertGreaterEqual(Part.kernelBudget()["abandonedTotal"], 1)
         self.setLimit(60)
