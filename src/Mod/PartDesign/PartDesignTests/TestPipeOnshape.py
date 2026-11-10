@@ -360,3 +360,26 @@ class TestPipeEndAfterThePathGrows(PipeCase):
         tip = V(10, 0, 30) + V(1, 0, 1).normalize() * 5
         box = pad.AddSubShape.BoundBox
         self.assertLess((box.Center - (V(10, 0, 30) + tip) * 0.5).Length, 1e-3, box)
+
+    def testPadOnTheEndFaceFollowsATangentArc(self):
+        """SW6 (c): a tangent quarter arc appended to the path (centre (10, 0, 20), to (10, 0, 30)); Onshape's
+        boss follows, its axis +X from (10, 0, 30) to x = 15."""
+        path = self.line(0, 20)
+        pipe = self.pipe(self.circle(), (path, ["Edge1"]))
+        end = [f"Face{i}" for i, f in enumerate(pipe.Shape.Faces, 1)
+               if abs(f.CenterOfMass.z - 20) < 1e-6 and f.Surface.isPlanar()]
+        self.assertEqual(len(end), 1)
+        top = self.body.newObject("Sketcher::SketchObject", "OnEnd")
+        top.AttachmentSupport = [(pipe, end[0])]
+        top.MapMode = "FlatFace"
+        top.addGeometry(models.circle(0, 0, 1), False)
+        pad = models.pad(self.body, top, 5)
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        path.addGeometry(arc3((0, 20, 0), (10, 20, 0), (10, 30, 0)), False)
+        pipe.Spine = (path, ["Edge1", "Edge2"])
+        self.doc.recompute()
+        self.assertSweeps(pipe, AREA * (20 + 5 * math.pi))
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        box = pad.AddSubShape.BoundBox
+        self.assertLess((box.Center - V(12.5, 0, 30)).Length, 1e-3, box)
