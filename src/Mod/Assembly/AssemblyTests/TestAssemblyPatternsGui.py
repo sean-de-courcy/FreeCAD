@@ -84,18 +84,14 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         Gui.Selection.addSelection(doc.Name, asm.Name, f"{seed.Name}.")
         Gui.runCommand("Assembly_CreatePatternLinear")
         pump(0.3)
-        panel = Gui.Control.activeTaskDialog()
         self.assertTrue(Gui.Control.activeDialog(), "the pattern panel")
         pattern = [o for o in asm.getObject("Joints").Group if AssemblyPattern.isPattern(o)][0]
         self.assertEqual(list(pattern.Seeds), [seed], "the selected instance is the seed")
-        task = pattern.Proxy  # the panel object is the dialog's: find it through the selection observer
         # The direction field is the next pick's: pick the edge along X
         Gui.Selection.addSelection(doc.Name, asm.Name, f"{seed.Name}.{edge}")
         pump(0.3)
         self.assertEqual(pattern.Direction[0], seed)
         self.assertTrue(pattern.Direction[1][0].endswith(edge))
-        form = Gui.Control.activeTaskDialog()
-        self.assertIsNotNone(form)
         spins = [w for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget) if w.metaObject().className() in ("Gui::QuantitySpinBox", "Gui::IntSpinBox") and w.isVisible()]
         distance = [w for w in spins if w.metaObject().className() == "Gui::QuantitySpinBox"][0]
         count = [w for w in spins if w.metaObject().className() == "Gui::IntSpinBox"][0]
@@ -109,12 +105,9 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         for copy in copies:
             expected = App.Placement(self.along * (15.0 * copy.PatternIndex), App.Rotation()).multiply(seed.Placement)
             self.assertTrue(copy.Placement.isSame(expected, 1e-6), copy.Label)
-        Gui.Control.activeTaskDialog().accept() if hasattr(Gui.Control.activeTaskDialog(), "accept") else None
-        if Gui.Control.activeDialog():
-            box = Gui.getMainWindow().findChild(QtWidgets.QDialogButtonBox)
-            ok = [b for b in Gui.getMainWindow().findChildren(QtWidgets.QPushButton) if b.isVisible() and b.text().replace("&", "") in ("OK", "Ok")]
-            self.assertTrue(ok, "no OK button")
-            ok[0].click()
+        ok = [b for b in Gui.getMainWindow().findChildren(QtWidgets.QPushButton) if b.isVisible() and b.text().replace("&", "") in ("OK", "Ok")]
+        self.assertTrue(ok, "no OK button")
+        ok[0].click()
         pump(0.3)
         self.assertFalse(Gui.Control.activeDialog(), "the panel closed")
         # The list: four instances, the pattern with the mates

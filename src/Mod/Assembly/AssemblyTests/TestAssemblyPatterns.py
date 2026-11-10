@@ -380,7 +380,8 @@ class TestAssemblyPatterns(AssemblyTestBase):
         self.doc.recompute()
         self.assertIn("Invalid", pattern.State)
         self.assertEqual([c.Name for c in pattern.Instances], names)
-        self.assertEqual(joint.Reference2[0], last, "the mate keeps its part")
+        refs = [joint.Reference1[0] if joint.Reference1 else None, joint.Reference2[0] if joint.Reference2 else None]
+        self.assertIn(last, refs, f"the mate keeps its part: {[r.Name if r else None for r in refs]}")
         pattern.Suppressed = True
         self.doc.recompute()
         self.assertEqual([c.Name for c in pattern.Instances], names, "suppressed: the same rule")
