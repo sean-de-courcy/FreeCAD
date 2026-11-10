@@ -125,7 +125,7 @@ class TestStudioHistoryGui(unittest.TestCase):
         parts; no step has a row."""
         self.assertEqual(self.rows(), EXPECTED)
         steps = [o.Name for p, _ in PARTS for o in self.doc.getObject(p).Group if isStep(o)]
-        self.assertEqual(sorted(steps), ["F1_A", "F1_B", "F2_B", "F2_C"])
+        self.assertEqual(sorted(steps), ["F1_at_A", "F1_at_B", "F2_at_B", "F2_at_C"])
         self.assertEqual([o.Label for o in self.studioList().Entries], EXPECTED[:-1])
 
     # ---------------------------------------------------------------------------------- bar
@@ -135,7 +135,7 @@ class TestStudioHistoryGui(unittest.TestCase):
         undo = self.doc.UndoCount
         self.dragBarAfter("F1")
         self.assertEqual(self.studioList().Bar, NATIVES + 1)
-        self.assertEqual(self.tips(), {"A": "F1_A", "B": "F1_B", "C": "CPad"})
+        self.assertEqual(self.tips(), {"A": "F1_at_A", "B": "F1_at_B", "C": "CPad"})
         self.assertEqual(self.doc.UndoCount, undo + 1)
         self.assertTrue(
             fv.waitFor(lambda: self.rows() == NATIVE_ROWS + ["F1", "|", "F2"]), self.rows()
@@ -145,7 +145,7 @@ class TestStudioHistoryGui(unittest.TestCase):
         self.doc.undo()
         self.doc.recompute()
         self.assertEqual(self.studioList().Bar, -1)
-        self.assertEqual(self.tips(), {"A": "F1_A", "B": "F2_B", "C": "F2_C"})
+        self.assertEqual(self.tips(), {"A": "F1_at_A", "B": "F2_at_B", "C": "F2_at_C"})
         self.assertTrue(fv.waitFor(lambda: self.rows() == EXPECTED), self.rows())
 
     # --------------------------------------------------------------------------------- drag
@@ -173,7 +173,7 @@ class TestStudioHistoryGui(unittest.TestCase):
         undo = self.doc.UndoCount
         self.assertEqual(self.menuAction("F1", "featureDelete"), [True])
         self.doc.recompute()
-        for name in ("F1", "F1_A", "F1_B"):
+        for name in ("F1", "F1_at_A", "F1_at_B"):
             self.assertIsNone(self.doc.getObject(name), name)
         self.assertEqual(self.doc.UndoCount, undo + 1)
         self.assertTrue(fv.waitFor(lambda: self.rows() == NATIVE_ROWS + ["F2", "|"]), self.rows())
@@ -181,7 +181,7 @@ class TestStudioHistoryGui(unittest.TestCase):
         self.doc.undo()
         self.doc.recompute()
         self.assertTrue(fv.waitFor(lambda: self.rows() == EXPECTED), self.rows())
-        self.assertIsNotNone(self.doc.getObject("F1_A"))
+        self.assertIsNotNone(self.doc.getObject("F1_at_A"))
         self.assertVolume("A", partBox("A").cut(tool(*F1[:3])).Volume)
 
     def testSuppressARowSuppressesItsSteps(self):
@@ -190,13 +190,13 @@ class TestStudioHistoryGui(unittest.TestCase):
         self.assertEqual(self.menuAction("F1", "featureToggleSuppress"), [True])
         self.doc.recompute()
         self.assertTrue(self.f1.Suppressed)
-        self.assertTrue(self.doc.getObject("F1_A").Suppressed)
-        self.assertTrue(self.doc.getObject("F1_B").Suppressed)
+        self.assertTrue(self.doc.getObject("F1_at_A").Suppressed)
+        self.assertTrue(self.doc.getObject("F1_at_B").Suppressed)
         self.assertVolume("A", 1000)
         self.assertEqual(self.doc.UndoCount, undo + 1)
         self.doc.undo()
         self.doc.recompute()
-        self.assertFalse(self.doc.getObject("F1_A").Suppressed)
+        self.assertFalse(self.doc.getObject("F1_at_A").Suppressed)
         self.assertVolume("A", partBox("A").cut(tool(*F1[:3])).Volume)
 
 

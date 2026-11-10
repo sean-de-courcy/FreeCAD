@@ -212,7 +212,7 @@ class TestStudioHistory(StudioCase):
         self.assertEqual(self.list.Bar, NATIVES + 2)
         self.assertTrue(PartDesign.isStudioRolledBack(self.studio))
         self.assertEqual(self.tips(), {"A": "F1", "B": "F2", "C": "F2"})
-        self.assertEqual(PartDesign.studioBarAfter(self.studio).Name, "F2_C")
+        self.assertEqual(PartDesign.studioBarAfter(self.studio).Name, "F2_at_C")
         self.assertVolumes(
             {
                 "A": self.partBox("A").cut(tool1).Volume,
@@ -293,8 +293,8 @@ class TestStudioHistory(StudioCase):
         self.assertEqual(self.tips()["A"], "F1")
 
         self.transaction("delete F1", lambda: self.doc.removeObject("F1"))
-        self.assertIsNone(self.doc.getObject("F1_A"))
-        self.assertIsNone(self.doc.getObject("F1_B"))
+        self.assertIsNone(self.doc.getObject("F1_at_A"))
+        self.assertIsNone(self.doc.getObject("F1_at_B"))
         self.assertEqual(self.entries()[NATIVES:], ["F2", "BSk2", "F3"])
         self.assertEqual(self.list.Bar, NATIVES + 2)
         self.assertEqual(chainOf(self.doc.getObject("A")), ["ASk", "APad", "F3"])
@@ -307,8 +307,8 @@ class TestStudioHistory(StudioCase):
         self.doc.undo()
         self.doc.recompute()
         self.assertEqual(self.state(), before)
-        self.assertIsNotNone(self.doc.getObject("F1_A"))
-        self.assertIsNotNone(self.doc.getObject("F1_B"))
+        self.assertIsNotNone(self.doc.getObject("F1_at_A"))
+        self.assertIsNotNone(self.doc.getObject("F1_at_B"))
 
     def testDeleteRetracesAcrossTheOwner(self):
         """notes/stored-tags.md 3, item 3: a step names what its cut makes with its owner's tag.
