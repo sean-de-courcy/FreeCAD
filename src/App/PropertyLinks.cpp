@@ -6550,6 +6550,18 @@ void App::holdElementReferencesInto(DocumentObject* target)
     }
 }
 
+namespace App
+{
+/** Takes the records of the references into \a target now, as the end of its recompute would:
+ * \a target, an object the recompute stopped, has its last shape only until the rule's
+ * afterStop() (F37 writes a stopped Body empty), and a record taken from an empty shape keeps its
+ * old marks (ops#652). Its closure is made, since it sorts before it. A reference that also links
+ * an object still to be recomputed waits for the end, as before. Called by Document::recompute(),
+ * which declares it (not ElementReferences.h, to keep App's headers as they are).
+ */
+void takeElementReferencesInto(DocumentObject* target);
+}  // namespace App
+
 void App::takeElementReferencesInto(DocumentObject* target)
 {
     const auto& references = PropertyLinkBase::getElementReferences(target);

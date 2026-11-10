@@ -51,13 +51,4 @@ void updateHeldElementFingerprints(const Document* doc,
  */
 void holdElementReferencesInto(DocumentObject* target);
 
-/** Takes the records of the references into  target now, as the end of its recompute would:
- *  target, an object the recompute stopped, has its last shape only until the rule's
- * afterStop() (F37 writes a stopped Body empty), and a record taken from an empty shape keeps its
- * old marks (ops#652). Its closure is made, since it sorts before it. A reference that also links
- * an object still to be recomputed waits for the end, as before. Called by Document::recompute();
- * defined in PropertyLinks.cpp.
- */
-void takeElementReferencesInto(DocumentObject* target);
-
 }  // namespace App
