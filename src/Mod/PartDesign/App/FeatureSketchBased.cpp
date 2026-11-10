@@ -1719,23 +1719,12 @@ void ProfileBased::getUpToFace(
 
 void ProfileBased::addOffsetToFace(TopoShape& upToFace, const gp_Dir& dir, double offset)
 {
-    // A plane moves along its normal, turned towards the extrusion direction, as Onshape's offset
-    // of an up-to face does: the end lies `offset` past the plane, slanted or not (FreeCAD-CH P3).
-    // Any other face moves in the extrusion direction.
+    // Move the face in the extrusion direction. Onshape's offset does the same, a slanted face's
+    // too (FreeCAD-CH P3: `notes\onshape-facts.md` U2)
     // TODO: For non-planar faces, we could consider offsetting the surface
     if (fabs(offset) > Precision::Confusion()) {
-        gp_Vec along(dir);
-        if (upToFace.shapeType(true) == TopAbs_FACE) {
-            BRepAdaptor_Surface adapt(TopoDS::Face(upToFace.getShape()));
-            if (adapt.GetType() == GeomAbs_Plane) {
-                gp_Vec normal(adapt.Plane().Axis().Direction());
-                if (std::fabs(normal.Dot(along)) > Precision::Confusion()) {
-                    along = normal.Dot(along) < 0 ? -normal : normal;
-                }
-            }
-        }
         gp_Trsf mov;
-        mov.SetTranslation(offset * along);
+        mov.SetTranslation(offset * gp_Vec(dir));
         TopLoc_Location loc(mov);
         upToFace.move(loc);
     }

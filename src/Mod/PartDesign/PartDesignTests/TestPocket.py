@@ -480,9 +480,9 @@ class TestPocket(unittest.TestCase):
         """FreeCAD-CH P3: a Pocket of a 20 x 20 square at z = 0 into the box x, y -15..15, z -20..0,
         up to a smaller face off the square's centre (parallel at z = -10, or slanted,
         z = -10 + x / 4), offset by +2 and -2, as Onshape does: the end lies on the face's plane
-        moved `offset` along its normal, deeper for +2. Before, the offset went the other way."""
+        moved `offset` along the extrusion, deeper for +2. Before, the offset went the other way."""
         import Part
-        from PartDesignTests.TestPad import squareSketch, upToOffsetFace, upToOffsetReach
+        from PartDesignTests.TestPad import squareSketch, upToOffsetFace
 
         V = FreeCAD.Vector
         for slanted in (False, True):
@@ -502,9 +502,9 @@ class TestPocket(unittest.TestCase):
                     pocket.Offset = offset
                     self.Doc.recompute()
                     self.assertTrue(pocket.isValid(), pocket.getStatusString())
-                    # the plane's height at x = 0 is -10 (moved down by the offset's reach), and
+                    # the plane's height at x = 0 is -10 (moved down by the offset), and
                     # the slant's x / 4 averages to 0 over the square
-                    depth = 10.0 + upToOffsetReach(slanted, offset)
+                    depth = 10.0 + offset
                     self.assertAlmostEqual(
                         pocket.Shape.Volume, 30 * 30 * 20 - 400.0 * depth, places=4
                     )

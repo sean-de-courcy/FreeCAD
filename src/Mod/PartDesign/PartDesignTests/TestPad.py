@@ -607,7 +607,7 @@ def upToOffsetFace(doc, slanted, z, x0=4, x1=8):
     the centre of a 20 x 20 profile centred on the z axis, so that the line through the profile's
     centre misses it both ways. In the plane z = `z` (`slanted` False), or z = `z` + x / 4 (normal
     along (-1, 0, 4)). Onshape's extrusion up to such a face goes to its plane, and an offset moves
-    the plane along its normal, `offset` past it."""
+    the plane `offset` along the extrusion (the Onshape facts U1 and U2)."""
     V = FreeCAD.Vector
 
     def at(x, y):
@@ -617,13 +617,6 @@ def upToOffsetFace(doc, slanted, z, x0=4, x1=8):
     face = doc.addObject("Part::Feature", "Face")
     face.Shape = Part.Face(Part.makePolygon(corners + [corners[0]]))
     return face
-
-
-def upToOffsetReach(slanted, offset):
-    """How far past z = its plane's height at x = 0 the end of P3's extrusion lies, along the
-    extrusion: the plane moved `offset` along its normal, which makes 4 / sqrt(17) with z when
-    slanted"""
-    return offset * math.sqrt(17) / 4 if slanted else offset
 
 
 def squareSketch(body, name, placement, rectangles):
@@ -5128,9 +5121,9 @@ class TestPad(unittest.TestCase):
         """FreeCAD-CH P3: a 20 x 20 square up to a smaller face, parallel or slanted, off its
         centre (x 4..8) or on it (x -2..2), in front of the profile (z = 10) or behind it
         (z = -10), offset by +2 and -2, as Onshape does: the end lies on the face's plane moved
-        `offset` along its normal, away from the profile for +2. Before, the line through the
-        centre missed a face off it, the side was taken as reversed, and the offset moved the face
-        the other way; and a slanted face moved `offset` along the extrusion, not its normal."""
+        `offset` along the extrusion, away from the profile for +2 (Onshape's "opposite direction").
+        Before, the line through the centre missed a face off it, the side was taken as reversed,
+        and the offset moved the face the other way."""
         cases = [
             (upTo, slanted, ahead, offset, span)
             for upTo in ("UpToFace", "UpToShape")
@@ -5156,7 +5149,7 @@ class TestPad(unittest.TestCase):
                 self.assertTrue(pad.isValid(), pad.getStatusString())
                 # the end's distance from the profile at x = 0, and the plane's rise over
                 # x 0..10 on the far side from the profile
-                reach = 10.0 + upToOffsetReach(slanted, offset)
+                reach = 10.0 + offset
                 rise = 2.5 if slanted else 0.0
                 box = pad.Shape.BoundBox
                 if ahead:
