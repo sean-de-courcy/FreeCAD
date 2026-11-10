@@ -45,5 +45,8 @@ void noteRefine(const Feature* feature, const TopoDS_Shape& before, const TopoDS
 /// names it (kernel safety S1: the limit covers the whole recompute, and a step that can't be
 /// stopped doesn't start late)
 bool skippedForTheLimit(const Feature* feature, const char* step);
+
+/// The warning that  step was skipped for the limit
+void warnSkipped(const Feature* feature, const char* step);
 }  // namespace ResultCheck
 }  // namespace PartDesign

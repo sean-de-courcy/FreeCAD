@@ -176,6 +176,9 @@ thread_local Clock::time_point scopeDeadline;
 thread_local bool onWorker = false;
 // Why the outermost Scope's limit or Esc stopped a call, where one did (the first)
 thread_local std::string scopeFired;
+// runOptional(): a stop by the limit is the caller's to report, and was it one
+thread_local bool limitStopIsOptional = false;
+thread_local bool limitStopped = false;
 
 // Large: OCCT recurses deeply, and a secondary thread gets 512 KB on macOS by default
 constexpr unsigned workerStackSize = 64U * 1024U * 1024U;
@@ -397,6 +400,10 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         }
         return error;
     };
+    auto limitStop = [&fire](Base::CADKernelError error) {
+        limitStopped = true;
+        return limitStopIsOptional ? error : fire(error);
+    };
     auto stopped = [&]() {
         const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
         return fire(Base::CADKernelError(
@@ -407,7 +414,7 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         throw stopped();
     }
     if (limited && started >= deadline) {
-        throw fire(Base::CADKernelError(
+        throw limitStop(Base::CADKernelError(
             name + " could not start: the feature's geometry took longer than " + limitText
             + " already: the feature is not built"
         ));
@@ -462,7 +469,7 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         if (cancelled) {
             throw stopped();
         }
-        throw fire(Base::CADKernelError(
+        throw limitStop(Base::CADKernelError(
             name + " took longer than " + limitText + ", and was stopped: the feature is not built"
         ));
     }
@@ -471,6 +478,31 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     if (call->error) {
         std::rethrow_exception(call->error);
     }
+}
+
+bool runOptional(const char* what, const std::function<void(const Message_ProgressRange&)>& work)
+{
+    struct Restore
+    {
+        bool optional = limitStopIsOptional;
+        ~Restore()
+        {
+            limitStopIsOptional = optional;
+        }
+    } restore;
+    limitStopIsOptional = true;
+    limitStopped = false;
+    try {
+        run(what, work, Inputs::Owned);
+    }
+    catch (const Base::CADKernelError&) {
+        if (limitStopped) {
+            limitStopped = false;
+            return false;
+        }
+        throw;
+    }
+    return true;
 }
 
 TopoDS_Shape exactCopy(const TopoDS_Shape& shape)

@@ -69,6 +69,14 @@ PartExport void run(
     Inputs inputs = Inputs::Owned
 );
 
+/** As run(), for a check the result doesn't need (work on copies only): false, with nothing noted
+ * as a stop, where the limit stopped it or it could not start; the caller warns. Esc and the
+ * work's own errors throw as from run(). */
+PartExport bool runOptional(
+    const char* what,
+    const std::function<void(const Message_ProgressRange&)>& work
+);
+
 /** An exact copy of the shape, its geometry included (a binary round trip, as a file saves it),
  * for work under run() that must not read the document's shapes. BRepBuilderAPI_Copy's copy isn't
  * exact: a valid B-spline face of a cut by a degenerate ellipsoid came out "unorientable" from it,

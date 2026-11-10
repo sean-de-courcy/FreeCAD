@@ -10646,10 +10646,9 @@ TopoShape& TopoShape::makeElementBoolean(
         const bool vouchedFor = inputCheck == BooleanInputCheck::Tools
             && static_cast<int>(k) < firstArgumentInputs;
         if (!vouchedFor) {
-            // A copy of its topology: an abandoned check reads nothing the document changes
-            toCheck.push_back(
-                BRepBuilderAPI_Copy(fixedInputs[k].getShape(), Standard_False, Standard_False).Shape()
-            );
+            // An exact copy: an abandoned check reads nothing the document changes, and a valid
+            // input checks valid (BRepBuilderAPI_Copy's copy of a valid face can fail, kernel-4)
+            toCheck.push_back(KernelBudget::exactCopy(fixedInputs[k].getShape()));
             checked.push_back(k);
         }
     }

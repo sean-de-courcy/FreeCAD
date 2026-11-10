@@ -296,7 +296,7 @@ struct KnownVolume
 };
 std::mutex knownVolumesMutex;
 std::deque<KnownVolume> knownVolumes;
-constexpr std::size_t knownVolumesKept = 8;
+constexpr std::size_t knownVolumesKept = 64;  // a body's chain after an edit: one per feature
 
 bool knownVolume(const TopoDS_Shape& shape, double& volume)
 {
@@ -558,6 +558,22 @@ std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& 
         if (!refine.before.IsNull() && refine.after.TShape() == result.TShape()) {
             checked = refine.before.Moved(result.Location() * refine.after.Location().Inverted());
         }
+        else if (!refine.before.IsNull()) {
+            // The solid taken out of the refine's result (getSolid): the one solid before it
+            auto onlySolid = [](const TopoDS_Shape& shape) {
+                TopoDS_Shape found;
+                int count = 0;
+                for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next(), ++count) {
+                    found = it.Current();
+                }
+                return count == 1 ? found : TopoDS_Shape();
+            };
+            const TopoDS_Shape after = onlySolid(refine.after);
+            const TopoDS_Shape before = onlySolid(refine.before);
+            if (!after.IsNull() && !before.IsNull() && after.TShape() == result.TShape()) {
+                checked = before.Moved(result.Location() * after.Location().Inverted());
+            }
+        }
         refineNotes.erase(note);
     }
 
@@ -571,7 +587,8 @@ std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& 
     collectFaces(checked, resultFaces);
     // Where an input of the boolean was repaired, every face is checked and the base's volume
     // says nothing about the result's (the repair changed it)
-    const bool allFaces = !inputsValid && !base.IsNull();
+    // (a dress-up has no boolean: its flag says nothing)
+    const bool allFaces = !inputsValid && !base.IsNull() && !feature.isDerivedFrom<DressUp>();
     BRep_Builder builder;
     TopoDS_Compound made;
     TopoDS_Compound removed;
@@ -672,9 +689,13 @@ std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& 
             check->base = copies.Value();
         }
     }
-    Part::KernelBudget::run("The check of the result", [check](const Message_ProgressRange&) {
-        check->run();
-    });
+    // Not needed for the result: stopped by the limit, it is skipped with a warning (kernel-4)
+    if (!Part::KernelBudget::runOptional("The check of the result", [check](const Message_ProgressRange&) {
+            check->run();
+        })) {
+        ResultCheck::warnSkipped(&feature, "The check of the result");
+        return {};
+    }
 
     const double before = check->baseVolume;
     const double after = check->baseVolume + check->change;
@@ -743,6 +764,12 @@ bool ResultCheck::skippedForTheLimit(const Feature* feature, const char* step)
     if (!Part::KernelBudget::pastDeadline()) {
         return false;
     }
+    warnSkipped(feature, step);
+    return true;
+}
+
+void ResultCheck::warnSkipped(const Feature* feature, const char* step)
+{
     if (auto doc = feature ? feature->getDocument() : nullptr) {
         const std::string text = std::string(step)
             + " was skipped: the feature took longer than " + number(Part::KernelBudget::limit())
@@ -756,7 +783,6 @@ bool ResultCheck::skippedForTheLimit(const Feature* feature, const char* step)
             );
         }
     }
-    return true;
 }
 
 App::DocumentObjectExecReturn* Feature::recompute()
