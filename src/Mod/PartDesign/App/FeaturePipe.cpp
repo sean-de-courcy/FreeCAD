@@ -5499,8 +5499,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
             const ProfileFoot foot = profileFoot(profileWires, TopoDS::Wire(path.getShape()));
             const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
-            // Pending Onshape's answer (SW5), loud where the sweep would be degenerate or far off
-            // (skeptic c721, finding 3): a profile at the centre of an arc swept nothing, "valid"
+            // A profile off the path keeps its offset, as in Onshape (SW5: 5 below, or 5 beside, a
+            // circle r 2); one as near to two places of the path is loud (skeptic c721, finding
+            // 3): at the centre of an arc it swept nothing, "valid"
             if (foot.tie) {
                 return new App::DocumentObjectExecReturn(fmt::format(
                     "Pipe: the profile's nearest point on the path isn't one place: it lies as near "
@@ -5511,19 +5512,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     foot.distance
                 ));
             }
-            if (foot.distance > foot.size + Precision::Confusion()) {
-                return new App::DocumentObjectExecReturn(fmt::format(
-                    "Pipe: the profile lies {:.6g} mm from the path, farther than its own size "
-                    "({:.6g} mm): the sweep would run far from the path. Move the profile onto the "
-                    "path.",
-                    foot.distance,
-                    foot.size
-                ));
-            }
             // A profile in the middle with the option off sweeps one way from its foot point:
             // against the profile's normal (Onshape, SW1: a Top circle on a line along Z sweeps
             // -Z whichever way the line is drawn; at a joint, the segment below it), the other way
-            // with PathReversed. Which rule Onshape follows beyond those cases is pending (SW1b).
+            // with PathReversed. SW1b: against the normal whatever the pick order or the lines' way.
             if (!ExtendToFullPath.getValue() && !foot.atEnd) {
                 const std::optional<gp_Dir> normal = profileNormal(invObjLoc);
                 if (!normal) {

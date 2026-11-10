@@ -183,7 +183,7 @@ class TestPipeExtendToFullPath(PipeCase):
     sweeps one way from it, against the profile's normal (a Top circle on a line along Z sweeps -Z, whichever
     way the line is drawn; at a joint, the segment below it), the other way with `PathReversed`. On, it
     sweeps both ways along all of the path, as Pipe did before (a file without the property reads on).
-    Which rule Onshape follows beyond these cases is pending (SW1b)."""
+    SW1b: against the profile plane's normal whatever the pick order or the lines' way."""
 
     def sw4Path(self, reversedOrder=False):
         """SW4's path shifted so the joint of its first two segments is at the origin: a line up to the
@@ -240,6 +240,15 @@ class TestPipeExtendToFullPath(PipeCase):
         pipe = self.pipe(self.circle(), self.sw4Path(), ExtendToFullPath=True)
         self.assertSweeps(pipe, AREA * (10 + 5 * math.pi + 20), 2)
 
+    def testOffFollowsTheProfilesNormalNotThePicks(self):
+        """SW1b (c): the path's segments picked 3, 2, 1, a profile whose normal is -Z: segments 2 and 3
+        (448.720, box (-2, -2, 0)-(30, 2, 12))."""
+        flipped = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 180))
+        pipe = self.pipe(self.circle(placement=flipped), self.sw4Path(reversedOrder=True))
+        self.assertSweeps(pipe, AREA * (5 * math.pi + 20), 2)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, 0, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMax, 30, 4)
+
     def testOppositeDirectionChangesNothingWhenExtended(self):
         pipe = self.pipe(self.circle(), self.line(-10, 10), ExtendToFullPath=True, PathReversed=True)
         self.assertSweeps(pipe, AREA * 20)
@@ -247,17 +256,28 @@ class TestPipeExtendToFullPath(PipeCase):
 
 
 class TestPipeProfilePlacement(PipeCase):
-    """The profile's foot point on the path (skeptic c721, finding 3; SW5 pending): a profile whose
-    nearest point on the path is ambiguous, or that lies farther from the path than its own size, stops
-    loudly instead of sweeping something degenerate. Near the path, it keeps its offset (as before)."""
+    """The profile's foot point on the path (skeptic c721, finding 3): a profile whose nearest point on
+    the path is ambiguous stops loudly instead of sweeping something degenerate. Off the path, near or
+    far, it keeps its offset (Onshape, SW5)."""
 
     def testProfileAtTheCentreOfASemicircleStops(self):
         path = self.sketch("Path", [Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), 0, math.pi)],
                            placement=XZ)
         self.assertStops(self.pipe(self.circle(), path), "nearest")
 
-    def testProfileFarFromThePathStops(self):
-        self.assertStops(self.pipe(self.circle(10, 0), self.line()), "far")
+    def testProfileBesideThePathKeepsItsOffset(self):
+        """SW5: a circle r 2 at (5, 0): x 3..7, z 0..20, 251.327."""
+        pipe = self.pipe(self.circle(5, 0), self.line())
+        self.assertSweeps(pipe, AREA * 20)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMin, 3, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMax, 7, 4)
+
+    def testProfileBelowThePathKeepsItsOffset(self):
+        """SW5: a circle r 2 on a plane 5 below Top: z -5..15."""
+        pipe = self.pipe(self.circle(z=-5), self.line())
+        self.assertSweeps(pipe, AREA * 20)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, -5, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMax, 15, 4)
 
     def testProfileNearThePathKeepsItsOffset(self):
         pipe = self.pipe(self.circle(1, 0), self.line())
