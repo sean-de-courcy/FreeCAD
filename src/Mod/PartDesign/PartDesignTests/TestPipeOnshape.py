@@ -149,7 +149,7 @@ class TestPipeProfileControl(PipeCase):
         self.assertStops(pipe, "edge-on", "(")
 
     def testNoneCarriesAnAsymmetricProfileWithoutRollOnAThreeDPath(self):
-        """SW16 (pending; FreeCAD-CH's Standard and Frenet agree): a line up Z, a quarter arc to +X, a
+        """SW16 (Onshape: 165.664 and these vertices, no roll): a line up Z, a quarter arc to +X, a
         quarter arc at z = 20 to +Y; a triangle with legs 4 (X) and 2 (Y), right angle at (-1, -1).
         Carried without roll, the end face's right angle is at (21, 10, 21), the 4 leg's end at
         (21, 10, 17), the 2 leg's end at (19, 10, 21). The path comes from two sketches."""
@@ -158,8 +158,12 @@ class TestPipeProfileControl(PipeCase):
         second = self.sketch("Path001", [arc3((10, 0, 0), (10, 10, 0), (20, 10, 0))], z=20)
         profile = self.sketch("Profile", models.polygon([(-1, -1), (3, -1), (-1, 1)]))
         pipe = self.pipe(profile, first, more=[second], ProfileControl="None")
-        self.assertSweeps(pipe)
+        self.assertSweeps(pipe, 165.664)
         self.assertHasVertices(pipe.Shape, [(21, 10, 21), (21, 10, 17), (19, 10, 21)])
+        # Keep orientation: Onshape fails (SWEEP_FAILED); the path turns edge-on to the profile
+        pipe.ProfileControl = "Keep orientation"
+        self.doc.recompute()
+        self.assertStops(pipe, "edge-on")
 
     def testNoneKeepsASquareRadialAlongAHelix(self):
         """SW3 (pending): a 1 x 1 square on Front at the helix start, one side on the cylinder r 10;
@@ -175,13 +179,25 @@ class TestPipeProfileControl(PipeCase):
 
 
 class TestPipeExtendToFullPath(PipeCase):
-    """`ExtendToFullPath` on (Onshape's default, and Pipe's behaviour so far): a profile in the middle of
-    the path sweeps both ways along all of it. Off: from the profile one way. Which way is SW1's answer;
-    until it comes, a profile in the middle with the option off stops loudly."""
+    """`ExtendToFullPath` (Onshape, SW0 and SW1): off by default; a profile in the middle of the path then
+    sweeps one way from it, against the profile's normal (a Top circle on a line along Z sweeps -Z, whichever
+    way the line is drawn; at a joint, the segment below it), the other way with `PathReversed`. On, it
+    sweeps both ways along all of the path, as Pipe did before (a file without the property reads on).
+    Which rule Onshape follows beyond these cases is pending (SW1b)."""
+
+    def sw4Path(self, reversedOrder=False):
+        """SW4's path shifted so the joint of its first two segments is at the origin: a line up to the
+        origin from z = -10, a quarter arc r 10 to (10, 0, 10), a line to (30, 0, 10)."""
+        geometry = [Part.LineSegment(V(0, -10, 0), V(0, 0, 0)),
+                    arc3((0, 0, 0), (10, 0, 0), (10, 10, 0)),
+                    Part.LineSegment(V(10, 10, 0), V(30, 10, 0))]
+        return self.sketch("Path", geometry[::-1] if reversedOrder else geometry, placement=XZ)
+
+    def testOffByDefault(self):
+        self.assertFalse(self.pipe(self.circle(), self.line(0, 20)).ExtendToFullPath)
 
     def testOnSweepsBothWaysFromTheMiddle(self):
-        pipe = self.pipe(self.circle(), self.line(-10, 10))
-        self.assertTrue(pipe.ExtendToFullPath)
+        pipe = self.pipe(self.circle(), self.line(-10, 10), ExtendToFullPath=True)
         self.assertSweeps(pipe, AREA * 20)
         self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, -10, 4)
         self.assertAlmostEqual(pipe.Shape.BoundBox.ZMax, 10, 4)
@@ -192,13 +208,40 @@ class TestPipeExtendToFullPath(PipeCase):
     def testOffAtTheFarEndSweepsTheWholePath(self):
         self.assertSweeps(self.pipe(self.circle(), self.line(20, 0), ExtendToFullPath=False), AREA * 20)
 
-    def testOffInTheMiddleStops(self):
-        """Pending SW1: the loud choice."""
-        pipe = self.pipe(self.circle(), self.line(-10, 10), ExtendToFullPath=False)
-        self.assertStops(pipe, "extend to full path")
+    def assertZ(self, pipe, low, high):
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, low, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMax, high, 4)
+
+    def testOffInTheMiddleSweepsAgainstTheNormal(self):
+        """SW1: 125.664, z -10..0."""
+        pipe = self.pipe(self.circle(), self.line(-10, 10))
+        self.assertSweeps(pipe, AREA * 10)
+        self.assertZ(pipe, -10, 0)
+
+    def testOffInTheMiddleSweepsTheSameWayWhenTheLineIsDrawnTheOtherWay(self):
+        pipe = self.pipe(self.circle(), self.line(10, -10))
+        self.assertSweeps(pipe, AREA * 10)
+        self.assertZ(pipe, -10, 0)
+
+    def testOppositeDirectionFlipsIt(self):
+        """SW1: pathOppositeDirection gives z 0..10."""
+        pipe = self.pipe(self.circle(), self.line(-10, 10), PathReversed=True)
+        self.assertSweeps(pipe, AREA * 10)
+        self.assertZ(pipe, 0, 10)
+
+    def testOffAtAJointSweepsTheSegmentBelow(self):
+        """SW1's 3-segment path, profile at the joint of segments 1 and 2: off, segment 1 only (125.664)."""
+        pipe = self.pipe(self.circle(), self.sw4Path())
+        self.assertSweeps(pipe, AREA * 10)
+        self.assertZ(pipe, -10, 0)
+
+    def testOnAtAJointSweepsAllOfIt(self):
+        """SW1: on, 574.383 = area x (10 + 5 pi + 20): the whole path."""
+        pipe = self.pipe(self.circle(), self.sw4Path(), ExtendToFullPath=True)
+        self.assertSweeps(pipe, AREA * (10 + 5 * math.pi + 20), 2)
 
     def testOppositeDirectionChangesNothingWhenExtended(self):
-        pipe = self.pipe(self.circle(), self.line(-10, 10), PathReversed=True)
+        pipe = self.pipe(self.circle(), self.line(-10, 10), ExtendToFullPath=True, PathReversed=True)
         self.assertSweeps(pipe, AREA * 20)
         self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, -10, 4)
 

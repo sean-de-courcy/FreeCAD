@@ -41,6 +41,7 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
@@ -4397,6 +4398,85 @@ ProfileFoot profileFoot(const std::vector<TopoDS_Shape>& wires, const TopoDS_Wir
     return foot;
 }
 
+/// The path from the profile's foot point one way (Extend to full path off)
+struct OneWay
+{
+    Part::TopoShape path;
+};
+
+/// \a path from \a at, which lies on it, to the end that runs against \a normal (with \a
+/// reversed, along it): the edges past it whole, with their names, and the edge it lies on cut
+/// there. None where the path runs edge-on to \a normal at \a at.
+std::optional<OneWay> oneWayFrom(
+    const Part::TopoShape& path,
+    const gp_Pnt& at,
+    const gp_Dir& normal,
+    bool reversed
+)
+{
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(TopoDS::Wire(path.getShape()));
+    for (size_t k = 0; k < edges.size(); ++k) {
+        const TopoDS_Edge& edge = edges[k];
+        double first = 0;
+        double last = 0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+        if (curve.IsNull()) {
+            continue;
+        }
+        GeomAPI_ProjectPointOnCurve projection(at, curve, first, last);
+        if (projection.NbPoints() == 0 || projection.LowerDistance() > tieTolerance) {
+            continue;
+        }
+        const double u = projection.LowerDistanceParameter();
+        const bool forward = edge.Orientation() != TopAbs_REVERSED;
+        gp_Pnt point;
+        gp_Vec tangent;
+        curve->D1(u, point, tangent);
+        if (!forward) {
+            tangent.Reverse();
+        }
+        if (tangent.Magnitude() < gp::Resolution()
+            || std::abs(gp_Dir(tangent).Dot(normal)) < std::sin(std::numbers::pi / 180)) {
+            return std::nullopt;
+        }
+        // Along the path's order where its tangent runs against the normal
+        const bool ahead = (gp_Dir(tangent).Dot(normal) < 0) != reversed;
+        std::vector<Part::TopoShape> kept;
+        auto whole = [&](size_t i) {
+            const int index = path.findShape(edges[i]);
+            kept.push_back(index > 0 ? path.getSubTopoShape(TopAbs_EDGE, index) : Part::TopoShape(edges[i]));
+        };
+        // The cut edge's part on the kept side, in its curve's parameters
+        const double from = ahead == forward ? u : first;
+        const double to = ahead == forward ? last : u;
+        if (to - from > Precision::PConfusion()
+            && BRepAdaptor_Curve(edge).Value(from).Distance(BRepAdaptor_Curve(edge).Value(to))
+                > Precision::Confusion()) {
+            kept.emplace_back(BRepBuilderAPI_MakeEdge(curve, from, to).Edge());
+        }
+        if (ahead) {
+            for (size_t i = k + 1; i < edges.size(); ++i) {
+                whole(i);
+            }
+        }
+        else {
+            for (size_t i = 0; i < k; ++i) {
+                whole(i);
+            }
+        }
+        if (kept.empty()) {
+            return std::nullopt;
+        }
+        OneWay result;
+        result.path = Part::TopoShape(0, path.Hasher).makeElementWires(kept);
+        if (result.path.isNull() || result.path.shapeType() != TopAbs_WIRE) {
+            return std::nullopt;
+        }
+        return result;
+    }
+    return std::nullopt;
+}
+
 /// Whether \a path lies in a plane, or on a line, within a micrometre
 bool isPlanarPath(const TopoDS_Wire& path)
 {
@@ -4754,7 +4834,7 @@ Pipe::Pipe()
     );
     ADD_PROPERTY_TYPE(
         ExtendToFullPath,
-        (true),
+        (false),
         "Sweep",
         App::Prop_None,
         "A profile in the middle of the path sweeps both ways along all of it"
@@ -4806,11 +4886,45 @@ void Pipe::onChanged(const App::Property* prop)
     ProfileBased::onChanged(prop);
 }
 
+std::optional<gp_Dir> Pipe::profileNormal(const TopLoc_Location& invObjLoc) const
+{
+    // A sketch's normal is its placement's Z, whichever way its curves run; a face's, its own
+    gp_Dir normal;
+    App::DocumentObject* profile = Profile.getValue();
+    if (auto sketch = freecad_cast<Part::Part2DObject*>(profile)) {
+        const Base::Vector3d z = sketch->Placement.getValue().getRotation().multVec(Base::Vector3d(0, 0, 1));
+        normal = gp_Dir(z.x, z.y, z.z);
+    }
+    else if (auto feature = freecad_cast<Part::Feature*>(profile)) {
+        const std::vector<std::string>& subs = Profile.getSubValues();
+        if (subs.empty()) {
+            return std::nullopt;
+        }
+        const Part::TopoShape face = feature->Shape.getShape().getSubTopoShape(subs.front().c_str(), true);
+        if (face.isNull() || face.shapeType() != TopAbs_FACE) {
+            return std::nullopt;
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()));
+        if (surface.GetType() != GeomAbs_Plane) {
+            return std::nullopt;
+        }
+        normal = surface.Plane().Axis().Direction();
+        if (face.getShape().Orientation() == TopAbs_REVERSED) {
+            normal.Reverse();
+        }
+    }
+    else {
+        return std::nullopt;
+    }
+    return normal.Transformed(invObjLoc.Transformation());
+}
+
 void Pipe::Restore(Base::XMLReader& reader)
 {
     settingMode = true;
     ProfileControl.setValue(long(2));
     settingMode = false;
+    ExtendToFullPath.setValue(true);
     ProfileBased::Restore(reader);
 }
 
@@ -5082,6 +5196,7 @@ std::array<gp_Trsf, 2> profileFramesOf(const TopoDS_Shape& profile)
 
 App::DocumentObjectExecReturn* Pipe::execute()
 {
+    frenetForNone = false;
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
@@ -5382,8 +5497,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     profileWires.push_back(wire.getShape());
                 }
             }
-            const TopoDS_Wire spineWire = TopoDS::Wire(path.getShape());
-            const ProfileFoot foot = profileFoot(profileWires, spineWire);
+            const ProfileFoot foot = profileFoot(profileWires, TopoDS::Wire(path.getShape()));
             const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
             // Pending Onshape's answer (SW5), loud where the sweep would be degenerate or far off
             // (skeptic c721, finding 3): a profile at the centre of an arc swept nothing, "valid"
@@ -5406,19 +5520,35 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     foot.size
                 ));
             }
-            // Which way Onshape sweeps from a profile in the middle with the option off is
-            // pending (SW1): loud until then
+            // A profile in the middle with the option off sweeps one way from its foot point:
+            // against the profile's normal (Onshape, SW1: a Top circle on a line along Z sweeps
+            // -Z whichever way the line is drawn; at a joint, the segment below it), the other way
+            // with PathReversed. Which rule Onshape follows beyond those cases is pending (SW1b).
             if (!ExtendToFullPath.getValue() && !foot.atEnd) {
-                return new App::DocumentObjectExecReturn(fmt::format(
-                    "Pipe: with 'Extend to full path' off, a profile in the middle of the path (at "
-                    "{}) isn't supported yet. Turn 'Extend to full path' on, or split the path at "
-                    "the profile.",
-                    pointText(foot.at.Transformed(toBody))
-                ));
+                const std::optional<gp_Dir> normal = profileNormal(invObjLoc);
+                if (!normal) {
+                    return new App::DocumentObjectExecReturn(
+                        "Pipe: with 'Extend to full path' off, the profile's plane decides which way "
+                        "the sweep runs from it, and this profile has none. Turn 'Extend to full "
+                        "path' on."
+                    );
+                }
+                const std::optional<OneWay> oneWay
+                    = oneWayFrom(path, foot.at, *normal, PathReversed.getValue());
+                if (!oneWay) {
+                    return new App::DocumentObjectExecReturn(fmt::format(
+                        "Pipe: with 'Extend to full path' off, the path runs edge-on to the profile "
+                        "at {}, so neither way from the profile is the one it faces. Turn 'Extend "
+                        "to full path' on, or turn the profile.",
+                        pointText(foot.at.Transformed(toBody))
+                    ));
+                }
+                path = oneWay->path;
             }
             // None off a plane: Frenet's frame where it neither turns over nor jumps (a helix's
             // profile stays square to its axis; corrected Frenet rolls it), else corrected Frenet.
             // On a plane both are the same, so planar paths sweep exactly as Standard did.
+            const TopoDS_Wire spineWire = TopoDS::Wire(path.getShape());
             if (ProfileControl.getValue() == 0 && Mode.getValue() == 0
                 && !isPlanarPath(spineWire)) {
                 try {

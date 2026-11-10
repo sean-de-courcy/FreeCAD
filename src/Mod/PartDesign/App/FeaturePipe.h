@@ -25,12 +25,14 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "FeatureSketchBased.h"
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp_Dir.hxx>
 
 namespace PartDesign
 {
@@ -95,7 +97,8 @@ public:
 
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;
-    /// A file without ProfileControl reads as "Advanced": its Mode decides, as before
+    /// A file without ProfileControl reads as "Advanced" (its Mode decides, as before), without
+    /// ExtendToFullPath as on (it swept the whole path)
     void Restore(Base::XMLReader& reader) override;
     /// returns the type name of the view provider
     const char* getViewProviderName() const override
@@ -128,6 +131,9 @@ protected:
     void setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS_Shape& auxshape);
     /// ProfileControl sets Mode; Mode set directly makes ProfileControl "Advanced"
     void onChanged(const App::Property* prop) override;
+    /// The profile's plane normal in the pipe's frame (\a invObjLoc): a sketch's placement Z, a
+    /// planar face's normal; none for another profile
+    std::optional<gp_Dir> profileNormal(const TopLoc_Location& invObjLoc) const;
     /// handle changed property
     void handleChangedPropertyType(
         Base::XMLReader& reader,
