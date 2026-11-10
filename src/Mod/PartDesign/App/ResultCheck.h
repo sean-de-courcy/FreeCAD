@@ -39,5 +39,11 @@ namespace ResultCheck
 /// FeatureRefine notes what its refine started from (before) and gave (after): the faces that
 /// refine rebuilds are compared on the shape before it
 void noteRefine(const Feature* feature, const TopoDS_Shape& before, const TopoDS_Shape& after);
+
+/// Whether the feature's time limit has passed (Part::KernelBudget::pastDeadline()): then  step,
+/// a check or a refine the result doesn't need, is skipped, with a warning on the feature that
+/// names it (kernel safety S1: the limit covers the whole recompute, and a step that can't be
+/// stopped doesn't start late)
+bool skippedForTheLimit(const Feature* feature, const char* step);
 }  // namespace ResultCheck
 }  // namespace PartDesign

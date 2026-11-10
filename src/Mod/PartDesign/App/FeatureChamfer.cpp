@@ -43,6 +43,7 @@
 #include <Mod/Part/App/TopoShapeRepair.h>
 
 #include "FeatureChamfer.h"
+#include "ResultCheck.h"
 
 #include <Base/ProgramVersion.h>
 
@@ -196,13 +197,19 @@ App::DocumentObjectExecReturn* Chamfer::execute()
             );
         }
         // OCCT fills a recess its band crosses, in a valid solid (ops#393)
-        const std::string filled = Part::filledPocket(shape, TopShape, edges);
+        const std::string filled
+            = ResultCheck::skippedForTheLimit(this, "The chamfer's check for a filled recess")
+            ? std::string()
+            : Part::filledPocket(shape, TopShape, edges);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + filled);
         }
         // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
         // (ops#603)
-        const std::string lost = Part::lostMaterial(shape, TopShape, edges, reach);
+        const std::string lost
+            = ResultCheck::skippedForTheLimit(this, "The chamfer's check for lost material")
+            ? std::string()
+            : Part::lostMaterial(shape, TopShape, edges, reach);
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + lost);
         }

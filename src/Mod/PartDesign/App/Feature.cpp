@@ -72,6 +72,7 @@
 #include <Base/Console.h>
 
 #include <Mod/Part/App/KernelBudget.h>
+#include <Mod/Part/App/MassProperties.h>
 
 #include "Feature.h"
 #include "FailureContinuation.h"
@@ -279,7 +280,15 @@ struct RefineNote
 };
 thread_local std::unordered_map<const Feature*, RefineNote> refineNotes;
 
-/// The volumes of the last results that passed, newest last: the next feature's base is one
+/// The scale of a location's transform: 1 for a placement
+double scaleOf(const TopLoc_Location& location)
+{
+    return std::abs(location.Transformation().ScaleFactor());
+}
+
+/// The volumes of the last results that passed, newest last: the next feature's base is one. A
+/// volume belongs to the shape's TShape and orientation: the base comes back under another
+/// placement (the feature's own), which moves it without changing its volume
 struct KnownVolume
 {
     TopoDS_Shape shape;
@@ -293,7 +302,8 @@ bool knownVolume(const TopoDS_Shape& shape, double& volume)
 {
     std::lock_guard<std::mutex> lock(knownVolumesMutex);
     for (auto it = knownVolumes.rbegin(); it != knownVolumes.rend(); ++it) {
-        if (it->shape.IsEqual(shape)) {
+        if (it->shape.IsPartner(shape) && it->shape.Orientation() == shape.Orientation()
+            && std::abs(scaleOf(it->shape.Location()) - scaleOf(shape.Location())) <= 1e-12) {
             volume = it->volume;
             return true;
         }
@@ -310,11 +320,11 @@ void rememberVolume(const TopoDS_Shape& shape, double volume)
     }
 }
 
+/// The volume the faces bound: adaptive where a face carries a B-spline of many spans, whose
+/// default integration is badly wrong (negative for a correct pipe along 1000 of them, ops#414)
 double volumeOf(const TopoDS_Shape& shape)
 {
-    GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return props.Mass();
+    return Part::MassProperties::volume(shape);
 }
 
 enum class Direction
@@ -383,11 +393,11 @@ bool sameTransform(const TopLoc_Location& a, const TopLoc_Location& b)
     return true;
 }
 
-/// A solid's own scale for "no volume": its bounding box's volume
-double boxVolume(const TopoDS_Shape& solid)
+/// The volume of a shape's bounding box: the scale for "no volume"
+double boxVolume(const TopoDS_Shape& shape)
 {
     Bnd_Box box;
-    BRepBndLib::Add(solid, box, Standard_False);
+    BRepBndLib::Add(shape, box, Standard_False);
     if (box.IsVoid()) {
         return 0.0;
     }
@@ -401,15 +411,45 @@ double boxVolume(const TopoDS_Shape& solid)
     return (x1 - x0) * (y1 - y0) * (z1 - z0);
 }
 
-/// The check's work: plain shapes only (copies), so that it runs under KernelBudget::run()
+/// The faces of a shape's solids (loose faces and shells don't count), with their placement
+using FaceMap = std::unordered_multimap<const TopoDS_TShape*, TopoDS_Shape>;
+
+void collectFaces(const TopoDS_Shape& shape, FaceMap& faces)
+{
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        for (TopExp_Explorer face(solid.Current(), TopAbs_FACE); face.More(); face.Next()) {
+            faces.emplace(face.Current().TShape().get(), face.Current());
+        }
+    }
+}
+
+/// A face is unchanged where the other shape has it: the same TShape, orientation and transform
+/// (PartDesign's results share their base's TShapes under other location datums)
+bool containsFace(const FaceMap& faces, const TopoDS_Shape& face)
+{
+    auto range = faces.equal_range(face.TShape().get());
+    for (auto it = range.first; it != range.second; ++it) {
+        if (it->second.Orientation() == face.Orientation()
+            && sameTransform(it->second.Location(), face.Location())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The check's work under KernelBudget::run(): exact copies only (Part::KernelBudget::exactCopy),
+/// of what the feature changed, so that its cost follows the change and not the part's size
 struct Check
 {
-    // Inputs
-    TopoDS_Shape base;    // null for a first feature
-    TopoDS_Shape result;  // before a refine, where the refine's input is known
-    bool baseVolumeKnown {false};
-    bool checkFaces {true};
-    bool allFaces {false};
+    // Inputs, copies: compounds of the result's faces the base doesn't have (made), of the base's
+    // the result doesn't have (removed), of the faces to check, of the result's solids it changed
+    // where it has several, and the base where its volume isn't known (else a null shape)
+    TopoDS_Shape made;
+    TopoDS_Shape removed;
+    TopoDS_Shape faces;
+    TopoDS_Shape solids;
+    TopoDS_Shape base;
+    bool oneSolid {true};
     // Inputs and outputs
     double baseVolume {0.0};
     // Outputs
@@ -421,57 +461,25 @@ struct Check
     bool hasChangedSolid {false};
     int facesChecked {0};
     int facesInvalid {0};
-    std::string shellProblem;
 
     void run()
     {
-        // The faces of the solids (loose faces and shells don't count), with their placement
-        std::unordered_multimap<const TopoDS_TShape*, TopoDS_Shape> baseFaces;
-        std::unordered_multimap<const TopoDS_TShape*, TopoDS_Shape> resultFaces;
-        auto collect = [](const TopoDS_Shape& shape, auto& faces) {
-            for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
-                for (TopExp_Explorer face(solid.Current(), TopAbs_FACE); face.More(); face.Next()) {
-                    faces.emplace(face.Current().TShape().get(), face.Current());
-                }
-            }
-        };
-        if (!base.IsNull()) {
-            collect(base, baseFaces);
-        }
-        collect(result, resultFaces);
-        // A face is unchanged where the other shape has it: the same TShape, orientation and
-        // transform (PartDesign's results share their base's TShapes under other location datums)
-        auto contains = [](const auto& faces, const TopoDS_Shape& face) {
-            auto range = faces.equal_range(face.TShape().get());
-            for (auto it = range.first; it != range.second; ++it) {
-                if (it->second.Orientation() == face.Orientation()
-                    && sameTransform(it->second.Location(), face.Location())) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
         // The volume's change: the faces it made and those it removed, reversed, close up into one
         // surface (the unchanged faces cancel), whose divergence integral is the change
         BRep_Builder builder;
         TopoDS_Compound cycle;
         builder.MakeCompound(cycle);
-        TopTools_IndexedMapOfShape changed;
-        for (const auto& [tshape, face] : resultFaces) {
-            if (!contains(baseFaces, face)) {
-                builder.Add(cycle, face);
-                changed.Add(face);
-            }
+        bool anyMade = false;
+        for (TopoDS_Iterator it(made); it.More(); it.Next()) {
+            builder.Add(cycle, it.Value());
+            anyMade = true;
         }
-        for (const auto& [tshape, face] : baseFaces) {
-            if (!contains(resultFaces, face)) {
-                builder.Add(cycle, face.Reversed());
-            }
+        for (TopoDS_Iterator it(removed); it.More(); it.Next()) {
+            builder.Add(cycle, it.Value().Reversed());
         }
         change = volumeOf(cycle);
 
-        if (!baseVolumeKnown && !base.IsNull()) {
+        if (!base.IsNull()) {
             baseVolume = 0.0;
             for (TopExp_Explorer it(base, TopAbs_SOLID); it.More(); it.Next()) {
                 const double volume = volumeOf(it.Current());
@@ -482,64 +490,32 @@ struct Check
             }
         }
 
-        // The solids it changed
-        int solids = 0;
-        for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
-            ++solids;
-        }
-        for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
-            bool touched = false;
-            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
-                 face.Next()) {
-                touched = changed.Contains(face.Current());
-            }
-            if (!touched) {
-                continue;
-            }
-            // One solid: the base's volume and the change give it
-            const double volume = solids == 1 ? baseVolume + change : volumeOf(it.Current());
-            const double ratio = volume / std::max(boxVolume(it.Current()), 1e-300);
+        // The solids it changed. One solid: the base's volume and the change give it, against the
+        // box of the faces it made (a part's change no larger than it, the box no larger than the
+        // part's: a small change to a sound part is far from "no volume", a collapse isn't)
+        auto judge = [this](double volume, double box) {
+            const double ratio = volume / std::max(box, 1e-300);
             if (!hasChangedSolid || ratio < worstSolid) {
                 worstSolid = ratio;
                 worstSolidVolume = volume;
             }
             hasChangedSolid = true;
+        };
+        if (oneSolid) {
+            if (anyMade) {
+                judge(baseVolume + change, boxVolume(made));
+            }
+        }
+        else {
+            for (TopoDS_Iterator it(solids); it.More(); it.Next()) {
+                judge(volumeOf(it.Value()), boxVolume(it.Value()));
+            }
         }
 
-        if (!checkFaces) {
-            return;
-        }
-        TopTools_IndexedMapOfShape faces;
-        for (const auto& [tshape, face] : resultFaces) {
-            if (allFaces || changed.Contains(face)) {
-                faces.Add(face);
-            }
-        }
-        for (int i = 1; i <= faces.Extent(); ++i) {
+        for (TopoDS_Iterator it(faces); it.More(); it.Next()) {
             ++facesChecked;
-            if (!BRepCheck_Analyzer(faces(i)).IsValid()) {
+            if (!BRepCheck_Analyzer(it.Value()).IsValid()) {
                 ++facesInvalid;
-            }
-        }
-        for (TopExp_Explorer solid(result, TopAbs_SOLID); solid.More(); solid.Next()) {
-            for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
-                bool touched = allFaces;
-                for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
-                     face.Next()) {
-                    touched = changed.Contains(face.Current());
-                }
-                if (!touched) {
-                    continue;
-                }
-                BRepCheck_Shell shell(TopoDS::Shell(it.Current()));
-                if (shell.Closed() != BRepCheck_NoError) {
-                    shellProblem = "a shell is open";
-                    return;
-                }
-                if (shell.Orientation() != BRepCheck_NoError) {
-                    shellProblem = "a shell's faces are not oriented consistently";
-                    return;
-                }
             }
         }
     }
@@ -562,16 +538,19 @@ std::string number(double value)
 
 const char* notBuilt = ": the feature is not built";
 
-/// Empty when the result passes, else what is wrong
-std::string checkResult(Feature& feature, bool inputsValid)
+/// Empty when the result passes, else what is wrong. \a lastVouched: the result this feature's
+/// last recompute vouched for; the same result again needs no check
+std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& lastVouched)
 {
     TopoDS_Shape result = feature.Shape.getShape().getShape();
     if (result.IsNull() || TopExp_Explorer(result, TopAbs_SOLID).More() == Standard_False) {
         return {};
     }
+    if (inputsValid && !lastVouched.IsNull() && result.IsEqual(lastVouched)) {
+        return {};
+    }
     TopoDS_Shape base = feature.getBaseTopoShape(true).getShape();
 
-    auto check = std::make_shared<Check>();
     TopoDS_Shape checked = result;
     if (auto note = refineNotes.find(&feature); note != refineNotes.end()) {
         // The refine rebuilds faces it doesn't merge: the shape it started from has the base's
@@ -581,30 +560,118 @@ std::string checkResult(Feature& feature, bool inputsValid)
         }
         refineNotes.erase(note);
     }
-    check->baseVolumeKnown = base.IsNull() || knownVolume(base, check->baseVolume);
-    // Copies of both in one: the TShapes they share stay shared, and an abandoned check reads
-    // nothing the document changes (the pass-through's redraw meshes the base's shapes)
-    {
-        BRep_Builder builder;
-        TopoDS_Compound both;
-        builder.MakeCompound(both);
-        builder.Add(both, checked);
-        if (!base.IsNull()) {
-            builder.Add(both, base);
+
+    // What changed, from the topology alone (the TShapes, orientations and locations, which the
+    // redraw's meshing doesn't touch), on this thread: about a microsecond per face
+    FaceMap baseFaces;
+    FaceMap resultFaces;
+    if (!base.IsNull()) {
+        collectFaces(base, baseFaces);
+    }
+    collectFaces(checked, resultFaces);
+    // Where an input of the boolean was repaired, every face is checked and the base's volume
+    // says nothing about the result's (the repair changed it)
+    const bool allFaces = !inputsValid && !base.IsNull();
+    BRep_Builder builder;
+    TopoDS_Compound made;
+    TopoDS_Compound removed;
+    TopoDS_Compound faces;
+    TopoDS_Compound solids;
+    builder.MakeCompound(made);
+    builder.MakeCompound(removed);
+    builder.MakeCompound(faces);
+    builder.MakeCompound(solids);
+    TopTools_IndexedMapOfShape changed;
+    for (const auto& [tshape, face] : resultFaces) {
+        if (!containsFace(baseFaces, face)) {
+            builder.Add(made, face);
+            changed.Add(face);
         }
-        // Held: an iterator doesn't keep its compound alive (it walks the compound's own list)
-        const TopoDS_Shape copied = BRepBuilderAPI_Copy(both, Standard_False, Standard_False).Shape();
-        TopoDS_Iterator copies(copied);
-        check->result = copies.Value();
-        if (!base.IsNull()) {
-            copies.Next();
-            check->base = copies.Value();
+    }
+    for (const auto& [tshape, face] : baseFaces) {
+        if (!containsFace(resultFaces, face)) {
+            builder.Add(removed, face);
         }
     }
     const bool roundsOrChamfers = feature.isDerivedFrom<Fillet>() || feature.isDerivedFrom<Chamfer>();
     // A fillet's and a chamfer's whole result is checked where they are built
-    check->checkFaces = !roundsOrChamfers;
-    check->allFaces = !inputsValid && !base.IsNull();
+    if (!roundsOrChamfers) {
+        for (const auto& [tshape, face] : resultFaces) {
+            if (allFaces || changed.Contains(face)) {
+                builder.Add(faces, face);
+            }
+        }
+    }
+    int solidCount = 0;
+    for (TopExp_Explorer it(checked, TopAbs_SOLID); it.More(); it.Next()) {
+        ++solidCount;
+    }
+    std::string shellProblem;
+    for (TopExp_Explorer solid(checked, TopAbs_SOLID); solid.More(); solid.Next()) {
+        bool touchedSolid = false;
+        for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
+            bool touched = allFaces;
+            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
+                 face.Next()) {
+                touched = changed.Contains(face.Current());
+            }
+            if (!touched) {
+                continue;
+            }
+            touchedSolid = true;
+            // The shell's checks read its topology (and seams' pcurves): here, not on a copy
+            if (!roundsOrChamfers && shellProblem.empty()) {
+                BRepCheck_Shell shell(TopoDS::Shell(it.Current()));
+                if (shell.Closed() != BRepCheck_NoError) {
+                    shellProblem = "a shell is open";
+                }
+                else if (shell.Orientation() != BRepCheck_NoError) {
+                    shellProblem = "a shell's faces are not oriented consistently";
+                }
+            }
+        }
+        if (touchedSolid && solidCount > 1 && !allFaces) {
+            builder.Add(solids, solid.Current());
+        }
+    }
+
+    auto check = std::make_shared<Check>();
+    check->oneSolid = solidCount == 1 && !allFaces;
+    if (allFaces) {
+        // Each solid's volume on its own: the base's says nothing here
+        for (TopExp_Explorer it(checked, TopAbs_SOLID); it.More(); it.Next()) {
+            builder.Add(solids, it.Current());
+        }
+    }
+    double baseVolume = 0.0;
+    const bool baseVolumeKnown = base.IsNull() || knownVolume(base, baseVolume);
+    check->baseVolume = baseVolume;
+    // Exact copies of all in one, so that the TShapes they share stay shared, and an abandoned
+    // check reads nothing the document changes (the pass-through's redraw meshes the base's shapes)
+    {
+        TopoDS_Compound all;
+        builder.MakeCompound(all);
+        builder.Add(all, made);
+        builder.Add(all, removed);
+        builder.Add(all, faces);
+        builder.Add(all, solids);
+        if (!baseVolumeKnown) {
+            builder.Add(all, base);
+        }
+        const TopoDS_Shape copied = Part::KernelBudget::exactCopy(all);
+        TopoDS_Iterator copies(copied);
+        check->made = copies.Value();
+        copies.Next();
+        check->removed = copies.Value();
+        copies.Next();
+        check->faces = copies.Value();
+        copies.Next();
+        check->solids = copies.Value();
+        copies.Next();
+        if (copies.More()) {
+            check->base = copies.Value();
+        }
+    }
     Part::KernelBudget::run("The check of the result", [check](const Message_ProgressRange&) {
         check->run();
     });
@@ -627,7 +694,7 @@ std::string checkResult(Feature& feature, bool inputsValid)
             + number(check->worstSolidVolume) + ")" + notBuilt;
     }
     const double tolerance = 1e-5 * scale;
-    if (!base.IsNull()) {
+    if (!base.IsNull() && !allFaces) {
         switch (directionOf(feature)) {
             case Direction::Grows:
                 if (check->change < -tolerance) {
@@ -650,13 +717,15 @@ std::string checkResult(Feature& feature, bool inputsValid)
     if (check->facesInvalid > 0) {
         return "The geometry kernel built an invalid shape: " + std::to_string(check->facesInvalid)
             + " of the " + std::to_string(check->facesChecked)
-            + (check->allFaces ? " faces" : " faces it made or changed") + " fail the shape check"
+            + (allFaces ? " faces" : " faces it made or changed") + " fail the shape check"
             + notBuilt;
     }
-    if (!check->shellProblem.empty()) {
-        return "The geometry kernel built an invalid shape: " + check->shellProblem + notBuilt;
+    if (!shellProblem.empty()) {
+        return "The geometry kernel built an invalid shape: " + shellProblem + notBuilt;
     }
-    rememberVolume(result, after);
+    if (!allFaces) {
+        rememberVolume(result, after);
+    }
     return {};
 }
 }  // namespace
@@ -669,11 +738,34 @@ void ResultCheck::noteRefine(const Feature* feature, const TopoDS_Shape& before,
     }
 }
 
+bool ResultCheck::skippedForTheLimit(const Feature* feature, const char* step)
+{
+    if (!Part::KernelBudget::pastDeadline()) {
+        return false;
+    }
+    if (auto doc = feature ? feature->getDocument() : nullptr) {
+        const std::string text = std::string(step)
+            + " was skipped: the feature took longer than " + number(Part::KernelBudget::limit())
+            + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
+        const std::string previous
+            = doc->getWarningDescription(feature) ? doc->getWarningDescription(feature) : "";
+        if (previous.find(text) == std::string::npos) {
+            doc->setWarning(
+                const_cast<Feature*>(feature),
+                previous.empty() ? text : previous + '\n' + text
+            );
+        }
+    }
+    return true;
+}
+
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     failedElsewhere = false;
     DeletePart::setLocked(this, false);
     booleanInputsValid = false;
+    // The result this recompute may find again: then its check has nothing new to read
+    const TopoDS_Shape lastVouched = vouchedShape;
     vouchedShape.Nullify();
     // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
     // stays touched and runs when the bar passes it
@@ -749,10 +841,11 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature. A
     // BaseFeature builds nothing: the first feature on it checks the base it passes on
     if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
-        && !isDerivedFrom<FeatureBase>() && checkingResults()) {
+        && !isDerivedFrom<FeatureBase>() && checkingResults()
+        && !ResultCheck::skippedForTheLimit(this, "The check of the result")) {
         std::string why;
         try {
-            why = checkResult(*this, booleanInputsValid);
+            why = checkResult(*this, booleanInputsValid, lastVouched);
         }
         catch (const Base::Exception& e) {
             why = e.what();
@@ -763,6 +856,11 @@ App::DocumentObjectExecReturn* Feature::recompute()
         if (!why.empty()) {
             ret = new App::DocumentObjectExecReturn(why, this);
         }
+    }
+    // A call the limit or Esc stopped fails the feature, whatever its code made of it (kernel-4)
+    if (const std::string fired = budget.fired(); !fired.empty()) {
+        delete ret;
+        ret = new App::DocumentObjectExecReturn(fired, this);
     }
     refineNotes.erase(this);
     if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {

@@ -39,6 +39,7 @@
 #include <Mod/Part/App/TopoShapeRepair.h>
 
 #include "FeatureFillet.h"
+#include "ResultCheck.h"
 
 
 using namespace PartDesign;
@@ -138,18 +139,27 @@ App::DocumentObjectExecReturn* Fillet::execute()
             );
         }
         // OCCT fills a recess its band crosses, in a valid solid (ops#393)
-        const std::string filled = Part::filledPocket(shape, baseShape, edges);
+        const std::string filled
+            = ResultCheck::skippedForTheLimit(this, "The fillet's check for a filled recess")
+            ? std::string()
+            : Part::filledPocket(shape, baseShape, edges);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
         // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
         // (ops#603)
-        const std::string lost = Part::lostMaterial(shape, baseShape, edges, radius);
+        const std::string lost
+            = ResultCheck::skippedForTheLimit(this, "The fillet's check for lost material")
+            ? std::string()
+            : Part::lostMaterial(shape, baseShape, edges, radius);
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + lost);
         }
         // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
-        const std::string bridged = Part::bridgedRecess(shape, baseShape, edges, radius);
+        const std::string bridged
+            = ResultCheck::skippedForTheLimit(this, "The fillet's check for a bridged recess")
+            ? std::string()
+            : Part::bridgedRecess(shape, baseShape, edges, radius);
         if (!bridged.empty()) {
             return new App::DocumentObjectExecReturn("The fillet" + bridged);
         }

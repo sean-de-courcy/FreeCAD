@@ -15,6 +15,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 #include <Mod/Part/PartGlobal.h>
 
@@ -68,8 +69,27 @@ PartExport void run(
     Inputs inputs = Inputs::Owned
 );
 
-/** BRepCheck_Analyzer(shape).IsValid() under the limit, on a copy of the shape's topology. */
+/** An exact copy of the shape, its geometry included (a binary round trip, as a file saves it),
+ * for work under run() that must not read the document's shapes. BRepBuilderAPI_Copy's copy isn't
+ * exact: a valid B-spline face of a cut by a degenerate ellipsoid came out "unorientable" from it,
+ * also with its geometry copied (kernel-4). Costs what the shape's size does. */
+PartExport TopoDS_Shape exactCopy(const TopoDS_Shape& shape);
+
+/** BRepCheck_Analyzer(shape).IsValid() under the limit, on an exact copy of the shape. */
 PartExport bool isValid(const TopoDS_Shape& shape, const char* what = "Shape check");
+
+/** Whether this thread's feature (its outermost Scope) has a limit that has passed. A step on the
+ * calling thread that can't be stopped, and that the result doesn't need (a refine, a check), is
+ * skipped then, with a warning on the feature. */
+PartExport bool pastDeadline();
+
+/** Whether this thread runs a feature's recompute (inside a Scope, not on a worker). */
+PartExport bool inScope();
+
+/** For a step on the calling thread that can't be stopped and that the result needs (a repair):
+ * throws Base::CADKernelError, noted as a stop for the feature (Scope::fired()), when the
+ * feature's limit has passed.  what names the step ("The repair of the shape"). */
+PartExport void stopIfPastDeadline(const char* what);
 
 /** One deadline for every run() inside it, the outermost one's. */
 class PartExport Scope
@@ -77,6 +97,10 @@ class PartExport Scope
 public:
     Scope();
     ~Scope();
+    /** The outermost Scope: why the limit or Esc stopped a run() inside it, else empty. The
+     * feature then fails with it, whatever its code did with the exception (a script's feature
+     * that catches it would otherwise pass a partial result, kernel-4) */
+    std::string fired() const;
     Scope(const Scope&) = delete;
     Scope(Scope&&) = delete;
     Scope& operator=(const Scope&) = delete;

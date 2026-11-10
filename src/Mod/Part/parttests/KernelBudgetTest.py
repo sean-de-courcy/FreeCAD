@@ -96,15 +96,18 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertFalse(fillet.isValid())
         self.assertIn("took longer than 0.5 s", fillet.getStatusString())
         self.assertIn("the feature is not built", fillet.getStatusString())
-        # It returned at the limit, not when OCCT finished
-        self.assertLess(elapsed, 1.2)
         # The failed feature passes its base through
         self.assertAlmostEqual(body.Shape.Volume, body.BaseFeature.Shape.Volume, places=6)
         # A longer limit builds it, and undo works around it
         self.setLimit(60)
         fillet.touch()
+        start = time.perf_counter()
         doc.recompute()
+        built = time.perf_counter() - start
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        # It returned at the limit, not when OCCT finished: well before the whole build's time on
+        # this machine, under its load now (an absolute 1.2 s failed by 0.03 s during a build)
+        self.assertLess(elapsed, 0.6 * built, (elapsed, built))
         self.assertLess(fillet.Shape.Volume, body.BaseFeature.Shape.Volume)
 
     def testCutOverTheLimitFails(self):
@@ -188,6 +191,37 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertAlmostEqual(pocket.Shape.Volume, 12000 - math.pi * 16 * 10, places=6)
 
+
+    def testScriptThatSwallowsTheStopFails(self):
+        """A Part::FeaturePython whose execute() catches the stopped cut and goes on (BIM-style:
+        skip a subtraction that fails) would pass the plate without its hole as a valid result.
+        The stop fails the feature, whatever its code does with the error (kernel-4)."""
+
+        class Holes:
+            def __init__(self, obj):
+                obj.Proxy = self
+
+            def execute(self, obj):
+                shape = Part.makeBox(60, 60, 5)
+                try:
+                    shape = shape.cut(wavy(800, 30, 30, -1.0).extrude(V(0, 0, 7)))
+                except Exception:
+                    pass
+                obj.Shape = shape
+
+        doc = FreeCAD.newDocument("KernelBudgetSwallow")
+        self.docs.append(doc)
+        holes = doc.addObject("Part::FeaturePython", "Holes")
+        Holes(holes)
+        self.setLimit(0.3)
+        doc.recompute()
+        self.assertFalse(holes.isValid())
+        self.assertIn("took longer than", holes.getStatusString())
+        self.setLimit(60)
+        holes.touch()
+        doc.recompute()
+        self.assertTrue(holes.isValid(), holes.getStatusString())
+        self.assertLess(holes.Shape.Volume, 60 * 60 * 5 - 100)
 
 if __name__ == "__main__":
     unittest.main()

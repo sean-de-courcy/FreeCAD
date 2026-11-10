@@ -40,8 +40,8 @@
 
 #include <QThread>
 
-#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BinTools.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Message_ProgressScope.hxx>
 #include <TopoDS_Shape.hxx>
@@ -174,6 +174,8 @@ thread_local int scopeDepth = 0;
 thread_local double scopeLimit = 0.0;
 thread_local Clock::time_point scopeDeadline;
 thread_local bool onWorker = false;
+// Why the outermost Scope's limit or Esc stopped a call, where one did (the first)
+thread_local std::string scopeFired;
 
 // Large: OCCT recurses deeply, and a secondary thread gets 512 KB on macOS by default
 constexpr unsigned workerStackSize = 64U * 1024U * 1024U;
@@ -229,6 +231,7 @@ Scope::Scope()
     if (scopeDepth++ == 0) {
         outermost = true;
         scopeLimit = limit();
+        scopeFired.clear();
         scopeDeadline = Clock::now()
             + std::chrono::duration_cast<Clock::duration>(
                             std::chrono::duration<double>(std::max(0.0, scopeLimit))
@@ -239,6 +242,38 @@ Scope::Scope()
 Scope::~Scope()
 {
     --scopeDepth;
+}
+
+std::string Scope::fired() const
+{
+    return outermost ? scopeFired : std::string();
+}
+
+bool pastDeadline()
+{
+    return scopeDepth > 0 && !onWorker && scopeLimit > 0 && Clock::now() >= scopeDeadline;
+}
+
+bool inScope()
+{
+    return scopeDepth > 0 && !onWorker;
+}
+
+void stopIfPastDeadline(const char* what)
+{
+    if (!pastDeadline()) {
+        return;
+    }
+    Base::CADKernelError error(
+        std::string(what ? what : "The geometry") + " could not start: the feature's geometry took longer than "
+        + seconds(scopeLimit)
+        + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit) already: "
+          "the feature is not built"
+    );
+    if (scopeFired.empty()) {
+        scopeFired = error.what();
+    }
+    throw error;
 }
 
 int abandonedRunning()
@@ -355,20 +390,27 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     const std::string name = what ? what : "The geometry";
     const std::string limitText = seconds(seconds_)
         + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
+    // Noted for the feature: whatever its code does with the exception, it fails (kernel-4)
+    auto fire = [](Base::CADKernelError error) {
+        if (scopeDepth > 0 && scopeFired.empty()) {
+            scopeFired = error.what();
+        }
+        return error;
+    };
     auto stopped = [&]() {
         const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
-        return Base::CADKernelError(
+        return fire(Base::CADKernelError(
             name + " was stopped with Esc after " + seconds(elapsed) + " s: the feature is not built"
-        );
+        ));
     };
     if (Base::Sequencer().wasCanceled()) {
         throw stopped();
     }
     if (limited && started >= deadline) {
-        throw Base::CADKernelError(
+        throw fire(Base::CADKernelError(
             name + " could not start: the feature's geometry took longer than " + limitText
             + " already: the feature is not built"
-        );
+        ));
     }
 
     auto call = std::make_shared<Call>();
@@ -420,9 +462,9 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         if (cancelled) {
             throw stopped();
         }
-        throw Base::CADKernelError(
+        throw fire(Base::CADKernelError(
             name + " took longer than " + limitText + ", and was stopped: the feature is not built"
-        );
+        ));
     }
     thread->wait();
     delete thread;
@@ -431,13 +473,26 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     }
 }
 
+TopoDS_Shape exactCopy(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return shape;
+    }
+    // Without triangulations: they are the redraw's, and the work doesn't read them
+    std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+    BinTools::Write(shape, stream, false, false, BinTools_FormatVersion_CURRENT);
+    TopoDS_Shape copy;
+    BinTools::Read(copy, stream);
+    return copy;
+}
+
 bool isValid(const TopoDS_Shape& shape, const char* what)
 {
     if (shape.IsNull()) {
         return false;
     }
-    // A copy of its topology: an abandoned check reads nothing the document changes
-    const TopoDS_Shape copy = BRepBuilderAPI_Copy(shape, Standard_False, Standard_False).Shape();
+    // A copy: an abandoned check reads nothing the document changes
+    const TopoDS_Shape copy = exactCopy(shape);
     auto valid = std::make_shared<bool>(false);
     run(what, [copy, valid](const Message_ProgressRange& /*range*/) {
         *valid = BRepCheck_Analyzer(copy).IsValid() == Standard_True;
