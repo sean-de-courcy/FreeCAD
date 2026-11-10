@@ -67,7 +67,7 @@ public:
     void onReferenceSelectionTaken() override;
     /// The profile, the path and its more edges (ops#150 W8).
     std::vector<ReferenceField*> referenceFields() const override;
-    /// Shows the pipe's ProfileControl and ExtendToFullPath, writing nothing
+    /// Shows the pipe's ProfileControl, ExtendToFullPath and PathReversed, writing nothing
     void showProfileControl();
     /// Called after the panel set ProfileControl (which sets Mode): the dialog shows the mode
     std::function<void()> profileControlSet;
@@ -76,6 +76,7 @@ private Q_SLOTS:
     void onTransitionChanged(int);
     void onProfileControlChanged(int);
     void onExtendToFullPathChanged(bool checked);
+    void onOppositeDirectionChanged(bool checked);
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;

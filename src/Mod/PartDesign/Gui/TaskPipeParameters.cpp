@@ -315,6 +315,12 @@ TaskPipeParameters::TaskPipeParameters(ViewProviderPipe* PipeView, bool /*newObj
         this,
         &TaskPipeParameters::onExtendToFullPathChanged
     );
+    connect(
+        ui->checkBoxOppositeDirection,
+        &QCheckBox::toggled,
+        this,
+        &TaskPipeParameters::onOppositeDirectionChanged
+    );
 
     this->groupLayout()->addWidget(proxy);
 
@@ -453,8 +459,12 @@ void TaskPipeParameters::showProfileControl()
     }
     QSignalBlocker blockControl(ui->comboBoxProfileControl);
     QSignalBlocker blockExtend(ui->checkBoxExtendToFullPath);
+    QSignalBlocker blockOpposite(ui->checkBoxOppositeDirection);
     ui->comboBoxProfileControl->setCurrentIndex(pipe->ProfileControl.getValue());
     ui->checkBoxExtendToFullPath->setChecked(pipe->ExtendToFullPath.getValue());
+    ui->checkBoxOppositeDirection->setChecked(pipe->PathReversed.getValue());
+    // Only a one-way sweep has a direction to flip (Onshape, SW1: no effect when extended)
+    ui->checkBoxOppositeDirection->setEnabled(!pipe->ExtendToFullPath.getValue());
 }
 
 void TaskPipeParameters::onProfileControlChanged(int idx)
@@ -472,6 +482,15 @@ void TaskPipeParameters::onExtendToFullPathChanged(bool checked)
 {
     if (auto pipe = getObject<PartDesign::Pipe>()) {
         pipe->ExtendToFullPath.setValue(checked);
+        recomputeFeature();
+    }
+    ui->checkBoxOppositeDirection->setEnabled(!checked);
+}
+
+void TaskPipeParameters::onOppositeDirectionChanged(bool checked)
+{
+    if (auto pipe = getObject<PartDesign::Pipe>()) {
+        pipe->PathReversed.setValue(checked);
         recomputeFeature();
     }
 }

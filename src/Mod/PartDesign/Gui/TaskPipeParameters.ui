@@ -99,6 +99,16 @@
        </property>
       </widget>
      </item>
+     <item row="3" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxOppositeDirection">
+       <property name="text">
+        <string>Opposite direction</string>
+       </property>
+       <property name="toolTip">
+        <string>A profile in the middle of the path sweeps the other way from it</string>
+       </property>
+      </widget>
+     </item>
     </layout>
    </item>
   </layout>
@@ -107,6 +117,7 @@
   <tabstop>comboBoxTransition</tabstop>
   <tabstop>comboBoxProfileControl</tabstop>
   <tabstop>checkBoxExtendToFullPath</tabstop>
+  <tabstop>checkBoxOppositeDirection</tabstop>
  </tabstops>
  <resources/>
  <connections/>
