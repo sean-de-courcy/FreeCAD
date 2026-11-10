@@ -26,6 +26,7 @@ import PartDesign
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
 
+from PartDesignTests.TestDressUpDeleteKeyGui import focus
 from PartDesignTests.TestExpressionFieldsGui import taskButton
 from PartDesignTests.TestFeaturesViewGui import BAR, DEFAULT, mouse, pump, waitFor
 from PartDesignTests.TestStudioSequence import faceAt, sketch
@@ -262,12 +263,13 @@ class TestWorkflowGui(unittest.TestCase):
         )
         self.assertEqual(remove[0].shortcut(), QtGui.QKeySequence(standard))
         key = QtCore.Qt.Key_Backspace if sys.platform == "darwin" else QtCore.Qt.Key_Delete
-        rows.setFocus()
         rows.setCurrentRow(0)
         kept = rows.item(1).text()
-        QtTest.QTest.keyClick(rows, key)
-        pump(0.3)
-        self.assertEqual(self.entities(), [kept])
+        self.assertTrue(focus(rows))
+        # to the window, as the window system delivers it: QTest's QWidget overload skips the
+        # shortcut map (TestDressUpDeleteKeyGui.pressDelete)
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), key)
+        self.assertTrue(waitFor(lambda: self.entities() == [kept]), self.entities())
         self.close(ok=False)
 
     def testPicksAndTheXChangeTheList(self):
