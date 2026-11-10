@@ -17,6 +17,15 @@
 namespace PartDesign
 {
 
+// FreeCAD-CH ops#654 S3: Studio.cpp's drag of list entries (the bar kept, reads refused)
+bool moveStudioEntries(StudioList* list,
+                       const std::vector<App::DocumentObject*>& block,
+                       App::DocumentObject* after,
+                       bool hinted,
+                       App::DocumentObject* bar,
+                       std::string* why,
+                       bool* changed);
+
 namespace
 {
 
@@ -140,9 +149,19 @@ bool studioMove(App::DocumentObject* entry, int index, std::string* why)
     if (!list) {
         return false;
     }
+    // FreeCAD-CH ops#654 S3: a drag, Onshape's: refused above what entry reads or below what
+    // reads it; the bar stays after the entry it followed. index as moveEntry() reads it: a place
+    // in the list without entry
     return edited([&] {
-        list->moveEntry(entry, index);
-        return reconciled(list, why);
+        auto others = list->Entries.getValues();
+        std::erase(others, entry);
+        const int size = static_cast<int>(others.size());
+        if (index < 0 || index > size) {
+            index = size;
+        }
+        App::DocumentObject* after = index > 0 ? others[index - 1] : nullptr;
+        bool changed = false;
+        return moveStudioEntries(list, {entry}, after, false, nullptr, why, &changed);
     }, why);
 }
 

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -14,6 +15,7 @@
 #include <App/Application.h>
 #include <App/Datums.h>
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <App/DocumentObject.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
@@ -43,9 +45,19 @@
 #include "FeatureBase.h"
 #include "FeatureMultiTransform.h"
 #include "Retarget.h"
+#include "StudioList.h"
 
 namespace PartDesign
 {
+
+// FreeCAD-CH ops#654 S3: StudioEdit.cpp's studioMove() uses it too (no header)
+bool moveStudioEntries(StudioList* list,
+                       const std::vector<App::DocumentObject*>& block,
+                       App::DocumentObject* after,
+                       bool hinted,
+                       App::DocumentObject* bar,
+                       std::string* why,
+                       bool* changed);
 
 namespace
 {
@@ -64,18 +76,29 @@ bool isMultiTransformStep(const App::DocumentObject* obj)
     });
 }
 
+/// FreeCAD-CH ops#654 S3: a link reconcile() writes from the list's order (a feature's base, an
+/// owner's in-scope bases, a step's owner): what a feature reads by its place, not by a pick
+bool isProjectedLink(const App::Property* prop)
+{
+    const char* name = prop->getName();
+    return name
+        && (std::strcmp(name, "BaseFeature") == 0 || std::strcmp(name, "StudioBases") == 0
+            || std::strcmp(name, "StudioOwner") == 0);
+}
+
 /// What reader reads, link entry by link entry (design section 3): an entry with a subname path
 /// reads the path's last object (Support = (Studio, "A.BossA.Face3") reads BossA, not Studio nor all
 /// of A); an entry without one (a face of the object, or none) and an expression read the object
-/// itself. The links the out-list leaves out (hidden scope: a feature's _Body) are left out too
-std::vector<App::DocumentObject*> linkReads(const App::DocumentObject* reader)
+/// itself. The links the out-list leaves out (hidden scope: a feature's _Body) are left out too;
+/// with picksOnly, the links reconcile() writes too (isProjectedLink())
+std::vector<App::DocumentObject*> linkReads(const App::DocumentObject* reader, bool picksOnly = false)
 {
     std::vector<App::DocumentObject*> reads;
     std::vector<App::Property*> props;
     reader->getPropertyList(props);
     for (auto prop : props) {
         auto link = freecad_cast<App::PropertyLinkBase*>(prop);
-        if (!link) {
+        if (!link || (picksOnly && isProjectedLink(prop))) {
             continue;
         }
         std::vector<App::DocumentObject*> objs;
@@ -139,6 +162,346 @@ std::vector<Body*> studioBodies(App::Document* doc, App::Part* studio)
     }
     return bodies;
 }
+
+// FreeCAD-CH ops#654 S3: a studio with a list (StudioList) has the list's order, and the list's
+// bar; the derived order further down is only for a studio without one (notes/parts-design.md 3.2,
+// 3.5; notes/one-history-design.md 5: the list is the only stored order)
+namespace
+{
+
+std::string quotedLabel(const App::DocumentObject* obj)
+{
+    return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
+}
+
+/// A step's owner (StudioList::isStep()), else null
+App::DocumentObject* ownerOfStep(const App::DocumentObject* obj)
+{
+    return StudioList::isStep(obj) ? static_cast<const Feature*>(obj)->StudioOwner.getValue() : nullptr;
+}
+
+int placeOf(const std::vector<App::DocumentObject*>& entries, const App::DocumentObject* obj)
+{
+    auto it = std::ranges::find(entries, obj);
+    return it == entries.end() ? -1 : static_cast<int>(it - entries.begin());
+}
+
+/// The entries of list as reconcile() adopts them (StudioList.cpp, its step 1), nothing written: a
+/// Body member the list doesn't hold (made by an old command) after the entry before it in its
+/// Body, else before the Body's first entry, else at the bar. bar: the bar as an index (the size
+/// for the end), moved as reconcile() moves it
+std::vector<App::DocumentObject*> adoptedEntries(const StudioList& list, int& bar)
+{
+    std::vector<App::DocumentObject*> entries;
+    for (auto entry : list.Entries.getValues()) {
+        if (entry) {
+            entries.push_back(entry);
+        }
+    }
+    bar = std::min(list.barIndex(), static_cast<int>(entries.size()));
+    std::unordered_set<const App::DocumentObject*> held(entries.begin(), entries.end());
+    for (auto body : studioBodies(list.getDocument(), list.studio())) {
+        const std::string id = studioPartId(body);
+        App::DocumentObject* before = nullptr;
+        for (auto member : body->Group.getValues()) {
+            if (!member || member->isDerivedFrom<FeatureBase>() || isMultiTransformStep(member)) {
+                continue;
+            }
+            if (StudioList::isStep(member)) {
+                auto owner = ownerOfStep(member);
+                if (owner && held.count(owner)) {
+                    before = owner;
+                }
+                continue;
+            }
+            if (held.count(member)) {
+                before = member;
+                continue;
+            }
+            int index = before ? placeOf(entries, before) + 1 : bar;
+            for (std::size_t i = 0; !before && i < entries.size(); ++i) {
+                const auto ids = studioScopeIds(entries[i]);
+                if (body->hasObject(entries[i])
+                    || (!Body::findBodyOf(entries[i]) && std::ranges::find(ids, id) != ids.end())) {
+                    index = static_cast<int>(i);
+                    break;
+                }
+            }
+            entries.insert(entries.begin() + index, member);
+            if (index <= bar) {
+                ++bar;
+            }
+            held.insert(member);
+            before = member;
+        }
+    }
+    return entries;
+}
+
+/// The members of the studio's Bodies in the list's order (studioSequence() of a studio with a
+/// list): each entry at its place, a member as itself and an owner as its steps (in its scope's
+/// order); a member no entry stands for (a Body's base feature, a step whose owner is gone) after
+/// the member before it in its Body, else before its Body's first one listed
+std::vector<App::DocumentObject*> listSequence(const StudioList& list)
+{
+    int bar = 0;
+    const auto entries = adoptedEntries(list, bar);
+    const auto bodies = studioBodies(list.getDocument(), list.studio());
+    const std::unordered_set<const Body*> inStudio(bodies.begin(), bodies.end());
+    std::vector<App::DocumentObject*> out;
+    std::unordered_set<const App::DocumentObject*> placed;
+    auto place = [&](App::DocumentObject* obj) {
+        const Body* body = Body::findBodyOf(obj);
+        if (body && inStudio.count(body) && placed.insert(obj).second) {
+            out.push_back(obj);
+        }
+    };
+    for (auto entry : entries) {
+        if (Body::findBodyOf(entry)) {
+            place(entry);
+            continue;
+        }
+        for (auto step : StudioList::stepsOf(entry)) {
+            place(step);
+        }
+    }
+    for (auto body : bodies) {
+        const auto rows = rowsOf(body);
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (placed.count(rows[i])) {
+                continue;
+            }
+            std::size_t at = 0;
+            bool found = false;
+            for (std::size_t j = i; j-- > 0 && !found;) {
+                auto it = std::ranges::find(out, rows[j]);
+                if (it != out.end()) {
+                    at = static_cast<std::size_t>(it - out.begin()) + 1;
+                    found = true;
+                }
+            }
+            for (std::size_t j = i + 1; j < rows.size() && !found; ++j) {
+                auto it = std::ranges::find(out, rows[j]);
+                if (it != out.end()) {
+                    at = static_cast<std::size_t>(it - out.begin());
+                    found = true;
+                }
+            }
+            out.insert(out.begin() + static_cast<std::ptrdiff_t>(at), rows[i]);
+            placed.insert(rows[i]);
+        }
+    }
+    return out;
+}
+
+/// The entry obj is: itself, or a step's owner; else null
+App::DocumentObject* entryOf(const std::vector<App::DocumentObject*>& entries, App::DocumentObject* obj)
+{
+    if (placeOf(entries, obj) >= 0) {
+        return obj;
+    }
+    App::DocumentObject* owner = ownerOfStep(obj);
+    return owner && placeOf(entries, owner) >= 0 ? owner : nullptr;
+}
+
+/// The last entry at or above obj in listSequence(): obj's own (itself, a step's owner), for a
+/// base feature the entry before it; null for the top. found: obj is in the history (null: the top)
+App::DocumentObject* entryAtOrAbove(const StudioList& list,
+                                    const std::vector<App::DocumentObject*>& entries,
+                                    App::DocumentObject* obj,
+                                    bool& found)
+{
+    found = true;
+    if (!obj) {
+        return nullptr;
+    }
+    if (auto entry = entryOf(entries, obj)) {
+        return entry;
+    }
+    const auto sequence = listSequence(list);
+    auto it = std::ranges::find(sequence, obj);
+    if (it == sequence.end()) {
+        found = false;
+        return nullptr;
+    }
+    while (it != sequence.begin()) {
+        --it;
+        if (auto entry = entryOf(entries, *it)) {
+            return entry;
+        }
+    }
+    return nullptr;
+}
+
+/// Writes entries and the bar (an index; the size for the end) to list and reconciles: every
+/// Body's chain and Tip from the projection. Throws Base::ValueError when the list can't be
+/// projected
+void writeList(StudioList& list, const std::vector<App::DocumentObject*>& entries, int bar)
+{
+    if (entries != list.Entries.getValues()) {
+        list.Entries.setValues(entries);
+    }
+    list.setBarIndex(bar < static_cast<int>(entries.size()) ? bar : -1);
+    std::string why;
+    if (!list.reconcile(&why)) {
+        throw Base::ValueError(why);
+    }
+}
+
+/// The list of the studio sequence's Bodies belong to, or null
+StudioList* listOfSequence(const std::vector<App::DocumentObject*>& sequence)
+{
+    for (auto obj : sequence) {
+        if (auto body = Body::findBodyOf(obj)) {
+            App::Part* studio = nullptr;
+            return Part::BodyBase::studioOf(body, studio) ? StudioList::of(body->getDocument(), studio)
+                                                         : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+/** The entries entry reads (place: the entries' places), as Onshape's drag reads them: its picks
+ * (linkReads() without the links reconcile() writes), an entry as itself, a step as its owner,
+ * read through the objects outside the list (a spreadsheet). Not a solid of entry's own Body, a
+ * reference Body::reorderObject() re-targets (a drag inside a Body always could), nor a Body
+ * whole, which is read at the reader's place whatever it is
+ */
+std::vector<App::DocumentObject*> entryReads(
+    App::DocumentObject* entry,
+    const std::unordered_map<const App::DocumentObject*, std::size_t>& place
+)
+{
+    std::vector<App::DocumentObject*> found;
+    const Body* own = Body::findBodyOf(entry);
+    std::unordered_set<const App::DocumentObject*> seen {entry};
+    std::vector<const App::DocumentObject*> readers {entry};
+    while (!readers.empty()) {
+        const App::DocumentObject* reader = readers.back();
+        readers.pop_back();
+        for (auto obj : linkReads(reader, /*picksOnly=*/true)) {
+            if (!obj || !seen.insert(obj).second) {
+                continue;
+            }
+            App::DocumentObject* read = place.count(obj) ? obj : nullptr;
+            if (!read) {
+                App::DocumentObject* owner = ownerOfStep(obj);
+                read = owner && place.count(owner) ? owner : nullptr;
+            }
+            if (read) {
+                const bool ownSolid = own && Body::findBodyOf(read) == own && Body::isSolidFeature(read);
+                if (read != entry && !ownSolid) {
+                    found.push_back(read);
+                }
+                continue;
+            }
+            if (Body::findBodyOf(obj) || obj->isDerivedFrom<Part::BodyBase>()
+                || obj->isDerivedFrom<App::DatumElement>()
+                || obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())) {
+                continue;
+            }
+            readers.push_back(obj);
+        }
+    }
+    return found;
+}
+
+/// Why order can't be the list's (Onshape: a feature never goes above what it reads): the first
+/// entry that reads a later one, the reader or the read among moved; empty when there is none
+std::string orderRefusal(const std::vector<App::DocumentObject*>& order,
+                         const std::unordered_set<const App::DocumentObject*>& moved)
+{
+    std::unordered_map<const App::DocumentObject*, std::size_t> place;
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        place.emplace(order[i], i);
+    }
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        App::DocumentObject* reader = order[i];
+        for (auto read : entryReads(reader, place)) {
+            if (place.at(read) < i || (!moved.count(reader) && !moved.count(read))) {
+                continue;
+            }
+            const Body* readerBody = Body::findBodyOf(reader);
+            const Body* readBody = Body::findBodyOf(read);
+            if (moved.count(reader)) {
+                const std::string of =
+                    readBody && readBody != readerBody ? " of " + quotedLabel(readBody) : "";
+                return quotedLabel(reader) + " uses " + quotedLabel(read) + of
+                    + ": it can't go above it";
+            }
+            const std::string of =
+                readerBody && readerBody != readBody ? " of " + quotedLabel(readerBody) : "";
+            return quotedLabel(reader) + of + " uses " + quotedLabel(read) + ": it can't go below it";
+        }
+    }
+    return {};
+}
+
+/** A list entry deleted outside the list's own delete (Std_Delete, the tree, doc.removeObject()):
+ * it leaves its list with the bar kept after the same entries (StudioList::removeEntry()), and an
+ * owner's steps go with it, as studioRemove() takes them. In the delete's transaction, so one undo
+ * brings list and chains back together. Run from signalDeletedObject, before the links to it
+ * break; not on an undo, a redo or a rollback, which restore everything themselves
+ */
+void forgetDeletedEntry(const App::DocumentObject& deleted)
+{
+    auto obj = const_cast<App::DocumentObject*>(&deleted);
+    App::Document* doc = obj->getDocument();
+    if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Restoring)
+        || App::GetApplication().isClosingAll()) {
+        return;
+    }
+    StudioList* list = StudioList::holding(obj);
+    if (!list) {
+        return;
+    }
+    try {
+        std::vector<std::string> steps;
+        for (auto step : StudioList::stepsOf(obj)) {
+            steps.emplace_back(step->getNameInDocument());
+        }
+        list->removeEntry(obj);
+        for (const auto& name : steps) {
+            auto step = doc->getObject(name.c_str());
+            if (!step) {
+                continue;
+            }
+            if (auto body = Body::findBodyOf(step)) {
+                body->removeObject(step);
+            }
+            doc->removeObject(name.c_str());
+        }
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+    }
+}
+
+/// An owner's Suppressed set outside studioSuppress() (Std_ToggleSuppress, the property editor,
+/// Python): its steps follow at once, in the same transaction, as reconcile() would set them
+void followSuppressed(const App::DocumentObject& obj, const App::Property& prop)
+{
+    const char* name = prop.getName();
+    if (!name || std::strcmp(name, "Suppressed") != 0) {
+        return;
+    }
+    App::Document* doc = obj.getDocument();
+    if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Restoring)
+        || obj.isRestoring()) {
+        return;
+    }
+    auto value = freecad_cast<const App::PropertyBool*>(&prop);
+    if (!value || !isStudioOwner(&obj)) {
+        return;
+    }
+    for (auto step : StudioList::stepsOf(&obj)) {
+        if (step->Suppressed.getValue() != value->getValue()) {
+            step->Suppressed.setValue(value->getValue());
+        }
+    }
+}
+
+}  // namespace
 
 namespace
 {
@@ -323,6 +686,10 @@ void retraceReadsOfDeleted(const App::DocumentObject& deleted);
 
 std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* studio)
 {
+    // FreeCAD-CH ops#654 S3: the list's order where the studio has one
+    if (const StudioList* list = StudioList::of(doc, studio)) {
+        return listSequence(*list);
+    }
     return readHistory(doc, studio).sequence;
 }
 
@@ -351,6 +718,10 @@ void registerHistoryImport()
 {
     // Module start-up's one hook (AppPartDesign.cpp): a delete's re-target too (ops#640 rank 4)
     App::GetApplication().signalDeletedObject.connect(retraceReadsOfDeleted);
+    // FreeCAD-CH ops#654 S3: a list entry deleted, or an owner suppressed, outside the list's own
+    // operations
+    App::GetApplication().signalDeletedObject.connect(forgetDeletedEntry);
+    App::GetApplication().signalChangedObject.connect(followSuppressed);
 
     // A copy, a paste or a merged file is new to its studio: listed as the newest, not at its
     // source's place (reviews prlocal632-r1 T3, prlocal632-r1s 1)
@@ -674,20 +1045,73 @@ std::vector<Retrace> retraceRead(App::DocumentObject* reader,
     // on the same carrier (sameCarrier())
     auto origin = [&](const std::string& element, std::string& found) -> App::DocumentObject* {
         TopoDS_Shape now = elementOf(read, element);
-        for (const auto& item : Part::Feature::getElementHistory(read, element.c_str(), true, true)) {
-            if (item.obj == read || !item.obj || !earlier.count(item.obj)
-                || Body::findBodyOf(item.obj) != readBody || !Body::isSolidFeature(item.obj)) {
-                continue;
+        // obj, a member made before reader, holds the element (at index, else by name)
+        auto holds = [&](App::DocumentObject* obj, Data::IndexedName index, const Data::MappedName& name) {
+            if (!obj || obj == read || !earlier.count(obj) || Body::findBodyOf(obj) != readBody
+                || !Body::isSolidFeature(obj)) {
+                return false;
             }
-            Data::IndexedName index = item.index;
-            if (!index) {
-                index = Part::Feature::getTopoShape(item.obj, Part::ShapeOption::NeedSubElement)
-                            .getIndexedName(item.element);
+            if (!index && name) {
+                index = Part::Feature::getTopoShape(obj, Part::ShapeOption::NeedSubElement)
+                            .getIndexedName(name);
             }
-            if (index && sameCarrier(now, elementOf(item.obj, index.toString()))) {
+            if (index && sameCarrier(now, elementOf(obj, index.toString()))) {
                 found = index.toString();
-                return item.obj;
+                return true;
             }
+            return false;
+        };
+        // FreeCAD-CH ops#654 S3 (notes/stored-tags.md 3, item 3): a step names what it makes with
+        // its studio owner's tag, so the history of an element a step made goes to the owner,
+        // outside read's Body, whose own shape doesn't hold the name (the history stops there).
+        // The owner's step in read's Body stands for it, when the step's shape holds the name
+        auto stepFor = [&](App::DocumentObject* obj) -> App::DocumentObject* {
+            if (!obj || Body::findBodyOf(obj) == readBody) {
+                return nullptr;
+            }
+            App::DocumentObject* step = StudioList::stepOf(obj, readBody);
+            return step != read ? step : nullptr;
+        };
+        App::DocumentObject* from = read;
+        std::string name = element;
+        std::unordered_set<const App::DocumentObject*> traced;
+        while (from && traced.insert(from).second) {
+            const auto history = Part::Feature::getElementHistory(from, name.c_str(), true, true);
+            for (const auto& item : history) {
+                if (item.obj == read) {
+                    continue;
+                }
+                if (holds(item.obj, item.index, item.element)) {
+                    return item.obj;
+                }
+                auto step = stepFor(item.obj);
+                if (step && holds(step, Data::IndexedName(), item.element)) {
+                    return step;
+                }
+            }
+            if (history.empty() || !history.back().obj || !history.back().element) {
+                break;
+            }
+            // Where the history stopped: one more step by the tag alone, to the owner, and its
+            // step's names there (the element as named after, through or before the owner's op)
+            const auto& last = history.back();
+            const std::string lastName = Data::ELEMENT_MAP_PREFIX + last.element.toString();
+            const auto hop = Part::Feature::getElementHistory(last.obj, lastName.c_str(), false, false);
+            App::DocumentObject* step = hop.size() < 2 ? nullptr : stepFor(hop.back().obj);
+            if (!step) {
+                break;
+            }
+            std::vector<Data::MappedName> names {last.element};
+            names.insert(names.end(), hop.front().intermediates.begin(), hop.front().intermediates.end());
+            names.push_back(hop.back().element);
+            for (const auto& candidate : names) {
+                if (candidate && holds(step, Data::IndexedName(), candidate)) {
+                    return step;
+                }
+            }
+            // Traced on from the step: an earlier member may have made it
+            from = step;
+            name = Data::ELEMENT_MAP_PREFIX + hop.back().element.toString();
         }
         return nullptr;
     };
@@ -902,6 +1326,90 @@ std::vector<App::DocumentObject*> dropped(const std::vector<App::DocumentObject*
 
 }  // namespace
 
+/** FreeCAD-CH ops#654 S3: moves block, entries of list, to after the entry after (null: the top)
+ * as one drag, and reconciles. Refused with why, before anything is written, where an entry would
+ * go above what it reads or below what reads it (orderRefusal()). Rolled back, the bar stays after
+ * the entry it followed (the one before it when that one moves), or after bar when hinted (null:
+ * the top); at the end it stays at the end. changed: the list, the bar or a Tip changed.
+ * StudioEdit.cpp's studioMove() and moveInStudio() share it; no header (slices change none)
+ */
+bool moveStudioEntries(StudioList* list,
+                       const std::vector<App::DocumentObject*>& block,
+                       App::DocumentObject* after,
+                       bool hinted,
+                       App::DocumentObject* bar,
+                       std::string* why,
+                       bool* changed)
+{
+    auto refuse = [why](const std::string& text) {
+        if (why) {
+            *why = text;
+        }
+        return false;
+    };
+    int barAt = 0;
+    const auto entries = adoptedEntries(*list, barAt);
+    std::unordered_set<const App::DocumentObject*> moved;
+    for (auto entry : block) {
+        if (placeOf(entries, entry) < 0) {
+            return refuse(quotedLabel(entry) + " is not in this history");
+        }
+        moved.insert(entry);
+    }
+    if (after && placeOf(entries, after) < 0) {
+        return refuse("A drop goes after a feature of the part studio's history");
+    }
+    if (hinted && bar && placeOf(entries, bar) < 0) {
+        return refuse("The bar goes after a feature of the part studio's history");
+    }
+    std::vector<App::DocumentObject*> ordered;
+    std::ranges::copy_if(entries, std::back_inserter(ordered), [&moved](auto obj) {
+        return moved.count(obj) > 0;
+    });
+    const std::size_t at = after ? static_cast<std::size_t>(placeOf(entries, after)) + 1 : 0;
+    const auto order = dropped(entries, moved, ordered, at);
+
+    const bool rolledBack = barAt < static_cast<int>(entries.size());
+    App::DocumentObject* follows = nullptr;
+    if (rolledBack && hinted) {
+        follows = bar;
+    }
+    for (int i = barAt; rolledBack && !hinted && i-- > 0;) {
+        if (!moved.count(entries[i])) {
+            follows = entries[i];
+            break;
+        }
+    }
+    const int newBar = !rolledBack ? static_cast<int>(order.size())
+        : follows                  ? placeOf(order, follows) + 1
+                                   : 0;
+    const std::string text = orderRefusal(order, moved);
+    if (!text.empty()) {
+        return refuse(text);
+    }
+
+    const auto bodies = studioBodies(list->getDocument(), list->studio());
+    std::vector<App::DocumentObject*> tips;
+    for (auto body : bodies) {
+        tips.push_back(body->Tip.getValue());
+    }
+    const bool listChanged = order != list->Entries.getValues() || newBar != list->barIndex();
+    try {
+        writeList(*list, order, newBar);
+    }
+    catch (const Base::Exception& e) {
+        return refuse(e.what());
+    }
+    bool tipMoved = false;
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        tipMoved = tipMoved || bodies[i]->Tip.getValue() != tips[i];
+    }
+    if (changed) {
+        *changed = listChanged || tipMoved;
+    }
+    return true;
+}
+
 bool moveInStudio(App::Document* doc,
                   App::Part* studio,
                   const std::vector<App::DocumentObject*>& rows,
@@ -909,6 +1417,55 @@ bool moveInStudio(App::Document* doc,
                   bool hinted,
                   App::DocumentObject* bar)
 {
+    // FreeCAD-CH ops#654 S3: a studio with a list drags its entries (an owner with all its steps)
+    if (StudioList* list = StudioList::of(doc, studio)) {
+        if (rows.empty()) {
+            return false;
+        }
+        int barAt = 0;
+        const auto entries = adoptedEntries(*list, barAt);
+        std::vector<App::DocumentObject*> block;
+        std::unordered_set<const Body*> parts;
+        bool owners = false;
+        for (auto row : rows) {
+            if (row && row->isDerivedFrom<FeatureBase>()) {
+                throw Base::ValueError("The base feature can't be moved");
+            }
+            App::DocumentObject* entry = row ? entryOf(entries, row) : nullptr;
+            if (!entry) {
+                throw Base::ValueError("Only the features of the part studio's history can be dragged");
+            }
+            if (std::ranges::find(block, entry) == block.end()) {
+                block.push_back(entry);
+            }
+            if (const Body* body = Body::findBodyOf(entry)) {
+                parts.insert(body);
+            }
+            else {
+                owners = true;
+            }
+        }
+        // Members of two parts' old-style chains move one part at a time, as before
+        if (!owners && parts.size() > 1) {
+            throw Base::ValueError("Drag the features of one part at a time");
+        }
+        bool found = true;
+        App::DocumentObject* afterEntry = entryAtOrAbove(*list, entries, after, found);
+        if (!found) {
+            throw Base::ValueError("A drop goes after a feature of the part studio's history");
+        }
+        App::DocumentObject* barEntry = hinted ? entryAtOrAbove(*list, entries, bar, found) : nullptr;
+        if (!found) {
+            throw Base::ValueError("The bar goes after a feature of the part studio's history");
+        }
+        std::string why;
+        bool changed = false;
+        if (!moveStudioEntries(list, block, afterEntry, hinted, barEntry, &why, &changed)) {
+            throw Base::ValueError(why);
+        }
+        return changed;
+    }
+
     // Not const: a traced read changes what its reader reads (step 3)
     History history = readHistory(doc, studio);
     const auto& sequence = history.sequence;
@@ -1156,6 +1713,19 @@ std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* 
 
 void rollStudioTo(App::Document* doc, App::Part* studio, App::DocumentObject* member)
 {
+    // FreeCAD-CH ops#654 S3: a studio with a list moves the list's bar, and every Body's Tip
+    // follows from the projection: an owner's steps are all above it or all below it
+    if (StudioList* list = StudioList::of(doc, studio)) {
+        int bar = 0;
+        const auto entries = adoptedEntries(*list, bar);
+        bool found = true;
+        App::DocumentObject* entry = entryAtOrAbove(*list, entries, member, found);
+        if (!found) {
+            throw Base::ValueError("The studio's bar goes after a feature of one of its bodies");
+        }
+        writeList(*list, entries, entry ? placeOf(entries, entry) + 1 : 0);
+        return;
+    }
     const auto sequence = studioSequence(doc, studio);
     std::size_t end = 0;
     if (member) {
@@ -1179,6 +1749,19 @@ void rollStudioTo(App::Document* doc, App::Part* studio, App::DocumentObject* me
 
 void rollStudioToEnd(App::Document* doc, App::Part* studio)
 {
+    // FreeCAD-CH ops#654 S3: the list's bar to its end. Its callers catch nothing: a list that
+    // can't be projected is reported, not thrown
+    if (StudioList* list = StudioList::of(doc, studio)) {
+        int bar = 0;
+        const auto entries = adoptedEntries(*list, bar);
+        try {
+            writeList(*list, entries, static_cast<int>(entries.size()));
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+        }
+        return;
+    }
     for (auto body : studioBodies(doc, studio)) {
         body->rollToEnd();
     }
@@ -1186,6 +1769,12 @@ void rollStudioToEnd(App::Document* doc, App::Part* studio)
 
 bool isStudioRolledBack(App::Document* doc, App::Part* studio)
 {
+    // FreeCAD-CH ops#654 S3: the list's bar before its end
+    if (const StudioList* list = StudioList::of(doc, studio)) {
+        int bar = 0;
+        const auto entries = adoptedEntries(*list, bar);
+        return bar < static_cast<int>(entries.size());
+    }
     return std::ranges::any_of(studioBodies(doc, studio), [](const Body* body) {
         return body->isRolledBack();
     });
@@ -1195,6 +1784,22 @@ App::DocumentObject* studioBarAfter(const std::vector<App::DocumentObject*>& seq
                                     bool hinted,
                                     App::DocumentObject* hint)
 {
+    // FreeCAD-CH ops#654 S3: with a list, the member before the first one the list's bar holds
+    // (an entry at or after it, or a step of one); the hint is the derived order's
+    if (const StudioList* list = listOfSequence(sequence)) {
+        int bar = 0;
+        const auto entries = adoptedEntries(*list, bar);
+        const std::unordered_set<const App::DocumentObject*> held(entries.begin() + bar, entries.end());
+        App::DocumentObject* last = nullptr;
+        for (auto obj : sequence) {
+            App::DocumentObject* entry = held.count(obj) ? obj : ownerOfStep(obj);
+            if (entry && held.count(entry)) {
+                break;
+            }
+            last = obj;
+        }
+        return last;
+    }
     std::size_t first = sequence.size();
     for (std::size_t i = 0; i < sequence.size(); ++i) {
         auto body = Body::findBodyOf(sequence[i]);
