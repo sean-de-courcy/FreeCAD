@@ -16,6 +16,7 @@ from SketcherTests.TestSketchCopyElementsGui import TestMergeExternalPairingGui
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypesGui
 from SketcherTests.TestSketchCommandsGui import TestSketchCommandsGui
 from SketcherTests.TestSketchToolbarGui import TestSketchToolbarGui  # FreeCAD-CH, ops#605
+from SketcherTests.TestSketchDxfGui import TestSketchDxfGui  # FreeCAD-CH, the DXF lane
 from SketcherTests.TestSketchModelPicksGui import TestSketchModelPicksGui  # FreeCAD-CH, ops#634
 from SketcherTests.TestSketchModelFacesGui import TestSketchModelFacesGui  # FreeCAD-CH, ops#640
 from SketcherTests.TestSketchConstraintToolsGui import TestSketchConstraintToolsGui  # FreeCAD-CH, ops#640
