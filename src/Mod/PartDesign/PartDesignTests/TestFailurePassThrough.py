@@ -982,6 +982,42 @@ class FailurePassThroughBase:
         self.assertValid(groundPad, rim)
         self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
 
+    def testReferenceIntoAStoppedBodyBreaksAtTheFixAfterASlide(self):
+        """The model above with the reference into the Body itself: a sketch outside it attached to
+        the Body's front face (y = 0). In one edit a second rim is drawn at y = 20 and the rim, the
+        Body's only feature, fails (length zero): the Body stops and shows nothing (F37). Then the
+        first rim is deleted, the second slid onto y = 0, and the rim repaired: the sketch breaks,
+        as it does into the rim. The records into the Body are taken before its shape is cleared
+        (ops#652); taken after, from the empty shape, they kept the build's and the sketch
+        re-bound in place, quietly."""
+        body1 = self.doc.addObject("PartDesign::Body", "Body1")
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 40, 2), body1)
+        rim = models.pad(body1, profile, 10, "Rim")
+        self.recompute()
+        front = elementWhere(
+            body1.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.y) < TOL and abs(f.normalAt(0, 0).y + 1) < TOL,
+        )
+        top = self.doc.addObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(body1, front)]
+        top.MapMode = "FlatFace"
+        self.recompute()
+        self.assertValid(rim, body1, top)
+
+        profile.addGeometry(models.rectangle(0, 20, 40, 22), False)
+        rim.Length = 0
+        self.recompute()
+        self.assertTrue(body1.Shape.isNull(), "a stopped Body shows nothing (F37)")
+        self.assertFalse(top.isValid())
+
+        models.moveRectangle(profile, 0, 0, 40, 2, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        rim.Length = 10
+        self.recompute()
+        self.assertValid(rim, body1)
+        self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
+
     def assertFirstFeatureOfAnyKindStops(self, first):
         """`first`, the Body's first solid feature, is in error and of a kind whose result on
         nothing isn't known to be nothing: the Body doesn't continue past it (decision 255 (1)):

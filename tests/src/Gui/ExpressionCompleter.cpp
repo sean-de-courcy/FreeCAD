@@ -117,18 +117,34 @@ private Q_SLOTS:
     }
 
     // G8: `#Wi` offers `Width`, shown with its value and source.
+    // A name no variable has also gets the last row, "New variable..." (rank 55, d0c29e63fd),
+    // whose completion is the typed text.
     void hashPartialNameOffersTheVariable()
     {
-        QCOMPARE(typeAndList(QStringLiteral("#Wi")), QStringList({QStringLiteral("#Width")}));
+        QCOMPARE(
+            typeAndList(QStringLiteral("#Wi")),
+            QStringList({QStringLiteral("#Width"), QStringLiteral("#Wi")})
+        );
         const QString shown = QStringLiteral("Width  ") + userString(20.0)
             + QStringLiteral("  (Variables)");
-        QCOMPARE(shownRows(), QStringList({shown}));
+        QCOMPARE(shownRows(), QStringList({shown, newVariable()}));
+    }
+
+    // Rank 55: a name a variable has gets no "New variable..." row.
+    void existingNameOffersNoNewVariable()
+    {
+        QCOMPARE(typeAndList(QStringLiteral("#Width")), QStringList({QStringLiteral("#Width")}));
     }
 
     // G8: accepting the row gives `#Width`, after an operator too.
+    // A name no variable has also gets the last row, "New variable..." (rank 55, d0c29e63fd),
+    // whose completion is the typed text.
     void acceptingAVariableInsertsTheHashName()
     {
-        QCOMPARE(typeAndList(QStringLiteral("2 * #Wi")), QStringList({QStringLiteral("#Width")}));
+        QCOMPARE(
+            typeAndList(QStringLiteral("2 * #Wi")),
+            QStringList({QStringLiteral("#Width"), QStringLiteral("#Wi")})
+        );
         edit->slotCompleteTextSelected(QStringLiteral("#Width"));
         QCOMPARE(edit->text(), QStringLiteral("2 * #Width"));
     }
@@ -141,15 +157,19 @@ private Q_SLOTS:
         more->Label.setValue("More");
         addLength(more, "Width", 5.0);
 
+        // and the "New variable..." row last (rank 55)
         QCOMPARE(
             typeAndList(QStringLiteral("#Wi")),
-            QStringList({QStringLiteral("VarSet.Width"), QStringLiteral("VarSet001.Width")})
+            QStringList(
+                {QStringLiteral("VarSet.Width"), QStringLiteral("VarSet001.Width"), QStringLiteral("#Wi")}
+            )
         );
         QCOMPARE(
             shownRows(),
             QStringList(
                 {QStringLiteral("Width  ") + userString(20.0) + QStringLiteral("  (Variables)"),
-                 QStringLiteral("Width  ") + userString(5.0) + QStringLiteral("  (More)")}
+                 QStringLiteral("Width  ") + userString(5.0) + QStringLiteral("  (More)"),
+                 newVariable()}
             )
         );
         edit->slotCompleteTextSelected(QStringLiteral("VarSet.Width"));
@@ -175,7 +195,11 @@ private Q_SLOTS:
         addLength(more, "Width", 5.0);
         makeDependOnOwner(more);
         edit->setDocumentObject(owner);
-        QCOMPARE(typeAndList(QStringLiteral("#Wi")), QStringList({QStringLiteral("VarSet.Width")}));
+        // and the "New variable..." row last (rank 55)
+        QCOMPARE(
+            typeAndList(QStringLiteral("#Wi")),
+            QStringList({QStringLiteral("VarSet.Width"), QStringLiteral("#Wi")})
+        );
     }
 
     // The rows follow variables added, renamed and removed while the line edit exists.
@@ -199,13 +223,21 @@ private Q_SLOTS:
 
     // Exact Match: `#` matches the start of a name only. Toggling it with the same text changes
     // the rows (they were kept from the other mode).
+    // Rank 55: "New variable..." (the typed text) is the last row in both modes, and the only one
+    // where nothing matches.
     void exactMatchModeForVariables()
     {
-        QCOMPARE(typeAndList(QStringLiteral("#idt")), QStringList({QStringLiteral("#Width")}));
+        QCOMPARE(
+            typeAndList(QStringLiteral("#idt")),
+            QStringList({QStringLiteral("#Width"), QStringLiteral("#idt")})
+        );
         edit->setExactMatch(true);
         edit->getCompleter()->slotUpdate(QStringLiteral("#idt"), 4);
-        QCOMPARE(currentRows(), QStringList());
-        QCOMPARE(typeAndList(QStringLiteral("#Wi")), QStringList({QStringLiteral("#Width")}));
+        QCOMPARE(currentRows(), QStringList({QStringLiteral("#idt")}));
+        QCOMPARE(
+            typeAndList(QStringLiteral("#Wi")),
+            QStringList({QStringLiteral("#Width"), QStringLiteral("#Wi")})
+        );
     }
 
     // An unclosed `<<#Wi` is a string; deleting the `<<` makes it a variable name, whose rows
@@ -214,7 +246,8 @@ private Q_SLOTS:
     {
         edit->getCompleter()->slotUpdate(QStringLiteral("<<#Wi"), 5);
         edit->getCompleter()->slotUpdate(QStringLiteral("#Wi"), 3);
-        QCOMPARE(currentRows(), QStringList({QStringLiteral("#Width")}));
+        // with the "New variable..." row last (rank 55)
+        QCOMPARE(currentRows(), QStringList({QStringLiteral("#Width"), QStringLiteral("#Wi")}));
     }
 
     // Where only objects are wanted (noProperty), `#` offers no variables.
@@ -245,6 +278,12 @@ private:
     static QString userString(double millimetres)
     {
         return QString::fromStdString(Base::Quantity(millimetres, "mm").getUserString());
+    }
+
+    // The label of the "New variable..." row (rank 55).
+    static QString newVariable()
+    {
+        return QCoreApplication::translate("Gui::ExpressionCompleter", "New variable...");
     }
 
     // The text of each row the popup shows, in its order.

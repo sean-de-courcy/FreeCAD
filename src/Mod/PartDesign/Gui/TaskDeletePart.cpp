@@ -25,6 +25,7 @@
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
 #include <Gui/TaskView/TaskView.h>
+#include <Gui/Tools.h>
 #include <Mod/Part/App/BodyBase.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -76,9 +77,10 @@ TaskDlgDeletePart::TaskDlgDeletePart(App::Document* doc,
     list = new QListWidget(box);
     list->setObjectName(QStringLiteral("deletePartEntities"));
     box->groupLayout()->addWidget(list);
-    // Delete takes the current entry out, as the dialogs' reference fields
+    // Delete takes the current entry out, as the dialogs' reference fields: the platform's delete
+    // key, which is Backspace on a Mac (ops#652)
     auto removeCurrent = new QAction(tr("Remove"), list);
-    removeCurrent->setShortcut(QKeySequence::Delete);
+    removeCurrent->setShortcut(Gui::QtTools::deleteKeySequence());
     removeCurrent->setShortcutContext(Qt::WidgetShortcut);
     list->addAction(removeCurrent);
     connect(removeCurrent, &QAction::triggered, this, [this]() {
