@@ -665,6 +665,18 @@ class TestSketchArcMidpoint(unittest.TestCase):
         self.assertFalse([c for c in self.sk.Constraints if c.Type == "Midpoint"])
         self.assertTrue(self.sk.isValid())
 
+    def testRepeatedMidpointFollowsTheArc(self):
+        """Review sketcher-2 r1, L1: the same Midpoint twice on one point; the arc's sweep 100 ->
+        150 degrees: the point follows to 75 degrees (the repeat agrees at every sweep)."""
+        arc, pt, ang = self._driven_arc(math.radians(100))
+        self.sk.addConstraint(Sketcher.Constraint("Midpoint", pt, 1, arc))
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        self.sk.setDatum(ang, App.Units.Quantity("150 deg"))
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        self._assert_at_angle(pt, 75)
+
     def testDragAnEndThroughTheStart(self):
         """Skeptic 11-10, 2: the arc's end dragged back through its start, by the solver, in
         steps. Whatever each step does (refused, or moved), the point stays at the middle of the
