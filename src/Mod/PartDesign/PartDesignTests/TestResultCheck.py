@@ -204,6 +204,46 @@ class TestResultCheck(unittest.TestCase):
             self.assertBuilt(f)
         self.assertTrue(body.Shape.isValid())
 
+    def testBlindPocketAndBossPass(self):
+        # The volume's change is integrated over the faces that differ only: they must close up
+        # (a blind pocket's floor and a boss's top are open faces on their own)
+        body = self.body(Part.makeBox(40, 30, 10, V(300, 200, 0)))
+        blind = body.newObject("PartDesign::Pocket", "Blind")
+        blind.Profile = (self.profile(disk(310, 215, 4, 10), "BlindProfile"), ["Face1"])
+        blind.Length = 5
+        boss = self.pad(body, disk(330, 215, 3, 10), 7, "Boss")
+        self.doc.recompute()
+        self.assertBuilt(blind)
+        self.assertBuilt(boss)
+        self.assertAlmostEqual(blind.Shape.Volume, 12000 - math.pi * 16 * 5, places=6)
+        self.assertAlmostEqual(boss.Shape.Volume, 12000 - math.pi * 16 * 5 + math.pi * 9 * 7, places=6)
+
+    def testASmallPartBesideAHugeOnePasses(self):
+        body = self.body(
+            Part.makeCompound([Part.makeBox(2000, 1000, 1000), Part.makeBox(1, 1, 1, V(3000, 0, 0))])
+        )
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = (self.profile(disk(100, 100, 4, 1000)), ["Face1"])
+        pocket.Length = 5
+        self.doc.recompute()
+        for f in body.Group:
+            if f.isDerivedFrom("PartDesign::Feature"):
+                self.assertBuilt(f)
+        self.assertEqual(len(pocket.Shape.Solids), 2)
+
+    def testABaseWithLooseFacesPasses(self):
+        loose = Part.Face(
+            Part.makePolygon([V(0, 0, 50), V(100, 0, 50), V(100, 100, 50), V(0, 100, 50), V(0, 0, 50)])
+        )
+        body = self.body(Part.makeCompound([Part.makeBox(10, 10, 10), loose]))
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = (self.profile(disk(5, 5, 2, 10)), ["Face1"])
+        pocket.Length = 3
+        self.doc.recompute()
+        self.assertBuilt(pocket)
+        solids = sum(solid.Volume for solid in pocket.Shape.Solids)
+        self.assertAlmostEqual(solids, 1000 - math.pi * 4 * 3, places=6)
+
     def testAPadInsideTheBodyAndARefinedChainPass(self):
         body = self.body(Part.makeBox(40, 40, 10))
         inner = self.pad(body, disk(20, 20, 3, 2), 3, "Inside")  # wholly inside: no change

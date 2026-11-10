@@ -6379,7 +6379,8 @@ TopoShape& TopoShape::makeElementThickSolid(
                 Standard_False,
                 range
             );
-        }
+        },
+        KernelBudget::Inputs::Shared
     );
     // Only where OCCT refuses for the kept faces falling apart: every shell OCCT builds stays
     // its own (ops#640, F46).
@@ -9262,9 +9263,11 @@ TopoShape& TopoShape::makeElementDraft(
     } while (retry && !done);
 
     // On a worker under the feature's time limit (kernel safety S1)
-    KernelBudget::run("The draft", [mkDraft](const Message_ProgressRange& range) {
-        mkDraft->Build(range);
-    });
+    KernelBudget::run(
+        "The draft",
+        [mkDraft](const Message_ProgressRange& range) { mkDraft->Build(range); },
+        KernelBudget::Inputs::Shared
+    );
     return makeElementShape(*mkDraft, shape, op);
 }
 
@@ -10643,7 +10646,10 @@ TopoShape& TopoShape::makeElementBoolean(
         const bool vouchedFor = inputCheck == BooleanInputCheck::Tools
             && static_cast<int>(k) < firstArgumentInputs;
         if (!vouchedFor) {
-            toCheck.push_back(fixedInputs[k].getShape());
+            // A copy of its topology: an abandoned check reads nothing the document changes
+            toCheck.push_back(
+                BRepBuilderAPI_Copy(fixedInputs[k].getShape(), Standard_False, Standard_False).Shape()
+            );
             checked.push_back(k);
         }
     }
@@ -10693,7 +10699,12 @@ TopoShape& TopoShape::makeElementBoolean(
         : strcmp(maker, Part::OpCodes::Common) == 0           ? "The intersection"
         : strcmp(maker, Part::OpCodes::Section) == 0          ? "The section"
                                                               : "The fuse";
-    KernelBudget::run(what, [mk](const Message_ProgressRange& range) { mk->Build(range); });
+    // It reads its inputs in place: after a timeout it is waited for until OCCT reads the cancel
+    KernelBudget::run(
+        what,
+        [mk](const Message_ProgressRange& range) { mk->Build(range); },
+        KernelBudget::Inputs::Shared
+    );
     if (Base::Sequencer().wasCanceled()) {
         FC_THROWM(Base::CADKernelError, "User aborted");
     }

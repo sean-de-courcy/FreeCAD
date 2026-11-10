@@ -29,11 +29,12 @@ class TopoDS_Shape;
  * progress bar's filter, which lets only Esc through), Esc stops the call, and so does the time
  * limit. The feature then fails with a clear error; the document stays as before the feature.
  *
- * A stopped call can't be killed: its worker is abandoned. It receives a cancel through its
- * progress range (a boolean stops at its next check), runs on at idle priority, and frees what it
- * holds when it ends. So the work must touch only what it owns: shapes captured by value, makers
- * by shared_ptr. Never a TopoShape (its element map and the document's string hasher), the
- * Console, Python or a document. The naming of the result is made by the caller afterwards.
+ * A stopped call can't be killed. It receives a cancel through its progress range (a boolean stops
+ * at its next check). Work on copies (Inputs::Owned) is then abandoned: it runs on at idle priority
+ * and frees what it holds when it ends. Work that reads the document's shapes (Inputs::Shared) is
+ * waited for first. So the work must touch only what it owns: shapes captured by value, makers by
+ * shared_ptr. Never a TopoShape (its element map and the document's string hasher), the Console,
+ * Python or a document. The naming of the result is made by the caller afterwards.
  */
 namespace Part::KernelBudget
 {
@@ -44,15 +45,30 @@ namespace Part::KernelBudget
  */
 PartExport double limit();
 
-/** Runs work under the limit of the innermost Scope on this thread (a feature's recompute), or
- * under its own when there is none.
+/** Runs work under the limit of the outermost Scope on this thread (a feature's recompute); outside
+ * every Scope (a script, a command) there is no limit, only Esc.
  * @param what Names the operation in the error ("Fillet", "Cut", "Shape check"...)
  * @param work What the worker does, given the range to pass to OCCT's Build()
  * @throws Base::CADKernelError on a timeout or Esc; work's own exception otherwise
  */
-PartExport void run(const char* what, const std::function<void(const Message_ProgressRange&)>& work);
+/// What the work reads
+enum class Inputs
+{
+    /// Only its own data (copies): abandoned 0.3 s after its cancel
+    Owned,
+    /// The document's shapes, read in place (a boolean, a draft): waited for after its cancel, as
+    /// OCCT reads it at its own checks, up to 30 s; abandoned only then. An abandoned reader would
+    /// race the redraw of the feature's pass-through, which meshes the same shapes
+    Shared
+};
 
-/** BRepCheck_Analyzer(shape).IsValid() under the limit. */
+PartExport void run(
+    const char* what,
+    const std::function<void(const Message_ProgressRange&)>& work,
+    Inputs inputs = Inputs::Owned
+);
+
+/** BRepCheck_Analyzer(shape).IsValid() under the limit, on a copy of the shape's topology. */
 PartExport bool isValid(const TopoDS_Shape& shape, const char* what = "Shape check");
 
 /** One deadline for every run() inside it, the outermost one's. */

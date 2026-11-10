@@ -26,6 +26,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
@@ -36,6 +40,7 @@
 
 #include <QThread>
 
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Message_ProgressScope.hxx>
@@ -209,9 +214,14 @@ bool waitFor(const std::shared_ptr<Call>& call, std::chrono::milliseconds time)
 
 double limit()
 {
-    return App::GetApplication()
-        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/General")
-        ->GetFloat("GeometryTimeLimit", 60.0);
+    const double value = App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/General")
+                             ->GetFloat("GeometryTimeLimit", 60.0);
+    // A limit no feature reaches is none (and its deadline would overflow the clock)
+    if (!std::isfinite(value) || value > 1e6) {
+        return 0.0;
+    }
+    return value;
 }
 
 Scope::Scope()
@@ -246,14 +256,93 @@ int abandonedTotal()
     return reg.total;
 }
 
-void run(const char* what, const std::function<void(const Message_ProgressRange&)>& work)
+namespace
+{
+#ifndef _WIN32
+/** At exit, a worker still inside OCCT would meet OCCT's, Qt's and FreeCAD's static destructors
+ * (Windows ends the other threads before its DLLs' destructors run; Linux and macOS don't): the
+ * workers get a cancel and a moment, and if one still runs, the process ends without destructors.
+ */
+void endAbandoned()
+{
+    Registry& reg = registry();
+    const auto until = Clock::now() + std::chrono::seconds(2);
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(reg.mutex);
+            bool running = false;
+            for (auto* thread : reg.abandoned) {
+                running = running || !thread->isFinished();
+            }
+            if (!running) {
+                return;
+            }
+        }
+        if (Clock::now() >= until) {
+            std::fflush(nullptr);
+            std::_Exit(EXIT_SUCCESS);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+#endif
+
+void abandon(QThread* thread)
+{
+    thread->setPriority(QThread::IdlePriority);
+    Registry& reg = registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+#ifndef _WIN32
+    static const bool registered = std::atexit(endAbandoned) == 0;
+    (void)registered;
+#endif
+    reg.abandoned.push_back(thread);
+    ++reg.total;
+}
+
+/// Keeps the GUI repainting and reads Esc while the worker runs; true when the worker ended
+bool waitProcessing(
+    const std::shared_ptr<Call>& call,
+    std::unique_ptr<Base::SequencerLauncher>& launcher,
+    const std::string& name,
+    size_t& step,
+    const std::function<bool()>& stop
+)
+{
+    if (!launcher && !Base::Sequencer().isRunning()) {
+        // Its own progress bar when no recompute shows one
+        launcher = std::make_unique<Base::SequencerLauncher>((name + "...").c_str(), 0);
+    }
+    while (!waitFor(call, std::chrono::milliseconds(40))) {
+        if (stop()) {
+            return false;
+        }
+        // Repaints and reads Esc: the progress bar's filter passes nothing else
+        if (launcher) {
+            launcher->setProgress(++step);
+        }
+        else if (!Base::Sequencer().wasCanceled()) {
+            Base::Sequencer().checkAbort();
+        }
+    }
+    return true;
+}
+
+// How long a worker that reads the document's own shapes is waited for after its cancel: it is
+// abandoned only after this (OCCT reads the cancel at its own checks), since the document's
+// shapes change after the feature fails (its pass-through is redrawn and meshed)
+constexpr auto sharedGrace = std::chrono::seconds(30);
+}  // namespace
+
+void run(const char* what, const std::function<void(const Message_ProgressRange&)>& work, Inputs inputs)
 {
     if (onWorker) {
         // Inside a worker's own work: it runs under that worker's limit
         work(Message_ProgressRange());
         return;
     }
-    const double seconds_ = scopeDepth > 0 ? scopeLimit : limit();
+    // A feature's limit; outside one (a script, a command), no limit but Esc
+    const double seconds_ = scopeDepth > 0 ? scopeLimit : std::min(limit(), 0.0);
     if (seconds_ < 0) {
         // No worker: as before the time limit (to measure what the worker costs)
         work(Message_ProgressRange());
@@ -262,18 +351,10 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     sweep();
     const Clock::time_point started = Clock::now();
     const bool limited = seconds_ > 0;
-    const Clock::time_point deadline = scopeDepth > 0
-        ? scopeDeadline
-        : started
-            + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds_));
+    const Clock::time_point deadline = scopeDeadline;
     const std::string name = what ? what : "The geometry";
-    auto timedOut = [&]() {
-        return Base::CADKernelError(
-            name + " took longer than " + seconds(seconds_)
-            + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit), "
-              "and was stopped: the feature is not built"
-        );
-    };
+    const std::string limitText = seconds(seconds_)
+        + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
     auto stopped = [&]() {
         const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
         return Base::CADKernelError(
@@ -284,7 +365,10 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         throw stopped();
     }
     if (limited && started >= deadline) {
-        throw timedOut();
+        throw Base::CADKernelError(
+            name + " could not start: the feature's geometry took longer than " + limitText
+            + " already: the feature is not built"
+        );
     }
 
     auto call = std::make_shared<Call>();
@@ -295,31 +379,15 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
 
     bool timeout = false;
     bool cancelled = false;
+    std::unique_ptr<Base::SequencerLauncher> launcher;
+    size_t step = 0;
     if (!waitFor(call, std::chrono::milliseconds(150))) {
-        // Long enough to show: a progress bar of its own when no recompute shows one
-        std::unique_ptr<Base::SequencerLauncher> launcher;
-        if (!Base::Sequencer().isRunning()) {
-            launcher = std::make_unique<Base::SequencerLauncher>((name + "...").c_str(), 0);
-        }
-        size_t step = 0;
         try {
-            while (!waitFor(call, std::chrono::milliseconds(40))) {
-                if (Base::Sequencer().wasCanceled()) {
-                    cancelled = true;
-                    break;
-                }
-                if (limited && Clock::now() >= deadline) {
-                    timeout = true;
-                    break;
-                }
-                // Repaints and reads Esc: the progress bar's filter passes nothing else
-                if (launcher) {
-                    launcher->setProgress(++step);
-                }
-                else {
-                    Base::Sequencer().checkAbort();
-                }
-            }
+            waitProcessing(call, launcher, name, step, [&]() {
+                cancelled = Base::Sequencer().wasCanceled();
+                timeout = !cancelled && limited && Clock::now() >= deadline;
+                return cancelled || timeout;
+            });
         }
         catch (const Base::AbortException&) {
             // Esc confirmed in the bar's dialog (checkAbort())
@@ -329,22 +397,32 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
 
     if (timeout || cancelled) {
         call->cancel = true;
-        // A boolean stops at its next check of the cancel: often soon
-        if (waitFor(call, std::chrono::milliseconds(300))) {
+        bool ended = waitFor(call, std::chrono::milliseconds(300));
+        if (!ended && inputs == Inputs::Shared) {
+            // It reads the document's shapes: waited for until OCCT reads the cancel
+            const auto until = Clock::now() + sharedGrace;
+            try {
+                ended = waitProcessing(call, launcher, name + " (stopping)", step, [&]() {
+                    return Clock::now() >= until;
+                });
+            }
+            catch (const Base::AbortException&) {
+                ended = waitFor(call, sharedGrace);
+            }
+        }
+        if (ended) {
             thread->wait();
             delete thread;
         }
         else {
-            thread->setPriority(QThread::IdlePriority);
-            Registry& reg = registry();
-            std::lock_guard<std::mutex> lock(reg.mutex);
-            reg.abandoned.push_back(thread);
-            ++reg.total;
+            abandon(thread);
         }
         if (cancelled) {
             throw stopped();
         }
-        throw timedOut();
+        throw Base::CADKernelError(
+            name + " took longer than " + limitText + ", and was stopped: the feature is not built"
+        );
     }
     thread->wait();
     delete thread;
@@ -355,9 +433,14 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
 
 bool isValid(const TopoDS_Shape& shape, const char* what)
 {
+    if (shape.IsNull()) {
+        return false;
+    }
+    // A copy of its topology: an abandoned check reads nothing the document changes
+    const TopoDS_Shape copy = BRepBuilderAPI_Copy(shape, Standard_False, Standard_False).Shape();
     auto valid = std::make_shared<bool>(false);
-    run(what, [shape, valid](const Message_ProgressRange& /*range*/) {
-        *valid = BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+    run(what, [copy, valid](const Message_ProgressRange& /*range*/) {
+        *valid = BRepCheck_Analyzer(copy).IsValid() == Standard_True;
     });
     return *valid;
 }

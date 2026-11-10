@@ -31,9 +31,13 @@
 #include <BRepCheck_Status.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <Bnd_Box.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -282,7 +286,7 @@ struct KnownVolume
 };
 std::mutex knownVolumesMutex;
 std::deque<KnownVolume> knownVolumes;
-constexpr std::size_t knownVolumesKept = 16;
+constexpr std::size_t knownVolumesKept = 8;
 
 bool knownVolume(const TopoDS_Shape& shape, double& volume)
 {
@@ -359,7 +363,44 @@ Direction directionOf(Feature& feature)
     return Direction::None;
 }
 
-/// The check's work: plain shapes only, so that it runs under KernelBudget::run()
+/// Whether two locations are the same transform (a datum may differ where the transform doesn't)
+bool sameTransform(const TopLoc_Location& a, const TopLoc_Location& b)
+{
+    if (a.IsEqual(b)) {
+        return true;
+    }
+    const gp_Trsf& ta = a.Transformation();
+    const gp_Trsf& tb = b.Transformation();
+    for (int row = 1; row <= 3; ++row) {
+        for (int col = 1; col <= 4; ++col) {
+            const double tolerance = col == 4 ? 1e-9 : 1e-12;
+            if (std::abs(ta.Value(row, col) - tb.Value(row, col)) > tolerance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// A solid's own scale for "no volume": its bounding box's volume
+double boxVolume(const TopoDS_Shape& solid)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(solid, box, Standard_False);
+    if (box.IsVoid()) {
+        return 0.0;
+    }
+    double x0 = 0;
+    double y0 = 0;
+    double z0 = 0;
+    double x1 = 0;
+    double y1 = 0;
+    double z1 = 0;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    return (x1 - x0) * (y1 - y0) * (z1 - z0);
+}
+
+/// The check's work: plain shapes only (copies), so that it runs under KernelBudget::run()
 struct Check
 {
     // Inputs
@@ -371,10 +412,11 @@ struct Check
     // Inputs and outputs
     double baseVolume {0.0};
     // Outputs
-    double baseSmallestSolid {0.0};
+    double baseWorstSolid {0.0};  // the smallest of volume / its box's volume
     bool baseHasSolid {false};
     double change {0.0};
-    double smallestSolid {0.0};
+    double worstSolid {0.0};  // the same, over the solids it changed
+    double worstSolidVolume {0.0};
     bool hasChangedSolid {false};
     int facesChecked {0};
     int facesInvalid {0};
@@ -382,39 +424,58 @@ struct Check
 
     void run()
     {
-        TopTools_IndexedMapOfShape baseFaces;
-        TopTools_IndexedMapOfShape resultFaces;
+        // The faces of the solids (loose faces and shells don't count), with their placement
+        std::unordered_multimap<const TopoDS_TShape*, TopoDS_Shape> baseFaces;
+        std::unordered_multimap<const TopoDS_TShape*, TopoDS_Shape> resultFaces;
+        auto collect = [](const TopoDS_Shape& shape, auto& faces) {
+            for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+                for (TopExp_Explorer face(solid.Current(), TopAbs_FACE); face.More(); face.Next()) {
+                    faces.emplace(face.Current().TShape().get(), face.Current());
+                }
+            }
+        };
         if (!base.IsNull()) {
-            TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+            collect(base, baseFaces);
         }
-        TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+        collect(result, resultFaces);
+        // A face is unchanged where the other shape has it: the same TShape, orientation and
+        // transform (PartDesign's results share their base's TShapes under other location datums)
+        auto contains = [](const auto& faces, const TopoDS_Shape& face) {
+            auto range = faces.equal_range(face.TShape().get());
+            for (auto it = range.first; it != range.second; ++it) {
+                if (it->second.Orientation() == face.Orientation()
+                    && sameTransform(it->second.Location(), face.Location())) {
+                    return true;
+                }
+            }
+            return false;
+        };
 
-        // The volume's change, over the faces that differ: each face's part of the divergence
-        // integral, about one origin (the compounds' own)
+        // The volume's change: the faces it made and those it removed, reversed, close up into one
+        // surface (the unchanged faces cancel), whose divergence integral is the change
         BRep_Builder builder;
-        TopoDS_Compound made;
-        TopoDS_Compound gone;
-        builder.MakeCompound(made);
-        builder.MakeCompound(gone);
+        TopoDS_Compound cycle;
+        builder.MakeCompound(cycle);
         TopTools_IndexedMapOfShape changed;
-        for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
-            if (!baseFaces.Contains(it.Current())) {
-                builder.Add(made, it.Current());
-                changed.Add(it.Current());
+        for (const auto& [tshape, face] : resultFaces) {
+            if (!contains(baseFaces, face)) {
+                builder.Add(cycle, face);
+                changed.Add(face);
             }
         }
-        for (TopExp_Explorer it(base, TopAbs_FACE); !base.IsNull() && it.More(); it.Next()) {
-            if (!resultFaces.Contains(it.Current())) {
-                builder.Add(gone, it.Current());
+        for (const auto& [tshape, face] : baseFaces) {
+            if (!contains(resultFaces, face)) {
+                builder.Add(cycle, face.Reversed());
             }
         }
-        change = volumeOf(made) - volumeOf(gone);
+        change = volumeOf(cycle);
 
         if (!baseVolumeKnown && !base.IsNull()) {
             baseVolume = 0.0;
             for (TopExp_Explorer it(base, TopAbs_SOLID); it.More(); it.Next()) {
                 const double volume = volumeOf(it.Current());
-                baseSmallestSolid = baseHasSolid ? std::min(baseSmallestSolid, volume) : volume;
+                const double ratio = volume / std::max(boxVolume(it.Current()), 1e-300);
+                baseWorstSolid = baseHasSolid ? std::min(baseWorstSolid, ratio) : ratio;
                 baseHasSolid = true;
                 baseVolume += volume;
             }
@@ -436,41 +497,48 @@ struct Check
             }
             // One solid: the base's volume and the change give it
             const double volume = solids == 1 ? baseVolume + change : volumeOf(it.Current());
-            smallestSolid = hasChangedSolid ? std::min(smallestSolid, volume) : volume;
+            const double ratio = volume / std::max(boxVolume(it.Current()), 1e-300);
+            if (!hasChangedSolid || ratio < worstSolid) {
+                worstSolid = ratio;
+                worstSolidVolume = volume;
+            }
             hasChangedSolid = true;
         }
 
         if (!checkFaces) {
             return;
         }
-        TopTools_IndexedMapOfShape shells;
-        for (int i = 1; i <= resultFaces.Extent(); ++i) {
-            const TopoDS_Shape& face = resultFaces(i);
-            if (!allFaces && !changed.Contains(face)) {
-                continue;
+        TopTools_IndexedMapOfShape faces;
+        for (const auto& [tshape, face] : resultFaces) {
+            if (allFaces || changed.Contains(face)) {
+                faces.Add(face);
             }
+        }
+        for (int i = 1; i <= faces.Extent(); ++i) {
             ++facesChecked;
-            if (!BRepCheck_Analyzer(face).IsValid()) {
+            if (!BRepCheck_Analyzer(faces(i)).IsValid()) {
                 ++facesInvalid;
             }
         }
-        for (TopExp_Explorer it(result, TopAbs_SHELL); it.More(); it.Next()) {
-            bool touched = allFaces;
-            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
-                 face.Next()) {
-                touched = changed.Contains(face.Current());
-            }
-            if (!touched) {
-                continue;
-            }
-            BRepCheck_Shell shell(TopoDS::Shell(it.Current()));
-            if (shell.Closed() != BRepCheck_NoError) {
-                shellProblem = "a shell is open";
-                return;
-            }
-            if (shell.Orientation() != BRepCheck_NoError) {
-                shellProblem = "a shell's faces are not oriented consistently";
-                return;
+        for (TopExp_Explorer solid(result, TopAbs_SOLID); solid.More(); solid.Next()) {
+            for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
+                bool touched = allFaces;
+                for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
+                     face.Next()) {
+                    touched = changed.Contains(face.Current());
+                }
+                if (!touched) {
+                    continue;
+                }
+                BRepCheck_Shell shell(TopoDS::Shell(it.Current()));
+                if (shell.Closed() != BRepCheck_NoError) {
+                    shellProblem = "a shell is open";
+                    return;
+                }
+                if (shell.Orientation() != BRepCheck_NoError) {
+                    shellProblem = "a shell's faces are not oriented consistently";
+                    return;
+                }
             }
         }
     }
@@ -503,19 +571,33 @@ std::string checkResult(Feature& feature, bool inputsValid)
     TopoDS_Shape base = feature.getBaseTopoShape(true).getShape();
 
     auto check = std::make_shared<Check>();
-    check->base = base;
-    check->result = result;
+    TopoDS_Shape checked = result;
     if (auto note = refineNotes.find(&feature); note != refineNotes.end()) {
         // The refine rebuilds faces it doesn't merge: the shape it started from has the base's
         const RefineNote& refine = note->second;
         if (!refine.before.IsNull() && refine.after.TShape() == result.TShape()) {
-            check->result = refine.before.Moved(
-                result.Location() * refine.after.Location().Inverted()
-            );
+            checked = refine.before.Moved(result.Location() * refine.after.Location().Inverted());
         }
         refineNotes.erase(note);
     }
     check->baseVolumeKnown = base.IsNull() || knownVolume(base, check->baseVolume);
+    // Copies of both in one: the TShapes they share stay shared, and an abandoned check reads
+    // nothing the document changes (the pass-through's redraw meshes the base's shapes)
+    {
+        BRep_Builder builder;
+        TopoDS_Compound both;
+        builder.MakeCompound(both);
+        builder.Add(both, checked);
+        if (!base.IsNull()) {
+            builder.Add(both, base);
+        }
+        TopoDS_Iterator copies(BRepBuilderAPI_Copy(both, Standard_False, Standard_False).Shape());
+        check->result = copies.Value();
+        if (!base.IsNull()) {
+            copies.Next();
+            check->base = copies.Value();
+        }
+    }
     const bool roundsOrChamfers = feature.isDerivedFrom<Fillet>() || feature.isDerivedFrom<Chamfer>();
     // A fillet's and a chamfer's whole result is checked where they are built
     check->checkFaces = !roundsOrChamfers;
@@ -526,19 +608,20 @@ std::string checkResult(Feature& feature, bool inputsValid)
 
     const double before = check->baseVolume;
     const double after = check->baseVolume + check->change;
-    if (check->baseHasSolid && check->baseSmallestSolid <= 0) {
+    // A solid of no volume: of less than a billionth of its own bounding box
+    constexpr double noVolume = 1e-9;
+    if (check->baseHasSolid && check->baseWorstSolid <= noVolume) {
         std::string baseName = "its base";
         if (auto object = feature.getBaseObject(true)) {
             baseName = std::string("its base (") + object->Label.getValue() + ")";
         }
         return "The part this feature starts from, " + baseName
-            + ", is a solid turned inside out (volume " + number(check->baseSmallestSolid) + ")"
-            + notBuilt;
+            + ", is a solid with no volume or turned inside out" + notBuilt;
     }
     const double scale = std::max({1.0, std::abs(before), std::abs(after)});
-    if (check->hasChangedSolid && check->smallestSolid <= 1e-9 * scale) {
+    if (check->hasChangedSolid && check->worstSolid <= noVolume) {
         return "The geometry kernel built a solid with no volume or turned inside out (volume "
-            + number(check->smallestSolid) + ")" + notBuilt;
+            + number(check->worstSolidVolume) + ")" + notBuilt;
     }
     const double tolerance = 1e-5 * scale;
     if (!base.IsNull()) {
@@ -577,7 +660,10 @@ std::string checkResult(Feature& feature, bool inputsValid)
 
 void ResultCheck::noteRefine(const Feature* feature, const TopoDS_Shape& before, const TopoDS_Shape& after)
 {
-    refineNotes[feature] = {before, after};
+    // Only a recompute's own refines are read; a preview's would stay (one per feature) until then
+    if (feature && feature->isRecomputing()) {
+        refineNotes[feature] = {before, after};
+    }
 }
 
 App::DocumentObjectExecReturn* Feature::recompute()
@@ -654,6 +740,8 @@ App::DocumentObjectExecReturn* Feature::recompute()
         }
     }
     refineNotes.erase(this);
+    // The feature's execute and the check of its result share one deadline (kernel safety S1)
+    Part::KernelBudget::Scope budget;
     auto ret = Part::Feature::recompute();
     // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature
     if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
