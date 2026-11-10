@@ -2039,7 +2039,7 @@ bool SketchObject::deriveConstraintsForPieces(
                 Constraint* trans = con->copy();
                 trans->substituteIndex(oldId, newIds.front());
                 newConstraints.push_back(trans);
-                break;
+                return true;  // FreeCAD-CH (ops#656): carried, not released
             }
         } break;
         case Block: {

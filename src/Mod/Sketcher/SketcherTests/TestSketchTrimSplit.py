@@ -267,20 +267,21 @@ class TestSketchTrimSplit(unittest.TestCase):
         for p in _endpoints(g):
             self.assertAlmostEqual(p.y, 2.0, delta=TOL)
 
-    # Skeptic find 6: Split, then Trim the piece at the joint. The joint was all that kept the two arcs on
-    # one circle: it becomes an Equal, and the radius still governs both.
-    def testSplitThenTrimAtJointKeepsRadius(self):
+    # Review r2 (case rv2_arcs_joint_concentric): two arcs a user drew meeting at a common centre look like
+    # Split's pieces, so Trim ties nothing when it cuts their joint away (as upstream): the second arc keeps
+    # its radius. (Split, then Trim at the joint, of an arc is the same debt: ops#656.)
+    def testTrimAtArcJointTiesNothing(self):
         sk = self.sk
-        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), math.radians(20),
-                                        math.radians(160)))
+        C = Part.Circle(V(0, 0, 0), V(0, 0, 1), 10)
+        sk.addGeometry(Part.ArcOfCircle(C, math.radians(20), math.radians(90)))  # 0
+        sk.addGeometry(Part.ArcOfCircle(C, math.radians(90), math.radians(160)))  # 1
         sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 1, 3, 0, 3))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
         r = sk.addConstraint(Sketcher.Constraint("Radius", 0, 10))
         sk.renameConstraint(r, "radius")
-        self.doc.recompute()
-        sk.split(0, V(0, 10, 0))
         _line(sk, (3, -15), (3, 15))
-        n = len(sk.Geometry) - 1
-        sk.addConstraint(Sketcher.Constraint("Block", n))
+        sk.addConstraint(Sketcher.Constraint("Block", 2))
         self.doc.recompute()
         sk.trim(0, V(1.5, 9.887, 0))
         self.doc.recompute()
@@ -288,8 +289,8 @@ class TestSketchTrimSplit(unittest.TestCase):
         sk.setDatum(_named(sk, "radius"), App.Units.Quantity("12 mm"))
         self.doc.recompute()
         self._healthy()
-        for _, g in _arcs(sk):
-            self.assertAlmostEqual(g.Radius, 12.0, delta=TOL)
+        self.assertAlmostEqual(sk.Geometry[0].Radius, 12.0, delta=TOL)
+        self.assertAlmostEqual(sk.Geometry[1].Radius, 10.0, delta=0.05)  # free, not tied (12 if tied)
 
     # The same for a line: the pieces stay collinear.
     def testSplitThenTrimAtJointKeepsLine(self):

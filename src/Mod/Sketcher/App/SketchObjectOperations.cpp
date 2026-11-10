@@ -804,8 +804,9 @@ static bool onSameCarrier(const Part::Geometry* a, const Part::Geometry* b)
 // FreeCAD-CH (ops#656): where the rest of the sketch already implies a tie, the sketch has become
 // redundant. The solver may name the tie or one of the user's constraints (it prefers to name the one
 // that removes fewer degrees of freedom), so take the ties out one at a time, last first, and keep each
-// one out only if that lowers the number of redundant constraints. A redundancy the sketch had before
-// the cut stays, and the ties stay with it. `tieIndices` are constraint indices (0-based).
+// one out only if that lowers the number of redundant constraints without freeing anything (a two-equation
+// tie can be only half implied). A redundancy the sketch had before the cut stays, and the ties stay with
+// it: loud, never a silent loss. `tieIndices` are constraint indices (0-based).
 static void dropRedundantTies(SketchObject* obj, std::vector<int> tieIndices)
 {
     if (tieIndices.empty()) {
@@ -815,13 +816,14 @@ static void dropRedundantTies(SketchObject* obj, std::vector<int> tieIndices)
     std::ranges::sort(tieIndices, std::greater<>());
     for (int i : tieIndices) {
         const size_t before = obj->getLastRedundant().size();
+        const int dofBefore = obj->getLastDoF();
         if (before == 0) {
             return;
         }
         std::unique_ptr<Constraint> tie(obj->Constraints.getValues()[i]->copy());
         obj->delConstraint(i, DeleteOption::NoSolve);
         obj->solve();
-        if (obj->getLastRedundant().size() >= before) {
+        if (obj->getLastRedundant().size() >= before || obj->getLastDoF() > dofBefore) {
             // not this tie: put it back (at the end; the ties still to try have lower indices)
             obj->addConstraint(std::move(tie));
             obj->solve();
@@ -1002,11 +1004,10 @@ void createNewConstraintsForTrim(
         // If there is still any left, this means one of the remaining pieces was degenerate.
         if (!(con->Type == Angle || con->involvesGeoIdAndPosId(GeoId, PointPos::none))) {
             // FreeCAD-CH (ops#656): an end that is cut away may be the joint Split made to the other
-            // piece of the same curve, the only thing that kept the two on one circle or line. Keep that
-            // as a tie between the curves (an Equal of arcs, a collinear Tangent of lines). Only the
-            // joints Split makes count: an end-to-end Tangent of two lines, or an end-to-end Coincident
-            // of two arcs whose centres are Coincident too; a user's polyline vertex or two arcs that
-            // merely meet stay as they were.
+            // piece of a line, the only thing that kept the two collinear. An end-to-end Tangent of two
+            // lines says "collinear" whoever made it, so it is kept as an edge-to-edge (collinear)
+            // Tangent. Arcs are left alone: Split's joint of two arcs looks the same as two arcs a user
+            // drew meeting at a common centre, and a user's polyline vertex (a Coincident) ties nothing.
             const bool endToEnd = con->First != con->Second && con->FirstPos != PointPos::none
                 && con->FirstPos != PointPos::mid && con->SecondPos != PointPos::none
                 && con->SecondPos != PointPos::mid;
@@ -1016,18 +1017,9 @@ void createNewConstraintsForTrim(
             if (endToEnd && otherGeo && trimmedGeo->is<Part::GeomLineSegment>()) {
                 splitJoint = con->Type == Tangent;
             }
-            else if (endToEnd && otherGeo && con->Type == Coincident
-                     && trimmedGeo->is<Part::GeomArcOfCircle>()) {
-                splitJoint = std::ranges::any_of(allConstraints, [&](const Constraint* c) {
-                    return c->Type == Coincident && c->FirstPos == PointPos::mid
-                        && c->SecondPos == PointPos::mid
-                        && ((c->First == GeoId && c->Second == other)
-                            || (c->First == other && c->Second == GeoId));
-                });
-            }
             if (splitJoint && onSameCarrier(trimmedGeo, otherGeo)) {
                 auto* tie = new Constraint();
-                tie->Type = trimmedGeo->is<Part::GeomLineSegment>() ? Tangent : Equal;
+                tie->Type = Tangent;
                 tie->First = newIds.front();
                 tie->Second = other;
                 carrierTies.push_back(tie);
@@ -1037,8 +1029,7 @@ void createNewConstraintsForTrim(
         // constraint has not yet been changed
         size_t sizeBefore = newConstraints.size();
         // FreeCAD-CH (ops#656): tied pieces (collinear lines) take a line's orientation once.
-        if (!obj->deriveConstraintsForPieces(GeoId, newIds, newGeos, con, newConstraints, piecesTied)
-            && con->Type != InternalAlignment) {
+        if (!obj->deriveConstraintsForPieces(GeoId, newIds, newGeos, con, newConstraints, piecesTied)) {
             released.push_back(oldConstrId);
         }
         // Map all newly added derived constraints to the old ID
@@ -1228,6 +1219,7 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
         }
     }
 
+    warnReleased(this, "Trim", released);  // before the deletion renumbers them
     delConstraints(std::move(idsOfOldConstraints), DeleteOption::NoFlag);
 
     if (!isOriginalCurveClosed) {
@@ -1267,7 +1259,6 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
     addTiesBetweenPieces(geoAsCurve, newIds, /*joined=*/false, ties);
     ties.insert(ties.end(), carrierTies.begin(), carrierTies.end());
     newConstraints.insert(newConstraints.end(), ties.begin(), ties.end());
-    warnReleased(this, "Trim", released);
 
     replaceGeometries({GeoId}, newGeos);
     for (auto newId : newIds) {
@@ -1417,8 +1408,7 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
             continue;
         }
         const size_t sizeBefore = newConstraints.size();
-        if (!deriveConstraintsForPieces(GeoId, newIds, newGeosConst, con, newConstraints, true)
-            && con->Type != InternalAlignment) {
+        if (!deriveConstraintsForPieces(GeoId, newIds, newGeosConst, con, newConstraints, true)) {
             released.push_back(oldConstrId);
         }
         for (size_t i = sizeBefore; i < newConstraints.size(); ++i) {
