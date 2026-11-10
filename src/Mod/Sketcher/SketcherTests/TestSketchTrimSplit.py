@@ -71,13 +71,19 @@ class TestSketchTrimSplit(unittest.TestCase):
             self.assertAlmostEqual(g.Radius, radius, delta=TOL)
             self.assertAlmostEqual(g.Center.Length, 0.0, delta=TOL)
 
-    # Fix 1 (report 27 by Split, probe P1): a circle-to-circle distance survives two splits as a
-    # circle-to-circle distance, and the cuts move nothing.
+    # Fix 1 (report 27 by Split, probe P1): a curve-to-curve distance survives a split as a curve-to-curve
+    # distance, and the cut moves nothing. (A whole circle can't be split at one point: below.)
     def testSplitKeepsConcentricOffset(self):
-        self._concentric_pair()
-        self.sk.split(1, V(11, 0, 0))
+        sk = self.sk
+        _circle(sk, 10)  # 0 inner
+        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), 11), 0.3, 2.8))  # 1 outer
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 1, 3, 0, 3))
+        sk.addConstraint(Sketcher.Constraint("Radius", 0, 10))
+        d = sk.addConstraint(Sketcher.Constraint("Distance", 0, 1, 1.0))
+        sk.renameConstraint(d, "offset")
         self.doc.recompute()
-        self.sk.split(1, V(-11, 0, 0))
+        self.sk.split(1, V(0, 11, 0))
         self.doc.recompute()
         self._healthy()
         self._assert_outer_pieces_at(11.0)
@@ -188,35 +194,26 @@ class TestSketchTrimSplit(unittest.TestCase):
         g = sk.Geometry[0]
         self.assertAlmostEqual((g.StartPoint - g.EndPoint).Length, 0.0, delta=TOL, msg="the profile opened")
 
-    def testSplitCircleOnceStaysClosed(self):
-        self._split_once_stays_closed(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), V(0, 12, 0))
-
-    def testSplitEllipseOnceStaysClosed(self):
-        self._split_once_stays_closed(Part.Ellipse(V(0, 0, 0), 10, 5), V(0, 7, 0))
-
-    # A closed curve split twice is two pieces that close the loop at both cuts.
-    def _split_twice_stays_closed(self, geo, drag_to):
+    # A circle or an ellipse has no ends: one cut leaves it whole, so Split refuses (loudly) and the
+    # curve stays closed, with its constraints.
+    def _split_refused(self, geo, kind):
         sk = self.sk
         sk.addGeometry(geo)
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
         self.doc.recompute()
-        sk.split(0, geo.value(geo.FirstParameter + 0.3))
-        sk.split(0, geo.value(geo.FirstParameter + 3.5))
+        with self.assertRaises(ValueError):
+            sk.split(0, geo.value(geo.FirstParameter + 0.3))
         self.doc.recompute()
         self._healthy()
-        self.assertEqual(len(sk.Geometry), 2)
-        sk.moveGeometry(0, 1, drag_to, False)
-        self.doc.recompute()
-        a, b = sk.Geometry[0], sk.Geometry[1]
-        ends = [a.StartPoint, a.EndPoint, b.StartPoint, b.EndPoint]
-        for p in ends:
-            self.assertAlmostEqual(min((p - q).Length for q in ends if q is not p), 0.0, delta=TOL,
-                                   msg="the profile opened")
+        self.assertEqual(len(sk.Geometry), 1)
+        self.assertIsInstance(sk.Geometry[0], kind)
+        self.assertEqual(len(sk.Constraints), 1)
 
-    def testSplitCircleTwiceStaysClosed(self):
-        self._split_twice_stays_closed(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), V(0, 12, 0))
+    def testSplitCircleOnceRefused(self):
+        self._split_refused(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), Part.Circle)
 
-    def testSplitEllipseTwiceStaysClosed(self):
-        self._split_twice_stays_closed(Part.Ellipse(V(0, 0, 0), 10, 5), V(0, 7, 0))
+    def testSplitEllipseOnceRefused(self):
+        self._split_refused(Part.Ellipse(V(0, 0, 0), 10, 5), Part.Ellipse)
 
     def testSplitPeriodicBSplineOnceStaysClosed(self):
         poles = [V(10, 0, 0), V(0, 10, 0), V(-10, 0, 0), V(0, -10, 0)]
@@ -269,6 +266,105 @@ class TestSketchTrimSplit(unittest.TestCase):
         self.assertAlmostEqual(g.Radius, 12.0, delta=TOL)
         for p in _endpoints(g):
             self.assertAlmostEqual(p.y, 2.0, delta=TOL)
+
+    # Skeptic find 6: Split, then Trim the piece at the joint. The joint was all that kept the two arcs on
+    # one circle: it becomes an Equal, and the radius still governs both.
+    def testSplitThenTrimAtJointKeepsRadius(self):
+        sk = self.sk
+        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), math.radians(20),
+                                        math.radians(160)))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        r = sk.addConstraint(Sketcher.Constraint("Radius", 0, 10))
+        sk.renameConstraint(r, "radius")
+        self.doc.recompute()
+        sk.split(0, V(0, 10, 0))
+        _line(sk, (3, -15), (3, 15))
+        n = len(sk.Geometry) - 1
+        sk.addConstraint(Sketcher.Constraint("Block", n))
+        self.doc.recompute()
+        sk.trim(0, V(1.5, 9.887, 0))
+        self.doc.recompute()
+        self._healthy()
+        sk.setDatum(_named(sk, "radius"), App.Units.Quantity("12 mm"))
+        self.doc.recompute()
+        self._healthy()
+        for _, g in _arcs(sk):
+            self.assertAlmostEqual(g.Radius, 12.0, delta=TOL)
+
+    # The same for a line: the pieces stay collinear.
+    def testSplitThenTrimAtJointKeepsLine(self):
+        sk = self.sk
+        _line(sk, (-20, 0), (20, 0))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 1, -20))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 1, 0.5))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 2, 20))
+        self.doc.recompute()
+        sk.split(0, V(0, 0.5, 0))
+        _line(sk, (-5, -15), (-5, 15))
+        sk.addConstraint(Sketcher.Constraint("Block", len(sk.Geometry) - 1))
+        self.doc.recompute()
+        dof = sk.DoF
+        sk.trim(0, V(-2, 0.5, 0))
+        self.doc.recompute()
+        self._healthy()
+        self.assertLessEqual(sk.DoF, dof)
+        sk.moveGeometry(1, 1, V(3, 4, 0), False)
+        self.doc.recompute()
+        for g in sk.Geometry[:2]:
+            self.assertAlmostEqual(g.StartPoint.y, 0.5, delta=TOL, msg="a piece left the line")
+            self.assertAlmostEqual(g.EndPoint.y, 0.5, delta=TOL, msg="a piece left the line")
+
+    # Skeptic find 8: a line trimmed where it crosses a circle at the circle's parameter-0 point gets a
+    # point-on-object there, not a coincidence with a "start" the circle doesn't have.
+    def testTrimLineAtCircleSeam(self):
+        sk = self.sk
+        _line(sk, (-20, 0), (20, 0))
+        _circle(sk, 3, -6, 0)
+        _circle(sk, 3, 6, 0)
+        sk.addConstraint(Sketcher.Constraint("Block", 1))
+        sk.addConstraint(Sketcher.Constraint("Block", 2))
+        self.doc.recompute()
+        sk.trim(0, V(0, 0, 0))
+        self.doc.recompute()
+        self._healthy()
+
+    # Skeptic find 5: Split keeps the expression on a dimension it re-creates: the radius still follows
+    # the dimension it is bound to.
+    def testSplitKeepsExpression(self):
+        sk = self.sk
+        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), 8), 0.3, 2.8))
+        _line(sk, (20, 0), (24, 0))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 1, 1, 20))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 1, 1, 0.5))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", 1))
+        b = sk.addConstraint(Sketcher.Constraint("Distance", 1, 4))
+        sk.renameConstraint(b, "base")
+        r = sk.addConstraint(Sketcher.Constraint("Radius", 0, 8))
+        sk.renameConstraint(r, "rad")
+        sk.setExpression("Constraints.rad", "Constraints.base * 2")
+        self.doc.recompute()
+        sk.split(0, V(0, 8, 0))
+        self.doc.recompute()
+        sk.setDatum(_named(sk, "base"), App.Units.Quantity("5 mm"))
+        self.doc.recompute()
+        self._healthy()
+        for _, g in _arcs(sk):
+            self.assertAlmostEqual(g.Radius, 10.0, delta=TOL, msg="the radius lost its expression")
+
+    # Skeptic find 4: a construction curve split stays construction.
+    def testSplitKeepsConstruction(self):
+        sk = self.sk
+        bs = Part.BSplineCurve()
+        bs.buildFromPolesMultsKnots([V(10, 0, 0), V(0, 10, 0), V(-10, 0, 0), V(0, -10, 0)], [1] * 5,
+                                    [0, 1, 2, 3, 4], True, 3)
+        sk.addGeometry(bs, True)
+        self.doc.recompute()
+        sk.split(0, bs.value(0.3))
+        self.doc.recompute()
+        self.assertTrue(sk.getConstruction(0))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -645,6 +645,13 @@ def _apply(m, op, i, pts):
         m.doc.recompute()
         j = _piece_near(m, pts["twice"])
         return sk.trim(j, pts["twice"])
+    if op in ("split", "split_once", "split_twice") and isinstance(sk.Geometry[i], (Part.Circle, Part.Ellipse)):
+        # A circle or an ellipse has no ends: Split refuses a cut at one point (fix 3).
+        try:
+            sk.split(i, pts["split"][0])
+        except ValueError:
+            return "refused"
+        return "not refused"
     if op in ("split", "split_once"):
         return sk.split(i, pts["split"][0])
     if op == "split_twice":
@@ -734,6 +741,12 @@ def run_case(target, family, op):
         if rc == "n/a":
             return name, None
         m.doc.recompute()
+        if rc == "refused":
+            findings += ["after the refusal: %s" % b for b in _health(m.sk)]
+            findings += ["after the refusal: " + s for s in _moved(m, before, list(m.labels))]
+            if _names(m.sk) != names0 or m.sk.DoF != dof0:
+                findings.append("the refused split changed the sketch")
+            return name, findings
         if rc not in (0, None):
             return name, ["the %s returned %s" % (op, rc)]
         findings += ["after the cut: %s" % b for b in _health(m.sk)]

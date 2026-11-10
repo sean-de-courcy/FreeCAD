@@ -1744,8 +1744,10 @@ std::optional<size_t> findPieceContainingPoint(
 // constraint on such a curve can go to any piece and keeps measuring the same thing.
 static bool piecesShareCarrier(const Part::Geometry* geo)
 {
-    return geo->is<Part::GeomLineSegment>() || geo->isDerivedFrom<Part::GeomConic>()
-        || geo->isDerivedFrom<Part::GeomArcOfConic>();
+    // Only the curves whose pieces are tied: parabolas and hyperbolas aren't (yet).
+    return geo->is<Part::GeomLineSegment>() || geo->isDerivedFrom<Part::GeomCircle>()
+        || geo->isDerivedFrom<Part::GeomArcOfCircle>() || geo->isDerivedFrom<Part::GeomEllipse>()
+        || geo->isDerivedFrom<Part::GeomArcOfEllipse>();
 }
 
 // FreeCAD-CH (ops#656): the piece that holds `point`'s projection onto the old curve, or else the piece
