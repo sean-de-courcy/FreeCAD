@@ -53,3 +53,7 @@ studioReconcile = _PartDesign.studioReconcile
 studioProject = _PartDesign.studioProject
 studioStepOf = _PartDesign.studioStepOf
 studioNewPart = _PartDesign.studioNewPart  # ops#654 S2
+# FreeCAD-CH (notes/derived-design.md, slice 1): Derived from another document
+isDerivedCopy = _PartDesign.isDerivedCopy
+makeDerivedCopies = _PartDesign.makeDerivedCopies
+editDerivedCopies = _PartDesign.editDerivedCopies

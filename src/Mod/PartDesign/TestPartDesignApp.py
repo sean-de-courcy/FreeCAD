@@ -156,6 +156,9 @@ from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-CH, ops#640
 from PartDesignTests.TestProfileRegions import TestProfileRegions  # FreeCAD-CH, feat/profile-regions
 from PartDesignTests.TestDerived import TestDerived  # FreeCAD-CH, ops#640 round 6
+from PartDesignTests.TestDerivedFiles import TestDerivedFiles  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestDerivedFollowUps import TestDerivedFollowUps  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestPartStudioVariables import TestPartStudioVariables  # FreeCAD-CH, derived-design.md
 
 # Studio features (FreeCAD-CH, ops#654, ops#655)
 from PartDesignTests.TestStudioList import (

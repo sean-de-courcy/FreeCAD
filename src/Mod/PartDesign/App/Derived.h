@@ -9,7 +9,10 @@
 // BaseFeature, so it follows the source on every recompute. Each new Body's FeatureBase is a
 // member of the feature (its DerivedFrom names the source); the last one made is the lead, whose
 // row in the Features list stands for the whole feature, and its DerivedParts lists the others.
-// Other documents and versions as a source are not in this slice.
+// Another document's saved studio as a source (notes/derived-design.md 3): the part's shape is
+// copied into a Part::Feature held by this studio (a derived copy, isDerivedCopy()), which the
+// member takes as its BaseFeature instead of a binder; freecad.derived makes and refreshes the
+// copies, as Onshape's reference to another document's version changes only on an update.
 
 #include <string>
 #include <vector>
@@ -22,6 +25,11 @@ class Document;
 class DocumentObject;
 class Part;
 }  // namespace App
+
+namespace Part
+{
+class Feature;
+}  // namespace Part
 
 namespace PartDesign
 {
@@ -91,5 +99,28 @@ PartDesignExport FeatureBase* editDerived(FeatureBase* lead, const std::vector<B
  * Opens no transaction and doesn't recompute.
  */
 PartDesignExport void deleteDerivedParts(FeatureBase* lead);
+
+/// Whether obj is a derived copy: a Part::Feature (not a PartDesign feature) with a
+/// DerivedSourcePart property, holding a part of another document's saved studio
+PartDesignExport bool isDerivedCopy(const App::DocumentObject* obj);
+
+/// The name of a derived copy's part: its DerivedSourceLabel, else its DerivedSourcePart
+PartDesignExport std::string derivedCopyLabel(const App::DocumentObject* copy);
+
+/** Makes a Derived feature in studio (null: the document's top level) on copies, derived copies
+ * that studio holds, of one studio of one file: per copy a Body in studio labelled as its part,
+ * whose base is the copy. Throws Base::ValueError, before anything is written, for no copy, an
+ * object that is no derived copy of doc, a copy that studio doesn't hold, copies of several
+ * studios or files, or a copy chosen twice. Opens no transaction, doesn't recompute. Returns the
+ * lead.
+ */
+PartDesignExport FeatureBase* makeDerivedCopies(App::Document* doc,
+                                                App::Part* studio,
+                                                const std::vector<Part::Feature*>& copies);
+
+/// As editDerived() for a Derived feature on derived copies: lead's feature brings in copies
+/// instead, with makeDerivedCopies()'s refusals. Returns the lead after the edit
+PartDesignExport FeatureBase* editDerivedCopies(FeatureBase* lead,
+                                                const std::vector<Part::Feature*>& copies);
 
 }  // namespace PartDesign
