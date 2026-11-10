@@ -4750,6 +4750,16 @@ bool Sketch::updateGeometry()
             return false;
         }
     }
+    // FreeCAD-CH (ops#656): while dragging, a Midpoint's half sweep h must stay in (0, pi). A step
+    // that takes it through 0 (an arc's end dragged through its start) leaves the point at
+    // u = start + h on the far side of the circle once the arc is written back counterclockwise:
+    // no valid step. (Outside a drag SketchObject::solve solves again from the written arc.)
+    for (const ConstrDef& c : Constrs) {
+        if (isInitMove && c.constr && c.constr->Type == Midpoint && c.secondvalue
+            && !(*c.secondvalue > 0.0 && *c.secondvalue < std::numbers::pi)) {
+            return false;
+        }
+    }
     return true;
 }
 

@@ -1927,7 +1927,12 @@ int System::solve(bool isFine, Algorithm alg, bool isRedundantsolving)
             res = std::max(res, solve(subSystemsAux[cid], isFine, alg, isRedundantsolving));
         }
     }
-    if (res == Success) {
+    if (res == Success && !redundant.empty()) {
+        // FreeCAD-CH (ops#656): the redundant constraints, left out of the subsystems, are checked
+        // at the solution: the subsystems hold it until applySolution, so the parameters were
+        // still the start's here, and a repeat that holds only once the geometry has moved (two
+        // repeated dimensions driven to a new value together) failed. Apply, check, put back.
+        applySolution();
         for (std::set<Constraint*>::const_iterator constr = redundant.begin();
              constr != redundant.end();
              ++constr) {
@@ -1937,9 +1942,10 @@ int System::solve(bool isFine, Algorithm alg, bool isRedundantsolving)
             double err = (*constr)->error();
             if (err * err > (isRedundantsolving ? convergenceRedundant : convergence)) {
                 res = Converged;
-                return res;
+                break;
             }
         }
+        resetToReference();
     }
     return res;
 }

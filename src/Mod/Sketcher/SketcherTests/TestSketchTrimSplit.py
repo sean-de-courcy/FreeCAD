@@ -511,6 +511,47 @@ class TestSketchRepeatedConstraints(unittest.TestCase):
                                sk.Shape.Edges[0].Vertexes[1].Point.y, delta=TOL)
 
 
+    def testRepeatsHoldingOnlyAtTheSolution(self):
+        """Skeptic 11-10, 3: the whole rectangle's constraints added at once to the 19 x 9 drawing,
+        so the repeated length holds only once the geometry has moved: accepted, 20 x 10."""
+        sk = self.sk
+        pts = [(0, 0), (19, 0), (19, 9), (0, 9)]
+        ids = [_line(sk, pts[i], pts[(i + 1) % 4]) for i in range(4)]
+        b, r, t, l = ids
+        cs = [Sketcher.Constraint("Coincident", ids[i], 2, ids[(i + 1) % 4], 1) for i in range(4)]
+        cs += [Sketcher.Constraint("Coincident", b, 1, -1, 1)]
+        cs += [Sketcher.Constraint("Horizontal", i) for i in (b, t)]
+        cs += [Sketcher.Constraint("Vertical", i) for i in (r, l)]
+        cs += [Sketcher.Constraint("DistanceX", b, 1, b, 2, 20),
+               Sketcher.Constraint("DistanceX", t, 2, t, 1, 20),
+               Sketcher.Constraint("DistanceY", r, 1, r, 2, 10)]
+        sk.addConstraint(cs)
+        self.doc.recompute()
+        self.assertTrue(sk.RedundantConstraints)
+        self.assertTrue(sk.isValid())
+        self.assertAlmostEqual(sk.Geometry[b].length(), 20.0, delta=TOL)
+        self.assertAlmostEqual(sk.Geometry[t].length(), 20.0, delta=TOL)
+
+    def testRepeatedDimensionsDrivenTogether(self):
+        """Skeptic 11-10, 3: the bottom's and the top's length both bound to one spreadsheet cell;
+        the cell 20 -> 30: both follow (they repeat each other at every value)."""
+        import Spreadsheet  # noqa: F401  (the module's type)
+
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Params")
+        sheet.set("A1", "20")
+        sheet.setAlias("A1", "width")
+        self.doc.recompute()
+        self._repeated_rectangle()
+        self.sk.setExpression("Constraints[9]", "Params.width")
+        self.sk.setExpression("Constraints[10]", "Params.width")
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        sheet.set("A1", "30")
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        self.assertAlmostEqual(self.sk.Geometry[0].length(), 30.0, delta=TOL)
+        self.assertAlmostEqual(self.sk.Geometry[2].length(), 30.0, delta=TOL)
+
 class TestSketchArcMidpoint(unittest.TestCase):
     def setUp(self):
         self.doc = App.newDocument("ArcMidpoint")
@@ -623,3 +664,44 @@ class TestSketchArcMidpoint(unittest.TestCase):
         self.doc.recompute()
         self.assertFalse([c for c in self.sk.Constraints if c.Type == "Midpoint"])
         self.assertTrue(self.sk.isValid())
+
+    def testDragAnEndThroughTheStart(self):
+        """Skeptic 11-10, 2: the arc's end dragged back through its start, by the solver, in
+        steps. Whatever each step does (refused, or moved), the point stays at the middle of the
+        arc as written: never on the far side of the circle."""
+        sk = self.sk
+        arc = self._arc(0, math.radians(60))
+        sk.addConstraint(Sketcher.Constraint("Coincident", arc, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Radius", arc, 10))
+        sk.addConstraint(Sketcher.Constraint("PointOnObject", arc, 1, -1))
+        pt = self._point(2, 1)
+        sk.addConstraint(Sketcher.Constraint("Midpoint", pt, 1, arc))
+        self.doc.recompute()
+        for deg in (30, 10, 2, -2, -10, -90):
+            a = math.radians(deg)
+            try:
+                sk.moveGeometry(arc, 2, V(10 * math.cos(a), 10 * math.sin(a), 0), False)
+            except Exception:
+                pass
+            g = sk.Geometry[arc]
+            middle = g.value((g.FirstParameter + g.LastParameter) / 2)
+            self.assertLess((self._at(pt) - middle).Length, 1e-6, "after the step to %d" % deg)
+
+    def testFilletAtTheCornerDropsTheMidpoint(self):
+        """Skeptic 11-10, 1: a corner of two lines kept at an arc's middle, then filleted: the
+        corner is gone, so its Midpoint goes as a Point on object would, and the second line keeps
+        its direction (26.57 degrees)."""
+        sk = self.sk
+        arc = self._arc(0, math.pi)
+        sk.addConstraint(Sketcher.Constraint("Coincident", arc, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Radius", arc, 10))
+        l1 = _line(sk, (0, -10), (0, 10))
+        l2 = _line(sk, (0, 10), (10, 15))
+        sk.addConstraint(Sketcher.Constraint("Coincident", l1, 2, l2, 1))
+        sk.addConstraint(Sketcher.Constraint("Midpoint", l1, 2, arc))
+        self.doc.recompute()
+        sk.fillet(l1, 2, 1.0)
+        self.doc.recompute()
+        g = sk.Geometry[l2]
+        angle = math.degrees(math.atan2(g.EndPoint.y - g.StartPoint.y, g.EndPoint.x - g.StartPoint.x))
+        self.assertAlmostEqual(angle, math.degrees(math.atan2(5, 10)), delta=1e-6)
