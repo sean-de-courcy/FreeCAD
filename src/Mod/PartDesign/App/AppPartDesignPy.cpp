@@ -32,6 +32,7 @@
 #include <Base/VectorPy.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/BodyBase.h>
+#include <Mod/Part/App/PartFeature.h>
 
 #include "Body.h"
 #include "Derived.h"
@@ -253,6 +254,25 @@ public:
             &Module::editDerived,
             "editDerived(lead, bodies) -- The Derived feature brings in bodies instead. Returns the "
             "lead after the edit. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "isDerivedCopy",
+            &Module::isDerivedCopy,
+            "isDerivedCopy(obj) -- Whether obj is a derived copy: a Part::Feature holding a part of "
+            "another document's saved studio (DerivedSourcePart), which freecad.derived makes."
+        );
+        add_varargs_method(
+            "makeDerivedCopies",
+            &Module::makeDerivedCopies,
+            "makeDerivedCopies(studio, copies) -- A Derived feature in the studio (a document: its "
+            "top level) on derived copies it holds, of one studio of one file: per copy a Body "
+            "built on it. Returns the lead. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "editDerivedCopies",
+            &Module::editDerivedCopies,
+            "editDerivedCopies(lead, copies) -- The Derived feature on derived copies brings in "
+            "copies instead. Returns the lead after the edit. No transaction, no recompute."
         );
         add_varargs_method(
             "deleteDerivedParts",
@@ -898,6 +918,66 @@ private:
             bodies.push_back(body);
         }
         return bodies;
+    }
+
+    static std::vector<Part::Feature*> copiesArg(PyObject* objects)
+    {
+        std::vector<Part::Feature*> copies;
+        for (auto obj : objectsArg(objects)) {
+            if (!PartDesign::isDerivedCopy(obj)) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of derived copies");
+                throw Py::Exception();
+            }
+            copies.push_back(static_cast<Part::Feature*>(obj));
+        }
+        return copies;
+    }
+
+    Py::Object isDerivedCopy(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        return Py::Boolean(PartDesign::isDerivedCopy(objectArg(pObj)));
+    }
+
+    Py::Object makeDerivedCopies(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pCopies;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pStudio, &pCopies)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        std::vector<Part::Feature*> copies = copiesArg(pCopies);
+        try {
+            return Py::asObject(PartDesign::makeDerivedCopies(doc, studio, copies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    Py::Object editDerivedCopies(const Py::Tuple& args)
+    {
+        PyObject* pLead;
+        PyObject* pCopies;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pLead, &pCopies)) {
+            throw Py::Exception();
+        }
+        PartDesign::FeatureBase* lead = derivedArg(pLead);
+        std::vector<Part::Feature*> copies = copiesArg(pCopies);
+        try {
+            return Py::asObject(PartDesign::editDerivedCopies(lead, copies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
     }
 
     Py::Object derivedStudios(const Py::Tuple& args)

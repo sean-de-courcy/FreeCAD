@@ -67,6 +67,11 @@ class PartDesignWorkbench(Workbench):
 
         FreeCADGui.addCommand("PartDesign_Sprocket", CommandSprocket())
 
+        # FreeCAD-CH (notes/derived-design.md): Derived from another document
+        import DerivedFromFileGui
+
+        DerivedFromFileGui.register()
+
     def GetClassName(self):
         return "PartDesignGui::Workbench"
 

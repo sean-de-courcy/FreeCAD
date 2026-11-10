@@ -155,6 +155,9 @@ from PartDesignTests.TestBooleanRules import TestBooleanRules  # FreeCAD-CH, ops
 from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDerived import TestDerived  # FreeCAD-CH, ops#640 round 6
+from PartDesignTests.TestDerivedFiles import TestDerivedFiles  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestDerivedFollowUps import TestDerivedFollowUps  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestPartStudioVariables import TestPartStudioVariables  # FreeCAD-CH, derived-design.md
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

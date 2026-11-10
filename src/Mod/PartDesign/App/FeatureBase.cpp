@@ -226,11 +226,16 @@ App::DocumentObjectExecReturn* FeatureBase::execute()
     // which would leave the copy as it was without a word (FreeCAD-CH ops#640 round 6)
     if (!DerivedFrom.getStrValue().empty()) {
         App::DocumentObject* source = derivedSource(this);
-        if (source) {
+        // A derived copy of another document's part (Derived.h) is placed in this studio's frame:
+        // neither its description nor the studios' placements are to follow
+        const bool copied = isDerivedCopy(source);
+        if (source && !copied) {
             const std::string from = derivedDescription(source);
             if (from != DerivedFrom.getStrValue()) {
                 DerivedFrom.setValue(from);
             }
+        }
+        if (source) {
             if (Part::Feature::getTopoShape(
                     source,
                     Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
@@ -249,7 +254,8 @@ App::DocumentObjectExecReturn* FeatureBase::execute()
         App::Part* to = nullptr;
         Part::BodyBase::studioOf(Part::BodyBase::bodyOfObject(source), from);
         Part::BodyBase::studioOf(getFeatureBody(), to);
-        const std::string problem = derivedPlacementProblem(getDocument(), from, to);
+        const std::string problem = copied ? std::string()
+                                           : derivedPlacementProblem(getDocument(), from, to);
         if (!problem.empty()) {
             return new App::DocumentObjectExecReturn(problem);
         }

@@ -37,3 +37,7 @@ deleteDerivedParts = _PartDesign.deleteDerivedParts
 derivedLead = _PartDesign.derivedLead
 derivedMembers = _PartDesign.derivedMembers
 derivedSource = _PartDesign.derivedSource
+# FreeCAD-CH (notes/derived-design.md, slice 1): Derived from another document
+isDerivedCopy = _PartDesign.isDerivedCopy
+makeDerivedCopies = _PartDesign.makeDerivedCopies
+editDerivedCopies = _PartDesign.editDerivedCopies

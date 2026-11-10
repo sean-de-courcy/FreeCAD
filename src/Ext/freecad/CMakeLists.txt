@@ -49,6 +49,15 @@ foreach (it ${EXT_VARIABLES_FILES})
     configure_file(${it} ${NAMESPACE_DIR}/${it} COPYONLY)
 endforeach()
 
+# FreeCAD-CH (notes/derived-design.md): freecad.derived, Derived parts from another document
+set(EXT_DERIVED_FILES
+    derived.py
+)
+
+foreach (it ${EXT_DERIVED_FILES})
+    configure_file(${it} ${NAMESPACE_DIR}/${it} COPYONLY)
+endforeach()
+
 if (INSTALL_TO_SITEPACKAGES)
     SET(SITE_PACKAGE_DIR ${PYTHON_MAIN_DIR}/freecad)
 else ()
@@ -59,6 +68,7 @@ INSTALL(
     FILES
         ${NAMESPACE_INIT}
         ${EXT_FILES}
+        ${EXT_DERIVED_FILES}
     DESTINATION
         ${SITE_PACKAGE_DIR}
 )

@@ -21,6 +21,7 @@ if(BUILD_GUI)
           InvoluteGearFeature.ui
           SprocketFeature.py
           SprocketFeature.ui
+          DerivedFromFileGui.py
     )
 endif(BUILD_GUI)
 
@@ -101,6 +102,9 @@ set(PartDesign_TestScripts
     PartDesignTests/TestRegenerate.py
     PartDesignTests/TestOnshapeEndTypes.py
     PartDesignTests/TestDerived.py
+    PartDesignTests/TestDerivedFiles.py
+    PartDesignTests/TestDerivedFollowUps.py
+    PartDesignTests/TestPartStudioVariables.py
 )
 
 if(BUILD_GUI)

@@ -50,6 +50,7 @@
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/ObjectIdentifier.h>
+#include <App/Part.h>
 #include <App/PropertyUnits.h>
 #include <App/VariableChoice.h>
 #include <App/VariableLookup.h>
@@ -4020,6 +4021,33 @@ std::string resolveVariable(const App::DocumentObject* owner, const std::string&
         throw ParserError(
             fmt::format("no variable named {} in this document (in expression '{}')", name, buffer)
         );
+    }
+    // FreeCAD-CH (notes/derived-design.md, slice 2): Part Studio variables, Onshape's Variable
+    // feature. A holder inside a part studio (an App::Part) is seen only from that studio, and
+    // before the document's other holders (the nearer scope wins); holders outside every studio
+    // (the Variables set, the Variable Studios) are seen from everywhere
+    {
+        const App::Part* ownerStudio = App::Part::getPartOfObject(owner, true);
+        std::vector<App::VariableRef> mine;
+        std::vector<App::VariableRef> open;
+        for (const auto& ref : refs) {
+            const App::Part* holderStudio = App::Part::getPartOfObject(ref.holder, true);
+            if (!holderStudio) {
+                open.push_back(ref);
+            }
+            else if (holderStudio == ownerStudio) {
+                mine.push_back(ref);
+            }
+        }
+        refs = mine.empty() ? open : mine;
+        if (refs.empty()) {
+            throw ParserError(fmt::format(
+                "no variable named {} in this part studio: another studio's variables can't be "
+                "used here (in expression '{}')",
+                name,
+                buffer
+            ));
+        }
     }
     // FreeCAD-CH (ops#640, decision 317): the variable the user chose for a name a local set and
     // an imported copy both define (App/VariableChoice.h).
