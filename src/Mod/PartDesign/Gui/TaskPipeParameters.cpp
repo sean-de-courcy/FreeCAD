@@ -112,13 +112,14 @@ QString pipeScalingTitle(ViewProviderPipe* view)
                                    : TaskPipeScaling::tr("Additive Pipe Section Transformation");
 }
 
-// A sketch is taken whole, unless one of its points is picked: the pipe takes the whole sketch
-// for any other element of it (as the loft, Loft::getSectionShape)
+// A sketch is taken whole, unless one of its points or regions is picked: the pipe takes the
+// whole sketch for any other element of it, and a picked region as it is (as the loft,
+// Loft::getSectionShape)
 std::string sectionElement(App::DocumentObject* obj, const char* sub)
 {
     std::string element = Base::Tools::isNullOrEmpty(sub) ? std::string() : std::string(sub);
     if (obj && obj->isDerivedFrom<Part::Part2DObject>()
-        && ReferenceActions::subElementType(element) != "Vertex") {
+        && !ReferenceField::keepsSketchElement(element)) {
         element.clear();
     }
     return element;

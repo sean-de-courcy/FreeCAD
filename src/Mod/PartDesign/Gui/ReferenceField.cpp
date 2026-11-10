@@ -1982,14 +1982,20 @@ std::vector<App::PropertyLinkSubList::SubSet> ReferenceField::storedSections() c
     return sections;
 }
 
+bool ReferenceField::keepsSketchElement(const std::string& sub)
+{
+    const std::string element = bareElement(sub);
+    return boost::starts_with(element, "Vertex")
+        || boost::starts_with(element, "InternalFace");
+}
+
 void ReferenceField::pickSection(const Gui::SelectionChanges& msg)
 {
     App::DocumentObject* obj = owner()->getDocument()->getObject(msg.pObjectName);
     std::string sub = msg.pSubName ? msg.pSubName : "";
-    // A sketch is a section whole, unless one of its points is picked: the feature takes the
-    // whole sketch for any other element of it (Loft::getSectionShape)
-    if (obj->isDerivedFrom<Part::Part2DObject>()
-        && !boost::starts_with(bareElement(sub), "Vertex")) {
+    // A sketch is a section whole, unless one of its points or regions is picked: the feature
+    // takes the whole sketch for any other element of it (Loft::getSectionShape)
+    if (obj->isDerivedFrom<Part::Part2DObject>() && !keepsSketchElement(sub)) {
         sub.clear();
     }
     auto list = freecad_cast<App::PropertyLinkSubList*>(property());

@@ -278,6 +278,9 @@ public:
 
     /// The field armed now, if any: the selection has one gate, so there is at most one.
     static ReferenceField* armedField();
+    /// Whether a section or a profile of a loft or pipe keeps this element of a sketch: a point
+    /// (a point section) or a region (InternalFace<n>); the sketch is taken whole for any other
+    static bool keepsSketchElement(const std::string& sub);
     /// Called by the field's gate when it goes, whoever removed it.
     void gateGone();
 

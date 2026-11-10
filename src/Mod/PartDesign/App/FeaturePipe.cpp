@@ -109,6 +109,7 @@
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include "Mod/Part/App/TopoShapeMapper.h"
 #include "FeatureLoft.h"
+#include "ProfileRegions.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true);
 
@@ -4753,9 +4754,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
         return App::DocumentObject::StdReturn;
     }
 
-    auto getSectionShape = [](const char* name,
-                              App::DocumentObject* feature,
-                              const std::vector<std::string>& subs) -> Part::TopoShape {
+    // Sections are paired with the profile wire by wire, in order
+    const bool ordered = !Sections.getValues().empty();
+    auto getSectionShape = [this, ordered](const char* name,
+                                           App::DocumentObject* feature,
+                                           const std::vector<std::string>& subs) -> Part::TopoShape {
         if (!feature || !feature->isDerivedFrom<Part::Feature>()) {
             throw Base::TypeError("Pipe: Invalid profile/section");
         }
@@ -4771,11 +4774,36 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // only take the entire shape when we have a sketch selected, but
         // not a point of the sketch
         if (feature->isDerivedFrom<Part::Part2DObject>() && subName.compare(0, 6, "Vertex") != 0) {
+            // Picked regions: their faces' wires, adjacent regions merged (feat/profile-regions)
+            if (picksRegions(subs)) {
+                return wiresOfFaces(getTopoShapeVerifiedFace(false, false, feature, subs));
+            }
             // Its closed loops; open curves are ignored, as in Onshape (ops#631). With no loop
             // left, the open wires stay, and the pipe refuses them as before.
             const auto& shape = static_cast<Part::Part2DObject*>(feature)->Shape.getShape();
-            auto loops = withoutOpenCurves(shape);
-            return loops.isNull() ? shape : loops;
+            WholeSketchRegions rule(feature, shape);
+            if (rule.sameAsLoops()) {
+                try {
+                    auto loops = withoutOpenCurves(shape);
+                    return loops.isNull() ? shape : loops;
+                }
+                catch (const Base::Exception&) {
+                    // Onshape's regions below
+                }
+            }
+            // Loops that overlap, touch or nest deeper: Onshape's regions of the whole sketch
+            auto faces = rule.faces();
+            if (faces.isNull()) {
+                return shape;  // the pipe refuses the open wires as before
+            }
+            auto wires = wiresOfFaces(faces);
+            // One region with at most one hole pairs as the old loops do (outer to outer, hole
+            // to hole); more, and the face maker's order isn't the sketch's
+            if (ordered
+                && (faces.countSubShapes(TopAbs_FACE) > 1 || wires.countSubShapes(TopAbs_WIRE) > 2)) {
+                FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
+            }
+            return wires;
         }
         else {
             if (subName.empty()) {

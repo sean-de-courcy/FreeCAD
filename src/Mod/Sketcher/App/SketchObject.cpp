@@ -68,6 +68,7 @@
 
 #include "GeoEnum.h"
 #include "SketchObject.h"
+#include "SketchImprint.h"
 #include "Constraint.h"
 #include "SketchObjectPy.h"
 #include "ExternalGeometryFacade.h"
@@ -314,8 +315,9 @@ void SketchObject::setupObject()
             "User parameter:BaseApp/Preferences/Mod/Sketcher");
     ArcFitTolerance.setValue(hGrpp->GetFloat("ArcFitTolerance", Precision::Confusion()*10.0));
     MakeInternals.setValue(hGrpp->GetBool("MakeInternals", true));
-    // New sketches build internal faces with FaceMakerBuildFace.
-    _InternalFaceVersion.setValue(2);
+    // New sketches build internal faces with FaceMakerBuildFace, and take the model edges lying
+    // in their plane into their regions (Onshape's imprint, FreeCAD-CH feat/profile-regions).
+    _InternalFaceVersion.setValue(ImprintInternalFaceVersion);
     inherited::setupObject();
 }
 
@@ -748,11 +750,24 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
         }
         else {
             try {
-                result = result.makeElementFace(edges.getSubTopoShapes(TopAbs_WIRE),
+                // The model edges in the sketch's plane bound regions too (Onshape's imprint);
+                // they stay out of the open wires below and out of the sketch's Shape
+                auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
+                const auto imprint = imprintEdges(*this);
+                if (!imprint.isNull()) {
+                    for (auto& edge : imprint.getSubTopoShapes(TopAbs_EDGE)) {
+                        shapes.push_back(std::move(edge));
+                    }
+                }
+                result = result.makeElementFace(shapes,
                         /*op*/"",
                         /*maker*/"Part::FaceMakerBuildFace",
                         /*pln*/nullptr
                 );
+                if (!imprint.isNull()) {
+                    // the model edges split the sketch's regions, and make none of their own
+                    result = withinSketchRegions(result, edges);
+                }
             }
             catch (const Part::NullShapeException&) {
                 // An open-only sketch has no bounded regions, so a null face result is expected.
