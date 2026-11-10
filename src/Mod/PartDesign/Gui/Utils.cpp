@@ -50,6 +50,7 @@
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "Utils.h"
@@ -93,6 +94,15 @@ bool setEdit(App::DocumentObject* obj, PartDesign::Body* body)
     }
     if (!body) {
         body = getBodyFor(obj, false);
+        // FreeCAD-CH (ops#654 S4): a studio feature (an owner) belongs to no Body; its dialog
+        // opens on it in the studio
+        if (!body && PartDesign::isStudioOwner(obj)) {
+            Gui::cmdGuiDocument(
+                obj,
+                std::ostringstream() << "setEdit(" << Gui::Command::getObjectCmd(obj) << ", 0)"
+            );
+            return true;
+        }
         if (!body) {
             FC_ERR("no body found");
             return false;

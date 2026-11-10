@@ -53,6 +53,7 @@
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "ui_DlgReference.h"
 #include "ReferenceSelection.h"
@@ -211,8 +212,19 @@ bool ReferenceSelection::allowOrigin(
 
 bool ReferenceSelection::allowDatum(PartDesign::Body* body, App::DocumentObject* pObj) const
 {
-    if (!body) {  // Allow selecting Part::Datum features from the active Body
-        return false;
+    if (!body) {
+        // FreeCAD-CH (ops#654 S4): a studio feature takes the datums of its studio's parts
+        const PartDesign::StudioList* list =
+            support ? PartDesign::StudioList::holding(support) : nullptr;
+        App::Part* studio = nullptr;
+        auto datumBody = PartDesign::Body::findBodyOf(pObj);
+        if (!list || !PartDesign::isStudioOwner(support) || !datumBody
+            || !Part::BodyBase::studioOf(datumBody, studio) || studio != list->studio()) {
+            return false;
+        }
+        return (type.testFlag(AllowSelection::FACE) && pObj->isDerivedFrom<PartDesign::Plane>())
+            || (type.testFlag(AllowSelection::EDGE) && pObj->isDerivedFrom<PartDesign::Line>())
+            || (type.testFlag(AllowSelection::POINT) && pObj->isDerivedFrom<PartDesign::Point>());
     }
     else if (!type.testFlag(AllowSelection::OTHERBODY) && !body->hasObject(pObj)
              && !Part::BodyBase::isInOneStudio(body, pObj)) {  // FreeCAD-CH (ops#325)

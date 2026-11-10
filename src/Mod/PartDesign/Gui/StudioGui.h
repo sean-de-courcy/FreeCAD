@@ -11,6 +11,8 @@
 
 #include <Mod/PartDesign/PartDesignGlobal.h>
 
+class QWidget;
+
 namespace App
 {
 class DocumentObject;
@@ -24,6 +26,8 @@ class Body;
 namespace PartDesignGui
 {
 
+class ViewProvider;
+
 /// The parts offered as targets or tools at owner's place: live parts only (P6a, report 26)
 PartDesignGuiExport std::vector<PartDesign::Body*> liveStudioParts(const App::DocumentObject* at);
 
@@ -32,5 +36,9 @@ PartDesignGuiExport bool rollStudioToOwner(App::DocumentObject* owner, std::stri
 
 /// Ends rollStudioToOwner()
 PartDesignGuiExport void endStudioOwnerRollBack(App::DocumentObject* owner);
+
+/// The Result box of a studio feature's dialog (S4): New / Add / Remove / Intersect and a tick per
+/// live part; null when vp's object is no studio feature
+PartDesignGuiExport QWidget* makeStudioResultBox(ViewProvider* vp);
 
 }  // namespace PartDesignGui
