@@ -107,6 +107,26 @@ def _seg_dev(seg, pt):
     return abs(math.hypot(pt[0] - c[0], pt[1] - c[1]) - r)
 
 
+SAMPLES = 32  # points of the curve checked against each arc (each lies within one knot span)
+
+
+def _spans(edge, f, l):
+    """[f, l] cut at the curve's knots (a spline's), and in four for a closed curve, so that each
+    arc's samples lie within one polynomial span: a feature of the curve narrower than a span can't
+    fall between them unseen"""
+    cuts = [f, l]
+    c = edge.Curve
+    if hasattr(c, "getKnots"):
+        try:
+            cuts += [k for k in c.getKnots() if f < k < l]
+        except Exception:
+            pass
+    if edge.isClosed():
+        cuts += [f + (l - f) * k / 4.0 for k in (1, 2, 3)]
+    cuts = sorted(set(cuts))
+    return [(a, b) for a, b in zip(cuts, cuts[1:]) if b - a > 1e-12 * max(1.0, abs(b))]
+
+
 def _approximate(edge, f, l, tol, depth=0):
     """Arcs through the edge's own points from parameter f to l, within tol: [(segment, dev)]"""
     p = _xy(edge.valueAt(f))
@@ -114,10 +134,10 @@ def _approximate(edge, f, l, tol, depth=0):
     q = _xy(edge.valueAt(l))
     seg = _arc_segment(p, m, q)
     dev = 0.0
-    for k in range(1, 16):
-        if k == 8:
+    for k in range(1, SAMPLES):
+        if 2 * k == SAMPLES:
             continue
-        dev = max(dev, _seg_dev(seg, _xy(edge.valueAt(f + (l - f) * k / 16.0))))
+        dev = max(dev, _seg_dev(seg, _xy(edge.valueAt(f + (l - f) * k / SAMPLES))))
     if seg[0] == "A" and abs(seg[5]) > math.pi:
         dev = max(dev, tol * 2.0)  # split arcs over a half turn: better conditioned
     if dev <= tol or depth > 24:
@@ -145,12 +165,9 @@ def _edge_segments(edge, forward, tol, rep):
             return [("A", p, q, ctr, r, sweep)]
         return [("A", q, p, ctr, r, -sweep)]
     rep.approximated += 1
-    if edge.isClosed():
-        parts = []
-        for k in range(4):
-            parts += _approximate(edge, f + (l - f) * k / 4.0, f + (l - f) * (k + 1) / 4.0, tol)
-    else:
-        parts = _approximate(edge, f, l, tol)
+    parts = []
+    for a, b in _spans(edge, f, l):
+        parts += _approximate(edge, a, b, tol)
     for _, d in parts:
         rep.max_deviation = max(rep.max_deviation, d)
     segs = [s for s, _ in parts]

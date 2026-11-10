@@ -693,18 +693,160 @@ class TestDxfSkepticCases(unittest.TestCase):
         self.assertEqual(rep.open_ends, 2)
 
     def test_export_extents_are_tight(self):
-        """The header's $EXTMIN/$EXTMAX and the reported extent: a 30 x 10 slot (two half circles
-        of radius 5), not the arcs' whole circles"""
+        """The header's $EXTMIN/$EXTMAX and the reported extent: a 20 x 10 outline whose corner is a
+        quarter arc of radius 10 (centre (10, 10), from (10, 0) to (20, 10)), not its whole circle
+        (which reaches y = 20)"""
         sk = new_sketch(self.doc)
-        sk.addGeometry(Part.LineSegment(V(0, 0, 0), V(20, 0, 0)))
-        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(20, 5, 0), V(0, 0, 1), 5), -math.pi / 2, math.pi / 2))
+        sk.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))
+        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(10, 10, 0), V(0, 0, 1), 10), -math.pi / 2, 0.0))
         sk.addGeometry(Part.LineSegment(V(20, 10, 0), V(0, 10, 0)))
-        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 5, 0), V(0, 0, 1), 5), math.pi / 2, 3 * math.pi / 2))
-        path = os.path.join(self.dir, "slot.dxf")
+        sk.addGeometry(Part.LineSegment(V(0, 10, 0), V(0, 0, 0)))
+        path = os.path.join(self.dir, "quarter.dxf")
         rep = SketcherDxf.export_sketch(sk, path)
-        self.assertAlmostEqual(rep.size[0], 30.0, 9)
+        self.assertAlmostEqual(rep.size[0], 20.0, 9)
         self.assertAlmostEqual(rep.size[1], 10.0, 9)
         with open(path) as f:
             text = f.read()
-        self.assertIn("$EXTMIN\n 10\n-5.0\n 20\n0.0\n", text)
-        self.assertIn("$EXTMAX\n 10\n25.0\n 20\n10.0\n", text)
+        self.assertIn("$EXTMIN\n 10\n0.0\n 20\n0.0\n", text)
+        self.assertIn("$EXTMAX\n 10\n20.0\n 20\n10.0\n", text)
+
+
+def _line(p, q):
+    return f"0\nLINE\n8\n0\n10\n{p[0]!r}\n20\n{p[1]!r}\n30\n0.0\n11\n{q[0]!r}\n21\n{q[1]!r}\n31\n0.0\n"
+
+
+def _dip_rect():
+    """A rectangle 10 x 5 whose top edge, 500 segments, dips smoothly 0.009 below y = 0"""
+    top = [(10.0 * k / 500, -0.009 * math.sin(math.pi * k / 500)) for k in range(501)]
+    return top + [(10.0, -5.0), (0.0, -5.0), (0.0, 0.0)]
+
+
+def _ys_at_x5(sk):
+    cut = Part.LineSegment(V(5.0, -0.5, 0), V(5.0, 0.5, 0)).toShape()
+    ys = set()
+    for e in sk.Shape.Edges:
+        d, pairs, _ = e.distToShape(cut)
+        if d < 1e-9:
+            ys |= {round(a.y, 6) for a, _ in pairs}
+    return sorted(ys)
+
+
+class TestDxfReviewCases(unittest.TestCase):
+    """The full local review's designed cases (11-10, round 1), each failing before its fix"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dxf_")
+        self.doc = FreeCAD.newDocument("DxfReview")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def insert(self, ents, name, **kw):
+        sk = new_sketch(self.doc, "S" + str(len(self.doc.Objects)))
+        rep = SketcherDxf.insert(sk, write(self.dir, name, dxf_text(ents)), **kw)
+        self.doc.recompute()
+        return sk, rep
+
+    def test_export_sees_a_bump_narrower_than_a_sixteenth(self):
+        """The exact 150 degree arc of radius 50 as a rational quadratic spline with 64 knot spans,
+        one pole (its support 4/64 to 8/64 of the range) pushed out 3 mm: a 2.25 mm bump. Written as
+        arcs, the curve stays within the tolerance of the file and the report says so truly."""
+        R0, h = 50.0, math.radians(37.5)
+        poles, weights = [], []
+        for k in range(2):
+            a0 = math.radians(75.0 * k)
+            if k == 0:
+                poles.append(V(R0 * math.cos(a0), R0 * math.sin(a0), 0))
+                weights.append(1.0)
+            poles.append(V(R0 / math.cos(h) * math.cos(a0 + h), R0 / math.cos(h) * math.sin(a0 + h), 0))
+            weights.append(math.cos(h))
+            poles.append(V(R0 * math.cos(a0 + 2 * h), R0 * math.sin(a0 + 2 * h), 0))
+            weights.append(1.0)
+        bs = Part.BSplineCurve()
+        bs.buildFromPolesMultsKnots(poles, [3, 2, 3], [0.0, 0.5, 1.0], False, 2, weights)
+        for j in range(1, 64):
+            u = j / 64.0
+            if min(abs(u - k) for k in bs.getKnots()) > 1e-9:
+                bs.insertKnot(u, 1, 1e-12)
+        flat = []
+        for k, m in zip(bs.getKnots(), bs.getMultiplicities()):
+            flat += [k] * m
+        i = max(
+            (i for i in range(bs.NbPoles) if flat[i] >= 4 / 64 - 1e-12 and flat[i + 3] <= 8 / 64 + 1e-12),
+            key=lambda i: flat[i + 3] - flat[i],
+        )
+        p = bs.getPole(i + 1)
+        d = V(p.x, p.y, 0)
+        d.normalize()
+        bs.setPole(i + 1, p + d * 3.0, bs.getWeight(i + 1))
+        sk = new_sketch(self.doc)
+        sk.addGeometry([bs, Part.LineSegment(bs.EndPoint, bs.StartPoint)], False)
+        path = os.path.join(self.dir, "bump.dxf")
+        rep = SketcherDxf.export_sketch(sk, path, tolerance=0.01)
+        back = Part.Compound([g.toShape() for g in _read_curves(path)])
+        e = bs.toShape()
+        worst = max(
+            back.distToShape(Part.Vertex(e.valueAt(e.FirstParameter + (e.LastParameter - e.FirstParameter) * k / 1500)))[0]
+            for k in range(1501)
+        )
+        self.assertLessEqual(worst, 0.01 + 1e-6)
+        self.assertGreaterEqual(rep.max_deviation, worst - 1e-6)
+
+    def test_clearance_to_a_circle_from_the_file(self):
+        """The dipping rectangle and a CIRCLE r 2 whose bottom is 0.005 above the dip"""
+        r = _dip_rect()
+        ents = "".join(_line(p, q) for p, q in zip(r, r[1:])) + "0\nCIRCLE\n8\n0\n10\n5.0\n20\n1.996\n30\n0.0\n40\n2.0\n"
+        sk, rep = self.insert(ents, "clear_circle.dxf", tolerance=0.01)
+        circ = [g for g in sk.Geometry if g.TypeId == "Part::GeomCircle"][0].toShape()
+        rest = Part.Compound([g.toShape() for g in sk.Geometry if g.TypeId != "Part::GeomCircle"])
+        self.assertGreaterEqual(circ.distToShape(rest)[0], 0.0025 - 1e-9)
+
+    def test_clearance_of_loops_sharing_a_corner(self):
+        """The dipping rectangle and a triangle sharing its corner (10, 0), tip 0.005 above the dip:
+        the rectangle's top at x = 5 stays below the tip"""
+        r = _dip_rect()
+        tri = [(5.0, -0.004), (7.0, 2.0), (10.0, 0.0), (5.0, -0.004)]
+        ents = "".join(_line(p, q) for p, q in zip(r, r[1:])) + "".join(_line(p, q) for p, q in zip(tri, tri[1:]))
+        sk, rep = self.insert(ents, "clear_shared.dxf", tolerance=0.01)
+        top = [y for y in _ys_at_x5(sk) if abs(y + 0.004) > 1e-6]
+        self.assertTrue(top)
+        self.assertTrue(all(y < -0.004 for y in top), top)
+
+    def test_gap_and_fit_deviation_measured(self):
+        """A 74-gon of radius 10 whose last vertex falls 0.009 short of the first: the reported
+        deviation is at least the true distance of every original point from the result"""
+        n = 74
+        pts = [(10 * math.cos(2 * math.pi * k / n), 10 * math.sin(2 * math.pi * k / n)) for k in range(n)]
+        poly = pts + [(pts[0][0] - 0.009, 0.0)]
+        sk, rep = self.insert("".join(_line(p, q) for p, q in zip(poly, poly[1:])), "gapfit.dxf", tolerance=0.01)
+        shp = Part.Compound(sk.Shape.Edges)
+        worst = 0.0
+        for p, q in zip(poly, poly[1:]):
+            for s in (0.0, 0.25, 0.5, 0.75, 1.0):
+                x = V(p[0] + s * (q[0] - p[0]), p[1] + s * (q[1] - p[1]), 0)
+                worst = max(worst, shp.distToShape(Part.Vertex(x))[0])
+        self.assertLessEqual(worst, 0.01 + 1e-9)
+        self.assertGreaterEqual(rep.max_deviation, worst - 1e-9)
+        self.assertTrue(all(w.isClosed() for w in sk.Shape.Wires))
+
+    def test_unmovable_ends_are_reported_open(self):
+        """Two half ellipses whose ends miss by 0.0005: elliptical arcs can't move, so the report
+        must not say the outline is closed"""
+
+        def ell(c, t0, t1):
+            return (
+                f"0\nELLIPSE\n8\n0\n10\n{c[0]}\n20\n{c[1]}\n30\n0\n11\n20.0\n21\n0.0\n31\n0\n40\n0.5\n41\n{t0!r}\n42\n{t1!r}\n"
+            )
+
+        sk, rep = self.insert(ell((0, 0), 0.0, math.pi) + ell((0, 0.0005), math.pi, 2 * math.pi), "ell.dxf")
+        self.assertFalse(all(w.isClosed() for w in sk.Shape.Wires))
+        self.assertGreater(rep.open_ends, 0)
+
+
+def _read_curves(path):
+    """The curves of a DXF as Part geometry, without fitting (for comparisons)"""
+    from SketcherDxf import importer
+
+    d = reader.read(path)
+    geos, _ = importer.geometry(d, d.mm_per_unit or 1.0, fit=False)
+    return geos
