@@ -3,8 +3,12 @@
 // The generic step of a tool-making studio feature (FreeCAD-CH ops#654, notes/parts-design.md
 // 3.1 and 10.8): its owner's tool, applied to its base by Operation, then refined.
 
+#include <vector>
+
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
+#include <TopAbs_ShapeEnum.hxx>
 
 #include <App/Document.h>
 #include <App/GeoFeature.h>
@@ -18,6 +22,37 @@
 using namespace PartDesign;
 
 PROPERTY_SOURCE(PartDesign::FeatureApply, PartDesign::FeatureAddSub)
+
+namespace
+{
+
+/// tool's solids that touch or overlap base (a solid inside the other counts: distance 0); all of
+/// them when it has one solid, or when none touches (the step then fails as it would)
+Part::TopoShape touching(const Part::TopoShape& tool, const Part::TopoShape& base)
+{
+    const std::vector<Part::TopoShape> solids = tool.getSubTopoShapes(TopAbs_SOLID);
+    if (solids.size() < 2) {
+        return tool;
+    }
+    std::vector<Part::TopoShape> kept;
+    for (const auto& solid : solids) {
+        BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
+        if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+            kept.push_back(solid);
+        }
+    }
+    if (kept.empty() || kept.size() == solids.size()) {
+        return tool;
+    }
+    if (kept.size() == 1) {
+        return kept.front();
+    }
+    Part::TopoShape out = tool;  // its Tag, hasher and history algorithm
+    out.makeElementCompound(kept);
+    return out;
+}
+
+}  // namespace
 
 FeatureApply::FeatureApply()
 {
@@ -91,18 +126,15 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         }
         tool.setPlacement(Placement.getValue().inverse() * toolInBody);
 
-        // Its names are the owner's tool's (requirement 1: a step made again in the same place
-        // makes the same names, work/standby-f/tags.log); a tag minted for (owner, part) takes
-        // their place once the naming code is known to take it (studioTagFor())
-        const long tag = studioTagFor(owner, body);
-        if (tag != owner->getID()) {
-            tool.reTagElementMap(tag, tool.Hasher);
-        }
-        AddSubShape.setValue(tool);
+        // Its names are its owner's (format rule 2, notes/stored-tags.md 3 item 1): the tool
+        // carries the owner's ID, and so do the Boolean and the refine, never the step's own ID
+        // nor 0, so a step made again in the same place makes the same names
+        const long tag = namingTag();
 
         Part::TopoShape base = getBaseTopoShape(/*silent=*/true);
         Part::TopoShape result;
         if (base.isNull()) {
+            AddSubShape.setValue(tool);
             if (getBooleanOperation() != BooleanOperation::Union) {
                 return new App::DocumentObjectExecReturn(
                     "No merge scope selected: nothing comes before this step in " + part,
@@ -113,7 +145,17 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         }
         else {
             base.move(getInverseLocation(base));
-            result = makeTopoShape(tag, false);
+            // FreeCAD-CH ops#654 S2: an Add fuses into this part only the tool's solids that
+            // touch it; another region's solid belongs to the part it stops on (Onshape O8b)
+            if (getBooleanOperation() == BooleanOperation::Union) {
+                tool = touching(tool, base);
+            }
+            AddSubShape.setValue(tool);
+            result = Part::TopoShape(
+                tag,
+                getDocument()->getStringHasher(),
+                getSelectedHistoryAlgorithm()
+            );
             try {
                 result.makeElementBoolean(
                     getBooleanMaker(),

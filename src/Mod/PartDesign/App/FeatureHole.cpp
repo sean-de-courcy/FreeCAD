@@ -77,6 +77,7 @@
 #include <Mod/Part/App/Tools.h>
 
 #include "FeatureHole.h"
+#include "StudioOwner.h"
 #include "nlohmann/json.hpp"
 
 #include <numbers>
@@ -2131,10 +2132,13 @@ App::DocumentObjectExecReturn* Hole::execute()
         | Part::ShapeOption::Transform | Part::ShapeOption::DontSimplifyCompound
     );
 
-    // Find the base shape
+    // Find the base shape. A studio owner's is its in-scope parts at its place (FreeCAD-CH
+    // ops#654 S2): a hole of a given depth needs none, Through all and Up to next fail without
+    // one, below
+    const bool owner = runsAsStudioOwner(this);
     TopoShape base;
     try {
-        base = getBaseTopoShape();
+        base = getBaseTopoShape(/*silent=*/owner);
     }
     catch (const Base::Exception&) {
         std::string text(QT_TRANSLATE_NOOP(
@@ -2462,6 +2466,13 @@ App::DocumentObjectExecReturn* Hole::execute()
 
         // set the subtractive shape property for later usage in e.g. pattern
         this->AddSubShape.setValue(compound);
+
+        // FreeCAD-CH ops#654 S2: a studio owner computes only its tool (a hole per centre), which
+        // its steps apply; its own shape stays empty, so nothing sees it as a part
+        if (owner) {
+            Shape.setValue(TopoShape());
+            return App::DocumentObject::StdReturn;
+        }
 
         if (base.isNull()) {
             Shape.setValue(compound);

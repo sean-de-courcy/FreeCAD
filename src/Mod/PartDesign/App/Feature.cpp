@@ -64,6 +64,7 @@
 #include "FeatureDeletePart.h"
 #include "FeatureExtrude.h"
 #include "ShapeBinder.h"
+#include "StudioOwner.h"
 
 #include <BRep_Builder.hxx>
 
@@ -283,7 +284,8 @@ App::DocumentObjectExecReturn* Feature::recompute()
             _PassedThrough.setValue(true);
         }
         setFailurePassedThrough(false);
-        Shape.setValue(getBaseTopoShape(true));
+        // FreeCAD-CH ops#654 S2: an owner's shape stays empty, never its in-scope parts
+        Shape.setValue(runsAsStudioOwner(this) ? TopoShape() : getBaseTopoShape(true));
         updateSuppressedShape();
         return App::DocumentObject::StdReturn;
     }
@@ -336,9 +338,11 @@ App::DocumentObjectExecReturn* Feature::recompute()
     if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {
         vouchedShape = Shape.getShape().getShape();
     }
-    else if (ret != App::DocumentObject::StdReturn && getFeatureBody()) {
+    else if (ret != App::DocumentObject::StdReturn
+             && (getFeatureBody() || runsAsStudioOwner(this))) {
         // FreeCAD-CH (ops#640 round 8, J13): it ran and failed, as Onshape's red feature: nothing
-        // is pending (a recompute would fail it again); it runs again when an input changes
+        // is pending (a recompute would fail it again); it runs again when an input changes. A
+        // studio owner too (ops#654 S2)
         purgeTouched();
     }
     return ret;
@@ -868,7 +872,10 @@ Feature::SingleSolidRuleMode Feature::singleSolidRuleMode() const
 
     // When the feature is not part of an body (which should not happen) let's stay with the default
     if (!body) {
-        return SingleSolidRuleMode::Enforced;
+        // FreeCAD-CH ops#654 S2: an owner's tool may have several solids (one per region); its
+        // steps keep each part one solid (FeatureApply)
+        return runsAsStudioOwner(this) ? SingleSolidRuleMode::Disabled
+                                       : SingleSolidRuleMode::Enforced;
     }
 
     auto areCompoundSolidsAllowed = body->AllowCompound.getValue();
@@ -946,6 +953,24 @@ const TopoDS_Shape& Feature::getBaseShape() const
 Part::TopoShape Feature::getBaseTopoShape(bool silent) const
 {
     Part::TopoShape result = makeTopoShape(false);
+
+    // FreeCAD-CH ops#654 S2: an owner's base is its in-scope parts at its place in the history
+    // (Through all, the Up-to modes, the preview), one compound child per part, in its
+    // container's frame as a Body member's base is in its Body's
+    if (runsAsStudioOwner(this)) {
+        Part::TopoShape scope = studioScopeBaseAt(this);
+        if (scope.isNull()) {
+            if (!silent) {
+                throw Base::ValueError(
+                    "No part in this studio feature's scope has a solid before it"
+                );
+            }
+            return result;
+        }
+        const Base::Placement container = globalPlacement() * Placement.getValue().inverse();
+        scope.transformShape(container.inverse().toMatrix(), false, true);
+        return scope;
+    }
 
     const Part::Feature* BaseObject = getBaseObject(silent);
     if (!BaseObject) {

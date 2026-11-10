@@ -28,10 +28,14 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Pnt2d.hxx>
@@ -75,7 +79,10 @@
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include <Mod/Part/App/PartFeature.h>
 
+#include "Body.h"
 #include "FeatureExtrude.h"
+#include "StudioList.h"
+#include "StudioOwner.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
@@ -240,6 +247,11 @@ const FeatureExtrude* makerOf(const App::GeoFeature* geo, const char* name)
             return dynamic_cast<const FeatureExtrude*>(feature);
         }
         const auto partDesign = dynamic_cast<const PartDesign::Feature*>(feature);
+        // FreeCAD-CH ops#654 S2: a studio step's pieces carry its naming tag, its owner's ID: the
+        // owner made them
+        if (partDesign && partDesign->StudioOwner.getValue() && partDesign->namingTag() == tag) {
+            return dynamic_cast<const FeatureExtrude*>(partDesign->StudioOwner.getValue());
+        }
         feature = partDesign ? partDesign->getBaseObject(true) : nullptr;
     }
     return nullptr;
@@ -1057,6 +1069,99 @@ gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
     }
     return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
 }
+
+// Set while a studio owner builds one region of its profile (ops#654 S2), so that the region's
+// own side is built as today's, against the one part it meets
+thread_local bool ownerRegionRunning = false;
+
+/** A studio owner's "Up to next" (UpToFirst) or "Up to last", Onshape's rule (FreeCAD-CH ops#654
+ * S2, notes/onshape-facts.md O8): each region (face) of the profile goes against the one in-scope
+ * part its sweep ahead meets, by side(region, that part's shape); the tool is the regions' prisms
+ * fused. A region that meets no part ahead, or two (touching ones too, O8e), fails the whole
+ * feature: no partial result, one error naming the region. Shapes are in the owner's own frame
+ * (invObjLoc applied), as its profile is */
+template<typename Side>
+TopoShape ownerUpToPerRegion(
+    const FeatureExtrude& owner,
+    const TopoShape& profile,
+    const std::string& method,
+    const gp_Dir& dir,
+    const TopLoc_Location& invObjLoc,
+    Side side
+)
+{
+    const std::string mode = method == "UpToFirst" ? "Up to next" : "Up to last";
+    // The in-scope parts at the owner's place: the document's frame to its container's, then
+    // its own
+    const Base::Placement container =
+        owner.globalPlacement() * owner.Placement.getValue().inverse();
+    std::vector<std::pair<const Body*, TopoShape>> parts;
+    Bnd_Box all;
+    BRepBndLib::Add(profile.getShape(), all);
+    for (auto part : studioScopeOf(&owner)) {
+        TopoShape shape = studioBaseAt(&owner, part);
+        if (shape.isNull()) {
+            continue;
+        }
+        shape.transformShape(container.inverse().toMatrix(), false, true);
+        shape.move(invObjLoc);
+        BRepBndLib::Add(shape.getShape(), all);
+        parts.emplace_back(part, shape);
+    }
+    all.SetGap(0.0);
+    const double reach = 2.02 * std::sqrt(all.SquareExtent());
+    auto label = [](const Body* part) {
+        return std::string("'") + part->Label.getValue() + "'";
+    };
+
+    std::vector<TopoShape> prisms;
+    int index = 0;
+    for (const TopoShape& region : profile.getSubTopoShapes(TopAbs_FACE)) {
+        ++index;
+        // The region's sweep ahead, through all
+        TopoShape probe;
+        probe.makeElementPrism(region, reach * gp_Vec(dir));
+        Bnd_Box probeBox;
+        BRepBndLib::Add(probe.getShape(), probeBox);
+        std::vector<std::size_t> met;
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            Bnd_Box partBox;
+            BRepBndLib::Add(parts[i].second.getShape(), partBox);
+            if (probeBox.IsOut(partBox)) {
+                continue;
+            }
+            BRepAlgoAPI_Common common(probe.getShape(), parts[i].second.getShape());
+            if (!common.IsDone()) {
+                continue;
+            }
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(common.Shape(), props);
+            if (props.Mass() > Precision::Confusion()) {
+                met.push_back(i);
+            }
+        }
+        const std::string which = mode + ": region " + std::to_string(index) + " of the profile";
+        if (met.empty()) {
+            throw Base::ValueError(which + " meets no part ahead");
+        }
+        if (met.size() > 1) {
+            throw Base::ValueError(
+                which + " meets " + label(parts[met[0]].first) + " and "
+                + label(parts[met[1]].first) + ": a region goes up to one part"
+            );
+        }
+        prisms.push_back(side(region, parts[met.front()].second));
+    }
+    if (prisms.empty()) {
+        throw Base::ValueError(mode + ": the profile has no region");
+    }
+    if (prisms.size() == 1) {
+        return prisms.front();
+    }
+    TopoShape tool = owner.makeTopoShape();
+    tool.makeElementFuse(prisms, Part::OpCodes::Extrude);
+    return tool;
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions options)
@@ -1635,6 +1740,16 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // set the additive shape property for later usage in e.g. pattern
         this->AddSubShape.setValue(prism);
 
+        // FreeCAD-CH ops#654 S2: a studio owner computes only its tool, which its steps apply;
+        // its own shape stays empty, so nothing (a Body, the BOM, an assembly) sees it as a part
+        if (runsAsStudioOwner(this)) {
+            madeUnder = Placement.getValue();
+            this->rawShape = TopoShape();
+            this->Shape.setValue(TopoShape());
+            updateProperties();
+            return App::DocumentObject::StdReturn;
+        }
+
         // Remove or Intersect (FreeCAD-CH ops#640 H3): one that misses its base changes no
         // geometry and stays healthy, with Onshape's info "Selected tools and targets do not
         // intersect" (below). With no solid before it, it makes nothing, never its tool as
@@ -1795,6 +1910,27 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 {
     TopoShape prism = makeTopoShape();
 
+    if ((method == "UpToFirst" || method == "UpToLast") && !ownerRegionRunning
+        && runsAsStudioOwner(this)) {
+        Base::StateLocker perRegion(ownerRegionRunning);
+        return ownerUpToPerRegion(*this, sketchshape, method, dir, invObjLoc, [&](
+            const TopoShape& region, const TopoShape& part) {
+            return generateSingleExtrusionSide(
+                region,
+                method,
+                length,
+                taperAngleDeg,
+                upToFacePropHandle,
+                upToShapePropHandle,
+                dir,
+                offsetVal,
+                makeFace,
+                part,
+                invObjLoc
+            );
+        });
+    }
+
     if (method == "UpToFirst" || method == "UpToLast" || method == "UpToFace"
         || method == "UpToShape") {
         // Note: This will return an unlimited planar face if support is a datum plane
@@ -1835,7 +1971,8 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 
         try {
             TopoShape _base = makeTopoShape();
-            if (addSubType != FeatureAddSub::Type::Subtractive) {
+            // An owner's base is its in-scope parts (ops#654 S2): its tool is the prism alone
+            if (addSubType != FeatureAddSub::Type::Subtractive && !runsAsStudioOwner(this)) {
                 _base = base;  // avoid issue #16690
             }
             prism.makeElementPrismUntil(

@@ -23,6 +23,10 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <set>
+#include <string>
+
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentPy.h>
@@ -360,6 +364,15 @@ public:
             "studioStepOf",
             &Module::studioStepOf,
             "studioStepOf(owner, body) -- The step of the studio feature in body, or None."
+        );
+        // FreeCAD-CH ops#654 S2: a New result
+        add_varargs_method(
+            "studioNewPart",
+            &Module::studioNewPart,
+            "studioNewPart(owner) -- A new part made by the studio feature (a New result): a "
+            "Body in its studio with the part id '<owner>:<n>' and StudioMadeBy the owner, whose "
+            "first step is the owner's tool. The id joins the owner's scope, its Operation becomes "
+            "Union, and the list is reconciled. No transaction, no recompute. Returns the Body."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -1353,6 +1366,55 @@ private:
             return Py::None();
         }
         return Py::asObject(step->getPyObject());
+    }
+
+    // FreeCAD-CH ops#654 S2: a New result, a part the owner makes (notes/parts-design.md 3.1)
+    Py::Object studioNewPart(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pOwner)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* owner = entryArg(pOwner);
+        PartDesign::StudioList* list = PartDesign::StudioList::holding(owner);
+        if (!list || !PartDesign::isStudioOwner(owner)) {
+            throw Py::ValueError(
+                std::string("'") + owner->Label.getValue()
+                + "' is not a studio feature in a studio's history"
+            );
+        }
+        App::Document* doc = owner->getDocument();
+        // Its id: "<owner>:<n>", the first n no part of the document has
+        std::set<std::string> taken;
+        for (auto obj : doc->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+            taken.insert(PartDesign::studioPartId(static_cast<PartDesign::Body*>(obj)));
+        }
+        std::string id;
+        for (int n = 1; id.empty() || taken.count(id); ++n) {
+            id = std::string(owner->getNameInDocument()) + ":" + std::to_string(n);
+        }
+        auto body = static_cast<PartDesign::Body*>(doc->addObject("PartDesign::Body", "Body"));
+        if (App::Part* studio = list->studio()) {
+            studio->getExtensionByType<App::GroupExtension>()->addObject(body);
+        }
+        body->StudioPartId.setValue(id);
+        body->StudioMadeBy.setValue(owner);
+        auto ids = PartDesign::studioScopeIds(owner);
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
+            ids.push_back(id);
+        }
+        PartDesign::setStudioScopeIds(owner, ids);
+        if (auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(owner)) {
+            if (addSub->Operation.isPartOf("Union")
+                && std::string(addSub->Operation.getValueAsString()) != "Union") {
+                addSub->Operation.setValue("Union");
+            }
+        }
+        std::string why;
+        if (!list->reconcile(&why)) {
+            throw Py::ValueError(why.empty() ? std::string("Refused") : why);
+        }
+        return Py::asObject(body->getPyObject());
     }
 
     Py::Object makeFilletArc(const Py::Tuple& args)

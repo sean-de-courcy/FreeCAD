@@ -49,6 +49,8 @@
 #include "FeatureAddSub.h"
 #include "FeaturePy.h"
 #include "FeatureSketchBased.h"
+#include "StudioList.h"
+#include "StudioOwner.h"
 
 #include <Mod/Part/App/Tools.h>
 
@@ -210,6 +212,14 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
+    // FreeCAD-CH ops#654 S2: a studio feature outside every Body computes only its tool, and
+    // fails when its scope resolves to no part at its place, as Onshape's (F2, F3: a pick of a
+    // part gone or absorbed resolves to nothing, ignored beside a valid one)
+    const bool owner = runsAsStudioOwner(this);
+    if (owner && runs && studioScopeOf(this).empty()) {
+        purgeTouched();  // as a failure that ran (Feature::recompute())
+        return new App::DocumentObjectExecReturn("No merge scope selected", this);
+    }
     App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
     if (result == StdReturn && runs) {
         warnIfMissing();
@@ -230,7 +240,7 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     const bool nothingToReach = result != StdReturn && result
         && (result->Why.find("No faces found in this direction") != std::string::npos
             || result->Why.find("Up to face: No face found") != std::string::npos);
-    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs
+    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs && !owner
         && (addSubType == Type::Subtractive || emptyAdd) && getBaseTopoShape(true).isNull()) {
         if (result != StdReturn) {
             delete result;
@@ -247,7 +257,8 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
         }
         return new App::DocumentObjectExecReturn(noScope, this);
     }
-    if (result != StdReturn || booleanOperation != BooleanOperation::Common || Suppressed.getValue()
+    if (result != StdReturn || owner || booleanOperation != BooleanOperation::Common
+        || Suppressed.getValue()
         || (body && body->holds(this))) {
         return result;
     }

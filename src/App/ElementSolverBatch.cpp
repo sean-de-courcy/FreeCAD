@@ -864,6 +864,17 @@ bool samePlacement(const Base::Placement& a, const Base::Placement& b)
         && a.getRotation().isSame(b.getRotation(), angular);
 }
 
+// The tag obj's own names carry: a studio step's are its owner's ID (FreeCAD-CH ops#654 S2,
+// notes/stored-tags.md 3), read by name so that App knows no PartDesign class
+long namingTagOf(const DocumentObject* obj)
+{
+    auto owner = freecad_cast<PropertyLink*>(obj->getPropertyByName("StudioOwner"));
+    if (owner && owner->getValue()) {
+        return owner->getValue()->getID();
+    }
+    return obj->getID();
+}
+
 // The equivalence predicate of a reference whose owner has a probe: the probe runs once per
 // element (with the reference's sub-object prefix), and two elements are equivalent when both
 // give a result and the results are the same. A probe that throws gives no result.
@@ -2351,7 +2362,7 @@ bool solveElementReferences(DocumentObject* feature,
                                       std::vector<Data::ElementFingerprint::UpToFace>& all) {
                 return elementUpToFacesFunction(geo, name.c_str(), point, faces, &all);
             };
-            input.targetTag = geo->getID();
+            input.targetTag = namingTagOf(geo);  // FreeCAD-CH ops#654 S2
         }
         if (elementUpToPathFunction) {
             input.upToPathInside = [geo](const std::string& name,
@@ -3037,7 +3048,7 @@ bool elementUpToFaces(
     // by this feature. A later Pad's shape keeps an earlier Pad's pieces under their names, and
     // its own up-to faces aren't theirs (review pr398-r3). The piece's name names the extrusion
     // that made it (ops#524)
-    const long tag = geo->getID();
+    const long tag = namingTagOf(geo);  // FreeCAD-CH ops#654 S2: a step names by its owner
     std::string own;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
         std::string name = plainName(mapped.first.toString());

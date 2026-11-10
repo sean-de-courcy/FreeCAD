@@ -88,6 +88,7 @@
 #include "DatumLine.h"
 #include "DatumPlane.h"
 #include "PartDesignParameter.h"
+#include "StudioOwner.h"
 #include "Mod/Part/App/Geometry.h"
 
 
@@ -1071,6 +1072,11 @@ Part::Feature* ProfileBased::getBaseObject(bool silent) const
     Part::Feature* rv = Feature::getBaseObject(/* silent = */ true);
     if (rv) {
         return rv;
+    }
+    // FreeCAD-CH ops#654 S2: a studio owner has no base feature, never its profile's support:
+    // its base is its scope's parts at its place (Feature::getBaseTopoShape())
+    if (runsAsStudioOwner(this)) {
+        return Feature::getBaseObject(silent);
     }
 
     // A feature of another Body is never an implicit base: it would import that Body's whole
