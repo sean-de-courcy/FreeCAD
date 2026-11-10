@@ -1,0 +1,152 @@
+
+=== c1_two_parts_and_other_only: (c) one cut acting on A and B, then on B only (report 21), then on C only (sketch in A).
+  recomputed 3 Cut001 state=['Up-to-date'] why='Valid'
+  OK   A two parts: got 910.0, want 910
+  OK   B two parts: got 910.0, want 910
+  OK   C untouched: got 1000.0, want 1000
+  leader suppressed: Cut state=['Up-to-date'] why='Valid' | Cut001 state=['Up-to-date'] why='Valid'
+  OK   A left out (leader passes through): got 1000.0, want 1000
+  OK   B still cut by the follower: got 910.0, want 910
+  leader on A misses A: CutC state=['Warning', 'Up-to-date'] why='Warning: Selected tools and targets do not intersect'
+  OK   C cut by the follower only: got 964.0, want 964
+  OK   A unchanged: got 1000.0, want 1000
+   CutC state=['Up-to-date'] why='Valid' | CutC001 state=['Up-to-date'] why='Valid'
+
+=== c2_edit_undo_redo: (c) edit of the leader, undo and redo of the edit, of making the follower, of a delete.
+  edit recomputed 5
+  OK   A after edit 5: got 850.0, want 850
+  OK   B follows the edit: got 850.0, want 850
+  OK   A undo: got 910.0, want 910
+  OK   B undo: got 910.0, want 910
+  OK   A redo: got 850.0, want 850
+  OK   B redo: got 850.0, want 850
+  OK   undo siblings: follower gone: got 0, want 0
+  OK   B uncut after undo: got 1000.0, want 1000
+  OK   redo siblings: follower back: got 1, want 1
+  OK   B cut after redo: got 910.0, want 910
+  OK   delete fan-out: A: got 1000.0, want 1000
+  OK   delete fan-out: B: got 1000.0, want 1000
+  OK   undo delete: A: got 910.0, want 910
+  OK   undo delete: B: got 910.0, want 910
+  OK   undo delete: link back: got 1, want 1
+
+=== c3_delete_leader_only: (c) delete of the leader alone, and of its home part (Delete part feature; and the Body).
+  after deletePart(A): DeletePart state=['Up-to-date'] why='Valid' | Cut001 state=['Up-to-date'] why='Valid'
+  OK   A deleted (empty): got 0.0, want 0.0
+  OK   B keeps its cut: got 910.0, want 910
+  OK   B follows an edit of a leader whose part is deleted: got 880.0, want 880
+  leader deleted: Cut001 state=['Invalid'] why="Document object 'Cut' not found in 'c3'\nin property binding 'c3#Cut001.AllowMultiFace'" SiblingOf= None expr= [('AllowMultiFace', 'Cut.AllowMultiFace'), ('AlongSketchNormal', 'Cut.AlongSketchNormal'), ('Direction', 'Cut.Direction'), ('FuzzyTolerance', 'Cut.FuzzyTolerance'), ('Length', 'Cut.Length'), ('Length2', 'Cut.Length2'), ('Midplane', 'Cut.Midplane'), ('Offset', 'Cut.Offset'), ('Offset2', 'Cut.Offset2'), ('Operation', 'Cut.Operation'), ('Refine', 'Cut.Refine'), ('Reversed', 'Cut.Reversed'), ('SideType', 'Cut.SideType'), ('StartOffset', 'Cut.StartOffset'), ('StartType', 'Cut.StartType'), ('TaperAngle', 'Cut.TaperAngle'), ('TaperAngle2', 'Cut.TaperAngle2'), ('Type', 'Cut.Type'), ('Type2', 'Cut.Type2'), ('UseCustomVector', 'Cut.UseCustomVector')]
+  B volume 1000.0
+  home Body removed: Cut001 state=['Invalid'] why="Document object 'Cut' not found in 'c3b'\nin property binding 'c3b#Cut001.AllowMultiFace'" Profile= None SiblingOf= None
+  B volume 1000.0
+
+=== c4_reorder_rollback: (c) reorder of the leader across a later feature of the follower's part, and roll-back.
+  OK   B: cut then fill: got 1000.0, want 1000
+  sequence ['ASk', 'APad', 'BSk', 'BPad', 'CSk', 'CPad', 'CutSk', 'Cut', 'Cut001', 'FillSk', 'Fill']
+  moveInStudio(leader) refused: 'Cut (B)' of 'B' uses 'Cut': it can't go below it
+  follower moved too; sequence ['ASk', 'APad', 'BSk', 'BPad', 'CSk', 'CPad', 'CutSk', 'Cut', 'FillSk', 'Fill', 'Cut001']
+  OK   B after fan-out drag: got 910.0, want 910
+  OK   A after fan-out drag: got 910.0, want 910
+  rolled to leader: tips Cut BPad | holds sib True
+  A 910.0 B 910.0 | B.Tip vol 1000.0 | B state ['Up-to-date'] | B group ['BSk', 'BPad', 'FillSk', 'Fill', 'Cut001']
+  bases [('BPad', None, 1000.0), ('Fill', 'BPad', 1000.0), ('Cut001', 'Fill', 910.0)]
+  rolled to Fill: tips Cut Fill A 910.0 B 910.0 | B.Tip vol 1000.0 | B state ['Up-to-date']
+  FAIL rolled above the cut: B is 1000: got 910.0, want 1000
+  OK   end: B: got 910.0, want 910
+
+=== c5_suppress: (c) suppress of the studio feature: leader and follower together, and the leader alone.
+  OK   both suppressed A: got 1000.0, want 1000
+  OK   both suppressed B: got 1000.0, want 1000
+  OK   unsuppressed A: got 910.0, want 910
+  OK   unsuppressed B: got 910.0, want 910
+
+=== c6_split_part: (c) a cut that splits its home part in two, and the follower's part too.
+  OK   A solids: got 2, want 2
+  OK   B solids: got 2, want 2
+  OK   A volume: got 800.0, want 800
+  OK   B volume: got 800.0, want 800
+   Split state=['Up-to-date'] why='Valid' | Split001 state=['Up-to-date'] why='Valid'
+
+=== c7_boolean_between_parts: (c) a Boolean subtracting tool T from A and from C: leader in A, follower in C, one tool.
+  leader: Sub state=['Up-to-date'] why='Valid'
+  follower: SubC state=['Up-to-date'] why='Valid'
+  OK   A minus T: got 992.0, want 992
+  OK   C minus T: got 992.0, want 992
+  OK   B untouched: got 1000.0, want 1000
+  T visible True consumerOf(T) <PartDesign::Boolean>
+
+=== c8_pattern_two_parts: (c) a pattern whose original acts in A and B: leader pattern in A, follower in B bound to it.
+   LPat state=['Up-to-date'] why='Valid' | LPatB state=['Up-to-date'] why='Valid'
+  OK   A two slots: got 940.0, want 940
+  OK   B two slots: got 940.0, want 940
+  OK   A three slots: got 910.0, want 910
+  OK   B follows to three: got 910.0, want 910
+  OK   A deeper: got 850.0, want 850
+  OK   B deeper: got 850.0, want 850
+
+=== c9_save_reopen: (c) save, close, reopen, recompute: the follower's link and bindings survive.
+  OK   reopen: follower known: got 1, want 1
+  OK   reopen A: got 910.0, want 910
+  OK   reopen B: got 910.0, want 910
+  OK   reopen edit: B follows: got 850.0, want 850
+  OK   full recompute B: got 850.0, want 850
+
+=== b1_studio_feature_outside_bodies: (b) a Pocket in the studio outside every Body, Profile on A's sketch, steps in A and B.
+  studio feature: SF state=['Touched', 'Invalid'] why='No merge scope selected. Nothing to cut: a subtractive feature needs a solid before it in its Body, or a BaseFeature' | in S: True | body: S
+  recomputed 6
+  step: StepA state=['Invalid'] why="'SF' has an error"
+  step: StepB state=['Invalid'] why="'SF' has an error"
+  FAIL A: got 1000.0, want 910
+  FAIL B: got 1000.0, want 910
+  studioSequence ['ASk', 'APad', 'BSk', 'BPad', 'CSk', 'CPad', 'CutSk', 'StepA', 'StepB']
+  FAIL studio feature in the history: got False, want True
+  FAIL A follows edit: got 1000.0, want 850
+  FAIL B follows edit: got 1000.0, want 850
+  after edit: SF state=['Touched', 'Invalid'] why='No merge scope selected. Nothing to cut: a subtractive feature needs a solid before it in its Body, or a BaseFeature'
+  FAIL undo A: got 1000.0, want 850
+  reopened: SF state=['Touched', 'Invalid'] why='No merge scope selected. Nothing to cut: a subtractive feature needs a solid before it in its Body, or a BaseFeature'
+  FAIL reopen A: got 1000.0, want 850
+  FAIL reopen B: got 1000.0, want 850
+  sketch's Body removed: SF state=['Touched', 'Invalid'] why='Select face or sketch region to extrude' | StepB state=['Invalid'] why="'SF' has an error"
+  B 1000.0
+
+=== b2_scope_rule: (b) link scope: the studio feature's Local Profile into a Body, read by isLinkValid.
+  SF status: SF state=['Touched', 'Invalid'] why='No merge scope selected. Nothing to cut: a subtractive feature needs a solid before it in its Body, or a BaseFeature'
+  SF InList ['S'] OutList ['CutSk']
+
+=== b3_noncomputing_owner: (b) emulated: a non-computing owner in the studio (App::FeaturePython, re-declared Length), steps in A and B.
+  owner: SF state=['Up-to-date'] why='Valid' | steps: StepA state=['Up-to-date'] why='Valid' | StepB state=['Up-to-date'] why='Valid'
+  OK   A: got 910.0, want 910
+  OK   B: got 910.0, want 910
+  OK   owner is a history row: got False, want False
+  sequence ['ASk', 'APad', 'BSk', 'BPad', 'CSk', 'CPad', 'CutSk', 'StepA', 'StepB']
+  OK   B only: A: got 1000.0, want 1000
+  OK   B only: B: got 910.0, want 910
+  OK   edit A: got 850.0, want 850
+  OK   edit B: got 850.0, want 850
+  OK   undo B: got 910.0, want 910
+  OK   redo B: got 850.0, want 850
+  OK   B cut then fill: got 1000.0, want 1000
+  OK   B after the step's drag: got 850.0, want 850
+  sequence ['ASk', 'APad', 'BSk', 'BPad', 'CSk', 'CPad', 'CutSk', 'StepA', 'FillSk', 'Fill', 'StepB']
+  OK   A deleted: got 0.0, want 0.0
+  OK   B keeps its cut: got 850.0, want 850
+  OK   reopen edit B: got 880.0, want 880
+  reopened owner: SF state=['Up-to-date'] why='Valid'
+
+=== c10_scope_added_late: (c) a part added to an early feature's scope when that part has later features (mid-chain insert).
+  OK   B with boss: got 1060.0, want 1060
+  B group ['BSk', 'BPad', 'FillSk', 'Boss', 'Cut001'] sequence ['ASk', 'APad', 'BSk', 'BPad', 'CSk', 'CPad', 'CutSk', 'Cut', 'FillSk', 'Boss', 'Cut001']
+  FAIL B: follower at the leader's history point: got 970.0, want 1030
+
+FAILS: 10
+  c4_reorder_rollback: rolled above the cut: B is 1000: got 910.0, want 1000
+  b1_studio_feature_outside_bodies: A: got 1000.0, want 910
+  b1_studio_feature_outside_bodies: B: got 1000.0, want 910
+  b1_studio_feature_outside_bodies: studio feature in the history: got False, want True
+  b1_studio_feature_outside_bodies: A follows edit: got 1000.0, want 850
+  b1_studio_feature_outside_bodies: B follows edit: got 1000.0, want 850
+  b1_studio_feature_outside_bodies: undo A: got 1000.0, want 850
+  b1_studio_feature_outside_bodies: reopen A: got 1000.0, want 850
+  b1_studio_feature_outside_bodies: reopen B: got 1000.0, want 850
+  c10_scope_added_late: B: follower at the leader's history point: got 970.0, want 1030
