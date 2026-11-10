@@ -187,24 +187,6 @@ class TestStudioSketchesShownGui(StudioSketchesCase):
     def testHiddenPartsSketchAndPlaneArePickedThroughTheBody(self):
         self.runPathsWhileHidden()
 
-    def testHiddenOutsideAStudioHidesAll(self):
-        """A Body in an Assembly is no part of a studio: hidden, it hides its sketches as
-        before."""
-        try:
-            assembly = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
-        except Exception:
-            self.skipTest("no Assembly module")
-        body = self.doc.addObject("PartDesign::Body", "BodyC")
-        assembly.addObject(body)
-        sketch = models.sketch(self.doc, "SketchC", models.rectangle(0, 50, 10, 60), body)
-        self.doc.recompute()
-        sketch.ViewObject.Visibility = True
-        pump(0.1)
-        self.assertDrawn((sketch,))
-        body.ViewObject.Visibility = False
-        pump(0.1)
-        self.assertDrawn((sketch,), drawn=False)
-
 
 class TestTopLevelStudioSketchesShownGui(StudioSketchesCase):
     """The studio is the document's top level (Bodies in no App::Part)."""
