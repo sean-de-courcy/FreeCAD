@@ -51,6 +51,8 @@ from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInAT
 from SketcherTests.TestSketchCornerSteps import TestSketchCornerSteps  # FreeCAD-CH, ops#640
 from SketcherTests.TestSketchTrimSplit import TestSketchTrimSplit  # FreeCAD-CH, ops#656
 from SketcherTests.TestSketchTrimSplitAttacks import TestSketchTrimSplitAttacks  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchTrimSplit import TestSketchRepeatedConstraints  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchTrimSplit import TestSketchArcMidpoint  # FreeCAD-CH, ops#656
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py

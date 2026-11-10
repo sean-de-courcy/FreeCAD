@@ -137,6 +137,23 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         if (lastSolverStatus != 0) {// solving
             err = -1;
         }
+        else if (err == -2) {
+            // FreeCAD-CH (ops#656): a constraint that repeats what the others impose, and agrees
+            // with them, is accepted as Onshape accepts it: the solve is a success (the geometry
+            // is written, a dimension can be set, the recompute goes on), and the diagnosis still
+            // names the repeated constraints. The solver leaves them out of the solve, so each
+            // must hold at the solution, at the precision any solved constraint is accepted at
+            // (isPointOnCurve's test); one that does not is a contradiction and stays an error.
+            const double precision = solvedSketch.getSolverPrecision();
+            const bool allHold =
+                std::all_of(lastRedundant.begin(), lastRedundant.end(), [&](int tag) {
+                    const double residual = solvedSketch.calculateConstraintError(tag);
+                    return residual * residual < 10.0 * precision;  // false for NaN
+                });
+            if (allHold) {
+                err = 0;
+            }
+        }
     }
 
     if (lastHasMalformedConstraints) {
@@ -2542,6 +2559,7 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
             break;
         case Tangent:
         case Group:
+        case Midpoint:
             requireSecond = true;
             break;
         case Symmetric:

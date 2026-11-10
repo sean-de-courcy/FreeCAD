@@ -73,6 +73,9 @@ enum ConstraintType : int
     Weight = 19,
     Group = 20,
     Text = 21,
+    // FreeCAD-CH (ops#656): a point (First, FirstPos) at the middle of an arc of circle (Second):
+    // on its circle at the mean of its end angles
+    Midpoint = 22,
     NumConstraintTypes  // must be the last item!
 };
 
@@ -209,7 +212,8 @@ private:
          "Diameter",
          "Weight",
          "Group",
-         "Text"}};
+         "Text",
+         "Midpoint"}};
     // clang-format on
 
     constexpr static std::array<const char*, InternalAlignmentType::NumInternalAlignmentType>

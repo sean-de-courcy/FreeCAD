@@ -6,6 +6,8 @@
 # (radii, points on lines), never a constraint list.
 
 import math
+import os
+import tempfile
 import unittest
 
 import FreeCAD as App
@@ -394,3 +396,230 @@ class TestSketchTrimSplit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------------------------------
+# Sketcher round 2 (ops#656): repeated constraints, and the midpoint of an arc.
+#
+# Repeated constraints: a constraint that repeats what the others already impose, and agrees with them,
+# is accepted as Onshape accepts it: the sketch solves, its geometry is written, its dimensions can be
+# changed and the features built on it recompute. A constraint that contradicts the others still fails.
+#
+# Midpoint on an arc (the user's report 14, ops#645): Sketcher.Constraint('Midpoint', point, pos, arc)
+# keeps the point on the arc's circle at the mean of its end angles: the middle of the arc itself, not
+# of its chord, for arcs over 180 degrees too.
+
+
+def _rectangle(sk, w, h):
+    """Four lines drawn as a w x h rectangle at the origin, joined end to end, the corner fixed."""
+    pts = [(0, 0), (w, 0), (w, h), (0, h)]
+    ids = [_line(sk, pts[i], pts[(i + 1) % 4]) for i in range(4)]
+    for i in range(4):
+        sk.addConstraint(Sketcher.Constraint("Coincident", ids[i], 2, ids[(i + 1) % 4], 1))
+    sk.addConstraint(Sketcher.Constraint("Coincident", ids[0], 1, -1, 1))
+    return ids
+
+
+def _face_area(sk):
+    return Part.Face(Part.Wire(Part.__sortEdges__(sk.Shape.Edges))).Area
+
+
+class TestSketchRepeatedConstraints(unittest.TestCase):
+    def setUp(self):
+        self.doc = App.newDocument("Repeated")
+        self.sk = self.doc.addObject("Sketcher::SketchObject", "Sketch")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def _repeated_rectangle(self):
+        """A rectangle drawn 19 x 9 whose constraints make it 20 x 10, with a Horizontal on both the
+        bottom and the top and a Vertical on both sides, and the bottom's and the top's length both
+        20: with both sides vertical the top's length repeats the bottom's."""
+        sk = self.sk
+        b, r, t, l = _rectangle(sk, 19, 9)
+        for i in (b, t):
+            sk.addConstraint(Sketcher.Constraint("Horizontal", i))
+        for i in (r, l):
+            sk.addConstraint(Sketcher.Constraint("Vertical", i))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", b, 1, b, 2, 20))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", t, 2, t, 1, 20))
+        side = sk.addConstraint(Sketcher.Constraint("DistanceY", r, 1, r, 2, 10))
+        return side
+
+    def testConsistentRepeatsAreAccepted(self):
+        self._repeated_rectangle()
+        ext = self.doc.addObject("Part::Extrusion", "Extrude")
+        ext.Base = self.sk
+        ext.Dir = V(0, 0, 5)
+        ext.Solid = True
+        self.doc.recompute()
+        self.assertTrue(self.sk.RedundantConstraints, "the design must have repeated constraints")
+        self.assertEqual(list(self.sk.ConflictingConstraints), [])
+        self.assertNotIn("Invalid", self.sk.State)
+        self.assertTrue(self.sk.isValid())
+        # the solved geometry is written: 20 x 10, not the 19 x 9 drawn
+        self.assertAlmostEqual(self.sk.Geometry[0].length(), 20.0, delta=TOL)
+        self.assertAlmostEqual(self.sk.Geometry[1].length(), 10.0, delta=TOL)
+        self.assertAlmostEqual(_face_area(self.sk), 200.0, delta=1e-5)
+        self.assertTrue(ext.isValid())
+        self.assertAlmostEqual(ext.Shape.Volume, 1000.0, delta=1e-4)
+
+    def testDimensionChangesInARepeatedSketch(self):
+        side = self._repeated_rectangle()
+        self.doc.recompute()
+        self.sk.setDatum(side, App.Units.Quantity("12 mm"))
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        self.assertAlmostEqual(self.sk.Geometry[1].length(), 12.0, delta=TOL)
+        self.assertAlmostEqual(_face_area(self.sk), 240.0, delta=1e-5)
+
+    def testContradictingRepeatIsRefused(self):
+        self._repeated_rectangle()
+        self.doc.recompute()
+        bottom = 9  # the bottom's DistanceX (four coincidences, the corner, two H, two V before it)
+        self.assertEqual(self.sk.Constraints[bottom].Type, "DistanceX")
+        with self.assertRaises(ValueError):
+            self.sk.setDatum(bottom, App.Units.Quantity("25 mm"))
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        self.assertAlmostEqual(self.sk.Constraints[bottom].Value, 20.0, delta=TOL)
+        self.assertAlmostEqual(self.sk.Geometry[0].length(), 20.0, delta=TOL)
+
+    def testConflictStillFailsTheRecompute(self):
+        sk = self.sk
+        b, r, t, l = _rectangle(sk, 20, 10)
+        sk.addConstraint(Sketcher.Constraint("Horizontal", b))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", b, 1, b, 2, 20))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", b, 1, b, 2, 30))
+        self.doc.recompute()
+        self.assertTrue(sk.ConflictingConstraints)
+        self.assertFalse(sk.isValid())
+
+    def testDuplicateConstraintIsAccepted(self):
+        """The same Horizontal twice on one line, the rehearsals' commonest case."""
+        sk = self.sk
+        i = _line(sk, (0, 0), (10, 1))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", i))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", i))
+        self.doc.recompute()
+        self.assertEqual(len(sk.RedundantConstraints), 1)
+        self.assertTrue(sk.isValid())
+        g = sk.Geometry[i]
+        self.assertAlmostEqual(g.StartPoint.y, g.EndPoint.y, delta=TOL)
+        self.assertAlmostEqual(sk.Shape.Edges[0].Vertexes[0].Point.y,
+                               sk.Shape.Edges[0].Vertexes[1].Point.y, delta=TOL)
+
+
+class TestSketchArcMidpoint(unittest.TestCase):
+    def setUp(self):
+        self.doc = App.newDocument("ArcMidpoint")
+        self.sk = self.doc.addObject("Sketcher::SketchObject", "Sketch")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def _arc(self, a0, a1, r=10.0):
+        return self.sk.addGeometry(
+            Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), r), a0, a1))
+
+    def _point(self, x, y):
+        return self.sk.addGeometry(Part.Point(V(x, y, 0)))
+
+    def _at(self, gid):
+        p = self.sk.Geometry[gid]
+        return V(p.X, p.Y, 0)
+
+    def _driven_arc(self, sweep):
+        """An arc centred on the origin, radius 10, its start on the positive x axis, its sweep set
+        by an Angle; returns (arc, point, angle constraint) with the point kept at its middle."""
+        sk = self.sk
+        arc = self._arc(0, sweep)
+        sk.addConstraint(Sketcher.Constraint("Coincident", arc, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Radius", arc, 10))
+        sk.addConstraint(Sketcher.Constraint("PointOnObject", arc, 1, -1))
+        ang = sk.addConstraint(Sketcher.Constraint("Angle", arc, sweep))
+        pt = self._point(2, 1)
+        sk.addConstraint(Sketcher.Constraint("Midpoint", pt, 1, arc))
+        return arc, pt, ang
+
+    def _assert_at_angle(self, gid, degrees, r=10.0):
+        a = math.radians(degrees)
+        p = self._at(gid)
+        self.assertAlmostEqual(p.x, r * math.cos(a), delta=TOL)
+        self.assertAlmostEqual(p.y, r * math.sin(a), delta=TOL)
+
+    def testPointGoesToTheArcsMiddle(self):
+        arc, pt, ang = self._driven_arc(math.pi / 2)
+        self.assertEqual(self.sk.solve(), 0)
+        self.doc.recompute()
+        self.assertTrue(self.sk.isValid())
+        self.assertEqual(self.sk.Constraints[-1].Type, "Midpoint")
+        self._assert_at_angle(pt, 45)
+        self.assertTrue(self.sk.FullyConstrained)
+
+    def testMiddleFollowsTheArcPast180(self):
+        """At 270 degrees the arc's middle is at 135 degrees on the arc; the chord's middle would be
+        inside the circle and the far side of the circle at -45 degrees."""
+        arc, pt, ang = self._driven_arc(math.pi / 2)
+        self.doc.recompute()
+        for sweep, middle in ((math.pi, 90), (1.5 * math.pi, 135), (0.4 * math.pi, 36)):
+            self.sk.setDatum(ang, App.Units.Quantity("%.12f rad" % sweep))
+            self.doc.recompute()
+            self.assertTrue(self.sk.isValid())
+            self._assert_at_angle(pt, middle)
+
+    def testRadiusChangeKeepsTheMiddle(self):
+        sk = self.sk
+        arc, pt, ang = self._driven_arc(math.pi / 3)
+        self.doc.recompute()
+        sk.setDatum(1, App.Units.Quantity("25 mm"))
+        self.doc.recompute()
+        self._assert_at_angle(pt, 30, r=25.0)
+
+    def testLineEndAtTheMiddle(self):
+        """A line's end, not a lone point, kept at the middle of a blocked arc from 30 to 150 deg."""
+        sk = self.sk
+        arc = self._arc(math.radians(30), math.radians(150))
+        sk.addConstraint(Sketcher.Constraint("Block", arc))
+        ln = _line(sk, (0, 0), (1, 5))
+        sk.addConstraint(Sketcher.Constraint("Coincident", ln, 1, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Midpoint", ln, 2, arc))
+        self.doc.recompute()
+        self.assertTrue(sk.isValid())
+        end = sk.Geometry[ln].EndPoint
+        self.assertAlmostEqual(end.x, 0.0, delta=TOL)
+        self.assertAlmostEqual(end.y, 10.0, delta=TOL)
+        self.assertTrue(sk.FullyConstrained)
+
+    def testSavedAndReopened(self):
+        arc, pt, ang = self._driven_arc(math.pi / 2)
+        self.doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "midpoint.FCStd")
+        self.doc.saveAs(path)
+        name = self.doc.Name
+        App.closeDocument(name)
+        self.doc = App.openDocument(path)
+        sk = self.doc.getObject("Sketch")
+        self.assertEqual(sk.Constraints[-1].Type, "Midpoint")
+        sk.setDatum(ang, App.Units.Quantity("%.12f rad" % math.pi))
+        self.doc.recompute()
+        self.sk = sk
+        self._assert_at_angle(pt, 90)
+
+    def testOnlyArcsOfCircles(self):
+        sk = self.sk
+        ln = _line(sk, (0, 0), (10, 0))
+        pt = self._point(3, 3)
+        sk.addConstraint(Sketcher.Constraint("Midpoint", pt, 1, ln))
+        self.doc.recompute()
+        self.assertTrue(sk.MalformedConstraints)
+        self.assertFalse(sk.isValid())
+
+    def testDeletingTheArcDeletesTheConstraint(self):
+        arc, pt, ang = self._driven_arc(math.pi / 2)
+        self.doc.recompute()
+        self.sk.delGeometry(arc)
+        self.doc.recompute()
+        self.assertFalse([c for c in self.sk.Constraints if c.Type == "Midpoint"])
+        self.assertTrue(self.sk.isValid())

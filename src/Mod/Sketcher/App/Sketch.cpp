@@ -2606,6 +2606,31 @@ int Sketch::addConstraint(const Constraint* constraint)
             rtn = ++ConstraintsCounter;
             break;
         }
+        case Midpoint: {
+            // FreeCAD-CH (ops#656): the point on the arc's circle at the parameter u, and u the
+            // mean of the arc's end angles: u - start = end - u = h, with u and h two unknowns of
+            // their own (as a point on a B-spline has its parameter). Two equations net on the
+            // point. The solver's arcs run counterclockwise from start to end angle, so u is the
+            // middle of the arc itself, over 180 degrees too, never the far side of the circle.
+            const int geoId1 = checkGeoId(constraint->First);
+            const int geoId2 = checkGeoId(constraint->Second);
+            const int pointId = getPointId(geoId1, constraint->FirstPos);
+            if (Geoms[geoId2].type != Arc || pointId < 0 || pointId >= int(Points.size())
+                || geoId1 == geoId2) {
+                break;  // rtn stays -1: malformed (only arcs of circles have this middle)
+            }
+            GCS::Arc& a = Arcs[Geoms[geoId2].index];
+            c.value = new double((*a.startAngle + *a.endAngle) / 2.0);
+            c.secondvalue = new double((*a.endAngle - *a.startAngle) / 2.0);
+            Parameters.push_back(c.value);
+            Parameters.push_back(c.secondvalue);
+            const int tag = ++ConstraintsCounter;
+            GCSsys.addConstraintCurveValue(Points[pointId], a, c.value, tag, c.driving);
+            GCSsys.addConstraintDifference(a.startAngle, c.value, c.secondvalue, tag, c.driving);
+            GCSsys.addConstraintDifference(c.value, a.endAngle, c.secondvalue, tag, c.driving);
+            rtn = ConstraintsCounter;
+            break;
+        }
         case Sketcher::None:   // ambiguous enum value
         case Sketcher::Block:  // handled separately while adding geometry
         case NumConstraintTypes:
