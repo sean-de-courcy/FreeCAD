@@ -140,20 +140,16 @@ class Panel:
             self.addFaces()
         if kind == "Thicken":
             self.addOperation()
-            self.check("Flip", _tr("Opposite direction"), self.obj.Flip)
-            self.check("Midplane", _tr("Midplane"), self.obj.Midplane)
-            self.spin("Thickness1", _tr("Thickness 1"), "Thickness1", 0, 5e5)
-            self.spin("Thickness2", _tr("Thickness 2"), "Thickness2", 0, 5e5)
-            self.spin("Thickness", _tr("Thickness (midplane)"), "Thickness", 0, 5e5)
-            self.syncMidplane()
+            self.spin("Thickness1", _tr("Thickness 1"), "Thickness1", 0, 1e6)
+            self.spin("Thickness2", _tr("Thickness 2"), "Thickness2", 0, 1e6)
         elif kind == "OffsetSurface":
-            self.spin("Distance", _tr("Distance"), "Distance", 0, 5e5)
+            self.spin("Distance", _tr("Distance"), "Distance", -1e6, 1e6)
             self.check("Flip", _tr("Flip direction"), self.obj.Flip)
         else:
             self.check("Uniform", _tr("Uniform"), self.obj.Uniform)
-            self.spin("Factor", _tr("Scale factor"), "Factor", F.SCALE_MIN, F.SCALE_MAX, unit=None)
+            self.spin("Factor", _tr("Scale factor"), "Factor", 1e-6, 1e6, unit=None)
             for ax in "XYZ":
-                self.spin("Factor" + ax, _tr("Scale " + ax), "Factor" + ax, F.SCALE_MIN, F.SCALE_MAX, unit=None)
+                self.spin("Factor" + ax, _tr("Scale " + ax), "Factor" + ax, 1e-6, 1e6, unit=None)
             for ax in "XYZ":
                 self.spin("Point" + ax, _tr("Point " + ax), "Point." + ax.lower(), -1e9, 1e9)
             self.syncUniform()
@@ -231,7 +227,7 @@ class Panel:
             combo.addItem(_tr(text))
         hasBase = self.obj.BaseFeature is not None
         op = self.obj.Operation
-        if not hasBase or self.creating:
+        if not hasBase:
             index = 0
         else:
             index = [o for _, o in OPS].index(op)
@@ -266,13 +262,6 @@ class Panel:
         self.refresh()
 
     # -- values
-    def syncMidplane(self):
-        mid = self.widgets["Midplane"].isChecked()
-        self.widgets["Thickness"].setEnabled(mid)
-        self.widgets["Thickness1"].setEnabled(not mid)
-        self.widgets["Thickness2"].setEnabled(not mid)
-        self.widgets["Flip"].setEnabled(not mid)
-
     def syncUniform(self):
         uniform = self.widgets["Uniform"].isChecked()
         self.widgets["Factor"].setEnabled(uniform)
@@ -299,9 +288,6 @@ class Panel:
         for name in self.paths:
             self.put(name)
         if self.kind == "Thicken":
-            o.Flip = w["Flip"].isChecked()
-            o.Midplane = w["Midplane"].isChecked()
-            self.syncMidplane()
             ops = OPS[w["Operation"].currentIndex()][1]
             if ops:
                 o.Operation = ops
@@ -380,16 +366,16 @@ class Command:
         faces = selected_faces() if self.cfg["faces"] else []
         body = _active_body(doc)
         if self.kind == "Thicken":
-            # The panel starts on New (Onshape's default): accepting moves it into a part of its own
+            # A Body with a part in it: Add by default; none, or an empty one: New
             if body is None:
                 body = doc.addObject("PartDesign::Body", "Body")
-            obj = F.make_thicken(body, faces, 5.0, 0.0, "Union")
+            obj = F.make_thicken(body, faces, 1.0, 0.0, "Union")
         elif self.kind == "OffsetSurface":
             # A sheet is a part of its own (Onshape: a new surface part): in the active Body it
             # would replace the solid before it
             if body is None or body.BaseFeature is not None or any(o.isDerivedFrom("PartDesign::Feature") for o in body.Group):
                 body = doc.addObject("PartDesign::Body", "Body")
-            obj = F.make_offset_surface(body, faces, 5.0)
+            obj = F.make_offset_surface(body, faces, 1.0)
         else:
             if body is None:
                 raise FreeCAD.Base.FreeCADError("Scale needs an active Body: activate the part to scale")
