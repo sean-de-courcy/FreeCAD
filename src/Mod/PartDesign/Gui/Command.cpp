@@ -71,6 +71,7 @@
 #include <Mod/PartDesign/App/FeatureDefeaturing.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "DlgActiveBody.h"
 #include "ReferenceField.h"
@@ -1846,8 +1847,173 @@ static void openAsOnshape(App::DocumentObject* feature, bool recompute)
     }
 }
 
+/* FreeCAD-CH (ops#654 S4, notes/parts-design.md 3.1, 3.5): in a studio that has a history list
+ * (PartDesign::StudioList), Extrude and Extrude (remove) make a studio feature, an *owner*: the
+ * Pad or Pocket in the studio, outside every Body, whose steps act on the parts of its scope. The
+ * studio is the selected profile's, else the active Body's, else the active Part's (the document's
+ * top level without one). Null without a list: today's path. sketchPart: the Body the selected
+ * profile is in, if any
+ */
+static PartDesign::StudioList* ownerStudioList(
+    Gui::Command* cmd,
+    App::Part*& studio,
+    PartDesign::Body*& sketchPart,
+    App::DocumentObject*& profile,
+    std::vector<std::string>& subs
+)
+{
+    studio = nullptr;
+    sketchPart = nullptr;
+    profile = nullptr;
+    subs.clear();
+    App::Document* doc = cmd->getDocument();
+    if (!doc) {
+        return nullptr;
+    }
+    const std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
+    if (!selection.empty() && selection.front().getObject()) {
+        profile = const_cast<App::DocumentObject*>(selection.front().getObject());
+        subs = selection.front().getSubNames();
+        if (profile->getDocument() != doc) {
+            return nullptr;
+        }
+        sketchPart = PartDesign::Body::findBodyOf(profile);
+        if (sketchPart) {
+            if (!Part::BodyBase::studioOf(sketchPart, studio)) {
+                return nullptr;
+            }
+        }
+        else {
+            studio = App::Part::getPartOfObject(profile, /*recursive=*/true);
+        }
+    }
+    else if (PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false)) {
+        if (!Part::BodyBase::studioOf(active, studio)) {
+            return nullptr;
+        }
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    return PartDesign::StudioList::of(doc, studio, false);
+}
+
+/// FreeCAD-CH (ops#654 S4): Extrude in a studio with a list makes an owner, in one step with its
+/// list entry, its scope and its first recompute (Cancel aborts all of it); false: not such a
+/// studio, today's path
+static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, double length)
+{
+    if (which != "Pad" && which != "Pocket") {
+        return false;
+    }
+    App::Part* studio = nullptr;
+    PartDesign::Body* sketchPart = nullptr;
+    App::DocumentObject* profile = nullptr;
+    std::vector<std::string> subs;
+    PartDesign::StudioList* list = ownerStudioList(cmd, studio, sketchPart, profile, subs);
+    if (!list) {
+        return false;
+    }
+    App::Document* doc = cmd->getDocument();
+    // A profile: a sketch, its elements, or planar faces of a part's solid
+    QString leftOut;
+    if (profile && !profile->isDerivedFrom<Part::Feature>()) {
+        leftOut = QObject::tr("Left out of the selection: '%1' can't be a profile.")
+                      .arg(QString::fromUtf8(profile->Label.getValue()));
+        profile = nullptr;
+        subs.clear();
+    }
+    // The default scope (Onshape's): the profile's own part, else the active Body of the studio,
+    // else New for an Add and none for a Remove ("No merge scope selected")
+    PartDesign::Body* target = sketchPart;
+    if (!target) {
+        PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+        App::Part* activeStudio = nullptr;
+        if (active && active->getDocument() == doc
+            && Part::BodyBase::studioOf(active, activeStudio) && activeStudio == studio) {
+            target = active;
+        }
+    }
+    const std::string name = cmd->getUniqueObjectName(which.c_str());
+    cmd->openCommand(std::string("Make ") + which);
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::cmdAppDocument(
+            doc,
+            std::ostringstream() << "addObject('PartDesign::" << which << "','" << name << "')"
+        );
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The studio feature was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        auto sketch = freecad_cast<Part::Part2DObject*>(profile);
+        if (profile) {
+            std::ostringstream ss;
+            for (const auto& sub : subs) {
+                ss << "'" << sub << "',";
+            }
+            FCMD_OBJ_CMD(
+                owner,
+                "Profile = (" << Gui::Command::getObjectCmd(profile) << ", [" << ss.str() << "])"
+            );
+        }
+        FCMD_OBJ_CMD(owner, "Length = " << length);
+        if (sketch) {
+            FCMD_OBJ_CMD(
+                owner,
+                "ReferenceAxis = (" << Gui::Command::getObjectCmd(sketch) << ",['N_Axis'])"
+            );
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        if (target) {
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.studioSetScopeIds(%s, ['%s'])",
+                ownerCmd.c_str(),
+                PartDesign::studioPartId(target).c_str()
+            );
+        }
+        else if (which == "Pad") {
+            Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
+        }
+        {
+            // A missing profile isn't printed as an error while the dialog opens asking for it
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                profile == nullptr
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        if (sketch) {
+            FCMD_OBJ_HIDE(sketch);
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The studio feature's dialog didn't open");
+        }
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+        if (!leftOut.isEmpty()) {
+            noteLeftOut("Profile", leftOut);
+        }
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 void prepareProfileBased(Gui::Command* cmd, const std::string& which, double length)
 {
+    if (prepareStudioOwner(cmd, which, length)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {
