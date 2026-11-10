@@ -14,6 +14,7 @@ import FreeCAD as App
 import Part
 
 TOL = 1e-6
+SCALE_MIN, SCALE_MAX = 1e-5, 1e5  # Onshape's range
 
 
 class SolidOpsError(Exception):
@@ -117,11 +118,16 @@ def thicken_tool(faces, t1, t2):
 
 
 def offset_surface(faces, distance):
+    """Sheets offset along the face normals; adjacent faces become one sheet, extended to meet
+    (a sharp edge, as Onshape); zero is a copy."""
     out = []
     for group in _components(faces):
         surf = _as_surface(group)
+        if abs(distance) <= TOL:
+            out.append(surf.copy())
+            continue
         try:
-            res = surf.makeOffsetShape(distance, TOL)
+            res = surf.makeOffsetShape(distance, TOL, False, False, 0, 2 if len(group) > 1 else 0)  # join: intersection
         except Exception as e:
             raise SolidOpsError("Offset surface failed: %s" % e)
         _check_offset(surf, res, "Offset surface")
@@ -196,12 +202,22 @@ class Thicken(_Proxy):
         obj.addProperty("App::PropertyLinkSubList", "Base", "Thicken", "Faces or surfaces to thicken")
         obj.addProperty("App::PropertyLength", "Thickness1", "Thicken", "Thickness along the face normal")
         obj.addProperty("App::PropertyLength", "Thickness2", "Thicken", "Thickness against the face normal")
-        obj.Thickness1 = 1.0
+        obj.addProperty("App::PropertyBool", "Flip", "Thicken", "Opposite direction: Thickness 1 against the face normal")
+        obj.addProperty("App::PropertyBool", "Midplane", "Thicken", "Thicken on both sides, half of Thickness each")
+        obj.addProperty("App::PropertyLength", "Thickness", "Thicken", "Total thickness for Midplane")
+        obj.Thickness1 = 5.0  # Onshape's defaults
         obj.Thickness2 = 0.0
+        obj.Thickness = 5.0
 
     def execute(self, obj):
         faces = _resolve_faces(obj)
-        tool = thicken_tool(faces, obj.Thickness1.Value, obj.Thickness2.Value)
+        if obj.Midplane:
+            t1 = t2 = obj.Thickness.Value / 2
+        elif obj.Flip:
+            t1, t2 = obj.Thickness2.Value, obj.Thickness1.Value
+        else:
+            t1, t2 = obj.Thickness1.Value, obj.Thickness2.Value
+        tool = thicken_tool(faces, t1, t2)
         obj.AddSubShape = tool
         base = _base_shape(obj)
         op = obj.Operation
@@ -248,8 +264,8 @@ class Scale(_Proxy):
             sx = sy = sz = obj.Factor
         else:
             sx, sy, sz = obj.FactorX, obj.FactorY, obj.FactorZ
-        if min(sx, sy, sz) <= 0:
-            raise SolidOpsError("Scale factor must be greater than zero")
+        if min(sx, sy, sz) < SCALE_MIN or max(sx, sy, sz) > SCALE_MAX:
+            raise SolidOpsError("Scale factor must be between %g and %g" % (SCALE_MIN, SCALE_MAX))
         obj.Shape = scale_shape(base, obj.Point, sx, sy, sz)
 
 
@@ -261,20 +277,20 @@ class OffsetSurface(_Proxy):
         obj.addProperty("App::PropertyLinkSubList", "Base", "Offset", "Faces or surfaces to offset")
         obj.addProperty("App::PropertyDistance", "Distance", "Offset", "Offset along the face normal")
         obj.addProperty("App::PropertyBool", "Flip", "Offset", "Offset against the face normal")
-        obj.Distance = 1.0
+        obj.Distance = 5.0  # Onshape's default
 
     def execute(self, obj):
         faces = _resolve_faces(obj)
+        if obj.Distance.Value < 0:
+            raise SolidOpsError("Offset distance must not be negative: use Flip to offset the other way")
         d = obj.Distance.Value * (-1 if obj.Flip else 1)
-        if abs(d) <= TOL:
-            raise SolidOpsError("Offset distance is zero")
         obj.Shape = offset_surface(faces, d)
 
 
 # ---------------------------------------------------------------- creation (no GUI)
 
 
-def make_thicken(body, base_links, t1=1.0, t2=0.0, operation="Union", name="Thicken"):
+def make_thicken(body, base_links, t1=5.0, t2=0.0, operation="Union", name="Thicken"):
     obj = body.Document.addObject("PartDesign::FeatureAdditivePython", name)
     Thicken(obj)
     obj.Base = base_links
@@ -299,7 +315,7 @@ def make_scale(body, point=None, factor=1.0, factors=None, name="Scale"):
     return obj
 
 
-def make_offset_surface(body, base_links, distance=1.0, flip=False, name="OffsetSurface"):
+def make_offset_surface(body, base_links, distance=5.0, flip=False, name="OffsetSurface"):
     obj = body.Document.addObject("PartDesign::FeaturePython", name)
     OffsetSurface(obj)
     obj.Base = base_links

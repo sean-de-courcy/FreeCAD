@@ -54,6 +54,9 @@ class TestSolidOpsGui(unittest.TestCase):
         feature = panel.obj
         self.assertEqual(len(feature.Base), 1)
         self.assertEqual(panel.faceList.count(), 1)
+        self.assertEqual(panel.widgets["Operation"].currentIndex(), 0)  # Onshape starts on New
+        self.assertAlmostEqual(panel.value("Thickness1"), 5.0)
+        panel.widgets["Operation"].setCurrentIndex(1)  # Add
         panel.setValue("Thickness1", 2.0)
         self.assertTrue(panel.accept())
         self.assertIsNone(G.Panel.current)
@@ -71,6 +74,16 @@ class TestSolidOpsGui(unittest.TestCase):
         self.assertNotEqual(feature.getParentGeoFeatureGroup(), self.body)
         self.assertAlmostEqual(self.body.Shape.Volume, 4000.0, 3)
         self.assertAlmostEqual(feature.Shape.Volume, 800.0, 3)
+
+    def testMidplaneAndFlipFromThePanel(self):
+        self.selectTop()
+        Gui.runCommand("PartDesign_Thicken")
+        panel = G.Panel.current
+        panel.widgets["Operation"].setCurrentIndex(1)  # Add
+        panel.widgets["Midplane"].setChecked(True)
+        panel.setValue("Thickness", 4.0)  # z 8..12
+        self.assertTrue(panel.accept())
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000.0 + 400.0 * 2, 3)
 
     def testThickenRemoveFromThePanel(self):
         self.selectTop()
@@ -133,6 +146,8 @@ class TestSolidOpsGui(unittest.TestCase):
         self.selectTop()
         Gui.runCommand("PartDesign_Thicken")
         feature = G.Panel.current.obj
+        G.Panel.current.widgets["Operation"].setCurrentIndex(1)  # Add
+        G.Panel.current.setValue("Thickness1", 1.0)
         G.Panel.current.accept()
         Gui.ActiveDocument.setEdit(feature.Name, 0)
         panel = G.Panel.current
