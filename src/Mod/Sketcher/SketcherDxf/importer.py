@@ -1,0 +1,317 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+"""DXF into a sketch (FreeCAD-CH): `insert(sketch, path, ...)`.
+
+The file's model space lands in the sketch's plane, its origin on the sketch's origin and its X
+and Y on the sketch's, at 1:1 in the file's units ($INSUNITS); a file without units needs
+`units=` (the command asks). Blocks and layers are flattened; lines, arcs, circles, ellipses and
+splines stay what they are. With `fit` (the default), chains of short segments become lines, arcs
+and B-splines within `tolerance` millimetres (`fitting.py`), corners sharper than `corner` degrees
+kept. The imported curves are held by one Block constraint each (`hold="block"`, the default) or
+left free (`hold="free"`): the solver then has nothing of theirs to solve.
+"""
+
+import math
+import time
+
+import FreeCAD
+import Part
+
+from . import fitting, reader
+from .reader import DxfError
+
+V = FreeCAD.Vector
+
+UNITS = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4, "ft": 304.8, "um": 1e-3, "mil": 0.0254}
+
+DEFAULT_TOLERANCE = 0.01  # mm
+DEFAULT_CORNER = 30.0  # degrees
+
+
+class DxfUnitsMissing(DxfError):
+    """The file states no units, and none were given"""
+
+
+class Report:
+    def __init__(self):
+        self.units = None  # e.g. "mm"
+        self.units_from_file = False
+        self.entities = 0  # curves read
+        self.segments = 0  # line segments among them
+        self.curves = 0  # geometries added to the sketch
+        self.kinds = {}
+        self.fit = False
+        self.tolerance = None
+        self.max_deviation = 0.0
+        self.gaps_joined = 0
+        self.open_chains = 0
+        self.closed_chains = 0
+        self.skipped = {}
+        self.paperspace = 0
+        self.projected = 0
+        self.missing_blocks = []
+        self.first_geo = None
+        self.seconds = 0.0
+
+    def lines(self):
+        """The report in words, one finding a line"""
+        out = [
+            f"{self.entities} curves read ({self.segments} line segments), "
+            f"{self.curves} sketch curves added: "
+            + ", ".join(f"{n} {k}" for k, n in sorted(self.kinds.items()) if n)
+        ]
+        src = "from the file" if self.units_from_file else "chosen (the file states none)"
+        out.append(f"Units: {self.units}, {src}")
+        if self.fit:
+            out.append(
+                f"Fitted within {self.tolerance:g} mm: largest deviation {self.max_deviation:.4g} mm"
+            )
+        if self.gaps_joined:
+            out.append(f"{self.gaps_joined} gaps under the tolerance closed")
+        if self.open_chains:
+            out.append(f"{self.open_chains} open chains of segments")
+        if self.projected:
+            out.append(f"{self.projected} entities outside the XY plane projected onto it")
+        if self.paperspace:
+            out.append(f"{self.paperspace} paper-space entities not imported")
+        for k, n in sorted(self.skipped.items()):
+            out.append(f"{n} {k} not imported")
+        if self.missing_blocks:
+            out.append("Blocks missing from the file: " + ", ".join(sorted(map(str, self.missing_blocks))))
+        return out
+
+    def __str__(self):
+        return "\n".join(self.lines())
+
+
+def _scale(items, k):
+    if k == 1.0:
+        return items
+
+    def s(p):
+        return (p[0] * k, p[1] * k)
+
+    out = []
+    for it in items:
+        if isinstance(it, reader.Line):
+            out.append(reader.Line(s(it.p), s(it.q)))
+        elif isinstance(it, reader.Conic):
+            out.append(reader.Conic(s(it.c), s(it.u), s(it.v), it.t0, it.t1, it.full))
+        elif isinstance(it, reader.Spline):
+            out.append(reader.Spline(it.degree, [s(p) for p in it.poles], it.knots, it.weights))
+        elif isinstance(it, reader.FitSpline):
+            out.append(reader.FitSpline([s(p) for p in it.points]))
+        elif isinstance(it, reader.Point):
+            out.append(reader.Point(s(it.p)))
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# items -> Part geometry (sketch coordinates)
+
+
+def _arc_ccw(center, r, a0, a1):
+    """The arc of the circle (center, r) counterclockwise from angle a0 to a1"""
+    while a1 <= a0:
+        a1 += 2.0 * math.pi
+    circ = Part.Circle(V(center[0], center[1], 0), V(0, 0, 1), r)
+    return Part.ArcOfCircle(circ, a0, a1)
+
+
+def conic_geometry(it):
+    """A Conic as Part.Circle / ArcOfCircle / Ellipse / ArcOfEllipse, counterclockwise about +Z"""
+    c, u, v, t0, t1 = it.c, it.u, it.v, it.t0, it.t1
+    cross = u[0] * v[1] - u[1] * v[0]
+    if abs(cross) < 1e-300:
+        return None  # degenerate (a conic squashed to a line by a projection)
+    if cross < 0:
+        v = (-v[0], -v[1])
+        t0, t1 = -t1, -t0
+    uu = u[0] * u[0] + u[1] * u[1]
+    vv = v[0] * v[0] + v[1] * v[1]
+    uv = u[0] * v[0] + u[1] * v[1]
+    s = 0.5 * math.atan2(2.0 * uv, uu - vv)
+    cs, sn = math.cos(s), math.sin(s)
+    a = (u[0] * cs + v[0] * sn, u[1] * cs + v[1] * sn)  # major semi-axis
+    b = (-u[0] * sn + v[0] * cs, -u[1] * sn + v[1] * cs)  # minor
+    t0, t1 = t0 - s, t1 - s
+    ra, rb = math.hypot(*a), math.hypot(*b)
+    if abs(ra - rb) <= 1e-9 * ra:
+        r = 0.5 * (ra + rb)
+        phi = math.atan2(a[1], a[0])
+        if it.full:
+            return Part.Circle(V(c[0], c[1], 0), V(0, 0, 1), r)
+        return _arc_ccw(c, r, phi + t0, phi + t1)
+    if rb > ra:  # cannot happen after the choice of s, kept for safety
+        a, b, ra, rb = b, (-a[0], -a[1]), rb, ra
+        t0, t1 = t0 - math.pi / 2, t1 - math.pi / 2
+    C = V(c[0], c[1], 0)
+    ell = Part.Ellipse(C + V(a[0], a[1], 0), C + V(b[0], b[1], 0), C)
+    if it.full:
+        return ell
+    return Part.ArcOfEllipse(ell, t0, t1)
+
+
+def spline_geometry(it):
+    if isinstance(it, reader.FitSpline):
+        pts = [V(p[0], p[1], 0) for p in it.points]
+        c = Part.BSplineCurve()
+        c.interpolate(pts)
+        return c
+    flat = it.knots
+    knots, mults = [], []
+    for k in flat:
+        if knots and abs(k - knots[-1]) <= 1e-12 * (1.0 + abs(k)):
+            mults[-1] += 1
+        else:
+            knots.append(k)
+            mults.append(1)
+    deg = it.degree
+    # OCCT allows at most degree+1 at the ends and degree inside
+    mults = [min(m, deg + 1) if i in (0, len(mults) - 1) else min(m, deg) for i, m in enumerate(mults)]
+    poles = [V(p[0], p[1], 0) for p in it.poles]
+    if sum(mults) != len(poles) + deg + 1:
+        raise DxfError("a SPLINE whose knots don't match its control points")
+    c = Part.BSplineCurve()
+    if it.weights:
+        c.buildFromPolesMultsKnots(poles, mults, knots, False, deg, it.weights)
+    else:
+        c.buildFromPolesMultsKnots(poles, mults, knots, False, deg)
+    if mults[0] < deg + 1 or mults[-1] < deg + 1:
+        # an unclamped spline: clamped at its own domain, the same curve
+        c.segment(c.FirstParameter, c.LastParameter)
+    return c
+
+
+def piece_geometry(pc):
+    if pc.kind == "line":
+        p, q = pc.pts
+        return Part.LineSegment(V(p[0], p[1], 0), V(q[0], q[1], 0))
+    if pc.kind == "arc":
+        p, m, q = pc.pts
+        cr = fitting._circle3(p, m, q)
+        (cx, cy), r = cr
+        orient = (m[0] - p[0]) * (q[1] - m[1]) - (m[1] - p[1]) * (q[0] - m[0])
+        ap = math.atan2(p[1] - cy, p[0] - cx)
+        aq = math.atan2(q[1] - cy, q[0] - cx)
+        if orient > 0:
+            return _arc_ccw((cx, cy), r, ap, aq)
+        return _arc_ccw((cx, cy), r, aq, ap)
+    if pc.kind == "circle":
+        (cx, cy), r = pc.pts
+        return Part.Circle(V(cx, cy, 0), V(0, 0, 1), r)
+    return pc.curve
+
+
+def _kind(g):
+    return {
+        "Part::GeomLineSegment": "lines",
+        "Part::GeomArcOfCircle": "arcs",
+        "Part::GeomCircle": "circles",
+        "Part::GeomEllipse": "ellipses",
+        "Part::GeomArcOfEllipse": "elliptical arcs",
+        "Part::GeomBSplineCurve": "splines",
+        "Part::GeomPoint": "points",
+    }.get(g.TypeId, g.TypeId)
+
+
+def geometry(drawing, mm_per_unit, fit=True, tolerance=DEFAULT_TOLERANCE, corner=DEFAULT_CORNER, report=None):
+    """Part geometries for the drawing's items, in millimetres, and the report"""
+    rep = report or Report()
+    items = _scale(drawing.items, mm_per_unit)
+    geos = []
+    segs = []
+    other_ends = []
+    for it in items:
+        if isinstance(it, reader.Line):
+            if it.p != it.q:
+                segs.append((it.p, it.q))
+            continue
+        if isinstance(it, reader.Conic):
+            g = conic_geometry(it)
+            if g is None:
+                rep.skipped["degenerate ellipse"] = rep.skipped.get("degenerate ellipse", 0) + 1
+                continue
+        elif isinstance(it, (reader.Spline, reader.FitSpline)):
+            g = spline_geometry(it)
+        elif isinstance(it, reader.Point):
+            g = Part.Point(V(it.p[0], it.p[1], 0))
+        else:
+            continue
+        geos.append(g)
+        if not isinstance(g, (Part.Point, Part.Circle, Part.Ellipse)):
+            sp, ep = g.StartPoint, g.EndPoint
+            other_ends.append((sp.x, sp.y))
+            other_ends.append((ep.x, ep.y))
+    rep.entities = len(drawing.items)
+    rep.segments = len(segs)
+    if fit and segs:
+        rep.fit = True
+        rep.tolerance = tolerance
+        join = max(1e-6, tolerance * 1e-3)
+        chains, joined = fitting.chains(segs, other_ends, join, tolerance)
+        rep.gaps_joined = joined
+        for pts, closed in chains:
+            if closed:
+                rep.closed_chains += 1
+            else:
+                rep.open_chains += 1
+            for pc in fitting.fit_chain(pts, closed, tolerance, corner):
+                rep.max_deviation = max(rep.max_deviation, pc.dev)
+                geos.append(piece_geometry(pc))
+    else:
+        for p, q in segs:
+            geos.append(Part.LineSegment(V(p[0], p[1], 0), V(q[0], q[1], 0)))
+    for g in geos:
+        k = _kind(g)
+        rep.kinds[k] = rep.kinds.get(k, 0) + 1
+    rep.curves = len(geos)
+    return geos, rep
+
+
+def resolve_units(drawing, units=None):
+    """(mm per unit, name, from the file); units overrides the file's"""
+    if units is not None:
+        if isinstance(units, str):
+            if units not in UNITS:
+                raise DxfError(f"unknown units {units!r}: one of {', '.join(UNITS)}")
+            return UNITS[units], units, False
+        return float(units), f"{float(units):g} mm", False
+    k = drawing.mm_per_unit
+    if k is None:
+        raise DxfUnitsMissing("the file states no units ($INSUNITS): choose them")
+    return k, reader.UNIT_NAMES.get(drawing.insunits, f"code {drawing.insunits}"), True
+
+
+def insert(sketch, path, units=None, fit=True, tolerance=DEFAULT_TOLERANCE, corner=DEFAULT_CORNER, hold="block"):
+    """Insert the DXF at path into the sketch; returns the Report.
+
+    units: None for the file's; "mm", "in", ... or millimetres per unit to choose them.
+    hold: "block" (one Block constraint per curve) or "free"."""
+    t = time.perf_counter()
+    drawing = reader.read(path)
+    k, name, from_file = resolve_units(drawing, units)
+    rep = Report()
+    rep.units, rep.units_from_file = name, from_file
+    rep.skipped = dict(drawing.skipped)
+    rep.paperspace = drawing.paperspace
+    rep.projected = drawing.projected
+    rep.missing_blocks = sorted(drawing.missing_blocks, key=str)
+    geos, rep = geometry(drawing, k, fit, tolerance, corner, rep)
+    if geos:
+        first = sketch.GeometryCount
+        sketch.addGeometry(geos, False)
+        rep.first_geo = first
+        if hold == "block":
+            sketch.addConstraint(
+                [_sketcher().Constraint("Block", i) for i in range(first, first + len(geos))]
+            )
+        elif hold != "free":
+            raise ValueError(f"hold must be 'block' or 'free', not {hold!r}")
+    rep.seconds = time.perf_counter() - t
+    return rep
+
+
+def _sketcher():
+    import Sketcher
+
+    return Sketcher

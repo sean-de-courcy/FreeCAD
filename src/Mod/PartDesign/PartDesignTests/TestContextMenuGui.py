@@ -501,6 +501,19 @@ class TestContextMenuGui(unittest.TestCase):
         # the first entries are not in the menu twice
         self.assertNotIn(menuText("PartDesign_NewSketch"), found)
 
+    def testExportDxfOnAPlanarFace(self):
+        """FreeCAD-CH, the DXF lane: Export DXF on a planar face, just before More (after
+        Onshape's entries); not on an edge."""
+        self.pick("Face6")
+        found = texts(self.openMenu())
+        export = menuText("Sketcher_ExportDxf")
+        self.assertIsNotNone(export)
+        self.assertIn(export, found, found)
+        self.assertGreater(found.index(export), found.index(menuText("Std_DeletePart")), found)
+        self.assertEqual(found[-1], MORE, found)
+        self.pick("Edge1")
+        self.assertNotIn(export, texts(self.openMenu()))
+
     def testRightClickSelectsTheFace(self):
         """The real path (ctx-8): a right click with a face preselected selects it, replacing the
         selection, and opens the face's menu."""
