@@ -88,6 +88,12 @@ FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
 using namespace PartDesign;
 
+namespace PartDesign
+{
+// FeatureSketchBased.cpp: whether an extrusion along `dir` up to `upToFace` goes the other way
+bool upToFaceBehind(const TopoShape& upToFace, const TopoShape& profile, const gp_Dir& dir);
+}  // namespace PartDesign
+
 const char* FeatureExtrude::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", nullptr};
 
 PROPERTY_SOURCE(PartDesign::FeatureExtrude, PartDesign::ProfileBased)
@@ -110,7 +116,7 @@ namespace
 // All shapes in the feature's coordinates.
 std::optional<Base::Placement> upToFaceReached(TopoShape face, const TopoShape& profile, gp_Dir dir)
 {
-    if (Part::findAllFacesCutBy(face, profile, dir).empty()) {
+    if (upToFaceBehind(face, profile, dir)) {
         dir.Reverse();
     }
     if (face.shapeType(true) != TopAbs_FACE) {
@@ -2086,7 +2092,10 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 
         if (faceCount == 1) {
             getUpToFace(upToShape, base, sketchshape, method, dir);
-            addOffsetToFace(upToShape, dir, offsetVal);
+            // Onshape's sign (FreeCAD-CH P3, the Onshape fact U1; coordinator c720): a positive
+            // offset ends short of the face, back towards the profile, a negative one past it
+            // (Onshape's "opposite direction"). Up to a face, a shape's face, first and last.
+            addOffsetToFace(upToShape, dir, -offsetVal);
         }
         else {
             if (fabs(offsetVal) > Precision::Confusion()) {

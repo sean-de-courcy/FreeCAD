@@ -476,6 +476,45 @@ class TestPocket(unittest.TestCase):
 
         tabOnNamedBase(self, self.Doc, "Pocket", "UpToFace")
 
+    def testUpToFaceOffsetBesideTheProfile(self):
+        """FreeCAD-CH P3: a Pocket of a 20 x 20 square at z = 0 into the box x, y -15..15, z -20..0,
+        up to a smaller face off the square's centre or on it (parallel at z = -10, or slanted,
+        z = -10 + x / 4), offset by +2 and -2, as Onshape does (the Onshape facts U1 and U2): the
+        end lies on the face's plane moved `offset` along the extrusion, shallower for +2
+        (Onshape's default), deeper for -2. Before, +2 went deeper, and a face off the centre
+        line turned the offset round once more."""
+        import Part
+        from PartDesignTests.TestPad import squareSketch, upToOffsetFace
+
+        V = FreeCAD.Vector
+        # span (-2, 2): the face on the square's centre line, (4, 8) off it
+        for slanted in (False, True):
+            for offset, span in ((2.0, (4, 8)), (-2.0, (4, 8)), (2.0, (-2, 2)), (-2.0, (-2, 2))):
+                with self.subTest(slanted=slanted, offset=offset, span=span):
+                    face = upToOffsetFace(self.Doc, slanted, -10.0, *span)
+                    block = self.Doc.addObject("Part::Feature", "Block")
+                    block.Shape = Part.makeBox(30, 30, 20, V(-15, -15, -20))
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    base = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+                    base.BaseFeature = block
+                    sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                    pocket = body.newObject("PartDesign::Pocket", "Pocket")
+                    pocket.Profile = sketch
+                    pocket.Type = "UpToFace"
+                    pocket.UpToFace = (face, ["Face1"])
+                    pocket.Offset = offset
+                    self.Doc.recompute()
+                    self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                    # the plane's height at x = 0 is -10 (moved up by the offset), and
+                    # the slant's x / 4 averages to 0 over the square
+                    depth = 10.0 - offset
+                    self.assertAlmostEqual(
+                        pocket.Shape.Volume, 30 * 30 * 20 - 400.0 * depth, places=4
+                    )
+                    box = pocket.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, -20.0, places=6)
+                    self.assertAlmostEqual(box.ZMax, 0.0, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")
