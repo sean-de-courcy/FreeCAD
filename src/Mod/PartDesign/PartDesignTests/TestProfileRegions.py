@@ -379,6 +379,27 @@ class TestProfileRegions(unittest.TestCase):
             self.Doc.recompute()
             self.assertVolume(loft, 8000 - 320 * math.pi, solids=1)
 
+    def testLoftSeveralPickedRegionsStop(self):
+        """Review r2 (LoftTwoPickedSquaresRedrawn): a loft profile picking two separate regions
+        would pair them in the picks' order with the other section's sketch order (3500 of 4000
+        when one was redrawn): a loft section takes one region, and stops with the reason."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketches = []
+        for name, z in (("Bottom", 0), ("Top", 20)):
+            _, sk = self.sketch(body, name)
+            sk.AttachmentOffset = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+            rect(sk, 0, 0, 10, 10)
+            rect(sk, 20, 0, 30, 10)
+            sketches.append(sk)
+        self.Doc.recompute()
+        bottom, top = sketches
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = (bottom, [regionName(bottom, 100, x=5), regionName(bottom, 100, x=25)])
+        loft.Sections = [top]
+        self.Doc.recompute()
+        self.assertFalse(loft.isValid())
+        self.assertIn("pick one region of it per section", loft.getStatusString())
+
     # -- picked regions --------------------------------------------------------------------
 
     def testOneRegion(self):

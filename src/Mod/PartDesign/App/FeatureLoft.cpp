@@ -158,7 +158,13 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
             faces.push_back(face);
         }
         auto picked = Feature::makeTopoShape(obj, TopoDS_Shape(), 0, false).makeElementCompound(faces);
-        compound = wiresOfFaces(mergeAdjacentRegions(obj, subs, picked));
+        auto merged = mergeAdjacentRegions(obj, subs, picked);
+        // Several regions would pair in the picks' order with another section's sketch order:
+        // a second silent find of the pairing (review r2), so the literal rule: one region
+        if (merged.countSubShapes(TopAbs_FACE) > 1) {
+            FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
+        }
+        compound = wiresOfFaces(merged);
     }
     else if (useEntireSketch) {
         WholeSketchRegions rule(obj, compound);
