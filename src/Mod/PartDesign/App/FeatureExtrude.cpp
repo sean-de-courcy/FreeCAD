@@ -1074,6 +1074,112 @@ gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
 // own side is built as today's, against the one part it meets
 thread_local bool ownerRegionRunning = false;
 
+/** A studio owner's "Up to next" for one region against the one part it meets (FreeCAD-CH ops#654
+ * S2, notes/onshape-facts.md O8h): the region's sweep ahead (reach long) split by the part, keeping
+ * the pieces that start on the region. Starting outside the part they are the gap up to where the
+ * part begins, so a stepped bottom gives a stepped tool; starting inside it, the material up to
+ * where it ends. A region that starts partly inside and partly outside, or part of which meets
+ * nothing ahead, fails the whole feature (the loud choice; unverified on Onshape) */
+TopoShape ownerUpToNext(
+    const FeatureExtrude& owner,
+    const TopoShape& region,
+    const TopoShape& part,
+    const gp_Dir& dir,
+    double reach,
+    const std::string& which
+)
+{
+    const double tol = Precision::Confusion() * 10;
+    TopoDS_Face start = TopoDS::Face(region.getShape());
+    BRepAdaptor_Surface startSurface(start);
+    if (startSurface.GetType() != GeomAbs_Plane) {
+        throw Base::ValueError(which + " is not planar");
+    }
+    const gp_Pln plane = startSurface.Plane();
+    GProp_GProps startProps;
+    BRepGProp::SurfaceProperties(start, startProps);
+    const double startArea = startProps.Mass();
+    auto alongMax = [&](const TopoDS_Shape& shape, double sign = 1.0) {
+        double most = -std::numeric_limits<double>::max();
+        for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+            gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+            most = std::max(most, sign * gp_Vec(p.XYZ()).Dot(gp_Vec(dir)));
+        }
+        return sign * most;
+    };
+    // The nearest the start comes along dir: the sweep's far end lies reach beyond it
+    const double s0 = alongMax(start, -1.0);
+    // The area of solid's faces lying on the region's plane: its share of the start
+    auto areaOnStart = [&](const TopoDS_Shape& solid) {
+        double area = 0.0;
+        for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            const gp_Pln facePlane = surface.Plane();
+            if (!facePlane.Axis().IsParallel(plane.Axis(), Precision::Angular())
+                || plane.Distance(facePlane.Location()) > tol) {
+                continue;
+            }
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(face, props);
+            area += props.Mass();
+        }
+        return area;
+    };
+
+    TopoShape probe = owner.makeTopoShape();
+    probe.makeElementPrism(region, reach * gp_Vec(dir));
+    TopoShape outside = owner.makeTopoShape();
+    outside.makeElementCut({probe, part});
+    TopoShape inside = owner.makeTopoShape();
+    inside.makeElementBoolean(Part::OpCodes::Common, {probe, part});
+
+    auto startingPieces = [&](const TopoShape& shape, double& area) {
+        std::vector<TopoShape> pieces;
+        area = 0.0;
+        if (shape.isNull()) {
+            return pieces;
+        }
+        for (const TopoShape& solid : shape.getSubTopoShapes(TopAbs_SOLID)) {
+            const double share = areaOnStart(solid.getShape());
+            if (share > tol) {
+                area += share;
+                pieces.push_back(solid);
+            }
+        }
+        return pieces;
+    };
+    double outsideArea = 0.0;
+    double insideArea = 0.0;
+    std::vector<TopoShape> gap = startingPieces(outside, outsideArea);
+    std::vector<TopoShape> material = startingPieces(inside, insideArea);
+    const double areaTol = std::max(1e-6, startArea * 1e-6);
+    std::vector<TopoShape> pieces;
+    if (std::abs(outsideArea - startArea) <= areaTol && insideArea <= areaTol) {
+        pieces = std::move(gap);
+    }
+    else if (std::abs(insideArea - startArea) <= areaTol && outsideArea <= areaTol) {
+        pieces = std::move(material);
+    }
+    else {
+        throw Base::ValueError(which + " starts partly inside the part and partly outside it");
+    }
+    for (const TopoShape& piece : pieces) {
+        if (alongMax(piece.getShape()) >= s0 + reach - tol * 100) {
+            throw Base::ValueError(which + ": part of it meets nothing ahead");
+        }
+    }
+    if (pieces.size() == 1) {
+        return pieces.front();
+    }
+    TopoShape tool = owner.makeTopoShape();
+    tool.makeElementFuse(pieces, Part::OpCodes::Extrude);
+    return tool;
+}
+
 /** A studio owner's "Up to next" (UpToFirst) or "Up to last", Onshape's rule (FreeCAD-CH ops#654
  * S2, notes/onshape-facts.md O8): each region (face) of the profile goes against the one in-scope
  * part its sweep ahead meets, by side(region, that part's shape); the tool is the regions' prisms
@@ -1150,7 +1256,7 @@ TopoShape ownerUpToPerRegion(
                 + label(parts[met[1]].first) + ": a region goes up to one part"
             );
         }
-        prisms.push_back(side(region, parts[met.front()].second));
+        prisms.push_back(side(region, parts[met.front()].second, reach, which));
     }
     if (prisms.empty()) {
         throw Base::ValueError(mode + ": the profile has no region");
@@ -1914,20 +2020,41 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
         && runsAsStudioOwner(this)) {
         Base::StateLocker perRegion(ownerRegionRunning);
         return ownerUpToPerRegion(*this, sketchshape, method, dir, invObjLoc, [&](
-            const TopoShape& region, const TopoShape& part) {
-            return generateSingleExtrusionSide(
-                region,
-                method,
-                length,
-                taperAngleDeg,
-                upToFacePropHandle,
-                upToShapePropHandle,
-                dir,
-                offsetVal,
-                makeFace,
-                part,
-                invObjLoc
-            );
+            const TopoShape& region, const TopoShape& part, double reach, const std::string& which) {
+            auto asToday = [&](double taper, double offset) {
+                return generateSingleExtrusionSide(
+                    region,
+                    method,
+                    length,
+                    taper,
+                    upToFacePropHandle,
+                    upToShapePropHandle,
+                    dir,
+                    offset,
+                    makeFace,
+                    part,
+                    invObjLoc
+                );
+            };
+            if (method != "UpToFirst") {
+                return asToday(taperAngleDeg, offsetVal);
+            }
+            // Onshape's up to next (O8h): every point of the region stops at the part's next face
+            TopoShape tool = ownerUpToNext(*this, region, part, dir, reach, which);
+            if (std::abs(taperAngleDeg) < Precision::Angular()
+                && std::abs(offsetVal) < Precision::Confusion()) {
+                return tool;
+            }
+            // A taper or an offset is today's single face: right only when the next faces are
+            // one, which the plain flat tool's volume tells
+            if (std::abs(volumeOf(asToday(0.0, 0.0)) - volumeOf(tool))
+                > std::max(1e-6, volumeOf(tool) * 1e-7)) {
+                throw Base::ValueError(
+                    which + ": a taper or an offset over next faces at different depths is not "
+                            "supported yet"
+                );
+            }
+            return asToday(taperAngleDeg, offsetVal);
         });
     }
 

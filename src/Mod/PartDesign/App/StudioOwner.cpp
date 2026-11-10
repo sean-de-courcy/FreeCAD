@@ -3,8 +3,11 @@
 // Owners outside every Body (FreeCAD-CH ops#654 S2, notes/parts-design.md 10.1 "(b) on the build"
 // and 10.9): which features run as owners, and the in-scope parts' shapes at an owner's place.
 
+#include <string>
 #include <vector>
 
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <Precision.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 
 #include <App/PropertyLinks.h>
@@ -12,6 +15,7 @@
 
 #include "Body.h"
 #include "Feature.h"
+#include "FeatureApply.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 
@@ -82,6 +86,42 @@ Part::TopoShape studioScopeBaseAt(const App::DocumentObject* owner)
         Part::TopoShape::SingleShapeCompoundCreationPolicy::forceCompound
     );
     return out;
+}
+
+std::string studioAddLeftover(const App::DocumentObject* owner)
+{
+    std::vector<Part::TopoShape> bases;
+    for (auto part : studioScopeOf(owner)) {
+        Part::TopoShape shape = studioBaseAt(owner, part);
+        if (!shape.isNull()) {
+            bases.push_back(shape);
+        }
+    }
+    if (bases.empty()) {
+        return {};
+    }
+    Part::TopoShape tool = FeatureApply::toolOf(owner);
+    if (tool.isNull()) {
+        return {};
+    }
+    int index = 0;
+    for (const auto& solid : tool.getSubTopoShapes(TopAbs_SOLID)) {
+        ++index;
+        bool touches = false;
+        for (const auto& base : bases) {
+            BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
+            if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) {
+            return "Solid " + std::to_string(index)
+                + " of the tool touches no part of the merge scope: it would become a new part, "
+                  "which is not done yet";
+        }
+    }
+    return {};
 }
 
 bool runsAsStudioOwner(const Feature* feature)

@@ -224,6 +224,15 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     if (result == StdReturn && runs) {
         warnIfMissing();
     }
+    // FreeCAD-CH ops#654 S2: an Add owner's region that touches none of its parts would be dropped
+    // by every step. Onshape makes it a new part (H1a); until P6p it fails the whole feature
+    if (result == StdReturn && runs && owner && addSubType == Type::Additive) {
+        if (std::string why = studioAddLeftover(this); !why.empty()) {
+            AddSubShape.setValue(TopoShape());  // no step applies a part of it
+            purgeTouched();
+            return new App::DocumentObjectExecReturn(why, this);
+        }
+    }
     // A subtractive feature with nothing before it cut nothing and returned its tool as material
     // (FreeCAD-CH ops#308 F8: a Body's first Pocket, e.g. on another Body's face, which T1 no
     // longer takes as a base). Checked after the run, so an input's error is reported first; the

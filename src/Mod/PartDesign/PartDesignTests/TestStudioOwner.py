@@ -132,6 +132,43 @@ class TestStudioOwner(unittest.TestCase):
         self.assertVolume("C", 1000)
         self.assertIsNone(self.step(f1, "C"))
 
+    def testOwnerProfileInsideABody(self):
+        """A sketch in A on A's top (the usual way: sketch on a part's face), the profile of a
+        Pocket owner on A and B: each loses 90, and the sketch stays A's member."""
+        a = self.doc.getObject("A")
+        sk = sketch(a, "F1Sk", xyPlane(a), CUT, z=10)
+        self.doc.recompute()
+        f1 = makeOwner(self.doc, self.studio, "Pocket", "F1", sk, ("A", "B"), Length=3)
+        self.doc.recompute()
+        self.assertIsOwner(f1)
+        self.assertIn(sk, a.Group)
+        for p, x in (("A", 0), ("B", 20)):
+            self.assertTrue(self.step(f1, p).isValid(), self.step(f1, p).getStatusString())
+            self.assertVolume(p, self.partBox(x).cut(box(5, 2, 7, 25, 8, 10)).Volume)
+        self.assertVolume("C", 1000)
+
+    def testPlacedStudioAndPlacedBody(self):
+        """The studio placed (moved and turned 90 degrees about z) and B placed 2 lower in it: a
+        studio sketch on the studio's z 10 cuts 3 deep, so A loses 90 at its top and B 30 (its
+        top is at 8); each cut where the studio's frame says, read in the Body's own frame."""
+        b = self.doc.getObject("B")
+        b.Placement = App.Placement(V(0, 0, -2), App.Rotation())
+        self.studio.Placement = App.Placement(V(100, 50, 20), App.Rotation(V(0, 0, 1), 90))
+        self.doc.recompute()
+        f1 = self.cutOwner(Length=3)
+        self.doc.recompute()
+        self.assertIsOwner(f1)
+        self.assertAlmostEqual(self.volume("A"), 1000 - 90, places=3)
+        self.assertAlmostEqual(self.volume("B"), 1000 - 30, places=3)
+        # In each Body's own frame (Shape carries the Body's local coordinates)
+        self.assertVolume("A", self.partBox(0).cut(box(5, 2, 7, 10, 8, 10)).Volume)
+        self.assertAlmostEqual(
+            self.doc.getObject("A").Shape.common(box(5, 2, 7, 10, 8, 10)).Volume, 0, places=3)
+        self.assertAlmostEqual(
+            self.doc.getObject("B").Tip.Shape.common(box(20, 2, 9, 25, 8, 10)).Volume, 0,
+            places=3)
+        self.assertVolume("C", 1000)
+
     def testThroughAllPocketOwnerUsesTheScopeBases(self):
         """Through all reaches through the in-scope parts at the owner's place (300 each)."""
         f1 = self.cutOwner(Type="ThroughAll")
@@ -281,6 +318,106 @@ class TestStudioOwner(unittest.TestCase):
         doc, f1 = self.o8Remove("O8g", ((2, 2, 8, 8), (22, 2, 28, 8), (42, 2, 48, 8)))
         self.assertWholeFails(doc, f1, ["Up to next", "meets no part ahead"],
                               {"A": 1000, "B": 2000})
+
+    def steppedStudio(self, name, low, high):
+        """One part A of two boxes side by side, fused: x 0..10 at z low, x 10..20 at z high
+        (each (z0, height)); the region x 2..18, y 2..8 on z 0 spans the step."""
+        doc = App.newDocument(name)
+        doc.UndoMode = 1
+        studio = doc.addObject("App::Part", "S")
+        body = doc.addObject("PartDesign::Body", "A")
+        studio.addObject(body)
+        pad(body, "APad", sketch(body, "ASk", xyPlane(body), (0, 0, 10, 10), z=low[0]), low[1])
+        pad(body, "APad2", sketch(body, "ASk2", xyPlane(body), (10, 0, 20, 10), z=high[0]),
+            high[1])
+        doc.recompute()
+        studioList(doc)
+        return doc, studio
+
+    def testO8hAStepOfOnePartGivesASteppedTool(self):
+        """O8h: one region under one part whose bottom steps (z 5 over x 0..10, z 8 over
+        x 10..20): the tool is stepped, x 2..10 rises 5 and x 10..18 rises 8 (+240 +384)."""
+        doc, studio = self.steppedStudio("O8h", (5, 10), (8, 10))
+        before = self.volume("A", doc)
+        sk = studioSketch(doc, studio, "F1Sk", ((2, 2, 18, 8),), z=0)
+        f1 = makeOwner(doc, studio, "Pad", "F1", sk, ("A",), Type="UpToFirst")
+        doc.recompute()
+        self.assertIsOwner(f1)
+        part = box(0, 0, 5, 10, 10, 15).fuse(box(10, 0, 8, 20, 10, 18))
+        tool = box(2, 2, 0, 10, 8, 5).fuse(box(10, 2, 0, 18, 8, 8))
+        self.assertAlmostEqual(before, part.Volume, places=3)
+        self.assertAlmostEqual(f1.AddSubShape.Volume, tool.Volume, places=3)
+        self.assertVolume("A", part.fuse(tool).Volume, doc)
+        self.assertAlmostEqual(self.volume("A", doc), before + 240 + 384, places=3)
+        self.assertOneSolid("A", doc)
+
+    def testO8hRemoveUpAStepCutsToEachNextFace(self):
+        """Unverified on Onshape (O8h's Remove twin): a Remove up to next from z 0 under one part
+        standing on z 0 whose top steps (z 10 over x 0..10, z 20 over x 10..20) cuts each side
+        to its own top (-480 -960)."""
+        doc, studio = self.steppedStudio("O8hr", (0, 10), (0, 20))
+        sk = studioSketch(doc, studio, "F1Sk", ((2, 2, 18, 8),), z=0)
+        f1 = makeOwner(doc, studio, "Pocket", "F1", sk, ("A",), Type="UpToFirst",
+                       Reversed=True)
+        doc.recompute()
+        self.assertIsOwner(f1)
+        part = box(0, 0, 0, 10, 10, 10).fuse(box(10, 0, 0, 20, 10, 20))
+        tool = box(2, 2, 0, 10, 8, 10).fuse(box(10, 2, 0, 18, 8, 20))
+        self.assertVolume("A", part.cut(tool).Volume, doc)
+        self.assertAlmostEqual(self.volume("A", doc), 3000 - 480 - 960, places=3)
+
+    def testH2RemoveUpToNextFromAboveCutsNothing(self):
+        """Onshape H2: a Remove up to next downward from z 30 over A's stepped top (z 10 over
+        x 0..10, z 18 over x 10..20) runs from the sketch to the next faces, wholly in air: A
+        is unchanged and the feature is not an error. H2b: the same as an Add is stepped
+        (x 2..10 down to 10, x 10..18 down to 18: +960 +576)."""
+        for kind, name, gain in (("Pocket", "H2", 0), ("Pad", "H2b", 960 + 576)):
+            doc, studio = self.steppedStudio(name, (0, 10), (0, 18))
+            before = self.volume("A", doc)
+            sk = studioSketch(doc, studio, "F1Sk", ((2, 2, 18, 8),), z=30)
+            values = {"Reversed": True} if kind == "Pad" else {}
+            f1 = makeOwner(doc, studio, kind, "F1", sk, ("A",), Type="UpToFirst", **values)
+            doc.recompute()
+            self.assertTrue(f1.isValid(), name + ": " + f1.getStatusString())
+            self.assertTrue(self.step(f1, "A", doc).isValid(), name)
+            self.assertAlmostEqual(self.volume("A", doc), before + gain, places=3, msg=name)
+            self.assertOneSolid("A", doc)
+
+    def testO8RegionPartlyUnderNothingFailsLoudly(self):
+        """Unverified on Onshape (the loud choice): a region only part of which has the part
+        ahead (x 2..28 under A's x 0..20) fails the whole feature; A is unchanged."""
+        doc, studio = self.steppedStudio("O8p", (5, 10), (5, 10))
+        sk = studioSketch(doc, studio, "F1Sk", ((2, 2, 28, 8),), z=0)
+        f1 = makeOwner(doc, studio, "Pad", "F1", sk, ("A",), Type="UpToFirst")
+        doc.recompute()
+        self.assertWholeFails(doc, f1, ["Up to next", "part of it meets nothing ahead"],
+                              {"A": 2000})
+
+    def testAddRegionTouchingNoScopePartFailsLoudly(self):
+        """Onshape H1a makes the second region a new part; until pieces become parts (P6p) a
+        Blind Add of two regions, one on A's top and one beside every part, fails the whole
+        feature loudly instead of dropping the second region; A is unchanged."""
+        sk = studioSketch(self.doc, self.studio, "P1Sk", ((2, 2, 8, 8), (60, 2, 66, 8)), z=10)
+        p1 = makeOwner(self.doc, self.studio, "Pad", "P1", sk, ("A",), Length=3)
+        self.doc.recompute()
+        self.assertFalse(p1.isValid())
+        self.assertIn("touches no part of the merge scope", p1.getStatusString())
+        self.assertIn("new part", p1.getStatusString())
+        self.assertVolume("A", 1000)
+        self.assertOneSolid("A")
+        self.assertFalse(self.step(p1, "A").isValid())
+
+    def testAddRegionsEachTouchingAScopePart(self):
+        """The same Add with the second region on B's top, B in scope: each part gains its own
+        region (A +108, B +108)."""
+        sk = studioSketch(self.doc, self.studio, "P1Sk", ((2, 2, 8, 8), (22, 2, 28, 8)), z=10)
+        p1 = makeOwner(self.doc, self.studio, "Pad", "P1", sk, ("A", "B"), Length=3)
+        self.doc.recompute()
+        self.assertIsOwner(p1)
+        self.assertAlmostEqual(self.volume("A"), 1000 + 108, places=3)
+        self.assertAlmostEqual(self.volume("B"), 1000 + 108, places=3)
+        self.assertOneSolid("A")
+        self.assertOneSolid("B")
 
     # ------------------------------------------------------------------------------- failure
     def testFailedOwnerContributesNothing(self):

@@ -35,4 +35,10 @@ PartDesignExport Part::TopoShape studioScopeBaseAt(const App::DocumentObject* ow
 /// Feature::recompute()
 PartDesignExport bool runsAsStudioOwner(const Feature* feature);
 
+/// Why owner's Add tool can't be applied whole: a solid of it (a profile region) that touches no
+/// in-scope part's shape at owner's place, which no step would take. Onshape makes it a new part
+/// (notes/onshape-facts.md H1a); until pieces become parts (P6p) the feature fails loudly. Empty
+/// when every solid touches one, or when no in-scope part has a shape yet (a New result)
+PartDesignExport std::string studioAddLeftover(const App::DocumentObject* owner);
+
 }  // namespace PartDesign
