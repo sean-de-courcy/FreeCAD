@@ -244,6 +244,60 @@ class TestStoredTextReadsBack(unittest.TestCase):
         ]
         self.assertEqual(self.problems(forms), [])
 
+    def test_generated_wider_forms(self):
+        """Functions of quantities, comparisons and conditionals, negative exponents, unit-only
+        operands, and variables named like units (rank 54: `VarSet.t`, `VarSet.mm`)."""
+        varSet = self.doc.addObject("App::VarSet", "VarSet")
+        varSet.addProperty("App::PropertyLength", "t")
+        varSet.t = 3
+        varSet.addProperty("App::PropertyLength", "mm")
+        varSet.mm = 4
+        self.doc.recompute()
+        lengths = ["3 mm", "4 in", "-3 mm", "1/2 in", "VarSet.t", "VarSet.mm"]
+        atoms = ["2", "0.5", "2 mm^2"] + lengths
+        forms = []
+        for a in atoms:
+            forms += [f"{f}({a})" for f in ("abs", "sqrt", "round", "trunc", "floor", "ceil")]
+            forms += [f"({a}) ^ {e}" for e in ("-1", "(-2)", "-0.5", "- 1")]
+            for u in ("mm", "mm^2", "mm^-1", "s", "(mm/s)"):
+                forms += [f"({a}) / {u}", f"({a}) * 1/{u}"]
+            forms += [f"1/mm * ({a})", f"2 ^ -1 * ({a})"]
+        for a, b in itertools.product(atoms, repeat=2):
+            forms += [f"{f}({a}; {b})" for f in ("min", "max", "hypot", "mod", "pow")]
+            forms += [f"-({a}) ^ 2 + ({b})", f"({a}) / -({b})", f"({a}) * -({b}) ^ 2"]
+            forms += [f"min({a}; {b}) / ({a})", f"2 / min({a}; {b})"]
+        for a, b in itertools.product(lengths, repeat=2):
+            forms += [f"({a}) {op} ({b})" for op in ("<", ">", "<=", ">=", "==", "!=")]
+            forms += [
+                f"({a}) < ({b}) ? ({a}) : ({b})",
+                f"(({a}) < ({b}) ? 1 : 2) * ({b})",
+                f"1 / (({a}) > 0 mm ? ({b}) : ({a}))",
+            ]
+        self.assertEqual(self.problems(forms), [])
+
+    def test_comparing_two_units_is_an_error(self):
+        """`3 mm > 2 mm^2` is an error, in an expression and in Python, as `<` was: it crashed
+        FreeCAD (a C++ exception through the interpreter, ops#652)."""
+        for op in ("<", ">", "<=", ">=", "==", "!="):
+            text = f"3 mm {op} 2 mm^2"
+            if op in ("==", "!="):
+                # equality of two units is an answer, not an error
+                self.assertEqual(bool(self.sheet.evalExpression(text)), op == "!=", text)
+                continue
+            with self.assertRaises(Exception, msg=text):
+                self.sheet.evalExpression(text)
+        a, b = FreeCAD.Units.Quantity("3 mm"), FreeCAD.Units.Quantity("2 mm^2")
+        for compare in (
+            lambda: a < b,
+            lambda: a > b,
+            lambda: a <= b,
+            lambda: a >= b,
+        ):
+            with self.assertRaises(ArithmeticError):
+                compare()
+        self.assertFalse(a == b)
+        self.assertTrue(a != b)
+
     def test_generated_nesting(self):
         """Two operators deep, both ways round, over a smaller set of forms."""
         atoms = ["2", "3 mm", "2 mm^2", "1/2 in", "-3 mm"]
