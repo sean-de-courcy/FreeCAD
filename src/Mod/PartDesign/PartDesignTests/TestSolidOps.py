@@ -212,6 +212,26 @@ class TestThicken(SolidOpsBase):
         self.assertEqual(t.Operation, "Subtraction")
 
 
+class TestThickenOnshapeOptions(SolidOpsBase):
+    def testDefaultIsFiveAlongTheNormal(self):
+        t = S.make_thicken(self.newPart(), [self.top()])
+        self.doc.recompute()
+        self.assertBox(t.Shape, 0, 20, 0, 20, 10, 15)
+
+    def testFlipPutsThicknessOneAgainstTheNormal(self):
+        t = S.make_thicken(self.newPart(), [self.top()], 2.0, 3.0)
+        t.Flip = True
+        self.doc.recompute()
+        self.assertBox(t.Shape, 0, 20, 0, 20, 8, 13)
+
+    def testMidplaneUsesTheTotalThickness(self):
+        t = S.make_thicken(self.newPart(), [self.top()])
+        t.Midplane = True
+        t.Thickness = 4.0
+        self.doc.recompute()
+        self.assertBox(t.Shape, 0, 20, 0, 20, 8, 12)
+
+
 class TestScale(SolidOpsBase):
     def testUniformAboutAPoint(self):
         s = S.make_scale(self.src, App.Vector(5, 5, 5), 2.0)
@@ -265,11 +285,20 @@ class TestScale(SolidOpsBase):
     # ---- loud failures
     def testZeroFactorFails(self):
         s = S.make_scale(self.src, App.Vector(), 0.0)
-        self.assertInvalid(s, "greater than zero")
+        self.assertInvalid(s, "must be between")
+
+    def testFactorRangeIsOnshapes(self):
+        for factor, ok in ((1e-6, False), (2e5, False), (1e-4, True), (1e5, True)):
+            part = self.newPart()
+            b = self.doc.addObject("PartDesign::AdditiveBox", "B3")
+            part.addObject(b)
+            sc = S.make_scale(part, None, factor)
+            self.doc.recompute()
+            self.assertEqual("Invalid" not in sc.State, ok, "%g: %s" % (factor, sc.getStatusString()))
 
     def testNegativeFactorFails(self):
         s = S.make_scale(self.src, App.Vector(), factors=(1.0, -1.0, 1.0))
-        self.assertInvalid(s, "greater than zero")
+        self.assertInvalid(s, "must be between")
 
     def testNothingToScaleFails(self):
         s = S.make_scale(self.newPart(), App.Vector(), 2.0)
@@ -300,14 +329,38 @@ class TestOffsetSurface(SolidOpsBase):
         self.doc.recompute()
         self.assertBox(f.Shape, 0, 20, 0, 20, 7, 7)
 
-    def testNegativeDistance(self):
+    def testNegativeDistanceIsRejected(self):
         o = S.make_offset_surface(self.newPart(), [self.top()], -3.0)
+        self.assertInvalid(o, "negative")
+
+    def testZeroDistanceIsACopy(self):
+        o = S.make_offset_surface(self.newPart(), [self.top()], 0.0)
         self.doc.recompute()
-        self.assertBox(o.Shape, 0, 20, 0, 20, 7, 7)
+        self.assertEqual(o.State, ["Up-to-date"])
+        self.assertBox(o.Shape, 0, 20, 0, 20, 10, 10)
+
+    def testDefaultDistanceIsFive(self):
+        o = S.make_offset_surface(self.newPart(), [self.top()])
+        self.doc.recompute()
+        self.assertBox(o.Shape, 0, 20, 0, 20, 15, 15)
+
+    def testAdjacentFacesAreOneSharpSheet(self):
+        """Onshape OS2: top + front, 2: one sheet, the faces extended to meet (20x22 + 20x12 = 680)."""
+        faces = self.box.Shape
+        front = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(faces.Faces)
+            if abs(f.CenterOfMass.y) < 1e-6 and f.Surface.__class__.__name__ == "Plane"
+        ][0]
+        o = S.make_offset_surface(self.newPart(), [(self.box, [top_face_name(faces), front])], 2.0)
+        self.doc.recompute()
+        self.assertEqual(o.State, ["Up-to-date"], o.getStatusString())
+        self.assertEqual(len(o.Shape.Faces), 2)
+        self.assertAlmostEqual(o.Shape.Area, 680.0, 3)
 
     def testCylinderOutAndIn(self):
         o = S.make_offset_surface(self.newPart(), [self.lateral()], 2.0)
-        i = S.make_offset_surface(self.newPart(), [self.lateral()], -2.0)
+        i = S.make_offset_surface(self.newPart(), [self.lateral()], 2.0, flip=True)
         self.doc.recompute()
         self.assertAlmostEqual(o.Shape.Area, 2 * math.pi * 12 * 20, 3)
         self.assertAlmostEqual(i.Shape.Area, 2 * math.pi * 8 * 20, 3)
@@ -336,23 +389,19 @@ class TestOffsetSurface(SolidOpsBase):
         self.assertEqual(part.Shape.ShapeType, "Shell")
 
     # ---- loud failures
-    def testZeroDistanceFails(self):
-        o = S.make_offset_surface(self.newPart(), [self.top()], 0.0)
-        self.assertInvalid(o, "zero")
-
     def testNoFaceFails(self):
         o = S.make_offset_surface(self.newPart(), [], 1.0)
         self.assertInvalid(o, "select a face")
 
     def testInwardBeyondTheRadiusFails(self):
-        o = S.make_offset_surface(self.newPart(), [self.lateral()], -12.0)
+        o = S.make_offset_surface(self.newPart(), [self.lateral()], 12.0, flip=True)
         self.doc.recompute()
         self.assertIn("Invalid", o.State, "a cylinder offset inward past its radius must fail")
 
 
 def suite():
     s = unittest.TestSuite()
-    for cls in (TestThicken, TestScale, TestOffsetSurface):
+    for cls in (TestThicken, TestThickenOnshapeOptions, TestScale, TestOffsetSurface):
         s.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
     return s
 
