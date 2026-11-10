@@ -3483,10 +3483,24 @@ std::set<std::string> ReferenceFieldGroup::properties() const
     return result;
 }
 
-void ReferenceFieldGroup::armFirstEmpty()
+void ReferenceFieldGroup::armFirstEmpty(const std::string& preferred)
 {
     // Once the dialog shows, after the panels' own queued focus calls
-    QTimer::singleShot(0, this, [this]() {
+    QTimer::singleShot(0, this, [this, preferred]() {
+        // FreeCAD-CH (selection parity P1): the field armed before a restart of the edit, filled
+        // or not: a multi-pick field stays armed for the next pick, as Onshape's
+        if (!preferred.empty()) {
+            for (ReferenceField* field : fields()) {
+                if (field->propertyName() == preferred && field->isEnabled()
+                    && !field->isHidden()) {
+                    field->setArmed(true);
+                    if (field->isArmed()) {
+                        field->list()->setFocus(Qt::OtherFocusReason);
+                        return;
+                    }
+                }
+            }
+        }
         for (ReferenceField* field : fields()) {
             if (field->isRequired() && field->isEnabled() && field->entries().empty()) {
                 field->setArmed(true);

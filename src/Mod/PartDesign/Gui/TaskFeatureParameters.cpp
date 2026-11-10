@@ -28,6 +28,8 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <QAbstractSpinBox>
@@ -1093,6 +1095,14 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
             history->clear();
         }
     }
+    // FreeCAD-CH (selection parity P1): the field armed now is armed again in the new dialog. A
+    // new Extrude's first region moves it to its part (profileTaken), and the field that took
+    // the pick disarmed with the old dialog, so the second region became a plain selection
+    std::string armedProperty;
+    if (ReferenceField* field = ReferenceField::armedField();
+        field && field->ownerDocument() == doc) {
+        armedProperty = field->propertyName();
+    }
     App::TransactionLocker lock(doc);
     {
         Base::FlagToggler<> restarting(restartingEdit, false);
@@ -1105,12 +1115,15 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
         e.reportException();
     }
     if (App::DocumentObject* feature = featureT.getObject()) {
+        TaskDlgFeatureParameters::armOnOpen(armedProperty);
         try {
             PartDesignGui::setEdit(feature, PartDesign::Body::findBodyOf(feature));
         }
         catch (const Base::Exception& e) {
             e.reportException();
         }
+        // Taken by the dialog's open(), or no dialog came
+        TaskDlgFeatureParameters::armOnOpen({});
     }
     // No panel came back, so no box takes the move over (PR 303 round 2)
     if (!Gui::Control().activeDialog(doc)) {
@@ -2644,6 +2657,8 @@ namespace
 {
 // The features a command made for the dialog it opens next (TaskDlgFeatureParameters::hasInput)
 std::vector<App::DocumentObjectT> createdForDialog;
+// The field the dialog opened next arms first (TaskDlgFeatureParameters::armOnOpen)
+std::string armOnOpenProperty;
 
 // A property the user gives (a value, a link, a choice): not a result, not the view's
 bool isInputProperty(const App::Property* prop)
@@ -2698,6 +2713,11 @@ void TaskDlgFeatureParameters::noteCreated(App::DocumentObject* feature)
             == createdForDialog.end()) {
         createdForDialog.emplace_back(feature);
     }
+}
+
+void TaskDlgFeatureParameters::armOnOpen(const std::string& property)
+{
+    armOnOpenProperty = property;
 }
 
 bool TaskDlgFeatureParameters::hasInput() const
@@ -2798,7 +2818,7 @@ void TaskDlgFeatureParameters::open()
             references->setCoveredProperties(fieldGroup->properties());
         });
     }
-    fieldGroup->armFirstEmpty();
+    fieldGroup->armFirstEmpty(std::exchange(armOnOpenProperty, std::string()));
     // A new feature's values as the dialog opens: what the user gives from here is its input
     if (App::DocumentObject* feature = created ? getObject() : nullptr) {
         std::vector<App::Property*> props;

@@ -311,6 +311,10 @@ public:
     Q_INVOKABLE bool hasInput() const;
     /// The command made @p feature for the dialog it opens next (hasInput).
     static void noteCreated(App::DocumentObject* feature);
+    /// FreeCAD-CH (selection parity P1): the dialog opened next arms the field of @p property
+    /// instead of the first empty one: a restart of the edit (restartEdit) keeps the field that
+    /// was armed armed, so the next pick still goes to it. Empty: none.
+    static void armOnOpen(const std::string& property);
 
     template<typename T = PartDesignGui::ViewProvider>
     T* getViewObject() const

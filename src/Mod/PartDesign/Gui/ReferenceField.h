@@ -495,8 +495,9 @@ public:
     /// One of the dialog's panels.
     bool isPanel(const QWidget* widget) const;
 
-    /// Arms the first empty required field (Q2), once the dialog shows.
-    void armFirstEmpty();
+    /// Arms the first empty required field (Q2), once the dialog shows; the field of
+    /// \a preferred instead, when one is enabled and not hidden (selection parity P1).
+    void armFirstEmpty(const std::string& preferred = {});
     void disarm();
     /// Called by a field about to arm: the others disarm.
     void fieldArming(ReferenceField* field);
