@@ -162,7 +162,7 @@ bool liveAt(const Body* body,
 
 /// ids resolved against the studio's bodies at index: each id's Body and the pieces descended
 /// from it (StudioParentId, up the chain of parts still present), in id order, without repeats
-std::vector<Body*> resolve(const std::vector<std::string>& ids,
+std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
                            const std::vector<Body*>& bodies,
                            int index,
                            const std::map<const App::DocumentObject*, int>& positions)
@@ -452,7 +452,7 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
         // An owner: a step in each part its scope resolves to at its place
         slot.isStep = true;
         const auto ids = studioScopeIds(entry);
-        const auto scope = resolve(ids, bodies, i, positions);
+        const auto scope = resolveScope(ids, bodies, i, positions);
         if (!ids.empty() && scope.empty()) {
             out.unresolved.push_back(entry);
         }
@@ -845,7 +845,7 @@ std::vector<Body*> PartDesign::studioScopeOf(const App::DocumentObject* owner)
     const auto positions = positionsOf(entries);
     auto it = positions.find(owner);
     const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
-    return resolve(studioScopeIds(owner), bodies, index, positions);
+    return resolveScope(studioScopeIds(owner), bodies, index, positions);
 }
 
 void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Body*>& parts)
