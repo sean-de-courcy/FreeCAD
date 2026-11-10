@@ -19,5 +19,7 @@ True if TestJointErrorsGui else False
 True if TestInsertStudioGui else False
 
 from AssemblyTests.TestOnshapeAssembliesGui import TestAssemblyListGui  # ops#640 round 10
+from AssemblyTests.TestAssemblyPatternsGui import TestAssemblyPatternsGui  # FreeCAD-CH (asm-patterns)
 
 True if TestAssemblyListGui else False
+True if TestAssemblyPatternsGui else False

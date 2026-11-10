@@ -72,6 +72,7 @@ class AssemblyWorkbench(Workbench):
         import CommandCreateSimulation
         import CommandCreateSnapshot
         import CommandCreateBom
+        import AssemblyPattern  # FreeCAD-CH (asm-patterns): instance patterns
         import Preferences
 
         FreeCADGui.addLanguagePath(":/translations")
@@ -90,6 +91,8 @@ class AssemblyWorkbench(Workbench):
             "Assembly_CreateSnapshot",
             "Assembly_CreateSimulation",
             "Assembly_CreateBom",
+            "Assembly_CreatePatternLinear",  # FreeCAD-CH (asm-patterns)
+            "Assembly_CreatePatternCircular",
         ]
 
         cmdListMenuOnly = [
