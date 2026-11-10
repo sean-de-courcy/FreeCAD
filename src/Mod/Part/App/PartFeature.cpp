@@ -104,6 +104,7 @@
 #include <Mod/Material/App/MaterialManager.h>
 
 #include "Geometry.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "PartFeature.h"
 #include "PartFeaturePy.h"
@@ -137,6 +138,8 @@ short Feature::mustExecute() const
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     try {
+        // One deadline for the feature's long geometry calls (FreeCAD-CH, kernel safety S1)
+        KernelBudget::Scope budget;
         auto ret = App::GeoFeature::recompute();
         if (!ret) {
             // A shape restored from another version that the recompute didn't rebuild (a plain

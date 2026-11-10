@@ -25,6 +25,7 @@
 #ifndef PART_FILLETFALLBACK_H
 #define PART_FILLETFALLBACK_H
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,11 @@
 
 #include <Mod/Part/PartGlobal.h>
 #include "TopoShape.h"
+
+namespace Part
+{
+struct ShapeMapper;
+}
 
 namespace Part::FilletFallback
 {
@@ -120,6 +126,41 @@ PartExport bool build(
     const Request& request,
     const char* op,
     std::string* reason = nullptr
+);
+
+/// What construct() makes: a shape and its history from the base, without names (kernel safety S1)
+struct PartExport Construction
+{
+    TopoDS_Shape shape;
+    std::shared_ptr<ShapeMapper> mapper;
+    int edges {0};
+    int corners {0};
+};
+
+/** build() in two steps, so that the long one can run on a worker thread (KernelBudget::run()):
+ * construct() reads only plain shapes and touches no element map or hasher; finish() names the
+ * result on the caller's thread.
+ *
+ * @param base The shape being dressed up: one solid (the makerInput() copy's shape)
+ * @param edges The selected edges of the base
+ * @param out Receives the construction when it succeeds and passes every check
+ * @param reason If not null, receives why the construction refused
+ * @return Whether it succeeded
+ */
+PartExport bool construct(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::string* reason = nullptr
+);
+
+/// Names a construction as through the fillet's own history (op), from base, into result
+PartExport void finish(
+    TopoShape& result,
+    const Construction& construction,
+    const TopoShape& base,
+    const char* op
 );
 
 /** The first face of a dress-up's result, not a face of its base, that is too thin to be one: what

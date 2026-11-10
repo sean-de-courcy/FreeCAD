@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+"""The check of each solid feature's result (FreeCAD-CH kernel safety S2, ResultCheck.h).
+
+OCCT can build an invalid solid, or a valid one of the wrong volume, without an error, and the
+next features built on it silently. Each case here was measured on fork-0.9.0 (notes
+kernel-robustness.md, probe 4): an inverted base, a revolve about an axis tangent to its profile
+(a horn torus, which OCCT's fuse with the plate leaves invalid) followed by a pocket that adds
+volume, and a whole-sketch pad of two overlapping squares (a solid of volume 0). Now the feature
+that makes the wrong result fails, and the ones after it build on its base. A set of ordinary
+features must not be flagged. Designed geometry; expected volumes are closed forms.
+"""
+
+import math
+import unittest
+
+import FreeCAD
+import Part
+
+V = FreeCAD.Vector
+PARAMS = "User parameter:BaseApp/Preferences/Mod/PartDesign"
+
+
+def disk(x, y, r, z):
+    return Part.Face(Part.Wire(Part.makeCircle(r, V(x, y, z))))
+
+
+def rect(x0, y0, x1, y1, z):
+    return Part.Face(
+        Part.makePolygon([V(x0, y0, z), V(x1, y0, z), V(x1, y1, z), V(x0, y1, z), V(x0, y0, z)])
+    )
+
+
+def mid(edge):
+    return edge.valueAt(0.5 * (edge.FirstParameter + edge.LastParameter))
+
+
+class TestResultCheck(unittest.TestCase):
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("ResultCheck")
+        self.params = FreeCAD.ParamGet(PARAMS)
+
+    def tearDown(self):
+        self.params.RemBool("CheckResults")
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def body(self, base_shape=None):
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        if base_shape is not None:
+            base = self.doc.addObject("Part::Feature", "Base")
+            base.Shape = base_shape
+            body.BaseFeature = base
+        return body
+
+    def profile(self, shape, name="Profile"):
+        prof = self.doc.addObject("Part::Feature", name)
+        prof.Shape = shape
+        return prof
+
+    def pocket(self, body, face, name="Pocket"):
+        p = body.newObject("PartDesign::Pocket", name)
+        p.Profile = (self.profile(face, name + "Profile"), ["Face1"])
+        p.Type = "ThroughAll"
+        return p
+
+    def pad(self, body, face, length, name="Pad"):
+        p = body.newObject("PartDesign::Pad", name)
+        p.Profile = (self.profile(face, name + "Profile"), ["Face1"])
+        p.Length = length
+        return p
+
+    def assertBuilt(self, feature):
+        self.assertTrue(feature.isValid(), "%s: %s" % (feature.Name, feature.getStatusString()))
+        self.assertNotIn("Touched", feature.State, feature.Name)
+        self.assertFalse(feature.Shape.isNull(), feature.Name)
+
+    def origin(self, body, role):
+        return [o for o in body.Origin.OriginFeatures if o.Role == role][0]
+
+    def testInvertedBaseFailsItsFirstFeature(self):
+        body = self.body(Part.makeBox(40, 30, 10).reversed())
+        pocket = self.pocket(body, disk(20, 15, 4, 10))
+        self.doc.recompute()
+        self.assertFalse(pocket.isValid())
+        self.assertIn("turned inside out", pocket.getStatusString())
+
+    def testHornTorusRevolveFailsAndThePocketAfterItBuildsOnTheBase(self):
+        body = self.body(Part.makeBox(40, 40, 4))
+        circle = Part.Circle(V(23, 20, 4), V(0, 1, 0), 3)
+        prof = self.profile(Part.Face(Part.Wire(circle.toShape())), "RevProfile")
+        axis = self.doc.addObject("Part::Feature", "Axis")
+        axis.Shape = Part.makeLine(V(20, 20, -5), V(20, 20, 15))
+        rev = body.newObject("PartDesign::Revolution", "Revolution")
+        rev.Profile = (prof, ["Face1"])
+        rev.ReferenceAxis = (axis, ["Edge1"])
+        rev.Angle = 360
+        pocket = self.pocket(body, disk(20, 20, 1.0, 10), "PocketAxis")
+        self.doc.recompute()
+        self.assertFalse(rev.isValid())
+        self.assertIn("invalid shape", rev.getStatusString())
+        # Fork-0.9.0: the pocket was "Valid" with volume 6920.4, more than the 6708.9 before it
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(pocket.Shape.Volume, 6400 - math.pi * 4, places=6)
+        self.assertTrue(pocket.Shape.isValid())
+
+    def testOverlappingSquaresPadOfNoVolumeFails(self):
+        body = self.body()
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        for x0, y0, x1, y1 in ((0, 0, 10, 10), (5, 5, 15, 15)):
+            pts = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+            for a, b in zip(pts, pts[1:] + pts[:1]):
+                sketch.addGeometry(Part.LineSegment(a, b))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 2
+        self.doc.recompute()
+        if pad.isValid():
+            # A face maker that reads the squares right gives 2 x 175 (Onshape's all regions)
+            self.assertAlmostEqual(pad.Shape.Volume, 350, places=6)
+        else:
+            self.assertIn("no volume", pad.getStatusString())
+
+    def testTheCheckCanBeTurnedOff(self):
+        self.params.SetBool("CheckResults", False)
+        body = self.body(Part.makeBox(40, 30, 10).reversed())
+        pocket = self.pocket(body, disk(20, 15, 4, 10))
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid())
+
+    def testOrdinaryFeaturesPass(self):
+        body = self.body(Part.makeBox(100, 60, 10))
+        feats = []
+        feats.append(self.pocket(body, disk(10, 10, 3, 10), "Hole1"))
+        feats.append(self.pad(body, disk(30, 30, 5, 10), 6, "Boss"))
+        miss = self.pocket(body, disk(300, 300, 3, 10), "Miss")
+        feats.append(miss)
+        feats.append(self.pocket(body, rect(48, -1, 52, 61, 10), "Slot"))  # splits it in two
+        feats.append(self.pad(body, rect(70, 20, 90, 40, 10), 3, "Block"))
+        lp = self.doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        lp.Originals = [feats[0]]
+        lp.Direction = (self.origin(body, "Y_Axis"), [""])
+        lp.Length = 30
+        lp.Occurrences = 3
+        body.addObject(lp)
+        feats.append(lp)
+        mirror = self.doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirror.Originals = [feats[0]]
+        mirror.MirrorPlane = (self.origin(body, "XZ_Plane"), [""])
+        body.addObject(mirror)
+        feats.append(mirror)
+        polar = self.doc.addObject("PartDesign::PolarPattern", "PolarPattern")
+        polar.Originals = [feats[1]]
+        polar.Axis = (self.origin(body, "Z_Axis"), [""])
+        polar.Angle = 20
+        polar.Occurrences = 2
+        body.addObject(polar)
+        feats.append(polar)
+        self.doc.recompute()
+        for f in feats:
+            self.assertBuilt(f)
+        # Dress-ups on the block's top edges, then a revolve and a groove
+        prev = feats[-1]
+        top = [
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(prev.Shape.Edges)
+            if abs(mid(e).z - 13) < 1e-6
+            and 70 - 1e-6 < mid(e).x < 90 + 1e-6
+            and 20 - 1e-6 < mid(e).y < 40 + 1e-6
+        ]
+        self.assertEqual(len(top), 4)
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (prev, top[:2])
+        fillet.Radius = 1
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (prev, top[2:])
+        chamfer.Size = 0.5
+        self.doc.recompute()
+        self.assertBuilt(fillet)
+        self.assertBuilt(chamfer)
+        axis = self.doc.addObject("Part::Feature", "RevAxis")
+        axis.Shape = Part.makeLine(V(20, 50, 0), V(20, 50, 30))
+        ring = body.newObject("PartDesign::Revolution", "Ring")
+        ring_face = Part.Face(
+            Part.makePolygon([V(24, 50, 10), V(26, 50, 10), V(26, 50, 12), V(24, 50, 12), V(24, 50, 10)])
+        )
+        ring.Profile = (self.profile(ring_face, "RingProfile"), ["Face1"])
+        ring.ReferenceAxis = (axis, ["Edge1"])
+        ring.Angle = 360
+        groove = body.newObject("PartDesign::Groove", "Groove")
+        groove_face = Part.Face(
+            Part.makePolygon([V(21, 50, 9), V(22, 50, 9), V(22, 50, 11), V(21, 50, 11), V(21, 50, 9)])
+        )
+        groove.Profile = (self.profile(groove_face, "GrooveProfile"), ["Face1"])
+        groove.ReferenceAxis = (axis, ["Edge1"])
+        groove.Angle = 360
+        box = body.newObject("PartDesign::AdditiveBox", "AddBox")
+        box.Length, box.Width, box.Height = 5, 5, 5
+        box.AttachmentOffset = FreeCAD.Placement(V(0, 50, 10), FreeCAD.Rotation())
+        cyl = body.newObject("PartDesign::SubtractiveCylinder", "SubCyl")
+        cyl.Radius, cyl.Height = 1, 30
+        cyl.AttachmentOffset = FreeCAD.Placement(V(2.5, 52.5, -5), FreeCAD.Rotation())
+        self.doc.recompute()
+        for f in (ring, groove, box, cyl):
+            self.assertBuilt(f)
+        self.assertTrue(body.Shape.isValid())
+
+    def testAPadInsideTheBodyAndARefinedChainPass(self):
+        body = self.body(Part.makeBox(40, 40, 10))
+        inner = self.pad(body, disk(20, 20, 3, 2), 3, "Inside")  # wholly inside: no change
+        feats = [inner]
+        for k in range(6):
+            p = self.pocket(body, disk(6 + 6 * k, 6, 1.5, 10), "P%d" % k)
+            p.Refine = k % 2 == 0
+            feats.append(p)
+        self.doc.recompute()
+        for f in feats:
+            self.assertBuilt(f)
+        self.assertAlmostEqual(feats[-1].Shape.Volume, 16000 - 6 * math.pi * 2.25 * 10, places=6)
+
+
+if __name__ == "__main__":
+    unittest.main()

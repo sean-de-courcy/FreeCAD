@@ -58,6 +58,7 @@ from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
 from parttests.SweepFrenetTest import SweepFrenetTest, SweepApproximationTest
 from parttests.BooleanLocationsTest import BooleanLocationsTest
 from parttests.BooleanLostToolTest import BooleanLostToolTest
+from parttests.KernelBudgetTest import KernelBudgetTest  # FreeCAD-CH kernel safety S1
 from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
 

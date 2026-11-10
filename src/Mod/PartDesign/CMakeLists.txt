@@ -101,6 +101,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestRegenerate.py
     PartDesignTests/TestOnshapeEndTypes.py
     PartDesignTests/TestDerived.py
+    PartDesignTests/TestResultCheck.py
 )
 
 if(BUILD_GUI)

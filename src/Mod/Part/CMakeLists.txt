@@ -91,6 +91,7 @@ set(Part_tests
     parttests/TopoShapeTest.py
     parttests/ElementReferenceTest.py
     parttests/FilletFallbackTest.py
+    parttests/KernelBudgetTest.py
     parttests/ReferenceFingerprintTest.py
     parttests/InternNamesTest.py
     parttests/ForkReleaseTest.py

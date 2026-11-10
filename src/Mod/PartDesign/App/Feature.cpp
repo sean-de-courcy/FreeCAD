@@ -25,8 +25,15 @@
 
 #include <BRep_Tool.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Shell.hxx>
 #include <BRepCheck_Solid.hxx>
 #include <BRepCheck_Status.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Compound.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -41,7 +48,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
+#include <memory>
 #include <mutex>
+#include <sstream>
+#include <unordered_map>
 #include <set>
 #include <unordered_set>
 #include <vector>
@@ -56,13 +67,20 @@
 #include <App/RecomputeThread.h>
 #include <Base/Console.h>
 
+#include <Mod/Part/App/KernelBudget.h>
+
 #include "Feature.h"
 #include "FailureContinuation.h"
 #include "FeaturePy.h"
 #include "Body.h"
 #include "FeatureBoolean.h"
+#include "FeatureChamfer.h"
 #include "FeatureDeletePart.h"
+#include "FeatureDressUp.h"
 #include "FeatureExtrude.h"
+#include "FeatureFillet.h"
+#include "FeatureTransformed.h"
+#include "ResultCheck.h"
 #include "ShapeBinder.h"
 
 #include <BRep_Builder.hxx>
@@ -243,6 +261,325 @@ bool Feature::placerElsewhereThan(const Body* body, const char** property, std::
     return false;
 }
 
+// ---------------------------------------------------------------------------------------------
+// FreeCAD-CH kernel safety S2: the check of a solid feature's result (ResultCheck.h)
+
+namespace
+{
+/// What a feature's last refine in its execute started from and gave
+struct RefineNote
+{
+    TopoDS_Shape before;
+    TopoDS_Shape after;
+};
+thread_local std::unordered_map<const Feature*, RefineNote> refineNotes;
+
+/// The volumes of the last results that passed, newest last: the next feature's base is one
+struct KnownVolume
+{
+    TopoDS_Shape shape;
+    double volume;
+};
+std::mutex knownVolumesMutex;
+std::deque<KnownVolume> knownVolumes;
+constexpr std::size_t knownVolumesKept = 16;
+
+bool knownVolume(const TopoDS_Shape& shape, double& volume)
+{
+    std::lock_guard<std::mutex> lock(knownVolumesMutex);
+    for (auto it = knownVolumes.rbegin(); it != knownVolumes.rend(); ++it) {
+        if (it->shape.IsEqual(shape)) {
+            volume = it->volume;
+            return true;
+        }
+    }
+    return false;
+}
+
+void rememberVolume(const TopoDS_Shape& shape, double volume)
+{
+    std::lock_guard<std::mutex> lock(knownVolumesMutex);
+    knownVolumes.push_back({shape, volume});
+    while (knownVolumes.size() > knownVolumesKept) {
+        knownVolumes.pop_front();
+    }
+}
+
+double volumeOf(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
+enum class Direction
+{
+    None,
+    Grows,
+    Shrinks
+};
+
+/// What the operation does to the volume, where it says
+Direction directionOf(Feature& feature)
+{
+    if (feature.isDerivedFrom<DressUp>()) {
+        // a fillet adds or removes, as its edges are concave or convex; so does a draft
+        return Direction::None;
+    }
+    if (auto addSub = freecad_cast<FeatureAddSub*>(&feature)) {
+        switch (addSub->getBooleanOperation()) {
+            case FeatureAddSub::BooleanOperation::Union:
+                return Direction::Grows;
+            default:
+                return Direction::Shrinks;
+        }
+    }
+    if (auto boolean = freecad_cast<Boolean*>(&feature)) {
+        return strcmp(boolean->Type.getValueAsString(), "Fuse") == 0 ? Direction::Grows
+                                                                      : Direction::Shrinks;
+    }
+    if (auto transformed = freecad_cast<Transformed*>(&feature)) {
+        const auto originals = transformed->getOriginals();
+        if (originals.empty()) {
+            return Direction::Grows;  // the whole shape's copies are fused
+        }
+        bool adds = false;
+        bool removes = false;
+        for (auto original : originals) {
+            auto addSub = freecad_cast<FeatureAddSub*>(original);
+            if (!addSub || addSub->isDerivedFrom<DressUp>()) {
+                return Direction::None;
+            }
+            (addSub->getAddSubType() == FeatureAddSub::Type::Additive ? adds : removes) = true;
+        }
+        if (adds != removes) {
+            return adds ? Direction::Grows : Direction::Shrinks;
+        }
+    }
+    return Direction::None;
+}
+
+/// The check's work: plain shapes only, so that it runs under KernelBudget::run()
+struct Check
+{
+    // Inputs
+    TopoDS_Shape base;    // null for a first feature
+    TopoDS_Shape result;  // before a refine, where the refine's input is known
+    bool baseVolumeKnown {false};
+    bool checkFaces {true};
+    bool allFaces {false};
+    // Inputs and outputs
+    double baseVolume {0.0};
+    // Outputs
+    double baseSmallestSolid {0.0};
+    bool baseHasSolid {false};
+    double change {0.0};
+    double smallestSolid {0.0};
+    bool hasChangedSolid {false};
+    int facesChecked {0};
+    int facesInvalid {0};
+    std::string shellProblem;
+
+    void run()
+    {
+        TopTools_IndexedMapOfShape baseFaces;
+        TopTools_IndexedMapOfShape resultFaces;
+        if (!base.IsNull()) {
+            TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+        }
+        TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+
+        // The volume's change, over the faces that differ: each face's part of the divergence
+        // integral, about one origin (the compounds' own)
+        BRep_Builder builder;
+        TopoDS_Compound made;
+        TopoDS_Compound gone;
+        builder.MakeCompound(made);
+        builder.MakeCompound(gone);
+        TopTools_IndexedMapOfShape changed;
+        for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
+            if (!baseFaces.Contains(it.Current())) {
+                builder.Add(made, it.Current());
+                changed.Add(it.Current());
+            }
+        }
+        for (TopExp_Explorer it(base, TopAbs_FACE); !base.IsNull() && it.More(); it.Next()) {
+            if (!resultFaces.Contains(it.Current())) {
+                builder.Add(gone, it.Current());
+            }
+        }
+        change = volumeOf(made) - volumeOf(gone);
+
+        if (!baseVolumeKnown && !base.IsNull()) {
+            baseVolume = 0.0;
+            for (TopExp_Explorer it(base, TopAbs_SOLID); it.More(); it.Next()) {
+                const double volume = volumeOf(it.Current());
+                baseSmallestSolid = baseHasSolid ? std::min(baseSmallestSolid, volume) : volume;
+                baseHasSolid = true;
+                baseVolume += volume;
+            }
+        }
+
+        // The solids it changed
+        int solids = 0;
+        for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
+            ++solids;
+        }
+        for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
+            bool touched = false;
+            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
+                 face.Next()) {
+                touched = changed.Contains(face.Current());
+            }
+            if (!touched) {
+                continue;
+            }
+            // One solid: the base's volume and the change give it
+            const double volume = solids == 1 ? baseVolume + change : volumeOf(it.Current());
+            smallestSolid = hasChangedSolid ? std::min(smallestSolid, volume) : volume;
+            hasChangedSolid = true;
+        }
+
+        if (!checkFaces) {
+            return;
+        }
+        TopTools_IndexedMapOfShape shells;
+        for (int i = 1; i <= resultFaces.Extent(); ++i) {
+            const TopoDS_Shape& face = resultFaces(i);
+            if (!allFaces && !changed.Contains(face)) {
+                continue;
+            }
+            ++facesChecked;
+            if (!BRepCheck_Analyzer(face).IsValid()) {
+                ++facesInvalid;
+            }
+        }
+        for (TopExp_Explorer it(result, TopAbs_SHELL); it.More(); it.Next()) {
+            bool touched = allFaces;
+            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !touched;
+                 face.Next()) {
+                touched = changed.Contains(face.Current());
+            }
+            if (!touched) {
+                continue;
+            }
+            BRepCheck_Shell shell(TopoDS::Shell(it.Current()));
+            if (shell.Closed() != BRepCheck_NoError) {
+                shellProblem = "a shell is open";
+                return;
+            }
+            if (shell.Orientation() != BRepCheck_NoError) {
+                shellProblem = "a shell's faces are not oriented consistently";
+                return;
+            }
+        }
+    }
+};
+
+bool checkingResults()
+{
+    return App::GetApplication()
+        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        ->GetBool("CheckResults", true);
+}
+
+std::string number(double value)
+{
+    std::ostringstream text;
+    text.precision(8);
+    text << value;
+    return text.str();
+}
+
+const char* notBuilt = ": the feature is not built";
+
+/// Empty when the result passes, else what is wrong
+std::string checkResult(Feature& feature, bool inputsValid)
+{
+    TopoDS_Shape result = feature.Shape.getShape().getShape();
+    if (result.IsNull() || TopExp_Explorer(result, TopAbs_SOLID).More() == Standard_False) {
+        return {};
+    }
+    TopoDS_Shape base = feature.getBaseTopoShape(true).getShape();
+
+    auto check = std::make_shared<Check>();
+    check->base = base;
+    check->result = result;
+    if (auto note = refineNotes.find(&feature); note != refineNotes.end()) {
+        // The refine rebuilds faces it doesn't merge: the shape it started from has the base's
+        const RefineNote& refine = note->second;
+        if (!refine.before.IsNull() && refine.after.TShape() == result.TShape()) {
+            check->result = refine.before.Moved(
+                result.Location() * refine.after.Location().Inverted()
+            );
+        }
+        refineNotes.erase(note);
+    }
+    check->baseVolumeKnown = base.IsNull() || knownVolume(base, check->baseVolume);
+    const bool roundsOrChamfers = feature.isDerivedFrom<Fillet>() || feature.isDerivedFrom<Chamfer>();
+    // A fillet's and a chamfer's whole result is checked where they are built
+    check->checkFaces = !roundsOrChamfers;
+    check->allFaces = !inputsValid && !base.IsNull();
+    Part::KernelBudget::run("The check of the result", [check](const Message_ProgressRange&) {
+        check->run();
+    });
+
+    const double before = check->baseVolume;
+    const double after = check->baseVolume + check->change;
+    if (check->baseHasSolid && check->baseSmallestSolid <= 0) {
+        std::string baseName = "its base";
+        if (auto object = feature.getBaseObject(true)) {
+            baseName = std::string("its base (") + object->Label.getValue() + ")";
+        }
+        return "The part this feature starts from, " + baseName
+            + ", is a solid turned inside out (volume " + number(check->baseSmallestSolid) + ")"
+            + notBuilt;
+    }
+    const double scale = std::max({1.0, std::abs(before), std::abs(after)});
+    if (check->hasChangedSolid && check->smallestSolid <= 1e-9 * scale) {
+        return "The geometry kernel built a solid with no volume or turned inside out (volume "
+            + number(check->smallestSolid) + ")" + notBuilt;
+    }
+    const double tolerance = 1e-5 * scale;
+    if (!base.IsNull()) {
+        switch (directionOf(feature)) {
+            case Direction::Grows:
+                if (check->change < -tolerance) {
+                    return "The geometry kernel's result is wrong: adding material made the part "
+                           "smaller (volume "
+                        + number(before) + " to " + number(after) + ")" + notBuilt;
+                }
+                break;
+            case Direction::Shrinks:
+                if (check->change > tolerance) {
+                    return "The geometry kernel's result is wrong: removing material made the part "
+                           "larger (volume "
+                        + number(before) + " to " + number(after) + ")" + notBuilt;
+                }
+                break;
+            case Direction::None:
+                break;
+        }
+    }
+    if (check->facesInvalid > 0) {
+        return "The geometry kernel built an invalid shape: " + std::to_string(check->facesInvalid)
+            + " of the " + std::to_string(check->facesChecked)
+            + (check->allFaces ? " faces" : " faces it made or changed") + " fail the shape check"
+            + notBuilt;
+    }
+    if (!check->shellProblem.empty()) {
+        return "The geometry kernel built an invalid shape: " + check->shellProblem + notBuilt;
+    }
+    rememberVolume(result, after);
+    return {};
+}
+}  // namespace
+
+void ResultCheck::noteRefine(const Feature* feature, const TopoDS_Shape& before, const TopoDS_Shape& after)
+{
+    refineNotes[feature] = {before, after};
+}
+
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     failedElsewhere = false;
@@ -316,7 +653,26 @@ App::DocumentObjectExecReturn* Feature::recompute()
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
+    refineNotes.erase(this);
     auto ret = Part::Feature::recompute();
+    // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature
+    if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
+        && checkingResults()) {
+        std::string why;
+        try {
+            why = checkResult(*this, booleanInputsValid);
+        }
+        catch (const Base::Exception& e) {
+            why = e.what();
+        }
+        catch (const Standard_Failure& e) {
+            why = std::string("The check of the result failed: ") + e.GetMessageString();
+        }
+        if (!why.empty()) {
+            ret = new App::DocumentObjectExecReturn(why, this);
+        }
+    }
+    refineNotes.erase(this);
     if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {
         vouchedShape = Shape.getShape().getShape();
     }
