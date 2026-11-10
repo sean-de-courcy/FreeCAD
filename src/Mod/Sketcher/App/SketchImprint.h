@@ -28,6 +28,9 @@ constexpr int ImprintInternalFaceVersion = 3;
 /// sketch's regions, nor does a face under a sketch on a plane (Onshape, notes/onshape-facts.md R4).
 SketcherExport Part::TopoShape imprintEdges(const SketchObject& sketch);
 
+/// Whether imprintEdges() has an edge, without copying any
+SketcherExport bool hasImprint(const SketchObject& sketch);
+
 /// The faces of an arrangement of a sketch's curves and its imprint edges that lie in the
 /// regions of the sketch's curves alone: model edges split the sketch's regions and never make one
 /// of their own (Onshape, R4 and R5). sketchEdges: the sketch's own wires, in the arrangement's

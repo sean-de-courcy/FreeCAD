@@ -46,12 +46,6 @@ public:
     /// is kept
     Part::TopoShape faces() const;
 
-    /// The number of regions kept
-    std::size_t count() const
-    {
-        return keptCount;
-    }
-
 private:
     Part::TopoShape wires;
     bool simple = false;
@@ -73,6 +67,15 @@ PartDesignExport bool picksRegions(const std::vector<std::string>& subs);
 
 /// The wires of faces, face by face (a section made of regions)
 PartDesignExport Part::TopoShape wiresOfFaces(const Part::TopoShape& faces);
+
+/// A section's loops in the order a loft pairs them: the outer loops first, then the holes (a
+/// loop inside an odd number of the others), each in its own order. Sections whose loops come
+/// from regions (outer wire first) and from the sketch's own order (any order) then pair outer to
+/// outer and hole to hole. holes: the number of holes.
+PartDesignExport std::vector<Part::TopoShape> outerLoopsFirst(
+    const std::vector<Part::TopoShape>& wires,
+    std::size_t* holes = nullptr
+);
 
 /// The message of a section (loft, multi-section pipe) whose whole sketch gives more than one
 /// region (or holes) in another order than its own

@@ -304,7 +304,10 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                 std::vector<TopoShape> shapes;
                 // In a reference solver document the elements that are gone are skipped: the
                 // feature computes on the rest, with a warning from the recompute check (ops#127).
-                const bool partial = Profile.isPartialAllowed() && Profile.inSolverDocument();
+                // Only for the feature's own Profile: another link's lost picks (a pipe's
+                // sections) must not be skipped by this property's rule (review r1, T4)
+                const bool partial
+                    = !profile && Profile.isPartialAllowed() && Profile.inSolverDocument();
                 for (auto& sub : subs) {
                     if (partial && Data::hasMissingElement(sub.c_str())) {
                         continue;
@@ -396,10 +399,7 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                         shape = faces;
                         regions = true;
                     }
-                    if (regions) {
-                        // the faces are made
-                    }
-                    else if (!allowOpen) {
+                    if (!regions && !allowOpen) {
                         // The faces come from the closed loops; open curves are ignored, as
                         // in Onshape (ops#631)
                         shape = withoutOpenCurves(shape);
@@ -411,7 +411,7 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                             );
                         }
                     }
-                    else {
+                    else if (!regions) {
                         std::vector<TopoShape> openwires;
                         std::vector<TopoShape> wires;
                         for (auto& wire : shape.getSubTopoShapes(TopAbs_WIRE)) {

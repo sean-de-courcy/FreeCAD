@@ -5,10 +5,13 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
-#include <set>
 
 #include <BRep_Builder.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
+#include <Precision.hxx>
 #include <BRepTools.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
@@ -275,7 +278,7 @@ const Sketcher::SketchObject* sketchOf(const App::DocumentObject* profile)
 bool ownRegions(const Sketcher::SketchObject* sketch)
 {
     return sketch && sketch->MakeInternals.getValue() && sketch->_InternalFaceVersion.getValue() >= 2
-        && Sketcher::imprintEdges(*sketch).isNull();
+        && !Sketcher::hasImprint(*sketch);
 }
 
 }  // namespace
@@ -378,6 +381,55 @@ TopoShape wiresOfFaces(const TopoShape& faces)
         return {};
     }
     return prototype(faces).makeElementCompound(wires);
+}
+
+std::vector<TopoShape> outerLoopsFirst(const std::vector<TopoShape>& wires, std::size_t* holes)
+{
+    const std::size_t n = wires.size();
+    std::vector<bool> hole(n, false);
+    if (n > 1) {
+        std::vector<TopoDS_Face> faces(n);
+        for (std::size_t j = 0; j < n; ++j) {
+            BRepBuilderAPI_MakeFace mk(TopoDS::Wire(wires[j].getShape()), /*OnlyPlane*/ true);
+            if (mk.IsDone()) {
+                faces[j] = mk.Face();
+            }
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            TopExp_Explorer x(wires[i].getShape(), TopAbs_EDGE);
+            if (!x.More()) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(TopoDS::Edge(x.Current()));
+            const gp_Pnt middle
+                = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
+            int around = 0;
+            for (std::size_t j = 0; j < n; ++j) {
+                if (j == i || faces[j].IsNull()) {
+                    continue;
+                }
+                BRepClass_FaceClassifier inside(faces[j], middle, Precision::Confusion());
+                around += inside.State() == TopAbs_IN ? 1 : 0;
+            }
+            hole[i] = around % 2 == 1;
+        }
+    }
+    std::vector<TopoShape> ordered;
+    ordered.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!hole[i]) {
+            ordered.push_back(wires[i]);
+        }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        if (hole[i]) {
+            ordered.push_back(wires[i]);
+        }
+    }
+    if (holes) {
+        *holes = static_cast<std::size_t>(std::ranges::count(hole, true));
+    }
+    return ordered;
 }
 
 TopoShape mergeAdjacentRegions(

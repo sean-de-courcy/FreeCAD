@@ -338,6 +338,47 @@ class TestProfileRegions(unittest.TestCase):
         self.Doc.recompute()
         self.assertVolume(loft, 3000, solids=1)
 
+    def ringSketch(self, body, name, z, circleFirst, strayLine=False):
+        """A 20 x 20 square with a concentric circle of r 4, at height z."""
+        _, sk = self.sketch(body, name)
+        sk.AttachmentOffset = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+        if circleFirst:
+            sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        rect(sk, 0, 0, 20, 20)
+        if not circleFirst:
+            sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 4), False)
+        if strayLine:
+            sk.addGeometry(Part.LineSegment(V(20, 20, 0), V(25, 25, 0)), False)
+        self.Doc.recompute()
+        return sk
+
+    def testLoftPickedRingPairsWithAnotherDrawingOrder(self):
+        """Review r1 (LoftPickedRingRedrawn): a loft from a picked ring region (square drawn
+        first) to a whole ring sketch drawn circle first: outer to outer, hole to hole, the square
+        tube 8000 - 320 pi (before the fix: a valid loft of volume 0)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        bottom = self.ringSketch(body, "Bottom", 0, circleFirst=False)
+        top = self.ringSketch(body, "Top", 20, circleFirst=True)
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = (bottom, [regionName(bottom, 400 - 16 * math.pi)])
+        loft.Sections = [top]
+        self.Doc.recompute()
+        self.assertVolume(loft, 8000 - 320 * math.pi, solids=1)
+
+    def testLoftRuleRingSectionPairsWithAPlainRing(self):
+        """Review r1 (T2): a ring sketch drawn circle first with a solid line from the square's
+        corner (the rule makes its region, outer wire first) lofted to a plain ring drawn circle
+        first: the square tube, either way round."""
+        for strayBelow in (True, False):
+            body = self.Doc.addObject("PartDesign::Body", "Body")
+            bottom = self.ringSketch(body, "Bottom", 0, circleFirst=True, strayLine=strayBelow)
+            top = self.ringSketch(body, "Top", 20, circleFirst=True, strayLine=not strayBelow)
+            loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+            loft.Profile = bottom
+            loft.Sections = [top]
+            self.Doc.recompute()
+            self.assertVolume(loft, 8000 - 320 * math.pi, solids=1)
+
     # -- picked regions --------------------------------------------------------------------
 
     def testOneRegion(self):

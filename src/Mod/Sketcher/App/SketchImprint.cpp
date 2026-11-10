@@ -2,6 +2,8 @@
 
 // Onshape's imprint for a sketch's regions (FreeCAD-CH, feat/profile-regions): see SketchImprint.h
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -77,9 +79,14 @@ bool imprints(const App::DocumentObject* obj)
 
 }  // namespace
 
-Part::TopoShape Sketcher::imprintEdges(const SketchObject& sketch)
+namespace
 {
-    if (sketch._InternalFaceVersion.getValue() < ImprintInternalFaceVersion
+
+/// The imprint edges (imprintEdges()); firstOnly: stop at the first one, without copying it
+std::vector<Part::TopoShape> collectImprint(const Sketcher::SketchObject& sketch, bool firstOnly)
+{
+    using Sketcher::SketchObject;
+    if (sketch._InternalFaceVersion.getValue() < Sketcher::ImprintInternalFaceVersion
         || !sketch.MakeInternals.getValue()) {
         return {};
     }
@@ -112,6 +119,10 @@ Part::TopoShape Sketcher::imprintEdges(const SketchObject& sketch)
                     if (!liesInPlane(TopoDS::Edge(edge.getShape()), trsf)) {
                         continue;  // a face not in the sketch's plane (an offset sketch)
                     }
+                    if (firstOnly) {
+                        edges.push_back(edge);
+                        return edges;
+                    }
                     // A copy: the regions' face maker adds curves to its edges, which must not
                     // touch the model's (ops#316)
                     edges.push_back(Part::TopoShape(edge.Tag, edge.Hasher, edge.getHistoryAlgorithm())
@@ -134,10 +145,23 @@ Part::TopoShape Sketcher::imprintEdges(const SketchObject& sketch)
                                          << e.GetMessageString());
         }
     }
+    return edges;
+}
+
+}  // namespace
+
+Part::TopoShape Sketcher::imprintEdges(const SketchObject& sketch)
+{
+    auto edges = collectImprint(sketch, false);
     if (edges.empty()) {
         return {};
     }
     return sketch.makeTopoShape().makeElementCompound(edges);
+}
+
+bool Sketcher::hasImprint(const SketchObject& sketch)
+{
+    return !collectImprint(sketch, true).empty();
 }
 
 Part::TopoShape Sketcher::withinSketchRegions(
@@ -168,34 +192,63 @@ Part::TopoShape Sketcher::withinSketchRegions(
     for (const auto& edge : own) {
         ownMap.Add(edge);
     }
+    // A piece of a sketch edge the face maker split keeps the edge's curve (BOPAlgo trims it): exact.
+    // Else (a model edge over a sketch edge, a common block's representative), the piece lies on a
+    // sketch edge at its middle and both quarter points: a model curve only tangent to a sketch
+    // edge meets it at one point (review r1, T3)
+    std::vector<Handle(Geom_Curve)> ownCurves;
+    for (const auto& edge : own) {
+        TopLoc_Location location;
+        double first {}, last {};
+        ownCurves.push_back(BRep_Tool::Curve(edge, location, first, last));
+    }
     auto isSketchEdge = [&](const TopoDS_Edge& edge) {
         if (ownMap.Contains(edge)) {
             return true;
         }
+        {
+            TopLoc_Location location;
+            double first {}, last {};
+            Handle(Geom_Curve) c = BRep_Tool::Curve(edge, location, first, last);
+            if (!c.IsNull() && std::ranges::find(ownCurves, c) != ownCurves.end()) {
+                return true;
+            }
+        }
         BRepAdaptor_Curve curve(edge);
-        const gp_Pnt middle = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
+        const double f = curve.FirstParameter();
+        const double l = curve.LastParameter();
+        const std::array<gp_Pnt, 3> points {
+            curve.Value(0.5 * (f + l)),
+            curve.Value(0.75 * f + 0.25 * l),
+            curve.Value(0.25 * f + 0.75 * l)
+        };
+        auto onSketchEdge = [&](std::size_t k, const gp_Pnt& point) {
+            double first {}, last {};
+            Handle(Geom_Curve) c = BRep_Tool::Curve(own[k], first, last);
+            if (c.IsNull()) {
+                return false;
+            }
+            gp_Pnt projected;
+            double param {};
+            return ShapeAnalysis_Curve().Project(
+                       c,  // with the edge's location (BRep_Tool::Curve)
+                       point,
+                       Precision::Confusion(),
+                       projected,
+                       param,
+                       first,
+                       last,
+                       false
+                   )
+                <= 10 * Precision::Confusion();
+        };
+        const gp_Pnt& middle = points[0];
         for (std::size_t k = 0; k < own.size(); ++k) {
             if (ownBoxes[k].IsOut(middle)) {
                 continue;
             }
-            double first {}, last {};
-            Handle(Geom_Curve) c = BRep_Tool::Curve(own[k], first, last);
-            if (c.IsNull()) {
-                continue;
-            }
-            gp_Pnt projected;
-            double param {};
-            const double d = ShapeAnalysis_Curve().Project(
-                c,  // with the edge's location (BRep_Tool::Curve)
-                middle,
-                Precision::Confusion(),
-                projected,
-                param,
-                first,
-                last,
-                false
-            );
-            if (d <= 10 * Precision::Confusion()) {
+            if (onSketchEdge(k, points[0]) && onSketchEdge(k, points[1])
+                && onSketchEdge(k, points[2])) {
                 return true;
             }
         }
