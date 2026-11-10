@@ -38,6 +38,7 @@
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
 #include "FeatureLoft.h"
+#include "ProfileRegions.h"
 using namespace PartDesign;
 
 PROPERTY_SOURCE(PartDesign::Loft, PartDesign::ProfileBased)
@@ -136,9 +137,48 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
                         );
     // A whole sketch gives its closed loops; open curves are ignored, as in Onshape (ops#631).
     // With no loop left, the open wires stay, and the loft refuses them as before.
-    if (useEntireSketch) {
-        if (auto loops = withoutOpenCurves(compound); !loops.isNull()) {
-            compound = loops;
+    if (useEntireSketch && picksRegions(subs)) {
+        // Picked regions (they were left for the whole sketch before): their faces' wires,
+        // adjacent regions merged, in the picks' order (feat/profile-regions)
+        std::vector<TopoShape> faces;
+        for (const auto& sub : subs) {
+            auto face = Part::Feature::getTopoShape(
+                obj,
+                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                    | Part::ShapeOption::Transform,
+                sub.c_str()
+            );
+            if (face.isNull() || !face.hasSubShape(TopAbs_FACE)) {
+                FC_THROWM(Part::NullShapeException, "Failed to get the region " << sub << " of " << name);
+            }
+            faces.push_back(face);
+        }
+        auto picked = Feature::makeTopoShape(obj, TopoDS_Shape(), 0, false).makeElementCompound(faces);
+        compound = wiresOfFaces(mergeAdjacentRegions(obj, subs, picked));
+    }
+    else if (useEntireSketch) {
+        WholeSketchRegions rule(obj, compound);
+        bool loopsDone = false;
+        if (rule.sameAsLoops()) {
+            try {
+                if (auto loops = withoutOpenCurves(compound); !loops.isNull()) {
+                    compound = loops;
+                }
+                loopsDone = true;
+            }
+            catch (const Base::Exception&) {
+                // Onshape's regions below
+            }
+        }
+        if (!loopsDone) {
+            // Loops that overlap, touch or nest deeper: Onshape's regions, which pair with
+            // another section's only as one loop
+            if (auto faces = rule.faces(); !faces.isNull()) {
+                compound = wiresOfFaces(faces);
+                if (compound.countSubShapes(TopAbs_WIRE) > 1) {
+                    FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
+                }
+            }
         }
     }
     auto wires = compound.getSubTopoShapes(TopAbs_WIRE);

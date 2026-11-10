@@ -85,6 +85,7 @@
 #include "Body.h"
 #include "FeatureExtrude.h"
 #include "FeatureSketchBased.h"
+#include "ProfileRegions.h"
 #include "DatumLine.h"
 #include "DatumPlane.h"
 #include "PartDesignParameter.h"
@@ -328,6 +329,8 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                     shapes.push_back(subshape);
                 }
                 shape.makeElementCompound(shapes);
+                // Picked regions that share a side make one face, as in Onshape
+                shape = mergeAdjacentRegions(obj, subs, shape);
             }
         }
         else {
@@ -358,7 +361,45 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                 }
                 if (shape.hasSubShape(TopAbs_WIRE)) {
                     shape.Hasher = getDocument()->getStringHasher();
-                    if (!allowOpen) {
+                    // A whole sketch is Onshape's regions: every region of its curves but those
+                    // whose outer boundary is another's inner boundary, adjacent ones merged
+                    // (feat/profile-regions). Where its loops give the same faces, they are made
+                    // as before, with the names files saved before have.
+                    bool regions = false;
+                    if (!allowOpen && subs.empty() && AllowMultiFace.getValue()
+                        && obj->getLinkedObject(true)->isDerivedFrom<Part::Part2DObject>()) {
+                        WholeSketchRegions rule(obj, shape);
+                        TopoShape faces = makeTopoShape();
+                        if (rule.sameAsLoops()) {
+                            try {
+                                faces = withoutOpenCurves(shape);
+                                if (!faces.isNull()) {
+                                    faces = faces.makeElementFace();  // FaceMakerBullseye
+                                }
+                            }
+                            catch (const Base::Exception&) {
+                                faces = makeTopoShape();
+                            }
+                            catch (const Standard_Failure&) {
+                                faces = makeTopoShape();
+                            }
+                            if (!rule.matches(faces)) {
+                                faces = makeTopoShape();
+                            }
+                        }
+                        if (faces.isNull()) {
+                            faces = rule.faces();
+                        }
+                        if (faces.isNull()) {
+                            throw Base::CADKernelError("The sketch has no closed region");
+                        }
+                        shape = faces;
+                        regions = true;
+                    }
+                    if (regions) {
+                        // the faces are made
+                    }
+                    else if (!allowOpen) {
                         // The faces come from the closed loops; open curves are ignored, as
                         // in Onshape (ops#631)
                         shape = withoutOpenCurves(shape);
@@ -399,7 +440,7 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                             }
                         }
                     }
-                    if (!shape.isNull()) {
+                    if (!regions && !shape.isNull()) {
                         if (AllowMultiFace.getValue()) {
                             shape = shape.makeElementFace();  // default to use FaceMakerBullseye
                         }
@@ -486,8 +527,16 @@ TopoDS_Shape ProfileBased::getVerifiedFace(bool silent) const
                     if (shape.hasSubShape(TopAbs_WIRE)) {
                         // Open curves are ignored, as in getTopoShapeVerifiedFace (ops#631:
                         // the Helix's centre and pitch come from here)
-                        shape = withoutOpenCurves(shape);
-                        if (shape.isNull()) {
+                        auto regions = Profile.getSubValues().empty()
+                                && result->getLinkedObject(true)->isDerivedFrom<Part::Part2DObject>()
+                            ? getTopoShapeVerifiedFace(true)
+                            : TopoShape();
+                        if (!regions.isNull() && regions.hasSubShape(TopAbs_FACE)) {
+                            // A whole sketch: Onshape's regions, as the feature's own profile
+                            // (feat/profile-regions)
+                            shape = regions;
+                        }
+                        else if (shape = withoutOpenCurves(shape); shape.isNull()) {
                             err = "The sketch has no closed region";
                         }
                         else {

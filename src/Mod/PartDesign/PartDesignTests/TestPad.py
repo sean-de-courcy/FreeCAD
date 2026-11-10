@@ -4913,18 +4913,19 @@ class TestPad(unittest.TestCase):
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((0, 10), (20, 10))], tangent=True)
         self.assertSolidVolume(pad, 500 * math.pi)
 
-    def testOpenCurvesLineFromALoopStops(self):
+    def testOpenCurvesLineFromALoop(self):
         """Review pro631s-r1fix: a line drawn from a loop's vertex shares the loop's wire (a radius
-        line to a circle's seam point (10, 0); two circles joined between their seam points). The
-        loop would have to be rebuilt from its edges, which renames the faces and reorders a
-        loft's wires: the pad stops with the reason, as it failed before."""
-        for circles, lines in (
-            ([(0, 0, 10)], [((0, 0), (10, 0))]),
-            ([(0, 0, 3), (16, 0, 3)], [((3, 0), (13, 0))]),
+        line to a circle's seam point (10, 0); two circles joined by a line from one's seam point
+        to the other's side). It stopped the pad; the sketch's regions give Onshape's result, the
+        disk and the two disks (feat/profile-regions)."""
+        for circles, lines, solids, volume in (
+            ([(0, 0, 10)], [((0, 0), (10, 0))], 1, 500 * math.pi),
+            ([(0, 0, 3), (16, 0, 3)], [((3, 0), (13, 0))], 2, 2 * 45 * math.pi),
         ):
             pad = self.openCurvePad(circles=circles, lines=lines)
-            self.assertFalse(pad.isValid())
-            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            self.assertEqual(len(pad.Shape.Solids), solids)
+            self.assertAlmostEqual(pad.Shape.Volume, volume, places=3)
 
     def testOpenCurvesTwoCirclesAndAStrayLine(self):
         """Two circles of r 3 and a line between them touching neither: two cylinders."""
@@ -4952,24 +4953,24 @@ class TestPad(unittest.TestCase):
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-15, 0), (15, 0))])
         self.assertSolidVolume(pad, 500 * math.pi)
 
-    def testOpenCurvesClosingARegionStop(self):
+    def testOpenCurvesClosingARegion(self):
         """Review pro631-r1 R2: a 20 x 20 square and a U whose ends lie on its top side (not at
-        its corners). The U closes a 10 x 10 tab that Onshape would add; the pad stops, as
-        before, with the reason, rather than leave the tab out. With the U's ends crossing the
-        side, the same."""
+        its corners). The U closes a 10 x 10 tab that Onshape adds: it stopped the pad; the
+        sketch's regions add the tab (feat/profile-regions). With the U's ends crossing the side,
+        the same."""
         U = [((5, 20), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 20))]
         square = [((0, 0), (20, 0)), ((20, 0), (20, 20)), ((20, 20), (0, 20)), ((0, 20), (0, 0))]
         crossing = [((5, 15), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 15))]
         for lines in (square + U, square + crossing):
             pad = self.openCurvePad(lines=lines)
-            self.assertFalse(pad.isValid())
-            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
+            self.assertSolidVolume(pad, 500 * 5)
 
     def testOpenCurvesLoftKeepsTheSectionOrder(self):
         """Review pro631-r1 R1: a loft between two pairs of 10 x 10 squares 40 apart, the
         section with a stray line beside its first square: each square lofts to the one above
         it, two prisms. With the line drawn from that square's corner (one wire with it, the
-        sketch's wire order changed), the loft stops (pro631s-r1fix)."""
+        sketch's wire order changed), the loft stops (pro631s-r1fix): its regions are two loops
+        whose order isn't the sketch's (feat/profile-regions)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
 
         def squares(x):
@@ -4991,7 +4992,7 @@ class TestPad(unittest.TestCase):
             self.Doc.recompute()
             if not valid:
                 self.assertFalse(loft.isValid())
-                self.assertIn(OPEN_CURVES_STOP, loft.getStatusString())
+                self.assertIn("pick one region of it per section", loft.getStatusString())
                 continue
             self.assertTrue(loft.isValid(), loft.getStatusString())
             self.assertEqual(len(loft.Shape.Solids), 2)

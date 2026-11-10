@@ -79,6 +79,8 @@ SET(Features_SRCS
     PythonConverter.h
     ParkedReference.cpp
     ParkedReference.h
+    SketchImprint.cpp
+    SketchImprint.h
 )
 SOURCE_GROUP("Features" FILES ${Features_SRCS})
 
