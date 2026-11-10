@@ -2622,8 +2622,10 @@ int Sketch::addConstraint(const Constraint* constraint)
             // the same Midpoint again (same point, same arc) repeats the first and agrees with it
             // always: no equations, so no unknowns of its own left out of the solve as a
             // redundant constraint's are (they kept their start, and an edit of the arc failed)
-            const bool repeat = std::ranges::any_of(Constrs, [&](const ConstrDef& other) {
-                return other.constr && other.constr->Type == Midpoint
+            // (both driving: a Midpoint is always saved driving, but a non-driving one read from
+            // an edited file would hold nothing and has no value for the driven-value update)
+            const bool repeat = c.driving && std::ranges::any_of(Constrs, [&](const ConstrDef& other) {
+                return other.constr && other.driving && other.constr->Type == Midpoint
                     && checkGeoId(other.constr->First) == geoId1
                     && other.constr->FirstPos == constraint->FirstPos
                     && checkGeoId(other.constr->Second) == geoId2;
