@@ -8,12 +8,17 @@ few curves within a stated tolerance:
 
 1. **Chaining.** Segment ends closer than `join` are one node. A chain runs through nodes where
    exactly two segments meet and nothing else (an arc, a spline, a third segment) ends. Dangling
-   ends closer to each other than the tolerance are joined first (so an outline that misses its
-   start by less than the tolerance closes).
-2. **Corners.** A chain is cut where it turns by more than `corner` degrees at one vertex; the
+   ends closer to each other than the tolerance are joined first, nearest pairs first (so an
+   outline that misses its start by less than the tolerance closes; a stroke shorter than four
+   tolerances is never closed onto itself).
+2. **Corners.** A chain is cut at a vertex that turns by more than `corner` degrees, and keeps
+   turning by more than that between the points five tolerances back and ahead (so a staircase or
+   noise finer than the tolerance is no corner); of a cluster of such vertices the sharpest. The
    corner's vertex is kept exactly, so corners stay sharp.
 3. **Lines and arcs.** Each run between corners is cut greedily into the longest line or arc that
-   stays within the tolerance of every vertex and every segment's midpoint.
+   stays within the tolerance of every vertex and every segment's midpoint. An arc runs from one
+   vertex to another, its centre on their bisector at the least-squares fit of the vertices
+   between (`_arc_center`). A closed run that is a circle within the tolerance becomes one.
 4. **Splines.** Where three or more consecutive pieces are short (each covers fewer than
    `KEEP_POINTS` vertices), their vertices are approximated by one cubic B-spline (OCCT's
    GeomAPI_PointsToBSpline), kept only if its measured deviation is within the tolerance;
@@ -35,22 +40,11 @@ class Piece:
     """A fitted piece: kind 'line' (p, q), 'arc' (p, m, q: through three points) or 'spline'
     (points; curve is the Part.BSplineCurve)"""
 
-    __slots__ = ("kind", "pts", "curve", "dev", "count")
+    __slots__ = ("kind", "pts", "curve", "dev", "count", "span")
 
-    def __init__(self, kind, pts, dev, count, curve=None):
+    def __init__(self, kind, pts, dev, count, curve=None, span=None):
         self.kind, self.pts, self.dev, self.count, self.curve = kind, pts, dev, count, curve
-
-
-class Stats:
-    def __init__(self):
-        self.segments_in = 0
-        self.chains = 0
-        self.closed_chains = 0
-        self.open_chains = 0
-        self.gaps_joined = 0
-        self.max_dev = 0.0
-        self.pieces = {"line": 0, "arc": 0, "spline": 0}
-        self.open_gaps = []  # (gap, point) of open chains whose ends are near (< 100 x tolerance)
+        self.span = span  # (first, last) vertex index in the run it was fitted to
 
 
 # ---------------------------------------------------------------------------------------------
@@ -107,18 +101,50 @@ def chains(segments, other_ends, join, gap):
         deg[b] += 1
 
     joined = 0
+    widest = 0.0
     if gap > 0.0:
-        # join dangling ends pairwise, nearest first
+        # join dangling ends pairwise, nearest first, found on a grid of cell `gap`
         dangling = [n for n in range(len(deg)) if deg[n] == 1 and n not in blocked]
+        # each component's length: the two ends of a piece shorter than a few gaps are not
+        # joined to each other (that would make a loop of nothing of a stray stroke)
+        parent = list(range(len(nodes.pos)))
+
+        def root(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        size = {}
+        for a, b in edges:
+            ra, rb = root(a), root(b)
+            if ra != rb:
+                parent[ra] = rb
+        for a, b in edges:
+            pa, pb = nodes.pos[a], nodes.pos[b]
+            r = root(a)
+            size[r] = size.get(r, 0.0) + math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+        grid = {}
+        for n in dangling:
+            p = nodes.pos[n]
+            grid.setdefault((math.floor(p[0] / gap), math.floor(p[1] / gap)), []).append(n)
         cand = []
-        if len(dangling) < 4000:
-            for i, a in enumerate(dangling):
-                pa = nodes.pos[a]
-                for b in dangling[i + 1 :]:
-                    pb = nodes.pos[b]
-                    d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
-                    if d <= gap:
-                        cand.append((d, a, b))
+        for n in dangling:
+            p = nodes.pos[n]
+            kx, ky = math.floor(p[0] / gap), math.floor(p[1] / gap)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for o in grid.get((kx + dx, ky + dy), ()):
+                        if o <= n:
+                            continue
+                        q = nodes.pos[o]
+                        d = math.hypot(p[0] - q[0], p[1] - q[1])
+                        if d > gap:
+                            continue
+                        r = root(n)
+                        if r == root(o) and size.get(r, 0.0) < 4.0 * gap:
+                            continue
+                        cand.append((d, n, o))
         cand.sort()
         alias = {}
         used = set()
@@ -129,6 +155,7 @@ def chains(segments, other_ends, join, gap):
             used.add(b)
             alias[b] = a
             joined += 1
+            widest = max(widest, d)
         if alias:
             edges = [(alias.get(a, a), alias.get(b, b)) for a, b in edges]
             edges = [(a, b) for a, b in edges if a != b]
@@ -177,7 +204,7 @@ def chains(segments, other_ends, join, gap):
             seq = walk(start, k)
             closed = seq[-1] == seq[0]
             out.append(([nodes.pos[i] for i in seq], closed))
-    return out, joined
+    return out, joined, widest
 
 
 # ---------------------------------------------------------------------------------------------
@@ -218,20 +245,55 @@ def _line_dev(pts, i, j, tol):
     return worst
 
 
+def _arc_center(pts, i, j):
+    """The circle through pts[i] and pts[j] that fits pts[i..j] best: its centre on the chord's
+    perpendicular bisector, at the least-squares solution of |P - C|^2 = R^2 (linear in the
+    centre's offset along the bisector); (cx, cy, r) or None when the points are collinear"""
+    a, c = pts[i], pts[j]
+    mx, my = (a[0] + c[0]) * 0.5, (a[1] + c[1]) * 0.5
+    dx, dy = c[0] - a[0], c[1] - a[1]
+    L = math.hypot(dx, dy)
+    if L == 0.0:
+        return None
+    nx, ny = -dy / L, dx / L
+    h2 = (L * 0.5) ** 2
+    num = den = 0.0
+    for k in range(i + 1, j):
+        px, py = pts[k][0] - mx, pts[k][1] - my
+        ak = px * px + py * py - h2
+        bk = 2.0 * (px * nx + py * ny)
+        num += ak * bk
+        den += bk * bk
+    if den <= 1e-300:
+        return None
+    s_ = num / den
+    cx, cy = mx + s_ * nx, my + s_ * ny
+    return cx, cy, math.sqrt(h2 + s_ * s_)
+
+
+def _arc_mid(pts, i, j):
+    """A point in the middle of the fitted arc from pts[i] to pts[j]"""
+    cx, cy, r = _arc_center(pts, i, j)
+    b = pts[(i + j) // 2]
+    d = math.hypot(b[0] - cx, b[1] - cy)
+    return (cx + (b[0] - cx) * r / d, cy + (b[1] - cy) * r / d)
+
+
 def _arc_dev(pts, i, j, tol, rmax):
-    """Largest deviation of pts[i..j] and their segments' midpoints from the arc through
-    pts[i], pts[(i+j)//2], pts[j]; None when over tol, turning back, or nearly a line"""
+    """Largest deviation of pts[i..j] and their segments' midpoints from the fitted arc from
+    pts[i] to pts[j] (`_arc_center`); None when over tol, turning back, or nearly a line"""
     if j - i < 2:
         return None
-    m = (i + j) // 2
-    cr = _circle3(pts[i], pts[m], pts[j])
+    cr = _arc_center(pts, i, j)
     if cr is None:
         return None
-    (cx, cy), r = cr
+    cx, cy, r = cr
     if r > rmax:
         return None
-    a, b, c = pts[i], pts[m], pts[j]
+    a, b, c = pts[i], pts[(i + j) // 2], pts[j]
     orient = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+    if orient == 0.0:
+        return None
     sgn = 1.0 if orient > 0 else -1.0
     worst = 0.0
     sweep = 0.0
@@ -295,11 +357,11 @@ def _greedy(pts, tol, rmax):
         ja, da = _longest(pts, i, n, lambda a, b: _arc_dev(pts, a, b, tol, rmax), first=2)
         if jl is None:
             jl, dl = i + 1, 0.0
-        if ja is not None and ja > jl:
-            out.append(Piece("arc", (i, (i + ja) // 2, ja), da, ja - i))
+        if ja is not None and (ja > jl or (ja == jl and da < dl)):
+            out.append(Piece("arc", (pts[i], _arc_mid(pts, i, ja), pts[ja]), da, ja - i, span=(i, ja)))
             i = ja
         else:
-            out.append(Piece("line", (i, jl), dl, jl - i))
+            out.append(Piece("line", (pts[i], pts[jl]), dl, jl - i, span=(i, jl)))
             i = jl
     return out
 
@@ -363,7 +425,7 @@ def _fit_run(pts, tol, rmax):
         if pc.count >= KEEP_POINTS:
             return True
         if pc.kind == "line":
-            i, j = pc.pts
+            i, j = pc.span
             L = math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1])
             return L >= 5.0 * median * pc.count
         return False
@@ -373,21 +435,21 @@ def _fit_run(pts, tol, rmax):
 
     def flush():
         if len(cluster) >= 3:
-            i0 = cluster[0].pts[0]
-            i1 = cluster[-1].pts[-1]
+            i0 = cluster[0].span[0]
+            i1 = cluster[-1].span[1]
             sp = _spline(pts[i0 : i1 + 1], tol)
             if sp is not None:
                 out.append(sp)
                 cluster.clear()
                 return
         for pc in cluster:
-            out.append(_points(pc, pts))
+            out.append(pc)
         cluster.clear()
 
     for pc in greedy:
         if keeper(pc):
             flush()
-            out.append(_points(pc, pts))
+            out.append(pc)
         else:
             cluster.append(pc)
     flush()
@@ -427,9 +489,77 @@ def _full_circle(ring, tol):
     return Piece("circle", ((cx, cy), r), worst, m)
 
 
-def _points(pc, pts):
-    pc.pts = tuple(pts[i] for i in pc.pts)
-    return pc
+def _turn(a, b, c):
+    d1x, d1y = b[0] - a[0], b[1] - a[1]
+    d2x, d2y = c[0] - b[0], c[1] - b[1]
+    return abs(math.atan2(d1x * d2y - d1y * d2x, d1x * d2x + d1y * d2y))
+
+
+def _corners(pts, closed, corner, span):
+    """Indices of the corner vertices, in order: a vertex turning by more than `corner` where the
+    turn persists, measured between the points `span` back and ahead along the chain (so a
+    staircase or noise finer than the tolerance is no corner), one per cluster (the sharpest)"""
+    m = len(pts)
+    if closed:
+
+        def at(k):
+            return pts[k % m]
+
+        lo, hi = 0, m
+    else:
+
+        def at(k):
+            return pts[k]
+
+        lo, hi = 1, m - 1
+
+    def reach(k, step):
+        j = k
+        dist = 0.0
+        while True:
+            nj = j + step
+            if not closed and (nj < 0 or nj > m - 1):
+                return at(j)
+            if closed and abs(nj - k) >= m:
+                return at(j)
+            q, r = at(j), at(nj)
+            dist += math.hypot(r[0] - q[0], r[1] - q[1])
+            j = nj
+            if dist >= span:
+                return r
+
+    def along(k0, k1):
+        """Length along the chain from vertex k0 forward to k1, stopping at span"""
+        gap = 0.0
+        for j in range(k0, k1):
+            q, r = at(j), at(j + 1)
+            gap += math.hypot(r[0] - q[0], r[1] - q[1])
+            if gap >= span:
+                break
+        return gap
+
+    raw = []
+    for k in range(lo, hi):
+        t = _turn(at(k - 1), at(k), at(k + 1))
+        if t <= corner:
+            continue
+        if _turn(reach(k, -1), at(k), reach(k, 1)) > corner:
+            raw.append((k, t))
+    # one per cluster: candidates closer than span along the chain keep the sharpest
+    out = []
+    for k, t in raw:
+        if out and along(out[-1][0], k) < span:
+            if t > out[-1][1]:
+                out[-1] = (k, t)
+            continue
+        out.append((k, t))
+    if closed and len(out) > 1 and along(out[-1][0], out[0][0] + m) < span:
+        # the last and the first are one cluster across the seam
+        if out[-1][1] > out[0][1]:
+            out[0] = out[-1]
+        out.pop()
+        out.sort()
+    return [k for k, _ in out]
 
 
 def fit_chain(pts, closed, tol, corner_deg):
@@ -447,19 +577,13 @@ def fit_chain(pts, closed, tol, corner_deg):
     ys = [p[1] for p in pts]
     rmax = 1.0e3 * max(max(xs) - min(xs), max(ys) - min(ys), tol)
     corner = math.radians(corner_deg)
-
-    def turn(a, b, c):
-        d1x, d1y = b[0] - a[0], b[1] - a[1]
-        d2x, d2y = c[0] - b[0], c[1] - b[1]
-        return abs(math.atan2(d1x * d2y - d1y * d2x, d1x * d2x + d1y * d2y))
-
     n = len(pts)
     if closed:
         ring = pts[:-1]
         m = len(ring)
         if m < 3:
             return _fit_run(pts, tol, rmax)
-        corners = [k for k in range(m) if turn(ring[k - 1], ring[k], ring[(k + 1) % m]) > corner]
+        corners = _corners(ring, True, corner, 5.0 * tol)
         if not corners:
             whole = _full_circle(ring, tol)
             if whole is not None:
@@ -482,7 +606,7 @@ def fit_chain(pts, closed, tol, corner_deg):
         for a, b in zip(cut, cut[1:]):
             out += _fit_run(rot[a : b + 1], tol, rmax)
         return out
-    cut = [0] + [k for k in range(1, n - 1) if turn(pts[k - 1], pts[k], pts[k + 1]) > corner] + [n - 1]
+    cut = [0] + _corners(pts, False, corner, 5.0 * tol) + [n - 1]
     out = []
     for a, b in zip(cut, cut[1:]):
         out += _fit_run(pts[a : b + 1], tol, rmax)

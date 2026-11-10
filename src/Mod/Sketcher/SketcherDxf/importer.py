@@ -43,8 +43,9 @@ class Report:
         self.tolerance = None
         self.max_deviation = 0.0
         self.gaps_joined = 0
-        self.open_chains = 0
-        self.closed_chains = 0
+        self.ends_joined = 0
+        self.open_ends = 0
+        self.snap = None
         self.skipped = {}
         self.paperspace = 0
         self.projected = 0
@@ -67,8 +68,12 @@ class Report:
             )
         if self.gaps_joined:
             out.append(f"{self.gaps_joined} gaps under the tolerance closed")
-        if self.open_chains:
-            out.append(f"{self.open_chains} open chains of segments")
+        if self.ends_joined:
+            out.append(f"{self.ends_joined} curve ends moved to meet another (under {self.snap:g} mm)")
+        if self.open_ends:
+            out.append(f"{self.open_ends} curve ends meet no other curve: an outline is open")
+        else:
+            out.append("Every curve end meets another: the outlines are closed")
         if self.projected:
             out.append(f"{self.projected} entities outside the XY plane projected onto it")
         if self.paperspace:
@@ -248,24 +253,200 @@ def geometry(drawing, mm_per_unit, fit=True, tolerance=DEFAULT_TOLERANCE, corner
         rep.fit = True
         rep.tolerance = tolerance
         join = max(1e-6, tolerance * 1e-3)
-        chains, joined = fitting.chains(segs, other_ends, join, tolerance)
+        chains, joined, widest = fitting.chains(segs, other_ends, join, tolerance)
         rep.gaps_joined = joined
+        rep.max_deviation = max(rep.max_deviation, widest)
+        fitted = []
         for pts, closed in chains:
-            if closed:
-                rep.closed_chains += 1
-            else:
-                rep.open_chains += 1
-            for pc in fitting.fit_chain(pts, closed, tolerance, corner):
+            pieces = fitting.fit_chain(pts, closed, tolerance, corner)
+            fitted.append([pts, closed, pieces, tolerance])
+        _keep_clearance(fitted, corner)
+        for pts, closed, pieces, tol in fitted:
+            for pc in pieces:
                 rep.max_deviation = max(rep.max_deviation, pc.dev)
                 geos.append(piece_geometry(pc))
     else:
         for p, q in segs:
             geos.append(Part.LineSegment(V(p[0], p[1], 0), V(q[0], q[1], 0)))
+    # curve ends that miss each other by less than the snap distance meet (a writer's rounding
+    # of LINE and ARC ends: 6 decimals of a rotated drawing miss by about 1e-7)
+    snap = min(tolerance, SNAP) if tolerance else SNAP
+    geos, rep.ends_joined, moved, rep.open_ends = snap_ends(geos, snap)
+    rep.max_deviation = max(rep.max_deviation, moved)
+    rep.snap = snap
     for g in geos:
         k = _kind(g)
         rep.kinds[k] = rep.kinds.get(k, 0) + 1
     rep.curves = len(geos)
     return geos, rep
+
+
+SNAP = 0.001  # mm: the most a curve's end is moved to meet another's
+
+
+def _ends(g):
+    if isinstance(g, (Part.Point, Part.Circle, Part.Ellipse)):
+        return None
+    if isinstance(g, Part.BSplineCurve) and g.isClosed():
+        return None
+    return g.StartPoint, g.EndPoint
+
+
+_RANK = {
+    "Part::GeomArcOfEllipse": 0,
+    "Part::GeomArcOfCircle": 1,
+    "Part::GeomBSplineCurve": 2,
+    "Part::GeomLineSegment": 3,
+}
+
+
+def _moved(g, start, end):
+    """g with its ends at start and end (vectors), or None if it can't be"""
+    if isinstance(g, Part.LineSegment):
+        if (end - start).Length == 0.0:
+            return None
+        return Part.LineSegment(start, end)
+    if isinstance(g, Part.ArcOfCircle):
+        m = g.value(0.5 * (g.FirstParameter + g.LastParameter))
+        pc = fitting.Piece("arc", ((start.x, start.y), (m.x, m.y), (end.x, end.y)), 0.0, 0)
+        if fitting._circle3(*pc.pts) is None:
+            return None
+        return piece_geometry(pc)
+    if isinstance(g, Part.BSplineCurve) and not g.isPeriodic():
+        mults = g.getMultiplicities()
+        if mults[0] != g.Degree + 1 or mults[-1] != g.Degree + 1:
+            return None
+        c = g.copy()
+        c.setPole(1, start)
+        c.setPole(c.NbPoles, end)
+        return c
+    return None
+
+
+def snap_ends(geos, snap):
+    """Curve ends within snap of each other moved to one point: (geometries, ends moved, the
+    largest move, ends that meet no other). The point is an end of the curve least able to move
+    (an elliptical arc, then an arc, a spline, a line)."""
+    ends = []  # (geo index, 0 start / 1 end, point)
+    for i, g in enumerate(geos):
+        e = _ends(g)
+        if e is not None:
+            ends.append((i, 0, e[0]))
+            ends.append((i, 1, e[1]))
+    if not ends:
+        return geos, 0, 0.0, 0
+    parent = list(range(len(ends)))
+
+    def root(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    cell = max(snap, 1e-12)
+    grid = {}
+    for k, (_, _, p) in enumerate(ends):
+        grid.setdefault((math.floor(p.x / cell), math.floor(p.y / cell)), []).append(k)
+    for k, (_, _, p) in enumerate(ends):
+        kx, ky = math.floor(p.x / cell), math.floor(p.y / cell)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for o in grid.get((kx + dx, ky + dy), ()):
+                    if o > k and (ends[o][2] - p).Length <= snap:
+                        ra, rb = root(k), root(o)
+                        if ra != rb:
+                            parent[ra] = rb
+    clusters = {}
+    for k in range(len(ends)):
+        clusters.setdefault(root(k), []).append(k)
+    target = {}  # (geo, which) -> new point
+    open_ends = 0
+    for members in clusters.values():
+        if len(members) == 1:
+            open_ends += 1
+            continue
+        best = min(members, key=lambda k: (_RANK.get(geos[ends[k][0]].TypeId, 9), k))
+        tp = ends[best][2]
+        for k in members:
+            i, w, p = ends[k]
+            if (p - tp).Length > 0.0:
+                target[(i, w)] = tp
+    out = list(geos)
+    moved, largest = 0, 0.0
+    for i in sorted(set(i for i, _ in target)):
+        g = geos[i]
+        s, e = _ends(g)
+        ns, ne = target.get((i, 0), s), target.get((i, 1), e)
+        ng = _moved(g, ns, ne)
+        if ng is None:
+            continue
+        out[i] = ng
+        for old, new in ((s, ns), (e, ne)):
+            d = (new - old).Length
+            if d > 1e-9:  # not the 1e-15 of an arc's ends computed from its angles
+                moved += 1
+                largest = max(largest, d)
+    return out, moved, largest, open_ends
+
+
+def _keep_clearance(fitted, corner):
+    """Refits chains that the fit brought closer to another than half their original clearance
+    (two loops 0.005 apart, each fitted within 0.01, could touch): with a tolerance of a quarter
+    of the clearance, each pair keeps at least half of it. fitted: [[pts, closed, pieces, tol]]"""
+    if len(fitted) < 2:
+        return
+
+    def bbox(pts):
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def wire(pieces):
+        return Part.Wire([piece_geometry(pc).toShape() for pc in pieces]) if pieces else None
+
+    boxes = [bbox(f[0]) for f in fitted]
+    # the pairs whose boxes, grown by both tolerances, overlap: a sweep over x
+    grow = 2.0 * max(f[3] for f in fitted)
+    order = sorted(range(len(fitted)), key=lambda k: boxes[k][0])
+    pairs = []
+    active = []
+    for k in order:
+        x0 = boxes[k][0]
+        active = [o for o in active if boxes[o][2] + grow >= x0]
+        for o in active:
+            if boxes[o][1] <= boxes[k][3] + grow and boxes[k][1] <= boxes[o][3] + grow:
+                pairs.append((min(o, k), max(o, k)))
+        active.append(k)
+    for _ in range(2):
+        changed = False
+        for a, b in pairs:
+            if True:
+                reach = fitted[a][3] + fitted[b][3]
+                wa, wb = wire(fitted[a][2]), wire(fitted[b][2])
+                if wa is None or wb is None:
+                    continue
+                df = wa.distToShape(wb)[0]
+                if df >= reach:
+                    continue  # farther apart than both deviations: the fit can't have made them meet
+                ra = Part.makePolygon([V(p[0], p[1], 0) for p in fitted[a][0]])
+                rb = Part.makePolygon([V(p[0], p[1], 0) for p in fitted[b][0]])
+                draw = ra.distToShape(rb)[0]
+                if df >= 0.5 * draw:
+                    continue
+                for k in (a, b):
+                    t = 0.25 * draw
+                    if t >= fitted[k][3]:
+                        continue
+                    pts, closed = fitted[k][0], fitted[k][1]
+                    if t > 1e-9:
+                        fitted[k][2] = fitting.fit_chain(pts, closed, t, corner)
+                    else:
+                        fitted[k][2] = [fitting.Piece("line", (pts[j], pts[j + 1]), 0.0, 1) for j in range(len(pts) - 1)]
+                        t = 0.0
+                    fitted[k][3] = t
+                    changed = True
+        if not changed:
+            break
 
 
 def resolve_units(drawing, units=None):

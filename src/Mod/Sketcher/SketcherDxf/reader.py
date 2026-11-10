@@ -16,6 +16,7 @@ projection maps a conic to a conic and a spline's poles to its poles). What is n
 """
 
 import math
+import re
 
 # $INSUNITS codes -> millimetres per unit (0 = unitless: none)
 INSUNITS_MM = {
@@ -33,6 +34,9 @@ INSUNITS_MM = {
     12: 1.0e-6,  # nanometres
     13: 1.0e-3,  # microns
     14: 100.0,  # decimetres
+    15: 1.0e4,  # decametres
+    16: 1.0e5,  # hectometres
+    17: 1.0e12,  # gigametres
 }
 UNIT_NAMES = {1: "in", 2: "ft", 4: "mm", 5: "cm", 6: "m", 9: "mil", 10: "yd", 13: "um", 14: "dm"}
 
@@ -173,10 +177,16 @@ def _pairs(path):
         data = f.read()
     if data.startswith(b"AutoCAD Binary DXF"):
         raise DxfError("a binary DXF: save it as an ASCII DXF")
-    if data[:4] in (b"AC10", b"AC10"[:4]) or data[:6].startswith(b"AC10"):
+    if data.startswith(b"AC10") or data.startswith(b"AC1."):
         raise DxfError("a DWG file, not a DXF: save it as DXF")
-    text = data.decode("utf-8", errors="replace")
-    lines = text.splitlines()
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        text = data.decode("utf-16", errors="replace")
+    else:
+        text = data.decode("utf-8", errors="replace")
+    text = text.lstrip("\ufeff")
+    # only CR, LF and CRLF end a line (str.splitlines also splits at form feeds and U+0085,
+    # which a TEXT value may hold)
+    lines = re.split(r"\r\n|\n|\r", text)
     pairs = []
     n = len(lines) - 1
     i = 0
@@ -336,12 +346,14 @@ class _Reader:
 
     def bulge_segment(self, m, p, q, bulge):
         """A polyline segment from p to q (object coordinates) with its bulge"""
-        if abs(bulge) < 1e-12:
-            self.emit_line(m, p, q)
-            return
         dx, dy = q[0] - p[0], q[1] - p[1]
         chord = math.hypot(dx, dy)
         if chord < 1e-15:
+            return
+        # straight when the arc's sagitta (about bulge x chord / 2) is below a nanometre: a
+        # radius of thousands of kilometres, whose ends computed from angles miss its vertices
+        if abs(bulge) * chord * 0.5 < 1e-9:
+            self.emit_line(m, p, q)
             return
         theta = 4.0 * math.atan(bulge)  # included angle, positive counterclockwise
         r = chord / (2.0 * math.sin(abs(theta) / 2.0))

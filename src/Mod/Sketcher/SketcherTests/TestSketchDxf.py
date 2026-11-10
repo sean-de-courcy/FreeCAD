@@ -302,8 +302,7 @@ class TestDxfFitting(unittest.TestCase):
         self.assertEqual(rep.segments, 3650)
         self.assertLessEqual(rep.curves, 150, rep)
         self.assertLessEqual(rep.max_deviation, self.TOL)
-        self.assertEqual(rep.closed_chains, 5)
-        self.assertEqual(rep.open_chains, 0)
+        self.assertEqual(rep.open_ends, 0)
         t = time.perf_counter()
         self.assertEqual(sk.solve(), 0)
         self.doc.recompute()
@@ -382,6 +381,28 @@ class TestDxfFitting(unittest.TestCase):
         coarse = SketcherDxf.insert(new_sketch(self.doc, "S2"), self.path, tolerance=0.05)
         self.assertLessEqual(coarse.curves, rep.curves)
 
+    def test_splines_where_arcs_are_short(self):
+        """A chirp y = 3 sin(0.02 x^2), x 0 to 60, 3,000 segments, at 0.001 mm: where its curvature
+        changes fast the arcs get short and runs of them become B-splines, all within the
+        tolerance, the chain still one open wire from (0, 0) to its end."""
+        pts = [(x, 3 * math.sin(0.02 * x * x)) for x in [60.0 * k / 3000 for k in range(3001)]]
+        path = write(self.dir, "chirp.dxf", dxf_text(lines_text([pts])))
+        sk = new_sketch(self.doc)
+        rep = SketcherDxf.insert(sk, path, tolerance=0.001)
+        self.assertLessEqual(rep.max_deviation, 0.001)
+        self.assertGreater(rep.kinds.get("splines", 0), 0, rep)
+        self.assertLess(rep.curves, 300, rep)
+        self.doc.recompute()
+        wires = sk.Shape.Wires
+        self.assertEqual(len(wires), 1)
+        self.assertFalse(wires[0].isClosed())
+        ends = sorted((v.Point for v in wires[0].Vertexes), key=lambda p: p.x)
+        self.assertLess((ends[0] - V(0, 0, 0)).Length, 1e-12)
+        self.assertLess((ends[-1] - V(pts[-1][0], pts[-1][1], 0)).Length, 1e-12)
+        # every vertex of the polyline lies within the tolerance of the fitted wire
+        for p in pts[::50]:
+            self.assertLessEqual(wires[0].distToShape(Part.Vertex(V(p[0], p[1], 0)))[0], 0.001 + 1e-9)
+
     def test_no_fit_keeps_segments(self):
         sk = new_sketch(self.doc)
         rep = SketcherDxf.insert(sk, self.path, fit=False, hold="free")
@@ -404,7 +425,7 @@ class TestDxfFitting(unittest.TestCase):
         sk2 = new_sketch(self.doc, "S2")
         rep2 = SketcherDxf.insert(sk2, path, tolerance=0.001)
         self.assertEqual(rep2.gaps_joined, 0)
-        self.assertEqual(rep2.open_chains, 1)
+        self.assertEqual(rep2.open_ends, 2)
 
 
 class TestDxfExport(unittest.TestCase):
@@ -529,3 +550,161 @@ class TestDxfExport(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(Part.Face(back.Shape.Wires[0]).Area, 100 + math.pi * 12.5, 9)
         self.assertAlmostEqual(back.Shape.BoundBox.XMax, 15.0, 9)
+
+
+class TestDxfSkepticCases(unittest.TestCase):
+    """The skeptic's designed cases (11-10), each failing before its fix"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dxf_")
+        self.doc = FreeCAD.newDocument("DxfSkeptic")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def insert(self, text, name="t.dxf", **kw):
+        sk = new_sketch(self.doc, "S" + str(len(self.doc.Objects)))
+        rep = SketcherDxf.insert(sk, write(self.dir, name, text), **kw)
+        self.doc.recompute()
+        return sk, rep
+
+    def test_rounded_rectangle_of_lines_and_arcs_at_six_decimals(self):
+        """A 40 x 20 rectangle with corners of radius 3, rotated 17 degrees, as 4 LINE and 4 ARC
+        written with 6 decimals: the ends miss by up to ~3e-7 and must still meet."""
+        rot = math.radians(17.0)
+
+        def R(p):
+            return (p[0] * math.cos(rot) - p[1] * math.sin(rot), p[0] * math.sin(rot) + p[1] * math.cos(rot))
+
+        hw, hh, r = 20.0, 10.0, 3.0
+        f = "{:.6f}".format
+        ents = []
+        sides = [((-hw + r, -hh), (hw - r, -hh)), ((hw, -hh + r), (hw, hh - r)), ((hw - r, hh), (-hw + r, hh)), ((-hw, hh - r), (-hw, -hh + r))]
+        for p, q in sides:
+            p, q = R(p), R(q)
+            ents.append(f"0\nLINE\n8\n0\n10\n{f(p[0])}\n20\n{f(p[1])}\n30\n0\n11\n{f(q[0])}\n21\n{f(q[1])}\n31\n0\n")
+        for k, (cx, cy) in enumerate(((hw - r, -hh + r), (hw - r, hh - r), (-hw + r, hh - r), (-hw + r, -hh + r))):
+            c = R((cx, cy))
+            a0 = -90.0 + 90.0 * k + 17.0
+            ents.append(f"0\nARC\n8\n0\n10\n{f(c[0])}\n20\n{f(c[1])}\n30\n0\n40\n{f(r)}\n50\n{f(a0)}\n51\n{f(a0 + 90.0)}\n")
+        exact = 2 * hw * 2 * hh - (4 - math.pi) * r * r
+        for fit in (True, False):
+            sk, rep = self.insert(dxf_text("".join(ents)), fit=fit)
+            self.assertEqual(rep.open_ends, 0, rep)
+            wires = sk.Shape.Wires
+            self.assertEqual(len(wires), 1, rep)
+            self.assertTrue(wires[0].isClosed())
+            self.assertAlmostEqual(Part.Face(wires[0]).Area, exact, 3)
+
+    def test_gap_closes_among_thousands_of_strokes(self):
+        """2,100 short open strokes (4,200 dangling ends) and a 300-segment circle that misses
+        closing by 0.005: the circle closes whatever else is in the file."""
+        ents = []
+        for i in range(2100):
+            x, y = (i % 50) * 1.0, (i // 50) * 1.0
+            ents.append(f"0\nLINE\n8\n0\n10\n{x}\n20\n{y}\n30\n0\n11\n{x + 0.3}\n21\n{y + 0.1}\n31\n0\n")
+            ents.append(f"0\nLINE\n8\n0\n10\n{x + 0.3}\n20\n{y + 0.1}\n30\n0\n11\n{x + 0.5}\n21\n{y}\n31\n0\n")
+        pts = [(100 + 5 * math.cos(t), 5 * math.sin(t)) for t in [2 * math.pi * k / 300 for k in range(300)]]
+        pts.append((pts[0][0], pts[0][1] + 0.005))
+        for p, q in zip(pts, pts[1:]):
+            ents.append(f"0\nLINE\n8\n0\n10\n{p[0]!r}\n20\n{p[1]!r}\n30\n0\n11\n{q[0]!r}\n21\n{q[1]!r}\n31\n0\n")
+        sk = new_sketch(self.doc)
+        path = write(self.dir, "strokes.dxf", dxf_text("".join(ents)))
+        t = time.perf_counter()
+        rep = SketcherDxf.insert(sk, path, hold="free")
+        self.assertLess(time.perf_counter() - t, 10.0)
+        self.assertEqual(rep.gaps_joined, 1, rep)
+        self.assertEqual(rep.open_ends, 2 * 2100, rep)
+        # the circle's curves (beyond x = 90) make one closed wire (no recompute of 4,200 lines)
+        circle = [g.toShape() for g in sk.Geometry if g.toShape().BoundBox.XMin > 90]
+        wire = Part.Wire(Part.__sortEdges__(circle))
+        self.assertTrue(wire.isClosed())
+        self.assertAlmostEqual(Part.Face(wire).Area, math.pi * 25, 0)
+
+    def test_fitting_keeps_neighbouring_loops_apart(self):
+        """A rectangle whose top edge dips smoothly 0.009 below y = 0 (500 segments) and a triangle
+        whose tip is 0.005 above the dip: fitted at 0.01 each could straighten the edge through
+        the tip. The fitted loops keep at least half their clearance."""
+        top = [(10.0 * k / 500, -0.009 * math.sin(math.pi * k / 500)) for k in range(501)]
+        rect = top + [(10.0, -5.0), (0.0, -5.0), (0.0, 0.0)]
+        tri = [(5.0, -0.004), (7.0, 2.0), (3.0, 2.0), (5.0, -0.004)]
+        sk, rep = self.insert(dxf_text(lines_text([rect, tri])), tolerance=0.01)
+        self.assertLessEqual(rep.max_deviation, 0.01)
+        wires = sk.Shape.Wires
+        self.assertEqual(len(wires), 2)
+        self.assertGreaterEqual(wires[0].distToShape(wires[1])[0], 0.0025 - 1e-9)
+
+    def test_staircase_and_noise_below_the_tolerance_are_no_corners(self):
+        """A staircase of 0.001 steps from (0, 0) to (3, 3), closed by two lines: a triangle of
+        area 4.5 in a few curves (each step's 90 degree turn doesn't persist). A circle r 30 of
+        20,000 segments with radial noise of +-0.004: a few arcs."""
+        st = [(0.0, 0.0)]
+        for k in range(3000):
+            x, y = st[-1]
+            st.append((x + 0.001, y))
+            st.append((x + 0.001, y + 0.001))
+        st += [(3.0, 0.0), (0.0, 0.0)]
+        sk, rep = self.insert(dxf_text(lines_text([st])), "stairs.dxf", tolerance=0.01)
+        self.assertLess(rep.curves, 12, rep)
+        self.assertEqual(rep.open_ends, 0)
+        self.assertLess(abs(abs(Part.Face(sk.Shape.Wires[0]).Area) - 4.5), length(st) * 0.01)
+        import random
+
+        rnd = random.Random(7)
+        circ = []
+        for k in range(20000):
+            t = 2 * math.pi * k / 20000
+            r = 30 + rnd.uniform(-0.004, 0.004)
+            circ.append((r * math.cos(t), r * math.sin(t)))
+        circ.append(circ[0])
+        sk, rep = self.insert(dxf_text(lines_text([circ])), "noise.dxf", tolerance=0.01)
+        self.assertLess(rep.curves, 60, rep)
+        self.assertLessEqual(rep.max_deviation, 0.01)
+
+    def test_tiny_bulge_closes(self):
+        """A closed 100 mm square whose first side has bulge 1e-11 (a radius of ~1e12 mm)"""
+        ents = (
+            "0\nLWPOLYLINE\n8\n0\n90\n4\n70\n1\n10\n0\n20\n0\n42\n1e-11\n10\n100\n20\n0\n10\n100\n20\n100\n10\n0\n20\n100\n"
+        )
+        for fit in (True, False):
+            sk, rep = self.insert(dxf_text(ents), fit=fit)
+            self.assertEqual(rep.open_ends, 0, rep)
+            self.assertTrue(sk.Shape.Wires[0].isClosed())
+            self.assertAlmostEqual(Part.Face(sk.Shape.Wires[0]).Area, 10000.0, 6)
+
+    def test_bom_and_form_feed_in_text(self):
+        text = "﻿" + dxf_text(
+            "0\nTEXT\n8\n0\n10\n0\n20\n0\n40\n1\n1\npage\x0cbreak\x85here\n"
+            "0\nLINE\n8\n0\n10\n0\n20\n0\n30\n0\n11\n5\n21\n0\n31\n0\n"
+        )
+        path = os.path.join(self.dir, "bom.dxf")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        sk = new_sketch(self.doc)
+        rep = SketcherDxf.insert(sk, path)
+        self.assertEqual(len(sk.Geometry), 1)
+        self.assertEqual(rep.skipped, {"TEXT": 1})
+
+    def test_tiny_stroke_is_kept(self):
+        """A lone 0.006 mm stroke under a 0.01 tolerance: kept, not closed onto itself"""
+        sk, rep = self.insert(dxf_text("0\nLINE\n8\n0\n10\n0\n20\n0\n30\n0\n11\n0.006\n21\n0\n31\n0\n"))
+        self.assertEqual(len(sk.Geometry), 1)
+        self.assertEqual(rep.gaps_joined, 0)
+        self.assertEqual(rep.open_ends, 2)
+
+    def test_export_extents_are_tight(self):
+        """The header's $EXTMIN/$EXTMAX and the reported extent: a 30 x 10 slot (two half circles
+        of radius 5), not the arcs' whole circles"""
+        sk = new_sketch(self.doc)
+        sk.addGeometry(Part.LineSegment(V(0, 0, 0), V(20, 0, 0)))
+        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(20, 5, 0), V(0, 0, 1), 5), -math.pi / 2, math.pi / 2))
+        sk.addGeometry(Part.LineSegment(V(20, 10, 0), V(0, 10, 0)))
+        sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 5, 0), V(0, 0, 1), 5), math.pi / 2, 3 * math.pi / 2))
+        path = os.path.join(self.dir, "slot.dxf")
+        rep = SketcherDxf.export_sketch(sk, path)
+        self.assertAlmostEqual(rep.size[0], 30.0, 9)
+        self.assertAlmostEqual(rep.size[1], 10.0, 9)
+        with open(path) as f:
+            text = f.read()
+        self.assertIn("$EXTMIN\n 10\n-5.0\n 20\n0.0\n", text)
+        self.assertIn("$EXTMAX\n 10\n25.0\n 20\n10.0\n", text)

@@ -204,6 +204,19 @@ class _Writer:
         self.xmax = max(self.xmax, p[0] + r)
         self.ymax = max(self.ymax, p[1] + r)
 
+    def ext_arc(self, s):
+        """The tight extent of an arc segment: its ends and the quarter points it passes"""
+        _, p, q, c, r, sweep = s
+        self.ext(p)
+        self.ext(q)
+        a0 = math.atan2(p[1] - c[1], p[0] - c[0])
+        if sweep < 0:
+            a0, sweep = a0 + sweep, -sweep
+        for k in range(4):
+            a = k * math.pi / 2.0
+            if (a - a0) % (2.0 * math.pi) <= sweep:
+                self.ext((c[0] + r * math.cos(a), c[1] + r * math.sin(a)))
+
     def pt(self, code, p):
         self.g(code, _num(p[0]))
         self.g(code + 10, _num(p[1]))
@@ -239,7 +252,7 @@ class _Writer:
             self.g(40, _num(r))
             self.g(50, _num(a0))
             self.g(51, _num(a1))
-            self.ext(c, r)  # a bound, not the tight extent
+            self.ext_arc(s)
             rep.entities["ARC"] += 1
 
     def polyline(self, segs, rep):
@@ -258,7 +271,7 @@ class _Writer:
                 self.g(42, _num(bulge))
             self.ext(p)
             if s[0] == "A":
-                self.ext(s[3], s[4])
+                self.ext_arc(s)
         self.g(0, "SEQEND")
         self.g(8, "0")
         rep.entities["POLYLINE"] += 1
