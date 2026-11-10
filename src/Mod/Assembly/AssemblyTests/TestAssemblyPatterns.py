@@ -511,6 +511,29 @@ class TestAssemblyPatterns(AssemblyTestBase):
         self.assertNotIn(twin, list(pattern.Instances))
         self.assertLinear(pattern, self.seed, 3, 30.0, self.plateX())
 
+    def test_pasted_copy_survives_count_down_and_suppress(self):
+        """A pasted copy stays a plain instance when the next edit lowers the count past it or
+        suppresses the pattern (review asm-r1b-paste-count-down, asm-r1b-paste-suppress)"""
+        for edit in ("count", "suppress"):
+            pattern = self.linear(3, 20.0)
+            second = [c for c in pattern.Instances if c.PatternIndex == 2][0]
+            twin = self.doc.copyObject(second)
+            self.assembly.addObject(twin)
+            where = App.Placement(App.Vector(0, 100, 50), App.Rotation())
+            twin.Placement = where
+            self.doc.recompute()
+            if edit == "count":
+                pattern.Count = 2
+            else:
+                pattern.Suppressed = True
+            self.doc.recompute()
+            self.assertIsNotNone(self.doc.getObject(twin.Name), edit)
+            self.assertFalse(AssemblyPattern.isPatternCopy(twin), edit)
+            self.assertPlacement(twin, where, "the pasted instance after " + edit)
+            self.doc.removeObject(pattern.Name)
+            self.doc.removeObject(twin.Name)
+            self.doc.recompute()
+
     def test_time_four_patterns_of_thirty(self):
         """4 seeds fastened to the plate, each patterned 30 times (120 copies, 124 instances): the
         recompute that makes them, a distance change and a solve stay well under a second each"""

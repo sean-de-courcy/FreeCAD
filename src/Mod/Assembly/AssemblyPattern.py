@@ -341,17 +341,22 @@ class InstancePattern:
         unlisted = [
             o for o in assembly.Group if getattr(o, "PatternOwner", None) == fp and o not in listed
         ]
+        def keyOf(copy):
+            return (copy.PatternSeed.Name if copy.PatternSeed else "", copy.PatternIndex)
+
+        listedKeys = {keyOf(c) for c in listed}
         keep = {}
         extra = []
         for copy in listed + unlisted:
-            key = (copy.PatternSeed.Name if copy.PatternSeed else "", copy.PatternIndex)
-            if key in wanted and key not in keep:
-                keep[key] = copy
-            elif copy in unlisted and key in keep:
-                # A duplicate of a copy (pasted, or copied with its properties): a plain instance of
-                # its own, not the pattern's
+            key = keyOf(copy)
+            if copy in unlisted and key in listedKeys:
+                # A duplicate of a listed copy (pasted, or copied with its properties): a plain
+                # instance of its own, whatever the pattern now asks for (an undo brings back only
+                # copies no listed copy stands for)
                 for name in ("PatternOwner", "PatternSeed", "PatternIndex"):
                     copy.removeProperty(name)
+            elif key in wanted and key not in keep:
+                keep[key] = copy
             else:
                 extra.append(copy)
         # A copy a mate uses isn't removed: the pattern says so and changes nothing (a mate would
