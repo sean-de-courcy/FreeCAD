@@ -317,6 +317,27 @@ class TestProfileRegions(unittest.TestCase):
         else:
             self.assertTrue(loft.getStatusString())
 
+    def testLoftWholeSketchNestedLoops(self):
+        """Skeptic F1: sections of three nested squares (20, 10, 4) at z 0 and 10: the rule gives
+        one region with one hole, which pairs as a plate with a hole does: the frame lofted
+        straight up, 3000 (before: 3160 in 2 solids, the island filled)."""
+        body, sk = self.sketch()
+        for k, z in enumerate((0, 10)):
+            if k:
+                _, sk = self.sketch(body, "Top")
+                sk.AttachmentOffset = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+            rect(sk, 0, 0, 20, 20)
+            rect(sk, 5, 5, 15, 15)
+            rect(sk, 8, 8, 12, 12)
+            if not k:
+                bottom = sk
+        self.Doc.recompute()
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = bottom
+        loft.Sections = [sk]
+        self.Doc.recompute()
+        self.assertVolume(loft, 3000, solids=1)
+
     # -- picked regions --------------------------------------------------------------------
 
     def testOneRegion(self):

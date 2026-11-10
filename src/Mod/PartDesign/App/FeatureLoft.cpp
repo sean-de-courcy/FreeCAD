@@ -175,7 +175,10 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
             // another section's only as one loop
             if (auto faces = rule.faces(); !faces.isNull()) {
                 compound = wiresOfFaces(faces);
-                if (compound.countSubShapes(TopAbs_WIRE) > 1) {
+                // One region with at most one hole pairs as the old loops do (outer to outer,
+                // hole to hole); more, and the face maker's order isn't the sketch's
+                if (faces.countSubShapes(TopAbs_FACE) > 1
+                    || compound.countSubShapes(TopAbs_WIRE) > 2) {
                     FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
                 }
             }

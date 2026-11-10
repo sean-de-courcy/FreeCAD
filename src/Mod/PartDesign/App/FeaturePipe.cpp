@@ -4797,7 +4797,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 return shape;  // the pipe refuses the open wires as before
             }
             auto wires = wiresOfFaces(faces);
-            if (ordered && wires.countSubShapes(TopAbs_WIRE) > 1) {
+            // One region with at most one hole pairs as the old loops do (outer to outer, hole
+            // to hole); more, and the face maker's order isn't the sketch's
+            if (ordered
+                && (faces.countSubShapes(TopAbs_FACE) > 1 || wires.countSubShapes(TopAbs_WIRE) > 2)) {
                 FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
             }
             return wires;

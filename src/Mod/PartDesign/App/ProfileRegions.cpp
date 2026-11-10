@@ -222,8 +222,10 @@ std::vector<TopoShape> mergeShared(const std::vector<TopoShape>& group, const To
     return shell.makeElementRefine().getSubTopoShapes(TopAbs_FACE);
 }
 
-/// The arrangement of the wires' curves (as the sketch makes its regions)
-TopoShape arrangementOf(const TopoShape& wires)
+/// The arrangement of the wires' curves (as the sketch makes its regions); named: with element
+/// names (the faces made), else topology only (the rule's decision: about a third of the cost on
+/// 750 squares)
+TopoShape arrangementOf(const TopoShape& wires, bool named)
 {
     std::vector<TopoShape> shapes = wires.getSubTopoShapes(TopAbs_WIRE);
     for (auto& edge : wires.getSubTopoShapes(TopAbs_EDGE, TopAbs_WIRE)) {
@@ -233,7 +235,13 @@ TopoShape arrangementOf(const TopoShape& wires)
         return {};
     }
     try {
-        return prototype(wires).makeElementFace(shapes, nullptr, "Part::FaceMakerBuildFace");
+        return prototype(wires).makeElementFace(
+            shapes,
+            nullptr,
+            "Part::FaceMakerBuildFace",
+            nullptr,
+            named ? Part::ElementMapPolicy::Propagate : Part::ElementMapPolicy::Drop
+        );
     }
     catch (const Part::NullShapeException&) {
         return {};  // no bounded region
@@ -284,7 +292,7 @@ WholeSketchRegions::WholeSketchRegions(const App::DocumentObject* profile, const
         cells = facesOf(sketch->InternalShape.getShape().getShape());
     }
     if (cells.empty()) {
-        cells = facesOf(arrangementOf(wires).getShape());
+        cells = facesOf(arrangementOf(wires, false).getShape());
     }
     const Analysis a = analyse(cells);
     simple = a.simple;
@@ -306,7 +314,7 @@ bool WholeSketchRegions::matches(const TopoShape& faces) const
 
 TopoShape WholeSketchRegions::faces() const
 {
-    const TopoShape arrangement = arrangementOf(wires);
+    const TopoShape arrangement = arrangementOf(wires, true);
     const auto cells = arrangement.isNull() ? std::vector<TopoShape>()
                                             : arrangement.getSubTopoShapes(TopAbs_FACE);
     std::vector<TopoDS_Face> plain;

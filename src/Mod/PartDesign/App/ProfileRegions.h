@@ -75,9 +75,9 @@ PartDesignExport bool picksRegions(const std::vector<std::string>& subs);
 PartDesignExport Part::TopoShape wiresOfFaces(const Part::TopoShape& faces);
 
 /// The message of a section (loft, multi-section pipe) whose whole sketch gives more than one
-/// loop in another order than its own
+/// region (or holes) in another order than its own
 inline constexpr const char* SectionRegionsMessage
     = "A section's sketch has overlapping, touching or nested loops that give more than one "
-      "loop: pick one region of it per section";
+      "region, or a region with more than one hole: pick one region of it per section";
 
 }  // namespace PartDesign

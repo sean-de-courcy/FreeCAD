@@ -161,9 +161,17 @@ Part::TopoShape Sketcher::withinSketchRegions(
         box.Enlarge(10 * Precision::Confusion());
         ownBoxes.push_back(box);
     }
-    // An arrangement edge is the sketch's when its middle lies on one of the sketch's edges (a
-    // piece of it, or a model edge drawn over it)
+    // An arrangement edge is the sketch's when it is one of the sketch's edges (the face maker keeps
+    // the edges it doesn't split), or when its middle lies on one (a piece of it, or a model edge
+    // drawn over it)
+    TopTools_IndexedMapOfShape ownMap;
+    for (const auto& edge : own) {
+        ownMap.Add(edge);
+    }
     auto isSketchEdge = [&](const TopoDS_Edge& edge) {
+        if (ownMap.Contains(edge)) {
+            return true;
+        }
         BRepAdaptor_Curve curve(edge);
         const gp_Pnt middle = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
         for (std::size_t k = 0; k < own.size(); ++k) {
