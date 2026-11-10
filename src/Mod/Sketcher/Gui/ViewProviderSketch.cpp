@@ -5956,6 +5956,9 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
                 menu << "Sketcher_ConstrainCoincidentUnified"
                      << "Sketcher_ConstrainPerpendicular"
                      << "Sketcher_ConstrainTangent";
+                if (selectedConics == 1 && selectedPoints == 1) {
+                    menu << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#656): an arc's middle
+                }
             }
         }
         else if (selectedEdges == 0 && selectedPoints >= 1 && !onlyOrigin) {
