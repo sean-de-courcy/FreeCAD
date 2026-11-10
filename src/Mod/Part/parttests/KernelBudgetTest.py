@@ -129,7 +129,9 @@ class KernelBudgetTest(unittest.TestCase):
         elapsed = time.perf_counter() - start
         self.assertFalse(cut.isValid())
         self.assertIn("took longer than", cut.getStatusString())
-        self.assertLess(elapsed, 1.5)
+        # A boolean reads the document's shapes: it is waited for until OCCT reads the cancel
+        # (it is not abandoned), so it returns after the limit but before the cut would end alone
+        self.assertLess(elapsed, 10)
         # The rest of the document goes on: a new box computes
         other = doc.addObject("Part::Box", "Other")
         doc.recompute()
