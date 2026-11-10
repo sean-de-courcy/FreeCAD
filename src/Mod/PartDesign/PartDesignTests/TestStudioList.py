@@ -226,6 +226,67 @@ def listOf(doc):
     return natives, records, bar
 
 
+def oracle(natives, records, bar):
+    """Per part, (volume, solids) by Part booleans from the list as data, never by reconcile
+    (the S1 skeptic, 2026-11-10: fromScratch() reconciles too, so it shows only that incremental
+    and one-shot reconcile agree). Records apply in list order up to the bar, each to the parts
+    its scope names unless suppressed; a step that would split its part contributes nothing.
+    The generator keeps the natives first, so the bar counts them first."""
+    shapes = {p: Part.makeBox(10, 10, 10, V(x, 0, 0)) for p, x in PARTS}
+    for i, record in enumerate(records):
+        if len(natives) + i >= bar:
+            break
+        if record["suppressed"]:
+            continue
+        length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
+        tool = Part.makeBox(length, width, height, corner)
+        for p in record["scope"]:
+            if p not in shapes:
+                continue
+            cut = record["op"] == "Subtraction"
+            result = (shapes[p].cut(tool) if cut else shapes[p].fuse(tool)).removeSplitter()
+            if len(result.Solids) == 1:
+                shapes[p] = result
+    return {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items()}
+
+
+def oracleDifferences(doc):
+    """oracle() against each Tip's shape (the state at the bar), and the Body's own shape when
+    it is not rolled back; plus hygiene: nothing touched or invalid after a recompute, no step
+    without an owner or outside every Body."""
+    want = oracle(*listOf(doc))
+    found = []
+    bodies = [doc.getObject(p) for p, _ in PARTS]
+    for body in bodies:
+        tip = body.Tip
+        shape = tip.Shape if tip else Part.Shape()
+        got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+        if got != want[body.Name]:
+            found.append(f"{body.Name}: Tip {got}, oracle {want[body.Name]}")
+        if not body.isRolledBack() and not body.Shape.isNull():
+            volume = round(body.Shape.Volume, 4)
+            if volume != want[body.Name][0]:
+                found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
+    # A held object (after its Body's Tip) and a rolled-back Body are not recomputed: they stay
+    # touched until the bar passes them (ops#127 R5/R7)
+    held = set()
+    for body in bodies:
+        group = list(body.Group)
+        if body.Tip in group:
+            held.update(o.Name for o in group[group.index(body.Tip) + 1:])
+        if body.isRolledBack():
+            held.add(body.Name)
+    for obj in doc.Objects:
+        if "Touched" in obj.State and obj.Name not in held:
+            found.append(f"{obj.Name} touched after a recompute")
+        if obj.TypeId == "PartDesign::FeatureApply":
+            if obj.StudioOwner is None:
+                found.append(f"{obj.Name}: a step without an owner")
+            if not any(b.hasObject(obj) for b in bodies):
+                found.append(f"{obj.Name}: a step in no Body")
+    return found
+
+
 def deleteSteps(doc, active=False):
     """Deletes every step (with active, only those up to the Tip and not suppressed)."""
     for p, _ in PARTS:
@@ -697,6 +758,50 @@ class TestStudioList(StudioCase):
         self.assertIsNone(self.step(box, "B"))
 
     # --------------------------------------------------------------------- readers keep a step
+    def testDeletedOwnersReadStepGoesAndFreesItsName(self):
+        """S1 skeptic 3: an owner deleted while a datum reads its step's floor takes the step
+        with it (its readers fail, as Onshape's dependants of a deleted feature), so a new owner
+        given the freed name is accepted; undo brings the old one back, readers intact."""
+        f1 = self.owner("F1", [5, 2, 25, 8], 2, "Subtraction", ["A", "B"])  # floor z 8
+        a = self.doc.getObject("A")
+        step = self.step(f1, "A")
+        datum = a.newObject("PartDesign::Plane", "ADatum")
+        datum.AttachmentSupport = [(step, faceAt(step, 8))]
+        datum.MapMode = "FlatFace"
+        self.doc.openTransaction("adopt")
+        PartDesign.studioReconcile(self.list)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        stepName = step.Name
+
+        self.doc.openTransaction("delete F1")
+        PartDesign.studioRemove(f1)
+        self.doc.removeObject("F1")
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.doc.openTransaction("a new F1")
+        g = makeOwner(self.doc, self.studio, "F1", [1, 1, 3, 3], 1, "Subtraction", ["A"])
+        PartDesign.studioInsert(g, -1)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(g.Name, "F1")
+        new = self.step(g, "A")
+        self.assertIsNotNone(new)
+        self.assertEqual(new.Name, stepName)
+        self.assertIs(new.StudioOwner, g)
+        self.assertTrue(new.isValid(), new.getStatusString())
+        self.assertVolume("A", 1000 - 2 * 2 * 1)
+        self.assertFalse(datum.isValid())  # its floor is gone: loud
+
+        self.doc.undo()
+        self.doc.undo()
+        self.doc.recompute()
+        f1 = self.doc.getObject("F1")
+        self.assertIs(self.step(f1, "A").StudioOwner, f1)
+        self.assertIs(datum.AttachmentSupport[0][0], self.step(f1, "A"))
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 8, places=6)
+
     def testReadStepIsKeptSuppressed(self):
         """A step something reads (a datum on its cut floor, an Up to face Pocket to that floor)
         isn't deleted when its part leaves the scope: it stays, suppressed, at its owner's place,
@@ -941,6 +1046,7 @@ class TestStudioListProperty(unittest.TestCase):
             got = snapshot(doc)
             want = fromScratch(*listOf(doc))
             found = differences(got, want)
+            found += ["oracle " + d for d in oracleDifferences(doc)]
             found += ["G1 " + d for d in gateG1(doc)[:4]]
             if found:
                 bad += 1

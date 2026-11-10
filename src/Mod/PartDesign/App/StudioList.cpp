@@ -670,7 +670,12 @@ bool StudioList::reconcile(std::string* why)
                 );
                 continue;
             }
-            if (readersOf(member, body).empty()) {
+            // A step whose owner is deleted goes even when read, as the tree's delete takes it
+            // (forgetDeletedEntry): nothing can bring it back but undo, and it would hold its
+            // name against a new owner given the freed name (S1 skeptic, 2026-11-10). Its readers
+            // fail, as Onshape's dependants of a deleted feature do
+            const bool ownerGone = !owner || !owner->isAttachedToDocument();
+            if (ownerGone || readersOf(member, body).empty()) {
                 doomed.push_back(member);
             }
             else {
