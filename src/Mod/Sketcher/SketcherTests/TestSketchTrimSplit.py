@@ -315,6 +315,31 @@ class TestSketchTrimSplit(unittest.TestCase):
             self.assertAlmostEqual(g.StartPoint.y, 0.5, delta=TOL, msg="a piece left the line")
             self.assertAlmostEqual(g.EndPoint.y, 0.5, delta=TOL, msg="a piece left the line")
 
+    # Review r1 (case rv_polyline_joint_free): a user's polyline vertex is not a Split joint. Trimming it
+    # away ties nothing: the trimmed line doesn't follow its neighbour.
+    def testTrimPolylineVertexTiesNothing(self):
+        sk = self.sk
+        _line(sk, (-20, 1), (0, 1))  # 0
+        _line(sk, (0, 1), (20, 1))  # 1
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 1, -20))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 1, 1))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", 1))
+        h = sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 1, 2, 1))
+        sk.renameConstraint(h, "h")
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 1, 2, 20))
+        _line(sk, (-5, -15), (-5, 15))
+        sk.addConstraint(Sketcher.Constraint("Block", 2))
+        self.doc.recompute()
+        sk.trim(0, V(-2, 1, 0))
+        self.doc.recompute()
+        self._healthy()
+        sk.setDatum(_named(sk, "h"), App.Units.Quantity("4 mm"))
+        self.doc.recompute()
+        self._healthy()
+        g = sk.Geometry[0]
+        self.assertAlmostEqual(g.EndPoint.y, 1.0, delta=TOL, msg="the trimmed line followed its neighbour")
+
     # Skeptic find 8: a line trimmed where it crosses a circle at the circle's parameter-0 point gets a
     # point-on-object there, not a coincidence with a "start" the circle doesn't have.
     def testTrimLineAtCircleSeam(self):
