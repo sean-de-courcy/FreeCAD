@@ -62,7 +62,7 @@ public:
     /// profile one way (off)
     App::PropertyBool ExtendToFullPath;
     /// The other way along the path from the profile, with ExtendToFullPath off (Onshape's
-    /// opposite direction); hidden while that way isn't decided (SW1)
+    /// opposite direction, SW1)
     App::PropertyBool PathReversed;
     /// More path edges, from other objects than Spine's: joined with Spine's in any order
     App::PropertyLinkSubList SpineMore;

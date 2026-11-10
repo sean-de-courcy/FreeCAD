@@ -4843,7 +4843,7 @@ Pipe::Pipe()
         PathReversed,
         (false),
         "Sweep",
-        App::Prop_Hidden,
+        App::Prop_None,
         "With 'Extend to full path' off, sweep the other way along the path from the profile"
     );
     ADD_PROPERTY_TYPE(
