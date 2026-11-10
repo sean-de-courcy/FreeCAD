@@ -93,6 +93,8 @@ private:
         bodyRemove
     };
     selectionModes selectionMode;
+    /// A Boolean studio feature's Targets and Tools (ops#654 P5), or null
+    QWidget* studioBox = nullptr;
 };
 
 /// simulation dialog for the TaskView

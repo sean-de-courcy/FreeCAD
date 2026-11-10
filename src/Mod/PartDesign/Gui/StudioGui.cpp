@@ -29,6 +29,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Studio.h>
 #include <Mod/PartDesign/App/StudioList.h>
@@ -36,8 +37,21 @@
 #include "StudioGui.h"
 #include "ViewProvider.h"
 
+namespace PartDesign
+{
+// App/StudioList.cpp (FreeCAD-CH ops#654 P5, P6a; declared where used)
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
+                                         std::vector<Body*>& steps,
+                                         std::vector<Body*>& tools,
+                                         std::vector<Body*>& both);
+}  // namespace PartDesign
+
 namespace PartDesignGui
 {
+
+QString studioPartName(const PartDesign::Body* body);
+QString studioPartNameAt(const PartDesign::Body* body, const App::DocumentObject* at);
 
 namespace
 {
@@ -228,7 +242,7 @@ private:
             ticks->clear();
             for (PartDesign::Body* body : liveStudioParts(owner)) {
                 const std::string id = PartDesign::studioPartId(body);
-                auto item = new QListWidgetItem(QString::fromUtf8(body->Label.getValue()), ticks);
+                auto item = new QListWidgetItem(studioPartNameAt(body, owner), ticks);
                 item->setData(Qt::UserRole, QString::fromStdString(id));
                 item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
                 item->setCheckState(
@@ -394,7 +408,307 @@ private:
     bool updating = false;
 };
 
+/** A Boolean studio feature's parts (ops#654 P5, Onshape O3): Targets and Tools, one tick per part
+ * live at its place (P6a: never a consumed or merged-away part), as Onshape's fields; Union has
+ * Tools only, merged into the first ticked. Each change is a list edit
+ * (PartDesign.studioSetScopeIds / studioSetToolIds) in the dialog's transaction; why the Boolean
+ * fails is said under the ticks, in red.
+ */
+class StudioBooleanBox: public QWidget
+{
+public:
+    explicit StudioBooleanBox(App::DocumentObject* owner)
+        : ownerT(owner)
+    {
+        setObjectName(QStringLiteral("studioBooleanBox"));
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        targetsLabel = new QLabel(trStudio("Targets:"), this);
+        layout->addWidget(targetsLabel);
+        targets = new QListWidget(this);
+        targets->setObjectName(QStringLiteral("studioTargetList"));
+        targets->setToolTip(trStudio("The parts the tools are subtracted from"));
+        layout->addWidget(targets);
+        toolsLabel = new QLabel(trStudio("Tools:"), this);
+        layout->addWidget(toolsLabel);
+        tools = new QListWidget(this);
+        tools->setObjectName(QStringLiteral("studioToolList"));
+        layout->addWidget(tools);
+        note = new QLabel(this);
+        note->setObjectName(QStringLiteral("studioBooleanNote"));
+        note->setWordWrap(true);
+        layout->addWidget(note);
+        refresh();
+        QObject::connect(targets, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
+            onTicked(item, false);
+        });
+        QObject::connect(tools, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
+            onTicked(item, true);
+        });
+    }
+
+    void refresh()
+    {
+        auto owner = freecad_cast<PartDesign::Boolean*>(ownerT.getObject());
+        if (!owner) {
+            return;
+        }
+        updating = true;
+        const bool fuse = std::string(owner->Type.getValueAsString()) == "Fuse";
+        const auto live = liveStudioParts(owner);
+        auto fill = [&live, owner](QListWidget* list, const std::vector<std::string>& ids) {
+            QSignalBlocker block(list);
+            list->clear();
+            for (PartDesign::Body* body : live) {
+                const std::string id = PartDesign::studioPartId(body);
+                auto item = new QListWidgetItem(studioPartNameAt(body, owner), list);
+                item->setData(Qt::UserRole, QString::fromStdString(id));
+                item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+                item->setCheckState(
+                    std::ranges::find(ids, id) != ids.end() ? Qt::Checked : Qt::Unchecked
+                );
+            }
+        };
+        fill(targets, PartDesign::studioScopeIds(owner));
+        fill(tools, owner->StudioTools.getValues());
+        targetsLabel->setVisible(!fuse);
+        targets->setVisible(!fuse);
+        tools->setToolTip(fuse ? trStudio("The parts merged, into the first one ticked")
+                               : trStudio("The parts subtracted from the targets"));
+        QString text = refusal;
+        if (text.isEmpty() && owner->isError()) {
+            text = QString::fromUtf8(owner->getStatusString());
+        }
+        if (text.isEmpty()) {
+            for (auto step : PartDesign::StudioList::stepsOf(owner)) {
+                if (step->isError()) {
+                    text = QString::fromUtf8(step->getStatusString());
+                    break;
+                }
+            }
+        }
+        std::vector<PartDesign::Body*> steps;
+        std::vector<PartDesign::Body*> toolParts;
+        std::vector<PartDesign::Body*> both;
+        PartDesign::studioBooleanParts(owner, steps, toolParts, both);
+        QString info;
+        if (fuse && !steps.empty()) {
+            info = trStudio("Merged into %1").arg(studioPartNameAt(steps.front(), owner));
+        }
+        note->setText(text.isEmpty() ? info : text);
+        note->setStyleSheet(text.isEmpty() ? QString() : QStringLiteral("color: #d32f2f;"));
+        note->setVisible(!note->text().isEmpty());
+        updating = false;
+    }
+
+    /// Runs the Python edits in the dialog's transaction, then computes the Boolean again
+    void run(const std::vector<std::string>& commands)
+    {
+        refusal.clear();
+        try {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            for (const auto& command : commands) {
+                Gui::Command::doCommand(Gui::Command::Doc, "%s", command.c_str());
+            }
+        }
+        catch (const Base::Exception& e) {
+            refusal = QString::fromUtf8(e.what());
+        }
+        if (auto owner = freecad_cast<PartDesign::Feature*>(ownerT.getObject())) {
+            try {
+                owner->recomputeFeature();
+            }
+            catch (const Base::Exception& e) {
+                e.reportException();
+            }
+        }
+        // After the signal that called it: the lists are rebuilt
+        QPointer<StudioBooleanBox> self(this);
+        QMetaObject::invokeMethod(
+            this,
+            [self]() {
+                if (self) {
+                    self->refresh();
+                }
+            },
+            Qt::QueuedConnection
+        );
+    }
+
+    /// Type (Fuse, Cut, Common) and Keep tools set; a Union lists its targets first among its
+    /// tools, and a Subtract takes the first of a Union's parts as its target
+    void setType(const std::string& type)
+    {
+        auto owner = freecad_cast<PartDesign::Boolean*>(ownerT.getObject());
+        if (!owner) {
+            return;
+        }
+        const std::string cmd = Gui::Command::getObjectCmd(owner);
+        auto scope = PartDesign::studioScopeIds(owner);
+        auto toolIds = owner->StudioTools.getValues();
+        const bool wasFuse = std::string(owner->Type.getValueAsString()) == "Fuse";
+        std::vector<std::string> commands {cmd + ".Type = '" + type + "'"};
+        if (type == "Fuse" && !wasFuse) {
+            for (const auto& id : toolIds) {
+                if (std::ranges::find(scope, id) == scope.end()) {
+                    scope.push_back(id);
+                }
+            }
+            toolIds = scope;
+            scope.clear();
+        }
+        else if (type != "Fuse" && wasFuse && scope.empty() && !toolIds.empty()) {
+            scope = {toolIds.front()};
+            toolIds.erase(toolIds.begin());
+        }
+        commands.push_back("PartDesign.studioSetScopeIds(" + cmd + ", " + pyList(scope) + ")");
+        commands.push_back("PartDesign.studioSetToolIds(" + cmd + ", " + pyList(toolIds) + ")");
+        run(commands);
+    }
+
+    void setKeepTools(bool on)
+    {
+        auto owner = ownerT.getObject();
+        if (!owner) {
+            return;
+        }
+        const std::string cmd = Gui::Command::getObjectCmd(owner);
+        const auto list = PartDesign::StudioList::holding(owner);
+        run({cmd + ".KeepTools = " + (on ? "True" : "False"),
+             std::string("PartDesign.studioReconcile(App.getDocument('")
+                 + owner->getDocument()->getName() + "').getObject('"
+                 + (list ? list->getNameInDocument() : "") + "'))"});
+    }
+
+private:
+    void onTicked(QListWidgetItem* item, bool tool)
+    {
+        auto owner = freecad_cast<PartDesign::Boolean*>(ownerT.getObject());
+        if (updating || !owner || !item) {
+            return;
+        }
+        const std::string id = item->data(Qt::UserRole).toString().toStdString();
+        const bool on = item->checkState() == Qt::Checked;
+        auto ids = tool ? owner->StudioTools.getValues() : PartDesign::studioScopeIds(owner);
+        auto at = std::ranges::find(ids, id);
+        if (on && at == ids.end()) {
+            ids.push_back(id);
+        }
+        else if (!on && at != ids.end()) {
+            ids.erase(at);
+        }
+        else {
+            return;
+        }
+        const std::string cmd = Gui::Command::getObjectCmd(owner);
+        run({std::string(tool ? "PartDesign.studioSetToolIds(" : "PartDesign.studioSetScopeIds(")
+             + cmd + ", " + pyList(ids) + ")"});
+    }
+
+    App::DocumentObjectT ownerT;
+    QLabel* targetsLabel = nullptr;
+    QListWidget* targets = nullptr;
+    QLabel* toolsLabel = nullptr;
+    QListWidget* tools = nullptr;
+    QLabel* note = nullptr;
+    QString refusal;
+    bool updating = false;
+};
+
 }  // namespace
+
+namespace
+{
+/// studioPartName() among live, the parts live where the name is shown
+QString partNameAmong(const PartDesign::Body* body, const std::vector<PartDesign::Body*>& live)
+{
+    const QString label = body ? QString::fromUtf8(body->Label.getValue()) : QString();
+    const QString prefix = QCoreApplication::translate("QObject", "Part %1").arg(QString());
+    auto isDefault = [&prefix](const QString& text) {
+        if (!text.startsWith(prefix) || text.size() == prefix.size()) {
+            return false;
+        }
+        bool ok = false;
+        text.mid(prefix.size()).toInt(&ok);
+        return ok;
+    };
+    if (!body || !isDefault(label)) {
+        return label;
+    }
+    if (std::ranges::find(live, body) == live.end()) {
+        return label;
+    }
+    std::set<QString> typed;
+    for (auto part : live) {
+        const QString text = QString::fromUtf8(part->Label.getValue());
+        if (!isDefault(text)) {
+            typed.insert(text);
+        }
+    }
+    int n = 0;
+    QString name;
+    for (auto part : live) {
+        if (!isDefault(QString::fromUtf8(part->Label.getValue()))) {
+            continue;
+        }
+        do {
+            name = QCoreApplication::translate("QObject", "Part %1").arg(++n);
+        } while (typed.count(name));
+        if (part == body) {
+            return name;
+        }
+    }
+    return label;
+}
+}  // namespace
+
+/// The name a part shows in lists (P6a): its label; in a listed studio a default name ("Part N")
+/// is positional, as Onshape renumbers default names when a part goes (O9): the parts live at the
+/// bar with default names, in the studio's order, take the lowest numbers no typed name has
+QString studioPartName(const PartDesign::Body* body)
+{
+    App::Part* studio = nullptr;
+    const PartDesign::StudioList* list = nullptr;
+    if (body && Part::BodyBase::studioOf(body, studio)) {
+        list = PartDesign::StudioList::of(body->getDocument(), studio);
+    }
+    if (!list) {
+        return body ? QString::fromUtf8(body->Label.getValue()) : QString();
+    }
+    return partNameAmong(body, PartDesign::studioLivePartsAt(list, -1));
+}
+
+/// studioPartName() where at is in the history (a dialog's list of parts): numbered among the
+/// parts live just before at
+QString studioPartNameAt(const PartDesign::Body* body, const App::DocumentObject* at)
+{
+    if (!at || !PartDesign::StudioList::holding(at)) {
+        return studioPartName(body);
+    }
+    return partNameAmong(body, liveStudioParts(at));
+}
+
+QWidget* makeStudioBooleanBox(App::DocumentObject* owner)
+{
+    if (!freecad_cast<PartDesign::Boolean*>(owner) || !PartDesign::isStudioOwner(owner)) {
+        return nullptr;
+    }
+    return new StudioBooleanBox(owner);
+}
+
+void studioBooleanBoxSetType(QWidget* box, const char* type)
+{
+    if (auto booleanBox = dynamic_cast<StudioBooleanBox*>(box)) {
+        booleanBox->setType(type);
+    }
+}
+
+void studioBooleanBoxSetKeepTools(QWidget* box, bool on)
+{
+    if (auto booleanBox = dynamic_cast<StudioBooleanBox*>(box)) {
+        booleanBox->setKeepTools(on);
+    }
+}
 
 std::vector<PartDesign::Body*> liveStudioParts(const App::DocumentObject* at)
 {
@@ -406,6 +720,13 @@ std::vector<PartDesign::Body*> liveStudioParts(const App::DocumentObject* at)
     App::Part* studio = studioOfEntry(at, ok);
     if (!ok) {
         return out;
+    }
+    // In a listed studio, the App's query (P6a): live just before at's place, so no part merged
+    // away, consumed by a Boolean before it, or made by it or later
+    if (const PartDesign::StudioList* list = PartDesign::StudioList::holding(at)) {
+        const auto& entries = list->Entries.getValues();
+        const auto it = std::ranges::find(entries, at);
+        return PartDesign::studioLivePartsAt(list, static_cast<int>(it - entries.begin()));
     }
     // Places in the list (as the App's scope resolution reads them): a part made by an entry at
     // or after at's place isn't there yet; a part merged into another isn't a part any more
