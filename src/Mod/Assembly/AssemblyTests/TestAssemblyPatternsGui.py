@@ -47,7 +47,7 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
     shown = TestAssemblyListGui.shown
     row = TestAssemblyListGui.row
     doubleClick = TestAssemblyListGui.doubleClick
-    view = TestAssemblyListGui.view
+    view = staticmethod(TestAssemblyListGui.view)
 
     def model(self):
         doc = self.newDocument("AssemblyPatternsGui")
@@ -92,9 +92,11 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         pump(0.3)
         self.assertEqual(pattern.Direction[0], seed)
         self.assertTrue(pattern.Direction[1][0].endswith(edge))
-        spins = [w for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget) if w.metaObject().className() in ("Gui::QuantitySpinBox", "Gui::IntSpinBox") and w.isVisible()]
-        distance = [w for w in spins if w.metaObject().className() == "Gui::QuantitySpinBox"][0]
-        count = [w for w in spins if w.metaObject().className() == "Gui::IntSpinBox"][0]
+        main = Gui.getMainWindow()
+        distance = main.findChild(QtWidgets.QWidget, "patternAmount")
+        count = main.findChild(QtWidgets.QWidget, "patternCount")
+        self.assertIsNotNone(distance)
+        self.assertIsNotNone(count)
         distance.setProperty("rawValue", 15.0)
         count.setValue(4)
         pump(0.3)
@@ -105,9 +107,8 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         for copy in copies:
             expected = App.Placement(self.along * (15.0 * copy.PatternIndex), App.Rotation()).multiply(seed.Placement)
             self.assertTrue(copy.Placement.isSame(expected, 1e-6), copy.Label)
-        ok = [b for b in Gui.getMainWindow().findChildren(QtWidgets.QPushButton) if b.isVisible() and b.text().replace("&", "") in ("OK", "Ok")]
-        self.assertTrue(ok, "no OK button")
-        ok[0].click()
+        self.assertIsNotNone(AssemblyPattern.activePanel)
+        self.assertTrue(AssemblyPattern.activePanel.accept())
         pump(0.3)
         self.assertFalse(Gui.Control.activeDialog(), "the panel closed")
         # The list: four instances, the pattern with the mates
@@ -121,9 +122,8 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         k = shown[headers[1]].index("Linear pattern 1")
         self.doubleClick(self.row(1, k))
         self.assertTrue(waitFor(lambda: bool(Gui.Control.activeDialog())), "the panel opens again")
-        cancel = [b for b in Gui.getMainWindow().findChildren(QtWidgets.QPushButton) if b.isVisible() and b.text().replace("&", "") == "Cancel"]
-        self.assertTrue(cancel)
-        cancel[0].click()
+        self.assertIsNotNone(AssemblyPattern.activePanel)
+        AssemblyPattern.activePanel.reject()
         pump(0.3)
         self.assertEqual(len(pattern.Instances), 3)
         # Undo takes the pattern and its copies back

@@ -550,6 +550,16 @@ int AssemblyObject::solve(bool enableRedo)
         return -1;
     }
 
+    // FreeCAD-CH (asm-patterns): a result that moves a grounded part is refused, as the drag refuses
+    // it (two Fixed joints that disagree, e.g. a pattern copy fastened to a grounded part where the
+    // pattern doesn't put it, turned the grounded part and reported success)
+    if (!validateNewPlacements()) {
+        FC_ERR("Assembly " << getFullName() << ": the solve would move a grounded part; nothing moved");
+        lastSolverStatus = -1;
+        updateSolveStatus();
+        return -1;
+    }
+
     setNewPlacements();
 
     // FreeCAD-CH (asm-patterns): the copies moved with their seed's body; placing them again makes
@@ -926,6 +936,10 @@ bool AssemblyObject::validateNewPlacements()
     // First we check if a grounded object has moved. It can happen that they flip.
     auto groundedParts = getGroundedParts();
     for (auto* obj : groundedParts) {
+        // FreeCAD-CH (asm-patterns): solve() checks too now, where the origin can be unset
+        if (!obj || !obj->isAttachedToDocument()) {
+            continue;
+        }
         auto* propPlacement = obj->getPlacementProperty();
         if (propPlacement) {
             Base::Placement oldPlc = propPlacement->getValue();
@@ -957,6 +971,10 @@ bool AssemblyObject::validateNewPlacements()
 void AssemblyObject::postDrag()
 {
     mbdAssembly->runPostDrag();  // Do this after last drag
+    // FreeCAD-CH (asm-patterns): the copies moved with their seed's body; a direction on another part
+    // makes them exact only when placed again
+    placePatterns(activePatterns(getJointGroup()));
+    updateRigidPlacementCache();
     purgeTouched();
 }
 
@@ -2658,6 +2676,50 @@ AssemblyObject::MbDPartData AssemblyObject::getMbDData(App::DocumentObject* part
         return it->second;
     }
 
+    // While dragging (bundleFixed), the parts held to start by Fixed joints go on its body, at their
+    // offsets from bodyPlc (the body's placement). FreeCAD-CH (asm-patterns): a part bundled so brings
+    // its rigid cluster along, and a cluster's members bundle their own Fixed partners: otherwise a
+    // part fastened to a pattern copy got a body of its own and no joint (bundled Fixed joints are
+    // not made), and dragged off its mate.
+    auto bundleFixedPartners = [&](App::DocumentObject* start,
+                                   const std::shared_ptr<ASMTPart>& body,
+                                   const Base::Placement& bodyPlc) {
+        auto visit = [&](App::DocumentObject* currentPart, auto& self) -> void {
+            std::vector<App::DocumentObject*> joints = getJointsOfPart(currentPart);
+            for (auto* joint : joints) {
+                JointType jointType = getJointType(joint);
+                if (jointType != JointType::Fixed) {
+                    continue;
+                }
+                App::DocumentObject* part1 = getMovingPartFromRef(joint, "Reference1");
+                App::DocumentObject* part2 = getMovingPartFromRef(joint, "Reference2");
+                App::DocumentObject* partToAdd = currentPart == part1 ? part2 : part1;
+
+                if (!partToAdd || objectPartMap.find(partToAdd) != objectPartMap.end()) {
+                    // already added
+                    continue;
+                }
+
+                Base::Placement plci = getPlacementFromProp(partToAdd, "Placement");
+                objectPartMap[partToAdd] = {body, bodyPlc.inverse() * plci};
+
+                if (const auto* members = getRigidMembers(partToAdd)) {
+                    for (auto* member : *members) {
+                        if (member && objectPartMap.find(member) == objectPartMap.end()) {
+                            objectPartMap[member]
+                                = {body, bodyPlc.inverse() * getPlacementFromProp(member, "Placement")};
+                            self(member, self);
+                        }
+                    }
+                }
+
+                // Recursively call for partToAdd
+                self(partToAdd, self);
+            }
+        };
+        visit(start, visit);
+    };
+
     // Associate objects that belong to an active rigid cluster.
     if (auto* rep = getRigidRepresentative(part)) {
         Base::Placement repPlc = getPlacementFromProp(rep, "Placement");
@@ -2697,6 +2759,13 @@ AssemblyObject::MbDPartData AssemblyObject::getMbDData(App::DocumentObject* part
                 Base::Placement memberPlc = getPlacementFromProp(member, "Placement");
                 objectPartMap[member] = {mbdPart, bodyPlc.inverse() * memberPlc};
             }
+            if (bundleFixed) {
+                for (auto* member : *members) {
+                    if (member) {
+                        bundleFixedPartners(member, mbdPart, bodyPlc);
+                    }
+                }
+            }
         }
 
         auto mapped = objectPartMap.find(part);
@@ -2715,43 +2784,7 @@ AssemblyObject::MbDPartData AssemblyObject::getMbDData(App::DocumentObject* part
 
     // Associate other objects connected with fixed joints
     if (bundleFixed) {
-        auto addConnectedFixedParts = [&](App::DocumentObject* currentPart, auto& self) -> void {
-            std::vector<App::DocumentObject*> joints = getJointsOfPart(currentPart);
-            for (auto* joint : joints) {
-                JointType jointType = getJointType(joint);
-                if (jointType == JointType::Fixed) {
-                    App::DocumentObject* part1 = getMovingPartFromRef(joint, "Reference1");
-                    App::DocumentObject* part2 = getMovingPartFromRef(joint, "Reference2");
-                    App::DocumentObject* partToAdd = currentPart == part1 ? part2 : part1;
-
-                    if (objectPartMap.find(partToAdd) != objectPartMap.end()) {
-                        // already added
-                        continue;
-                    }
-
-                    Base::Placement plci = getPlacementFromProp(partToAdd, "Placement");
-                    MbDPartData partData = {mbdPart, plc.inverse() * plci};
-                    objectPartMap[partToAdd] = partData;  // Store the association
-
-                    // FreeCAD-CH (asm-patterns): a bundled part's rigid cluster comes along on the
-                    // same body
-                    if (const auto* members = getRigidMembers(partToAdd)) {
-                        for (auto* member : *members) {
-                            if (member && objectPartMap.find(member) == objectPartMap.end()) {
-                                objectPartMap[member]
-                                    = {mbdPart, plc.inverse() * getPlacementFromProp(member, "Placement")};
-                                self(member, self);
-                            }
-                        }
-                    }
-
-                    // Recursively call for partToAdd
-                    self(partToAdd, self);
-                }
-            }
-        };
-
-        addConnectedFixedParts(part, addConnectedFixedParts);
+        bundleFixedPartners(part, mbdPart, plc);
     }
     return data;
 }

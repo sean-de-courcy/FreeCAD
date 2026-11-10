@@ -417,6 +417,66 @@ class TestAssemblyPatterns(AssemblyTestBase):
             self.assertEqual(sorted(o.PatternIndex for o in owned), [1, 2, 3], [o.Name for o in owned])
             self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
 
+    def test_deleted_pattern_keeps_a_mated_copy(self):
+        """Deleting the pattern deletes its copies but one a mate uses: that one stays, a plain
+        instance where it was, and its mate keeps its part"""
+        pattern = self.linear(4, 20.0)
+        third = [c for c in pattern.Instances if c.PatternIndex == 3][0]
+        others = [c.Name for c in pattern.Instances if c != third]
+        where = third.Placement
+        peg = self.instance(self.block)
+        joint = self.fixedJoint(peg, third, name="PegOnCopy")
+        self.doc.recompute()
+        self.doc.removeObject(pattern.Name)
+        self.doc.recompute()
+        for name in others:
+            self.assertIsNone(self.doc.getObject(name), name)
+        self.assertIsNotNone(self.doc.getObject(third.Name))
+        self.assertFalse(AssemblyPattern.isPatternCopy(third))
+        self.assertPlacement(third, where, "the kept copy")
+        refs = [joint.Reference1[0] if joint.Reference1 else None, joint.Reference2[0] if joint.Reference2 else None]
+        self.assertIn(third, refs, "the mate keeps its part")
+
+    def test_copies_follow_a_relinked_seed(self):
+        """The seed relinked to another part, its copies link to it too (the BOM counts it)"""
+        pattern = self.linear(3, 20.0)
+        other = self.doc.addObject("Part::Box", "Bigger")
+        other.Length = other.Width = other.Height = 30
+        self.doc.recompute()
+        self.seed.LinkedObject = other
+        self.doc.recompute()
+        self.assertEqual([c.LinkedObject for c in pattern.Instances], [other, other])
+
+    def test_refusals(self):
+        """A copy of another pattern as seed, and a fixed copy, are said, not dropped or moved"""
+        first = self.linear(3, 20.0)
+        copy = first.Instances[0]
+        edge = self.edgeAlong(self.plateSrc.Shape, X)
+        second = AssemblyPattern.makePattern(self.assembly, "Linear", [copy], (self.plate, [edge]))
+        self.doc.recompute()
+        self.assertIn("Invalid", second.State)
+        with self.assertRaisesRegex(RuntimeError, "is a copy of"):
+            second.Proxy.execute(second)
+        self.doc.removeObject(second.Name)
+        ground = self.jointgroup.newObject("App::FeaturePython", "GroundedCopy")
+        JointObject.GroundedJoint(ground, copy)
+        first.touch()
+        self.doc.recompute()
+        self.assertIn("Invalid", first.State)
+        with self.assertRaisesRegex(RuntimeError, "is fixed"):
+            first.Proxy.execute(first)
+
+    def test_disagreeing_mate_moves_no_grounded_part(self):
+        """Copy 1 fastened to the grounded plate where the pattern doesn't put it: the solve fails
+        and nothing moves (it turned the grounded plate and reported success)"""
+        pattern = self.linear(3, 20.0)
+        plate_plc = self.plate.Placement
+        copy = [c for c in pattern.Instances if c.PatternIndex == 1][0]
+        self.fixedJoint(copy, self.plate, App.Vector(150, 150, 0), name="CopyOnPlate")
+        self.doc.recompute()
+        self.assertEqual(self.assembly.solve(), -1)
+        self.assertPlacement(self.plate, plate_plc, "the grounded plate")
+
     def test_time_four_patterns_of_thirty(self):
         """4 seeds fastened to the plate, each patterned 30 times (120 copies, 124 instances): the
         recompute that makes them, a distance change and a solve stay well under a second each"""

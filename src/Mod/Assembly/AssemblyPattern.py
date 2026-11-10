@@ -30,6 +30,13 @@ __title__ = "Assembly instance patterns"
 PATTERN_TYPES = ["Linear", "Circular"]
 # Placements closer than this are the same (mm, and radians for the rotation)
 TOLERANCE = 1e-7
+# The pattern panel that is open (as JointObject.activeTask)
+activePanel = None
+
+
+def hasExpression(obj, name):
+    """Whether an expression drives obj's property name"""
+    return any(path == name for path, _ in obj.ExpressionEngine)
 
 
 def isPattern(obj):
@@ -228,6 +235,10 @@ class InstancePattern:
         members = set(assembly.Group) if assembly else set()
         return [s for s in fp.Seeds if s is not None and s in members and not isPatternCopy(s)]
 
+    def copySeeds(self, fp):
+        """The seeds that are another pattern's copies (not patterned: said, not dropped)"""
+        return [s for s in fp.Seeds if s is not None and isPatternCopy(s) and s.PatternOwner != fp]
+
     def copiesBySeed(self, fp):
         """{seed name: {index: copy}} of the copies the pattern holds that its count wants"""
         result = {}
@@ -278,9 +289,7 @@ class InstancePattern:
         source = sourceOf(seed)
         kind = "Assembly::AssemblyLink" if seed.isDerivedFrom("Assembly::AssemblyLink") else "App::Link"
         copy = assembly.newObject(kind, source.Name)
-        copy.LinkedObject = source
-        if kind == "Assembly::AssemblyLink" and hasattr(seed, "Rigid"):
-            copy.Rigid = seed.Rigid
+        self.matchSeed(copy, seed)
         copy.Label = instanceLabel(assembly, source)
         copy.addProperty("App::PropertyLinkHidden", "PatternSeed", "Pattern", "The seed this copy repeats")
         copy.addProperty("App::PropertyInteger", "PatternIndex", "Pattern", "The copy's number in its pattern")
@@ -292,6 +301,15 @@ class InstancePattern:
             copy.setPropertyStatus(name, ["ReadOnly"])
         copy.Placement = seed.Placement
         return copy
+
+    def matchSeed(self, copy, seed):
+        """The copy links to what its seed links to, scaled and rigid as the seed"""
+        source = sourceOf(seed)
+        if copy.LinkedObject != source:
+            copy.LinkedObject = source
+        for name in ("Rigid", "ScaleVector"):
+            if hasattr(copy, name) and hasattr(seed, name) and getattr(copy, name) != getattr(seed, name):
+                setattr(copy, name, getattr(seed, name))
 
     def reconcile(self, fp):
         """Makes the copies the properties ask for and removes the others"""
@@ -318,8 +336,11 @@ class InstancePattern:
                 extra.append(copy)
         # A copy a mate uses isn't removed: the pattern says so and changes nothing (a mate would
         # otherwise lose its part without an error)
+        direction = fp.Direction[0] if fp.Direction else None
         for copy in extra:
             users = usersOf(assembly, copy, fp)
+            if copy == direction:
+                users.append(fp)
             if users:
                 raise RuntimeError(
                     translate("Assembly", "{0}: {1} is used by {2}; delete or change that first").format(
@@ -334,6 +355,8 @@ class InstancePattern:
                 copy = keep.get((seed.Name, i))
                 if copy is None:
                     copy = self.makeCopy(fp, assembly, seed, i)
+                else:
+                    self.matchSeed(copy, seed)
                 ordered.append(copy)
         if list(fp.Instances) != ordered:
             fp.setPropertyStatus("Instances", "-ReadOnly")
@@ -341,6 +364,13 @@ class InstancePattern:
             fp.setPropertyStatus("Instances", "ReadOnly")
 
     def execute(self, fp):
+        copySeeds = self.copySeeds(fp)
+        if copySeeds:
+            raise RuntimeError(
+                translate("Assembly", "{0}: {1} is a copy of {2}; pattern its seed instead").format(
+                    fp.Label, copySeeds[0].Label, copySeeds[0].PatternOwner.Label
+                )
+            )
         if not fp.Suppressed:
             if not self.seeds(fp):
                 self.reconcile(fp)  # the copies of a deleted seed go
@@ -348,6 +378,17 @@ class InstancePattern:
             # Raises when the direction is lost, before anything changes: the copies stay
             self.transforms(fp)
         self.reconcile(fp)
+        # A fixed copy would be moved by its pattern: said instead
+        import UtilsAssembly
+
+        for other in UtilsAssembly.getJointGroup(assemblyOf(fp)).Group:
+            ground = getattr(other, "ObjectToGround", None)
+            if ground is not None and ground in fp.Instances:
+                raise RuntimeError(
+                    translate("Assembly", "{0}: {1} is fixed; a patterned instance follows its seed: unfix it").format(
+                        fp.Label, ground.Label
+                    )
+                )
         self.placeInstances(fp)
         for copy in fp.Instances:
             if copy is not None:
@@ -363,8 +404,14 @@ class InstancePattern:
         if assembly is not None and assembly.Removing:
             return
         for copy in list(fp.Instances):
-            if copy is not None and not copy.Removing and doc.getObject(copy.Name) is not None:
-                doc.removeObject(copy.Name)
+            if copy is None or copy.Removing or doc.getObject(copy.Name) is None:
+                continue
+            if assembly is not None and usersOf(assembly, copy, fp):
+                # A copy a mate uses stays, as a plain instance where it is: its mates keep their part
+                for name in ("PatternOwner", "PatternSeed", "PatternIndex"):
+                    copy.removeProperty(name)
+                continue
+            doc.removeObject(copy.Name)
 
 
 def usersOf(assembly, obj, pattern=None):
@@ -445,9 +492,18 @@ class ViewProviderInstancePattern:
     def edit(self, vobj):
         if Gui.Control.activeDialog():
             return False
-        panel = TaskInstancePattern(vobj.Object)
-        Gui.Control.showDialog(panel)
+        showPanel(TaskInstancePattern(vobj.Object))
         return True
+
+
+def showPanel(panel):
+    """Shows the pattern panel; it closes (Cancel) when its transaction or its document goes"""
+    dialog = Gui.Control.showDialog(panel)
+    if dialog is not None:
+        dialog.setAutoCloseOnTransactionChange(True)
+        dialog.setAutoCloseOnDeletedDocument(True)
+        dialog.setDocumentName(panel.doc.Name)
+    return dialog
 
 
 class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
@@ -456,6 +512,8 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
 
     def __init__(self, pattern, created=False):
         super().__init__()
+        global activePanel
+        activePanel = self
         self.pattern = pattern
         self.created = created
         self.doc = pattern.Document
@@ -499,9 +557,11 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
             self.amount.setProperty("unit", "mm")
             self.bind(self.amount, "Distance")
             layout.addRow(translate("Assembly", "Distance"), self.amount)
+        self.amount.setObjectName("patternAmount")
         self.amount.setProperty("rawValue", pattern.Angle.Value if circular else pattern.Distance.Value)
         self.amount.valueChanged.connect(self.onAmount)
         self.count = loader.createWidget("Gui::IntSpinBox")
+        self.count.setObjectName("patternCount")
         self.count.setMinimum(1)
         self.count.setMaximum(100000)
         self.count.setValue(int(pattern.Count))
@@ -520,7 +580,8 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         self.refresh()
         self.setField("seeds" if not pattern.Seeds else "direction" if not pattern.Direction else "")
         Gui.Selection.clearSelection()
-        Gui.Selection.addObserver(self)
+        # Picks with their whole path from the root, as the joint dialog takes them
+        Gui.Selection.addObserver(self, Gui.Selection.ResolveMode.NoResolve)
 
     def bind(self, widget, name):
         binding = Gui.ExpressionBinding(widget)
@@ -549,6 +610,9 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
     def update(self):
         self.pattern.touch()
         self.doc.recompute()
+        # Copies removed in a recompute go after it: the assembly solves again without them
+        if self.assembly is not None and "Touched" in self.assembly.State:
+            self.doc.recompute()
         self.refresh()
         if "Invalid" in self.pattern.State or "Error" in self.pattern.State:
             self.message.setText(self.lastError())
@@ -567,14 +631,14 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
     def onAmount(self, *args):
         value = self.amount.property("rawValue")
         if self.pattern.PatternType == "Circular":
-            if self.pattern.getExpression("Angle") is None and abs(self.pattern.Angle.Value - value) > 1e-12:
+            if not hasExpression(self.pattern, "Angle") and abs(self.pattern.Angle.Value - value) > 1e-12:
                 self.pattern.Angle = value
-        elif self.pattern.getExpression("Distance") is None and abs(self.pattern.Distance.Value - value) > 1e-12:
+        elif not hasExpression(self.pattern, "Distance") and abs(self.pattern.Distance.Value - value) > 1e-12:
             self.pattern.Distance = value
         self.update()
 
     def onCount(self, value):
-        if self.pattern.getExpression("Count") is None and int(self.pattern.Count) != int(value):
+        if not hasExpression(self.pattern, "Count") and int(self.pattern.Count) != int(value):
             self.pattern.Count = int(value)
         self.update()
 
@@ -588,7 +652,23 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
 
     # picks
     def addSelection(self, doc_name, obj_name, sub_name, mousePos=None):
+        # An error in a selection observer is lost: report it
+        try:
+            self.onPick(doc_name, obj_name, sub_name)
+        except Exception:
+            import traceback
+
+            App.Console.PrintError(traceback.format_exc())
+
+    def onPick(self, doc_name, obj_name, sub_name):
         import UtilsAssembly
+
+        try:
+            self.doc.Name
+        except ReferenceError:
+            # The dialog was closed without OK or Cancel and its document is gone
+            Gui.Selection.removeObserver(self)
+            return
 
         if self.assembly is None or doc_name != self.doc.Name:
             return
@@ -601,15 +681,21 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
                 return
             self.pattern.Direction = (comp, [sub])
             self.setField("")
-        else:
-            if isPatternCopy(comp):
-                comp = comp.PatternSeed
+        elif self.field == "seeds":
             seeds = [s for s in self.pattern.Seeds if s is not None]
+            if isPatternCopy(comp):
+                # A copy stands for its seed: it adds the seed, it never removes it
+                comp = comp.PatternSeed
+                if comp in seeds:
+                    return
             if comp in seeds:
                 seeds.remove(comp)
             else:
                 seeds.append(comp)
             self.pattern.Seeds = seeds
+        else:
+            # No field chosen: a pick goes nowhere (click Instances or Direction first)
+            return
         QtCore.QTimer.singleShot(0, Gui.Selection.clearSelection)
         self.update()
 
@@ -618,10 +704,28 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         return QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
 
     def finish(self):
+        global activePanel
+        if activePanel is self:
+            activePanel = None
+        Gui.Selection.removeObserver(self)
+        self.bindings = []
+        gdoc = Gui.getDocument(self.doc.Name) if self.doc.Name in App.listDocuments() else None
+        if gdoc is not None and gdoc.getInEdit() == self.pattern.ViewObject:
+            gdoc.resetEdit()
+
+    def autoClosedOnTransactionChange(self):
+        self.reject()
+
+    def autoClosedOnDeletedDocument(self):
         Gui.Selection.removeObserver(self)
         self.bindings = []
 
     def accept(self):
+        self.update()
+        if "Invalid" in self.pattern.State or "Error" in self.pattern.State:
+            # OK keeps the dialog while the pattern is in error (Cancel leaves)
+            self.message.setText(self.lastError())
+            return False
         self.finish()
         self.doc.recompute()
         self.doc.commitTransaction()
@@ -689,7 +793,7 @@ class CommandCreatePattern:
         doc.openTransaction(translate("Assembly", "{0} pattern").format(self.kind))
         pattern = makePattern(assembly, self.kind, seeds)
         doc.recompute()
-        Gui.Control.showDialog(TaskInstancePattern(pattern, created=True))
+        showPanel(TaskInstancePattern(pattern, created=True))
 
 
 if App.GuiUp:
