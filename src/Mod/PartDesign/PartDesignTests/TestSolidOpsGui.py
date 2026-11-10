@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """FreeCAD-CH lane solid-ops: the Thicken, Scale and Offset surface commands and task panels."""
 
+import time
 import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
+
+from PySide import QtWidgets
+from PySide6.QtTest import QTest
 
 from PartDesignTests.TestSolidOps import top_face_name
 
@@ -50,7 +54,7 @@ class TestSolidOpsGui(unittest.TestCase):
         feature = panel.obj
         self.assertEqual(len(feature.Base), 1)
         self.assertEqual(panel.faceList.count(), 1)
-        panel.widgets["Thickness1"].setValue(2.0)
+        panel.setValue("Thickness1", 2.0)
         self.assertTrue(panel.accept())
         self.assertIsNone(G.Panel.current)
         self.assertAlmostEqual(self.body.Shape.Volume, 4800.0, 3)
@@ -61,7 +65,7 @@ class TestSolidOpsGui(unittest.TestCase):
         Gui.runCommand("PartDesign_Thicken")
         panel = G.Panel.current
         panel.widgets["Operation"].setCurrentIndex(0)  # New
-        panel.widgets["Thickness1"].setValue(2.0)
+        panel.setValue("Thickness1", 2.0)
         self.assertTrue(panel.accept())
         feature = [o for o in self.doc.Objects if o.Name.startswith("Thicken")][0]
         self.assertNotEqual(feature.getParentGeoFeatureGroup(), self.body)
@@ -73,8 +77,8 @@ class TestSolidOpsGui(unittest.TestCase):
         Gui.runCommand("PartDesign_Thicken")
         panel = G.Panel.current
         panel.widgets["Operation"].setCurrentIndex(2)  # Remove
-        panel.widgets["Thickness1"].setValue(0.0)
-        panel.widgets["Thickness2"].setValue(2.0)
+        panel.setValue("Thickness1", 0.0)
+        panel.setValue("Thickness2", 2.0)
         self.assertTrue(panel.accept())
         self.assertAlmostEqual(self.body.Shape.Volume, 3200.0, 3)
 
@@ -82,7 +86,7 @@ class TestSolidOpsGui(unittest.TestCase):
         self.selectTop()
         Gui.runCommand("PartDesign_Thicken")
         panel = G.Panel.current
-        panel.widgets["Thickness1"].setValue(0.0)
+        panel.setValue("Thickness1", 0.0)
         self.assertFalse(panel.accept())
         self.assertIs(G.Panel.current, panel)
         self.assertIn("zero", panel.message.text().lower())
@@ -98,7 +102,7 @@ class TestSolidOpsGui(unittest.TestCase):
         self.selectTop()
         Gui.runCommand("PartDesign_OffsetSurface")
         panel = G.Panel.current
-        panel.widgets["Distance"].setValue(3.0)
+        panel.setValue("Distance", 3.0)
         panel.widgets["Flip"].setChecked(True)
         self.assertTrue(panel.accept())
         feature = panel.obj
@@ -110,7 +114,7 @@ class TestSolidOpsGui(unittest.TestCase):
     def testScaleTheActiveBody(self):
         Gui.runCommand("PartDesign_ScalePart")
         panel = G.Panel.current
-        panel.widgets["Factor"].setValue(2.0)
+        panel.setValue("Factor", 2.0)
         self.assertTrue(panel.accept())
         self.assertAlmostEqual(self.body.Shape.Volume, 32000.0, 2)
 
@@ -118,9 +122,9 @@ class TestSolidOpsGui(unittest.TestCase):
         Gui.runCommand("PartDesign_ScalePart")
         panel = G.Panel.current
         panel.widgets["Uniform"].setChecked(False)
-        panel.widgets["FactorX"].setValue(2.0)
-        panel.widgets["FactorY"].setValue(1.0)
-        panel.widgets["FactorZ"].setValue(0.5)
+        panel.setValue("FactorX", 2.0)
+        panel.setValue("FactorY", 1.0)
+        panel.setValue("FactorZ", 0.5)
         self.assertTrue(panel.accept())
         self.assertAlmostEqual(self.body.Shape.BoundBox.XMax, 40.0, 4)
         self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 5.0, 4)
@@ -135,7 +139,103 @@ class TestSolidOpsGui(unittest.TestCase):
         self.assertIsNotNone(panel)
         self.assertEqual(panel.obj, feature)
         self.assertEqual(panel.faceList.count(), 1)
-        self.assertAlmostEqual(panel.widgets["Thickness1"].value(), 1.0)
-        panel.widgets["Thickness1"].setValue(3.0)
+        self.assertAlmostEqual(panel.value("Thickness1"), 1.0)
+        panel.setValue("Thickness1", 3.0)
         panel.accept()
         self.assertAlmostEqual(self.body.Shape.Volume, 4000.0 + 1200.0, 3)
+
+    # -- expression fields: `#variable` typed into a field binds it (Onshape's variables)
+
+    def pump(self, seconds=0.2):
+        app = QtWidgets.QApplication.instance()
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            time.sleep(0.01)
+
+    def typeInto(self, panel, name, text):
+        from PySide import QtCore
+
+        spin = panel.widgets[name]
+        if spin.property("unresolvedVariable") is None:
+            self.skipTest("this build's fields do not take #variable (ops#640)")
+        spin.show()
+        spin.setFocus()
+        self.pump(0.1)
+        spin.findChild(QtWidgets.QLineEdit).selectAll()
+        QTest.keyClicks(spin, text)
+        QTest.keyClick(spin, QtCore.Qt.Key_Return)
+        self.pump(0.2)
+
+    def addVariables(self):
+        vs = self.doc.addObject("App::VarSet", "Variables")
+        vs.addProperty("App::PropertyLength", "Thick")
+        vs.addProperty("App::PropertyLength", "Dist")
+        vs.addProperty("App::PropertyFloat", "Scl")
+        vs.Thick, vs.Dist, vs.Scl = 2.0, 3.0, 2.0
+        self.doc.recompute()
+        return vs
+
+    def exprs(self, obj):
+        return {p.lstrip("."): e for p, e in obj.ExpressionEngine}
+
+    def testThickenFieldTakesAVariable(self):
+        vs = self.addVariables()
+        self.selectTop()
+        Gui.runCommand("PartDesign_Thicken")
+        panel = G.Panel.current
+        feature = panel.obj
+        self.typeInto(panel, "Thickness1", "#Thick")
+        self.assertEqual(self.exprs(feature).get("Thickness1"), "Variables.Thick")
+        self.assertAlmostEqual(feature.Thickness1.Value, 2.0, 6)
+        self.assertAlmostEqual(feature.Shape.Volume, 4800.0, 3)
+        self.assertTrue(panel.accept())
+        vs.Thick = 3.0
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000.0 + 1200.0 * 1.5, 3)
+
+    def testOffsetFieldTakesAVariable(self):
+        self.addVariables()
+        self.selectTop()
+        Gui.runCommand("PartDesign_OffsetSurface")
+        panel = G.Panel.current
+        self.typeInto(panel, "Distance", "#Dist")
+        self.assertEqual(self.exprs(panel.obj).get("Distance"), "Variables.Dist")
+        self.assertAlmostEqual(panel.obj.Shape.BoundBox.ZMin, 13.0, 5)
+        self.assertTrue(panel.accept())
+
+    def testScaleFactorFieldTakesAVariable(self):
+        self.addVariables()
+        Gui.runCommand("PartDesign_ScalePart")
+        panel = G.Panel.current
+        self.typeInto(panel, "Factor", "#Scl")
+        self.assertEqual(self.exprs(panel.obj).get("Factor"), "Variables.Scl")
+        self.assertAlmostEqual(panel.obj.Shape.Volume, 32000.0, 2)
+        self.assertTrue(panel.accept())
+
+    def testAnExpressionFieldIsNotOverwrittenByThePanel(self):
+        vs = self.addVariables()
+        self.selectTop()
+        Gui.runCommand("PartDesign_Thicken")
+        panel = G.Panel.current
+        panel.obj.setExpression("Thickness1", "Variables.Thick")
+        panel.changed()  # any later edit: the value is not written over the expression
+        self.assertEqual(self.exprs(panel.obj).get("Thickness1"), "Variables.Thick")
+        vs.Thick = 4.0
+        self.doc.recompute()
+        self.assertAlmostEqual(panel.obj.Thickness1.Value, 4.0, 6)
+        self.assertTrue(panel.accept())
+
+    def testReopenedPanelShowsTheExpression(self):
+        self.addVariables()
+        self.selectTop()
+        Gui.runCommand("PartDesign_Thicken")
+        feature = G.Panel.current.obj
+        feature.setExpression("Thickness1", "Variables.Thick")
+        G.Panel.current.accept()
+        Gui.ActiveDocument.setEdit(feature.Name, 0)
+        panel = G.Panel.current
+        self.assertTrue(panel.hasExpression("Thickness1"))
+        self.assertAlmostEqual(panel.value("Thickness1"), 2.0, 6)
+        panel.reject()
+        self.assertEqual(self.exprs(feature).get("Thickness1"), "Variables.Thick")

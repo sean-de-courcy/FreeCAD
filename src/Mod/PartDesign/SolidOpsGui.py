@@ -95,6 +95,7 @@ class ViewProviderSolidOp:
     def setEdit(self, vobj, mode=0):
         if mode != 0:
             return None
+        vobj.Object.Document.openTransaction(_tr("Edit") + " " + vobj.Object.Label)
         FreeCADGui.Control.showDialog(Panel(vobj.Object, self._kind(), creating=False))
         return True
 
@@ -132,23 +133,25 @@ class Panel:
         self.form.setWindowTitle(_tr(self.cfg["text"]))
         self.layout = QtWidgets.QFormLayout(self.form)
         self.widgets = {}
+        self.paths = {}
         self.busy = True
+        self.closed = False
         if self.cfg["faces"]:
             self.addFaces()
         if kind == "Thicken":
             self.addOperation()
-            self.spin("Thickness1", _tr("Thickness 1"), self.obj.Thickness1.Value, 0, 1e6)
-            self.spin("Thickness2", _tr("Thickness 2"), self.obj.Thickness2.Value, 0, 1e6)
+            self.spin("Thickness1", _tr("Thickness 1"), "Thickness1", 0, 1e6)
+            self.spin("Thickness2", _tr("Thickness 2"), "Thickness2", 0, 1e6)
         elif kind == "OffsetSurface":
-            self.spin("Distance", _tr("Distance"), self.obj.Distance.Value, -1e6, 1e6)
+            self.spin("Distance", _tr("Distance"), "Distance", -1e6, 1e6)
             self.check("Flip", _tr("Flip direction"), self.obj.Flip)
         else:
             self.check("Uniform", _tr("Uniform"), self.obj.Uniform)
-            self.spin("Factor", _tr("Scale factor"), self.obj.Factor, 1e-6, 1e6, "")
+            self.spin("Factor", _tr("Scale factor"), "Factor", 1e-6, 1e6, unit=None)
             for ax in "XYZ":
-                self.spin("Factor" + ax, _tr("Scale " + ax), getattr(self.obj, "Factor" + ax), 1e-6, 1e6, "")
-            for i, ax in enumerate("XYZ"):
-                self.spin("Point" + ax, _tr("Point " + ax), getattr(self.obj.Point, ax.lower()), -1e9, 1e9)
+                self.spin("Factor" + ax, _tr("Scale " + ax), "Factor" + ax, 1e-6, 1e6, unit=None)
+            for ax in "XYZ":
+                self.spin("Point" + ax, _tr("Point " + ax), "Point." + ax.lower(), -1e9, 1e9)
             self.syncUniform()
         self.message = QtWidgets.QLabel("")
         self.message.setWordWrap(True)
@@ -158,17 +161,44 @@ class Panel:
         self.refresh()
 
     # -- widgets
-    def spin(self, name, label, value, lo, hi, unit=" mm"):
-        w = QtWidgets.QDoubleSpinBox()
-        w.setRange(lo, hi)
-        w.setDecimals(6)
-        w.setSingleStep(1.0)
+    def spin(self, name, label, path, lo, hi, unit="mm"):
+        """A Gui::QuantitySpinBox bound to the property (or component, "Point.x") `path`: the
+        f(x) button, `#variable` and `=expression` work, and an expression is stored on the feature."""
+        w = FreeCADGui.UiLoader().createWidget("Gui::QuantitySpinBox")
         if unit:
-            w.setSuffix(unit)
-        w.setValue(value)
+            w.setProperty("unit", unit)
+        w.setProperty("minimum", float(lo))
+        w.setProperty("maximum", float(hi))
+        w.setProperty("decimals", 6)
+        w.setProperty("rawValue", self._number(path))
+        FreeCADGui.ExpressionBinding(w).bind(self.obj, path)  # after the value (binding shows none)
         w.valueChanged.connect(self.changed)
+        # An expression is stored when the edit ends (Enter, or leaving the field): recompute then
+        w.editingFinished.connect(self.edited)
         self.widgets[name] = w
+        self.paths[name] = path
         self.layout.addRow(label, w)
+
+    def _number(self, path):
+        value = self.obj
+        for part in path.split("."):
+            value = getattr(value, part)
+        return float(getattr(value, "Value", value))
+
+    def hasExpression(self, name):
+        path = self.paths[name]
+        return any(p.lstrip(".") == path for p, _ in self.obj.ExpressionEngine)
+
+    def value(self, name):
+        """The field's number (mm, or plain for a factor)."""
+        return float(self.widgets[name].property("rawValue"))
+
+    def setValue(self, name, number):
+        self.widgets[name].setProperty("rawValue", float(number))
+        self.changed()
+
+    def edited(self):
+        QtCore.QTimer.singleShot(0, self.changed)
 
     def check(self, name, label, value):
         w = QtWidgets.QCheckBox(label)
@@ -238,25 +268,33 @@ class Panel:
         for ax in "XYZ":
             self.widgets["Factor" + ax].setEnabled(not uniform)
 
+    def put(self, name):
+        """Write a field's number to the feature, unless an expression drives it."""
+        if name in self.paths and not self.hasExpression(name):
+            path = self.paths[name]
+            if "." in path:
+                prop, comp = path.split(".")
+                vec = FreeCAD.Vector(getattr(self.obj, prop))
+                setattr(vec, comp, self.value(name))
+                setattr(self.obj, prop, vec)
+            else:
+                setattr(self.obj, path, self.value(name))
+
     def changed(self, *args):
-        if self.busy:
+        if self.busy or self.closed:
             return
         w = self.widgets
         o = self.obj
+        for name in self.paths:
+            self.put(name)
         if self.kind == "Thicken":
-            o.Thickness1 = w["Thickness1"].value()
-            o.Thickness2 = w["Thickness2"].value()
             ops = OPS[w["Operation"].currentIndex()][1]
             if ops:
                 o.Operation = ops
         elif self.kind == "OffsetSurface":
-            o.Distance = w["Distance"].value()
             o.Flip = w["Flip"].isChecked()
         else:
             o.Uniform = w["Uniform"].isChecked()
-            o.Factor = w["Factor"].value()
-            o.FactorX, o.FactorY, o.FactorZ = (w["Factor" + a].value() for a in "XYZ")
-            o.Point = FreeCAD.Vector(*(w["Point" + a].value() for a in "XYZ"))
             self.syncUniform()
         self.refresh()
 
@@ -293,6 +331,7 @@ class Panel:
         return True
 
     def close(self):
+        self.closed = True
         Panel.current = None
         FreeCADGui.Control.closeDialog()
         FreeCADGui.ActiveDocument.resetEdit()

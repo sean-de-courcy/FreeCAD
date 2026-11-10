@@ -359,3 +359,96 @@ def suite():
 
 if __name__ == "__main__":
     unittest.TextTestRunner(verbosity=2).run(suite())
+
+
+class TestSolidOpsExpressions(SolidOpsBase):
+    """Variables drive the main length of each feature, and keep driving it after save and reopen."""
+
+    def addVariables(self):
+        vs = self.doc.addObject("App::VarSet", "Variables")
+        vs.addProperty("App::PropertyLength", "Thick")
+        vs.addProperty("App::PropertyLength", "Dist")
+        vs.addProperty("App::PropertyFloat", "Scl")
+        vs.Thick, vs.Dist, vs.Scl = 2.0, 3.0, 2.0
+        return vs
+
+    def reopen(self):
+        import os, tempfile
+
+        path = os.path.join(tempfile.mkdtemp(), "e.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        return self.doc
+
+    def testThickenExpression(self):
+        vs = self.addVariables()
+        t = S.make_thicken(self.newPart(), [self.top()], 1.0, 0.0)
+        t.setExpression("Thickness1", "Variables.Thick")
+        self.doc.recompute()
+        self.assertAlmostEqual(t.Shape.Volume, 800.0, 4)
+        vs.Thick = 5.0
+        self.doc.recompute()
+        self.assertAlmostEqual(t.Shape.Volume, 2000.0, 4)
+
+    def testScaleExpression(self):
+        vs = self.addVariables()
+        part = self.newPart()
+        b = self.doc.addObject("PartDesign::AdditiveBox", "B2")
+        b.Length, b.Width, b.Height = 10, 10, 10
+        part.addObject(b)
+        sc = S.make_scale(part)
+        sc.setExpression("Factor", "Variables.Scl")
+        self.doc.recompute()
+        self.assertAlmostEqual(sc.Shape.Volume, 8000.0, 2)
+        vs.Scl = 3.0
+        self.doc.recompute()
+        self.assertAlmostEqual(sc.Shape.Volume, 27000.0, 2)
+
+    def testScalePointComponentExpression(self):
+        self.addVariables()
+        part = self.newPart()
+        b = self.doc.addObject("PartDesign::AdditiveBox", "B2")
+        b.Length, b.Width, b.Height = 10, 10, 10
+        part.addObject(b)
+        sc = S.make_scale(part, None, 2.0)
+        sc.setExpression("Point.x", "Variables.Thick * 5")  # 10 mm
+        self.doc.recompute()
+        self.assertAlmostEqual(sc.Shape.BoundBox.XMin, -10.0, 4)  # about x = 10: 0 -> -10, 10 stays
+
+    def testOffsetExpression(self):
+        vs = self.addVariables()
+        o = S.make_offset_surface(self.newPart(), [self.top()], 1.0)
+        o.setExpression("Distance", "Variables.Dist")
+        self.doc.recompute()
+        self.assertAlmostEqual(o.Shape.BoundBox.ZMin, 13.0, 5)
+        vs.Dist = 4.0
+        self.doc.recompute()
+        self.assertAlmostEqual(o.Shape.BoundBox.ZMin, 14.0, 5)
+
+    def testExpressionsSurviveSaveAndReopen(self):
+        vs = self.addVariables()
+        t = S.make_thicken(self.newPart(), [self.top()], 1.0, 0.0)
+        t.setExpression("Thickness1", "Variables.Thick")
+        part = self.newPart()
+        b = self.doc.addObject("PartDesign::AdditiveBox", "B2")
+        b.Length, b.Width, b.Height = 10, 10, 10
+        part.addObject(b)
+        sc = S.make_scale(part)
+        sc.setExpression("Factor", "Variables.Scl")
+        o = S.make_offset_surface(self.newPart(), [self.top()], 1.0)
+        o.setExpression("Distance", "Variables.Dist")
+        self.doc.recompute()
+        self.reopen()
+        vs = self.doc.getObject("Variables")
+        t, sc, o = (self.doc.getObject(n) for n in ("Thicken", "Scale", "OffsetSurface"))
+        for f, prop in ((t, "Thickness1"), (sc, "Factor"), (o, "Distance")):
+            self.assertIn(prop, [p for p, _ in f.ExpressionEngine])
+        # a changed variable recomputes each feature: the proxies are back
+        vs.Thick, vs.Scl, vs.Dist = 5.0, 3.0, 4.0
+        self.doc.recompute()
+        for f in (t, sc, o):
+            self.assertEqual(f.State, ["Up-to-date"], f.getStatusString())
+        self.assertAlmostEqual(t.Shape.Volume, 2000.0, 4)
+        self.assertAlmostEqual(sc.Shape.Volume, 27000.0, 2)
+        self.assertAlmostEqual(o.Shape.BoundBox.ZMin, 14.0, 5)
