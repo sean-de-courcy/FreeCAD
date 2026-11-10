@@ -12,7 +12,10 @@ import FreeCAD as App
 import Part
 import PartDesign
 
-import SolidOpsFeatures as S
+try:
+    from PartDesign import SolidOpsFeatures as S
+except ImportError:  # run with the source folder on the path
+    import SolidOpsFeatures as S
 
 
 def lateral_face_name(shape):
