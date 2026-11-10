@@ -144,6 +144,9 @@ def sameValue(a, b):
         x, y = qa.Value, qb.Value
     else:
         x, y = float(a), float(b)
+    if math.isnan(x) or math.isnan(y):
+        # a negative base to a fractional power: NaN both times is the same result
+        return math.isnan(x) and math.isnan(y)
     return math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-12)
 
 
