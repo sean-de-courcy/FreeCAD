@@ -505,7 +505,9 @@ class TestFillet(unittest.TestCase):
         dressed = block.cut(models.front_top_removed("Fillet", 2.5))
         dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
         expected = dressed.cut(block.cut(base)).Volume
-        self.assertAlmostEqual(expected, 745.816371, delta=1e-5)
+        # The adaptive readout of the B-spline dimple (SC7, ops#640): OCCT's default read 745.816371;
+        # meshes at deflections 1e-3 to 3e-5 tend to 745.81636, both within 2e-5
+        self.assertAlmostEqual(expected, 745.816341, delta=1e-5)
         if fillet.isValid():
             self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
         else:
@@ -525,7 +527,9 @@ class TestFillet(unittest.TestCase):
         dressed = block.cut(models.outer_floor_removed("Fillet", 2.5))
         dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
         expected = dressed.cut(block.cut(base)).Volume
-        self.assertAlmostEqual(expected, 947.961856, delta=1e-5)
+        # The adaptive readout (SC7, ops#640): OCCT's default read 947.961856, 5e-4 under the
+        # meshes' limit (deflections 1e-3 to 1e-4: 947.96246, .96240, .96239)
+        self.assertAlmostEqual(expected, 947.962368, delta=1e-5)
         if fillet.isValid():
             self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
         else:

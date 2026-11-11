@@ -64,6 +64,7 @@ prints the differences of two record files.
 
 import json
 import math
+import os
 import sys
 
 FORMAT = 1
@@ -751,16 +752,38 @@ class _Drift:
 
 
 class _Comparison:
-    def __init__(self, tolerance):
+    def __init__(self, tolerance, deltas=None):
         self.rel, self.abs = tolerance
         self.lines = []
+        self.found = []
         self.drift = _Drift()
+        self.deltas = deltas or {}
+        self.used = set()
 
     def differ(self, where, expected, actual):
         self.lines.append(f"{where}: expected {_short(expected)}, got {_short(actual)}")
+        self.found.append((where, expected, actual))
+
+    def delta(self, where, expected, actual, entry):
+        """An intended change of one float (a generation's delta file): the record must hold the
+        entry's old value and the build give its new one, each within the entry's tolerance."""
+        self.used.add(where)
+        rel, floor = entry.get("rel", DELTA_TOLERANCE[0]), entry.get("abs", DELTA_TOLERANCE[1])
+
+        def close(a, b):
+            return abs(a - b) <= max(floor, rel * max(abs(a), abs(b)))
+
+        if not isinstance(expected, (int, float)) or not close(float(expected), entry["old"]):
+            self.differ(where + " (the delta's old value)", entry["old"], expected)
+        elif not isinstance(actual, (int, float)) or not close(float(actual), entry["new"]):
+            self.differ(where + " (the delta's new value)", entry["new"], actual)
 
     def value(self, where, expected, actual):
         """Compares two plain values, floats with the tolerance."""
+        entry = self.deltas.get(where)
+        if entry is not None and not isinstance(expected, (bool, list, dict)):
+            self.delta(where, expected, actual, entry)
+            return
         if isinstance(expected, bool) or isinstance(actual, bool):
             if type(expected) is not type(actual) or expected != actual:
                 self.differ(where, expected, actual)
@@ -804,7 +827,8 @@ def _short(value, limit=160):
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
+def compare(expected, actual, stage, tolerance=None, names=None, touched=True, deltas=None,
+            allDeltas=True):
     """The differences between two records as lines, and the drift (largest float deviations).
 
     Objects, their types and ids must match. A saved property that is gone or whose type
@@ -812,8 +836,12 @@ def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
     it) is not. Names are compared unless `names` is False (by default, in every stage but
     "rehearsal"); a caller turns them off when the file's naming revision isn't the build's.
     Guess records are compared in every stage. `touched=False` leaves out which objects are
-    Touched (a forced naming migration touches every migrated object at the open)."""
-    c = _Comparison(tolerance or TOLERANCE[stage])
+    Touched (a forced naming migration touches every migrated object at the open).
+
+    `deltas` {where: {"old", "new", "rel", "abs"}}: a generation's intended changes for this
+    record (`loadDeltas`), each a float the record holds as old and the build must give as new;
+    with `allDeltas`, an entry nothing compared is a difference too (a stale delta)."""
+    c = _Comparison(tolerance or TOLERANCE[stage], deltas)
     if names is None:
         names = stage != "rehearsal"
     eobjs, aobjs = expected.get("objects", {}), actual.get("objects", {})
@@ -853,7 +881,58 @@ def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
             c.differ(f"{name}.guesses", e.get("guesses", []), a.get("guesses", []))
         if stage != "open" and e.get("dof") != a.get("dof"):
             c.differ(f"{name}.dof", e.get("dof"), a.get("dof"))
+    if allDeltas:
+        for where in sorted(set(c.deltas) - c.used):
+            c.lines.append(f"{where}: a delta entry that nothing compared")
     return c.lines, c.drift.asDict()
+
+
+def differences(expected, actual, stage):
+    """[(where, expected, actual)] of the leaves that differ, as `compare` finds them: what a
+    delta file's entries are made from (`deltaEntries`)."""
+    c = _Comparison(TOLERANCE[stage])
+    for name in sorted(set(expected.get("objects", {})) & set(actual.get("objects", {}))):
+        e, a = expected["objects"][name], actual["objects"][name]
+        for prop in sorted(set(e.get("props", {})) & set(a.get("props", {}))):
+            c.value(f"{name}.{prop}", e["props"][prop][1], a["props"][prop][1])
+        c.value(f"{name}.shape", e.get("shape"), a.get("shape"))
+        c.value(f"{name}.geometry", e.get("geometry"), a.get("geometry"))
+    return c.found
+
+
+# An intended change's tolerance (relative, absolute floor in mm): far above both platforms'
+# spread of an adaptive integration (about 1e-12), far below the changes a delta records (SC7's
+# readouts: 1e-8 to 1e-3), so one delta holds on Windows and on macOS
+DELTA_TOLERANCE = (1e-9, 1e-12)
+
+
+def deltaEntries(expected, actual, stage, rel=DELTA_TOLERANCE[0]):
+    """{where: entry} for every float leaf that differs, old from `expected`, new from `actual`;
+    a difference that isn't a float is returned apart, as lines (a delta can't hold it)."""
+    entries, others = {}, []
+    for where, e, a in differences(expected, actual, stage):
+        if isinstance(e, float) and isinstance(a, (int, float)) and not isinstance(a, bool):
+            entries[where] = {"old": e, "new": float(a), "rel": rel}
+        else:
+            others.append(f"{where}: expected {_short(e)}, got {_short(a)}")
+    return entries, others
+
+
+def loadDeltas(folder, model):
+    """{stem: {where: entry}} of `<folder>/<model>.delta.json`, or {} when there is none. The
+    file (beta-compatibility 3.5): {"format": 1, "issue", "label", "approved", "why", "changes":
+    {stem: {where: {"old", "new", "rel", "abs"}}}}."""
+    path = os.path.join(folder, model + ".delta.json")
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    for key in ("format", "issue", "label", "approved", "why", "changes"):
+        if key not in data:
+            raise ValueError(f"{path}: no {key!r}")
+    if data["label"] not in ("compat-change", "compat-neutral"):
+        raise ValueError(f"{path}: label {data['label']!r}")
+    return data["changes"]
 
 
 def delta(base, other, stage="open"):

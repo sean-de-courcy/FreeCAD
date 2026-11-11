@@ -75,6 +75,7 @@
 #include <Base/Console.h>
 
 #include "Attacher.h"
+#include "MassProperties.h"
 #include "AttachExtension.h"
 #include "BodyBase.h"
 #include "DatumFeature.h"
@@ -341,7 +342,7 @@ PlanarFaceInfo getPlanarFaceInfo(const TopoShape& shape, double precision)
     PlanarFaceInfo result {plane, normal.Direction(), plane.Location()};
     if (!face.IsNull() && !face.Infinite()) {
         GProp_GProps properties;
-        BRepGProp::SurfaceProperties(face, properties);
+        MassProperties::readoutSurfaceProperties(face, properties);
         result.center = properties.CentreOfMass();
     }
     return result;
@@ -1308,7 +1309,9 @@ GProp_GProps AttachEngine::getInertialPropsOfShape(const std::vector<const TopoS
                         "AttachEngine::getInertialPropsOfShape: infinite shape provided"
                     );
                 }
-                BRepGProp::SurfaceProperties(sh, gpr);
+                // As Face.CenterOfMass reads it (SC7, ops#640): OCCT's default put a datum point
+                // at a B-spline cap's centre 2e-5 off, the adaptive one within 1.4e-9
+                MassProperties::readoutSurfaceProperties(sh, gpr);
                 gpr_acc.Add(gpr);
             }
             return gpr_acc;
@@ -1330,7 +1333,7 @@ GProp_GProps AttachEngine::getInertialPropsOfShape(const std::vector<const TopoS
                         "AttachEngine::getInertialPropsOfShape: infinite shape provided"
                     );
                 }
-                BRepGProp::VolumeProperties(sh, gpr);
+                MassProperties::readoutVolumeProperties(sh, gpr);
                 gpr_acc.Add(gpr);
             }
             return gpr_acc;

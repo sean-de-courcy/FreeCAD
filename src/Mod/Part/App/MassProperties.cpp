@@ -9,6 +9,7 @@
 #include <BRepLib.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom2d_OffsetCurve.hxx>
@@ -252,6 +253,46 @@ bool needsAdaptive(const TopoDS_Shape& shape)
 namespace
 {
 
+// Whether a face's parameters leave its surface's own range: a face across a periodic surface's
+// seam, whose pcurves lie a period over (a Pad up to a loft's periodic B-spline side: u -0.34 to
+// 0.34 on a surface of 0 to 2 pi)
+bool outsideItsSurface(const TopoDS_Face& face)
+{
+    TopLoc_Location location;
+    const auto surface = BRep_Tool::Surface(face, location);
+    if (surface.IsNull()) {
+        return false;
+    }
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    surface->Bounds(u0, u1, v0, v1);
+    double a0 = 0.0;
+    double a1 = 0.0;
+    double b0 = 0.0;
+    double b1 = 0.0;
+    BRepTools::UVBounds(face, a0, a1, b0, b1);
+    const double margin = Precision::PConfusion();
+    auto past = [margin](double low, double high, double first, double last) {
+        return (!Precision::IsInfinite(low) && first < low - margin)
+            || (!Precision::IsInfinite(high) && last > high + margin);
+    };
+    return past(u0, u1, a0, a1) || past(v0, v1, b0, b1);
+}
+
+bool anyOutsideItsSurface(const TopoDS_Shape& shape)
+{
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        if (outsideItsSurface(TopoDS::Face(faces(i)))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The adaptive volume properties into props, with the centre of mass and inertia when everything
 // is set; false, with props unchanged, when the integration failed
 bool adaptiveVolume(
@@ -266,7 +307,10 @@ bool adaptiveVolume(
     // One integration per knot span. Without, the volume a cut removed from a 500- or 1000-span
     // prism, a difference of whole volumes, was off by 3e-6 and 3e-4 at any tolerance, too much
     // for FilletFallback's 1e-6 checks; and a 150 x 150-span face took 46 s instead of 2 (ops#414)
-    const bool useSpans = true;
+    // Not where a face lies across its surface's seam: the spans are the surface's knots, and
+    // OCCT 8.0.1's integration by spans then read the Pad's prism 156.716 for 167.266 (6 %; its
+    // area right): the integration over the whole face is within 1e-8 there (SC7, ops#640)
+    const bool useSpans = !anyOutsideItsSurface(shape);
     if (BRepGProp::VolumePropertiesGK(
             shape,
             adaptive,
