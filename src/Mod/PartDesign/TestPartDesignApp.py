@@ -62,6 +62,14 @@ from PartDesignTests.TestPipe import TestPipeAlongTiltedWaves, TestLoosePipeWarn
 from PartDesignTests.TestPipe import TestRoundCornerNames  # FreeCAD-CH, ops#455
 from PartDesignTests.TestPipe import TestBinormalPipe  # FreeCAD-CH, ops#406
 from PartDesignTests.TestPipe import TestPipeNamesUnderSpineEdits  # FreeCAD-CH, ops#469, ops#435
+from PartDesignTests.TestPipeOnshape import (  # FreeCAD-CH, sweeps as Onshape's (ops#640)
+    TestPipeToolCheck,
+    TestPipeProfileControl,
+    TestPipeExtendToFullPath,
+    TestPipeProfilePlacement,
+    TestPipePathFromSeveralObjects,
+    TestPipeEndAfterThePathGrows,
+)
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
