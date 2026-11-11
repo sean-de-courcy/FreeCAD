@@ -595,16 +595,17 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
     # Clicks on model elements (skipped where the off-screen view doesn't pick) -----------------
 
     def test_hover_and_click_pick_a_model_edge_beside_the_sketch_selection(self):
-        """Hover on the box's top front edge preselects it; a click adds it to the selected line
-        end; a later click on the sketch line adds the line (no rubber band after the pick)."""
+        """Hover on the box's top right edge (x 20) preselects it; a click adds it to the selected
+        line end; a later click on the sketch line adds the line (no rubber band after the pick).
+        Not the top front edge: it lies under the sketch's H axis, which a click there picks."""
         self.require_picking()
         self.start_edit()
-        edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
+        edge = self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))
         self.select((self.sketch, "Vertex1"))
 
-        self.mouse_at(V(15, 0, 5))
+        self.mouse_at(V(20, 5, 5))
         self.assertEqual(self.preselected(), ("Pad", edge))
-        self.click_at(V(15, 0, 5))
+        self.click_at(V(20, 5, 5))
         self.assertEqual(self.selected(), {("Sketch", "Vertex1"), ("Pad", edge)})
 
         self.mouse_at(V(10, 5, 5))
@@ -612,6 +613,41 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.assertEqual(
             self.selected(), {("Sketch", "Vertex1"), ("Pad", edge), ("Sketch", "Edge1")}
         )
+
+    def test_a_constraint_right_after_a_model_edge_click_is_made(self):
+        """Selection parity P3 (journey S3b): the line's start selected, the box's top right edge
+        (x 20) clicked with Ctrl, then Point On Object with the mouse still on the edge (a key):
+        the command is active, the start moves onto the edge (x 20), one link, one undo step. The
+        click's release went to the 3D view's selection, so the sketch stayed in its rubber-band
+        press state, and every constraint command was inactive until the mouse moved."""
+        self.require_picking()
+        self.start_edit()
+        edge = self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))
+        self.select((self.sketch, "Vertex1"))
+        self.click_at(V(20, 5, 5), QtCore.Qt.ControlModifier)
+        self.assertEqual(self.selected(), {("Sketch", "Vertex1"), ("Pad", edge)})
+        command = FreeCADGui.Command.get("Sketcher_ConstrainPointOnObject")
+        self.assertTrue(command.isActive(), "Point On Object is inactive after the model pick")
+        self.run_command("Sketcher_ConstrainPointOnObject")
+
+        self.assertEqual(len(self.constraints_of("PointOnObject")), 1)
+        self.assertEqual(len(self.sketch.ExternalGeometry), 1)
+        self.assertAlmostEqual(self.line_point(1).x, 20, places=6)
+        self.assertEqual(self.doc.UndoCount, self.undo_start + 1)
+
+    def test_a_constraint_right_after_a_plain_model_edge_click_is_made(self):
+        """The same with a plain click on the edge after the line's start (additive in plain
+        edit mode): Point On Object is active and made."""
+        self.require_picking()
+        self.start_edit()
+        edge = self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))
+        self.select((self.sketch, "Vertex1"))
+        self.click_at(V(20, 5, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Vertex1"), ("Pad", edge)})
+        self.assertTrue(FreeCADGui.Command.get("Sketcher_ConstrainPointOnObject").isActive())
+        self.run_command("Sketcher_ConstrainPointOnObject")
+        self.assertEqual(len(self.constraints_of("PointOnObject")), 1)
+        self.assertAlmostEqual(self.line_point(1).x, 20, places=6)
 
     def test_a_click_on_a_sketch_line_over_a_model_edge_is_the_sketch_s(self):
         """A sketch line on the box's top back edge (y 10): hover and click take the line, not
@@ -634,7 +670,7 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.require_picking()
         self.start_edit()
         FreeCADGui.Selection.clearSelection()
-        self.click_at(V(15, 0, 5))
+        self.click_at(V(20, 5, 5))
         self.assertEqual(len(self.selected()), 1)
         self.click_at(V(14, 6, 5))
         self.assertEqual(self.selected(), set())
@@ -645,9 +681,9 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.require_picking()
         self.start_edit()
         FreeCADGui.Selection.clearSelection()
-        self.click_at(V(15, 0, 5))
+        self.click_at(V(20, 5, 5))
         self.assertEqual(len(self.selected()), 1)
-        self.click_at(V(15, 0, 5))
+        self.click_at(V(20, 5, 5))
         self.assertEqual(self.selected(), set())
         self.mouse_at(V(10, 5, 5))
         self.click_at(V(5, 2, 5))

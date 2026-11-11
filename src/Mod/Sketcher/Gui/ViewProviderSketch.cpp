@@ -2991,6 +2991,10 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
              || msg.Type == Gui::SelectionChanges::RmvSelection)
             && Mode == STATUS_SKETCH_StartRubberBand && msg.Object.getSubObject() != getObject()) {
             modelPickedInClick = true;
+            // FreeCAD-CH (selection parity P3): idle at once. The release goes to the 3D view's
+            // selection, so the press state stayed until the mouse moved, and every constraint
+            // command (active only while idle) did nothing when run right after the pick (a key)
+            setSketchMode(STATUS_NONE);
         }
 
         std::string temp;
