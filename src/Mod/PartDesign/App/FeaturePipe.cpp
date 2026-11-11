@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <sstream>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -45,6 +46,14 @@
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <BOPAlgo_ArgumentAnalyzer.hxx>
+#include <BOPAlgo_BuilderSolid.hxx>
+#include <BOPAlgo_MakerVolume.hxx>
+#include <BOPTools_AlgoTools3D.hxx>
+#include <BRepTools_History.hxx>
+#include <Message_Report.hxx>
+#include <TopoDS_AlertWithShape.hxx>
+#include <IntTools_Context.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -1501,6 +1510,344 @@ bool intersectsItself(const TopoDS_Shape& shape)
     check.SelfInterMode() = true;
     check.Perform();
     return check.HasFaulty();
+}
+
+/// The union of a sweep's tubes where they overlap (ops#666, `notes\sweep-design.md` 13): the solid
+/// and the history from the sweep's faces, or why it couldn't be built (any doubt is an error, never a
+/// guess), or neither when the faces don't touch each other (the sweep stays as it is)
+struct SweepUnion
+{
+    TopoDS_Shape solid;
+    occ::handle<BRepTools_History> history;
+    std::string error;
+};
+
+/// A shape's volume, integrated adaptively (the default integration is badly wrong on faces of many
+/// B-spline spans, ops#414)
+double volumeOf(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props, 1e-7, true);
+    return props.Mass();
+}
+
+/// The union of the swept \a solids (each turned outward), each counted +1, or -1 at an odd \a depth
+/// (a hole's shell of a closed spine's holed profile). The faces split one another
+/// (BOPAlgo_MakerVolume, each face an argument of its own: an argument isn't checked against
+/// itself), the cells they bound are numbered by their winding number from the exterior (0), and the
+/// cells of number >= 1 are kept, as Onshape keeps a point in some section's area
+SweepUnion unionOfOverlaps(const std::vector<TopoDS_Shape>& solids, const std::vector<int>& depths)
+{
+    SweepUnion out;
+    struct Original
+    {
+        TopoDS_Face face;  // oriented as in its solid: its normal points out of the solid
+        int sign;
+    };
+    std::vector<Original> originals;
+    NCollection_List<TopoDS_Shape> arguments;
+    double fuzzy = 0.0;
+    double naive = 0.0;
+    for (size_t i = 0; i < solids.size(); ++i) {
+        const int sign = depths[i] % 2 ? -1 : 1;
+        naive += sign * volumeOf(solids[i]);
+        for (TopExp_Explorer it(solids[i], TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            originals.push_back({face, sign});
+            arguments.Append(face);
+            fuzzy = std::max(fuzzy, BRep_Tool::Tolerance(face));
+        }
+    }
+    BOPAlgo_MakerVolume maker;
+    maker.SetArguments(arguments);
+    maker.SetIntersect(true);
+    maker.SetNonDestructive(true);  // the start cap shares the sketch's edges
+    maker.SetToFillHistory(true);
+    maker.SetFuzzyValue(fuzzy);  // a loose sweep (ops#448)
+    maker.Perform();
+    if (maker.HasErrors() || maker.HasWarnings()) {
+        std::ostringstream alerts;
+        maker.DumpErrors(alerts);
+        maker.DumpWarnings(alerts);
+        std::string text = alerts.str();
+        std::replace(text.begin(), text.end(), '\n', ' ');
+        // How many faces an alert names (a holed profile's tube left all of its faces unused)
+        int named = 0;
+        for (const occ::handle<Message_Alert>& alert :
+             maker.GetReport()->GetAlerts(Message_Warning)) {
+            const auto withShape = occ::down_cast<TopoDS_AlertWithShape>(alert);
+            for (TopExp_Explorer it(withShape.IsNull() ? TopoDS_Shape() : withShape->GetShape(),
+                                    TopAbs_FACE);
+                 it.More();
+                 it.Next()) {
+                ++named;
+            }
+        }
+        out.error = fmt::format("OCCT's volume maker: {}, {} faces", text, named);
+        return out;
+    }
+    const occ::handle<BRepTools_History> history = maker.History();
+    if (history.IsNull()) {
+        out.error = "no history";
+        return out;
+    }
+    if (!history->HasModified() && !history->HasGenerated()) {
+        return out;  // nothing touched: no overlap
+    }
+
+    // The pieces: each original face's images, or the face itself when left whole
+    TopTools_IndexedMapOfShape pieces;
+    std::vector<std::vector<size_t>> sources;  // per piece, the originals it lies on
+    for (size_t k = 0; k < originals.size(); ++k) {
+        const TopoDS_Face& face = originals[k].face;
+        if (history->IsRemoved(face)) {
+            out.error = "a face of the sweep was removed";
+            return out;
+        }
+        NCollection_List<TopoDS_Shape> images = history->Modified(face);
+        if (images.IsEmpty()) {
+            images.Append(face);
+        }
+        for (const TopoDS_Shape& image : images) {
+            if (image.ShapeType() != TopAbs_FACE) {
+                out.error = "a face's image isn't a face";
+                return out;
+            }
+            const int index = pieces.Add(image);
+            if (index > static_cast<int>(sources.size())) {
+                sources.emplace_back();
+            }
+            sources[index - 1].push_back(k);
+        }
+    }
+
+    // The cells and the pieces bounding them, each with the orientation its cell gives it
+    std::vector<TopoDS_Shape> cells;
+    for (TopExp_Explorer it(maker.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        cells.push_back(it.Current());
+    }
+    struct Side
+    {
+        size_t cell;
+        TopoDS_Face face;  // its normal points out of the cell
+    };
+    std::vector<std::vector<Side>> sides(pieces.Extent());
+    std::vector<std::optional<Side>> inner(pieces.Extent());
+    for (size_t c = 0; c < cells.size(); ++c) {
+        for (TopExp_Explorer it(cells[c], TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            const int index = pieces.FindIndex(face);
+            if (index == 0) {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(face, props);
+                const gp_Pnt at = props.CentreOfMass();
+                out.error = fmt::format(
+                    "a cell is bounded by a face that isn't a piece of the sweep (area {:.6g} at "
+                    "({:.4g}, {:.4g}, {:.4g}))",
+                    props.Mass(), at.X(), at.Y(), at.Z());
+                return out;
+            }
+            // A piece inside its cell (OCCT's maker leaves an end cap flush on another tube's side
+            // inside the one cell of both): the same number on both sides, so a step of 0 (below)
+            std::vector<Side>& found = sides[index - 1];
+            const auto same = std::find_if(found.begin(), found.end(), [&](const Side& side) {
+                return side.cell == c;
+            });
+            if (face.Orientation() == TopAbs_INTERNAL || face.Orientation() == TopAbs_EXTERNAL
+                || same != found.end()) {
+                if (inner[index - 1] || (same == found.end() && !found.empty())) {
+                    out.error = "a piece lies inside a cell and bounds another";
+                    return out;
+                }
+                if (same != found.end()) {
+                    found.erase(same);
+                }
+                inner[index - 1] = Side {c, face};
+                continue;
+            }
+            if (inner[index - 1]) {
+                out.error = "a piece lies inside a cell and bounds another";
+                return out;
+            }
+            found.push_back({c, face});
+        }
+    }
+
+    // A piece's winding step seen from one of its cells: the sum over the originals it lies on of
+    // +1 where the original's normal agrees with the cell's outward one (crossing out of the cell
+    // leaves that tube), -1 where it doesn't; signed by the original's depth
+    const occ::handle<IntTools_Context> context = new IntTools_Context();
+    auto stepOf = [&](size_t piece, const Side& side) -> std::optional<int> {
+        gp_Pnt point;
+        gp_Pnt2d uv;
+        if (BOPTools_AlgoTools3D::PointInFace(side.face, point, uv, context) != 0) {
+            return {};
+        }
+        gp_Pnt on;
+        gp_Vec normal;
+        BRepGProp_Face(side.face).Normal(uv.X(), uv.Y(), on, normal);
+        if (normal.Magnitude() < Precision::Confusion()) {
+            return {};
+        }
+        int step = 0;
+        for (const size_t k : sources[piece]) {
+            const TopoDS_Face& face = originals[k].face;
+            GeomAPI_ProjectPointOnSurf projection(point, BRep_Tool::Surface(face));
+            if (!projection.IsDone() || projection.NbPoints() < 1
+                || projection.LowerDistance() > std::max(1e-6, 10 * BRep_Tool::Tolerance(face))) {
+                return {};
+            }
+            double u = 0.0;
+            double v = 0.0;
+            projection.LowerDistanceParameters(u, v);
+            gp_Vec outward;
+            BRepGProp_Face(face).Normal(u, v, on, outward);
+            if (outward.Magnitude() < Precision::Confusion()) {
+                return {};
+            }
+            const double cosine = normal.Normalized().Dot(outward.Normalized());
+            if (std::abs(cosine) < 0.99) {
+                return {};  // a piece lies on its originals; their normals agree or oppose
+            }
+            step += (cosine > 0 ? 1 : -1) * originals[k].sign;
+        }
+        return step;
+    };
+
+    // Number the cells from the exterior, breadth first
+    std::vector<std::optional<int>> number(cells.size());
+    std::vector<size_t> queue;
+    auto assign = [&](size_t cell, int value) {
+        if (value < 0 || (number[cell] && *number[cell] != value)) {
+            return false;
+        }
+        if (!number[cell]) {
+            number[cell] = value;
+            queue.push_back(cell);
+        }
+        return true;
+    };
+    std::vector<std::vector<int>> steps(pieces.Extent());
+    for (size_t p = 0; p < sides.size(); ++p) {
+        if (inner[p]) {
+            if (!sides[p].empty() || stepOf(p, *inner[p]) != std::optional<int>(0)) {
+                out.error = "a piece inside a cell changes the winding number";
+                return out;
+            }
+            continue;
+        }
+        if (sides[p].empty() || sides[p].size() > 2) {
+            out.error = "a piece bounds no cell, or more than two";
+            return out;
+        }
+        for (const Side& side : sides[p]) {
+            const std::optional<int> step = stepOf(p, side);
+            if (!step) {
+                out.error = "a piece's normal couldn't be compared with its faces'";
+                return out;
+            }
+            steps[p].push_back(*step);
+        }
+        if (sides[p].size() == 2 && steps[p][0] != -steps[p][1]) {
+            out.error = "a piece's two sides disagree";
+            return out;
+        }
+        // The exterior (0) beyond a piece of one cell: the cell's number is its step
+        if (sides[p].size() == 1 && !assign(sides[p][0].cell, steps[p][0])) {
+            out.error = "a cell numbered twice, or below 0";
+            return out;
+        }
+    }
+    for (size_t next = 0; next < queue.size(); ++next) {
+        const size_t cell = queue[next];
+        for (size_t p = 0; p < sides.size(); ++p) {
+            if (sides[p].size() != 2) {
+                continue;
+            }
+            for (size_t s = 0; s < 2; ++s) {
+                if (sides[p][s].cell == cell
+                    && !assign(sides[p][1 - s].cell, *number[cell] - steps[p][s])) {
+                    out.error = "a cell numbered twice, or below 0";
+                    return out;
+                }
+            }
+        }
+    }
+    double counted = 0.0;
+    double kept = 0.0;
+    std::vector<double> volumes(cells.size());
+    for (size_t c = 0; c < cells.size(); ++c) {
+        if (!number[c]) {
+            out.error = "a cell left unnumbered";
+            return out;
+        }
+        volumes[c] = volumeOf(cells[c]);
+        counted += *number[c] * volumes[c];
+        kept += *number[c] >= 1 ? volumes[c] : 0.0;
+    }
+    // The winding number integrates to the naive sweep's volume (the divergence theorem)
+    auto agrees = [](double a, double b) {
+        return std::abs(a - b) <= 1e-5 * std::max(std::abs(a), std::abs(b)) + 1e-7;
+    };
+    if (!agrees(counted, naive)) {
+        out.error = fmt::format("the cells' volumes, {:.9g}, don't add up to the sweep's, {:.9g}",
+                                counted, naive);
+        return out;
+    }
+
+    // The union's boundary: the pieces between a kept cell and one of number 0 or the exterior,
+    // oriented out of the kept cell
+    NCollection_List<TopoDS_Shape> boundary;
+    for (size_t p = 0; p < sides.size(); ++p) {
+        std::vector<size_t> inKept;
+        for (size_t s = 0; s < sides[p].size(); ++s) {
+            if (*number[sides[p][s].cell] >= 1) {
+                inKept.push_back(s);
+            }
+        }
+        if (inKept.size() == 1) {
+            boundary.Append(sides[p][inKept.front()].face);
+        }
+    }
+    BOPAlgo_BuilderSolid builder;
+    builder.SetShapes(boundary);
+    builder.SetContext(context);
+    builder.Perform();
+    if (builder.HasErrors() || builder.HasWarnings() || builder.Areas().Extent() != 1) {
+        out.error = "the union's faces don't make one solid";
+        return out;
+    }
+    out.solid = builder.Areas().First();
+    if (!agrees(volumeOf(out.solid), kept)) {
+        out.error = "the union's volume isn't its cells'";
+        out.solid.Nullify();
+        return out;
+    }
+    // The history as a fuse's: only the images in the union (the maker's lists every cell's pieces),
+    // so a face whose one piece is kept keeps its name, as a face a fuse notches does
+    TopTools_IndexedMapOfShape inUnion;
+    TopExp::MapShapes(out.solid, inUnion);
+    out.history = new BRepTools_History();
+    for (const TopoDS_Shape& solid : solids) {
+        for (const TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(solid, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                const TopoDS_Shape& element = elements(i);
+                for (const TopoDS_Shape& image : history->Modified(element)) {
+                    if (inUnion.Contains(image)) {
+                        out.history->AddModified(element, image);
+                    }
+                }
+                for (const TopoDS_Shape& image : history->Generated(element)) {
+                    if (inUnion.Contains(image)) {
+                        out.history->AddGenerated(element, image);
+                    }
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /// The first wire of \a shape (a section the sweep reports), or a null one
@@ -8201,7 +8548,47 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
         }
         const int deepest = shapes.empty() ? 0 : *std::max_element(depths.begin(), depths.end());
-        if (deepest == 0) {
+
+        // Tubes overlapping where the path passes near itself (oracle 9, ops#660, ops#666): Onshape
+        // builds their exact union, and so does FreeCAD-CH, from the sweep's cells numbered by their
+        // winding number (unionOfOverlaps), before the holes' shells are cut (a cut of solids that
+        // interfere with themselves is unpredictable). Named from the sweep through the history, as
+        // a fuse is: a face the overlap doesn't reach keeps its name. Thin keeps the stop below.
+        bool united = false;
+        std::string notUnited;
+        if (passesNear && BodyType.getValue() != 1) {
+            std::vector<TopoDS_Shape> solids;
+            for (const auto& s : shapes) {
+                solids.push_back(s.getShape());
+            }
+            const SweepUnion overlap = unionOfOverlaps(solids, depths);
+            notUnited = overlap.error;
+            if (!overlap.solid.IsNull()) {
+                Part::TopoShape naive = makeTopoShape();
+                naive.makeElementCompound(
+                    shapes,
+                    nullptr,
+                    Part::TopoShape::SingleShapeCompoundCreationPolicy::returnShape
+                );
+                Part::TopoShape unionShape = makeTopoShape();
+                unionShape.makeShapeWithElementMap(
+                    overlap.solid,
+                    Part::MapperHistory(overlap.history),
+                    {naive},
+                    Part::OpCodes::Fuse
+                );
+                if (!isValidSolid(unionShape)) {
+                    return new App::DocumentObjectExecReturn(invalidPipe());
+                }
+                result = unionShape;
+                AddSubShape.setValue(result);
+                united = true;
+            }
+        }
+        if (united) {
+            // The union replaces the fuse and the holes' cut
+        }
+        else if (deepest == 0) {
             AddSubShape.setValue(result.makeElementCompound(
                 shapes,
                 nullptr,
@@ -8252,16 +8639,18 @@ App::DocumentObjectExecReturn* Pipe::execute()
             AddSubShape.setValue(result);
         }
 
-        // Tubes overlapping where the path passes near itself (oracle 9, ops#660): Onshape builds
-        // their exact union; the sweep is one solid counting the overlap twice. Until the union
-        // is built, a stop.
-        if (passesNear && intersectsItself(result.getShape())) {
+        // Where the union couldn't be built, or for Thin, the sweep counts an overlap twice: a stop
+        // when OCCT's check finds one
+        if (passesNear && !united && (BodyType.getValue() == 1 || !notUnited.empty())
+            && intersectsItself(result.getShape())) {
             return new App::DocumentObjectExecReturn(fmt::format(
                 "Pipe: the swept body overlaps itself where the path passes {:.6g} mm from itself "
-                "near {}. Onshape builds the union there; FreeCAD-CH doesn't yet. Move the "
-                "path's edges apart or make the profile smaller.",
+                "near {}. Onshape builds the union there; FreeCAD-CH {}. Move the path's edges "
+                "apart or make the profile smaller.",
                 passesNear->second,
-                pointText(passesNear->first.Transformed(invObjLoc.Inverted().Transformation()))
+                pointText(passesNear->first.Transformed(invObjLoc.Inverted().Transformation())),
+                notUnited.empty() ? std::string("doesn't for a thin body")
+                                  : "couldn't build it (" + notUnited + ")"
             ));
         }
 

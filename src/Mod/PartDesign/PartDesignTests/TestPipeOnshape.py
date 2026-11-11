@@ -695,11 +695,20 @@ class TestPipeSelfOverlap(PipeCase):
         """The path ends on its first segment (Onshape: an error too)."""
         self.assertStops(self.tube((10, 0)), "path", "crosses or touches itself")
 
-    def testTubesOverlappingWhileThePathIsClearStop(self):
+    def testTubesOverlappingWhileThePathIsClearBuildTheUnion(self):
         """The path ends at (10, 0.5): the last tube runs 0.5 into the first, the path clear of itself.
-        Onshape builds the exact union (154.3944, not the naive 155.509); FreeCAD-CH built the naive
-        self-intersecting solid, Up-to-date. Until it builds the union, it stops with an error."""
-        self.assertStops(self.tube((10, 0.5)), "overlaps itself")
+        Onshape builds the exact union (oracle 9 S2: 7 faces, V 154.3944; the naive sweep is 155.509,
+        counting the overlap twice): start cap, legs 1 (holed), 2, 3, 4 (cut short) and the end cap's
+        two slivers outside leg 1 (|z| > 0.866). By geometry the overlap is the integral over z of
+        2 sqrt(1 - z^2) (sqrt(1 - z^2) - 0.5), 1.117866: the union is 154.390970 (Onshape's 0.0034
+        more is its own sweep's)."""
+        pipe = self.tube((10, 0.5))
+        self.assertSweeps(pipe, 154.390970, places=5)
+        self.assertTrue(pipe.Shape.isValid())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertEqual(len(pipe.Shape.Faces), 7)
+        self.assertAlmostEqual(pipe.AddSubShape.Volume, 154.390970, 5)
+
 
     def testScaledTurnsOverlappingStop(self):
         """The ops#666 skeptic's silent path A: pitch 4 clears the 3-tall profile, but scaled 1.6x
@@ -718,6 +727,151 @@ class TestPipeSelfOverlap(PipeCase):
     def testTubesClearOfEachOtherSweep(self):
         """The path ends at (10, 1.5): the tubes miss each other: pi x the path's length."""
         self.assertSweeps(self.tube((10, 1.5)), math.pi * 48.5, places=2)
+
+
+
+class TestPipeSelfOverlapUnion(PipeCase):
+    """ops#666: tubes overlapping while the path stays clear of itself sweep their exact union
+    (notes\\sweep-design.md 13), as Onshape does (oracle 9 S2). Designed: S2's path
+    (0,0)-(20,0)-(20,10)-(10,10)-end in the XY plane; leg 4 (x = 10) runs into leg 1 (y = 0) for
+    an end below 1 + the profile's reach. The volumes are by geometry: a square tube along a polyline
+    with mitred corners holds its area times the path's length."""
+
+    def path(self, end):
+        return self.sketch("Path", models.polyline([(0, 0), (20, 0), (20, 10), (10, 10), end]))
+
+    def tube(self, end, profile=None, **properties):
+        """A profile normal to X at the origin (a circle r 1 by default) swept along S2's path."""
+        if profile is None:
+            profile = [models.circle(0, 0, 1)]
+        profile = self.sketch("Profile", profile, placement=YZ)
+        return self.pipe(profile, self.path(end), ProfileControl="None", **properties)
+
+    def assertOneSolid(self, pipe, volume=None, places=3):
+        self.assertSweeps(pipe, volume, places)
+        self.assertTrue(pipe.Shape.isValid())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+
+    def testSquareDuctCoincidentFaces(self):
+        """A 2 x 2 square ends at (10, 0.5): leg 4's top and bottom lie on leg 1's (a winding step of
+        2 there) and its sides cross leg 1's side. 2 x 2 x 49.5 less the overlap x 9..11, y 0.5..1,
+        z -1..1 (2): 196."""
+        self.assertOneSolid(self.tube((10, 0.5), models.rectangle(-1, -1, 1, 1)), 196)
+
+    def testFlushEndCapOnTheSide(self):
+        """The square ends at (10, 1): its end cap lies on leg 1's side y = 1 (a step of 0: the
+        pieces there bound two cells of number 1 and leave the union). 2 x 2 x 49: 196, one solid."""
+        pipe = self.tube((10, 1), models.rectangle(-1, -1, 1, 1))
+        self.assertOneSolid(pipe, 196)
+        inner = [f for f in pipe.Shape.Faces
+                 if abs(f.CenterOfMass.y - 1) < 1e-6 and abs(f.CenterOfMass.x - 10) < 1e-6]
+        self.assertEqual(inner, [], "the end cap stayed inside the union")
+
+    def testSubtractiveCutsTheUnion(self):
+        """A subtractive S2 tube through a box x -5..25, y -5..15, z -3..3 cuts the union, not the
+        naive sweep: 3600 - 154.390970."""
+        box = self.sketch("Box", models.rectangle(-5, -5, 25, 15), z=-3)
+        models.pad(self.body, box, 6, "Block")
+        pipe = self.tube((10, 0.5), kind="SubtractivePipe")
+        self.assertOneSolid(pipe, 3600 - 154.390970, places=4)
+        self.assertAlmostEqual(pipe.AddSubShape.Volume, 154.390970, 5)
+
+    def leg(self, pipe, centre):
+        """The side face whose centroid is within 0.75 of the point `centre`."""
+        found = ["Face%d" % (i + 1) for i, f in enumerate(pipe.Shape.Faces)
+                 if not f.Surface.isPlanar() and (f.CenterOfMass - V(*centre)).Length < 0.75]
+        self.assertEqual(len(found), 1, (centre, [tuple(round(c, 2) for c in f.CenterOfMass)
+                                                  for f in pipe.Shape.Faces]))
+        return found[0]
+
+    def pointOn(self, pipe, face, name):
+        point = self.body.newObject("PartDesign::Point", name)
+        point.AttachmentSupport = [(pipe, face)]
+        point.MapMode = "CenterOfMass"
+        return point
+
+    def testReferencesFollowTheOverlapAndBack(self):
+        """Datum points on leg 1's face (rebuilt holed by the overlap), leg 2's (untouched) and leg 4's
+        (cut short) follow the end 1.5 -> 0.5 -> 1.5: each stays near its leg's middle."""
+        pipe = self.tube((10, 1.5))
+        self.assertOneSolid(pipe, math.pi * 48.5)
+        middles = {"Leg1": (10, 0, 0), "Leg2": (20, 5, 0), "Leg4": (10, 5.75, 0)}
+        points = {name: self.pointOn(pipe, self.leg(pipe, at), name) for name, at in middles.items()}
+        path = self.doc.getObject("Path")
+        for end in (0.5, 1.5):
+            models.setLines(path, {3: ((10, 10), (10, end))})
+            self.doc.recompute()
+            self.assertOneSolid(pipe)
+            for name, point in points.items():
+                self.assertTrue(point.isValid(), (end, name, point.getStatusString()))
+                self.assertLess((point.Placement.Base - V(*middles[name])).Length, 0.75,
+                                (end, name, point.Placement.Base))
+
+    def testEndCapSliverAcrossADepthEdit(self):
+        """UNVERIFIED (SW19 pending): the end cap's sliver above leg 1 (z > 0.866) across the end
+        0.5 -> 0.3. FreeCAD-CH's chosen behaviour: the point follows the upper sliver or breaks; it
+        never passes to the lower one."""
+        pipe = self.tube((10, 0.5))
+        self.assertOneSolid(pipe)
+        upper = ["Face%d" % (i + 1) for i, f in enumerate(pipe.Shape.Faces)
+                 if f.Surface.isPlanar() and abs(f.CenterOfMass.y - 0.5) < 1e-6 and f.CenterOfMass.z > 0]
+        self.assertEqual(len(upper), 1)
+        point = self.pointOn(pipe, upper[0], "OnSliver")
+        self.doc.recompute()
+        self.assertGreater(point.Placement.Base.z, 0.866)
+        models.setLines(self.doc.getObject("Path"), {3: ((10, 10), (10, 0.3))})
+        self.doc.recompute()
+        self.assertOneSolid(pipe)
+        if point.isValid():
+            self.assertGreater(point.Placement.Base.z, 0.9, "the reference passed to the lower sliver")
+
+    def testRingProfileHoleStaysOpen(self):
+        """A ring r 1 / 0.4: a point is kept where it lies in some leg's annulus (Onshape's union),
+        open where it lies only in holes. (10, 0.75, 0): leg 1's wall and leg 4's hole: in.
+        (10, 0.3, 0) leg 1's hole only, (10, 2, 0) leg 4's hole only, (5, 0, 0): out. (A bore of
+        r 0.5 would leave the end cap at y 0.5 tangent to leg 1's bore.)
+        DEBT (sweeps 10): OCCT's BOPAlgo_MakerVolume leaves every face of this holed tube unused
+        (BOPAlgo_AlertSolidBuilderUnusedFaces), so FreeCAD-CH stops, loud; the union is expected
+        once that is solved."""
+        ring = [models.circle(0, 0, 1), models.circle(0, 0, 0.4)]
+        pipe = self.tube((10, 0.5), ring)
+        if not pipe.isValid():
+            self.assertStops(pipe, "overlaps itself", "couldn't build it")
+            raise unittest.SkipTest("debt: MakerVolume leaves a holed tube's faces unused")
+        self.assertOneSolid(pipe)
+        self.assertLess(pipe.Shape.Volume, 0.84 * math.pi * 49.5 - 1e-3)
+        solid = pipe.Shape.Solids[0]
+        self.assertTrue(solid.isInside(V(10, 0.75, 0), 1e-6, False))
+        for outside in ((10, 0.3, 0), (10, 2, 0), (5, 0, 0)):
+            self.assertFalse(solid.isInside(V(*outside), 1e-6, False), outside)
+
+    def testClosedSpinePassingNearItself(self):
+        """A closed path with a notch, (0,0)-(20,0)-(20,10)-(12,10)-(12,1.5)-(8,1.5)-(8,10)-(0,10): the
+        notch's bottom runs 1.5 above leg 1 for 4, so the tubes (r 1) overlap there (a lens of 0.4532
+        in section) and at the notch's mitred corners: 2.678 by a numerical integration of the
+        mitred tubes (grid 0.005), less than the naive pi x 77."""
+        path = self.sketch("Path", models.polygon(
+            [(0, 0), (20, 0), (20, 10), (12, 10), (12, 1.5), (8, 1.5), (8, 10), (0, 10)]))
+        profile = self.sketch("Profile", [models.circle(0, 0, 1)], placement=YZ)
+        pipe = self.pipe(profile, path, ProfileControl="None")
+        self.assertOneSolid(pipe, math.pi * 77 - 2.678, places=2)
+
+    def testTwistedSquareOverlapping(self):
+        """UNVERIFIED (SW19 pending): the square twisted 45 degrees along S2's path with its corners
+        rounded r 2 (twist needs a smooth path), end (10, 0.5): one solid, less than the naive
+        4 x (37.5 + 3 pi) (twist keeps the section's area) by at most the end's reach into leg 1."""
+        geometry = models.polyline([(0, 0), (18, 0)]) + [arc3((18, 0, 0), (18, 2, 0), (20, 2, 0))] \
+            + models.polyline([(20, 2), (20, 8)]) + [arc3((20, 8, 0), (18, 8, 0), (18, 10, 0))] \
+            + models.polyline([(18, 10), (12, 10)]) + [arc3((12, 10, 0), (12, 8, 0), (10, 8, 0))] \
+            + models.polyline([(10, 8), (10, 0.5)])
+        path = self.sketch("Path", geometry)
+        profile = self.sketch("Profile", models.rectangle(-1, -1, 1, 1), placement=YZ)
+        pipe = self.pipe(profile, path, ProfileControl="None",
+                         HasTwist=True, TwistType="Angle", TwistAngle=45)
+        self.assertOneSolid(pipe)
+        naive = 4 * (37.5 + 3 * math.pi)
+        self.assertLess(pipe.Shape.Volume, naive - 0.5)
+        self.assertGreater(pipe.Shape.Volume, naive - 4)
 
 
 class TestPipeTwist(PipeCase):
