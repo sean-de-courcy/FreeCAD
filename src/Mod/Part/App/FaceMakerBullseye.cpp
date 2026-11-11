@@ -34,6 +34,7 @@
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopExp_Explorer.hxx>
 #include <QtGlobal>
 #include <TopExp.hxx>
@@ -235,7 +236,23 @@ FaceMakerBullseye::FaceDriller::HitTest FaceMakerBullseye::FaceDriller::hitTest(
                 throw Base::ValueError(err);
         }
     }
-    BRepClass_FaceClassifier cl(myFace, gp_Pnt2d(u, v), tol);
+    // Against the outer wire and the holes whose box holds the point, not the whole face: a hole
+    // the point is away from can't change its state, and classifying against every earlier hole
+    // made a sketch of 3600 circles' faces quadratic (73 of a Pad's 89 s, kernel-9)
+    TopoDS_Face face = myFace;
+    if (!myHoleWires.empty()) {
+        BRep_Builder builder;
+        builder.MakeFace(face, myHPlane, Precision::Confusion());
+        builder.Add(face, TopoDS_Iterator(myFace).Value());  // the outer wire, added first
+        for (const auto& [wire, box] : myHoleWires) {
+            Bnd_Box reach = box;
+            reach.Enlarge(2 * tol + Precision::Confusion());
+            if (!reach.IsOut(point)) {
+                builder.Add(face, wire);
+            }
+        }
+    }
+    BRepClass_FaceClassifier cl(face, gp_Pnt2d(u, v), tol);
     TopAbs_State ret = cl.State();
     switch (ret) {
         case TopAbs_IN:
@@ -279,6 +296,14 @@ void FaceMakerBullseye::FaceDriller::addHole(TopoDS_Wire w)
 
     BRep_Builder builder;
     builder.Add(this->myFace, w);
+    addHoleWire(w);
+}
+
+void FaceMakerBullseye::FaceDriller::addHoleWire(const TopoDS_Wire& w)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(w, box);
+    myHoleWires.emplace_back(w, box);
 }
 
 void FaceMakerBullseye::FaceDriller::addHole(const WireInfo& wireInfo, std::vector<TopoShape>& sources)
@@ -319,6 +344,7 @@ void FaceMakerBullseye::FaceDriller::addHole(const WireInfo& wireInfo, std::vect
                 }
             }
             copyFaceBound(this->myFace, this->myTopoFace, this->myTopoFaceBound);
+            myHoleWires.clear();  // the face is the outer wire again; the joined holes follow
             wire = hole;
         }
     }
@@ -326,12 +352,12 @@ void FaceMakerBullseye::FaceDriller::addHole(const WireInfo& wireInfo, std::vect
     BRep_Builder builder;
     for (const auto& w : wire.getSubShapes(TopAbs_WIRE)) {
         // Ensure correct orientation of the wire.
-        if (getWireDirection(myPlane, TopoDS::Wire(w)) > 0) {       // if wire is CCW..
-            builder.Add(this->myFace, TopoDS::Wire(w.Reversed()));  //.. we want CW!
+        TopoDS_Wire hole = TopoDS::Wire(w);
+        if (getWireDirection(myPlane, hole) > 0) {  // if wire is CCW..
+            hole = TopoDS::Wire(w.Reversed());      //.. we want CW!
         }
-        else {
-            builder.Add(this->myFace, TopoDS::Wire(w));
-        }
+        builder.Add(this->myFace, hole);
+        addHoleWire(hole);
     }
 }
 
