@@ -153,6 +153,7 @@
 #include "Geometry.h"
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "PipeShellApproximation.h"
+#include "KernelBudget.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
 #include "SweepFrenet.h"
@@ -6358,16 +6359,28 @@ TopoShape& TopoShape::makeElementThickSolid(
         }
         remFace.Append(face.getShape());
     }
-    BRepOffsetAPI_MakeThickSolid mkThick;
-    mkThick.MakeThickSolidByJoin(
-        shape.getShape(),
-        remFace,
-        offset,
-        tol,
-        BRepOffset_Mode(offsetMode),
-        intersection ? Standard_True : Standard_False,
-        selfInter ? Standard_True : Standard_False,
-        GeomAbs_JoinType(join)
+    // On a worker under the feature's time limit (kernel safety S1)
+    auto mkThickPtr = std::make_shared<BRepOffsetAPI_MakeThickSolid>();
+    BRepOffsetAPI_MakeThickSolid& mkThick = *mkThickPtr;
+    KernelBudget::run(
+        "The thickness",
+        [mkThickPtr, base = shape.getShape(), remFace, offset, tol, offsetMode, intersection, selfInter, join](
+            const Message_ProgressRange& range
+        ) {
+            mkThickPtr->MakeThickSolidByJoin(
+                base,
+                remFace,
+                offset,
+                tol,
+                BRepOffset_Mode(offsetMode),
+                intersection ? Standard_True : Standard_False,
+                selfInter ? Standard_True : Standard_False,
+                GeomAbs_JoinType(join),
+                Standard_False,
+                range
+            );
+        },
+        KernelBudget::Inputs::Shared
     );
     // Only where OCCT refuses for the kept faces falling apart: every shell OCCT builds stays
     // its own (ops#640, F46).
@@ -7690,15 +7703,6 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
     throw StdFail_NotDone(message.c_str());
 }
 
-/** Whether OCCT built the dress-up with a face of zero width (ops#298): the face it consumes whole,
- * kept with area 0, or a sliver narrower than its tolerance. The exact construction builds the
- * dress-up at the limit instead; if it can't, the dress-up fails with a clear error.
- */
-bool builtThinFace(BRepFilletAPI_LocalOperation& maker, const TopoShape& base)
-{
-    return !FilletFallback::thinFace(maker.Shape(), base.getShape()).IsNull();
-}
-
 [[noreturn]] void raiseThinFaceError(const char* what, const std::string& reason)
 {
     FC_THROWM(
@@ -7707,6 +7711,75 @@ bool builtThinFace(BRepFilletAPI_LocalOperation& maker, const TopoShape& base)
                 "narrower than its tolerance), and its exact construction refused: "
              << reason
     );
+}
+
+/// What the worker made of a dress-up (kernel safety S1)
+struct DressUpOutcome
+{
+    bool failed {false};
+    bool thin {false};
+    bool invalid {false};
+    std::exception_ptr occtError;
+    bool constructed {false};
+    FilletFallback::Construction construction;
+    std::string reason;
+};
+
+/** Builds a fillet or chamfer maker under the feature's time limit, on a worker thread
+ * (KernelBudget::run()): OCCT's build, the checks of its result, and where OCCT failed or built
+ * an unusable result, the exact construction. All of it on plain shapes; the caller names the
+ * result. On a timeout or Esc it throws, and the maker is left to the abandoned worker.
+ */
+std::shared_ptr<DressUpOutcome> buildDressUp(
+    const std::shared_ptr<BRepFilletAPI_LocalOperation>& maker,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    const FilletFallback::Request& request,
+    const char* what
+)
+{
+    auto outcome = std::make_shared<DressUpOutcome>();
+    std::vector<TopoDS_Shape> edges;
+    edges.reserve(inputEdges.size());
+    for (const auto& edge : inputEdges) {
+        edges.push_back(edge.getShape());
+    }
+    KernelBudget::run(
+        what,
+        [maker, base = input.getShape(), edges, request = FilletFallback::Request(request), outcome](
+            const Message_ProgressRange& /*range*/
+        ) mutable {
+            DressUpOutcome& out = *outcome;
+            out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
+            // A face of zero width (ops#298): the exact construction builds it at the limit
+            out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
+            out.invalid = !out.failed && !out.thin && builtInvalid(*maker);
+            if (out.failed || out.thin || out.invalid) {
+                out.constructed
+                    = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+            }
+        }
+    );
+    return outcome;
+}
+
+/// Names the exact construction into result: false, with the reason, if that fails
+bool finishConstruction(TopoShape& result, DressUpOutcome& outcome, const TopoShape& input, const char* op)
+{
+    if (!outcome.constructed) {
+        return false;
+    }
+    try {
+        FilletFallback::finish(result, outcome.construction, input, op);
+        return true;
+    }
+    catch (const Standard_Failure& e) {
+        outcome.reason = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        outcome.reason = e.what();
+    }
+    return false;
 }
 }  // namespace
 
@@ -7739,33 +7812,30 @@ TopoShape& TopoShape::makeElementFillet(
     // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
     std::vector<TopoShape> inputEdges = edges;
     const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
-    BRepFilletAPI_MakeFillet mkFillet(input.getShape());
+    auto mkFillet = std::make_shared<BRepFilletAPI_MakeFillet>(input.getShape());
     for (auto& e : inputEdges) {
-        mkFillet.Add(radius1, radius2, TopoDS::Edge(e.getShape()));
+        mkFillet->Add(radius1, radius2, TopoDS::Edge(e.getShape()));
     }
-    std::exception_ptr occtError;
     FilletFallback::Request request;
     // Before the maker raises the copy's tolerances in place
     request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
-    const bool failed = buildDressUpFailed(mkFillet, occtError, request.contour);
-    const bool thin = !failed && builtThinFace(mkFillet, input);
-    if (failed || thin || builtInvalid(mkFillet)) {
-        Part::SignalException sig;
-        request.kind = FilletFallback::Kind::Fillet;
-        request.size1 = radius1;
-        request.size2 = radius2;
-        std::string reason;
-        if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
+    request.kind = FilletFallback::Kind::Fillet;
+    request.size1 = radius1;
+    request.size2 = radius2;
+    Part::SignalException sig;
+    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
+    if (outcome->failed || outcome->thin || outcome->invalid) {
+        if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
-        if (failed) {
-            raiseDressUpError(mkFillet, occtError, reason);
+        if (outcome->failed) {
+            raiseDressUpError(*mkFillet, outcome->occtError, outcome->reason);
         }
-        if (thin) {
-            raiseThinFaceError("The fillet", reason);
+        if (outcome->thin) {
+            raiseThinFaceError("The fillet", outcome->reason);
         }
     }
-    return makeElementShape(mkFillet, input, op);
+    return makeElementShape(*mkFillet, input, op);
 }
 
 TopoShape& TopoShape::makeElementChamfer(
@@ -7798,7 +7868,8 @@ TopoShape& TopoShape::makeElementChamfer(
     // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
     std::vector<TopoShape> inputEdges = edges;
     const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
-    BRepFilletAPI_MakeChamfer mkChamfer(input.getShape());
+    auto mkChamferPtr = std::make_shared<BRepFilletAPI_MakeChamfer>(input.getShape());
+    BRepFilletAPI_MakeChamfer& mkChamfer = *mkChamferPtr;
     for (auto& e : inputEdges) {
         const auto& edge = e.getShape();
         if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
@@ -7833,27 +7904,24 @@ TopoShape& TopoShape::makeElementChamfer(
         }
     }
     Part::SignalException sig;
-    std::exception_ptr occtError;
     FilletFallback::Request request;
     // Before the maker raises the copy's tolerances in place
     request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
-    const bool failed = buildDressUpFailed(mkChamfer, occtError, request.contour);
-    const bool thin = !failed && builtThinFace(mkChamfer, input);
-    if (failed || thin || builtInvalid(mkChamfer)) {
-        request.kind = FilletFallback::Kind::Chamfer;
-        request.size1 = radius1;
-        request.size2 = radius2;
-        request.chamferType = chamferType;
-        request.flipDirection = flipDirection;
-        std::string reason;
-        if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
+    request.kind = FilletFallback::Kind::Chamfer;
+    request.size1 = radius1;
+    request.size2 = radius2;
+    request.chamferType = chamferType;
+    request.flipDirection = flipDirection;
+    auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
+    if (outcome->failed || outcome->thin || outcome->invalid) {
+        if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
-        if (failed) {
-            raiseDressUpError(mkChamfer, occtError, reason);
+        if (outcome->failed) {
+            raiseDressUpError(mkChamfer, outcome->occtError, outcome->reason);
         }
-        if (thin) {
-            raiseThinFaceError("The chamfer", reason);
+        if (outcome->thin) {
+            raiseThinFaceError("The chamfer", outcome->reason);
         }
     }
     return makeElementShape(mkChamfer, input, op);
@@ -9168,18 +9236,18 @@ TopoShape& TopoShape::makeElementDraft(
 
     std::vector<TopoShape> faces(_faces);
     bool done = true;
-    BRepOffsetAPI_DraftAngle mkDraft;
+    auto mkDraft = std::make_shared<BRepOffsetAPI_DraftAngle>();
     do {
         if (faces.empty()) {
             FC_THROWM(Base::CADKernelError, "no faces can be used");
         }
 
-        mkDraft.Init(shape.getShape());
+        mkDraft->Init(shape.getShape());
         done = true;
         for (auto it = faces.begin(); it != faces.end(); ++it) {
             // TODO: What is the flag for?
-            mkDraft.Add(TopoDS::Face(it->getShape()), pullDirection, angle, neutralPlane);
-            if (!mkDraft.AddDone()) {
+            mkDraft->Add(TopoDS::Face(it->getShape()), pullDirection, angle, neutralPlane);
+            if (!mkDraft->AddDone()) {
                 // Note: the function ProblematicShape returns the face on which the error occurred
                 // Note: mkDraft.Remove() stumbles on a bug in Draft_Modification::Remove() and is
                 //       therefore unusable. See
@@ -9194,12 +9262,13 @@ TopoShape& TopoShape::makeElementDraft(
         }
     } while (retry && !done);
 
-#if OCC_VERSION_HEX >= 0x070600
-    mkDraft.Build(std::make_unique<Part::ProgressIndicator>()->Start());
-#else
-    mkDraft.Build();
-#endif
-    return makeElementShape(mkDraft, shape, op);
+    // On a worker under the feature's time limit (kernel safety S1)
+    KernelBudget::run(
+        "The draft",
+        [mkDraft](const Message_ProgressRange& range) { mkDraft->Build(range); },
+        KernelBudget::Inputs::Shared
+    );
+    return makeElementShape(*mkDraft, shape, op);
 }
 
 TopoShape& TopoShape::makeElementFace(
@@ -10542,7 +10611,8 @@ TopoShape& TopoShape::makeElementBoolean(
         return *this;
     }
 
-    std::unique_ptr<BRepAlgoAPI_BooleanOperation> mk;
+    // Shared with the worker that builds it, which may outlive this call (kernel safety S1)
+    std::shared_ptr<BRepAlgoAPI_BooleanOperation> mk;
     if (strcmp(maker, Part::OpCodes::Fuse) == 0) {
         mk.reset(new FCBRepAlgoAPI_Fuse);
     }
@@ -10564,21 +10634,45 @@ TopoShape& TopoShape::makeElementBoolean(
 
     std::vector<TopoShape> fixedInputs = inputs;
 
-    bool allValid = true;
-    int i = -1;
-    for (auto& shape : fixedInputs) {
-        if (shape.isNull()) {
+    // The inputs' check runs on a worker under the feature's time limit (kernel safety S1)
+    std::vector<TopoDS_Shape> toCheck;
+    std::vector<std::size_t> checked;
+    for (std::size_t k = 0; k < fixedInputs.size(); ++k) {
+        if (fixedInputs[k].isNull()) {
             FC_THROWM(NullShapeException, "Null input shape");
         }
-
         // A first argument the caller vouches for isn't checked (ops#310): the check is a full
         // BRepCheck_Analyzer, and a PartDesign feature's base can be the output of its own boolean
-        const bool vouchedFor = inputCheck == BooleanInputCheck::Tools && i + 1 < firstArgumentInputs;
-        if (!vouchedFor && !shape.isValid()) {
-            allValid = false;
-            shape.fix();
+        const bool vouchedFor = inputCheck == BooleanInputCheck::Tools
+            && static_cast<int>(k) < firstArgumentInputs;
+        if (!vouchedFor) {
+            // An exact copy: an abandoned check reads nothing the document changes, and a valid
+            // input checks valid (BRepBuilderAPI_Copy's copy of a valid face can fail, kernel-4)
+            toCheck.push_back(KernelBudget::exactCopy(fixedInputs[k].getShape()));
+            checked.push_back(k);
         }
+    }
+    auto validity = std::make_shared<std::vector<char>>(toCheck.size(), 1);
+    if (!toCheck.empty()) {
+        KernelBudget::run(
+            "The check of the boolean's inputs",
+            [toCheck, validity](const Message_ProgressRange& /*range*/) {
+                for (std::size_t k = 0; k < toCheck.size(); ++k) {
+                    (*validity)[k] = BRepCheck_Analyzer(toCheck[k]).IsValid() ? 1 : 0;
+                }
+            }
+        );
+    }
+    bool allValid = true;
+    for (std::size_t k = 0; k < checked.size(); ++k) {
+        if (!(*validity)[k]) {
+            allValid = false;
+            fixedInputs[checked[k]].fix();
+        }
+    }
 
+    int i = -1;
+    for (auto& shape : fixedInputs) {
         if (++i == 0) {
             shapeArguments.Append(shape.getShape());
         }
@@ -10598,11 +10692,18 @@ TopoShape& TopoShape::makeElementBoolean(
     else if (tolerance < 0.0) {
         FCBRepAlgoAPIHelper::setAutoFuzzy(mk.get());
     }
-#if OCC_VERSION_HEX >= 0x070600
-    mk->Build(std::make_unique<Part::ProgressIndicator>()->Start());
-#else
-    mk->Build();
-#endif
+    // On a worker under the feature's time limit, with Esc (kernel safety S1): the range carries
+    // the cancel, which OCCT reads at its few checks
+    const char* what = strcmp(maker, Part::OpCodes::Cut) == 0 ? "The cut"
+        : strcmp(maker, Part::OpCodes::Common) == 0           ? "The intersection"
+        : strcmp(maker, Part::OpCodes::Section) == 0          ? "The section"
+                                                              : "The fuse";
+    // It reads its inputs in place: after a timeout it is waited for until OCCT reads the cancel
+    KernelBudget::run(
+        what,
+        [mk](const Message_ProgressRange& range) { mk->Build(range); },
+        KernelBudget::Inputs::Shared
+    );
     if (Base::Sequencer().wasCanceled()) {
         FC_THROWM(Base::CADKernelError, "User aborted");
     }

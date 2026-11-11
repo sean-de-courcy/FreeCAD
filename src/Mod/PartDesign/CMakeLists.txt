@@ -116,6 +116,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDerivedFiles.py
     PartDesignTests/TestDerivedFollowUps.py
     PartDesignTests/TestPartStudioVariables.py
+    PartDesignTests/TestResultCheck.py
 )
 
 if(BUILD_GUI)

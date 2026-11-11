@@ -172,6 +172,7 @@ from PartDesignTests.TestStudioHistory import TestStudioHistory
 from PartDesignTests.TestPieces import TestPieces
 from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
+from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

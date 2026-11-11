@@ -36,6 +36,7 @@
 
 #include "FeatureRefine.h"
 #include "FeaturePy.h"
+#include "ResultCheck.h"
 
 
 using namespace PartDesign;
@@ -123,12 +124,14 @@ TopoShape FeatureRefine::refineShapeIfActive(
     const RefineErrorPolicy onError
 ) const
 {
-    if (!this->Refine.getValue()) {
+    if (!this->Refine.getValue() || ResultCheck::skippedForTheLimit(this, "The refine")) {
         return oldShape;
     }
     TopoShape shape(oldShape);
     try {
         TopoShape refinedShape = shape.makeElementRefine();
+        // The result's check compares the base with the shape before the refine (kernel safety S2)
+        ResultCheck::noteRefine(this, oldShape.getShape(), refinedShape.getShape());
         // Only a refine that merges faces has its result checked here: the check reads the whole
         // shape (BRepCheck_Analyzer), about a third of a 40-feature body's recompute when it ran
         // after every refine (ops#389).

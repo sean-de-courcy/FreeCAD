@@ -1857,16 +1857,18 @@ TopoDS_Edge grownEdge(
     return {};
 }
 
-/// The construction; cornerCount receives how many corners it built
-TopoDS_Shape construct(
-    TopoShape& result,
-    const TopoShape& base,
-    const std::vector<TopoShape>& edges,
+/// The construction, of plain shapes (kernel safety S1: it may run on a worker thread): the result
+/// and its history from the base in mapper; cornerCount receives how many corners it built
+TopoDS_Shape constructShape(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
     const Request& request,
-    const char* op,
+    ShapeMapper& mapper,
     int& cornerCount
 )
 {
+    // Its own TopoShape: no element map, no hasher, a cache of its own
+    const TopoShape base(baseShape);
     if (base.isNull() || countSolids(base.getShape()) != 1) {
         refuse("the base is not one solid");
     }
@@ -1884,13 +1886,13 @@ TopoDS_Shape construct(
     Context ctx(base, request);
     std::vector<EdgeData> data;
     for (const auto& edge : edges) {
-        if (edge.isNull() || edge.getShape().ShapeType() != TopAbs_EDGE) {
+        if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
             refuse("not an edge");
         }
-        if (ctx.selected.Contains(edge.getShape())) {
+        if (ctx.selected.Contains(edge)) {
             continue;
         }
-        ctx.selected.Add(edge.getShape());
+        ctx.selected.Add(edge);
     }
     // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: where it would
     // have reached an unselected edge, the construction (which stops there) differs from it
@@ -2220,7 +2222,6 @@ TopoDS_Shape construct(
             }
         }
     }
-    ShapeMapper mapper;
     for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
         for (TopExp_Explorer it(base.getShape(), type); it.More(); it.Next()) {
             const TopoDS_Shape& element = it.Current();
@@ -2242,7 +2243,6 @@ TopoDS_Shape construct(
             }
         }
     }
-    result.makeShapeWithElementMap(shape, mapper, {base}, op);
     cornerCount = cornerVertices.Extent();
     return shape;
 }
@@ -2365,28 +2365,27 @@ std::string Recorder::report(const std::string& name) const
     return line.str();
 }
 
-bool build(
-    TopoShape& result,
-    const TopoShape& base,
-    const std::vector<TopoShape>& edges,
+bool construct(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
     const Request& request,
-    const char* op,
+    Construction& out,
     std::string* reason
 )
 {
     std::string why;
     try {
-        // A copy keeps the result's tag, hasher and history algorithm, which name the elements
-        TopoShape built(result);
+        auto mapper = std::make_shared<ShapeMapper>();
         int corners = 0;
-        construct(built, base, edges, request, op, corners);
-        result = built;
+        TopoDS_Shape shape = constructShape(base, edges, request, *mapper, corners);
         TopTools_IndexedMapOfShape selected;
         for (const auto& edge : edges) {
-            selected.Add(edge.getShape());
+            selected.Add(edge);
         }
-        FC_LOG("built exactly: " << selected.Extent() << " edges, " << corners << " corners");
-        Recorder::add(selected.Extent(), corners);
+        out.shape = shape;
+        out.mapper = mapper;
+        out.edges = selected.Extent();
+        out.corners = corners;
         return true;
     }
     catch (const Refusal& refusal) {
@@ -2403,6 +2402,58 @@ bool build(
     }
     catch (...) {
         why = "an unknown exception";
+    }
+    if (reason) {
+        *reason = why;
+    }
+    return false;
+}
+
+void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)
+{
+    // A copy keeps the result's tag, hasher and history algorithm, which name the elements
+    TopoShape built(result);
+    built.makeShapeWithElementMap(construction.shape, *construction.mapper, {base}, op);
+    result = built;
+    FC_LOG("built exactly: " << construction.edges << " edges, " << construction.corners << " corners");
+    Recorder::add(construction.edges, construction.corners);
+}
+
+bool build(
+    TopoShape& result,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const Request& request,
+    const char* op,
+    std::string* reason
+)
+{
+    std::vector<TopoDS_Shape> edgeShapes;
+    edgeShapes.reserve(edges.size());
+    for (const auto& edge : edges) {
+        edgeShapes.push_back(edge.getShape());
+    }
+    Construction construction;
+    std::string why;
+    if (!construct(base.getShape(), edgeShapes, request, construction, &why)) {
+        FC_LOG("exact construction refused: " << why);
+        if (reason) {
+            *reason = why;
+        }
+        return false;
+    }
+    try {
+        finish(result, construction, base, op);
+        return true;
+    }
+    catch (const Standard_Failure& e) {
+        why = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const std::exception& e) {
+        why = e.what();
     }
     FC_LOG("exact construction refused: " << why);
     if (reason) {

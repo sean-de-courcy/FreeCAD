@@ -66,6 +66,7 @@
 #include <Base/Exception.h>
 
 #include "Geometry.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "TopoShape.h"
 
@@ -828,6 +829,8 @@ bool checkResult(TopoShape& shape, const TopoShape& base)
         FC_WARN("Invalid dress-up result with " << found << " solids from " << solids);
         return false;
     }
+    // The result needs the repair: too late for it, the feature fails (kernel safety S1)
+    KernelBudget::stopIfPastDeadline("The repair of the dress-up's result");
     TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
     repaired.makeElementCopy(shape);
     if (!fixKeepingNames(repaired, shape)) {
