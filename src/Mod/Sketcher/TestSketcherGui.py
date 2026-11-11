@@ -36,6 +36,8 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
     TestSketchTangentArcGui,
     TestSketchFilletFieldsGui,
     TestSketchSplitCircleGui,  # FreeCAD-CH, ops#656 F3
+    TestSketchSplitCirclePicksGui,  # FreeCAD-CH, sketcher 3 (hand-check 6)
+    TestSketchSplitIntersectionGui,  # FreeCAD-CH, sketcher 3 (hand-check 6)
 )
 from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch round 3)
     TestSketchModelInferenceGui,
