@@ -557,7 +557,10 @@ class TestThreadEndRevolve(unittest.TestCase):
             self.assertGreater(rev.Shape.Volume, shape.Volume - 1e-6 * shape.Volume)
             self.assertLess(rev.Shape.Volume, shape.Volume + math.pi * 3.0 + 1e-6 * shape.Volume)
         else:
-            self.assertIn("no solid", rev.getStatusString())
+            # Loud either way: where the Revolution's own volume check (sweeps, ops#640) runs,
+            # it stops first, before the fuse's "no solid"
+            message = rev.getStatusString()
+            self.assertTrue("no solid" in message or "volume is wrong" in message, message)
 
     def testAStraightFreeFormEdgeOfTheCapIsAnAxis(self):
         shape = self.helix.Shape

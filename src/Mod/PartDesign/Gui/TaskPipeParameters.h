@@ -77,10 +77,29 @@ private Q_SLOTS:
     void onProfileControlChanged(int);
     void onExtendToFullPathChanged(bool checked);
     void onOppositeDirectionChanged(bool checked);
+    void onTwistChanged(bool checked);
+    void onTwistTypeChanged(int idx);
+    void onTurnsChanged(double turns);
+    void onTwistAngleChanged(double degrees);
+    void onTwistPitchChanged(double length);
+    void onTwistCCWChanged(bool checked);
+    void onScaleChanged(bool checked);
+    void onScaleFactorChanged(double factor);
+    void onBodyTypeChanged(int idx);
+    void onThicknessChanged(double length);
+    void onThickness2Changed(double length);
+    void onMidplaneChanged(bool checked);
+    void onFlipWallChanged(bool checked);
+    void onTrimEndsChanged(bool checked);
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void createFields();
+    /// Shows the Lock faces and Lock direction fields, the Twist rows and the Thin rows as the
+    /// boxes now stand (shows only, writes nothing)
+    void updateSweepWidgets();
+    /// Writes to the pipe and recomputes, as each handler does
+    void writePipe(const std::function<void(PartDesign::Pipe*)>& write);
     void setVisibilityOfSpineAndProfile();
 
     /// The spine, the profile and the auxiliary spine shown for the edit, also those picked
@@ -94,6 +113,10 @@ private:
     ReferenceField* spineField = nullptr;
     /// SpineMore: path edges from other objects
     ReferenceField* spineMoreField = nullptr;
+    /// LockFaces (ProfileControl "Lock faces") and LockDirection ("Lock direction"): optional,
+    /// each shown with its control only
+    ReferenceField* lockFacesField = nullptr;
+    ReferenceField* lockDirectionField = nullptr;
     friend class TaskDlgPipeParameters;
 };
 

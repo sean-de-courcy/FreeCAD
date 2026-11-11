@@ -69,6 +69,16 @@ from PartDesignTests.TestPipeOnshape import (  # FreeCAD-CH, sweeps as Onshape's
     TestPipeProfilePlacement,
     TestPipePathFromSeveralObjects,
     TestPipeEndAfterThePathGrows,
+    TestThreadCapFollowsEdits,
+    TestHelixTurnNamesNeverPass,
+    TestPipeHelixTurnsCountFromTheStart,
+    TestThreadToothOnTheCylinder,
+    TestPipeSelfOverlap,
+    TestPipeSelfOverlapUnion,
+    TestPipeTwist,
+    TestPipeScale,
+    TestPipeLock,
+    TestPipeThin,
 )
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive

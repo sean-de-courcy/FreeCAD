@@ -104,6 +104,7 @@ SET(FeaturesSketchBased_SRCS
     FeatureSketchBased.h
     ProfileRegions.cpp
     ProfileRegions.h
+    StraightEdge.h
     FeaturePad.cpp
     FeaturePad.h
     FeaturePocket.cpp

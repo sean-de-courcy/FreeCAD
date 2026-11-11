@@ -54,6 +54,7 @@
 #include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/StudioList.h>
+#include <Mod/PartDesign/App/StraightEdge.h>
 
 #include "ui_DlgReference.h"
 #include "ReferenceSelection.h"
@@ -279,8 +280,10 @@ bool ReferenceSelection::isEdge(App::DocumentObject* pObj, const char* sSubName)
     const TopoDS_Edge& edgeShape = TopoDS::Edge(sh);
     if (!edgeShape.IsNull()) {
         if (type.testFlag(AllowSelection::PLANAR)) {
-            BRepAdaptor_Curve adapt(edgeShape);
-            if (adapt.GetType() == GeomAbs_Line) {
+            // A line, or a B-spline straight by its shape, as the axis reader takes (SW7)
+            gp_Pnt base;
+            gp_Dir dir;
+            if (PartDesign::straightEdge(edgeShape, base, dir)) {
                 return true;
             }
         }

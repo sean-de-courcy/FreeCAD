@@ -92,6 +92,7 @@
 #include "DatumLine.h"
 #include "DatumPlane.h"
 #include "PartDesignParameter.h"
+#include "StraightEdge.h"
 #include "StudioOwner.h"
 #include "Mod/Part/App/Geometry.h"
 
@@ -2067,43 +2068,6 @@ double ProfileBased::getReversedAngle(
     }
 }
 
-namespace
-{
-// A free-form edge that is straight within its tolerance, as the cap edges of a sweep or a helix
-// are (straight profile edges moved rigidly, stored as B-splines): its axis, through its ends.
-// Onshape takes such an edge as an axis (ops#640, FSLC #30)
-bool straightEdgeAxis(const BRepAdaptor_Curve& adapt, double edgeTolerance, gp_Pnt& base, gp_Dir& dir)
-{
-    const GeomAbs_CurveType type = adapt.GetType();
-    if (type != GeomAbs_BSplineCurve && type != GeomAbs_BezierCurve && type != GeomAbs_OtherCurve) {
-        return false;
-    }
-    const double first = adapt.FirstParameter();
-    const double last = adapt.LastParameter();
-    if (Precision::IsInfinite(first) || Precision::IsInfinite(last)) {
-        return false;
-    }
-    const gp_Pnt p0 = adapt.Value(first);
-    const gp_Pnt p1 = adapt.Value(last);
-    const double length = p0.Distance(p1);
-    const double tolerance = std::max(edgeTolerance, Precision::Confusion());
-    if (length <= 10 * tolerance) {
-        return false;
-    }
-    const gp_Lin line(p0, gp_Dir(gp_Vec(p0, p1)));
-    constexpr int samples = 32;
-    for (int i = 1; i < samples; ++i) {
-        const double u = first + (last - first) * i / samples;
-        if (line.Distance(adapt.Value(u)) > tolerance) {
-            return false;
-        }
-    }
-    base = p0;
-    dir = line.Direction();
-    return true;
-}
-}  // namespace
-
 void ProfileBased::getAxis(
     const App::DocumentObject* pcReferenceAxis,
     const std::vector<std::string>& subReferenceAxis,
@@ -2147,7 +2111,7 @@ void ProfileBased::getAxis(
             b = adapt.Circle().Location();
             d = adapt.Circle().Axis().Direction();
         }
-        else if (!straightEdgeAxis(adapt, BRep_Tool::Tolerance(refEdge), b, d)) {
+        else if (!straightEdge(refEdge, b, d)) {  // a B-spline straight by its shape (SW7)
             throw Base::TypeError("Edge must be a straight line, circle or arc of circle");
         }
 
