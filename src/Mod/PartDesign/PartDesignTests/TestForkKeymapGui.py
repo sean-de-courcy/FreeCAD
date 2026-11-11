@@ -54,6 +54,7 @@ from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
 
 from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap
 SHORTCUTS = "User parameter:BaseApp/Preferences/Shortcut"
@@ -878,6 +879,7 @@ class TestForkKeymapGui(unittest.TestCase):
             waitFor(lambda: abs(direction()[0]) > 0.5 and abs(direction()[2]) > 0.5), direction()
         )
 
+    @siblingEraPath
     def testShiftEPadsTheSelectedSketch(self):
         """With a body active and its sketch selected, Shift+E runs PartDesign_Pad (not the box
         element selection), which pads the sketch."""
@@ -1163,6 +1165,7 @@ class TestForkKeymapGui(unittest.TestCase):
         box.activated.emit(index)
         pump(0.3)
 
+    @siblingEraPath
     def testShiftEInSketchClosesItAndPads(self):
         """In sketch edit, Shift+E closes the sketch and pads it, as Onshape's extrude does."""
         self.editAndPress(QtCore.Qt.Key_E, "PartDesign::Pad")

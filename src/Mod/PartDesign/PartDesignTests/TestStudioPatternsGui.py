@@ -259,8 +259,60 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.accept()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
 
+    def testFirstPatternInAFreshStudioMakesTheList(self):
+        """ops#654 list on first use: in a fresh document (a Body at the top level, its plate and
+        boss made without a list) the first Linear pattern makes the studio's list in its own
+        step, the Body's members adopted in order and the pattern at the bar, the boss its
+        original; one undo takes the pattern and the list."""
+        from PartDesignTests.TestStudio import pad, sketch, xyPlane
+
+        doc = App.newDocument("FirstPattern")
+        doc.UndoMode = 1
+        try:
+            body = doc.addObject("PartDesign::Body", "Body")
+            pad(body, "Plate", sketch(body, "PlateSk", xyPlane(body), (0, 0, 60, 20)), 10)
+            boss = pad(body, "Boss", sketch(body, "BossSk", xyPlane(body), (2, 7, 8, 13), z=10), 5)
+            doc.recompute()
+            self.assertIsNone(PartDesign.studioList(doc))
+            App.setActiveDocument(doc.Name)
+            Gui.setActiveDocument(doc.Name)
+            pump(0.2)
+            Gui.getDocument(doc.Name).ActiveView.setActiveObject("pdbody", body)
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(doc.Name, boss.Name)
+            undo, before = doc.UndoCount, sorted(o.Name for o in doc.Objects)
+            Gui.runCommand("PartDesign_LinearPattern")
+            self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+            settle()
+            lst = PartDesign.studioList(doc)
+            self.assertIsNotNone(lst, "no list made")
+            pattern = next(o for o in doc.Objects if o.TypeId == "PartDesign::LinearPattern")
+            self.assertEqual(
+                [e.Name for e in lst.Entries], ["PlateSk", "Plate", "BossSk", "Boss", pattern.Name]
+            )
+            self.assertEqual(list(pattern.Originals), [boss])
+            ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+            ok.click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+            doc.recompute()
+            self.assertIn(pattern, PartDesign.studioList(doc).Entries)
+            self.assertEqual(doc.UndoCount, undo + 1)
+            doc.undo()
+            doc.recompute()
+            self.assertIsNone(PartDesign.studioList(doc))
+            self.assertEqual(sorted(o.Name for o in doc.Objects), before)
+            self.assertAlmostEqual(body.Shape.Volume, 60 * 20 * 10 + 6 * 6 * 5, places=4)
+        finally:
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+                pump()
+            App.closeDocument(doc.Name)
+            App.setActiveDocument(self.doc.Name)
+            Gui.setActiveDocument(self.doc.Name)
+
     def testReapplyBoxInABody(self):
-        """In a Body outside any listed studio, the Linear panel has the box too, and it works."""
+        """In a Body at a document's top level, the Linear panel has the box too, and it works
+        (the document's list is made by the pattern since ops#654's list on first use)."""
         from PartDesignTests.TestStudio import pad, sketch, xyPlane
 
         doc = App.newDocument("ReapplyBody")

@@ -610,7 +610,19 @@ bool TaskDlgBooleanParameters::accept()
                 ->SetBool(keepToolsParam, parameter->getKeepTools());
             Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.recompute()");
             Gui::Command::doCommand(Gui::Command::Gui, "Gui.activeDocument().resetEdit()");
-            obj->getDocument()->commitTransaction();
+            // FreeCAD-CH (ops#654 P6p): the OK is the command that makes a split's pieces parts
+            // (once the edit has ended; a step of its own when the edit's is closed by then)
+            App::Document* document = obj->getDocument();
+            const bool own = !document->hasPendingTransaction();
+            if (own) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+            }
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                Gui::Command::getObjectCmd(obj).c_str()
+            );
+            document->commitTransaction();
         }
         catch (const Base::Exception& e) {
             obj->getDocument()->abortTransaction();

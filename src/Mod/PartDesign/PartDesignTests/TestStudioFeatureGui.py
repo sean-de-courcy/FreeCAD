@@ -241,6 +241,73 @@ class TestStudioFeatureGui(StudioDialog, unittest.TestCase):
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertVolumes(A=1000, B=910, C=1000)
 
+    def testOKOfASplittingPocketMakesTwoParts(self):
+        """P6p: a Remove 11 deep through A (x 4..6, y -1..11) splits it: the dialog's OK is the
+        command that makes the two pieces parts (400 each) in the Parts list in place of A; one
+        undo takes them away again."""
+        s = self.sketchInA("Sk", (4, -1, 6, 11))
+        owner = self.runCommand("PartDesign_Pocket", s, active="A")
+        self.setLength(11)
+        self.choose("Remove")
+        for label, on in (("A", True), ("B", False), ("C", False)):
+            self.tick(label, on)
+        self.close(ok=True)
+        made = self.madeParts(owner)
+        self.assertEqual(len(made), 2)
+        for b in made:
+            self.assertAlmostEqual(b.Shape.Volume, 400, places=4, msg=b.Name)
+            self.assertEqual(b.StudioParentId, "A")
+        live = PartDesign.studioLiveParts(self.list)
+        self.assertNotIn(self.body("A"), live)
+        self.assertEqual(sorted(b.Name for b in live), sorted(["B", "C"] + [b.Name for b in made]))
+        names = [b.Name for b in made]
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual([n for n in names if self.doc.getObject(n)], [])
+        self.assertIn(self.body("A"), PartDesign.studioLiveParts(self.list))
+
+    def testUnchangedOKMakesAPieceWhereARecordWent(self):
+        """P6p: two slots (x 3..3.5 and 6..6.5) through A make three parts; the first slot is
+        redrawn at x 8..8.5: the part left of it loses its record (the middle one's witness
+        claims the big left solid) and x 8.5..10 is a new piece, so the count of Bodies is the
+        same. The unchanged OK of the owner makes it a part all the same, in a step of its own:
+        the owner is no longer red (review prline-b5-r1 T3)."""
+        from PartDesignTests.TestStudio import rect
+
+        s = self.sketchInA("Sk", (3, -1, 3.5, 11))
+        rect(s, 6, -1, 6.5, 11)
+        self.doc.recompute()
+        owner = self.runCommand("PartDesign_Pocket", s, active="A")
+        self.setLength(11)
+        self.choose("Remove")
+        for label, on in (("A", True), ("B", False), ("C", False)):
+            self.tick(label, on)
+        self.close(ok=True)
+        self.assertEqual(len(self.madeParts(owner)), 3)
+        self.doc.openTransaction("redraw")
+        for i in (3, 2, 1, 0):
+            s.delGeometry(i)
+        rect(s, 8, -1, 8.5, 11)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        step = PartDesign.studioStepOf(owner, self.body("A"))
+        self.assertFalse(step.isValid())
+        self.assertIn("2 are parts", step.getStatusString())
+        bodies = len([o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"])
+        undo = self.doc.UndoCount
+        owner.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertEqual(len([o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]), bodies)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertTrue(step.isValid(), step.getStatusString())
+        made = sorted(self.madeParts(owner), key=lambda b: b.Shape.BoundBox.XMin)
+        self.assertEqual(len(made), 3)
+        for b, (x0, x1) in zip(made, ((0, 6), (6.5, 8), (8.5, 10))):
+            self.assertAlmostEqual(b.Shape.BoundBox.XMin, x0, places=6, msg=b.Name)
+            self.assertAlmostEqual(b.Shape.Volume, (x1 - x0) * 100, places=4, msg=b.Name)
+
     def testBothPartsTicked(self):
         """The same cut with A and B ticked: each loses 5*6*3 (910 each)."""
         s = self.sketchInA("Sk", CUT)
@@ -521,28 +588,179 @@ class TestStudioFeatureGui(StudioDialog, unittest.TestCase):
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertVolumes(A=1000 - 6 * 6 * 5, B=1000)
 
-    def testAStudioWithoutAListKeepsTodaysPath(self):
-        """No list: Extrude on a sketch of A makes a Pad in A, as before."""
-        doc, studio = newStudio("StudioFeatureGuiNoList")
-        try:
-            App.setActiveDocument(doc.Name)
-            Gui.setActiveDocument(doc.Name)
-            a = doc.getObject("A")
-            s = sketch(a, "Sk", xyPlane(a), OVER_A, z=10)
-            doc.recompute()
-            Gui.getDocument(doc.Name).ActiveView.setActiveObject("pdbody", a)
-            Gui.Selection.clearSelection()
-            Gui.Selection.addSelection(doc.Name, s.Name)
-            Gui.runCommand("PartDesign_Pad")
-            self.waitForPanel()
-            self.assertIsNone(PartDesign.studioList(studio))
-            [made] = [o for o in a.Group if o.TypeId == "PartDesign::Pad" and o.Name != "APad"]
-            self.close(ok=True)
-            self.assertAlmostEqual(a.Shape.Volume, 1360, places=4)
-        finally:
-            App.closeDocument(doc.Name)
-            App.setActiveDocument(self.doc.Name)
-            Gui.setActiveDocument(self.doc.Name)
+# ------------------------------------------------------------- the list on first use (decision 337)
+
+
+class TestListOnFirstUseGui(StudioDialog, unittest.TestCase):
+    """ops#654, the list on first use (notes/parts-design.md 10.8): the studio's list is the only
+    truth, so in a studio without one the first studio command makes it, adopted from the derived
+    order, in the command's own step (Cancel or one undo takes it back with the feature), and then
+    takes the owner path. A studio whose adoption could change what the person sees without a word
+    is refused loudly (studioListRefusal in Gui/Command.cpp): rolled back, or an in-Body Boolean
+    using one of its parts as a tool."""
+
+    def setUp(self):
+        self.doc = None
+
+    def tearDown(self):
+        if self.doc is not None:
+            super().tearDown()
+
+    def openUnlisted(self, doc, studio):
+        self.doc, self.studio, self.list = doc, studio, None
+        self.doc.recompute()
+        self.assertIsNone(PartDesign.studioList(self.studioArg()))
+        Gui.Selection.clearSelection()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+
+    def studioArg(self):
+        return self.studio if self.studio is not None else self.doc
+
+    def listed(self):
+        self.list = PartDesign.studioList(self.studioArg())
+        return self.list
+
+    def fresh(self):
+        """A fresh document: a Body A at its top level holding only a sketch (6 x 6 at z 0)."""
+        doc = App.newDocument("ListOnFirstUseFresh")
+        doc.UndoMode = 1
+        body = doc.addObject("PartDesign::Body", "A")
+        s = sketch(body, "Sk", xyPlane(body), OVER_A)
+        self.openUnlisted(doc, None)
+        return s
+
+    def solidVolume(self):
+        bodies = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
+        return sum(b.Shape.Volume for b in bodies if not b.Shape.isNull())
+
+    def refused(self, command, profile, active, words):
+        """command with profile selected and Body active is refused: no dialog, no list, nothing
+        made, no undo step, and the status bar says why (words in it)."""
+        before, undo = self.objects(), self.doc.UndoCount
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body(active))
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        Gui.runCommand(command)
+        pump(0.5)
+        self.assertFalse(Gui.Control.activeDialog(), "a dialog opened")
+        self.assertIsNone(self.listed())
+        self.assertEqual(self.objects(), before)
+        self.assertEqual(self.doc.UndoCount, undo)
+        # MainWindow::showMessage writes the status bar's action label
+        bar = Gui.getMainWindow().statusBar()
+        message = " | ".join(label.text() for label in bar.findChildren(QtWidgets.QLabel))
+        self.assertIn(words, message)
+
+    # -------------------------------------------------------------------------------- tests
+    def testFirstPadOfAFreshDocumentMakesTheListAndAnOwner(self):
+        """A fresh document's first Extrude: the list (of the document's top level) is made with
+        the owner, the sketch adopted before it; the owner is no Body's member; OK makes the 6 x 6
+        x 10 solid; one undo takes the owner, its part and the list, redo brings them back."""
+        s = self.fresh()
+        undo, before = self.doc.UndoCount, self.objects()
+        owner = self.runCommand("PartDesign_Pad", s, active="A")
+        self.assertIsNotNone(self.listed(), "no list made")
+        self.assertEqual(self.entries(), ["Sk", owner.Name])
+        bodies = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
+        self.assertFalse([b.Name for b in bodies if owner in b.Group], "the owner is in a Body")
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertAlmostEqual(self.solidVolume(), 360, places=4)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.listed())
+        self.assertEqual(self.objects(), before)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.listed())
+        self.assertEqual(self.entries(), ["Sk", owner.Name])
+        self.assertAlmostEqual(self.solidVolume(), 360, places=4)
+
+    def testCancelOfTheFirstPadLeavesNothing(self):
+        """Cancel of a fresh document's first Extrude: no owner, no part, no list, no undo step."""
+        s = self.fresh()
+        undo, before = self.doc.UndoCount, self.objects()
+        self.runCommand("PartDesign_Pad", s, active="A")
+        self.assertIsNotNone(self.listed())
+        self.close(ok=False)
+        self.doc.recompute()
+        self.assertIsNone(self.listed())
+        self.assertEqual(self.objects(), before)
+        self.assertEqual(self.doc.UndoCount, undo)
+
+    def testFirstPocketAdoptsTheInBodyFeaturesInOrder(self):
+        """A studio of in-Body features (A, B, C: sketch and Pad each, made without a list) and a
+        sketch on A: the first Extrude (remove) adopts them in the derived order and puts its
+        owner at the bar (the end); a Remove 3 deep into A cuts 6*6*3; one undo leaves the studio
+        as it was, without a list."""
+        self.openUnlisted(*newStudio("ListOnFirstUse"))
+        s = self.sketchInA("Sk", OVER_A)
+        order = [o.Name for o in PartDesign.studioSequence(self.studio)]
+        self.assertEqual(order, ["ASk", "APad", "BSk", "BPad", "CSk", "CPad", "Sk"])
+        undo, before = self.doc.UndoCount, self.objects()
+        owner = self.runCommand("PartDesign_Pocket", s, active="A")
+        self.assertIsNotNone(self.listed(), "no list made")
+        self.assertEqual(self.entries(), order + [owner.Name])
+        self.assertEqual(self.list.Bar, -1)
+        self.setLength(3)
+        self.choose("Remove")
+        for label, on in (("A", True), ("B", False), ("C", False)):
+            self.tick(label, on)
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["A"])
+        self.assertVolumes(A=1000 - 6 * 6 * 3, B=1000, C=1000)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.listed())
+        self.assertEqual(self.objects(), before)
+        self.assertVolumes(A=1000, B=1000, C=1000)
+
+    def testFirstPadAddsIntoItsSketchsPart(self):
+        """The first Extrude on a sketch of A with A active (the case that made an in-Body Pad
+        before the list on first use): an owner adding into A, 1000 + 6*6*10."""
+        self.openUnlisted(*newStudio("ListOnFirstUsePad"))
+        s = self.sketchInA("Sk", OVER_A)
+        owner = self.runCommand("PartDesign_Pad", s, active="A")
+        self.assertIsNotNone(self.listed())
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.close(ok=True)
+        self.assertOwner(owner, ["A"])
+        self.assertVolumes(A=1360, B=1000, C=1000)
+        self.assertFalse([o.Name for o in self.body("A").Group if o.TypeId == "PartDesign::Pad"
+                          and o.Name != "APad"], "an in-Body Pad")
+
+    def assertOwner(self, owner, scope):
+        TestStudioFeatureGui.assertOwner(self, owner, scope)
+
+    def testARolledBackStudioIsRefusedLoudly(self):
+        """A studio rolled back without a list (A's Tip moved back to its sketch): the derived bar
+        could hold B's or C's rows below it, so the first studio command is refused with the
+        reason, and nothing changes."""
+        self.openUnlisted(*newStudio("ListOnFirstUseRolled"))
+        a, b = self.body("A"), self.body("B")
+        a.Tip = self.doc.getObject("ASk")
+        s = sketch(b, "Sk", xyPlane(b), OVER_B, z=10)
+        self.doc.recompute()
+        self.assertTrue(a.isRolledBack())
+        self.refused("PartDesign_Pad", s, "B", "rolled back")
+
+    def testAnInBodyBooleanOfAStudioPartIsRefusedLoudly(self):
+        """An in-Body Boolean in A whose tool is the part B: the list would see B as a live part,
+        so the first studio command is refused with the reason, and nothing changes."""
+        self.openUnlisted(*newStudio("ListOnFirstUseBoolean"))
+        a, b, c = self.body("A"), self.body("B"), self.body("C")
+        boolean = a.newObject("PartDesign::Boolean", "Bool")
+        boolean.addObjects([b])
+        s = sketch(c, "Sk", xyPlane(c), (42, 2, 48, 8), z=10)
+        self.doc.recompute()
+        self.assertEqual(PartDesign.studioOf(b), self.studio, "B left the studio")
+        self.refused("PartDesign_Pad", s, "C", "Bool")
 
 
 # ------------------------------------------------------------------ Onshape's pre-fill (oracle 6)
@@ -845,8 +1063,9 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
     def testLeavingNewWithoutLaterFeatures(self):
         """P without later features: New -> Add deletes P (scope empty, "No merge scope selected");
         back to New makes it again with the same id; OK. Then Add with A ticked (the tool apart
-        from A): the fork's S2 failure, loud (Onshape keeps P with an info); undo brings P back
-        whole, redo takes it again."""
+        from A): Onshape H1a makes the region a new part, and the OK is the command that makes it
+        (P6p): a leftover part, its own undo step after the edit's; undo leaves the edit's loud
+        failure, a second undo brings P back whole, redo takes it again."""
         owner, made = self.makeE()
         pid = made.StudioPartId
         undo = self.doc.UndoCount
@@ -868,12 +1087,19 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
         self.choose("Add")
         self.tick("A", True)
         self.close(ok=True)
-        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual(self.doc.UndoCount, undo + 2)
+        [left] = self.madeParts(owner)
+        self.assertEqual(left.StudioParentId, "")
+        self.assertAlmostEqual(left.Shape.Volume, self.PV, places=4)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertVolumes(A=4000)
+
+        self.doc.undo()
+        self.doc.recompute()
         self.assertEqual(self.madeParts(owner), [])
         self.assertFalse(owner.isValid())
         self.assertIn("touches no part", owner.getStatusString())
         self.assertVolumes(A=4000)
-
         self.doc.undo()
         self.doc.recompute()
         [back] = self.madeParts(owner)

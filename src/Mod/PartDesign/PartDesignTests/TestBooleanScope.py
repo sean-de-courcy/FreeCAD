@@ -168,13 +168,16 @@ class TestBooleanScope(unittest.TestCase):
         self.assertConsumed("B", b)
 
     def testUnionOfPartsApartFailsLoudly(self):
-        """A Union whose tool touches nothing it merges fails (Onshape keeps it a part of its own,
-        a new part: not done yet); no part changes."""
+        """A Union whose only tool touches nothing it merges: Onshape keeps a tool apart a part
+        of its own (P6p, A-2' b), so C stays a part, not consumed; with nothing left to merge the
+        Union fails loudly (unverified on Onshape); no part changes."""
         b = self.boolean(kind="Fuse", targets=("A",), tools=("C",))
-        step = self.step(b, "A")
-        self.assertFalse(step.isValid())
-        self.assertIn("separate solids", step.getStatusString())
+        self.assertFalse(b.isValid())
+        self.assertIn("No tool part touches", b.getStatusString())
         self.assertVolume("A", 1000)
+        self.assertVolume("C", 1000)
+        self.assertIn("C", self.live())
+        self.assertIsNone(PartDesign.studioConsumerOf(self.doc.getObject("C")))
 
     # ------------------------------------------------------------------------------- consumed parts
     def testPickOfAConsumedToolResolvesToNothing(self):

@@ -46,6 +46,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/Pieces.h>
 #include <Mod/PartDesign/App/FeatureApply.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeaturePad.h>
@@ -1337,6 +1338,10 @@ QString partNameAmong(const PartDesign::Body* body, const std::vector<PartDesign
     };
     if (!body || !isDefault(label)) {
         return label;
+    }
+    // A piece of a renamed part shows its name (P6p, Onshape S3)
+    if (const std::string inherited = PartDesign::pieceInheritedName(body); !inherited.empty()) {
+        return QString::fromUtf8(inherited.c_str());
     }
     if (std::ranges::find(live, body) == live.end()) {
         return label;

@@ -44,6 +44,7 @@
 #include "Feature.h"
 #include "FeatureBase.h"
 #include "FeatureMultiTransform.h"
+#include "Pieces.h"
 #include "Retarget.h"
 #include "StudioList.h"
 
@@ -460,6 +461,8 @@ void forgetDeletedEntry(const App::DocumentObject& deleted)
         for (auto step : StudioList::stepsOf(obj)) {
             steps.emplace_back(step->getNameInDocument());
         }
+        // The parts it made from pieces (P6p) go with it, or stay never live
+        releasePiecesOf(obj);
         list->removeEntry(obj);
         for (const auto& name : steps) {
             auto step = doc->getObject(name.c_str());

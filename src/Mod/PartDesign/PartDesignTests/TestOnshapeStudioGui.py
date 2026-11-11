@@ -49,6 +49,7 @@ from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 ONSHAPE = "Gui::OnshapeNavigationStyle"  # the pack's and the code's default since ops#640
 
@@ -244,6 +245,7 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(Gui.Control.activeDialog(), "no Pad panel")
         return doc
 
+    @siblingEraPath
     def testEnterInThePadPanelAcceptsIt(self):
         """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field commits the value
         and leaves the panel open (ops#640 rank 38, the hands-on notes); Enter in the graphics area

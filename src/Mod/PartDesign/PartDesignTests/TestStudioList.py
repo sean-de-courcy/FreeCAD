@@ -306,6 +306,26 @@ def ownerRecord(box):
     p = box.Placement.Base
     op = box.Operation
     depth = round(box.Height.Value - 0.001, 6)
+    # P6p: the parts the command made from its pieces are intent, copied to the scratch build
+    # (the witness's object IDs written as object names: the scratch build has its own IDs)
+    masker = Masker(box.Document)
+    pieces = sorted(
+        (
+            b.StudioPartId,
+            b.StudioParentId,
+            tuple(w[:2] + masker.v2(w[2:]) for w in b.StudioPieceWitness),
+        )
+        for b in box.Document.Objects
+        if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == box and b.StudioPieceWitness
+    )
+    # For the Part oracle (not the scratch build): each piece's side of the slot, as the test
+    # noted it when the command made it (labelPieces), and its place among the Bodies (the
+    # order a scope resolves in)
+    sides = {
+        b.StudioPartId: (getattr(b, "OracleSide", ""), i)
+        for i, b in enumerate(box.Document.Objects)
+        if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == box and b.StudioPieceWitness
+    }
     rect = [
         round(p.x, 6),
         round(p.y, 6),
@@ -320,7 +340,25 @@ def ownerRecord(box):
         op=op,
         scope=list(box.StudioScope),
         suppressed=bool(getattr(box, "Suppressed", False)),
+        pieces=pieces,
+        sides=sides,
     )
+
+
+def labelPieces(made, box):
+    """Notes on each part the command just made from a piece the side of box's slot it lies on
+    (L, R; N for a leftover), for the Part oracle: identity stays with the side (notes/
+    parts-design.md 10.12). Any assignment is right when made; the oracle checks it holds."""
+    middle = box.Placement.Base.x + box.Length.Value / 2
+    for body in made:
+        if not body.StudioParentId:
+            side = "N"
+        else:
+            shape = body.Tip.Shape if body.Tip else Part.Shape()
+            side = "?" if shape.isNull() else ("L" if shape.BoundBox.Center.x < middle else "R")
+        if not hasattr(body, "OracleSide"):
+            body.addProperty("App::PropertyString", "OracleSide", "Test")
+        body.OracleSide = side
 
 
 def studioList(doc):
@@ -388,6 +426,8 @@ def chainOf(body):
 def failedUpToTip(body):
     """The members in error up to the Tip (a held member keeps the error of its last run)"""
     group = list(body.Group)
+    if body.Tip is None:
+        return []  # nothing active (a part made later than the bar, P6p): every member is held
     last = group.index(body.Tip) if body.Tip in group else len(group) - 1
     chain = chainOf(body)
     return sorted(chain[i] for i, o in enumerate(group[: last + 1]) if not o.isValid())
@@ -415,14 +455,36 @@ def snapshot(doc, names=True):
             failed=failedUpToTip(body),
             rolledBack=rolled,
             body=None if rolled or body.Shape.isNull() else round(body.Shape.Volume, 4),
-            live=body in PartDesign.studioLiveParts(body),
+            # Unlisted (a property seed's start, ops#654 list on first use): every Body a part
+            live=body in PartDesign.studioLiveParts(body)
+            if PartDesign.studioList(PartDesign.studioOf(body)) is not None
+            else True,
             visible=bool(body.Visibility),
         )
         if names:
             out[p]["names"] = elementNames(shape, masker)
+    # P6p: each part made from a piece, by its part id (its name depends on the order made)
+    for body in doc.Objects:
+        if body.TypeId != "PartDesign::Body" or not body.StudioPieceWitness:
+            continue
+        tip = body.Tip
+        shape = tip.Shape if tip else Part.Shape()
+        key = "piece:" + body.StudioPartId
+        out[key] = dict(
+            chain=chainOf(body),
+            tip=(tip.StudioOwner.Name if isStep(tip) else tip.Name) if tip else None,
+            volume=0.0 if shape.isNull() else round(shape.Volume, 4),
+            solids=0 if shape.isNull() else len(shape.Solids),
+            failed=failedUpToTip(body),
+            live=body in PartDesign.studioLiveParts(body),
+            visible=bool(body.Visibility),
+        )
+        if names:
+            out[key]["names"] = elementNames(shape, masker)
     # A New part mirror's part (slice 9), by its maker's name (its own name depends on the order
-    # the parts were made in)
-    for owner in studioList(doc).Entries:
+    # the parts were made in). Unlisted (ops#654): none, and no list made here
+    lst = PartDesign.studioList(doc.getObject("S"))
+    for owner in lst.Entries if lst is not None else []:
         if not isPartMirror(owner):
             continue
         for body in madeBy(owner):
@@ -467,7 +529,13 @@ def oracle(natives, records, bar, live=None):
     Pattern records (slice 8): a pattern in part p of one box owner copies the owner's box (its
     instances at k * length / (count - 1) along y, or its mirror about y 5) into p when the owner
     comes before it, resolved at its place to exactly [p], its step applied in p, and neither is
-    suppressed; otherwise it does nothing."""
+    suppressed; otherwise it does nothing.
+
+    Pieces (P6p, notes/parts-design.md 10.12): a box record's piece records (intent, copied
+    from the parts its command made, with the side of its slot each was made on) make parts at
+    its place: each holds the solid on its side of the split, the parent is no part after it,
+    and scopes resolve an id to its living descendants. Out: "piece:<id>" -> (volume, solids),
+    or "failed" when the record holds nothing."""
     shapes = {p: Part.makeBox(10, 10, 10, V(x, 0, 0)) for p, x in PARTS}
     # Slice 9: the part each New mirror makes, by its maker ("new:<name>"); None: empty
     made = {
@@ -478,23 +546,63 @@ def oracle(natives, records, bar, live=None):
     consumed = set()
     resolved = {}  # box owner -> the parts it resolved to at its place
     applied = set()  # (box owner, part) whose step changed its part
+    # P6p: the parts made from pieces, by part id. A maker's pieces are parts from its place on
+    # (not suppressed, before the bar); a split parent is none after it (dead), unless the split
+    # is lost (no record holds its one solid). A piece whose record holds nothing is a part that
+    # fails (failed): a scope still resolves to it, and what acts on it fails there (a Boolean
+    # with it still consumes its tools). A scope resolves to an id's part and its living
+    # descendants, in the Bodies' order
+    pieceRecs = {
+        r["name"]: {
+            pid: (parent, r.get("sides", {}).get(pid, ("", 0))[0])
+            for pid, parent, _ in r.get("pieces", ())
+        }
+        for r in records
+    }
+    order = [p for p, _ in PARTS] + [
+        pid for _, pid in sorted(
+            (side[1], pid) for r in records for pid, side in r.get("sides", {}).items()
+        )
+    ]
+    parentOf = {}
+    madePieces = set()  # made: live unless consumed or dead
+    dead = set()
+    failed = set()
+
+    def descends(key, ident):
+        seen = set()
+        while key and key not in seen:
+            if key == ident:
+                return True
+            seen.add(key)
+            key = parentOf.get(key)
+        return False
+
+    def resolve(ids):
+        out = []
+        for ident in ids:
+            for key in order:
+                if (
+                    key not in out and (key in shapes or key in failed) and key not in consumed
+                    and key not in dead and descends(key, ident)
+                ):
+                    out.append(key)
+        return out
     for i, record in enumerate(records):
         if len(natives) + i >= bar:
             break
         if record["suppressed"]:
             continue
         if record.get("mirror"):
-            src = record["source"]
-            if src not in shapes or src in consumed:
-                continue  # no part to mirror: it fails
+            sources = resolve([record["source"]])
+            if len(sources) != 1 or sources[0] not in shapes:
+                continue  # no part to mirror, or a split part's pieces: it fails
+            src = sources[0]
             copy = shapes[src].mirror(V(record["x"], 0, 0), V(1, 0, 0))
             if record["op"] == "New":
                 made["new:" + record["name"]] = copy
                 continue
-            targets = []
-            for p in record["scope"]:
-                if p in shapes and p not in consumed and p not in targets:
-                    targets.append(p)
+            targets = [p for p in resolve(record["scope"]) if p in shapes]
             tool = [copy]
             if record["op"] == "Add":
                 touched = [p for p in targets if copy.distToShape(shapes[p])[0] <= 1e-7]
@@ -570,13 +678,32 @@ def oracle(natives, records, bar, live=None):
                 shapes[p] = result
             continue
         if "kind" in record:
-            targets = [p for p in record["scope"] if p in shapes and p not in consumed]
-            tools = [p for p in record["tools"] if p in shapes and p not in consumed]
+            targets = resolve(record["scope"])
+            tools = resolve(record["tools"])
             if record["kind"] == "Fuse":
                 listed = targets + [p for p in tools if p not in targets]
                 if len(listed) < 2:
                     continue
                 survivor, others = listed[0], listed[1:]
+                if any(p not in shapes for p in listed):
+                    # A part that fails (P6p): the Union fails, its tools consumed
+                    if not record["keep"]:
+                        consumed.update(others)
+                    continue
+                # P6p (Onshape A-2' b): a tool touching none of the parts merged (in turn)
+                # stays a part, not fused, not consumed; with none touching the Union fails
+                merged, rest = [survivor], list(others)
+                grew = True
+                while grew:
+                    grew = False
+                    for p in list(rest):
+                        if any(shapes[p].distToShape(shapes[q])[0] <= 1e-7 for q in merged):
+                            merged.append(p)
+                            rest.remove(p)
+                            grew = True
+                others = merged[1:]
+                if not others:
+                    continue
                 result = shapes[survivor].fuse([shapes[p] for p in others]).removeSplitter()
                 if len(result.Solids) == 1:
                     shapes[survivor] = result
@@ -584,13 +711,14 @@ def oracle(natives, records, bar, live=None):
                 cutters = [p for p in tools if p not in targets]
                 if not targets or not cutters or len(cutters) < len(tools):
                     continue
-                tool = shapes[cutters[0]]
-                if len(cutters) > 1:
-                    tool = tool.fuse([shapes[p] for p in cutters[1:]])
-                for p in targets:
-                    result = shapes[p].cut(tool).removeSplitter()
-                    if len(result.Solids) == 1:
-                        shapes[p] = result
+                if all(p in shapes for p in targets + cutters):
+                    tool = shapes[cutters[0]]
+                    if len(cutters) > 1:
+                        tool = tool.fuse([shapes[p] for p in cutters[1:]])
+                    for p in targets:
+                        result = shapes[p].cut(tool).removeSplitter()
+                        if len(result.Solids) == 1:
+                            shapes[p] = result
                 others = cutters
             if not record["keep"]:
                 consumed.update(others)
@@ -600,26 +728,103 @@ def oracle(natives, records, bar, live=None):
         else:
             length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
             tool = Part.makeBox(length, width, height, corner)
+        own = pieceRecs.get(record["name"], {})
         resolved[record["name"]] = []
-        for p in record["scope"]:
-            if p not in shapes or p in consumed or p in resolved[record["name"]]:
-                continue
+        for p in resolve(record["scope"]):
             resolved[record["name"]].append(p)
+            if p not in shapes:
+                continue  # a part that fails: its step fails
             cut = record["op"] == "Subtraction"
             result = (shapes[p].cut(tool) if cut else shapes[p].fuse(tool)).removeSplitter()
-            if len(result.Solids) == 1:
+            recs = sorted(pid for pid, (parent, _) in own.items() if parent == p)
+            if not recs:
+                if len(result.Solids) == 1:
+                    shapes[p] = result
+                    applied.add((record["name"], p))
+                continue
+            # P6p: a split of p (its records name it). Each record holds the solid on its side of
+            # the slot (the leftmost, the rightmost), the step holding them all; with a solid
+            # unheld the step fails and contributes nothing. One solid: the record whose wall
+            # (the slot's face on its side) is on it holds it, if only one's is; else the split
+            # is lost and p goes on
+            solids = sorted(result.Solids, key=lambda solid: solid.BoundBox.Center.x)
+            x0, _, x1, _ = record["rect"]
+            claims = {}
+            if len(solids) > 1:
+                for pid in recs:
+                    if own[pid][1] in ("L", "R"):
+                        claims[pid] = solids[0] if own[pid][1] == "L" else solids[-1]
+                held = {id(solid) for solid in claims.values()}
+                if len(claims) == len(held) == len(solids):
+                    shapes[p] = result
+                else:
+                    claims = {}
+                dead.add(p)
+            else:
+
+                def wall(pid):
+                    x = x0 if own[pid][1] == "L" else x1
+                    return any(
+                        abs(face.BoundBox.XMin - x) < 1e-6 and abs(face.BoundBox.XMax - x) < 1e-6
+                        for face in result.Faces
+                    )
+
+                holders = [pid for pid in recs if own[pid][1] in ("L", "R") and wall(pid)]
                 shapes[p] = result
                 applied.add((record["name"], p))
+                if len(holders) == 1:
+                    claims[holders[0]] = result
+                    dead.add(p)
+            for pid in recs:
+                parentOf[pid] = p
+                madePieces.add(pid)
+                if pid in claims:
+                    shapes[pid] = claims[pid]
+                else:
+                    failed.add(pid)
+        # Its records of a parent it doesn't act on hold nothing (the parent stays split); a
+        # leftover (H1a) holds the tool when it touches no part of the scope
+        bases = [shapes[p] for p in resolved[record["name"]] if p in shapes]
+        left = (
+            record["op"] != "Subtraction" and bool(bases)
+            and all(tool.distToShape(base)[0] > 1e-7 for base in bases)
+        )
+        for pid, (parent, _) in sorted(own.items()):
+            if pid in madePieces:
+                continue
+            madePieces.add(pid)
+            if parent:
+                parentOf[pid] = parent
+                dead.add(parent)
+                failed.add(pid)
+            elif left:
+                shapes[pid] = tool
+                left = False  # one solid: the first record holds it
+            else:
+                failed.add(pid)
     if live is not None:
-        live.update(p for p in shapes if p not in consumed)
+        live.update(
+            p for p in shapes if p not in consumed and p not in dead and p not in madePieces
+        )
         live.update(made)
-    out = {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items()}
+        live.update("piece:" + pid for pid in madePieces if pid not in consumed and pid not in dead)
+    out = {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items() if p not in madePieces}
+    out.update(
+        {
+            "piece:" + pid: "failed" if pid in failed or pid not in shapes else
+            (round(shapes[pid].Volume, 4), len(shapes[pid].Solids))
+            for pid in madePieces
+        }
+    )
     out.update({k: (0.0, 0) if s is None else (round(s.Volume, 4), len(s.Solids)) for k, s in made.items()})
     return out
 
 
 def liveKey(body):
-    """A part as the oracle names it: its name, or a New mirror's part by its maker."""
+    """A part as the oracle names it: its name, a part made from a piece by its part id, or a
+    New mirror's part by its maker."""
+    if body.StudioPieceWitness:
+        return "piece:" + body.StudioPartId
     maker = body.StudioMadeBy
     return "new:" + maker.Name if maker is not None else body.Name
 
@@ -632,9 +837,12 @@ def oracleDifferences(doc):
     want = oracle(*listOf(doc), live=live)
     found = []
     bodies = [doc.getObject(p) for p, _ in PARTS]
+    pieceBodies = [
+        b for b in doc.Objects if b.TypeId == "PartDesign::Body" and b.StudioPieceWitness
+    ]
     # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
     got = sorted(liveKey(b) for b in PartDesign.studioLiveParts(studioList(doc)))
-    if got != sorted(live):
+    if live is not None and got != sorted(live):
         found.append(f"live parts {got}, oracle {sorted(live)}")
     for body in bodies:
         if bool(body.Visibility) != (body.Name in live):
@@ -649,9 +857,31 @@ def oracleDifferences(doc):
             volume = round(body.Shape.Volume, 4)
             if volume != want[body.Name][0]:
                 found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
+    # P6p: each part made from a piece, live at the bar: its Tip's solid, or failing when its
+    # record holds nothing (a piece's Tip fails too when a later feature in it fails: then only
+    # the solid is checked, as for any part)
+    for body in pieceBodies:
+        key = "piece:" + body.StudioPartId
+        if key not in live:
+            continue
+        tip = body.Tip
+        expected = want.get(key)
+        if expected == "failed":
+            if tip is not None and tip.isValid() and tip.StudioOwner == body.StudioMadeBy:
+                found.append(f"{key} ({body.Name}): piece step valid, oracle: holds nothing")
+            continue
+        shape = tip.Shape if tip else Part.Shape()
+        got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+        if got != expected:
+            found.append(f"{key} ({body.Name}): Tip {got}, oracle {expected}")
+        parent = body.StudioParentId
+        if parent and not any(
+            b.StudioPartId == parent for b in doc.Objects if b.TypeId == "PartDesign::Body"
+        ):
+            found.append(f"{key}: its parent {parent} is gone")
     # Slice 9: each listed New mirror's part, at the bar
     for owner in studioList(doc).Entries:
-        if not isPartMirror(owner):
+        if not isPartMirror(owner) or live is None:
             continue
         key = "new:" + owner.Name
         for body in madeBy(owner):
@@ -805,6 +1035,27 @@ def ownIdSteps(doc):
     doc.recompute()
 
 
+def unmasked(name, doc):
+    """A name Masker.v2 wrote, with each `{ObjectName}` tag doc's object's ID again (the lists
+    sorted again by their bytes)."""
+    sections = App.getDecodedMappedName(name)
+    if not sections:
+        return name
+    out = []
+    for section in sections:
+        section = dict(section)
+        for field in ("linkedNames", "connectedElements"):
+            section[field] = sorted(unmasked(n, doc) for n in section[field])
+        tag = section["iterationTag"]
+        if tag.startswith("{") and tag.endswith("}"):
+            sign = "-" if tag.startswith("{-") else ""
+            obj = doc.getObject(tag.strip("{}-"))
+            if obj is not None:
+                section["iterationTag"] = sign + str(obj.ID)
+        out.append(App.makeEncodedSection(**section))
+    return "|".join(out)
+
+
 def fromScratch(natives, records, bar, maker=None):
     """The document built from scratch from the list (G2): the same parts; the owners made in the
     live document's ID order (names depend on the IDs' order, notes/stored-tags.md 4), then
@@ -844,6 +1095,18 @@ def fromScratch(natives, records, bar, maker=None):
                 PartDesign.studioInsert(doc.getObject(r["name"]), -1)
                 if r.get("mirror") and r["op"] == "New":
                     PartDesign.studioNewPart(doc.getObject(r["name"]))
+        # P6p: the piece records, as the command wrote them (intent)
+        for r in records:
+            for partId, parentId, witness in r.get("pieces", ()):
+                body = doc.addObject("PartDesign::Body", "Body")
+                studio.addObject(body)
+                body.StudioPartId = partId
+                body.StudioParentId = parentId
+                body.StudioMadeBy = doc.getObject(r["name"])
+                body.StudioPieceWitness = [w[:2] + unmasked(w[2:], doc) for w in witness]
+                body.Label = "Part 1"
+        if any(r.get("pieces") for r in records):
+            PartDesign.studioReconcile(lst)
         PartDesign.studioSetBar(lst, bar if bar < len(lst.Entries) else -1)
         doc.recompute()
         return snapshot(doc)
@@ -1409,6 +1672,8 @@ class TestStudioListProperty(unittest.TestCase):
         self.consumedSeen = 0  # states after an edit with a part consumed at the bar (P5)
         self.patternsSeen = 0  # valid patterns of an owner, summed over the states (slice 8)
         self.mirrorsSeen = 0  # valid part mirrors, summed over the states (slice 9)
+        self.piecesSeen = 0  # states with a live part made from a piece (P6p)
+        self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1424,7 +1689,7 @@ class TestStudioListProperty(unittest.TestCase):
         entries = boxes + [e for e in lst.Entries if isPattern(e)]
         free = len(lst.Entries) - NATIVES  # places after the natives
         kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern", "mirror", "mirror"]
-        kinds += ["delete", "move", "scope", "depth", "suppress", "bar"]
+        kinds += ["delete", "move", "scope", "depth", "suppress", "bar", "split", "split"]
         kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
         if kind == "pattern" and not shapeOwners:
             kind = "insert"
@@ -1473,6 +1738,17 @@ class TestStudioListProperty(unittest.TestCase):
             owner = booleanOwner(doc, doc.getObject("S"), f"F{counter}", op, targets, tools, keep)
             PartDesign.studioInsert(owner, NATIVES + at)
             return f"boolean {owner.Name} {op} targets {targets} tools {tools} keep {keep} at {at}"
+        if kind == "split":
+            # P6p: a slot through a part (its x the random parameter), and its command
+            p, px = rng.choice(PARTS)
+            x = px + rng.choice([3, 4, 5, 6])
+            rect = [x, -1, x + 1, 11]
+            at = rng.randint(0, free)
+            box = makeOwner(doc, doc.getObject("S"), f"F{counter}", rect, 11, "Subtraction", [p])
+            PartDesign.studioInsert(box, NATIVES + at)
+            made = PartDesign.studioMakePieces(box)
+            labelPieces(made, box)
+            return f"split {box.Name} {rect} scope {[p]} at {at}: {len(made)} parts"
         if kind == "insert":
             x0 = rng.choice([2, 5, 8, 22, 25, 42, 45, 5, 25])
             w = rng.choice([2, 4, 8, 20, 25])
@@ -1546,6 +1822,9 @@ class TestStudioListProperty(unittest.TestCase):
                 if " uses " not in str(e):
                     raise
                 return f"move {name} -> {j} refused: {e}"
+            if box.TypeId == "Part::Box":
+                # P6p: a moved feature's command (the drag's)
+                labelPieces(PartDesign.studioMakePieces(box), box)
             return f"move {name} -> {j}"
         if kind in ("scope", "depth") and box.TypeId == "PartDesign::Boolean":
             names = [p for p, _ in PARTS]
@@ -1571,6 +1850,16 @@ class TestStudioListProperty(unittest.TestCase):
             return f"scope {name} {scope}"
         if kind == "depth" and box.TypeId == "PartDesign::Pocket":
             kind = "suppress"  # an Up to face owner has no depth
+        if kind == "depth" and box.TypeId == "Part::Box" and round(box.Placement.Base.y) == -1:
+            # P6p: the slot moved (its edit's OK is the command)
+            r = ownerRecord(box)
+            p = r["scope"][0]
+            x = dict(PARTS)[p] + rng.choice([3, 4, 5, 6])
+            setBox(box, [x, -1, x + 1, 11], 11, "Subtraction")
+            PartDesign.studioReconcile(lst)
+            made = PartDesign.studioMakePieces(box)
+            labelPieces(made, box)
+            return f"slot {name} at x {x}: {len(made)} new parts"
         if kind == "depth":
             r = ownerRecord(box)
             depth = rng.choice([1, 2, 3, 4, 5])
@@ -1589,7 +1878,16 @@ class TestStudioListProperty(unittest.TestCase):
         rng = random.Random(seed)
         doc, _ = propStudio(f"prop{seed}")
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
-        studioList(doc)
+        # ops#654 list on first use: these seeds start from the document without a list (its
+        # parts' sketches and Pads in-Body), and the first edit makes it in its own transaction by
+        # the call the studio commands make (PartDesign.studioList(studio, True), in edit()); until
+        # then, and after that edit's undo, the document is its start, unlisted
+        unlisted = seed in {
+            int(s) for s in os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",") if s
+        }
+        start = snapshot(doc)
+        if not unlisted:
+            studioList(doc)
         bad = 0
         for step in range(nops):
             roll = rng.random()
@@ -1609,20 +1907,60 @@ class TestStudioListProperty(unittest.TestCase):
                 doc.openTransaction("edit")
                 try:
                     what = self.edit(rng, doc, step + 1)
+                    # The command's recompute is in its transaction, as every GUI command and
+                    # dialog OK does it (recompute, then commit): what the recompute decides
+                    # and the projection takes after it (a Union's tools apart, a part mirror's
+                    # consumption, a lost split) then goes with the edit's undo step. Committed
+                    # first, the resync's steps were made outside any transaction, and an undo
+                    # restored the edit's deleted steps under suffixed names beside them (seed 3,
+                    # edit 63, ops#654 P6p open item a)
+                    doc.recompute()
                     doc.commitTransaction()
                 except Exception as e:
                     doc.abortTransaction()
                     what = f"refused: {e}"
-                    bad += 1
-                    self.log.append(f"seed {seed} op {step} {what}")
+                    # P6p: a member placed in a part after its split, or in a piece before the
+                    # split, is refused loudly by design (nothing changes)
+                    if "split before it" not in str(e) and "makes after it" not in str(e):
+                        bad += 1
+                        self.log.append(f"seed {seed} op {step} {what}")
             doc.recompute()
+            if unlisted and step == 0 and doc.UndoCount:
+                # The first edit's undo takes the list back with it: the start, unlisted; redo
+                doc.undo()
+                doc.recompute()
+                if PartDesign.studioList(doc.getObject("S")) is not None:
+                    bad += 1
+                    self.log.append(f"seed {seed}: the first edit's undo kept the list")
+                found = ["first undo " + d for d in differences(snapshot(doc), start)]
+                if found:
+                    bad += 1
+                    self.log.append(f"seed {seed} after the first edit's undo:")
+                    self.log.extend("    " + d for d in found)
+                self.unlistedSeen += 1
+                doc.redo()
+                doc.recompute()
             got = snapshot(doc)
+            if PartDesign.studioList(doc.getObject("S")) is None:
+                self.unlistedSeen += 1
+                self.assertTrue(unlisted, f"seed {seed} op {step}: the list is gone after {what}")
+                found = ["unlisted " + d for d in differences(got, start)]
+                if found:
+                    bad += 1
+                    self.log.append(f"seed {seed} op {step} after {what} (no list):")
+                    self.log.extend("    " + d for d in found)
+                continue
             want = fromScratch(*listOf(doc), maker=propStudio)
             found = differences(got, want)
             found += ["oracle " + d for d in oracleDifferences(doc)]
             found += ["G1 " + d for d in gateG1(doc)[:4]]
-            if len(PartDesign.studioLiveParts(studioList(doc))) < len(PARTS):
+            # A part consumed at the bar by a Boolean or a part mirror (a split's parent, P6p,
+            # is no consumed part here)
+            consumers = [PartDesign.studioConsumerOf(doc.getObject(p)) for p, _ in PARTS]
+            if any(c is not None and c.TypeId != "Part::Box" for c in consumers):
                 self.consumedSeen += 1
+            if any(b.StudioPieceWitness for b in PartDesign.studioLiveParts(studioList(doc))):
+                self.piecesSeen += 1
             self.patternsSeen += sum(
                 1 for e in studioList(doc).Entries if isPattern(e) and e.isValid() and e.Originals
             )
@@ -1648,9 +1986,14 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.consumedSeen, 0)
         self.assertGreater(self.patternsSeen, 0)
         self.assertGreater(self.mirrorsSeen, 0)
+        self.assertGreater(self.piecesSeen, 0)
+        unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
+        if any(str(s) in unlisted for s in seeds):
+            self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
         print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
-              f"part mirrors seen")
+              f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
+              f"states without a list")
 
 
 if __name__ == "__main__":
