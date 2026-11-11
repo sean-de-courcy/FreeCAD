@@ -101,7 +101,8 @@ from PartDesignTests.TestStudioSketchesShownGui import (  # FreeCAD-CH, ops#654 
 from PartDesignTests.TestStudioFeatureGui import TestStudioFeatureGui  # FreeCAD-CH, ops#654
 from PartDesignTests.TestStudioHistoryGui import TestStudioHistoryGui  # FreeCAD-CH, ops#654
 from PartDesignTests.TestPartsListGui import TestPartsListGui  # FreeCAD-CH, ops#654
-from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection parity P1
+from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection parity P1, P2
+    TestBoxSelectionGui,
     TestProfileFieldStaysArmedGui,
 )
 
