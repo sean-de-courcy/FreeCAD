@@ -5715,18 +5715,12 @@ std::optional<std::string> Pipe::prepareSlice3(
     }
     double to = from < total / 2 ? total : 0.0;
     if (!foot.atEnd) {
-        if (twist) {
-            return std::string(
-                "Pipe: twist with the profile in the middle of the path isn't defined yet (an "
-                "Onshape question is pending). Put the profile at an end of the path, or turn "
-                "'Extend to full path' off."
-            );
-        }
+        // Twist too (SW17): reached at the one-way end, going on past the profile the other way
         const std::optional<gp_Dir> normal = profileNormal(invObjLoc);
         if (!normal) {
             return std::string(
-                "Pipe: scale with the profile in the middle of the path runs to the end the "
-                "profile's plane faces away from, and this profile has no plane"
+                "Pipe: twist and scale with the profile in the middle of the path run to the end "
+                "the profile's plane faces away from, and this profile has no plane"
             );
         }
         to = samples[nearest].tangent.Dot(*normal) > 0 ? 0.0 : total;

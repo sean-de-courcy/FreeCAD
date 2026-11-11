@@ -695,10 +695,27 @@ class TestPipeTwist(PipeCase):
     def testKeepOrientationStops(self):
         self.assertStops(self.twisted(ProfileControl="Keep orientation"), "twist", "None")
 
-    def testProfileInTheMiddleWithExtendStops(self):
-        """Onshape's rule for a twist past the profile isn't known yet: loud."""
-        pipe = self.pipe(self.square(), self.line(-10, 10), HasTwist=True, ExtendToFullPath=True)
-        self.assertStops(pipe, "twist", "middle")
+    def testProfileInTheMiddleWithExtendTwistsBothWays(self):
+        """SW17: line z -10..10, the profile at z 0, Extend on, ANGLE 30: reached at the one-way end
+        (-Z: +30 degrees about +Z), going on past the profile (-30 at z +10). V 320."""
+        pipe = self.pipe(self.square(), self.line(-10, 10), HasTwist=True, TwistType="Angle",
+                         TwistAngle=30, ExtendToFullPath=True)
+        self.assertSweeps(pipe, 320, places=4)
+        self.assertHasVertices(pipe.Shape, [self.corner(30, -10), self.corner(-30, 10)], 1e-6)
+
+    def testTwistAngleIsOverTheProfileToTheOneWayEnd(self):
+        """SW17: path z -15..5: +30 degrees at z -15, -10 at z +5 (2 degrees a mm)."""
+        pipe = self.pipe(self.square(), self.line(-15, 5), HasTwist=True, TwistType="Angle",
+                         TwistAngle=30, ExtendToFullPath=True)
+        self.assertSweeps(pipe, 320, places=4)
+        self.assertHasVertices(pipe.Shape, [self.corner(30, -15), self.corner(-10, 5)], 1e-6)
+
+    def testProfileInTheMiddleOneWay(self):
+        """SW17 (d): Extend off: one way to -Z, +30 degrees at z -10, V 160."""
+        pipe = self.pipe(self.square(), self.line(-10, 10), HasTwist=True, TwistType="Angle",
+                         TwistAngle=30)
+        self.assertSweeps(pipe, 160, places=4)
+        self.assertHasVertices(pipe.Shape, [self.corner(30, -10)], 1e-6)
 
     def testEndFaceKeepsItsNameAcrossTwistEdits(self):
         """A pad on the end face (ops#379's case) follows edits of the twist's angle, turns and hand."""
