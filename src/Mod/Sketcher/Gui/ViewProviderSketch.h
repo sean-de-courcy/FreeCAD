@@ -694,6 +694,19 @@ public:
     bool getIsShownVirtualSpace() const;
     //@}
 
+    /** @name Onshape's "Show constraints" (FreeCAD-CH, ops#640 polish P1) */
+    //@{
+    /** The preference Mod/Sketcher/General/ShowConstraints: every constraint glyph is drawn. Off,
+     * only the dimensions, the selected constraints, the constraints of the selected geometry
+     * and the over-defining (conflicting, redundant, malformed) ones are, as in Onshape. Its
+     * default: off under the Onshape keymap, on under FreeCAD's.
+     */
+    static bool showConstraintsPreference();
+    static void setShowConstraintsPreference(bool show);
+    /// With the preference off, redraws which constraints are drawn (they follow the selection)
+    void updateConstraintsShownBySelection();
+    //@}
+
     /** @name base class implementer */
     //@{
     void attach(App::DocumentObject*) override;

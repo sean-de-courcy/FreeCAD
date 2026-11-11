@@ -47,6 +47,18 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
 {
     createSettingsButtonActions();
 
+    // FreeCAD-CH (ops#640 polish P1): Onshape's "Show constraints", under the solver's message.
+    // The preference's observer in edit mode (EditModeCoinManager) redraws the sketch
+    auto* showConstraints = new QCheckBox(tr("Show constraints"));
+    showConstraints->setObjectName(QStringLiteral("showConstraints"));
+    showConstraints->setToolTip(tr("Draws every constraint. Off, only the dimensions, the "
+        "selection's constraints and the conflicting ones are drawn"));
+    showConstraints->setChecked(ViewProviderSketch::showConstraintsPreference());
+    groupLayout()->addWidget(showConstraints);
+    connect(showConstraints, &QCheckBox::toggled, this, [](bool checked) {
+        ViewProviderSketch::setShowConstraintsPreference(checked);
+    });
+
     //NOLINTBEGIN
     connectionSetUp = sketchView->signalSetUp.connect(std::bind(
         &SketcherGui::TaskSketcherMessages::slotSetUp, this, sp::_1, sp::_2, sp::_3, sp::_4));

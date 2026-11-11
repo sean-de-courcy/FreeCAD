@@ -76,6 +76,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>  // FreeCAD-CH (ops#640 polish P1): ShowConstraints' default
 #include <Gui/MainWindow.h>
 #include <Gui/MenuManager.h>
 #include <Gui/Selection/Selection.h>
@@ -3042,6 +3043,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                 clearSelectPoints();
                 selection.SelCurvSet.clear();
                 selection.SelConstraintSet.clear();
+                if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1)
+                    editCoinManager->updateVirtualSpace();
+                }
                 editCoinManager->drawConstraintIcons();
                 updateColor();
             }
@@ -3089,10 +3093,18 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                             Sketcher::PropertyConstraintList::getIndexFromConstraintName(shapetype);
                         selection.SelConstraintSet.insert(ConstrId);
                         if (!selection.selectionBuffering) {
+                            if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 P1)
+                                editCoinManager->updateVirtualSpace();
+                            }
                             editCoinManager->drawConstraintIcons();
                         }
                     }
                     updateColor();
+                    // FreeCAD-CH (ops#640 polish P1): with ShowConstraints off, the selected
+                    // geometry's constraints are drawn (a constraint's own redraw is above)
+                    if (!shapetype.starts_with("Constraint")) {
+                        updateConstraintsShownBySelection();
+                    }
                 }
             }
         }
@@ -3133,9 +3145,16 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                                 Sketcher::PropertyConstraintList::getIndexFromConstraintName(
                                     shapetype);
                             selection.SelConstraintSet.erase(ConstrId);
+                            if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 P1)
+                                editCoinManager->updateVirtualSpace();
+                            }
                             editCoinManager->drawConstraintIcons();
                         }
                         updateColor();
+                        // FreeCAD-CH (ops#640 polish P1): see AddSelection
+                        if (!shapetype.starts_with("Constraint")) {
+                            updateConstraintsShownBySelection();
+                        }
                     }
                 }
             }
@@ -3673,6 +3692,9 @@ void ViewProviderSketch::doBoxSelection(const SbVec2s& startPos, const SbVec2s& 
     }
 
     selection.selectionBuffering = false;
+    if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1): follows the selection
+        editCoinManager->updateVirtualSpace();
+    }
     editCoinManager->drawConstraintIcons();
     updateColor();
 }
@@ -3858,6 +3880,9 @@ bool ViewProviderSketch::selectAll()
     }
 
     selection.selectionBuffering = false;
+    if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1): follows the selection
+        editCoinManager->updateVirtualSpace();
+    }
     editCoinManager->drawConstraintIcons();
     updateColor();
 
@@ -4098,6 +4123,37 @@ void ViewProviderSketch::setIsShownVirtualSpace(bool isshownvirtualspace)
 bool ViewProviderSketch::getIsShownVirtualSpace() const
 {
     return viewProviderParameters.isShownVirtualSpace;
+}
+
+namespace
+{
+ParameterGrp::handle sketcherGeneralGroup()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher/General");
+}
+}  // namespace
+
+bool ViewProviderSketch::showConstraintsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P1): Onshape draws no constraint glyph until "Show constraints"
+    // is on; FreeCAD's keymap keeps FreeCAD's every glyph drawn
+    return sketcherGeneralGroup()->GetBool("ShowConstraints", !Gui::ForkKeymap::isOnshape());
+}
+
+void ViewProviderSketch::setShowConstraintsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the open sketch
+    sketcherGeneralGroup()->SetBool("ShowConstraints", show);
+}
+
+void ViewProviderSketch::updateConstraintsShownBySelection()
+{
+    if (!isInEditMode() || selection.selectionBuffering || showConstraintsPreference()) {
+        return;
+    }
+    editCoinManager->updateVirtualSpace();
+    editCoinManager->drawConstraintIcons();
 }
 
 

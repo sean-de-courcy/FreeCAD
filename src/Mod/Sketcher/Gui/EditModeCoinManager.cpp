@@ -550,6 +550,9 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          [this](const std::string& param) { updateConstraintPresentationParameters(param); }},
         {"DimensionalStringFormat",
          [this](const std::string& param) { updateConstraintPresentationParameters(param); }},
+        // FreeCAD-CH (ops#640 polish P1): read where drawn (ViewProviderSketch::
+        // showConstraintsPreference()); a change only needs OnChange's redraw
+        {"ShowConstraints", [](const std::string&) {}},
         {"ViewScalingFactor", [this](const std::string&) { Client.updateElementSizeParameters(); }},
         {"MarkerSize", [this](const std::string&) { Client.updateElementSizeParameters(); }},
         {"EditSketcherFontName", [this](const std::string&) { Client.updateElementSizeParameters(); }},
