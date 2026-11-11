@@ -60,3 +60,6 @@ studioConsumerOf = _PartDesign.studioConsumerOf
 studioMakePieces = _PartDesign.studioMakePieces  # ops#654 P6p
 studioPieceName = _PartDesign.studioPieceName
 studioSetMergeAll = _PartDesign.studioSetMergeAll  # ops#654 10.13
+studioPickId = _PartDesign.studioPickId  # ops#654 P8a
+studioSetPickIds = _PartDesign.studioSetPickIds
+studioDressUpPicks = _PartDesign.studioDressUpPicks

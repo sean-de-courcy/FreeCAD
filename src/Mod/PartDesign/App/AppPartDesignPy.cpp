@@ -38,8 +38,12 @@
 #include <Base/Tools.h>
 #include <Mod/Part/App/BodyBase.h>
 
+#include <App/ElementNamingUtils.h>
+#include <App/NameTable.h>
+
 #include "Body.h"
 #include "Derived.h"
+#include "FeatureDressUp.h"
 #include "FeatureBase.h"
 #include "FeatureBoolean.h"
 #include "FeatureDeletePart.h"
@@ -50,6 +54,18 @@
 #include "StudioEdit.h"
 #include "StudioList.h"
 
+
+namespace PartDesign
+{
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
+struct StudioDressUpPick
+{
+    std::string text;
+    std::string id;
+    std::vector<std::pair<Body*, std::vector<std::string>>> found;
+};
+PartDesignExport std::vector<StudioDressUpPick> studioDressUpPicks(const DressUp* owner);
+}  // namespace PartDesign
 
 namespace PartDesign
 {
@@ -434,6 +450,28 @@ public:
             &Module::studioPieceName,
             "studioPieceName(body) -- The custom name a piece shows: its parent's, up the "
             "lineage; empty when there is none."
+        );
+        // FreeCAD-CH ops#654 P8a: one fillet or chamfer over several parts
+        add_varargs_method(
+            "studioPickId",
+            &Module::studioPickId,
+            "studioPickId(obj, element) -- The pick of element (e.g. 'Edge3') of obj's shape (a "
+            "Body, or a feature of one) as a dress-up studio feature stores it in StudioPickIds: "
+            "'<part id>|<element name>', the name expanded."
+        );
+        add_varargs_method(
+            "studioSetPickIds",
+            &Module::studioSetPickIds,
+            "studioSetPickIds(owner, picks) -- Sets the Fillet or Chamfer studio feature's picks "
+            "(StudioPickIds) and reconciles its list: its scope is the parts they resolve to. No "
+            "transaction, no recompute."
+        );
+        add_varargs_method(
+            "studioDressUpPicks",
+            &Module::studioDressUpPicks,
+            "studioDressUpPicks(owner) -- Each pick of the Fillet or Chamfer studio feature found "
+            "at its place: [(pick, [(body, [subname, ...]), ...]), ...]; a pick found nowhere has "
+            "no body."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -1542,6 +1580,86 @@ private:
             PartDesign::studioSetMergeAll(entryArg(pOwner), PyObject_IsTrue(pOn) == 1, &why),
             why
         );
+    }
+
+    // FreeCAD-CH ops#654 P8a
+    Py::Object studioPickId(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        const char* element;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pObj, &element)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* obj = entryArg(pObj);
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesign::Body::findBodyOf(obj);
+        }
+        auto feature = freecad_cast<Part::Feature*>(obj);
+        if (!body || !feature) {
+            throw Py::ValueError("Expected a Body, or a feature of one");
+        }
+        const char* indexed = Data::findElementName(element);
+        const Part::TopoShape shape = feature->Shape.getShape();
+        const auto names = shape.getElementMappedNames(
+            Data::IndexedName(indexed && *indexed ? indexed : element)
+        );
+        if (names.empty()) {
+            throw Py::ValueError(std::string("No element map name for '") + element + "'");
+        }
+        return Py::String(
+            PartDesign::studioPartId(body) + "|"
+            + Data::NameTable::instance().toPlain(names.front().first.toString())
+        );
+    }
+
+    Py::Object studioSetPickIds(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pPicks;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pOwner, &pPicks)) {
+            throw Py::Exception();
+        }
+        auto owner = freecad_cast<PartDesign::DressUp*>(entryArg(pOwner));
+        if (!owner || PartDesign::Body::findBodyOf(owner)) {
+            throw Py::TypeError("Expected a Fillet or Chamfer studio feature");
+        }
+        std::vector<std::string> picks;
+        Py::Sequence sequence(pPicks);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            picks.push_back(Py::String(*it).as_std_string("utf-8"));
+        }
+        if (owner->StudioPickIds.getValues() != picks) {
+            owner->StudioPickIds.setValues(picks);
+        }
+        std::string why;
+        auto list = PartDesign::StudioList::holding(owner);
+        return done(!list || list->reconcile(&why), why);
+    }
+
+    Py::Object studioDressUpPicks(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pOwner)) {
+            throw Py::Exception();
+        }
+        auto owner = freecad_cast<PartDesign::DressUp*>(entryArg(pOwner));
+        if (!owner) {
+            throw Py::TypeError("Expected a Fillet or Chamfer");
+        }
+        Py::List out;
+        for (const auto& pick : PartDesign::studioDressUpPicks(owner)) {
+            Py::List found;
+            for (const auto& [body, subs] : pick.found) {
+                Py::List names;
+                for (const auto& sub : subs) {
+                    names.append(Py::String(sub));
+                }
+                found.append(Py::TupleN(Py::asObject(body->getPyObject()), names));
+            }
+            out.append(Py::TupleN(Py::String(pick.text), found));
+        }
+        return out;
     }
 
     Py::Object studioPieceName(const Py::Tuple& args)
