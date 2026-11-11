@@ -1329,8 +1329,8 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
     if (isOriginalCurveClosed && !geoAsCurve->is<Part::GeomBSplineCurve>()) {
         Base::Console().error(
             getFullLabel(),
-            "Split: a circle or an ellipse has no ends, so one cut leaves it whole. Trim it between "
-            "two crossing curves, or draw arcs.\n"
+            "Split: a circle or an ellipse has no ends, so one cut leaves it whole. Split a circle at "
+            "two points; trim an ellipse between two crossing curves, or draw arcs.\n"
         );
         return -1;
     }
@@ -1511,6 +1511,114 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
         delete cons;
     }
 
+    return 0;
+}
+
+// FreeCAD-CH (ops#656, rehearsal 3 F3; Onshape SK11): a circle has no ends, so Split takes two points on it
+// and replaces it with two arcs of that circle, joined end to end at both points. The first arc keeps the
+// circle's id and what was on its centre; the second is new. The two joints are one Coincident and one
+// end-to-end Tangent: together 5 equations, exactly what makes the second arc the first one's circle
+// (a Coincident at both joints plus a shared centre would repeat one equation, and two Coincidents plus
+// an Equal lose the centre when the points are opposite). Ellipses are refused, as before.
+int SketchObject::split(int GeoId, const Base::Vector3d& point1, const Base::Vector3d& point2)
+{
+    Base::StateLocker lock(managedoperation, true);
+
+    if (GeoId < 0 || GeoId > getHighestCurveIndex()) {
+        return -1;
+    }
+    const auto* circle = dynamic_cast<const Part::GeomCircle*>(getGeometry(GeoId));
+    if (!circle || !GeometryFacade::isInternalType(circle, InternalType::None)) {
+        Base::Console().error(
+            getFullLabel(),
+            "Split at two points: only a whole circle is split that way. Split other curves at one point.\n"
+        );
+        return -1;
+    }
+    double u1 {}, u2 {};
+    circle->closestParameter(point1, u1);
+    circle->closestParameter(point2, u2);
+    if (u2 < u1) {
+        std::swap(u1, u2);
+    }
+    const double period = 2 * std::numbers::pi;
+    const double sweep = u2 - u1;
+    // two points the same on the circle (within a micrometre on a 1 m circle) give no second arc
+    if (sweep < 1e-9 || period - sweep < 1e-9) {
+        Base::Console().error(getFullLabel(), "Split: pick two different points on the circle.\n");
+        return -1;
+    }
+    const bool isConstruction = GeometryFacade::getConstruction(circle);
+
+    std::vector<int> newIds {GeoId, getHighestCurveIndex() + 1};
+    std::vector<Part::Geometry*> newGeos;
+    createArcsFromGeoWithLimits(circle, {{u1, u2}, {u2, u1 + period}}, newGeos);
+    std::vector<const Part::Geometry*> newGeosConst(newGeos.begin(), newGeos.end());
+
+    // the circle's edge constraints go to the pieces (its centre constraints stay on GeoId, the first arc)
+    std::vector<int> idsOfOldConstraints;
+    getConstraintIndices(GeoId, idsOfOldConstraints);
+    const auto& allConstraints = this->Constraints.getValues();
+    std::erase_if(idsOfOldConstraints, [&GeoId, &allConstraints](const auto& i) {
+        return !allConstraints[i]->involvesGeoIdAndPosId(GeoId, PointPos::none);
+    });
+    std::vector<Constraint*> newConstraints;
+    std::map<Constraint*, int> newToOld;
+    std::vector<int> released;
+    for (const auto& oldConstrId : idsOfOldConstraints) {
+        const size_t sizeBefore = newConstraints.size();
+        if (!deriveConstraintsForPieces(
+                GeoId, newIds, newGeosConst, allConstraints[oldConstrId], newConstraints, true
+            )) {
+            released.push_back(oldConstrId);
+        }
+        for (size_t i = sizeBefore; i < newConstraints.size(); ++i) {
+            newToOld[newConstraints[i]] = oldConstrId;
+        }
+    }
+    std::map<Constraint*, std::shared_ptr<App::Expression>> exprBackup;
+    for (auto const& [newConstr, oldId] : newToOld) {
+        auto exprInfo = getExpression(Constraints.createPath(oldId));
+        if (exprInfo.expression) {
+            exprBackup[newConstr] = std::shared_ptr<App::Expression>(exprInfo.expression->copy());
+        }
+    }
+    warnReleased(this, "Split", released);
+
+    auto* joint = new Constraint();
+    joint->Type = Coincident;
+    joint->First = newIds.front();
+    joint->FirstPos = PointPos::end;
+    joint->Second = newIds.back();
+    joint->SecondPos = PointPos::start;
+    newConstraints.push_back(joint);
+    auto* closing = new Constraint();
+    closing->Type = Tangent;
+    closing->First = newIds.back();
+    closing->FirstPos = PointPos::end;
+    closing->Second = newIds.front();
+    closing->SecondPos = PointPos::start;
+    newConstraints.push_back(closing);
+
+    delConstraints(std::move(idsOfOldConstraints), DeleteOption::NoSolve);
+    replaceGeometries({GeoId}, newGeos);
+    for (auto newId : newIds) {
+        setConstruction(newId, isConstruction);
+    }
+    const int lastAddedIndex = addConstraints(newConstraints);
+    const int firstAddedIndex = lastAddedIndex - int(newConstraints.size()) + 1;
+    for (size_t i = 0; i < newConstraints.size(); ++i) {
+        auto it = exprBackup.find(newConstraints[i]);
+        if (it != exprBackup.end()) {
+            setExpression(Constraints.createPath(firstAddedIndex + int(i)), it->second);
+        }
+    }
+    if (noRecomputes) {
+        solve();
+    }
+    for (auto& cons : newConstraints) {
+        delete cons;
+    }
     return 0;
 }
 // clang-format off

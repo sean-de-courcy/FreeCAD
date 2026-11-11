@@ -732,7 +732,8 @@ class SketchObject(Part2DObject):
 
     def split(self) -> None:
         """
-        Split a curve with a given id at a given reference point
+        Split a curve with a given id at a given reference point.
+        split(geoId, point1, point2) splits a whole circle at two points into two arcs joined end to end
         """
         ...
 

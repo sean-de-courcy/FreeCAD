@@ -217,6 +217,80 @@ class TestSketchTrimSplit(unittest.TestCase):
     def testSplitEllipseOnceRefused(self):
         self._split_refused(Part.Ellipse(V(0, 0, 0), 10, 5), Part.Ellipse)
 
+    # ops#656 F3 (rehearsal 3; Onshape SK11): a whole circle splits at two points into two arcs of that
+    # circle, joined end to end at both points. They stay one closed circle through a radius change, and
+    # the cut points slide on it (2 more degrees of freedom), with nothing repeated.
+    def _split_circle_twice(self, p1, p2):
+        sk = self.sk
+        _circle(sk, 5, 60, 20)  # the rehearsal's circle
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 3, 60))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 3, 20))
+        r = sk.addConstraint(Sketcher.Constraint("Radius", 0, 5))
+        sk.renameConstraint(r, "radius")
+        self.doc.recompute()
+        self.assertEqual(sk.DoF, 0)
+        sk.split(0, p1, p2)
+        self.doc.recompute()
+        self._healthy()
+        arcs = _arcs(sk)
+        self.assertEqual(len(arcs), 2)
+        self.assertTrue(all(isinstance(g, Part.ArcOfCircle) for _, g in arcs))
+        self.assertEqual(sk.DoF, 2, "the two cut points slide on the circle; nothing else is free")
+        self._assert_closed_circle(5.0)
+        sk.setDatum(_named(sk, "radius"), App.Units.Quantity("7 mm"))
+        self.doc.recompute()
+        self._healthy()
+        self._assert_closed_circle(7.0)
+
+    def _assert_closed_circle(self, radius):
+        (_, a), (_, b) = _arcs(self.sk)
+        for g in (a, b):
+            self.assertAlmostEqual(g.Radius, radius, delta=TOL, msg="an arc left the circle")
+            self.assertAlmostEqual((g.Center - V(60, 20, 0)).Length, 0.0, delta=TOL)
+        self.assertAlmostEqual((a.EndPoint - b.StartPoint).Length, 0.0, delta=TOL, msg="the circle opened")
+        self.assertAlmostEqual((b.EndPoint - a.StartPoint).Length, 0.0, delta=TOL, msg="the circle opened")
+        self.assertAlmostEqual(_face_area(self.sk), math.pi * radius**2, delta=1e-5)
+
+    def testSplitCircleAtTwoOppositePoints(self):
+        self._split_circle_twice(V(65, 20, 0), V(55, 20, 0))
+
+    def testSplitCircleAtTwoPoints(self):
+        self._split_circle_twice(V(60, 25, 0), V(65, 20, 0))
+
+    def testSplitCircleAtTwoPointsKeepsTangentLine(self):
+        sk = self.sk
+        _circle(sk, 10)  # 0
+        _line(sk, (-20, 10), (20, 10))  # 1, tangent on top
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        sk.addConstraint(Sketcher.Constraint("Tangent", 0, 1))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", 1))
+        r = sk.addConstraint(Sketcher.Constraint("Radius", 0, 10))
+        sk.renameConstraint(r, "radius")
+        self.doc.recompute()
+        sk.split(0, V(10, 0, 0), V(-10, 0, 0))
+        self.doc.recompute()
+        self._healthy()
+        sk.setDatum(_named(sk, "radius"), App.Units.Quantity("12 mm"))
+        self.doc.recompute()
+        self._healthy()
+        self.assertAlmostEqual(sk.Geometry[1].StartPoint.y, 12.0, delta=TOL, msg="the line lost its tangency")
+
+    def testSplitCircleAtOnePointTwiceRefused(self):
+        sk = self.sk
+        _circle(sk, 10)
+        self.doc.recompute()
+        with self.assertRaises(ValueError):
+            sk.split(0, V(10, 0, 0), V(10, 0, 0))
+        self.assertEqual(len(sk.Geometry), 1)
+
+    def testSplitEllipseAtTwoPointsRefused(self):
+        sk = self.sk
+        sk.addGeometry(Part.Ellipse(V(0, 0, 0), 10, 5))
+        self.doc.recompute()
+        with self.assertRaises(ValueError):
+            sk.split(0, V(10, 0, 0), V(-10, 0, 0))
+        self.assertIsInstance(sk.Geometry[0], Part.Ellipse)
+
     def testSplitPeriodicBSplineOnceStaysClosed(self):
         poles = [V(10, 0, 0), V(0, 10, 0), V(-10, 0, 0), V(0, -10, 0)]
         bs = Part.BSplineCurve()
@@ -392,6 +466,108 @@ class TestSketchTrimSplit(unittest.TestCase):
         sk.split(0, bs.value(0.3))
         self.doc.recompute()
         self.assertTrue(sk.getConstruction(0))
+
+    # ops#656 trim then radius (Onshape SK10): a circle trimmed between two free lines becomes two arcs of
+    # one circle; a radius change moves both arcs, and every arc end stays on its line (the profile stays
+    # closed: the lines move instead, as in Onshape, where they went to x = +-6).
+    def testTrimCircleBetweenFreeLinesThenRadius(self):
+        sk = self.sk
+        _circle(sk, 10)  # 0
+        lines = [_line(sk, (-5, -15), (-5, 15)), _line(sk, (5, -15), (5, 15))]
+        sk.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        r = sk.addConstraint(Sketcher.Constraint("Radius", 0, 10))
+        sk.renameConstraint(r, "radius")
+        self.doc.recompute()
+        sk.trim(0, V(0, 10, 0))
+        self.doc.recompute()
+        sk.trim(0, V(0, -10, 0))
+        self.doc.recompute()
+        self.assertEqual(len(_arcs(sk)), 2)
+        self._healthy()
+        sk.setDatum(_named(sk, "radius"), App.Units.Quantity("12 mm"))
+        self.doc.recompute()
+        self._healthy()
+
+        def off_line(p):
+            return min(
+                abs((V(p) - sk.Geometry[i].StartPoint).cross(sk.Geometry[i].EndPoint - sk.Geometry[i].StartPoint).Length)
+                / (sk.Geometry[i].EndPoint - sk.Geometry[i].StartPoint).Length
+                for i in lines
+            )
+
+        for _, g in _arcs(sk):
+            self.assertAlmostEqual(g.Radius, 12.0, delta=TOL, msg="an arc kept the old radius")
+            self.assertAlmostEqual(g.Center.Length, 0.0, delta=TOL)
+            for p in _endpoints(g):
+                self.assertLess(off_line(p), TOL, "an arc end left its line: the profile opened")
+
+    # ops#656 trim then radius (Onshape SK10b): a line trimmed between two free lines keeps its pieces
+    # collinear: pulling one piece's outer end off the old line tilts the other piece with it.
+    def testTrimLineBetweenFreeLinesStaysCollinear(self):
+        sk = self.sk
+        _line(sk, (-15, 0), (15, 0))  # 0
+        _line(sk, (-5, -10), (-5, 10))  # 1
+        _line(sk, (5, -10), (5, 10))  # 2
+        self.doc.recompute()
+        sk.trim(0, V(0, 0, 0))
+        self.doc.recompute()
+        self._healthy()
+        pieces = [i for i, g in enumerate(sk.Geometry) if isinstance(g, Part.LineSegment) and i not in (1, 2)]
+        self.assertEqual(len(pieces), 2)
+        left, right = sorted(pieces, key=lambda i: sk.Geometry[i].StartPoint.x + sk.Geometry[i].EndPoint.x)
+        outer = lambda i: max((1, 2), key=lambda pos: abs(sk.getPoint(i, pos).x))  # noqa: E731
+        sk.addConstraint(Sketcher.Constraint("DistanceY", left, outer(left), right, outer(right), 4))
+        self.doc.recompute()
+        self._healthy()
+        a, b = sk.getPoint(left, outer(left)), sk.getPoint(right, outer(right))
+        self.assertAlmostEqual(b.y - a.y, 4.0, delta=TOL)
+        d = (b - a).normalize()
+        for i in pieces:
+            for pos in (1, 2):
+                self.assertLess((sk.getPoint(i, pos) - a).cross(d).Length, TOL, "the pieces are no longer collinear")
+
+    # ops#656 trim then radius (the TNP test testRectanglewithArcChangeinGlobalCenter, in designed
+    # geometry): a rectangle's bottom edge trimmed between the ends of an arc standing on it. The pieces
+    # are collinear, so an Equal of the two sides then repeats what the sketch imposes; it is accepted
+    # (TestSketchRepeatedConstraints), and the arc's radius can then be dimensioned and changed.
+    def testTrimRectangleEdgeThenEqualAndRadius(self):
+        sk = self.sk
+        top = _line(sk, (-50, 25), (50, 25))
+        right = _line(sk, (50, 25), (50, -25))
+        bottom = _line(sk, (50, -25), (-50, -25))
+        left = _line(sk, (-50, -25), (-50, 25))
+        for a, b in ((top, right), (right, bottom), (bottom, left), (left, top)):
+            sk.addConstraint(Sketcher.Constraint("Coincident", a, 2, b, 1))
+        for i in (top, bottom):
+            sk.addConstraint(Sketcher.Constraint("Horizontal", i))
+        for i in (right, left):
+            sk.addConstraint(Sketcher.Constraint("Vertical", i))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", bottom, 2, -50))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", bottom, 2, -25))
+        a1 = math.asin(35.0 / 40.0)  # an arc of r40 about (0, -60) with both ends on y = -25
+        arc = sk.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, -60, 0), V(0, 0, 1), 40), a1, math.pi - a1))
+        sk.addConstraint(Sketcher.Constraint("PointOnObject", arc, 3, -2))
+        sk.addConstraint(Sketcher.Constraint("PointOnObject", arc, 1, bottom))
+        sk.addConstraint(Sketcher.Constraint("PointOnObject", arc, 2, bottom))
+        self.doc.recompute()
+        sk.trim(bottom, V(0, -25, 0))
+        self.doc.recompute()
+        self._healthy()
+        sk.addConstraint(Sketcher.Constraint("Equal", left, right))
+        rad = sk.addConstraint(Sketcher.Constraint("Radius", arc, 30))
+        sk.setDatum(rad, App.Units.Quantity("25 mm"))  # raised "Datum ... is invalid" on the line (b24d855144)
+        self.doc.recompute()
+        self.assertEqual(list(sk.ConflictingConstraints), [])
+        self.assertTrue(sk.isValid())
+        g = sk.Geometry[arc]
+        self.assertAlmostEqual(g.Radius, 25.0, delta=TOL)
+        for p in _endpoints(g):
+            self.assertAlmostEqual(p.y, -25.0, delta=TOL, msg="an arc end left the bottom edge")
+        bottoms = [i for i, x in enumerate(sk.Geometry) if isinstance(x, Part.LineSegment) and i not in (top, right, left)]
+        self.assertEqual(len(bottoms), 2)
+        for i in bottoms:
+            for pos in (1, 2):
+                self.assertAlmostEqual(sk.getPoint(i, pos).y, -25.0, delta=TOL, msg="a bottom piece moved off its line")
 
 
 if __name__ == "__main__":

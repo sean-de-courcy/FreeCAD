@@ -1645,15 +1645,22 @@ PyObject* SketchObjectPy::extend(PyObject* args)
 PyObject* SketchObjectPy::split(PyObject* args)
 {
     PyObject* pcObj;
+    PyObject* pcObj2 = nullptr;
     int GeoId;
 
-    if (!PyArg_ParseTuple(args, "iO!", &GeoId, &(Base::VectorPy::Type), &pcObj)) {
+    // FreeCAD-CH (ops#656 F3): a second point splits a whole circle into two arcs
+    if (!PyArg_ParseTuple(
+            args, "iO!|O!", &GeoId, &(Base::VectorPy::Type), &pcObj, &(Base::VectorPy::Type), &pcObj2
+        )) {
         return nullptr;
     }
 
     Base::Vector3d v1 = static_cast<Base::VectorPy*>(pcObj)->value();
     try {
-        if (this->getSketchObjectPtr()->split(GeoId, v1)) {
+        const int err = pcObj2
+            ? this->getSketchObjectPtr()->split(GeoId, v1, static_cast<Base::VectorPy*>(pcObj2)->value())
+            : this->getSketchObjectPtr()->split(GeoId, v1);
+        if (err) {
             std::stringstream str;
             str << "Not able to split curve with the given index: " << GeoId;
             PyErr_SetString(PyExc_ValueError, str.str().c_str());
