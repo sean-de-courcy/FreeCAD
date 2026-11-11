@@ -1584,6 +1584,16 @@ bool configSetReaderKey(App::DocumentObject* reader,
 
 std::string configReaderError(const App::DocumentObject* reader, const App::DocumentObject* source)
 {
+    // A part made from a piece whose solid is gone (its split suppressed, or another row's) keeps
+    // its Body while something outside the studio reads it: the reader is loud, never showing
+    // the solid it had or nothing at all (review R2, round 2)
+    if (auto body = freecad_cast<const Body*>(source)) {
+        if (body->StudioMadeBy.getValue() && !body->StudioPieceWitness.getValues().empty()
+            && body->Shape.getShape().isNull()) {
+            return quoted(body) + " holds no solid: the piece it was made from is gone (its split "
+                   "is suppressed, or this configuration doesn't make it)";
+        }
+    }
     const std::string key = configReaderKey(reader, source);
     if (key.empty()) {
         return {};
@@ -1603,6 +1613,19 @@ void registerConfigurationHooks()
 {
     App::setExpressionWriteHook(hookWrite);
     App::setConfigReaderCheck(configReaderError);
+    // An undo or redo can bring back expressions a StudioConfig's cells disagree with (a file
+    // that failed the load check, then a configReconcile write undone) without restoring any of
+    // its properties: touched, its execute() checks again (review R3, round 2)
+    auto recheck = [](const App::Document& doc) {
+        if (liveConfigs.load() == 0) {
+            return;
+        }
+        for (auto obj : doc.getObjectsOfType(StudioConfig::getClassTypeId())) {
+            obj->touch();
+        }
+    };
+    App::GetApplication().signalUndoDocument.connect(recheck);
+    App::GetApplication().signalRedoDocument.connect(recheck);
 }
 
 }  // namespace PartDesign

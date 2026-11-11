@@ -333,6 +333,32 @@ class TestConfigurations(unittest.TestCase):
         self.assertAlmostEqual(binder.Shape.Volume, 400, delta=1e-4)
         self.assertFalse(invalid(binder))
 
+    def testReaderOfAnEmptiedPieceErrors(self):
+        """A Link and a Binder outside the studio of a piece whose split is suppressed (by hand,
+        no configuration involved) error loudly; unsuppressed, they show the piece again (review
+        R2, round 2)"""
+        cut = makeOwner(self.doc, self.studio, "Cut", (24, -1, 26, 11), 11, "Subtraction", ["B"])
+        self.edit(lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(lambda: PartDesign.studioMakePieces(cut))
+        right = [b for b in self.pieceBodies() if b.Shape.BoundBox.XMin > 25][0]
+        link = self.doc.addObject("App::Link", "Inst")
+        link.LinkedObject = right
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        binder = other.newObject("PartDesign::SubShapeBinder", "Bound")
+        binder.Support = [(right, ("",))]
+        self.doc.recompute()
+        self.assertFalse(invalid(link) or invalid(binder))
+        self.edit(lambda: PartDesign.studioSuppress(cut, True))
+        self.edit(lambda: PartDesign.studioMakePieces(cut))
+        self.assertTrue(right.isAttachedToDocument())
+        self.assertTrue(invalid(link), link.State)
+        self.assertTrue(invalid(binder), binder.State)
+        self.edit(lambda: PartDesign.studioSuppress(cut, False))
+        self.edit(lambda: PartDesign.studioMakePieces(cut))
+        self.assertAlmostEqual(right.Shape.Volume, 400, delta=1e-4)
+        self.assertFalse(invalid(link) or invalid(binder))
+        self.assertAlmostEqual(binder.Shape.Volume, 400, delta=1e-4)
+
     def testNestedMakersSwitchBackGivesPiecesTheirIds(self):
         """Cut splits B and M2 splits Cut's right piece, both suppressed in Large: the switch
         back makes the pieces in the list's order, so M2's come back too (review R4)"""
@@ -411,6 +437,13 @@ class TestConfigurations(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(invalid(self.cfg))
         self.edit(lambda: PartDesign.configSetActive(self.studio, {"Size": "Large"}))
+        self.assertFalse(invalid(self.cfg))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(self.APad.Length.Value, 10, delta=TOL)
+        self.assertTrue(invalid(self.cfg))
+        # A reconcile write changes no property of the StudioConfig: its undo checks again too
+        self.edit(lambda: PartDesign.configReconcile(self.studio, False))
         self.assertFalse(invalid(self.cfg))
         self.doc.undo()
         self.doc.recompute()
