@@ -9098,15 +9098,24 @@ App::DocumentObjectExecReturn* Pipe::execute()
             // A cell OCCT's maker couldn't build (a holed profile's wall meeting itself): again
             // with the tubes cut at the spine's joints. Only then, so every union the maker builds
             // uncut keeps its cells and its faces' names as they were
+            bool roundUncut = false;
             if (overlap.unusedFaces) {
                 const std::vector<TopoDS_Face> cuts
                     = jointSections(solids, TopoDS::Wire(path.getShape()));
                 if (!cuts.empty()) {
                     overlap = unionOfOverlaps(solids, depths, cuts);
                 }
+                // A Round corner's joint has no planar edges to cut at (its sphere wedge spans
+                // the bisecting plane): said, so the stop names the option (sweeps 18). Onshape
+                // has no Round corner; it mitres every sharp corner, as Right corner does
+                roundUncut = cuts.empty() && Transition.getValue() == 2;
             }
             notUnited = overlap.untouched ? std::string("the overlap lies within one of its faces")
                                           : overlap.error;
+            if (roundUncut && !notUnited.empty()) {
+                notUnited += "; a Round corner's joint can't be cut there, Right corner (Onshape's "
+                             "mitre) can";
+            }
             if (!overlap.solid.IsNull()) {
                 Part::TopoShape naive = makeTopoShape();
                 naive.makeElementCompound(
