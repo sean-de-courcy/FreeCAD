@@ -1657,6 +1657,9 @@ private:
     std::map<const App::DocumentObject*, OwnerPlan> owners;
 };
 
+/// The OnlyGivenObjects alive on this thread
+thread_local int onlyGiven = 0;
+
 /// The planned state of a reorder: the new Group and each solid's new base
 struct Plan
 {
@@ -1683,6 +1686,12 @@ struct Plan
         for (auto prop : props) {
             auto link = freecad_cast<App::PropertyLinkBase*>(prop);
             if (!link || link->getScope() == App::LinkScope::Hidden) {
+                continue;
+            }
+            // FreeCAD-CH ops#654 slice 9: a studio list's reconcile places each member
+            // (OnlyGivenObjects) and then writes the owners' StudioBases from the list's order:
+            // their old values aren't the planned graph (a stale one made a false cycle)
+            if (onlyGiven > 0 && std::strcmp(prop->getName(), "StudioBases") == 0) {
                 continue;
             }
             if (planned != newBase.end() && followsBase(obj, prop)) {
@@ -1751,8 +1760,6 @@ struct Plan
 /// The reorders writing their plan on this thread (reorderWriting())
 thread_local int reorderWrites = 0;
 
-/// The OnlyGivenObjects alive on this thread
-thread_local int onlyGiven = 0;
 
 }  // namespace
 

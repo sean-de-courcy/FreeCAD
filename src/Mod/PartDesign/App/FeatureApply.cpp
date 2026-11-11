@@ -20,6 +20,7 @@
 #include "FeatureBoolean.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
+#include "StudioPattern.h"
 
 using namespace PartDesign;
 
@@ -27,6 +28,10 @@ namespace PartDesign
 {
 // StudioOwner.cpp (FreeCAD-CH ops#654 P5; declared where used)
 PartDesignExport Part::TopoShape studioBooleanTool(const App::DocumentObject* owner, std::string* why);
+// StudioList.cpp (FreeCAD-CH ops#654 slice 9; declared where used)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
+PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
 }  // namespace PartDesign
 
 PROPERTY_SOURCE(PartDesign::FeatureApply, PartDesign::FeatureAddSub)
@@ -96,6 +101,22 @@ Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::stri
     const std::string label = std::string("'") + owner->Label.getValue() + "'";
     if (isBooleanOwner(owner)) {
         return studioBooleanTool(owner, why);  // in the document's frame already
+    }
+    if (isStudioPartPattern(owner)) {
+        // The part mirror (slice 9): its source part mirrored, in the document's frame already;
+        // with the source itself when its Add consumes it (Onshape oracle 9, R4)
+        Part::TopoShape copy = studioPatternTool(owner, nullptr, why);
+        const auto sources = studioPartPatternSources(owner);
+        if (copy.isNull() || !studioPartMirrorConsumes(owner) || sources.size() != 1) {
+            return copy;
+        }
+        Part::TopoShape source = studioBaseAt(owner, sources.front());
+        if (source.isNull()) {
+            return copy;
+        }
+        Part::TopoShape fused(owner->getID(), owner->getDocument()->getStringHasher());
+        fused.makeElementFuse({copy, source});
+        return fused;
     }
     Part::TopoShape tool;
     // The frame the tool's own location is in: an owner's AddSubShape is in the owner's frame; a

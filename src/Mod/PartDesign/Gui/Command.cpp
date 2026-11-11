@@ -3393,6 +3393,108 @@ void finishTransformed(Gui::Command* cmd, App::DocumentObject* Feat)
 //===========================================================================
 // PartDesign_Mirrored
 //===========================================================================
+
+/** FreeCAD-CH (ops#654 slice 9): Mirror in a studio with a list makes a part mirror (Onshape's
+ * Mirror, Part type) when no feature is picked and either no Body is active or a part is picked
+ * (whole, or by a face of it: its part is the part to mirror). It is a studio feature, in one step
+ * with its list entry, its New part and its first recompute (Cancel aborts all of it): the part's
+ * id in StudioEntities, Operation Union (the Result row's words, New with the part it makes), the
+ * plane picked in its dialog. False: today's path */
+static bool prepareStudioPartMirror(Gui::Command* cmd)
+{
+    App::Document* doc = cmd->getDocument();
+    if (!doc) {
+        return false;
+    }
+    PartDesign::Body* source = nullptr;
+    for (const auto& sel : cmd->getSelection().getSelectionEx()) {
+        auto obj = const_cast<App::DocumentObject*>(sel.getObject());
+        if (!obj || obj->getDocument() != doc) {
+            continue;
+        }
+        if (auto body = freecad_cast<PartDesign::Body*>(obj)) {
+            source = body;
+            continue;
+        }
+        auto body = PartDesign::Body::findBodyOf(obj);
+        const auto& subs = sel.getSubNames();
+        const bool element = std::ranges::any_of(subs, [](const std::string& sub) {
+            return !sub.empty();
+        });
+        if (!body || !element || !obj->isDerivedFrom<PartDesign::Feature>()) {
+            return false;  // a feature (or anything else) picked: today's feature mirror
+        }
+        source = body;
+    }
+    App::Part* studio = nullptr;
+    if (source) {
+        if (!Part::BodyBase::studioOf(source, studio)) {
+            return false;
+        }
+    }
+    else if (PartDesignGui::getBody(/*messageIfNot = */ false)) {
+        return false;  // a Body is active: today's mirror of its features
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
+    if (!list) {
+        return false;
+    }
+    const std::string name = cmd->getUniqueObjectName("Mirrored");
+    cmd->openCommand("Make Mirrored");
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::cmdAppDocument(
+            doc,
+            std::ostringstream() << "addObject('PartDesign::Mirrored','" << name << "')"
+        );
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The part mirror was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        FCMD_OBJ_CMD(owner, "PatternType = 'Part'");
+        FCMD_OBJ_CMD(
+            owner,
+            "addProperty('App::PropertyEnumeration', 'Operation', 'Studio', 'The Result row: New "
+            "or Add (Union), Remove (Subtraction), Intersect (Common)', 0, False, True)"
+        );
+        FCMD_OBJ_CMD(owner, "Operation = ['Union', 'Subtraction', 'Common']");
+        FCMD_OBJ_CMD(owner, "Operation = 'Union'");
+        if (source) {
+            FCMD_OBJ_CMD(owner, "StudioEntities = ['" << PartDesign::studioPartId(source) << "']");
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        // Onshape's part mirror makes a new part by default
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
+        {
+            // No plane yet: its error isn't printed while the dialog opens asking for it
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                true
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The part mirror's dialog didn't open");
+        }
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 DEF_STD_CMD_A(CmdPartDesignMirrored)
 
 CmdPartDesignMirrored::CmdPartDesignMirrored()
@@ -3412,6 +3514,9 @@ void CmdPartDesignMirrored::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    if (prepareStudioPartMirror(this)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {

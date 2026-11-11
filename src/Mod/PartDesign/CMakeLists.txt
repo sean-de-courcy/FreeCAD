@@ -108,6 +108,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestPieces.py
     PartDesignTests/TestBooleanScope.py
     PartDesignTests/TestStudioPatterns.py
+    PartDesignTests/TestStudioPartMirror.py
 )
 
 if(BUILD_GUI)
@@ -156,6 +157,7 @@ if(BUILD_GUI)
         PartDesignTests/TestStudioHistoryGui.py
         PartDesignTests/TestPartsListGui.py
         PartDesignTests/TestStudioPatternsGui.py
+        PartDesignTests/TestStudioPartMirrorGui.py
     )
 endif(BUILD_GUI)
 

@@ -73,6 +73,7 @@
 #include "FeatureSketchBased.h"
 #include "Retarget.h"
 #include "StudioList.h"
+#include "StudioOwner.h"
 #include "StudioPattern.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
@@ -1318,8 +1319,110 @@ void Transformed::onChanged(const App::Property* prop)
     FeatureRefine::onChanged(prop);
 }
 
+// StudioList.cpp (FreeCAD-CH ops#654 slice 9; declared where used)
+PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+PartDesignExport void studioSetPartMirrorConsumes(App::DocumentObject* owner, bool consumes);
+
+namespace
+{
+
+bool touches(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    BRepExtrema_DistShapeShape distance(a, b);
+    return distance.IsDone() && distance.Value() <= Precision::Confusion();
+}
+
+/** A part pattern as a studio feature (FreeCAD-CH ops#654 slice 9, notes/patterns-design.md
+ * 3.1): the part mirror. Outside every Body, its steps apply its tool (FeatureApply::toolOf):
+ * New, a new part holding the copy (studioNewPart); Add, Remove, Intersect, one step per scope
+ * part. Its Operation is a dynamic enumeration of FreeCAD's words (Union, Subtraction, Common),
+ * as the Result row writes; New is a Union whose scope is the parts it made. Its own shape stays
+ * empty; it fails loudly when its tool can't be made or its scope resolves to nothing.
+ * Add (Onshape oracle 9, R4): the copy merges into the scope part it touches (the survivor); a
+ * copy touching none would be a new part (P6p), and one touching two would merge parts, which is
+ * not done yet: both refused loudly. The source part outside the scope is consumed, merged into
+ * the survivor with the copy, exactly when it touches the copy or the survivor; it is decided here
+ * (StudioConsumesSource) and the list's projection follows after the recompute. Remove,
+ * Intersect and New never consume it. */
+App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
+{
+    pattern.Shape.setValue(Part::TopoShape());
+    studioSetPartMirrorConsumes(&pattern, false);  // a failed feature contributes nothing
+    std::string why;
+    const Part::TopoShape tool = studioPatternTool(&pattern, nullptr, &why);
+    if (tool.isNull()) {
+        return new App::DocumentObjectExecReturn(why, &pattern);
+    }
+    const std::vector<Body*> scope = studioScopeOf(&pattern);
+    if (scope.empty()) {
+        return new App::DocumentObjectExecReturn("No merge scope selected", &pattern);
+    }
+    auto operation =
+        freecad_cast<App::PropertyEnumeration*>(pattern.getPropertyByName("Operation"));
+    const char* value = operation ? operation->getValueAsString() : nullptr;
+    const bool isNew = std::ranges::all_of(scope, [&pattern](const Body* part) {
+        return part->StudioMadeBy.getValue() == &pattern;
+    });
+    if ((value && std::string(value) != "Union") || isNew) {
+        return App::DocumentObject::StdReturn;
+    }
+    std::vector<const Body*> touched;
+    Part::TopoShape survivorBase;
+    bool anyBase = false;
+    for (auto part : scope) {
+        const Part::TopoShape base = studioBaseAt(&pattern, part);
+        if (base.isNull()) {
+            continue;
+        }
+        anyBase = true;
+        if (touches(tool.getShape(), base.getShape())) {
+            touched.push_back(part);
+            survivorBase = base;
+        }
+    }
+    if (anyBase && touched.empty()) {
+        return new App::DocumentObjectExecReturn(
+            "Solid 1 of the tool touches no part of the merge scope: it would become a new part, "
+            "which is not done yet",
+            &pattern
+        );
+    }
+    if (touched.size() > 1) {
+        std::string names;
+        for (auto part : touched) {
+            names += std::string(names.empty() ? "" : " and ") + "'" + part->Label.getValue() + "'";
+        }
+        return new App::DocumentObjectExecReturn(
+            "The mirrored copy touches " + names
+                + ": an Add that would merge parts is not done yet; keep one of them in the "
+                  "merge scope",
+            &pattern
+        );
+    }
+    if (touched.size() == 1) {
+        const std::vector<Body*> sources = studioPartPatternSources(&pattern);
+        const Body* source = sources.empty() ? nullptr : sources.front();
+        if (source && std::ranges::find(scope, source) == scope.end()) {
+            const Part::TopoShape sourceBase = studioBaseAt(&pattern, source);
+            if (!sourceBase.isNull()
+                && (touches(sourceBase.getShape(), tool.getShape())
+                    || touches(sourceBase.getShape(), survivorBase.getShape()))) {
+                studioSetPartMirrorConsumes(&pattern, true);
+            }
+        }
+    }
+    return App::DocumentObject::StdReturn;
+}
+
+}  // namespace
+
 App::DocumentObjectExecReturn* Transformed::execute()
 {
+    // FreeCAD-CH ops#654 slice 9: a part pattern in a studio's list computes only what its steps
+    // apply (the part mirror's tool); here it checks it
+    if (runsAsStudioOwner(this) && PatternType.getValue() == 1) {
+        return executeStudioPartPattern(*this);
+    }
     if (isOutOfChain()) {
         // FreeCAD-CH (ops#640): a MultiTransform's step computes nothing of its own (its
         // MultiTransform runs it), and a reorder's parked Originals have their own message, before

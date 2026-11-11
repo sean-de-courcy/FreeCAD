@@ -26,6 +26,7 @@
 #include "Body.h"
 #include "Feature.h"
 #include "FeatureAddSub.h"
+#include "FeatureApply.h"
 #include "FeatureBase.h"
 #include "FeatureDressUp.h"
 #include "FeatureSketchBased.h"
@@ -190,6 +191,12 @@ bool emptyOnEmpty(const Feature& feature)
         return false;
     }
     if (feature.isDerivedFrom<DressUp>() || feature.isDerivedFrom<Transformed>()) {
+        return true;
+    }
+    // A studio feature's step (FreeCAD-CH ops#654 slice 9): a failed feature contributes nothing
+    // (parts-design 10.9), so a New part whose feature fails holds nothing, never the shape of
+    // the feature's last success
+    if (feature.isDerivedFrom<FeatureApply>()) {
         return true;
     }
     // getAddSubType() only reads the type

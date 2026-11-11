@@ -1523,11 +1523,14 @@ private:
             ids.push_back(id);
         }
         PartDesign::setStudioScopeIds(owner, ids);
+        auto operation = freecad_cast<App::PropertyEnumeration*>(owner->getPropertyByName("Operation"));
         if (auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(owner)) {
-            if (addSub->Operation.isPartOf("Union")
-                && std::string(addSub->Operation.getValueAsString()) != "Union") {
-                addSub->Operation.setValue("Union");
-            }
+            operation = &addSub->Operation;
+        }
+        // An Extrude owner's, or a part mirror's dynamic one (ops#654 slice 9)
+        if (operation && operation->isPartOf("Union")
+            && std::string(operation->getValueAsString()) != "Union") {
+            operation->setValue("Union");
         }
         std::string why;
         if (!list->reconcile(&why)) {
