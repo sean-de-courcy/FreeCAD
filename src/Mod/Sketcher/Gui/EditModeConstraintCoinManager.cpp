@@ -2234,8 +2234,7 @@ QString EditModeConstraintCoinManager::getPresentationString(
         && ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex);
     // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions" (PL5a): a dimension set by
     // an expression keeps its value and (fx) marker and gets a tag above it with the expression
-    // (variables as #Name): "tag
-value", which SoDatumLabel draws as a light-blue tag
+    // (variables as #Name): "tag\nvalue", which SoDatumLabel draws as a light-blue tag
     QString expressionTag;
     if (hasExpression && ViewProviderSketch::showExpressionsPreference()) {
         auto* sketch = viewProvider.getSketchObject();
@@ -2279,8 +2278,7 @@ value", which SoDatumLabel draws as a light-blue tag
     }
 
     if (!expressionTag.isEmpty()) {
-        fixedValueStr = expressionTag + QLatin1Char('
-') + fixedValueStr;
+        fixedValueStr = expressionTag + QLatin1Char('\n') + fixedValueStr;
     }
     return fixedValueStr;
 }

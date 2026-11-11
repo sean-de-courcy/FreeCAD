@@ -360,12 +360,10 @@ void SoDatumLabel::drawImage()
     QFont font(QString::fromLatin1(name.getValue(), -1), size.getValue());
     QFontMetrics fm(font);
     QString str = QString::fromUtf8(s[0].getString());
-    // FreeCAD-CH (ops#640 polish P4): "tag
-value" draws Onshape's expression tag, a light-blue
+    // FreeCAD-CH (ops#640 polish P4): "tag\nvalue" draws Onshape's expression tag, a light-blue
     // box with the expression, above the value (Sketcher's Show expressions)
     QString tag;
-    if (const auto cut = str.indexOf(QLatin1Char('
-')); cut >= 0) {
+    if (const auto cut = str.indexOf(QLatin1Char('\n')); cut >= 0) {
         tag = str.left(cut);
         str = str.mid(cut + 1);
     }
