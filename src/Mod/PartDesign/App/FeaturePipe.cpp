@@ -6628,39 +6628,13 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         }
                     }
                 }
-                // A profile scaled up along the path, or a larger section further on, reaches
-                // further than the start profile does (the ops#666 skeptic's silent path A): a
-                // scaled profile's reach grows with the factor, and a section reaches no further
-                // than its distance from the path plus its extent
+                // A profile scaled up along the path reaches further than the start profile does
+                // (the ops#666 skeptic's silent path A): its reach grows with the factor. A larger
+                // section further on isn't counted: armed by the sections, OCCT's self-interference
+                // check stopped multisection helix pipes that built before (tier F, sweeps 9);
+                // whether those hits are real is open (ops#666's debt)
                 if (HasScale.getValue()) {
                     reach *= std::max(1.0, ScaleFactor.getValue());
-                }
-                if (Transformation.getValue() == 1) {
-                    for (const auto& subSet : Sections.getSubListValues()) {
-                        try {
-                            const Part::TopoShape section
-                                = getSectionShape("Section", subSet.first, subSet.second);
-                            if (section.isNull()) {
-                                continue;
-                            }
-                            const TopoDS_Shape placed = section.getShape().Moved(invObjLoc);
-                            Bnd_Box extent;
-                            BRepBndLib::Add(placed, extent);
-                            BRepExtrema_DistShapeShape gap(placed, wire);
-                            if (!extent.IsVoid()) {
-                                reach = std::max(
-                                    reach,
-                                    (gap.IsDone() ? gap.Value() : 0.0)
-                                        + std::sqrt(extent.SquareExtent())
-                                );
-                            }
-                        }
-                        catch (const Standard_Failure&) {
-                        }
-                        catch (const Base::Exception&) {
-                            // the sections' own checks below say what's wrong with it
-                        }
-                    }
                 }
                 passesNear = pathPassesNearItself(wire, reach);
             }
