@@ -2254,9 +2254,17 @@ void FeaturesView::syncSelectionFromApp()
         return;
     }
     std::set<std::string> selected;
+    // A face, edge or vertex picked highlights its part's row too (selection parity, Onshape SQ6);
+    // a whole feature picked doesn't (review props602s-r1, finding 1)
+    std::set<std::string> partsOfPicks;
     for (const auto& sel : Gui::Selection().getSelection(doc->getName())) {
         if (sel.pObject && sel.pObject->isAttachedToDocument()) {
             selected.insert(sel.pObject->getNameInDocument());
+            if (sel.SubName && sel.SubName[0]) {
+                if (auto body = PartDesign::Body::findBodyOf(sel.pObject)) {
+                    partsOfPicks.insert(body->getNameInDocument());
+                }
+            }
         }
     }
     // Only the rows that differ: setSelected() on a row commits the range a Shift+click is still
@@ -2276,7 +2284,8 @@ void FeaturesView::syncSelectionFromApp()
     }
     for (int i = 0; i < parts->topLevelItemCount(); ++i) {
         auto item = parts->topLevelItem(i);
-        bool want = selected.count(item->data(0, Qt::UserRole).toByteArray().toStdString()) > 0;
+        const std::string name = item->data(0, Qt::UserRole).toByteArray().toStdString();
+        bool want = selected.count(name) > 0 || partsOfPicks.count(name) > 0;
         if (item->isSelected() != want) {
             item->setSelected(want);
         }
