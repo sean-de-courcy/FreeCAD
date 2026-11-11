@@ -505,8 +505,7 @@ class TestFillet(unittest.TestCase):
         dressed = block.cut(models.front_top_removed("Fillet", 2.5))
         dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
         expected = dressed.cut(block.cut(base)).Volume
-        # Adaptive since the readouts are (ops#640, SC7); OCCT's default read 745.816371
-        self.assertAlmostEqual(expected, 745.816341, delta=1e-5)
+        self.assertAlmostEqual(expected, 745.816371, delta=1e-5)
         if fillet.isValid():
             self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
         else:
@@ -526,7 +525,7 @@ class TestFillet(unittest.TestCase):
         dressed = block.cut(models.outer_floor_removed("Fillet", 2.5))
         dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
         expected = dressed.cut(block.cut(base)).Volume
-        self.assertAlmostEqual(expected, 947.962368, delta=1e-5)
+        self.assertAlmostEqual(expected, 947.961856, delta=1e-5)
         if fillet.isValid():
             self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
         else:

@@ -100,7 +100,6 @@
 #include "PartPyCXX.h"
 #include "ShapeMapHasher.h"
 #include "TopoShapeMapper.h"
-#include "MassProperties.h"
 
 
 using namespace Part;
@@ -2924,7 +2923,9 @@ Py::Float TopoShapePy::getArea() const
     if (shape.IsNull()) {
         throw Py::RuntimeError("shape is invalid");
     }
-    return Py::Float(MassProperties::readoutArea(shape));
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return Py::Float(props.Mass());
 }
 
 Py::Float TopoShapePy::getVolume() const
@@ -2933,7 +2934,9 @@ Py::Float TopoShapePy::getVolume() const
     if (shape.IsNull()) {
         throw Py::RuntimeError("shape is invalid");
     }
-    return Py::Float(MassProperties::readoutVolume(shape));
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return Py::Float(props.Mass());
 }
 
 Py::String TopoShapePy::getHistoryAlgorithm() const

@@ -54,7 +54,6 @@
 #include "TopoShapeShellPy.h"
 #include "TopoShapeSolidPy.h"
 #include "TopoShapeSolidPy.cpp"
-#include "MassProperties.h"
 
 
 using namespace Part;
@@ -108,13 +107,16 @@ int TopoShapeSolidPy::PyInit(PyObject* args, PyObject* /*kwd*/)
 
 Py::Float TopoShapeSolidPy::getMass() const
 {
-    return Py::Float(MassProperties::readoutVolume(getTopoShapePtr()->getShape()));
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
+    double c = props.Mass();
+    return Py::Float(c);
 }
 
 Py::Object TopoShapeSolidPy::getCenterOfMass() const
 {
     GProp_GProps props;
-    MassProperties::readoutVolumeProperties(getTopoShapePtr()->getShape(), props);
+    BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
     gp_Pnt c = props.CentreOfMass();
     return Py::Vector(Base::Vector3d(c.X(), c.Y(), c.Z()));
 }
@@ -122,7 +124,7 @@ Py::Object TopoShapeSolidPy::getCenterOfMass() const
 Py::Object TopoShapeSolidPy::getMatrixOfInertia() const
 {
     GProp_GProps props;
-    MassProperties::readoutVolumeProperties(getTopoShapePtr()->getShape(), props);
+    BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
     gp_Mat m = props.MatrixOfInertia();
     Base::Matrix4D mat;
     for (int i = 0; i < 3; i++) {
@@ -136,7 +138,7 @@ Py::Object TopoShapeSolidPy::getMatrixOfInertia() const
 Py::Object TopoShapeSolidPy::getStaticMoments() const
 {
     GProp_GProps props;
-    MassProperties::readoutVolumeProperties(getTopoShapePtr()->getShape(), props);
+    BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
     Standard_Real lx, ly, lz;
     props.StaticMoments(lx, ly, lz);
     Py::Tuple tuple(3);
@@ -149,7 +151,7 @@ Py::Object TopoShapeSolidPy::getStaticMoments() const
 Py::Dict TopoShapeSolidPy::getPrincipalProperties() const
 {
     GProp_GProps props;
-    MassProperties::readoutVolumeProperties(getTopoShapePtr()->getShape(), props);
+    BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
     GProp_PrincipalProps pprops = props.PrincipalProperties();
 
     Py::Dict dict;
@@ -209,7 +211,7 @@ PyObject* TopoShapeSolidPy::getMomentOfInertia(PyObject* args) const
 
     try {
         GProp_GProps props;
-        MassProperties::readoutVolumeProperties(getTopoShapePtr()->getShape(), props);
+        BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
         double r = props.MomentOfInertia(
             gp_Ax1(Base::convertTo<gp_Pnt>(pnt), Base::convertTo<gp_Dir>(dir))
         );
@@ -233,7 +235,7 @@ PyObject* TopoShapeSolidPy::getRadiusOfGyration(PyObject* args) const
 
     try {
         GProp_GProps props;
-        MassProperties::readoutVolumeProperties(getTopoShapePtr()->getShape(), props);
+        BRepGProp::VolumeProperties(getTopoShapePtr()->getShape(), props);
         double r = props.RadiusOfGyration(
             gp_Ax1(Base::convertTo<gp_Pnt>(pnt), Base::convertTo<gp_Dir>(dir))
         );
