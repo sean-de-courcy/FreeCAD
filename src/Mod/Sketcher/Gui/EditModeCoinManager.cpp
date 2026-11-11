@@ -555,6 +555,8 @@ void EditModeCoinManager::ParameterObserver::initParameters()
         {"ShowConstraints", [](const std::string&) {}},
         // FreeCAD-CH (ops#640 polish P4): read in getPresentationString(), like the above
         {"ShowExpressions", [](const std::string&) {}},
+        // FreeCAD-CH (ops#640 polish P1b): read in shownConstraints(), like ShowConstraints
+        {"ShowErrors", [](const std::string&) {}},
         {"ViewScalingFactor", [this](const std::string&) { Client.updateElementSizeParameters(); }},
         {"MarkerSize", [this](const std::string&) { Client.updateElementSizeParameters(); }},
         {"EditSketcherFontName", [this](const std::string&) { Client.updateElementSizeParameters(); }},

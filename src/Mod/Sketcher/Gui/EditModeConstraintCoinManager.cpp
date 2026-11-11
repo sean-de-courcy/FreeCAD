@@ -111,40 +111,40 @@ std::vector<bool> EditModeConstraintCoinManager::shownConstraints(
 
     std::vector<bool> shown(constrlist.size(), false);
 
-    // FreeCAD-CH (ops#640 polish P1): with ShowConstraints off, Onshape's rule. The solver's
-    // over-defining constraints (1-based numbers, as EditModeGeometryCoinManager reads them) and
-    // the selected points as (GeoId, PosId), gathered once
+    // FreeCAD-CH (ops#640 polish P1, P1b): with ShowConstraints off, Onshape's rule (PL1b,
+    // PL1d): the dimensions, the selected or hovered constraints, the constraints of the hovered
+    // curve or point (not of the selected ones), and the over-defining ones with Show errors on.
+    // The solver's over-defining constraints are 1-based numbers, as EditModeGeometryCoinManager
+    // reads them
     std::set<int> overdefined;
-    std::set<std::pair<int, Sketcher::PointPos>> selectedPoints;
+    std::optional<int> hoverCurve;
+    std::optional<std::pair<int, Sketcher::PointPos>> hoverPoint;
     if (!showAll) {
         const Sketcher::SketchObject* sketch = viewProvider.getSketchObject();
-        for (const auto* numbers :
-             {&sketch->getLastConflicting(),
-              &sketch->getLastRedundant(),
-              &sketch->getLastMalformedConstraints()}) {
-            for (int number : *numbers) {
-                overdefined.insert(number - 1);
+        if (ViewProviderSketch::showErrorsPreference()) {
+            for (const auto* numbers :
+                 {&sketch->getLastConflicting(),
+                  &sketch->getLastRedundant(),
+                  &sketch->getLastMalformedConstraints()}) {
+                for (int number : *numbers) {
+                    overdefined.insert(number - 1);
+                }
             }
         }
-        ViewProviderSketchCoinAttorney::executeOnSelectionPointSet(
-            viewProvider,
-            [sketch, &selectedPoints](const int vertexId) {
-                if (vertexId == -1) {  // the root point (ViewProviderSketch::Selection)
-                    selectedPoints.emplace(Sketcher::GeoEnum::RtPnt, Sketcher::PointPos::start);
-                    return;
-                }
-                int geoId = Sketcher::GeoEnum::GeoUndef;
-                Sketcher::PointPos posId = Sketcher::PointPos::none;
-                sketch->getGeoVertexIndex(vertexId, geoId, posId);
-                if (geoId != Sketcher::GeoEnum::GeoUndef) {
-                    selectedPoints.emplace(geoId, posId);
-                }
+        hoverCurve = ViewProviderSketchCoinAttorney::getGlyphHoverCurve(viewProvider);
+        if (auto vertexId = ViewProviderSketchCoinAttorney::getGlyphHoverPoint(viewProvider)) {
+            int geoId = Sketcher::GeoEnum::GeoUndef;
+            Sketcher::PointPos posId = Sketcher::PointPos::none;
+            sketch->getGeoVertexIndex(*vertexId, geoId, posId);
+            if (geoId != Sketcher::GeoEnum::GeoUndef) {
+                hoverPoint.emplace(geoId, posId);
             }
-        );
+        }
     }
 
-    auto onSelection = [&](int constrId, const Sketcher::Constraint* constraint) {
-        if (ViewProviderSketchCoinAttorney::isConstraintSelected(viewProvider, constrId)) {
+    auto onHover = [&](int constrId, const Sketcher::Constraint* constraint) {
+        if (ViewProviderSketchCoinAttorney::isConstraintSelected(viewProvider, constrId)
+            || ViewProviderSketchCoinAttorney::isConstraintPreselected(viewProvider, constrId)) {
             return true;
         }
         const std::array<std::pair<int, Sketcher::PointPos>, 3> elements {{
@@ -152,14 +152,14 @@ std::vector<bool> EditModeConstraintCoinManager::shownConstraints(
             {constraint->Second, constraint->SecondPos},
             {constraint->Third, constraint->ThirdPos},
         }};
-        for (const auto& [geoId, posId] : elements) {
-            if (geoId == Sketcher::GeoEnum::GeoUndef) {
+        for (const auto& element : elements) {
+            if (element.first == Sketcher::GeoEnum::GeoUndef) {
                 continue;
             }
-            if (ViewProviderSketchCoinAttorney::isCurveSelected(viewProvider, geoId)) {
+            if (hoverCurve && element.first == *hoverCurve) {
                 return true;
             }
-            if (posId != Sketcher::PointPos::none && selectedPoints.contains({geoId, posId})) {
+            if (hoverPoint && element.second != Sketcher::PointPos::none && element == *hoverPoint) {
                 return true;
             }
         }
@@ -174,7 +174,7 @@ std::vector<bool> EditModeConstraintCoinManager::shownConstraints(
         }
         shown[i] = showAll || constraint->isDimensional()
             || overdefined.contains(static_cast<int>(i))
-            || onSelection(static_cast<int>(i), constraint);
+            || onHover(static_cast<int>(i), constraint);
     }
     return shown;
 }

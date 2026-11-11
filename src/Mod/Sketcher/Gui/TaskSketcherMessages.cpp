@@ -73,8 +73,8 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
     // FreeCAD-CH (ops#640 polish P1): Onshape's "Show constraints"
     auto* showConstraints = new QCheckBox(tr("Show constraints"));
     showConstraints->setObjectName(QStringLiteral("showConstraints"));
-    showConstraints->setToolTip(tr("Draws every constraint. Off, only the dimensions, the "
-        "selection's constraints and the conflicting ones are drawn"));
+    showConstraints->setToolTip(tr("Draws every constraint. Off, only the dimensions and the "
+        "constraints of the curve or point under the cursor are drawn"));
     showConstraints->setChecked(ViewProviderSketch::showConstraintsPreference());
     groupLayout()->addWidget(showConstraints);
     connect(showConstraints, &QCheckBox::toggled, this, [](bool checked) {
@@ -89,6 +89,16 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
     groupLayout()->addWidget(showExpressions);
     connect(showExpressions, &QCheckBox::toggled, this, [](bool checked) {
         ViewProviderSketch::setShowExpressionsPreference(checked);
+    });
+
+    // FreeCAD-CH (ops#640 polish P1b): Onshape's "Show errors", its fourth box
+    auto* showErrors = new QCheckBox(tr("Show errors"));
+    showErrors->setObjectName(QStringLiteral("showErrors"));
+    showErrors->setToolTip(tr("Draws the conflicting, redundant and malformed constraints"));
+    showErrors->setChecked(ViewProviderSketch::showErrorsPreference());
+    groupLayout()->addWidget(showErrors);
+    connect(showErrors, &QCheckBox::toggled, this, [](bool checked) {
+        ViewProviderSketch::setShowErrorsPreference(checked);
     });
 
     //NOLINTBEGIN

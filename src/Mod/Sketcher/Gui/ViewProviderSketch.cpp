@@ -1271,6 +1271,9 @@ void ViewProviderSketch::getSelectOtherPicks(
         pick.preselect = [idleSketch, result]() {
             if (ViewProviderSketch* vp = idleSketch()) {
                 if (vp->detectAndShowPreselection(result)) {
+                    if (vp->updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
+                        vp->editCoinManager->updateVirtualSpace();
+                    }
                     vp->editCoinManager->drawConstraintIcons();
                     vp->updateColor();
                 }
@@ -2110,6 +2113,9 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
     switch (Mode) {
         case STATUS_NONE:
             if (preselectChanged) {
+                if (updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
+                    editCoinManager->updateVirtualSpace();
+                }
                 editCoinManager->drawConstraintIcons();
                 updateColor();
                 return true;
@@ -3100,11 +3106,6 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                         }
                     }
                     updateColor();
-                    // FreeCAD-CH (ops#640 polish P1): with ShowConstraints off, the selected
-                    // geometry's constraints are drawn (a constraint's own redraw is above)
-                    if (!shapetype.starts_with("Constraint")) {
-                        updateConstraintsShownBySelection();
-                    }
                 }
             }
         }
@@ -3151,10 +3152,6 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                             editCoinManager->drawConstraintIcons();
                         }
                         updateColor();
-                        // FreeCAD-CH (ops#640 polish P1): see AddSelection
-                        if (!shapetype.starts_with("Constraint")) {
-                            updateConstraintsShownBySelection();
-                        }
                     }
                 }
             }
@@ -4159,13 +4156,82 @@ void ViewProviderSketch::setShowExpressionsPreference(bool show)
     sketcherGeneralGroup()->SetBool("ShowExpressions", show);
 }
 
-void ViewProviderSketch::updateConstraintsShownBySelection()
+bool ViewProviderSketch::showErrorsPreference()
 {
-    if (!isInEditMode() || selection.selectionBuffering || showConstraintsPreference()) {
+    // FreeCAD-CH (ops#640 polish P1b): Onshape's "Show errors", off by default
+    return sketcherGeneralGroup()->GetBool("ShowErrors", false);
+}
+
+void ViewProviderSketch::setShowErrorsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the open sketch
+    sketcherGeneralGroup()->SetBool("ShowErrors", show);
+}
+
+void ViewProviderSketch::updateConstraintsShownByHover()
+{
+    if (!isInEditMode() || !editCoinManager || showConstraintsPreference()) {
         return;
     }
     editCoinManager->updateVirtualSpace();
     editCoinManager->drawConstraintIcons();
+}
+
+bool ViewProviderSketch::updateGlyphHover()
+{
+    // FreeCAD-CH (ops#640 polish P1b): Onshape draws a curve's constraint glyphs while it is
+    // hovered (PL1b). FreeCAD draws them beside the curve, away from the cursor, so they stay
+    // ~0.8 s after the hover leaves, and while one of them is hovered, to be clicked
+    if (showConstraintsPreference()) {
+        return false;
+    }
+    GlyphHover hovered;
+    if (preselection.isPreselectPointValid()) {
+        hovered.point = preselection.PreselectPoint;
+    }
+    else if (preselection.isPreselectCurveValid()) {
+        hovered.curve = preselection.PreselectCurve;
+    }
+    if (hovered.curve || hovered.point) {
+        if (glyphHoverTimer) {
+            glyphHoverTimer->stop();
+        }
+        if (hovered.curve == glyphHover.curve && hovered.point == glyphHover.point) {
+            return false;
+        }
+        glyphHover = hovered;
+        return true;
+    }
+    if (!glyphHover.curve && !glyphHover.point) {
+        return false;
+    }
+    if (!preselection.PreselectConstraintSet.empty()) {  // a glyph is hovered: keep it
+        if (glyphHoverTimer) {
+            glyphHoverTimer->stop();
+        }
+        return false;
+    }
+    if (!glyphHoverTimer) {
+        glyphHoverTimer = std::make_unique<QTimer>();
+        glyphHoverTimer->setSingleShot(true);
+        glyphHoverTimer->setInterval(800);
+        QObject::connect(glyphHoverTimer.get(), &QTimer::timeout, [this]() {
+            glyphHover = GlyphHover();
+            updateConstraintsShownByHover();
+        });
+    }
+    if (!glyphHoverTimer->isActive()) {
+        glyphHoverTimer->start();
+    }
+    return false;
+}
+
+void ViewProviderSketch::clearGlyphHover()
+{
+    if (glyphHoverTimer) {
+        glyphHoverTimer->stop();
+    }
+    glyphHover = GlyphHover();
 }
 
 
@@ -4936,6 +5002,7 @@ void ViewProviderSketch::unsetEdit(int ModNum)
     if (ModNum != ViewProviderSketch::Default) {
         return PartGui::ViewProvider2DObject::unsetEdit(ModNum);
     }
+    clearGlyphHover();  // FreeCAD-CH (ops#640 polish P1b)
 
     if (dragAutoConstraintHandler) {
         dragAutoConstraintHandler->clear();

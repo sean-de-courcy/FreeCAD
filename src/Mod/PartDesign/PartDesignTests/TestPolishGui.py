@@ -169,6 +169,7 @@ class SketchCase(PolishCase):
     def setUp(self):
         super().setUp()
         App.ParamGet(SKETCHER_GENERAL).RemBool("ShowConstraints")
+        App.ParamGet(SKETCHER_GENERAL).RemBool("ShowErrors")
         self.distance = self.sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
         self.horizontal = self.sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
         self.doc.recompute()
@@ -178,6 +179,7 @@ class SketchCase(PolishCase):
             Gui.ActiveDocument.resetEdit()
             pump(0.2)
         App.ParamGet(SKETCHER_GENERAL).RemBool("ShowConstraints")
+        App.ParamGet(SKETCHER_GENERAL).RemBool("ShowErrors")
         super().tearDown()
 
     def openSketch(self):
@@ -187,9 +189,10 @@ class SketchCase(PolishCase):
 
 
 class TestShowConstraintsGui(SketchCase):
-    """P1: inside a sketch Onshape draws no constraint glyph until the sketch dialog's "Show
-    constraints" is on; the dimensions are always drawn, and so are a selected entity's own
-    constraints. What is drawn is read from the sketch's constraint switchboard (the node
+    """P1, P1b: inside a sketch Onshape draws no constraint glyph until the sketch dialog's "Show
+    constraints" is on; the dimensions are always drawn, and so are a hovered entity's own
+    constraints (not a selected one's: notes/onshape-facts.md PL1b), kept a moment after the hover
+    leaves; the conflicting ones only with "Show errors" on (PL1d). What is drawn is read from the sketch's constraint switchboard (the node
     "ConstraintGroup", one switch per constraint), the one the change drives. The pad's sketch
     gets a Distance and a Horizontal on line 0 after its four corner coincidents (0 to 3):
     coincidents 0 (line 0's end) and 3 (line 0's start) are line 0's, 1 and 2 are not."""
@@ -215,19 +218,58 @@ class TestShowConstraintsGui(SketchCase):
         self.assertFalse(drawn[self.horizontal], "Onshape draws no horizontal glyph by default")
         self.assertEqual(drawn[:4], [False] * 4, "nor the coincidents")
 
-    def testSelectedLineDrawsItsOwnConstraints(self):
+    def screenPoint(self, sketchPoint):
+        """The view's widget point over a point of the sketch's plane."""
+        global_point = self.sketch.getGlobalPlacement().multVec(sketchPoint)
+        x, y = self.view.getPointOnViewport(global_point)
+        viewport = self.view.graphicsView().viewport()
+        ratio = viewport.devicePixelRatioF()
+        return QtCore.QPoint(round(x / ratio), round(viewport.height() - y / ratio))
+
+    def hoverLine0(self):
+        """Hovers line 0 a quarter along it (its dimension's label sits at its middle)."""
+        line = self.sketch.Geometry[0]
+        self.hover(QtCore.QPoint(5, 5))
+        self.hover(self.screenPoint(line.StartPoint + (line.EndPoint - line.StartPoint) * 0.25))
+
+    def testHoveredLineDrawsItsOwnConstraints(self):
+        self.openSketch()
+        self.hoverLine0()
+        drawn = self.drawn()
+        self.assertTrue(drawn[self.horizontal], "the hovered line's horizontal is drawn")
+        self.assertTrue(drawn[self.distance])
+        self.assertEqual(drawn[:4], [True, False, False, True], "the line's own coincidents only")
+        self.hover(QtCore.QPoint(5, 5))
+        self.assertTrue(self.drawn()[self.horizontal], "kept a moment after the hover leaves")
+        pump(1.2)
+        drawn = self.drawn()
+        self.assertFalse(drawn[self.horizontal], "hidden again once the hover is gone")
+        self.assertEqual(drawn[:4], [False] * 4)
+
+    def testSelectedLineDrawsNoGlyph(self):
+        """Onshape: selecting a line shows none of its constraints (only hovering does)."""
         self.openSketch()
         Gui.Selection.addSelection(self.doc.Name, self.sketch.Name, "Edge1")
         pump()
         drawn = self.drawn()
-        self.assertTrue(drawn[self.horizontal], "the selected line's horizontal is drawn")
-        self.assertTrue(drawn[self.distance])
-        self.assertEqual(drawn[:4], [True, False, False, True], "the line's own coincidents only")
-        Gui.Selection.clearSelection()
+        self.assertFalse(drawn[self.horizontal])
+        self.assertEqual(drawn[:4], [False] * 4)
+
+    def testShowErrorsDrawsTheConflictingConstraints(self):
+        """A Vertical on the horizontal line 0 conflicts: its glyphs only with Show errors on."""
+        vertical = self.sketch.addConstraint(Sketcher.Constraint("Vertical", 0))
+        self.doc.recompute()
+        conflicting = [n - 1 for n in self.sketch.ConflictingConstraints]
+        self.assertTrue(conflicting, "Expected the solver to report the conflict")
+        self.assertTrue(set(conflicting) <= {self.horizontal, vertical})
+        self.openSketch()
+        drawn = self.drawn()
+        self.assertFalse(drawn[self.horizontal] or drawn[vertical], "Show errors is off")
+        App.ParamGet(SKETCHER_GENERAL).SetBool("ShowErrors", True)
         pump()
         drawn = self.drawn()
-        self.assertFalse(drawn[self.horizontal], "hidden again once the line is unselected")
-        self.assertEqual(drawn[:4], [False] * 4)
+        self.assertTrue(all(drawn[i] for i in conflicting), "the conflicting glyphs are drawn")
+        self.assertEqual(drawn[:4], [False] * 4, "the other glyphs stay hidden")
 
     def testSelectedConstraintIsDrawn(self):
         self.openSketch()
@@ -272,8 +314,8 @@ class TestShowConstraintsGui(SketchCase):
 
 
 class TestSketchDialogCheckboxesGui(SketchCase):
-    """P4: Onshape's sketch dialog holds, in this order, Disable imprinting, Show constraints,
-    Show expressions (and Show errors, not yet here). Disable imprinting is the sketch's own (its
+    """P4, P1b: Onshape's sketch dialog holds, in this order, Disable imprinting, Show
+    constraints, Show expressions and Show errors. Disable imprinting is the sketch's own (its
     property DisableImprinting, one undo step; what it does to the regions is in
     TestProfileRegions); Show expressions is the user's (Mod/Sketcher/General/ShowExpressions,
     off by default): a dimension set by an expression then reads the expression, not its value.
@@ -310,11 +352,11 @@ class TestSketchDialogCheckboxesGui(SketchCase):
 
     def testBoxesInOnshapesOrder(self):
         self.openSketch()
-        names = ["disableImprinting", "showConstraints", "showExpressions"]
+        names = ["disableImprinting", "showConstraints", "showExpressions", "showErrors"]
         boxes = [self.box(name) for name in names]
         layout = boxes[0].parentWidget().layout()
         self.assertEqual([layout.indexOf(b) for b in boxes], sorted(layout.indexOf(b) for b in boxes))
-        self.assertEqual([b.isChecked() for b in boxes], [False] * 3, "Onshape's defaults: all off")
+        self.assertEqual([b.isChecked() for b in boxes], [False] * 4, "Onshape's defaults: all off")
 
     def testDisableImprintingSetsTheSketchsProperty(self):
         self.openSketch()
