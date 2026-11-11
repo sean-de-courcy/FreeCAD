@@ -12,6 +12,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QEvent>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -691,17 +693,58 @@ private:
     bool pending = false;
 };
 
+/// The live part at owner's place a pick on obj names (selection parity P4, SQ15): obj is the
+/// part itself or one of its solid features (a face, edge or vertex of it); null for a sketch, a
+/// plane, a part not live there (consumed, merged away, made later) or another document's object
+PartDesign::Body* pickedLivePart(const App::DocumentObject* owner, App::DocumentObject* obj)
+{
+    if (!owner || !obj || obj->getDocument() != owner->getDocument()) {
+        return nullptr;
+    }
+    auto body = freecad_cast<PartDesign::Body*>(obj);
+    if (!body && freecad_cast<PartDesign::Feature*>(obj)) {
+        body = PartDesign::Body::findBodyOf(obj);
+    }
+    if (!body) {
+        return nullptr;
+    }
+    const auto live = liveStudioParts(owner);
+    return std::ranges::find(live, body) != live.end() ? body : nullptr;
+}
+
+/// While a studio Boolean's dialog is open, only its live parts are pickable (P4): a sketch
+/// element or a plane is refused, as Onshape's Boolean fields take parts only
+class StudioPartPickGate: public Gui::SelectionGate
+{
+public:
+    explicit StudioPartPickGate(App::DocumentObject* owner)
+        : ownerT(owner)
+    {}
+
+    bool allow(App::Document* /*doc*/, App::DocumentObject* obj, const char* /*sub*/) override
+    {
+        return pickedLivePart(ownerT.getObject(), obj) != nullptr;
+    }
+
+private:
+    App::DocumentObjectT ownerT;
+};
+
 /** A Boolean studio feature's parts (ops#654 P5, Onshape O3): Targets and Tools, one tick per part
  * live at its place (P6a: never a consumed or merged-away part), as Onshape's fields; Union has
  * Tools only, merged into the first ticked. Each change is a list edit
  * (PartDesign.studioSetScopeIds / studioSetToolIds) in the dialog's transaction; why the Boolean
  * fails is said under the ticks, in red.
+ * 3D picks (selection parity P4, Onshape SQ14/SQ15): one list is armed, Tools when the dialog
+ * opens, Targets after a click on it; a pick on a live part toggles that part's tick in the armed
+ * list (the same list edit), clears the selection and leaves the list armed.
  */
-class StudioBooleanBox: public QWidget
+class StudioBooleanBox: public QWidget, public Gui::SelectionObserver
 {
 public:
     explicit StudioBooleanBox(App::DocumentObject* owner)
-        : ownerT(owner)
+        : Gui::SelectionObserver(true, Gui::ResolveMode::NoResolve)
+        , ownerT(owner)
     {
         setObjectName(QStringLiteral("studioBooleanBox"));
         auto* layout = new QVBoxLayout(this);
@@ -728,6 +771,19 @@ public:
         QObject::connect(tools, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
             onTicked(item, true);
         });
+        for (QListWidget* list : {targets, tools}) {
+            list->viewport()->installEventFilter(this);
+            list->installEventFilter(this);
+        }
+        gate = new StudioPartPickGate(owner);
+        Gui::Selection().addSelectionGate(gate);
+    }
+
+    ~StudioBooleanBox() override
+    {
+        if (gate && Gui::Selection().getSelectionGate(nullptr) == gate) {
+            Gui::Selection().rmvSelectionGate();
+        }
     }
 
     void refresh()
@@ -756,6 +812,8 @@ public:
         fill(tools, owner->StudioTools.getValues());
         targetsLabel->setVisible(!fuse);
         targets->setVisible(!fuse);
+        hasTargets = !fuse;
+        arm(armTargets);
         tools->setToolTip(fuse ? trStudio("The parts merged, into the first one ticked")
                                : trStudio("The parts subtracted from the targets"));
         QString text = refusal;
@@ -863,7 +921,82 @@ public:
                  + (list ? list->getNameInDocument() : "") + "'))"});
     }
 
+protected:
+    /// A click on a list arms it (P4)
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        const auto type = event->type();
+        if (type == QEvent::MouseButtonPress || type == QEvent::FocusIn) {
+            if (watched == targets || watched == targets->viewport()) {
+                arm(true);
+            }
+            else if (watched == tools || watched == tools->viewport()) {
+                arm(false);
+            }
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void onSelectionChanged(const Gui::SelectionChanges& msg) override
+    {
+        auto owner = ownerT.getObject();
+        if (msg.Type != Gui::SelectionChanges::AddSelection || !owner) {
+            return;
+        }
+        App::DocumentObject* obj = msg.Object.getSubObject();
+        if (!obj) {
+            obj = msg.Object.getObject();
+        }
+        PartDesign::Body* body = pickedLivePart(owner, obj);
+        if (!body) {
+            return;
+        }
+        // After the selection signal: the toggle runs a list edit and clears the selection
+        QPointer<StudioBooleanBox> self(this);
+        const std::string id = PartDesign::studioPartId(body);
+        QMetaObject::invokeMethod(
+            this,
+            [self, id]() {
+                if (self) {
+                    self->toggle(id);
+                    Gui::Selection().clearSelection();
+                }
+            },
+            Qt::QueuedConnection
+        );
+    }
+
 private:
+    /// Arms Targets (on) or Tools; a Union has no Targets, so Tools
+    void arm(bool targetsOn)
+    {
+        armTargets = targetsOn && hasTargets;
+        const QString frame = QStringLiteral("QListWidget { border: 2px solid palette(highlight); }");
+        targets->setProperty("armed", armTargets);
+        tools->setProperty("armed", !armTargets);
+        targets->setStyleSheet(armTargets ? frame : QString());
+        tools->setStyleSheet(armTargets ? QString() : frame);
+        QFont font = toolsLabel->font();
+        font.setBold(armTargets);
+        targetsLabel->setFont(font);
+        font.setBold(!armTargets);
+        toolsLabel->setFont(font);
+    }
+
+    /// The armed list's tick of the part id, toggled (itemChanged makes the list edit)
+    void toggle(const std::string& id)
+    {
+        QListWidget* list = armTargets ? targets : tools;
+        const QString key = QString::fromStdString(id);
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem* item = list->item(i);
+            if (item->data(Qt::UserRole).toString() == key) {
+                item->setCheckState(item->checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked);
+                return;
+            }
+        }
+    }
+
     void onTicked(QListWidgetItem* item, bool tool)
     {
         auto owner = freecad_cast<PartDesign::Boolean*>(ownerT.getObject());
@@ -895,7 +1028,10 @@ private:
     QListWidget* tools = nullptr;
     QLabel* note = nullptr;
     QString refusal;
+    StudioPartPickGate* gate = nullptr;
     bool updating = false;
+    bool armTargets = false;
+    bool hasTargets = true;
 };
 
 

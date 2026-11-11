@@ -1322,6 +1322,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertNotIn(MAGENTA, colours)
         self.assertEqual(colours.count(CURRENT), 1)
 
+    def testEditedFieldStaysArmedOverTheReferencesPanel(self):
+        """Selection parity 8: an edited dress-up's Base field is armed on open (rank 14) and
+        stays armed once the panel shows, though the dialog has a References panel (a guessed
+        entry). The panel's refresh on the field's show had nothing to highlight (the field
+        covers Base) but still took the selection, which disarmed the field: whether the field
+        ended armed hung on whether the panel showed before or after the arm."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed"])
+        pump(0.5)
+        self.assertTrue(armed(field), "the field disarmed after the dialog opened")
+
     def testGuessStaysGuessedAfterAnotherPick(self):
         """Review 2: the redrawn fillet's guessed entry stays guessed (its record kept) when
         another edge is picked, when that one is deleted again, and through the field's undo."""
@@ -4653,6 +4665,29 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testMirroredReferencePickThenOk(self):
         self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
+
+    def testMirroredPlaneTakesASketchRegion(self):
+        """Selection parity SQ16 (Onshape's Mirror plane takes a sketch region): a region of a
+        sketch standing at x = 3 (normal +X) mirrors the first bump (x 1..2, y 1..2) to x 4..5;
+        the plane is the sketch itself."""
+        first, second = self.bumps()
+        sk = models.sketch(self.doc, "MirrorSk", models.rectangle(-2, -2, 2, 2), self.body,
+                           placement=App.Placement(App.Vector(3, 0, 0),
+                                                   App.Rotation(App.Vector(0, 1, 0), 90)))
+        sk.MakeInternals = True
+        self.doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
+        pattern = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(pattern)
+        self.selectReference("comboPlane")
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sk.Name + ".InternalFace1")
+        pump(0.3)
+        self.assertLink(pattern.MirrorPlane, sk, [])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(pattern.Shape.Volume, 1003, places=6)
+        self.assertTrue(pattern.Shape.isInside(App.Vector(4.5, 1.5, 10.5), 1e-7, True))
 
     def testPatternOriginalsLabelRenamed(self):
         """A listed original renamed while the panel is open shows its new Label (and the other
