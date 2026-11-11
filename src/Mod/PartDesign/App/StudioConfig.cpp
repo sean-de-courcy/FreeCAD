@@ -409,7 +409,6 @@ std::string currentText(App::DocumentObject* obj, const std::string& path)
 /// configReconcile's work; changed collects the objects whose expression or suppression it wrote
 std::string reconcileCells(StudioConfig* cfg, bool checkOnly, std::set<App::DocumentObject*>* changed)
 {
-    App::Document* doc = cfg->getDocument();
     const json inputs = inputsOf(cfg);
     json table = tableOf(cfg);
     const auto values = activeValues(cfg);
