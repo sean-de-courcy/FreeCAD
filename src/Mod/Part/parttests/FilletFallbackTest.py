@@ -1998,6 +1998,28 @@ class OverflowTest(unittest.TestCase):
                 )
                 self.assertBuilt(plate.makeFillet(size, rims), volume, 10)
 
+    def testRimsAtTwentyTimesWhoseLensIsBelowTheVolumesNoise(self):
+        # ops#669: K2A's fillet 1.6 at 20x (holes r 29, 120 apart, fillet 32). The raised tolerances
+        # (3.2e-4) put the integrated volume 0.099 off the closed form, and the lens the rounds share
+        # is 0.105: the volume check can't tell a lens left from a lens removed (the construction
+        # checks it by points). The shape is right: the material in a box around the lens is the
+        # analytic 3105.6097 (midpoint quadrature of the material's height over x, y; 4000 x 4000
+        # and 2000 x 2000 agree to 2e-7), and nothing of the lens is left
+        plate, rims = plate_with_holes((600, 400, 100), [(240, 200), (360, 200)], 29)
+        shape = plate.makeFillet(32, rims)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), 10)
+        # The plate less the two rounds (Pappus) plus the lens, to the measurement's noise
+        self.assertAlmostEqual(shape.Volume, 23371762.554, delta=0.2)
+        half = math.sqrt(61**2 - 58.6**2) + 0.4  # the lens's half length (to x 301.4), plus 0.4
+        box = Part.makeBox(2.8, 2 * half, 32, V(298.6, 200 - half, 68))
+        self.assertAlmostEqual(shape.common(box).Volume, 3105.6097, delta=0.01)
+        # Points inside the lens (removed by both rounds; it is 0.0156 thick at its middle, x 300,
+        # y 200, and ends 11 to either side): outside the result
+        for x, y, z in ((300, 200, 99.995), (300, 198, 99.995), (300.3, 200, 99.995)):
+            self.assertFalse(shape.isInside(V(x, y, z), 1e-6, True), (x, y, z))
+
     def testRimsWhoseRoundsBarelyOverlapFail(self):
         # Debt (ops#640): Onshape builds K2A's fillet 1.56 (2922.145). Where two rounds overlap by
         # less than about 0.02, each is within 1e-5 of the plate's top in the lens they share, and

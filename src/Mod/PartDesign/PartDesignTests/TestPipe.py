@@ -3640,9 +3640,12 @@ class TestLoosePipeWarns(unittest.TestCase):
 
     def testLongSpiral(self):
         """A circle of radius 0.5 along a 3D spiral through 1000 points (radius 10 to 30 mm,
-        rising 0.05 mm a point; curvature radius at least 10 mm), Standard mode: at degree 14 it
-        builds 0.43 mm off the tube with tolerances of 2 mm (at OCCT's default degree it failed to
-        build). Before, the Pipe was "Valid" with no warning"""
+        rising 0.05 mm a point; curvature radius at least 10 mm), Standard mode. OCCT's corrected
+        Frenet law drifts along it: at degree 14 the sweep was 0.43 mm off the tube with vertex
+        tolerances of 2 mm, warned on Windows and refused on macOS (one face failed the shape
+        check there, ops#667). A circle about the spine sweeps to the same solid in any frame: the
+        loose sweep is built again with the Frenet frame, within 1e-4 of the tube on every
+        platform, valid with no warning"""
         points = [
             V((10 + 0.02 * i) * math.cos(i * 0.05), (10 + 0.02 * i) * math.sin(i * 0.05), 0.05 * i)
             for i in range(1000)
@@ -3663,27 +3666,24 @@ class TestLoosePipeWarns(unittest.TestCase):
         pipe.Profile = profile
         pipe.Spine = (spine, ["Edge1"])
         pipe.Mode = "Standard"  # not None's Frenet off a plane (ops#640), which builds it tight
-        self.assertWarns(pipe)
-        # Each edge's tolerance holds its curves' deviation with a margin (ops#667): OCCT stored
-        # the end circles' at 1.05 times it on Windows, and macOS's slightly different sweep went
-        # past it, failing a face's check there alone. Measured here at 400 points of each
-        # face's curve on surface against the edge's curve, at the same parameter
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("tolerance of", pipe.getStatusString())
         shape = pipe.Shape
-        for k, face in enumerate(shape.Faces):
-            for edge in face.Edges:
-                if edge.Degenerated:
-                    continue
-                curve2d, first, last = face.curveOnSurface(edge)
-                deviation = 0.0
-                for i in range(401):
-                    u = first + (last - first) * i / 400
-                    p = curve2d.value(u)
-                    deviation = max(deviation, (face.Surface.value(p.x, p.y) - edge.valueAt(u)).Length)
-                self.assertGreaterEqual(
-                    edge.Tolerance,
-                    1.5 * deviation,
-                    "face %d: tolerance %.4g, deviation %.4g" % (k + 1, edge.Tolerance, deviation),
-                )
+        self.assertLess(shape.getTolerance(1), 1e-3)
+        # Pappus: the tube's volume is the circle's area times the spine's length
+        volume = math.pi * 0.25 * curve.length()
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-5 * volume)
+        # The side within 1e-4 of the tube: its distance from the spine is the radius
+        side = [face for face in shape.Faces if face.Surface.TypeId == "Part::GeomBSplineSurface"]
+        self.assertEqual(len(side), 1)
+        u0, u1, v0, v1 = side[0].ParameterRange
+        spineEdge = curve.toShape()
+        for i in range(10):
+            for j in range(30):
+                point = side[0].valueAt(u0 + (u1 - u0) * (i + 0.5) / 10, v0 + (v1 - v0) * (j + 0.5) / 30)
+                distance = spineEdge.distToShape(Part.Vertex(point))[0]
+                self.assertAlmostEqual(distance, 0.5, delta=1e-4)
 
     def testTwistedSquareAlongAnAuxiliarySpine(self):
         """A square of side 2 along a 50 mm line up Z, a helix of radius 5 and pitch 50 as

@@ -31,6 +31,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <numeric>
 #include <optional>
@@ -43,6 +44,7 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <BOPAlgo_ArgumentAnalyzer.hxx>
@@ -103,6 +105,7 @@
 #include <GProp_PEquation.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
 #include <gp_Hypr.hxx>
@@ -137,6 +140,7 @@
 #include <Base/Reader.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/PipeShellApproximation.h>
 #include <Mod/Part/App/SweepFrenet.h>
 
@@ -6787,6 +6791,60 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
     return Part::TopoShape(wall.Located(location));
 }
 
+// Whether every section is one circle centred on a one-edge spine with its axis along the spine's
+// tangent there: a solid of revolution about the spine, the same whatever the frame law turns
+// the sections by
+bool circlesAboutSpine(const std::vector<Part::TopoShape>& sections, const TopoDS_Shape& spine)
+{
+    TopTools_IndexedMapOfShape spineEdges;
+    TopExp::MapShapes(spine, TopAbs_EDGE, spineEdges);
+    if (spineEdges.Extent() != 1 || sections.empty()) {
+        return false;
+    }
+    const TopoDS_Edge& path = TopoDS::Edge(spineEdges(1));
+    const BRepAdaptor_Curve along(path);
+    for (const Part::TopoShape& section : sections) {
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(section.getShape(), TopAbs_EDGE, edges);
+        if (edges.Extent() != 1) {
+            return false;
+        }
+        const BRepAdaptor_Curve curve(TopoDS::Edge(edges(1)));
+        if (curve.GetType() != GeomAbs_Circle) {
+            return false;
+        }
+        const gp_Circ circle = curve.Circle();
+        BRepExtrema_DistShapeShape distance(
+            BRepBuilderAPI_MakeVertex(circle.Location()).Vertex(),
+            path
+        );
+        if (!distance.IsDone() || distance.NbSolution() < 1
+            || distance.Value() > Precision::Confusion()
+            || (distance.SupportTypeShape2(1) == BRepExtrema_IsVertex
+                && !(distance.SupportOnShape2(1).IsSame(TopExp::FirstVertex(path))
+                     || distance.SupportOnShape2(1).IsSame(TopExp::LastVertex(path))))) {
+            return false;
+        }
+        double parameter = 0.0;
+        if (distance.SupportTypeShape2(1) == BRepExtrema_IsOnEdge) {
+            distance.ParOnEdgeS2(1, parameter);
+        }
+        else {
+            parameter = distance.SupportOnShape2(1).IsSame(TopExp::FirstVertex(path))
+                ? along.FirstParameter()
+                : along.LastParameter();
+        }
+        gp_Pnt point;
+        gp_Vec tangent;
+        along.D1(parameter, point, tangent);
+        if (tangent.Magnitude() < gp::Resolution()
+            || !circle.Axis().Direction().IsParallel(gp_Dir(tangent), Precision::Angular())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Honest edge tolerances (ops#667). OCCT's sweep stores an edge's tolerance from the deviation of
 // its curves on the faces as it measured them, with little margin: the end circles of a long
 // B-spline pipe had 3.36e-6 against a deviation of 3.20e-6 on Windows, and the slightly different
@@ -8186,29 +8244,67 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
         std::vector<Part::TopoShape> frontwires, backwires;
         for (auto& wires : wiresections) {
-            BRepOffsetAPI_MakePipeShell mkPS(TopoDS::Wire(path.getShape()));
-            setupAlgorithm(mkPS, auxpath.getShape());
-
-            if (!scalinglaw) {
-                if (!profilePoint.isNull()) {
-                    mkPS.Add(copyProfilePoint.getShape());
+            for (size_t i = 0; i < wires.size(); ++i) {
+                place(wires[i], i);
+            }
+            auto addSections = [&](BRepOffsetAPI_MakePipeShell& pipe) {
+                if (!scalinglaw) {
+                    if (!profilePoint.isNull()) {
+                        pipe.Add(copyProfilePoint.getShape());
+                    }
+                    for (const auto& wire : wires) {
+                        pipe.Add(wire.getShape());
+                    }
                 }
-
-                for (size_t i = 0; i < wires.size(); ++i) {
-                    place(wires[i], i);
-                    mkPS.Add(wires[i].getShape());
+                else {
+                    if (!profilePoint.isNull()) {
+                        pipe.SetLaw(copyProfilePoint.getShape(), scalinglaw);
+                    }
+                    for (const auto& wire : wires) {
+                        pipe.SetLaw(wire.getShape(), scalinglaw);
+                    }
+                }
+            };
+            auto standard
+                = std::make_unique<BRepOffsetAPI_MakePipeShell>(TopoDS::Wire(path.getShape()));
+            setupAlgorithm(*standard, auxpath.getShape());
+            addSections(*standard);
+            // A loose Standard sweep of circles about the spine is built again with the Frenet
+            // frame, the same solid (ops#667): OCCT's corrected Frenet law drifts along a long 3D
+            // spine (a circle of radius 0.5 along a 50-turn spiral of 1000 points: 0.4 mm off the
+            // tube, tolerances of 2 mm, and one face that failed the shape check on macOS alone),
+            // where the Frenet frame built it 6e-6 off with tolerances of 5e-5. Taken only when
+            // valid and no longer loose; other sweeps are unchanged
+            if (mode == 0 && !scalinglaw && profilePoint.isNull()
+                && circlesAboutSpine(wires, path.getShape())) {
+                const auto tolerance = [](const TopoDS_Shape& shape) {
+                    return ShapeAnalysis_ShapeTolerance().Tolerance(shape, 1);
+                };
+                try {
+                    standard->Build();
+                    if (standard->IsDone()
+                        && tolerance(standard->Shape())
+                            > Part::PipeShellApproximation::warningTolerance) {
+                        auto frenet = std::make_unique<BRepOffsetAPI_MakePipeShell>(
+                            TopoDS::Wire(path.getShape())
+                        );
+                        setupAlgorithm(*frenet, auxpath.getShape());
+                        frenet->SetMode(true);
+                        addSections(*frenet);
+                        frenet->Build();
+                        if (frenet->IsDone()
+                            && tolerance(frenet->Shape())
+                                <= Part::PipeShellApproximation::warningTolerance
+                            && Part::KernelBudget::checkValid(frenet->Shape())) {
+                            standard = std::move(frenet);
+                        }
+                    }
+                }
+                catch (const Standard_Failure&) {
+                    // The Standard sweep as it builds below, with its own errors
                 }
             }
-            else {
-                if (!profilePoint.isNull()) {
-                    mkPS.SetLaw(copyProfilePoint.getShape(), scalinglaw);
-                }
-
-                for (size_t i = 0; i < wires.size(); ++i) {
-                    place(wires[i], i);
-                    mkPS.SetLaw(wires[i].getShape(), scalinglaw);
-                }
-            }
+            BRepOffsetAPI_MakePipeShell& mkPS = *standard;
 
             if (!mkPS.IsReady()) {
                 return new App::DocumentObjectExecReturn(
