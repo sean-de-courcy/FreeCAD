@@ -273,6 +273,114 @@ class TestPartsListGui(unittest.TestCase):
         self.assertRows([("Part 1", "A"), ("Part 2", "B"), ("Part 3", "C")])
         self.assertAlmostEqual(self.body("A").Shape.Volume, 500, places=3)
 
+    # -------------------------------------------------------------- 3D picks (selection parity P4)
+    # Onshape's Boolean (SQ14, SQ15): Tools is active when the dialog opens and stays active; a pick
+    # on a part adds it (again: removes it); a click on Targets makes Targets the active field; a
+    # sketch element, a plane or a part not live at the Boolean's place is refused.
+    def armed(self, name):
+        rows = self.visible(QtWidgets.QListWidget, name)
+        return bool(rows is not None and rows.property("armed"))
+
+    def pick(self, obj, sub=""):
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, obj, sub)
+        pump(0.3)
+
+    def clickList(self, name):
+        from PySide6 import QtTest
+
+        rows = self.visible(QtWidgets.QListWidget, name)
+        self.assertIsNotNone(rows, name)
+        rect = rows.visualItemRect(rows.item(0))
+        QtTest.QTest.mouseClick(rows.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                                QtCore.QPoint(rect.right() - 4, rect.center().y()))
+        pump(0.2)
+
+    def testBooleanToolsArmedPickTogglesAPart(self):
+        """A Union opens with Tools armed; a face of C ticks C, a face again unticks it; the
+        selection is cleared and Tools stays armed."""
+        b = self.runBoolean()
+        self.assertTrue(self.armed("studioToolList"))
+        self.pick("CPad", "Face1")
+        self.assertEqual(list(b.StudioTools), ["A", "B", "C"])
+        self.assertEqual(self.ticks("studioToolList"),
+                         [("Part 1", "A", True), ("Part 2", "B", True), ("Part 3", "C", True)])
+        self.assertTrue(waitFor(lambda: not Gui.Selection.getSelectionEx()))
+        self.assertTrue(self.armed("studioToolList"))
+        self.pick("C", "CPad.Edge1")  # a pick through the part, as the 3D view gives it
+        self.assertEqual(list(b.StudioTools), ["A", "B"])
+        self.pick("B")  # the part itself (a Parts list or tree click)
+        self.assertEqual(list(b.StudioTools), ["A"])
+        self.close(ok=False)
+
+    def testBooleanTargetsArmByClick(self):
+        """Subtract: Tools armed; a click on Targets arms it, and a pick of C makes C a target;
+        a click on Tools arms Tools again."""
+        b = self.runBoolean()
+        self.visible(QtWidgets.QPushButton, "buttonSubtract").click()
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: self.ticks("studioTargetList") is not None))
+        self.assertTrue(self.armed("studioToolList"))
+        self.assertFalse(self.armed("studioTargetList"))
+        self.clickList("studioTargetList")
+        self.assertTrue(self.armed("studioTargetList"))
+        self.assertFalse(self.armed("studioToolList"))
+        self.assertEqual(list(b.StudioScope), ["A"])  # the click ticked nothing
+        self.pick("CPad", "Face1")
+        self.assertEqual(list(b.StudioScope), ["A", "C"])
+        self.assertEqual(list(b.StudioTools), ["B"])
+        self.assertTrue(self.armed("studioTargetList"))
+        self.clickList("studioToolList")
+        self.assertTrue(self.armed("studioToolList"))
+        self.pick("CPad", "Face2")
+        self.assertEqual(list(b.StudioTools), ["B", "C"])
+        self.close(ok=False)
+
+    def testBooleanUnionArmsToolsAgain(self):
+        """Targets armed, then Union: Targets is hidden, so Tools is armed."""
+        self.runBoolean()
+        self.visible(QtWidgets.QPushButton, "buttonSubtract").click()
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: self.ticks("studioTargetList") is not None))
+        self.clickList("studioTargetList")
+        self.assertTrue(self.armed("studioTargetList"))
+        self.visible(QtWidgets.QPushButton, "buttonUnion").click()
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: self.ticks("studioTargetList") is None))
+        self.assertTrue(self.armed("studioToolList"))
+        self.close(ok=False)
+
+    def testBooleanRefusesSketchPlaneAndStaysArmed(self):
+        """A sketch edge and an origin plane are refused: nothing selected, no tick, still armed."""
+        b = self.runBoolean()
+        tools = list(b.StudioTools)
+        self.pick("CSk", "Edge1")
+        self.assertFalse(Gui.Selection.getSelectionEx())
+        plane = self.body("C").Origin.OriginFeatures[3]  # XY_Plane
+        self.pick(plane.Name)
+        self.assertFalse(Gui.Selection.getSelectionEx())
+        self.assertEqual(list(b.StudioTools), tools)
+        self.assertTrue(self.armed("studioToolList"))
+        self.close(ok=False)
+
+    def testBooleanRefusesAConsumedPart(self):
+        """After a Subtract consumed B, a second Boolean refuses a pick on B (not live there)."""
+        self.boolean()
+        b = self.runBoolean(active="A", selected=("C",))
+        tools = list(b.StudioTools)
+        self.assertNotIn("B", [t[1] for t in self.ticks("studioToolList")])
+        self.pick("BPad", "Face1")
+        self.assertFalse(Gui.Selection.getSelectionEx())
+        self.assertEqual(list(b.StudioTools), tools)
+        self.close(ok=False)
+
+    def testBooleanGateGoesWithTheDialog(self):
+        """After the dialog closes, a sketch edge is selectable again."""
+        self.runBoolean()
+        self.close(ok=False)
+        self.pick("CSk", "Edge1")
+        self.assertTrue(Gui.Selection.getSelectionEx())
+
 
 if __name__ == "__main__":
     unittest.main()
