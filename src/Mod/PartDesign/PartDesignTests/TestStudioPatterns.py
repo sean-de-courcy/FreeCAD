@@ -311,6 +311,53 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertValid(hole, lp)
         self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(10))
 
+    def testUpToNextFromReferenceReapplyOff(self):
+        """An Up to next column starting at a reference (the floor's top face), patterned with
+        Reapply off in a plain Body: copied as integration does (re-running it isn't available
+        from a reference), no refusal (review prline-b4-r1 T2, case UpToNextFromReferenceLower).
+        A floor x 0..60, y 0..20, z 0..5; a back wall y 16..20 up to z 33; ceiling A over
+        x 0..30 (z 25..30), ceiling B over x 30..60 (z 28..33). The column x 5..10, y 5..10
+        ends under ceiling A (z 25); the pattern +x 30 x 2: instance 2 is the seed's copy, z 5..25
+        (a re-run would end at z 28)."""
+        doc = App.newDocument("TestStudioPatternsPlain")
+        self.docs.append(doc.Name)
+        self.doc = doc
+        body = doc.addObject("PartDesign::Body", "P")
+        floor = pad(body, "FloorPad", sketch(body, "FloorSk", xyPlane(body), (0, 0, 60, 20)), 5)
+        pad(body, "WallPad", sketch(body, "WallSk", xyPlane(body), (0, 16, 60, 20), z=5), 28)
+        pad(body, "CeilAPad", sketch(body, "CeilASk", xyPlane(body), (0, 0, 30, 16), z=25), 5)
+        pad(body, "CeilBPad", sketch(body, "CeilBSk", xyPlane(body), (30, 0, 60, 16), z=28), 5)
+        doc.recompute()
+        top = [
+            f"Face{i + 1}"
+            for i, f in enumerate(floor.Shape.Faces)
+            if f.Surface.isPlanar() and abs(f.CenterOfMass.z - 5) < 1e-6
+        ]
+        self.assertEqual(len(top), 1, top)
+        column = pad(
+            body, "ColumnPad", sketch(body, "ColumnSk", xyPlane(body), (5, 5, 10, 10), z=5), 10
+        )
+        column.Type = "UpToFirst"
+        column.StartType = "Reference"
+        column.StartReference = (floor, top)
+        doc.recompute()
+        self.assertValid(column)
+        walls = 60 * 20 * 5 + 60 * 4 * 28 + 30 * 16 * 5 + 30 * 16 * 5
+        self.assertAlmostEqual(column.Shape.Volume, walls + 5 * 5 * 20, places=3)
+        lp = doc.addObject("PartDesign::LinearPattern", "LP")
+        lp.Originals = [column]
+        lp.Direction = (body.Origin.OriginFeatures[X_AXIS], [""])
+        lp.Mode = "Extent"
+        lp.Length = 30
+        lp.Occurrences = 2
+        lp.Reapply = False
+        body.addObject(lp)
+        doc.recompute()
+        self.assertValid(lp)
+        self.assertAlmostEqual(lp.Shape.Volume, walls + 2 * 5 * 5 * 20, places=3)
+        self.assertTrue(lp.Shape.isInside(V(37.5, 7.5, 24), 1e-6, True))
+        self.assertFalse(lp.Shape.isInside(V(37.5, 7.5, 26.5), 1e-6, True))
+
     def testRemoveThatSplitItsPartIsRefused(self):
         """A seed Remove that cut the plate in two (Onshape refuses it with Reapply off, O7)."""
         self.plate()
@@ -1009,6 +1056,38 @@ class TestStudioPatterns(unittest.TestCase):
         sector.Type = "UpToFace"
         sector.UpToFace = (stop, [""])
         listed(sector)
+        pp = polar(r, "PP", [sector], 4)
+        pp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(pp, "Reapply isn't available for a revolve", "up to a face")
+
+    def testReapplyTwoSidedRevolveUpToFaceRefused(self):
+        """A two-sided revolve, side 1 by an angle (20 deg), side 2 up to a face (a plane through
+        the z axis at -40 deg), under Reapply on: refused loudly, naming side 2's end type, as the
+        one-sided case (review prline-b4-r1 T3: side 2 wasn't checked, the seed was copied)."""
+        self.roundStudio()
+        r = self.part("R")
+        profile = polygonSketch(
+            r, "SectorSk", [(r.Origin.OriginFeatures[XZ_PLANE], "")],
+            [(4, 10), (8, 10), (8, 12), (4, 12)],
+        )
+        stop = r.newObject("PartDesign::Plane", "Stop")
+        stop.MapMode = "Deactivated"
+        stop.Placement = App.Placement(
+            V(0, 0, 0), App.Rotation(V(0, 0, 1), -40).multiply(App.Rotation(V(1, 0, 0), 90))
+        )
+        listed(stop)
+        sector = r.newObject("PartDesign::Revolution", "Sector")
+        sector.Profile = profile
+        sector.ReferenceAxis = (profile, ["V_Axis"])
+        sector.SideType = "Two sides"
+        sector.Type = "Angle"
+        sector.Angle = 20
+        sector.Type2 = "UpToFace"
+        sector.UpToFace2 = (stop, [""])
+        listed(sector)
+        self.doc.recompute()
+        self.assertValid(sector)
         pp = polar(r, "PP", [sector], 4)
         pp.Reapply = True
         self.doc.recompute()

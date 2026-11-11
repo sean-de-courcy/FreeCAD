@@ -54,6 +54,7 @@
 #include <TopoDS_AlertWithShape.hxx>
 #include <IntTools_Context.hxx>
 #include <gp_Pnt2d.hxx>
+#include <BRepLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -113,6 +114,7 @@
 #include <Law_Linear.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <Precision.hxx>
+#include <ShapeAnalysis_Edge.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopExp.hxx>
@@ -6784,6 +6786,55 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
     }
     return Part::TopoShape(wall.Located(location));
 }
+
+// Honest edge tolerances (ops#667). OCCT's sweep stores an edge's tolerance from the deviation of
+// its curves on the faces as it measured them, with little margin: the end circles of a long
+// B-spline pipe had 3.36e-6 against a deviation of 3.20e-6 on Windows, and the slightly different
+// approximation of macOS's build went past it, failing the face's check there alone (decision
+// 181). Each edge whose tolerance is under twice its measured deviation gets twice that, on a
+// topology-only copy (the caps' edges are the profile's own) that keeps the element names; then
+// the vertices follow. Geometry unchanged. Returns the number of edges raised.
+int raiseTightEdgeTolerances(Part::TopoShape& shape)
+{
+    constexpr double margin = 2.0;
+    constexpr int controlPoints = 101;
+    auto tight = [&](const TopoDS_Edge& edge, double& wanted) {
+        if (BRep_Tool::Degenerated(edge)) {
+            return false;
+        }
+        double deviation = 0.0;
+        ShapeAnalysis_Edge analysis;
+        analysis.CheckSameParameter(edge, deviation, controlPoints);
+        wanted = margin * deviation;
+        return wanted > BRep_Tool::Tolerance(edge);
+    };
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape.getShape(), TopAbs_EDGE, edges);
+    std::vector<std::pair<int, double>> raise;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        double wanted = 0.0;
+        if (tight(TopoDS::Edge(edges(i)), wanted)) {
+            raise.emplace_back(i, wanted);
+        }
+    }
+    if (raise.empty()) {
+        return 0;
+    }
+    Part::TopoShape copy(shape);
+    copy.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
+    TopTools_IndexedMapOfShape copied;
+    TopExp::MapShapes(copy.getShape(), TopAbs_EDGE, copied);
+    if (copied.Extent() != edges.Extent()) {
+        return 0;
+    }
+    BRep_Builder builder;
+    for (const auto& [index, tolerance] : raise) {
+        builder.UpdateEdge(TopoDS::Edge(copied(index)), tolerance);
+    }
+    BRepLib::UpdateTolerances(copy.getShape(), Standard_False);
+    shape = copy;
+    return static_cast<int>(raise.size());
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* Pipe::execute()
@@ -8557,6 +8608,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
             if (inward) {
                 s.setShape(s.getShape().Reversed(), false);
             }
+            // Before any check reads them: the same verdicts on every platform (ops#667)
+            raiseTightEdgeTolerances(s);
         }
 
         // Every pipe is a valid solid with a positive volume, whatever its transition (ops#381):

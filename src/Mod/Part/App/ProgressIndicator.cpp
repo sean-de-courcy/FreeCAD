@@ -246,11 +246,13 @@ double limit()
     return value;
 }
 
-Scope::Scope()
+Scope::Scope(bool timeLimited)
 {
     if (scopeDepth++ == 0) {
         outermost = true;
-        scopeLimit = limit();
+        // Unlimited: no deadline but Esc (0), or no worker at all when the preference is negative,
+        // as a call outside any Scope (run())
+        scopeLimit = timeLimited ? limit() : std::min(limit(), 0.0);
         scopeFired.clear();
         scopeDeadline = Clock::now()
             + std::chrono::duration_cast<Clock::duration>(

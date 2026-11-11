@@ -14,6 +14,7 @@ from PySide import QtCore, QtWidgets
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestCrossBodyGui import ResultBoxGuiCase
 from PartDesignTests.TestExpressionFieldsGui import pump
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 V = App.Vector
 XZ = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))  # sketch y -> global z
@@ -86,6 +87,7 @@ class TestOpeningScopeGui(ResultBoxGuiCase):
         self.doc.recompute()
         return pocket
 
+    @siblingEraPath
     def testPocketOverItsOwnPartStays(self):
         """Over A: the Pocket stays in A and cuts it, 2 x 2 x 5 = 20."""
         a, b = self.twoParts()
@@ -95,6 +97,7 @@ class TestOpeningScopeGui(ResultBoxGuiCase):
         self.assertAlmostEqual(a.Shape.Volume, 980, places=4)
         self.assertAlmostEqual(b.Shape.Volume, 1000, places=4)
 
+    @siblingEraPath
     def testPocketOverAnotherPartOpensThere(self):
         """A sketch of A over B only: the Pocket opens in B (its scope) and cuts it, 20; A keeps
         its pad as its tip."""
@@ -107,6 +110,7 @@ class TestOpeningScopeGui(ResultBoxGuiCase):
         self.assertAlmostEqual(b.Shape.Volume, 980, places=4)
         self.assertAlmostEqual(a.Shape.Volume, 1000, places=4)
 
+    @siblingEraPath
     def testPocketOverNothingStaysHealthy(self):
         """Over no part: the Pocket stays in A, healthy, removing nothing (Onshape's no-op Remove,
         R7b); no Body is made for it, and neither part changes."""
@@ -118,6 +122,7 @@ class TestOpeningScopeGui(ResultBoxGuiCase):
         self.assertAlmostEqual(a.Shape.Volume, 1000, places=4)
         self.assertAlmostEqual(b.Shape.Volume, 1000, places=4)
 
+    @siblingEraPath
     def testPocketOverTwoOtherPartsStays(self):
         """A third part C, a 10 x 10 x 10 pad at x 20..30, y 10..20: a sketch of A over B and C
         (x 22..24, y 3..12), not over A: the Pocket stays in A, healthy, and no part changes
@@ -136,6 +141,7 @@ class TestOpeningScopeGui(ResultBoxGuiCase):
         for body in (a, b, c):
             self.assertAlmostEqual(body.Shape.Volume, 1000, places=4)
 
+    @siblingEraPath
     def testPocketInAnEmptyPartOpensInTheOneItOverlaps(self):
         """A third Body C, empty and active: Pocket asks nothing (there was a 'no solid to subtract
         from' modal) and opens in B, which its tool overlaps: 980."""

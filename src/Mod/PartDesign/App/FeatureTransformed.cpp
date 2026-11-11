@@ -72,6 +72,7 @@
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
 #include "FeatureSketchBased.h"
+#include "Pieces.h"
 #include "Retarget.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
@@ -571,6 +572,20 @@ bool endsUpToNext(const App::DocumentObject* computer)
     return false;
 }
 
+/// Whether computer, an extrusion or a hole, starts at a reference rather than at its profile's
+/// plane (or an offset from it): rerunItem() can't re-run it
+bool startsAtReference(const App::DocumentObject* computer)
+{
+    if (auto hole = freecad_cast<const Hole*>(computer)) {
+        return std::strcmp(hole->StartType.getValueAsString(), "Reference") == 0;
+    }
+    if (auto ext = freecad_cast<const FeatureExtrude*>(computer)) {
+        const std::string start = ext->StartType.getValueAsString();
+        return start != "Profile plane" && start != "Offset";
+    }
+    return false;
+}
+
 /// Whether edges a and b coincide: their ends and their middle within tol of each other
 bool sameEdge(const TopoDS_Shape& a, const TopoDS_Shape& b, double tol)
 {
@@ -673,7 +688,10 @@ struct ReapplyCollector
             }
             ++on;
         }
-        if (endsUpToNext(computer) || (on == levels.size() && reapplyOn)) {
+        // Up to next is re-run with Reapply off too (oracle 9 R2), but from a reference it can't
+        // be yet: with Reapply off it is then copied, as integration does (review prline-b4-r1 T2)
+        if ((endsUpToNext(computer) && !startsAtReference(computer))
+            || (on == levels.size() && reapplyOn)) {
             return rerunItem(seed, computer, levels, out);
         }
         const std::size_t before = out.size();
@@ -729,12 +747,23 @@ struct ReapplyCollector
         if (auto revolved = freecad_cast<Revolved*>(computer)) {
             // By an angle its tool is the same wherever it goes (patterns-design 3.3): the copy
             // is the re-run. Up to a face, a vertex, next or last: not yet
+            // Both sides when it has two (review prline-b4-r1 T3: side 2 up to a face was copied)
+            auto byAngle = [](const std::string& type) {
+                return type == "Angle" || type == "?TwoAngles";
+            };
             const std::string type = revolved->Type.getValueAsString();
-            if (type == "Angle" || type == "?TwoAngles") {
+            const std::string type2 = revolved->Type2.getValueAsString();
+            const bool twoSides =
+                std::strcmp(revolved->SideType.getValueAsString(), "Two sides") == 0;
+            if (byAngle(type) && (type == "?TwoAngles" || !twoSides || byAngle(type2))) {
                 return copied(seed, computer, levels, out);
             }
-            return "Reapply isn't available for a revolve that ends " + endName(type) + " yet: "
-                + name + " can only be copied (Reapply off)";
+            if (!byAngle(type)) {
+                return "Reapply isn't available for a revolve that ends " + endName(type)
+                    + " yet: " + name + " can only be copied (Reapply off)";
+            }
+            return "Reapply isn't available for a revolve whose second side ends " + endName(type2)
+                + " yet: " + name + " can only be copied (Reapply off)";
         }
         if (freecad_cast<Pipe*>(computer) || freecad_cast<Loft*>(computer)
             || freecad_cast<Helix*>(computer) || freecad_cast<FeaturePrimitive*>(computer)) {
@@ -1465,11 +1494,12 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
         }
     }
     if (anyBase && touched.empty()) {
-        return new App::DocumentObjectExecReturn(
-            "Solid 1 of the tool touches no part of the merge scope: it would become a new part, "
-            "which is not done yet",
-            &pattern
-        );
+        // Onshape oracle 9 R4: a copy touching no scope part is a new part, made by the command
+        // (P6p); until then the mirror fails loudly
+        if (std::string left = unclaimedLeftovers(&pattern); !left.empty()) {
+            return new App::DocumentObjectExecReturn(left, &pattern);
+        }
+        return App::DocumentObject::StdReturn;
     }
     if (touched.size() > 1) {
         std::string names;
@@ -2078,17 +2108,18 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     supportShape = refineShapeIfActive((supportShape));
 
-    // FreeCAD-CH ops#654 slice 8: a part of a listed studio never goes on in two solids
-    // (requirement 2, as a step's split: Onshape makes the pieces parts, P6p)
+    // FreeCAD-CH ops#654 slice 8, P6p: a part of a listed studio goes on in two solids only as
+    // pieces a command made parts (Onshape S1): the part's chain then ends here, holding them all
     if (StudioList::holding(this)) {
+        noteSplitHeld(this, getFeatureBody(), supportShape);
         if (const int solids = countSolids(supportShape.getShape()); solids > 1) {
-            const Body* body = getFeatureBody();
-            return new App::DocumentObjectExecReturn(
-                quoted(this) + " splits " + (body ? quoted(body) : std::string("its part"))
-                    + " into " + std::to_string(solids)
-                    + " pieces: pieces becoming parts is not done yet",
-                this
-            );
+            if (std::string why = unclaimedSplit(this, getFeatureBody(), supportShape);
+                !why.empty()) {
+                return new App::DocumentObjectExecReturn(why, this);
+            }
+            this->Shape.setValue(supportShape);
+            rejected.Nullify();
+            return App::DocumentObject::StdReturn;
         }
     }
 

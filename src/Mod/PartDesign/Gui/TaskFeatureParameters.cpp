@@ -28,6 +28,7 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -77,6 +78,7 @@
 #include <Mod/PartDesign/App/FeaturePipe.h>
 #include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
+#include <Mod/PartDesign/App/FeatureTransformed.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 
@@ -1048,9 +1050,24 @@ void endDialogHistory(const App::Document* doc)
     }
 }
 
-// Other parts in the Body's studio: Bodies of one container placed alike (ops#325)
+// FreeCAD-CH ops#654 R0 lite: in a studio with a history list the studio features (owners) act on
+// other parts, so an in-Body feature's Result box offers no sibling rows there (the parts list, the
+// in-Body merge list); the sibling code stays for studios without a list, and files using it open
+// as before
+static bool inListedStudio(const PartDesign::Body* body)
+{
+    App::Part* studio = nullptr;
+    return body && Part::BodyBase::studioOf(body, studio)
+        && PartDesign::StudioList::of(body->getDocument(), studio);
+}
+
+// Other parts in the Body's studio: Bodies of one container placed alike (ops#325); none offered
+// in a listed studio (R0 lite)
 bool hasStudioSiblings(const PartDesign::Body* body)
 {
+    if (inListedStudio(body)) {
+        return false;
+    }
     for (auto obj : body->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
         if (obj != body
             && Part::BodyBase::areStudioSiblings(body, static_cast<PartDesign::Body*>(obj))) {
@@ -2152,6 +2169,9 @@ void TaskResultParameters::addPartsList()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (inListedStudio(body)) {
+        return;  // R0 lite: the studio's owners act on other parts
+    }
     touchCache = std::make_shared<TouchCache>();
     std::map<App::DocumentObject*, PartDesign::FeatureAddSub*> siblings;
     for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
@@ -2208,6 +2228,9 @@ void TaskResultParameters::addMergeList()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (inListedStudio(body)) {
+        return;  // R0 lite: the studio's owners act on other parts
+    }
     touchCache = std::make_shared<TouchCache>();
     PartDesign::Boolean* merge = mergeAfter(feature);
     const bool adding =
@@ -3038,6 +3061,8 @@ bool TaskDlgFeatureParameters::accept()
     if (references) {
         references->stopPick();
     }
+    // The pieces' step (P6p), open while they are made: a refusal aborts it
+    bool piecesStep = false;
     try {
         // Iterate over parameter dialogs and apply all parameters from them, the Result box last
         forEachParameters([&isUpdateBlocked](TaskFeatureParameters* param) {
@@ -3060,6 +3085,31 @@ bool TaskDlgFeatureParameters::accept()
                 throw Base::ValueError(why.empty() ? "The studio's list can't take the feature" : why);
             }
         }
+        // FreeCAD-CH (ops#654 P6p): the OK of a studio feature, or of an in-Body pattern of a
+        // listed part, is the command that makes its pieces and leftovers parts
+        // (run once the edit has ended: during it the edited feature isn't recomputed)
+        const bool makesPieces = PartDesign::isStudioOwner(feature)
+            || (feature->isDerivedFrom<PartDesign::Transformed>()
+                && PartDesign::StudioList::holding(feature));
+        // Whether it made or deleted a part: the Bodies themselves, not their count (one record
+        // deleted and one piece made leave it equal: review prline-b5-r1 T3). A refusal throws
+        auto makePieces = [feature]() {
+            App::Document* document = feature->getDocument();
+            auto bodies = [document]() {
+                std::set<std::string> names;
+                for (auto obj : document->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+                    names.insert(obj->getNameInDocument());
+                }
+                return names;
+            };
+            const auto before = bodies();
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                Gui::Command::getObjectCmd(feature).c_str()
+            );
+            return bodies() != before;
+        };
         if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
@@ -3110,10 +3160,39 @@ bool TaskDlgFeatureParameters::accept()
             document->abortTransaction();
             Gui::cmdAppDocument(document, "recompute()");
             Gui::cmdGuiDocument(document, "resetEdit()");
+            // An unchanged OK of a feature whose pieces aren't parts yet makes them (P6p): its
+            // message says to press OK. A step of its own, only when it made a part
+            if (makesPieces) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+                piecesStep = true;
+                if (makePieces()) {
+                    document->commitTransaction();
+                }
+                else {
+                    document->abortTransaction();
+                }
+            }
             return true;
         }
 
         Gui::cmdGuiDocument(feature, "resetEdit()");
+        if (makesPieces) {
+            // The edit's step may be closed by now: the pieces then make a step of their own
+            App::Document* document = feature->getDocument();
+            const bool own = !document->hasPendingTransaction();
+            if (own) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+            }
+            // Not its own, the edit's step: then a refusal fails the OK as a whole
+            piecesStep = true;
+            const bool made = makePieces();
+            if (own && made) {
+                document->commitTransaction();
+            }
+            else if (own) {
+                document->abortTransaction();
+            }
+        }
         // FreeCAD-CH (ops#640, journey J18, F4): the edit's end shows the feature it edited,
         // which hid its Merge again, so a merged part vanished from the view while the merging
         // extrude was the last feature. The part's result is the Merge when it is the tip
@@ -3128,6 +3207,14 @@ bool TaskDlgFeatureParameters::accept()
         endDialogHistory(feature->getDocument());  // FreeCAD-CH (ops#640)
     }
     catch (const Base::Exception& e) {
+        // A refusal of the pieces' command (P6p): its step goes, with what it changed (review
+        // prline-b5-r1 T3)
+        if (App::Document* document = feature->getDocument();
+            piecesStep && document && document->hasPendingTransaction()) {
+            document->abortTransaction();
+            endDialogHistory(document);
+            Gui::cmdAppDocument(document, "recompute()");
+        }
         QString errorText = QString::fromUtf8(e.what());
         QString statusText = QString::fromUtf8(getObject()->getStatusString());
 

@@ -28,6 +28,7 @@
 #include "FeatureBase.h"
 #include "FeatureBoolean.h"
 #include "FeatureMultiTransform.h"
+#include "Pieces.h"
 #include "Retarget.h"
 #include "Studio.h"
 #include "StudioList.h"
@@ -118,6 +119,13 @@ bool flagOf(const App::DocumentObject* obj, const char* name)
 {
     auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName(name));
     return prop && prop->getValue();
+}
+
+/// A dynamic string list of obj, empty without it (P6p)
+std::vector<std::string> stringsOf(const App::DocumentObject* obj, const char* name)
+{
+    auto prop = freecad_cast<App::PropertyStringList*>(obj->getPropertyByName(name));
+    return prop ? prop->getValues() : std::vector<std::string>();
 }
 
 /// The Boolean operation an owner asks for: its Operation (an enumeration or a string), by
@@ -218,8 +226,40 @@ bool liveAt(const Body* body,
         if (it != positions.end() && (it->second > index || (before && it->second == index))) {
             return false;
         }
+        // A suppressed maker makes nothing (P6p; New parts too, S4's debt)
+        if (suppressedOf(madeBy)) {
+            return false;
+        }
+    }
+    // A part its maker made from a piece, the maker deleted: never live (it fails loudly)
+    if (flagOf(body, "StudioMakerGone")) {
+        return false;
     }
     return true;
+}
+
+/// The parts split by each entry (P6p): maker -> the Bodies whose ids its piece records name. A
+/// split part is no part after its maker (consumed there), unless the maker is suppressed
+std::map<const App::DocumentObject*, std::vector<const Body*>>
+splitParents(const std::vector<Body*>& bodies)
+{
+    std::map<const App::DocumentObject*, std::vector<const Body*>> out;
+    for (auto piece : bodies) {
+        const std::string parentId = piece->StudioParentId.getValue();
+        if (!isPieceBody(piece) || parentId.empty()) {
+            continue;
+        }
+        App::DocumentObject* maker = piece->StudioMadeBy.getValue();
+        for (auto parent : bodies) {
+            if (parent != piece && studioPartId(parent) == parentId) {
+                auto& parents = out[maker];
+                if (std::ranges::find(parents, parent) == parents.end()) {
+                    parents.push_back(parent);
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /// ids resolved against the studio's bodies at index: each id's Body and the pieces descended
@@ -290,6 +330,7 @@ struct BooleanParts
     std::vector<Body*> tools;
     std::vector<Body*> consumed;
     std::vector<Body*> both;
+    std::vector<Body*> apart;  ///< a Union's tools apart (P6p): no tools, not consumed, still read
 };
 
 BooleanParts booleanPartsAt(const Boolean* owner,
@@ -313,7 +354,17 @@ BooleanParts booleanPartsAt(const Boolean* owner,
         }
         if (!listed.empty()) {
             out.steps.push_back(listed.front());
-            out.tools.assign(listed.begin() + 1, listed.end());
+            // A tool part touching none of the parts merged stays a part (P6p): decided by the
+            // Union's last compute (StudioApartTools)
+            const auto apart = stringsOf(owner, "StudioApartTools");
+            for (auto it = listed.begin() + 1; it != listed.end(); ++it) {
+                if (std::ranges::find(apart, studioPartId(*it)) == apart.end()) {
+                    out.tools.push_back(*it);
+                }
+                else {
+                    out.apart.push_back(*it);
+                }
+            }
         }
     }
     else {
@@ -354,7 +405,19 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                     const std::map<const App::DocumentObject*, int>& positions)
 {
     Consumed out;
+    const auto split = splitParents(bodies);
     for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (auto it = split.find(entries[i]); it != split.end() && !suppressedOf(entries[i])) {
+            auto at = positions.find(entries[i]);
+            if (at != positions.end() && at->second == static_cast<int>(i)) {
+                const auto lost = stringsOf(entries[i], "StudioSplitLost");
+                for (auto parent : it->second) {
+                    if (std::ranges::find(lost, studioPartId(parent)) == lost.end()) {
+                        out.emplace(parent, static_cast<int>(i));
+                    }
+                }
+            }
+        }
         if (entries[i] && isStudioPartPattern(entries[i]) && !suppressedOf(entries[i])
             && studioPartMirrorConsumes(entries[i])) {
             auto at = positions.find(entries[i]);
@@ -390,10 +453,22 @@ std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
                                const std::map<const App::DocumentObject*, int>& positions,
                                const Consumed& consumed)
 {
+    std::vector<Body*> out;
     if (const Boolean* boolean = booleanOwner(owner)) {
-        return booleanPartsAt(boolean, bodies, index, positions, consumed).steps;
+        out = booleanPartsAt(boolean, bodies, index, positions, consumed).steps;
     }
-    return resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
+    else {
+        out = resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
+    }
+    // And each part it made from a piece or a leftover (P6p): its piece step
+    for (auto body : bodies) {
+        if (isPieceBody(body) && body->StudioMadeBy.getValue() == owner
+            && std::ranges::find(out, body) == out.end()
+            && liveAt(body, index, positions, consumed)) {
+            out.push_back(body);
+        }
+    }
+    return out;
 }
 
 /// A part pattern's source parts (StudioEntities) resolved at its place (index), without the
@@ -480,7 +555,8 @@ std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, con
             }
             const char* name = prop->getName();
             const std::string propName = name ? name : "";
-            if ((member && propName == "BaseFeature") || propName == "StudioBases") {
+            if ((member && propName == "BaseFeature") || propName == "StudioBases"
+                || propName == "StudioPieceSource") {
                 continue;
             }
             std::vector<App::DocumentObject*> linked;
@@ -716,6 +792,24 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
         }
     }
     const Consumed consumed = consumedBy(entries, bodies, positions);
+    // Where each split part stops being one (P6p): its maker's place
+    std::map<const Body*, int> splitAt;
+    for (const auto& [maker, parents] : splitParents(bodies)) {
+        auto at = positions.find(maker);
+        if (at == positions.end() || suppressedOf(maker)) {
+            continue;
+        }
+        const auto lost = stringsOf(maker, "StudioSplitLost");
+        for (auto parent : parents) {
+            if (std::ranges::find(lost, studioPartId(parent)) != lost.end()) {
+                continue;
+            }
+            auto [it, added] = splitAt.emplace(parent, at->second);
+            if (!added) {
+                it->second = std::min(it->second, at->second);
+            }
+        }
+    }
     for (int i = 0; i < size; ++i) {
         App::DocumentObject* entry = entries[i];
         if (!entry || positions[entry] != i) {
@@ -740,7 +834,33 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
                                      + ", a part outside the studio");
                 continue;
             }
+            // P6p: a member placed in a part after the entry that split it, or in a part made
+            // from a piece before the entry that made it, has no part to act on
+            if (auto split = splitAt.find(body); split != splitAt.end() && split->second < i) {
+                out.errors.push_back(quoted(entry) + " is in " + quoted(body) + ", which "
+                                     + quoted(entries[split->second])
+                                     + " split before it: put it in one of the pieces");
+                continue;
+            }
+            if (auto maker = body->StudioMadeBy.getValue(); maker && isPieceBody(body)) {
+                auto at = positions.find(maker);
+                if (at != positions.end() && at->second > i) {
+                    out.errors.push_back(quoted(entry) + " is in " + quoted(body) + ", which "
+                                         + quoted(maker) + " makes after it");
+                    continue;
+                }
+            }
             out.chains[body].push_back(slot);
+            // A Body member that split its part (an in-Body pattern): a piece step in each part
+            // it made
+            for (auto piece : bodies) {
+                if (piece != body && isPieceBody(piece) && piece->StudioMadeBy.getValue() == entry
+                    && liveAt(piece, i, positions, consumed)) {
+                    Slot step = slot;
+                    step.isStep = true;
+                    out.chains[piece].push_back(step);
+                }
+            }
             continue;
         }
         // An owner: a step in each part its scope resolves to at its place
@@ -1101,6 +1221,32 @@ bool StudioList::reconcile(std::string* why)
             if (step->Suppressed.getValue() != suppressed) {
                 step->Suppressed.setValue(suppressed);
             }
+            // A piece step reads the step that split the part it came from (P6p)
+            if (isPieceBody(body) && body->StudioMadeBy.getValue() == owner
+                && !Body::findBodyOf(owner)) {
+                const std::string parentId = body->StudioParentId.getValue();
+                App::DocumentObject* source = nullptr;
+                for (auto parent : bodies) {
+                    if (!parentId.empty() && parent != body && studioPartId(parent) == parentId) {
+                        source = stepOf(owner, parent);
+                    }
+                }
+                auto link = freecad_cast<App::PropertyLinkGlobal*>(
+                    step->getPropertyByName("StudioPieceSource")
+                );
+                if (!link && source) {
+                    link = static_cast<App::PropertyLinkGlobal*>(step->addDynamicProperty(
+                        "App::PropertyLinkGlobal",
+                        "StudioPieceSource",
+                        "Studio",
+                        "The step whose result this piece is a solid of (ops#654 P6p)",
+                        App::Prop_Hidden
+                    ));
+                }
+                if (link && link->getValue() != source) {
+                    link->setValue(source);
+                }
+            }
             if (auto base = body->getPrevSolidFeature(step)) {
                 bases.push_back(base);
             }
@@ -1112,6 +1258,26 @@ bool StudioList::reconcile(std::string* why)
     // one of them changes
     for (int i = 0; i < size; ++i) {
         App::DocumentObject* entry = entries[i];
+        // The lost splits this projection took (consumedBy, splitAt): of every maker, a Body
+        // member (an in-Body pattern) too, which the loop below skips, so that the resync after
+        // a recompute settles (review prline-b5-r1 T2)
+        if (const auto lost = entry ? stringsOf(entry, "StudioSplitLost")
+                                    : std::vector<std::string>();
+            entry && lost != stringsOf(entry, "StudioSplitLostSeen")) {
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioSplitLostSeen")
+            );
+            if (!seen) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioSplitLostSeen",
+                    "Studio",
+                    "The lost splits the projection last took (ops#654 P6p)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            seen->setValues(lost);
+        }
         if (Body::findBodyOf(entry)) {
             continue;
         }
@@ -1120,7 +1286,10 @@ bool StudioList::reconcile(std::string* why)
         // at its place
         std::vector<Body*> read;
         if (const Boolean* boolean = booleanOwner(entry)) {
-            read = booleanPartsAt(boolean, bodies, i, positions, consumed).tools;
+            // Its tools apart too (P6p): its compute decides again from every tool listed
+            auto parts = booleanPartsAt(boolean, bodies, i, positions, consumed);
+            read = parts.tools;
+            read.insert(read.end(), parts.apart.begin(), parts.apart.end());
         }
         else if (isStudioPartPattern(entry)) {
             read = partPatternSourcesAt(entry, bodies, i, positions, consumed);
@@ -1145,6 +1314,25 @@ bool StudioList::reconcile(std::string* why)
         if (isStudioPartPattern(entry)) {
             // What this projection took of its Add's consumption (resync after a recompute)
             setFlag(entry, "StudioConsumesSourceSeen", studioPartMirrorConsumes(entry));
+        }
+        if (booleanOwner(entry)) {
+            // What this projection took of the Union's tools apart (P6p, the same resync)
+            const auto apart = stringsOf(entry, "StudioApartTools");
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioApartToolsSeen")
+            );
+            if (!seen && !apart.empty()) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioApartToolsSeen",
+                    "Studio",
+                    "The tools apart the projection last took (ops#654 P6p)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            if (seen && seen->getValues() != apart) {
+                seen->setValues(apart);
+            }
         }
     }
 
@@ -1496,29 +1684,70 @@ void resyncPartMirrors(const App::Document& constDoc)
         || App::GetApplication().isClosingAll()) {
         return;
     }
-    std::vector<StudioList*> stale;
-    for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
-        auto list = static_cast<StudioList*>(obj);
-        for (auto entry : list->Entries.getValues()) {
-            if (entry && isStudioPartPattern(entry)
-                && flagOf(entry, "StudioConsumesSource")
-                    != flagOf(entry, "StudioConsumesSourceSeen")) {
-                stale.push_back(list);
-                break;
+    auto staleLists = [&doc]() {
+        std::vector<StudioList*> stale;
+        for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
+            auto list = static_cast<StudioList*>(obj);
+            for (auto entry : list->Entries.getValues()) {
+                if (entry && isStudioPartPattern(entry)
+                    && flagOf(entry, "StudioConsumesSource")
+                        != flagOf(entry, "StudioConsumesSourceSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                if (entry && booleanOwner(entry)
+                    && stringsOf(entry, "StudioApartTools")
+                        != stringsOf(entry, "StudioApartToolsSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                if (entry
+                    && stringsOf(entry, "StudioSplitLost")
+                        != stringsOf(entry, "StudioSplitLostSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
             }
         }
-    }
+        return stale;
+    };
+    std::vector<StudioList*> stale = staleLists();
     if (stale.empty()) {
         return;
     }
+    // Until nothing is stale: the recompute after a reconcile can decide anew for an entry later
+    // in the list (a second Union sees its tool, which the first one's resync gave back, and
+    // decides it apart: ops#654 P6p, gate seed 3). Its own signal comes while busy, so this
+    // loop takes it, not the signal. A bound per list entry: each round settles at least the
+    // first stale entry's decision, which later entries don't change
     Base::StateLocker lock(busy, true);
-    for (auto list : stale) {
-        std::string why;
-        if (!list->reconcile(&why)) {
-            Base::Console().warning("%s\n", why.c_str());
-        }
+    std::size_t bound = 1;
+    for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
+        bound += static_cast<StudioList*>(obj)->Entries.getSize();
     }
-    doc.recompute();
+    for (std::size_t round = 0; !stale.empty(); ++round) {
+        if (round == bound) {
+            Base::Console().warning(
+                "%s: the studio's history doesn't settle after a recompute (a Union's tools apart, "
+                "a part mirror's consumption or a lost split keep changing)\n",
+                doc.Label.getValue()
+            );
+            return;
+        }
+        bool refused = false;
+        for (auto list : stale) {
+            std::string why;
+            if (!list->reconcile(&why)) {
+                Base::Console().warning("%s\n", why.c_str());
+                refused = true;
+            }
+        }
+        doc.recompute();
+        if (refused) {
+            return;  // a refused reconcile writes nothing: going on would only refuse again
+        }
+        stale = staleLists();
+    }
 }
 }  // namespace
 

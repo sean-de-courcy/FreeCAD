@@ -116,8 +116,10 @@ class TestSketchToolbarFeaturesGui(Round3GuiCase):
             self.flush_gui(200)
         self.doc.recompute()
         self.assertTrue(pad.isValid(), pad.getStatusString())
-        # the 6 x 4 rectangle, 10 mm up (the command's default length) from the box's top
-        added = pad.Shape.Volume - self.pad.Shape.Volume
+        # the 6 x 4 rectangle, 10 mm up (the command's default length) from the box's top; measured on
+        # the Body: on the listed path (ops#654 list on first use) the Pad is an owner whose result is
+        # the Body's apply feature, and its own Shape is empty
+        added = self.body.Shape.Volume - self.pad.Shape.Volume
         self.assertAlmostEqual(added, 6 * 4 * 10, places=3)
 
     def test_revolve_accepts_the_sketch_and_opens_with_it_as_its_profile(self):

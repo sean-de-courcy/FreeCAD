@@ -30,6 +30,7 @@ from PySide import QtWidgets
 
 from PartDesignTests.TestCrossBodyGui import ResultBoxGuiCase
 from PartDesignTests.TestExpressionFieldsGui import pump, waitFor
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 V = App.Vector
 
@@ -84,6 +85,7 @@ class TestBooleanDialogGui(ResultBoxGuiCase):
         self.assertIsNotNone(rows, "no Tools list")
         return [rows.item(i).text() for i in range(rows.count()) if not rows.item(i).isHidden()]
 
+    @siblingEraPath
     def testTheFieldsOfEachOperation(self):
         """A-5: a new Boolean opens on Union: Tools (the enclosure first, then Tool), Keep tools
         (off), no Targets or Offset. Subtract: Type Cut, Targets "Enclosure", Offset shown but
@@ -115,6 +117,7 @@ class TestBooleanDialogGui(ResultBoxGuiCase):
         self.assertEqual(self.toolRows(), ["Enclosure (this part)", "Tool"])
         self.close(ok=False)
 
+    @siblingEraPath
     def testOkConsumesTheTool(self):
         """Union, Keep tools off, OK: the enclosure is the union (22000); Tool is consumed
         (consumerOf names the Boolean) and hidden; the parameter stays off."""
@@ -129,6 +132,7 @@ class TestBooleanDialogGui(ResultBoxGuiCase):
         self.assertFalse(self.tool.Visibility)
         self.assertFalse(self.param.GetBool("BooleanKeepTools", True))
 
+    @siblingEraPath
     def testKeepToolsIsRememberedButNotTheOperation(self):
         """A-5: Intersect with Keep tools ticked, OK: the enclosure is the overlap (6000), Tool
         stays a part, shown; the next Boolean opens on Union with Keep tools ticked."""
@@ -151,6 +155,7 @@ class TestBooleanDialogGui(ResultBoxGuiCase):
         self.assertTrue(self.keepTools().isChecked())
         self.close(ok=False)
 
+    @siblingEraPath
     def testASubtractThatMissesIsHealthy(self):
         """B3-3a: Subtract of Far, OK: healthy, the info "Selected tools and targets do not
         intersect.", the enclosure unchanged (16000), Far consumed and hidden."""
@@ -164,6 +169,7 @@ class TestBooleanDialogGui(ResultBoxGuiCase):
         self.assertIs(PartDesign.consumerOf(self.far), boolean)
         self.assertFalse(self.far.Visibility)
 
+    @siblingEraPath
     def testAUnionOfAPartApartLeavesIt(self):
         """A-2' b: Union of Far, OK: healthy, "Boolean resulted in no geometry change.", the
         enclosure 16000, Far left separate: a part still, shown."""

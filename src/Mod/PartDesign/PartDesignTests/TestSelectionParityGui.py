@@ -21,6 +21,7 @@ from PySide import QtCore, QtGui, QtWidgets
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestDialogFlowGui import DialogFlowCase
 from PartDesignTests.TestExpressionFieldsGui import pump, waitFor
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 ENCLOSURE = 16000
 
@@ -64,6 +65,7 @@ class TestProfileFieldStaysArmedGui(DialogFlowCase):
         Gui.Selection.addSelection(self.doc.Name, part.Name, sk.Name + "." + region)
         pump(0.3)
 
+    @siblingEraPath
     def testSecondRegionAfterTheOpeningMoveIsAdded(self):
         """Nothing selected, Pad: its Profile field is armed. R1 picked: the pad and its sketch
         move to a new part (the edit restarts), and the Profile field is armed again. R2 picked:

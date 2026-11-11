@@ -46,6 +46,7 @@
 #include "FeatureDeletePart.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSplit.h"
+#include "Pieces.h"
 #include "Studio.h"
 #include "StudioEdit.h"
 #include "StudioList.h"
@@ -427,6 +428,22 @@ public:
             &Module::studioConsumerOf,
             "studioConsumerOf(body, index=-1) -- The Boolean studio feature that consumes body "
             "before the list entry at index (-1: at the bar), or None."
+        );
+        // FreeCAD-CH ops#654 P6p: pieces and leftovers become parts at command time
+        add_varargs_method(
+            "studioMakePieces",
+            &Module::studioMakePieces,
+            "studioMakePieces(entry) -- The piece command: recomputes, makes every solid of the "
+            "entry's results that no part holds (a piece of a part it splits, a solid of its tool "
+            "touching no part of its scope) a new part, deletes the parts it made that hold "
+            "nothing else, reconciles and recomputes. In the caller's transaction. Returns the "
+            "new Bodies."
+        );
+        add_varargs_method(
+            "studioPieceName",
+            &Module::studioPieceName,
+            "studioPieceName(body) -- The custom name a piece shows: its parent's, up the "
+            "lineage; empty when there is none."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -1565,6 +1582,30 @@ private:
             return Py::None();
         }
         return Py::asObject(const_cast<App::DocumentObject*>(consumer)->getPyObject());
+    }
+
+    // FreeCAD-CH ops#654 P6p
+    Py::Object studioMakePieces(const Py::Tuple& args)
+    {
+        PyObject* pEntry;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pEntry)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        const auto made = PartDesign::makePieces(entryArg(pEntry), &why);
+        if (!why.empty()) {
+            throw Py::ValueError(why);
+        }
+        return objectList(made);
+    }
+
+    Py::Object studioPieceName(const Py::Tuple& args)
+    {
+        PyObject* pBody;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pBody)) {
+            throw Py::Exception();
+        }
+        return Py::String(PartDesign::pieceInheritedName(bodyArg(pBody)));
     }
 
     // FreeCAD-CH ops#654 S2: a New result, a part the owner makes (notes/parts-design.md 3.1)

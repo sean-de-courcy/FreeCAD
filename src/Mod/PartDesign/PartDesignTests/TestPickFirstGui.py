@@ -48,6 +48,7 @@ from PySide import QtCore, QtWidgets
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestDressUpDeleteKeyGui import pump, taskButton, waitFor
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 
 def flushDeletes():
@@ -191,6 +192,7 @@ class TestPickFirstGui(unittest.TestCase):
 
     # -- profile features ------------------------------------------------------------------------
 
+    @siblingEraPath
     def testPadWithNothingSelectedArmsItsProfile(self):
         """Pad with nothing selected: a Pad with no profile, red, its Profile field armed (no
         sketch list although the document has one free sketch, no message box). The sketch
@@ -237,6 +239,7 @@ class TestPickFirstGui(unittest.TestCase):
             notes("fieldProfile"),
         )
 
+    @siblingEraPath
     def testPadOfACurvedFaceStartsEmpty(self):
         """Rank 5: the Disc's curved face selected, then Pad: the face is left out (an extrude
         takes planar faces), said in the field or the status bar; the new Pad has no profile."""
@@ -250,6 +253,7 @@ class TestPickFirstGui(unittest.TestCase):
             notes("fieldProfile"),
         )
 
+    @siblingEraPath
     def testPadOfASolidsEdgeStartsEmpty(self):
         """Hands-on B-2: an edge of a solid selected, then Extrude: Onshape opens with the field
         empty. The Disc's top circle selected, then Pad: the new Pad has no profile and the edge
@@ -269,6 +273,7 @@ class TestPickFirstGui(unittest.TestCase):
             notes("fieldProfile"),
         )
 
+    @siblingEraPath
     def testProfileFieldRefusesACurvedFace(self):
         """Rank 5 (B3-4): with the new Pad's Profile armed the Disc's curved face can't be picked
         (nothing is selected, the Profile stays empty); its top face can: the Pad takes it, and
@@ -371,6 +376,7 @@ class TestPickFirstGui(unittest.TestCase):
         self.assertTrue(mirror.isValid(), mirror.getStatusString())
         self.assertAlmostEqual(mirror.Shape.Volume, 2000, places=4)
 
+    @siblingEraPath
     def testLinearPatternWithNothingSelectedArmsItsFeatures(self):
         """Linear pattern with nothing selected: Features mode, its Features field armed. The
         cube picked: a copy at x 25, 2000."""

@@ -2551,6 +2551,17 @@ void FeaturesView::moveRows(App::Document* doc,
         );
         bool tipsMoved = showMovedTips(bodies, oldTips);
         bool listMoved = list && (list->Entries.getValues() != oldEntries || entryAtBar(list) != oldBar);
+        // FreeCAD-CH ops#654 P6p: a moved studio feature or pattern that now splits a part, or
+        // leaves a solid outside its scope, makes them parts, in this step (Onshape H2)
+        if (listMoved) {
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "for _o in %s:\n"
+                "    if PartDesign.studioScopeIds(_o) or _o.isDerivedFrom('PartDesign::Transformed'):\n"
+                "        PartDesign.studioMakePieces(_o)",
+                rowsCmd.c_str()
+            );
+        }
         if (!tipsMoved && !listMoved && PartDesign::studioSequence(doc, studio) == oldSequence) {
             App::GetApplication().abortTransaction(tid);
             return;

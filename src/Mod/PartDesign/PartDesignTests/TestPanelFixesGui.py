@@ -35,6 +35,7 @@ from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import Z, face
 from PartDesignTests.TestDressUpDeleteKeyGui import reportText
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 V = App.Vector
 XZ = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))  # sketch y -> global z
@@ -731,6 +732,7 @@ class TestPanelFixesGui(unittest.TestCase):
                 texts.append(status.text())
         return texts
 
+    @siblingEraPath
     def testPadOnASketchOfAnotherDocumentSaysSo(self):
         """ops#410 (decision 104), then ops#640 rank 13: a sketch selected in another document is
         no profile. With no sketch in the active document the Pad starts empty and says so,
@@ -744,6 +746,7 @@ class TestPanelFixesGui(unittest.TestCase):
         )
         self.assertTrue(any(expected in t for t in notes), notes)
 
+    @siblingEraPath
     def testPadOnASketchOfAnotherDocumentDoesNotTakeAnotherSketch(self):
         """ops#410, PR 360 round 2, then ops#640 rank 13: with a sketch in the active document the
         Pad still starts empty: the active document's sketch isn't taken in the selected one's
@@ -755,6 +758,7 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#395 1: Pad on a sketch of another body ---------------------------------------------
 
+    @siblingEraPath
     def testPadOnASketchOfAnotherBodyIsLeftOut(self):
         """ops#395 1 (PR 343 review L3): the dependent profile copy that Pad's code makes for a
         selected sketch outside the active body (a traced shape binder, not computed before the
@@ -3503,6 +3507,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.body.hasObject(copy))
         return pad, copy
 
+    @siblingEraPath
     def testPadOfASketchCopiedIntoARotatedBody(self):
         """ops#245: a sketch outside any body (a 10 x 10 square at (2, 3, 5), turned 15 degrees
         about Z), selected, then Pad (its independent copy, since ops#640 made by the command:
@@ -3529,6 +3534,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
 
+    @siblingEraPath
     def testPadOfAnXZSketchCopiedIntoABody(self):
         """ops#244 L6: a 10 x 10 square sketch outside any body on XZ, moved by (2, 3, 5) and
         turned in its plane, selected, then Pad (its independent copy: padOfAFreeSketch): the copy
@@ -4139,6 +4145,7 @@ class TestPanelFixesGui(unittest.TestCase):
         notes = self.leftOutNotes("fieldOriginals")
         self.assertTrue(any("left out of the selection: 'First sketch'." in t for t in notes), notes)
 
+    @siblingEraPath
     def testPadOfTwoSketchesSaysWhichIsLeftOut(self):
         """Two sketches selected, then Pad: the first is the profile, and the status bar names
         both, the second as left out (it was dropped without a word)."""
@@ -4273,6 +4280,7 @@ class TestPanelFixesGui(unittest.TestCase):
             (reportText() or "")[before:],
         )
 
+    @siblingEraPath
     def testBooleanWithoutToolsFailsOnlyOutsideItsPanel(self):
         """ops#314: a Boolean with no tools computes nothing while it is set up (created by its
         command with nothing selected, or its panel open) and fails once the panel is closed.

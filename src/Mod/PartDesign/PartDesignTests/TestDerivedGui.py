@@ -27,6 +27,7 @@ from PySide import QtCore, QtWidgets
 from PartDesignTests.TestDerived import boxBody
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 from PartDesignTests.TestStudioSequence import sketch
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 PARAM = "User parameter:BaseApp/Preferences/Mod/PartDesign"
 BAR = QtWidgets.QListWidgetItem.UserType + 1  # FeatureList::BarType
@@ -242,6 +243,7 @@ class TestDerivedGui(unittest.TestCase):
         self.assertTrue(waitFor(red), "the row isn't red")
         self.assertIn("Missing source part: Box (Part Studio 1)", self.featureItem("Derived 1").toolTip())
 
+    @siblingEraPath
     def testDerivedAcceptsAnOpenExtrude(self):
         """Review R6-3: with an Extrude (Pad) dialog open on a sketch of Part Studio 2's Plate,
         Derived is enabled; run, it accepts the Pad first (the plate is 20 x 10 x 10 mm, 2000
