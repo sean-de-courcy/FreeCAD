@@ -2147,6 +2147,40 @@ def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
     return wall, edges
 
 
+def keyhole_groove(floor=2.6, height=0.8):
+    """A plate 40 x 40 x 6 with a keyhole bore through it (a circle r 5 and a slot |x| < 3 open
+    to y = -20) and a groove in the bore's wall from z = floor, height high (a circle r 6 and a
+    slot |x| < 4). Returns the solid and the groove bottom's concave edges at the wall (the arc r 6
+    and the two legs x = +-4), which meet at corners convex in the material"""
+
+    def keyhole(r, h, z0, z1):
+        y = -math.sqrt(r * r - h * h)
+        arc = Part.Arc(V(h, y, z0), V(0, r, z0), V(-h, y, z0)).toShape()
+        wire = Part.Wire(
+            [
+                arc,
+                Part.makeLine(V(-h, y, z0), V(-h, -25, z0)),
+                Part.makeLine(V(-h, -25, z0), V(h, -25, z0)),
+                Part.makeLine(V(h, -25, z0), V(h, y, z0)),
+            ]
+        )
+        return Part.Face(wire).extrude(V(0, 0, z1 - z0))
+
+    plate = Part.makeBox(40, 40, 6, V(-20, -20, 0))
+    plate = plate.cut(keyhole(5, 3, -1, 7)).cut(keyhole(6, 4, floor, floor + height)).removeSplitter()
+    edges = [
+        e
+        for e in edges_at(plate, floor)
+        if (e.Curve.TypeId == "Part::GeomCircle" and abs(e.Curve.Radius - 6) < 1e-9)
+        or (
+            e.Curve.TypeId == "Part::GeomLine"
+            and abs(abs(e.BoundBox.XMin) - 4) < 1e-9
+            and e.BoundBox.XLength < 1e-9
+        )
+    ]
+    return plate, edges
+
+
 def edges_at(shape, z):
     """The shape's edges in the plane at the height z"""
     return [
@@ -2220,6 +2254,35 @@ class CornerWithACircleTest(unittest.TestCase):
                 tall.translate(V(0, 0, -3))
                 reference = tall.makeChamfer(3.0, edges_at(tall, 3.0))
                 self.assertSameAs(plate.makeChamfer(3.0, edges_at(plate, 3.0)), plate, reference, 5)
+
+    def assertKeyholeGrooveChamfer(self, size, added, area):
+        plate, edges = keyhole_groove()
+        self.assertEqual(len(edges), 3)
+        shape = plate.makeChamfer(size, edges)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume - plate.Volume, added, delta=2e-4)
+        self.assertAlmostEqual(shape.Area - plate.Area, area, delta=2e-4)
+        self.assertEqual(len(shape.Faces), len(plate.Faces))
+
+    def testKeyholeGrooveChamferAtTheLimit(self):
+        # A groove 0.8 high cut into a keyhole bore's wall (ops#640, #15, designed): its bottom's
+        # concave edges, an arc r 6 and two legs x = +-4 that meet it at corners convex in the
+        # material, chamfered as wide as the groove is high. OCCT builds up to 0.79 (a sharp miter
+        # at the corners) and refuses from 0.8 on. Onshape (oracle 9d) builds it with the sharp
+        # miter: the walls vanish (one cone, two planes: faces +0)
+        self.assertKeyholeGrooveChamfer(0.8, 18.94097, -27.87796)
+        # A concave fillet there is not known from Onshape yet: OCCT's error
+        plate, edges = keyhole_groove()
+        with self.assertRaises(Part.OCCError):
+            plate.makeFillet(0.8, edges)
+
+    @unittest.expectedFailure
+    def testKeyholeGrooveChamferPastTheLimit(self):
+        # Past the limit Onshape clips the chamfer by the groove's top (oracle 9d). Not built yet:
+        # the legs' ends at the plate's side refuse ("the end face of a selected edge does not
+        # cover the end of its tool"), where the tools rise past the groove's top
+        self.assertKeyholeGrooveChamfer(0.81, 19.41115, -29.07163)
 
     def testConcaveCornerWithACircleFails(self):
         # Not built yet (fillet-parity L8): a plate fused with a disc that bulges past its sides,
