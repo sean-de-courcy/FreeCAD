@@ -705,6 +705,11 @@ public:
     static void setShowConstraintsPreference(bool show);
     /// With the preference off, redraws which constraints are drawn (they follow the selection)
     void updateConstraintsShownBySelection();
+    /** Onshape's "Show expressions" (ops#640 polish P4), Mod/Sketcher/General/ShowExpressions,
+     * off by default: a dimension set by an expression shows the expression, not its value.
+     */
+    static bool showExpressionsPreference();
+    static void setShowExpressionsPreference(bool show);
     //@}
 
     /** @name base class implementer */

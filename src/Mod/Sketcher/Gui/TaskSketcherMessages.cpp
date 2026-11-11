@@ -29,10 +29,12 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/CommandT.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "Command.h"
 #include "TaskSketcherMessages.h"
+#include "Utils.h"
 #include "ViewProviderSketch.h"
 
 
@@ -47,8 +49,28 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
 {
     createSettingsButtonActions();
 
-    // FreeCAD-CH (ops#640 polish P1): Onshape's "Show constraints", under the solver's message.
-    // The preference's observer in edit mode (EditModeCoinManager) redraws the sketch
+    // FreeCAD-CH (ops#640 polish P4): Onshape's sketch dialog checkboxes, under the solver's
+    // message and in Onshape's order. Disable imprinting is the sketch's own (a property, one undo
+    // step); Show constraints and Show expressions are the user's preferences, whose observer in
+    // edit mode (EditModeCoinManager) redraws the sketch.
+    auto* disableImprinting = new QCheckBox(tr("Disable imprinting"));
+    disableImprinting->setObjectName(QStringLiteral("disableImprinting"));
+    disableImprinting->setToolTip(tr("The edges of the face the sketch lies on don't split its "
+        "regions"));
+    disableImprinting->setChecked(sketchView->getSketchObject()->DisableImprinting.getValue());
+    groupLayout()->addWidget(disableImprinting);
+    connect(disableImprinting, &QCheckBox::toggled, this, [this](bool checked) {
+        auto* sketch = this->sketchView->getSketchObject();
+        if (sketch->DisableImprinting.getValue() == checked) {
+            return;
+        }
+        Gui::Command::openCommand(QT_TRANSLATE_NOOP("Command", "Disable imprinting"));
+        Gui::cmdAppObjectArgs(sketch, "DisableImprinting = %s", checked ? "True" : "False");
+        Gui::Command::commitCommand();
+        tryAutoRecomputeIfNotSolve(sketch);
+    });
+
+    // FreeCAD-CH (ops#640 polish P1): Onshape's "Show constraints"
     auto* showConstraints = new QCheckBox(tr("Show constraints"));
     showConstraints->setObjectName(QStringLiteral("showConstraints"));
     showConstraints->setToolTip(tr("Draws every constraint. Off, only the dimensions, the "
@@ -57,6 +79,16 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
     groupLayout()->addWidget(showConstraints);
     connect(showConstraints, &QCheckBox::toggled, this, [](bool checked) {
         ViewProviderSketch::setShowConstraintsPreference(checked);
+    });
+
+    auto* showExpressions = new QCheckBox(tr("Show expressions"));
+    showExpressions->setObjectName(QStringLiteral("showExpressions"));
+    showExpressions->setToolTip(tr("A dimension set by an expression shows the expression "
+        "instead of its value"));
+    showExpressions->setChecked(ViewProviderSketch::showExpressionsPreference());
+    groupLayout()->addWidget(showExpressions);
+    connect(showExpressions, &QCheckBox::toggled, this, [](bool checked) {
+        ViewProviderSketch::setShowExpressionsPreference(checked);
     });
 
     //NOLINTBEGIN

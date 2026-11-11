@@ -23,8 +23,8 @@ constexpr int ImprintInternalFaceVersion = 3;
 /// The edges of the faces the sketch is attached to (AttachmentSupport's faces of model objects:
 /// datums, origin features and other sketches left out) when they lie in the sketch's plane, as
 /// copies in the sketch's own coordinates, named after the model's edges. Null when there are
-/// none, when the sketch's regions predate the imprint, or when it makes no regions (MakeInternals
-/// off). Only that face's edges: another face's or another part's coplanar edges don't split the
+/// none, when the sketch's regions predate the imprint, when it makes no regions (MakeInternals
+/// off), or when DisableImprinting is on. Only that face's edges: another face's or another part's coplanar edges don't split the
 /// sketch's regions, nor does a face under a sketch on a plane (Onshape, notes/onshape-facts.md R4).
 SketcherExport Part::TopoShape imprintEdges(const SketchObject& sketch);
 

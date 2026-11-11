@@ -162,13 +162,9 @@ class TestHoverStatusGui(PolishCase):
 SKETCHER_GENERAL = "User parameter:BaseApp/Preferences/Mod/Sketcher/General"
 
 
-class TestShowConstraintsGui(PolishCase):
-    """P1: inside a sketch Onshape draws no constraint glyph until the sketch dialog's "Show
-    constraints" is on; the dimensions are always drawn, and so are a selected entity's own
-    constraints. What is drawn is read from the sketch's constraint switchboard (the node
-    "ConstraintGroup", one switch per constraint), the one the change drives. The pad's sketch
-    gets a Distance and a Horizontal on line 0 after its four corner coincidents (0 to 3):
-    coincidents 0 (line 0's end) and 3 (line 0's start) are line 0's, 1 and 2 are not."""
+class SketchCase(PolishCase):
+    """The pad's sketch with a Distance (10) and a Horizontal on line 0 after its four corner
+    coincidents (0 to 3), opened by openSketch(); the sketch preferences tests set are removed."""
 
     def setUp(self):
         super().setUp()
@@ -188,6 +184,15 @@ class TestShowConstraintsGui(PolishCase):
         Gui.ActiveDocument.setEdit(self.sketch.Name)
         pump(0.3)
         self.assertIsNotNone(Gui.ActiveDocument.getInEdit(), "the sketch must be in edit")
+
+
+class TestShowConstraintsGui(SketchCase):
+    """P1: inside a sketch Onshape draws no constraint glyph until the sketch dialog's "Show
+    constraints" is on; the dimensions are always drawn, and so are a selected entity's own
+    constraints. What is drawn is read from the sketch's constraint switchboard (the node
+    "ConstraintGroup", one switch per constraint), the one the change drives. The pad's sketch
+    gets a Distance and a Horizontal on line 0 after its four corner coincidents (0 to 3):
+    coincidents 0 (line 0's end) and 3 (line 0's start) are line 0's, 1 and 2 are not."""
 
     def drawn(self):
         """Whether each constraint is drawn: its switch in the switchboard."""
@@ -264,3 +269,77 @@ class TestShowConstraintsGui(PolishCase):
         App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
         self.openSketch()
         self.assertTrue(all(self.drawn()))
+
+
+class TestSketchDialogCheckboxesGui(SketchCase):
+    """P4: Onshape's sketch dialog holds, in this order, Disable imprinting, Show constraints,
+    Show expressions (and Show errors, not yet here). Disable imprinting is the sketch's own (its
+    property DisableImprinting, one undo step; what it does to the regions is in
+    TestProfileRegions); Show expressions is the user's (Mod/Sketcher/General/ShowExpressions,
+    off by default): a dimension set by an expression then reads the expression, not its value.
+    The pad's sketch gets the Distance of line 0 bound to "4 mm * 2.5"."""
+
+    def setUp(self):
+        super().setUp()
+        App.ParamGet(SKETCHER_GENERAL).RemBool("ShowExpressions")
+        self.sketch.setExpression(f"Constraints[{self.distance}]", "4 mm * 2.5")
+        self.doc.recompute()
+
+    def tearDown(self):
+        App.ParamGet(SKETCHER_GENERAL).RemBool("ShowExpressions")
+        super().tearDown()
+
+    def box(self, name):
+        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, name)
+        self.assertIsNotNone(box, f"Expected the {name} box in the Sketch Edit panel")
+        return box
+
+    def labels(self):
+        """The texts of the sketch's datum labels (one per dimension), as one string."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setType(coin.SoType.fromName("SoDatumLabel"))
+        search.setSearchingAll(True)
+        search.setInterest(coin.SoSearchAction.ALL)
+        search.apply(self.sketch.ViewObject.RootNode)
+        paths = search.getPaths()
+        texts = [paths[i].getTail().getField("string").get() for i in range(paths.getLength())]
+        self.assertTrue(texts, "Expected the Distance's datum label in edit")
+        return " | ".join(texts)
+
+    def testBoxesInOnshapesOrder(self):
+        self.openSketch()
+        names = ["disableImprinting", "showConstraints", "showExpressions"]
+        boxes = [self.box(name) for name in names]
+        layout = boxes[0].parentWidget().layout()
+        self.assertEqual([layout.indexOf(b) for b in boxes], sorted(layout.indexOf(b) for b in boxes))
+        self.assertEqual([b.isChecked() for b in boxes], [False] * 3, "Onshape's defaults: all off")
+
+    def testDisableImprintingSetsTheSketchsProperty(self):
+        self.openSketch()
+        box = self.box("disableImprinting")
+        box.setChecked(True)
+        pump()
+        self.assertTrue(self.sketch.DisableImprinting)
+        self.assertEqual(self.doc.UndoNames[0], "Disable imprinting", "one undo step")
+        box.setChecked(False)
+        pump()
+        self.assertFalse(self.sketch.DisableImprinting)
+
+    def testValueShownByDefault(self):
+        self.openSketch()
+        labels = self.labels()
+        self.assertIn("10", labels)
+        self.assertNotIn("*", labels)
+
+    def testShowExpressionsShowsTheExpression(self):
+        self.openSketch()
+        self.box("showExpressions").setChecked(True)
+        pump()
+        self.assertTrue(App.ParamGet(SKETCHER_GENERAL).GetBool("ShowExpressions", False))
+        labels = self.labels()
+        self.assertIn("* 2.5", labels, "the open sketch redraws its label as the expression")
+        self.box("showExpressions").setChecked(False)
+        pump()
+        self.assertNotIn("*", self.labels())

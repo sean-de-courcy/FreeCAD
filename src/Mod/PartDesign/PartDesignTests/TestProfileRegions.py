@@ -592,6 +592,20 @@ class TestProfileRegions(unittest.TestCase):
         pad = self.pad(body, (sk, [onFace]), length=3)
         self.assertVolume(pad, 3000 + 3 * half, solids=1)
 
+    def testDisableImprintingKeepsTheDiskWhole(self):
+        """Onshape's Disable imprinting (R5, ops#640 polish P4): the same circle over the face's
+        right edge stays one disk of 25 pi; unticked again, the face's edge splits it again."""
+        body, block, sk = self.blockAndTopSketch()
+        self.assertFalse(sk.DisableImprinting)  # Onshape's default: imprinting on
+        sk.addGeometry(Part.Circle(V(30, 10, 0), V(0, 0, 1), 5), False)
+        sk.DisableImprinting = True
+        self.Doc.recompute()
+        self.assertEqual([round(f.Area, 6) for f in sk.InternalShape.Faces],
+                         [round(25 * math.pi, 6)])
+        sk.DisableImprinting = False
+        self.Doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 2)
+
     def testImprintMakesNoRegionOfItsOwn(self):
         """A lone line across the face (ends past it): model edges never close a region, so there
         is none, and the whole sketch stops (Onshape, R4 and PR6b)."""

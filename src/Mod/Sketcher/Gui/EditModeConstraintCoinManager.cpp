@@ -63,6 +63,7 @@
 #include <Gui/SoDatumLabel.h>
 #include <Gui/Tools.h>
 #include <Gui/Utilities.h>
+#include <Gui/VariableDisplay.h>
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/Sketcher/App/Constraint.h>
 #include <Mod/Sketcher/App/GeoEnum.h>
@@ -2224,6 +2225,25 @@ QString EditModeConstraintCoinManager::getPresentationString(
     auto valueStr = QString::fromStdString(constrPresValue);
 
     auto fixedValueStr = fixValueStr(valueStr, unitStr).value_or(valueStr);
+    const auto& constrlist = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
+    const auto it = std::ranges::find(constrlist, constraint);
+    const int constraintIndex = it != constrlist.end()
+        ? static_cast<int>(std::distance(constrlist.begin(), it))
+        : -1;
+    const bool hasExpression = constraintIndex >= 0
+        && ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex);
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions": a dimension set by an
+    // expression shows the expression (variables as #Name) instead of its value
+    bool expressionShown = false;
+    if (hasExpression && ViewProviderSketch::showExpressionsPreference()) {
+        auto* sketch = viewProvider.getSketchObject();
+        const auto info = sketch->getExpression(sketch->Constraints.createPath(constraintIndex));
+        if (info.expression) {
+            fixedValueStr = Gui::expressionDisplayText(info.expression.get());
+            expressionShown = true;
+        }
+    }
+
     if (!prefix.empty()) {
         fixedValueStr.prepend(QString::fromStdString(prefix));
     }
@@ -2249,14 +2269,8 @@ QString EditModeConstraintCoinManager::getPresentationString(
         }
     }
 
-    int constraintIndex = -1;
-    const auto& constrlist = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
-    auto it = std::ranges::find(constrlist, constraint);
-    if (it != constrlist.end()) {
-        constraintIndex = std::distance(constrlist.begin(), it);
-        if (ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex)) {
-            fixedValueStr += QStringLiteral(" (ƒ𝑥)");
-        }
+    if (hasExpression && !expressionShown) {
+        fixedValueStr += QStringLiteral(" (ƒ𝑥)");
     }
 
     if (!constraint->isDriving) {

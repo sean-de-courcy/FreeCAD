@@ -4147,6 +4147,18 @@ void ViewProviderSketch::setShowConstraintsPreference(bool show)
     sketcherGeneralGroup()->SetBool("ShowConstraints", show);
 }
 
+bool ViewProviderSketch::showExpressionsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions", off by default
+    return sketcherGeneralGroup()->GetBool("ShowExpressions", false);
+}
+
+void ViewProviderSketch::setShowExpressionsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the labels
+    sketcherGeneralGroup()->SetBool("ShowExpressions", show);
+}
+
 void ViewProviderSketch::updateConstraintsShownBySelection()
 {
     if (!isInEditMode() || selection.selectionBuffering || showConstraintsPreference()) {
