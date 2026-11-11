@@ -1193,7 +1193,7 @@ def differences(got, want):
         for key in want[p]:
             if got.get(p, {}).get(key) != want[p][key]:
                 if key == "names":
-                    a, b = set(got[p][key]), set(want[p][key])
+                    a, b = set(got.get(p, {}).get(key, [])), set(want[p][key])
                     out.append(
                         f"{p}.names: {len(a - b)} only in the document, {len(b - a)} only built: "
                         f"{sorted(a - b)[:3]} / {sorted(b - a)[:3]}"
@@ -1757,6 +1757,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
         self.mergesSeen = 0  # states with a part an Add merged into another at the bar (10.13)
         self.switchesSeen = 0  # switches of the active configuration (ops#671 C1)
+        self.switchRefusals = 0  # switches the list refused loudly (a split or merge before)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -2028,13 +2029,28 @@ class TestStudioListProperty(unittest.TestCase):
             done.append(f"{b.Name} suppressed {on} in {other}")
         doc.recompute()
         before = snapshot(doc)
-        PartDesign.configSetActive(studio, {"Size": other})
-        PartDesign.configSetActive(studio, {"Size": "Small" if other == "Large" else "Large"})
+
+        def switchTo(value):
+            PartDesign.configSetActive(studio, {"Size": value})
+            # The parts the switch made from pieces get their side for the Part oracle, as
+            # the command's do (labelPieces: the side is the solid's, so a piece that comes
+            # back with its id comes back on its side)
+            for body in doc.Objects:
+                maker = getattr(body, "StudioMadeBy", None)
+                if (
+                    body.TypeId == "PartDesign::Body" and body.StudioPieceWitness
+                    and not hasattr(body, "OracleSide") and maker is not None
+                    and maker.TypeId == "Part::Box"
+                ):
+                    labelPieces([body], maker)
+
+        switchTo(other)
+        switchTo("Small" if other == "Large" else "Large")
         doc.recompute()
         found = differences(snapshot(doc), before)
         if found:
             raise AssertionError("the names after a switch and back differ: " + "; ".join(found[:6]))
-        PartDesign.configSetActive(studio, {"Size": other})
+        switchTo(other)
         self.switchesSeen += 1
         return f"switch to {other}" + (f" after configuring {done}" if done else "")
 
@@ -2065,8 +2081,14 @@ class TestStudioListProperty(unittest.TestCase):
                     doc.commitTransaction()
                 except Exception as e:
                     doc.abortTransaction()
-                    bad += 1
-                    self.log.append(f"seed {seed} op {step} switch failed: {e}")
+                    # The list's loud refusals (an owner in a part another row splits or merges
+                    # before it) refuse the switch as they refuse an edit: nothing changes
+                    refusals = ("split before it", "makes after it", "merged into")
+                    if any(r in str(e) for r in refusals):
+                        self.switchRefusals += 1
+                    else:
+                        bad += 1
+                        self.log.append(f"seed {seed} op {step} switch failed: {e}")
             roll = rng.random()
             if roll < 0.12 and doc.UndoCount:
                 doc.undo()
@@ -2185,7 +2207,7 @@ class TestStudioListProperty(unittest.TestCase):
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
               f"states without a list, {self.mergesSeen} states with a merge, "
-              f"{self.switchesSeen} switches")
+              f"{self.switchesSeen} switches, {self.switchRefusals} refused")
 
 
 if __name__ == "__main__":

@@ -504,6 +504,10 @@ std::string reconcileCells(StudioConfig* cfg, bool checkOnly, std::set<App::Docu
         }
     }
 
+    if (!checkOnly) {
+        // Written: what the load check found is gone (the next recompute clears the error)
+        cfg->clearLoadMismatch();
+    }
     std::string text;
     for (const auto& d : differ) {
         text += (text.empty() ? "" : "; ") + d;

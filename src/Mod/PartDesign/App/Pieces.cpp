@@ -17,6 +17,8 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 
+#include <nlohmann/json.hpp>
+
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
@@ -613,6 +615,160 @@ const App::DocumentObject* piecesCommandEntry()
     return commandEntry;
 }
 
+namespace
+{
+/// The piece records an entry deleted when their solid went (ops#671 C1c): a piece made again
+/// with the same parent and witness takes its id and name back, so a configuration switch and
+/// back (or a suppression and its reversal) gives the parts their names again, as in Onshape.
+/// The witness must be equal, so no id goes to another piece
+constexpr const char* retiredProperty = "StudioRetiredPieces";
+
+std::vector<std::string> retiredOf(const App::DocumentObject* entry)
+{
+    auto prop = freecad_cast<App::PropertyStringList*>(entry->getPropertyByName(retiredProperty));
+    return prop ? prop->getValues() : std::vector<std::string>();
+}
+
+void setRetired(App::DocumentObject* entry, const std::vector<std::string>& values)
+{
+    auto prop = freecad_cast<App::PropertyStringList*>(entry->getPropertyByName(retiredProperty));
+    if (!prop) {
+        if (values.empty()) {
+            return;
+        }
+        prop = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+            "App::PropertyStringList",
+            retiredProperty,
+            "Studio",
+            "The parts this entry made from a piece whose solid went: id, parent, witness, name "
+            "(ops#671)",
+            App::Prop_Hidden
+        ));
+    }
+    if (prop->getValues() != values) {
+        prop->setValues(values);
+    }
+}
+
+void retirePiece(App::DocumentObject* entry, const Body* body)
+{
+    nlohmann::json record = {
+        {"id", studioPartId(body)},
+        {"parent", body->StudioParentId.getValue()},
+        {"witness", body->StudioPieceWitness.getValues()},
+        {"label", body->Label.getStrValue()},
+    };
+    auto values = retiredOf(entry);
+    const std::string id = record["id"];
+    std::erase_if(values, [&id](const std::string& text) {
+        const auto old = nlohmann::json::parse(text, nullptr, false);
+        return old.is_object() && old.value("id", std::string()) == id;
+    });
+    values.push_back(record.dump());
+    setRetired(entry, values);
+}
+
+struct Retired
+{
+    std::string id;
+    std::string parent;
+    std::string label;
+    std::vector<std::string> witness;
+};
+
+std::vector<Retired> retiredRecords(const App::DocumentObject* entry)
+{
+    std::vector<Retired> out;
+    for (const auto& text : retiredOf(entry)) {
+        const auto record = nlohmann::json::parse(text, nullptr, false);
+        if (!record.is_object() || !record.contains("witness") || !record["witness"].is_array()) {
+            continue;
+        }
+        Retired r;
+        r.id = record.value("id", std::string());
+        r.parent = record.value("parent", std::string());
+        r.label = record.value("label", std::string());
+        for (const auto& w : record["witness"]) {
+            if (w.is_string()) {
+                r.witness.push_back(w.get<std::string>());
+            }
+        }
+        if (!r.id.empty()) {
+            out.push_back(std::move(r));
+        }
+    }
+    return out;
+}
+
+void dropRetired(App::DocumentObject* entry, const std::set<std::string>& ids)
+{
+    auto values = retiredOf(entry);
+    std::erase_if(values, [&ids](const std::string& text) {
+        const auto record = nlohmann::json::parse(text, nullptr, false);
+        return record.is_object() && ids.count(record.value("id", std::string())) > 0;
+    });
+    setRetired(entry, values);
+}
+
+/// For each of the new solids (indices into source's solids), the retired record that claims it,
+/// or -1: by the witness score matchPieces() uses for living records, as the side of the split is
+/// told by the faces, not by a shape an edit since may have changed. A record that ties between
+/// two solids claims none; a solid two records claim goes to the strictly higher score, else none
+std::vector<int> claimRetired(const Part::TopoShape& source, const std::vector<int>& solids,
+                              const std::vector<Retired>& retired)
+{
+    std::vector<int> out(solids.size(), -1);
+    if (retired.empty() || solids.empty()) {
+        return out;
+    }
+    const auto unique = uniqueNames(source);
+    std::vector<int> at(retired.size(), -1);
+    std::vector<Score> best(retired.size(), Score {0, 0, 0});
+    for (std::size_t r = 0; r < retired.size(); ++r) {
+        int ties = 0;
+        for (std::size_t k = 0; k < solids.size(); ++k) {
+            const int j = solids[k];
+            if (j < 0 || j >= static_cast<int>(unique.size())) {
+                continue;
+            }
+            const Score score = scoreOf(retired[r].witness, unique[j]);
+            if (score == Score {0, 0, 0}) {
+                continue;
+            }
+            if (at[r] < 0 || score > best[r]) {
+                best[r] = score;
+                at[r] = static_cast<int>(k);
+                ties = 0;
+            }
+            else if (score == best[r]) {
+                ++ties;
+            }
+        }
+        if (ties > 0) {
+            at[r] = -1;
+        }
+    }
+    for (std::size_t k = 0; k < solids.size(); ++k) {
+        int winner = -1;
+        bool tie = false;
+        for (std::size_t r = 0; r < retired.size(); ++r) {
+            if (at[r] != static_cast<int>(k)) {
+                continue;
+            }
+            if (winner < 0 || best[r] > best[winner]) {
+                winner = static_cast<int>(r);
+                tie = false;
+            }
+            else if (best[r] == best[winner]) {
+                tie = true;
+            }
+        }
+        out[k] = tie ? -1 : winner;
+    }
+    return out;
+}
+}  // namespace
+
 std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
 {
     std::vector<Body*> made;
@@ -676,6 +832,20 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     else {
         emptied = pieceRecords(entry, std::string());
     }
+    // A suppressed entry splits nothing: every part it made from a piece goes (retired, so the
+    // same piece comes back with its id when it is unsuppressed, as Onshape's parts do), none
+    // holding its parent's whole solid by a witness score (ops#671 C1c)
+    if (auto prop = freecad_cast<App::PropertyBool*>(entry->getPropertyByName("Suppressed"));
+        prop && prop->getValue()) {
+        sources.clear();
+        emptied.clear();
+        for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
+            auto body = static_cast<Body*>(obj);
+            if (isPieceBody(body) && body->StudioMadeBy.getValue() == entry) {
+                emptied.push_back(body);
+            }
+        }
+    }
 
     // Every new piece and its witness first: a piece that can't become a part refuses the
     // command before anything changes
@@ -683,8 +853,16 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     {
         std::string parentId;
         std::vector<std::string> witness;
+        std::string id;     // a retired record's, when one claims the solid
+        std::string label;  // its name
     };
     std::vector<NewPiece> pieces;
+    std::set<std::string> held;  // the ids a Body holds
+    for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
+        held.insert(studioPartId(static_cast<Body*>(obj)));
+    }
+    const auto retired = retiredRecords(entry);
+    std::set<std::string> reused;
     for (const auto& source : sources) {
         const std::string parentId = source.parent ? studioPartId(source.parent) : std::string();
         const auto records = pieceRecords(entry, parentId);
@@ -695,6 +873,8 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
                 emptied.push_back(records[r]);
             }
         }
+        const std::size_t first = pieces.size();
+        std::vector<int> fresh;
         for (int j = 0; j < solids && (solids > 1 || !source.parent); ++j) {
             if (std::ranges::find(match.solids, j) != match.solids.end()) {
                 continue;
@@ -705,14 +885,33 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
                               + (source.parent ? quoted(source.parent) : quoted(entry))
                               + " apart from the others: it can't become a part");
             }
-            pieces.push_back({parentId, std::move(witness)});
+            pieces.push_back({parentId, std::move(witness), {}, {}});
+            fresh.push_back(j);
+        }
+        std::vector<Retired> candidates;
+        for (const auto& r : retired) {
+            if (r.parent == parentId && !held.count(r.id) && !reused.count(r.id)) {
+                candidates.push_back(r);
+            }
+        }
+        const auto claims = claimRetired(source.shape, fresh, candidates);
+        for (std::size_t k = 0; k < claims.size(); ++k) {
+            if (claims[k] >= 0) {
+                pieces[first + k].id = candidates[claims[k]].id;
+                pieces[first + k].label = candidates[claims[k]].label;
+                reused.insert(pieces[first + k].id);
+            }
         }
     }
 
     App::Part* studio = list->studio();
     auto counter = freecad_cast<App::PropertyInteger*>(entry->getPropertyByName("StudioPieceCount"));
-    for (const auto& [parentId, witness] : pieces) {
-        // Its id: "<entry>:<k>", k from the entry's counter, never reused
+    if (!reused.empty()) {
+        dropRetired(entry, reused);
+    }
+    for (const auto& [parentId, witness, reusedId, label] : pieces) {
+        // Its id: a retired record's that claims it (the same piece back), else "<entry>:<k>",
+        // k from the entry's counter, never reused
         if (!counter) {
             counter = static_cast<App::PropertyInteger*>(entry->addDynamicProperty(
                 "App::PropertyInteger",
@@ -726,13 +925,15 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
             taken.insert(studioPartId(static_cast<Body*>(obj)));
         }
-        int k = counter->getValue();
-        std::string id;
-        do {
-            ++k;
-            id = std::string(entry->getNameInDocument()) + ":" + std::to_string(k);
-        } while (taken.count(id));
-        counter->setValue(k);
+        std::string id = reusedId;
+        if (id.empty()) {
+            int k = counter->getValue();
+            do {
+                ++k;
+                id = std::string(entry->getNameInDocument()) + ":" + std::to_string(k);
+            } while (taken.count(id));
+            counter->setValue(k);
+        }
         auto body = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
         if (studio) {
             studio->getExtensionByType<App::GroupExtension>()->addObject(body);
@@ -741,7 +942,8 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         body->StudioParentId.setValue(parentId);
         body->StudioMadeBy.setValue(entry);
         body->StudioPieceWitness.setValues(witness);
-        body->Label.setValue("Part 1");  // a default name: numbered by place (S3)
+        // A default name: numbered by place (S3); a retired piece's name comes back with its id
+        body->Label.setValue(label.empty() ? "Part 1" : label.c_str());
         made.push_back(body);
     }
     // A record without a solid goes when its Body holds nothing else; else it stays, failing
@@ -753,6 +955,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         if (!alone) {
             continue;
         }
+        retirePiece(entry, body);
         for (auto member : group) {
             const std::string name = member->getNameInDocument();
             body->removeObject(member);

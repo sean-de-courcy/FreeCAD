@@ -66,6 +66,11 @@ public:
     {
         return mismatch;
     }
+    /// Called when the cells are written: the file then is the active configuration
+    void clearLoadMismatch()
+    {
+        mismatch.clear();
+    }
 
 private:
     std::string mismatch;

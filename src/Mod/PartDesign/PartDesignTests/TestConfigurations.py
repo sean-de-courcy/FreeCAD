@@ -249,6 +249,28 @@ class TestConfigurations(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(bodies(), large)
 
+    def testSwitchBackGivesPiecesTheirIds(self):
+        """The pieces a switch removes come back with their ids and names on the switch back,
+        as Onshape's parts do (the property test's switch-and-back check, G1)"""
+        cut = makeOwner(self.doc, self.studio, "Cut", (24, -1, 26, 11), 11, "Subtraction", ["B"])
+        self.edit(lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(lambda: PartDesign.configConfigureSuppression(cut, self.size))
+        self.edit(lambda: PartDesign.configSetSuppressionCell(cut, "Small", True))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        pieces = lambda: sorted(
+            (b.StudioPartId, b.Label) for b in self.doc.Objects
+            if b.isDerivedFrom("PartDesign::Body") and b.StudioPieceWitness
+        )
+        large = pieces()
+        self.assertGreaterEqual(len(large), 2)
+        renamed = self.doc.getObjectsByLabel(large[0][1])[0]
+        renamed.Label = "Left end"
+        large = pieces()
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertEqual(pieces(), [])  # the suppressed split made no part
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertEqual(pieces(), large)
+
     # ----------------------------------------------------------------------------------- the file
     def save(self):
         folder = tempfile.mkdtemp(prefix="cfg")
