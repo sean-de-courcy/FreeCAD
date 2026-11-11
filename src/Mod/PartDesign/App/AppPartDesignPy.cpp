@@ -62,6 +62,8 @@ PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
                                          std::vector<Body*>& tools,
                                          std::vector<Body*>& both);
 PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
+// FreeCAD-CH (ops#654 10.13): StudioList.cpp's Merge with all
+PartDesignExport bool studioSetMergeAll(App::DocumentObject* owner, bool on, std::string* why);
 
 class Module: public Py::ExtensionModule<Module>
 {
@@ -418,6 +420,14 @@ public:
             "touching no part of its scope) a new part, deletes the parts it made that hold "
             "nothing else, reconciles and recomputes. In the caller's transaction. Returns the "
             "new Bodies."
+        );
+        // FreeCAD-CH ops#654 10.13: an Add merges the parts its tool joins
+        add_varargs_method(
+            "studioSetMergeAll",
+            &Module::studioSetMergeAll,
+            "studioSetMergeAll(owner, on) -- Sets the studio feature's Merge with all (its scope "
+            "is every part live at its place, ordered by each part's first feature in the "
+            "history) and reconciles its list. No transaction, no recompute."
         );
         add_varargs_method(
             "studioPieceName",
@@ -1517,6 +1527,21 @@ private:
             throw Py::ValueError(why);
         }
         return objectList(made);
+    }
+
+    // FreeCAD-CH ops#654 10.13
+    Py::Object studioSetMergeAll(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pOn;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pOwner, &pOn)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(
+            PartDesign::studioSetMergeAll(entryArg(pOwner), PyObject_IsTrue(pOn) == 1, &why),
+            why
+        );
     }
 
     Py::Object studioPieceName(const Py::Tuple& args)

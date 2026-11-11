@@ -109,6 +109,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestBooleanScope.py
     PartDesignTests/TestStudioPatterns.py
     PartDesignTests/TestStudioPartMirror.py
+    PartDesignTests/TestStudioMerge.py
 )
 
 if(BUILD_GUI)

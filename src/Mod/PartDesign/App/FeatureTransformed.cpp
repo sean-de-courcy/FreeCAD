@@ -256,6 +256,15 @@ std::string studioStepOf(
     if (freecad_cast<Boolean*>(owner)) {
         return name + " is a Boolean between parts: it can't be patterned";
     }
+    // An Add that merges parts (ops#654 10.13, skeptic 4): its copies would merge too, which
+    // patterns over parts decide (T1/T2); loud until then
+    if (auto merges = freecad_cast<App::PropertyStringList*>(
+            owner->getPropertyByName("StudioMergedParts")
+        );
+        merges && !merges->getValues().empty()) {
+        return name + " merges parts into one (" + merges->getValues().front()
+            + "): a pattern of an Add that merges parts comes later";
+    }
     const std::vector<Body*> parts = studioScopeOf(owner);
     if (parts.size() > 1) {
         std::string names;

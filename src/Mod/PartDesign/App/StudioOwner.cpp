@@ -36,12 +36,24 @@ const Part::Feature* baseOf(const App::DocumentObject* owner, const Body* part)
         return freecad_cast<const Part::Feature*>(previous);
     }
     auto bases = freecad_cast<const App::PropertyLinkList*>(owner->getPropertyByName("StudioBases"));
-    if (!bases) {
+    if (bases) {
+        for (auto base : bases->getValues()) {
+            if (base && part->hasObject(base)) {
+                return freecad_cast<const Part::Feature*>(base);
+            }
+        }
         return nullptr;
     }
-    for (auto base : bases->getValues()) {
-        if (base && part->hasObject(base)) {
-            return freecad_cast<const Part::Feature*>(base);
+    // A shape owner has no bases of its own: its Add's steps hold them (ops#654 10.13)
+    for (auto user : owner->getInList()) {
+        auto step = freecad_cast<const Feature*>(user);
+        if (!step || step->StudioOwner.getValue() != owner) {
+            continue;
+        }
+        for (auto base : step->StudioBases.getValues()) {
+            if (base && part->hasObject(base)) {
+                return freecad_cast<const Part::Feature*>(base);
+            }
         }
     }
     return nullptr;
