@@ -2108,9 +2108,18 @@ TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
     TopoShape dPlate(BRepPrimAPI_MakePrism(d, gp_Vec(0, 0, 4)).Shape(), 1L);
     auto dTop = edgesWhere(dPlate, atHeight(4));
     ASSERT_EQ(dTop.size(), 2U);
-    // Its corners are convex now (Corner2Union, ops#640); at r = t OCCT 8.0.1's cut of the
-    // first tool, which passes through the bottom vertex, differs from its common part by 1e-3
-    EXPECT_TRUE(refusedFor(dPlate, dTop, fillet(4), "the cut removed"));
+    // Its corners are convex now (Corner2Union, ops#640). At r = t OCCT 8.0.1 fails, and its cut
+    // of the first tool, which passes through the bottom vertex, measured 1e-3 off its common
+    // part: the loops raised vertex tolerances open (ops#669), so the construction builds it
+    // (batch 8 review). Four exact faces; the volume is the closed form's (the D's area times t,
+    // less the integral over the D of max(distance to the line, distance to the arc)): 474.33880
+    std::string why;
+    TopoShape built = forced(dPlate, dTop, fillet(4), &why);
+    ASSERT_FALSE(built.isNull()) << why;
+    EXPECT_TRUE(built.isValid());
+    EXPECT_EQ(count(built.getShape(), TopAbs_SOLID), 1);
+    EXPECT_EQ(count(built.getShape(), TopAbs_FACE), 4);
+    EXPECT_NEAR(volume(built.getShape()), 474.3388, 1e-3);
 }
 
 TEST_F(FilletFallbackTest, refusesCornersJustOverTheLimit)
