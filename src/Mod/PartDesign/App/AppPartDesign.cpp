@@ -37,6 +37,7 @@
 #include "FeatureBoolean.h"
 #include "FeatureChamfer.h"
 #include "FeatureDefeaturing.h"
+#include "FeatureFacePattern.h"
 #include "FeatureDraft.h"
 #include "FeatureDressUp.h"
 #include "FeatureFillet.h"
@@ -145,6 +146,11 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::Draft                       ::init();
     PartDesign::Thickness                   ::init();
     PartDesign::Defeaturing                 ::init();
+    // FreeCAD-CH (ops#655 T8): Onshape's Face pattern
+    PartDesign::FacePattern                 ::init();
+    PartDesign::FaceLinearPattern           ::init();
+    PartDesign::FacePolarPattern            ::init();
+    PartDesign::FaceMirrored                ::init();
     PartDesign::Pipe                        ::init();
     PartDesign::AdditivePipe                ::init();
     PartDesign::SubtractivePipe             ::init();

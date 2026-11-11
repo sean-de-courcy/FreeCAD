@@ -46,6 +46,7 @@
 #include "ViewProviderSplit.h"
 #include "ViewProviderChamfer.h"
 #include "ViewProviderDefeaturing.h"
+#include "ViewProviderFacePattern.h"
 #include "ViewProviderDatumCS.h"
 #include "ViewProviderDatumLine.h"
 #include "ViewProviderDatumPlane.h"
@@ -169,6 +170,7 @@ PyMOD_INIT_FUNC(PartDesignGui)
     PartDesignGui::ViewProviderChamfer       ::init();
     PartDesignGui::ViewProviderFillet        ::init();
     PartDesignGui::ViewProviderDefeaturing   ::init();
+    PartDesignGui::ViewProviderFacePattern   ::init();  // FreeCAD-CH (ops#655 T8)
     PartDesignGui::ViewProviderDraft         ::init();
     PartDesignGui::ViewProviderThickness     ::init();
     PartDesignGui::ViewProviderTransformed   ::init();

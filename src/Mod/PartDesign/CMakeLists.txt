@@ -57,6 +57,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestLostTool.py
     PartDesignTests/TestMirrored.py
     PartDesignTests/TestLinearPattern.py
+    PartDesignTests/TestFacePattern.py
     PartDesignTests/TestPolarPattern.py
     PartDesignTests/TestMultiTransform.py
     PartDesignTests/TestPatternRules.py

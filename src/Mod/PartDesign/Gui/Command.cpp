@@ -23,6 +23,8 @@
  ***************************************************************************/
 
 
+#include <functional>
+
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
@@ -2980,7 +2982,10 @@ void finishDressupFeature(
     const bool useAllEdges,
     const bool updateDocument = true,
     const std::vector<DressUpPick>& otherParts = {},
-    const bool placedByFirstPick = false
+    const bool placedByFirstPick = false,
+    // FreeCAD-CH (ops#655 T8): sets the new dress-up's parameters, in its transaction, before its
+    // dialog opens (the face patterns' defaults)
+    const std::function<void(App::DocumentObject*)>& setDefaults = {}
 )
 {
     auto body = PartDesignGui::getBodyFor(base, false);
@@ -2993,6 +2998,9 @@ void finishDressupFeature(
     if (!Feat) {
         cmd->abortCommand();
         return;
+    }
+    if (setDefaults) {
+        setDefaults(Feat);
     }
     // FreeCAD-CH (ops#640 rank 14): made with nothing selected, its dialog's first pick decides
     // its part (the dialog opens in finishFeature below)
@@ -3268,6 +3276,187 @@ void CmdPartDesignDefeaturing::activated(int iMsg)
 }
 
 bool CmdPartDesignDefeaturing::isActive()
+{
+    return hasActiveDocument();
+}
+
+//===========================================================================
+// PartDesign_FaceLinearPattern, PartDesign_FacePolarPattern, PartDesign_FaceMirrored
+//===========================================================================
+
+// FreeCAD-CH (ops#655 T8): a face pattern of `which` on the faces selected on the active Body's
+// solid, or on none (its dialog takes them). Like makeDefeaturing; the defaults are Onshape's
+static void makeFacePattern(Gui::Command* cmd, const std::string& which)
+{
+    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    if (!pcActiveBody) {
+        return;
+    }
+
+    auto setDefaults = [which, pcActiveBody](App::DocumentObject* Feat) {
+        App::Origin* origin = pcActiveBody->getOrigin();
+        if (which == "FaceLinearPattern") {
+            FCMD_OBJ_CMD(
+                Feat,
+                "Direction = (" << Gui::Command::getObjectCmd(origin->getX()) << ",[''])"
+            );
+            FCMD_OBJ_CMD(
+                Feat,
+                "Direction2 = (" << Gui::Command::getObjectCmd(origin->getY()) << ",[''])"
+            );
+            // Distance is the spacing between neighbouring instances; count 2
+            FCMD_OBJ_CMD(Feat, "Mode = 'Spacing'");
+            FCMD_OBJ_CMD(Feat, "Offset = 20");
+            FCMD_OBJ_CMD(Feat, "Occurrences = 2");
+        }
+        else if (which == "FacePolarPattern") {
+            FCMD_OBJ_CMD(
+                Feat,
+                "Axis = (" << Gui::Command::getObjectCmd(origin->getZ()) << ",[''])"
+            );
+            FCMD_OBJ_CMD(Feat, "Mode = 'Extent'");
+            FCMD_OBJ_CMD(Feat, "Angle = 360");
+            FCMD_OBJ_CMD(Feat, "Occurrences = 4");
+        }
+        else {
+            FCMD_OBJ_CMD(
+                Feat,
+                "MirrorPlane = (" << Gui::Command::getObjectCmd(origin->getYZ()) << ",[''])"
+            );
+        }
+    };
+
+    std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
+
+    if (selection.empty()) {
+        auto* base = static_cast<Part::Feature*>(pcActiveBody->Tip.getValue());
+        finishDressupFeature(cmd, which, base, {}, false, true, {}, false, setDefaults);
+        return;
+    }
+
+    if (selection.size() != 1) {
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Wrong Selection"),
+            QObject::tr("Select faces from a single body")
+        );
+        return;
+    }
+    if (pcActiveBody != PartDesignGui::getBodyFor(selection[0].getObject(), false)) {
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Selection Outside Active Body"),
+            QObject::tr("Select faces from the active body")
+        );
+        return;
+    }
+    if (!selection[0].isObjectTypeOf(Part::Feature::getClassTypeId())) {
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Wrong Object Type"),
+            QObject::tr("Face patterns work only on faces")
+        );
+        return;
+    }
+
+    std::vector<std::string> subNames = selection[0].getSubNames();
+    for (const auto& name : subNames) {
+        if (name.substr(0, 4) != "Face") {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Wrong Selection"),
+                QObject::tr("Face patterns work only on faces")
+            );
+            return;
+        }
+    }
+
+    Gui::Selection().clearSelection();
+
+    auto* base = static_cast<Part::Feature*>(selection[0].getObject());
+    finishDressupFeature(cmd, which, base, subNames, false, true, {}, false, setDefaults);
+}
+
+DEF_STD_CMD_A(CmdPartDesignFaceLinearPattern)
+
+CmdPartDesignFaceLinearPattern::CmdPartDesignFaceLinearPattern()
+    : Command("PartDesign_FaceLinearPattern")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Face Linear Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Patterns the selected faces (a boss, pocket or hole) of the part in a linear pattern"
+    );
+    sWhatsThis = "PartDesign_FaceLinearPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_LinearPattern";
+    eType |= AcceptsOpenDialog;
+}
+
+void CmdPartDesignFaceLinearPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    makeFacePattern(this, "FaceLinearPattern");
+}
+
+bool CmdPartDesignFaceLinearPattern::isActive()
+{
+    return hasActiveDocument();
+}
+
+DEF_STD_CMD_A(CmdPartDesignFacePolarPattern)
+
+CmdPartDesignFacePolarPattern::CmdPartDesignFacePolarPattern()
+    : Command("PartDesign_FacePolarPattern")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Face Polar Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Patterns the selected faces (a boss, pocket or hole) of the part around an axis"
+    );
+    sWhatsThis = "PartDesign_FacePolarPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_PolarPattern";
+    eType |= AcceptsOpenDialog;
+}
+
+void CmdPartDesignFacePolarPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    makeFacePattern(this, "FacePolarPattern");
+}
+
+bool CmdPartDesignFacePolarPattern::isActive()
+{
+    return hasActiveDocument();
+}
+
+DEF_STD_CMD_A(CmdPartDesignFaceMirrored)
+
+CmdPartDesignFaceMirrored::CmdPartDesignFaceMirrored()
+    : Command("PartDesign_FaceMirrored")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Face Mirror");
+    sToolTipText = QT_TR_NOOP(
+        "Mirrors the selected faces (a boss, pocket or hole) of the part in a plane"
+    );
+    sWhatsThis = "PartDesign_FaceMirrored";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_Mirrored";
+    eType |= AcceptsOpenDialog;
+}
+
+void CmdPartDesignFaceMirrored::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    makeFacePattern(this, "FaceMirrored");
+}
+
+bool CmdPartDesignFaceMirrored::isActive()
 {
     return hasActiveDocument();
 }
@@ -4678,6 +4867,10 @@ void CreatePartDesignCommands()
     rcCmdMgr.addCommand(new CmdPartDesignChamfer());
     rcCmdMgr.addCommand(new CmdPartDesignThickness());
     rcCmdMgr.addCommand(new CmdPartDesignDefeaturing());
+    // FreeCAD-CH (ops#655 T8): the face patterns
+    rcCmdMgr.addCommand(new CmdPartDesignFaceLinearPattern());
+    rcCmdMgr.addCommand(new CmdPartDesignFacePolarPattern());
+    rcCmdMgr.addCommand(new CmdPartDesignFaceMirrored());
 
     rcCmdMgr.addCommand(new CmdPartDesignMirrored());
     rcCmdMgr.addCommand(new CmdPartDesignLinearPattern());

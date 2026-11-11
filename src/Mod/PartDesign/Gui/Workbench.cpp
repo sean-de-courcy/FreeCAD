@@ -541,6 +541,10 @@ void Workbench::activated()
         "PartDesign_LinearPattern",
         "PartDesign_PolarPattern",
         "PartDesign_MultiTransform",
+        // FreeCAD-CH (ops#655 T8): the face patterns
+        "PartDesign_FaceLinearPattern",
+        "PartDesign_FacePolarPattern",
+        "PartDesign_FaceMirrored",
         nullptr
     };
     Watcher.push_back(new Gui::TaskView::TaskWatcherCommands(
@@ -635,7 +639,11 @@ Gui::MenuItem* Workbench::setupMenuBar() const
     *transformations << "PartDesign_Mirrored"
                      << "PartDesign_LinearPattern"
                      << "PartDesign_PolarPattern"
-                     << "PartDesign_MultiTransform";
+                     << "PartDesign_MultiTransform"
+                     // FreeCAD-CH (ops#655 T8): the face patterns
+                     << "PartDesign_FaceLinearPattern"
+                     << "PartDesign_FacePolarPattern"
+                     << "PartDesign_FaceMirrored";
 
     // dressups
     Gui::MenuItem* dressups = new Gui::MenuItem;
@@ -729,6 +737,10 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
           << "PartDesign_LinearPattern"
           << "PartDesign_PolarPattern"
           << "PartDesign_MultiTransform"
+          // FreeCAD-CH (ops#655 T8): the face patterns
+          << "PartDesign_FaceLinearPattern"
+          << "PartDesign_FacePolarPattern"
+          << "PartDesign_FaceMirrored"
           << "Separator"
           << "PartDesign_Boolean"
           << "PartDesign_Split"
@@ -792,7 +804,11 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
     *part << "PartDesign_Mirrored"
           << "PartDesign_LinearPattern"
           << "PartDesign_PolarPattern"
-          << "PartDesign_MultiTransform";
+          << "PartDesign_MultiTransform"
+          // FreeCAD-CH (ops#655 T8): the face patterns
+          << "PartDesign_FaceLinearPattern"
+          << "PartDesign_FacePolarPattern"
+          << "PartDesign_FaceMirrored";
 
     return root;
 }
