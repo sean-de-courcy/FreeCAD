@@ -6178,11 +6178,36 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             Trade,
         };
         int twinsNow = 0;
+        // A source twin (profile regions 4, batch 2's R1): the old element was one of two twins
+        // or more (its record says so), no element now holds a name of its order group (the
+        // producer named them anew: a whole sketch that turned from loops into regions names its
+        // faces through the splitter and refine), and the pick keeps the old element's sources
+        // and maker. Its name can't say which twin it is, so the rule decides by the record, as
+        // for a twin by name: a circle's other crossing, the nearer one to the saved place, is a
+        // trade. Known sources only: a name without any can't be judged.
+        std::optional<bool> oldGroupRenamed;
+        auto sourceTwin = [&](const std::vector<std::string>& names) {
+            if (!saved || saved->twinCount < 2) {
+                return false;
+            }
+            if (!oldGroupRenamed) {
+                oldGroupRenamed = !requiredSourcesOf(oldName).empty()
+                    && std::none_of(pool.elements.begin(), pool.elements.end(), [&](const auto& e) {
+                           return std::any_of(e.names.begin(), e.names.end(), [&](const auto& n) {
+                               return n == oldName || isTwinName(n, oldName);
+                           });
+                       });
+            }
+            return *oldGroupRenamed && !lostOldSources(names, oldName)
+                && otherOriginOf(names, oldName, true) == nullptr;
+        };
         auto twinPick = [&](int position) {
             const auto& names = pool.elements[position].names;
-            if (oldName.empty() || std::none_of(names.begin(), names.end(), [&](const auto& n) {
-                    return isTwinName(n, oldName);
-                })) {
+            if (oldName.empty()
+                || (std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                        return isTwinName(n, oldName);
+                    })
+                    && !sourceTwin(names))) {
                 return TwinPick::NotTwin;
             }
             // Its order group now: it and the type's elements with a name that is one of its
