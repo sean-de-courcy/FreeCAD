@@ -1183,12 +1183,15 @@ struct HelixWinding
 {
     gp_Ax1 axis;         ///< where the edge is
     double pitch = 0.0;  ///< the advance along the axis per turn
-    double span = 0.0;   ///< the angle wound, more than one turn
+    double span = 0.0;   ///< the angle wound, more than one turn (any, with partTurn)
     double first = 0.0;  ///< the edge's parameters (its 2D and 3D curves share them)
     double last = 0.0;
 };
 
-std::optional<HelixWinding> helixWinding(const TopoDS_Edge& edge)
+/// \a edge's winding, if it is one (HelixWinding). With \a partTurn, an edge that winds one turn
+/// or less is one too, its pitch the advance a whole turn would make: withHelixTurns names it
+/// turn 1, so a reference on turn 1 holds when an edit leaves one turn (2 -> 1).
+std::optional<HelixWinding> helixWinding(const TopoDS_Edge& edge, bool partTurn = false)
 {
     Handle(Geom2d_Curve) curve2d;
     Handle(Geom_Surface) surface;
@@ -1235,7 +1238,7 @@ std::optional<HelixWinding> helixWinding(const TopoDS_Edge& edge)
     }
     constexpr double turn = 2.0 * std::numbers::pi;
     const double span = std::fabs(curve2d->Value(last).X() - curve2d->Value(first).X());
-    if (span <= turn * (1.0 + 1e-6)) {
+    if ((span <= turn * (1.0 + 1e-6) && !partTurn) || span < Precision::Angular()) {
         return {};
     }
     const gp_Vec advance(pointAt(first), pointAt(first + (last - first) * turn / span));
@@ -1334,53 +1337,97 @@ std::vector<TopoDS_Edge> helixTurns(const TopoDS_Edge& edge, const HelixWinding&
     return pieces;
 }
 
-/// \a path with every helix edge cut at its turns (helixTurns), each piece named as modified from
-/// its edge and the new vertices as generated from it, made a wire as \a wire; \a path itself when
-/// no edge is cut. A helix whose turns \a profile makes touch stays whole: OCCT's sweep along its
-/// pieces fails (FindFromKey), along the one edge it builds, as Onshape does.
+std::string withoutTags(const std::string& name);
+long lastTag(const std::string& name);
+std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element);
+std::string field(const std::string& text);
+std::string hashed(const std::string& text);
+
+/// \a path with every helix edge cut at its turns (helixTurns), made a wire as \a wire; \a path
+/// itself when no edge is cut. A helix whose turns \a profile makes touch stays whole: OCCT's
+/// sweep along its pieces fails (FindFromKey), along the one edge it builds, as Onshape does.
+/// Turn k (counted from the helix's start, by parameter) is named by its edge's name and k, `TRN`,
+/// and the vertex k turns from the start by the edge's name and k, `TRV`; the helix's own ends
+/// keep their names. Named as pieces modified from the edge (batch 6's R1, ops#640), the turns
+/// were twins and the last was told apart by the end vertex alone, so a reference on turn 2 of 2
+/// followed the end piece when an edit added turns. By its place from the start, turn k keeps
+/// its name whatever the number of turns, and a turn that goes takes its name with it.
 Part::TopoShape withHelixTurns(
     const Part::TopoShape& path,
     Part::TopoShape wire,
     const TopoDS_Shape& profile
 )
 {
-    Part::ShapeMapper mapper;
-    BRep_Builder builder;
-    TopoDS_Compound edges;
-    builder.MakeCompound(edges);
+    std::vector<Part::TopoShape> edges;
     bool cut = false;
     for (const Part::TopoShape& edge : path.getSubTopoShapes(TopAbs_EDGE)) {
         const TopoDS_Edge& whole = TopoDS::Edge(edge.getShape());
-        const std::optional<HelixWinding> winding = helixWinding(whole);
+        const std::optional<HelixWinding> winding = helixWinding(whole, true);
         std::vector<TopoDS_Edge> pieces;
         if (winding && extentAlong(profile, winding->axis) < winding->pitch * (1.0 - 1e-4)) {
             pieces = helixTurns(whole, *winding);
         }
         if (pieces.empty()) {
-            builder.Add(edges, edge.getShape());
+            edges.push_back(edge);
             continue;
         }
         cut = true;
-        std::vector<Part::TopoShape> named;
+        const std::string name = firstName(path, whole);
+        const std::string bare = withoutTags(name);
+        const long tag = lastTag(name);
+        auto turnName = [&](const char* op, char type, size_t k) {
+            return Data::MappedName(Data::MappedName::makeEncodedSection(
+                {hashed(field(bare) + field(op) + field(std::to_string(k)))},
+                {},
+                static_cast<int>(tag),
+                op,
+                0,
+                type,
+                0,
+                {Data::MAPPER_FLAG_SOURCE}
+            ));
+        };
+        TopoDS_Vertex start;
+        TopoDS_Vertex end;
+        TopExp::Vertices(whole, start, end);  // by parameter, as helixTurns cuts
         for (size_t k = 0; k < pieces.size(); ++k) {
-            builder.Add(edges, pieces[k]);
-            named.emplace_back(pieces[k]);
-            if (k > 0) {
-                mapper.populate(
-                    Part::MappingStatus::Generated,
-                    edge,
-                    std::vector<Part::TopoShape> {TopExp::FirstVertex(pieces[k], true)}
-                );
+            Part::TopoShape named(pieces[k], edge.Tag, edge.Hasher, edge.getHistoryAlgorithm());
+            named.setElementName(
+                Data::IndexedName::fromConst("Edge", 1),
+                turnName("TRN", 'E', k + 1),
+                edge.Tag
+            );
+            TopoDS_Vertex from;
+            TopoDS_Vertex to;
+            TopExp::Vertices(pieces[k], from, to);
+            for (const auto& [vertex, cutAt] : {std::pair {from, k}, std::pair {to, k + 1}}) {
+                const int at = named.findShape(vertex);
+                if (at <= 0) {
+                    continue;
+                }
+                const Data::IndexedName element = Data::IndexedName::fromConst("Vertex", at);
+                const TopoDS_Vertex& own = cutAt == 0 ? start : end;
+                if (cutAt == 0 || cutAt == pieces.size()) {
+                    // The helix's own end: its name as it was
+                    const int index = path.findShape(own);
+                    if (index <= 0) {
+                        continue;
+                    }
+                    for (const auto& [mapped, sids] :
+                         path.getElementMappedNames(Data::IndexedName::fromConst("Vertex", index))) {
+                        named.setElementName(element, mapped, edge.Tag, &sids);
+                    }
+                    continue;
+                }
+                named.setElementName(element, turnName("TRV", 'V', cutAt), edge.Tag);
             }
+            edges.push_back(named);
         }
-        mapper.populate(Part::MappingStatus::Modified, edge, named);
     }
     if (!cut) {
         return path;
     }
-    Part::TopoShape split(wire);
-    split.makeShapeWithElementMap(edges, mapper, {path}, Part::OpCodes::Split);
-    wire.makeElementWires(split.getSubTopoShapes(TopAbs_EDGE));
+    wire.makeElementWires(edges);
     if (wire.isNull() || wire.getShape().ShapeType() != TopAbs_WIRE) {
         return path;
     }

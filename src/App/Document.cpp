@@ -184,7 +184,10 @@ namespace
 // 17: ops#640 (sweeps slice 2, batch 4's T1 and I-R3), a PartDesign Helix's caps are the profile
 // face and its edges and vertexes, modified (the start) and projected (the end), so turn 1's side
 // faces and edges are told apart by the start cap's names; the one turn left without them keeps
-// the count, `0of1`, where its lone `0` was the name of turn 1 in a helix of one turn.
+// the count, `0of1`, where its lone `0` was the name of turn 1 in a helix of one turn. A Pipe
+// along a helix edge (a Part::Helix) sweeps turn by turn, the path cut at each whole turn, and
+// turn k and the vertex k turns from the start are named by the edge's name and k (`TRN`, `TRV`;
+// batch 6's R1), where the whole edge's name was the side faces'.
 constexpr int ForkNamingRevision = 17;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the

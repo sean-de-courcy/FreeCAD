@@ -593,6 +593,110 @@ class TestHelixTurnNamesNeverPass(PipeCase):
         self.assertAlmostEqual(point.Placement.Base.z, 10, 2)
 
 
+class TestPipeHelixTurnsCountFromTheStart(PipeCase):
+    """Batch 6's R1 (ops#640): a Pipe along a Part::Helix of several turns is swept turn by turn
+    (the path cut at each whole turn, ops#665), one side face per turn and profile edge. Turn k's
+    pieces took the plain names of the path's pieces, and the last piece was told apart by the
+    path's end vertex: after an edit that adds turns, "turn 2 of 2" was the new end piece, and a
+    reference on turn 2 went to it, silently. Onshape's helix sweep has one side face, which
+    follows the edit. Turn k is now named by its place counted from the helix's start, so it keeps
+    its name whatever the number of turns. Designed: a Part::Helix about Z, r 10.5, pitch 6,
+    height 12; a 3 x 2 rectangle on XZ (x 9..12, z -1..1) swept in Frenet mode. Turn k's outer
+    face lies at r 12 (area 2 pi 12 x 2) and its centre of mass on the axis at
+    z = pitch (k - 1/2)."""
+
+    def build(self, height=12.0, pitch=6.0):
+        self.helixPath = self.doc.addObject("Part::Helix", "Path")
+        self.helixPath.Pitch, self.helixPath.Height, self.helixPath.Radius = pitch, height, 10.5
+        self.doc.recompute()
+        profile = self.sketch("HS", models.rectangle(9, -1, 12, 1), placement=XZ)
+        pipe = self.pipe(profile, (self.helixPath, ["Edge1"]), Mode="Frenet")
+        self.assertSweeps(pipe)
+        return pipe
+
+    def outer(self, pipe, k, pitch):
+        """Turn k's outer face: area 2 pi 12 x 2, its centre of mass at z = pitch (k - 1/2)."""
+        z = pitch * (k - 0.5)
+        names = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(pipe.Shape.Faces)
+            if abs(f.Area - 2 * math.pi * 12 * 2) < 1 and abs(f.CenterOfMass.z - z) < 0.25
+        ]
+        self.assertEqual(len(names), 1, names)
+        return names[0]
+
+    def pointOn(self, pipe, k, pitch=6.0):
+        point = self.body.newObject("PartDesign::Point", "OnTurn%d" % k)
+        point.AttachmentSupport = [(pipe, self.outer(pipe, k, pitch))]
+        point.MapMode = "CenterOfMass"
+        self.doc.recompute()
+        self.assertAlmostEqual(point.Placement.Base.z, pitch * (k - 0.5), 2)
+        return point
+
+    def edit(self, pitch, height):
+        self.helixPath.Pitch = pitch
+        self.helixPath.Height = height
+        self.doc.recompute()
+
+    def assertOnTurn(self, point, k, pitch):
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertAlmostEqual(point.Placement.Base.z, pitch * (k - 0.5), 2)
+
+    def testPitchDownKeepsTurn2(self):
+        """Pitch 6 -> 5 (2 -> 2.4 turns): the point on turn 2 stays on turn 2 (z 7.5), not on the
+        0.4-turn end piece (z 10..12), where it went (the review's PipeHelixPitchDown|t2_outer)."""
+        pipe = self.build()
+        point = self.pointOn(pipe, 2)
+        self.edit(5.0, 12.0)
+        self.assertOnTurn(point, 2, 5.0)
+
+    def testPitchDownKeepsTurn1(self):
+        pipe = self.build()
+        point = self.pointOn(pipe, 1)
+        self.edit(5.0, 12.0)
+        self.assertOnTurn(point, 1, 5.0)
+
+    def testTurnAddedKeepsTurn2(self):
+        """Height 12 -> 18 (2 -> 3 turns)."""
+        pipe = self.build()
+        point = self.pointOn(pipe, 2)
+        self.edit(6.0, 18.0)
+        self.assertOnTurn(point, 2, 6.0)
+
+    def testHalfTurnMoreKeepsTurn2(self):
+        """Height 12 -> 15 (2 -> 2.5 turns)."""
+        pipe = self.build()
+        point = self.pointOn(pipe, 2)
+        self.edit(6.0, 15.0)
+        self.assertOnTurn(point, 2, 6.0)
+
+    def testThreeToFourKeepsTurn2(self):
+        """Built at 3 turns; height 18 -> 24: turn 2 goes from the middle turn to the second of
+        three middle turns."""
+        pipe = self.build(height=18.0)
+        point = self.pointOn(pipe, 2)
+        self.edit(6.0, 24.0)
+        self.assertOnTurn(point, 2, 6.0)
+
+    def testTurnRemovedKeepsTurn2(self):
+        """Built at 3 turns; height 18 -> 12: turn 2 becomes the last turn."""
+        pipe = self.build(height=18.0)
+        point = self.pointOn(pipe, 2)
+        self.edit(6.0, 12.0)
+        self.assertOnTurn(point, 2, 6.0)
+
+    def testGoneTurnDoesNotPassToAnother(self):
+        """Built at 3 turns; height 18 -> 12: turn 3 is gone, so the point on it breaks (loud) or
+        stays off turns 1 and 2."""
+        pipe = self.build(height=18.0)
+        point = self.pointOn(pipe, 3)
+        self.edit(6.0, 12.0)
+        if point.isValid():
+            for k in (1, 2):
+                self.assertGreater(abs(point.Placement.Base.z - 6.0 * (k - 0.5)), 1,
+                                   "the reference on the gone turn 3 passed to turn %d" % k)
+
+
 class TestThreadToothOnTheCylinder(PipeCase):
     """Oracle 9 (ops#665, Onshape's answers): a cylinder r 10, 20 tall; a helix r 10, pitch 2,
     height 10 from z = 2.5; a tooth on XZ swept along it, added (profile control None)."""
