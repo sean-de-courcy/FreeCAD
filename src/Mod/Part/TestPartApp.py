@@ -40,12 +40,15 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     BridgedRecessTest,
+    CornerWithACircleTest,
+    CurvedWallEndTest,
     DroppedBasePartsTest,
     DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
     LostStepTest,
+    OverflowTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest

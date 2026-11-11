@@ -2077,7 +2077,7 @@ TEST_F(FilletFallbackTest, refusesObliqueCornersWhoseRoundsRunPastTheirVertex)
         oblique,
         oblique.getSubTopoShapes(TopAbs_EDGE),
         fillet(2),
-        "a tangent strip runs off its face"
+        "runs past both its faces"
     ));
 }
 
@@ -2108,7 +2108,9 @@ TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
     TopoShape dPlate(BRepPrimAPI_MakePrism(d, gp_Vec(0, 0, 4)).Shape(), 1L);
     auto dTop = edgesWhere(dPlate, atHeight(4));
     ASSERT_EQ(dTop.size(), 2U);
-    EXPECT_TRUE(refusedFor(dPlate, dTop, fillet(4), "not straight"));
+    // Its corners are convex now (Corner2Union, ops#640); at r = t OCCT 8.0.1's cut of the
+    // first tool, which passes through the bottom vertex, differs from its common part by 1e-3
+    EXPECT_TRUE(refusedFor(dPlate, dTop, fillet(4), "the cut removed"));
 }
 
 TEST_F(FilletFallbackTest, refusesCornersJustOverTheLimit)
@@ -2155,40 +2157,69 @@ TEST_F(FilletFallbackTest, refusesVariableRadius)
     EXPECT_TRUE(throwsOcctsError([&] { result.makeElementFillet(base, edges, 1, 2); }));
 }
 
-TEST_F(FilletFallbackTest, refusesOverlappingTools)
+/** The area the rounds of radius r of count edges (1 or 2) remove from the section of a plate of
+ * the width: at the depth r (1 - cos t) one round is r (1 - sin t) wide, the rounds together at
+ * most the width. By Simpson's rule on each side of the kink, where the integrand is smooth */
+double roundsSection(double r, double width, int count)
 {
-    // r = 2.1 on the rib 4 wide: the two rounds overlap
+    auto f = [&](double t) {
+        return std::min(width, count * r * (1 - std::sin(t))) * r * std::sin(t);
+    };
+    auto simpson = [&](double a, double b) {
+        const int n = 2000;
+        double h = (b - a) / n;
+        double sum = f(a) + f(b);
+        for (int i = 1; i < n; ++i) {
+            sum += f(a + i * h) * (i % 2 ? 4 : 2);
+        }
+        return sum * h / 3;
+    };
+    double kink = std::asin(std::max(0.0, 1 - width / count / r));
+    return simpson(0, kink) + simpson(kink, pi / 2);
+}
+
+TEST_F(FilletFallbackTest, overlappingToolsAsOnshape)
+{
+    // r = 2.1 on the rib 4 wide, 20 long: the two rounds overlap, and the result is the rib
+    // without their union, as Onshape's (ops#640, S3; notes/onshape-facts.md K2E)
     TopoShape base(ribAgainstWall(), 1L);
     std::vector<TopoShape> edges {
         edgeBetween(base, {13, 0, 4}, {13, 20, 4}),
         edgeBetween(base, {17, 0, 4}, {17, 20, 4})
     };
-    EXPECT_TRUE(refusedFor(base, edges, fillet(2.1), "overlap"));
+    EXPECT_TRUE(exact(dressUp(base, edges, fillet(2.1)), 6000 + 320 - 20 * roundsSection(2.1, 4, 2)));
 }
 
-TEST_F(FilletFallbackTest, refusesJustOverTheLimit)
+TEST_F(FilletFallbackTest, justOverTheLimitAsOnshape)
 {
-    // The volume error grows with the square or cube of the excess, so the volume checks pass
-    // these; the strips' areas grow linearly with it. The plate's top is 4 wide
+    // Past the limit the result is the plate without the tools' union (ops#640, S3; Onshape's
+    // KP3, K2D, K2E). The plate's top is 4 wide
     TopoShape base(box(30, 4, 20), 1L);
     TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
     TopoShape back = edgeBetween(base, {0, 4, 20}, {30, 4, 20});
     for (double r : {2.005, 2.01, 2.02}) {
-        EXPECT_TRUE(refusedFor(base, {front, back}, fillet(r), "overlap")) << r;
+        EXPECT_TRUE(exact(dressUp(base, {front, back}, fillet(r)), 2400 - 30 * roundsSection(r, 4, 2)))
+            << r;
     }
     for (double r : {4.01, 4.02, 4.04}) {
-        EXPECT_TRUE(refusedFor(base, {front}, fillet(r), "runs off its face")) << r;
+        EXPECT_TRUE(exact(dressUp(base, {front}, fillet(r)), 2400 - 30 * roundsSection(r, 4, 1)))
+            << r;
     }
+    // Two chamfers meet in a ridge: d^2 less the overlap (2 d - 4)^2 / 4; one past the top: its
+    // triangle less the part beyond the far side, (d - 4)^2 / 2
     for (double d : {2.001, 2.002}) {
-        EXPECT_TRUE(refusedFor(base, {front, back}, chamfer(d), "overlap")) << d;
+        EXPECT_TRUE(exact(
+            dressUp(base, {front, back}, chamfer(d)),
+            2400 - 30 * (d * d - (2 * d - 4) * (2 * d - 4) / 4)
+        )) << d;
     }
-    EXPECT_TRUE(refusedFor(base, {front}, chamfer(4.002), "runs off its face"));
-    // On a short edge the overhang's area is small next to the strip's perimeter: the tolerance
-    // goes with the strip's length along the edge
+    double d = 4.002;
+    EXPECT_TRUE(exact(dressUp(base, {front}, chamfer(d)), 2400 - 30 * (d * d - (d - 4) * (d - 4)) / 2));
     TopoShape sliver(box(0.01, 4, 20), 1L);
     TopoShape shortEdge = edgeBetween(sliver, {0, 0, 20}, {0.01, 0, 20});
     EXPECT_TRUE(exact(dressUp(sliver, {shortEdge}, chamfer(4)), 0.8 - 0.01 * 8));
-    EXPECT_TRUE(refusedFor(sliver, {shortEdge}, chamfer(4.0004), "runs off its face"));
+    d = 4.0004;
+    EXPECT_TRUE(exact(dressUp(sliver, {shortEdge}, chamfer(d)), 0.8 - 0.01 * (d * d - (d - 4) * (d - 4)) / 2));
 }
 
 TEST_F(FilletFallbackTest, refusesBelowTheLimit)

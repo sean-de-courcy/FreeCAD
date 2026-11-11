@@ -119,6 +119,55 @@ class TestResultCheck(unittest.TestCase):
         )
         self.assertTrue(pocket.Shape.isValid())
 
+    def revolveSketch(self, body, geometry, angle):
+        sketch = body.newObject("Sketcher::SketchObject", "RevSketch")
+        sketch.Placement = FreeCAD.Placement(V(0, 0, 0), FreeCAD.Rotation(V(1, 0, 0), 90))
+        for g in geometry:
+            sketch.addGeometry(g)
+        rev = body.newObject("PartDesign::Revolution", "Revolution")
+        rev.Profile = sketch
+        rev.ReferenceAxis = (sketch, ["V_Axis"])
+        rev.Angle = angle
+        return rev
+
+    def testHornTorusRevolveWithoutBaseBuilds(self):
+        """The horn torus as the Body's first feature, from a sketch: a circle r 3 tangent to the
+        sketch's V axis, a full turn, 2 pi^2 R r^2 with R = r = 3 (Onshape's RV1 builds it). The
+        seated profile (P4) turned a sketch face's Reversed wire twice: the face's area came out
+        negative, the solid inside out, and S2 stopped it (F1, kernel-8, ops#640)."""
+        body = self.body()
+        rev = self.revolveSketch(body, [Part.Circle(V(3, 4, 0), V(0, 0, 1), 3)], 360)
+        self.doc.recompute()
+        self.assertBuilt(rev)
+        self.assertAlmostEqual(rev.Shape.Volume, 2 * math.pi**2 * 3 * 9, delta=1e-6 * 533)
+        self.assertTrue(rev.Shape.isValid())
+
+    def testHalfDiscTouchingTheAxisRevolvesWithoutBase(self):
+        """A D (the left half of a circle r 100 centred (100, 0), closed by the line x = 100) touches
+        the axis at the arc's middle; revolved without a base it builds at 360, 180 and 120 degrees,
+        V by Pappus (half disc area times its centroid's path), and the 180-degree end caps have the
+        half disc's positive area (F1: they were turned inside out)."""
+        r = 100.0
+        area = math.pi * r * r / 2
+        centroid = r - 4 * r / (3 * math.pi)
+        for angle in (360, 180, 120):
+            body = self.body()
+            arc = Part.ArcOfCircle(Part.Circle(V(r, 0, 0), V(0, 0, 1), r), math.pi / 2, 1.5 * math.pi)
+            rev = self.revolveSketch(body, [arc, Part.LineSegment(V(r, -r, 0), V(r, r, 0))], angle)
+            self.doc.recompute()
+            self.assertBuilt(rev)
+            shape = rev.Shape
+            self.assertTrue(shape.isValid(), angle)
+            expected = area * centroid * math.radians(angle)
+            self.assertAlmostEqual(shape.Volume, expected, delta=1e-7 * expected)
+            for f in shape.Faces:
+                self.assertGreater(f.Area, 0, (angle, f.Surface))
+            if angle < 360:
+                caps = [f for f in shape.Faces if isinstance(f.Surface, Part.Plane)]
+                self.assertEqual(len(caps), 2, angle)
+                for cap in caps:
+                    self.assertAlmostEqual(cap.Area, area, delta=1e-7 * area)
+
     def testOverlappingSquaresPadOfNoVolumeFails(self):
         body = self.body()
         sketch = body.newObject("Sketcher::SketchObject", "Sketch")

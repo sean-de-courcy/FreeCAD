@@ -337,12 +337,15 @@ class TestChamfer(unittest.TestCase):
         rib, edges = models.rib_against_wall()
         self._assertValidDressUp(self._chamfer_on_base(rib, edges, 4.0), 4800 - 8 * 30)
 
-    def testChamferOverlongFails(self):
+    def testChamferOverlongBuilds(self):
         # Just over chamfers meeting on a disk's rim face, and on a stadium plate's: OCCT returns
-        # two invalid solids, which the feature stored with Allow Compound on
-        for model, size in ((models.disk, 1.00001), (models.stadium_plate, 2.0002)):
+        # two invalid solids; the chamfers meet in a ridge, as Onshape's (ops#640, S3; volumes by
+        # quadrature, Part's OverflowTest.testOverlongFullChamfers)
+        for model, size, volume in ((models.disk, 1.00001, 567.579879), (models.stadium_plate, 2.0002, 845.198614)):
             shape, edges = model()
-            self._assertFails(self._chamfer_on_base(shape, edges, size, allow_compound=True))
+            chamfer = self._chamfer_on_base(shape, edges, size, allow_compound=True)
+            self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+            self.assertAlmostEqual(chamfer.Shape.Volume, volume, delta=1e-5)
 
     def testChamferOverlappingFail(self):
         # Chamfers of 2.65 on two edges 4 apart overlap on the face between them, and no chamfer
