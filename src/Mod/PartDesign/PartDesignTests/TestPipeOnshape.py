@@ -927,6 +927,36 @@ class TestPipeSelfOverlapUnion(PipeCase):
                  if f.Surface.isPlanar() and abs(f.CenterOfMass.y - y) < 1e-6]
         return found
 
+    def testEndCapReferencesBreakWhileTheCapIsCutInTwo(self):
+        """SW19 (a): a point and a sketch on the end cap at y 1.5 (clear: one cap, A pi). The end moved
+        to y 0.5 cuts the cap in two (|z| > 0.866): Onshape fails both references (CANNOT_RESOLVE_ENTITIES,
+        SKETCH_NO_PLANE) and picks no piece; moved back to y 1.5, both come back."""
+        pipe = self.tube((10, 1.5))
+        self.assertOneSolid(pipe, math.pi * 48.5)
+        cap = self.endCap(pipe, 1.5)
+        self.assertEqual(len(cap), 1)
+        self.assertAlmostEqual(pipe.Shape.getElement(cap[0]).Area, math.pi, 4)
+        point = self.pointOn(pipe, cap[0], "OnCap")
+        sketch = self.body.newObject("Sketcher::SketchObject", "OnCapSketch")
+        sketch.AttachmentSupport = [(pipe, cap[0])]
+        sketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertTrue(point.isValid() and sketch.isValid())
+        self.assertLess((point.Placement.Base - V(10, 1.5, 0)).Length, 1e-6)
+        path = self.doc.getObject("Path")
+        models.setLines(path, {3: ((10, 10), (10, 0.5))})
+        self.doc.recompute()
+        self.assertOneSolid(pipe, 154.390970, places=4)
+        self.assertEqual(len(self.endCap(pipe, 0.5)), 2)
+        self.assertFalse(point.isValid(), ("the point picked a piece", point.Placement.Base))
+        self.assertFalse(sketch.isValid(), ("the sketch picked a piece", sketch.Placement.Base))
+        models.setLines(path, {3: ((10, 10), (10, 1.5))})
+        self.doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertLess((point.Placement.Base - V(10, 1.5, 0)).Length, 1e-6)
+        self.assertAlmostEqual(sketch.Placement.Base.y, 1.5, 9)  # on the cap's plane again
+
     def testRingProfileHoleStaysOpen(self):
         """A ring r 1 / 0.4: a point is kept where it lies in some leg's annulus (Onshape's union),
         open where it lies only in holes. (10, 0.75, 0): leg 1's wall and leg 4's hole: in.

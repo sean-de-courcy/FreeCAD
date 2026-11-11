@@ -733,6 +733,10 @@ struct AppExport SolveInput
         /// the person asked for the whole element, so a split breaks with the pieces listed,
         /// never G3's one piece.
         bool listHolder = false;
+        /// Under Equivalent, two or more pieces of the old element break the entry even when
+        /// they give the consumer one result (an attachment: Onshape's SW19 (a), a sketch and
+        /// a mate connector on a face cut in two fail and come back once it is whole again).
+        bool piecesBreak = false;
         /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`, whose mapped name is
         /// exactName (the name the reference holds).
         bool exact = false;
@@ -958,6 +962,9 @@ struct AppExport SolveOutcome
     std::string from;
     /// Resolved by a collapse: the group's `from` is cleared.
     bool collapsed = false;
+    /// Resolved to the representative of pieces of the old element that give the consumer one
+    /// result (the Equivalent policy): the batch keeps the way back to the whole element.
+    bool equivalentPieces = false;
     /// Broken: the candidates the user may choose from, pieces first, each part in index order,
     /// with their mapped names (parallel). Resolved by tier 2 or 3 (ops#127): the other
     /// candidates tier 1 found, which the user may prefer to the one geometry chose.
