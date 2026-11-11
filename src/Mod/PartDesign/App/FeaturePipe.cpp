@@ -1936,6 +1936,44 @@ std::vector<gp_Pnt> pointsAlong(const TopoDS_Wire& wire)
     return points;
 }
 
+/// How far the multisection pipe's \a sections reach about the path \a wire: for each, the largest
+/// distance from its points (each wire's, or its vertices') to its own path point, the point of the
+/// path nearest their middle. A section's box diagonal reaches 2.6 times a hexagon's circumradius
+/// and armed the overlap check on multisection helix pipes whose tubes stay clear (sweeps 11).
+double sectionsReach(const TopoDS_Wire& wire, const std::vector<TopoDS_Shape>& sections)
+{
+    double reach = 0.0;
+    for (const TopoDS_Shape& section : sections) {
+        std::vector<gp_Pnt> points;
+        for (TopExp_Explorer it(section, TopAbs_WIRE); it.More(); it.Next()) {
+            const std::vector<gp_Pnt> along = pointsAlong(TopoDS::Wire(it.Current()));
+            points.insert(points.end(), along.begin(), along.end());
+        }
+        if (points.empty()) {
+            for (TopExp_Explorer it(section, TopAbs_VERTEX); it.More(); it.Next()) {
+                points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+            }
+        }
+        if (points.empty()) {
+            continue;
+        }
+        gp_XYZ sum(0, 0, 0);
+        for (const gp_Pnt& point : points) {
+            sum += point.XYZ();
+        }
+        const gp_Pnt middle(sum / static_cast<double>(points.size()));
+        BRepExtrema_DistShapeShape nearest(BRepBuilderAPI_MakeVertex(middle).Vertex(), wire);
+        if (!nearest.IsDone() || nearest.NbSolution() < 1) {
+            continue;
+        }
+        const gp_Pnt onPath = nearest.PointOnShape2(1);
+        for (const gp_Pnt& point : points) {
+            reach = std::max(reach, onPath.Distance(point));
+        }
+    }
+    return reach;
+}
+
 /// The normal of the plane of \a points, oriented by their order around it (Newell's method):
 /// none when they enclose no area or don't lie in one plane
 std::optional<gp_Dir> planeNormal(const std::vector<gp_Pnt>& points)
@@ -7152,12 +7190,32 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     }
                 }
                 // A profile scaled up along the path reaches further than the start profile does
-                // (the ops#666 skeptic's silent path A): its reach grows with the factor. A larger
-                // section further on isn't counted: armed by the sections, OCCT's self-interference
-                // check stopped multisection helix pipes that built before (tier F, sweeps 9);
-                // whether those hits are real is open (ops#666's debt)
+                // (the ops#666 skeptic's silent path A): its reach grows with the factor
                 if (HasScale.getValue()) {
                     reach *= std::max(1.0, ScaleFactor.getValue());
+                }
+                // So does a larger section further on: a U path whose last section grows to r 5.5
+                // swept a self-overlapping solid, Up-to-date. Its reach is the largest distance
+                // from its points to its own path point (the path's point nearest their middle),
+                // not its box's diagonal: that one armed the check on multisection helix pipes
+                // whose tubes stay clear (sweeps 11)
+                if (Transformation.getValue() == 1) {
+                    std::vector<TopoDS_Shape> sections;
+                    for (const auto& subSet : Sections.getSubListValues()) {
+                        try {
+                            const Part::TopoShape section
+                                = getSectionShape("Section", subSet.first, subSet.second);
+                            if (!section.isNull()) {
+                                sections.push_back(section.getShape().Moved(invObjLoc));
+                            }
+                        }
+                        catch (const Standard_Failure&) {
+                        }
+                        catch (const Base::Exception&) {
+                            // the sections' own checks below say what's wrong with it
+                        }
+                    }
+                    reach = std::max(reach, sectionsReach(wire, sections));
                 }
                 passesNear = pathPassesNearItself(wire, reach);
             }

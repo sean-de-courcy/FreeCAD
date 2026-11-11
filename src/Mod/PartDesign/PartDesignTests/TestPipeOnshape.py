@@ -927,6 +927,36 @@ class TestPipeSelfOverlapUnion(PipeCase):
                  if f.Surface.isPlanar() and abs(f.CenterOfMass.y - y) < 1e-6]
         return found
 
+    def testEndCapReferencesBreakWhileTheCapIsCutInTwo(self):
+        """SW19 (a): a point and a sketch on the end cap at y 1.5 (clear: one cap, A pi). The end moved
+        to y 0.5 cuts the cap in two (|z| > 0.866): Onshape fails both references (CANNOT_RESOLVE_ENTITIES,
+        SKETCH_NO_PLANE) and picks no piece; moved back to y 1.5, both come back."""
+        pipe = self.tube((10, 1.5))
+        self.assertOneSolid(pipe, math.pi * 48.5)
+        cap = self.endCap(pipe, 1.5)
+        self.assertEqual(len(cap), 1)
+        self.assertAlmostEqual(pipe.Shape.getElement(cap[0]).Area, math.pi, 4)
+        point = self.pointOn(pipe, cap[0], "OnCap")
+        sketch = self.body.newObject("Sketcher::SketchObject", "OnCapSketch")
+        sketch.AttachmentSupport = [(pipe, cap[0])]
+        sketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertTrue(point.isValid() and sketch.isValid())
+        self.assertLess((point.Placement.Base - V(10, 1.5, 0)).Length, 1e-6)
+        path = self.doc.getObject("Path")
+        models.setLines(path, {3: ((10, 10), (10, 0.5))})
+        self.doc.recompute()
+        self.assertOneSolid(pipe, 154.390970, places=4)
+        self.assertEqual(len(self.endCap(pipe, 0.5)), 2)
+        self.assertFalse(point.isValid(), ("the point picked a piece", point.Placement.Base))
+        self.assertFalse(sketch.isValid(), ("the sketch picked a piece", sketch.Placement.Base))
+        models.setLines(path, {3: ((10, 10), (10, 1.5))})
+        self.doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertLess((point.Placement.Base - V(10, 1.5, 0)).Length, 1e-6)
+        self.assertAlmostEqual(sketch.Placement.Base.y, 1.5, 9)  # on the cap's plane again
+
     def testRingProfileHoleStaysOpen(self):
         """A ring r 1 / 0.4: a point is kept where it lies in some leg's annulus (Onshape's union),
         open where it lies only in holes. (10, 0.75, 0): leg 1's wall and leg 4's hole: in.
@@ -982,6 +1012,43 @@ class TestPipeSelfOverlapUnion(PipeCase):
         naive = 4 * (37.5 + 3 * math.pi)
         self.assertLess(pipe.Shape.Volume, naive - 0.5)
         self.assertGreater(pipe.Shape.Volume, naive - 4)
+
+    def multisection(self, radius):
+        """A circle r 1 normal to X at the origin swept along the U path (0,0)-(30,0)-(30,6)-(0,6),
+        with sections r 1 at both corners and r `radius` at the end: only leg 3 (y = 6) grows."""
+        path = self.sketch("Path", models.polyline([(0, 0), (30, 0), (30, 6), (0, 6)]))
+        profile = self.sketch("Profile", [models.circle(0, 0, 1)], placement=YZ)
+        sections = []
+        for k, (x, y, r) in enumerate(((30, 0, 1), (30, 6, 1), (0, 6, radius))):
+            placement = App.Placement(V(x, 0, 0), YZ.Rotation)
+            sections.append(self.sketch(f"Section{k}", [models.circle(y, 0, r)], placement=placement))
+        return self.pipe(profile, path, ProfileControl="None", Transformation="Multisection",
+                         Sections=sections)
+
+    def testALargerSectionFurtherOnIsUnited(self):
+        """The ops#666 skeptic's silent path A for sections: the start profile's reach (r 1) keeps the
+        overlap check off for legs 6 apart, but the end section r 5.5 dips leg 3's tube to y 0.5 at
+        x = 0, into leg 1's (r 1). The sweep came out a self-overlapping solid (BOP SelfIntersect on
+        faces, V 869.6967, the overlap counted twice), Up-to-date. Now the sections' reach arms the
+        check, and the tubes' union is one solid holding the point (1, 0.8, 0), inside both tubes
+        (V 869.2494, 7 faces, BOP finds only the C0 edges it finds at r 4). The overlap lies in leg 1's
+        tube (r 1) where leg 3 reaches below y 1, which needs its radius over 5: x < 3.4 for a radius
+        growing evenly from 1 at x 30. So the union is under the double-counted volume and over it
+        less a 6 long piece of leg 1's tube (twice that reach)."""
+        doubled = 869.6967
+        pipe = self.multisection(5.5)
+        self.assertOneSolid(pipe)
+        self.assertTrue(pipe.Shape.isInside(V(1, 0.8, 0), 1e-6, True))
+        volume = pipe.Shape.Volume
+        self.assertLess(volume, doubled - 0.1)
+        self.assertGreater(volume, doubled - 6 * math.pi)
+        self.assertAlmostEqual(volume, 869.2494, places=2)
+
+    def testASectionClearOfTheOtherLegSweepsAsBefore(self):
+        """The end section r 4 reaches y 2 at x = 0, clear of leg 1's tube (y 1): the check runs (the
+        sections' reach, 4, against legs 6 apart) and finds nothing, and the sweep is as before
+        (V 569.609 on the build without the sections' reach)."""
+        self.assertOneSolid(self.multisection(4), 569.609, places=2)
 
 
 class TestPipeTwist(PipeCase):
