@@ -2401,6 +2401,11 @@ bool solveElementReferences(DocumentObject* feature,
             }
             if (item.policy == Data::SolvePolicy::Equivalent) {
                 item.equivalent = equivalenceOf(*entry);
+                // An attachment's face cut into pieces breaks, as in Onshape (SW19 (a)); an
+                // up-to face keeps either piece. Told by the attachment extension's property
+                // name, so the link flags in PropertyLinks.h stay as they are.
+                const char* name = entry->prop->getName();
+                item.piecesBreak = name && std::strcmp(name, "AttachmentSupport") == 0;
             }
             // The old names, plain; their own forms are what `from` is written back in
             auto plainOld = [&mapForms](const std::string& name) {

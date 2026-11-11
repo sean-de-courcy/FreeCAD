@@ -133,6 +133,59 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(point.AttachmentSupport, [(groove, (halves[0],))])
         self.assertEqual(App.getReferenceReport(point), [])
 
+    def testAttachmentsOnATopCutInTwoBreakAndComeBack(self):
+        """SW19 (a) / SW20: a box 0..40 x 0..20 x 0..10 with a pocket 2 deep at x 18..22, y 5..15
+        (inside the top: the top stays one face), a sketch (FlatFace) and a datum point
+        (CenterOfMass) on the top. The pocket made a slot across (y -5..25) cuts the top in two
+        coplanar pieces: both references break with the pieces as candidates, the sketch too
+        though both pieces give it one plane, and neither picks a piece. Made a pocket inside
+        again, both come back on the whole top."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 40, 20), body)
+        models.pad(body, profile, 10)
+        slot = models.sketch(doc, "SlotSketch", models.rectangle(18, 5, 22, 15), body, z=10)
+        pocket = models.pocket(body, slot, 2, "Slot")
+        doc.recompute()
+        top = face("plane", normal=Z, through=(0, 0, 10))
+        [name] = top.select(pocket.Shape)
+        onTop = body.newObject("Sketcher::SketchObject", "OnTop")
+        onTop.AttachmentSupport = [(pocket, name)]
+        onTop.MapMode = "FlatFace"
+        point = body.newObject("PartDesign::Point", "Centre")
+        point.AttachmentSupport = [(pocket, name)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertTrue(onTop.isValid() and point.isValid())
+        centre = point.Placement.Base
+
+        # Act: the slot across
+        models.moveRectangle(slot, 18, -5, 22, 25)
+        doc.recompute()
+
+        # Assert
+        pieces = top.select(pocket.Shape)
+        self.assertEqual(len(pieces), 2)
+        for consumer in (onTop, point):
+            self.assertFalse(consumer.isValid(), (consumer.Name, consumer.AttachmentSupport))
+            [entry] = App.getReferenceReport(consumer)
+            self.assertEqual(entry["status"], "broken", consumer.Name)
+            self.assertTrue(entry["sub"].startswith("?Face"), (consumer.Name, entry["sub"]))
+            self.assertEqual(sorted(entry["candidates"][:2]), sorted(pieces), consumer.Name)
+
+        # Act: the pocket inside the top again
+        models.moveRectangle(slot, 18, 5, 22, 15)
+        doc.recompute()
+
+        # Assert
+        [whole] = top.select(pocket.Shape)
+        for consumer in (onTop, point):
+            self.assertTrue(consumer.isValid(), (consumer.Name, consumer.getStatusString()))
+            self.assertEqual(consumer.AttachmentSupport, [(pocket, (whole,))], consumer.Name)
+        self.assertAlmostEqual(onTop.Placement.Base.z, 10, 9)
+        self.assertLess((point.Placement.Base - centre).Length, 1e-7)
+
     def testAttacherPlacementOnCoplanarPieces(self):
         """What the attachment's equivalence relies on (Task 2 PR 5): a groove across a pad's
         top face splits it into two coplanar pieces; FlatFace gives the same placement on
