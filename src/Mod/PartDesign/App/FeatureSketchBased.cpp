@@ -88,6 +88,7 @@
 #include "DatumLine.h"
 #include "DatumPlane.h"
 #include "PartDesignParameter.h"
+#include "StraightEdge.h"
 #include "StudioOwner.h"
 #include "Mod/Part/App/Geometry.h"
 
@@ -2018,7 +2019,7 @@ void ProfileBased::getAxis(
             b = adapt.Circle().Location();
             d = adapt.Circle().Axis().Direction();
         }
-        else {
+        else if (!straightEdge(refEdge, b, d)) {  // a B-spline straight by its shape (SW7)
             throw Base::TypeError("Edge must be a straight line, circle or arc of circle");
         }
 

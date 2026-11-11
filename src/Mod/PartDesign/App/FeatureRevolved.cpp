@@ -2991,8 +2991,10 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
             return;
         }
         // A correct fuse holds at least the larger of the two and at most both; a correct cut at
-        // least the base less the tool and at most the base
-        if (checkVolume) {
+        // least the base less the tool and at most the base. Checked for every revolution, not
+        // only up to a face: a thread's cap revolved one way into the thread fused to nothing,
+        // no solid at all, Up-to-date (rehearsal 4; ops#640). Onshape builds it.
+        {
             const auto [baseVolume, baseError] = checkedVolume(base.getShape(), constructedTool);
             const auto [toolVolume, toolError] = checkedVolume(tool.getShape(), constructedTool);
             const auto [volume, error] = checkedVolume(result.getShape(), constructedTool);
@@ -3014,7 +3016,8 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                     "Could not combine the revolution with the base: the result's volume is wrong"
                 ));
             }
-            if (!combinedWithinTolerance(result.getShape(), base.getShape(), tool.getShape())) {
+            if (checkVolume
+                && !combinedWithinTolerance(result.getShape(), base.getShape(), tool.getShape())) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's edges don't meet "

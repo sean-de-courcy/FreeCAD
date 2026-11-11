@@ -102,6 +102,7 @@ SET(FeaturesSketchBased_SRCS
     FeatureExtrude.h
     FeatureSketchBased.cpp
     FeatureSketchBased.h
+    StraightEdge.h
     FeaturePad.cpp
     FeaturePad.h
     FeaturePocket.cpp
