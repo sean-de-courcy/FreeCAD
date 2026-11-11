@@ -6939,6 +6939,125 @@ double areaOf(const TopoDS_Shape& faces)
     return std::abs(props.Mass());
 }
 
+/// The thin wall's history (sweeps 16): the wall is built from OCCT offsets, which keep none, so each
+/// of its edges is related to the profile's by geometry. An edge on a profile curve is modified from
+/// it; one through a profile vertex (an open curve's end) is generated from that vertex; one
+/// parallel to a profile curve at a wall's thickness (its midpoint that far from it, the nearest
+/// curve) is generated from it. The wall's sides are then named from the profile's curves, as a
+/// solid profile's are, so adding a curve or flipping the wall leaves the others' names alone.
+class MapperThinWall: public Part::TopoShape::Mapper
+{
+public:
+    MapperThinWall(const TopoDS_Shape& wall, const TopoDS_Shape& profile, double right, double left)
+    {
+        TopTools_IndexedMapOfShape edges;
+        TopTools_IndexedMapOfShape vertices;
+        TopExp::MapShapes(profile, TopAbs_EDGE, edges);
+        TopExp::MapShapes(profile, TopAbs_VERTEX, vertices);
+        sourceEdges.reserve(edges.Extent());
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            sourceEdges.push_back(edges(i));
+        }
+        for (int i = 1; i <= vertices.Extent(); ++i) {
+            sourceVertices.push_back(vertices(i));
+        }
+        modifiedOf.resize(sourceEdges.size());
+        generatedOf.resize(sourceEdges.size());
+        generatedOfVertex.resize(sourceVertices.size());
+        const double tolerance = 1e-7 + 1e-6 * std::max(1.0, right + left);
+        auto distance = [](const TopoDS_Shape& a, const gp_Pnt& p) {
+            BRepExtrema_DistShapeShape measure(a, BRepBuilderAPI_MakeVertex(p).Vertex());
+            return measure.IsDone() ? measure.Value() : std::numeric_limits<double>::max();
+        };
+        TopTools_IndexedMapOfShape wallEdges;
+        TopExp::MapShapes(wall, TopAbs_EDGE, wallEdges);
+        for (int w = 1; w <= wallEdges.Extent(); ++w) {
+            const TopoDS_Edge& edge = TopoDS::Edge(wallEdges(w));
+            BRepAdaptor_Curve curve(edge);
+            const double u0 = curve.FirstParameter();
+            const double u1 = curve.LastParameter();
+            const gp_Pnt middle = curve.Value((u0 + u1) / 2);
+            const std::array<gp_Pnt, 3> samples {curve.Value(u0 + (u1 - u0) / 4), middle, curve.Value(u1 - (u1 - u0) / 4)};
+            bool named = false;
+            for (std::size_t s = 0; s < sourceEdges.size() && !named; ++s) {
+                if (std::all_of(samples.begin(), samples.end(), [&](const gp_Pnt& p) {
+                        return distance(sourceEdges[s], p) < tolerance;
+                    })) {
+                    modifiedOf[s].push_back(edge);
+                    named = true;
+                }
+            }
+            for (std::size_t v = 0; v < sourceVertices.size() && !named; ++v) {
+                BRepExtrema_DistShapeShape measure(edge, sourceVertices[v]);
+                if (measure.IsDone() && measure.Value() < tolerance) {
+                    generatedOfVertex[v].push_back(edge);
+                    named = true;
+                }
+            }
+            if (named) {
+                continue;
+            }
+            std::size_t nearest = sourceEdges.size();
+            double best = std::numeric_limits<double>::max();
+            for (std::size_t s = 0; s < sourceEdges.size(); ++s) {
+                const double d = distance(sourceEdges[s], middle);
+                if (d < best) {
+                    best = d;
+                    nearest = s;
+                }
+            }
+            if (nearest < sourceEdges.size()
+                && ((right > tolerance && std::abs(best - right) < tolerance)
+                    || (left > tolerance && std::abs(best - left) < tolerance))) {
+                generatedOf[nearest].push_back(edge);
+            }
+        }
+    }
+
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
+    {
+        return lookUp(s, generatedOf, generatedOfVertex);
+    }
+
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        return lookUp(s, modifiedOf, {});
+    }
+
+private:
+    const std::vector<TopoDS_Shape>& lookUp(
+        const TopoDS_Shape& s,
+        const std::vector<std::vector<TopoDS_Shape>>& ofEdges,
+        const std::vector<std::vector<TopoDS_Shape>>& ofVertices
+    ) const
+    {
+        _res.clear();
+        if (s.ShapeType() == TopAbs_EDGE) {
+            for (std::size_t i = 0; i < sourceEdges.size(); ++i) {
+                if (sourceEdges[i].IsSame(s)) {
+                    _res = ofEdges[i];
+                    break;
+                }
+            }
+        }
+        else if (s.ShapeType() == TopAbs_VERTEX && !ofVertices.empty()) {
+            for (std::size_t i = 0; i < sourceVertices.size(); ++i) {
+                if (sourceVertices[i].IsSame(s)) {
+                    _res = ofVertices[i];
+                    break;
+                }
+            }
+        }
+        return _res;
+    }
+
+    std::vector<TopoDS_Shape> sourceEdges;
+    std::vector<TopoDS_Shape> sourceVertices;
+    std::vector<std::vector<TopoDS_Shape>> modifiedOf;
+    std::vector<std::vector<TopoDS_Shape>> generatedOf;
+    std::vector<std::vector<TopoDS_Shape>> generatedOfVertex;
+};
+
 /// The thin wall of \a pipe's profile (SW14), in place of its curves, its corners mitred (SW18)
 Part::TopoShape thinProfileOf(const Pipe& pipe)
 {
@@ -6947,8 +7066,10 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
     TopoDS_Shape curves;
     gp_Pln plane;
     TopLoc_Location location;
+    Part::TopoShape named;  // the profile's curves with their names, where the wall is
     if (auto sketch = freecad_cast<Part::Part2DObject*>(profile)) {
         // All the sketch's curves, open ones included: in the sketch's own plane
+        named = sketch->Shape.getShape();
         location = sketch->Shape.getShape().getShape().Location();
         curves = sketch->Shape.getShape().getShape().Located(TopLoc_Location());
         plane = gp_Pln(gp::XOY());
@@ -6967,6 +7088,7 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
         }
         plane = surface.Plane();
         curves = face.getShape();
+        named = face;
     }
     else {
         throw Base::TypeError("Pipe: Invalid profile/section");
@@ -6987,7 +7109,15 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
     if (areaOf(wall) < Precision::Confusion()) {
         throw Base::ValueError("Pipe: the thin profile has no curves to put a wall around");
     }
-    return Part::TopoShape(wall.Located(location));
+    const TopoDS_Shape placed = wall.Located(location);
+    Part::TopoShape result(0, pipe.getDocument()->getStringHasher());
+    result.makeShapeWithElementMap(
+        placed,
+        MapperThinWall(placed, named.getShape(), right, left),
+        {named},
+        Part::OpCodes::Offset2D
+    );
+    return result;
 }
 
 // Honest edge tolerances (ops#667). OCCT's sweep stores an edge's tolerance from the deviation of
