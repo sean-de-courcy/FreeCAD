@@ -648,6 +648,9 @@ void Controller::sizeButtons()
     }
 }
 
+// The Variable Studio tab's workbench (feat/variable-studio-tab adds it; absent until merged)
+constexpr const char* VariableStudioWorkbenchName = "VariableStudioWorkbench";
+
 bool Controller::allowsWorkbench(const std::string& name, std::string* refusal) const
 {
     // Under the Onshape keymap a tab's kind fixes its tools (decision 355): a Part Studio takes
@@ -676,8 +679,16 @@ bool Controller::allowsWorkbench(const std::string& name, std::string* refusal) 
             break;
         case AppTabs::Kind::VariableStudio: {
             tabIs = QT_TRANSLATE_NOOP("DocumentTabs", "a Variable Studio");
-            Workbench* current = WorkbenchManager::instance()->active();
-            fits = current && current->name() == name;
+            // Its own workbench when there is one (the Variable Studio lane's, looked up by name);
+            // else it keeps what it has
+            const QString own = QString::fromLatin1(VariableStudioWorkbenchName);
+            if (Application::Instance->workbenches().contains(own)) {
+                fits = name == VariableStudioWorkbenchName;
+            }
+            else {
+                Workbench* current = WorkbenchManager::instance()->active();
+                fits = current && current->name() == name;
+            }
             break;
         }
     }
