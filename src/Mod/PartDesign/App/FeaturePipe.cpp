@@ -1785,7 +1785,15 @@ SweepUnion unionOfOverlaps(
     maker.SetToFillHistory(true);
     maker.SetFuzzyValue(fuzzy);  // a loose sweep (ops#448)
     maker.Perform();
-    if (maker.HasErrors() || maker.HasWarnings()) {
+    // OCCT couldn't tell whether a split piece faces as its face does (a Round corner's sphere
+    // wedges, tangent to the legs they join: sweeps 17). Nothing below reads a piece's orientation
+    // from its face: each cell gives its pieces theirs, and the volume checks hold the result
+    bool otherWarnings = false;
+    for (const occ::handle<Message_Alert>& alert : maker.GetReport()->GetAlerts(Message_Warning)) {
+        otherWarnings = otherWarnings
+            || !alert->IsKind(STANDARD_TYPE(BOPAlgo_AlertUnableToOrientTheShape));
+    }
+    if (maker.HasErrors() || otherWarnings) {
         std::ostringstream alerts;
         maker.DumpErrors(alerts);
         maker.DumpWarnings(alerts);
@@ -6876,12 +6884,25 @@ OffsetCurve offsetOpenWire(const TopoDS_Wire& wire, const gp_Pln& plane, double 
 
 /// The thin wall of \a curves in \a plane (SW14): around each open wire, a strip from \a left to its
 /// left to \a right to its right (seen from the plane's normal); each region of the closed wires,
-/// a ring from \a right outward to \a left inward. Faces, in a compound.
-TopoDS_Shape thinWall(const TopoDS_Shape& curves, const gp_Pln& plane, double right, double left, GeomAbs_JoinType join)
+/// a ring from \a right outward to \a left inward. Faces, in a compound. \a sides, if given, gets
+/// the curves of the wall's boundary on each side, left then right (the strips' offsets; the
+/// rings' inner and outer boundaries), to tell the sides apart where both are offsets of one curve.
+TopoDS_Shape thinWall(
+    const TopoDS_Shape& curves,
+    const gp_Pln& plane,
+    double right,
+    double left,
+    GeomAbs_JoinType join,
+    std::array<TopoDS_Compound, 2>* sides = nullptr
+)
 {
     BRep_Builder builder;
     TopoDS_Compound wall;
     builder.MakeCompound(wall);
+    if (sides) {
+        builder.MakeCompound((*sides)[0]);
+        builder.MakeCompound((*sides)[1]);
+    }
     std::vector<Part::TopoShape> closed;
     for (TopExp_Explorer it(curves, TopAbs_WIRE); it.More(); it.Next()) {
         const TopoDS_Wire& wire = TopoDS::Wire(it.Current());
@@ -6894,9 +6915,15 @@ TopoDS_Shape thinWall(const TopoDS_Shape& curves, const gp_Pln& plane, double ri
         std::vector<Part::TopoShape> edges;
         for (const TopoDS_Edge& edge : a.edges) {
             edges.emplace_back(edge);
+            if (sides) {
+                builder.Add((*sides)[0], edge);
+            }
         }
         for (const TopoDS_Edge& edge : b.edges) {
             edges.emplace_back(edge);
+            if (sides) {
+                builder.Add((*sides)[1], edge);
+            }
         }
         edges.emplace_back(BRepBuilderAPI_MakeEdge(a.start, b.start).Edge());
         edges.emplace_back(BRepBuilderAPI_MakeEdge(a.end, b.end).Edge());
@@ -6929,6 +6956,14 @@ TopoDS_Shape thinWall(const TopoDS_Shape& curves, const gp_Pln& plane, double ri
         if (outer.isNull() || inner.isNull() || inner.countSubShapes(TopAbs_FACE) == 0) {
             throw Base::ValueError("Pipe: the thin wall is thicker than the region it goes into");
         }
+        if (sides) {
+            for (TopExp_Explorer it(inner.getShape(), TopAbs_EDGE); it.More(); it.Next()) {
+                builder.Add((*sides)[0], it.Current());
+            }
+            for (TopExp_Explorer it(outer.getShape(), TopAbs_EDGE); it.More(); it.Next()) {
+                builder.Add((*sides)[1], it.Current());
+            }
+        }
         FCBRepAlgoAPI_Cut ring(outer.getShape(), inner.getShape());
         if (!ring.IsDone()) {
             throw Base::CADKernelError("Pipe: the thin wall's ring failed");
@@ -6951,12 +6986,22 @@ double areaOf(const TopoDS_Shape& faces)
 /// of its edges is related to the profile's by geometry. An edge on a profile curve is modified from
 /// it; one through a profile vertex (an open curve's end) is generated from that vertex; one
 /// parallel to a profile curve at a wall's thickness (its midpoint that far from it, the nearest
-/// curve) is generated from it. The wall's sides are then named from the profile's curves, as a
-/// solid profile's are, so adding a curve or flipping the wall leaves the others' names alone.
+/// curve) is generated from it. Where the curve lies inside the wall (Midplane, or a second
+/// thickness), its two offsets would be twins told apart only by rank, which an added curve
+/// changes (sweeps 17): the one on the near side (where the curve is when that side's thickness
+/// is 0: on \a nearSides) is modified from the curve, the other generated from it. The wall's
+/// sides are then named from the profile's curves, as a solid profile's are, so adding a curve or
+/// flipping the wall leaves the others' names alone.
 class MapperThinWall: public Part::TopoShape::Mapper
 {
 public:
-    MapperThinWall(const TopoDS_Shape& wall, const TopoDS_Shape& profile, double right, double left)
+    MapperThinWall(
+        const TopoDS_Shape& wall,
+        const TopoDS_Shape& profile,
+        double right,
+        double left,
+        const TopoDS_Shape& nearSides
+    )
     {
         TopTools_IndexedMapOfShape edges;
         TopTools_IndexedMapOfShape vertices;
@@ -7017,7 +7062,12 @@ public:
             if (nearest < sourceEdges.size()
                 && ((right > tolerance && std::abs(best - right) < tolerance)
                     || (left > tolerance && std::abs(best - left) < tolerance))) {
-                generatedOf[nearest].push_back(edge);
+                const bool inside = right > tolerance && left > tolerance;
+                const bool onNearSide = inside && !nearSides.IsNull()
+                    && std::all_of(samples.begin(), samples.end(), [&](const gp_Pnt& p) {
+                           return distance(nearSides, p) < tolerance;
+                       });
+                (onNearSide ? modifiedOf : generatedOf)[nearest].push_back(edge);
             }
         }
     }
@@ -7113,15 +7163,21 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
         std::swap(right, left);
     }
     // SW18: Onshape mitres the wall's corners, the outside of a corner included; never rounds them
-    const TopoDS_Shape wall = thinWall(curves, plane, right, left, GeomAbs_Intersection);
+    std::array<TopoDS_Compound, 2> sides;
+    const TopoDS_Shape wall = thinWall(curves, plane, right, left, GeomAbs_Intersection, &sides);
     if (areaOf(wall) < Precision::Confusion()) {
         throw Base::ValueError("Pipe: the thin profile has no curves to put a wall around");
     }
     const TopoDS_Shape placed = wall.Located(location);
+    // The near side, where the curve is when its thickness is 0: Thickness2's, the left (the right
+    // when flipped). With Midplane always the left: flipping leaves the wall and its names as
+    // they are
+    const bool nearIsRight = !pipe.Midplane.getValue() && pipe.FlipWall.getValue();
+    const TopoDS_Shape nearSides = sides[nearIsRight ? 1 : 0].Located(location);
     Part::TopoShape result(0, pipe.getDocument()->getStringHasher());
     result.makeShapeWithElementMap(
         placed,
-        MapperThinWall(placed, named.getShape(), right, left),
+        MapperThinWall(placed, named.getShape(), right, left, nearSides),
         {named},
         Part::OpCodes::Offset2D
     );

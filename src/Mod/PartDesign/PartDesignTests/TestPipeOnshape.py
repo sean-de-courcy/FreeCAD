@@ -1052,6 +1052,33 @@ class TestPipeSelfOverlapUnion(PipeCase):
         for outside in ((10, 0.3, 0), (10, 2, 0), (5, 0, 0)):
             self.assertFalse(solid.isInside(V(*outside), 1e-6, False), outside)
 
+    def testRoundCornerCircleOverlapping(self):
+        """S2's tube with 'Round corner' (FreeCAD's option; Onshape mitres every sharp corner and
+        builds S2's union, oracle 9). Each 90 degree round corner holds the legs cut square at the
+        corner, less their overlap on the inside (a quarter of the bicylinder, 4/3 r^3), plus the
+        sphere's quarter wedge outside (pi/3 r^3): pi x 49.5 - 3 (4 - pi) / 3 for r 1, and the union
+        drops S2's overlap at leg 4's end, 1.117866, as with the mitre. Stopped with OCCT's
+        BOPAlgo_AlertUnableToOrientTheShape (sweeps 14)."""
+        pipe = self.tube((10, 0.5), Transition="Round corner")
+        self.assertOneSolid(pipe, math.pi * 49.5 - (4 - math.pi) - 1.117866, places=5)
+        self.assertTrue(pipe.Shape.Solids[0].isInside(V(10, 0.75, 0), 1e-6, False))
+
+    def testRoundCornerRingOverlapping(self):
+        """The ring r 1 / 0.4 with 'Round corner': its corners are the same at both ends (10, 1.5) and
+        (10, 0.5), so the union differs from the clear sweep as with the mitre: 0.84 pi more path,
+        less the annuli's overlap 0.876804 (testRingProfileHoleStaysOpen). The hole stays open."""
+        pipe = self.tube((10, 1.5), [models.circle(0, 0, 1), models.circle(0, 0, 0.4)],
+                         Transition="Round corner")
+        self.assertOneSolid(pipe)
+        clear = pipe.Shape.Volume
+        models.setLines(self.doc.getObject("Path"), {3: ((10, 10), (10, 0.5))})
+        self.doc.recompute()
+        self.assertOneSolid(pipe, clear + 0.84 * math.pi - 0.876804, places=4)
+        solid = pipe.Shape.Solids[0]
+        self.assertTrue(solid.isInside(V(10, 0.75, 0), 1e-6, False))
+        for outside in ((10, 0.3, 0), (10, 2, 0), (5, 0, 0)):
+            self.assertFalse(solid.isInside(V(*outside), 1e-6, False), outside)
+
     def testClosedSpinePassingNearItself(self):
         """A closed path with a notch, (0,0)-(20,0)-(20,10)-(12,10)-(12,1.5)-(8,1.5)-(8,10)-(0,10): the
         notch's bottom runs 1.5 above leg 1 for 4, so the tubes (r 1) overlap there (a lens of 0.4532
