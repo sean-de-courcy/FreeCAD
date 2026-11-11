@@ -84,7 +84,12 @@ class TestResultCheck(unittest.TestCase):
         self.assertFalse(pocket.isValid())
         self.assertIn("turned inside out", pocket.getStatusString())
 
-    def testHornTorusRevolveFailsAndThePocketAfterItBuildsOnTheBase(self):
+    def testHornTorusRevolveBuildsAndThePocketAfterIt(self):
+        """A circle r 3 tangent to the axis, a full turn: a horn torus whose lower half lies in the
+        box. It failed as an invalid shape (the pocket then built on the base) until the revolve
+        put a vertex at the touch (P4, ops#640); it is exact now. The torus adds its upper half,
+        pi^2 R r^2; the pocket, a rod r 1 about the axis, takes the box's 4 pi and the torus's part
+        within 1 of the axis above the box, the integral of 2 pi rho sqrt(9 - (rho - 3)^2)."""
         body = self.body(Part.makeBox(40, 40, 4))
         circle = Part.Circle(V(23, 20, 4), V(0, 1, 0), 3)
         prof = self.profile(Part.Face(Part.Wire(circle.toShape())), "RevProfile")
@@ -96,11 +101,22 @@ class TestResultCheck(unittest.TestCase):
         rev.Angle = 360
         pocket = self.pocket(body, disk(20, 20, 1.0, 10), "PocketAxis")
         self.doc.recompute()
-        self.assertFalse(rev.isValid())
-        self.assertIn("invalid shape", rev.getStatusString())
+        self.assertTrue(rev.isValid(), rev.getStatusString())
+        # within 1e-7 relative: OCCT's integration on the torus face (2e-8 seen)
+        self.assertAlmostEqual(rev.Shape.Volume, 6400 + math.pi**2 * 3 * 9, delta=7e-4)
         # Fork-0.9.0: the pocket was "Valid" with volume 6920.4, more than the 6708.9 before it
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
-        self.assertAlmostEqual(pocket.Shape.Volume, 6400 - math.pi * 4, places=6)
+        n = 2000  # Simpson's rule over rho in [0, 1]
+
+        def ring(rho):
+            return 2 * math.pi * rho * math.sqrt(9 - (rho - 3) ** 2)
+
+        inner = sum(
+            (1 if k in (0, n) else 4 if k % 2 else 2) * ring(k / n) for k in range(n + 1)
+        ) / (3 * n)
+        self.assertAlmostEqual(
+            pocket.Shape.Volume, 6400 + math.pi**2 * 27 - math.pi * 4 - inner, delta=7e-4
+        )
         self.assertTrue(pocket.Shape.isValid())
 
     def testOverlappingSquaresPadOfNoVolumeFails(self):
