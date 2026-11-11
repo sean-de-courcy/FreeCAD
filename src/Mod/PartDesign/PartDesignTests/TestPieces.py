@@ -1019,5 +1019,243 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(p, 60 * 20 * 10 - 4 * 16 * 10)
 
 
+class TestStudioUndo(unittest.TestCase):
+    """ops#654 10.15: the resync after a recompute outside any transaction records into the undo
+    step it follows (the last one), so undoing the edit undoes the steps the resync made or
+    deleted with it.
+
+    Designed geometry: Y (x 2..12, y 0..10, 10 high) and X (x -20..-10), a part mirror Mir of Y
+    about Y's YZ plane (x = 0), Add, scope X: the copy x -12..-2 joins X and stays apart from Y.
+    E, a Pocket in Y (x 4..8, y 2..8, 3 deep), after Mir. Y's sketch moved by -2 (x 0..10): Y
+    touches its copy at x = 0, Mir consumes it, and E's step in Y goes (decided at compute)."""
+
+    def setUp(self):
+        self.doc = None
+        self.observer = None
+
+    def tearDown(self):
+        if self.observer is not None:
+            App.removeDocumentObserver(self.observer)
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestStudioUndo"):
+                App.closeDocument(doc.Name)
+
+    # ------------------------------------------------------------------------------- the model
+    def model(self):
+        from PartDesignTests.TestStudioPartMirror import boxPart
+
+        doc = self.doc = App.newDocument("TestStudioUndo")
+        doc.UndoMode = 1
+        # As the Gui has it (ops#640): an undo or redo regenerates before its own signal, so the
+        # resync there sees the records the regeneration re-derives. Without it (FreeCADCmd's
+        # default) the resync at undo()'s own signal reads a record written outside the step
+        # against the restored inputs (ops#654 10.15, left open)
+        doc.RegenerateOnCommit = True
+        self.S = doc.addObject("App::Part", "S")
+        self.y = boxPart(doc, self.S, "Y", 2, 0, 12, 10, 0, 10)
+        self.x = boxPart(doc, self.S, "X", -20, 0, -10, 10, 0, 10)
+        doc.recompute()
+        self.list = PartDesign.studioList(self.S, True)
+        doc.openTransaction("mirror")
+        self.mir = partMirror(
+            doc, self.S, "Mir", "Y", (originPlane(self.y, "YZ_Plane"), [""]), "Add", ("X",)
+        )
+        doc.recompute()
+        doc.commitTransaction()
+        doc.openTransaction("pocket")
+        sk = studioSketch(doc, self.S, "ESk", ((4, 2, 8, 8),), z=10)
+        self.e = makeOwner(doc, self.S, "Pocket", "E", sk, ("Y",), Length=3)
+        doc.recompute()
+        doc.commitTransaction()
+        self.assertIsNone(PartDesign.studioConsumerOf(self.y))
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        return doc
+
+    def moveY(self, dx):
+        sk = self.doc.getObject("YSk")
+        sk.AttachmentOffset = App.Placement(V(dx, 0, 0), App.Rotation())
+
+    def state(self):
+        """Every Body's Group (its origin left out), the list, the live parts, and every step's
+        name and Body (None: a step in no Body)."""
+        out = {}
+        steps = []
+        bodies = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
+        for body in bodies:
+            out[body.Name] = [g.Name for g in body.Group if g.TypeId != "App::Origin"]
+        for o in self.doc.Objects:
+            if getattr(o, "StudioOwner", None) is not None:
+                holder = [b.Name for b in bodies if o in b.Group]
+                steps.append((o.Name, holder[0] if holder else None))
+        out["list"] = [e.Name for e in self.list.Entries]
+        out["live"] = sorted(b.Name for b in PartDesign.studioLiveParts(self.list))
+        out["steps"] = sorted(steps)
+        return out
+
+    def assertNoStray(self, state):
+        stray = [name for name, body in state["steps"] if body is None]
+        self.assertEqual(stray, [], "steps in no Body")
+        names = [name for name, _ in state["steps"]]
+        self.assertFalse([n for n in names if n[-3:].isdigit()], f"suffixed steps: {names}")
+
+    def consoleOutput(self, action):
+        """What action() prints through FreeCADCmd's console observer (stderr), warnings on."""
+        if "Console" not in App.Console.GetObservers():
+            self.skipTest("no console observer to catch the warnings (the GUI)")
+        status = App.Console.GetStatus("Console", "Wrn")
+        App.Console.SetStatus("Console", "Wrn", True)
+        saved = os.dup(2)
+        with tempfile.TemporaryFile() as caught:
+            os.dup2(caught.fileno(), 2)
+            try:
+                action()
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+                App.Console.SetStatus("Console", "Wrn", bool(status))
+            caught.seek(0)
+            return caught.read().decode("utf-8", "replace")
+
+    # ------------------------------------------------------------------------------- the tests
+    def testCommitThenRecomputeUndoesTheResyncWithTheEdit(self):
+        """The move committed, then recomputed outside it: Mir consumes Y and E's step in Y goes,
+        inside the move's step (no step of the resync's own). Undo: every Body, the list and every
+        step as before the move, and a reconcile succeeds; redo: the moved state again."""
+        doc = self.model()
+        before = self.state()
+        doc.openTransaction("move")
+        self.moveY(-2)
+        doc.commitTransaction()
+        doc.recompute()
+        after = self.state()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+        doc.undo()
+        doc.recompute()
+        self.assertEqual(self.state(), before)
+        self.assertIsNone(PartDesign.studioConsumerOf(self.y))
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        PartDesign.studioReconcile(self.list)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), after)
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+        self.assertEqual(doc.RedoCount, 0)
+
+    def testUnrecordedChangeThenUndoClearsRedoLoudly(self):
+        """The skeptic's F1: the move made with no transaction (Python), recomputed: the resync
+        joins the pocket's step. Undo it: the resync in the undo's regeneration (the move stayed,
+        unrecorded) can't join a step (Redo isn't empty), so its writes clear Redo with a
+        warning; redo then does nothing. No step in no Body, no suffixed duplicate, at any point."""
+        doc = self.model()
+        self.moveY(-2)
+        doc.recompute()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])  # no "Delete" step of its own
+        self.assertNoStray(self.state())
+
+        def undoAndRecompute():
+            doc.undo()
+            doc.recompute()
+
+        printed = self.consoleOutput(undoAndRecompute)
+        self.assertIn("Redo cleared", printed)
+        self.assertEqual(doc.RedoCount, 0)
+        self.assertEqual(doc.UndoNames, ["mirror"])
+        undone = self.state()
+        self.assertNoStray(undone)
+        self.assertIsNone(doc.getObject("E"))
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), undone)
+        self.assertNoStray(self.state())
+        PartDesign.studioReconcile(self.list)
+
+    def testBookedRecomputeMakesNoStepOfItsOwn(self):
+        """Std_Refresh books "Recompute" before its recompute. With nothing stale it records
+        only outputs and is set aside for the signal, then dropped at its close: no step. After
+        an unrecorded move its recompute writes Mir's consumption record, an input: "Recompute"
+        is a step, and the resync records into it, beside the record (no "Delete" step of its
+        own, no step in no Body)."""
+        doc = self.model()
+        App.setActiveTransaction("Recompute")
+        doc.getObject("ESk").touch()
+        doc.recompute()
+        App.closeActiveTransaction()
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        self.moveY(-2)
+        App.setActiveTransaction("Recompute")
+        doc.recompute()
+        App.closeActiveTransaction()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertEqual(doc.UndoNames, ["Recompute", "pocket", "mirror"])
+        self.assertNoStray(self.state())
+
+    def testObserverCreatingDuringTheResyncRecordsIntoTheSameStep(self):
+        """Y moved in its own step (consumed), then moved back committed and recomputed: the
+        resync makes E's step in Y again. A document observer that creates an object when it sees
+        that step created records into the same step: undo takes both away."""
+        doc = self.model()
+        doc.openTransaction("move")
+        self.moveY(-2)
+        doc.recompute()
+        doc.commitTransaction()
+        consumed = self.state()
+        self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
+        test = self
+
+        class Observer:
+            made = []
+
+            def slotCreatedObject(self, obj):
+                if obj.Document == test.doc and obj.Name.startswith("E_at_") and not self.made:
+                    self.made.append(test.doc.addObject("App::DocumentObjectGroup", "Witness"))
+
+        self.observer = Observer()
+        App.addDocumentObserver(self.observer)
+        doc.openTransaction("back")
+        self.moveY(0)
+        doc.commitTransaction()
+        doc.recompute()
+        App.removeDocumentObserver(self.observer)
+        self.observer = None
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertIsNotNone(doc.getObject("Witness"))
+        self.assertEqual(doc.UndoNames, ["back", "move", "pocket", "mirror"])
+        doc.undo()
+        doc.recompute()
+        self.assertIsNone(doc.getObject("Witness"))
+        self.assertEqual(self.state(), consumed)
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+
+    def testPlainRecomputeLeavesTheUndoStackAsItWas(self):
+        """Nothing stale: a recompute after a touch leaves the undo steps as they were (count and
+        names), and undoing the last one still undoes the whole pocket."""
+        doc = self.model()
+        pre = self.state()
+        doc.openTransaction("noop")
+        doc.commitTransaction()
+        self.doc.getObject("ESk").touch()
+        doc.recompute()
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        self.assertEqual(doc.UndoCount, 2)
+        self.assertEqual(doc.RedoCount, 0)
+        self.assertEqual(self.state(), pre)
+        doc.undo()
+        doc.recompute()
+        self.assertIsNone(doc.getObject("E"))
+        self.assertIsNone(doc.getObject("E_at_Y"))
+        self.assertEqual(doc.UndoNames, ["mirror"])
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), pre)
+
+
 if __name__ == "__main__":
     unittest.main()

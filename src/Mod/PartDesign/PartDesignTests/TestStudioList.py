@@ -1741,6 +1741,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.piecesSeen = 0  # states with a live part made from a piece (P6p)
         self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
         self.mergesSeen = 0  # states with a part an Add merged into another at the bar (10.13)
+        self.lateSeen = 0  # edits committed, then recomputed outside the transaction (10.15)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1969,6 +1970,7 @@ class TestStudioListProperty(unittest.TestCase):
 
     def run_sequence(self, seed, nops):
         rng = random.Random(seed)
+        late = random.Random(f"late{seed}")
         doc, _ = propStudio(f"prop{seed}")
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
         # ops#654 list on first use: these seeds start from the document without a list (its
@@ -1997,21 +1999,38 @@ class TestStudioListProperty(unittest.TestCase):
                 doc.UndoMode = 1
                 what = "save, close, reopen"
             else:
+                # 10.15: some edits are committed first and recomputed after, outside the
+                # transaction (Python's commitTransaction() then recompute(), the property
+                # editor's commit then recompute). Drawn from a stream of its own, so the seeds'
+                # edits stay as they were
+                committedFirst = late.random() < 0.25
+                committed = False
                 doc.openTransaction("edit")
                 try:
                     what = self.edit(rng, doc, step + 1)
-                    # The command's recompute is in its transaction, as every GUI command and
-                    # dialog OK does it (recompute, then commit): what the recompute decides
-                    # and the projection takes after it (a Union's tools apart, a part mirror's
-                    # consumption, a lost split) then goes with the edit's undo step. Committed
-                    # first, the resync's steps were made outside any transaction, and an undo
-                    # restored the edit's deleted steps under suffixed names beside them (seed 3,
-                    # edit 63, ops#654 P6p open item a)
-                    doc.recompute()
-                    stranded(doc)
-                    doc.commitTransaction()
+                    if committedFirst:
+                        # The resync after the recompute records into the edit's step, so its
+                        # undo takes what the resync made of it too (ops#654 10.15)
+                        doc.commitTransaction()
+                        committed = True
+                        doc.recompute()
+                        what += " (committed, then recomputed)"
+                        self.lateSeen += 1
+                        stranded(doc)
+                    else:
+                        # The command's recompute is in its transaction, as every GUI command
+                        # and dialog OK does it (recompute, then commit): what the recompute
+                        # decides and the projection takes after it (a Union's tools apart, a
+                        # part mirror's consumption, a lost split) goes with the edit's undo
+                        # step (seed 3, edit 63, ops#654 P6p open item a)
+                        doc.recompute()
+                        stranded(doc)
+                        doc.commitTransaction()
                 except Exception as e:
-                    doc.abortTransaction()
+                    if committed:
+                        doc.undo()  # refused after its commit: its undo takes it all back
+                    else:
+                        doc.abortTransaction()
                     what = f"refused: {e}"
                     # P6p: a member placed in a part after its split, or in a piece before the
                     # split, is refused loudly by design (nothing changes); so is one placed in a
@@ -2086,13 +2105,15 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.mirrorsSeen, 0)
         self.assertGreater(self.piecesSeen, 0)
         self.assertGreater(self.mergesSeen, 0)
+        self.assertGreater(self.lateSeen, 0)
         unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
         if any(str(s) in unlisted for s in seeds):
             self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
         print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
-              f"states without a list, {self.mergesSeen} states with a merge")
+              f"states without a list, {self.mergesSeen} states with a merge, {self.lateSeen} "
+              f"edits committed before their recompute")
 
 
 if __name__ == "__main__":
