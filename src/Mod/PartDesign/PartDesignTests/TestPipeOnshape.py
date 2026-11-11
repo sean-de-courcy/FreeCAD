@@ -388,3 +388,134 @@ class TestPipeEndAfterThePathGrows(PipeCase):
         box = pad.AddSubShape.BoundBox
         self.assertAlmostEqual(box.XMin, 10, 4)
         self.assertAlmostEqual(box.XMax, 15, 4)
+
+
+class TestThreadCapFollowsEdits(PipeCase):
+    """SW7 (oracle 5): Onshape's thread cap, a revolve of the thread's end face about the face's
+    edge on the cylinder, follows the helix's height and pitch edits. Designed: a cylinder r 10,
+    20 tall; a tooth (10, 2)-(11, 2.5)-(10, 3) on XZ; an AdditiveHelix about Z, pitch 2, height 10
+    (5 turns); the cap a Revolution of the end face about its edge at r = 10, 90 degrees. The tooth
+    is 0.5 in area, its centroid 1/3 from that edge: the cap is 0.5 x 1/3 x pi/2 = pi/12, between
+    z = H + 2 and H + 3, on the end face's side of the axis plane through the helix's end."""
+
+    CAP = math.pi / 12
+
+    def thread(self):
+        base = self.circle(r=10, name="Base")
+        models.pad(self.body, base, 20, "Cylinder")
+        tooth = self.sketch("Tooth", models.polygon([(10, 2), (11, 2.5), (10, 3)]), placement=XZ)
+        helix = self.body.newObject("PartDesign::AdditiveHelix", "Thread")
+        helix.Profile = tooth
+        helix.ReferenceAxis = (models.originFeature(self.body, "Z_Axis"), [""])
+        helix.Mode = "pitch-height-angle"
+        helix.Pitch = 2
+        helix.Height = 10
+        self.doc.recompute()
+        self.assertTrue(helix.isValid(), helix.getStatusString())
+        return helix
+
+    def endFace(self, helix):
+        """The thread's end face: the planar face on the cylinder (centroid at r > 9.95) highest up."""
+        shape = helix.Shape
+        planar = [
+            (f.CenterOfMass.z, "Face%d" % (i + 1), f)
+            for i, f in enumerate(shape.Faces)
+            if f.Surface.__class__.__name__ == "Plane"
+            and math.hypot(f.CenterOfMass.x, f.CenterOfMass.y) > 9.95
+        ]
+        return max(planar, key=lambda t: t[0])[1:]
+
+    def axisEdge(self, shape, face):
+        """The end face's edge on the cylinder: both its vertices at r = 10."""
+        for edge in face.Edges:
+            if all(abs(math.hypot(v.Point.x, v.Point.y) - 10) < 1e-3 for v in edge.Vertexes):
+                return next("Edge%d" % (j + 1) for j, e in enumerate(shape.Edges) if e.isSame(edge))
+        self.fail("no edge of the end face on the cylinder")
+
+    def cap(self, helix):
+        name, face = self.endFace(helix)
+        cap = self.body.newObject("PartDesign::Revolution", "Cap")
+        cap.Profile = (helix, [name])
+        cap.ReferenceAxis = (helix, [self.axisEdge(helix.Shape, face)])
+        cap.Angle = 90
+        self.doc.recompute()
+        return cap
+
+    def assertCapAt(self, cap, helix):
+        """The cap is the revolve of the thread's end face where the helix ends now."""
+        self.assertTrue(cap.isValid(), cap.getStatusString())
+        height = helix.Height.Value
+        tool = cap.AddSubShape
+        self.assertAlmostEqual(tool.Volume, self.CAP, 4)
+        box = tool.BoundBox
+        self.assertAlmostEqual(box.ZMin, height + 2, 3)
+        self.assertAlmostEqual(box.ZMax, height + 3, 3)
+        # It starts at the thread's end face as it is now: the face's centroid is on the cap
+        _, face = self.endFace(helix)
+        self.assertLess(tool.distToShape(Part.Vertex(face.CenterOfMass))[0], 1e-3)
+
+    def testCapFollowsHeightAndPitchAtWholeTurns(self):
+        """Height 10 -> 12 (6 turns), then pitch 2 -> 2.4 (5 turns): the end face's edge on the
+        cylinder is a line at whole turns; the cap's axis is named from the tooth's edge, not from
+        the last turn's side face (which renamed with the turn count: "Missing edge reference")."""
+        helix = self.thread()
+        cap = self.cap(helix)
+        self.assertCapAt(cap, helix)
+        helix.Height = 12
+        self.doc.recompute()
+        self.assertCapAt(cap, helix)
+        helix.Pitch = 2.4
+        self.doc.recompute()
+        self.assertCapAt(cap, helix)
+
+    def testCapFollowsAtPartTurns(self):
+        """Height 10 -> 11 (5.5 turns): the end face's edge on the cylinder stays a B-spline,
+        straight within tolerance; the revolve takes it as its axis, as Onshape does."""
+        helix = self.thread()
+        cap = self.cap(helix)
+        helix.Height = 11
+        self.doc.recompute()
+        self.assertCapAt(cap, helix)
+
+    def testInnerCapInsideTheThreadIsNotLostSilently(self):
+        """Rehearsal 4's silent find, designed: a thread swept by a Pipe along a helix (pitch 2,
+        r 10, 10 tall, from z = 2.5), its tooth (9.9, 2)-(11, 2.5)-(9.9, 3) sunk 0.1 into the
+        cylinder (the fuse trims the start face to x >= 10); the cap a Revolution of that face about
+        its edge on the cylinder, 180 degrees one way, swinging into the cylinder and the thread. The fuse of the two came out
+        empty (no solid) while the Revolution was Up-to-date. Onshape builds it: the thread, the cap
+        adding at most its own 0.476. Until it builds so, the Revolution stops with an error."""
+        base = self.circle(r=10, name="Base")
+        models.pad(self.body, base, 20, "Cylinder")
+        tooth = self.sketch("Tooth", models.polygon([(9.9, 2), (11, 2.5), (9.9, 3)]), placement=XZ)
+        path = self.doc.addObject("Part::Helix", "Helix")
+        path.Pitch = 2
+        path.Height = 10
+        path.Radius = 10
+        path.Placement = App.Placement(V(0, 0, 2.5), App.Rotation())
+        thread = self.pipe(tooth, path)
+        self.assertSweeps(thread)
+        before = thread.Shape.Volume
+        start = min(
+            (f.CenterOfMass.z, "Face%d" % (i + 1), f)
+            for i, f in enumerate(thread.Shape.Faces)
+            if f.Surface.__class__.__name__ == "Plane"
+            and math.hypot(f.CenterOfMass.x, f.CenterOfMass.y) > 9.95
+        )
+        [axis] = [
+            "Edge%d" % (j + 1)
+            for j, e in enumerate(thread.Shape.Edges)
+            if any(e.isSame(x) for x in start[2].Edges)
+            and all(abs(math.hypot(v.Point.x, v.Point.y) - 10) < 1e-3 for v in e.Vertexes)
+        ]
+        cap = self.body.newObject("PartDesign::Revolution", "Cap")
+        cap.Profile = (thread, [start[1]])
+        cap.ReferenceAxis = (thread, [axis])
+        cap.Angle = 180
+        cap.Refine = False
+        self.doc.recompute()
+        if cap.isValid():
+            self.assertEqual(len(cap.Shape.Solids), 1, "the cap's result lost the part")
+            self.assertGreaterEqual(cap.Shape.Volume, before - 1e-6)
+            self.assertLessEqual(cap.Shape.Volume, before + cap.AddSubShape.Volume + 1e-6)
+        else:
+            self.assertIn("volume", cap.getStatusString().lower())
