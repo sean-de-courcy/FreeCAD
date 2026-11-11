@@ -425,6 +425,7 @@ void TaskPipeParameters::createFields()
     ReferenceField::Options more = pathOptions(pipeT);
     more.kind = ReferenceField::Kind::Sections;
     more.label = tr("More path edges");
+    more.required = false;  // optional: a new or multisection pipe arms its own field first
     auto moreSelf = std::make_shared<QPointer<ReferenceField>>();
     auto writeMore = [this, moreSelf](const std::vector<App::PropertyLinkSubList::SubSet>& list) {
         if (*moreSelf) {
