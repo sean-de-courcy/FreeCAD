@@ -11,12 +11,14 @@ set(PartDesign_Scripts
     __init__.py
     Init.py
     TestPartDesignApp.py
+    SolidOpsFeatures.py
 )
 
 if(BUILD_GUI)
     list (APPEND PartDesign_Scripts
           InitGui.py
           TestPartDesignGui.py
+          SolidOpsGui.py
           InvoluteGearFeature.py
           InvoluteGearFeature.ui
           SprocketFeature.py
@@ -103,6 +105,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestOnshapeEndTypes.py
     PartDesignTests/TestProfileRegions.py
     PartDesignTests/TestDerived.py
+    PartDesignTests/TestSolidOps.py
     PartDesignTests/TestStudioList.py
     PartDesignTests/TestApply.py
     PartDesignTests/TestStudioOwner.py
@@ -120,6 +123,7 @@ if(BUILD_GUI)
         PartDesignTests/TestMaterial.py
         PartDesignTests/TestSuppressed.py
         PartDesignTests/TestPreviewPython.py
+        PartDesignTests/TestSolidOpsGui.py
         PartDesignTests/TestProfileLinkDialog.py
         PartDesignTests/TestReferencePickerGui.py
         PartDesignTests/TestCrossBodyGui.py
