@@ -381,7 +381,11 @@ class TestSketchDialogCheckboxesGui(SketchCase):
         pump()
         self.assertTrue(App.ParamGet(SKETCHER_GENERAL).GetBool("ShowExpressions", False))
         labels = self.labels()
-        self.assertIn("* 2.5", labels, "the open sketch redraws its label as the expression")
+        self.assertIn("* 2.5", labels, "the open sketch redraws its label with the expression tag")
+        tag, _, value = labels.partition("
+")
+        self.assertIn("* 2.5", tag, "the expression is the tag, the first line")
+        self.assertIn("10", value, "Onshape keeps the value under the tag (PL5a)")
         self.box("showExpressions").setChecked(False)
         pump()
         self.assertNotIn("*", self.labels())

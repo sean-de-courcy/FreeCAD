@@ -2232,15 +2232,16 @@ QString EditModeConstraintCoinManager::getPresentationString(
         : -1;
     const bool hasExpression = constraintIndex >= 0
         && ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex);
-    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions": a dimension set by an
-    // expression shows the expression (variables as #Name) instead of its value
-    bool expressionShown = false;
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions" (PL5a): a dimension set by
+    // an expression keeps its value and (fx) marker and gets a tag above it with the expression
+    // (variables as #Name): "tag
+value", which SoDatumLabel draws as a light-blue tag
+    QString expressionTag;
     if (hasExpression && ViewProviderSketch::showExpressionsPreference()) {
         auto* sketch = viewProvider.getSketchObject();
         const auto info = sketch->getExpression(sketch->Constraints.createPath(constraintIndex));
         if (info.expression) {
-            fixedValueStr = Gui::expressionDisplayText(info.expression.get());
-            expressionShown = true;
+            expressionTag = Gui::expressionDisplayText(info.expression.get());
         }
     }
 
@@ -2269,7 +2270,7 @@ QString EditModeConstraintCoinManager::getPresentationString(
         }
     }
 
-    if (hasExpression && !expressionShown) {
+    if (hasExpression) {
         fixedValueStr += QStringLiteral(" (ƒ𝑥)");
     }
 
@@ -2277,6 +2278,10 @@ QString EditModeConstraintCoinManager::getPresentationString(
         fixedValueStr = QStringLiteral("(") + fixedValueStr + QStringLiteral(")");
     }
 
+    if (!expressionTag.isEmpty()) {
+        fixedValueStr = expressionTag + QLatin1Char('
+') + fixedValueStr;
+    }
     return fixedValueStr;
 }
 
