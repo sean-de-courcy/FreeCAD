@@ -10,6 +10,7 @@
 #include <Precision.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 
+#include <App/Document.h>
 #include <App/PropertyLinks.h>
 #include <Mod/Part/App/PartFeature.h>
 
@@ -122,6 +123,47 @@ std::string studioAddLeftover(const App::DocumentObject* owner)
         }
     }
     return {};
+}
+
+// FreeCAD-CH ops#654 P5: StudioList.cpp (declared where used)
+PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
+                                         std::vector<Body*>& steps,
+                                         std::vector<Body*>& tools,
+                                         std::vector<Body*>& both);
+PartDesignExport Part::TopoShape studioBooleanTool(const App::DocumentObject* owner, std::string* why);
+
+/// A Boolean studio feature's tool (P5): its tool parts' shapes at its place (studioBaseAt), fused
+/// when there are several, in the document's frame, named with the owner's tag; null with why
+Part::TopoShape studioBooleanTool(const App::DocumentObject* owner, std::string* why)
+{
+    auto fail = [why](const std::string& text) {
+        if (why) {
+            *why = text;
+        }
+        return Part::TopoShape();
+    };
+    std::vector<Body*> steps;
+    std::vector<Body*> tools;
+    std::vector<Body*> both;
+    studioBooleanParts(owner, steps, tools, both);
+    if (tools.empty()) {
+        return fail("No tool part: the Boolean's tools are gone or consumed at its place");
+    }
+    std::vector<Part::TopoShape> shapes;
+    for (auto tool : tools) {
+        Part::TopoShape shape = studioBaseAt(owner, tool);
+        if (shape.isNull()) {
+            return fail(std::string("'") + tool->Label.getValue()
+                        + "' has no solid before the Boolean");
+        }
+        shapes.push_back(shape);
+    }
+    if (shapes.size() == 1) {
+        return shapes.front();
+    }
+    Part::TopoShape fused(owner->getID(), owner->getDocument()->getStringHasher());
+    fused.makeElementFuse(shapes);
+    return fused;
 }
 
 bool runsAsStudioOwner(const Feature* feature)

@@ -79,6 +79,18 @@
 
 using namespace PartDesignGui;
 
+namespace PartDesign
+{
+// App/StudioList.cpp (FreeCAD-CH ops#654 P6a; declared where used)
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+}  // namespace PartDesign
+
+namespace PartDesignGui
+{
+// StudioGui.cpp (ops#654 P6a): a part's name in lists, default names positional
+QString studioPartName(const PartDesign::Body* body);
+}  // namespace PartDesignGui
+
 QPointer<FeaturesView> FeaturesView::registered;
 
 namespace PartDesignGui
@@ -561,8 +573,18 @@ std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* stu
                 && !isSuppressed(obj) && !feature->Shape.getShape().isNull();
         });
     };
+    // A studio with a history list (FreeCAD-CH ops#654 P6a, report 26): only the parts live at
+    // its bar, the App's one query (no part a Boolean consumed or a merge absorbed there)
+    const PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio);
+    std::vector<PartDesign::Body*> live;
+    if (list) {
+        live = PartDesign::studioLivePartsAt(list, -1);
+    }
     std::vector<App::DocumentObject*> parts;
     for (auto body : PartDesign::studioBodies(doc, studio)) {
+        if (list && std::ranges::find(live, body) == live.end()) {
+            continue;
+        }
         if (body->Tip.getValue() && !PartDesign::DeletePart::deleterOf(body) && exists(body)) {
             parts.push_back(body);
         }
@@ -1991,7 +2013,8 @@ void FeaturesView::rebuildParts()
     std::set<QString> taken;
     for (std::size_t i = 0; i < objs.size(); ++i) {
         if (!pieces[i]) {
-            taken.insert(QString::fromUtf8(objs[i]->Label.getValue()));
+            auto part = freecad_cast<PartDesign::Body*>(objs[i]);
+            taken.insert(part ? studioPartName(part) : QString::fromUtf8(objs[i]->Label.getValue()));
         }
     }
     auto nextPartName = [&taken]() {
@@ -2007,8 +2030,9 @@ void FeaturesView::rebuildParts()
         auto body = freecad_cast<PartDesign::Body*>(obj);
         bool held = body && body->isRolledBack();
         auto item = inPlace ? parts->topLevelItem(static_cast<int>(i)) : new QTreeWidgetItem(parts);
-        // A later piece names its Body: its rename is the first row's
-        const QString label = QString::fromUtf8(obj->Label.getValue());
+        // A later piece names its Body: its rename is the first row's. A default name is
+        // positional in a listed studio, as Onshape renumbers it (ops#654 P6a)
+        const QString label = body ? studioPartName(body) : QString::fromUtf8(obj->Label.getValue());
         if (pieces[i]) {
             item->setFlags(item->flags() & ~Qt::ItemIsEditable);
             item->setText(0, partNumbers ? nextPartName()

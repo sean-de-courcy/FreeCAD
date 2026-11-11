@@ -59,6 +59,8 @@
 #include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
 #include <Mod/PartDesign/App/FeaturePocket.h>
+#include <Mod/PartDesign/App/StudioList.h>
+#include <App/Part.h>
 #include <Mod/Part/App/GizmoHelper.h>
 #include <Mod/Sketcher/Gui/ViewProviderSketch.h>
 
@@ -127,16 +129,31 @@ bool acceptProfile(const App::DocumentObject* feature,
         return false;
     }
     auto body = PartDesign::Body::findBodyOf(feature);
+    // FreeCAD-CH (ops#654 S4): a studio feature is in no Body: every part of its studio is
+    // another part, and a sketch outside every Body of the studio is its own
+    const bool owner = !body && PartDesign::isStudioOwner(feature);
+    auto inOwnersStudio = [feature, obj]() {
+        const PartDesign::StudioList* list = PartDesign::StudioList::holding(feature);
+        if (!list || obj->getDocument() != feature->getDocument()) {
+            return false;
+        }
+        App::Part* studio = nullptr;
+        if (auto objBody = PartDesign::Body::findBodyOf(obj)) {
+            return Part::BodyBase::studioOf(objBody, studio) && studio == list->studio();
+        }
+        return App::Part::getPartOfObject(obj, /*recursive=*/true) == list->studio();
+    };
     // FreeCAD-CH (ops#325): another Body of the same studio, linked directly
-    const bool otherBody = body && !body->hasObject(obj);
-    const bool inStudio = otherBody && Part::BodyBase::isInOneStudio(feature, obj);
+    const bool otherBody = owner || (body && !body->hasObject(obj));
+    const bool inStudio = otherBody
+        && (owner ? inOwnersStudio() : Part::BodyBase::isInOneStudio(feature, obj));
     if (inStudio && !obj->isDerivedFrom<Part::Part2DObject>()
         && obj->isDerivedFrom<Part::Feature>() && (startsWith("Face") || startsWith("Edge"))) {
         if (startsWith("Face") && isCurvedFace(obj, element)) {
             why = QT_TR_NOOP("Pick a planar face.");
             return false;
         }
-        if (PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
+        if (owner || PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
             return true;
         }
         why = QT_TR_NOOP("Pick a face of another part directly, not through a link.");

@@ -103,6 +103,7 @@
 #include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ReferenceField.h"
+#include <Mod/PartDesign/App/StudioList.h>
 #include "ReferenceSelection.h"
 
 using namespace PartDesignGui;
@@ -295,7 +296,11 @@ public:
                  && kind != ReferenceField::Kind::Sections && !acceptOnly) {
             // A profile's gate is its accept test alone (an object of the body, or its elements),
             // and so are a list of objects' and a list of sections'
-            if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
+            // FreeCAD-CH (ops#654 S4): a studio feature has no solid before it; its studio
+            // (its parts' datums, the studio's origin) is the gate's
+            App::DocumentObject* gateSupport =
+                support ? support : (PartDesign::isStudioOwner(own) ? own : nullptr);
+            if (ReferenceSelection selection(gateSupport, flags); !selection.allow(doc, obj, sub)) {
                 notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
                 return false;
             }

@@ -67,6 +67,7 @@
 #include <Gui/MainWindow.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Gui/BitmapFactory.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -82,6 +83,7 @@
 #include "ui_TaskPreviewParameters.h"
 
 #include "ReferenceField.h"
+#include "StudioGui.h"
 #include "TaskFeatureParameters.h"
 #include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
@@ -2860,9 +2862,13 @@ void TaskDlgFeatureParameters::open()
                 return;
             }
             titlePending = true;
-            QTimer::singleShot(0, this, [this]() {
+            // Only while the feature is there: a Cancel that aborts its creation deletes it and
+            // its view provider (vp, which getObject() reads) before the dialog goes (ops#654)
+            QTimer::singleShot(0, this, [this, featureT]() {
                 titlePending = false;
-                updateTitle();
+                if (featureT.getObject()) {
+                    updateTitle();
+                }
             });
         };
         titleChanged = feature->getDocument()->signalChangedObject.connect(
@@ -2895,12 +2901,23 @@ void TaskDlgFeatureParameters::modifyStandardButtons(QDialogButtonBox* box)
     requiredConnection = feature->getDocument()->signalChangedObject.connect(
         [this, featureT](const App::DocumentObject& obj, const App::Property&) {
             if (&obj == featureT.getObject()) {
-                QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+                // The rollback of a Cancel changes the feature, then deletes it and its view
+                // provider: the queued update must not read vp then (getObject()), FreeCAD-CH
+                // ops#654 P5 (the Boolean dialog's intermittent "Illegal storage access")
+                QTimer::singleShot(0, this, [this, featureT]() {
+                    if (featureT.getObject()) {
+                        updateOkButton();
+                    }
+                });
             }
         }
     );
     // Once the box is decorated: TaskEditControl::decorateButtons sets its tooltip after this call
-    QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+    QTimer::singleShot(0, this, [this, featureT]() {
+        if (featureT.getObject()) {
+            updateOkButton();
+        }
+    });
 }
 
 void TaskDlgFeatureParameters::updateTitle()
@@ -2960,6 +2977,15 @@ std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
 
 void TaskDlgFeatureParameters::addResultBox()
 {
+    // FreeCAD-CH (ops#654 S4): a studio feature's own Result box, on top as an Extrude's
+    if (QWidget* studioBox = makeStudioResultBox(vp)) {
+        auto at = Content.begin();
+        if (references && !Content.empty() && Content.front() == references) {
+            ++at;
+        }
+        Content.insert(at, studioBox);
+        return;
+    }
     if (!TaskResultParameters::hasRows(getObject())) {
         return;
     }
@@ -3025,7 +3051,16 @@ bool TaskDlgFeatureParameters::accept()
             throw Base::TypeError("Bad object processed in the feature dialog.");
         }
 
-        if (isUpdateBlocked) {
+        // FreeCAD-CH (ops#654 S4): a studio feature's edit changes Bodies that don't use it (a
+        // part left out of its scope loses its step): nothing touched is purged
+        if (PartDesign::isStudioOwner(feature)) {
+            // Its steps take its values at reconcile (Operation, Refine)
+            std::string why;
+            if (!PartDesign::StudioList::holding(feature)->reconcile(&why)) {
+                throw Base::ValueError(why.empty() ? "The studio's list can't take the feature" : why);
+            }
+        }
+        if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
         else {

@@ -49,6 +49,13 @@
 
 using namespace PartDesign;
 
+namespace PartDesign
+{
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
+PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
+PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
+}  // namespace PartDesign
+
 
 PROPERTY_SOURCE(PartDesign::Chamfer, PartDesign::DressUp)
 
@@ -121,7 +128,11 @@ short Chamfer::mustExecute() const
 
 App::DocumentObjectExecReturn* Chamfer::execute()
 {
-    if (onlyHaveRefined()) {
+    // FreeCAD-CH ops#654 T3: re-run at a pattern's instance, on its base and edges
+    Part::TopoShape reapplyBase;
+    std::vector<Part::TopoShape> reapplyEdges;
+    const bool reapplying = dressUpReapplying(reapplyBase, reapplyEdges);
+    if (!reapplying && onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
 
@@ -129,7 +140,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
     // The only difference is that the Base property also stores the edges that are to be chamfered
     Part::TopoShape TopShape;
     try {
-        TopShape = getBaseTopoShape();
+        TopShape = reapplying ? reapplyBase : getBaseTopoShape();
     }
     catch (Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
@@ -137,8 +148,9 @@ App::DocumentObjectExecReturn* Chamfer::execute()
 
     TopShape.locate(TopLoc_Location());
 
-    auto edges = UseAllEdges.getValue() ? TopShape.getSubTopoShapes(TopAbs_EDGE)
-                                        : getContinuousEdges(TopShape);
+    auto edges = reapplying            ? reapplyEdges
+        : UseAllEdges.getValue() ? TopShape.getSubTopoShapes(TopAbs_EDGE)
+                                 : getContinuousEdges(TopShape);
 
     if (edges.empty()) {
         return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP("Exception", "No edges specified"));
@@ -154,7 +166,9 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         return res;
     }
 
-    this->positionByBaseFeature();
+    if (!reapplying) {
+        this->positionByBaseFeature();
+    }
 
     // The chamfer's largest distance along a face, for the check of what it drops (ops#603). By
     // distance and angle, the distance on the other face grows without bound as the angle and the
@@ -205,6 +219,10 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         const std::string lost = Part::lostMaterial(shape, TopShape, edges, reach);
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + lost);
+        }
+        if (reapplying) {
+            dressUpReapplied(refineShapeIfActive(shape));
+            return App::DocumentObject::StdReturn;
         }
         // store shape before refinement
         this->rawShape = shape;
