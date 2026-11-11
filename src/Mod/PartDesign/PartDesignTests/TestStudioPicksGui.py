@@ -374,26 +374,110 @@ class TestStudioDressUpsGui(ResultBoxGuiCase):
         self.assertEqual(b.Tip, fillet)
         self.assertEqual(a.Tip, padA)
 
+    # -- P8a (ops#654, parts-design.md 10.14): in a listed studio, one studio feature --------------
+
+    def listed(self):
+        """The two parts' studio (the document's top level) with its list, as a studio command
+        makes it on first use."""
+        import PartDesign
+
+        PartDesign.studioList(self.doc, True)
+        self.doc.recompute()
+        return PartDesign.studioList(self.doc)
+
+    def owners(self, typeId="PartDesign::Fillet"):
+        """The studio features of typeId: outside every Body."""
+        return [o for o in self.made(typeId) if getattr(o, "StudioOwner", None) is None]
+
+    def rows(self):
+        field = self.panelWidget("studioPicks", QtWidgets.QListWidget)
+        return [field.item(i).text() for i in range(field.count())]
+
     def testFilletOnEdgesOfTwoPartsRoundsEach(self):
-        """Edges of A and of B, one Fillet command: a fillet in each Body, the second's radius
-        following the first's; both rounded at r = 2 after OK."""
+        """P8a (10.14; Onshape O2): edges of A and of B, one Fillet command in a listed studio: one
+        studio feature, one entry in the list, a Fillet step in each part reading its radius; the
+        dialog lists both picks, "A: Edge.." and "B: Edge..". Both rounded at r = 2 after OK.
+        Until P8a this pinned two native fillets, one per Body, the second's Radius following
+        the first's by expression (the per-Body path, which unlisted documents keep)."""
         a, b, padA, padB = self.twoParts()
+        lst = self.listed()
+        before = len(lst.Entries)
         self.runWith("PartDesign_Fillet", a, self.twoEdges(padA, padB))
-        fillets = self.made("PartDesign::Fillet")
-        self.assertEqual(len(fillets), 2)
-        [first] = [f for f in fillets if a.hasObject(f)]
-        [second] = [f for f in fillets if b.hasObject(f)]
-        expressions = dict(second.ExpressionEngine)
-        self.assertEqual(expressions.get("Radius"), first.Name + ".Radius")
+        [owner] = self.owners()
+        self.assertEqual(len(lst.Entries), before + 1)
+        self.assertEqual(
+            self.rows(),
+            ["A: " + verticalEdge(padA, 10, 10), "B: " + verticalEdge(padB, 30, 10)],
+        )
         self.setField("filletRadius", 2)
         self.close(ok=True)
         self.watching = False
         self.assertEqual(self.modals, [])
         self.doc.recompute()
-        for fillet in (first, second):
-            self.assertTrue(fillet.isValid(), fillet.getStatusString())
-            self.assertAlmostEqual(fillet.Shape.Volume, filletedBoxVolume(2), places=4)
-        self.assertEqual((a.Tip, b.Tip), (first, second))
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        for body in (a, b):
+            [step] = [o for o in body.Group if getattr(o, "StudioOwner", None) is owner]
+            self.assertEqual(step.TypeId, "PartDesign::Fillet")
+            self.assertAlmostEqual(step.Radius.Value, 2)
+            self.assertAlmostEqual(body.Shape.Volume, filletedBoxVolume(2), places=4)
+            self.assertEqual(body.Tip, step)
+
+    def testStudioFilletTakesAnotherPartsEdgeInItsDialog(self):
+        """P8a (10.14, SQ13's fix): in a listed studio the fillet's edge field takes an edge of
+        another part: an edge of A picked, the dialog open, then B's edge picked in the 3D view:
+        the rows are A's and B's, and OK rounds both."""
+        a, b, padA, padB = self.twoParts()
+        self.listed()
+        self.runWith("PartDesign_Fillet", a, [(padA, verticalEdge(padA, 10, 10))])
+        [owner] = self.owners()
+        self.assertEqual(self.rows(), ["A: " + verticalEdge(padA, 10, 10)])
+        Gui.Selection.addSelection(self.doc.Name, padB.Name, verticalEdge(padB, 30, 10))
+        pump(0.3)
+        self.assertEqual(
+            self.rows(),
+            ["A: " + verticalEdge(padA, 10, 10), "B: " + verticalEdge(padB, 30, 10)],
+        )
+        self.setField("filletRadius", 2)
+        self.close(ok=True)
+        self.watching = False
+        self.assertEqual(self.modals, [])
+        self.doc.recompute()
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        for body in (a, b):
+            self.assertAlmostEqual(body.Shape.Volume, filletedBoxVolume(2), places=4)
+
+    def testCancelLeavesNoStudioFillet(self):
+        """P8a (10.14): Cancel on the studio fillet's dialog leaves nothing: no fillet, no list
+        entry, the parts' Tips as before."""
+        a, b, padA, padB = self.twoParts()
+        lst = self.listed()
+        entries = [e.Name for e in lst.Entries]
+        self.runWith("PartDesign_Fillet", a, self.twoEdges(padA, padB))
+        self.assertEqual(len(self.owners()), 1)
+        self.close(ok=False)
+        self.watching = False
+        self.assertEqual(self.made("PartDesign::Fillet"), [])
+        self.assertEqual([e.Name for e in lst.Entries], entries)
+        self.assertEqual((a.Tip, b.Tip), (padA, padB))
+        for body in (a, b):
+            self.assertAlmostEqual(body.Shape.Volume, 1000, places=4)
+
+    def testStudioChamferOnTwoParts(self):
+        """P8a (10.14): a Chamfer in a listed studio on an edge of each part: one studio feature,
+        both chamfered at size 2 (a prism of 2 x 2 / 2 x 10 off each: 980)."""
+        a, b, padA, padB = self.twoParts()
+        self.listed()
+        self.runWith("PartDesign_Chamfer", b, self.twoEdges(padA, padB))
+        [owner] = self.owners("PartDesign::Chamfer")
+        self.setField("chamferSize", 2)
+        self.close(ok=True)
+        self.watching = False
+        self.doc.recompute()
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        for body in (a, b):
+            self.assertAlmostEqual(body.Shape.Volume, 980, places=4)
+
+    # -- the per-Body path (unlisted documents, until R0) ------------------------------------------
 
     def testCancelTakesEveryPartsFillet(self):
         """Cancel on the two-part fillet's dialog leaves no fillet in either part."""

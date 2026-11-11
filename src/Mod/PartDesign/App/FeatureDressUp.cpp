@@ -869,6 +869,13 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         const auto& names = subs[part];
         if (seen->getValues() != wanted || step->Base.getValue() != base
             || !holdsLookup(step->Base, names)) {
+            if (!holdsLookup(step->Base, names) && step->Base.getValue() == base
+                && step->Base.getSubValues() == names) {
+                // The same names, one resolved to nothing when it was last tracked: a write of
+                // the same value keeps each entry's shadow (ops#504 E2), so it is emptied first
+                // and every name is resolved again on the base's shape as it is now
+                step->Base.setValue(base, std::vector<std::string>());
+            }
             if (step->Base.getValue() != base || step->Base.getSubValues() != names) {
                 step->Base.setValue(base, names);
             }
@@ -940,6 +947,92 @@ PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step)
     }
     const auto failed = stringsOf(owner, "StudioFailedParts");
     return std::ranges::find(failed, studioPartId(step->getFeatureBody())) != failed.end();
+}
+
+/// The owner's picks as its dialog lists them (P8a-2, 10.14 "the dialog"), one row per pick: the
+/// part holding it at the owner's place and its elements there, "Part 2: Edge7" (a split edge:
+/// "Part 2: Edge7, Edge9"); a pick found nowhere or in two parts says so. Declared where used
+PartDesignExport std::vector<std::string> studioDressUpRows(const DressUp* owner)
+{
+    std::vector<std::string> rows;
+    auto labelOf = [owner](const std::string& id) {
+        for (auto obj : owner->getDocument()->getObjectsOfType(Body::getClassTypeId())) {
+            auto body = static_cast<Body*>(obj);
+            if (studioPartId(body) == id) {
+                return std::string(body->Label.getValue());
+            }
+        }
+        return id;
+    };
+    for (const auto& pick : studioDressUpPicks(owner)) {
+        if (pick.found.empty()) {
+            rows.push_back(labelOf(pick.id) + ": not found");
+            continue;
+        }
+        if (pick.found.size() > 1) {
+            rows.push_back(labelOf(pick.id) + ": in two parts, left out");
+            continue;
+        }
+        std::string elements;
+        for (const auto& sub : pick.found.front().second) {
+            const auto dot = sub.rfind('.');
+            elements += (elements.empty() ? "" : ", ")
+                + (dot == std::string::npos ? sub : sub.substr(dot + 1));
+        }
+        rows.push_back(std::string(pick.found.front().first->Label.getValue()) + ": " + elements);
+    }
+    return rows;
+}
+
+/// The pick of element ("Edge3") of obj (a Body, or a feature of one) as owner stores it in
+/// StudioPickIds, "<part id>|<element name>" with the name expanded (P8a-2, the dialog's picks).
+/// The part shows owner's own step once it rounds it: an element of that step is the same
+/// element of the step's base, found by its geometry (a face the round made has none). Empty, with
+/// why, when there is no pick. Declared where used
+PartDesignExport std::string studioDressUpPickOf(const DressUp* owner,
+                                                 App::DocumentObject* obj,
+                                                 const std::string& element,
+                                                 std::string& why)
+{
+    auto body = freecad_cast<Body*>(obj);
+    if (!body) {
+        body = Body::findBodyOf(obj);
+    }
+    auto feature = freecad_cast<Part::Feature*>(obj);
+    if (!body || !feature) {
+        why = "not an element of a part";
+        return {};
+    }
+    Part::TopoShape shape = feature->Shape.getShape();
+    std::string indexed = element;
+    if (auto step = owner ? StudioList::stepOf(owner, body) : nullptr;
+        step && (feature == step || (feature == body && body->Tip.getValue() == step))) {
+        auto base = freecad_cast<Part::Feature*>(body->getPrevSolidFeature(step));
+        Part::TopoShape baseShape = base ? base->Shape.getShape() : Part::TopoShape();
+        Part::TopoShape picked;
+        try {
+            picked = shape.getSubTopoShape(element.c_str(), /*silent=*/true);
+        }
+        catch (...) {
+        }
+        std::vector<std::string> names;
+        if (!picked.isNull() && !baseShape.isNull()) {
+            baseShape.findSubShapesWithSharedVertex(picked, &names);
+        }
+        if (names.size() != 1) {
+            why = "an element the " + std::string(owner->isDerivedFrom<Chamfer>() ? "chamfer" : "fillet")
+                + " made: pick an edge the part had before it";
+            return {};
+        }
+        shape = baseShape;
+        indexed = names.front();
+    }
+    const auto mapped = shape.getElementMappedNames(Data::IndexedName(indexed.c_str()));
+    if (mapped.empty()) {
+        why = "the element has no name";
+        return {};
+    }
+    return studioPartId(body) + "|" + Data::NameTable::instance().toPlain(mapped.front().first.toString());
 }
 
 }  // namespace PartDesign
