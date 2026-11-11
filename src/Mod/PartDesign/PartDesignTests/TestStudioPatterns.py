@@ -851,3 +851,141 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertTrue(self.doc.getObject("LP").isValid())
         self.assertAlmostEqual(self.tipShape().Volume, volume, places=4)
         self.assertEqual(elementNames(self.tipShape()), before)
+
+    # ------------------------------------------------------------------------------- Reapply (T3 B)
+    def testReapplyHoleUpToNextStopsAtItsOwnMaterial(self):
+        """A plate x 0..60, y 0..20, z 0..5 with a shelf z 10..15 over x 30..60 (held by a wall at
+        x 55..60). An r3 flat hole sketched at z 15 at (10, 10), up to next: through the plate
+        (depth to z 0). Patterned +x 30 x 2 with Reapply on: instance 2 at x 40 stops where the
+        shelf's material ends (z 10), never reaching the plate."""
+        self.plate(height=5, rect=(0, 0, 60, 20))
+        p = self.part()
+        pad(p, "Wall", sketch(p, "WallSk", xyPlane(p), (55, 0, 60, 20), z=5), 10)
+        pad(p, "Shelf", sketch(p, "ShelfSk", xyPlane(p), (30, 0, 60, 20), z=10), 5)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        base = 60 * 20 * 5 + 5 * 20 * 5 + 30 * 20 * 5
+        sk = sketch(p, "HoleSk", xyPlane(p), z=15)
+        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), HOLE_R))
+        hole = p.newObject("PartDesign::Hole", "Drill")
+        hole.Profile = sk
+        hole.Diameter = 2 * HOLE_R
+        hole.DepthType = "UpToFirst"
+        hole.DrillPoint = "Flat"
+        listed(hole)
+        self.doc.recompute()
+        self.assertValid(hole)
+        self.assertTipVolume(base - self.hole(5))
+        lp = linear(p, "LP", [hole], X_AXIS, 30, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(lp)
+        self.assertTipVolume(base - 2 * self.hole(5))
+        self.assertTrue(lp.Shape.isInside(V(40, 10, 2.5), 1e-6, True))
+        self.assertFalse(lp.Shape.isInside(V(40, 10, 12.5), 1e-6, True))
+
+    def roundStudio(self):
+        """Part R, a disc r20 x 10 at the origin."""
+        return self.studio((("R", 20, 10),))
+
+    def testReapplyCircularPatternWithARevolveAndAChamfer(self):
+        """The team's shape (designed): on a disc r20 x 10, a pocket x 12..16, y -2..2 down to a datum
+        plane at z 4 (Up to face), its rim chamfered 0.5, and a 45 deg revolve of a 4 x 2 profile
+        (r 4..8, z 10..12) about z; circular pattern 4 x 90 deg of the three, Reapply on: each
+        instance is the pocket, its chamfered rim and the sector."""
+        self.roundStudio()
+        r = self.part("R")
+        floor = r.newObject("PartDesign::Plane", "Floor")
+        floor.MapMode = "Deactivated"
+        floor.Placement = App.Placement(V(0, 0, 4), App.Rotation())
+        listed(floor)
+        pocket = r.newObject("PartDesign::Pocket", "Slot")
+        pocket.Profile = sketch(r, "SlotSk", xyPlane(r), (12, -2, 16, 2), z=10)
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = (floor, [""])
+        listed(pocket)
+        self.doc.recompute()
+        self.assertValid(pocket)
+        rim = [
+            f"Edge{i}"
+            for i, e in enumerate(pocket.Shape.Edges, 1)
+            if all(abs(v.Point.z - 10) < 1e-6 and 11.9 < v.Point.x < 16.1 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(rim), 4)
+        chamfer = r.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pocket, rim)
+        chamfer.Size = 0.5
+        listed(chamfer)
+        profile = polygonSketch(
+            r, "SectorSk", [(r.Origin.OriginFeatures[XZ_PLANE], "")],
+            [(4, 10), (8, 10), (8, 12), (4, 12)],
+        )
+        sector = r.newObject("PartDesign::Revolution", "Sector")
+        sector.Profile = profile
+        sector.ReferenceAxis = (profile, ["V_Axis"])
+        sector.Angle = 45
+        listed(sector)
+        self.doc.recompute()
+        self.assertValid(chamfer, sector)
+        pp = polar(r, "PP", [pocket, chamfer, sector], 4)
+        pp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(pp)
+        disc = Part.makeCylinder(20, 10)
+        cut = disc.cut(box(12, -2, 4, 16, 2, 10))
+        edges = [
+            e for e in cut.Edges
+            if all(abs(v.Point.z - 10) < 1e-6 and 11.9 < v.Point.x < 16.1 for v in e.Vertexes)
+        ]
+        removed = disc.Volume - cut.makeChamfer(0.5, edges).Volume
+        sectorVolume = math.pi * (8**2 - 4**2) * 2 / 8
+        self.assertAlmostEqual(
+            self.tipShape("R").Volume, disc.Volume - 4 * removed + 4 * sectorVolume, places=2
+        )
+        self.assertEqual(len(self.tipShape("R").Solids), 1)
+
+    def testReapplyChamferWhoseEdgesAreNotOnTheInstanceFailsLoudly(self):
+        """A chamfer of the plate's own edge (not made by a patterned feature) under Reapply on: the
+        instance has no such edge, so the pattern fails naming the chamfer and the instance."""
+        self.plate()
+        p = self.part()
+        base = self.doc.getObject("PPad")
+        edge = next(
+            f"Edge{i}"
+            for i, e in enumerate(base.Shape.Edges, 1)
+            if all(abs(v.Point.z - 10) < 1e-6 and abs(v.Point.y) < 1e-6 for v in e.Vertexes)
+        )
+        chamfer = p.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (base, [edge])
+        chamfer.Size = 1
+        listed(chamfer)
+        lp = linear(p, "LP", [chamfer], Y_AXIS, 5, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(lp, "Chamfer", "instance 2", "edges")
+
+    def testReapplyRefusesARevolveUpToAFace(self):
+        """A revolve up to a face under Reapply on: refused loudly, naming the end type."""
+        self.roundStudio()
+        r = self.part("R")
+        profile = polygonSketch(
+            r, "SectorSk", [(r.Origin.OriginFeatures[XZ_PLANE], "")],
+            [(4, 10), (8, 10), (8, 12), (4, 12)],
+        )
+        stop = r.newObject("PartDesign::Plane", "Stop")
+        stop.MapMode = "Deactivated"
+        # a plane through the z axis at 60 deg from the profile's
+        stop.Placement = App.Placement(
+            V(0, 0, 0), App.Rotation(V(0, 0, 1), 60).multiply(App.Rotation(V(1, 0, 0), 90))
+        )
+        listed(stop)
+        sector = r.newObject("PartDesign::Revolution", "Sector")
+        sector.Profile = profile
+        sector.ReferenceAxis = (profile, ["V_Axis"])
+        sector.Type = "UpToFace"
+        sector.UpToFace = (stop, [""])
+        listed(sector)
+        pp = polar(r, "PP", [sector], 4)
+        pp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(pp, "Reapply isn't available for a revolve", "up to a face")

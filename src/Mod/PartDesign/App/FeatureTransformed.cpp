@@ -26,7 +26,13 @@
 #include <BRep_Builder.hxx>
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <TopoDS.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <Precision.hxx>
@@ -51,8 +57,16 @@
 #include "Body.h"
 #include "FeatureAddSub.h"
 #include "FeatureBoolean.h"
+#include "FeatureChamfer.h"
 #include "FeatureExtrude.h"
+#include "FeatureFillet.h"
+#include "FeatureHelix.h"
+#include "FeatureHole.h"
+#include "FeatureLoft.h"
 #include "FeatureMultiTransform.h"
+#include "FeaturePipe.h"
+#include "FeaturePrimitive.h"
+#include "FeatureRevolved.h"
 #include "FeatureMirrored.h"
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
@@ -518,6 +532,8 @@ struct ReapplyItem
     FeatureAddSub* seed = nullptr;         ///< a native feature, or a studio feature's step
     App::DocumentObject* named = nullptr;  ///< the feature messages name (the owner of a step)
     FeatureExtrude* rerun = nullptr;       ///< re-run at each instance; null: its tool is copied
+    Hole* hole = nullptr;                  ///< a hole re-run at each instance
+    DressUp* dressUp = nullptr;            ///< a chamfer or fillet re-run on each instance's edges
     gp_Trsf toPattern;                     ///< rerun's own frame to the pattern's
     Part::TopoShape tool;                  ///< the seed's tool, in the pattern's frame
     bool additive = true;
@@ -533,6 +549,32 @@ struct ReapplyItem
         return move;
     }
 };
+
+/// Whether edges a and b coincide: their ends and their middle within tol of each other
+bool sameEdge(const TopoDS_Shape& a, const TopoDS_Shape& b, double tol)
+{
+    if (a.IsNull() || b.IsNull() || a.ShapeType() != TopAbs_EDGE || b.ShapeType() != TopAbs_EDGE) {
+        return false;
+    }
+    GProp_GProps pa;
+    GProp_GProps pb;
+    BRepGProp::LinearProperties(a, pa);
+    BRepGProp::LinearProperties(b, pb);
+    if (std::fabs(pa.Mass() - pb.Mass()) > tol) {
+        return false;
+    }
+    BRepAdaptor_Curve curve(TopoDS::Edge(a));
+    const gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+    std::vector<gp_Pnt> points {middle, curve.Value(curve.FirstParameter()),
+                                curve.Value(curve.LastParameter())};
+    for (const gp_Pnt& point : points) {
+        BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), b);
+        if (!distance.IsDone() || distance.Value() > tol) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// The type of a feature as a person reads it ("Thickness" for PartDesign::Thickness)
 std::string typeName(const App::DocumentObject* obj)
@@ -596,6 +638,42 @@ struct ReapplyCollector
     )
     {
         const std::string name = quoted(computer);
+        if (auto hole = freecad_cast<Hole*>(computer)) {
+            return holeItem(seed, hole, levels, out);
+        }
+        if (auto revolved = freecad_cast<Revolved*>(computer)) {
+            // By an angle its tool is the same wherever it goes (patterns-design 3.3): the copy
+            // is the re-run. Up to a face, a vertex, next or last: not yet
+            const std::string type = revolved->Type.getValueAsString();
+            if (type == "Angle" || type == "?TwoAngles") {
+                return copied(seed, computer, levels, out);
+            }
+            return "Reapply isn't available for a revolve that ends " + endName(type) + " yet: "
+                + name + " can only be copied (Reapply off)";
+        }
+        if (freecad_cast<Pipe*>(computer) || freecad_cast<Loft*>(computer)
+            || freecad_cast<Helix*>(computer) || freecad_cast<FeaturePrimitive*>(computer)) {
+            // A sweep, loft or helix along its own path, a primitive: its tool doesn't depend on
+            // the base, so its copy is the re-run
+            return copied(seed, computer, levels, out);
+        }
+        if (auto dressUp = freecad_cast<DressUp*>(computer);
+            dressUp && (freecad_cast<Chamfer*>(dressUp) || freecad_cast<Fillet*>(dressUp))) {
+            auto chamfer = freecad_cast<Chamfer*>(dressUp);
+            auto fillet = freecad_cast<Fillet*>(dressUp);
+            if ((chamfer && chamfer->UseAllEdges.getValue())
+                || (fillet && fillet->UseAllEdges.getValue())) {
+                return "Reapply isn't available for a " + typeName(computer)
+                    + " of all edges yet: " + name + " can only be copied (Reapply off)";
+            }
+            ReapplyItem it;
+            it.seed = seed;
+            it.named = computer;
+            it.levels = levels;
+            it.dressUp = dressUp;
+            out.push_back(it);
+            return {};
+        }
         auto ext = freecad_cast<FeatureExtrude*>(computer);
         if (!ext) {
             // A studio feature that is a shape object (a primitive): its tool is its own shape,
@@ -630,14 +708,76 @@ struct ReapplyCollector
         if (!blind(ext->Type.getValueAsString())
             || (twoSides && !blind(ext->Type2.getValueAsString()))) {
             it.rerun = ext;
-            // The frame its tool is made in: a Body feature's placement in its Body; a studio
-            // feature's in the document, as its steps take its tool (FeatureApply::toolOf())
-            it.toPattern = seed == computer
-                ? frame.Multiplied(seed->getLocation().Transformation())
-                : fromDocument.Multiplied(Part::TopoShape::convert(
-                      App::GeoFeature::getGlobalPlacement(computer).toMatrix()
-                  ));
+            it.toPattern = toolFrame(seed, computer);
         }
+        out.push_back(it);
+        return {};
+    }
+
+    /// An end type as the dialogs name it
+    static std::string endName(const std::string& type)
+    {
+        if (type == "UpToFirst") {
+            return "up to next";
+        }
+        if (type == "UpToLast") {
+            return "up to last";
+        }
+        if (type == "UpToFace") {
+            return "up to a face";
+        }
+        if (type == "UpToVertex") {
+            return "up to a vertex";
+        }
+        if (type == "UpToShape") {
+            return "up to a shape";
+        }
+        if (type == "ThroughAll") {
+            return "through all";
+        }
+        return type;
+    }
+
+    /// The frame computer's tool is made in, to the pattern's: a Body feature's placement in its
+    /// Body; a studio feature's in the document, as its steps take its tool (FeatureApply::toolOf())
+    gp_Trsf toolFrame(FeatureAddSub* seed, App::DocumentObject* computer) const
+    {
+        return seed == computer ? frame.Multiplied(seed->getLocation().Transformation())
+                                : fromDocument.Multiplied(Part::TopoShape::convert(
+                                      App::GeoFeature::getGlobalPlacement(computer).toMatrix()
+                                  ));
+    }
+
+    /// A hole: of a given depth from its profile, its tool is the same wherever it goes (copied);
+    /// through all, up to next or a face, or from the part's surface: re-run at each instance
+    std::string holeItem(
+        FeatureAddSub* seed,
+        Hole* hole,
+        const std::vector<InnerLevel>& levels,
+        std::vector<ReapplyItem>& out
+    )
+    {
+        const std::string name = quoted(hole);
+        const std::string start = hole->StartType.getValueAsString();
+        if (start == "Reference") {
+            return name + " starts at a reference: Reapply isn't available for it yet";
+        }
+        const std::string depth = hole->DepthType.getValueAsString();
+        if (depth == "Dimension" && start != "Part") {
+            return copied(seed, hole, levels, out);
+        }
+        PatternTool tool;
+        if (std::string why = tools.plain(seed, tool); !why.empty()) {
+            return why;
+        }
+        ReapplyItem it;
+        it.seed = seed;
+        it.named = hole;
+        it.levels = levels;
+        it.additive = !tool.fuse.isNull();
+        it.tool = it.additive ? tool.fuse : tool.cut;
+        it.hole = hole;
+        it.toPattern = toolFrame(seed, hole);
         out.push_back(it);
         return {};
     }
@@ -745,6 +885,20 @@ PartDesignExport Part::TopoShape reapplyExtrusion(
     const gp_Trsf& toSeed,
     const Part::TopoShape& base,
     const std::string& partLabel,
+    std::string& why
+);
+
+// FeatureHole.cpp and FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
+PartDesignExport Part::TopoShape reapplyHole(
+    Hole* hole,
+    const gp_Trsf& toSeed,
+    const Part::TopoShape& base,
+    std::string& why
+);
+PartDesignExport Part::TopoShape reapplyDressUp(
+    DressUp* feature,
+    const Part::TopoShape& base,
+    const std::vector<Part::TopoShape>& edges,
     std::string& why
 );
 
@@ -1330,7 +1484,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     }
                 }
                 const bool rerun = std::ranges::any_of(items, [](const ReapplyItem& item) {
-                    return item.rerun != nullptr;
+                    return item.rerun || item.hole || item.dressUp;
                 });
                 const bool adds = std::ranges::any_of(items, [](const ReapplyItem& item) {
                     return item.additive;
@@ -1356,8 +1510,66 @@ App::DocumentObjectExecReturn* Transformed::execute()
                             const std::string instance = "instance " + std::to_string(position + 1);
                             for (const ReapplyItem& item : items) {
                                 const gp_Trsf full = outer.Multiplied(item.innerMove());
+                                if (item.dressUp) {
+                                    // A chamfer or fillet on the instance's edges: the seed's
+                                    // edges moved there, each an edge of the part as it is now
+                                    Part::TopoShape seedBase =
+                                        item.dressUp->getBaseTopoShape(/*silent=*/true);
+                                    if (seedBase.isNull()) {
+                                        return new App::DocumentObjectExecReturn(
+                                            quoted(item.named) + " has no base", this
+                                        );
+                                    }
+                                    const gp_Trsf seedFrame = trsfInv.Multiplied(
+                                        seedBase.getShape().Location().Transformation()
+                                    );
+                                    seedBase.locate(TopLoc_Location());
+                                    const gp_Trsf move = full.Multiplied(seedFrame);
+                                    Bnd_Box partBox;
+                                    BRepBndLib::Add(supportShape.getShape(), partBox);
+                                    const double tol =
+                                        std::max(1e-6, 1e-7 * std::sqrt(partBox.SquareExtent()));
+                                    const std::vector<Part::TopoShape> partEdges =
+                                        supportShape.getSubTopoShapes(TopAbs_EDGE);
+                                    std::vector<Part::TopoShape> edges;
+                                    for (const auto& edge : item.dressUp->getContinuousEdges(seedBase)) {
+                                        const TopoDS_Shape there =
+                                            BRepBuilderAPI_Transform(edge.getShape(), move, true).Shape();
+                                        auto found = std::ranges::find_if(
+                                            partEdges,
+                                            [&](const Part::TopoShape& candidate) {
+                                                return sameEdge(there, candidate.getShape(), tol);
+                                            }
+                                        );
+                                        if (found == partEdges.end()) {
+                                            return new App::DocumentObjectExecReturn(
+                                                quoted(item.named) + " at " + instance
+                                                    + ": its edges aren't found on the instance",
+                                                this
+                                            );
+                                        }
+                                        edges.push_back(*found);
+                                    }
+                                    if (edges.empty()) {
+                                        return new App::DocumentObjectExecReturn(
+                                            quoted(item.named) + " has no edges", this
+                                        );
+                                    }
+                                    std::string why;
+                                    Part::TopoShape made =
+                                        reapplyDressUp(item.dressUp, supportShape, edges, why);
+                                    if (made.isNull()) {
+                                        return new App::DocumentObjectExecReturn(
+                                            quoted(item.named) + " at " + instance + ": " + why,
+                                            this
+                                        );
+                                    }
+                                    supportShape = made;
+                                    inputCheck = ownResultCheck();
+                                    continue;
+                                }
                                 Part::TopoShape shape = item.tool;
-                                if (item.rerun) {
+                                if (item.rerun || item.hole) {
                                     // Re-run in the seed's place against the base and references
                                     // carried back there; then moved, as a copy is
                                     const gp_Trsf back = item.toPattern.Inverted().Multiplied(
@@ -1366,8 +1578,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     const gp_Trsf toSeed = back.Multiplied(item.toPattern);
                                     const Part::TopoShape base = supportShape.makeElementTransform(back);
                                     std::string why;
-                                    Part::TopoShape made =
-                                        reapplyExtrusion(item.rerun, toSeed, base, partName, why);
+                                    Part::TopoShape made = item.rerun
+                                        ? reapplyExtrusion(item.rerun, toSeed, base, partName, why)
+                                        : reapplyHole(item.hole, toSeed, base, why);
                                     if (made.isNull()) {
                                         return new App::DocumentObjectExecReturn(
                                             quoted(item.named) + " at " + instance + ": " + why,
