@@ -1883,11 +1883,9 @@ void ViewProviderSketch::editDoubleClicked()
             editTextDialog.exec();
             setSketchMode(STATUS_NONE);
         }
-        else {
-            // We cannot do toggleWireSelection directly here because the released event with
-            //STATUS_NONE return false which clears the selection.
-            setSketchMode(STATUS_SELECT_Wire);
-        }
+        // FreeCAD-CH (selection parity P6, oracle 8 SQ9): a double click on a sketch line selects
+        // nothing, as in Onshape (its chains come from a menu); upstream selected the whole
+        // closed chain (STATUS_SELECT_Wire). The release that follows clears the selection.
     }
     else if (preselection.isCrossPreselected()) {
         Base::Console().log("double click cross:%d\n",
@@ -2991,6 +2989,10 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
              || msg.Type == Gui::SelectionChanges::RmvSelection)
             && Mode == STATUS_SKETCH_StartRubberBand && msg.Object.getSubObject() != getObject()) {
             modelPickedInClick = true;
+            // FreeCAD-CH (selection parity P3): idle at once. The release goes to the 3D view's
+            // selection, so the press state stayed until the mouse moved, and every constraint
+            // command (active only while idle) did nothing when run right after the pick (a key)
+            setSketchMode(STATUS_NONE);
         }
 
         std::string temp;

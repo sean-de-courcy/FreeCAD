@@ -150,6 +150,7 @@ if(BUILD_GUI)
         PartDesignTests/TestMergeScopeGui.py
         PartDesignTests/TestPickFirstGui.py
         PartDesignTests/TestEscCancelsGui.py
+        PartDesignTests/TestSelectionParityGui.py
         PartDesignTests/TestSketchPlaneGui.py
         PartDesignTests/TestBooleanDialogGui.py
         PartDesignTests/TestDialogFlowGui.py
