@@ -733,10 +733,6 @@ struct AppExport SolveInput
         /// the person asked for the whole element, so a split breaks with the pieces listed,
         /// never G3's one piece.
         bool listHolder = false;
-        /// Under Equivalent, two or more pieces of the old element break the entry even when
-        /// they give the consumer one result (an attachment: Onshape's SW19 (a), a sketch and
-        /// a mate connector on a face cut in two fail and come back once it is whole again).
-        bool piecesBreak = false;
         /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`, whose mapped name is
         /// exactName (the name the reference holds).
         bool exact = false;

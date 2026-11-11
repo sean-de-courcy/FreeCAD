@@ -1405,20 +1405,6 @@ TEST(SolveOwner, equivalentPiecesResolveToTheFirstPiece)
         << outcomes[0].evidence;
 }
 
-TEST(SolveOwner, equivalentPiecesBreakAnAttachment)
-{
-    //   SW19 (a): an attachment's face cut in two breaks though both pieces give one placement
-    SplitFace names;
-    auto input = names.input([](const std::string&, const std::string&) { return true; });
-    input.entries[0].piecesBreak = true;
-
-    auto outcomes = Data::solveOwner(input);
-
-    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face3", "Face1"}));
-    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces");
-}
-
 TEST(SolveOwner, equivalentPiecesWithDifferentResultsBreak)
 {
     SplitFace names;

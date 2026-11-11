@@ -150,11 +150,9 @@ class SplitTopGroove(SplitModel):
     """A blind hole (x 16..18, y 2..4, 4 deep) in the block's top; a pad, 3 high, whose profile
     is the top face; a sketch attached to the top face. The hole becomes a groove across the top
     (x 12..14, y -1..11): the top face splits into x 0..12 and x 14..20. The pad should pad both
-    pieces, and the sketch breaks, as in Onshape (SW19 (a): an attachment on a face cut in two
-    fails rather than pick a piece, coplanar or not)."""
+    pieces, and the sketch lies on either (they are coplanar)."""
 
     REFS = ("pad_profile", "sketch_top")
-    split = False
 
     def topFace(self):
         return pieces(face("plane", normal=Z, through=(0, 0, self.height)))
@@ -175,14 +173,10 @@ class SplitTopGroove(SplitModel):
         pad.Profile = (groove, top)
         pad.Length = 3
         self.ref("pad_profile", pad, "Profile", self.topFace, Extruded(3, Z))
-        self.ref("sketch_top", onTop, "AttachmentSupport", self.sketchFace, Attached())
-
-    def sketchFace(self):
-        return Broken(self.topFace()) if self.split else self.topLeftPiece()
+        self.ref("sketch_top", onTop, "AttachmentSupport", self.topLeftPiece, Attached())
 
     def edit(self, doc):
         m.moveRectangle(doc.GrooveSketch, 12, -1, 14, 11)
-        self.split = True
 
 
 class SplitFilletNotch(SplitModel):

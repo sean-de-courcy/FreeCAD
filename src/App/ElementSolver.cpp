@@ -6510,9 +6510,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         // Under Equivalent they resolve as one candidate if every piece gives the consumer the
         // same result, represented by the piece whose first name sorts first; otherwise the
         // entry breaks. The other survivors don't count: the pieces are what is left of the old
-        // element. Equivalent without pieces is One (see solveOwner()'s comment). An entry with
-        // piecesBreak (an attachment) breaks on two or more pieces, keeping its old name, so the
-        // whole element gives it back (Onshape's SW19 (a)).
+        // element. Equivalent without pieces is One (see solveOwner()'s comment).
         std::vector<int> pieces;
         std::vector<int> others;
         for (int k : state.candidates) {
@@ -6524,18 +6522,6 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             (piece ? pieces : others).push_back(k);
         }
         const bool equivalentPolicy = std::get<2>(key) == static_cast<int>(SolvePolicy::Equivalent);
-        const bool piecesBreak = equivalentPolicy && pieces.size() >= 2
-            && std::any_of(members.begin(), members.end(), [&](int member) {
-                   return input.entries[member].piecesBreak;
-               });
-        if (piecesBreak) {
-            state.decided = true;
-            state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
-            listCandidates(state, pieces);
-            listCandidates(state, others);
-            listDropped(state);
-            continue;
-        }
         if (!pieces.empty() && equivalentPolicy) {
             std::vector<std::string> indexes;
             for (int k : pieces) {

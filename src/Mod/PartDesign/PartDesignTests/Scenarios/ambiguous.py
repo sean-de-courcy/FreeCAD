@@ -33,9 +33,7 @@ class AmbiguousHalves(Scenario):
     """A block 0..20 x 0..10 x 0..10 (a pad) with a blind hole (x 16..18, y 2..4, 4 deep) in its
     top; a sketch attached to the top face, and a datum point at the top face's centre of mass.
     The hole becomes a groove across the middle (x 9..11): the top face splits into two equal
-    halves. Neither reference picks a half: the point has no right half to go to, and the sketch
-    breaks too, as in Onshape (SW19 (a): an attachment on a face cut in two fails and comes back
-    once the face is whole again)."""
+    halves. The sketch lies on either half; the point has no right half to go to."""
 
     area = "ambiguous"
     REFS = ("sketch_top", "point_top")
@@ -43,6 +41,9 @@ class AmbiguousHalves(Scenario):
 
     def topFace(self):
         return face("plane", normal=Z, through=(0, 0, 10))
+
+    def leftHalf(self):
+        return face("plane", normal=Z, through=(0, 0, 10), contains=(2, 5, 10))
 
     def pointFace(self):
         return Broken(pieces(self.topFace())) if self.halves else self.topFace()
@@ -61,7 +62,7 @@ class AmbiguousHalves(Scenario):
         point = body.newObject("PartDesign::Point", "Centre")
         point.AttachmentSupport = [(groove, top)]
         point.MapMode = "CenterOfMass"
-        self.ref("sketch_top", onTop, "AttachmentSupport", self.pointFace, Attached())
+        self.ref("sketch_top", onTop, "AttachmentSupport", self.leftHalf, Attached())
         self.ref("point_top", point, "AttachmentSupport", self.pointFace, Attached())
 
     def edit(self, doc):
