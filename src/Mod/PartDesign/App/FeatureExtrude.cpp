@@ -81,6 +81,8 @@
 
 #include "Body.h"
 #include "FeatureExtrude.h"
+#include "FeaturePad.h"
+#include "FeaturePocket.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 
@@ -1074,6 +1076,23 @@ gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
 // own side is built as today's, against the one part it meets
 thread_local bool ownerRegionRunning = false;
 
+/* FreeCAD-CH ops#654 T3 (notes/patterns-design.md 3.3, Reapply): set while a pattern with Reapply
+ * on re-runs this extrusion at one of its instances. The run is the seed's own, in the feature's
+ * frame, against the instance's surroundings carried back onto the seed by the inverse instance
+ * transform: the base at that instance and the fixed references (the up-to face, shape or vertex:
+ * Onshape re-intersects the same face per instance, O6). The profile, its support face and the
+ * direction stay. The tool the run makes, moved by the instance transform, is the instance
+ * re-solved where it is (a rigid motion or a mirror carries the whole construction). The run
+ * writes nothing of the feature: its tool goes here */
+struct ReapplyRun
+{
+    gp_Trsf toSeed;         ///< the instance's surroundings onto the seed's, in the feature's frame
+    TopoShape base;         ///< the base at the instance, carried onto the seed (feature's frame)
+    std::string partLabel;  ///< the pattern's part, for messages
+    TopoShape tool;         ///< the tool made (out)
+};
+thread_local ReapplyRun* reapplyRun = nullptr;
+
 /** A studio owner's "Up to next" for one region against the one part it meets (FreeCAD-CH ops#654
  * S2, notes/onshape-facts.md O8h): the region's sweep ahead (reach long) split by the part, keeping
  * the pieces that start on the region. Starting outside the part they are the gap up to where the
@@ -1201,24 +1220,33 @@ TopoShape ownerUpToPerRegion(
     // its own
     const Base::Placement container =
         owner.globalPlacement() * owner.Placement.getValue().inverse();
-    std::vector<std::pair<const Body*, TopoShape>> parts;
+    std::vector<std::pair<std::string, TopoShape>> parts;
     Bnd_Box all;
     BRepBndLib::Add(profile.getShape(), all);
-    for (auto part : studioScopeOf(&owner)) {
-        TopoShape shape = studioBaseAt(&owner, part);
-        if (shape.isNull()) {
-            continue;
-        }
-        shape.transformShape(container.inverse().toMatrix(), false, true);
-        shape.move(invObjLoc);
-        BRepBndLib::Add(shape.getShape(), all);
-        parts.emplace_back(part, shape);
-    }
-    all.SetGap(0.0);
-    const double reach = 2.02 * std::sqrt(all.SquareExtent());
     auto label = [](const Body* part) {
         return std::string("'") + part->Label.getValue() + "'";
     };
+    if (reapplyRun) {
+        // A pattern's instance (ops#654 T3): the pattern's part at the instance, in this frame
+        if (!reapplyRun->base.isNull()) {
+            BRepBndLib::Add(reapplyRun->base.getShape(), all);
+            parts.emplace_back(reapplyRun->partLabel, reapplyRun->base);
+        }
+    }
+    else {
+        for (auto part : studioScopeOf(&owner)) {
+            TopoShape shape = studioBaseAt(&owner, part);
+            if (shape.isNull()) {
+                continue;
+            }
+            shape.transformShape(container.inverse().toMatrix(), false, true);
+            shape.move(invObjLoc);
+            BRepBndLib::Add(shape.getShape(), all);
+            parts.emplace_back(label(part), shape);
+        }
+    }
+    all.SetGap(0.0);
+    const double reach = 2.02 * std::sqrt(all.SquareExtent());
 
     std::vector<TopoShape> prisms;
     int index = 0;
@@ -1252,8 +1280,8 @@ TopoShape ownerUpToPerRegion(
         }
         if (met.size() > 1) {
             throw Base::ValueError(
-                which + " meets " + label(parts[met[0]].first) + " and "
-                + label(parts[met[1]].first) + ": a region goes up to one part"
+                which + " meets " + parts[met[0]].first + " and " + parts[met[1]].first
+                + ": a region goes up to one part"
             );
         }
         prisms.push_back(side(region, parts[met.front()].second, reach, which));
@@ -1272,7 +1300,7 @@ TopoShape ownerUpToPerRegion(
 
 App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions options)
 {
-    if (onlyHaveRefined()) {
+    if (!reapplyRun && onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
 
@@ -1393,14 +1421,23 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
     Base::Vector3d SketchVector = getProfileNormal();
 
     try {
-        this->positionByPrevious();
+        if (!reapplyRun) {
+            this->positionByPrevious();
+        }
         auto invObjLoc = getInverseLocation(base);
 
         auto invTrsf = invObjLoc.Transformation();
 
         base.move(invObjLoc);
+        if (reapplyRun) {
+            // A pattern's instance (ops#654 T3): its base, carried onto the seed, and the
+            // direction the seed's own run computed (no property writes)
+            base = reapplyRun->base;
+        }
 
-        Base::Vector3d paddingDirection = computeDirection(SketchVector, inverseDirection);
+        Base::Vector3d paddingDirection = reapplyRun
+            ? Direction.getValue()
+            : computeDirection(SketchVector, inverseDirection);
 
         // create vector in padding direction with length 1
         gp_Dir dir(paddingDirection.x, paddingDirection.y, paddingDirection.z);
@@ -1432,7 +1469,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
 
         // explicitly set the Direction so that the dialog shows also the used direction
         // if the sketch's normal vector was used
-        Direction.setValue(paddingDirection);
+        if (!reapplyRun) {
+            Direction.setValue(paddingDirection);
+        }
 
         dir.Transform(invTrsf);
         if (Reversed.getValue()) {
@@ -1445,6 +1484,23 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             );
         }
         sketchshape.move(invObjLoc);
+
+        if (reapplyRun && (method == "ThroughAll" || method2 == "ThroughAll")) {
+            // Through all at a pattern's instance (ops#654 T3): through the base there
+            Bnd_Box box;
+            if (!base.isNull()) {
+                BRepBndLib::Add(base.getShape(), box);
+            }
+            BRepBndLib::Add(sketchshape.getShape(), box);
+            box.SetGap(0.0);
+            const double all = 2.02 * std::sqrt(box.SquareExtent()) / factor;
+            if (method == "ThroughAll") {
+                L = all;
+            }
+            if (Sidemethod == "Two sides" && method2 == "ThroughAll") {
+                L2 = all;
+            }
+        }
 
         const char* startType = StartType.getValueAsString();
         const double startOffset = std::strcmp(startType, "Profile plane") == 0 ? 0.0
@@ -1474,6 +1530,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             auto lengthTo = [&](const App::PropertyLinkSub& link, const gp_Dir& along, double offset) {
                 gp_Pnt target = upToVertexPoint(link);
                 target.Transform(invTrsf);
+                if (reapplyRun) {
+                    target.Transform(reapplyRun->toSeed);
+                }
                 const double cosine = gp_Vec(along).Dot(gp_Vec(profileNormal));
                 const double length = gp_Vec(onProfile, target).Dot(gp_Vec(profileNormal)) / cosine;
                 if (std::fabs(length) < Precision::Confusion()) {
@@ -1840,6 +1899,12 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             );
         }
 
+        if (reapplyRun) {
+            // A pattern's instance (ops#654 T3): its tool only, refined as the seed's
+            reapplyRun->tool = refineShapeIfActive(prism);
+            return App::DocumentObject::StdReturn;
+        }
+
         // store shape before refinement
         this->rawShape = prism;
         prism = refineShapeIfActive(prism);
@@ -2074,10 +2139,16 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
         if (method == "UpToFace") {
             getUpToFaceFromLinkSub(upToShape, upToFacePropHandle);
             upToShape.move(invObjLoc);
+            if (reapplyRun) {
+                upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
+            }
         }
         else if (method == "UpToShape") {
             faceCount = getUpToShapeFromLinkSubList(upToShape, upToShapePropHandle);
             upToShape.move(invObjLoc);
+            if (reapplyRun) {
+                upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
+            }
             if (faceCount == 0) {
                 // No shape selected, use the base
                 upToShape = base;
@@ -2243,3 +2314,52 @@ bool FeatureExtrude::shapeMadeUnderPlacement() const
 {
     return madeUnder && madeUnder->isSame(Placement.getValue(), Precision::Confusion());
 }
+
+namespace PartDesign
+{
+
+/** FreeCAD-CH ops#654 T3: feature's tool re-solved at a pattern's instance (ReapplyRun above), in
+ * the feature's own frame; null with why when it can't be made there. Declared where used
+ * (FeatureTransformed.cpp) */
+PartDesignExport TopoShape reapplyExtrusion(
+    FeatureExtrude* feature,
+    const gp_Trsf& toSeed,
+    const TopoShape& base,
+    const std::string& partLabel,
+    std::string& why
+)
+{
+    ReapplyRun run {toSeed, base, partLabel, TopoShape()};
+    ReapplyRun* outer = reapplyRun;
+    reapplyRun = &run;
+    App::DocumentObjectExecReturn* ret = nullptr;
+    try {
+        if (auto pad = freecad_cast<Pad*>(feature)) {
+            ret = pad->execute();
+        }
+        else if (auto pocket = freecad_cast<Pocket*>(feature)) {
+            ret = pocket->execute();
+        }
+        else {
+            why = "it isn't a Pad or a Pocket";
+        }
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const Standard_Failure& e) {
+        why = e.GetMessageString();
+    }
+    reapplyRun = outer;
+    if (ret) {
+        why = ret->Why;
+        delete ret;
+        return {};
+    }
+    if (run.tool.isNull() && why.empty()) {
+        why = "it made no tool there";
+    }
+    return why.empty() ? run.tool : TopoShape();
+}
+
+}  // namespace PartDesign

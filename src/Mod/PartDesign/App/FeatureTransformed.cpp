@@ -34,6 +34,7 @@
 
 
 #include <array>
+#include <cstring>
 #include <optional>
 #include <unordered_map>
 #include <algorithm>
@@ -50,6 +51,7 @@
 #include "Body.h"
 #include "FeatureAddSub.h"
 #include "FeatureBoolean.h"
+#include "FeatureExtrude.h"
 #include "FeatureMultiTransform.h"
 #include "FeatureMirrored.h"
 #include "FeatureLinearPattern.h"
@@ -306,6 +308,9 @@ struct ToolCollector
     gp_Trsf fromDocument;  ///< the document's frame to the pattern's
     Part::TopoShape part;  ///< the part at the pattern's place, in its frame
     bool nameInstances;
+    /// Reapply on with every original's tool independent of the base (ops#654 T3): a copy is the
+    /// instance re-run, so the copy rule (studioCopyRefusal) has nothing to refuse
+    bool reapply = false;
 
     /// original's tools into out; checks: the transforms they undergo (for the copy rule)
     std::string add(
@@ -328,7 +333,9 @@ struct ToolCollector
                 return why;
             }
             const Part::TopoShape& shape = tool.fuse.isNull() ? tool.cut : tool.fuse;
-            if (std::string why = studioCopyRefusal(step, shape, part, checks, fromDocument);
+            if (std::string why = reapply
+                    ? std::string()
+                    : studioCopyRefusal(step, shape, part, checks, fromDocument);
                 !why.empty()) {
                 return why;
             }
@@ -495,10 +502,252 @@ struct ToolCollector
     }
 };
 
+/// A pattern among the originals that an instance went through (flattened, Onshape P2): its move
+/// in the outer pattern's frame and the instance's number in it (ops#654 T3)
+struct InnerLevel
+{
+    Transformed* inner = nullptr;
+    gp_Trsf move;
+    std::size_t position = 0;
+    std::string number;
+};
+
+/// One original a pattern with Reapply on makes at each instance (ops#654 T3)
+struct ReapplyItem
+{
+    FeatureAddSub* seed = nullptr;         ///< a native feature, or a studio feature's step
+    App::DocumentObject* named = nullptr;  ///< the feature messages name (the owner of a step)
+    FeatureExtrude* rerun = nullptr;       ///< re-run at each instance; null: its tool is copied
+    gp_Trsf toPattern;                     ///< rerun's own frame to the pattern's
+    Part::TopoShape tool;                  ///< the seed's tool, in the pattern's frame
+    bool additive = true;
+    std::vector<InnerLevel> levels;  ///< the patterns among the originals it is in, innermost first
+
+    /// The move of the patterns among the originals, composed
+    gp_Trsf innerMove() const
+    {
+        gp_Trsf move;
+        for (const InnerLevel& level : levels) {
+            move = level.move.Multiplied(move);
+        }
+        return move;
+    }
+};
+
+/// The type of a feature as a person reads it ("Thickness" for PartDesign::Thickness)
+std::string typeName(const App::DocumentObject* obj)
+{
+    std::string name(obj->getTypeId().getName());
+    if (const auto colons = name.rfind("::"); colons != std::string::npos) {
+        name = name.substr(colons + 2);
+    }
+    return name;
+}
+
+/** The originals of a pattern with Reapply on, flattened as ToolCollector does (Onshape P2, P3),
+ * each with how an instance is made (ops#654 T3, notes/patterns-design.md 3.3): an extrusion whose
+ * tool depends on the base (Up to next, last, face, vertex or shape, Through all) is re-run at each
+ * instance against the part as it grows; a Blind, Two lengths or Symmetric extrusion's tool is the
+ * same wherever it goes, so its copy is the re-run. Anything else is refused loudly */
+struct ReapplyCollector
+{
+    Transformed& pattern;
+    Body* body;
+    gp_Trsf frame;         ///< the Body's frame to the pattern's
+    gp_Trsf fromDocument;  ///< the document's frame to the pattern's
+    bool nameInstances;
+    ToolCollector& tools;
+
+    std::string add(
+        App::DocumentObject* original,
+        const std::vector<InnerLevel>& levels,
+        std::vector<ReapplyItem>& out,
+        int depth
+    )
+    {
+        if (auto owner = studioOwnerOfOriginal(original)) {
+            FeatureAddSub* step = nullptr;
+            if (std::string why = studioStepOf(owner, pattern, body, step); !why.empty()) {
+                return why;
+            }
+            if (step->Suppressed.getValue()) {
+                return {};
+            }
+            return item(step, owner, levels, out);
+        }
+        if (auto inner = freecad_cast<Transformed*>(original)) {
+            return instances(*inner, levels, out, depth);
+        }
+        auto feature = freecad_cast<FeatureAddSub*>(original);
+        if (!feature) {
+            return QT_TRANSLATE_NOOP(
+                "Exception",
+                "Only additive and subtractive features can be transformed"
+            );
+        }
+        return item(feature, feature, levels, out);
+    }
+
+    std::string item(
+        FeatureAddSub* seed,
+        App::DocumentObject* computer,
+        const std::vector<InnerLevel>& levels,
+        std::vector<ReapplyItem>& out
+    )
+    {
+        const std::string name = quoted(computer);
+        auto ext = freecad_cast<FeatureExtrude*>(computer);
+        if (!ext) {
+            // A studio feature that is a shape object (a primitive): its tool is its own shape,
+            // the same wherever it goes, so its copy is the re-run
+            if (computer != seed && !freecad_cast<PartDesign::Feature*>(computer)) {
+                return copied(seed, computer, levels, out);
+            }
+            return "Reapply isn't available for " + typeName(computer) + " yet: " + name
+                + " can only be copied (Reapply off)";
+        }
+        if (seed->getBooleanOperation() == FeatureAddSub::BooleanOperation::Common) {
+            return name + " is an Intersect: Reapply isn't available for it yet";
+        }
+        const std::string start = ext->StartType.getValueAsString();
+        if (start != "Profile plane" && start != "Offset") {
+            return name + " starts at a reference: Reapply isn't available for it yet";
+        }
+        PatternTool tool;
+        if (std::string why = tools.plain(seed, tool); !why.empty()) {
+            return why;
+        }
+        ReapplyItem it;
+        it.seed = seed;
+        it.named = computer;
+        it.levels = levels;
+        it.additive = !tool.fuse.isNull();
+        it.tool = it.additive ? tool.fuse : tool.cut;
+        auto blind = [](const char* type) {
+            return std::strcmp(type, "Length") == 0 || std::strcmp(type, "?TwoLengths") == 0;
+        };
+        const bool twoSides = std::strcmp(ext->SideType.getValueAsString(), "Two sides") == 0;
+        if (!blind(ext->Type.getValueAsString())
+            || (twoSides && !blind(ext->Type2.getValueAsString()))) {
+            it.rerun = ext;
+            // The frame its tool is made in: a Body feature's placement in its Body; a studio
+            // feature's in the document, as its steps take its tool (FeatureApply::toolOf())
+            it.toPattern = seed == computer
+                ? frame.Multiplied(seed->getLocation().Transformation())
+                : fromDocument.Multiplied(Part::TopoShape::convert(
+                      App::GeoFeature::getGlobalPlacement(computer).toMatrix()
+                  ));
+        }
+        out.push_back(it);
+        return {};
+    }
+
+    /// An original whose tool doesn't depend on the base: copied at each instance
+    std::string copied(
+        FeatureAddSub* seed,
+        App::DocumentObject* computer,
+        const std::vector<InnerLevel>& levels,
+        std::vector<ReapplyItem>& out
+    )
+    {
+        PatternTool tool;
+        if (std::string why = tools.plain(seed, tool); !why.empty()) {
+            return why;
+        }
+        ReapplyItem it;
+        it.seed = seed;
+        it.named = computer;
+        it.levels = levels;
+        it.additive = !tool.fuse.isNull();
+        it.tool = it.additive ? tool.fuse : tool.cut;
+        out.push_back(it);
+        return {};
+    }
+
+    /// inner's own instances (a pattern among the originals), flattened: its originals at each
+    std::string instances(
+        Transformed& inner,
+        const std::vector<InnerLevel>& levels,
+        std::vector<ReapplyItem>& out,
+        int depth
+    )
+    {
+        const std::string name = quoted(&inner);
+        if (depth > 8) {
+            return name + ": patterns nested too deep";
+        }
+        if (freecad_cast<MultiTransform*>(&inner)) {
+            return name + " is a MultiTransform: it can't be an original";
+        }
+        if (static_cast<Transformed::Mode>(inner.TransformMode.getValue())
+            != Transformed::Mode::Features) {
+            return name + " transforms the whole shape: it can't be an original";
+        }
+        if (inner.getFeatureBody() != body) {
+            return name + " is in another part";
+        }
+        if (inner.isError()) {
+            return name + " failed: a failed feature can't be patterned";
+        }
+        const std::vector<App::DocumentObject*> originals = inner.getOriginals();
+        if (originals.empty()) {
+            return {};
+        }
+        std::vector<gp_Trsf> list;
+        try {
+            std::list<gp_Trsf> got = inner.getTransformations(originals);
+            list.assign(got.begin(), got.end());
+        }
+        catch (const Base::Exception& e) {
+            return name + ": " + e.what();
+        }
+        catch (const Standard_Failure& e) {
+            return name + ": " + e.GetMessageString();
+        }
+        const auto skipped = inner.getSkippedPositions();
+        const auto numbers = nameInstances
+            ? instanceNumbers(inner.getTransformationSteps(), list.size())
+            : std::vector<std::string>();
+        gp_Trsf innerFrame = frame;
+        if (const Part::Feature* support = inner.getBaseObject(/*silent=*/true)) {
+            innerFrame.Multiply(support->Shape.getShape().getShape().Location().Transformation());
+        }
+        const gp_Trsf innerFrameInv = innerFrame.Inverted();
+        for (std::size_t position = 1; position < list.size(); ++position) {
+            if (std::ranges::find(skipped, position) != skipped.end()) {
+                continue;
+            }
+            InnerLevel level;
+            level.inner = &inner;
+            level.move = innerFrame.Multiplied(list[position]).Multiplied(innerFrameInv);
+            level.position = position;
+            level.number = nameInstances ? numbers[position] : std::string();
+            std::vector<InnerLevel> deeper {level};
+            deeper.insert(deeper.end(), levels.begin(), levels.end());
+            for (auto original : originals) {
+                if (std::string why = add(original, deeper, out, depth + 1); !why.empty()) {
+                    return why;
+                }
+            }
+        }
+        return {};
+    }
+};
+
 }  // namespace
 
 namespace PartDesign
 {
+// FeatureExtrude.cpp (FreeCAD-CH ops#654 T3; declared where used): feature's tool re-solved at a
+// pattern's instance, in the feature's frame
+PartDesignExport Part::TopoShape reapplyExtrusion(
+    FeatureExtrude* feature,
+    const gp_Trsf& toSeed,
+    const Part::TopoShape& base,
+    const std::string& partLabel,
+    std::string& why
+);
+
 extern bool getPDRefineModelParameter();
 
 PROPERTY_SOURCE(PartDesign::Transformed, PartDesign::FeatureRefine)
@@ -1067,6 +1316,143 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 ));
             }
             ToolCollector collector {*this, body, trsfInv, fromDocument, supportShape, nameInstances};
+            const bool reapply = Reapply.getValue();
+            collector.reapply = reapply;
+            if (reapply) {
+                // FreeCAD-CH ops#654 T3 (Onshape's Reapply features, O6, O10): each instance
+                // re-runs the originals there, in order, against the part as it grows
+                ReapplyCollector reapplied {*this, body, trsfInv, fromDocument, nameInstances, collector};
+                std::vector<ReapplyItem> items;
+                for (auto original : originals) {
+                    std::string why = reapplied.add(original, {}, items, 0);
+                    if (!why.empty()) {
+                        return new App::DocumentObjectExecReturn(why, this);
+                    }
+                }
+                const bool rerun = std::ranges::any_of(items, [](const ReapplyItem& item) {
+                    return item.rerun != nullptr;
+                });
+                const bool adds = std::ranges::any_of(items, [](const ReapplyItem& item) {
+                    return item.additive;
+                });
+                const bool removes = std::ranges::any_of(items, [](const ReapplyItem& item) {
+                    return !item.additive;
+                });
+                // Tools independent of the base, all adding or all removing: the order doesn't
+                // matter, and the copies below are the instances re-run, names and all
+                if (rerun || (adds && removes)) {
+                    const std::string partName = body ? quoted(body) : std::string("the part");
+                    const long tag = namingTag() ? namingTag() : getID();
+                    try {
+                        for (std::size_t position = 1; position < transformations.size();
+                             ++position) {
+                            if (std::ranges::find(skipped, position) != skipped.end()) {
+                                continue;
+                            }
+                            if (Base::Sequencer().wasCanceled()) {
+                                return new App::DocumentObjectExecReturn("User aborted");
+                            }
+                            const gp_Trsf& outer = transformations[position];
+                            const std::string instance = "instance " + std::to_string(position + 1);
+                            for (const ReapplyItem& item : items) {
+                                const gp_Trsf full = outer.Multiplied(item.innerMove());
+                                Part::TopoShape shape = item.tool;
+                                if (item.rerun) {
+                                    // Re-run in the seed's place against the base and references
+                                    // carried back there; then moved, as a copy is
+                                    const gp_Trsf back = item.toPattern.Inverted().Multiplied(
+                                        full.Inverted()
+                                    );
+                                    const gp_Trsf toSeed = back.Multiplied(item.toPattern);
+                                    const Part::TopoShape base = supportShape.makeElementTransform(back);
+                                    std::string why;
+                                    Part::TopoShape made =
+                                        reapplyExtrusion(item.rerun, toSeed, base, partName, why);
+                                    if (made.isNull()) {
+                                        return new App::DocumentObjectExecReturn(
+                                            quoted(item.named) + " at " + instance + ": " + why,
+                                            this
+                                        );
+                                    }
+                                    shape = made.makeElementTransform(item.toPattern);
+                                }
+                                // Named as a copy is (pattern-instance-names.md, patterns-design 3.3)
+                                for (const InnerLevel& level : item.levels) {
+                                    Part::TopoShape moved = nameInstances
+                                        ? level.inner->makeTopoShape(false)
+                                        : Part::TopoShape(
+                                              shape.Tag,
+                                              shape.Hasher,
+                                              shape.getHistoryAlgorithm()
+                                          );
+                                    const std::string op = nameInstances
+                                        ? std::string()
+                                        : Data::indexSuffix(static_cast<int>(level.position) + 1);
+                                    moved.makeElementTransform(shape, level.move, op.c_str());
+                                    if (nameInstances) {
+                                        const long innerTag = level.inner->namingTag()
+                                            ? level.inner->namingTag()
+                                            : level.inner->getID();
+                                        moved.appendElementSection(
+                                            innerTag,
+                                            Part::OpCodes::Transformed,
+                                            level.number
+                                        );
+                                    }
+                                    shape = moved;
+                                }
+                                const std::string op = nameInstances
+                                    ? std::string()
+                                    : Data::indexSuffix(static_cast<int>(position));
+                                Part::TopoShape placed =
+                                    makeResultShape(shape).makeElementTransform(shape, outer, op.c_str());
+                                if (nameInstances) {
+                                    placed.appendElementSection(
+                                        tag,
+                                        Part::OpCodes::Transformed,
+                                        numbers[position]
+                                    );
+                                }
+                                const int before = countSolids(supportShape.getShape());
+                                Part::TopoShape result = makeResultShape(supportShape);
+                                result.makeElementBoolean(
+                                    item.additive ? Part::OpCodes::Fuse : Part::OpCodes::Cut,
+                                    {supportShape, placed},
+                                    nullptr,
+                                    -1.0,
+                                    Part::ElementMapPolicy::Propagate,
+                                    inputCheck,
+                                    &booleanInputsValid
+                                );
+                                // An instance that removes nothing does nothing (Onshape P1); one
+                                // that adds a solid apart from the part is a new part in Onshape
+                                if (item.additive && countSolids(result.getShape()) > before
+                                    && !FeatureAddSub::shapesTouch(
+                                        placed.getShape(),
+                                        supportShape.getShape()
+                                    )) {
+                                    return new App::DocumentObjectExecReturn(
+                                        quoted(item.named) + " at " + instance
+                                            + " touches nothing of " + partName
+                                            + ": with Reapply on it would become a new part, which "
+                                              "is not done yet",
+                                        this
+                                    );
+                                }
+                                supportShape = result;
+                                inputCheck = ownResultCheck();
+                            }
+                        }
+                    }
+                    catch (const Standard_Failure& e) {
+                        return new App::DocumentObjectExecReturn(e.GetMessageString(), this);
+                    }
+                    catch (const Base::Exception& e) {
+                        return new App::DocumentObjectExecReturn(e.what(), this);
+                    }
+                    break;
+                }
+            }
             std::vector<PatternTool> tools;
             for (auto original : originals) {
                 std::string why = collector.add(original, instances, tools, 0);
@@ -1097,6 +1483,20 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     // no message and no lump: the fuse is made again without it. The others keep
                     // their instance numbers
                     auto floating = floatingCopies(fused, supportShape, shapes);
+                    if (!floating.empty() && reapply
+                        && !makesItsOwnPart(*feature, tool.seedFuse, trsfInv)) {
+                        // ops#654 T3: Onshape makes such an instance a new part (H1 B3-3b)
+                        return new App::DocumentObjectExecReturn(
+                            "An instance of " + quoted(feature->StudioOwner.getValue()
+                                                           ? feature->StudioOwner.getValue()
+                                                           : feature)
+                                + " touches nothing of "
+                                + (body ? quoted(body) : std::string("the part"))
+                                + ": with Reapply on it would become a new part, which is not "
+                                  "done yet",
+                            this
+                        );
+                    }
                     if (!floating.empty() && !makesItsOwnPart(*feature, tool.seedFuse, trsfInv)) {
                         std::vector<Part::TopoShape> kept;
                         for (std::size_t i = 0; i < shapes.size(); ++i) {

@@ -41,6 +41,14 @@ def originalsField():
     return None
 
 
+def reapplyBox():
+    flushDeletes()
+    for widget in Gui.getMainWindow().findChildren(QtWidgets.QCheckBox, "checkBoxReapply"):
+        if widget.isVisible():
+            return widget
+    return None
+
+
 def statusOf(field):
     label = field.findChild(QtWidgets.QLabel, "status")
     return label.text() if label is not None and label.isVisible() else ""
@@ -187,6 +195,107 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(pattern.Originals, [self.hole])
         self.assertAlmostEqual(pattern.Shape.Volume, volume, places=4)
+
+    # ------------------------------------------------------------------------------ Reapply (T3)
+    def editAgain(self, pattern):
+        Gui.getDocument(self.doc.Name).setEdit(pattern.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()))
+        settle()
+        self.assertTrue(waitFor(lambda: reapplyBox() is not None), "no Reapply box")
+        return reapplyBox()
+
+    def testReapplyBoxInEachPanel(self):
+        """Linear, Polar and Mirror panels in a listed studio: a Reapply features box, off by
+        default; ticked, the pattern's Reapply is on; OK, and an edit again shows it ticked."""
+        kinds = (
+            ("PartDesign_LinearPattern", "PartDesign::LinearPattern"),
+            ("PartDesign_PolarPattern", "PartDesign::PolarPattern"),
+            ("PartDesign_Mirrored", "PartDesign::Mirrored"),
+        )
+        for command, typeId in kinds:
+            with self.subTest(command):
+                self.runTool(command, self.hole)
+                found = [o for o in self.doc.Objects if o.TypeId == typeId]
+                self.assertEqual(len(found), 1)
+                pattern = found[0]
+                self.assertTrue(waitFor(lambda: reapplyBox() is not None), "no Reapply box")
+                box = reapplyBox()
+                self.assertFalse(box.isChecked())
+                self.assertFalse(pattern.Reapply)
+                box.click()
+                pump(0.2)
+                self.assertTrue(pattern.Reapply)
+                self.accept()
+                self.assertTrue(pattern.Reapply)
+                box = self.editAgain(pattern)
+                self.assertTrue(box.isChecked())
+                taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+                self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+                self.assertTrue(pattern.Reapply)
+
+    def testReapplyBoxTurnsARefusalIntoInstances(self):
+        """An Up to next hole (refused with Reapply off, Onshape O10); the box ticked, the pattern
+        computes each instance, and its Features field shows no refusal."""
+        sk = studioSketch(self.doc, self.S, "NextSk", z=10, circles=((10, 10, 3),))
+        nxt = makeOwner(self.doc, self.S, "Pocket", "Next", sk, ("P",), Type="UpToFirst")
+        self.doc.recompute()
+        self.runTool("PartDesign_LinearPattern", nxt)
+        pattern = self.pattern()
+        field = self.field()
+        # two instances on the plate: the seed's and one 30 along x
+        pattern.Direction = (self.P.Origin.OriginFeatures[0], [""])
+        pattern.Mode = "Extent"
+        pattern.Length = 30
+        pattern.Occurrences = 2
+        self.doc.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertIn("Up to next", pattern.getStatusString())
+        self.assertTrue(waitFor(lambda: reapplyBox() is not None))
+        reapplyBox().click()
+        pump(0.2)
+        self.assertTrue(pattern.Reapply)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertNotIn("Up to next", statusOf(field))
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+
+    def testReapplyBoxInABody(self):
+        """In a Body outside any listed studio, the Linear panel has the box too, and it works."""
+        from PartDesignTests.TestStudio import pad, sketch, xyPlane
+
+        doc = App.newDocument("ReapplyBody")
+        try:
+            body = doc.addObject("PartDesign::Body", "Body")
+            pad(body, "Plate", sketch(body, "PlateSk", xyPlane(body), (0, 0, 60, 20)), 10)
+            boss = pad(body, "Boss", sketch(body, "BossSk", xyPlane(body), (2, 7, 8, 13), z=10), 5)
+            doc.recompute()
+            App.setActiveDocument(doc.Name)
+            Gui.setActiveDocument(doc.Name)
+            pump(0.2)
+            Gui.getDocument(doc.Name).ActiveView.setActiveObject("pdbody", body)
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(doc.Name, boss.Name)
+            Gui.runCommand("PartDesign_LinearPattern")
+            self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+            settle()
+            self.assertTrue(waitFor(lambda: reapplyBox() is not None), "no Reapply box")
+            reapplyBox().click()
+            pump(0.2)
+            pattern = next(o for o in doc.Objects if o.TypeId == "PartDesign::LinearPattern")
+            self.assertTrue(pattern.Reapply)
+            ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+            ok.click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+            doc.recompute()
+            self.assertTrue(pattern.isValid(), pattern.getStatusString())
+            self.assertTrue(pattern.Reapply)
+        finally:
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+                pump()
+            App.closeDocument(doc.Name)
+            App.setActiveDocument(self.doc.Name)
+            Gui.setActiveDocument(self.doc.Name)
 
 
 if __name__ == "__main__":

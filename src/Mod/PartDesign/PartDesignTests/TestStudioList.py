@@ -36,6 +36,12 @@
 # the owner's box itself where the pattern applies (the owner resolved at its place to exactly the
 # pattern's part, its step applied, neither suppressed), and nothing otherwise (Onshape's patterns
 # across parts come later: refused loudly).
+#
+# T3 adds Reapply on and off to the patterns, and Up to face Remove owners (a Pocket studio feature
+# on a rectangle at z 10.001, down to a plane slanted along y, z = 6.01 + 0.171 y): with Reapply
+# off a pattern of one is refused (its copies would meet the plane at the seed's depth, Onshape
+# O6); with Reapply on each instance is re-solved, the oracle's prism from its own rectangle down
+# to the plane.
 
 import os
 import random
@@ -124,7 +130,39 @@ def booleanOwner(doc, studio, name, kind, targets=(), tools=(), keep=False, supp
 
 
 def isOwner(obj):
-    return obj.TypeId in ("Part::Box", "PartDesign::Boolean")
+    return obj.TypeId in ("Part::Box", "PartDesign::Boolean", "PartDesign::Pocket")
+
+
+# The slanted plane of the Up to face owners (T3), z = a + b y; digits that put no element's
+# centre on a rounding boundary of elementKey()
+SLANT = (6.0123457, 0.17131729)
+
+
+def slantTool(rect):
+    """The prism an Up to face owner on rect makes: from z 10.001 down to the slanted plane."""
+    x0, y0, x1, y1 = rect
+    a, b = SLANT
+    points = [V(x0, y0, a + b * y0), V(x0, y1, a + b * y1), V(x0, y1, 10.001), V(x0, y0, 10.001)]
+    face = Part.Face(Part.makePolygon(points + [points[0]]))
+    return face.extrude(V(x1 - x0, 0, 0))
+
+
+def makeUpTo(doc, studio, name, rect, scope=(), suppressed=False):
+    """An Up to face Remove owner (T3): a Pocket studio feature on a rectangle sketched at z 10.001,
+    down to the studio's slanted plane (not yet listed)."""
+    from PartDesignTests.TestStudioOwner import studioSketch
+
+    sk = studioSketch(doc, studio, name + "Sk", rects=(tuple(rect),), z=10.001)
+    owner = doc.addObject("PartDesign::Pocket", name)
+    studio.addObject(owner)
+    owner.Profile = sk
+    owner.Type = "UpToFace"
+    owner.UpToFace = (doc.getObject("Slant"), ["Face1"])
+    owner.Refine = False
+    owner.StudioScope = list(scope)
+    if suppressed:
+        owner.Suppressed = True
+    return owner
 
 
 PATTERN_TYPES = {"Linear": "PartDesign::LinearPattern", "Mirror": "PartDesign::Mirrored"}
@@ -134,9 +172,12 @@ def isPattern(obj):
     return obj.TypeId in PATTERN_TYPES.values()
 
 
-def makePattern(doc, name, kind, part, originals, length=0, count=2, suppressed=False):
+def makePattern(
+    doc, name, kind, part, originals, length=0, count=2, suppressed=False, reapply=False
+):
     """A pattern (slice 8) of part's, outside its Body until inserted (insertPattern)."""
     pat = doc.addObject(PATTERN_TYPES[kind], name)
+    pat.Reapply = reapply
     body = doc.getObject(part)
     pat.Originals = [doc.getObject(o) for o in originals if doc.getObject(o)]
     if kind == "Linear":
@@ -174,6 +215,7 @@ def patternRecord(pat):
         part=pat.getParentGeoFeatureGroup().Name,
         originals=[o.Name for o in pat.Originals],
         suppressed=bool(pat.Suppressed),
+        reapply=bool(pat.Reapply),
     )
     if kind == "Linear":
         record["length"] = round(pat.Length.Value, 6)
@@ -182,6 +224,17 @@ def patternRecord(pat):
 
 
 def ownerRecord(box):
+    if box.TypeId == "PartDesign::Pocket":
+        bound = box.Profile[0].Shape.BoundBox
+        return dict(
+            name=box.Name,
+            id=box.ID,
+            upto=True,
+            rect=[round(v, 6) for v in (bound.XMin, bound.YMin, bound.XMax, bound.YMax)],
+            op="Subtraction",
+            scope=list(box.StudioScope),
+            suppressed=bool(box.Suppressed),
+        )
     if box.TypeId == "PartDesign::Boolean":
         return dict(
             name=box.Name,
@@ -362,16 +415,30 @@ def oracle(natives, records, bar, live=None):
             if resolved[o] != [p] or (o, p) not in applied:
                 continue
             owner = next(r for r in records if r["name"] == o)
-            length, width, height, corner = toolBox(owner["rect"], owner["depth"], owner["op"])
-            tool = Part.makeBox(length, width, height, corner)
-            if record["pattern"] == "Linear":
-                count = record["count"]
-                copies = [
-                    tool.translated(V(0, k * record["length"] / (count - 1), 0))
-                    for k in range(1, count)
-                ]
+            if owner.get("upto"):
+                # T3: with Reapply off refused (the copies would differ from the instances
+                # re-solved, O6); on, each instance re-solved from its own rectangle
+                if not record.get("reapply"):
+                    continue
+                x0, y0, x1, y1 = owner["rect"]
+                if record["pattern"] == "Linear":
+                    count = record["count"]
+                    moves = [k * record["length"] / (count - 1) for k in range(1, count)]
+                    rects = [(x0, y0 + d, x1, y1 + d) for d in moves]
+                else:
+                    rects = [(x0, 10 - y1, x1, 10 - y0)]
+                copies = [slantTool(r) for r in rects]
             else:
-                copies = [tool.mirror(V(0, 5, 0), V(0, 1, 0))]
+                length, width, height, corner = toolBox(owner["rect"], owner["depth"], owner["op"])
+                tool = Part.makeBox(length, width, height, corner)
+                if record["pattern"] == "Linear":
+                    count = record["count"]
+                    copies = [
+                        tool.translated(V(0, k * record["length"] / (count - 1), 0))
+                        for k in range(1, count)
+                    ]
+                else:
+                    copies = [tool.mirror(V(0, 5, 0), V(0, 1, 0))]
             cut = owner["op"] == "Subtraction"
             result = (shapes[p].cut(copies) if cut else shapes[p].fuse(copies)).removeSplitter()
             if len(result.Solids) == 1:
@@ -403,8 +470,11 @@ def oracle(natives, records, bar, live=None):
             if not record["keep"]:
                 consumed.update(others)
             continue
-        length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
-        tool = Part.makeBox(length, width, height, corner)
+        if record.get("upto"):
+            tool = slantTool(record["rect"])
+        else:
+            length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
+            tool = Part.makeBox(length, width, height, corner)
         resolved[record["name"]] = []
         for p in record["scope"]:
             if p not in shapes or p in consumed or p in resolved[record["name"]]:
@@ -598,8 +668,10 @@ def fromScratch(natives, records, bar, maker=None):
             if "pattern" in r:
                 box = makePattern(
                     doc, r["name"], r["pattern"], r["part"], r["originals"], r.get("length", 0),
-                    r.get("count", 2), r["suppressed"],
+                    r.get("count", 2), r["suppressed"], r.get("reapply", False),
                 )
+            elif r.get("upto"):
+                box = makeUpTo(doc, studio, r["name"], r["rect"], r["scope"], r["suppressed"])
             elif "kind" in r:
                 box = booleanOwner(
                     doc, studio, r["name"], r["kind"], r["scope"], r["tools"], r["keep"],
@@ -1152,6 +1224,16 @@ def propStudio(name):
         mid = doc.getObject(p).newObject("PartDesign::Plane", p + "Mid")
         mid.MapMode = "Deactivated"
         mid.Placement = App.Placement(V(0, 5, 0), App.Rotation(V(1, 0, 0), -90))
+    # T3: the plane the Up to face owners go down to (SLANT, outside the list)
+    import math
+
+    slant = doc.addObject("Part::Plane", "Slant")
+    studio.addObject(slant)
+    slant.Length, slant.Width = 80, 40
+    angle = math.degrees(math.atan(SLANT[1]))
+    slant.Placement = App.Placement(
+        V(-15, -15, SLANT[0] - 15 * SLANT[1]), App.Rotation(V(1, 0, 0), angle)
+    )
     doc.recompute()
     return doc, studio
 
@@ -1175,7 +1257,7 @@ class TestStudioListProperty(unittest.TestCase):
         lst = studioList(doc)
         NATIVES = PROP_NATIVES
         boxes = owners(doc)
-        shapeOwners = [b for b in boxes if b.TypeId == "Part::Box"]
+        shapeOwners = [b for b in boxes if b.TypeId in ("Part::Box", "PartDesign::Pocket")]
         entries = boxes + [e for e in lst.Entries if isPattern(e)]
         free = len(lst.Entries) - NATIVES  # places after the natives
         kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern"]
@@ -1194,9 +1276,15 @@ class TestStudioListProperty(unittest.TestCase):
             length = rng.choice([1, 2]) * (count - 1)
             after = list(lst.Entries).index(owner) + 1 - NATIVES
             at = rng.randint(after, free)
-            pat = makePattern(doc, f"F{counter}", which, part, [owner.Name], length, count)
+            reapply = rng.random() < 0.5  # T3
+            pat = makePattern(
+                doc, f"F{counter}", which, part, [owner.Name], length, count, reapply=reapply
+            )
             insertPattern(pat, part, NATIVES + at)
-            return f"pattern {pat.Name} {which} of {owner.Name} in {part} L{length} n{count} at {at}"
+            return (
+                f"pattern {pat.Name} {which} of {owner.Name} in {part} L{length} n{count} at {at}"
+                f" reapply {reapply}"
+            )
         if kind == "boolean":
             # P5: a Subtract or a Union between parts, Keep tools on or off
             names = [p for p, _ in PARTS]
@@ -1219,14 +1307,22 @@ class TestStudioListProperty(unittest.TestCase):
             op = rng.choice(["Subtraction", "Subtraction", "Union"])
             depth = rng.choice([1, 2, 3, 4])
             at = rng.randint(0, free)
+            if rng.random() < 0.3:
+                # T3: an Up to face Remove owner
+                box = makeUpTo(doc, doc.getObject("S"), f"F{counter}", rect, scope)
+                PartDesign.studioInsert(box, NATIVES + at)
+                return f"insert {box.Name} up to face {rect} scope {scope} at {at}"
             box = makeOwner(doc, doc.getObject("S"), f"F{counter}", rect, depth, op, scope)
             PartDesign.studioInsert(box, NATIVES + at)
             return f"insert {box.Name} {op} {rect} d{depth} scope {scope} at {at}"
         box = rng.choice(entries)
         name = box.Name
         if isPattern(box) and kind in ("scope", "depth"):
-            if box.TypeId == PATTERN_TYPES["Mirror"]:
-                kind = "suppress"
+            if box.TypeId == PATTERN_TYPES["Mirror"] or kind == "scope":
+                # T3: Reapply toggled
+                box.Reapply = not box.Reapply
+                PartDesign.studioReconcile(lst)
+                return f"reapply {name} {box.Reapply}"
             else:
                 count = rng.choice([2, 3])
                 box.Occurrences = count
@@ -1234,8 +1330,11 @@ class TestStudioListProperty(unittest.TestCase):
                 PartDesign.studioReconcile(lst)
                 return f"count {name} n{count} L{box.Length.Value}"
         if kind == "delete":
+            profile = box.Profile[0] if box.TypeId == "PartDesign::Pocket" else None
             PartDesign.studioRemove(box)
             doc.removeObject(name)
+            if profile is not None:
+                doc.removeObject(profile.Name)
             return f"delete {name}"
         if kind == "move":
             j = rng.randrange(free)
@@ -1270,6 +1369,8 @@ class TestStudioListProperty(unittest.TestCase):
                 scope = sorted(scope + [p])
             PartDesign.studioSetScopeIds(box, scope)
             return f"scope {name} {scope}"
+        if kind == "depth" and box.TypeId == "PartDesign::Pocket":
+            kind = "suppress"  # an Up to face owner has no depth
         if kind == "depth":
             r = ownerRecord(box)
             depth = rng.choice([1, 2, 3, 4, 5])
