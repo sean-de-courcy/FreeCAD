@@ -65,6 +65,7 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "StudioConfig.h"
 #include "StudioList.h"
 #include "FeatureApply.h"
 
@@ -107,6 +108,7 @@ PyMOD_INIT_FUNC(_PartDesign)
     // A part mirror's Add that consumes its source re-projects the list after a recompute
     // (ops#654 slice 9)
     PartDesign::registerPartMirrorResync();
+    PartDesign::registerConfigurationHooks();  // ops#671
     Base::Console().log("Loading Part Design module… done\n");
 
 
@@ -192,6 +194,7 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::FeatureBase                 ::init();
     // FreeCAD-CH ops#654: studio features
     PartDesign::StudioList                  ::init();
+    PartDesign::StudioConfig                ::init();  // ops#671
     PartDesign::FeatureApply                ::init();
 
     PartDesign::Measure ::initialize();

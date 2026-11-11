@@ -1,0 +1,324 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+"""A part studio's configurations, Onshape's (FreeCAD-CH ops#671, slice C1;
+notes/configurations-design.md). Designed geometry: the studio of TestStudioList (parts A, B, C:
+10 x 10 pads of height 10 at x 0, 20 and 40) with a List "Size" (Small = the row "Default",
+Large) that configures A's pad length and the suppression of a cut owner E on B, a Checkbox
+"Tall" that configures C's pad length, and a configuration Variable `len` (Length, 80 mm,
+10..200 mm). The expected results are volumes and heights of those boxes."""
+
+import os
+import shutil
+import tempfile
+import unittest
+
+import FreeCAD as App
+import Part
+import PartDesign
+
+from PartDesignTests.TestStudio import pad, sketch, xyPlane
+from PartDesignTests.TestStudioList import makeOwner, newStudio, studioList
+
+TOL = 1e-6
+
+
+def height(body):
+    return body.Shape.BoundBox.ZMax - body.Shape.BoundBox.ZMin
+
+
+def invalid(obj):
+    return "Invalid" in obj.State or "Error" in obj.State
+
+
+class TestConfigurations(unittest.TestCase):
+    def setUp(self):
+        self.doc, self.studio = newStudio("TestConfigurations")
+        self.list = studioList(self.doc)
+        self.A, self.B, self.C = (self.doc.getObject(n) for n in "ABC")
+        self.APad = self.doc.getObject("APad")
+        # E: a 3 x 3 cut 2 deep into B's top, a studio owner
+        self.E = makeOwner(self.doc, self.studio, "E", (22, 2, 25, 5), 2, "Subtraction", ["B"])
+        self.edit(lambda: PartDesign.studioInsert(self.E, -1))
+        self.size = self.edit(lambda: PartDesign.configAddList(self.studio, "Size", ["Small", "Large"]))
+        self.cfg = PartDesign.configStudio(self.studio)
+
+    def tearDown(self):
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestConfigurations"):
+                App.closeDocument(doc.Name)
+
+    def edit(self, fn):
+        """fn in one transaction, then a recompute (the GUI's pattern)"""
+        self.doc.openTransaction("edit")
+        try:
+            out = fn()
+        except Exception:
+            self.doc.abortTransaction()
+            raise
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        return out
+
+    def configureSizes(self):
+        """A's pad: Small 10, Large 20; E suppressed in Small only"""
+        self.edit(lambda: PartDesign.configConfigure(self.APad, "Length", self.size))
+        self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", "Large", "20 mm"))
+        self.edit(lambda: PartDesign.configConfigureSuppression(self.E, self.size))
+        self.edit(lambda: PartDesign.configSetSuppressionCell(self.E, "Small", True))
+
+    def assertSmall(self):
+        self.assertAlmostEqual(height(self.A), 10, delta=TOL)
+        self.assertAlmostEqual(self.B.Shape.Volume, 1000, delta=1e-4)
+
+    def assertLarge(self, aHeight=20):
+        self.assertAlmostEqual(height(self.A), aHeight, delta=TOL)
+        self.assertAlmostEqual(self.B.Shape.Volume, 1000 - 18, delta=1e-4)
+
+    # -------------------------------------------------------------------- inputs and the object
+    def testInputsAndRows(self):
+        """Onshape's rows: the first keeps the id Default whatever its name; a new row's id is its
+        name; a rename keeps the id, so the key and the cells don't move (CF1)"""
+        self.assertEqual(self.cfg.TypeId, "PartDesign::StudioConfig")
+        self.assertIn(self.cfg, self.studio.Group)
+        self.assertEqual(PartDesign.configDefaultKey(self.studio), self.size + "=Default")
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Default")
+        self.assertEqual(PartDesign.configKey(self.studio, {"Size": "Large"}), self.size + "=Large")
+        self.configureSizes()
+        PartDesign.configRenameRow(self.studio, self.size, "Default", "Tiny")
+        self.assertEqual(PartDesign.configKey(self.studio, {"Size": "Tiny"}), self.size + "=Default")
+        self.edit(lambda: PartDesign.configSetActive(self.studio, {"Size": "Large"}))
+        self.assertLarge()
+        with self.assertRaises(ValueError):
+            PartDesign.configSetActive(self.studio, {"Size": "Huge"})
+        with self.assertRaises(ValueError):
+            PartDesign.configAddList(self.studio, "Size", ["X"])
+
+    # -------------------------------------------------------------------------------- switching
+    def testSwitchRebuilds(self):
+        """A switch rebinds the pad length and E's suppression, reconciles and recomputes"""
+        self.configureSizes()
+        self.assertSmall()
+        self.assertTrue(self.E.Suppressed)
+        self.assertEqual(self.APad.ExpressionEngine[0][0], "Length")
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertLarge()
+        self.assertFalse(self.E.Suppressed)
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Large")
+        PartDesign.configSetActive(self.studio, {self.size: "Default"})
+        self.assertSmall()
+        self.assertFalse(any(invalid(o) for o in self.doc.Objects), [o.Name for o in self.doc.Objects if invalid(o)])
+
+    def testSwitchIsOneUndoStep(self):
+        self.configureSizes()
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertLarge()
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertSmall()
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Default")
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertLarge()
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Large")
+
+    def testNamesSurviveASwitchAndBack(self):
+        """G1: the element names of every part are the same after Large and back to Small"""
+        self.configureSizes()
+        before = {b.Name: sorted(b.Shape.ElementReverseMap.keys()) for b in (self.A, self.B, self.C)}
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        after = {b.Name: sorted(b.Shape.ElementReverseMap.keys()) for b in (self.A, self.B, self.C)}
+        self.assertEqual(before, after)
+
+    # -------------------------------------------------------------------- configured parameters
+    def testFieldEditWritesTheActiveRow(self):
+        """Editing a configured field writes the active row's cell only (CF3); clearing it is
+        refused: the table and the expressions can't diverge"""
+        self.configureSizes()
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.edit(lambda: self.APad.setExpression("Length", "25 mm"))
+        self.assertAlmostEqual(height(self.A), 25, delta=TOL)
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertAlmostEqual(height(self.A), 10, delta=TOL)
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertAlmostEqual(height(self.A), 25, delta=TOL)
+        with self.assertRaises(Exception):
+            self.APad.setExpression("Length", None)
+        self.assertTrue(PartDesign.configIsConfigured(self.APad, "Length"))
+        self.assertEqual(PartDesign.configReconcile(self.studio), "")
+
+    def testUnconfigureKeepsTheActiveValue(self):
+        self.configureSizes()
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.edit(lambda: PartDesign.configUnconfigure(self.APad, "Length"))
+        self.assertFalse(PartDesign.configIsConfigured(self.APad, "Length"))
+        self.assertEqual(len(self.APad.ExpressionEngine), 0)
+        self.assertAlmostEqual(self.APad.Length.Value, 20, delta=TOL)
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertAlmostEqual(height(self.A), 20, delta=TOL)
+
+    def testCheckbox(self):
+        """A Checkbox is ticked by default (CF1); its cells are true and false"""
+        tall = self.edit(lambda: PartDesign.configAddCheckbox(self.studio, "Tall"))
+        cpad = self.doc.getObject("CPad")
+        self.edit(lambda: PartDesign.configConfigure(cpad, "Length", tall))
+        self.edit(lambda: PartDesign.configSetCell(cpad, "Length", "true", "15 mm"))
+        self.assertAlmostEqual(height(self.C), 15, delta=TOL)
+        PartDesign.configSetActive(self.studio, {"Tall": False})
+        self.assertAlmostEqual(height(self.C), 10, delta=TOL)
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Default;Tall=false")
+
+    def testConfigurationVariable(self):
+        """A configuration Variable is used as #len, in a cell too (CF3: #len * 0.25 in Large);
+        a value out of its range is refused (Onshape's field turns invalid, CF8)"""
+        self.configureSizes()
+        self.edit(lambda: PartDesign.configAddVariable(self.studio, "len", "Length", "80 mm", "10 mm", "200 mm"))
+        self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", "Large", "#len * 0.25"))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertLarge(20)
+        PartDesign.configSetActive(self.studio, {"len": "120 mm"})
+        self.assertLarge(30)
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Large;len=0.12 meter")
+        with self.assertRaises(ValueError):
+            PartDesign.configSetActive(self.studio, {"len": "300 mm"})
+        self.assertLarge(30)
+        # A studio feature uses it as #len too
+        bpad = self.doc.getObject("BPad")
+        self.edit(lambda: bpad.setExpression("Length", "#len / 12"))
+        self.assertAlmostEqual(height(self.B), 10, delta=TOL)
+
+    def testCellFailsOnlyInItsRow(self):
+        """F7 / CF10: a cell that fails fails only while its row is active, and heals"""
+        self.configureSizes()
+        self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", "Large", "#nosuch * 2"))
+        self.assertFalse(invalid(self.APad))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertTrue(invalid(self.APad))
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertFalse(invalid(self.APad))
+        self.assertSmall()
+
+    # ----------------------------------------------------------------------- configured suppression
+    def testSuppressWritesTheActiveCell(self):
+        """Suppress on a configured owner edits the active row's cell (CF4)"""
+        self.configureSizes()
+        self.edit(lambda: PartDesign.studioSuppress(self.E, False))
+        self.assertAlmostEqual(self.B.Shape.Volume, 982, delta=1e-4)
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertFalse(self.E.Suppressed)
+        self.edit(lambda: PartDesign.studioSuppress(self.E, True))
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertFalse(self.E.Suppressed)
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertTrue(self.E.Suppressed)
+
+    def testBodyMemberSuppressionIsRefused(self):
+        with self.assertRaises(ValueError):
+            PartDesign.configConfigureSuppression(self.APad, self.size)
+
+    def testSwitchThatSplitsMakesPieces(self):
+        """A cut across B in Large only splits B there: the switch makes the pieces, in its own
+        undo step (10.12)"""
+        cut = makeOwner(self.doc, self.studio, "Cut", (24, -1, 26, 11), 11, "Subtraction", ["B"])
+        self.edit(lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(lambda: PartDesign.configConfigureSuppression(cut, self.size))
+        self.edit(lambda: PartDesign.configSetSuppressionCell(cut, "Small", True))
+        bodies = lambda: sorted(b.Name for b in self.doc.Objects if b.isDerivedFrom("PartDesign::Body"))
+        small = bodies()
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        large = bodies()
+        self.assertGreater(len(large), len(small))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(bodies(), small)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(bodies(), large)
+
+    # ----------------------------------------------------------------------------------- the file
+    def save(self):
+        folder = tempfile.mkdtemp(prefix="cfg")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "TestConfigurationsFile.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.studio = self.doc.getObject("S")
+        self.A, self.B, self.C = (self.doc.getObject(n) for n in "ABC")
+        self.APad = self.doc.getObject("APad")
+        self.E = self.doc.getObject("E")
+        self.cfg = PartDesign.configStudio(self.studio)
+        return path
+
+    def testSaveAndReopenInLarge(self):
+        """The file opens in the configuration it was saved in; the load only checks, so nothing
+        is touched"""
+        self.configureSizes()
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.save()
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Large")
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertLarge()
+        self.assertEqual(PartDesign.configReconcile(self.studio), "")
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertSmall()
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertLarge()
+
+    def testLoadMismatchIsLoud(self):
+        """A file whose expression is not its active cell opens with the StudioConfig in error,
+        naming the path, and writes nothing"""
+        self.configureSizes()
+        self.cfg.Table = self.cfg.Table.replace('"Default":"10 mm"', '"Default":"11 mm"')
+        self.assertIn("11 mm", self.cfg.Table)
+        self.save()
+        self.assertIn("APad.Length", PartDesign.configReconcile(self.studio))
+        self.doc.recompute()
+        self.assertTrue(invalid(self.cfg))
+        self.assertAlmostEqual(self.APad.Length.Value, 10, delta=TOL)
+        PartDesign.configReconcile(self.studio, False)
+        self.doc.recompute()
+        self.assertFalse(invalid(self.cfg))
+        self.assertAlmostEqual(height(self.A), 11, delta=TOL)
+
+    # --------------------------------------------------------------------------- outside readers
+    def testInstanceOnAnotherRowErrors(self):
+        """A Link outside the studio shows the default row (Onshape's Insert, CF8); while the
+        studio shows another, it errors loudly, and heals when the studio is switched back"""
+        self.configureSizes()
+        link = self.doc.addObject("App::Link", "Instance")
+        link.LinkedObject = self.A
+        self.doc.recompute()
+        self.assertFalse(invalid(link))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertTrue(invalid(link))
+        self.assertIn("configuration", PartDesign.configReaderError(link, self.A))
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertFalse(invalid(link))
+        # An instance made on Large is right in Large and loud in Small
+        PartDesign.configSetReaderKey(link, self.A, {"Size": "Large"})
+        self.doc.recompute()
+        self.assertTrue(invalid(link))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertFalse(invalid(link))
+
+    def testDerivedBinderOnAnotherRowErrors(self):
+        """A binder of a configured studio's part in another body (Derived's reader) is loud too;
+        one inside the studio is not an outside reader"""
+        self.configureSizes()
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        binder = other.newObject("PartDesign::SubShapeBinder", "Bound")
+        binder.Support = [(self.A, ("",))]
+        self.doc.recompute()
+        self.assertFalse(invalid(binder))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertTrue(invalid(binder))
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertFalse(invalid(binder))
+        inner = self.B.newObject("PartDesign::SubShapeBinder", "Inner")
+        inner.Support = [(self.A, ("",))]
+        self.assertEqual(PartDesign.configReaderError(inner, self.A), "")
+
+
+if __name__ == "__main__":
+    unittest.main()

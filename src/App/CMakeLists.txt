@@ -291,6 +291,7 @@ SET(Properties_CPP_SRCS
     PropertyStandard.cpp
     PropertyUnits.cpp
     PropertyExpressionEngine.cpp
+    ConfigurationHooks.cpp
 )
 SET(Properties_HPP_SRCS
     DynamicProperty.h
@@ -313,6 +314,7 @@ SET(Properties_HPP_SRCS
     PropertyStandard.h
     PropertyUnits.h
     PropertyExpressionEngine.h
+    ConfigurationHooks.h
     PropertyOverrides.h
 )
 SET(Properties_SRCS

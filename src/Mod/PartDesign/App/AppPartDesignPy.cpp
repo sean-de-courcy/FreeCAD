@@ -48,6 +48,7 @@
 #include "FeatureSplit.h"
 #include "Pieces.h"
 #include "Studio.h"
+#include "StudioConfig.h"
 #include "StudioEdit.h"
 #include "StudioList.h"
 
@@ -376,6 +377,116 @@ public:
             "studioSuppress",
             &Module::studioSuppress,
             "studioSuppress(entry, on) -- Suppresses or unsuppresses entry and reconciles."
+        );
+        add_varargs_method(
+            "configStudio",
+            &Module::configStudio,
+            "configStudio(studio, create=False) -- The studio's StudioConfig (ops#671), or None."
+        );
+        add_varargs_method(
+            "configAddList",
+            &Module::configAddList,
+            "configAddList(studio, name, rowNames) -- Adds a List input; returns its id."
+        );
+        add_varargs_method(
+            "configAddCheckbox",
+            &Module::configAddCheckbox,
+            "configAddCheckbox(studio, name, default=True) -- Adds a Checkbox input; returns its id."
+        );
+        add_varargs_method(
+            "configAddVariable",
+            &Module::configAddVariable,
+            "configAddVariable(studio, name, type, default, min=None, max=None) -- Adds a configuration Variable (#name); returns its id."
+        );
+        add_varargs_method(
+            "configAddRow",
+            &Module::configAddRow,
+            "configAddRow(studio, input, name) -- Adds a row to a List input; returns its id."
+        );
+        add_varargs_method(
+            "configRenameRow",
+            &Module::configRenameRow,
+            "configRenameRow(studio, input, row, name) -- Renames a row (its id stays)."
+        );
+        add_varargs_method(
+            "configRemoveRow",
+            &Module::configRemoveRow,
+            "configRemoveRow(studio, input, row) -- Removes a row and its cells."
+        );
+        add_varargs_method(
+            "configSetDefaultRow",
+            &Module::configSetDefaultRow,
+            "configSetDefaultRow(studio, input, row) -- Makes row the List's default."
+        );
+        add_varargs_method(
+            "configRemoveInput",
+            &Module::configRemoveInput,
+            "configRemoveInput(studio, input) -- Removes an input; what it configured keeps its active value."
+        );
+        add_varargs_method(
+            "configConfigure",
+            &Module::configConfigure,
+            "configConfigure(obj, path, input) -- Configures obj's path with a List or Checkbox input."
+        );
+        add_varargs_method(
+            "configUnconfigure",
+            &Module::configUnconfigure,
+            "configUnconfigure(obj, path) -- Unconfigures obj's path (it keeps the active cell)."
+        );
+        add_varargs_method(
+            "configSetCell",
+            &Module::configSetCell,
+            "configSetCell(obj, path, row, text) -- Writes a configured path's cell (row empty: the active one)."
+        );
+        add_varargs_method(
+            "configConfigureSuppression",
+            &Module::configConfigureSuppression,
+            "configConfigureSuppression(owner, input) -- Configures owner's suppression."
+        );
+        add_varargs_method(
+            "configUnconfigureSuppression",
+            &Module::configUnconfigureSuppression,
+            "configUnconfigureSuppression(owner) -- Unconfigures owner's suppression."
+        );
+        add_varargs_method(
+            "configSetSuppressionCell",
+            &Module::configSetSuppressionCell,
+            "configSetSuppressionCell(owner, row, suppressed) -- Writes a suppression cell (row empty: the active one)."
+        );
+        add_varargs_method(
+            "configIsConfigured",
+            &Module::configIsConfigured,
+            "configIsConfigured(obj, path=None) -- Whether obj's path (None: its suppression) is configured."
+        );
+        add_varargs_method(
+            "configSetActive",
+            &Module::configSetActive,
+            "configSetActive(studio, values) -- The switch: values maps inputs (id or name) to rows, bools or values; rebinds, reconciles, makes pieces, recomputes."
+        );
+        add_varargs_method(
+            "configKey",
+            &Module::configKey,
+            "configKey(studio, values=None) -- The canonical key of values (None: the active configuration)."
+        );
+        add_varargs_method(
+            "configDefaultKey",
+            &Module::configDefaultKey,
+            "configDefaultKey(studio) -- The key of every input at its default."
+        );
+        add_varargs_method(
+            "configReconcile",
+            &Module::configReconcile,
+            "configReconcile(studio, checkOnly=True) -- Rebinds from the active cells (checkOnly: only reports what differs)."
+        );
+        add_varargs_method(
+            "configSetReaderKey",
+            &Module::configSetReaderKey,
+            "configSetReaderKey(reader, source, values) -- The configuration a Link or binder outside the studio shows."
+        );
+        add_varargs_method(
+            "configReaderError",
+            &Module::configReaderError,
+            "configReaderError(reader, source) -- Why reader may not show source now (empty: it may)."
         );
         add_varargs_method(
             "studioReconcile",
@@ -1441,6 +1552,397 @@ private:
             throw Py::Exception();
         }
         return Py::String(PartDesign::studioPartId(bodyArg(pBody)));
+    }
+
+    // ---- FreeCAD-CH ops#671: configurations ----
+
+    static void configStudioArg(PyObject* obj, App::Document*& doc, App::Part*& studio)
+    {
+        doc = nullptr;
+        studio = nullptr;
+        if (obj == Py_None) {
+            doc = App::GetApplication().getActiveDocument();
+            if (!doc) {
+                throw Py::ValueError("No active document");
+            }
+            return;
+        }
+        studioArg(obj, doc, studio);
+    }
+
+    static std::string configValueText(PyObject* v)
+    {
+        if (PyBool_Check(v)) {
+            return v == Py_True ? "true" : "false";
+        }
+        if (PyLong_Check(v)) {
+            return std::to_string(PyLong_AsLongLong(v));
+        }
+        if (PyFloat_Check(v)) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.17g", PyFloat_AsDouble(v));
+            return buf;
+        }
+        if (PyUnicode_Check(v)) {
+            return Py::String(v).as_std_string("utf-8");
+        }
+        return Py::String(Py::Object(v).str()).as_std_string("utf-8");
+    }
+
+    static std::map<std::string, std::string> configValues(PyObject* dict)
+    {
+        std::map<std::string, std::string> values;
+        if (!dict || dict == Py_None) {
+            return values;
+        }
+        if (!PyDict_Check(dict)) {
+            throw Py::TypeError("Expected a dict of input -> value");
+        }
+        PyObject* key = nullptr;
+        PyObject* value = nullptr;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(dict, &pos, &key, &value)) {
+            values[configValueText(key)] = configValueText(value);
+        }
+        return values;
+    }
+
+    static Py::Object configId(const std::string& id, const std::string& why)
+    {
+        if (id.empty()) {
+            throw Py::ValueError(why.empty() ? std::string("Refused") : why);
+        }
+        return Py::String(id);
+    }
+
+    static PartDesign::StudioConfig* configOrThrow(PyObject* pStudio)
+    {
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        auto cfg = PartDesign::StudioConfig::of(doc, studio);
+        if (!cfg) {
+            throw Py::ValueError("The studio has no configurations");
+        }
+        return cfg;
+    }
+
+    Py::Object configStudio(const Py::Tuple& args)
+    {
+        PyObject* pStudio = Py_None;
+        PyObject* pCreate = Py_False;
+        if (!PyArg_ParseTuple(args.ptr(), "|OO", &pStudio, &pCreate)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        auto cfg = PartDesign::StudioConfig::of(doc, studio, PyObject_IsTrue(pCreate) == 1);
+        return cfg ? Py::asObject(cfg->getPyObject()) : Py::None();
+    }
+
+    Py::Object configAddList(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* name;
+        PyObject* pRows = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "Os|O", &pStudio, &name, &pRows)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::vector<std::string> rows;
+        if (pRows != Py_None) {
+            Py::Sequence seq(pRows);
+            for (auto it = seq.begin(); it != seq.end(); ++it) {
+                rows.push_back(Py::String(*it).as_std_string("utf-8"));
+            }
+        }
+        std::string why;
+        return configId(PartDesign::configAddList(studio, name, rows, &why), why);
+    }
+
+    Py::Object configAddCheckbox(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* name;
+        PyObject* pDefault = Py_True;
+        if (!PyArg_ParseTuple(args.ptr(), "Os|O", &pStudio, &name, &pDefault)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return configId(
+            PartDesign::configAddCheckbox(studio, name, PyObject_IsTrue(pDefault) == 1, &why),
+            why
+        );
+    }
+
+    Py::Object configAddVariable(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* name;
+        const char* type;
+        PyObject* pDefault;
+        PyObject* pMin = Py_None;
+        PyObject* pMax = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "OssO|OO", &pStudio, &name, &type, &pDefault, &pMin, &pMax)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        auto text = [](PyObject* v) {
+            return v == Py_None ? std::string() : configValueText(v);
+        };
+        std::string why;
+        return configId(
+            PartDesign::configAddVariable(studio, name, type, text(pDefault), text(pMin), text(pMax), &why),
+            why
+        );
+    }
+
+    Py::Object configAddRow(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        const char* name;
+        if (!PyArg_ParseTuple(args.ptr(), "Oss", &pStudio, &input, &name)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return configId(PartDesign::configAddRow(studio, input, name, &why), why);
+    }
+
+    Py::Object configRenameRow(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        const char* row;
+        const char* name;
+        if (!PyArg_ParseTuple(args.ptr(), "Osss", &pStudio, &input, &row, &name)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configRenameRow(studio, input, row, name, &why), why);
+    }
+
+    Py::Object configRemoveRow(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        const char* row;
+        if (!PyArg_ParseTuple(args.ptr(), "Oss", &pStudio, &input, &row)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configRemoveRow(studio, input, row, &why), why);
+    }
+
+    Py::Object configSetDefaultRow(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        const char* row;
+        if (!PyArg_ParseTuple(args.ptr(), "Oss", &pStudio, &input, &row)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configSetDefaultRow(studio, input, row, &why), why);
+    }
+
+    Py::Object configRemoveInput(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pStudio, &input)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configRemoveInput(studio, input, &why), why);
+    }
+
+    Py::Object configConfigure(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        const char* path;
+        const char* input;
+        if (!PyArg_ParseTuple(args.ptr(), "Oss", &pObj, &path, &input)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::configConfigure(entryArg(pObj), path, input, &why), why);
+    }
+
+    Py::Object configUnconfigure(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        const char* path;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pObj, &path)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::configUnconfigure(entryArg(pObj), path, &why), why);
+    }
+
+    Py::Object configSetCell(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        const char* path;
+        const char* row;
+        PyObject* pText;
+        if (!PyArg_ParseTuple(args.ptr(), "OssO", &pObj, &path, &row, &pText)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(
+            PartDesign::configSetCell(entryArg(pObj), path, row, configValueText(pText), &why),
+            why
+        );
+    }
+
+    Py::Object configConfigureSuppression(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        const char* input;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pObj, &input)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::configConfigureSuppression(entryArg(pObj), input, &why), why);
+    }
+
+    Py::Object configUnconfigureSuppression(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pObj)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::configUnconfigureSuppression(entryArg(pObj), &why), why);
+    }
+
+    Py::Object configSetSuppressionCell(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        const char* row;
+        PyObject* pOn;
+        if (!PyArg_ParseTuple(args.ptr(), "OsO", &pObj, &row, &pOn)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(
+            PartDesign::configSetSuppressionCell(entryArg(pObj), row, PyObject_IsTrue(pOn) == 1, &why),
+            why
+        );
+    }
+
+    Py::Object configIsConfigured(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pPath = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pObj, &pPath)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* obj = entryArg(pObj);
+        if (pPath == Py_None) {
+            return Py::Boolean(PartDesign::configSuppressionIsConfigured(obj));
+        }
+        return Py::Boolean(PartDesign::configIsConfigured(obj, configValueText(pPath)));
+    }
+
+    Py::Object configSetActive(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pValues;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pStudio, &pValues)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configSetActive(studio, configValues(pValues), &why), why);
+    }
+
+    Py::Object configKey(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pValues = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pStudio, &pValues)) {
+            throw Py::Exception();
+        }
+        auto cfg = configOrThrow(pStudio);
+        if (pValues == Py_None) {
+            return Py::String(cfg->activeKey());
+        }
+        std::string why;
+        std::string key = PartDesign::configKeyOf(cfg, configValues(pValues), &why);
+        return configId(key, why);
+    }
+
+    Py::Object configDefaultKey(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pStudio)) {
+            throw Py::Exception();
+        }
+        return Py::String(configOrThrow(pStudio)->defaultKey());
+    }
+
+    Py::Object configReconcile(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pCheck = Py_True;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pStudio, &pCheck)) {
+            throw Py::Exception();
+        }
+        return Py::String(
+            PartDesign::configReconcile(configOrThrow(pStudio), PyObject_IsTrue(pCheck) == 1)
+        );
+    }
+
+    Py::Object configSetReaderKey(const Py::Tuple& args)
+    {
+        PyObject* pReader;
+        PyObject* pSource;
+        PyObject* pValues = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "OO|O", &pReader, &pSource, &pValues)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(
+            PartDesign::configSetReaderKey(entryArg(pReader), entryArg(pSource), configValues(pValues), &why),
+            why
+        );
+    }
+
+    Py::Object configReaderError(const Py::Tuple& args)
+    {
+        PyObject* pReader;
+        PyObject* pSource;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pReader, &pSource)) {
+            throw Py::Exception();
+        }
+        return Py::String(PartDesign::configReaderError(entryArg(pReader), entryArg(pSource)));
     }
 
     Py::Object studioSuppress(const Py::Tuple& args)
