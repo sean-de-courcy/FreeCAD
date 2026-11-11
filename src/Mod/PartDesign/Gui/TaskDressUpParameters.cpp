@@ -105,7 +105,8 @@ App::DocumentObject* placingTarget(
     if (!dressUp || !obj) {
         return nullptr;
     }
-    const bool edge = sub.starts_with("Edge");
+    // A vertex stands for its adjacent edge nearest the click (selection parity P6b, SQ13)
+    const bool edge = sub.starts_with("Edge") || sub.starts_with("Vertex");
     const bool face = sub.starts_with("Face");
     if (!(edge && edges) && !(face && faces)) {
         why = edges && faces ? QT_TRANSLATE_NOOP("PartDesignGui::TaskDressUpParameters",
@@ -398,12 +399,19 @@ void TaskDressUpParameters::onPlacingPick(const Gui::SelectionChanges& msg)
     if (std::strcmp(msg.pDocName, doc->getName()) != 0) {
         return;
     }
-    const std::string sub = msg.pSubName ? msg.pSubName : "";
+    std::string sub = msg.pSubName ? msg.pSubName : "";
     std::string why;
     App::DocumentObject* base = placingTarget(own, doc->getObject(msg.pObjectName), sub,
                                               allowEdges, allowFaces, why);
     if (!base) {
         return;
+    }
+    if (sub.starts_with("Vertex")) {
+        // Its adjacent edge nearest the click (selection parity P6b, oracle 8 SQ13)
+        sub = nearestEdgeAt(base, sub, Base::Vector3d(msg.x, msg.y, msg.z));
+        if (sub.empty()) {
+            return;
+        }
     }
     // Placed: the dialog comes back on the moved dress-up, after this notification (the panel
     // goes with the edit's restart)
@@ -465,6 +473,9 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
     ReferenceField::Options options;
     options.flags.setFlag(AllowSelection::EDGE, allowEdges);
     options.flags.setFlag(AllowSelection::FACE, allowFaces);
+    // A vertex click takes its adjacent edge nearest the click, as Onshape's Fillet (selection
+    // parity P6b, oracle 8 SQ13)
+    options.vertexToEdge = allowEdges;
     // Picks are written as subs of the object Base links, so they come from its shape. That is
     // BaseFeature's, except after a move to it that didn't happen at dialog open (ops#176).
     options.target = [this]() -> App::DocumentObject* {

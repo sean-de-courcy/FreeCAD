@@ -136,6 +136,12 @@ std::string bareElement(const std::string& sub)
     return name;
 }
 
+bool isVertex(const char* sub)
+{
+    const char* element = Base::Tools::isNullOrEmpty(sub) ? nullptr : Data::findElementName(sub);
+    return element && std::string_view(element).starts_with("Vertex");
+}
+
 // Onshape's words for an element of an object: "Face of Pad" for Pad's `Face6`; another kind of
 // element keeps FreeCAD's form, `Pad:Wire1` (ops#640 round 6, J10)
 QString elementInWords(const std::string& element, const QString& name)
@@ -242,6 +248,7 @@ public:
         , kind(options.kind)
         , wholeObject(options.wholeObject)
         , acceptOnly(options.acceptOnly)
+        , vertexToEdge(options.vertexToEdge)
     {}
     ~ReferenceFieldGate() override
     {
@@ -280,6 +287,9 @@ public:
                 notAllowedReason = QT_TR_NOOP("Pick a shape.");
                 return false;
             }
+        }
+        else if (vertexToEdge && kind == ReferenceField::Kind::Elements && isVertex(sub)) {
+            // The pick takes the adjacent edge nearest the click (ReferenceField::onSelectionChanged)
         }
         else if (kind != ReferenceField::Kind::Profile && kind != ReferenceField::Kind::Objects
                  && kind != ReferenceField::Kind::Sections && !acceptOnly) {
@@ -321,6 +331,7 @@ private:
     ReferenceField::Kind kind;
     bool wholeObject;
     bool acceptOnly;
+    bool vertexToEdge;
 };
 
 // The link properties a field writes: PropertyLinkSub, and PropertyLinkSubList (an up-to-shape)
@@ -688,6 +699,60 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
 }
 
 }  // namespace
+
+// Selection parity P6b (oracle 8 SQ13): Onshape's Fillet filters vertices and takes the nearest
+// allowed entity, the adjacent edge
+std::string PartDesignGui::nearestEdgeAt(App::DocumentObject* obj, const std::string& vertex, const Base::Vector3d& click)
+{
+    try {
+        const Part::ShapeOptions shapeOptions
+            = Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
+        const Part::TopoShape shape = Part::Feature::getTopoShape(obj, shapeOptions);
+        const TopoDS_Shape point = shape.getSubShape(vertex.c_str(), /* silent = */ true);
+        if (point.IsNull() || point.ShapeType() != TopAbs_VERTEX) {
+            return {};
+        }
+        // The click into the shape's coordinates: the containers above its Body place it
+        Base::Vector3d local = click;
+        if (auto body = PartDesign::Body::findBodyOf(obj)) {
+            body->globalPlacement().inverse().multVec(click, local);
+        }
+        const TopoDS_Shape at = BRepBuilderAPI_MakeVertex(gp_Pnt(local.x, local.y, local.z)).Shape();
+        const std::string kind = Part::TopoShape::shapeName(TopAbs_EDGE);
+        const int count = static_cast<int>(shape.countSubElements(kind.c_str()));
+        std::string best;
+        double nearest = 0;
+        for (int index = 1; index <= count; ++index) {
+            const std::string name = kind + std::to_string(index);
+            const TopoDS_Edge edge = TopoDS::Edge(shape.getSubShape(name.c_str()));
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            bool touches = false;
+            for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More() && !touches; it.Next()) {
+                touches = it.Current().IsSame(point);
+            }
+            if (!touches) {
+                continue;
+            }
+            BRepExtrema_DistShapeShape distance(edge, at);
+            if (!distance.IsDone()) {
+                continue;
+            }
+            if (best.empty() || distance.Value() < nearest) {
+                best = name;
+                nearest = distance.Value();
+            }
+        }
+        return best;
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+}
 
 /*********************************************************************
  *                          Reference field                          *
@@ -1351,6 +1416,17 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
         return;
     }
     if (obj != target() || Base::Tools::isNullOrEmpty(msg.pSubName)) {
+        return;
+    }
+    if (options.vertexToEdge && isVertex(msg.pSubName)) {
+        const std::string edge =
+            nearestEdgeAt(obj, Data::findElementName(msg.pSubName), Base::Vector3d(msg.x, msg.y, msg.z));
+        if (edge.empty()) {
+            Base::StateLocker lock(busy, true);
+            Gui::Selection().clearSelection();
+            return;
+        }
+        pick(obj, edge);
         return;
     }
     pick(obj, msg.pSubName);

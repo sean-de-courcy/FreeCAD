@@ -394,3 +394,79 @@ class TestDressUpAnyPartGui(ResultBoxGuiCase):
         self.watching = False
         self.assertNoTrace(a, b, padA, padB)
 
+    # -- a vertex click takes its adjacent edge nearest the click (selection parity P6b, SQ13)
+
+    @staticmethod
+    def vertexAt(feature, x, y, z):
+        for index, vertex in enumerate(feature.Shape.Vertexes, start=1):
+            if vertex.Point.distanceToPoint(App.Vector(x, y, z)) < 1e-6:
+                return "Vertex%d" % index
+        raise AssertionError("no vertex at (%g, %g, %g)" % (x, y, z))
+
+    @staticmethod
+    def edgeThrough(feature, p, q):
+        """The straight edge from p to q (either way)."""
+        p, q = App.Vector(*p), App.Vector(*q)
+        for index, edge in enumerate(feature.Shape.Edges, start=1):
+            ends = [v.Point for v in edge.Vertexes]
+            if len(ends) == 2 and {
+                (round(e.x, 6), round(e.y, 6), round(e.z, 6)) for e in ends
+            } == {(round(p.x, 6), round(p.y, 6), round(p.z, 6)), (round(q.x, 6), round(q.y, 6), round(q.z, 6))}:
+                return "Edge%d" % index
+        raise AssertionError("no edge %s-%s" % (p, q))
+
+    def clickVertex(self, feature, vertex, at):
+        """A click on the vertex at the point `at` (as the 3D view gives it)."""
+        body = feature.getParentGeoFeatureGroup()
+        Gui.Selection.addSelection(self.doc.Name, body.Name, feature.Name + "." + vertex, *at)
+
+    def testAVertexClickInAnOpenFilletAddsTheNearestEdge(self):
+        """SQ13: B's corner (30, 0, 10) clicked just below it, just left of it and just behind
+        it adds the vertical, the front top and the right top edge in turn; the same click again
+        takes its edge out. Fillet r1 on the four edges: B loses the three edges' rounds, less the
+        corner's overlap (checked only as a valid solid smaller than 1000)."""
+        a, b, padA, padB = self.twoParts()
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", b)
+        first = verticalEdge(padB, 30, 10)
+        Gui.Selection.clearSelection()
+        self.click(padB, first)
+        self.watchModals()
+        Gui.runCommand("PartDesign_Fillet")
+        self.waitForPanel()
+        [fillet] = self.made("PartDesign::Fillet")
+        pump(0.3)
+        corner = self.vertexAt(padB, 30, 0, 10)
+        vertical = verticalEdge(padB, 30, 0)
+        front = self.edgeThrough(padB, (20, 0, 10), (30, 0, 10))
+        right = self.edgeThrough(padB, (30, 0, 10), (30, 10, 10))
+        expected = [first]
+        for at, edge in (((30, 0, 9.6), vertical), ((29.6, 0, 10), front), ((30, 0.4, 10), right)):
+            self.clickVertex(padB, corner, at)
+            pump(0.3)
+            expected.append(edge)
+            self.assertEqual(sorted(base(fillet)[1]), sorted(expected), "click at %s" % (at,))
+            self.assertEqual(Gui.Selection.getSelectionEx("", 0), [])
+        self.clickVertex(padB, corner, (29.6, 0, 10))
+        pump(0.3)
+        expected.remove(front)
+        self.assertEqual(sorted(base(fillet)[1]), sorted(expected), "the second click kept the front edge")
+        self.setField("filletRadius", 1)
+        self.close(ok=True)
+        self.watching = False
+        self.assertEqual(self.modals, [])
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(sorted(base(fillet)[1]), sorted(expected))
+        self.assertLess(fillet.Shape.Volume, 1000 - filletLoss(1, 2) + 1e-6)
+
+    def testAVertexAsTheFirstPickPlacesTheFilletWithTheNearestEdge(self):
+        """SQ13 with the tool-first flow: A active, Fillet with nothing selected; a click on B's
+        corner (30, 0, 10) just below it puts the fillet in B on the vertical edge at (30, 0)."""
+        a, b, padA, padB = self.twoParts()
+        fillet = self.toolFirst("PartDesign_Fillet", a)
+        self.clickVertex(padB, self.vertexAt(padB, 30, 0, 10), (30, 0, 9.6))
+        self.placedIn(fillet, b)
+        self.assertEqual(base(fillet), (padB, [verticalEdge(padB, 30, 0)]))
+        self.close(ok=False)
+        self.watching = False
+        self.assertNoTrace(a, b, padA, padB)
