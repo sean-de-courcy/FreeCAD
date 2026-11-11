@@ -744,6 +744,26 @@ std::vector<std::string> stringsOf(const App::DocumentObject* obj, const char* n
     return prop ? prop->getValues() : std::vector<std::string>();
 }
 
+/// Whether a step's Base holds the elements the lookup found (names: "<mapped>.<indexed>"), each
+/// resolved now, none missing (P8a-2)
+bool holdsLookup(const App::PropertyLinkSub& link, const std::vector<std::string>& names)
+{
+    std::vector<std::string> held = link.getSubValues(false);
+    if (std::ranges::any_of(held, [](const std::string& sub) {
+            return sub.starts_with(Data::MISSING_PREFIX);
+        })) {
+        return false;
+    }
+    std::vector<std::string> found;
+    for (const auto& name : names) {
+        const auto dot = name.rfind('.');
+        found.push_back(dot == std::string::npos ? name : name.substr(dot + 1));
+    }
+    std::ranges::sort(held);
+    std::ranges::sort(found);
+    return held == found;
+}
+
 /// The parameters a step reads from its owner when it runs (skeptic 3: never copied at
 /// reconcile, so an edit of the owner by Python or the property editor can't leave it stale)
 std::vector<const char*> ownerParameters(const DressUp* step)
@@ -832,8 +852,12 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         if (!step || !base) {
             continue;
         }
-        // The step's Base: written when its picks or its base changed, else FreeCAD's own
-        // (skeptic 2: the reference solver's guesses and warnings are never reset silently)
+        // The step's Base: written when its picks or its base changed, or when what it holds now
+        // isn't what the lookup finds (P8a-2, 10.14 point 2 as amended): the list is the only
+        // truth, so the result is the rebuild's from scratch. FreeCAD's tracking of the names it
+        // last held can keep one piece of a split edge and lose another (a merge's edge cut
+        // again, gate seed 6), where the lookup by ancestry finds them all; an element the lookup
+        // misses is the owner's warning above, never a guess of the reference solver
         std::vector<std::string> wanted;
         for (const auto& pick : picks) {
             if (pick.found.size() == 1 && pick.found.front().first == part) {
@@ -842,8 +866,9 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         }
         wanted.push_back(std::string("@") + base->getNameInDocument());
         auto seen = stringList(step, "StudioPicksSeen", "What Base was last written from (ops#654 P8a)");
-        if (seen->getValues() != wanted || step->Base.getValue() != base) {
-            const auto& names = subs[part];
+        const auto& names = subs[part];
+        if (seen->getValues() != wanted || step->Base.getValue() != base
+            || !holdsLookup(step->Base, names)) {
             if (step->Base.getValue() != base || step->Base.getSubValues() != names) {
                 step->Base.setValue(base, names);
             }

@@ -22,8 +22,8 @@ import unittest
 import FreeCAD as App
 import PartDesign
 
-from PartDesignTests.TestStudio import pad, sketch, xyPlane
-from PartDesignTests.TestStudioList import newStudio, studioList
+from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
+from PartDesignTests.TestStudioList import booleanOwner, newStudio, studioList
 from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
 
 V = App.Vector
@@ -208,6 +208,48 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertIsNotNone(self.step(f, "A"))
         self.assertIsNone(self.step(f, "B"))
         self.assertVolume("A", 2900 - rounded(1))
+        self.assertClean(f)
+
+    def testAMergedEdgeCutAgainRoundsEveryPiece(self):
+        """10.14 point 2 as amended (P8a-2, gate seed 6 ops 54-56): the list is the only truth, so
+        a step's Base follows the owner's lookup, not FreeCAD's tracking of what it last held. F
+        rounds C's top left edge (x 40, z 10, along y; r 1); E, an Add x 25..45, y 2..4, z 5..15
+        joining B and C, put before F, merges them and cuts the edge into y 0..2 and 4..10, both
+        pieces of the pick (oracle 9 P2), L 8. A second rectangle y 6..7 in E's sketch cuts it
+        into three, y 0..2, 4..6 and 7..10 (L 7), F's step keeping its base: every piece is
+        rounded (FreeCAD's tracking kept one and lost one). Each piece ends on a wall square to
+        it, so the round takes r^2 (1 - pi/4) L. The union: 2000 + the tool's 400 (then 600) less
+        what of it is inside B and C, 2 x 50 (then 2 x 75)."""
+        c = self.body("C")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(c, V(40, 5, 10))], 1)
+        sk = studioSketch(self.doc, self.S, "ESk", ((25, 2, 45, 4),), z=5)
+        e = makeOwner(self.doc, self.S, "Pad", "E", sk, ("B", "C"), Length=10, Refine=False)
+        PartDesign.studioMove(e, list(self.list.Entries).index(f))
+        self.doc.recompute()
+        [merged] = list(e.StudioMergedParts)
+        survivor = self.body(merged.split(" -> ")[1])
+        self.assertVolume(survivor, 2300 - rounded(1, 8))
+        rect(sk, 25, 6, 45, 7)
+        self.doc.recompute()
+        self.assertVolume(survivor, 2450 - rounded(1, 7))
+        self.assertClean(f)
+
+    def testAPickFollowsItsPartIntoABooleanUnion(self):
+        """Q2c through a Boolean (P5): C moved to x 30..40, y 5..15 (touching B's right face);
+        F rounds C's top front edge (y 5, z 10, x 30..40; r 1); the Boolean Union of B with the
+        tool C, put before F, absorbs C into B: the pick follows to B (a step in B, none in C).
+        The edge ends on B's face x 30, square to it: B is 2000 less r^2 (1 - pi/4) 10."""
+        self.doc.getObject("CSk").AttachmentOffset = App.Placement(V(-10, 5, 0), App.Rotation())
+        self.doc.recompute()
+        c = self.body("C")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(c, V(35, 5, 10))], 1)
+        self.assertVolume("C", 1000 - rounded(1))
+        u = booleanOwner(self.doc, self.S, "U", "Fuse", ("B",), ("C",))
+        PartDesign.studioInsert(u, list(self.list.Entries).index(f))
+        self.doc.recompute()
+        self.assertIsNotNone(self.step(f, "B"))
+        self.assertIsNone(self.step(f, "C"))
+        self.assertVolume("B", 2000 - rounded(1))
         self.assertClean(f)
 
     def slot(self, rect, scope=("B",), index=None):

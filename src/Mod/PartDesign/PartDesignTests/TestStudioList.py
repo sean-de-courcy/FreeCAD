@@ -414,7 +414,10 @@ def isStep(obj):
 
 # ------------------------------------------------------------------------------------- the names
 def _number(value):
-    text = f"{value:.4f}"
+    # Nudged off the half: the designed boxes put centres on binary fractions such as 4.40625,
+    # exactly half way at four places, where noise of 1e-15 between two constructions of the same
+    # face flips the last digit (seed 5, op 73, ops#654 P8a-2)
+    text = f"{value + 1e-7:.4f}"
     return "0.0000" if text == "-0.0000" else text
 
 
