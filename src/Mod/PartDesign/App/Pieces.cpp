@@ -428,6 +428,19 @@ PieceMatch matchPieces(const Part::TopoShape& source, const std::vector<Body*>& 
     out.why.assign(records.size(), std::string());
     const auto unique = uniqueNames(source);
     const int count = static_cast<int>(unique.size());
+    // A split whose source is one solid is gone (Onshape Q13, SPLIT_NO_CHANGE): no piece claims
+    // the unsplit part, whatever the witness scores; picks of a piece resolve to the parent
+    // (parts-design.md 10.12 amendment). Leftovers keep the rule below
+    if (count == 1 && !records.empty()
+        && std::ranges::none_of(records, [](const Body* r) {
+               return std::string(r->StudioParentId.getValue()).empty();
+           })) {
+        for (std::size_t r = 0; r < records.size(); ++r) {
+            out.why[r] = "The split that made " + quoted(records[r])
+                + " is gone: it is the part it was cut from again";
+        }
+        return out;
+    }
     std::vector<std::vector<Score>> scores(records.size());
     bool ambiguous = false;
     std::vector<Score> best(records.size(), Score {0, 0, 0});
@@ -691,7 +704,9 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         const PieceMatch match = matchPieces(source.shape, records);
         const int solids = static_cast<int>(source.shape.countSubShapes(TopAbs_SOLID));
         for (std::size_t r = 0; r < records.size(); ++r) {
-            if (match.solids[r] < 0) {
+            // A gone split's records stay, so its pieces come back with their ids when an edit
+            // cuts again (10.12 amendment, point 4)
+            if (match.solids[r] < 0 && !(source.parent && solids == 1)) {
                 emptied.push_back(records[r]);
             }
         }

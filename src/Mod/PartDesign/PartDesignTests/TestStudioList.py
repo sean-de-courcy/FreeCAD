@@ -554,7 +554,8 @@ def oracle(natives, records, bar, live=None):
     applied = set()  # (box owner, part) whose step changed its part
     # P6p: the parts made from pieces, by part id. A maker's pieces are parts from its place on
     # (not suppressed, before the bar); a split parent is none after it (dead), unless the split
-    # is lost (no record holds its one solid). A piece whose record holds nothing is a part that
+    # is gone (its result is one solid, Onshape Q13): then its pieces are no parts (vanished) and
+    # a pick of one resolves to the parent. A piece whose record holds nothing is a part that
     # fails (failed): a scope still resolves to it, and what acts on it fails there (a Boolean
     # with it still consumes its tools). A scope resolves to an id's part and its living
     # descendants, in the Bodies' order
@@ -574,6 +575,7 @@ def oracle(natives, records, bar, live=None):
     madePieces = set()  # made: live unless consumed or dead
     dead = set()
     failed = set()
+    vanished = set()  # the pieces of a split that is gone (10.12 amendment)
 
     def descends(key, ident):
         seen = set()
@@ -587,6 +589,10 @@ def oracle(natives, records, bar, live=None):
     def resolve(ids):
         out = []
         for ident in ids:
+            seen = set()
+            while ident in vanished and ident not in seen:  # a gone split's piece: its parent
+                seen.add(ident)
+                ident = parentOf.get(ident, ident)
             for key in order:
                 if (
                     key not in out and (key in shapes or key in failed) and key not in consumed
@@ -781,26 +787,17 @@ def oracle(natives, records, bar, live=None):
                     claims = {}
                 dead.add(p)
             else:
-
-                def wall(pid):
-                    x = x0 if own[pid][1] == "L" else x1
-                    return any(
-                        abs(face.BoundBox.XMin - x) < 1e-6 and abs(face.BoundBox.XMax - x) < 1e-6
-                        for face in result.Faces
-                    )
-
-                holders = [pid for pid in recs if own[pid][1] in ("L", "R") and wall(pid)]
+                # 10.12 amendment (Onshape Q13, SPLIT_NO_CHANGE): one solid, the split is gone:
+                # p goes on with it, the pieces are no parts and picks of them resolve to p
                 shapes[p] = result
                 applied.add((record["name"], p))
-                if len(holders) == 1:
-                    claims[holders[0]] = result
-                    dead.add(p)
+                vanished.update(recs)
             for pid in recs:
                 parentOf[pid] = p
                 madePieces.add(pid)
                 if pid in claims:
                     shapes[pid] = claims[pid]
-                else:
+                elif pid not in vanished:
                     failed.add(pid)
         # Its records of a parent it doesn't act on hold nothing (the parent stays split); a
         # leftover (H1a) holds the tool when it touches no part of the scope
@@ -827,13 +824,16 @@ def oracle(natives, records, bar, live=None):
             p for p in shapes if p not in consumed and p not in dead and p not in madePieces
         )
         live.update(made)
-        live.update("piece:" + pid for pid in madePieces if pid not in consumed and pid not in dead)
+        live.update(
+            "piece:" + pid for pid in madePieces
+            if pid not in consumed and pid not in dead and pid not in vanished
+        )
     out = {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items() if p not in madePieces}
     out.update(
         {
             "piece:" + pid: "failed" if pid in failed or pid not in shapes else
             (round(shapes[pid].Volume, 4), len(shapes[pid].Solids))
-            for pid in madePieces
+            for pid in madePieces if pid not in vanished
         }
     )
     out.update({k: (0.0, 0) if s is None else (round(s.Volume, 4), len(s.Solids)) for k, s in made.items()})
@@ -859,19 +859,12 @@ def spans(doc, y):
 
 
 def clear(offsets, width, taken, base):
-    """The offsets whose span (base + offset, width long) bridges none of taken (one strictly
-    inside the other: a merge bar over a slot, from wall to wall and past both); all of them when
-    each does. Known debt, 10.13 gate round (work/hub7/gate/probe-cross.txt, X8 and X10): a bar
-    over a slot before it in the list keeps both sides of the cut on one solid, so the split is
-    lost (no material is separated: the oracle's two walls on one solid); P6p's matchPieces gives
-    that solid to the record with the strictly higher witness score and fails the other loudly
-    ("'s piece is ...'s now"), where the scores differ. Wrong but loud; the gate leaves the bridge
-    out until the lost-split rule follows the walls (unverified on Onshape; its Q13a keeps the
-    unsplit part's id). A bar that ends on a wall, or lies beside the slot, is no bridge."""
-    free = [d for d in offsets
-            if not any((base + d < x0 and base + d + width > x1)
-                       or (x0 < base + d and x1 > base + d + width) for x0, x1 in taken)]
-    return free or offsets
+    """All the offsets: a merge bar may bridge a slot again. The 10.13 gate round left bridges out
+    (work/hub7/gate/probe-cross.txt, X8 and X10: a bar over a slot before it in the list keeps
+    both sides of the cut on one solid, and P6p's matchPieces gave that solid to the stronger
+    record and failed the other loudly); the 10.12 amendment (Onshape Q13) makes such a split gone:
+    the unsplit part keeps its id and picks of either piece resolve to it."""
+    return offsets
 
 
 def stranded(doc):

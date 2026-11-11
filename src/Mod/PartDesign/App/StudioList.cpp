@@ -204,6 +204,22 @@ std::set<const App::DocumentObject*> entriesElsewhere(const StudioList* list)
 /// that consumes it. From that place on it is no part: no scope or tool resolves to it
 using Consumed = std::map<const Body*, int>;
 
+/// Whether body is a piece whose split is gone (10.12 amendment, Onshape Q13): consumedBy takes it
+/// at its own maker's place, where nothing else consumes a part the maker made. It is a part
+/// nowhere (liveAt), and a pick of it resolves to the part it was cut from (resolveScope). Its
+/// maker is in positions whenever this is true: resolveScope's positions.at relies on it
+bool vanishedPiece(const Body* body,
+                   const std::map<const App::DocumentObject*, int>& positions,
+                   const Consumed& consumed)
+{
+    if (!isPieceBody(body) || std::string(body->StudioParentId.getValue()).empty()) {
+        return false;
+    }
+    auto it = consumed.find(body);
+    auto maker = positions.find(body->StudioMadeBy.getValue());
+    return it != consumed.end() && maker != positions.end() && it->second == maker->second;
+}
+
 /// Whether body is a part at index of entries (positions: each entry's index): not absorbed into
 /// another part (MergedInto, ops#325), not consumed by a Boolean before index, and not made by an
 /// entry after index (StudioMadeBy). With before, the state just before the entry at index: a part
@@ -219,6 +235,9 @@ bool liveAt(const Body* body,
         return false;
     }
     if (auto it = consumed.find(body); it != consumed.end() && it->second < index) {
+        return false;
+    }
+    if (vanishedPiece(body, positions, consumed)) {
         return false;
     }
     if (auto madeBy = body->StudioMadeBy.getValue()) {
@@ -292,7 +311,19 @@ std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
         }
     };
     std::vector<Body*> out;
-    for (const auto& id : ids) {
+    for (const auto& named : ids) {
+        // A pick of a piece whose split is gone resolves to the part it was cut from, up through
+        // nested gone splits (10.12 amendment, Onshape Q13)
+        std::string id = named;
+        std::set<std::string> seen;
+        while (!id.empty() && seen.insert(id).second) {
+            auto it = byId.find(id);
+            if (it == byId.end() || !vanishedPiece(it->second, positions, consumed)
+                || positions.at(it->second->StudioMadeBy.getValue()) >= index) {
+                break;
+            }
+            id = it->second->StudioParentId.getValue();
+        }
         if (id.empty()) {
             continue;
         }
@@ -538,8 +569,23 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                     ? stringsOf(entries[i], "StudioSplitLost")
                     : std::vector<std::string>();
                 for (auto parent : it->second) {
-                    if (std::ranges::find(lost, studioPartId(parent)) == lost.end()) {
+                    const std::string parentId = studioPartId(parent);
+                    // A lost split counts only while the parent is a part at the maker's place:
+                    // consumed before it (a merge, a Boolean), the maker doesn't compute there,
+                    // and a record from an earlier compute is stale (gate seed 6, hub 8)
+                    auto before = out.find(parent);
+                    const bool stale = before != out.end() && before->second < static_cast<int>(i);
+                    if (stale || std::ranges::find(lost, parentId) == lost.end()) {
                         out.emplace(parent, static_cast<int>(i));
+                        continue;
+                    }
+                    // The split is gone (10.12 amendment): its pieces vanish at their maker's
+                    // own place (vanishedPiece), so they are parts nowhere
+                    for (auto piece : bodies) {
+                        if (isPieceBody(piece) && piece->StudioMadeBy.getValue() == entries[i]
+                            && parentId == piece->StudioParentId.getValue()) {
+                            out.emplace(piece, static_cast<int>(i));
+                        }
                     }
                 }
             }
@@ -608,7 +654,8 @@ std::vector<Body*> scopePartsAt(const App::DocumentObject* owner,
     for (auto body : bodies) {
         if (isPieceBody(body) && body->StudioMadeBy.getValue() == owner
             && std::ranges::find(out, body) == out.end()
-            && liveAt(body, index, positions, consumed)) {
+            && liveAt(body, index, positions, consumed)
+            && !vanishedPiece(body, positions, consumed)) {
             out.push_back(body);
         }
     }
@@ -963,7 +1010,9 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
         const auto lost = at->second < barAt ? stringsOf(maker, "StudioSplitLost")
                                              : std::vector<std::string>();  // as consumedBy
         for (auto parent : parents) {
-            if (std::ranges::find(lost, studioPartId(parent)) != lost.end()) {
+            auto before = consumed.find(parent);
+            const bool stale = before != consumed.end() && before->second < at->second;
+            if (!stale && std::ranges::find(lost, studioPartId(parent)) != lost.end()) {
                 continue;
             }
             auto [it, added] = splitAt.emplace(parent, at->second);
@@ -1030,13 +1079,21 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
                                          + quoted(maker) + " makes after it");
                     continue;
                 }
+                // 10.12 amendment: a member of a piece whose split is gone has no part
+                if (vanishedPiece(body, positions, consumed)) {
+                    out.errors.push_back(quoted(entry) + " is in " + quoted(body)
+                                         + ", made by the split of " + quoted(maker)
+                                         + ", which is gone: move it into the part it was cut from");
+                    continue;
+                }
             }
             out.chains[body].push_back(slot);
             // A Body member that split its part (an in-Body pattern): a piece step in each part
             // it made
             for (auto piece : bodies) {
                 if (piece != body && isPieceBody(piece) && piece->StudioMadeBy.getValue() == entry
-                    && liveAt(piece, i, positions, consumed)) {
+                    && liveAt(piece, i, positions, consumed)
+                    && !vanishedPiece(piece, positions, consumed)) {
                     Slot step = slot;
                     step.isStep = true;
                     out.chains[piece].push_back(step);

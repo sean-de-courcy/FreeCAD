@@ -476,9 +476,32 @@ class TestPieces(unittest.TestCase):
             self.assertFalse(step.isValid(), name)
             self.assertIn("press OK", step.getStatusString())
 
-    def testSplitStoppedTheStrongerRecordClaims(self):
-        """The slot made shallow (z 5..10): one solid. The left piece, which carries a boss (more
-        unsplit faces), claims it; the right piece's step fails loudly."""
+    # ----------------------------------------------- a split that stops (10.12 amendment, Q13)
+    def shallow(self, e, length=5):
+        self.doc.openTransaction("depth")
+        e.Length = length
+        self.doc.commitTransaction()
+        self.doc.recompute()
+
+    def assertNothingFails(self):
+        self.assertEqual(
+            [(o.Name, o.getStatusString()) for o in self.doc.Objects if not o.isValid()], []
+        )
+
+    def assertGone(self, e, p, volume, *pieces):
+        """The split is gone (Onshape SPLIT_NO_CHANGE): P is the one part, with volume; the pieces
+        are no parts and have no step of E; nothing fails."""
+        self.assertEqual(PartDesign.studioLiveParts(self.list), [p])
+        self.assertVolume(p, volume)
+        for piece in pieces:
+            self.assertIsNone(self.step(e, piece), piece.Name)
+        self.assertEqual(list(getattr(e, "StudioSplitLost", [])), ["P"])
+        self.assertNothingFails()
+
+    def testSplitStoppedResolvesToTheParent(self):
+        """Q13: the slot made shallow (z 5..10), one solid. Neither piece claims it, though the
+        left one carries a boss (more unsplit faces): P is the one part again (the boss's volume
+        included), the pieces are no parts, and nothing fails."""
         self.studio()
         p = self.doc.getObject("P")
         boss = pad(p, "B1", sketch(p, "B1Sk", xyPlane(p), (10, 2, 20, 8), z=10), 5)
@@ -486,28 +509,142 @@ class TestPieces(unittest.TestCase):
         self.doc.recompute()
         e = self.pocket("E", (SLOT,), ("P",))
         left, right = self.leftRight(self.command(e))
-        self.doc.openTransaction("shallow")
-        e.Length = 5
-        self.doc.commitTransaction()
-        self.doc.recompute()
-        self.assertValid(self.step(e, left))
-        self.assertVolume(left, 10000 + 300 - 50)
-        self.assertFalse(self.step(e, right).isValid())
+        self.shallow(e)
+        self.assertGone(e, p, 10000 + 300 - 50, left, right)
+        self.assertValid(e)
 
-    def testSplitStoppedATieMakesTheParentLive(self):
-        """The slot made shallow with nothing to tell the pieces apart: both piece steps fail and
-        P is live again after E (records name it, none holds a solid)."""
+    def testSplitStoppedWithATieResolvesToTheParent(self):
+        """The slot made shallow with nothing to tell the pieces apart: as above."""
         e, made = self.slotSplit()
         left, right = self.leftRight(made)
-        self.doc.openTransaction("shallow")
-        e.Length = 5
-        self.doc.commitTransaction()
+        self.shallow(e)
+        self.assertGone(e, self.doc.getObject("P"), 10000 - 50, left, right)
+
+    def addOwner(self, name, rect, scope, height=5):
+        sk = studioSketch(self.doc, self.S, name + "Sk", (rect,), z=10)
+        owner = makeOwner(self.doc, self.S, "Pad", name, sk, scope, Length=height)
         self.doc.recompute()
-        self.assertFalse(self.step(e, left).isValid())
-        self.assertFalse(self.step(e, right).isValid())
+        return owner
+
+    def testQ13aAnAddScopedToAVanishedPieceMergesIntoTheParent(self):
+        """Q13a: F, an Add on the right piece (a 10 x 6 x 5 boss at x 70..80) scoped to it. The
+        split stopped: F stays OK and adds to P."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        f = self.addOwner("F", (70, 2, 80, 8), (right.StudioPartId,))
+        self.assertVolume(right, 6900 + 300)
+        self.shallow(e)
         p = self.doc.getObject("P")
-        self.assertIn(p, PartDesign.studioLiveParts(self.list))
-        self.assertVolume(p, 10000 - 50)
+        self.assertGone(e, p, 10000 - 50 + 300, left, right)
+        self.assertValid(f, self.step(f, p))
+        self.assertIsNone(self.step(f, right))
+
+    def testQ13bAScopeOfBothPiecesResolvesToTheParentOnce(self):
+        """Q13b: F bridges the slot (x 25..36, 11 x 6 x 5), scope the right piece then the left:
+        it rejoins them (the right survives, 10.13). The split stopped: F adds to P once."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        f = self.addOwner("F", (25, 2, 36, 8), (right.StudioPartId, left.StudioPartId))
+        self.assertVolume(right, 3000 + 6900 + 330)
+        self.shallow(e)
+        p = self.doc.getObject("P")
+        self.assertGone(e, p, 10000 - 50 + 330, left, right)
+        self.assertValid(f, self.step(f, p))
+
+    def testTheSplitComesBackWithItsIds(self):
+        """Gone, then cutting again: the pieces are parts again with their ids, and G (a hole
+        2 x 2 x 2 at x 70..72 scoped to the right piece) goes back to it, having cut P meanwhile.
+        A command on E while the split is gone deletes no record (unverified on Onshape, Q14a)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        ids = (left.StudioPartId, right.StudioPartId)
+        g = self.pocket("G", ((70, 2, 72, 4),), (right.StudioPartId,), length=2)
+        self.assertVolume(right, 6900 - 8)
+        self.shallow(e)
+        p = self.doc.getObject("P")
+        self.assertGone(e, p, 10000 - 50 - 8, left, right)
+        self.assertEqual(self.command(e), [])
+        self.assertGone(e, p, 10000 - 50 - 8, left, right)
+        self.shallow(e, 11)
+        self.assertEqual(self.live(), [left, right])
+        self.assertEqual((left.StudioPartId, right.StudioPartId), ids)
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900 - 8)
+        self.assertValid(e, g, self.step(g, right))
+        self.assertIsNone(self.step(g, p))
+        self.assertEqual(list(getattr(e, "StudioSplitLost", [])), [])
+
+    def testABodyMemberOfAVanishedPieceIsLoud(self):
+        """A Pad in the right piece's Body (a FreeCAD construct, no Onshape analogue), then the
+        split stopped: the reconcile refuses, naming the member and the gone split, and the
+        piece's step stays in error: loud, never a silent part (skeptic 5, 10.12 amendment)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        rb = pad(right, "RB", sketch(right, "RBSk", xyPlane(right), (70, 2, 80, 8), z=10), 2)
+        self.doc.recompute()
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        self.assertVolume(right, 6900 + 120)
+        self.shallow(e)
+        with self.assertRaises(Exception) as refused:
+            PartDesign.studioReconcile(self.list)
+        self.assertIn("'RB' is in", str(refused.exception))
+        self.assertIn("which is gone", str(refused.exception))
+        self.assertFalse(self.step(e, right).isValid())
+
+    def testSplitStoppedUndoRedo(self):
+        """Undo of the edit that stops the split: the pieces are parts again; redo: P again. The
+        recompute inside the edit's transaction, as a dialog's OK (a recompute after the commit
+        is 10.15's)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        p = self.doc.getObject("P")
+        self.doc.openTransaction("depth")
+        e.Length = 5
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertGone(e, p, 10000 - 50, left, right)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), [left, right])
+        self.assertVolume(left, 3000)
+        self.assertValid(self.step(e, left), self.step(e, right))
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertGone(e, p, 10000 - 50, left, right)
+
+    def testSplitStoppedSaveAndReopen(self):
+        """Saved with the split gone: reopened, P is the one part and nothing fails."""
+        e, made = self.slotSplit()
+        self.shallow(e)
+        names = [b.Name for b in made]
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "gone.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = studioList(self.doc)
+        self.doc.recompute()
+        e = self.doc.getObject("E")
+        pieces = [self.doc.getObject(name) for name in names]
+        self.assertGone(e, self.doc.getObject("P"), 10000 - 50, *pieces)
+
+    def testPartMirrorOfAVanishedPieceMirrorsTheParent(self):
+        """M, a part mirror (New) of the right piece about x = 0. The split stopped: M mirrors P
+        (unverified on Onshape, Q14c's analogue)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        p = self.doc.getObject("P")
+        m = partMirror(self.doc, self.S, "M", right.StudioPartId, (originPlane(p, "YZ_Plane"), [""]))
+        self.doc.recompute()
+        copy = [b for b in self.live() if b not in (left, right)]
+        self.assertEqual(len(copy), 1)
+        self.assertVolume(copy[0], 6900)
+        self.shallow(e)
+        self.assertEqual(sorted(b.Name for b in PartDesign.studioLiveParts(self.list)), sorted([p.Name, copy[0].Name]))
+        self.assertVolume(copy[0], 10000 - 50)
+        self.assertValid(m)
+        self.assertNothingFails()
 
     def testSuppressedSplitListsTheParentNotThePieces(self):
         """E suppressed: P and C listed (two parts, not three); unsuppressed: the pieces and C."""
