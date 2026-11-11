@@ -2277,11 +2277,10 @@ class CornerWithACircleTest(unittest.TestCase):
         with self.assertRaises(Part.OCCError):
             plate.makeFillet(0.8, edges)
 
-    @unittest.expectedFailure
     def testKeyholeGrooveChamferPastTheLimit(self):
-        # Past the limit Onshape clips the chamfer by the groove's top (oracle 9d). Not built yet:
-        # the legs' ends at the plate's side refuse ("the end face of a selected edge does not
-        # cover the end of its tool"), where the tools rise past the groove's top
+        # Past the limit Onshape clips the chamfer by the groove's top (oracle 9d): one cone, two
+        # planes, and the plate's side face whole, though the legs' ends rise past the groove's
+        # top into the plate there (faces +0)
         self.assertKeyholeGrooveChamfer(0.81, 19.41115, -29.07163)
 
     def testConcaveCornerWithACircleFails(self):

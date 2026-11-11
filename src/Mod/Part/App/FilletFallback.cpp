@@ -2906,6 +2906,27 @@ TopoDS_Shape constructShape(
                 }
             }
         }
+        // A fused tool's end that runs on into the base's material past its free end (#15 past
+        // the limit: a leg's end triangle rises above the groove's top) leaves the overlap as a
+        // piece of the base's face: the edges its outline cut into that face are new, and must
+        // not keep the piece apart from the rest of the face
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (tools[i].cut) {
+                continue;
+            }
+            for (const auto& cap : tools[i].capFaces) {
+                for (const auto& image : imagesThrough(stages, toolStage[i], cap)) {
+                    if (image.ShapeType() != TopAbs_FACE || !baseImages.Contains(image)) {
+                        continue;
+                    }
+                    for (TopExp_Explorer edge(image, TopAbs_EDGE); edge.More(); edge.Next()) {
+                        if (!baseImages.Contains(edge.Current())) {
+                            unlocked.Add(edge.Current());
+                        }
+                    }
+                }
+            }
+        }
         for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
             const TopoDS_Shape& face = it.Current();
             if (baseImages.Contains(face)) {
