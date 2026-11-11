@@ -54,6 +54,7 @@
 #include "SelectionFilter.h"
 #include "SelectionFilterPy.h"
 #include "SelectionObserverPython.h"
+#include "ForkKeymap.h"  // FreeCAD-CH (ops#640 polish 1)
 #include "Tree.h"
 #include "ViewProvider.h"
 #include "ViewProviderDocumentObject.h"
@@ -1286,6 +1287,12 @@ void printPreselectionInfo(
     double precision
 )
 {
+    // FreeCAD-CH (ops#640 polish 1, P3): Onshape writes nothing technical at the bottom of the window
+    // on hover (the tint is the feedback); FreeCAD's "Preselected: <doc>.<object>.<element> (x, y, z)"
+    // stays under FreeCAD's keymap.
+    if (ForkKeymap::isOnshape()) {
+        return;
+    }
     if (getMainWindow()) {
         QString message
             = getPreselectionInfo(documentName, objectName, subElementName, x, y, z, precision);

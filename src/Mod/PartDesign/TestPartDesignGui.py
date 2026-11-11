@@ -78,6 +78,8 @@ from PartDesignTests.TestOnshapeStudioGui import TestOnshapeStudioGui
 from PartDesignTests.TestMergeScopeGui import TestMergeScopeGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestMergeScopeGui import TestMergeScopeListGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestPickFirstGui import TestPickFirstGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestPolishGui import TestHoverStatusGui  # FreeCAD-CH, ops#640 polish 1
+from PartDesignTests.TestPolishGui import TestShowConstraintsGui  # FreeCAD-CH, ops#640 polish 1
 from PartDesignTests.TestEscCancelsGui import TestEscCancelsGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSketchPlaneGui import TestSketchPlaneGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBooleanDialogGui import TestBooleanDialogGui  # FreeCAD-CH, ops#640
