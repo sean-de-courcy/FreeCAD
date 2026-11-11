@@ -204,10 +204,24 @@ std::set<const App::DocumentObject*> entriesElsewhere(const StudioList* list)
 /// that consumes it. From that place on it is no part: no scope or tool resolves to it
 using Consumed = std::map<const Body*, int>;
 
-/// Whether body is a piece whose split is gone (10.12 amendment, Onshape Q13): consumedBy takes it
-/// at its own maker's place, where nothing else consumes a part the maker made. It is a part
-/// nowhere (liveAt), and a pick of it resolves to the part it was cut from (resolveScope). Its
-/// maker is in positions whenever this is true: resolveScope's positions.at relies on it
+/// The holder a partial unsplit absorbed pieceId into, from its maker's lost splits (entries
+/// "<piece id>><holder id>", noteSplitHeld; Onshape Q14e); empty when it absorbed none
+std::string absorbedInto(const std::vector<std::string>& lost, const std::string& pieceId)
+{
+    const std::string head = pieceId + ">";
+    for (const auto& entry : lost) {
+        if (entry.starts_with(head)) {
+            return entry.substr(head.size());
+        }
+    }
+    return {};
+}
+
+/// Whether body is a piece whose split is gone (10.12 amendment, Onshape Q13), or that a partial
+/// unsplit absorbed into another piece (Onshape Q14e): consumedBy takes it at its own maker's
+/// place, where nothing else consumes a part the maker made. It is a part nowhere (liveAt), and a
+/// pick of it resolves to the part it was cut from, or to its holder (resolveScope). Its maker is
+/// in positions whenever this is true: resolveScope's positions.at relies on it
 bool vanishedPiece(const Body* body,
                    const std::map<const App::DocumentObject*, int>& positions,
                    const Consumed& consumed)
@@ -313,7 +327,8 @@ std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
     std::vector<Body*> out;
     for (const auto& named : ids) {
         // A pick of a piece whose split is gone resolves to the part it was cut from, up through
-        // nested gone splits (10.12 amendment, Onshape Q13)
+        // nested gone splits (10.12 amendment, Onshape Q13); one a partial unsplit absorbed, to
+        // its holder (Onshape Q14e), then on up
         std::string id = named;
         std::set<std::string> seen;
         while (!id.empty() && seen.insert(id).second) {
@@ -322,7 +337,9 @@ std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
                 || positions.at(it->second->StudioMadeBy.getValue()) >= index) {
                 break;
             }
-            id = it->second->StudioParentId.getValue();
+            const std::string holder =
+                absorbedInto(stringsOf(it->second->StudioMadeBy.getValue(), "StudioSplitLost"), id);
+            id = holder.empty() ? std::string(it->second->StudioParentId.getValue()) : holder;
         }
         if (id.empty()) {
             continue;
@@ -575,15 +592,20 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                     // and a record from an earlier compute is stale (gate seed 6, hub 8)
                     auto before = out.find(parent);
                     const bool stale = before != out.end() && before->second < static_cast<int>(i);
-                    if (stale || std::ranges::find(lost, parentId) == lost.end()) {
+                    const bool gone = !stale && std::ranges::find(lost, parentId) != lost.end();
+                    if (!gone) {
                         out.emplace(parent, static_cast<int>(i));
+                    }
+                    if (stale) {
                         continue;
                     }
                     // The split is gone (10.12 amendment): its pieces vanish at their maker's
-                    // own place (vanishedPiece), so they are parts nowhere
+                    // own place (vanishedPiece), so they are parts nowhere; so does a piece a
+                    // partial unsplit absorbed into another (Onshape Q14e), the parent split
                     for (auto piece : bodies) {
                         if (isPieceBody(piece) && piece->StudioMadeBy.getValue() == entries[i]
-                            && parentId == piece->StudioParentId.getValue()) {
+                            && parentId == piece->StudioParentId.getValue()
+                            && (gone || !absorbedInto(lost, studioPartId(piece)).empty())) {
                             out.emplace(piece, static_cast<int>(i));
                         }
                     }
