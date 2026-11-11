@@ -44,6 +44,13 @@
 
 using namespace PartDesign;
 
+namespace PartDesign
+{
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
+PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
+PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
+}  // namespace PartDesign
+
 
 PROPERTY_SOURCE(PartDesign::Fillet, PartDesign::DressUp)
 
@@ -76,22 +83,27 @@ short Fillet::mustExecute() const
 
 App::DocumentObjectExecReturn* Fillet::execute()
 {
-    if (onlyHaveRefined()) {
+    // FreeCAD-CH ops#654 T3: re-run at a pattern's instance, on its base and edges
+    Part::TopoShape reapplyBase;
+    std::vector<Part::TopoShape> reapplyEdges;
+    const bool reapplying = dressUpReapplying(reapplyBase, reapplyEdges);
+    if (!reapplying && onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
 
 
     Part::TopoShape baseShape;
     try {
-        baseShape = getBaseTopoShape();
+        baseShape = reapplying ? reapplyBase : getBaseTopoShape();
     }
     catch (Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
     }
     baseShape.locate(TopLoc_Location());
 
-    auto edges = UseAllEdges.getValue() ? baseShape.getSubTopoShapes(TopAbs_EDGE)
-                                        : getContinuousEdges(baseShape);
+    auto edges = reapplying            ? reapplyEdges
+        : UseAllEdges.getValue() ? baseShape.getSubTopoShapes(TopAbs_EDGE)
+                                 : getContinuousEdges(baseShape);
     if (edges.empty()) {
         return new App::DocumentObjectExecReturn(
             QT_TRANSLATE_NOOP("Exception", "Fillet not possible on selected shapes")
@@ -106,7 +118,9 @@ App::DocumentObjectExecReturn* Fillet::execute()
         );
     }
 
-    this->positionByBaseFeature();
+    if (!reapplying) {
+        this->positionByBaseFeature();
+    }
 
     try {
         TopoShape shape = makeTopoShape();
@@ -164,6 +178,10 @@ App::DocumentObjectExecReturn* Fillet::execute()
             return new App::DocumentObjectExecReturn("The fillet" + bridged);
         }
         // store shape before refinement
+        if (reapplying) {
+            dressUpReapplied(refineShapeIfActive(shape));
+            return App::DocumentObject::StdReturn;
+        }
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);
         if (!isSingleSolidRuleSatisfied(shape.getShape())) {

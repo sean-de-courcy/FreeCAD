@@ -13,6 +13,16 @@
 # originals brings its own instances only, never its seed (onshape-facts P2, P3), each moved by
 # the outer transforms; the instances' names stay distinct.
 #
+# T3 (ops#654, patterns-design 3.3): with Reapply on (Onshape's Reapply features) each instance
+# re-runs its originals there, in order, against the part as it grows: an extrusion whose tool
+# depends on the base (Up to next, last, face, vertex or shape, Through all) is re-solved per
+# instance (O6, O10, O10b); a Blind one's copy is its re-run. An Add instance touching nothing is
+# refused (Onshape makes it a new part); a Remove instance off the part does nothing (P1).
+#
+# The T3 fix (oracle 9): instances are made instance by instance with Reapply on and off (R1); a
+# failing re-run contributes nothing, silently, and Up to next is re-run with Reapply off too (R2);
+# Reapply off copies an Up to face seed, and each pattern follows its own Reapply, nested too (R3).
+#
 # Designed geometry only; expected values come from the geometry (Part solids), never from a run.
 
 import math
@@ -24,8 +34,9 @@ import unittest
 import FreeCAD as App
 import Part
 import PartDesign
+import Sketcher
 
-from PartDesignTests.TestStudio import pad, sketch, xyPlane
+from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
 from PartDesignTests.TestStudioList import elementNames, studioList
 from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
 
@@ -97,6 +108,20 @@ def mirror(body, name, originals, plane):
     m.Originals = list(originals)
     m.MirrorPlane = axis(body, plane)
     return listed(m)
+
+
+def polygonSketch(body, name, support, points):
+    """A closed polygon sketch on support (points in the sketch's own u, v)."""
+    s = body.newObject("Sketcher::SketchObject", name)
+    s.AttachmentSupport = support
+    s.MapMode = "FlatFace"
+    n = len(points)
+    for i in range(n):
+        a, b = points[i], points[(i + 1) % n]
+        s.addGeometry(Part.LineSegment(V(a[0], a[1], 0), V(b[0], b[1], 0)))
+    for i in range(n):
+        s.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % n, 1))
+    return s
 
 
 def faceNames(shape):
@@ -276,15 +301,15 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertRefused(lp, "Cut", "B")
         self.assertTipVolume(1000, "A")
 
-    def testUpToNextIsRefused(self):
-        """An Up to next seed: Onshape refuses it with Reapply off (O10, O10b)."""
+    def testUpToNextIsReRunWithReapplyOff(self):
+        """An Up to next seed with Reapply off: re-run at each instance all the same (oracle 9,
+        R2): three holes through the plate."""
         self.plate()
         hole = self.holeOwner(Type="UpToFirst")
         lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
         self.doc.recompute()
-        self.assertValid(hole)
-        self.assertRefused(lp, "Hole", "Up to next", "Reapply")
-        self.assertTipVolume(60 * 20 * 10 - self.hole(10))
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(10))
 
     def testRemoveThatSplitItsPartIsRefused(self):
         """A seed Remove that cut the plate in two (Onshape refuses it with Reapply off, O7)."""
@@ -309,19 +334,29 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertTipVolume(60 * 20 * 10 - 4 * 11 * 10)
         self.assertEqual(len(self.tipShape().Solids), 1)
 
-    def testUpToASlantedFaceIsRefused(self):
-        """A hole up to a slanted plane, patterned along x: each instance would reach the plane
-        at its own depth (Onshape O6 with Reapply on), so copies are refused."""
-        self.plate()
+    def slant(self):
+        """A plane slanted along x, z = 2 + (x + 20) tan 3 deg (a Part::Plane in the studio)."""
         floor = self.doc.addObject("Part::Plane", "Slant")
         self.S.addObject(floor)
         floor.Length, floor.Width = 100, 40
         floor.Placement = App.Placement(V(-20, -10, 2), App.Rotation(V(0, 1, 0), -3))
+        return floor
+
+    def slantDepth(self, x, top=10.0):
+        """The depth from z top down to the slanted plane at x (a planar floor: the mean depth
+        over a disc is the depth at its centre)."""
+        return top - (2 + (x + 20) * math.tan(math.radians(3)))
+
+    def testUpToASlantedFaceIsCopiedWithReapplyOff(self):
+        """A hole up to a slanted plane, patterned along x, Reapply off: each instance is a copy of
+        the seed, at the seed's depth (oracle 9, R3)."""
+        self.plate()
+        floor = self.slant()
         hole = self.holeOwner(Type="UpToFace", UpToFace=(floor, ["Face1"]))
         lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
         self.doc.recompute()
-        self.assertValid(hole)
-        self.assertRefused(lp, "Hole", "Up to face", "Reapply")
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(self.slantDepth(10)))
 
     def testThroughAllNotSpanningIsRefused(self):
         """A Through all hole from z 10 patterned onto a block raised to z 20: the copy can't be
@@ -470,3 +505,796 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertTrue(self.doc.getObject("Mir2").isValid())
         self.assertAlmostEqual(self.tipShape().Volume, volume, places=4)
         self.assertEqual(elementNames(self.tipShape()), before)
+
+    # ------------------------------------------------------------------------------- Reapply (T3)
+    # Reapply on (Onshape's Reapply features, onshape-facts O6, O10, P1): each instance re-runs the
+    # originals there, in order, against the part as it grows; the expected volumes come from the
+    # geometry of the re-solved instances.
+
+    def roofStudio(self, x0=0.0, x1=100.0):
+        """Part P, a roof: the Front-plane profile (x0, z(x0)) (x1, z(x1)) (x1, 70) (x0, 70) with
+        z(x) = 40 + 0.2 x, padded symmetric 40 (y -20..20): its underside is z = 40 + 0.2 x (O6).
+        Returns the roof's Pad and the underside's name."""
+        doc = App.newDocument("TestStudioReapply")
+        doc.UndoMode = 1
+        self.docs.append(doc.Name)
+        studio = doc.addObject("App::Part", "S")
+        body = doc.addObject("PartDesign::Body", "P")
+        studio.addObject(body)
+
+        def z(x):
+            return 40 + 0.2 * x
+
+        profile = polygonSketch(
+            body,
+            "RoofSk",
+            [(body.Origin.OriginFeatures[XZ_PLANE], "")],
+            [(x0, z(x0)), (x1, z(x1)), (x1, 70), (x0, 70)],
+        )
+        roof = body.newObject("PartDesign::Pad", "Roof")
+        roof.Profile = profile
+        roof.SideType = "Symmetric"
+        roof.Length = 40
+        doc.recompute()
+        studioList(doc)
+        self.doc, self.S = doc, studio
+        under = next(
+            f"Face{i}"
+            for i, f in enumerate(roof.Shape.Faces, 1)
+            if f.normalAt(0, 0).z < -0.5 and abs(f.normalAt(0, 0).x) > 0.1
+        )
+        return roof, under
+
+    def roofVolume(self, x0=0.0, x1=100.0):
+        def z(x):
+            return 40 + 0.2 * x
+
+        return ((70 - z(x0)) + (70 - z(x1))) / 2 * (x1 - x0) * 40
+
+    def column(self, x):
+        """A 10 x 10 column from z 0 up to the underside, centred at x: 100 x (40 + 0.2 x)."""
+        return 100 * (40 + 0.2 * x)
+
+    def roofSeedOwner(self, roof, under, name="Seed"):
+        """O6's seed as a studio feature: 10 x 10 at x 5..15, y -5..5 on z 0, Add up to the
+        roof's underside."""
+        sk = studioSketch(self.doc, self.S, name + "Sk", rects=((5, -5, 15, 5),), z=0)
+        return makeOwner(
+            self.doc, self.S, "Pad", name, sk, ("P",), Type="UpToFace", UpToFace=(roof, [under])
+        )
+
+    def testReapplyUpToASlantedFaceReachesItAtEachDepth(self):
+        """O6: a linear pattern +x 30 x 3 of the seed up to the slanted underside, Reapply on:
+        each instance reaches the face at its own depth (4200, 4800, 5400)."""
+        roof, under = self.roofStudio()
+        seed = self.roofSeedOwner(roof, under)
+        lp = linear(self.part(), "LP", [seed], X_AXIS, 60, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, lp)
+        self.assertTipVolume(self.roofVolume() + self.column(10) + self.column(40) + self.column(70))
+        self.assertEqual(len(self.tipShape().Solids), 1)
+        self.assertNamesDistinct(lp.Shape)
+        # Reapply off: copies of the seed, at its height (oracle 9, R3): their tops (z 41..43) stay
+        # below the underside there (z 47 and up), so no copy reaches the part: Onshape's "Could
+        # not create all instances" (ops#640 A-2' d), and the part keeps the seed only
+        lp.Reapply = False
+        self.doc.recompute()
+        self.assertValid(seed)
+        self.assertRefused(lp, "Could not create all instances")
+        self.assertTipVolume(self.roofVolume() + self.column(10))
+
+    def testReapplyNativeUpToFace(self):
+        """O6 with a Body Pad as the seed: Reapply on re-runs it at each instance."""
+        roof, under = self.roofStudio()
+        p = self.part()
+        seed = p.newObject("PartDesign::Pad", "Seed")
+        seed.Profile = sketch(p, "SeedSk", xyPlane(p), (5, -5, 15, 5))
+        seed.Type = "UpToFace"
+        seed.UpToFace = (roof, [under])
+        listed(seed)
+        lp = linear(p, "LP", [seed], X_AXIS, 60, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, lp)
+        self.assertTipVolume(self.roofVolume() + self.column(10) + self.column(40) + self.column(70))
+
+    def testReapplyUpToNextStopsOnTheInstanceBefore(self):
+        """O10: a plate x -10..30, y 0..20, z 0..5; the seed 10 x 10 (x 0..10, y 5..15) from z 10
+        Add up to next downward (z 5..10); a pattern +z 10 x 2, Reapply on: instance 2 (from z 20)
+        stops on the seed's top (z 10): +1000."""
+        self.plate(height=5, rect=(-10, 0, 30, 20))
+        sk = studioSketch(self.doc, self.S, "SeedSk", rects=((0, 5, 10, 15),), z=10)
+        seed = makeOwner(
+            self.doc, self.S, "Pad", "Seed", sk, ("P",), Type="UpToFirst", Reversed=True
+        )
+        lp = linear(self.part(), "LP", [seed], Z_AXIS, 10, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, lp)
+        self.assertTipVolume(40 * 20 * 5 + 500 + 1000)
+        self.assertTrue(lp.Shape.isInside(V(5, 10, 15), 1e-6, True))
+        self.assertFalse(lp.Shape.isInside(V(5, 10, 21), 1e-6, True))
+        # Reapply off: an up to next seed is re-run at each instance all the same (oracle 9, R2)
+        lp.Reapply = False
+        self.doc.recompute()
+        self.assertValid(seed, lp)
+        self.assertTipVolume(40 * 20 * 5 + 500 + 1000)
+
+    def testReapplyNativeUpToNext(self):
+        """O10 with a Body Pad as the seed (Up to first, downward)."""
+        self.plate(height=5, rect=(-10, 0, 30, 20))
+        p = self.part()
+        seed = p.newObject("PartDesign::Pad", "Seed")
+        seed.Profile = sketch(p, "SeedSk", xyPlane(p), (0, 5, 10, 15), z=10)
+        seed.Type = "UpToFirst"
+        seed.Reversed = True
+        listed(seed)
+        lp = linear(p, "LP", [seed], Z_AXIS, 10, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, lp)
+        self.assertTipVolume(40 * 20 * 5 + 500 + 1000)
+
+    def steppedPlate(self):
+        """O10b: a plate x -10..50, y 0..20, top z 5, raised to z 10 for x 20..50."""
+        self.plate(height=5, rect=(-10, 0, 50, 20))
+        p = self.part()
+        pad(p, "Step", sketch(p, "StepSk", xyPlane(p), (20, 0, 50, 20), z=5), 5)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        return p
+
+    def testReapplyUpToNextOnAStep(self):
+        """O10b: the seed from z 20 down to the plate (depth 15); a pattern +x 25 x 2, Reapply on:
+        instance 2 (x 25..35) is re-solved, depth 10 to the high step (+1000)."""
+        p = self.steppedPlate()
+        sk = studioSketch(self.doc, self.S, "SeedSk", rects=((0, 5, 10, 15),), z=20)
+        seed = makeOwner(
+            self.doc, self.S, "Pad", "Seed", sk, ("P",), Type="UpToFirst", Reversed=True
+        )
+        lp = linear(p, "LP", [seed], X_AXIS, 25, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, lp)
+        self.assertTipVolume(30 * 20 * 5 + 30 * 20 * 10 + 1500 + 1000)
+
+    def testReapplyMirrorOfAnUpToFaceSeed(self):
+        """A roof over x -100..100 (underside z = 40 + 0.2 x); the seed up to it at x 5..15 (4200),
+        mirrored about YZ with Reapply on: the image at x -15..-5 reaches the face at z 38 (3800).
+        Reapply off: a copy of the seed (top at z 41..43, oracle 9 R3), which goes into the roof
+        there: the union is the same."""
+        roof, under = self.roofStudio(-100, 100)
+        seed = self.roofSeedOwner(roof, under)
+        m = mirror(self.part(), "Mir", [seed], YZ_PLANE)
+        m.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, m)
+        self.assertTipVolume(self.roofVolume(-100, 100) + self.column(10) + self.column(-10))
+        m.Reapply = False
+        self.doc.recompute()
+        self.assertValid(seed, m)
+        self.assertTipVolume(self.roofVolume(-100, 100) + self.column(10) + self.column(-10))
+        self.assertTrue(m.Shape.isInside(V(-10, 0, 39), 1e-6, True))
+
+    def testReapplyPatternOfAPattern(self):
+        """LP1 = [Seed] +x 30 x 2 and LP2 = [LP1] +x 30 x 2, both Reapply on: LP2 re-runs LP1's
+        instance only (Onshape P2), 60 from the seed: x 65..75, 5400."""
+        roof, under = self.roofStudio()
+        seed = self.roofSeedOwner(roof, under)
+        p = self.part()
+        lp1 = linear(p, "LP1", [seed], X_AXIS, 30, 2)
+        lp1.Reapply = True
+        lp2 = linear(p, "LP2", [lp1], X_AXIS, 30, 2)
+        lp2.Reapply = True
+        self.doc.recompute()
+        self.assertValid(seed, lp1, lp2)
+        self.assertTipVolume(self.roofVolume() + self.column(10) + self.column(40) + self.column(70))
+        self.assertNamesDistinct(lp2.Shape)
+
+    def testReapplyBlindIsTheCopy(self):
+        """A Blind Remove with Reapply on: the instances are the copies, names and all."""
+        self.plate()
+        hole = self.holeOwner(Length=5)
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        names = elementNames(lp.Shape)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(5))
+        self.assertEqual(elementNames(lp.Shape), names)
+
+    def floorPlane(self, z=0.0):
+        floor = self.doc.addObject("Part::Plane", "Floor")
+        self.S.addObject(floor)
+        floor.Length, floor.Width = 100, 40
+        floor.Placement = App.Placement(V(-20, -10, z), App.Rotation())
+        return floor
+
+    def testReapplyMixedAddAndRemoveInOrder(self):
+        """A boss (Add, Blind 5 at x 2..8) and a hole through it (Remove, Up to the plate's floor
+        plane z 0), patterned +x 20 x 3 with Reapply on: each instance adds its boss then cuts
+        its hole."""
+        self.plate(height=5, rect=(0, 0, 60, 20))
+        floor = self.floorPlane()
+        boss = self.bossOwner("Boss", (2, 7, 8, 13), 5, 5)
+        hole = self.holeOwner(x=5, y=10, z=10, Type="UpToFace", UpToFace=(floor, ["Face1"]))
+        lp = linear(self.part(), "LP", [boss, hole], X_AXIS, 40, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(boss, hole, lp)
+        self.assertTipVolume(60 * 20 * 5 + 3 * (6 * 6 * 5 - self.hole(10)))
+
+    def testReapplyRemoveOffThePartDoesNothing(self):
+        """P1: a plate x 0..30; an r3 hole up to the floor plane at (5, 10), patterned +x 20 x 3,
+        Reapply on: instance 3 (x 45) misses the plate and does nothing, with no message."""
+        self.plate(rect=(0, 0, 30, 20))
+        floor = self.floorPlane()
+        hole = self.holeOwner(x=5, Type="UpToFace", UpToFace=(floor, ["Face1"]))
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(30 * 20 * 10 - 2 * self.hole(10))
+
+    def testReapplyFloatingAddFailsLoudly(self):
+        """An Add instance touching nothing of the part (Onshape makes it a new part): refused
+        loudly until parts are made then (P6b), re-run or copied."""
+        self.plate()
+        ceiling = self.doc.addObject("Part::Plane", "Ceiling")
+        self.S.addObject(ceiling)
+        ceiling.Length, ceiling.Width = 200, 40
+        ceiling.Placement = App.Placement(V(-20, -10, 15), App.Rotation())
+        sk = studioSketch(self.doc, self.S, "BossSk", rects=((2, 7, 8, 13),), z=10)
+        boss = makeOwner(
+            self.doc,
+            self.S,
+            "Pad",
+            "Boss",
+            sk,
+            ("P",),
+            Type="UpToFace",
+            UpToFace=(ceiling, ["Face1"]),
+        )
+        lp = linear(self.part(), "LP", [boss], X_AXIS, 80, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(lp, "Boss", "instance 3", "new part")
+        blind = self.bossOwner("Blind", (12, 7, 18, 13), 10, 5)
+        lp2 = linear(self.part(), "LP2", [blind], X_AXIS, 80, 3)
+        lp2.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(lp2, "Blind", "new part")
+
+    def testReapplyRefusesWhatItCantReRun(self):
+        """Under Reapply on, an original it can't re-run yet is refused loudly, naming its type."""
+        self.plate()
+        p = self.part()
+        base = self.doc.getObject("PPad")
+        top = next(
+            f"Face{i}"
+            for i, f in enumerate(base.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 10) < 1e-6
+        )
+        thickness = p.newObject("PartDesign::Thickness", "Shell")
+        thickness.Base = (base, [top])
+        thickness.Value = 1
+        listed(thickness)
+        lp = linear(p, "LP", [thickness], X_AXIS, 10, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(lp, "Reapply isn't available for Thickness")
+
+    def filletOnInstance2(self):
+        """Plate 60 x 20 x 10; an r3 hole up to the plane z 4 (parallel to the motion), patterned +x
+        20 x 3, Reapply off (copies); a fillet r1 on instance 2's rim (x 30, z 10)."""
+        self.plate()
+        floor = self.floorPlane(4)
+        hole = self.holeOwner(Type="UpToFace", UpToFace=(floor, ["Face1"]))
+        p = self.part()
+        lp = linear(p, "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        rim = next(
+            f"Edge{i}"
+            for i, e in enumerate(lp.Shape.Edges, 1)
+            if e.Curve.__class__.__name__ == "Circle"
+            and e.Curve.Center.distanceToPoint(V(30, 10, 10)) < 1e-6
+        )
+        fillet = p.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (lp, [rim])
+        fillet.Radius = 1
+        listed(fillet)
+        self.doc.recompute()
+        self.assertValid(fillet)
+        return lp, fillet
+
+    def testReapplyToggleKeepsALaterFillet(self):
+        """Reapply toggled on and off: the instances are alike in both modes, so their faces keep
+        their names and the fillet on instance 2's rim keeps working."""
+        lp, fillet = self.filletOnInstance2()
+        volume = self.tipShape().Volume
+        self.assertLess(volume, 60 * 20 * 10 - 3 * self.hole(6))
+        names = faceNames(lp.Shape)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(lp, fillet)
+        self.assertEqual(sorted(faceNames(lp.Shape)), sorted(names))
+        self.assertAlmostEqual(self.tipShape().Volume, volume, places=4)
+        lp.Reapply = False
+        self.doc.recompute()
+        self.assertValid(lp, fillet)
+        self.assertAlmostEqual(self.tipShape().Volume, volume, places=4)
+
+    def testReapplyUndoRedo(self):
+        """Reapply set in a transaction goes with undo and comes back with redo (O6's seed: off,
+        copies at the seed's height, none reaching the roof: refused; on, each instance up to the
+        slanted face)."""
+        roof, under = self.roofStudio()
+        seed = self.roofSeedOwner(roof, under)
+        linear(self.part(), "LP", [seed], X_AXIS, 60, 3)
+        self.doc.recompute()
+        copies = self.roofVolume() + self.column(10)  # no copy reaches the part: refused
+        reRun = self.roofVolume() + self.column(10) + self.column(40) + self.column(70)
+        self.assertRefused(self.doc.getObject("LP"), "Could not create all instances")
+        self.assertTipVolume(copies)
+        self.doc.openTransaction("reapply")
+        self.doc.getObject("LP").Reapply = True
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertTipVolume(reRun)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse(self.doc.getObject("LP").Reapply)
+        self.assertRefused(self.doc.getObject("LP"), "Could not create all instances")
+        self.assertTipVolume(copies)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertTrue(self.doc.getObject("LP").Reapply)
+        self.assertValid(self.doc.getObject("LP"))
+        self.assertTipVolume(reRun)
+
+    def testReapplySaveAndReopen(self):
+        """Saved and opened again: Reapply kept, the same volume and element names."""
+        roof, under = self.roofStudio()
+        seed = self.roofSeedOwner(roof, under)
+        lp = linear(self.part(), "LP", [seed], X_AXIS, 60, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        before = elementNames(self.tipShape())
+        volume = self.tipShape().Volume
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "reapply.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.docs.append(self.doc.Name)
+        self.doc.recompute()
+        self.assertTrue(self.doc.getObject("LP").Reapply)
+        self.assertTrue(self.doc.getObject("LP").isValid())
+        self.assertAlmostEqual(self.tipShape().Volume, volume, places=4)
+        self.assertEqual(elementNames(self.tipShape()), before)
+
+    # ------------------------------------------------------------------------------- Reapply (T3 B)
+    def testReapplyHoleUpToNextStopsAtItsOwnMaterial(self):
+        """A plate x 0..60, y 0..20, z 0..5 with a shelf z 10..15 over x 30..60 (held by a wall at
+        x 55..60). An r3 flat hole sketched at z 15 at (10, 10), up to next: through the plate
+        (depth to z 0). Patterned +x 30 x 2 with Reapply on: instance 2 at x 40 stops where the
+        shelf's material ends (z 10), never reaching the plate."""
+        self.plate(height=5, rect=(0, 0, 60, 20))
+        p = self.part()
+        pad(p, "Wall", sketch(p, "WallSk", xyPlane(p), (55, 0, 60, 20), z=5), 10)
+        pad(p, "Shelf", sketch(p, "ShelfSk", xyPlane(p), (30, 0, 60, 20), z=10), 5)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        base = 60 * 20 * 5 + 5 * 20 * 5 + 30 * 20 * 5
+        sk = sketch(p, "HoleSk", xyPlane(p), z=15)
+        sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), HOLE_R))
+        hole = p.newObject("PartDesign::Hole", "Drill")
+        hole.Profile = sk
+        hole.Diameter = 2 * HOLE_R
+        hole.DepthType = "UpToFirst"
+        hole.DrillPoint = "Flat"
+        listed(hole)
+        self.doc.recompute()
+        self.assertValid(hole)
+        self.assertTipVolume(base - self.hole(5))
+        lp = linear(p, "LP", [hole], X_AXIS, 30, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(lp)
+        self.assertTipVolume(base - 2 * self.hole(5))
+        self.assertTrue(lp.Shape.isInside(V(40, 10, 2.5), 1e-6, True))
+        self.assertFalse(lp.Shape.isInside(V(40, 10, 12.5), 1e-6, True))
+
+    def roundStudio(self):
+        """Part R, a disc r20 x 10 at the origin."""
+        return self.studio((("R", 20, 10),))
+
+    def testReapplyCircularPatternWithARevolveAndAChamfer(self):
+        """The team's shape (designed): on a disc r20 x 10, a pocket x 12..16, y -2..2 down to a datum
+        plane at z 4 (Up to face), its rim chamfered 0.5, and a 45 deg revolve of a 4 x 2 profile
+        (r 4..8, z 10..12) about z; circular pattern 4 x 90 deg of the three, Reapply on: each
+        instance is the pocket, its chamfered rim and the sector."""
+        self.roundStudio()
+        r = self.part("R")
+        floor = r.newObject("PartDesign::Plane", "Floor")
+        floor.MapMode = "Deactivated"
+        floor.Placement = App.Placement(V(0, 0, 4), App.Rotation())
+        listed(floor)
+        pocket = r.newObject("PartDesign::Pocket", "Slot")
+        pocket.Profile = sketch(r, "SlotSk", xyPlane(r), (12, -2, 16, 2), z=10)
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = (floor, [""])
+        listed(pocket)
+        self.doc.recompute()
+        self.assertValid(pocket)
+        rim = [
+            f"Edge{i}"
+            for i, e in enumerate(pocket.Shape.Edges, 1)
+            if all(abs(v.Point.z - 10) < 1e-6 and 11.9 < v.Point.x < 16.1 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(rim), 4)
+        chamfer = r.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pocket, rim)
+        chamfer.Size = 0.5
+        listed(chamfer)
+        profile = polygonSketch(
+            r, "SectorSk", [(r.Origin.OriginFeatures[XZ_PLANE], "")],
+            [(4, 10), (8, 10), (8, 12), (4, 12)],
+        )
+        sector = r.newObject("PartDesign::Revolution", "Sector")
+        sector.Profile = profile
+        sector.ReferenceAxis = (profile, ["V_Axis"])
+        sector.Angle = 45
+        listed(sector)
+        self.doc.recompute()
+        self.assertValid(chamfer, sector)
+        pp = polar(r, "PP", [pocket, chamfer, sector], 4)
+        pp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(pp)
+        disc = Part.makeCylinder(20, 10)
+        cut = disc.cut(box(12, -2, 4, 16, 2, 10))
+        edges = [
+            e for e in cut.Edges
+            if all(abs(v.Point.z - 10) < 1e-6 and 11.9 < v.Point.x < 16.1 for v in e.Vertexes)
+        ]
+        removed = disc.Volume - cut.makeChamfer(0.5, edges).Volume
+        sectorVolume = math.pi * (8**2 - 4**2) * 2 / 8
+        self.assertAlmostEqual(
+            self.tipShape("R").Volume, disc.Volume - 4 * removed + 4 * sectorVolume, places=2
+        )
+        self.assertEqual(len(self.tipShape("R").Solids), 1)
+
+    def testReapplyChamferWhoseEdgesAreNotOnTheInstanceFailsLoudly(self):
+        """A chamfer of the plate's own edge (not made by a patterned feature) under Reapply on: the
+        instance has no such edge, so the pattern fails naming the chamfer and the instance."""
+        self.plate()
+        p = self.part()
+        base = self.doc.getObject("PPad")
+        edge = next(
+            f"Edge{i}"
+            for i, e in enumerate(base.Shape.Edges, 1)
+            if all(abs(v.Point.z - 10) < 1e-6 and abs(v.Point.y) < 1e-6 for v in e.Vertexes)
+        )
+        chamfer = p.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (base, [edge])
+        chamfer.Size = 1
+        listed(chamfer)
+        lp = linear(p, "LP", [chamfer], Y_AXIS, 5, 2)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(lp, "Chamfer", "instance 2", "edges")
+
+    def testReapplyRefusesARevolveUpToAFace(self):
+        """A revolve up to a face under Reapply on: refused loudly, naming the end type."""
+        self.roundStudio()
+        r = self.part("R")
+        profile = polygonSketch(
+            r, "SectorSk", [(r.Origin.OriginFeatures[XZ_PLANE], "")],
+            [(4, 10), (8, 10), (8, 12), (4, 12)],
+        )
+        stop = r.newObject("PartDesign::Plane", "Stop")
+        stop.MapMode = "Deactivated"
+        # a plane through the z axis at 60 deg from the profile's
+        stop.Placement = App.Placement(
+            V(0, 0, 0), App.Rotation(V(0, 0, 1), 60).multiply(App.Rotation(V(1, 0, 0), 90))
+        )
+        listed(stop)
+        sector = r.newObject("PartDesign::Revolution", "Sector")
+        sector.Profile = profile
+        sector.ReferenceAxis = (profile, ["V_Axis"])
+        sector.Type = "UpToFace"
+        sector.UpToFace = (stop, [""])
+        listed(sector)
+        pp = polar(r, "PP", [sector], 4)
+        pp.Reapply = True
+        self.doc.recompute()
+        self.assertRefused(pp, "Reapply isn't available for a revolve", "up to a face")
+
+    # ------------------------------------------------------------------------------- oracle 9 (T3 fix)
+    # Onshape's answers, batch 9 (notes/onshape-facts.md): R1, a pattern's instances are made
+    # instance by instance (each instance's originals in order), Reapply on and off; R2, an
+    # instance that fails contributes nothing, silently, and an Up to next seed is re-run at each
+    # instance with Reapply off too; R3, each pattern follows its own Reapply, nested too.
+
+    def orderStudio(self, upTo=False):
+        """R1: a block 100 x 20 x 10; seed A, a boss 10 x 10 x 10 on it at x 10..20, y 5..15 (z
+        10..20; upTo: Up to face to a plane z 20 instead of Blind 10); seed B, a slot Remove from
+        the plane x = 15, +x Blind 20, section y 8..12, z 12..18."""
+        self.studio((("P", (0, 0, 100, 20), 10),), name="TestStudioOrder")
+        if upTo:
+            top = self.doc.addObject("Part::Plane", "Top")
+            self.S.addObject(top)
+            top.Length, top.Width = 200, 40
+            top.Placement = App.Placement(V(-20, -10, 20), App.Rotation())
+            sk = studioSketch(self.doc, self.S, "ASk", rects=((10, 5, 20, 15),), z=10)
+            a = makeOwner(
+                self.doc, self.S, "Pad", "A", sk, ("P",), Type="UpToFace", UpToFace=(top, ["Face1"])
+            )
+        else:
+            a = self.bossOwner("A", (10, 5, 20, 15), 10, 10)
+        sk = self.doc.addObject("Sketcher::SketchObject", "BSk")
+        self.S.addObject(sk)
+        # the sketch's u along -z, v along y, normal +x: (u, v) is the point (15, v, -u)
+        sk.Placement = App.Placement(V(15, 0, 0), App.Rotation(V(0, 1, 0), 90))
+        rect(sk, -18, 8, -12, 12)
+        b = makeOwner(self.doc, self.S, "Pocket", "B", sk, ("P",), Length=20, Reversed=True)
+        self.doc.recompute()
+        self.assertValid(a, b)
+        # the seeds: the slot cuts A's half x 15..20 only (x 20..35 is above the block)
+        self.assertTipVolume(20000 + 1000 - 5 * 4 * 6)
+        self.assertFalse(self.tipShape().isInside(V(17.5, 10, 15), 1e-6, True))
+        self.assertTrue(self.tipShape().isInside(V(12.5, 10, 15), 1e-6, True))
+        return a, b
+
+    def assertInstanceMajor(self, lp):
+        """R1's pattern: instance by instance (A2 B2 A3 B3) gives 22640, and boss 3 is solid at
+        x 50..55; feature by feature (A2 A3 B2 B3) would give 22520, B2 cutting A3."""
+        self.assertValid(lp)
+        self.assertTipVolume(22640)
+        self.assertTrue(self.tipShape().isInside(V(52.5, 10, 15), 1e-6, True))
+        self.assertFalse(self.tipShape().isInside(V(37.5, 10, 15), 1e-6, True))
+        self.assertFalse(self.tipShape().isInside(V(57.5, 10, 15), 1e-6, True))
+        self.assertNamesDistinct(lp.Shape)
+
+    def testOrderIsInstanceByInstance(self):
+        """R1: the pattern [A, B] +x 20 x 3, Reapply off and on: 22640 both ways (Onshape)."""
+        a, b = self.orderStudio()
+        lp = linear(self.part(), "LP", [a, b], X_AXIS, 40, 3)
+        for reapply in (False, True):
+            with self.subTest(reapply=reapply):
+                lp.Reapply = reapply
+                self.doc.recompute()
+                self.assertInstanceMajor(lp)
+
+    def testReapplyOrderWithAnUpToFaceSeed(self):
+        """R1 with A Up to face (a plane z 20, so its instances are its copies) and Reapply on, and
+        off: still instance by instance, 22640."""
+        a, b = self.orderStudio(upTo=True)
+        lp = linear(self.part(), "LP", [a, b], X_AXIS, 40, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertInstanceMajor(lp)
+        lp.Reapply = False
+        self.doc.recompute()
+        self.assertInstanceMajor(lp)
+
+    def ceilingStudio(self):
+        """R2: a plate x 0..60, y 0..20, z 0..5, and a ceiling x 0..40, z 20..25 over it, held by a
+        back wall x 0..40, y 20..25 (the ceiling is of the same part here); the seed, a boss
+        10 x 10 at x 5..15, y 5..15 from the plate's top Add up to next: up to the ceiling."""
+        self.plate(height=5, rect=(0, 0, 60, 20))
+        p = self.part()
+        pad(p, "Wall", sketch(p, "WallSk", xyPlane(p), (0, 20, 40, 25)), 25)
+        pad(p, "Ceiling", sketch(p, "CeilingSk", xyPlane(p), (0, 0, 40, 20), z=20), 5)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        sk = studioSketch(self.doc, self.S, "BossSk", rects=((5, 5, 15, 15),), z=5)
+        boss = makeOwner(self.doc, self.S, "Pad", "Boss", sk, ("P",), Type="UpToFirst")
+        self.doc.recompute()
+        self.assertValid(boss)
+        base = 60 * 20 * 5 + 40 * 5 * 25 + 40 * 20 * 5
+        self.assertTipVolume(base + 1500)
+        return boss, base
+
+    def testFailingInstanceContributesNothing(self):
+        """R2: the boss patterned +x 20 x 3, Reapply on and off: instance 3 (x 45..55) has no
+        ceiling over it and adds nothing, with no error; instance 2 reaches the ceiling."""
+        boss, base = self.ceilingStudio()
+        lp = linear(self.part(), "LP", [boss], X_AXIS, 40, 3)
+        for reapply in (True, False):
+            with self.subTest(reapply=reapply):
+                lp.Reapply = reapply
+                self.doc.recompute()
+                self.assertValid(lp)
+                self.assertEqual(lp.getStatusString(), "Valid")
+                self.assertTipVolume(base + 2 * 1500)
+                self.assertTrue(self.tipShape().isInside(V(30, 10, 12), 1e-6, True))
+                self.assertFalse(self.tipShape().isInside(V(50, 10, 7), 1e-6, True))
+
+    def tiltStudio(self):
+        """R3: a plate 80 x 60 x 5; a plane z = 20 + 0.1 x + 0.1 y; the seed, a boss 10 x 10 at
+        x 5..15, y 5..15 from the plate's top Add up to the plane: 17 high at its centre, 1700."""
+        self.plate(height=5, rect=(0, 0, 80, 60))
+        tilt = self.doc.addObject("Part::Plane", "Tilt")
+        self.S.addObject(tilt)
+        tilt.Length, tilt.Width = 250, 250
+        tilt.Placement = App.Placement(
+            V(-40, -40, 20 - 8), App.Rotation(V(0, 0, 1), V(-0.1, -0.1, 1))
+        )
+        sk = studioSketch(self.doc, self.S, "BossSk", rects=((5, 5, 15, 15),), z=5)
+        boss = makeOwner(
+            self.doc, self.S, "Pad", "Boss", sk, ("P",), Type="UpToFace", UpToFace=(tilt, ["Face1"])
+        )
+        self.doc.recompute()
+        self.assertValid(boss)
+        self.assertTipVolume(80 * 60 * 5 + 1700)
+        return boss
+
+    def testEachPatternFollowsItsReapply(self):
+        """R3, one level: the boss +x 30 x 2; Reapply off copies the seed (1700), on follows the
+        plane (2000)."""
+        boss = self.tiltStudio()
+        lp = linear(self.part(), "LP", [boss], X_AXIS, 30, 2)
+        for reapply, second in ((False, 1700), (True, 2000)):
+            with self.subTest(reapply=reapply):
+                lp.Reapply = reapply
+                self.doc.recompute()
+                self.assertValid(lp)
+                self.assertTipVolume(80 * 60 * 5 + 1700 + second)
+
+    def testNestedPatternsFollowTheirOwnReapply(self):
+        """R3, nested: inner [boss] +x 30 x 2, outer [inner] +y 30 x 2 (the inner's instance only).
+        The outer's instance at (40, 40): both on, re-run there (2300); inner off and outer on,
+        the seed's shape (1700); inner on and outer off, a copy of the inner's instance (2000);
+        both off, 1700. The inner's own instance: 2000 on, 1700 off."""
+        boss = self.tiltStudio()
+        p = self.part()
+        inner = linear(p, "Inner", [boss], X_AXIS, 30, 2)
+        outer = linear(p, "Outer", [inner], Y_AXIS, 30, 2)
+        cases = {(True, True): 2300, (False, True): 1700, (True, False): 2000, (False, False): 1700}
+        for (innerOn, outerOn), at4040 in cases.items():
+            with self.subTest(inner=innerOn, outer=outerOn):
+                inner.Reapply = innerOn
+                outer.Reapply = outerOn
+                self.doc.recompute()
+                self.assertValid(inner, outer)
+                innerInstance = 2000 if innerOn else 1700
+                self.assertTipVolume(80 * 60 * 5 + 1700 + innerInstance + at4040)
+                top = 5 + at4040 / 100
+                self.assertTrue(self.tipShape().isInside(V(40, 40, top - 0.5), 1e-6, True))
+                self.assertFalse(self.tipShape().isInside(V(40, 40, top + 0.5), 1e-6, True))
+                # nothing at the seed's place moved by the outer only (the inner's seed isn't one)
+                self.assertFalse(self.tipShape().isInside(V(10, 40, 7), 1e-6, True))
+
+    # ------------------------------------------------------------------------------- variants of T3's tests
+    # Five of T3's tests pass on a build without T3 (work/hub4/red.sum): each has a variant here
+    # whose expected geometry only the re-run (or the instance order) gives.
+
+    def testReapplyBlindBesideAnUpToFaceSeed(self):
+        """Variant of testReapplyBlindIsTheCopy: a Blind r3 hole 5 deep at (10, 5) and an r3 hole
+        down to the slanted plane at (10, 15), patterned +x 20 x 3, Reapply on: the blind copies,
+        the other hole at each instance's own depth."""
+        self.plate()
+        floor = self.slant()
+        blind = self.holeOwner("Blind", y=5.0, Length=5)
+        deep = self.holeOwner("Deep", y=15.0, Type="UpToFace", UpToFace=(floor, ["Face1"]))
+        lp = linear(self.part(), "LP", [blind, deep], X_AXIS, 40, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(blind, deep, lp)
+        depths = sum(self.slantDepth(x) for x in (10, 30, 50))
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(5) - self.hole(1) * depths)
+        self.assertNamesDistinct(lp.Shape)
+
+    def testReapplyCircularPatternDownToATiltedFloor(self):
+        """Variant of testReapplyCircularPatternWithARevolveAndAChamfer: the pocket goes down to a
+        floor plane tilted along x (z = 4 + 0.05 x), which the rotation doesn't keep: each
+        instance's pocket reaches it at its own depth, its rim chamfered 0.5."""
+        self.roundStudio()
+        r = self.part("R")
+        slope = math.degrees(math.atan(0.05))
+        floor = r.newObject("PartDesign::Plane", "Floor")
+        floor.MapMode = "Deactivated"
+        floor.Placement = App.Placement(V(0, 0, 4), App.Rotation(V(0, 1, 0), -slope))
+        listed(floor)
+        pocket = r.newObject("PartDesign::Pocket", "Slot")
+        pocket.Profile = sketch(r, "SlotSk", xyPlane(r), (12, -2, 16, 2), z=10)
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = (floor, [""])
+        listed(pocket)
+        self.doc.recompute()
+        self.assertValid(pocket)
+        rim = [
+            f"Edge{i}"
+            for i, e in enumerate(pocket.Shape.Edges, 1)
+            if all(abs(v.Point.z - 10) < 1e-6 and 11.9 < v.Point.x < 16.1 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(rim), 4)
+        chamfer = r.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pocket, rim)
+        chamfer.Size = 0.5
+        listed(chamfer)
+        self.doc.recompute()
+        self.assertValid(chamfer)
+        pp = polar(r, "PP", [pocket, chamfer], 4)
+        pp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(pp)
+        disc = Part.makeCylinder(20, 10)
+        # below the floor: a slab whose top is the plane z = 4 + 0.05 x
+        below = Part.makeBox(200, 200, 100, V(-100, -100, -96))
+        below.rotate(V(0, 0, 4), V(0, 1, 0), -slope)
+        expected = disc
+        for k in range(4):
+            prism = box(12, -2, -10, 16, 2, 10)
+            prism.rotate(V(0, 0, 0), V(0, 0, 1), 90 * k)
+            expected = expected.cut(prism.cut(below))
+        # the chamfer at the top takes the same at every instance
+        seedCut = disc.cut(box(12, -2, 4, 16, 2, 10))
+        edges = [
+            e
+            for e in seedCut.Edges
+            if all(abs(v.Point.z - 10) < 1e-6 and 11.9 < v.Point.x < 16.1 for v in e.Vertexes)
+        ]
+        chamferTakes = seedCut.Volume - seedCut.makeChamfer(0.5, edges).Volume
+        self.assertAlmostEqual(
+            self.tipShape("R").Volume, expected.Volume - 4 * chamferTakes, places=2
+        )
+        # the instance at x -14 (low floor, z 3.3) is deeper than the seed's at x 14 (z 4.7)
+        self.assertFalse(self.tipShape("R").isInside(V(-14, 0, 3.5), 1e-6, True))
+        self.assertTrue(self.tipShape("R").isInside(V(14, 0, 4.5), 1e-6, True))
+
+    def testReapplyRemoveOffThePartDownToASlant(self):
+        """Variant of testReapplyRemoveOffThePartDoesNothing: the hole down to the slanted plane,
+        Reapply on: instances 1-2 each at their own depth, instance 3 off the plate does nothing.
+        Reapply off: copies at the seed's depth, the third doing nothing."""
+        self.plate(rect=(0, 0, 30, 20))
+        floor = self.slant()
+        hole = self.holeOwner(x=5, Type="UpToFace", UpToFace=(floor, ["Face1"]))
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        lp.Reapply = True
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(
+            30 * 20 * 10 - self.hole(self.slantDepth(5)) - self.hole(self.slantDepth(25))
+        )
+        lp.Reapply = False
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(30 * 20 * 10 - 2 * self.hole(self.slantDepth(5)))
+
+    def testReapplyToggleUpToNextKeepsALaterFillet(self):
+        """Variant of testReapplyToggleKeepsALaterFillet: the holes are Up to next, re-run at each
+        instance both ways (R2), so a fillet on instance 2's rim keeps working through the toggle."""
+        self.plate()
+        hole = self.holeOwner(Type="UpToFirst")
+        p = self.part()
+        lp = linear(p, "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(10))
+        rim = next(
+            f"Edge{i}"
+            for i, e in enumerate(lp.Shape.Edges, 1)
+            if e.Curve.__class__.__name__ == "Circle"
+            and e.Curve.Center.distanceToPoint(V(30, 10, 10)) < 1e-6
+        )
+        fillet = p.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (lp, [rim])
+        fillet.Radius = 1
+        listed(fillet)
+        self.doc.recompute()
+        self.assertValid(fillet)
+        volume = self.tipShape().Volume
+        self.assertLess(volume, 60 * 20 * 10 - 3 * self.hole(10))
+        names = faceNames(lp.Shape)
+        for reapply in (True, False):
+            lp.Reapply = reapply
+            self.doc.recompute()
+            self.assertValid(lp, fillet)
+            self.assertEqual(sorted(faceNames(lp.Shape)), sorted(names))
+            self.assertAlmostEqual(self.tipShape().Volume, volume, places=4)

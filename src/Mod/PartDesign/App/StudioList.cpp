@@ -12,10 +12,12 @@
 #include <utility>
 #include <vector>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
 #include <App/PropertyStandard.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Tools.h>
 
@@ -41,6 +43,13 @@ AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* 
 using namespace PartDesign;
 
 PROPERTY_SOURCE(PartDesign::StudioList, App::DocumentObject)
+
+namespace PartDesign
+{
+// Below (slice 9)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
+}  // namespace PartDesign
 
 namespace
 {
@@ -81,6 +90,33 @@ App::DocumentObject* ownerOfStep(const App::DocumentObject* obj)
 bool suppressedOf(const App::DocumentObject* entry)
 {
     auto prop = freecad_cast<App::PropertyBool*>(entry->getPropertyByName("Suppressed"));
+    return prop && prop->getValue();
+}
+
+/// A hidden dynamic flag of obj (slice 9), written only when it changes; it touches nothing
+void setFlag(App::DocumentObject* obj, const char* name, bool on)
+{
+    auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName(name));
+    if (!prop) {
+        if (!on || obj->getPropertyByName(name)) {
+            return;
+        }
+        prop = static_cast<App::PropertyBool*>(obj->addDynamicProperty(
+            "App::PropertyBool",
+            name,
+            "Studio",
+            "Whether this part mirror's Add consumes its source part (ops#654 slice 9)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (prop->getValue() != on) {
+        prop->setValue(on);
+    }
+}
+
+bool flagOf(const App::DocumentObject* obj, const char* name)
+{
+    auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName(name));
     return prop && prop->getValue();
 }
 
@@ -303,14 +339,34 @@ BooleanParts booleanPartsAt(const Boolean* owner,
     return out;
 }
 
+std::vector<Body*> partPatternSourcesAt(const App::DocumentObject* owner,
+                                        const std::vector<Body*>& bodies,
+                                        int index,
+                                        const std::map<const App::DocumentObject*, int>& positions,
+                                        const Consumed& consumed);
+
 /// The parts the Boolean owners of entries consume, each at its owner's place, in list order (a
-/// part a Boolean consumed earlier is no tool of a later one)
+/// part a Boolean consumed earlier is no tool of a later one); and the source of a part mirror's
+/// Add that merges it (slice 9, Onshape oracle 9 R4: decided by the mirror's last compute,
+/// StudioConsumesSource), unless suppressed
 Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                     const std::vector<Body*>& bodies,
                     const std::map<const App::DocumentObject*, int>& positions)
 {
     Consumed out;
     for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i] && isStudioPartPattern(entries[i]) && !suppressedOf(entries[i])
+            && studioPartMirrorConsumes(entries[i])) {
+            auto at = positions.find(entries[i]);
+            if (at != positions.end() && at->second == static_cast<int>(i)) {
+                const auto sources =
+                    partPatternSourcesAt(entries[i], bodies, static_cast<int>(i), positions, out);
+                if (sources.size() == 1) {
+                    out.emplace(sources.front(), static_cast<int>(i));
+                }
+            }
+            continue;
+        }
         const Boolean* owner = booleanOwner(entries[i]);
         if (!owner) {
             continue;
@@ -338,6 +394,28 @@ std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
         return booleanPartsAt(boolean, bodies, index, positions, consumed).steps;
     }
     return resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
+}
+
+/// A part pattern's source parts (StudioEntities) resolved at its place (index), without the
+/// parts it makes itself (FreeCAD-CH ops#654 slice 9)
+std::vector<Body*> partPatternSourcesAt(const App::DocumentObject* owner,
+                                        const std::vector<Body*>& bodies,
+                                        int index,
+                                        const std::map<const App::DocumentObject*, int>& positions,
+                                        const Consumed& consumed)
+{
+    auto pattern = freecad_cast<const Transformed*>(owner);
+    if (!pattern) {
+        return {};
+    }
+    std::vector<Body*> out;
+    for (auto body :
+         resolveScope(pattern->StudioEntities.getValues(), bodies, index, positions, consumed)) {
+        if (body->StudioMadeBy.getValue() != owner) {
+            out.push_back(body);
+        }
+    }
+    return out;
 }
 
 std::map<const App::DocumentObject*, int>
@@ -1038,8 +1116,17 @@ bool StudioList::reconcile(std::string* why)
             continue;
         }
         std::vector<App::DocumentObject*> bases = basesByOwner[entry];
+        // A part pattern's source parts too (the part mirror, slice 9): its tool is their shapes
+        // at its place
+        std::vector<Body*> read;
         if (const Boolean* boolean = booleanOwner(entry)) {
-            for (auto tool : booleanPartsAt(boolean, bodies, i, positions, consumed).tools) {
+            read = booleanPartsAt(boolean, bodies, i, positions, consumed).tools;
+        }
+        else if (isStudioPartPattern(entry)) {
+            read = partPatternSourcesAt(entry, bodies, i, positions, consumed);
+        }
+        if (!read.empty()) {
+            for (auto tool : read) {
                 App::DocumentObject* last = nullptr;
                 for (const auto& item : orders.at(tool)) {
                     if (item.key < i && Body::isSolidFeature(item.obj)) {
@@ -1054,6 +1141,10 @@ bool StudioList::reconcile(std::string* why)
         auto prop = freecad_cast<App::PropertyLinkList*>(entry->getPropertyByName("StudioBases"));
         if (prop && prop->getValues() != bases) {
             prop->setValues(bases);
+        }
+        if (isStudioPartPattern(entry)) {
+            // What this projection took of its Add's consumption (resync after a recompute)
+            setFlag(entry, "StudioConsumesSourceSeen", studioPartMirrorConsumes(entry));
         }
     }
 
@@ -1337,6 +1428,116 @@ void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Bo
         ids.push_back(studioPartId(body));
     }
     setStudioScopeIds(owner, ids);
+}
+
+// The part mirror (FreeCAD-CH ops#654 slice 9). Declared where used
+namespace PartDesign
+{
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+}  // namespace PartDesign
+
+/// A part pattern (PatternType Part) outside every Body: a studio feature whose tool is other
+/// parts' shapes at its place
+bool PartDesign::isStudioPartPattern(const App::DocumentObject* obj)
+{
+    auto pattern = freecad_cast<const Transformed*>(obj);
+    return pattern && pattern->isAttachedToDocument() && !Body::findBodyOf(obj)
+        && pattern->PatternType.getValue() == 1;
+}
+
+/// A part pattern's source parts live at its place in its list, in StudioEntities' order
+std::vector<Body*> PartDesign::studioPartPatternSources(const App::DocumentObject* owner)
+{
+    const StudioList* list = StudioList::holding(owner);
+    if (!isStudioPartPattern(owner) || !list) {
+        return {};
+    }
+    const auto bodies = studioBodies(owner->getDocument(), list->studio());
+    const auto& entries = list->Entries.getValues();
+    const auto positions = positionsOf(entries);
+    auto it = positions.find(owner);
+    const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
+    return partPatternSourcesAt(owner,
+                                bodies,
+                                index,
+                                positions,
+                                consumedBy(entries, bodies, positions));
+}
+
+namespace PartDesign
+{
+PartDesignExport void studioSetPartMirrorConsumes(App::DocumentObject* owner, bool consumes);
+void registerPartMirrorResync();
+}  // namespace PartDesign
+
+bool PartDesign::studioPartMirrorConsumes(const App::DocumentObject* owner)
+{
+    return owner && flagOf(owner, "StudioConsumesSource");
+}
+
+void PartDesign::studioSetPartMirrorConsumes(App::DocumentObject* owner, bool consumes)
+{
+    if (owner) {
+        setFlag(owner, "StudioConsumesSource", consumes);
+    }
+}
+
+namespace
+{
+/// After a recompute: a part mirror whose Add decided to consume its source (or no longer) since
+/// the list was last projected changes which parts live after it, so the list is reconciled and
+/// the document computed again (slice 9). Not while undoing, restoring or closing
+void resyncPartMirrors(const App::Document& constDoc)
+{
+    static bool busy = false;
+    auto& doc = const_cast<App::Document&>(constDoc);
+    if (busy || doc.isPerformingTransaction() || doc.testStatus(App::Document::Restoring)
+        || App::GetApplication().isClosingAll()) {
+        return;
+    }
+    std::vector<StudioList*> stale;
+    for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
+        auto list = static_cast<StudioList*>(obj);
+        for (auto entry : list->Entries.getValues()) {
+            if (entry && isStudioPartPattern(entry)
+                && flagOf(entry, "StudioConsumesSource")
+                    != flagOf(entry, "StudioConsumesSourceSeen")) {
+                stale.push_back(list);
+                break;
+            }
+        }
+    }
+    if (stale.empty()) {
+        return;
+    }
+    Base::StateLocker lock(busy, true);
+    for (auto list : stale) {
+        std::string why;
+        if (!list->reconcile(&why)) {
+            Base::Console().warning("%s\n", why.c_str());
+        }
+    }
+    doc.recompute();
+}
+}  // namespace
+
+void PartDesign::registerPartMirrorResync()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    registered = true;
+    auto watch = [](const App::Document& doc) {
+        const_cast<App::Document&>(doc).signalBecameStable.connect(&resyncPartMirrors);
+    };
+    App::GetApplication().signalNewDocument.connect(
+        [watch](const App::Document& doc, bool) { watch(doc); }
+    );
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
 }
 
 long PartDesign::studioTagFor(const App::DocumentObject* owner, const Body* /*body*/)

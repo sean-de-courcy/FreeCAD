@@ -186,6 +186,37 @@ void TaskTransformedParameters::setupUI()
     }
 
     setupParameterUI(ui->featureUI);  // create parameter UI widgets
+
+    // FreeCAD-CH ops#654 T3: Onshape's "Reapply features" (a feature pattern's, off by default):
+    // each instance re-runs its features there, against the part as it grows
+    if (!insideMultiTransform) {
+        auto reapply = new QCheckBox(tr("Reapply features"), proxy);
+        reapply->setObjectName(QStringLiteral("checkBoxReapply"));
+        reapply->setToolTip(
+            tr("Recompute each feature at each instance, against the part there: its end "
+               "conditions apply per instance")
+        );
+        reapply->setChecked(pcTransformed->Reapply.getValue());
+        reapply->setEnabled(mode == Mode::Features);
+        ui->verticalLayout->insertWidget(ui->verticalLayout->indexOf(ui->featureUI) + 1, reapply);
+        connect(reapply, &QCheckBox::toggled, this, [this](bool on) {
+            auto pattern = getObject<PartDesign::Transformed>();
+            if (!pattern || pattern->Reapply.getValue() == on) {
+                return;
+            }
+            setupTransaction();
+            pattern->Reapply.setValue(on);
+            recomputeFeature();
+            if (originalsField) {
+                originalsField->setNote(QString());
+            }
+            showStudioRefusal(originalsField, pattern);
+        });
+        connect(ui->buttonGroupMode, &QButtonGroup::idClicked, reapply, [reapply](int id) {
+            reapply->setEnabled(id == static_cast<int>(Mode::Features));
+        });
+    }
+
     this->groupLayout()->addWidget(proxy);
 }
 

@@ -20,11 +20,13 @@
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 
 #include <App/Datums.h>
+#include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
@@ -37,22 +39,12 @@
 #include "FeatureAddSub.h"
 #include "FeatureExtrude.h"
 #include "FeatureHole.h"
+#include "FeatureMirrored.h"
+#include "StudioOwner.h"
 #include "StudioPattern.h"
 
 namespace PartDesign
 {
-
-Part::TopoShape studioPatternTool(
-    const App::DocumentObject* /*pattern*/,
-    const Body* /*part*/,
-    std::string* why
-)
-{
-    if (why) {
-        *why = "not yet (T1)";
-    }
-    return {};
-}
 
 std::vector<Body*> studioPatternScope(const App::DocumentObject* /*pattern*/)
 {
@@ -249,9 +241,12 @@ std::string studioCopyRefusal(
         return {};
     }
     const std::string name = quoted(owner);
+    // The T3 fix (Onshape oracle 9): an Up to next seed is re-run at each instance with Reapply
+    // off too (R2), and an Up to face seed is copied (R3: Onshape copies it); the others stay
+    // refused where the copy may differ (unverified on Onshape)
     const std::string later =
-        ": a copy at each instance could differ from the instance computed there (Reapply per "
-        "instance comes later)";
+        ": a copy at each instance could differ from the instance computed there (turn Reapply "
+        "on to compute each instance)";
     const bool hole = owner->isDerivedFrom<Hole>();
 
     // A face the feature starts or ends at: its plane must be every instance's own
@@ -313,13 +308,7 @@ std::string studioCopyRefusal(
             return name + " ends Up to a shape" + later;
         }
         if (type == "UpToFace") {
-            if (!keepsFace(linkOf(owner, end.face))) {
-                return name
-                    + " ends Up to face, and an instance doesn't map the face's plane onto "
-                      "itself, so it would meet the face at its own depth"
-                    + later;
-            }
-            continue;
+            continue;  // Reapply off copies it, as Onshape does (oracle 9, R3)
         }
         if (type == "UpToVertex") {
             const TopoDS_Shape shape = referenceShape(linkOf(owner, end.face));
@@ -369,6 +358,66 @@ std::string studioCopyRefusal(
         return name + " ends " + type + later;  // a type this rule doesn't know: not proved
     }
     return {};
+}
+
+// ------------------------------------------------------------------------------------------------
+// Part patterns (FreeCAD-CH ops#654 slice 9, notes/patterns-design.md 3.1): the part mirror
+
+// StudioList.cpp (declared where used)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+
+/// A part pattern's tool (the part mirror, slice 9): its source part as it is just before the
+/// pattern (studioBaseAt), mirrored about MirrorPlane, in the document's frame, named with the
+/// pattern's tag; null with why. Other part patterns, and feature patterns as owners, not yet
+Part::TopoShape studioPatternTool(
+    const App::DocumentObject* pattern,
+    const Body* /*part*/,
+    std::string* why
+)
+{
+    auto fail = [why](const std::string& text) {
+        if (why) {
+            *why = text;
+        }
+        return Part::TopoShape();
+    };
+    if (!isStudioPartPattern(pattern)) {
+        return fail("not yet (T1)");
+    }
+    if (!freecad_cast<const Mirrored*>(pattern)) {
+        return fail(
+            "A part pattern other than the part mirror is not done yet: pattern the part's "
+            "features, or mirror it"
+        );
+    }
+    const std::vector<Body*> sources = studioPartPatternSources(pattern);
+    if (sources.empty()) {
+        return fail(
+            "No part to mirror: the source part is gone, merged or consumed at the mirror's place"
+        );
+    }
+    if (sources.size() > 1) {
+        return fail(
+            "A part mirror takes one part, and " + std::to_string(sources.size())
+            + " are picked: mirroring several parts at once is not done yet"
+        );
+    }
+    const Body* source = sources.front();
+    const std::optional<gp_Pln> plane = referencePlane(linkOf(pattern, "MirrorPlane"));
+    if (!plane) {
+        return fail("The mirror plane must be a plane or a planar face");
+    }
+    const Part::TopoShape base = studioBaseAt(pattern, source);
+    if (base.isNull()) {
+        return fail(std::string("'") + source->Label.getValue() + "' has no solid before the mirror");
+    }
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(plane->Location(), plane->Axis().Direction()));
+    // Left-handed: a copy (BRepBuilderAPI_Transform), as the Whole-shape engine makes
+    Part::TopoShape out(pattern->getID(), pattern->getDocument()->getStringHasher());
+    out.makeElementTransform(base, mirror, nullptr, Part::CopyType::copy);
+    return out;
 }
 
 }  // namespace PartDesign

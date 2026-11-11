@@ -529,3 +529,88 @@ void DressUp::updatePreviewShape()
 }
 
 }  // namespace PartDesign
+
+// FreeCAD-CH ops#654 T3 (notes/patterns-design.md 3.3): a chamfer or fillet re-run at a pattern's
+// instance, on the instance's base and edges; nothing of the feature is written
+namespace
+{
+struct DressUpRun
+{
+    Part::TopoShape base;
+    std::vector<Part::TopoShape> edges;
+    Part::TopoShape result;
+};
+thread_local DressUpRun* dressUpRun = nullptr;
+}  // namespace
+
+namespace PartDesign
+{
+
+PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges)
+{
+    if (!dressUpRun) {
+        return false;
+    }
+    base = dressUpRun->base;
+    edges = dressUpRun->edges;
+    return true;
+}
+
+PartDesignExport void dressUpReapplied(const Part::TopoShape& result)
+{
+    if (dressUpRun) {
+        dressUpRun->result = result;
+    }
+}
+
+}  // namespace PartDesign
+
+#include "FeatureChamfer.h"
+#include "FeatureFillet.h"
+
+namespace PartDesign
+{
+
+/// feature (a Chamfer or a Fillet) run on base's edges instead of its own: the result, or null
+/// with why (ops#654 T3; declared where used, FeatureTransformed.cpp)
+PartDesignExport Part::TopoShape reapplyDressUp(
+    DressUp* feature,
+    const Part::TopoShape& base,
+    const std::vector<Part::TopoShape>& edges,
+    std::string& why
+)
+{
+    DressUpRun run {base, edges, Part::TopoShape()};
+    DressUpRun* outer = dressUpRun;
+    dressUpRun = &run;
+    App::DocumentObjectExecReturn* ret = nullptr;
+    try {
+        if (auto chamfer = freecad_cast<Chamfer*>(feature)) {
+            ret = chamfer->execute();
+        }
+        else if (auto fillet = freecad_cast<Fillet*>(feature)) {
+            ret = fillet->execute();
+        }
+        else {
+            why = "it isn't a chamfer or a fillet";
+        }
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const Standard_Failure& e) {
+        why = e.GetMessageString();
+    }
+    dressUpRun = outer;
+    if (ret) {
+        why = ret->Why;
+        delete ret;
+        return {};
+    }
+    if (run.result.isNull() && why.empty()) {
+        why = "it made nothing there";
+    }
+    return why.empty() ? run.result : Part::TopoShape();
+}
+
+}  // namespace PartDesign
