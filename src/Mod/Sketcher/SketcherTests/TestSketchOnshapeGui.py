@@ -5,10 +5,13 @@
 - Esc with no tool running keeps the sketch open: Onshape's Esc leaves the running tool only, and
   the sketch closes with its check (preference LeaveSketchWithEscape, now off by default).
 - Midpoint (ops#645, the user's report 14): a point and a line, in either order, or two points and
-  then the point between them. The point is kept at the middle; an arc is refused.
+  then the point between them. The point is kept at the middle; a point and an arc of circle keep
+  the point at the arc's own middle (Sketcher's Midpoint, ops#656).
 
 Designed geometry: a line from (0, 0) to (10, 4) and a free point at (3, 7), in an unattached
 sketch; the midpoint is (5, 2)."""
+
+import math
 
 import FreeCAD
 import Part
@@ -124,13 +127,26 @@ class TestSketchMidpointGui(SketchOnshapeTestCase):
         self.doc.undo()
         self.assertEqual(self.sketch.ConstraintCount, 0)
 
-    def test_an_arc_is_refused(self):
-        """The middle of an arc's chord is not on the arc: the command refuses an arc."""
+    def test_an_arcs_middle(self):
+        """A point and an arc (ops#656): the point goes to the middle of the arc itself, at the mean
+        of its end angles (not the middle of its chord), and the arc stays; it follows when an end
+        of the arc moves. The arc: centre (0, -20), radius 5, from 0.5 to 2.5 rad."""
         arc = Part.ArcOfCircle(Part.Circle(V(0, -20, 0), V(0, 0, 1), 5), 0.5, 2.5)
         self.sketch.addGeometry(arc, False)
         self.doc.recompute()
         self.run_midpoint("Vertex3", "Edge3")
-        self.assertEqual(self.sketch.ConstraintCount, 0)
+        self.assertEqual(self.sketch.ConstraintCount, 1)
+        self.assertEqual(self.sketch.Constraints[0].Type, "Midpoint")
+        point = self.sketch.getPoint(1, 1)
+        self.assertAlmostEqual(point.x, 5 * math.cos(1.5), places=6)
+        self.assertAlmostEqual(point.y, -20 + 5 * math.sin(1.5), places=6)
+        self.assertAlmostEqual(self.sketch.Geometry[2].Radius, 5, places=6)
+        self.sketch.moveGeometry(2, 1, V(5, -20, 0), False)  # the arc's start, by the solver
+        self.assertEqual(self.sketch.solve(), 0)
+        g = self.sketch.Geometry[2]
+        u = (g.FirstParameter + g.LastParameter) / 2
+        point = self.sketch.getPoint(1, 1)
+        self.assertAlmostEqual((point - g.value(u)).Length, 0, places=6)
 
     def test_a_lines_own_end_is_refused(self):
         self.run_midpoint("Vertex1", "Edge1")

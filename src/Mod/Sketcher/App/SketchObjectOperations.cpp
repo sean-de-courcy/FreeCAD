@@ -1836,6 +1836,7 @@ int SketchObject::addSymmetric(
                       || constr->Type == Sketcher::Equal          //
                       || constr->Type == Sketcher::Angle          //
                       || constr->Type == Sketcher::PointOnObject  //
+                      || constr->Type == Sketcher::Midpoint       // FreeCAD-CH (ops#656)
                       || constr->Type == Sketcher::InternalAlignment)) {
                     continue;
                 }

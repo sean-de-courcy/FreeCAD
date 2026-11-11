@@ -426,7 +426,7 @@ App::DocumentObjectExecReturn* SketchObject::execute()
         appendConflictMsg(lastConflicting, msg);
         return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
-    else if (err == -2) {// redundant constraints
+    else if (err == -2) {// redundant constraints that do not hold at the solution (ops#656)
         std::string msg = "Sketch with redundant constraints\n";
         appendRedundantMsg(lastRedundant, msg);
         return new App::DocumentObjectExecReturn(withExternalError(msg), this);
@@ -439,6 +439,14 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     else if (err == -1) {// Solver failed
         return new App::DocumentObjectExecReturn(withExternalError("Solving the sketch failed"),
                                                this);
+    }
+
+    // FreeCAD-CH (ops#656): repeated constraints that agree with the others solved (solve()
+    // returned 0): the sketch goes on, as in Onshape, and the Report view names them
+    if (lastHasRedundancies) {
+        std::string msg = "Sketch with redundant constraints (they agree, the sketch is solved)\n";
+        appendRedundantMsg(lastRedundant, msg);
+        Base::Console().warning(this->getFullLabel(), "%s", msg.c_str());
     }
 
     // this is not necessary for sketch representation in edit mode, unless we want to trigger an

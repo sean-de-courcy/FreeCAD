@@ -134,6 +134,9 @@ public:
             case Sketcher::PointOnObject:
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "PointOnObject");
                 break;
+            case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                type = QCoreApplication::translate("SketcherGui::ConstraintView", "Midpoint");
+                break;
             case Sketcher::Parallel:
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "Parallel");
                 break;
@@ -230,6 +233,7 @@ public:
                 case Sketcher::Vertical:
                 case Sketcher::Coincident:
                 case Sketcher::PointOnObject:
+                case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
                 case Sketcher::Parallel:
                 case Sketcher::Perpendicular:
                 case Sketcher::Tangent:
@@ -322,6 +326,7 @@ public:
             // Gui::BitmapFactory().iconFromTheme("Constraint_Ellipse_Axis_Angle") );
             static QIcon equal(Gui::BitmapFactory().iconFromTheme("Constraint_EqualLength"));
             static QIcon pntoo(Gui::BitmapFactory().iconFromTheme("Constraint_PointOnObject"));
+            static QIcon midpt(Gui::BitmapFactory().iconFromTheme("Constraint_PointOnMidPoint"));
             static QIcon group(Gui::BitmapFactory().iconFromTheme("Constraint_Group"));
             static QIcon text(Gui::BitmapFactory().iconFromTheme("Constraint_Text"));
             static QIcon symm(Gui::BitmapFactory().iconFromTheme("Constraint_Symmetric"));
@@ -384,6 +389,8 @@ public:
                     return selicon(constraint, block, block);
                 case Sketcher::PointOnObject:
                     return selicon(constraint, pntoo, pntoo);
+                case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                    return selicon(constraint, midpt, midpt);
                 case Sketcher::Group:
                     return selicon(constraint, group, group);
                 case Sketcher::Text:
@@ -469,6 +476,7 @@ public:
                 case Sketcher::Coincident:
                 case Sketcher::Block:
                 case Sketcher::PointOnObject:
+                case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
                 case Sketcher::Parallel:
                 case Sketcher::Perpendicular:
                 case Sketcher::Tangent:
@@ -1832,6 +1840,7 @@ bool TaskSketcherConstraints::isConstraintFiltered(QListWidgetItem* item)
                 visible = checkFilterBitset(multiFilterStatus, FilterValue::Coincident);
                 break;
             case Sketcher::PointOnObject:
+            case Sketcher::Midpoint:  // FreeCAD-CH (ops#656): a point kept on an object
                 visible = checkFilterBitset(multiFilterStatus, FilterValue::PointOnObject);
                 break;
             case Sketcher::Group:
