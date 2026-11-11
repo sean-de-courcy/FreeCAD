@@ -35,6 +35,7 @@ from PySide6 import QtTest
 from PartDesignTests.TestCrossBodyGui import ResultBoxGuiCase
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 from PartDesignTests.TestStudio import pad, sketch, xyPlane
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 ENCLOSURE = 16000
 LID = ENCLOSURE + 9000
@@ -86,6 +87,7 @@ class DialogFlowCase(ResultBoxGuiCase):
 class TestOpeningOperationGui(DialogFlowCase):
     """Hands-on check A-1: where a new Extrude opens."""
 
+    @siblingEraPath
     def testASketchOnAPartFaceOpensAsAdd(self):
         """The lid sketch on the Enclosure's top: the pad stays in the Enclosure, Add to
         Enclosure; OK: the Enclosure 25000, Panel 4000, no new part."""
@@ -99,6 +101,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertAlmostEqual(self.body.Shape.Volume, LID, places=3)
         self.assertAlmostEqual(self.panel.Shape.Volume, PANEL, places=3)
 
+    @siblingEraPath
     def testAPlaneSketchOverOnePartOpensAsAddToIt(self):
         """A plane sketch at x 70..90, in the Enclosure, overlapping Panel only: the pad and its
         sketch go into Panel, Add to Panel; OK: Panel 5000, the Enclosure 16000, no new part."""
@@ -115,6 +118,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertAlmostEqual(self.panel.Shape.Volume, PANEL + 1000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
 
+    @siblingEraPath
     def testAPlaneSketchOverTwoPartsOpensAsNew(self):
         """A plane sketch at x 30..70 overlapping the Enclosure and Panel: New, a part of its own
         (A-1 (c): neither is merged); OK: the new part 4000, the others as they were."""
@@ -130,6 +134,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
         self.assertAlmostEqual(self.panel.Shape.Volume, PANEL, places=3)
 
+    @siblingEraPath
     def testAPlaneSketchTouchingNothingOpensAsNew(self):
         """A plane sketch at x 100..110 touching no part: New; OK: the new part 1000."""
         self.parts()
@@ -143,6 +148,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertAlmostEqual(part.Shape.Volume, 1000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
 
+    @siblingEraPath
     def testCancelTakesTheOpeningMoveBack(self):
         """The pad moved into Panel at its opening, then Cancel: no pad, the sketch back in the
         Enclosure, no new part, the volumes as they were."""
@@ -160,6 +166,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertAlmostEqual(self.panel.Shape.Volume, PANEL, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
 
+    @siblingEraPath
     def testTheFirstProfilePickedDecides(self):
         """Nothing selected, Pad: the pad starts in the Enclosure with its Profile field armed;
         the plane sketch over Panel picked: the edit restarts with the pad in Panel, Add to
@@ -320,6 +327,7 @@ class TestAnotherToolGui(DialogFlowCase):
         length.setProperty("unresolvedVariable", False)
         pump(0.3)
 
+    @siblingEraPath
     def testAPreselectedProfileIsInput(self):
         """The lid pad's dialog (its profile preselected, nothing else given), then Pad with
         nothing selected: the lid pad is committed (the Enclosure 25000)."""

@@ -1047,9 +1047,24 @@ void endDialogHistory(const App::Document* doc)
     }
 }
 
-// Other parts in the Body's studio: Bodies of one container placed alike (ops#325)
+// FreeCAD-CH ops#654 R0 lite: in a studio with a history list the studio features (owners) act on
+// other parts, so an in-Body feature's Result box offers no sibling rows there (the parts list, the
+// in-Body merge list); the sibling code stays for studios without a list, and files using it open
+// as before
+static bool inListedStudio(const PartDesign::Body* body)
+{
+    App::Part* studio = nullptr;
+    return body && Part::BodyBase::studioOf(body, studio)
+        && PartDesign::StudioList::of(body->getDocument(), studio);
+}
+
+// Other parts in the Body's studio: Bodies of one container placed alike (ops#325); none offered
+// in a listed studio (R0 lite)
 bool hasStudioSiblings(const PartDesign::Body* body)
 {
+    if (inListedStudio(body)) {
+        return false;
+    }
     for (auto obj : body->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
         if (obj != body
             && Part::BodyBase::areStudioSiblings(body, static_cast<PartDesign::Body*>(obj))) {
@@ -2140,6 +2155,9 @@ void TaskResultParameters::addPartsList()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (inListedStudio(body)) {
+        return;  // R0 lite: the studio's owners act on other parts
+    }
     touchCache = std::make_shared<TouchCache>();
     std::map<App::DocumentObject*, PartDesign::FeatureAddSub*> siblings;
     for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
@@ -2196,6 +2214,9 @@ void TaskResultParameters::addMergeList()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (inListedStudio(body)) {
+        return;  // R0 lite: the studio's owners act on other parts
+    }
     touchCache = std::make_shared<TouchCache>();
     PartDesign::Boolean* merge = mergeAfter(feature);
     const bool adding =

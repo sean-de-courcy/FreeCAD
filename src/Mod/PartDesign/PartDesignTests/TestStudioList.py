@@ -455,7 +455,10 @@ def snapshot(doc, names=True):
             failed=failedUpToTip(body),
             rolledBack=rolled,
             body=None if rolled or body.Shape.isNull() else round(body.Shape.Volume, 4),
-            live=body in PartDesign.studioLiveParts(body),
+            # Unlisted (a property seed's start, ops#654 list on first use): every Body a part
+            live=body in PartDesign.studioLiveParts(body)
+            if PartDesign.studioList(PartDesign.studioOf(body)) is not None
+            else True,
             visible=bool(body.Visibility),
         )
         if names:
@@ -479,8 +482,9 @@ def snapshot(doc, names=True):
         if names:
             out[key]["names"] = elementNames(shape, masker)
     # A New part mirror's part (slice 9), by its maker's name (its own name depends on the order
-    # the parts were made in)
-    for owner in studioList(doc).Entries:
+    # the parts were made in). Unlisted (ops#654): none, and no list made here
+    lst = PartDesign.studioList(doc.getObject("S"))
+    for owner in lst.Entries if lst is not None else []:
         if not isPartMirror(owner):
             continue
         for body in madeBy(owner):
@@ -1669,6 +1673,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.patternsSeen = 0  # valid patterns of an owner, summed over the states (slice 8)
         self.mirrorsSeen = 0  # valid part mirrors, summed over the states (slice 9)
         self.piecesSeen = 0  # states with a live part made from a piece (P6p)
+        self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1873,7 +1878,16 @@ class TestStudioListProperty(unittest.TestCase):
         rng = random.Random(seed)
         doc, _ = propStudio(f"prop{seed}")
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
-        studioList(doc)
+        # ops#654 list on first use: these seeds start from the document without a list (its
+        # parts' sketches and Pads in-Body), and the first edit makes it in its own transaction by
+        # the call the studio commands make (PartDesign.studioList(studio, True), in edit()); until
+        # then, and after that edit's undo, the document is its start, unlisted
+        unlisted = seed in {
+            int(s) for s in os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",") if s
+        }
+        start = snapshot(doc)
+        if not unlisted:
+            studioList(doc)
         bad = 0
         for step in range(nops):
             roll = rng.random()
@@ -1911,7 +1925,31 @@ class TestStudioListProperty(unittest.TestCase):
                         bad += 1
                         self.log.append(f"seed {seed} op {step} {what}")
             doc.recompute()
+            if unlisted and step == 0 and doc.UndoCount:
+                # The first edit's undo takes the list back with it: the start, unlisted; redo
+                doc.undo()
+                doc.recompute()
+                if PartDesign.studioList(doc.getObject("S")) is not None:
+                    bad += 1
+                    self.log.append(f"seed {seed}: the first edit's undo kept the list")
+                found = ["first undo " + d for d in differences(snapshot(doc), start)]
+                if found:
+                    bad += 1
+                    self.log.append(f"seed {seed} after the first edit's undo:")
+                    self.log.extend("    " + d for d in found)
+                self.unlistedSeen += 1
+                doc.redo()
+                doc.recompute()
             got = snapshot(doc)
+            if PartDesign.studioList(doc.getObject("S")) is None:
+                self.unlistedSeen += 1
+                self.assertTrue(unlisted, f"seed {seed} op {step}: the list is gone after {what}")
+                found = ["unlisted " + d for d in differences(got, start)]
+                if found:
+                    bad += 1
+                    self.log.append(f"seed {seed} op {step} after {what} (no list):")
+                    self.log.extend("    " + d for d in found)
+                continue
             want = fromScratch(*listOf(doc), maker=propStudio)
             found = differences(got, want)
             found += ["oracle " + d for d in oracleDifferences(doc)]
@@ -1949,9 +1987,13 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.patternsSeen, 0)
         self.assertGreater(self.mirrorsSeen, 0)
         self.assertGreater(self.piecesSeen, 0)
+        unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
+        if any(str(s) in unlisted for s in seeds):
+            self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
         print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
-              f"part mirrors seen, {self.piecesSeen} states with a live piece")
+              f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
+              f"states without a list")
 
 
 if __name__ == "__main__":

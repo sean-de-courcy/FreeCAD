@@ -71,6 +71,7 @@
 #include <Mod/PartDesign/App/FeatureDefeaturing.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
+#include <Mod/PartDesign/App/Studio.h>
 #include <Mod/PartDesign/App/StudioList.h>
 
 #include "DlgActiveBody.h"
@@ -1867,7 +1868,108 @@ bool studioPrefillPart(App::DocumentObject* owner, PartDesign::Body*& part);
 void studioPrefillLive(App::DocumentObject* owner);
 }  // namespace PartDesignGui
 
-static PartDesign::StudioList* ownerStudioList(
+/* FreeCAD-CH ops#654, the list on first use (decision 337, notes/parts-design.md 10.8): the
+ * studio's list is the only truth, so the first studio command (Extrude, Extrude (remove), the
+ * patterns and Mirror, part mirror, Boolean) makes it, adopted from studioSequence(), in the
+ * command's own transaction: undo or Cancel takes it back with the feature. Body members it
+ * doesn't hold (sketches, datums, fillets made later) are adopted at reconcile. Sketch, datum,
+ * Body, Fillet and Chamfer don't make it (no owner of theirs reads it yet)
+ */
+
+/// An assembly is no studio: it never gets a list (an active Part or a profile's container may be one)
+static bool isAssemblyStudio(const App::Part* studio)
+{
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    return studio && !assembly.isBad() && studio->isDerivedFrom(assembly);
+}
+
+/// Why the studio, without a list, can't get one by adoption now (a loud refusal: the first
+/// reconcile could change what the person sees without a word), else empty:
+/// - rolled back (a Body's Tip moved back): the derived bar is one place for every Body, so a
+///   Body whose rows the derived order puts below it would roll back at the first reconcile;
+/// - an in-Body Boolean (not a Merge) whose tool is a part of the studio: the list knows no such
+///   consumption, so the hidden tool would be a live part (a target, a pre-fill pick)
+static QString studioListRefusal(App::Document* doc, App::Part* studio)
+{
+    if (!doc || PartDesign::StudioList::of(doc, studio, false)) {
+        return {};
+    }
+    const auto bodies = PartDesign::studioBodies(doc, studio);
+    for (auto body : bodies) {
+        for (auto member : body->Group.getValues()) {
+            auto boolean = freecad_cast<PartDesign::Boolean*>(member);
+            if (!boolean || boolean->isMerge()) {
+                continue;
+            }
+            for (auto tool : boolean->Group.getValues()) {
+                if (std::ranges::find(bodies, tool) != bodies.end()) {
+                    return QObject::tr("'%1' in '%2' uses the part '%3' as its tool, which the "
+                                       "studio's history can't hold: studio features can't be "
+                                       "made in this studio")
+                        .arg(QString::fromUtf8(boolean->Label.getValue()),
+                             QString::fromUtf8(body->Label.getValue()),
+                             QString::fromUtf8(tool->Label.getValue()));
+                }
+            }
+        }
+    }
+    if (PartDesign::isStudioRolledBack(doc, studio)) {
+        return QObject::tr("The studio is rolled back: roll it to the end in the Features list "
+                           "first, then make the studio feature");
+    }
+    return {};
+}
+
+/// Whether a studio command takes the studio path (an owner, a listed pattern) in studio: it has
+/// a list, or one is made on first use. The hidden user parameter StudioListOnFirstUse (default
+/// on, no UI) is a test hook only: off, a studio without a list keeps the sibling-era in-Body path,
+/// for the GUI tests of that path until R0 removes it
+static bool takesStudioPath(App::Document* doc, App::Part* studio)
+{
+    if (!doc) {
+        return false;
+    }
+    if (PartDesign::StudioList::of(doc, studio, false)) {
+        return true;
+    }
+    return App::GetApplication()
+        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        ->GetBool("StudioListOnFirstUse", true);
+}
+
+/// studioListRefusal(), said in the status bar and the report: true when refused
+static bool refuseStudioList(App::Document* doc, App::Part* studio)
+{
+    const QString why = studioListRefusal(doc, studio);
+    if (why.isEmpty()) {
+        return false;
+    }
+    Gui::getMainWindow()->showMessage(why, 10000);
+    Base::Console().error("%s\n", why.toUtf8().constData());
+    return true;
+}
+
+/// The studio's list, made (adopted) if missing; inside the command's open transaction
+static PartDesign::StudioList* makeStudioList(App::Document* doc, App::Part* studio)
+{
+    if (PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false)) {
+        return list;
+    }
+    const std::string studioCmd = studio
+        ? Gui::Command::getObjectCmd(studio)
+        : std::string("App.getDocument('") + doc->getName() + "')";
+    Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+    Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioList(%s, True)", studioCmd.c_str());
+    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
+    if (!list) {
+        throw Base::RuntimeError("The studio's history list was not made");
+    }
+    return list;
+}
+
+/// The studio an owner goes in: the selected profile's, else the active Body's, else the active
+/// Part's; false where it can't be (a profile of another document, an assembly's Body)
+static bool ownerStudio(
     Gui::Command* cmd,
     App::Part*& studio,
     PartDesign::Body*& sketchPart,
@@ -1881,19 +1983,19 @@ static PartDesign::StudioList* ownerStudioList(
     subs.clear();
     App::Document* doc = cmd->getDocument();
     if (!doc) {
-        return nullptr;
+        return false;
     }
     const std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
     if (!selection.empty() && selection.front().getObject()) {
         profile = const_cast<App::DocumentObject*>(selection.front().getObject());
         subs = selection.front().getSubNames();
         if (profile->getDocument() != doc) {
-            return nullptr;
+            return false;
         }
         sketchPart = PartDesign::Body::findBodyOf(profile);
         if (sketchPart) {
             if (!Part::BodyBase::studioOf(sketchPart, studio)) {
-                return nullptr;
+                return false;
             }
         }
         else {
@@ -1902,18 +2004,18 @@ static PartDesign::StudioList* ownerStudioList(
     }
     else if (PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false)) {
         if (!Part::BodyBase::studioOf(active, studio)) {
-            return nullptr;
+            return false;
         }
     }
     else {
         studio = PartDesignGui::getActivePart();
     }
-    return PartDesign::StudioList::of(doc, studio, false);
+    return !isAssemblyStudio(studio);
 }
 
-/// FreeCAD-CH (ops#654 S4): Extrude in a studio with a list makes an owner, in one step with its
-/// list entry, its scope and its first recompute (Cancel aborts all of it); false: not such a
-/// studio, today's path
+/// FreeCAD-CH (ops#654 S4): Extrude in a studio makes an owner, in one step with the studio's
+/// list (made on first use), its list entry, its scope and its first recompute (Cancel aborts all
+/// of it); false: no studio (an assembly, another document's profile), today's path
 static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, double length)
 {
     if (which != "Pad" && which != "Pocket") {
@@ -1923,11 +2025,16 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
     PartDesign::Body* sketchPart = nullptr;
     App::DocumentObject* profile = nullptr;
     std::vector<std::string> subs;
-    PartDesign::StudioList* list = ownerStudioList(cmd, studio, sketchPart, profile, subs);
-    if (!list) {
+    if (!ownerStudio(cmd, studio, sketchPart, profile, subs)) {
         return false;
     }
     App::Document* doc = cmd->getDocument();
+    if (!takesStudioPath(doc, studio)) {
+        return false;
+    }
+    if (refuseStudioList(doc, studio)) {
+        return true;
+    }
     // A profile: a sketch, its elements, or planar faces of a part's solid
     QString leftOut;
     if (profile && !profile->isDerivedFrom<Part::Feature>()) {
@@ -1939,7 +2046,7 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
     const std::string name = cmd->getUniqueObjectName(which.c_str());
     cmd->openCommand(std::string("Make ") + which);
     try {
-        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        makeStudioList(doc, studio);
         Gui::cmdAppDocument(
             doc,
             std::ostringstream() << "addObject('PartDesign::" << which << "','" << name << "')"
@@ -3285,10 +3392,22 @@ void prepareTransformed(
     const bool waitsForFeatures
         = which == "Mirrored" || which == "LinearPattern" || which == "PolarPattern";
 
+    // FreeCAD-CH ops#654: the studio's list is made on first use, before the pattern (adopted
+    // with the Body's members, then the pattern inserted at its bar)
+    App::Part* studio = nullptr;
+    const bool inStudio = Part::BodyBase::studioOf(pcActiveBody, studio)
+        && takesStudioPath(pcActiveBody->getDocument(), studio);
+    if (inStudio && refuseStudioList(pcActiveBody->getDocument(), studio)) {
+        return;
+    }
+
     auto worker = [=](std::vector<App::DocumentObject*> features) {
         std::string msg("Make ");
         msg += which;
         cmd->openCommand(msg.c_str());
+        if (inStudio) {
+            makeStudioList(pcActiveBody->getDocument(), studio);
+        }
         // The solid it follows, before it is inserted (a transform without originals isn't a
         // solid feature, so the Tip stays there until it is set below)
         auto previous = freecad_cast<Part::Feature*>(pcActiveBody->Tip.getValue());
@@ -3302,9 +3421,7 @@ void prepareTransformed(
 
         // FreeCAD-CH ops#654 slice 8: in a listed studio the pattern is a member of the list, at
         // its bar, as every Body member is
-        App::Part* studio = nullptr;
-        if (Feat && Part::BodyBase::studioOf(pcActiveBody, studio)
-            && PartDesign::StudioList::of(Feat->getDocument(), studio, false)) {
+        if (Feat && inStudio && PartDesign::StudioList::of(Feat->getDocument(), studio, false)) {
             Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
             Gui::Command::doCommand(
                 Gui::Command::Doc,
@@ -3438,14 +3555,17 @@ static bool prepareStudioPartMirror(Gui::Command* cmd)
     else {
         studio = PartDesignGui::getActivePart();
     }
-    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
-    if (!list) {
+    // FreeCAD-CH ops#654: the studio's list is made on first use, in this step
+    if (isAssemblyStudio(studio) || !takesStudioPath(doc, studio)) {
         return false;
+    }
+    if (refuseStudioList(doc, studio)) {
+        return true;
     }
     const std::string name = cmd->getUniqueObjectName("Mirrored");
     cmd->openCommand("Make Mirrored");
     try {
-        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        makeStudioList(doc, studio);
         Gui::cmdAppDocument(
             doc,
             std::ostringstream() << "addObject('PartDesign::Mirrored','" << name << "')"
@@ -3937,24 +4057,12 @@ static bool makeStudioBoolean(Gui::Command* cmd)
     else {
         studio = PartDesignGui::getActivePart();
     }
-    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
-    if (!list) {
+    // FreeCAD-CH ops#654: the studio's list is made on first use, in this step
+    if (isAssemblyStudio(studio) || !takesStudioPath(doc, studio)) {
         return false;
     }
-    const auto live = PartDesign::studioLivePartsAt(list, -1);
-    auto isLive = [&live](PartDesign::Body* body) {
-        return body && std::ranges::find(live, body) != live.end();
-    };
-    std::vector<std::string> targets;
-    if (isLive(active)) {
-        targets.push_back(PartDesign::studioPartId(active));
-    }
-    std::vector<std::string> tools;
-    for (auto body : picked) {
-        const std::string id = PartDesign::studioPartId(body);
-        if (isLive(body) && std::ranges::find(targets, id) == targets.end()) {
-            tools.push_back(id);
-        }
+    if (refuseStudioList(doc, studio)) {
+        return true;
     }
     auto pyList = [](const std::vector<std::string>& ids) {
         std::string out = "[";
@@ -3966,7 +4074,22 @@ static bool makeStudioBoolean(Gui::Command* cmd)
     const std::string name = cmd->getUniqueObjectName("Boolean");
     cmd->openCommand(QT_TRANSLATE_NOOP("Command", "Create Boolean"));
     try {
-        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        PartDesign::StudioList* list = makeStudioList(doc, studio);
+        const auto live = PartDesign::studioLivePartsAt(list, -1);
+        auto isLive = [&live](PartDesign::Body* body) {
+            return body && std::ranges::find(live, body) != live.end();
+        };
+        std::vector<std::string> targets;
+        if (isLive(active)) {
+            targets.push_back(PartDesign::studioPartId(active));
+        }
+        std::vector<std::string> tools;
+        for (auto body : picked) {
+            const std::string id = PartDesign::studioPartId(body);
+            if (isLive(body) && std::ranges::find(targets, id) == targets.end()) {
+                tools.push_back(id);
+            }
+        }
         Gui::cmdAppDocument(doc, std::ostringstream() << "addObject('PartDesign::Boolean','" << name << "')");
         App::DocumentObject* owner = doc->getObject(name.c_str());
         if (!owner) {
@@ -4130,7 +4253,24 @@ void CmdPartDesignMergeParts::activated(int iMsg)
 
 bool CmdPartDesignMergeParts::isActive()
 {
-    return getActiveGuiDocument() && Gui::Selection().size() >= 2;
+    if (!getActiveGuiDocument() || Gui::Selection().size() < 2) {
+        return false;
+    }
+    // FreeCAD-CH ops#654 R0 lite: the sibling path's Merge isn't offered in a studio with a
+    // history list (its Boolean's Union merges parts there); the code stays for older studios
+    for (auto& sel : Gui::Selection().getSelectionEx()) {
+        App::DocumentObject* obj = sel.getObject();
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesign::Body::findBodyOf(obj);
+        }
+        App::Part* studio = nullptr;
+        if (body && Part::BodyBase::studioOf(body, studio)
+            && PartDesign::StudioList::of(body->getDocument(), studio, false)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 //===========================================================================
