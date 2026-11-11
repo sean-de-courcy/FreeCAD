@@ -10658,7 +10658,7 @@ TopoShape& TopoShape::makeElementBoolean(
             "The check of the boolean's inputs",
             [toCheck, validity](const Message_ProgressRange& /*range*/) {
                 for (std::size_t k = 0; k < toCheck.size(); ++k) {
-                    (*validity)[k] = BRepCheck_Analyzer(toCheck[k]).IsValid() ? 1 : 0;
+                    (*validity)[k] = KernelBudget::checkValid(toCheck[k]) ? 1 : 0;
                 }
             }
         );

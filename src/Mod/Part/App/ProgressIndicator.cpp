@@ -40,8 +40,25 @@
 
 #include <QThread>
 
+#include <initializer_list>
+
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Result.hxx>
+#include <BRepCheck_Shell.hxx>
+#include <BRepCheck_Solid.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BinTools.hxx>
+#include <Bnd_Box2d.hxx>
+#include <Geom_Surface.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopoDS_Wire.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Message_ProgressScope.hxx>
 #include <TopoDS_Shape.hxx>
@@ -526,10 +543,178 @@ bool isValid(const TopoDS_Shape& shape, const char* what)
     // A copy: an abandoned check reads nothing the document changes
     const TopoDS_Shape copy = exactCopy(shape);
     auto valid = std::make_shared<bool>(false);
-    run(what, [copy, valid](const Message_ProgressRange& /*range*/) {
-        *valid = BRepCheck_Analyzer(copy).IsValid() == Standard_True;
-    });
+    run(what, [copy, valid](const Message_ProgressRange& /*range*/) { *valid = checkValid(copy); });
     return *valid;
+}
+
+namespace
+{
+// A face checked by parts from this many wires on: below it OCCT's check of the whole face is as
+// fast (a pocket's floor of 97 wires: 0.07 s whole, 0.4 s by single holes, kernel-9's profile)
+constexpr int manyWires = 300;
+// Holes checked together with the outer wire in one part: OCCT compares each two of them, so a
+// batch checks more pairs than the boxes ask for, and the outer wire once per batch
+constexpr std::size_t holesPerPart = 30;
+
+int wireCount(const TopoDS_Face& face)
+{
+    int count = 0;
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        ++count;
+    }
+    return count;
+}
+
+// Whether a face is checked by parts: many wires, every one a wire, on a surface that is neither
+// periodic nor closed (no seams: the outer wire is one loop), without natural restriction
+bool byParts(const TopoDS_Face& face)
+{
+    if (wireCount(face) < manyWires || BRep_Tool::NaturalRestriction(face)) {
+        return false;
+    }
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_WIRE) {
+            return false;
+        }
+    }
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    return !surface.IsNull() && !surface->IsUPeriodic() && !surface->IsVPeriodic()
+        && !surface->IsUClosed() && !surface->IsVClosed();
+}
+
+// The face with only these wires: the same surface, location, tolerance and orientation, so the
+// wires' edges find their curves on it as on the face
+bool partValid(const TopoDS_Face& face, std::initializer_list<const TopoDS_Shape*> wires)
+{
+    TopoDS_Face part = TopoDS::Face(face.EmptyCopied());
+    BRep_Builder builder;
+    for (const TopoDS_Shape* wire : wires) {
+        builder.Add(part, *wire);
+    }
+    return BRepCheck_Analyzer(part).IsValid() == Standard_True;
+}
+
+bool faceValidByParts(const TopoDS_Face& face)
+{
+    const TopoDS_Wire outer = BRepTools::OuterWire(face);
+    if (outer.IsNull()) {
+        return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+    }
+    std::vector<TopoDS_Shape> holes;
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        if (!it.Value().IsSame(outer)) {
+            holes.push_back(it.Value());
+        }
+    }
+    // The holes in batches with the outer wire: the holes' own checks, their orientation, inside
+    // the outer wire, and each two holes of a batch
+    for (std::size_t first = 0; first < holes.size(); first += holesPerPart) {
+        TopoDS_Face part = TopoDS::Face(face.EmptyCopied());
+        BRep_Builder builder;
+        builder.Add(part, outer);
+        for (std::size_t k = first; k < std::min(holes.size(), first + holesPerPart); ++k) {
+            builder.Add(part, holes[k]);
+        }
+        if (BRepCheck_Analyzer(part).IsValid() != Standard_True) {
+            return false;
+        }
+    }
+    // Two holes whose boxes in the parameters overlap, each two once (a sweep along u): crossing
+    // or nested holes overlap there. The margin, a millionth of the face's span, only adds pairs
+    Bnd_Box2d all;
+    BRepTools::AddUVBounds(face, all);
+    double u0 = 0;
+    double v0 = 0;
+    double u1 = 0;
+    double v1 = 0;
+    all.Get(u0, v0, u1, v1);
+    const double margin = 1e-6 * std::hypot(u1 - u0, v1 - v0) + 1e-9;
+    struct Box
+    {
+        double u0, v0, u1, v1;
+        std::size_t hole;
+    };
+    std::vector<Box> boxes;
+    boxes.reserve(holes.size());
+    for (std::size_t k = 0; k < holes.size(); ++k) {
+        Bnd_Box2d box;
+        BRepTools::AddUVBounds(face, TopoDS::Wire(holes[k]), box);
+        if (box.IsVoid()) {
+            return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        }
+        Box b {0, 0, 0, 0, k};
+        box.Get(b.u0, b.v0, b.u1, b.v1);
+        boxes.push_back({b.u0 - margin, b.v0 - margin, b.u1 + margin, b.v1 + margin, k});
+    }
+    std::sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.u0 < b.u0; });
+    for (std::size_t a = 0; a < boxes.size(); ++a) {
+        for (std::size_t b = a + 1; b < boxes.size() && boxes[b].u0 <= boxes[a].u1; ++b) {
+            if (boxes[b].v0 > boxes[a].v1 || boxes[a].v0 > boxes[b].v1
+                || boxes[a].hole / holesPerPart == boxes[b].hole / holesPerPart) {
+                continue;  // apart, or checked together in their batch
+            }
+            if (!partValid(face, {&outer, &holes[boxes[a].hole], &holes[boxes[b].hole]})) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool statusOk(const Handle(BRepCheck_Result)& result)
+{
+    const auto& list = result->Status();
+    return list.IsEmpty() || list.First() == BRepCheck_NoError;
+}
+}  // namespace
+
+bool checkValid(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    // By parts only for solids (alone or in compounds) with a face that has many wires, every
+    // face in a shell and every shell in a solid; anything else as BRepCheck_Analyzer checks it
+    bool anyByParts = false;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More() && !anyByParts; it.Next()) {
+        anyByParts = byParts(TopoDS::Face(it.Current()));
+    }
+    const bool solidsOnly = TopExp_Explorer(shape, TopAbs_SHELL, TopAbs_SOLID).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_FACE, TopAbs_SHELL).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_EDGE, TopAbs_FACE).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_VERTEX, TopAbs_EDGE).More() == Standard_False;
+    const bool oneFace = shape.ShapeType() == TopAbs_FACE;
+    if (!anyByParts || !(solidsOnly || oneFace)) {
+        return BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+    }
+    if (oneFace) {
+        return faceValidByParts(TopoDS::Face(shape));
+    }
+    // Each face once (shared faces too), as the analyzer checks each sub-shape once
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (int k = 1; k <= faces.Extent(); ++k) {
+        const TopoDS_Face& face = TopoDS::Face(faces(k));
+        const bool valid = byParts(face) ? faceValidByParts(face)
+                                         : BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        if (!valid) {
+            return false;
+        }
+    }
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        Handle(BRepCheck_Solid) solidCheck = new BRepCheck_Solid(TopoDS::Solid(solid.Current()));
+        if (!statusOk(solidCheck)) {
+            return false;
+        }
+        for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
+            Handle(BRepCheck_Shell) shell = new BRepCheck_Shell(TopoDS::Shell(it.Current()));
+            if (!statusOk(shell) || shell->Closed() != BRepCheck_NoError
+                || shell->Orientation() != BRepCheck_NoError) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 }  // namespace Part::KernelBudget

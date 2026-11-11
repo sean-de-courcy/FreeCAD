@@ -12,6 +12,7 @@ features must not be flagged. Designed geometry; expected volumes are closed for
 """
 
 import math
+import time
 import unittest
 
 import FreeCAD
@@ -351,6 +352,61 @@ class TestResultCheck(unittest.TestCase):
             self.assertAlmostEqual(boolean.Shape.Volume, before + change, places=6)
             self.assertTrue(boolean.Shape.isValid())
 
+
+
+class TestManyHoles(unittest.TestCase):
+    """A Pocket of 25 regions into a part with thousands of faces (kernel-9, ops#640): Onshape cuts
+    such a sketch into a ~3800-face part in ~3.5 s; ours passed the 60 s limit, most of it OCCT's
+    shape check comparing each two holes of the plate's faces (the boolean's input check, S2 and
+    the refine's). Designed: a 300 x 300 x 20 plate with 40 x 40 holes (1606 faces) as the Body's
+    BaseFeature, a sketch of 5 x 5 squares on its top, each over 36 holes, pocketed 10 deep with
+    Refine: every square's floor keeps its holes, the top loses those inside the squares."""
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("ManyHoles")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def testPocketOfManyRegionsIntoAPlateWithManyHoles(self):
+        n, side = 40, 300.0
+        step = side / n
+        outer = Part.makePolygon([V(0, 0, 0), V(side, 0, 0), V(side, side, 0), V(0, side, 0), V(0, 0, 0)])
+        holes = [
+            Part.Wire([Part.makeCircle(step * 0.25, V(step * (i + 0.5), step * (j + 0.5), 0), V(0, 0, 1))]).reversed()
+            for i in range(n)
+            for j in range(n)
+        ]
+        plate = Part.Face(Part.Plane(), [outer] + holes).extrude(V(0, 0, 20))
+        base = self.doc.addObject("Part::Feature", "Plate")
+        base.Shape = plate
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        sketch = body.newObject("Sketcher::SketchObject", "Squares")
+        sketch.Placement = FreeCAD.Placement(V(0, 0, 20), FreeCAD.Rotation())
+        cell = side / 5
+        for i in range(5):
+            for j in range(5):
+                x0, y0 = cell * (i + 0.1), cell * (j + 0.1)
+                x1, y1 = x0 + cell * 0.8, y0 + cell * 0.8
+                p = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+                for k in range(4):
+                    sketch.addGeometry(Part.LineSegment(p[k], p[(k + 1) % 4]))
+        self.doc.recompute()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = sketch
+        pocket.Length = 10
+        pocket.Refine = True
+        start = time.time()
+        self.doc.recompute()
+        took = time.time() - start
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        # each square 48 x 48 over 6 x 6 holes of radius 1.875: the material of 25 squares' boxes
+        # less their holes, 10 deep
+        removed = 25 * (48.0 * 48.0 - 36 * math.pi * 1.875**2) * 10
+        self.assertAlmostEqual(plate.Volume - pocket.Shape.Volume, removed, delta=1e-6 * plate.Volume)
+        # seconds here (2026-11; at 60 x 60 holes 35 s now, 88 s and stopped before)
+        self.assertLess(took, 30.0)
 
 if __name__ == "__main__":
     unittest.main()

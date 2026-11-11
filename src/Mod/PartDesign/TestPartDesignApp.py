@@ -156,6 +156,7 @@ from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDerived import TestDerived  # FreeCAD-CH, ops#640 round 6
 from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
+from PartDesignTests.TestResultCheck import TestManyHoles  # FreeCAD-CH, kernel-9
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

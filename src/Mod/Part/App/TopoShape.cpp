@@ -1480,8 +1480,8 @@ bool TopoShape::isNull() const
 
 bool TopoShape::isValid() const
 {
-    BRepCheck_Analyzer aChecker(this->_Shape);
-    return aChecker.IsValid() ? true : false;
+    // BRepCheck_Analyzer's verdict, faces with thousands of holes in seconds (kernel-9, ops#640)
+    return !this->_Shape.IsNull() && KernelBudget::checkValid(this->_Shape);
 }
 
 bool TopoShape::isEmpty() const

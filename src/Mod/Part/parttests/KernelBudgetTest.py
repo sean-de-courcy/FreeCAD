@@ -223,5 +223,89 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertTrue(holes.isValid(), holes.getStatusString())
         self.assertLess(holes.Shape.Volume, 60 * 60 * 5 - 100)
 
+
+def circle_wire(cx, cy, r, reverse=True):
+    w = Part.Wire([Part.makeCircle(r, V(cx, cy, 0), V(0, 0, 1))])
+    return w.reversed() if reverse else w
+
+
+def holed_face(holes, side=100.0):
+    """A square plate face with the given hole wires: Part.Face(surface, wires) keeps them as given"""
+    outer = Part.makePolygon([V(0, 0, 0), V(side, 0, 0), V(side, side, 0), V(0, side, 0), V(0, 0, 0)])
+    return Part.Face(Part.Plane(), [outer] + holes)
+
+
+def grid_holes(n, side=100.0, r=1.0):
+    step = side / n
+    return [circle_wire(step * (i + 0.5), step * (j + 0.5), r) for i in range(n) for j in range(n)]
+
+
+class KernelCheckTest(unittest.TestCase):
+    """Part.kernelCheck, the shape check of kernel safety (kernel-9, ops#640): BRepCheck_Analyzer's
+    verdict, in time that grows with a face's holes and not with their square. OCCT 8.0.1 compares
+    each two wires of a face: a plate with 3600 holes took about 25 s per face, and a Pocket of 25
+    squares into it passed the 60 s limit, where Onshape builds such cuts in seconds. Designed
+    faces with many holes, each wrong in one
+    way the face check finds: the verdicts must be BRepCheck_Analyzer's. 18 x 18 = 324 holes, past the
+    300 wires where the check goes by parts (batches of 30 holes, then pairs of batches)."""
+
+    def verdicts(self, shape):
+        """kernelCheck's and BRepCheck_Analyzer's (Shape.check: isValid uses kernelCheck now)"""
+        try:
+            shape.check()
+            analyzer = True
+        except ValueError:
+            analyzer = False
+        return Part.kernelCheck(shape), analyzer
+
+    def testValidFaceWithManyHoles(self):
+        face = holed_face(grid_holes(18))
+        self.assertEqual(self.verdicts(face), (True, True))
+
+    def testCrossingHolesFail(self):
+        c = 100.0 / 18 / 2
+        holes = grid_holes(18)
+        holes.append(circle_wire(c + 1.5, c, 1.0))  # crosses the first hole, in another batch
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+        holes = grid_holes(18)
+        holes.insert(1, circle_wire(c + 1.5, c, 1.0))  # the same, in the first hole's batch
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testNestedHoleFails(self):
+        c = 100.0 / 18 / 2
+        holes = grid_holes(18, r=2.0)
+        holes.append(circle_wire(c, c, 0.5))  # inside the first hole
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testHoleOutsideFails(self):
+        holes = grid_holes(18)
+        holes.append(circle_wire(150.0, 50.0, 1.0))
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testHoleTurnedTheWrongWayFails(self):
+        holes = grid_holes(18)
+        holes[200] = holes[200].reversed()
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testValidSolidWithManyHoles(self):
+        solid = holed_face(grid_holes(18)).extrude(V(0, 0, 5))
+        self.assertEqual(self.verdicts(solid), (True, True))
+        self.assertEqual(self.verdicts(Part.makeCompound([solid])), (True, True))
+
+    def testSolidWithAFaceTurnedFails(self):
+        solid = holed_face(grid_holes(18)).extrude(V(0, 0, 5))
+        faces = solid.Faces
+        faces[0] = faces[0].reversed()
+        broken = Part.Solid(Part.Shell(faces))
+        self.assertEqual(self.verdicts(broken), (False, False))
+
+    def testThousandsOfHolesInSeconds(self):
+        """2500 holes: by parts a few seconds on the reference machine (2026-11), where
+        BRepCheck_Analyzer took minutes"""
+        solid = holed_face(grid_holes(50, r=0.5)).extrude(V(0, 0, 5))
+        start = time.time()
+        self.assertTrue(Part.kernelCheck(solid))
+        self.assertLess(time.time() - start, 20.0)
+
 if __name__ == "__main__":
     unittest.main()
