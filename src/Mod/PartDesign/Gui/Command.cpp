@@ -1949,16 +1949,17 @@ static bool refuseStudioList(App::Document* doc, App::Part* studio)
     return true;
 }
 
-/// The studio's list, made (adopted) if missing; inside the command's open transaction
+/// The studio's list, made (adopted) if missing; inside the command's open transaction. Its callers'
+/// later command lines (`PartDesign.studioInsert(...)`) need the module in the console, list or not
 static PartDesign::StudioList* makeStudioList(App::Document* doc, App::Part* studio)
 {
+    Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
     if (PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false)) {
         return list;
     }
     const std::string studioCmd = studio
         ? Gui::Command::getObjectCmd(studio)
         : std::string("App.getDocument('") + doc->getName() + "')";
-    Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
     Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioList(%s, True)", studioCmd.c_str());
     PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
     if (!list) {
