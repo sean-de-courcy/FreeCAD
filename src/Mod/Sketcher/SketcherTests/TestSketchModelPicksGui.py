@@ -127,6 +127,18 @@ class ModelPicksGuiCase(SketcherGuiTestCase):
         self.flush_gui(100)
 
     def screen_point(self, point):
+        if getattr(self, "corrected_points", False):
+            # getPointOnScreen is off from where a click lands; corrected through the focal
+            # plane as TestSketchRound3Gui's screen_point is (orthographic top view only)
+            target = V(point)
+            guess = V(point)
+            for _ in range(20):
+                hit = self.view.getPointOnFocalPlane(self.view.getPointOnScreen(guess))
+                error = V(target.x - hit.x, target.y - hit.y, 0)
+                if error.Length < 1e-6:
+                    break
+                guess += error
+            point = guess
         return self.viewport_to_qpoint(self.view, self.viewport, self.view.getPointOnScreen(point))
 
     def answer_modals(self, timeout_ms=4000):
@@ -582,6 +594,77 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.assertEqual(self.selected(), {("Sketch", "Edge1")})
         self.click_at(V(14, 6, 5))
         self.assertEqual(self.selected(), set())
+
+    def add_rectangle(self, x0, y0, x1, y1):
+        corners = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+        first = len(self.sketch.Geometry)
+        for i in range(4):
+            self.sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            self.sketch.addConstraint(
+                Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+            )
+        self.doc.recompute()
+
+    def region_at(self, x, y):
+        """The sketch's InternalFaceN holding the sketch point (x, y), found geometrically."""
+        for i, face in enumerate(self.sketch.InternalShape.Faces):
+            if face.isInside(V(x, y, 0), TOL, True):
+                return "InternalFace%d" % (i + 1)
+        self.fail("No region of the sketch at (%s, %s)" % (x, y))
+
+    def selected_regions(self):
+        return {sub for name, sub in self.selected() if "InternalFace" in sub}
+
+    def start_edit_from_above(self):
+        """The editor in an orthographic top view of the box (fitAll's camera puts a click a
+        millimetre or more off the point aimed at, which a region's inside doesn't need, but its
+        test does)."""
+        from SketcherTests.TestSketchRound3Gui import TOP_VIEW_CAMERA
+
+        self.start_edit()
+        self.view.setCamera(TOP_VIEW_CAMERA)
+        self.flush_gui(100)
+        self.corrected_points = True
+
+    def test_a_click_inside_a_closed_profile_selects_its_region(self):
+        """Selection parity SQ11 (oracle 8): with the sketch open, a click inside a rectangle
+        selects its region; a second click there removes it, as for the sketch's other elements.
+        A click outside every region (only the box's refused top face) still clears."""
+        self.add_rectangle(12, 2, 18, 8)
+        region = self.region_at(15, 5)
+        self.start_edit_from_above()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 5, 5))
+        self.assertEqual(self.selected_regions(), {region}, self.selected())
+        self.click_at(V(15, 5, 5))
+        self.assertEqual(self.selected_regions(), set(), self.selected())
+        self.click_at(V(15, 5, 5))
+        self.assertEqual(self.selected_regions(), {region}, self.selected())
+        self.click_at(V(10, 8, 5))
+        self.assertEqual(self.selected(), set())
+
+    def test_a_region_drawn_in_the_open_sketch_is_pickable_at_once(self):
+        """A rectangle added while the sketch is open (no document recompute) is a region at once,
+        as in Onshape."""
+        self.start_edit_from_above()
+        corners = [V(12, 2, 0), V(18, 2, 0), V(18, 8, 0), V(12, 8, 0)]
+        for i in range(4):
+            self.sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            self.sketch.addConstraint(Sketcher.Constraint("Coincident", 1 + i, 2, 1 + (i + 1) % 4, 1))
+        self.pump(200)
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 5, 5))
+        self.assertEqual(len(self.selected_regions()), 1, self.selected())
+        self.assertEqual(self.selected_regions(), {self.region_at(15, 5)})
+
+    def test_a_click_on_a_region_s_side_takes_the_side_not_the_region(self):
+        self.add_rectangle(12, 2, 18, 8)
+        self.start_edit_from_above()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 2, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Edge2")})
 
     def test_escape_keeps_the_selection_and_the_sketch_open(self):
         """Selection parity P7 (oracle 8, SQ7): Esc in the sketch editor with a sketch line and a

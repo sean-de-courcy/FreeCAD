@@ -60,6 +60,7 @@
 class TopoDS_Shape;
 class TopoDS_Face;
 class SoSeparator;
+class SoSwitch;
 class SbLine;
 class SbVec2f;
 class SbVec2s;
@@ -954,6 +955,13 @@ private:
     void clearSelectPoints();
 
     void preselectToSelection(const std::stringstream& ss, const Base::Vector3d& pickedPoint, bool toggle);
+    /** FreeCAD-CH (selection parity SQ11): the N of the InternalFaceN holding the sketch point
+     * (x, y), the smallest if regions nest; 0 for none. A sketch changed in edit since its last
+     * recompute is recomputed first, so a region just drawn is there (as in Onshape).
+     */
+    int internalFaceAt(double x, double y);
+    /// shades the InternalFaceN of this sketch that are selected (edit mode)
+    void updateSelectedRegions();
     //@}
 
     /** @name miscelanea utilities */
@@ -1115,6 +1123,10 @@ private:
     Gui::CoinPtr<SoSketchFaces> pcSketchFaces;
     Gui::CoinPtr<SoToggleSwitch> pcSketchFacesToggle;
     bool regionEmphasis = false;
+    /// FreeCAD-CH (selection parity SQ11): the regions selected in edit mode, shaded in the edit
+    /// root (unpickable); rebuilt on each selection change
+    Gui::CoinPtr<SoSwitch> pcSelectedRegionsRoot;
+    Gui::CoinPtr<SoSketchFaces> pcSelectedRegions;
 
     std::unique_ptr<ShortcutListener> listener;
 
