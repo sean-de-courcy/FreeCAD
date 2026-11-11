@@ -666,6 +666,48 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.click_at(V(15, 2, 5))
         self.assertEqual(self.selected(), {("Sketch", "Edge2")})
 
+    def preselected_element(self):
+        pre = self.preselected()
+        return pre[1].split(".")[-1] if pre else None
+
+    def test_hover_inside_a_closed_profile_tints_its_region(self):
+        """Polish P7 (selection parity P6, Onshape keymap): the pointer inside a rectangle, on
+        none of its elements, tints its region, which is the preselection; on a side the side
+        is; outside every region nothing is."""
+        self.add_rectangle(12, 2, 18, 8)
+        region = self.region_at(15, 5)
+        self.start_edit_from_above()
+        self.mouse_at(V(15, 5, 5))
+        self.flush_gui(100)
+        self.assertEqual(self.preselected_element(), region)
+        self.mouse_at(V(15, 2, 5))
+        self.flush_gui(100)
+        self.assertEqual(self.preselected_element(), "Edge2")
+        self.mouse_at(V(15, 5, 5))
+        self.flush_gui(100)
+        self.assertEqual(self.preselected_element(), region)
+        self.mouse_at(V(6, 8, 5))
+        self.flush_gui(100)
+        self.assertNotEqual(self.preselected_element(), region)
+
+    def test_freecad_keymap_tints_no_region_on_hover(self):
+        """The control: FreeCAD's keymap keeps the hover on the sketch's elements only."""
+        general = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/General")
+        saved = general.GetString("Keymap") if "Keymap" in general.GetStrings() else None
+        general.SetString("Keymap", "FreeCAD")
+        try:
+            self.add_rectangle(12, 2, 18, 8)
+            region = self.region_at(15, 5)
+            self.start_edit_from_above()
+            self.mouse_at(V(15, 5, 5))
+            self.flush_gui(100)
+            self.assertNotEqual(self.preselected_element(), region)
+        finally:
+            if saved is None:
+                general.RemString("Keymap")
+            else:
+                general.SetString("Keymap", saved)
+
     def test_escape_keeps_the_selection_and_the_sketch_open(self):
         """Selection parity P7 (oracle 8, SQ7): Esc in the sketch editor with a sketch line and a
         model edge selected clears neither, and the sketch stays open (default

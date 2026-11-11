@@ -1000,6 +1000,11 @@ private:
     int internalFaceAt(double x, double y);
     /// shades the InternalFaceN of this sketch that are selected (edit mode)
     void updateSelectedRegions();
+    /** FreeCAD-CH (ops#640 polish P7, selection parity P6): Onshape's hover over a region: the
+     * InternalFaceN under the pointer (0: none) tinted and preselected, at the sketch point
+     * (x, y). Returns whether the hovered region changed.
+     */
+    bool updateHoveredRegion(int face, double x, double y);
     //@}
 
     /** @name miscelanea utilities */
@@ -1178,6 +1183,11 @@ private:
     /// root (unpickable); rebuilt on each selection change
     Gui::CoinPtr<SoSwitch> pcSelectedRegionsRoot;
     Gui::CoinPtr<SoSketchFaces> pcSelectedRegions;
+    /// FreeCAD-CH (ops#640 polish P7): the region under the pointer (Onshape keymap), its
+    /// InternalFaceN index or 0, shaded beside the selected ones (unpickable)
+    Gui::CoinPtr<SoSwitch> pcHoveredRegionRoot;
+    Gui::CoinPtr<SoSketchFaces> pcHoveredRegion;
+    int hoveredRegion = 0;
 
     std::unique_ptr<ShortcutListener> listener;
 

@@ -669,6 +669,8 @@ ViewProviderSketch::ViewProviderSketch()
     , pcSketchFacesToggle(new SoToggleSwitch)
     , pcSelectedRegionsRoot(new SoSwitch)
     , pcSelectedRegions(new SoSketchFaces)
+    , pcHoveredRegionRoot(new SoSwitch)
+    , pcHoveredRegion(new SoSketchFaces)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -791,6 +793,15 @@ ViewProviderSketch::ViewProviderSketch()
     selectedRegions->addChild(pcSelectedRegions);
     pcSelectedRegionsRoot->addChild(selectedRegions);
     pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
+
+    // FreeCAD-CH (ops#640 polish P7): the hovered region, unpickable as well
+    auto hoveredRegionNode = new SoSeparator;
+    auto hoverUnpickable = new SoPickStyle;
+    hoverUnpickable->style = SoPickStyle::UNPICKABLE;
+    hoveredRegionNode->addChild(hoverUnpickable);
+    hoveredRegionNode->addChild(pcHoveredRegion);
+    pcHoveredRegionRoot->addChild(hoveredRegionNode);
+    pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
 }
 
 ViewProviderSketch::~ViewProviderSketch()
@@ -2111,7 +2122,14 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
     }
 
     switch (Mode) {
-        case STATUS_NONE:
+        case STATUS_NONE: {
+            // FreeCAD-CH (ops#640 polish P7): Onshape tints the region under the pointer when
+            // none of the sketch's elements is under it
+            const bool element = preselection.isPreselectPointValid()
+                || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
+                || !preselection.PreselectConstraintSet.empty();
+            const int region = Gui::ForkKeymap::isOnshape() && !element ? internalFaceAt(x, y) : 0;
+            const bool regionChanged = updateHoveredRegion(region, x, y);
             if (preselectChanged) {
                 if (updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
                     editCoinManager->updateVirtualSpace();
@@ -2120,7 +2138,8 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
                 updateColor();
                 return true;
             }
-            return false;
+            return regionChanged;
+        }
         case STATUS_SELECT_Point:
             if (!getSolvedSketch().hasConflicts() && preselection.isPreselectPointValid()) {
                 int geoId;
@@ -4317,6 +4336,9 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
                 Deviation.getValue(),
                 AngularDeflection.getValue());
         updateSelectedRegions();  // FreeCAD-CH (selection parity SQ11)
+        // FreeCAD-CH (ops#640 polish P7): the regions are new: the next move finds the hovered one
+        hoveredRegion = 0;
+        pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
     }
 
     if (prop != &getSketchObject()->Constraints) {
@@ -4696,6 +4718,9 @@ bool ViewProviderSketch::setEdit(int ModNum)
     snapManager = std::make_unique<SnapManager>(*this);
     pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
     editCoinManager->getRootEditNode()->addChild(pcSelectedRegionsRoot);
+    hoveredRegion = 0;
+    pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
+    editCoinManager->getRootEditNode()->addChild(pcHoveredRegionRoot);
 
 
     App::DocumentObject* editObj = getSketchObject();
@@ -6328,6 +6353,47 @@ void ViewProviderSketch::updateSelectedRegions()
         setupCoinGeometry(selected, pcSelectedRegions, Deviation.getValue(), AngularDeflection.getValue());
     }
     pcSelectedRegionsRoot->whichChild = any ? 0 : SO_SWITCH_NONE;
+}
+
+bool ViewProviderSketch::updateHoveredRegion(int face, double x, double y)
+{
+    if (face == hoveredRegion || !isInEditMode()) {
+        return false;
+    }
+    const bool hadRegion = hoveredRegion > 0;
+    hoveredRegion = 0;
+    TopoDS_Shape region;
+    const TopoDS_Shape& shape = getSketchObject()->InternalShape.getValue();
+    if (face > 0 && !shape.IsNull()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        if (face <= faces.Extent()) {
+            region = faces(face);
+        }
+    }
+    if (region.IsNull()) {
+        pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
+        // The region's preselection goes with it; an element's (the pointer on a side) stays
+        const bool element = preselection.isPreselectPointValid()
+            || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
+            || !preselection.PreselectConstraintSet.empty();
+        if (hadRegion && !element) {
+            Gui::Selection().rmvPreselect();
+        }
+        return hadRegion;
+    }
+    hoveredRegion = face;
+    pcHoveredRegion->color.setValue(DrawingParameters::PreselectColor);
+    pcHoveredRegion->transparency.setValue(0.6F);
+    setupCoinGeometry(region, pcHoveredRegion, Deviation.getValue(), AngularDeflection.getValue());
+    pcHoveredRegionRoot->whichChild = 0;
+    Base::Vector3d onPlane;
+    getEditingPlacement().multVec(Base::Vector3d(x, y, 0.0), onPlane);
+    setPreselect("InternalFace" + std::to_string(face),
+                 static_cast<float>(onPlane.x),
+                 static_cast<float>(onPlane.y),
+                 static_cast<float>(onPlane.z));
+    return true;
 }
 
 void ViewProviderSketch::preselectToSelection(const std::stringstream& ss,
