@@ -3909,6 +3909,84 @@ class TestRevolve(unittest.TestCase):
         disc = math.pi * r * r
         self._assertExactSolid(revolution, disc * 10 + disc * r * math.pi / 4)
 
+    def _tangentCircleBothWaysAwayFromTheBase(self, setup):
+        """The tangent circle turned both ways, its base a Pad far from it: built as one primitive,
+        so its revolved face stays one face, as Onshape's (kernel-6 review T1: built as two sides
+        from the plane, the face came out in two, and a reference to it kept one half). The Pad
+        (r 2, 10 high) has 3 faces; the revolve adds its revolved face and two end discs."""
+        V = FreeCAD.Vector
+        r = 5
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(0, r, 0), V(0, 0, 1), r)],
+            lambda: [Part.Circle(V(50, 50, 0), V(0, 0, 1), 2)],
+            setup,
+        )
+        disc = math.pi * r * r
+        turned = math.radians(revolution.Angle.Value)
+        if revolution.SideType == "Two sides":
+            turned += math.radians(revolution.Angle2.Value)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        shape.check(True)
+        self.assertEqual(len(shape.Solids), 2)  # the Pad and the revolved solid, apart
+        self.assertAlmostEqual(shape.Volume, math.pi * 4 * 10 + disc * r * turned, places=4)
+        self.assertEqual(len(shape.Faces), 6)
+
+    def testRevolutionSymmetricAboutTangentAxisAwayFromTheBaseKeepsOneFace(self):
+        def setup(revolution):
+            revolution.SideType = "Symmetric"
+            revolution.Angle = 90
+
+        self._tangentCircleBothWaysAwayFromTheBase(setup)
+
+    def testRevolutionTwoSidesAboutTangentAxisAwayFromTheBaseKeepsOneFace(self):
+        def setup(revolution):
+            revolution.SideType = "Two sides"
+            revolution.Angle2 = 30
+
+        self._tangentCircleBothWaysAwayFromTheBase(setup)
+
+    def _aboutTheVAxis(self, revolution):
+        revolution.ReferenceAxis = (self.Doc.getObject("RevolveProfile"), ["V_Axis"])
+
+    def testRevolutionSymmetricAboutAxisTangentAtCircleSeam(self):
+        """The tangent circle with its seam vertex at the touch: the circle r 5 at (-5, 0) about the
+        sketch's V axis, x = 0 (a sketch circle's seam is at its +x point, here (0, 0)). The touch
+        then needed no vertex, and the profile wasn't seen as touching: Symmetric took the one
+        primitive and came out wrong but up to date (kernel-6 review T3: V 785.398 on the
+        cylinder, for 1096.34). As _tangentCircleBothWays, with the box x -11..0, y -6..6."""
+        V = FreeCAD.Vector
+        r = 5
+
+        def box():
+            corners = [V(-11, -6, 0), V(0, -6, 0), V(0, 6, 0), V(-11, 6, 0)]
+            return [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+
+        def setup(revolution):
+            self._aboutTheVAxis(revolution)
+            revolution.SideType = "Symmetric"
+            revolution.Angle = 90
+
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(-r, 0, 0), V(0, 0, 1), r)], box, setup
+        )
+        self._assertExactSolid(revolution, 11 * 12 * 10 + math.pi * r * r * r * math.pi / 4)
+
+    def testRevolutionNearlyTangentCircleSeamAtTouch(self):
+        """As testRevolutionAboutAxisNearlyTangentToCircle, with the circle's seam vertex at the
+        touch (about the V axis): the move across the axis was dropped there, and the feature
+        was Valid with an empty shape (kernel-6 review T4)."""
+        V = FreeCAD.Vector
+        r = 5
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(-r - 1e-8, 0, 0), V(0, 0, 1), r)],
+            lambda: [Part.Circle(V(-r, 0, 0), V(0, 0, 1), r)],
+            self._aboutTheVAxis,
+        )
+        disc = math.pi * r * r
+        self._assertExactSolid(revolution, disc * 10 + disc * r * math.pi / 4)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")

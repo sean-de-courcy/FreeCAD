@@ -2541,7 +2541,8 @@ std::optional<EdgeSeat> seatOf(const TopoDS_Edge& edge, const gp_Ax1& axis, cons
         return std::nullopt;  // nearest outside the arc
     }
     constexpr double crossing = 1e-10;
-    if (gap > -crossing) {
+    const bool moved = gap > -crossing;
+    if (moved) {
         const gp_Vec shift = -outward * (gap + crossing);
         if (!closed
             && shift.Magnitude()
@@ -2551,6 +2552,13 @@ std::optional<EdgeSeat> seatOf(const TopoDS_Edge& edge, const gp_Ax1& axis, cons
         seat.curve = Handle(Geom_Curve)::DownCast(seat.curve->Translated(shift));
     }
     const gp_Pnt point = seat.curve->Value(touch);
+    if (closed && moved) {
+        // A circle whose seam vertex is already at the touch still has to cross the axis: re-seated
+        // with a new vertex there (the vertex return below dropped the move, and a circle 1e-8
+        // short of the axis gave an empty solid, kernel-6 review T4)
+        seat.touches = {touch};
+        return seat;
+    }
     for (const TopoDS_Vertex& vertex : {first, last}) {
         if (!vertex.IsNull()
             && BRep_Tool::Pnt(vertex).Distance(point)
@@ -2988,6 +2996,19 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     const TopoShape seatedProfile = seatAxisTouches(sketchshape, revolutionAxis);
     const bool profileTouchesAxis = !seatedProfile.getShape().IsSame(sketchshape.getShape());
     sketchshape = seatedProfile;
+    // Such a profile turned both ways from its plane is built as two sides from the plane only
+    // where the base meets the profile (below). Elsewhere the one primitive is right and keeps
+    // the revolved face whole, as Onshape does: two halves split it, and a reference to it kept
+    // one half (kernel-6 review T1)
+    const bool halvesAtProfile = profileTouchesAxis && !base.isNull() && [&]() {
+        BRepExtrema_DistShapeShape distance(sketchshape.getShape(), base.getShape());
+        return distance.IsDone()
+            && distance.Value() <= std::max(
+                   {Precision::Confusion(),
+                    largestTolerance(sketchshape.getShape()),
+                    largestTolerance(base.getShape())}
+               );
+    }();
 
     // Up to vertex (FreeCAD-CH ops#640 rank 21, Onshape's): the side ends where the profile
     // reaches the half-plane through the axis and the vertex, so it is the side by that angle,
@@ -3068,7 +3089,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         // from the plane and fused (P4): turned as one primitive from one end, the profile's own
         // place lay inside the revolved face, and a base face there (the cap the profile sits
         // on) made the fuse wrong, silently (RV1 symmetric 90: V 1343.05 for 1096.34)
-        const bool sidesFromPlane = profileTouchesAxis && angle > Precision::Angular()
+        const bool sidesFromPlane = halvesAtProfile && angle > Precision::Angular()
             && angle2 > Precision::Angular();
 
         if (isThroughAll || coversFullRevolution) {
@@ -3143,7 +3164,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     else if (sideType == "Symmetric") {
         const bool isThroughAll = method == RevolMethod::ThroughAll
             && revolMode == Part::RevolMode::CutFromBase;
-        if (method == RevolMethod::Angle && profileTouchesAxis
+        if (method == RevolMethod::Angle && halvesAtProfile
             && std::fabs(angle) < 2.0 * std::numbers::pi - Precision::Angular()) {
             // Two halves from the profile's plane, fused, as Two sides (P4, above)
             addRevolution(generateSingleRevolutionSide(
