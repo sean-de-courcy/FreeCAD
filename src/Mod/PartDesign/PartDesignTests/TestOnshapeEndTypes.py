@@ -151,8 +151,14 @@ class TestOnshapeEndTypes(unittest.TestCase):
         self.assertAlmostEqual(pad.Shape.Volume, 2500, places=5)
 
     def testPadUpToAVertexWithAnOffset(self):
-        """An offset of 5 goes past the vertex's plane: z 0..30, 3000."""
+        """Onshape's sign (oracle 7c, UV1), as for a face: an offset of 5 ends 5 short of the
+        vertex's plane, z 0..20, 2000; an offset of -5 goes past it, z 0..30, 3000."""
         pad = self.plate(25, Offset=5)
+        self.assertValid(pad)
+        self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, 20, places=6)
+        self.assertAlmostEqual(pad.Shape.Volume, 2000, places=6)
+        pad.Offset = -5
+        self.doc.recompute()
         self.assertValid(pad)
         self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, 30, places=6)
         self.assertAlmostEqual(pad.Shape.Volume, 3000, places=6)

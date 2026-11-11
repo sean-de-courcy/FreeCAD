@@ -620,6 +620,17 @@ def upToOffsetFace(doc, slanted, z, x0=4, x1=8):
     return face
 
 
+def upToVertexMarker(doc, z):
+    """FreeCAD-CH: a Part::Feature, a line from (3, 3, z) up to (4, 4, z + 1), whose first vertex
+    (Vertex1) is the up-to vertex at height z. Onshape's extrusion up to a vertex ends on the
+    plane through it parallel to the profile, and an offset moves that plane `offset` along the
+    extrusion, back towards the profile for a positive one (oracle 7c, UV1)."""
+    V = FreeCAD.Vector
+    marker = doc.addObject("Part::Feature", "VertexMarker")
+    marker.Shape = Part.makeLine(V(3, 3, z), V(4, 4, z + 1))
+    return marker
+
+
 def squareSketch(body, name, placement, rectangles):
     """A sketch in `body` at `placement` of closed rectangles (x0, y0, x1, y1) in its plane"""
     import Sketcher
@@ -5193,6 +5204,88 @@ class TestPad(unittest.TestCase):
                 self.assertAlmostEqual(pad.Shape.Volume, volume, places=4)
                 self.assertAlmostEqual(pad.Shape.BoundBox.ZMin, 0.0, places=6)
                 self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, top, places=6)
+
+    def testUpToVertexOffsetSign(self):
+        """FreeCAD-CH: a 20 x 20 square at z = 0 padded up to a vertex at z = 10 or z = -10, offset
+        by +2 and -2, as Onshape does (oracle 7c, UV1, both directions): up to a vertex follows the
+        rule of up to a face, the end on the vertex's plane moved `offset` along the extrusion,
+        back towards the profile for +2 (short of the vertex) and past it for -2. One side, a
+        symmetric pad (each half) and side 2 up to its vertex. Before, +2 went past the vertex."""
+        for ahead in (True, False):
+            for offset in (2.0, -2.0):
+                z = 10.0 if ahead else -10.0
+                reach = 10.0 - offset
+                with self.subTest(case="one side", ahead=ahead, offset=offset):
+                    pad = self.upToVertexPad(z, offset)
+                    box = pad.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, 0.0 if ahead else -reach, places=6)
+                    self.assertAlmostEqual(box.ZMax, reach if ahead else 0.0, places=6)
+                    self.assertAlmostEqual(pad.Shape.Volume, 400.0 * reach, places=4)
+                    self.assertEqual(len(pad.Shape.Solids), 1)
+                    self.Doc.removeObject("Body")
+                if not ahead:
+                    continue
+                with self.subTest(case="symmetric", offset=offset):
+                    pad = self.upToVertexPad(z, offset, SideType="Symmetric")
+                    box = pad.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, -reach, places=6)
+                    self.assertAlmostEqual(box.ZMax, reach, places=6)
+                    self.assertAlmostEqual(pad.Shape.Volume, 800.0 * reach, places=4)
+                    self.Doc.removeObject("Body")
+                with self.subTest(case="side 2", offset=offset):
+                    # side 1 blind 5 up, side 2 up to the vertex at z = -10 below
+                    marker = upToVertexMarker(self.Doc, -z)
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                    pad = body.newObject("PartDesign::Pad", "Pad")
+                    pad.Profile = sketch
+                    pad.Type = "Length"
+                    pad.Length = 5
+                    pad.SideType = "Two sides"
+                    pad.Type2 = "UpToVertex"
+                    pad.UpToFace2 = (marker, ["Vertex1"])
+                    pad.Offset2 = offset
+                    self.Doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    box = pad.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, -reach, places=6)
+                    self.assertAlmostEqual(box.ZMax, 5.0, places=6)
+                    self.assertAlmostEqual(pad.Shape.Volume, 400.0 * (5.0 + reach), places=4)
+                    self.Doc.removeObject("Body")
+
+    def testUpToVertexOffsetPastTheProfileFails(self):
+        """FreeCAD-CH: an offset of +10 or more up to a vertex 10 away leaves nothing to extrude
+        (the end at or before the profile plane): the pad fails and says so."""
+        for offset in (10.0, 12.0):
+            with self.subTest(offset=offset):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                marker = upToVertexMarker(self.Doc, 10.0)
+                sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Type = "UpToVertex"
+                pad.UpToFace = (marker, ["Vertex1"])
+                pad.Offset = offset
+                self.Doc.recompute()
+                self.assertFalse(pad.isValid())
+                self.assertIn("nothing to extrude", pad.getStatusString())
+                self.Doc.removeObject("Body")
+
+    def upToVertexPad(self, z, offset, **values):
+        """A 20 x 20 square at z = 0 padded up to the vertex at height z with `offset`"""
+        marker = upToVertexMarker(self.Doc, z)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Type = "UpToVertex"
+        pad.UpToFace = (marker, ["Vertex1"])
+        pad.Offset = offset
+        for name, value in values.items():
+            setattr(pad, name, value)
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        return pad
 
     def tearDown(self):
         # closing doc
