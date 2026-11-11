@@ -597,3 +597,281 @@ class TestSketchSplitCircleGui(SketchToolsTestCase):
         self.assertEqual(ends, [0.0, 10.0], "Expected the cuts at the two clicks")
         self.assertEqual(self.sketch.solve(), 0)
         self.assertEqual(modals["seen"], [])
+
+
+class SketchSplitTestCase(SketchToolsTestCase):
+    """Sketcher 3 (Ward's hand-check 6, Onshape SK11): helpers for the Split tool's picks."""
+
+    def start_split(self):
+        self.modals = self.answer_modals()
+        self.start_edit()
+        FreeCADGui.runCommand("Sketcher_Split")
+        self.flush_gui(200)
+
+    def trace(self, *points):
+        """Moves the cursor through sketch points, as a hand approaching a pick along a curve."""
+        for x, y in points:
+            self.move_to(x, y)
+
+    def preselected(self):
+        try:
+            return list(FreeCADGui.Selection.getPreselection().SubElementNames)
+        except Exception:  # no preselection
+            return []
+
+    def require_preselection(self):
+        if not self.preselected():
+            self.skipTest("the 3D view doesn't preselect here (off screen without OpenGL)")
+
+    def hint(self):
+        """The status bar's text (the tool's hint line included)."""
+        bar = FreeCADGui.getMainWindow().statusBar()
+        labels = bar.findChildren(QtGui.QLabel)
+        return " ".join([bar.currentMessage()] + [w.text() for w in labels])
+
+    def markers(self):
+        """The edit markers the tool draws, as sketch points."""
+        from pivy import coin
+
+        root = self.view.getViewer().getSoRenderManager().getSceneGraph()
+        search = coin.SoSearchAction()
+        search.setName("EditMarkersCoordinate")
+        search.setSearchingAll(True)
+        search.apply(root)
+        path = search.getPath()
+        self.assertIsNotNone(path, "Expected the edit markers in the scene graph")
+        return [V(p[0], p[1], 0) for p in path.getTail().point.getValues()]
+
+    def has_marker(self, x, y, tolerance=1e-6):
+        return any((m - V(x, y, 0)).Length < tolerance for m in self.markers())
+
+    def cursor_forbidden(self):
+        widgets = [self.view.graphicsView(), self.viewport]
+        return any(w.cursor().shape() == QtCore.Qt.ForbiddenCursor for w in widgets)
+
+    def lines(self):
+        return [g for g in self.sketch.Geometry if isinstance(g, Part.LineSegment)]
+
+    def arcs(self):
+        return [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)]
+
+    def has_line(self, a, b, tolerance=1e-9):
+        for line in self.lines():
+            s, e = line.StartPoint, line.EndPoint
+            if ((s - a).Length < tolerance and (e - b).Length < tolerance) or (
+                (s - b).Length < tolerance and (e - a).Length < tolerance
+            ):
+                return True
+        return False
+
+
+class TestSketchSplitCirclePicksGui(SketchSplitTestCase):
+    """Onshape SK11 and Ward's hand-check 6: the first pick on a whole circle is shown and waits; a
+    second pick on another curve is refused where it can be read and the first pick stays; Esc drops
+    the pending pick only. Designed geometry: a circle of radius 5 centred on (5, 5) and a line
+    x = 12 (y 0..10), 2 mm right of the circle; the picks at (10, 5) and (0, 5) give two half
+    circles."""
+
+    def build(self):
+        self.sketch.addGeometry(Part.Circle(V(5, 5, 0), V(0, 0, 1), 5), False)
+        self.sketch.addGeometry(Part.LineSegment(V(12, 0, 0), V(12, 10, 0)), False)
+
+    def pick_circle(self, x, y):
+        self.move_to(x + 0.3, y)
+        self.move_to(x, y)
+        self.require_preselection()
+        self.click_at(x, y)
+
+    def assert_halves_at(self, xs):
+        arcs = self.arcs()
+        self.assertEqual(len(arcs), 2, f"Expected two arcs, got {self.sketch.Geometry}")
+        # a pick off an intersection lands on the cursor's pixel
+        ends = sorted(p.x for p in (arcs[0].StartPoint, arcs[0].EndPoint))
+        for end, x in zip(ends, xs):
+            self.assertAlmostEqual(end, x, delta=CLICK_TOLERANCE, msg=f"Expected the cuts at {xs}, got {ends}")
+        self.assertLess((arcs[0].EndPoint - arcs[1].StartPoint).Length, 1e-6, "Expected the arcs joined")
+        self.assertLess((arcs[1].EndPoint - arcs[0].StartPoint).Length, 1e-6, "Expected the arcs joined")
+        self.assertTrue(self.has_line(V(12, 0, 0), V(12, 10, 0)), "Expected the line whole")
+
+    def test_the_first_pick_is_shown_until_the_second(self):
+        self.start_split()
+        self.pick_circle(10, 5)
+        self.assertEqual(len(self.sketch.Geometry), 2, "the first pick on a circle splits nothing")
+        # the point is shown on the circle (snapped onto it, not the cursor's pixel)
+        self.assertTrue(
+            any(abs((m - V(5, 5, 0)).Length - 5) < 1e-6 and (m - V(10, 5, 0)).Length < 0.2
+                for m in self.markers()),
+            f"Expected a marker at the first pick, got {self.markers()}",
+        )
+        self.assertIn("second point", self.hint())
+        self.pick_circle(0, 5)
+        self.assert_halves_at([0.0, 10.0])
+        self.assertFalse(
+            any((m - V(10, 5, 0)).Length < 0.2 for m in self.markers()),
+            "Expected the first pick's marker gone after the split",
+        )
+        self.assertEqual(self.modals["seen"], [])
+
+    def test_a_second_pick_on_another_curve_is_refused_and_the_first_stays(self):
+        self.start_split()
+        self.pick_circle(10, 5)
+        self.trace((12.3, 3), (12, 3))
+        self.require_preselection()
+        self.click_at(12, 3)
+        self.assertEqual(len(self.sketch.Geometry), 2, "Expected the line not split")
+        self.assertTrue(self.has_line(V(12, 0, 0), V(12, 10, 0)), "Expected the line whole")
+        self.assertIn("same circle", self.hint(), "Expected the refusal in the hint line")
+        self.assertIn("second point", self.hint(), "Expected the first pick still pending")
+        self.pick_circle(0, 5)
+        self.assert_halves_at([0.0, 10.0])
+        self.assertEqual(self.modals["seen"], [])
+
+    def test_escape_drops_the_pending_pick_and_keeps_the_tool(self):
+        self.start_split()
+        self.pick_circle(10, 5)
+        self.key_click(self.viewport, QtCore.Qt.Key_Escape)
+        self.flush_gui(100)
+        self.assertNotIn("second point", self.hint(), "Expected the pending pick dropped")
+        self.assertFalse(
+            any((m - V(10, 5, 0)).Length < 0.2 for m in self.markers()),
+            "Expected the dropped pick's marker gone",
+        )
+        # the tool is still active: two new picks split the circle at them (the quadrant points,
+        # where the circle's drawn polyline has vertices: the view's pick lands on those)
+        self.pick_circle(0, 5)
+        self.assertEqual(len(self.sketch.Geometry), 2, "Expected the tool still running, one pick")
+        self.assertIn("second point", self.hint())
+        self.pick_circle(10, 5)
+        self.assert_halves_at([0.0, 10.0])
+        self.assertEqual(self.modals["seen"], [])
+
+
+class TestSketchSplitIntersectionGui(SketchSplitTestCase):
+    """Ward's hand-check 6: Onshape picks the intersection of two curves easily and splits the
+    curve the cursor traced on the way in; FreeCAD showed a "no" cursor there. Designed geometry,
+    built per test: two lines crossing at (5, 5); a line y = 5 through a circle of radius 3 centred
+    on (5, 5) (crossings at (2, 5) and (8, 5)); an upper half arc of radius 3 centred on (5, 5)
+    whose end (2, 5) lies inside the line y = 5 (x 0..4), square to it. Cuts are expected exactly at the
+    intersection, not at the cursor's pixel."""
+
+    def add(self, *geometry):
+        for g in geometry:
+            self.sketch.addGeometry(g, False)
+        self.doc.recompute()
+
+    def test_crossing_lines_split_the_line_traced_on_the_way_in(self):
+        self.add(Part.LineSegment(V(0, 5, 0), V(10, 5, 0)), Part.LineSegment(V(5, 0, 0), V(5, 10, 0)))
+        self.start_split()
+        self.trace((2, 5), (3.5, 5), (4.5, 5), (4.9, 5))
+        self.require_preselection()
+        self.move_to(5.04, 5.04)
+        self.assertTrue(self.has_marker(5, 5), f"Expected the crossing shown, got {self.markers()}")
+        self.assertFalse(self.cursor_forbidden(), "Expected no 'no' cursor at the crossing")
+        self.click_at(5.04, 5.04)
+        self.assertEqual(len(self.lines()), 3, f"Expected one line split, got {self.sketch.Geometry}")
+        self.assertTrue(self.has_line(V(0, 5, 0), V(5, 5, 0)), "Expected y = 5 cut at x = 5")
+        self.assertTrue(self.has_line(V(5, 5, 0), V(10, 5, 0)), "Expected y = 5 cut at x = 5")
+        self.assertTrue(self.has_line(V(5, 0, 0), V(5, 10, 0)), "Expected x = 5 whole")
+        self.assertEqual(self.modals["seen"], [])
+
+    def test_crossing_lines_approached_along_the_other_split_that_one(self):
+        self.add(Part.LineSegment(V(0, 5, 0), V(10, 5, 0)), Part.LineSegment(V(5, 0, 0), V(5, 10, 0)))
+        self.start_split()
+        self.trace((5, 2), (5, 3.5), (5, 4.5), (5, 4.9))
+        self.require_preselection()
+        self.click_at(5.04, 5.04)
+        self.assertEqual(len(self.lines()), 3, f"Expected one line split, got {self.sketch.Geometry}")
+        self.assertTrue(self.has_line(V(5, 0, 0), V(5, 5, 0)), "Expected x = 5 cut at y = 5")
+        self.assertTrue(self.has_line(V(5, 5, 0), V(5, 10, 0)), "Expected x = 5 cut at y = 5")
+        self.assertTrue(self.has_line(V(0, 5, 0), V(10, 5, 0)), "Expected y = 5 whole")
+
+    def test_a_line_through_a_circle_splits_the_line_traced(self):
+        self.add(Part.LineSegment(V(0, 5, 0), V(10, 5, 0)), Part.Circle(V(5, 5, 0), V(0, 0, 1), 3))
+        self.start_split()
+        self.trace((0.5, 5), (1.2, 5), (1.8, 5))
+        self.require_preselection()
+        self.click_at(2.04, 5.03)
+        self.assertTrue(self.has_line(V(0, 5, 0), V(2, 5, 0)), "Expected the line cut at x = 2")
+        self.assertTrue(self.has_line(V(2, 5, 0), V(10, 5, 0)), "Expected the line cut at x = 2")
+        circles = [g for g in self.sketch.Geometry if isinstance(g, Part.Circle)]
+        self.assertEqual(len(circles), 1, "Expected the circle whole")
+
+    def test_a_circle_traced_to_both_crossings_splits_there(self):
+        self.add(Part.LineSegment(V(0, 5, 0), V(10, 5, 0)), Part.Circle(V(5, 5, 0), V(0, 0, 1), 3))
+        self.start_split()
+
+        def on_circle(degrees):
+            a = math.radians(degrees)
+            return (5 + 3 * math.cos(a), 5 + 3 * math.sin(a))
+
+        self.trace(on_circle(130), on_circle(150), on_circle(170))
+        self.require_preselection()
+        self.click_at(2.03, 5.04)
+        self.assertTrue(self.has_marker(2, 5), f"Expected the first pick at (2, 5), got {self.markers()}")
+        self.trace(on_circle(-30), on_circle(-15), on_circle(-6))
+        self.click_at(7.97, 4.96)
+        arcs = self.arcs()
+        self.assertEqual(len(arcs), 2, f"Expected two arcs, got {self.sketch.Geometry}")
+        for arc in arcs:
+            for p in (arc.StartPoint, arc.EndPoint):
+                self.assertTrue(
+                    (p - V(2, 5, 0)).Length < 1e-9 or (p - V(8, 5, 0)).Length < 1e-9,
+                    f"Expected the cuts at the crossings, got {p}",
+                )
+        self.assertTrue(self.has_line(V(0, 5, 0), V(10, 5, 0)), "Expected the line whole")
+
+    def test_a_b_spline_knot_splits_there(self):
+        """A knot of a B-spline (poles (0, 0) (3, 6) (6, 0) (9, 6) (12, 0), degree 3, one inner knot
+        at u = 1) splits the B-spline exactly at the knot, as before."""
+        spline = Part.BSplineCurve()
+        poles = [V(0, 0, 0), V(3, 6, 0), V(6, 0, 0), V(9, 6, 0), V(12, 0, 0)]
+        spline.buildFromPolesMultsKnots(poles, [4, 1, 4], [0, 1, 2], False, 3)
+        knot = spline.value(1)
+        self.add(spline)
+        self.sketch.exposeInternalGeometry(0)
+        self.doc.recompute()
+        self.start_split()
+        self.trace((knot.x + 1.5, knot.y + 1.5), (knot.x + 0.04, knot.y + 0.03))
+        self.require_preselection()
+        self.click_at(knot.x + 0.04, knot.y + 0.03)
+        pieces = [g for g in self.sketch.Geometry if isinstance(g, Part.BSplineCurve)]
+        self.assertEqual(len(pieces), 2, f"Expected two B-splines, got {self.sketch.Geometry}")
+        ends = [p for g in pieces for p in (g.StartPoint, g.EndPoint)]
+        self.assertTrue(
+            any((p - knot).Length < 1e-9 for p in ends), f"Expected a cut at the knot {knot}, got {ends}"
+        )
+        self.assertEqual(self.modals["seen"], [])
+
+    def arc_on_a_line(self):
+        self.add(
+            Part.ArcOfCircle(Part.Circle(V(5, 5, 0), V(0, 0, 1), 3), 0, math.pi),
+            Part.LineSegment(V(0, 5, 0), V(4, 5, 0)),
+        )
+
+    def test_an_arc_end_inside_a_line_splits_the_line_traced(self):
+        self.arc_on_a_line()
+        self.start_split()
+        self.trace((0.3, 5), (1.0, 5), (1.6, 5))
+        self.require_preselection()
+        self.move_to(2.03, 4.97)
+        self.assertFalse(self.cursor_forbidden(), "Expected no 'no' cursor at the arc's end")
+        self.click_at(2.03, 4.97)
+        self.assertTrue(self.has_line(V(0, 5, 0), V(2, 5, 0)), "Expected the line cut at x = 2")
+        self.assertTrue(self.has_line(V(2, 5, 0), V(4, 5, 0)), "Expected the line cut at x = 2")
+        self.assertEqual(len(self.arcs()), 1, "Expected the arc whole")
+        self.assertEqual(self.modals["seen"], [])
+
+    def test_an_arc_traced_to_its_own_end_is_refused_there(self):
+        self.arc_on_a_line()
+        self.start_split()
+
+        def on_arc(degrees):
+            a = math.radians(degrees)
+            return (5 + 3 * math.cos(a), 5 + 3 * math.sin(a))
+
+        self.trace(on_arc(150), on_arc(165), on_arc(172))
+        self.require_preselection()
+        self.click_at(2.0, 5.0)
+        self.assertEqual(len(self.sketch.Geometry), 2, "Expected nothing split at the arc's own end")
+        self.assertIn("Nothing to split", self.hint(), "Expected the refusal in the hint line")
+        self.assertEqual(self.modals["seen"], [])
