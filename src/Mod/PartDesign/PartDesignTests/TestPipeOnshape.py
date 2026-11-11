@@ -632,3 +632,202 @@ class TestPipeSelfOverlap(PipeCase):
     def testTubesClearOfEachOtherSweep(self):
         """The path ends at (10, 1.5): the tubes miss each other: pi x the path's length."""
         self.assertSweeps(self.tube((10, 1.5)), math.pi * 48.5, places=2)
+
+
+class TestPipeTwist(PipeCase):
+    """SW11: twist is linear in the path's length; `TwistCCW` off = clockwise about the path's direction.
+    Line z 0..20, a 4x4 square centred on it: every section is the square (320), turned."""
+
+    def square(self, half=2, name="Profile"):
+        return self.sketch(name, models.rectangle(-half, -half, half, half))
+
+    def twisted(self, **properties):
+        return self.pipe(self.square(), self.line(0, 20), HasTwist=True, **properties)
+
+    def corner(self, degrees, z):
+        a = math.radians(45 + degrees)
+        return (2 * math.sqrt(2) * math.cos(a), 2 * math.sqrt(2) * math.sin(a), z)
+
+    def assertCornerAt(self, pipe, degrees, z):
+        section = pipe.Shape.slice(V(0, 0, 1), z)
+        points = [v.Point for wire in section for v in wire.Vertexes]
+        nearest = min((p - V(*self.corner(degrees, z))).Length for p in points)
+        self.assertLess(nearest, 1e-4, (degrees, z, [tuple(round(c, 3) for c in p) for p in points]))
+
+    def testAngleClockwise(self):
+        """ANGLE 30, ccw off: (2, 2, 0) ends at (2.732, 0.733, 20), -15 degrees at z 10."""
+        pipe = self.twisted(TwistType="Angle", TwistAngle=30)
+        self.assertSweeps(pipe, 320, places=4)
+        self.assertHasVertices(pipe.Shape, [self.corner(-30, 20)], 1e-6)
+        self.assertCornerAt(pipe, -15, 10)
+
+    def testAngleCounterClockwise(self):
+        pipe = self.twisted(TwistType="Angle", TwistAngle=30, TwistCCW=True)
+        self.assertSweeps(pipe, 320, places=4)
+        self.assertHasVertices(pipe.Shape, [self.corner(30, 20)], 1e-6)
+
+    def testOneTurn(self):
+        """TURNS 1: back to (2, 2, 20), at (-2, -2) at z 10."""
+        pipe = self.twisted(TwistType="Turns", Turns=1)
+        self.assertSweeps(pipe, 320, places=4)
+        self.assertHasVertices(pipe.Shape, [(2, 2, 20)], 1e-6)
+        self.assertCornerAt(pipe, -180, 10)
+
+    def testPitch(self):
+        """PITCH 15: 20/15 turns, -480 degrees: (0.736, -2.731, 20)."""
+        pipe = self.twisted(TwistType="Pitch", TwistPitch=15)
+        self.assertSweeps(pipe, 320, places=3)
+        self.assertHasVertices(pipe.Shape, [self.corner(-480, 20)], 1e-5)
+
+    def testProfileAtTheFarEndTwistsWithTheSameHand(self):
+        """The line drawn from z 20 down to 0, the profile at z 0: still -30 degrees at z 20."""
+        path = self.sketch("Path", models.polyline([(0, 20), (0, 0)]), placement=XZ)
+        pipe = self.pipe(self.square(), path, HasTwist=True, TwistType="Angle", TwistAngle=30)
+        self.assertSweeps(pipe, 320, places=4)
+        self.assertHasVertices(pipe.Shape, [self.corner(-30, 20)], 1e-6)
+
+    def testAlongAnArcKeepsTheSection(self):
+        """A quarter arc r 20 (SW2's), one turn: every section the square, Pappus 16 x 10 pi."""
+        path = self.sketch("Path", [arc3((0, 0, 0), (20, 0, 0), (20, 20, 0))], placement=XZ)
+        pipe = self.pipe(self.square(), path, HasTwist=True, TwistType="Turns", Turns=1)
+        self.assertSweeps(pipe, 16 * 10 * math.pi, places=3)
+
+    def testKeepOrientationStops(self):
+        self.assertStops(self.twisted(ProfileControl="Keep orientation"), "twist", "None")
+
+    def testProfileInTheMiddleWithExtendStops(self):
+        """Onshape's rule for a twist past the profile isn't known yet: loud."""
+        pipe = self.pipe(self.square(), self.line(-10, 10), HasTwist=True, ExtendToFullPath=True)
+        self.assertStops(pipe, "twist", "middle")
+
+    def testEndFaceKeepsItsNameAcrossTwistEdits(self):
+        """A pad on the end face (ops#379's case) follows edits of the twist's angle, turns and hand."""
+        pipe = self.twisted(TwistType="Angle", TwistAngle=30)
+        self.assertSweeps(pipe)
+        end = [f"Face{i}" for i, f in enumerate(pipe.Shape.Faces, 1)
+               if abs(f.CenterOfMass.z - 20) < 1e-6 and f.Surface.isPlanar()]
+        self.assertEqual(len(end), 1)
+        top = self.body.newObject("Sketcher::SketchObject", "OnEnd")
+        top.AttachmentSupport = [(pipe, end[0])]
+        top.MapMode = "FlatFace"
+        top.addGeometry(models.circle(0, 0, 1), False)
+        pad = models.pad(self.body, top, 5)
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        for edit in ({"TwistAngle": 75}, {"TwistType": "Turns", "Turns": 2}, {"TwistCCW": True}):
+            for name, value in edit.items():
+                setattr(pipe, name, value)
+            self.doc.recompute()
+            self.assertSweeps(pipe, 320, places=3)
+            self.assertTrue(pad.isValid(), (edit, pad.getStatusString()))
+            self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, 25, 4)
+            self.assertAlmostEqual(pad.Shape.Volume, 320 + 5 * math.pi, 3)
+
+
+class TestPipeScale(PipeCase):
+    """SW12: the radius is linear in the path's length, reaching `ScaleFactor` at the path's end; with
+    the profile in the middle and Extend to full path on, it goes on linearly past the profile."""
+
+    def testFactorTwo(self):
+        """Line z 0..20, circle r 2, factor 2: 586.431 (r 3 at z 10, cap 16 pi at z 20)."""
+        pipe = self.pipe(self.circle(), self.line(0, 20), HasScale=True, ScaleFactor=2)
+        self.assertSweeps(pipe, math.pi * 10 / 3 * (64 - 8), places=3)
+        self.assertAlmostEqual(Part.Face(pipe.Shape.slice(V(0, 0, 1), 10)[0]).Area, 9 * math.pi, 3)
+        caps = [f.Area for f in pipe.Shape.Faces if f.Surface.isPlanar() and abs(f.CenterOfMass.z - 20) < 1e-6]
+        self.assertEqual(len(caps), 1)
+        self.assertAlmostEqual(caps[0], 16 * math.pi, 3)
+
+    def testLinearInLengthAcrossEdges(self):
+        """Line z 0..10, then a tangent quarter arc r 10 to (10, 0, 20): length L = 10 + 5 pi. Radius
+        2 -> 4 linear in length: 2 (1 + 10 / L) at the joint, and the volume pi L (4 + 8 + 16) / 3."""
+        path = self.sketch("Path", models.polyline([(0, 0), (0, 10)])
+                           + [arc3((0, 10, 0), (10, 10, 0), (10, 20, 0))], placement=XZ)
+        pipe = self.pipe(self.circle(), path, HasScale=True, ScaleFactor=2)
+        length = 10 + 5 * math.pi
+        self.assertSweeps(pipe, math.pi * length * 28 / 3, places=2)
+        r = 2 * (1 + 10 / length)
+        self.assertAlmostEqual(Part.Face(pipe.Shape.slice(V(0, 0, 1), 10 - 1e-6)[0]).Area, math.pi * r * r, 3)
+
+    def testInTheMiddleOneWay(self):
+        """Line z -10..10, profile at z 0, extend off: -Z only, r 2 -> 4 at z -10 (293.215)."""
+        pipe = self.pipe(self.circle(), self.line(-10, 10), HasScale=True, ScaleFactor=2)
+        self.assertSweeps(pipe, math.pi * 10 / 3 * (64 - 8) / 2, places=3)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, -10, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMax, 4, 3)
+
+    def testInTheMiddleExtendedGoesOnPastTheProfile(self):
+        """Extend on, factor 1.5: r 3 at z -10, r 1 at z +10 (272.271)."""
+        pipe = self.pipe(self.circle(), self.line(-10, 10), HasScale=True, ScaleFactor=1.5,
+                         ExtendToFullPath=True)
+        self.assertSweeps(pipe, math.pi * 20 * (1 + 3 + 9) / 3, places=3)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, -10, 4)
+        self.assertAlmostEqual(Part.Face(pipe.Shape.slice(V(0, 0, 1), -9.9)[0]).Area, math.pi * 2.99 ** 2, 3)
+
+    def testScaleReachingZeroStops(self):
+        """Extend on, factor 2: r 0 at z +10. Onshape: SWEEP_SCALE_LESS_THAN_ZERO."""
+        pipe = self.pipe(self.circle(), self.line(-10, 10), HasScale=True, ScaleFactor=2,
+                         ExtendToFullPath=True)
+        self.assertStops(pipe, "scale", "zero")
+
+    def testScaleAndTwistTogether(self):
+        """A square scaled 2 and turned 90 degrees: every section a square, V = 16 x 20 x 7 / 3."""
+        square = self.sketch("Profile", models.rectangle(-2, -2, 2, 2))
+        pipe = self.pipe(square, self.line(0, 20), HasScale=True, ScaleFactor=2, HasTwist=True,
+                         TwistType="Angle", TwistAngle=90)
+        self.assertSweeps(pipe, 16 * 20 * 7 / 3, places=3)
+        self.assertHasVertices(pipe.Shape, [(4, -4, 20)], 1e-5)
+
+
+class TestPipeLock(PipeCase):
+    """SW13: Lock direction normal to the arc's plane is the same as None; in the arc's plane it fails.
+    Lock faces on a path that lies on the faces gives the same as None."""
+
+    def quarterArc(self):
+        return self.sketch("Path", [arc3((0, 0, 0), (20, 0, 0), (20, 20, 0))], placement=XZ)
+
+    def square(self):
+        return self.sketch("Profile", models.rectangle(-2, -2, 2, 2))
+
+    def testLockDirectionNormalToThePathIsNone(self):
+        plane = models.originFeature(self.body, "XZ_Plane")
+        pipe = self.pipe(self.square(), self.quarterArc(), ProfileControl="Lock direction",
+                         LockDirection=(plane, [""]))
+        self.assertSweeps(pipe, 16 * 10 * math.pi, places=3)
+        self.assertEqual(pipe.Mode, "Binormal")
+
+    def testLockDirectionInThePathsPlaneStops(self):
+        plane = models.originFeature(self.body, "YZ_Plane")
+        pipe = self.pipe(self.square(), self.quarterArc(), ProfileControl="Lock direction",
+                         LockDirection=(plane, [""]))
+        self.assertStops(pipe, "binormal")
+
+    def testLockDirectionWithoutADirectionStops(self):
+        self.assertStops(self.pipe(self.square(), self.quarterArc(), ProfileControl="Lock direction"),
+                         "Lock direction")
+
+    def boxTop(self):
+        box = models.box(self.doc, "Box", (20, 20, 10))  # outside the body
+        self.doc.recompute()
+        top = [f"Face{i}" for i, f in enumerate(box.Shape.Faces, 1) if abs(f.CenterOfMass.z - 10) < 1e-6]
+        self.assertEqual(len(top), 1)
+        return box, top
+
+    def testLockFacesOnAPlanarFaceIsNone(self):
+        """An arc on a box's top face (z 10), a square standing on it: the same as None."""
+        box, top = self.boxTop()
+        path = self.sketch("Path", [arc3((5, 15, 0), (5, 5, 0), (15, 5, 0))], z=10)
+        profile = self.sketch("Profile", models.rectangle(-1, 0, 1, 2), placement=App.Placement(
+            V(5, 15, 10), App.Rotation(V(0, 1, 0), 90)))
+        locked = self.pipe(profile, path, ProfileControl="Lock faces", LockFaces=[(box, top)])
+        # The square spans radii 10..12 about (5, 5), 2 high, over a quarter turn
+        self.assertSweeps(locked, math.pi / 4 * (144 - 100) * 2, places=4)
+        self.assertAlmostEqual(locked.Shape.BoundBox.ZMin, 9, 3)
+        self.assertHasVertices(locked.Shape, [(17, 5, 9), (15, 5, 11)], 1e-6)
+
+    def testLockFacesOffThePathStops(self):
+        box, top = self.boxTop()
+        path = self.sketch("Path", models.polyline([(5, 5), (15, 5)]), z=11)
+        profile = self.sketch("Profile", models.rectangle(-1, -1, 1, 1), placement=App.Placement(
+            V(5, 5, 11), App.Rotation(V(0, 1, 0), 90)))
+        pipe = self.pipe(profile, path, ProfileControl="Lock faces", LockFaces=[(box, top)])
+        self.assertStops(pipe, "leaves the lock faces")
