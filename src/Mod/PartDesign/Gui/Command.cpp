@@ -3300,6 +3300,19 @@ void prepareTransformed(
 
         auto Feat = pcActiveBody->getDocument()->getObject(FeatName.c_str());
 
+        // FreeCAD-CH ops#654 slice 8: in a listed studio the pattern is a member of the list, at
+        // its bar, as every Body member is
+        App::Part* studio = nullptr;
+        if (Feat && Part::BodyBase::studioOf(pcActiveBody, studio)
+            && PartDesign::StudioList::of(Feat->getDocument(), studio, false)) {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.studioInsert(%s, -1)",
+                Gui::Command::getObjectCmd(Feat).c_str()
+            );
+        }
+
         if (features.empty() && waitsForFeatures) {
             // Nothing to transform yet: it shows the solid before it (a transform without
             // originals keeps its shape, as Multi-Transform's start does) until the pick
@@ -3337,18 +3350,23 @@ void prepareTransformed(
     // made a "Whole shape" transform without a word). FreeCAD-CH (ops#640, rank 13): a feature
     // of another body is left out too, said in the Features field's status: it was a modal
     PartDesign::Body* activeBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH ops#654 slice 8: a studio feature (a Features-list row) with a step in the
+    // active Body is taken: its step is copied
+    auto takes = [activeBody](const App::DocumentObject* obj) {
+        if (PartDesign::isStudioOwner(obj)) {
+            return PartDesign::StudioList::stepOf(obj, activeBody) != nullptr;
+        }
+        return obj->isDerivedFrom<PartDesign::Feature>()
+            && activeBody == PartDesignGui::getBodyFor(obj, false);
+    };
     QStringList dropped;
     for (const auto& sel : cmd->getSelection().getSelectionEx()) {
         const App::DocumentObject* obj = sel.getObject();
-        if (obj
-            && (!obj->isDerivedFrom<PartDesign::Feature>()
-                || activeBody != PartDesignGui::getBodyFor(obj, false))) {
+        if (obj && !takes(obj)) {
             dropped << QStringLiteral("'%1'").arg(QString::fromUtf8(obj->Label.getValue()));
         }
     }
-    std::erase_if(features, [activeBody](App::DocumentObject* feature) {
-        return activeBody != PartDesignGui::getBodyFor(feature, false);
-    });
+    std::erase_if(features, [&takes](App::DocumentObject* feature) { return !takes(feature); });
 
     worker(features);
 
@@ -3404,7 +3422,8 @@ void CmdPartDesignMirrored::activated(int iMsg)
     auto worker = [cmd,
                    pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
         bool direction = false;
-        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
             Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                              ->getVerifiedSketch(/* silent =*/true);
             if (sketch) {
@@ -3464,7 +3483,8 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
     auto worker =
         [cmd, pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
             bool direction = false;
-            if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+            if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
                 Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                                  ->getVerifiedSketch(/* silent =*/true);
                 if (sketch) {
@@ -3543,7 +3563,8 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
     auto worker = [cmd,
                    pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
         bool direction = false;
-        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
             Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                              ->getVerifiedSketch(/* silent =*/true);
             if (sketch) {

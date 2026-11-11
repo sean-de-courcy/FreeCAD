@@ -104,6 +104,7 @@ from PartDesignTests.TestStudioFeatureGui import (  # FreeCAD-CH, ops#654 S4 fix
     TestLeavingNewGui,
 )
 from PartDesignTests.TestStudioHistoryGui import TestStudioHistoryGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioPatternsGui import TestStudioPatternsGui  # FreeCAD-CH, ops#654 slice 8
 from PartDesignTests.TestPartsListGui import TestPartsListGui  # FreeCAD-CH, ops#654
 
 

@@ -36,4 +36,25 @@ PartDesignExport Part::TopoShape studioPatternTool(
 /// The parts a feature pattern's originals act on (the pattern's scope)
 PartDesignExport std::vector<Body*> studioPatternScope(const App::DocumentObject* pattern);
 
+class FeatureAddSub;
+
+/** Until Reapply per instance (T3; notes/parts-design.md 10.11, the coordinator's ruling on
+ * work/c719/hub-cut-skeptic.md finding 3): why copies of a studio feature's tool may differ from
+ * the instances Onshape computes at each place; empty when they provably agree (ops#654 slice 8).
+ * step: the owner's step whose tool is copied; tool: that tool and part: the part at the
+ * pattern's place, both in the pattern's frame; instances: the transforms the tool undergoes
+ * there (the original left out); fromDocument: the document's frame to the pattern's.
+ * Refused: Up to next (Onshape refuses it without Reapply, O10), Up to last, Up to a shape; Up to
+ * face unless every instance maps the face's plane onto itself; Up to vertex unless every instance
+ * keeps the end plane through the vertex; a start from a reference face, likewise; Through all
+ * unless the tool removes material, is straight and every copy spans the part along its
+ * direction. T3 replaces it. */
+PartDesignExport std::string studioCopyRefusal(
+    FeatureAddSub* step,
+    const Part::TopoShape& tool,
+    const Part::TopoShape& part,
+    const std::vector<gp_Trsf>& instances,
+    const gp_Trsf& fromDocument
+);
+
 }  // namespace PartDesign

@@ -34,10 +34,12 @@
 
 
 #include <array>
+#include <optional>
 #include <unordered_map>
 #include <algorithm>
 
 #include <App/Document.h>
+#include <App/GeoFeature.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
@@ -47,12 +49,15 @@
 #include "FeatureTransformed.h"
 #include "Body.h"
 #include "FeatureAddSub.h"
+#include "FeatureBoolean.h"
 #include "FeatureMultiTransform.h"
 #include "FeatureMirrored.h"
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
 #include "FeatureSketchBased.h"
 #include "Retarget.h"
+#include "StudioList.h"
+#include "StudioPattern.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
 
@@ -190,6 +195,306 @@ App::DocumentObjectExecReturn* nothingToTransform(const Transformed& obj)
     );
 }
 
+std::string quoted(const App::DocumentObject* obj)
+{
+    return std::string("'") + obj->Label.getValue() + "'";
+}
+
+/// FreeCAD-CH ops#654 slice 8: the studio feature an original stands for: a studio feature (an
+/// owner, outside every Body) or one of its steps; null for any other original
+App::DocumentObject* studioOwnerOfOriginal(App::DocumentObject* obj)
+{
+    if (!obj) {
+        return nullptr;
+    }
+    if (isStudioOwner(obj)) {
+        return obj;
+    }
+    if (StudioList::isStep(obj)) {
+        auto feature = freecad_cast<PartDesign::Feature*>(obj);
+        return feature ? feature->StudioOwner.getValue() : nullptr;
+    }
+    return nullptr;
+}
+
+/** The step an owner picked as an original maps to in the pattern's part, or why it can't be
+ * patterned there (ops#654 slice 8): a feature acting on another part or on several (Onshape cuts
+ * every part at every instance, O7: a pattern across parts, a later slice), a Boolean between
+ * parts, a failed step (a Remove that split its part among them: Onshape refuses it without
+ * Reapply), an Intersect, a New feature (its copies are new parts, P6p), or a step after the
+ * pattern */
+std::string studioStepOf(
+    App::DocumentObject* owner,
+    const Transformed& pattern,
+    Body* body,
+    FeatureAddSub*& step
+)
+{
+    const std::string name = quoted(owner);
+    if (!body) {
+        return name + " is a studio feature: a pattern of it belongs in a part";
+    }
+    if (freecad_cast<Boolean*>(owner)) {
+        return name + " is a Boolean between parts: it can't be patterned";
+    }
+    const std::vector<Body*> parts = studioScopeOf(owner);
+    if (parts.size() > 1) {
+        std::string names;
+        for (auto part : parts) {
+            names += (names.empty() ? "" : ", ") + quoted(part);
+        }
+        return name + " acts on " + std::to_string(parts.size()) + " parts (" + names
+            + "): a pattern across parts comes later; pattern it in one part";
+    }
+    if (parts.empty()) {
+        return name + " acts on no part";
+    }
+    if (parts.front() != body) {
+        return name + " acts on " + quoted(parts.front()) + ", not on " + quoted(body)
+            + ", the pattern's part";
+    }
+    step = freecad_cast<FeatureAddSub*>(StudioList::stepOf(owner, body));
+    if (!step) {
+        return name + " has no step in " + quoted(body);
+    }
+    const auto& group = body->Group.getValues();
+    const auto stepAt = std::ranges::find(group, step);
+    const auto patternAt = std::ranges::find(group, &pattern);
+    if (patternAt != group.end() && stepAt > patternAt) {
+        return name + " comes after the pattern";
+    }
+    if (step->Suppressed.getValue()) {
+        return {};  // suppressed: it contributes nothing, as a suppressed original
+    }
+    if (step->isError()) {
+        const std::string status = step->getStatusString();
+        if (status.find("splits") != std::string::npos) {
+            return name + " splits " + quoted(body)
+                + ": a Remove that splits its part can't be copied (Reapply per instance comes "
+                  "later)";
+        }
+        return name + " failed in " + quoted(body) + ": a failed feature can't be patterned";
+    }
+    if (step->getBooleanOperation() == FeatureAddSub::BooleanOperation::Common) {
+        return name + " is an Intersect: patterning it comes later";
+    }
+    if (step->getBaseTopoShape(/*silent=*/true).isNull()) {
+        return name + " makes a new part: a pattern of it makes new parts, which comes later";
+    }
+    return {};
+}
+
+/// One tool the copy engine copies at every instance: an original's, or an instance of a
+/// pattern among the originals
+struct PatternTool
+{
+    Part::TopoShape fuse;
+    Part::TopoShape cut;
+    FeatureAddSub* seed = nullptr;  ///< the feature whose tool this is (or is an instance of)
+    Part::TopoShape seedFuse;       ///< the seed's own additive tool, in the same frame
+};
+
+/** The tools of a pattern's originals, in the pattern's frame (ops#654 slice 8, Onshape P2 and
+ * P3): a feature's tool; a studio feature's: its step's in the pattern's part; a pattern's or
+ * mirror's: its own instances, flattened (each of its originals' tools moved by each of its
+ * transforms but the first), never its seeds */
+struct ToolCollector
+{
+    Transformed& pattern;
+    Body* body;
+    gp_Trsf frame;         ///< the Body's frame to the pattern's
+    gp_Trsf fromDocument;  ///< the document's frame to the pattern's
+    Part::TopoShape part;  ///< the part at the pattern's place, in its frame
+    bool nameInstances;
+
+    /// original's tools into out; checks: the transforms they undergo (for the copy rule)
+    std::string add(
+        App::DocumentObject* original,
+        const std::vector<gp_Trsf>& checks,
+        std::vector<PatternTool>& out,
+        int depth
+    )
+    {
+        if (auto owner = studioOwnerOfOriginal(original)) {
+            FeatureAddSub* step = nullptr;
+            if (std::string why = studioStepOf(owner, pattern, body, step); !why.empty()) {
+                return why;
+            }
+            if (step->Suppressed.getValue()) {
+                return {};
+            }
+            PatternTool tool;
+            if (std::string why = plain(step, tool); !why.empty()) {
+                return why;
+            }
+            const Part::TopoShape& shape = tool.fuse.isNull() ? tool.cut : tool.fuse;
+            if (std::string why = studioCopyRefusal(step, shape, part, checks, fromDocument);
+                !why.empty()) {
+                return why;
+            }
+            out.push_back(tool);
+            return {};
+        }
+        if (auto inner = freecad_cast<Transformed*>(original)) {
+            return instances(*inner, checks, out, depth);
+        }
+        auto feature = freecad_cast<FeatureAddSub*>(original);
+        if (!feature) {
+            return QT_TRANSLATE_NOOP(
+                "Exception",
+                "Only additive and subtractive features can be transformed"
+            );
+        }
+        PatternTool tool;
+        if (std::string why = plain(feature, tool); !why.empty()) {
+            return why;
+        }
+        out.push_back(tool);
+        return {};
+    }
+
+    std::string plain(FeatureAddSub* feature, PatternTool& tool) const
+    {
+        Part::TopoShape fuseShape = pattern.makeTopoShape(false);
+        Part::TopoShape cutShape = pattern.makeTopoShape(false);
+        feature->getAddSubShape(fuseShape, cutShape);
+        if (fuseShape.isNull() && cutShape.isNull()) {
+            return QT_TRANSLATE_NOOP("Exception", "Shape of additive/subtractive feature is empty");
+        }
+        gp_Trsf trsf = frame.Multiplied(feature->getLocation().Transformation());
+        if (!fuseShape.isNull()) {
+            fuseShape = fuseShape.makeElementTransform(trsf);
+        }
+        if (!cutShape.isNull()) {
+            cutShape = cutShape.makeElementTransform(trsf);
+        }
+        tool.fuse = fuseShape;
+        tool.cut = cutShape;
+        tool.seed = feature;
+        tool.seedFuse = fuseShape;
+        return {};
+    }
+
+    /// inner's own instances (a pattern among the originals), flattened
+    std::string instances(
+        Transformed& inner,
+        const std::vector<gp_Trsf>& checks,
+        std::vector<PatternTool>& out,
+        int depth
+    )
+    {
+        const std::string name = quoted(&inner);
+        if (depth > 8) {
+            return name + ": patterns nested too deep";
+        }
+        if (freecad_cast<MultiTransform*>(&inner)) {
+            return name + " is a MultiTransform: it can't be an original";
+        }
+        if (static_cast<Transformed::Mode>(inner.TransformMode.getValue())
+            != Transformed::Mode::Features) {
+            return name + " transforms the whole shape: it can't be an original";
+        }
+        if (inner.getFeatureBody() != body) {
+            return name + " is in another part";
+        }
+        if (inner.isError()) {
+            return name + " failed: a failed feature can't be patterned";
+        }
+        const std::vector<App::DocumentObject*> originals = inner.getOriginals();
+        if (originals.empty()) {
+            return {};
+        }
+        std::vector<gp_Trsf> list;
+        try {
+            std::list<gp_Trsf> got = inner.getTransformations(originals);
+            list.assign(got.begin(), got.end());
+        }
+        catch (const Base::Exception& e) {
+            return name + ": " + e.what();
+        }
+        catch (const Standard_Failure& e) {
+            return name + ": " + e.GetMessageString();
+        }
+        const auto skipped = inner.getSkippedPositions();
+        const auto numbers = nameInstances
+            ? instanceNumbers(inner.getTransformationSteps(), list.size())
+            : std::vector<std::string>();
+        // inner's transforms are in its support's frame: moved into the pattern's
+        gp_Trsf innerFrame = frame;
+        if (const Part::Feature* support = inner.getBaseObject(/*silent=*/true)) {
+            innerFrame.Multiply(support->Shape.getShape().getShape().Location().Transformation());
+        }
+        const gp_Trsf innerFrameInv = innerFrame.Inverted();
+        std::vector<std::pair<std::size_t, gp_Trsf>> moves;
+        for (std::size_t position = 1; position < list.size(); ++position) {
+            if (std::ranges::find(skipped, position) != skipped.end()) {
+                continue;
+            }
+            moves.emplace_back(
+                position,
+                innerFrame.Multiplied(list[position]).Multiplied(innerFrameInv)
+            );
+        }
+        // Its seeds' copies go through its moves, then through those of the patterns outside it
+        std::vector<gp_Trsf> innerChecks;
+        for (const gp_Trsf& check : checks) {
+            for (const auto& move : moves) {
+                innerChecks.push_back(check.Multiplied(move.second));
+            }
+        }
+        std::vector<PatternTool> seeds;
+        for (auto original : originals) {
+            if (std::string why = add(original, innerChecks, seeds, depth + 1); !why.empty()) {
+                return why;
+            }
+        }
+        // An additive copy inner dropped (entirely off its part, ops#640 B3-3b) is no instance
+        const TopoDS_Shape result = inner.Shape.getShape().getShape().Moved(TopLoc_Location(frame));
+        const long tag = inner.namingTag() ? inner.namingTag() : inner.getID();
+        auto copy = [&](const Part::TopoShape& shape, const std::pair<std::size_t, gp_Trsf>& move) {
+            const std::string op = nameInstances
+                ? std::string()
+                : Data::indexSuffix(static_cast<int>(move.first) + 1);
+            // inner's result shape (Feature::makeResultShape(), protected)
+            Part::TopoShape moved = nameInstances
+                ? inner.makeTopoShape(false)
+                : Part::TopoShape(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+            moved.makeElementTransform(shape, move.second, op.c_str());
+            if (nameInstances) {
+                moved.appendElementSection(tag, Part::OpCodes::Transformed, numbers[move.first]);
+            }
+            return moved;
+        };
+        for (const PatternTool& seed : seeds) {
+            std::optional<bool> ownPart;
+            for (const auto& move : moves) {
+                PatternTool tool;
+                tool.seed = seed.seed;
+                tool.seedFuse = seed.seedFuse;
+                if (!seed.fuse.isNull()) {
+                    Part::TopoShape moved = copy(seed.fuse, move);
+                    if (!FeatureAddSub::shapesTouch(moved.getShape(), result)) {
+                        if (!ownPart) {
+                            ownPart = makesItsOwnPart(*seed.seed, seed.seedFuse, frame);
+                        }
+                        if (!*ownPart) {
+                            moved = Part::TopoShape();
+                        }
+                    }
+                    tool.fuse = moved;
+                }
+                if (!seed.cut.isNull()) {
+                    tool.cut = copy(seed.cut, move);
+                }
+                if (!tool.fuse.isNull() || !tool.cut.isNull()) {
+                    out.push_back(tool);
+                }
+            }
+        }
+        return {};
+    }
+};
+
 }  // namespace
 
 namespace PartDesign
@@ -205,6 +510,9 @@ Transformed::Transformed()
 {
     ADD_PROPERTY(Originals, (nullptr));
     Originals.setSize(0);
+    // FreeCAD-CH ops#654 slice 8: an original may be a studio feature, outside the pattern's Body
+    // (its step in the Body is what is copied)
+    Originals.setScope(App::LinkScope::Global);
     Placement.setStatus(App::Property::ReadOnly, true);
 
     ADD_PROPERTY(TransformMode, (static_cast<long>(Mode::Features)));
@@ -289,9 +597,18 @@ std::vector<App::DocumentObject*> Transformed::getSortedOriginals() const
         for (size_t i = 0; i < group.size(); ++i) {
             indexMap[group[i]] = i;
         }
-        std::ranges::sort(originals, [&indexMap](const DocumentObject* a, const DocumentObject* b) {
-            auto itA = indexMap.find(a);
-            auto itB = indexMap.find(b);
+        // A studio feature sorts at its step in this Body (ops#654 slice 8)
+        auto inBody = [body](DocumentObject* obj) -> const DocumentObject* {
+            if (obj && isStudioOwner(obj)) {
+                if (auto step = StudioList::stepOf(obj, body)) {
+                    return step;
+                }
+            }
+            return obj;
+        };
+        std::ranges::sort(originals, [&indexMap, &inBody](DocumentObject* a, DocumentObject* b) {
+            auto itA = indexMap.find(inBody(a));
+            auto itB = indexMap.find(inBody(b));
             size_t idxA = (itA != indexMap.end()) ? itA->second : std::numeric_limits<size_t>::max();
             size_t idxB = (itB != indexMap.end()) ? itB->second : std::numeric_limits<size_t>::max();
             return idxA < idxB;
@@ -479,7 +796,10 @@ App::DocumentObjectExecReturn* Transformed::recomputePreview()
         TopoDS_Compound compound;
 
         builder.MakeCompound(compound);
-        for (const auto& original : getOriginals()) {
+        for (auto original : getOriginals()) {
+            if (auto owner = studioOwnerOfOriginal(original)) {
+                original = StudioList::stepOf(owner, getFeatureBody());  // ops#654 slice 8
+            }
             if (auto* feature = freecad_cast<FeatureAddSub*>(original)) {
                 auto shape = feature->AddSubShape.getShape();
 
@@ -621,7 +941,12 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     std::vector<DocumentObject*> originals = getOriginals();
 
-    if (mode == Mode::Features && originals.empty()) {
+    // FreeCAD-CH ops#654 slice 8: of studio features every one suppressed, it passes its base
+    // through (below, with no tool), as their suppressed steps do: it kept its last shape
+    const bool studioOriginals = std::ranges::any_of(Originals.getValues(), [](auto obj) {
+        return studioOwnerOfOriginal(obj) != nullptr;
+    });
+    if (mode == Mode::Features && originals.empty() && !studioOriginals) {
         // Every original suppressed: as upstream
         return App::DocumentObject::StdReturn;
     }
@@ -718,39 +1043,41 @@ App::DocumentObjectExecReturn* Transformed::execute()
     };
 
     switch (mode) {
-        case Mode::Features:
+        case Mode::Features: {
             // NOTE: It would be possible to build a compound from all original addShapes/subShapes
             // and then transform the compounds as a whole. But we choose to apply the
             // transformations to each Original separately. This way it is easier to discover what
             // feature causes a fuse/cut to fail. The downside is that performance suffers when
             // there are many originals. But it seems safe to assume that in most cases there are
             // few originals and many transformations
+            // FreeCAD-CH ops#654 slice 8: the originals' tools first, a studio feature's from its
+            // step, a pattern's own instances flattened (Onshape P2), each refused loudly where a
+            // copy may differ from Onshape's instance (studioCopyRefusal(), until T3)
+            std::vector<gp_Trsf> instances;
+            for (std::size_t position = 1; position < transformations.size(); ++position) {
+                if (std::ranges::find(skipped, position) == skipped.end()) {
+                    instances.push_back(transformations[position]);
+                }
+            }
+            Body* body = getFeatureBody();
+            gp_Trsf fromDocument = trsfInv;
+            if (body) {
+                fromDocument.Multiply(Part::TopoShape::convert(
+                    App::GeoFeature::getGlobalPlacement(body).inverse().toMatrix()
+                ));
+            }
+            ToolCollector collector {*this, body, trsfInv, fromDocument, supportShape, nameInstances};
+            std::vector<PatternTool> tools;
             for (auto original : originals) {
-                // Extract the original shape and determine whether to cut or to fuse
-                Part::TopoShape fuseShape = makeTopoShape(false);
-                Part::TopoShape cutShape = makeTopoShape(false);
-
-                auto feature = freecad_cast<PartDesign::FeatureAddSub*>(original);
-                if (!feature) {
-                    return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                        "Exception",
-                        "Only additive and subtractive features can be transformed"
-                    ));
+                std::string why = collector.add(original, instances, tools, 0);
+                if (!why.empty()) {
+                    return new App::DocumentObjectExecReturn(why, this);
                 }
-
-                feature->getAddSubShape(fuseShape, cutShape);
-                if (fuseShape.isNull() && cutShape.isNull()) {
-                    return new App::DocumentObjectExecReturn(
-                        QT_TRANSLATE_NOOP("Exception", "Shape of additive/subtractive feature is empty")
-                    );
-                }
-                gp_Trsf trsf = trsfInv.Multiplied(feature->getLocation().Transformation());
-                if (!fuseShape.isNull()) {
-                    fuseShape = fuseShape.makeElementTransform(trsf);
-                }
-                if (!cutShape.isNull()) {
-                    cutShape = cutShape.makeElementTransform(trsf);
-                }
+            }
+            for (const PatternTool& tool : tools) {
+                Part::TopoShape fuseShape = tool.fuse;
+                Part::TopoShape cutShape = tool.cut;
+                auto feature = tool.seed;
                 if (!fuseShape.isNull()) {
                     auto shapes = getTransformedCompShape(supportShape, fuseShape);
                     if (Base::Sequencer().wasCanceled()) {
@@ -770,7 +1097,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     // no message and no lump: the fuse is made again without it. The others keep
                     // their instance numbers
                     auto floating = floatingCopies(fused, supportShape, shapes);
-                    if (!floating.empty() && !makesItsOwnPart(*feature, fuseShape, trsfInv)) {
+                    if (!floating.empty() && !makesItsOwnPart(*feature, tool.seedFuse, trsfInv)) {
                         std::vector<Part::TopoShape> kept;
                         for (std::size_t i = 0; i < shapes.size(); ++i) {
                             if (std::ranges::find(floating, i) == floating.end()) {
@@ -829,6 +1156,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 );
             }
             break;
+        }
         case Mode::WholeShape: {
             auto shapes = getTransformedCompShape(supportShape, supportShape);
             if (Base::Sequencer().wasCanceled()) {
@@ -848,6 +1176,20 @@ App::DocumentObjectExecReturn* Transformed::execute()
     }
 
     supportShape = refineShapeIfActive((supportShape));
+
+    // FreeCAD-CH ops#654 slice 8: a part of a listed studio never goes on in two solids
+    // (requirement 2, as a step's split: Onshape makes the pieces parts, P6p)
+    if (StudioList::holding(this)) {
+        if (const int solids = countSolids(supportShape.getShape()); solids > 1) {
+            const Body* body = getFeatureBody();
+            return new App::DocumentObjectExecReturn(
+                quoted(this) + " splits " + (body ? quoted(body) : std::string("its part"))
+                    + " into " + std::to_string(solids)
+                    + " pieces: pieces becoming parts is not done yet",
+                this
+            );
+        }
+    }
 
     this->Shape.setValue(getSolid(supportShape));
     if (singleSolidRuleMode() == SingleSolidRuleMode::Enforced) {
