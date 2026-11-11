@@ -138,8 +138,10 @@ short Feature::mustExecute() const
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     try {
-        // One deadline for the feature's long geometry calls (FreeCAD-CH, kernel safety S1)
-        KernelBudget::Scope budget;
+        // The feature's long geometry calls on a worker, with Esc (FreeCAD-CH, kernel safety S1).
+        // No time limit here: it is PartDesign features' (PartDesign::Feature::recompute opens
+        // the outer, limited Scope), not other workbenches' objects' (the ruling of 11-11)
+        KernelBudget::Scope budget(false);
         auto ret = App::GeoFeature::recompute();
         // A call the limit or Esc stopped fails the feature, whatever its code made of it: a
         // script's feature that catches the error would pass a partial result (kernel-4)

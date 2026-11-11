@@ -110,12 +110,7 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertLess(elapsed, 0.6 * built, (elapsed, built))
         self.assertLess(fillet.Shape.Volume, body.BaseFeature.Shape.Volume)
 
-    def testCutOverTheLimitFails(self):
-        doc = FreeCAD.newDocument("KernelBudgetCut")
-        self.docs.append(doc)
-        box = doc.addObject("Part::Box", "Plate")
-        box.Length = box.Width = 60
-        box.Height = 5
+    def tool(self, doc):
         prof = doc.addObject("Part::Feature", "Profile")
         prof.Shape = wavy(800, 30, 30, -1.0)
         ext = doc.addObject("Part::Extrusion", "Tool")
@@ -124,16 +119,41 @@ class KernelBudgetTest(unittest.TestCase):
         ext.Dir = V(0, 0, 1)
         ext.LengthFwd = 7
         ext.Solid = True
+        return prof, ext
+
+    def testOnlyPartDesignFeaturesHaveTheLimit(self):
+        """The limit is PartDesign features' (the ruling of 11-11): a Part::Cut over it, as an
+        Arch/BIM object's boolean (bimtests.TestArchCovering), runs to its end; a Pocket of the
+        same profile into the same plate stops at it."""
+        doc = FreeCAD.newDocument("KernelBudgetCut")
+        self.docs.append(doc)
+        box = doc.addObject("Part::Box", "Plate")
+        box.Length = box.Width = 60
+        box.Height = 5
+        prof, ext = self.tool(doc)
         doc.recompute()
         cut = doc.addObject("Part::Cut", "Cut")
         cut.Base = box
         cut.Tool = ext
         self.setLimit(0.3)
+        doc.recompute()
+        self.assertTrue(cut.isValid(), cut.getStatusString())
+        self.assertLess(cut.Shape.Volume, 60 * 60 * 5 - 100)
+
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = box
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = (prof, ["Face1"])
+        # Length, not ThroughAll: about as long as the cut (testSymmetricThroughAllPocket times
+        # the through-all one)
+        pocket.Type = "Length"
+        pocket.Length = 20
+        pocket.Midplane = True
         start = time.perf_counter()
         doc.recompute()
         elapsed = time.perf_counter() - start
-        self.assertFalse(cut.isValid())
-        self.assertIn("took longer than", cut.getStatusString())
+        self.assertFalse(pocket.isValid())
+        self.assertIn("took longer than", pocket.getStatusString())
         # A boolean reads the document's shapes: it is waited for until OCCT reads the cancel
         # (it is not abandoned), so it returns after the limit but before the cut would end alone
         self.assertLess(elapsed, 10)
@@ -142,9 +162,44 @@ class KernelBudgetTest(unittest.TestCase):
         doc.recompute()
         self.assertTrue(other.isValid())
         self.setLimit(60)
-        cut.touch()
+        pocket.touch()
         doc.recompute()
-        self.assertTrue(cut.isValid(), cut.getStatusString())
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(pocket.Shape.Volume, cut.Shape.Volume, delta=1e-6 * cut.Shape.Volume)
+
+    def testSymmetricThroughAllPocket(self):
+        """A symmetric through-all Pocket of an 800-edge profile, refined, in seconds (168 s
+        before: the refine's face mapper fetched every face of the two sides' prism with its
+        element map for each merged face). The result is the plate less the profile's prism:
+        the volume from the polygon's area, the faces the plate's six plus one per edge."""
+        n = 800
+        doc = FreeCAD.newDocument("KernelBudgetSymmetric")
+        self.docs.append(doc)
+        box = doc.addObject("Part::Box", "Plate")
+        box.Length = box.Width = 60
+        box.Height = 5
+        prof = doc.addObject("Part::Feature", "Profile")
+        prof.Shape = wavy(n, 30, 30, -1.0)
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = box
+        doc.recompute()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = (prof, ["Face1"])
+        pocket.Type = "ThroughAll"
+        pocket.Midplane = True
+        pocket.Refine = True
+        self.setLimit(120)
+        start = time.perf_counter()
+        doc.recompute()
+        elapsed = time.perf_counter() - start
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        pts = [v.Point for v in prof.Shape.Wires[0].OrderedVertexes]
+        area = 0.5 * abs(
+            sum(a.x * b.y - b.x * a.y for a, b in zip(pts, pts[1:] + pts[:1]))
+        )
+        self.assertAlmostEqual(pocket.Shape.Volume, (60 * 60 - area) * 5, delta=1e-6 * 60 * 60 * 5)
+        self.assertEqual(len(pocket.Shape.Faces), 6 + n)
+        self.assertLess(elapsed, 30, elapsed)
 
     def testShortCallsUnderTheLimit(self):
         # Ordinary features are unaffected by a short limit
@@ -193,9 +248,11 @@ class KernelBudgetTest(unittest.TestCase):
 
 
     def testScriptThatSwallowsTheStopFails(self):
-        """A Part::FeaturePython whose execute() catches the stopped cut and goes on (BIM-style:
-        skip a subtraction that fails) would pass the plate without its hole as a valid result.
-        The stop fails the feature, whatever its code does with the error (kernel-4)."""
+        """A PartDesign Python feature whose execute() catches the stopped cut and goes on
+        (BIM-style: skip a subtraction that fails) would pass the plate without its hole as a
+        valid result. The stop fails the feature, whatever its code does with the error
+        (kernel-4). A Part::FeaturePython has no limit (only PartDesign features do): the same
+        code builds the hole."""
 
         class Holes:
             def __init__(self, obj):
@@ -211,18 +268,22 @@ class KernelBudgetTest(unittest.TestCase):
 
         doc = FreeCAD.newDocument("KernelBudgetSwallow")
         self.docs.append(doc)
-        holes = doc.addObject("Part::FeaturePython", "Holes")
+        body = doc.addObject("PartDesign::Body", "Body")
+        holes = body.newObject("PartDesign::FeaturePython", "Holes")
         Holes(holes)
+        loose = doc.addObject("Part::FeaturePython", "LooseHoles")
+        Holes(loose)
         self.setLimit(0.3)
         doc.recompute()
         self.assertFalse(holes.isValid())
         self.assertIn("took longer than", holes.getStatusString())
+        self.assertTrue(loose.isValid(), loose.getStatusString())
+        self.assertLess(loose.Shape.Volume, 60 * 60 * 5 - 100)
         self.setLimit(60)
         holes.touch()
         doc.recompute()
         self.assertTrue(holes.isValid(), holes.getStatusString())
         self.assertLess(holes.Shape.Volume, 60 * 60 * 5 - 100)
-
 
 def circle_wire(cx, cy, r, reverse=True):
     w = Part.Wire([Part.makeCircle(r, V(cx, cy, 0), V(0, 0, 1))])
