@@ -848,3 +848,95 @@ class TestPipeLock(PipeCase):
             V(5, 5, 11), App.Rotation(V(0, 1, 0), 90)))
         pipe = self.pipe(profile, path, ProfileControl="Lock faces", LockFaces=[(box, top)])
         self.assertStops(pipe, "leaves the lock faces")
+
+
+class TestPipeThin(PipeCase):
+    """SW14: Thin sweeps a wall around the profile's curves. An open curve's wall goes to the right of
+    its drawn direction, seen from the sketch's normal (a Top line drawn +X walls to -Y); Midplane centres
+    it, FlipWall puts it on the other side, Thickness2 is the other side's. A closed loop is a region: its
+    wall is a ring outward (FlipWall: inward). TrimEnds has no effect, as in Onshape."""
+
+    def strip(self, points=((-2, 0), (2, 0))):
+        return self.sketch("Profile", models.polyline(list(points)))
+
+    def assertBox(self, shape, xmin, ymin, zmin, xmax, ymax, zmax, places=4):
+        box = shape.BoundBox
+        for got, want in zip((box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax),
+                             (xmin, ymin, zmin, xmax, ymax, zmax)):
+            self.assertAlmostEqual(got, want, places, box)
+
+    def testOpenLineWallsToTheRight(self):
+        """Line (-2, 0) -> (2, 0) on Top, thickness 1: y -1..0, 80."""
+        pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=1)
+        self.assertSweeps(pipe, 80)
+        self.assertBox(pipe.Shape, -2, -1, 0, 2, 0, 20)
+
+    def testMidplane(self):
+        pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=1, Midplane=True)
+        self.assertSweeps(pipe, 80)
+        self.assertBox(pipe.Shape, -2, -0.5, 0, 2, 0.5, 20)
+
+    def testFlipWall(self):
+        pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=1, FlipWall=True)
+        self.assertSweeps(pipe, 80)
+        self.assertBox(pipe.Shape, -2, 0, 0, 2, 1, 20)
+
+    def testThickness2IsTheOtherSide(self):
+        """Thickness 1 to the right, 0.5 to the left: y -1..0.5, 120 (SW18 (e) asks Onshape)."""
+        pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=1, Thickness2=0.5)
+        self.assertSweeps(pipe, 120)
+        self.assertBox(pipe.Shape, -2, -1, 0, 2, 0.5, 20)
+
+    def testTrimEndsHasNoEffect(self):
+        pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=1, TrimEnds=False)
+        self.assertSweeps(pipe, 80)
+
+    def testClosedLoopIsARingOutward(self):
+        """Circle r 2, thickness 0.5: a tube r 2..2.5, 141.372."""
+        pipe = self.pipe(self.circle(), self.line(0, 20), BodyType="Thin", Thickness1=0.5)
+        self.assertSweeps(pipe, math.pi * (2.5 ** 2 - 4) * 20)
+        self.assertBox(pipe.Shape, -2.5, -2.5, 0, 2.5, 2.5, 20)
+        self.assertTrue(pipe.Shape.isInside(V(2.25, 0, 10), 1e-7, True))
+        self.assertFalse(pipe.Shape.isInside(V(1, 0, 10), 1e-7, True))
+
+    def testClosedLoopFlippedIsARingInward(self):
+        pipe = self.pipe(self.circle(), self.line(0, 20), BodyType="Thin", Thickness1=0.5, FlipWall=True)
+        self.assertSweeps(pipe, math.pi * (4 - 1.5 ** 2) * 20)
+        self.assertBox(pipe.Shape, -2, -2, 0, 2, 2, 20)
+
+    def testAlongABentPath(self):
+        """SW4's path (line z 0..10, quarter arc r 10 to (10, 0, 20), line to (30, 0, 20)), the line's
+        wall: 4 x (10 + 5 pi + 20) = 182.832, the wall staying across the path's plane."""
+        path = self.sketch("Path", models.polyline([(0, 0), (0, 10)])
+                           + [arc3((0, 10, 0), (10, 10, 0), (10, 20, 0))]
+                           + models.polyline([(10, 20), (30, 20)]), placement=XZ)
+        pipe = self.pipe(self.strip(), path, BodyType="Thin", Thickness1=1)
+        self.assertSweeps(pipe, 4 * (30 + 5 * math.pi), places=3)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.YMin, -1, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.YMax, 0, 4)
+
+    def testWallInsideACorner(self):
+        """Polyline (-2, 0) -> (2, 0) -> (2, 3), the wall on its left (inside the corner): 6 x 20."""
+        pipe = self.pipe(self.strip(((-2, 0), (2, 0), (2, 3))), self.line(0, 20), BodyType="Thin",
+                         Thickness1=1, FlipWall=True)
+        self.assertSweeps(pipe, 120)
+        self.assertBox(pipe.Shape, -2, 0, 0, 2, 3, 20)
+
+    def testWallOutsideACornerStops(self):
+        """The wall round the corner's outside: sharp (160) or round (155.708) is SW18, pending; loud."""
+        pipe = self.pipe(self.strip(((-2, 0), (2, 0), (2, 3))), self.line(0, 20), BodyType="Thin",
+                         Thickness1=1)
+        self.assertStops(pipe, "corner")
+
+    def testZeroThicknessStops(self):
+        pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=0)
+        self.assertStops(pipe, "thickness")
+
+    def testSubtractiveThinCutsTheWall(self):
+        """A 10 x 10 x 10 box less the line's wall along z 0..10 (40)."""
+        box = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        box.Placement.Base = V(-5, -5, 0)
+        path = self.line(0, 10)
+        pipe = self.pipe(self.strip(), path, kind="SubtractivePipe", BodyType="Thin", Thickness1=1)
+        self.assertSweeps(pipe, 1000 - 40)
