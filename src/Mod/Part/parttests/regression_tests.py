@@ -1312,6 +1312,29 @@ class RegressionTests(unittest.TestCase):
                     normals[(axis, round(low, 6))] = face.normalAt(0, 0)
         return normals
 
+    def test_readouts_of_a_scaled_sphere(self):
+        """A sphere scaled by (1, 1, 1.6), a rational B-spline of few spans (the native replica's
+        #97, oracle 7's SC7): OCCT's default integration read its area 3.4e-3 high. The readouts
+        are now adaptive on free-form faces: a prolate spheroid's area and volume in closed form
+        (Onshape: area exact, volume within 2e-5)"""
+        sphere = Part.makeSphere(10)
+        matrix = Base.Matrix()
+        matrix.scale(1, 1, 1.6)
+        scaled = sphere.transformGeometry(matrix)
+        self.assertEqual(scaled.Faces[0].Surface.TypeId, "Part::GeomBSplineSurface")
+        a, c = 10.0, 16.0
+        e = math.sqrt(1 - a * a / (c * c))
+        area = 2 * math.pi * a * a * (1 + c / (a * e) * math.asin(e))
+        volume = 4 / 3 * math.pi * a * a * c
+        self.assertAlmostEqual(scaled.Area, area, delta=1e-6 * area)
+        self.assertAlmostEqual(scaled.Volume, volume, delta=1e-6 * volume)
+        self.assertAlmostEqual(scaled.Solids[0].Mass, volume, delta=1e-6 * volume)
+        self.assertAlmostEqual(scaled.Faces[0].Area, area, delta=1e-6 * area)
+        # Debt (ops#640): a solid's centre of mass stays OCCT's default here, 2.2e-3 off (the
+        # adaptive centre and inertia took 74 s on this sphere)
+        # Elementary faces keep OCCT's default, exact there
+        self.assertAlmostEqual(sphere.Area, 400 * math.pi, delta=1e-9)
+
     def test_removeSplitter_keeps_a_long_wave_prism_outward(self):
         """Refine orients a long wave prism outwards (ops#426).
 
