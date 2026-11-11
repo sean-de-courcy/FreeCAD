@@ -78,6 +78,8 @@
 #include <Geom_TrimmedCurve.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <GeomConvert_BSplineCurveToBezierCurve.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GeomFill_Frenet.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -94,6 +96,8 @@
 #include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
 #include <Law_Function.hxx>
+#include <Law_Linear.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <TColgp_Array1OfPnt.hxx>
@@ -115,6 +119,7 @@
 #include <App/NameTable.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
+#include <Base/Tools.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 #include <Mod/Part/App/PipeShellApproximation.h>
 #include <Mod/Part/App/SweepFrenet.h>
@@ -4950,6 +4955,164 @@ CornerTilts foldsAlongCurves(
     }
     return tilts;
 }
+// Onshape's Sweep, slice 3 (notes\sweep-design.md 3): twist, scale and lock faces
+
+/// A place on a path, its edges in order: the point, the tangent the way the path runs, the
+/// second derivative there (by the arc length's direction, not normalized) and the length from
+/// the path's start
+struct PathSample
+{
+    gp_Pnt point;
+    gp_Dir tangent;
+    gp_Vec second;
+    double length = 0.0;
+};
+
+/// Samples of \a edges (a wire's, in order), at least \a perEdge each and one per \a turn radians
+/// of the edge's bend and \a perLength per unit of its length; each joint once
+std::vector<PathSample> samplesAlong(
+    const std::vector<TopoDS_Edge>& edges,
+    int perEdge,
+    double turn,
+    double perLength = 0.0
+)
+{
+    std::vector<PathSample> samples;
+    double done = 0.0;
+    for (const TopoDS_Edge& edge : edges) {
+        BRepAdaptor_Curve curve(edge);
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const double length = GCPnts_AbscissaPoint::Length(curve, first, last);
+        int count = std::max(perEdge, static_cast<int>(std::ceil(length * perLength)));
+        if (curve.GetType() != GeomAbs_Line) {
+            // The bend: the tangent's turn summed over a fine sampling
+            double bend = 0.0;
+            gp_Pnt p;
+            gp_Vec before;
+            curve.D1(first, p, before);
+            for (int i = 1; i <= 64; ++i) {
+                gp_Vec now;
+                curve.D1(first + (last - first) * i / 64, p, now);
+                if (before.Magnitude() > gp::Resolution() && now.Magnitude() > gp::Resolution()) {
+                    bend += before.Angle(now);
+                }
+                before = now;
+            }
+            count = std::max(count, static_cast<int>(std::ceil(bend / turn)));
+        }
+        const size_t from = samples.empty() ? 0 : 1;
+        for (int i = static_cast<int>(from); i <= count; ++i) {
+            const double t = static_cast<double>(i) / count;
+            const double at = reversed ? last - t * (last - first) : first + t * (last - first);
+            gp_Pnt point;
+            gp_Vec d1, d2;
+            curve.D2(at, point, d1, d2);
+            if (reversed) {
+                d1.Reverse();
+            }
+            if (d1.Magnitude() < gp::Resolution()) {
+                continue;
+            }
+            PathSample sample;
+            sample.point = point;
+            sample.tangent = gp_Dir(d1);
+            // The curvature vector: d2 less its part along d1, over |d1|^2
+            const double speed2 = d1.SquareMagnitude();
+            sample.second = (d2 - d1 * (d2.Dot(d1) / speed2)) / speed2;
+            sample.length = done
+                + (reversed ? GCPnts_AbscissaPoint::Length(curve, at, last)
+                            : GCPnts_AbscissaPoint::Length(curve, first, at));
+            samples.push_back(sample);
+        }
+        done += length;
+    }
+    return samples;
+}
+
+/// Where \a edges (in order) turn at a joint by more than a hundredth of a degree: the joint
+std::optional<gp_Pnt> sharpJoint(const std::vector<TopoDS_Edge>& edges, bool closed)
+{
+    for (size_t i = 0; i < edges.size(); ++i) {
+        if (i + 1 == edges.size() && !closed) {
+            break;
+        }
+        const TopoDS_Edge& next = edges[(i + 1) % edges.size()];
+        if (tangentAlong(edges[i], false).Angle(tangentAlong(next, true)) > 1.0e-2 * M_PI / 180.0) {
+            return BRep_Tool::Pnt(TopExp::FirstVertex(next, true));
+        }
+    }
+    return std::nullopt;
+}
+
+/// The frame's normal before the twist, one per sample, from \a normalAt where given, else
+/// rotation-minimizing: carried from the start with the least turn (double reflection), which
+/// on a plane is the plane's normal crossed with the tangent, as OCCT's corrected Frenet frame
+std::vector<gp_Dir> carriedNormals(const std::vector<PathSample>& samples)
+{
+    std::vector<gp_Dir> normals;
+    if (samples.empty()) {
+        return normals;
+    }
+    const gp_Dir& t0 = samples.front().tangent;
+    gp_Vec start = gp_Vec(t0).Crossed(gp_Vec(0, 0, 1));
+    if (start.Magnitude() < 1.0e-3) {
+        start = gp_Vec(t0).Crossed(gp_Vec(1, 0, 0));
+    }
+    normals.emplace_back(start);
+    for (size_t i = 1; i < samples.size(); ++i) {
+        const gp_Vec v1(samples[i - 1].point, samples[i].point);
+        const double c1 = v1.SquareMagnitude();
+        gp_Vec r = gp_Vec(normals.back());
+        gp_Vec t = gp_Vec(samples[i - 1].tangent);
+        if (c1 > gp::Resolution()) {
+            r -= v1 * (2.0 / c1 * v1.Dot(r));
+            t -= v1 * (2.0 / c1 * v1.Dot(t));
+        }
+        const gp_Vec v2 = gp_Vec(samples[i].tangent) - t;
+        const double c2 = v2.SquareMagnitude();
+        if (c2 > gp::Resolution()) {
+            r -= v2 * (2.0 / c2 * v2.Dot(r));
+        }
+        // Square to the tangent again, against rounding
+        r -= gp_Vec(samples[i].tangent) * r.Dot(gp_Vec(samples[i].tangent));
+        normals.emplace_back(r);
+    }
+    return normals;
+}
+
+/// A guide through each sample at \a reach along its normal \a normals[i] turned by \a angles[i]
+/// about the tangent: one B-spline edge through them all
+std::optional<TopoDS_Wire> guideThrough(
+    const std::vector<PathSample>& samples,
+    const std::vector<gp_Dir>& normals,
+    const std::vector<double>& angles,
+    double reach
+)
+{
+    if (samples.size() < 2) {
+        return std::nullopt;
+    }
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, static_cast<int>(samples.size()));
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const gp_Vec n(normals[i]);
+        const gp_Vec b = gp_Vec(samples[i].tangent).Crossed(n);
+        const gp_Vec offset = (n * std::cos(angles[i]) + b * std::sin(angles[i])) * reach;
+        points->SetValue(static_cast<int>(i) + 1, samples[i].point.Translated(offset));
+    }
+    GeomAPI_Interpolate interpolate(points, false, Precision::Confusion());
+    interpolate.Perform();
+    if (!interpolate.IsDone()) {
+        return std::nullopt;
+    }
+    BRepBuilderAPI_MakeEdge edge(interpolate.Curve());
+    if (!edge.IsDone()) {
+        return std::nullopt;
+    }
+    return BRepBuilderAPI_MakeWire(edge.Edge()).Wire();
+}
+
 }  // namespace
 
 PipeCapFacing PartDesign::pipeCapsFacing(
@@ -5066,7 +5229,10 @@ const char* Pipe::TransitionEnums[] = {"Transformed", "Right corner", "Round cor
 const char* Pipe::ModeEnums[] = {"Standard", "Fixed", "Frenet", "Auxiliary", "Binormal", nullptr};
 const char* Pipe::TransformEnums[]
     = {"Constant", "Multisection", "Linear", "S-shape", "Interpolation", nullptr};
-const char* Pipe::ProfileControlEnums[] = {"None", "Keep orientation", "Advanced", nullptr};
+const char* Pipe::ProfileControlEnums[]
+    = {"None", "Keep orientation", "Advanced", "Lock faces", "Lock direction", nullptr};
+const char* Pipe::TwistTypeEnums[] = {"Turns", "Angle", "Pitch", nullptr};
+const char* Pipe::BodyTypeEnums[] = {"Solid", "Thin", nullptr};
 
 
 PROPERTY_SOURCE(PartDesign::Pipe, PartDesign::ProfileBased)
@@ -5198,6 +5364,121 @@ Pipe::Pipe()
         App::Prop_None,
         "More path edges, from other objects: joined with the Spine's in any order"
     );
+    // Slice 3 (notes\sweep-design.md 3; Onshape's defaults where known)
+    ADD_PROPERTY_TYPE(
+        LockFaces,
+        (nullptr),
+        "Sweep",
+        App::Prop_None,
+        "Faces the path lies on: with 'Lock faces' the profile keeps its angle to their normal"
+    );
+    ADD_PROPERTY_TYPE(
+        LockDirection,
+        (nullptr),
+        "Sweep",
+        App::Prop_None,
+        "A plane, planar face or straight edge: with 'Lock direction' the profile's plane keeps containing its direction"
+    );
+    ADD_PROPERTY_TYPE(
+        HasTwist,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The profile turns about the path, linearly in its length"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistType,
+        (long(1)),
+        "Sweep",
+        App::Prop_None,
+        "The twist given as Turns, an Angle, or a Pitch (the length of one turn)"
+    );
+    ADD_PROPERTY_TYPE(
+        Turns,
+        (1.0),
+        "Sweep",
+        App::Prop_None,
+        "The twist's turns from the profile to the path's end"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistAngle,
+        (30.0),
+        "Sweep",
+        App::Prop_None,
+        "The twist's angle from the profile to the path's end"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistPitch,
+        (10.0),
+        "Sweep",
+        App::Prop_None,
+        "The path's length for one turn of the twist"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistCCW,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "Counter-clockwise about the path's direction (off: clockwise)"
+    );
+    ADD_PROPERTY_TYPE(
+        HasScale,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The profile scales linearly in the path's length"
+    );
+    ADD_PROPERTY_TYPE(
+        ScaleFactor,
+        (1.0),
+        "Sweep",
+        App::Prop_None,
+        "The profile's scale at the path's end"
+    );
+    ADD_PROPERTY_TYPE(
+        BodyType,
+        (long(0)),
+        "Sweep",
+        App::Prop_None,
+        "Solid, or Thin: a wall around the profile's curves"
+    );
+    ADD_PROPERTY_TYPE(
+        Thickness1,
+        (1.0),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall's thickness"
+    );
+    ADD_PROPERTY_TYPE(
+        Thickness2,
+        (0.0),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall's thickness on the other side"
+    );
+    ADD_PROPERTY_TYPE(
+        Midplane,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall centred on the profile's curves"
+    );
+    ADD_PROPERTY_TYPE(
+        FlipWall,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall on the other side of the profile's curves"
+    );
+    ADD_PROPERTY_TYPE(
+        TrimEnds,
+        (true),
+        "Sweep",
+        App::Prop_None,
+        "Onshape's Thin option: no effect, as in Onshape"
+    );
+    TwistType.setEnums(TwistTypeEnums);
+    BodyType.setEnums(BodyTypeEnums);
     Mode.setEnums(ModeEnums);
     Transition.setEnums(TransitionEnums);
     Transformation.setEnums(TransformEnums);
@@ -5213,9 +5494,10 @@ void Pipe::onChanged(const App::Property* prop)
         if (prop == &ProfileControl) {
             // None sweeps in Standard (with Frenet's frame where it is steady off a plane), Keep
             // orientation in Fixed: a translation, whatever the profile's plane
-            const long mode = ProfileControl.getValue() == 0 ? 0
-                : ProfileControl.getValue() == 1             ? 1
-                                                             : -1;
+            // Lock faces sweeps in Standard along a guide (execute), Lock direction in Binormal
+            static const long modes[] = {0, 1, -1, 0, 4};
+            const long control = ProfileControl.getValue();
+            const long mode = control >= 0 && control < 5 ? modes[control] : -1;
             if (mode >= 0 && Mode.getValue() != mode) {
                 settingMode = true;
                 Mode.setValue(mode);
@@ -5264,6 +5546,326 @@ std::optional<gp_Dir> Pipe::profileNormal(const TopLoc_Location& invObjLoc) cons
     return normal.Transformed(invObjLoc.Transformation());
 }
 
+namespace
+{
+/// The shape of \a object's \a sub (all of it when empty), in the Body's coordinates
+Part::TopoShape linkedShape(App::DocumentObject* object, const std::string& sub)
+{
+    if (!object) {
+        return {};
+    }
+    return Part::Feature::getTopoShape(
+        object,
+        Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            | Part::ShapeOption::NeedSubElement,
+        sub.empty() ? nullptr : sub.c_str()
+    );
+}
+
+/// LockDirection's direction: a plane's or planar face's normal, a straight edge's direction
+std::optional<gp_Dir> directionOf(const Part::TopoShape& shape)
+{
+    if (shape.isNull()) {
+        return std::nullopt;
+    }
+    TopExp_Explorer faces(shape.getShape(), TopAbs_FACE);
+    if (faces.More()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(faces.Current()));
+        if (surface.GetType() == GeomAbs_Plane) {
+            return surface.Plane().Axis().Direction();
+        }
+        return std::nullopt;
+    }
+    TopExp_Explorer edges(shape.getShape(), TopAbs_EDGE);
+    if (edges.More()) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+        if (curve.GetType() == GeomAbs_Line) {
+            return curve.Line().Direction();
+        }
+    }
+    return std::nullopt;
+}
+
+/// The surface normal of the nearest of \a faces at \a point, with its distance
+std::pair<double, gp_Vec> nearestNormal(const std::vector<TopoDS_Face>& faces, const gp_Pnt& point)
+{
+    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
+    double best = std::numeric_limits<double>::max();
+    gp_Vec normal;
+    for (const TopoDS_Face& face : faces) {
+        BRepExtrema_DistShapeShape distance(vertex, face);
+        if (!distance.IsDone() || distance.NbSolution() < 1 || distance.Value() >= best) {
+            continue;
+        }
+        GeomAPI_ProjectPointOnSurf onSurface(distance.PointOnShape2(1), BRep_Tool::Surface(face));
+        if (onSurface.NbPoints() < 1) {
+            continue;
+        }
+        double u = 0, v = 0;
+        onSurface.LowerDistanceParameters(u, v);
+        gp_Pnt at;
+        gp_Vec du, dv;
+        BRep_Tool::Surface(face)->D1(u, v, at, du, dv);
+        gp_Vec n = du.Crossed(dv);
+        if (n.Magnitude() < gp::Resolution()) {
+            continue;
+        }
+        if (face.Orientation() == TopAbs_REVERSED) {
+            n.Reverse();
+        }
+        best = distance.Value();
+        normal = n;
+    }
+    return {best, normal};
+}
+}  // namespace
+
+std::optional<std::string> Pipe::prepareSlice3(
+    const Part::TopoShape& path,
+    const std::vector<TopoDS_Shape>& profileWires,
+    const TopLoc_Location& invObjLoc,
+    Handle(Law_Function)& scale
+)
+{
+    frameGuide.Nullify();
+    const long control = ProfileControl.getValue();
+    const bool twist = HasTwist.getValue();
+    const bool scaled = HasScale.getValue();
+    const bool lockFaces = control == 3;
+    if (!twist && !scaled && !lockFaces) {
+        return std::nullopt;
+    }
+    const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
+    auto inPlace = [&](const gp_Pnt& point) {
+        return pointText(point.Transformed(toBody));
+    };
+    if (path.shapeType() != TopAbs_WIRE || profileWires.empty()) {
+        return std::string(
+            "Pipe: twist, scale and 'Lock faces' sweep one profile along a path, without Sections"
+        );
+    }
+    const TopoDS_Wire& wire = TopoDS::Wire(path.getShape());
+    const bool closed = BRep_Tool::IsClosed(wire);
+    if ((twist || scaled) && closed) {
+        return std::string(
+            "Pipe: twist and scale run from the profile to the path's end, and this path is "
+            "closed. Open the path, or turn twist and scale off."
+        );
+    }
+    if (twist && control != 0 && control != 3 && control != 4) {
+        return std::string(
+            "Pipe: twist turns the profile about the path from the frame it is carried in: use "
+            "the profile control None, Lock faces or Lock direction ('Keep orientation' and "
+            "'Advanced' have no such frame)."
+        );
+    }
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(wire);
+    if (twist || lockFaces) {
+        if (const std::optional<gp_Pnt> joint = sharpJoint(edges, closed)) {
+            const char* what = twist ? "twist" : "'Lock faces'";
+            return fmt::format(
+                "Pipe: {} needs a smooth path, and the path turns sharply at {}. Round the corner, "
+                "or turn {} off.",
+                what,
+                inPlace(*joint),
+                what
+            );
+        }
+    }
+    std::vector<PathSample> samples = samplesAlong(edges, 16, M_PI / 32);
+    if (samples.size() < 2) {
+        return std::string("Pipe: the path has no length");
+    }
+    const double total = samples.back().length;
+
+    // Where the profile lies along the path, and the end the scale and twist reach their values
+    // at: the far end from a profile at one end; from one in the middle (Extend to full path
+    // on), the end it would sweep to with the option off, and they go on linearly past the
+    // profile the other way (Onshape, SW12)
+    const ProfileFoot foot = profileFoot(profileWires, wire);
+    size_t nearest = 0;
+    for (size_t i = 1; i < samples.size(); ++i) {
+        if (samples[i].point.Distance(foot.at) < samples[nearest].point.Distance(foot.at)) {
+            nearest = i;
+        }
+    }
+    double from = samples[nearest].length;
+    double before = 0.0;
+    for (const TopoDS_Edge& edge : edges) {
+        // The foot's own place, more exactly than the nearest sample
+        BRepAdaptor_Curve curve(edge);
+        const double length = GCPnts_AbscissaPoint::Length(curve);
+        Extrema_ExtPC extrema(foot.at, curve);
+        if (extrema.IsDone()) {
+            for (int i = 1; i <= extrema.NbExt(); ++i) {
+                if (extrema.SquareDistance(i) > tieTolerance * tieTolerance) {
+                    continue;
+                }
+                const double at = extrema.Point(i).Parameter();
+                from = before
+                    + (edge.Orientation() == TopAbs_REVERSED
+                           ? GCPnts_AbscissaPoint::Length(curve, at, curve.LastParameter())
+                           : GCPnts_AbscissaPoint::Length(curve, curve.FirstParameter(), at));
+            }
+        }
+        before += length;
+    }
+    if (foot.atEnd) {
+        from = from < total / 2 ? 0.0 : total;
+    }
+    double to = from < total / 2 ? total : 0.0;
+    if (!foot.atEnd) {
+        if (twist) {
+            return std::string(
+                "Pipe: twist with the profile in the middle of the path isn't defined yet (an "
+                "Onshape question is pending). Put the profile at an end of the path, or turn "
+                "'Extend to full path' off."
+            );
+        }
+        const std::optional<gp_Dir> normal = profileNormal(invObjLoc);
+        if (!normal) {
+            return std::string(
+                "Pipe: scale with the profile in the middle of the path runs to the end the "
+                "profile's plane faces away from, and this profile has no plane"
+            );
+        }
+        to = samples[nearest].tangent.Dot(*normal) > 0 ? 0.0 : total;
+    }
+    const double span = std::abs(to - from);
+    if (span < Precision::Confusion()) {
+        return std::string("Pipe: the profile lies at the path's end it would sweep to");
+    }
+
+    // The twist's rate in radians per unit of length, and samples to follow it, 64 a turn
+    double rate = 0.0;
+    if (twist) {
+        switch (TwistType.getValue()) {
+            case 0:  // Turns
+                rate = 2 * M_PI * Turns.getValue() / span;
+                break;
+            case 1:  // Angle
+                rate = Base::toRadians(TwistAngle.getValue()) / span;
+                break;
+            default:  // Pitch: the length of one turn
+                if (TwistPitch.getValue() < Precision::Confusion()) {
+                    return std::string("Pipe: the twist's pitch must be more than zero");
+                }
+                rate = 2 * M_PI / TwistPitch.getValue();
+                break;
+        }
+        rate *= TwistCCW.getValue() ? 1.0 : -1.0;
+        samples = samplesAlong(edges, 16, M_PI / 32, std::abs(rate) / (M_PI / 32));
+    }
+
+    if (scaled) {
+        const double factor = ScaleFactor.getValue();
+        auto at = [&](double length) {
+            return 1.0 + (factor - 1.0) * (length - from) / (to - from);
+        };
+        const double first = at(0.0);
+        const double last = at(total);
+        if (factor <= 0.0 || first <= Precision::Confusion() || last <= Precision::Confusion()) {
+            return fmt::format(
+                "Pipe: the scale reaches zero or less along the path (from {:.6g} to {:.6g}), and "
+                "Onshape refuses this too. Use a scale factor nearer 1, or move the profile.",
+                first,
+                last
+            );
+        }
+        Handle(Law_Linear) law = new Law_Linear();
+        law->Set(0.0, first, 1.0, last);
+        scale = law;
+    }
+
+    if (!twist && !lockFaces) {
+        return std::nullopt;
+    }
+    std::vector<gp_Dir> normals;
+    if (lockFaces) {
+        std::vector<TopoDS_Face> faces;
+        for (const auto& [object, subs] : LockFaces.getSubListValues()) {
+            const std::vector<std::string> names = subs.empty() ? std::vector<std::string> {""} : subs;
+            for (const std::string& sub : names) {
+                Part::TopoShape shape = linkedShape(object, sub);
+                if (shape.isNull()) {
+                    continue;
+                }
+                shape.move(invObjLoc);
+                for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+                    faces.push_back(TopoDS::Face(it.Current()));
+                }
+            }
+        }
+        if (faces.empty()) {
+            return std::string("Pipe: 'Lock faces' needs the faces the path lies on");
+        }
+        for (const PathSample& sample : samples) {
+            auto [distance, normal] = nearestNormal(faces, sample.point);
+            if (distance > 1.0e-4) {
+                return fmt::format(
+                    "Pipe: the path leaves the lock faces at {} ({:.3g} mm off them). The path "
+                    "must lie on the faces picked for 'Lock faces'.",
+                    inPlace(sample.point),
+                    distance
+                );
+            }
+            normal -= gp_Vec(sample.tangent) * normal.Dot(gp_Vec(sample.tangent));
+            if (normal.Magnitude() < 1.0e-6) {
+                return fmt::format(
+                    "Pipe: at {} the path runs along the lock face's normal",
+                    inPlace(sample.point)
+                );
+            }
+            normals.emplace_back(normal);
+        }
+    }
+    else if (control == 4) {
+        const std::optional<gp_Dir> binormal = sweptBinormal(binormalInBody, getLocation());
+        for (const PathSample& sample : samples) {
+            const gp_Vec n = binormal ? gp_Vec(*binormal).Crossed(gp_Vec(sample.tangent)) : gp_Vec();
+            if (n.Magnitude() < 1.0e-6) {
+                return fmt::format(
+                    "Pipe: at {} the path runs along the lock direction",
+                    inPlace(sample.point)
+                );
+            }
+            normals.emplace_back(n);
+        }
+    }
+    else if (frenetForNone) {
+        // A helix: its profile stays square to its axis, in Frenet's frame
+        for (const PathSample& sample : samples) {
+            if (sample.second.Magnitude() < gp::Resolution()) {
+                normals.clear();
+                break;
+            }
+            normals.emplace_back(sample.second);
+        }
+    }
+    if (normals.empty()) {
+        normals = carriedNormals(samples);
+    }
+
+    // About the path's tangent the way it runs: a twist's hand doesn't depend on the way the
+    // profile sweeps (SW11: clockwise about the path's direction is Onshape's default)
+    std::vector<double> angles(samples.size(), 0.0);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        angles[i] = rate * (samples[i].length - from);
+    }
+    double curvature = 0.0;
+    for (const PathSample& sample : samples) {
+        curvature = std::max(curvature, sample.second.Magnitude());
+    }
+    const double reach
+        = 0.2 * std::min(total, curvature > gp::Resolution() ? 1.0 / curvature : total);
+    const std::optional<TopoDS_Wire> guide = guideThrough(samples, normals, angles, reach);
+    if (!guide) {
+        return std::string("Pipe: the profile's frame along the path couldn't be built");
+    }
+    frameGuide = *guide;
+    return std::nullopt;
+}
+
 void Pipe::Restore(Base::XMLReader& reader)
 {
     settingMode = true;
@@ -5289,6 +5891,14 @@ short Pipe::mustExecute() const
     }
     if (ProfileControl.isTouched() || ExtendToFullPath.isTouched() || PathReversed.isTouched()
         || SpineMore.isTouched()) {
+        return 1;
+    }
+    if (LockFaces.isTouched() || LockDirection.isTouched() || HasTwist.isTouched()
+        || TwistType.isTouched() || Turns.isTouched() || TwistAngle.isTouched()
+        || TwistPitch.isTouched() || TwistCCW.isTouched() || HasScale.isTouched()
+        || ScaleFactor.isTouched() || BodyType.isTouched() || Thickness1.isTouched()
+        || Thickness2.isTouched() || Midplane.isTouched() || FlipWall.isTouched()
+        || TrimEnds.isTouched()) {
         return 1;
     }
     return ProfileBased::mustExecute();
@@ -5542,6 +6152,24 @@ std::array<gp_Trsf, 2> profileFramesOf(const TopoDS_Shape& profile)
 App::DocumentObjectExecReturn* Pipe::execute()
 {
     frenetForNone = false;
+    frameGuide.Nullify();
+    binormalInBody = Binormal.getValue();
+    if (ProfileControl.getValue() == 4) {
+        // Lock direction: Binormal mode with the picked direction, in the Body's coordinates
+        const std::vector<std::string>& subs = LockDirection.getSubValues();
+        const std::optional<gp_Dir> direction = directionOf(
+            linkedShape(LockDirection.getValue(), subs.empty() ? std::string() : subs.front())
+        );
+        if (!direction) {
+            return new App::DocumentObjectExecReturn(
+                "Pipe: 'Lock direction' needs a plane, a planar face or a straight edge"
+            );
+        }
+        binormalInBody = Base::Vector3d(direction->X(), direction->Y(), direction->Z());
+    }
+    if (BodyType.getValue() == 1) {
+        return new App::DocumentObjectExecReturn("Pipe: the Thin body type isn't built yet");
+    }
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
@@ -6508,12 +7136,12 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // tangent runs along it, which no profile survives (ops#406)
         std::optional<gp_Dir> binormal;
         auto binormalText = [&]() {
-            Base::Vector3d direction = Binormal.getValue();
+            Base::Vector3d direction = binormalInBody;
             direction.Normalize();
             return pointText(gp_Pnt(direction.x, direction.y, direction.z));
         };
         if (mode == 4) {
-            binormal = sweptBinormal(Binormal.getValue(), getLocation());
+            binormal = sweptBinormal(binormalInBody, getLocation());
             if (!binormal) {
                 return new App::DocumentObjectExecReturn(
                     QT_TRANSLATE_NOOP(
@@ -6804,6 +7432,27 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
         };
 
+        // Slice 3: twist, scale, lock faces (the frame's guide and the scale's law)
+        if (HasTwist.getValue() || HasScale.getValue() || ProfileControl.getValue() == 3) {
+            if (!profilePoint.isNull() || (Transformation.getValue() == 1 && !multisections.empty())
+                || Transformation.getValue() > 1) {
+                return new App::DocumentObjectExecReturn(
+                    "Pipe: twist, scale and 'Lock faces' sweep one profile, without Sections or "
+                    "a section transformation"
+                );
+            }
+            std::vector<TopoDS_Shape> profileWires;
+            for (const auto& wires : wiresections) {
+                if (!wires.empty()) {
+                    profileWires.push_back(wires.front().getShape().Moved(invObjLoc));
+                }
+            }
+            if (const std::optional<std::string> error
+                = prepareSlice3(path, profileWires, invObjLoc, scalinglaw)) {
+                return new App::DocumentObjectExecReturn(*error);
+            }
+        }
+
         std::vector<Part::TopoShape> frontwires, backwires;
         for (auto& wires : wiresections) {
             BRepOffsetAPI_MakePipeShell mkPS(TopoDS::Wire(path.getShape()));
@@ -7067,6 +7716,13 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
         Part::TopoShape result = makeTopoShape();
 
+        if (!tilts.pieceStarts.empty() && (!frameGuide.IsNull() || scalinglaw)) {
+            return new App::DocumentObjectExecReturn(
+                "Pipe: with twist, scale or 'Lock faces' the path's corners must turn the profile "
+                "less than 90 degrees in 'Transformed' (it would be swept in pieces). Use 'Right "
+                "corner' or 'Round corner'."
+            );
+        }
         if (!tilts.pieceStarts.empty()) {
             // Past 90 degrees: the union. The first piece starts from the profile where it lies
             // at the spine's start, or else from the one sweep's start section with its names.
@@ -7489,8 +8145,16 @@ void Pipe::setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS
             break;
     }
 
+    // Twist and lock faces: the guide orients the frame, its normal pointing from the path to
+    // the guide in each plane square to the path (OCCT's guide in a plane is exact here, where
+    // the curvilinear equivalence approximated the twisted faces to 1e-2 mm)
+    if (!frameGuide.IsNull()) {
+        mkPipeShell.SetMode(frameGuide, false, BRepFill_NoContact);
+        return;
+    }
+
     bool auxiliary = false;
-    const Base::Vector3d& bVec = Binormal.getValue();
+    const Base::Vector3d& bVec = binormalInBody;
     switch (Mode.getValue()) {
         case 0:
             // ProfileControl "None" off a plane, where Frenet's frame is steady (execute)
