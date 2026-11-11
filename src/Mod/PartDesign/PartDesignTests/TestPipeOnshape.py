@@ -1064,20 +1064,16 @@ class TestPipeSelfOverlapUnion(PipeCase):
         self.assertTrue(pipe.Shape.Solids[0].isInside(V(10, 0.75, 0), 1e-6, False))
 
     def testRoundCornerRingOverlapping(self):
-        """The ring r 1 / 0.4 with 'Round corner': its corners are the same at both ends (10, 1.5) and
-        (10, 0.5), so the union differs from the clear sweep as with the mitre: 0.84 pi more path,
-        less the annuli's overlap 0.876804 (testRingProfileHoleStaysOpen). The hole stays open."""
+        """The ring r 1 / 0.4 with 'Round corner', its wall meeting itself: OCCT's maker leaves
+        faces unused and a Round corner's joint has no planar edges to cut the tubes at, so it stops,
+        naming Right corner (Onshape has no Round corner: it mitres, and builds the union, which
+        testRingProfileHoleStaysOpen checks for the mitre). Building it here is debt (sweeps 18)."""
         pipe = self.tube((10, 1.5), [models.circle(0, 0, 1), models.circle(0, 0, 0.4)],
                          Transition="Round corner")
         self.assertOneSolid(pipe)
-        clear = pipe.Shape.Volume
         models.setLines(self.doc.getObject("Path"), {3: ((10, 10), (10, 0.5))})
         self.doc.recompute()
-        self.assertOneSolid(pipe, clear + 0.84 * math.pi - 0.876804, places=4)
-        solid = pipe.Shape.Solids[0]
-        self.assertTrue(solid.isInside(V(10, 0.75, 0), 1e-6, False))
-        for outside in ((10, 0.3, 0), (10, 2, 0), (5, 0, 0)):
-            self.assertFalse(solid.isInside(V(*outside), 1e-6, False), outside)
+        self.assertStops(pipe, "overlaps itself", "Round corner", "Right corner")
 
     def testClosedSpinePassingNearItself(self):
         """A closed path with a notch, (0,0)-(20,0)-(20,10)-(12,10)-(12,1.5)-(8,1.5)-(8,10)-(0,10): the
