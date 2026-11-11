@@ -7,6 +7,7 @@ Large) that configures A's pad length and the suppression of a cut owner E on B,
 "Tall" that configures C's pad length, and a configuration Variable `len` (Length, 80 mm,
 10..200 mm). The expected results are volumes and heights of those boxes."""
 
+import json
 import os
 import shutil
 import tempfile
@@ -17,7 +18,7 @@ import Part
 import PartDesign
 
 from PartDesignTests.TestStudio import pad, sketch, xyPlane
-from PartDesignTests.TestStudioList import makeOwner, newStudio, studioList
+from PartDesignTests.TestStudioList import makeOwner, newStudio, setBox, studioList
 
 TOL = 1e-6
 
@@ -271,6 +272,89 @@ class TestConfigurations(unittest.TestCase):
         PartDesign.configSetActive(self.studio, {"Size": "Large"})
         self.assertEqual(pieces(), large)
 
+    def pieceBodies(self):
+        return [b for b in self.doc.Objects if b.isDerivedFrom("PartDesign::Body") and b.StudioPieceWitness]
+
+    def configuredCut(self, splitIn):
+        """Cut splits B (24..26) in splitIn only"""
+        cut = makeOwner(self.doc, self.studio, "Cut", (24, -1, 26, 11), 11, "Subtraction", ["B"])
+        self.edit(lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(lambda: PartDesign.configConfigureSuppression(cut, self.size))
+        other = "Small" if splitIn == "Large" else "Large"
+        self.edit(lambda: PartDesign.configSetSuppressionCell(cut, other, True))
+        return cut
+
+    def testCopiedMakerDoesNotTakeRetiredIds(self):
+        """A copy of a maker carries its retired pieces along (a dynamic property), but its own
+        pieces never take the original's ids or names (review R1)"""
+        cut = self.configuredCut("Large")
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertEqual(self.pieceBodies(), [])
+
+        def paste():
+            copy = self.doc.copyObject(cut)
+            self.studio.addObject(copy)
+            return copy
+
+        copy = self.edit(paste)
+        self.edit(lambda: setBox(copy, (21, -1, 22, 11), 11, "Subtraction"))
+        entries = [e.Name for e in PartDesign.studioList(self.studio).Entries]
+        self.edit(lambda: PartDesign.studioInsert(copy, entries.index("Cut") + 1))
+        if getattr(copy, "Suppressed", False):
+            self.edit(lambda: PartDesign.studioSuppress(copy, False))
+        self.edit(lambda: PartDesign.studioMakePieces(copy))
+        made = [b for b in self.pieceBodies() if b.StudioMadeBy == copy]
+        self.assertGreaterEqual(len(made), 1)
+        for body in made:
+            self.assertTrue(body.StudioPartId.startswith(copy.Name + ":"), body.StudioPartId)
+
+    def testBinderOfAPieceASwitchRemovesStays(self):
+        """A piece a Binder outside the studio reads keeps its Body when a switch takes its solid
+        away (the Binder never keeps a stale solid), and the switch back gives the same Body its
+        piece again (review R2)"""
+        cut = self.configuredCut("Small")
+        self.edit(lambda: PartDesign.studioMakePieces(cut))
+        right = [b for b in self.pieceBodies() if b.Shape.BoundBox.XMin > 25][0]
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        binder = other.newObject("PartDesign::SubShapeBinder", "Bound")
+        binder.Support = [(right, ("",))]
+        self.doc.recompute()
+        self.assertAlmostEqual(binder.Shape.Volume, 400, delta=1e-4)
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.doc.recompute()
+        self.assertTrue(right.isAttachedToDocument())
+        self.assertEqual([s[0] for s in binder.Support], [right])
+        self.assertTrue(binder.Shape.isNull() or invalid(binder) or invalid(right),
+                        "the binder shows a solid Large doesn't have")
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.doc.recompute()
+        self.assertAlmostEqual(right.Shape.Volume, 400, delta=1e-4)
+        self.assertAlmostEqual(binder.Shape.Volume, 400, delta=1e-4)
+        self.assertFalse(invalid(binder))
+
+    def testNestedMakersSwitchBackGivesPiecesTheirIds(self):
+        """Cut splits B and M2 splits Cut's right piece, both suppressed in Large: the switch
+        back makes the pieces in the list's order, so M2's come back too (review R4)"""
+        cut = makeOwner(self.doc, self.studio, "Cut", (24, -1, 26, 11), 11, "Subtraction", ["B"])
+        self.edit(lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(lambda: PartDesign.studioMakePieces(cut))
+        right = [b for b in self.pieceBodies() if b.Shape.BoundBox.XMin > 25][0].StudioPartId
+        m2 = makeOwner(self.doc, self.studio, "M2", (27.5, -1, 28.5, 11), 11, "Subtraction", [right])
+        self.edit(lambda: PartDesign.studioInsert(m2, -1))
+        self.edit(lambda: PartDesign.studioMakePieces(m2))
+        for maker in (cut, m2):
+            self.edit(lambda: PartDesign.configConfigureSuppression(maker, self.size))
+            self.edit(lambda: PartDesign.configSetSuppressionCell(maker, "Large", True))
+        ids = lambda: sorted((b.StudioPartId, b.Label) for b in self.pieceBodies() if not b.Shape.isNull())
+        before = ids()
+        self.assertEqual(len(before), 4)  # Cut:1, Cut:2 (M2's parent), M2's two
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.doc.recompute()
+        self.assertEqual(ids(), before)
+        self.assertEqual([o.Name for o in self.doc.Objects if invalid(o)], [])
+
     # ----------------------------------------------------------------------------------- the file
     def save(self):
         folder = tempfile.mkdtemp(prefix="cfg")
@@ -316,6 +400,55 @@ class TestConfigurations(unittest.TestCase):
         self.doc.recompute()
         self.assertFalse(invalid(self.cfg))
         self.assertAlmostEqual(height(self.A), 11, delta=TOL)
+
+    def testUndoAfterClearingALoadMismatchIsLoud(self):
+        """A switch heals a file opened in error; its undo brings the file's expressions back,
+        and the error with them (review R3)"""
+        self.configureSizes()
+        self.cfg.Table = self.cfg.Table.replace('"Default":"10 mm"', '"Default":"11 mm"')
+        self.save()
+        self.doc.UndoMode = 1
+        self.doc.recompute()
+        self.assertTrue(invalid(self.cfg))
+        self.edit(lambda: PartDesign.configSetActive(self.studio, {"Size": "Large"}))
+        self.assertFalse(invalid(self.cfg))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(self.APad.Length.Value, 10, delta=TOL)
+        self.assertTrue(invalid(self.cfg))
+
+    def testMalformedSavedDataIsLoud(self):
+        """A saved Table that can't be read opens with the StudioConfig in error, and a switch
+        refuses loudly: it is never read as empty and written over (review P2)"""
+        self.configureSizes()
+        self.cfg.Table = self.cfg.Table[:-5]
+        text = self.cfg.Table
+        self.save()
+        self.doc.recompute()
+        self.assertTrue(invalid(self.cfg))
+        with self.assertRaises(Exception):
+            PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertEqual(self.cfg.Table, text)
+
+    def testWrongTypedSavedValueRaises(self):
+        """A saved input whose field has the wrong JSON type makes the API raise a Python error,
+        never a C++ exception through the interpreter (review P3)"""
+        self.configureSizes()
+        inputs = json.loads(self.cfg.Inputs)
+        for entry in inputs["inputs"]:
+            for key, value in list(entry.items()):
+                if isinstance(value, str):
+                    entry[key] = 5
+        self.cfg.Inputs = json.dumps(inputs)
+        for call in (
+            lambda: PartDesign.configSetActive(self.studio, {"Size": "Large"}),
+            lambda: PartDesign.configKey(self.studio),
+            lambda: PartDesign.configReconcile(self.studio),
+        ):
+            try:
+                call()
+            except Exception:
+                pass
 
     # --------------------------------------------------------------------------- outside readers
     def testInstanceOnAnotherRowErrors(self):

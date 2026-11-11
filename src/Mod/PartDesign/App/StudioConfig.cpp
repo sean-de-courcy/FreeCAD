@@ -4,6 +4,7 @@
 // notes/configurations-design.md.
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -95,6 +96,12 @@ std::string number(double v)
     return buf;
 }
 
+/// StudioConfig objects alive in the session (any document, the undo stack's too): none, and
+/// StudioConfig::of() returns at once (the Link and expression hooks call it on every write)
+std::atomic<int> liveConfigs {0};
+
+/// A saved value as JSON. A value that can't be read throws (loud): read as empty, the next edit
+/// would write over it (ops#671 review)
 json parsed(const App::PropertyString& prop, const char* list)
 {
     const std::string text = prop.getValue();
@@ -103,8 +110,13 @@ json parsed(const App::PropertyString& prop, const char* list)
         try {
             j = json::parse(text);
         }
-        catch (const json::exception&) {
-            j = json();
+        catch (const json::exception& e) {
+            throw Base::RuntimeError(std::string("The configuration's saved ") + prop.getName()
+                                     + " can't be read: " + e.what());
+        }
+        if (!j.is_object()) {
+            throw Base::RuntimeError(std::string("The configuration's saved ") + prop.getName()
+                                     + " is not a JSON object");
         }
     }
     if (!j.is_object()) {
@@ -318,11 +330,13 @@ bool isEntryOf(const json& e, const App::DocumentObject* obj)
     return !e.contains("id") || !e["id"].is_number_integer() || e["id"].get<long>() == obj->getID();
 }
 
-/// The object a table entry configures, or null (deleted, or its name now another object's)
-App::DocumentObject* entryObject(App::Document* doc, const json& e)
+/// The object a table entry configures, or null (deleted, or its name now another object's, or
+/// an object outside cfg's studio: a pasted studio's copied table names the originals, which it
+/// must never write, ops#671 review P5)
+App::DocumentObject* entryObject(const StudioConfig* cfg, const json& e)
 {
-    App::DocumentObject* obj = doc->getObject(str(e, "object").c_str());
-    return isEntryOf(e, obj) ? obj : nullptr;
+    App::DocumentObject* obj = cfg->getDocument()->getObject(str(e, "object").c_str());
+    return isEntryOf(e, obj) && studioOfObject(obj) == cfg->studio() ? obj : nullptr;
 }
 
 json* findParam(json& table, const App::DocumentObject* obj, const std::string& path)
@@ -411,7 +425,7 @@ std::string reconcileCells(StudioConfig* cfg, bool checkOnly, std::set<App::Docu
     };
 
     for (const auto& p : table["params"]) {
-        App::DocumentObject* obj = entryObject(doc, p);
+        App::DocumentObject* obj = entryObject(cfg, p);
         const json* cell = activeCell(p);
         if (!obj || !cell || !cell->is_string()) {
             continue;
@@ -443,7 +457,7 @@ std::string reconcileCells(StudioConfig* cfg, bool checkOnly, std::set<App::Docu
     }
 
     for (const auto& s : table["suppress"]) {
-        App::DocumentObject* obj = entryObject(doc, s);
+        App::DocumentObject* obj = entryObject(cfg, s);
         const json* cell = activeCell(s);
         if (!obj || !cell || !cell->is_boolean()) {
             continue;
@@ -765,6 +779,7 @@ bool hookWrite(App::DocumentObject* owner,
 
 StudioConfig::StudioConfig()
 {
+    ++liveConfigs;
     ADD_PROPERTY_TYPE(Inputs, (""), "Configuration", App::Prop_Hidden,
                       "The configuration inputs (JSON; FreeCAD-CH ops#671)");
     ADD_PROPERTY_TYPE(Table, (""), "Configuration", App::Prop_Hidden,
@@ -775,6 +790,19 @@ StudioConfig::StudioConfig()
 
 App::DocumentObjectExecReturn* StudioConfig::execute()
 {
+    // The check again, not only the load's: an undo past the write that cleared a load mismatch
+    // brings the file's expressions back, and the error with them (review R3). Check only: an
+    // edit, undo or redo leaves the expressions and the cells agreeing, so this finds nothing
+    // but what the file brought
+    try {
+        mismatch = reconcileCells(this, true, nullptr);
+    }
+    catch (const Base::Exception& e) {  // no std::exception
+        mismatch = e.what();
+    }
+    catch (const std::exception& e) {
+        mismatch = e.what();
+    }
     if (!mismatch.empty()) {
         return new App::DocumentObjectExecReturn(
             "The file's configured values are not the active configuration's: " + mismatch, this);
@@ -791,15 +819,28 @@ void StudioConfig::onDocumentRestored()
 {
     App::VarSet::onDocumentRestored();
     // Check only (3.2): writing would touch every configured feature on open
-    mismatch = reconcileCells(this, true, nullptr);
+    try {
+        mismatch = reconcileCells(this, true, nullptr);
+    }
+    catch (const Base::Exception& e) {  // no std::exception
+        mismatch = e.what();
+    }
+    catch (const std::exception& e) {
+        mismatch = e.what();
+    }
     if (!mismatch.empty()) {
         touch();
     }
 }
 
+StudioConfig::~StudioConfig()
+{
+    --liveConfigs;
+}
+
 StudioConfig* StudioConfig::of(App::Document* doc, App::Part* studio, bool create)
 {
-    if (!doc) {
+    if (!doc || (!create && liveConfigs.load() == 0)) {
         return nullptr;
     }
     for (auto obj : doc->getObjectsOfType(StudioConfig::getClassTypeId())) {
@@ -1446,6 +1487,17 @@ bool configSetActive(App::Part* studio, const std::map<std::string, std::string>
                 makers.push_back(obj);
             }
         }
+        // In the list's order (then by object ID), never the set's pointer order: the pieces'
+        // Bodies and ids are made in this order (I-N1, ops#671 review P4)
+        std::vector<App::DocumentObject*> order;
+        if (auto list = cfg->studio() ? StudioList::of(cfg->getDocument(), cfg->studio()) : nullptr) {
+            order = list->Entries.getValues();
+        }
+        auto place = [&order](App::DocumentObject* obj) {
+            auto it = std::ranges::find(order, obj);
+            return std::pair<std::ptrdiff_t, long>(it - order.begin(), obj->getID());
+        };
+        std::ranges::sort(makers, {}, place);
         if (makers.empty()) {
             doc->recompute();
         }
@@ -1466,6 +1518,12 @@ bool configSetActive(App::Part* studio, const std::map<std::string, std::string>
             doc->abortTransaction();
         }
         return refuse(why, e.what());
+    }
+    catch (const std::exception& e) {  // a saved value of the wrong JSON type (review P3)
+        if (own) {
+            doc->abortTransaction();
+        }
+        return refuse(why, std::string("The configuration data can't be read: ") + e.what());
     }
 }
 

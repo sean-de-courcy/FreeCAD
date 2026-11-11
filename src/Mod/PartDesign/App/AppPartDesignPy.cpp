@@ -380,112 +380,112 @@ public:
         );
         add_varargs_method(
             "configStudio",
-            &Module::configStudio,
+            &Module::guarded<&Module::configStudio>,
             "configStudio(studio, create=False) -- The studio's StudioConfig (ops#671), or None."
         );
         add_varargs_method(
             "configAddList",
-            &Module::configAddList,
+            &Module::guarded<&Module::configAddList>,
             "configAddList(studio, name, rowNames) -- Adds a List input; returns its id."
         );
         add_varargs_method(
             "configAddCheckbox",
-            &Module::configAddCheckbox,
+            &Module::guarded<&Module::configAddCheckbox>,
             "configAddCheckbox(studio, name, default=True) -- Adds a Checkbox input; returns its id."
         );
         add_varargs_method(
             "configAddVariable",
-            &Module::configAddVariable,
+            &Module::guarded<&Module::configAddVariable>,
             "configAddVariable(studio, name, type, default, min=None, max=None) -- Adds a configuration Variable (#name); returns its id."
         );
         add_varargs_method(
             "configAddRow",
-            &Module::configAddRow,
+            &Module::guarded<&Module::configAddRow>,
             "configAddRow(studio, input, name) -- Adds a row to a List input; returns its id."
         );
         add_varargs_method(
             "configRenameRow",
-            &Module::configRenameRow,
+            &Module::guarded<&Module::configRenameRow>,
             "configRenameRow(studio, input, row, name) -- Renames a row (its id stays)."
         );
         add_varargs_method(
             "configRemoveRow",
-            &Module::configRemoveRow,
+            &Module::guarded<&Module::configRemoveRow>,
             "configRemoveRow(studio, input, row) -- Removes a row and its cells."
         );
         add_varargs_method(
             "configSetDefaultRow",
-            &Module::configSetDefaultRow,
+            &Module::guarded<&Module::configSetDefaultRow>,
             "configSetDefaultRow(studio, input, row) -- Makes row the List's default."
         );
         add_varargs_method(
             "configRemoveInput",
-            &Module::configRemoveInput,
+            &Module::guarded<&Module::configRemoveInput>,
             "configRemoveInput(studio, input) -- Removes an input; what it configured keeps its active value."
         );
         add_varargs_method(
             "configConfigure",
-            &Module::configConfigure,
+            &Module::guarded<&Module::configConfigure>,
             "configConfigure(obj, path, input) -- Configures obj's path with a List or Checkbox input."
         );
         add_varargs_method(
             "configUnconfigure",
-            &Module::configUnconfigure,
+            &Module::guarded<&Module::configUnconfigure>,
             "configUnconfigure(obj, path) -- Unconfigures obj's path (it keeps the active cell)."
         );
         add_varargs_method(
             "configSetCell",
-            &Module::configSetCell,
+            &Module::guarded<&Module::configSetCell>,
             "configSetCell(obj, path, row, text) -- Writes a configured path's cell (row empty: the active one)."
         );
         add_varargs_method(
             "configConfigureSuppression",
-            &Module::configConfigureSuppression,
+            &Module::guarded<&Module::configConfigureSuppression>,
             "configConfigureSuppression(owner, input) -- Configures owner's suppression."
         );
         add_varargs_method(
             "configUnconfigureSuppression",
-            &Module::configUnconfigureSuppression,
+            &Module::guarded<&Module::configUnconfigureSuppression>,
             "configUnconfigureSuppression(owner) -- Unconfigures owner's suppression."
         );
         add_varargs_method(
             "configSetSuppressionCell",
-            &Module::configSetSuppressionCell,
+            &Module::guarded<&Module::configSetSuppressionCell>,
             "configSetSuppressionCell(owner, row, suppressed) -- Writes a suppression cell (row empty: the active one)."
         );
         add_varargs_method(
             "configIsConfigured",
-            &Module::configIsConfigured,
+            &Module::guarded<&Module::configIsConfigured>,
             "configIsConfigured(obj, path=None) -- Whether obj's path (None: its suppression) is configured."
         );
         add_varargs_method(
             "configSetActive",
-            &Module::configSetActive,
+            &Module::guarded<&Module::configSetActive>,
             "configSetActive(studio, values) -- The switch: values maps inputs (id or name) to rows, bools or values; rebinds, reconciles, makes pieces, recomputes."
         );
         add_varargs_method(
             "configKey",
-            &Module::configKey,
+            &Module::guarded<&Module::configKey>,
             "configKey(studio, values=None) -- The canonical key of values (None: the active configuration)."
         );
         add_varargs_method(
             "configDefaultKey",
-            &Module::configDefaultKey,
+            &Module::guarded<&Module::configDefaultKey>,
             "configDefaultKey(studio) -- The key of every input at its default."
         );
         add_varargs_method(
             "configReconcile",
-            &Module::configReconcile,
+            &Module::guarded<&Module::configReconcile>,
             "configReconcile(studio, checkOnly=True) -- Rebinds from the active cells (checkOnly: only reports what differs)."
         );
         add_varargs_method(
             "configSetReaderKey",
-            &Module::configSetReaderKey,
+            &Module::guarded<&Module::configSetReaderKey>,
             "configSetReaderKey(reader, source, values) -- The configuration a Link or binder outside the studio shows."
         );
         add_varargs_method(
             "configReaderError",
-            &Module::configReaderError,
+            &Module::guarded<&Module::configReaderError>,
             "configReaderError(reader, source) -- Why reader may not show source now (empty: it may)."
         );
         add_varargs_method(
@@ -570,6 +570,25 @@ public:
     }
 
 private:
+    /// A configuration call: a C++ exception that is no Python one (a malformed saved value's
+    /// json type error, ops#671 review) becomes a Python RuntimeError instead of escaping
+    template<Py::Object (Module::*F)(const Py::Tuple&)>
+    Py::Object guarded(const Py::Tuple& args)
+    {
+        try {
+            return (this->*F)(args);
+        }
+        catch (const Py::BaseException&) {
+            throw;
+        }
+        catch (const Base::Exception&) {
+            throw;  // as before
+        }
+        catch (const std::exception& e) {
+            throw Py::RuntimeError(std::string("The configuration data can't be read: ") + e.what());
+        }
+    }
+
     // A deleted object, or one no longer in a document, raises ReferenceError
     static App::DocumentObject* objectArg(PyObject* obj)
     {

@@ -620,7 +620,7 @@ namespace
 /// The piece records an entry deleted when their solid went (ops#671 C1c): a piece made again
 /// with the same parent and witness takes its id and name back, so a configuration switch and
 /// back (or a suppression and its reversal) gives the parts their names again, as in Onshape.
-/// The witness must be equal, so no id goes to another piece
+/// The claim is by witness score (claimRetired), and only by the entry that retired it
 constexpr const char* retiredProperty = "StudioRetiredPieces";
 
 std::vector<std::string> retiredOf(const App::DocumentObject* entry)
@@ -657,6 +657,7 @@ void retirePiece(App::DocumentObject* entry, const Body* body)
         {"parent", body->StudioParentId.getValue()},
         {"witness", body->StudioPieceWitness.getValues()},
         {"label", body->Label.getStrValue()},
+        {"maker", entry->getID()},
     };
     auto values = retiredOf(entry);
     const std::string id = record["id"];
@@ -693,7 +694,11 @@ std::vector<Retired> retiredRecords(const App::DocumentObject* entry)
                 r.witness.push_back(w.get<std::string>());
             }
         }
-        if (!r.id.empty()) {
+        // Only the records this entry retired: a copied entry carries the property along
+        // (copy/paste, copyObject), and its pieces are not the original's (review R1)
+        const bool own = record.contains("maker") && record["maker"].is_number_integer()
+            && record["maker"].get<long>() == entry->getID();
+        if (!r.id.empty() && own) {
             out.push_back(std::move(r));
         }
     }
@@ -946,13 +951,33 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         body->Label.setValue(label.empty() ? "Part 1" : label.c_str());
         made.push_back(body);
     }
-    // A record without a solid goes when its Body holds nothing else; else it stays, failing
+    // A record without a solid goes when its Body holds nothing else and nothing outside the
+    // studio reads it (a Binder, a Link: deleted, the reader would keep its last shape, review
+    // R2); else it stays, failing, and takes its piece back when it comes back
+    auto readOutside = [studio](const Body* body) {
+        std::vector<App::DocumentObject*> read {const_cast<Body*>(body)};
+        for (auto member : body->Group.getValues()) {
+            read.push_back(member);
+        }
+        for (auto obj : read) {
+            for (auto reader : obj->getInList()) {
+                if (reader == studio || reader == body || StudioList::isStep(reader)
+                    || reader->isDerivedFrom<StudioList>()) {
+                    continue;
+                }
+                if (App::Part::getPartOfObject(reader, /*recursive=*/true) != studio) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
     for (auto body : emptied) {
         const auto group = body->Group.getValues();
         const bool alone = std::ranges::all_of(group, [](App::DocumentObject* member) {
             return StudioList::isStep(member);
         });
-        if (!alone) {
+        if (!alone || readOutside(body)) {
             continue;
         }
         retirePiece(entry, body);

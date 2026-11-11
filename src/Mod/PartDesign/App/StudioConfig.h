@@ -37,6 +37,7 @@ class PartDesignExport StudioConfig: public App::VarSet
 
 public:
     StudioConfig();
+    ~StudioConfig() override;
 
     App::PropertyString Inputs;  ///< JSON: {"version": 1, "inputs": [...]}
     App::PropertyString Table;   ///< JSON: {"version": 1, "params": [...], "suppress": [...]}
