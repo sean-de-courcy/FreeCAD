@@ -1322,6 +1322,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertNotIn(MAGENTA, colours)
         self.assertEqual(colours.count(CURRENT), 1)
 
+    def testEditedFieldStaysArmedOverTheReferencesPanel(self):
+        """Selection parity 8: an edited dress-up's Base field is armed on open (rank 14) and
+        stays armed once the panel shows, though the dialog has a References panel (a guessed
+        entry). The panel's refresh on the field's show had nothing to highlight (the field
+        covers Base) but still took the selection, which disarmed the field: whether the field
+        ended armed hung on whether the panel showed before or after the arm."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed"])
+        pump(0.5)
+        self.assertTrue(armed(field), "the field disarmed after the dialog opened")
+
     def testGuessStaysGuessedAfterAnotherPick(self):
         """Review 2: the redrawn fillet's guessed entry stays guessed (its record kept) when
         another edge is picked, when that one is deleted again, and through the field's undo."""
