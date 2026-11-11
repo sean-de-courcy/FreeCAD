@@ -30,6 +30,12 @@
 # Onshape's O3 rules itself, and its consumed rule (a tool part a Boolean consumes is no part from
 # the Boolean's place on: a later pick of it resolves to nothing) gives the live parts at the bar,
 # compared with PartDesign.studioLiveParts and the Bodies' visibility.
+#
+# Slice 8 adds in-Body patterns of owners' steps (a LinearPattern along the part's y, or a Mirrored
+# about a datum plane at y 5 in each part, with one box owner as the original): the oracle copies
+# the owner's box itself where the pattern applies (the owner resolved at its place to exactly the
+# pattern's part, its step applied, neither suppressed), and nothing otherwise (Onshape's patterns
+# across parts come later: refused loudly).
 
 import os
 import random
@@ -119,6 +125,60 @@ def booleanOwner(doc, studio, name, kind, targets=(), tools=(), keep=False, supp
 
 def isOwner(obj):
     return obj.TypeId in ("Part::Box", "PartDesign::Boolean")
+
+
+PATTERN_TYPES = {"Linear": "PartDesign::LinearPattern", "Mirror": "PartDesign::Mirrored"}
+
+
+def isPattern(obj):
+    return obj.TypeId in PATTERN_TYPES.values()
+
+
+def makePattern(doc, name, kind, part, originals, length=0, count=2, suppressed=False):
+    """A pattern (slice 8) of part's, outside its Body until inserted (insertPattern)."""
+    pat = doc.addObject(PATTERN_TYPES[kind], name)
+    body = doc.getObject(part)
+    pat.Originals = [doc.getObject(o) for o in originals if doc.getObject(o)]
+    if kind == "Linear":
+        pat.Direction = (body.Origin.OriginFeatures[1], [""])
+        pat.Mode = "Extent"
+        pat.Length = length
+        pat.Occurrences = count
+    else:
+        pat.MirrorPlane = (doc.getObject(part + "Mid"), [""])
+    pat.Refine = False
+    if suppressed:
+        pat.Suppressed = True
+    return pat
+
+
+def insertPattern(pat, part, index):
+    """pat into part's Body and the list. One with no original (its original deleted in the live
+    document) goes in the chain, red, as a pattern whose original went stays in it (ops#640 F3),
+    not out of it as a new one with nothing picked (ops#590)."""
+    empty = not pat.Originals
+    if empty:
+        pat.TransformMode = "Whole shape"
+    pat.Document.getObject(part).addObject(pat)
+    if empty:
+        pat.TransformMode = "Features"
+    PartDesign.studioInsert(pat, index)
+
+
+def patternRecord(pat):
+    kind = "Mirror" if pat.TypeId == PATTERN_TYPES["Mirror"] else "Linear"
+    record = dict(
+        name=pat.Name,
+        id=pat.ID,
+        pattern=kind,
+        part=pat.getParentGeoFeatureGroup().Name,
+        originals=[o.Name for o in pat.Originals],
+        suppressed=bool(pat.Suppressed),
+    )
+    if kind == "Linear":
+        record["length"] = round(pat.Length.Value, 6)
+        record["count"] = int(pat.Occurrences)
+    return record
 
 
 def ownerRecord(box):
@@ -257,8 +317,12 @@ def listOf(doc):
     lst = studioList(doc)
     entries = list(lst.Entries)
     bar = lst.Bar if 0 <= lst.Bar < len(entries) else len(entries)
-    records = [ownerRecord(e) for e in entries if isOwner(e)]
-    natives = [e.Name for e in entries if not isOwner(e)]
+    records = [
+        patternRecord(e) if isPattern(e) else ownerRecord(e)
+        for e in entries
+        if isOwner(e) or isPattern(e)
+    ]
+    natives = [e.Name for e in entries if not isOwner(e) and not isPattern(e)]
     return natives, records, bar
 
 
@@ -274,13 +338,44 @@ def oracle(natives, records, bar, live=None):
     the first. A Boolean that resolves to no target, no tool, a part both, or a Union of one part
     does nothing; otherwise, Keep tools off and not suppressed, its tools are consumed (even when
     the geometry fails it), so no later record acts on them. live, a set, gets the parts live at
-    the bar."""
+    the bar.
+
+    Pattern records (slice 8): a pattern in part p of one box owner copies the owner's box (its
+    instances at k * length / (count - 1) along y, or its mirror about y 5) into p when the owner
+    comes before it, resolved at its place to exactly [p], its step applied in p, and neither is
+    suppressed; otherwise it does nothing."""
     shapes = {p: Part.makeBox(10, 10, 10, V(x, 0, 0)) for p, x in PARTS}
     consumed = set()
+    resolved = {}  # box owner -> the parts it resolved to at its place
+    applied = set()  # (box owner, part) whose step changed its part
     for i, record in enumerate(records):
         if len(natives) + i >= bar:
             break
         if record["suppressed"]:
+            continue
+        if "pattern" in record:
+            p = record["part"]
+            originals = [o for o in record["originals"] if o in resolved]
+            if len(originals) != len(record["originals"]) or len(originals) != 1:
+                continue
+            o = originals[0]
+            if resolved[o] != [p] or (o, p) not in applied:
+                continue
+            owner = next(r for r in records if r["name"] == o)
+            length, width, height, corner = toolBox(owner["rect"], owner["depth"], owner["op"])
+            tool = Part.makeBox(length, width, height, corner)
+            if record["pattern"] == "Linear":
+                count = record["count"]
+                copies = [
+                    tool.translated(V(0, k * record["length"] / (count - 1), 0))
+                    for k in range(1, count)
+                ]
+            else:
+                copies = [tool.mirror(V(0, 5, 0), V(0, 1, 0))]
+            cut = owner["op"] == "Subtraction"
+            result = (shapes[p].cut(copies) if cut else shapes[p].fuse(copies)).removeSplitter()
+            if len(result.Solids) == 1:
+                shapes[p] = result
             continue
         if "kind" in record:
             targets = [p for p in record["scope"] if p in shapes and p not in consumed]
@@ -310,13 +405,16 @@ def oracle(natives, records, bar, live=None):
             continue
         length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
         tool = Part.makeBox(length, width, height, corner)
+        resolved[record["name"]] = []
         for p in record["scope"]:
-            if p not in shapes or p in consumed:
+            if p not in shapes or p in consumed or p in resolved[record["name"]]:
                 continue
+            resolved[record["name"]].append(p)
             cut = record["op"] == "Subtraction"
             result = (shapes[p].cut(tool) if cut else shapes[p].fuse(tool)).removeSplitter()
             if len(result.Solids) == 1:
                 shapes[p] = result
+                applied.add((record["name"], p))
     if live is not None:
         live.update(p for p in shapes if p not in consumed)
     return {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items()}
@@ -488,16 +586,21 @@ def ownIdSteps(doc):
     doc.recompute()
 
 
-def fromScratch(natives, records, bar):
+def fromScratch(natives, records, bar, maker=None):
     """The document built from scratch from the list (G2): the same parts; the owners made in the
     live document's ID order (names depend on the IDs' order, notes/stored-tags.md 4), then
     inserted in the list's order; then the bar."""
-    doc, studio = newStudio("scratch")
+    doc, studio = (maker or newStudio)("scratch")
     try:
         lst = studioList(doc)
         assert [e.Name for e in lst.Entries] == natives, ([e.Name for e in lst.Entries], natives)
         for r in sorted(records, key=lambda r: r["id"]):
-            if "kind" in r:
+            if "pattern" in r:
+                box = makePattern(
+                    doc, r["name"], r["pattern"], r["part"], r["originals"], r.get("length", 0),
+                    r.get("count", 2), r["suppressed"],
+                )
+            elif "kind" in r:
                 box = booleanOwner(
                     doc, studio, r["name"], r["kind"], r["scope"], r["tools"], r["keep"],
                     r["suppressed"],
@@ -509,7 +612,10 @@ def fromScratch(natives, records, bar):
                 )
             assert box.Name == r["name"], (box.Name, r["name"])
         for r in records:
-            PartDesign.studioInsert(doc.getObject(r["name"]), -1)
+            if "pattern" in r:
+                insertPattern(doc.getObject(r["name"]), r["part"], -1)
+            else:
+                PartDesign.studioInsert(doc.getObject(r["name"]), -1)
         PartDesign.studioSetBar(lst, bar if bar < len(lst.Entries) else -1)
         doc.recompute()
         return snapshot(doc)
@@ -1036,6 +1142,20 @@ def touches(rect):
     return [p for p, x in PARTS if x0 < x + 10 and x1 > x]
 
 
+PROP_NATIVES = NATIVES + len(PARTS)  # and each part's mirror plane
+
+
+def propStudio(name):
+    """newStudio, plus a datum plane at y 5 in each part (a Mirrored's plane, slice 8)."""
+    doc, studio = newStudio(name)
+    for p, _ in PARTS:
+        mid = doc.getObject(p).newObject("PartDesign::Plane", p + "Mid")
+        mid.MapMode = "Deactivated"
+        mid.Placement = App.Placement(V(0, 5, 0), App.Rotation(V(1, 0, 0), -90))
+    doc.recompute()
+    return doc, studio
+
+
 class TestStudioListProperty(unittest.TestCase):
     """After every random edit the document equals the one built from scratch from its list."""
 
@@ -1043,6 +1163,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="studiolist")
         self.log = []
         self.consumedSeen = 0  # states after an edit with a part consumed at the bar (P5)
+        self.patternsSeen = 0  # valid patterns of an owner, summed over the states (slice 8)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1052,9 +1173,30 @@ class TestStudioListProperty(unittest.TestCase):
 
     def edit(self, rng, doc, counter):
         lst = studioList(doc)
+        NATIVES = PROP_NATIVES
         boxes = owners(doc)
-        kinds = ["insert"] * 3 + ["boolean"] + ["delete", "move", "scope", "depth", "suppress", "bar"]
+        shapeOwners = [b for b in boxes if b.TypeId == "Part::Box"]
+        entries = boxes + [e for e in lst.Entries if isPattern(e)]
+        free = len(lst.Entries) - NATIVES  # places after the natives
+        kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern"]
+        kinds += ["delete", "move", "scope", "depth", "suppress", "bar"]
         kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
+        if kind == "pattern" and not shapeOwners:
+            kind = "insert"
+        if kind == "pattern":
+            # Slice 8: a Linear (along y) or a Mirror (about y 5) of one box owner, in one of its
+            # scope's parts (or another part: refused), somewhere after it
+            owner = rng.choice(shapeOwners)
+            scope = list(owner.StudioScope) or ["A"]
+            part = rng.choice(scope) if rng.random() < 0.85 else rng.choice([p for p, _ in PARTS])
+            which = rng.choice(["Linear", "Linear", "Mirror"])
+            count = rng.choice([2, 3])
+            length = rng.choice([1, 2]) * (count - 1)
+            after = list(lst.Entries).index(owner) + 1 - NATIVES
+            at = rng.randint(after, free)
+            pat = makePattern(doc, f"F{counter}", which, part, [owner.Name], length, count)
+            insertPattern(pat, part, NATIVES + at)
+            return f"pattern {pat.Name} {which} of {owner.Name} in {part} L{length} n{count} at {at}"
         if kind == "boolean":
             # P5: a Subtract or a Union between parts, Keep tools on or off
             names = [p for p, _ in PARTS]
@@ -1063,7 +1205,7 @@ class TestStudioListProperty(unittest.TestCase):
             rest = [p for p in names if p not in targets]
             tools = rng.sample(rest, rng.randint(1, len(rest)))
             keep = rng.random() < 0.4
-            at = rng.randint(0, len(boxes))
+            at = rng.randint(0, free)
             owner = booleanOwner(doc, doc.getObject("S"), f"F{counter}", op, targets, tools, keep)
             PartDesign.studioInsert(owner, NATIVES + at)
             return f"boolean {owner.Name} {op} targets {targets} tools {tools} keep {keep} at {at}"
@@ -1076,19 +1218,35 @@ class TestStudioListProperty(unittest.TestCase):
             scope = sorted(rng.sample(parts, rng.randint(1, len(parts))))
             op = rng.choice(["Subtraction", "Subtraction", "Union"])
             depth = rng.choice([1, 2, 3, 4])
-            at = rng.randint(0, len(boxes))
+            at = rng.randint(0, free)
             box = makeOwner(doc, doc.getObject("S"), f"F{counter}", rect, depth, op, scope)
             PartDesign.studioInsert(box, NATIVES + at)
             return f"insert {box.Name} {op} {rect} d{depth} scope {scope} at {at}"
-        box = rng.choice(boxes)
+        box = rng.choice(entries)
         name = box.Name
+        if isPattern(box) and kind in ("scope", "depth"):
+            if box.TypeId == PATTERN_TYPES["Mirror"]:
+                kind = "suppress"
+            else:
+                count = rng.choice([2, 3])
+                box.Occurrences = count
+                box.Length = rng.choice([1, 2]) * (count - 1)
+                PartDesign.studioReconcile(lst)
+                return f"count {name} n{count} L{box.Length.Value}"
         if kind == "delete":
             PartDesign.studioRemove(box)
             doc.removeObject(name)
             return f"delete {name}"
         if kind == "move":
-            j = rng.randrange(len(boxes))
-            PartDesign.studioMove(box, NATIVES + j)
+            j = rng.randrange(free)
+            try:
+                PartDesign.studioMove(box, NATIVES + j)
+            except ValueError as e:
+                # Onshape's drag: refused above what it reads or below what reads it (a pattern
+                # reads its original, slice 8); nothing changes
+                if " uses " not in str(e):
+                    raise
+                return f"move {name} -> {j} refused: {e}"
             return f"move {name} -> {j}"
         if kind in ("scope", "depth") and box.TypeId == "PartDesign::Boolean":
             names = [p for p, _ in PARTS]
@@ -1128,7 +1286,7 @@ class TestStudioListProperty(unittest.TestCase):
 
     def run_sequence(self, seed, nops):
         rng = random.Random(seed)
-        doc, _ = newStudio(f"prop{seed}")
+        doc, _ = propStudio(f"prop{seed}")
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
         studioList(doc)
         bad = 0
@@ -1155,14 +1313,18 @@ class TestStudioListProperty(unittest.TestCase):
                     doc.abortTransaction()
                     what = f"refused: {e}"
                     bad += 1
+                    self.log.append(f"seed {seed} op {step} {what}")
             doc.recompute()
             got = snapshot(doc)
-            want = fromScratch(*listOf(doc))
+            want = fromScratch(*listOf(doc), maker=propStudio)
             found = differences(got, want)
             found += ["oracle " + d for d in oracleDifferences(doc)]
             found += ["G1 " + d for d in gateG1(doc)[:4]]
             if len(PartDesign.studioLiveParts(studioList(doc))) < len(PARTS):
                 self.consumedSeen += 1
+            self.patternsSeen += sum(
+                1 for e in studioList(doc).Entries if isPattern(e) and e.isValid() and e.Originals
+            )
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -1179,8 +1341,9 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertEqual(total, 0, "\n".join(self.log))
         # The consumed rule was exercised, not only Booleans that keep their tools
         self.assertGreater(self.consumedSeen, 0)
+        self.assertGreater(self.patternsSeen, 0)
         print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
-              "with a consumed part")
+              f"with a consumed part, {self.patternsSeen} valid patterns seen")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 #include <set>
 #include <sstream>
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QHBoxLayout>
@@ -15,7 +16,12 @@
 #include <QListWidget>
 #include <QPointer>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QVBoxLayout>
+
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <Precision.hxx>
+#include <TopAbs_ShapeEnum.hxx>
 
 #include <App/Document.h>
 #include <App/DocumentObserver.h>
@@ -25,11 +31,16 @@
 #include <Base/Exception.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/Control.h>
+#include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureApply.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/FeaturePad.h>
+#include <Mod/PartDesign/App/FeaturePocket.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Studio.h>
 #include <Mod/PartDesign/App/StudioList.h>
@@ -144,12 +155,163 @@ std::string pyList(const std::vector<std::string>& values)
     return ss.str();
 }
 
+/// part's solid just before owner's place in the list, in the document's frame (as the App's
+/// studioBaseAt reads a scope part's): its last solid feature whose own place, or its owner's
+/// for a step, comes before owner's. Null when it has none there
+Part::TopoShape partSolidBefore(const App::DocumentObject* owner, const PartDesign::Body* part)
+{
+    const PartDesign::StudioList* list = PartDesign::StudioList::holding(owner);
+    if (!list || !part) {
+        return {};
+    }
+    const auto& entries = list->Entries.getValues();
+    auto placeOf = [&entries](const App::DocumentObject* obj) {
+        auto it = std::ranges::find(entries, obj);
+        return it == entries.end() ? -1 : static_cast<int>(it - entries.begin());
+    };
+    const int at = placeOf(owner);
+    if (at < 0) {
+        return {};
+    }
+    const Part::Feature* last = nullptr;
+    int key = -1;
+    for (App::DocumentObject* obj : part->Group.getValues()) {
+        int here = placeOf(obj);
+        if (here < 0) {
+            if (auto feature = freecad_cast<PartDesign::Feature*>(obj)) {
+                here = placeOf(feature->StudioOwner.getValue());
+            }
+        }
+        if (here >= 0) {
+            key = here;  // else the place of the member before it
+        }
+        if (key >= at || !PartDesign::Body::isSolidFeature(obj)) {
+            continue;
+        }
+        auto feature = static_cast<const Part::Feature*>(obj);
+        const Part::TopoShape& shape = feature->Shape.getShape();
+        if (!shape.isNull() && shape.hasSubShape(TopAbs_SOLID)) {
+            last = feature;  // a failed feature contributes nothing (parts-design 10.9)
+        }
+    }
+    if (!last) {
+        return {};
+    }
+    Part::TopoShape shape = last->Shape.getShape();
+    shape.transformShape(part->globalPlacement().toMatrix(), false, true);
+    return shape;
+}
+
+/** The live parts at owner's place that its tool touches or intersects (face contact counts):
+ * false when it has no tool. A tool its last recompute didn't keep (an Add touching no part of
+ * its scope, an empty scope) is computed for this and dropped again.
+ */
+bool toolContacts(App::DocumentObject* owner, std::vector<PartDesign::Body*>& out)
+{
+    out.clear();
+    auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(owner);
+    if (!addSub) {
+        return false;
+    }
+    Part::TopoShape tool = PartDesign::FeatureApply::toolOf(owner);
+    if (tool.isNull()) {
+        App::DocumentObjectExecReturn* result = nullptr;
+        try {
+            if (auto pad = freecad_cast<PartDesign::Pad*>(owner)) {
+                result = pad->execute();
+            }
+            else if (auto pocket = freecad_cast<PartDesign::Pocket*>(owner)) {
+                result = pocket->execute();
+            }
+            if (result == App::DocumentObject::StdReturn) {
+                tool = PartDesign::FeatureApply::toolOf(owner);
+            }
+        }
+        catch (...) {
+            tool = Part::TopoShape();
+        }
+        if (result && result != App::DocumentObject::StdReturn) {
+            delete result;
+        }
+        if (!addSub->AddSubShape.getShape().isNull()) {
+            addSub->AddSubShape.setValue(Part::TopoShape());
+        }
+        if (tool.isNull()) {
+            return false;
+        }
+    }
+    const auto toolSolids = tool.getSubTopoShapes(TopAbs_SOLID);
+    if (toolSolids.empty()) {
+        return false;
+    }
+    for (PartDesign::Body* body : liveStudioParts(owner)) {
+        const Part::TopoShape solid = partSolidBefore(owner, body);
+        if (solid.isNull()) {
+            continue;
+        }
+        bool touches = false;
+        for (const auto& partSolid : solid.getSubTopoShapes(TopAbs_SOLID)) {
+            for (const auto& toolSolid : toolSolids) {
+                BRepExtrema_DistShapeShape distance(toolSolid.getShape(), partSolid.getShape());
+                if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+                    touches = true;
+                    break;
+                }
+            }
+            if (touches) {
+                break;
+            }
+        }
+        if (touches) {
+            out.push_back(body);
+        }
+    }
+    return true;
+}
+
+/// The owners whose dialog picks the operation live (a new Extrude, until the person chooses)
+std::vector<App::DocumentObjectT> livePrefill;
+
+/// The members of the parts owner made that come after its step there, by name (a later step by
+/// its studio feature's)
+QStringList laterFeatures(const App::DocumentObject* owner, const std::vector<PartDesign::Body*>& made)
+{
+    QStringList names;
+    for (PartDesign::Body* body : made) {
+        PartDesign::Feature* own = PartDesign::StudioList::stepOf(owner, body);
+        for (App::DocumentObject* obj : body->Group.getValues()) {
+            if (!obj || obj == own) {
+                continue;
+            }
+            const App::DocumentObject* named = obj;
+            if (auto feature = freecad_cast<PartDesign::Feature*>(obj)) {
+                if (App::DocumentObject* by = feature->StudioOwner.getValue()) {
+                    named = by;
+                }
+            }
+            const QString name = QString::fromUtf8(named->Label.getValue());
+            if (!names.contains(name)) {
+                names.append(name);
+            }
+        }
+    }
+    return names;
+}
+
 /** The owner's Result box (ops#654 S4, parts-design 3.5): New / Add / Remove / Intersect and one
- * tick per live part of the studio, the profile's own part included, any of which can be cleared
- * (report 21). Each change is a list edit (PartDesign.studioSetScopeIds, studioNewPart) in the
- * dialog's transaction; a refusal is said under the ticks and the box shows the owner as it is.
- * Operation stays the owner's: Union (Add, or New when the scope is parts it made), Subtraction
- * (Remove), Common (Intersect).
+ * tick per live part of the studio, any of which can be cleared (report 21). Each change is a list
+ * edit (PartDesign.studioSetScopeIds, studioNewPart) in the dialog's transaction; a refusal is said
+ * under the ticks and the box shows the owner as it is. Operation stays the owner's: Union (Add,
+ * or New when the scope is parts it made), Subtraction (Remove), Common (Intersect).
+ *
+ * Onshape's Extrude (oracle 6, batch 6 Q1): while the person has chosen neither an operation nor a
+ * tick, a new Extrude's box picks the operation live from what the tool meets at its current
+ * values: exactly one live part touched or intersected -> Add, scope that part; none, or two or
+ * more -> New. A hand switch from New leaves the scope empty (the feature fails loudly, "No merge
+ * scope selected"); Add -> Remove keeps the scope. Remove flips the direction (into the material),
+ * and leaving it flips back (Intersect flips with Remove, as the Body path's ops#640 H4).
+ * Leaving New deletes the part it made, unless that part has later features: then the switch is
+ * refused, loudly (Onshape keeps or merges it, Q2: not done here).
  */
 class TaskStudioResult: public Gui::TaskView::TaskBox
 {
@@ -185,10 +347,21 @@ public:
         groupLayout()->addWidget(note);
 
         if (App::DocumentObject* owner = ownerT.getObject()) {
-            if (isNewResult(owner)) {
-                // An edit that leaves New for Add starts from the profile's part
-                scopeBeforeNew = defaultScope(owner);
+            auto it = std::ranges::find(livePrefill, ownerT);
+            if (it != livePrefill.end()) {
+                livePrefill.erase(it);
+                live = true;
             }
+            // Every recompute of the tool: the live pick again, after the event
+            toolChanged = owner->getDocument()->signalChangedObject.connect(
+                [this](const App::DocumentObject& obj, const App::Property& prop) {
+                    auto addSub = freecad_cast<const PartDesign::FeatureAddSub*>(&obj);
+                    if (live && !deciding && addSub && &prop == &addSub->AddSubShape
+                        && &obj == ownerT.getObject()) {
+                        scheduleDecision();
+                    }
+                }
+            );
         }
         refresh();
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
@@ -200,19 +373,6 @@ public:
     }
 
 private:
-    /// The profile's own part, if it is a live part at the owner's place
-    std::vector<std::string> defaultScope(App::DocumentObject* owner) const
-    {
-        auto profileBased = freecad_cast<PartDesign::ProfileBased*>(owner);
-        App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
-        PartDesign::Body* body = profile ? PartDesign::Body::findBodyOf(profile) : nullptr;
-        const auto live = liveStudioParts(owner);
-        if (body && std::ranges::find(live, body) != live.end()) {
-            return {PartDesign::studioPartId(body)};
-        }
-        return {};
-    }
-
     void refresh()
     {
         App::DocumentObject* owner = ownerT.getObject();
@@ -305,60 +465,103 @@ private:
         }
     }
 
+    /// Whether the owner's end follows its direction (Blind, Through all, Up to next/last): a
+    /// face or a shape fixes the side itself (the Body path's rule, ops#640 H4)
+    static bool directionBound(const App::DocumentObject* owner)
+    {
+        auto type = dynamic_cast<App::PropertyEnumeration*>(owner->getPropertyByName("Type"));
+        const char* value = type ? type->getValueAsString() : nullptr;
+        const std::string name = value ? value : "";
+        return name == "Length" || name == "ThroughAll" || name == "UpToLast" || name == "UpToFirst";
+    }
+
+    /// The extrude panel's Reversed switch shows the owner's (its OK writes the switch back)
+    void showReversed()
+    {
+        auto profileBased = freecad_cast<PartDesign::ProfileBased*>(ownerT.getObject());
+        Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog();
+        if (!profileBased || !dialog) {
+            return;
+        }
+        for (QWidget* widget : dialog->getDialogContent()) {
+            if (!widget) {
+                continue;
+            }
+            for (auto box : widget->findChildren<QCheckBox*>(QStringLiteral("checkBoxReversed"))) {
+                QSignalBlocker block(box);
+                box->setChecked(profileBased->Reversed.getValue());
+            }
+        }
+    }
+
+    /// The edits that leave New: the parts it made go, after the scope lets go of them
+    static void leaveNew(App::DocumentObject* owner, std::vector<std::string>& commands)
+    {
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
+        for (PartDesign::Body* body : partsMadeBy(owner)) {
+            commands.push_back(Gui::Command::getObjectCmd(body) + ".removeObjectsFromDocument()");
+            commands.push_back(
+                std::string("App.getDocument('") + owner->getDocument()->getName()
+                + "').removeObject('" + body->getNameInDocument() + "')"
+            );
+        }
+    }
+
     void onResultChanged(int index)
     {
         App::DocumentObject* owner = ownerT.getObject();
         if (updating || !owner) {
             return;
         }
+        live = false;  // the person chose: never picked for them again
         const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
         const bool wasNew = isNewResult(owner);
+        const std::string op = operationOf(owner);
+        const bool wasCut = !wasNew && (op == "Subtraction" || op == "Common");
+        const bool toCut = index == 2 || index == 3;
         std::vector<std::string> commands;
         if (index == 0) {
             if (wasNew) {
                 return;
             }
-            scopeBeforeNew = PartDesign::studioScopeIds(owner);
             commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
             commands.push_back("PartDesign.studioNewPart(" + ownerCmd + ")");
         }
         else {
+            if (wasNew) {
+                // Never a part's Body while it holds later features (they would be lost)
+                const auto made = partsMadeBy(owner);
+                const QStringList later = laterFeatures(owner, made);
+                if (!later.isEmpty()) {
+                    refusal = trStudio("%1 has later features: %2. Leaving New would delete them; "
+                                       "delete or move them first.")
+                                  .arg(made.empty() ? QString() : studioPartName(made.front()),
+                                       later.join(QStringLiteral(", ")));
+                    refresh();
+                    return;
+                }
+            }
             const char* ops[] = {"Union", "Union", "Subtraction", "Common"};
             commands.push_back(ownerCmd + ".Operation = '" + ops[index] + "'");
-            if (!wasNew) {
-                // The steps take the operation from the owner at reconcile
+            if (wasNew) {
+                // Onshape (Q1b, Q1d): a hand switch from New fills no scope
+                leaveNew(owner, commands);
+            }
+            else {
+                // The steps take the operation from the owner at reconcile; Add -> Remove keeps
+                // the scope (Q1e)
                 commands.push_back(
                     "PartDesign.studioSetScopeIds(" + ownerCmd + ", "
                     + pyList(PartDesign::studioScopeIds(owner)) + ")"
                 );
             }
-            else {
-                // Back to the parts it had, the made part goes
-                std::vector<std::string> ids;
-                const auto live = liveStudioParts(owner);
-                for (const auto& id : scopeBeforeNew) {
-                    for (auto body : live) {
-                        if (PartDesign::studioPartId(body) == id) {
-                            ids.push_back(id);
-                        }
-                    }
-                }
-                if (ids.empty()) {
-                    ids = defaultScope(owner);
-                }
-                commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", " + pyList(ids) + ")");
-                for (PartDesign::Body* body : partsMadeBy(owner)) {
-                    const std::string bodyCmd = Gui::Command::getObjectCmd(body);
-                    commands.push_back(bodyCmd + ".removeObjectsFromDocument()");
-                    commands.push_back(
-                        std::string("App.getDocument('") + owner->getDocument()->getName()
-                        + "').removeObject('"
-                        + body->getNameInDocument() + "')"
-                    );
-                }
-            }
+        }
+        if (wasCut != toCut && directionBound(owner)) {
+            commands.push_back(ownerCmd + ".Reversed = not " + ownerCmd + ".Reversed");
         }
         run(commands);
+        showReversed();
         recompute();
         refresh();
     }
@@ -369,6 +572,7 @@ private:
         if (updating || !owner || !item) {
             return;
         }
+        live = false;  // the person chose a part: never picked for them again
         const std::string id = item->data(Qt::UserRole).toString().toStdString();
         const bool on = item->checkState() == Qt::Checked;
         auto ids = PartDesign::studioScopeIds(owner);
@@ -398,14 +602,77 @@ private:
         );
     }
 
+    void scheduleDecision()
+    {
+        if (pending) {
+            return;
+        }
+        pending = true;
+        QMetaObject::invokeMethod(this, [this]() { decide(); }, Qt::QueuedConnection);
+    }
+
+    /// The live pick (Q1, Q1f): Add into the one part the tool meets, else New
+    void decide()
+    {
+        pending = false;
+        App::DocumentObject* owner = ownerT.getObject();
+        if (!live || updating || !owner || owner->getDocument()->isPerformingTransaction()) {
+            return;
+        }
+        std::vector<PartDesign::Body*> touched;
+        bool known = false;
+        deciding = true;
+        try {
+            known = toolContacts(owner, touched);
+        }
+        catch (...) {
+            known = false;
+        }
+        deciding = false;
+        if (!known) {
+            return;
+        }
+        const bool isNew = isNewResult(owner);
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        std::vector<std::string> commands;
+        if (touched.size() != 1) {
+            if (isNew) {
+                return;
+            }
+            commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
+            commands.push_back("PartDesign.studioNewPart(" + ownerCmd + ")");
+        }
+        else {
+            const std::string id = PartDesign::studioPartId(touched.front());
+            if (!isNew && operationOf(owner) == "Union"
+                && PartDesign::studioScopeIds(owner) == std::vector<std::string> {id}) {
+                return;
+            }
+            if (isNew && !laterFeatures(owner, partsMadeBy(owner)).isEmpty()) {
+                return;  // never a part with later features (none in a new feature's dialog)
+            }
+            commands.push_back(ownerCmd + ".Operation = 'Union'");
+            if (isNew) {
+                leaveNew(owner, commands);
+            }
+            commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", " + pyList({id}) + ")");
+        }
+        run(commands);
+        recompute();
+        refresh();
+    }
+
     App::DocumentObjectT ownerT;
     QComboBox* combo = nullptr;
     QLabel* scopeLabel = nullptr;
     QListWidget* ticks = nullptr;
     QLabel* note = nullptr;
     QString refusal;
-    std::vector<std::string> scopeBeforeNew;
+    fastsignals::scoped_connection toolChanged;
     bool updating = false;
+    bool live = false;
+    bool deciding = false;
+    bool pending = false;
 };
 
 /** A Boolean studio feature's parts (ops#654 P5, Onshape O3): Targets and Tools, one tick per part
@@ -775,6 +1042,32 @@ bool rollStudioToOwner(App::DocumentObject* /*owner*/, std::string* why)
 
 void endStudioOwnerRollBack(App::DocumentObject* /*owner*/)
 {}
+
+/// FreeCAD-CH ops#654 S4 fix (Onshape oracle 6 Q1; declared where used, Command.cpp): the one
+/// live part a new owner's tool touches or intersects at its place, null for none or several;
+/// false when it has no tool
+bool studioPrefillPart(App::DocumentObject* owner, PartDesign::Body*& part)
+{
+    part = nullptr;
+    std::vector<PartDesign::Body*> touched;
+    if (!toolContacts(owner, touched)) {
+        return false;
+    }
+    if (touched.size() == 1) {
+        part = touched.front();
+    }
+    return true;
+}
+
+/// The dialog opened next on owner picks its operation live until the person chooses (a new
+/// Extrude; declared where used, Command.cpp)
+void studioPrefillLive(App::DocumentObject* owner)
+{
+    std::erase_if(livePrefill, [](const App::DocumentObjectT& made) { return !made.getObject(); });
+    if (owner && std::ranges::find(livePrefill, App::DocumentObjectT(owner)) == livePrefill.end()) {
+        livePrefill.emplace_back(owner);
+    }
+}
 
 QWidget* makeStudioResultBox(ViewProvider* vp)
 {

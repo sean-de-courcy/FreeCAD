@@ -1860,6 +1860,13 @@ namespace PartDesign
 PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
 }  // namespace PartDesign
 
+namespace PartDesignGui
+{
+// StudioGui.cpp (FreeCAD-CH ops#654 S4 fix; declared where used)
+bool studioPrefillPart(App::DocumentObject* owner, PartDesign::Body*& part);
+void studioPrefillLive(App::DocumentObject* owner);
+}  // namespace PartDesignGui
+
 static PartDesign::StudioList* ownerStudioList(
     Gui::Command* cmd,
     App::Part*& studio,
@@ -1929,17 +1936,6 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
         profile = nullptr;
         subs.clear();
     }
-    // The default scope (Onshape's): the profile's own part, else the active Body of the studio,
-    // else New for an Add and none for a Remove ("No merge scope selected")
-    PartDesign::Body* target = sketchPart;
-    if (!target) {
-        PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
-        App::Part* activeStudio = nullptr;
-        if (active && active->getDocument() == doc
-            && Part::BodyBase::studioOf(active, activeStudio) && activeStudio == studio) {
-            target = active;
-        }
-    }
     const std::string name = cmd->getUniqueObjectName(which.c_str());
     cmd->openCommand(std::string("Make ") + which);
     try {
@@ -1975,6 +1971,21 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
             );
         }
         Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        // The scope Onshape's Extrude pre-fills (oracle 6, batch 6 Q1): the tool touching or
+        // intersecting exactly one live part -> Add into it, else New; not the sketch's part or
+        // the active Body. Extrude (remove) is the Extrude switched to Remove (Q1d, Q1e): the
+        // part the tool meets going the Extrude's way (out of the material) stays its scope, else
+        // none ("No merge scope selected"), and it cuts into the material, the Pocket's own way
+        const bool remove = which == "Pocket";
+        auto profileBased = freecad_cast<PartDesign::ProfileBased*>(owner);
+        if (remove && profileBased) {
+            profileBased->Reversed.setValue(true);
+        }
+        PartDesign::Body* target = nullptr;
+        PartDesignGui::studioPrefillPart(owner, target);
+        if (remove && profileBased) {
+            profileBased->Reversed.setValue(false);
+        }
         if (target) {
             Gui::Command::doCommand(
                 Gui::Command::Doc,
@@ -1983,7 +1994,7 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
                 PartDesign::studioPartId(target).c_str()
             );
         }
-        else if (which == "Pad") {
+        else if (!remove) {
             Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
         }
         {
@@ -1999,6 +2010,10 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
             FCMD_OBJ_HIDE(sketch);
         }
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        if (!remove) {
+            // Picked again on every change of the tool until the person chooses (Q1f)
+            PartDesignGui::studioPrefillLive(owner);
+        }
         if (!PartDesignGui::setEdit(owner)) {
             throw Base::RuntimeError("The studio feature's dialog didn't open");
         }
@@ -3285,6 +3300,19 @@ void prepareTransformed(
 
         auto Feat = pcActiveBody->getDocument()->getObject(FeatName.c_str());
 
+        // FreeCAD-CH ops#654 slice 8: in a listed studio the pattern is a member of the list, at
+        // its bar, as every Body member is
+        App::Part* studio = nullptr;
+        if (Feat && Part::BodyBase::studioOf(pcActiveBody, studio)
+            && PartDesign::StudioList::of(Feat->getDocument(), studio, false)) {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.studioInsert(%s, -1)",
+                Gui::Command::getObjectCmd(Feat).c_str()
+            );
+        }
+
         if (features.empty() && waitsForFeatures) {
             // Nothing to transform yet: it shows the solid before it (a transform without
             // originals keeps its shape, as Multi-Transform's start does) until the pick
@@ -3322,18 +3350,23 @@ void prepareTransformed(
     // made a "Whole shape" transform without a word). FreeCAD-CH (ops#640, rank 13): a feature
     // of another body is left out too, said in the Features field's status: it was a modal
     PartDesign::Body* activeBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH ops#654 slice 8: a studio feature (a Features-list row) with a step in the
+    // active Body is taken: its step is copied
+    auto takes = [activeBody](const App::DocumentObject* obj) {
+        if (PartDesign::isStudioOwner(obj)) {
+            return PartDesign::StudioList::stepOf(obj, activeBody) != nullptr;
+        }
+        return obj->isDerivedFrom<PartDesign::Feature>()
+            && activeBody == PartDesignGui::getBodyFor(obj, false);
+    };
     QStringList dropped;
     for (const auto& sel : cmd->getSelection().getSelectionEx()) {
         const App::DocumentObject* obj = sel.getObject();
-        if (obj
-            && (!obj->isDerivedFrom<PartDesign::Feature>()
-                || activeBody != PartDesignGui::getBodyFor(obj, false))) {
+        if (obj && !takes(obj)) {
             dropped << QStringLiteral("'%1'").arg(QString::fromUtf8(obj->Label.getValue()));
         }
     }
-    std::erase_if(features, [activeBody](App::DocumentObject* feature) {
-        return activeBody != PartDesignGui::getBodyFor(feature, false);
-    });
+    std::erase_if(features, [&takes](App::DocumentObject* feature) { return !takes(feature); });
 
     worker(features);
 
@@ -3389,7 +3422,8 @@ void CmdPartDesignMirrored::activated(int iMsg)
     auto worker = [cmd,
                    pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
         bool direction = false;
-        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
             Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                              ->getVerifiedSketch(/* silent =*/true);
             if (sketch) {
@@ -3449,7 +3483,8 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
     auto worker =
         [cmd, pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
             bool direction = false;
-            if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+            if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
                 Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                                  ->getVerifiedSketch(/* silent =*/true);
                 if (sketch) {
@@ -3528,7 +3563,8 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
     auto worker = [cmd,
                    pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
         bool direction = false;
-        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
             Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                              ->getVerifiedSketch(/* silent =*/true);
             if (sketch) {

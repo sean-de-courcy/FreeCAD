@@ -13,6 +13,7 @@
 # face to stop at, a part D (x 60..70) 4 mm high. Sketches lie in Body A at z = 10 (A's top).
 # Expected volumes come from the boxes: a cut of w x h in plan, d deep, removes w*h*d.
 
+import math
 import unittest
 
 import FreeCAD as App
@@ -21,7 +22,7 @@ import PartDesign
 from PySide import QtCore, QtWidgets
 
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
-from PartDesignTests.TestStudio import faceAt, pad, sketch, xyPlane
+from PartDesignTests.TestStudio import edgeAt, faceAt, pad, sketch, xyPlane
 from PartDesignTests.TestStudioList import newStudio
 
 CUT = (5, 2, 25, 8)  # 5 x 6 over A (x 5..10) and 5 x 6 over B (x 20..25)
@@ -30,9 +31,11 @@ OVER_B = (22, 2, 28, 8)  # 6 x 6 over B, the sketch still in A
 ROWS = ["New", "Add", "Remove", "Intersect"]
 
 
-class TestStudioFeatureGui(unittest.TestCase):
-    def setUp(self):
-        self.doc, self.studio = newStudio("StudioFeatureGui")
+class StudioDialog:
+    """The helpers of a studio feature's dialog tests (setUp makes doc, studio and list)."""
+
+    def openStudio(self, doc, studio):
+        self.doc, self.studio = doc, studio
         self.list = PartDesign.studioList(self.studio, True)
         self.doc.recompute()
         Gui.Selection.clearSelection()
@@ -163,6 +166,25 @@ class TestStudioFeatureGui(unittest.TestCase):
         field.setProperty("rawValue", float(value))
         pump(0.3)
 
+    def madeParts(self, owner):
+        return [b for b in self.doc.Objects if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == owner]
+
+    def note(self):
+        label = self.visible(QtWidgets.QLabel, "studioScopeNote")
+        return label.text() if label is not None else ""
+
+    def waitForResult(self, text):
+        self.assertTrue(
+            waitFor(lambda: self.combo() is not None and self.combo().currentText() == text),
+            f"the Result box shows {self.combo().currentText() if self.combo() else None}, not {text}",
+        )
+        pump(0.2)
+
+
+class TestStudioFeatureGui(StudioDialog, unittest.TestCase):
+    def setUp(self):
+        self.openStudio(*newStudio("StudioFeatureGui"))
+
     def assertOwner(self, owner, scope):
         bodies = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
         self.assertFalse([b.Name for b in bodies if owner in b.Group], "the owner is in a Body")
@@ -203,13 +225,14 @@ class TestStudioFeatureGui(unittest.TestCase):
         self.assertVolumes(A=1360, B=1000)
 
     def testRemoveLeavesOutItsOwnPart(self):
-        """Report 21: Extrude (remove) 3 deep on a sketch of A over A and B; B ticked, A
-        cleared. OK: A untouched (1000), B 1000 - 5*6*3 = 910; no step in A."""
+        """Report 21: Extrude (remove) 3 deep on a sketch of A over A and B. Its tool going the
+        Extrude's way touches A and B, so it opens with no part ticked (Onshape oracle 6, Q1d);
+        B ticked. OK: A untouched (1000), B 1000 - 5*6*3 = 910; no step in A."""
         s = self.sketchInA("Sk", CUT)
         owner = self.runCommand("PartDesign_Pocket", s, active="A")
         self.setLength(3)
         self.assertEqual(self.combo().currentText(), "Remove")
-        self.assertEqual(self.ticks(), [("A", True), ("B", False), ("C", False)])
+        self.assertEqual(self.ticks(), [("A", False), ("B", False), ("C", False)])
         self.tick("B", True)
         self.tick("A", False)
         self.assertEqual(self.ticks(), [("A", False), ("B", True), ("C", False)])
@@ -223,6 +246,7 @@ class TestStudioFeatureGui(unittest.TestCase):
         s = self.sketchInA("Sk", CUT)
         owner = self.runCommand("PartDesign_Pocket", s, active="A")
         self.setLength(3)
+        self.tick("A", True)
         self.tick("B", True)
         self.close(ok=True)
         self.assertOwner(owner, ["A", "B"])
@@ -269,29 +293,36 @@ class TestStudioFeatureGui(unittest.TestCase):
         self.doc.recompute()
         return s
 
-    def testDefaultScopes(self):
-        """A sketch outside every Body: with no Body active Extrude opens New (a part made by it),
-        Extrude (remove) opens Remove with no part ticked and says "No merge scope selected"
-        (Onshape's); with B active, Extrude (remove) opens on B."""
+    def testDefaultScopesFollowTheTool(self):
+        """The pre-fill is what the tool meets (Onshape oracle 6, Q1), never the active Body: a
+        sketch outside every Body over A on A's top opens Add with A ticked, B active or not; over
+        no part it opens New (a part made by it). Extrude (remove) over no part opens Remove with
+        no part ticked and says "No merge scope selected"; over A, with B active, it opens on A."""
         s = self.studioSketch("Free", OVER_A)
-        owner = self.runCommand("PartDesign_Pad", s, active=None)
+        owner = self.runCommand("PartDesign_Pad", s, active="B")
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertEqual(self.ticks(), [("A", True), ("B", False), ("C", False)])
+        self.close(ok=False)
+
+        away = self.studioSketch("Away", (60, 2, 66, 8))
+        owner = self.runCommand("PartDesign_Pad", away, active=None)
         self.assertEqual(self.combo().currentText(), "New")
         self.assertIsNone(self.scopeList())
         self.close(ok=True)
-        [made] = [b for b in self.studio.Group if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == owner]
+        [made] = self.madeParts(owner)
         self.assertAlmostEqual(made.Shape.Volume, 360, places=4)
         self.assertVolumes(A=1000)
 
-        pocket = self.runCommand("PartDesign_Pocket", s, active=None)
+        # Not over the part just made (its tool going up would meet it)
+        away2 = self.studioSketch("Away2", (80, 2, 86, 8))
+        pocket = self.runCommand("PartDesign_Pocket", away2, active="B")
         self.assertEqual(self.combo().currentText(), "Remove")
         self.assertEqual([t for t in self.ticks() if t[1]], [])
-        note = self.visible(QtWidgets.QLabel, "studioScopeNote")
-        self.assertIsNotNone(note, "an empty scope isn't said")
-        self.assertEqual(note.text(), "No merge scope selected")
+        self.assertEqual(self.note(), "No merge scope selected")
         self.close(ok=False)
 
         pocket = self.runCommand("PartDesign_Pocket", s, active="B")
-        self.assertEqual(PartDesign.studioScopeIds(pocket), ["B"])
+        self.assertEqual(PartDesign.studioScopeIds(pocket), ["A"])
         self.assertIsNone(self.visible(QtWidgets.QLabel, "studioScopeNote"))
         self.close(ok=False)
 
@@ -512,6 +543,349 @@ class TestStudioFeatureGui(unittest.TestCase):
             App.closeDocument(doc.Name)
             App.setActiveDocument(self.doc.Name)
             Gui.setActiveDocument(self.doc.Name)
+
+
+# ------------------------------------------------------------------ Onshape's pre-fill (oracle 6)
+
+QA = 20 * 20 * 10  # each box's volume
+
+
+def twoBoxStudio(name):
+    """Oracle 6's parts: A = box x 0..20, B = box x 30..50, both y 0..20, z 0..10, in studio S."""
+    doc = App.newDocument(name)
+    doc.UndoMode = 1
+    studio = doc.addObject("App::Part", "S")
+    for p, x in (("A", 0), ("B", 30)):
+        body = doc.addObject("PartDesign::Body", p)
+        studio.addObject(body)
+        pad(body, p + "Pad", sketch(body, p + "Sk", xyPlane(body), (x, 0, x + 20, 20)), 10)
+    doc.recompute()
+    return doc, studio
+
+
+class TestExtrudePrefillGui(StudioDialog, unittest.TestCase):
+    """Onshape's Extrude dialog picks its operation from what the tool meets (batch 6, Hub 3 Q1):
+    exactly one part touched or intersected -> Add, scope that part; none or two -> New; picked
+    again on every depth change until the person chooses. A hand switch from New fills no scope;
+    Add -> Remove keeps it; Remove flips the direction. Extrude (remove) is the Extrude switched
+    to Remove."""
+
+    def setUp(self):
+        self.openStudio(*twoBoxStudio("ExtrudePrefillGui"))
+
+    def onBTop(self, name, rect):
+        """A sketch in B on its top face plane (z = 10)."""
+        s = sketch(self.body("B"), name, xyPlane(self.body("B")), rect, z=10)
+        self.doc.recompute()
+        return s
+
+    def studioSketch(self, name, rect, z):
+        from PartDesignTests.TestStudioOwner import studioSketch
+
+        s = studioSketch(self.doc, self.studio, name, rects=[rect], z=z)
+        self.doc.recompute()
+        return s
+
+    def testQ1aToolOnBsTopFace(self):
+        """Q1a: on B's top face, x 35..45 y 5..15: Add, scope B (face contact counts). Blind 5:
+        B 4500, still two parts."""
+        owner = self.runCommand("PartDesign_Pad", self.onBTop("Sk", (35, 5, 45, 15)), active=None)
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.setLength(5)
+        self.waitForResult("Add")
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["B"])
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertVolumes(A=QA, B=QA + 10 * 10 * 5)
+
+    def testQ1bToolOverBothIsNewAndAddFillsNoScope(self):
+        """Q1b: on B's top plane, x 10..40, over both outlines (touching A's and B's top faces):
+        New. A switch to Add leaves the scope empty: no part ticked, "No merge scope selected",
+        the made part gone; OK commits it failed (Onshape: BOOLEAN_NEED_ONE_SOLID), nothing
+        changes."""
+        owner = self.runCommand("PartDesign_Pad", self.onBTop("Sk", (10, 5, 40, 15)), active=None)
+        self.assertEqual(self.combo().currentText(), "New")
+        self.assertEqual(len(self.madeParts(owner)), 1)
+        self.choose("Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", False)])
+        self.assertEqual(self.note(), "No merge scope selected")
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertEqual(PartDesign.studioScopeIds(owner), [])
+        self.close(ok=True)
+        self.assertFalse(owner.isValid())
+        self.assertIn("No merge scope selected", owner.getStatusString())
+        self.assertVolumes(A=QA, B=QA)
+
+    def testQ1cToolThroughB(self):
+        """Q1c: on the studio's Top plane, x 35..45, blind 15 through B: Add, scope B. B 4500."""
+        owner = self.runCommand("PartDesign_Pad", self.studioSketch("Sk", (35, 5, 45, 15), 0), active=None)
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.setLength(15)
+        self.waitForResult("Add")
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertVolumes(A=QA, B=QA + 10 * 10 * 5)
+
+    def testQ1dRemoveOverBothHasNoScope(self):
+        """Q1d: Extrude (remove) on Top, x 10..40: going the Extrude's way (up) its tool meets
+        both parts, so New, switched to Remove: no part ticked, "No merge scope selected", the
+        direction down (the Pocket's own, into the material; misses both). Through both with
+        Reversed still no scope: OK commits it failed, nothing changes."""
+        owner = self.runCommand("PartDesign_Pocket", self.studioSketch("Sk", (10, 5, 40, 15), 0), active=None)
+        self.assertEqual(self.combo().currentText(), "Remove")
+        self.assertEqual(self.ticks(), [("A", False), ("B", False)])
+        self.assertEqual(self.note(), "No merge scope selected")
+        self.assertFalse(owner.Reversed)
+        self.assertEqual(self.madeParts(owner), [])
+        self.setLength(15)
+        self.close(ok=True)
+        self.assertFalse(owner.isValid())
+        self.assertIn("No merge scope selected", owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), [])
+        self.assertVolumes(A=QA, B=QA)
+
+    def testQ1eRemoveOnBsTopFaceKeepsB(self):
+        """Q1e: Extrude (remove) on B's top face, x 35..45: the Extrude's tool meets B only, so
+        Add/B switched to Remove keeps B and cuts into it. Blind 5: B 3500."""
+        owner = self.runCommand("PartDesign_Pocket", self.onBTop("Sk", (35, 5, 45, 15)), active=None)
+        self.assertEqual(self.combo().currentText(), "Remove")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.setLength(5)
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertVolumes(A=QA, B=QA - 10 * 10 * 5)
+
+    def testQ1eAddSwitchedToRemoveKeepsTheScopeAndFlips(self):
+        """Q1e by hand: an Extrude on B's top face opens Add/B; Remove keeps B and flips the
+        direction into B (the panel's Reversed switch shows it). Blind 5: B 3500."""
+        owner = self.runCommand("PartDesign_Pad", self.onBTop("Sk", (35, 5, 45, 15)), active=None)
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertFalse(owner.Reversed)
+        self.choose("Remove")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.assertTrue(owner.Reversed)
+        reversedBox = self.visible(QtWidgets.QCheckBox, "checkBoxReversed")
+        self.assertIsNotNone(reversedBox)
+        self.assertTrue(reversedBox.isChecked(), "the panel's Reversed switch isn't the owner's")
+        self.setLength(5)
+        self.close(ok=True)
+        self.assertTrue(owner.Reversed)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(owner.Operation, "Subtraction")
+        self.assertVolumes(A=QA, B=QA - 10 * 10 * 5)
+
+    def testQ1fPickedAgainOnEveryDepthChange(self):
+        """Q1f: a plane 5 mm below Top, x 35..45: the default 10 passes through B -> Add/B; 2 mm
+        misses B -> New (a part made); 15 mm -> Add/B again (the made part gone). OK: B 4500
+        (z -5..10), no made part."""
+        owner = self.runCommand("PartDesign_Pad", self.studioSketch("Sk", (35, 5, 45, 15), -5), active=None)
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.setLength(2)
+        self.waitForResult("New")
+        self.assertEqual(len(self.madeParts(owner)), 1)
+        self.setLength(15)
+        self.waitForResult("Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.assertEqual(self.madeParts(owner), [])
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertVolumes(A=QA, B=QA + 10 * 10 * 5)
+
+    def testAHandChosenOperationSurvivesADepthChange(self):
+        """Q1f's sketch, New chosen by hand at depth 10 (where the pick is Add/B): 15 mm, which
+        passes through B, keeps New. OK: a new part of 10*10*15, B untouched."""
+        owner = self.runCommand("PartDesign_Pad", self.studioSketch("Sk", (35, 5, 45, 15), -5), active=None)
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.choose("New")
+        self.setLength(15)
+        pump(0.5)
+        self.waitForResult("New")
+        self.close(ok=True)
+        [made] = self.madeParts(owner)
+        self.assertAlmostEqual(made.Shape.Volume, 10 * 10 * 15, places=4)
+        self.assertVolumes(A=QA, B=QA)
+
+    def testAHandTickStopsThePick(self):
+        """Q1f's sketch, A ticked by hand at depth 10 (scope A and B): 2 mm keeps Add with both
+        ticked, no part made."""
+        owner = self.runCommand("PartDesign_Pad", self.studioSketch("Sk", (35, 5, 45, 15), -5), active=None)
+        self.tick("A", True)
+        self.setLength(2)
+        pump(0.5)
+        self.waitForResult("Add")
+        self.assertEqual(self.ticks(), [("A", True), ("B", True)])
+        self.assertEqual(self.madeParts(owner), [])
+        self.close(ok=False)
+
+    def testQ1gOverhangDoesNotMatter(self):
+        """Q1g: on Top, x 25..35, half over the gap, half over B: Add/B. 15 mm: one B of 5000."""
+        owner = self.runCommand("PartDesign_Pad", self.studioSketch("Sk", (25, 5, 35, 15), 0), active=None)
+        self.assertEqual(self.combo().currentText(), "Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", True)])
+        self.setLength(15)
+        self.waitForResult("Add")
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertVolumes(A=QA, B=5000)
+
+
+class TestLeavingNewGui(StudioDialog, unittest.TestCase):
+    """Oracle 6, batch 6 Hub 3 Q2: an Extrude E made New (P = "Part 2"), then a Fillet r1 on P's
+    vertical edge at (40, 10). Onshape keeps P when E goes to Add with a scope its tool doesn't
+    touch (an info), merges P into A when it does (P's later features follow), and back to New
+    brings P back. The fork refuses to leave New while P has later features (debt: the keep and
+    the merge with following features are P6p/P5 work), and leaves it as before when P has none:
+    P deleted, back to New makes it again with the same id."""
+
+    PV = 10 * 10 * 10
+
+    def setUp(self):
+        doc = App.newDocument("LeavingNewGui")
+        doc.UndoMode = 1
+        studio = doc.addObject("App::Part", "S")
+        body = doc.addObject("PartDesign::Body", "A")
+        studio.addObject(body)
+        pad(body, "APad", sketch(body, "ASk", xyPlane(body), (0, 0, 20, 20)), 10)
+        doc.recompute()
+        self.openStudio(doc, studio)
+
+    def makeE(self, rect=(30, 0, 40, 10)):
+        """E: an Extrude on Top, blind 10, New (over no part, else chosen by hand); returns
+        (E, P)."""
+        from PartDesignTests.TestStudioOwner import studioSketch
+
+        s = studioSketch(self.doc, self.studio, "ESk", rects=[rect], z=0)
+        self.doc.recompute()
+        owner = self.runCommand("PartDesign_Pad", s, active=None)
+        if self.combo().currentText() != "New":
+            self.choose("New")
+        self.close(ok=True)
+        [made] = self.madeParts(owner)
+        self.assertEqual(made.StudioPartId, owner.Name + ":1")
+        self.assertAlmostEqual(made.Shape.Volume, (rect[2] - rect[0]) * (rect[3] - rect[1]) * 10, places=4)
+        return owner, made
+
+    def filletP(self, owner, made):
+        """F: a Fillet r1 on P's vertical edge at (40, 10)."""
+        step = PartDesign.studioStepOf(owner, made)
+        edge = edgeAt(step, (40, 10, 0), (40, 10, 10))
+        self.assertIsNotNone(edge)
+        fillet = made.newObject("PartDesign::Fillet", "F")
+        fillet.Base = (step, [edge])
+        fillet.Radius = 1
+        made.Tip = fillet
+        self.doc.recompute()
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(made.Shape.Volume, self.PV - (1 - math.pi / 4) * 10, places=3)
+        return fillet
+
+    def editAgain(self, owner):
+        owner.ViewObject.doubleClicked()
+        self.waitForPanel()
+
+    def assertRefused(self, owner, made, fillet, choice):
+        undo = self.doc.UndoCount
+        self.editAgain(owner)
+        self.assertEqual(self.combo().currentText(), "New")
+        self.choose_refused(choice)
+        self.assertIn("has later features", self.note())
+        self.assertIn(fillet.Label, self.note())
+        self.assertIs(self.doc.getObject(made.Name), made)
+        self.assertEqual(PartDesign.studioScopeIds(owner), [made.StudioPartId])
+        self.close(ok=True)
+        self.assertEqual(made.StudioPartId, owner.Name + ":1")
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertIn(undo, (self.doc.UndoCount, self.doc.UndoCount - 1))
+
+    def choose_refused(self, text):
+        combo = self.combo()
+        index = [combo.itemText(i) for i in range(combo.count())].index(text)
+        combo.setCurrentIndex(index)
+        pump(0.3)
+        self.waitForResult("New")
+
+    def testQ2aAddWithAScopeItDoesNotTouchIsRefused(self):
+        """Q2a: E New -> Add, the tool not touching A. Onshape: E OK with an info, P kept (same id
+        and name), F follows. The fork: refused while P has F, said in the panel naming F; P, its
+        id and F unchanged (Q2b: back to New then changes nothing either)."""
+        owner, made = self.makeE()
+        fillet = self.filletP(owner, made)
+        self.assertRefused(owner, made, fillet, "Add")
+        self.assertAlmostEqual(made.Shape.Volume, self.PV - (1 - math.pi / 4) * 10, places=3)
+        self.assertVolumes(A=4000)
+
+    def testQ2cAddOverlappingAIsRefused(self):
+        """Q2c: E's rectangle x 15..40 overlapping A, New -> Add (Remove too). Onshape: P merges
+        into A (A's id), F follows; back to New brings P back. The fork: refused while P has F."""
+        owner, made = self.makeE(rect=(15, 0, 40, 10))
+        self.assertAlmostEqual(made.Shape.Volume, 2500, places=4)
+        step = PartDesign.studioStepOf(owner, made)
+        edge = edgeAt(step, (40, 10, 0), (40, 10, 10))
+        fillet = made.newObject("PartDesign::Fillet", "F")
+        fillet.Base = (step, [edge])
+        fillet.Radius = 1
+        made.Tip = fillet
+        self.doc.recompute()
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertRefused(owner, made, fillet, "Add")
+        self.assertRefused(owner, made, fillet, "Remove")
+        self.assertAlmostEqual(made.Shape.Volume, 2500 - (1 - math.pi / 4) * 10, places=3)
+        self.assertVolumes(A=4000)
+
+    def testLeavingNewWithoutLaterFeatures(self):
+        """P without later features: New -> Add deletes P (scope empty, "No merge scope selected");
+        back to New makes it again with the same id; OK. Then Add with A ticked (the tool apart
+        from A): the fork's S2 failure, loud (Onshape keeps P with an info); undo brings P back
+        whole, redo takes it again."""
+        owner, made = self.makeE()
+        pid = made.StudioPartId
+        undo = self.doc.UndoCount
+        self.editAgain(owner)
+        self.choose("Add")
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertEqual(self.note(), "No merge scope selected")
+        self.choose("New")
+        [again] = self.madeParts(owner)
+        self.assertEqual(again.StudioPartId, pid)
+        self.close(ok=True)
+        [again] = self.madeParts(owner)
+        self.assertEqual(again.StudioPartId, pid)
+        self.assertAlmostEqual(again.Shape.Volume, self.PV, places=4)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+
+        undo = self.doc.UndoCount
+        self.editAgain(owner)
+        self.choose("Add")
+        self.tick("A", True)
+        self.close(ok=True)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertFalse(owner.isValid())
+        self.assertIn("touches no part", owner.getStatusString())
+        self.assertVolumes(A=4000)
+
+        self.doc.undo()
+        self.doc.recompute()
+        [back] = self.madeParts(owner)
+        self.assertEqual(back.StudioPartId, pid)
+        self.assertAlmostEqual(back.Shape.Volume, self.PV, places=4)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), [pid])
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertFalse(owner.isValid())
+        self.assertVolumes(A=4000)
 
 
 if __name__ == "__main__":

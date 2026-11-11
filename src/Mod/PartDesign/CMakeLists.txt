@@ -160,6 +160,7 @@ if(BUILD_GUI)
         PartDesignTests/TestStudioFeatureGui.py
         PartDesignTests/TestStudioHistoryGui.py
         PartDesignTests/TestPartsListGui.py
+        PartDesignTests/TestStudioPatternsGui.py
     )
 endif(BUILD_GUI)
 
