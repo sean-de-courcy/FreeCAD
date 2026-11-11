@@ -315,8 +315,8 @@ class FilletFallbackTest(unittest.TestCase):
 
     def testRefusalsKeepOcctsError(self):
         # A corner of two concave edges with unequal dihedral angles (the boss's wall x = 25
-        # leans in by 10 degrees), variable radius, overlapping rounds, rounds just over the
-        # limit (the strips overlap, or run off their face, by a hundredth)
+        # leans in by 10 degrees), variable radius. (Rounds just over the limit build since S3:
+        # OverflowTest.testRoundsJustPastTheLimit)
         boss = Part.makeBox(10, 10, 2, V(15, 15, 4)).cut(
             half_space((25, 15, 4), (math.cos(math.radians(10)), 0, math.sin(math.radians(10))))
         )
@@ -336,11 +336,6 @@ class FilletFallbackTest(unittest.TestCase):
         edges = top_edges(box)
         with self.assertRaises(Part.OCCError):
             box.makeFillet(1, 2, edges)
-        for r in (2.1, 2.01):
-            with self.assertRaises(Part.OCCError):
-                box.makeFillet(r, edges)
-        with self.assertRaises(Part.OCCError):
-            box.makeFillet(4.01, edges[:1])
 
     def testWholeOutlineOfAFusedStadium(self):
         # ops#298: OCCT "succeeds" on the whole top outline at r = 2 and d = 2 (half the width),
@@ -557,8 +552,9 @@ class InvalidDressUpTest(unittest.TestCase):
 
     def testOverlongFullRoundsFail(self):
         # Just over a full round, OCCT returns two invalid solids with more volume than the base,
-        # which no fillet or chamfer can have
-        for kind in ("Fillet", "Chamfer"):
+        # which no fillet can have. (Debt, ops#640: Onshape builds them, K2E. The chamfers build
+        # since S3: OverflowTest.testOverlongFullChamfers)
+        for kind in ("Fillet",):
             for model, size in ((stadium_plate, 2.0002), (disk, 1.00001)):
                 shape, edges = model()
                 raw = self.dressUpShape(kind, shape, size, edges)
@@ -1975,10 +1971,17 @@ class OverflowTest(unittest.TestCase):
             ("Chamfer", 1.56, 2903.825),
             ("Chamfer", 2.0, 2881.118),
             ("Fillet", 1.55, 2922.310),
-            ("Fillet", 1.56, 2922.145),
         ):
             with self.subTest(kind=kind, size=size):
                 self.assertBuilt(self.dressUp(kind, plate, size, rims), volume, 10)
+
+    def testRimsWhoseRoundsBarelyOverlapFail(self):
+        # Debt (ops#640): Onshape builds K2A's fillet 1.56 (2922.145). Where two rounds overlap by
+        # less than about 0.02, each is within 1e-5 of the plate's top in the lens they share, and
+        # OCCT 8.0.1's cut leaves a piece of the second tool's top face: the construction refuses
+        plate, rims = plate_with_holes((30, 20, 5), [(12, 10), (18, 10)])
+        with self.assertRaises(Part.OCCError):
+            plate.makeFillet(1.56, rims)
 
     def testRimPastTheLandToASide(self):
         # KP1, K2B: a hole 1.55 from the plate's side: the band runs onto the side face
@@ -1988,7 +1991,9 @@ class OverflowTest(unittest.TestCase):
                 self.assertBuilt(self.dressUp("Chamfer", plate, size, rims), volume, 8)
         plate, rims = plate_with_holes((30, 20, 5), [(3, 10)])
         self.assertBuilt(self.dressUp("Chamfer", plate, 2.0, rims), 2940.559, 8)
-        self.assertBuilt(self.dressUp("Fillet", plate, 1.6, rims), 2960.735, 8)
+        # OCCT builds this one itself, with a B-spline patch where the round meets the side: 10
+        # faces against Onshape's 8, the same volume
+        self.assertBuilt(self.dressUp("Fillet", plate, 1.6, rims), 2960.735)
 
     def testRimThroughAThinPlate(self):
         # K2C: a chamfer deeper than the plate consumes the hole's wall
@@ -1998,15 +2003,48 @@ class OverflowTest(unittest.TestCase):
                 self.assertBuilt(self.dressUp("Chamfer", plate, size, rims), volume, 7)
 
     def testWallTopPastItsWidth(self):
-        # K2D: the top consumed, the band clipped by the far side
+        # K2D: the top consumed, the band clipped by the far side (the base is 580; the chamfer
+        # removes 20 (w^2 / 2 - (w - 1.5)^2 / 2))
         wall, edges = wall_on_base()
         for kind, size, volume in (
-            ("Chamfer", 2.0, 20 * (2 - 0.5**2 / 2)),
-            ("Chamfer", 3.0, 20 * (4.5 - 1.5**2 / 2)),
+            ("Chamfer", 2.0, 580 - 20 * (2 - 0.5**2 / 2)),
+            ("Chamfer", 3.0, 580 - 20 * (4.5 - 1.5**2 / 2)),
             ("Fillet", 2.0, 563.042),
         ):
             with self.subTest(kind=kind, size=size):
                 self.assertBuilt(self.dressUp(kind, wall, size, edges), volume, 10)
+
+    def testRoundsJustPastTheLimit(self):
+        # The two long top edges of a box 30 x 4 x 20 rounded past half its width (the rounds
+        # overlap), and one rounded past the whole width (KP3): 30 times the section's area
+        box = Part.makeBox(30, 4, 20)
+        edges = top_edges(box)
+        for size, count in ((2.1, 2), (2.01, 2), (4.01, 1)):
+            with self.subTest(size=size, edges=count):
+                # One round's width at depth r (1 - cos t) is r (1 - sin t), t from 0 to pi / 2
+                def section(t):
+                    width = min(4.0, count * size * (1 - math.sin(t)))
+                    return width * size * math.sin(t)
+
+                kink = math.asin(max(0.0, 1 - 4.0 / count / size))
+                area = gauss_legendre(section, 0, kink, 64) + gauss_legendre(section, kink, math.pi / 2, 64)
+                self.assertBuilt(box.makeFillet(size, edges[:count]), 2400 - 30 * area, 7 if count == 2 else 6)
+
+    def testOverlongFullChamfers(self):
+        # Chamfers just past a full round of a stadium plate 4 thick and a disk 2 thick: the
+        # two chamfers of a side face meet in a ridge. Removed: the straight sides' length times
+        # the section, and the section about the arcs' axis (Pappus, by quadrature in u, the
+        # distance in from the side)
+        for model, size, thickness, straight, radius in ((stadium_plate, 2.0002, 4, 40, 5), (disk, 1.00001, 2, 0, 10)):
+            with self.subTest(model=model.__name__):
+                shape, edges = model()
+                width = lambda u: min(thickness, 2 * (size - u))
+                kink = size - thickness / 2
+                removed = sum(
+                    gauss_legendre(lambda u: (straight + 2 * math.pi * (radius - u)) * width(u), a, b, 32)
+                    for a, b in ((0, kink), (kink, size))
+                )
+                self.assertBuilt(shape.makeChamfer(size, edges), shape.Volume - removed, 10 if straight else 4)
 
     def testEdgePastItsFace(self):
         # KP3: a box 10 x 10 x 2, a top edge rounded past the face's height
@@ -2034,3 +2072,114 @@ class OverflowTest(unittest.TestCase):
         edge = [edge_between(base, (15, 0, 10), (15, 20, 10))]
         with self.assertRaises(Part.OCCError):
             base.makeFillet(8, edge)
+
+
+def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
+    """A keyhole-shaped wall (the native replica's #15, designed): the opening is a disc r 6.35
+    and a slot toward +x; the wall's inner arc is 27.625 long and meets the slot's sides, each
+    10.738 long, at sharp convex corners. The wall is arc_wall thick around the arc and leg_wall
+    along the slot, whose ends are flat. Returns the solid and its inner top edges"""
+    radius = 6.35
+    half = (2 * math.pi - 27.625 / radius) / 2
+    side = radius * math.sin(half)
+    length = radius * math.cos(half) + 10.738
+    outer = Part.makeCylinder(radius + arc_wall, height).fuse(
+        Part.makeBox(length, 2 * (side + leg_wall), height, V(0, -side - leg_wall, 0))
+    )
+    opening = Part.makeCylinder(radius, height + 2, V(0, 0, -1)).fuse(
+        Part.makeBox(length + 1, 2 * side, height + 2, V(0, -side, -1))
+    )
+    wall = outer.cut(opening).removeSplitter()
+    edges = [
+        e
+        for e in wall.Edges
+        if all(abs(v.Point.z - height) < 1e-9 for v in e.Vertexes)
+        and (
+            (e.Curve.TypeId == "Part::GeomCircle" and abs(e.Curve.Radius - radius) < 1e-9)
+            or (e.Curve.TypeId == "Part::GeomLine" and abs(abs(e.CenterOfMass.y) - side) < 1e-9)
+        )
+    ]
+    return wall, edges
+
+
+def edges_at(shape, z):
+    """The shape's edges in the plane at the height z"""
+    return [
+        e
+        for e in shape.Edges
+        if all(abs(v.Point.z - z) < 1e-9 for v in e.Vertexes) and abs(e.CenterOfMass.z - z) < 1e-9
+    ]
+
+
+def half_disc(thickness):
+    return Part.makeCylinder(10, thickness).common(Part.makeBox(20, 20, thickness, V(0, -10, 0))).removeSplitter()
+
+
+def lens(thickness):
+    return Part.makeCylinder(10, thickness, V(-6, 0, 0)).common(
+        Part.makeCylinder(10, thickness, V(6, 0, 0))
+    ).removeSplitter()
+
+
+class CornerWithACircleTest(unittest.TestCase):
+    """Two-edge corners where an edge is a circle, at and past the limit (ops#640, the native
+    replica's #15: a chamfer of a keyhole wall's inner top edges, as wide as the wall at the arc
+    and wider than it along the slot; Onshape builds it, removing 25.059).
+
+    The expected shape is defined by OCCT's own dress-up, which builds these corners below the
+    limit: the same edges on a base whose faces reach farther (a thicker wall, a taller plate), cut
+    back to the base. At the limit or past it that is the base minus the dress-up's tools, as
+    Onshape's results are (OverflowTest)."""
+
+    def assertSameAs(self, shape, base, reference, faces):
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        expected = reference.common(base)
+        self.assertAlmostEqual(shape.Volume, expected.Volume, delta=1e-6)
+        self.assertLess(symmetric_difference(shape, expected), 1e-6)
+        self.assertEqual(len(shape.Faces), faces)
+
+    def testKeyholeWallPastItsWidth(self):
+        wall, edges = keyhole_ridge()
+        wide, wideEdges = keyhole_ridge(1.6, 1.6)
+        self.assertEqual(len(edges), 5)  # the arc in three pieces, at the cylinders' seams
+        for kind, size in (("Chamfer", 1.0), ("Fillet", 1.0), ("Chamfer", 1.05), ("Fillet", 1.05)):
+            with self.subTest(kind=kind, size=size):
+                if kind == "Chamfer":
+                    shape, reference = wall.makeChamfer(size, edges), wide.makeChamfer(size, wideEdges)
+                else:
+                    shape, reference = wall.makeFillet(size, edges), wide.makeFillet(size, wideEdges)
+                # The wall's top is consumed: 10 faces, less the top, plus one per edge
+                self.assertSameAs(shape, wall, reference, 14)
+        # The removed volume, against Onshape's #15 (its legs end otherwise: 2e-4)
+        self.assertAlmostEqual(wall.Volume - wall.makeChamfer(1.0, edges).Volume, 25.059, delta=0.01)
+
+    def testKeyholeWallAtItsWidth(self):
+        wall, edges = keyhole_ridge(1.0, 1.0)
+        wide, wideEdges = keyhole_ridge(1.6, 1.6)
+        self.assertSameAs(wall.makeChamfer(1.0, edges), wall, wide.makeChamfer(1.0, wideEdges), 14)
+
+    def testPlatesWithArcsChamferedThrough(self):
+        # A half disc (a line and an arc at right angles) and a lens (two arcs), the whole top
+        # loop chamfered as deep as the plate: the side faces vanish
+        for maker in (half_disc, lens):
+            with self.subTest(plate=maker.__name__):
+                plate = maker(3.0)
+                tall = maker(6.0)
+                tall.translate(V(0, 0, -3))
+                reference = tall.makeChamfer(3.0, edges_at(tall, 3.0))
+                self.assertSameAs(plate.makeChamfer(3.0, edges_at(plate, 3.0)), plate, reference, 5)
+
+    def testConcaveCornerWithACircleFails(self):
+        # Not built yet (fillet-parity L8): a plate fused with a disc that bulges past its sides,
+        # the top loop rounded as deep as the plate; Onshape builds it. The rounds meet past the
+        # concave corners, where the union of the tools would leave material
+        plate = Part.makeBox(20, 20, 3).fuse(Part.makeCylinder(12, 3, V(20, 10, 0))).removeSplitter()
+        edges = edges_at(plate, 3.0)
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(Part.OCCError):
+                    if kind == "Fillet":
+                        plate.makeFillet(3.0, edges)
+                    else:
+                        plate.makeChamfer(3.0, edges)
