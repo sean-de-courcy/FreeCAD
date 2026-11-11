@@ -1258,6 +1258,26 @@ bool StudioList::reconcile(std::string* why)
     // one of them changes
     for (int i = 0; i < size; ++i) {
         App::DocumentObject* entry = entries[i];
+        // The lost splits this projection took (consumedBy, splitAt): of every maker, a Body
+        // member (an in-Body pattern) too, which the loop below skips, so that the resync after
+        // a recompute settles (review prline-b5-r1 T2)
+        if (const auto lost = entry ? stringsOf(entry, "StudioSplitLost")
+                                    : std::vector<std::string>();
+            entry && lost != stringsOf(entry, "StudioSplitLostSeen")) {
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioSplitLostSeen")
+            );
+            if (!seen) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioSplitLostSeen",
+                    "Studio",
+                    "The lost splits the projection last took (ops#654 P6p)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            seen->setValues(lost);
+        }
         if (Body::findBodyOf(entry)) {
             continue;
         }
@@ -1294,22 +1314,6 @@ bool StudioList::reconcile(std::string* why)
         if (isStudioPartPattern(entry)) {
             // What this projection took of its Add's consumption (resync after a recompute)
             setFlag(entry, "StudioConsumesSourceSeen", studioPartMirrorConsumes(entry));
-        }
-        if (const auto lost = stringsOf(entry, "StudioSplitLost");
-            lost != stringsOf(entry, "StudioSplitLostSeen")) {
-            auto seen = freecad_cast<App::PropertyStringList*>(
-                entry->getPropertyByName("StudioSplitLostSeen")
-            );
-            if (!seen) {
-                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
-                    "App::PropertyStringList",
-                    "StudioSplitLostSeen",
-                    "Studio",
-                    "The lost splits the projection last took (ops#654 P6p)",
-                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
-                ));
-            }
-            seen->setValues(lost);
         }
         if (booleanOwner(entry)) {
             // What this projection took of the Union's tools apart (P6p, the same resync)

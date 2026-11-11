@@ -349,6 +349,104 @@ class TestPieces(unittest.TestCase):
         self.assertAlmostEqual(right.Shape.BoundBox.XMax, 20, places=6)
         self.assertGreater(left.Shape.Volume, right.Shape.Volume)
 
+    def testHoleSplitSketchTurnedKeepsTheSides(self):
+        """A hole r 8 at (50, 5) through the bar splits it; a Pocket G (x 10..20 or 80..90, y 2..8,
+        2 deep) scoped to E:1 and a sketch on E:1's top. E's circle turned about its centre by
+        180, 90 and 270 degrees leaves the geometry as it was: E:1 keeps its side (its centre of
+        mass), G still cuts it, the sketch stays on its top. The pieces of E's cylinder are
+        placed by u from its seam, which the turn moves: no witness may come from them (review
+        prline-b5-r1 R1, PieceHoleSketchTurnedHalf)."""
+        bar = box(0, 0, 0, 100, 10, 10)
+        hole = Part.makeCylinder(8, 12, V(50, 5, -1))
+        pieces = sorted(bar.cut(hole).Solids, key=lambda s: s.BoundBox.XMin)
+        for turn, stored in ((180, False), (90, False), (270, False), (180, True)):
+            with self.subTest(turn=turn, stored=stored):
+                self.studio()
+                sk = studioSketch(self.doc, self.S, "ESk", circles=((0, 0, 8),), z=10)
+                sk.Placement = App.Placement(V(50, 5, 10), App.Rotation())
+                e = makeOwner(self.doc, self.S, "Pocket", "E", sk, ("P",), Length=11)
+                self.doc.recompute()
+                made = self.command(e)
+                self.assertEqual(len(made), 2)
+                for body in made:
+                    self.assertFalse([w for w in body.StudioPieceWitness if "ORD" in w], body.Name)
+                    if stored:
+                        # As an older build stored it: the cylinder's pieces in tier 1 too
+                        ordered = [n for n in self.faceNames(body.Shape) if "ORD" in n]
+                        self.assertTrue(ordered)
+                        body.StudioPieceWitness = list(body.StudioPieceWitness) + [
+                            "1 " + n for n in ordered
+                        ]
+                first = self.byId("E:1")
+                self.assertIsNotNone(first)
+                leftSide = first.Shape.Solids[0].CenterOfMass.x < 50
+                piece = pieces[0] if leftSide else pieces[1]
+                self.assertAlmostEqual(first.Shape.Volume, piece.Volume, places=3)
+                gx = 10 if leftSide else 80
+                g = self.pocket("G", ((gx, 2, gx + 10, 8),), ("E:1",), length=2)
+                self.assertVolume(first, piece.Volume - 120)
+                top = [
+                    f"Face{i + 1}"
+                    for i, f in enumerate(first.Shape.Faces)
+                    if f.Surface.isPlanar() and abs(f.CenterOfMass.z - 10) < 1e-6
+                ]
+                self.assertEqual(len(top), 1, top)
+                on = self.doc.addObject("Sketcher::SketchObject", "OnFirst")
+                on.AttachmentSupport = [(first, top[0])]
+                on.MapMode = "FlatFace"
+                self.doc.recompute()
+                self.assertValid(on)
+                self.doc.openTransaction("turn")
+                sk.Placement = App.Placement(V(50, 5, 10), App.Rotation(V(0, 0, 1), turn))
+                self.doc.commitTransaction()
+                self.doc.recompute()
+                self.assertValid(e, g, self.step(e, first), self.step(g, first), on)
+                self.assertIs(self.byId("E:1"), first)
+                self.assertEqual(len(first.Shape.Solids), 1, (turn, first.Shape.BoundBox))
+                self.assertEqual(first.Shape.Solids[0].CenterOfMass.x < 50, leftSide, turn)
+                self.assertVolume(first, piece.Volume - 120)
+                sub = on.AttachmentSupport[0][1][0]
+                onFace = first.getSubObject(sub)
+                self.assertIsNotNone(onFace, sub)
+                self.assertEqual(onFace.CenterOfMass.x < 50, leftSide, (turn, sub))
+                self.assertAlmostEqual(on.Placement.Base.z, 10, places=6)
+                App.closeDocument(self.doc.Name)
+
+    def testRefusalPartWayLeavesNoPart(self):
+        """One Remove E on two parts: the slot splits the bar P (whose pieces could be parts),
+        two holes r 8 at (185, 0) and (215, 0) cut the ring R (r 10..20 at (200, 0)) into halves
+        y > 0 and y < 0 that only the holes' order on their circles tells apart (no witness): the
+        command refuses, and it leaves no part, P's pieces neither (the header's "empty on a
+        refusal"; review prline-b5-r1 T3). E stays loud, naming the count."""
+        self.studio()
+        ring = self.doc.addObject("PartDesign::Body", "R")
+        self.S.addObject(ring)
+        sk = sketch(ring, "RSk", xyPlane(ring))
+        for radius in (20, 10):
+            sk.addGeometry(Part.Circle(V(200, 0, 0), V(0, 0, 1), radius))
+        pad(ring, "RPad", sk, 10)
+        self.doc.recompute()
+        PartDesign.studioReconcile(self.list)
+        esk = studioSketch(
+            self.doc, self.S, "ESk", rects=(SLOT,), circles=((185, 0, 8), (215, 0, 8)), z=10
+        )
+        e = makeOwner(self.doc, self.S, "Pocket", "E", esk, ("P", "R"), Length=11)
+        self.doc.recompute()
+        bodies = sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body")
+        self.doc.openTransaction("pieces")
+        with self.assertRaises(ValueError) as refused:
+            PartDesign.studioMakePieces(e)
+        self.doc.commitTransaction()
+        self.assertIn("No face tells piece", str(refused.exception))
+        self.assertEqual(
+            sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body"), bodies
+        )
+        self.doc.recompute()
+        for name in ("P", "R"):
+            step = self.step(e, self.doc.getObject(name))
+            self.assertFalse(step.isValid(), name)
+            self.assertIn("press OK", step.getStatusString())
+
     def testSplitStoppedTheStrongerRecordClaims(self):
         """The slot made shallow (z 5..10): one solid. The left piece, which carries a boss (more
         unsplit faces), claims it; the right piece's step fails loudly."""
@@ -528,6 +626,35 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(left, 10 * 20 * 10)
         self.assertVolume(right, 46 * 20 * 10)
         self.assertNotIn(p, PartDesign.studioLiveParts(self.list))
+
+    def testPatternSplitLostSettles(self):
+        """The pattern's split lost (LP.Length 9 -> 5: the copy at y 5..16 overlaps the seed slot,
+        y -1..11, and leaves the plate whole): one recompute settles (the lost split's Seen twin
+        is taken, so the resync stops: no "doesn't settle" warning) and the plate is one part
+        again, its pieces' steps failing loudly (review prline-b5-r1 T2: the Seen twin of a Body
+        member's StudioSplitLost was never updated, every recompute ran its bound of rounds)."""
+        self.studio((("P", (0, 0, 60, 20), 10),))
+        p = self.doc.getObject("P")
+        slot = self.pocket("Slot", ((10, -1, 14, 11),), ("P",), length=10)
+        lp = p.newObject("PartDesign::LinearPattern", "LP")
+        lp.Originals = [slot]
+        lp.Direction = (p.Origin.OriginFeatures[1], [""])
+        lp.Mode = "Extent"
+        lp.Length = 9
+        lp.Occurrences = 2
+        PartDesign.studioInsert(lp, -1)
+        self.doc.recompute()
+        self.leftRight(self.command(lp))
+        self.doc.openTransaction("shorter")
+        lp.Length = 5
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(list(getattr(lp, "StudioSplitLost", [])), ["P"])
+        self.assertEqual(list(getattr(lp, "StudioSplitLostSeen", [])), ["P"])
+        self.assertIn(p, PartDesign.studioLiveParts(self.list))
+        self.assertValid(lp)
+        # The plate less the seed slot and its copy: x 10..14, y 0..16 (y 5..16 the copy's)
+        self.assertVolume(p, 60 * 20 * 10 - 4 * 16 * 10)
 
 
 if __name__ == "__main__":

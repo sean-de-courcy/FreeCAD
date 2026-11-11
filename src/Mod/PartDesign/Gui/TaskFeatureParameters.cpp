@@ -28,6 +28,8 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <set>
+#include <string>
 #include <vector>
 
 #include <QAbstractSpinBox>
@@ -3040,6 +3042,8 @@ bool TaskDlgFeatureParameters::accept()
     if (references) {
         references->stopPick();
     }
+    // The pieces' step (P6p), open while they are made: a refusal aborts it
+    bool piecesStep = false;
     try {
         // Iterate over parameter dialogs and apply all parameters from them, the Result box last
         forEachParameters([&isUpdateBlocked](TaskFeatureParameters* param) {
@@ -3068,15 +3072,24 @@ bool TaskDlgFeatureParameters::accept()
         const bool makesPieces = PartDesign::isStudioOwner(feature)
             || (feature->isDerivedFrom<PartDesign::Transformed>()
                 && PartDesign::StudioList::holding(feature));
+        // Whether it made or deleted a part: the Bodies themselves, not their count (one record
+        // deleted and one piece made leave it equal: review prline-b5-r1 T3). A refusal throws
         auto makePieces = [feature]() {
             App::Document* document = feature->getDocument();
-            const auto before = document->getObjectsOfType(PartDesign::Body::getClassTypeId()).size();
+            auto bodies = [document]() {
+                std::set<std::string> names;
+                for (auto obj : document->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+                    names.insert(obj->getNameInDocument());
+                }
+                return names;
+            };
+            const auto before = bodies();
             Gui::Command::doCommand(
                 Gui::Command::Doc,
                 "import PartDesign\nPartDesign.studioMakePieces(%s)",
                 Gui::Command::getObjectCmd(feature).c_str()
             );
-            return document->getObjectsOfType(PartDesign::Body::getClassTypeId()).size() != before;
+            return bodies() != before;
         };
         if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
@@ -3132,6 +3145,7 @@ bool TaskDlgFeatureParameters::accept()
             // message says to press OK. A step of its own, only when it made a part
             if (makesPieces) {
                 document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+                piecesStep = true;
                 if (makePieces()) {
                     document->commitTransaction();
                 }
@@ -3150,6 +3164,8 @@ bool TaskDlgFeatureParameters::accept()
             if (own) {
                 document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
             }
+            // Not its own, the edit's step: then a refusal fails the OK as a whole
+            piecesStep = true;
             const bool made = makePieces();
             if (own && made) {
                 document->commitTransaction();
@@ -3172,6 +3188,14 @@ bool TaskDlgFeatureParameters::accept()
         endDialogHistory(feature->getDocument());  // FreeCAD-CH (ops#640)
     }
     catch (const Base::Exception& e) {
+        // A refusal of the pieces' command (P6p): its step goes, with what it changed (review
+        // prline-b5-r1 T3)
+        if (App::Document* document = feature->getDocument();
+            piecesStep && document && document->hasPendingTransaction()) {
+            document->abortTransaction();
+            endDialogHistory(document);
+            Gui::cmdAppDocument(document, "recompute()");
+        }
         QString errorText = QString::fromUtf8(e.what());
         QString statusText = QString::fromUtf8(getObject()->getStatusString());
 

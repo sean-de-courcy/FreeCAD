@@ -17,8 +17,10 @@
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/ElementNamingUtils.h>
 #include <App/ElementSolver.h>
 #include <App/GroupExtension.h>
+#include <App/MappedName.h>
 #include <App/NameTable.h>
 #include <App/Part.h>
 #include <App/PropertyStandard.h>
@@ -117,9 +119,25 @@ std::set<std::string> faceNames(const Part::TopoShape& shape)
     return out;
 }
 
+/// True if a top-level section of name from the from-th on carries ORD or a closed edge's CLS:
+/// its place among its twins is an order, not a fact about the element
+bool placedByOrder(const std::string& name, std::size_t from)
+{
+    const auto& sections = Data::MappedName::getDecodedMappedName(name);
+    for (std::size_t i = from; i < sections.size(); ++i) {
+        if (sections[i].hasMapperFlag(Data::MAPPER_FLAG_ORDERED)
+            || sections[i].hasMapperFlag("CLS")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 using Score = std::tuple<int, int, int>;
 
-/// A record's witness against one solid's unique names: hits per tier
+/// A record's witness against one solid's unique names: hits per tier. An entry a file of an
+/// older build stored from an order (pieceWitness() no longer writes them: tier 1 placed by ORD
+/// anywhere, tier 3 by its last section, the split's) counts for nothing
 Score scoreOf(const std::vector<std::string>& witness, const std::set<std::string>& names)
 {
     int hits[3] = {0, 0, 0};
@@ -127,7 +145,14 @@ Score scoreOf(const std::vector<std::string>& witness, const std::set<std::strin
         if (entry.size() < 3 || entry[0] < '1' || entry[0] > '3') {
             continue;
         }
-        if (names.count(entry.substr(2))) {
+        const std::string name = entry.substr(2);
+        if (entry[0] != '2') {
+            const std::size_t sections = Data::MappedName::getDecodedMappedName(name).size();
+            if (placedByOrder(name, entry[0] == '1' || sections == 0 ? 0 : sections - 1)) {
+                continue;
+            }
+        }
+        if (names.count(name)) {
             ++hits[entry[0] - '1'];
         }
     }
@@ -315,20 +340,29 @@ pieceWitness(const Part::TopoShape& source, int index, const Part::TopoShape& ba
     const std::set<std::string> baseNames = faceNames(base);
     for (const auto& name : unique[index]) {
         int tier = 1;
+        std::size_t inherited = 0;  // the sections the parent's face had: E added the rest
         if (baseNames.count(name)) {
             tier = 2;
+            inherited = std::string::npos;
         }
         else {
-            const bool piece = std::ranges::any_of(baseNames, [&name](const std::string& old) {
+            const auto old = std::ranges::find_if(baseNames, [&name](const std::string& old) {
                 return Data::NameAncestry::isPieceOf(name, old);
             });
-            if (piece) {
+            if (old != baseNames.end()) {
                 // A piece of a closed face: its place on it isn't canonical (CLS), no witness
                 if (name.find("CLS") != std::string::npos) {
                     continue;
                 }
                 tier = 3;
+                inherited = Data::MappedName::getDecodedMappedName(*old).size();
             }
+        }
+        // A name E gave by an order that is no fact about the piece (ORD: the twins are told
+        // apart only by their place among them, e.g. by u on a closed face, which counts from a
+        // seam an edit can turn past them), no witness in any tier (review prline-b5-r1 R1)
+        if (inherited != std::string::npos && placedByOrder(name, inherited)) {
+            continue;
         }
         out.push_back(std::to_string(tier) + " " + name);
     }
@@ -531,11 +565,12 @@ const App::DocumentObject* piecesCommandEntry()
 std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
 {
     std::vector<Body*> made;
-    auto fail = [why, &made](const std::string& text) {
+    // A refusal leaves nothing it added and returns nothing (review prline-b5-r1 T3)
+    auto fail = [why](const std::string& text) {
         if (why) {
             *why = text;
         }
-        return made;
+        return std::vector<Body*>();
     };
     StudioList* list = entry ? StudioList::holding(entry) : nullptr;
     if (!list) {
@@ -553,6 +588,13 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         touchAll();
         doc->recompute({}, /*force=*/true);
     }
+    // A refusal after the recompute under the guard: computed again outside it, so that entry
+    // stays loud (its checks passed meanwhile)
+    auto refuse = [&](const std::string& text) {
+        touchAll();
+        doc->recompute({}, /*force=*/true);
+        return fail(text);
+    };
 
     struct Source
     {
@@ -584,8 +626,14 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         emptied = pieceRecords(entry, std::string());
     }
 
-    App::Part* studio = list->studio();
-    auto counter = freecad_cast<App::PropertyInteger*>(entry->getPropertyByName("StudioPieceCount"));
+    // Every new piece and its witness first: a piece that can't become a part refuses the
+    // command before anything changes
+    struct NewPiece
+    {
+        std::string parentId;
+        std::vector<std::string> witness;
+    };
+    std::vector<NewPiece> pieces;
     for (const auto& source : sources) {
         const std::string parentId = source.parent ? studioPartId(source.parent) : std::string();
         const auto records = pieceRecords(entry, parentId);
@@ -602,42 +650,48 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
             }
             auto witness = pieceWitness(source.shape, j, source.base);
             if (witness.empty()) {
-                return fail("No face tells piece " + std::to_string(j + 1) + " of "
-                            + (source.parent ? quoted(source.parent) : quoted(entry))
-                            + " apart from the others: it can't become a part");
+                return refuse("No face tells piece " + std::to_string(j + 1) + " of "
+                              + (source.parent ? quoted(source.parent) : quoted(entry))
+                              + " apart from the others: it can't become a part");
             }
-            // Its id: "<entry>:<k>", k from the entry's counter, never reused
-            if (!counter) {
-                counter = static_cast<App::PropertyInteger*>(entry->addDynamicProperty(
-                    "App::PropertyInteger",
-                    "StudioPieceCount",
-                    "Studio",
-                    "The last ordinal of a part this entry made from a piece (ops#654 P6p)",
-                    App::Prop_Hidden
-                ));
-            }
-            std::set<std::string> taken;
-            for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
-                taken.insert(studioPartId(static_cast<Body*>(obj)));
-            }
-            int k = counter->getValue();
-            std::string id;
-            do {
-                ++k;
-                id = std::string(entry->getNameInDocument()) + ":" + std::to_string(k);
-            } while (taken.count(id));
-            counter->setValue(k);
-            auto body = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
-            if (studio) {
-                studio->getExtensionByType<App::GroupExtension>()->addObject(body);
-            }
-            body->StudioPartId.setValue(id);
-            body->StudioParentId.setValue(parentId);
-            body->StudioMadeBy.setValue(entry);
-            body->StudioPieceWitness.setValues(witness);
-            body->Label.setValue("Part 1");  // a default name: numbered by place (S3)
-            made.push_back(body);
+            pieces.push_back({parentId, std::move(witness)});
         }
+    }
+
+    App::Part* studio = list->studio();
+    auto counter = freecad_cast<App::PropertyInteger*>(entry->getPropertyByName("StudioPieceCount"));
+    for (const auto& [parentId, witness] : pieces) {
+        // Its id: "<entry>:<k>", k from the entry's counter, never reused
+        if (!counter) {
+            counter = static_cast<App::PropertyInteger*>(entry->addDynamicProperty(
+                "App::PropertyInteger",
+                "StudioPieceCount",
+                "Studio",
+                "The last ordinal of a part this entry made from a piece (ops#654 P6p)",
+                App::Prop_Hidden
+            ));
+        }
+        std::set<std::string> taken;
+        for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
+            taken.insert(studioPartId(static_cast<Body*>(obj)));
+        }
+        int k = counter->getValue();
+        std::string id;
+        do {
+            ++k;
+            id = std::string(entry->getNameInDocument()) + ":" + std::to_string(k);
+        } while (taken.count(id));
+        counter->setValue(k);
+        auto body = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
+        if (studio) {
+            studio->getExtensionByType<App::GroupExtension>()->addObject(body);
+        }
+        body->StudioPartId.setValue(id);
+        body->StudioParentId.setValue(parentId);
+        body->StudioMadeBy.setValue(entry);
+        body->StudioPieceWitness.setValues(witness);
+        body->Label.setValue("Part 1");  // a default name: numbered by place (S3)
+        made.push_back(body);
     }
     // A record without a solid goes when its Body holds nothing else; else it stays, failing
     for (auto body : emptied) {
@@ -657,7 +711,16 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     }
     std::string text;
     if (!list->reconcile(&text)) {
-        return fail(text);
+        // What it added goes; the records it deleted come back with the caller's abort
+        for (auto body : made) {
+            for (auto member : body->Group.getValues()) {
+                const std::string name = member->getNameInDocument();
+                body->removeObject(member);
+                doc->removeObject(name.c_str());
+            }
+            doc->removeObject(body->getNameInDocument());
+        }
+        return refuse(text);
     }
     touchAll();
     doc->recompute({}, /*force=*/true);

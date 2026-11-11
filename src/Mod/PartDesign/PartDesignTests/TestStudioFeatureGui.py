@@ -266,6 +266,48 @@ class TestStudioFeatureGui(StudioDialog, unittest.TestCase):
         self.assertEqual([n for n in names if self.doc.getObject(n)], [])
         self.assertIn(self.body("A"), PartDesign.studioLiveParts(self.list))
 
+    def testUnchangedOKMakesAPieceWhereARecordWent(self):
+        """P6p: two slots (x 3..3.5 and 6..6.5) through A make three parts; the first slot is
+        redrawn at x 8..8.5: the part left of it loses its record (the middle one's witness
+        claims the big left solid) and x 8.5..10 is a new piece, so the count of Bodies is the
+        same. The unchanged OK of the owner makes it a part all the same, in a step of its own:
+        the owner is no longer red (review prline-b5-r1 T3)."""
+        from PartDesignTests.TestStudio import rect
+
+        s = self.sketchInA("Sk", (3, -1, 3.5, 11))
+        rect(s, 6, -1, 6.5, 11)
+        self.doc.recompute()
+        owner = self.runCommand("PartDesign_Pocket", s, active="A")
+        self.setLength(11)
+        self.choose("Remove")
+        for label, on in (("A", True), ("B", False), ("C", False)):
+            self.tick(label, on)
+        self.close(ok=True)
+        self.assertEqual(len(self.madeParts(owner)), 3)
+        self.doc.openTransaction("redraw")
+        for i in (3, 2, 1, 0):
+            s.delGeometry(i)
+        rect(s, 8, -1, 8.5, 11)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        step = PartDesign.studioStepOf(owner, self.body("A"))
+        self.assertFalse(step.isValid())
+        self.assertIn("2 are parts", step.getStatusString())
+        bodies = len([o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"])
+        undo = self.doc.UndoCount
+        owner.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertEqual(len([o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]), bodies)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertTrue(step.isValid(), step.getStatusString())
+        made = sorted(self.madeParts(owner), key=lambda b: b.Shape.BoundBox.XMin)
+        self.assertEqual(len(made), 3)
+        for b, (x0, x1) in zip(made, ((0, 6), (6.5, 8), (8.5, 10))):
+            self.assertAlmostEqual(b.Shape.BoundBox.XMin, x0, places=6, msg=b.Name)
+            self.assertAlmostEqual(b.Shape.Volume, (x1 - x0) * 100, places=4, msg=b.Name)
+
     def testBothPartsTicked(self):
         """The same cut with A and B ticked: each loses 5*6*3 (910 each)."""
         s = self.sketchInA("Sk", CUT)
