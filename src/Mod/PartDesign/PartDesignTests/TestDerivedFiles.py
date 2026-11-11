@@ -36,6 +36,8 @@ def boxBody(doc, studio, name, length, x=0):
 
 class TestDerivedFiles(unittest.TestCase):
     def setUp(self):
+        # Documents other suites left open under -t 0 (e.g. CAM's): not this test's to judge
+        self.others = set(App.listDocuments())
         self.dir = tempfile.mkdtemp(prefix="derivedfiles")
         self.sourcePath = os.path.join(self.dir, "Source.FCStd")
         self.ownerPath = os.path.join(self.dir, "Owner.FCStd")
@@ -119,7 +121,7 @@ class TestDerivedFiles(unittest.TestCase):
         self.assertEqual(copy.DerivedSourceFile, "Source.FCStd")
         self.assertEqual(derived.derived_state(lead), derived.UP_TO_DATE)
         # the source isn't left open
-        self.assertEqual(sorted(App.listDocuments()), ["DerivedOwner"])
+        self.assertEqual(sorted(set(App.listDocuments()) - self.others), ["DerivedOwner"])
 
     def testLaterFeaturesCutTheDerivedPart(self):
         lead = self.derive("A")
@@ -148,7 +150,7 @@ class TestDerivedFiles(unittest.TestCase):
         lead = self.lead()
         self.assertTrue(lead.isValid(), lead.getStatusString())
         self.assertAlmostEqual(self.bodyOf(lead).Shape.Volume, 960, places=6)
-        self.assertEqual(sorted(App.listDocuments()), ["Owner"])
+        self.assertEqual(sorted(set(App.listDocuments()) - self.others), ["Owner"])
         self.assertEqual(derived.derived_state(lead), derived.NOT_FOUND)
         with self.assertRaises(derived.DerivedError):
             derived.refresh_derived(lead)
