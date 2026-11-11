@@ -54,6 +54,11 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <Geom_Plane.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepLProp_CLProps.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
@@ -6141,6 +6146,251 @@ std::array<gp_Trsf, 2> profileFramesOf(const TopoDS_Shape& profile)
     }
     return {placement, placement};
 }
+
+/// Where an open wire starts or ends in its own order, and its direction of travel there
+std::pair<gp_Pnt, gp_Vec> wireEnd(const TopoDS_Wire& wire, bool atEnd)
+{
+    std::vector<TopoDS_Edge> edges;
+    for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
+        edges.push_back(it.Current());
+    }
+    if (edges.empty()) {
+        throw Base::ValueError("Pipe: an empty curve in the thin profile");
+    }
+    const TopoDS_Edge& edge = atEnd ? edges.back() : edges.front();
+    BRepAdaptor_Curve curve(edge);
+    const bool forward = edge.Orientation() != TopAbs_REVERSED;
+    const double u = (forward != atEnd) ? curve.FirstParameter() : curve.LastParameter();
+    gp_Pnt point;
+    gp_Vec tangent;
+    curve.D1(u, point, tangent);
+    if (!forward) {
+        tangent.Reverse();
+    }
+    return {point, tangent};
+}
+
+/// \a wire, open and in \a plane, offset by \a distance to its right seen from the plane's normal
+/// (to its left when negative): its edges, its start and its end
+struct OffsetCurve
+{
+    std::vector<TopoDS_Edge> edges;
+    gp_Pnt start;
+    gp_Pnt end;
+};
+
+OffsetCurve offsetOpenWire(const TopoDS_Wire& wire, const gp_Pln& plane, double distance, GeomAbs_JoinType join)
+{
+    const auto [start, startTangent] = wireEnd(wire, false);
+    const auto [end, endTangent] = wireEnd(wire, true);
+    OffsetCurve result;
+    if (std::abs(distance) < Precision::Confusion()) {
+        for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next()) {
+            result.edges.push_back(TopoDS::Edge(it.Current()));
+        }
+        result.start = start;
+        result.end = end;
+        return result;
+    }
+    const gp_Vec normal(plane.Axis().Direction());
+    auto rightOf = [&](const gp_Vec& tangent) {
+        gp_Vec right = tangent.Crossed(normal);
+        if (right.Magnitude() < Precision::Confusion()) {
+            throw Base::ValueError("Pipe: a thin profile's curve leaves its plane");
+        }
+        return right.Normalized();
+    };
+    const gp_Pnt wantStart = start.Translated(rightOf(startTangent) * distance);
+    const gp_Pnt wantEnd = end.Translated(rightOf(endTangent) * distance);
+    // OCCT finds no plane for a straight wire: give it the profile's, as its own open-wire case does
+    BRep_Builder builder;
+    TopoDS_Face face;
+    builder.MakeFace(face, new Geom_Plane(plane), Precision::Confusion());
+    builder.Add(face, wire);
+    TopTools_ListOfShape edges;
+    for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next()) {
+        edges.Append(it.Current());
+    }
+    BRepLib::BuildPCurveForEdgesOnPlane(edges, face);
+    // OCCT's sign for an open wire's side: try one, check it against the right, else the other
+    for (const double sign : {1.0, -1.0}) {
+        BRepOffsetAPI_MakeOffset offset(face, join, true);
+        try {
+            offset.Perform(sign * distance);
+        }
+        catch (const Standard_Failure&) {
+            continue;
+        }
+        if (!offset.IsDone() || offset.Shape().IsNull()) {
+            continue;
+        }
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopoDS_Wire built;
+        for (TopExp_Explorer it(offset.Shape(), TopAbs_WIRE); it.More(); it.Next()) {
+            if (!built.IsNull()) {
+                built.Nullify();  // more than one wire: not a plain parallel
+                break;
+            }
+            built = TopoDS::Wire(it.Current());
+        }
+        if (built.IsNull()) {
+            continue;
+        }
+        TopExp::Vertices(built, first, last);
+        if (first.IsNull() || last.IsNull()) {
+            continue;
+        }
+        gp_Pnt a = BRep_Tool::Pnt(first);
+        gp_Pnt b = BRep_Tool::Pnt(last);
+        if (a.Distance(wantEnd) < b.Distance(wantEnd) && b.Distance(wantStart) < a.Distance(wantStart)) {
+            std::swap(a, b);
+        }
+        const double tolerance = 1e-6 * std::max(1.0, std::abs(distance));
+        if (a.Distance(wantStart) > tolerance || b.Distance(wantEnd) > tolerance) {
+            continue;
+        }
+        for (TopExp_Explorer it(built, TopAbs_EDGE); it.More(); it.Next()) {
+            result.edges.push_back(TopoDS::Edge(it.Current()));
+        }
+        result.start = a;
+        result.end = b;
+        return result;
+    }
+    throw Base::CADKernelError("Pipe: the thin wall's offset of an open curve failed");
+}
+
+/// The thin wall of \a curves in \a plane (SW14): around each open wire, a strip from \a left to its
+/// left to \a right to its right (seen from the plane's normal); each region of the closed wires,
+/// a ring from \a right outward to \a left inward. Faces, in a compound.
+TopoDS_Shape thinWall(const TopoDS_Shape& curves, const gp_Pln& plane, double right, double left, GeomAbs_JoinType join)
+{
+    BRep_Builder builder;
+    TopoDS_Compound wall;
+    builder.MakeCompound(wall);
+    std::vector<Part::TopoShape> closed;
+    for (TopExp_Explorer it(curves, TopAbs_WIRE); it.More(); it.Next()) {
+        const TopoDS_Wire& wire = TopoDS::Wire(it.Current());
+        if (BRep_Tool::IsClosed(wire)) {
+            closed.emplace_back(wire);
+            continue;
+        }
+        const OffsetCurve a = offsetOpenWire(wire, plane, -left, join);
+        const OffsetCurve b = offsetOpenWire(wire, plane, right, join);
+        std::vector<Part::TopoShape> edges;
+        for (const TopoDS_Edge& edge : a.edges) {
+            edges.emplace_back(edge);
+        }
+        for (const TopoDS_Edge& edge : b.edges) {
+            edges.emplace_back(edge);
+        }
+        edges.emplace_back(BRepBuilderAPI_MakeEdge(a.start, b.start).Edge());
+        edges.emplace_back(BRepBuilderAPI_MakeEdge(a.end, b.end).Edge());
+        const Part::TopoShape joined = Part::TopoShape(-1).makeElementWires(edges);
+        if (joined.isNull() || joined.shapeType() != TopAbs_WIRE || !BRep_Tool::IsClosed(TopoDS::Wire(joined.getShape()))) {
+            throw Base::CADKernelError("Pipe: the thin wall of an open curve doesn't close");
+        }
+        BRepBuilderAPI_MakeFace face(plane, TopoDS::Wire(joined.getShape()), true);
+        if (!face.IsDone()) {
+            throw Base::CADKernelError("Pipe: the thin wall of an open curve has no face");
+        }
+        builder.Add(wall, face.Face());
+    }
+    if (!closed.empty()) {
+        const Part::TopoShape regions = Part::TopoShape(-1).makeElementFace(closed);
+        const Part::JoinType joinType = join == GeomAbs_Arc ? Part::JoinType::arc : Part::JoinType::intersection;
+        auto grown = [&](double distance) {
+            if (std::abs(distance) < Precision::Confusion()) {
+                return regions;
+            }
+            return regions.makeElementOffset2D(
+                distance,
+                joinType,
+                Part::FillType::noFill,
+                Part::OpenResult::noOpenResult
+            );
+        };
+        const Part::TopoShape outer = grown(right);
+        const Part::TopoShape inner = grown(-left);
+        if (outer.isNull() || inner.isNull() || inner.countSubShapes(TopAbs_FACE) == 0) {
+            throw Base::ValueError("Pipe: the thin wall is thicker than the region it goes into");
+        }
+        FCBRepAlgoAPI_Cut ring(outer.getShape(), inner.getShape());
+        if (!ring.IsDone()) {
+            throw Base::CADKernelError("Pipe: the thin wall's ring failed");
+        }
+        for (TopExp_Explorer it(ring.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+            builder.Add(wall, it.Current());
+        }
+    }
+    return wall;
+}
+
+double areaOf(const TopoDS_Shape& faces)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(faces, props);
+    return std::abs(props.Mass());
+}
+
+/// The thin wall of  pipe's profile (SW14), in place of its curves; it stops where the wall's
+/// corners would be sharp or round depending on a choice Onshape hasn't been asked about yet (SW18)
+Part::TopoShape thinProfileOf(const Pipe& pipe)
+{
+    App::DocumentObject* profile = pipe.Profile.getValue();
+    const std::vector<std::string>& subs = pipe.Profile.getSubValues();
+    TopoDS_Shape curves;
+    gp_Pln plane;
+    TopLoc_Location location;
+    if (auto sketch = freecad_cast<Part::Part2DObject*>(profile)) {
+        // All the sketch's curves, open ones included: in the sketch's own plane
+        location = sketch->Shape.getShape().getShape().Location();
+        curves = sketch->Shape.getShape().getShape().Located(TopLoc_Location());
+        plane = gp_Pln(gp::XOY());
+    }
+    else if (auto feature = freecad_cast<Part::Feature*>(profile)) {
+        if (subs.empty() || subs.front().empty()) {
+            throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
+        }
+        const Part::TopoShape face = feature->Shape.getShape().getSubTopoShape(subs.front().c_str(), true);
+        if (face.isNull() || face.shapeType() != TopAbs_FACE) {
+            throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()));
+        if (surface.GetType() != GeomAbs_Plane) {
+            throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
+        }
+        plane = surface.Plane();
+        curves = face.getShape();
+    }
+    else {
+        throw Base::TypeError("Pipe: Invalid profile/section");
+    }
+    const double thickness1 = pipe.Thickness1.getValue();
+    const double thickness2 = pipe.Thickness2.getValue();
+    if (thickness1 <= Precision::Confusion() || thickness2 < 0.0) {
+        throw Base::ValueError("Pipe: the thin wall's thickness must be more than zero");
+    }
+    // To the right (an open curve) or outward (a region) by default
+    double right = pipe.Midplane.getValue() ? thickness1 / 2 : thickness1;
+    double left = pipe.Midplane.getValue() ? thickness1 / 2 : thickness2;
+    if (pipe.FlipWall.getValue()) {
+        std::swap(right, left);
+    }
+    const TopoDS_Shape sharp = thinWall(curves, plane, right, left, GeomAbs_Intersection);
+    const TopoDS_Shape round = thinWall(curves, plane, right, left, GeomAbs_Arc);
+    const double area = areaOf(sharp);
+    if (area < Precision::Confusion()) {
+        throw Base::ValueError("Pipe: the thin profile has no curves to put a wall around");
+    }
+    if (std::abs(area - areaOf(round)) > 1e-7 * std::max(1.0, area)) {
+        throw Base::ValueError(
+            "Pipe: the thin wall goes round the outside of a corner of the profile; whether it's sharp "
+            "or round there isn't built yet. Put the wall on the corner's inside, or round the corner."
+        );
+    }
+    return Part::TopoShape(sharp.Located(location));
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* Pipe::execute()
@@ -6161,8 +6411,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
         binormalInBody = Base::Vector3d(direction->X(), direction->Y(), direction->Z());
     }
-    if (BodyType.getValue() == 1) {
-        return new App::DocumentObjectExecReturn("Pipe: the Thin body type isn't built yet");
+    if (BodyType.getValue() == 1 && !Sections.getValues().empty()) {
+        return new App::DocumentObjectExecReturn(
+            "Pipe: a thin sweep takes no sections; Onshape's Sweep has none either"
+        );
     }
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
@@ -6258,8 +6510,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
 
         // setup the profile section
-        Part::TopoShape profileShape
-            = getSectionShape("Profile", Profile.getValue(), Profile.getSubValues());
+        // Thin: the wall around the profile's curves, open ones included, swept as a solid profile
+        Part::TopoShape profileShape = BodyType.getValue() == 1
+            ? thinProfileOf(*this)
+            : getSectionShape("Profile", Profile.getValue(), Profile.getSubValues());
         if (profileShape.isNull()) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Pipe: Could not obtain profile shape")
