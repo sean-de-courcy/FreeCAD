@@ -257,24 +257,29 @@ class KernelBudgetTest(unittest.TestCase):
         class Holes:
             def __init__(self, obj):
                 obj.Proxy = self
+                self.caught = []
 
             def execute(self, obj):
                 shape = Part.makeBox(60, 60, 5)
                 try:
                     shape = shape.cut(wavy(800, 30, 30, -1.0).extrude(V(0, 0, 7)))
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.caught.append(str(e))
                 obj.Shape = shape
 
         doc = FreeCAD.newDocument("KernelBudgetSwallow")
         self.docs.append(doc)
         body = doc.addObject("PartDesign::Body", "Body")
         holes = body.newObject("PartDesign::FeaturePython", "Holes")
-        Holes(holes)
+        proxy = Holes(holes)
         loose = doc.addObject("Part::FeaturePython", "LooseHoles")
         Holes(loose)
-        self.setLimit(0.3)
+        # A limit no machine meets, so the stop doesn't depend on its speed: at 0.3 s a macOS
+        # runner finished the cut in time (ops#669). The cut's first call under it stops
+        self.setLimit(1e-6)
         doc.recompute()
+        self.assertEqual(len(proxy.caught), 1, proxy.caught)  # the script swallowed the stop
+        self.assertIn("took longer than", proxy.caught[0])
         self.assertFalse(holes.isValid())
         self.assertIn("took longer than", holes.getStatusString())
         self.assertTrue(loose.isValid(), loose.getStatusString())

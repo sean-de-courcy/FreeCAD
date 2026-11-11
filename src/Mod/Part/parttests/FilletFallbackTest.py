@@ -1977,6 +1977,27 @@ class OverflowTest(unittest.TestCase):
             with self.subTest(kind=kind, size=size):
                 self.assertBuilt(self.dressUp(kind, plate, size, rims), volume, 10)
 
+    def testRimsWhoseTipVerticesHaveRaisedTolerances(self):
+        # ops#669: two rims' rounds meet the top face nearly tangentially at their lens's tips;
+        # OCCT 8.0.1's cut leaves vertices of tolerance up to 4e-5 there, the faces' pcurve loops
+        # open by that much, and the integrated volume is up to 1.3e-4 of the tool off: more than
+        # 1e-6 of it (macOS refused K2A's fillet 1.6 so; on Windows these). The volumes: the plate
+        # less the two rounds (Pappus) plus their lens (quadrature)
+        for gap, size, volume in (
+            (6.0, 1.62, 2921.1248),
+            (6.0, 1.625, 2921.0376),
+            (5.9, 1.54, 2922.4743),
+            (5.9, 1.545, 2922.3925),
+            (5.9, 1.565, 2922.0619),
+            (5.8, 1.5, 2923.1168),
+            (5.8, 1.505, 2923.0377),
+        ):
+            with self.subTest(gap=gap, size=size):
+                plate, rims = plate_with_holes(
+                    (30, 20, 5), [(15 - gap / 2, 10), (15 + gap / 2, 10)]
+                )
+                self.assertBuilt(plate.makeFillet(size, rims), volume, 10)
+
     def testRimsWhoseRoundsBarelyOverlapFail(self):
         # Debt (ops#640): Onshape builds K2A's fillet 1.56 (2922.145). Where two rounds overlap by
         # less than about 0.02, each is within 1e-5 of the plate's top in the lens they share, and

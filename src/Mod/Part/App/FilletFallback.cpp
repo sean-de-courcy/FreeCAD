@@ -120,6 +120,39 @@ double areaOf(const TopoDS_Shape& shape)
     return MassProperties::area(shape);
 }
 
+/** How far a Boolean opened the faces' loops: the sum, over the result's vertices that none of its
+ * inputs holds, of their tolerances past linearTolerance. OCCT integrates a face's volume over its
+ * pcurve loop, and where a Boolean leaves a vertex off its edges (two rims' rounds meeting the top
+ * face nearly tangentially at their lens tips: tolerances up to 4e-5) the loop is open by that
+ * much and the measured volume is off by up to 30 times this sum times the tools' size squared,
+ * far more than volumeTolerance of the tools (ops#669: 1.3e-4 relative; macOS's cut is a
+ * different such variant than Windows')
+ */
+double raisedTolerance(const TopoDS_Shape& result, const std::vector<TopoDS_Shape>& inputs)
+{
+    TopTools_IndexedMapOfShape old;
+    for (const auto& input : inputs) {
+        TopExp::MapShapes(input, TopAbs_VERTEX, old);
+    }
+    TopTools_IndexedMapOfShape now;
+    TopExp::MapShapes(result, TopAbs_VERTEX, now);
+    double excess = 0.0;
+    for (int i = 1; i <= now.Extent(); ++i) {
+        if (!old.Contains(now(i))) {
+            excess += std::max(0.0, BRep_Tool::Tolerance(TopoDS::Vertex(now(i))) - linearTolerance);
+        }
+    }
+    return excess;
+}
+
+/// The square of a shape's bounding box's diagonal
+double squareSize(const TopoDS_Shape& shape)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    return box.IsVoid() ? 0.0 : box.SquareExtent();
+}
+
 int countSolids(const TopoDS_Shape& shape)
 {
     int count = 0;
@@ -2131,23 +2164,28 @@ std::vector<TopoDS_Shape> imagesThrough(
 
 /** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
  * the caller's: the tools' closed forms less the overlaps at unequal corners, or, for a trimmed
- * tool, its common part with the shape. The tolerance scales with the tools' closed forms
+ * tool, its common part with the shape. The tolerance scales with the tools' closed forms, and
+ * grows only by what the Booleans' raised tolerances can cost the measurement (raisedTolerance):
+ * the stage's own and the caller's (expectedAllowance, for a measured expectation)
  */
 TopoDS_Shape applyTools(
     const TopoDS_Shape& shape,
     const std::vector<const Tool*>& tools,
     double expected,
     bool cut,
-    std::vector<Stage>& stages
+    std::vector<Stage>& stages,
+    double expectedAllowance = 0.0
 )
 {
     TopTools_ListOfShape arguments;
     arguments.Append(shape);
     TopTools_ListOfShape toolShapes;
     double scale = 0.0;
+    double size = 0.0;
     for (const auto* tool : tools) {
         toolShapes.Append(tool->solid);
         scale += tool->volume;
+        size = std::max(size, squareSize(tool->solid));
     }
     std::unique_ptr<BRepAlgoAPI_BooleanOperation> operation;
     if (cut) {
@@ -2171,7 +2209,12 @@ TopoDS_Shape applyTools(
     if (cut) {
         change = -change;
     }
-    if (std::abs(change - expected) > volumeTolerance * scale) {
+    std::vector<TopoDS_Shape> inputs {shape};
+    for (const auto* tool : tools) {
+        inputs.push_back(tool->solid);
+    }
+    double raised = raisedTolerance(result, inputs);
+    if (std::abs(change - expected) > volumeTolerance * scale + raised * size + expectedAllowance) {
         refuse(std::string(cut ? "the cut removed " : "the fuse added ") + describe(change)
                + " instead of " + describe(expected));
     }
@@ -2497,6 +2540,7 @@ TopoDS_Shape constructShape(
     // other Booleans than the cut's: OCCT 8.0.1's cut by two barely overlapping tori (two rims'
     // fillets 1.56 on rims 3.1 apart) leaves more than either tool alone does
     double trimmedVolume = 0.0;
+    double trimmedAllowance = 0.0;  // what raised tolerances can cost trimmedVolume's measurements
     if (trimmed) {
         if (!overlaps.empty()) {
             refuse("a dress-up past its face at a corner with unequal angles");
@@ -2517,6 +2561,8 @@ TopoDS_Shape constructShape(
             cutTools.push_back(&tool);
             inside.push_back(commonOf(base.getShape(), tool.solid));
             trimmedVolume += volumeOf(inside.back());
+            trimmedAllowance += raisedTolerance(inside.back(), {base.getShape(), tool.solid})
+                * squareSize(tool.solid);
             boxes.emplace_back();
             BRepBndLib::Add(tool.solid, boxes.back());
         }
@@ -2529,10 +2575,13 @@ TopoDS_Shape constructShape(
                 if (boxes[i].IsOut(boxes[j])) {
                     continue;
                 }
-                double both = volumeOf(commonOf(inside[i], cutTools[j]->solid));
+                TopoDS_Shape common = commonOf(inside[i], cutTools[j]->solid);
+                double both = volumeOf(common);
                 if (both > overlapTolerance(i, j)) {
                     pairs[i][j] = true;
                     trimmedVolume -= both;
+                    trimmedAllowance += raisedTolerance(common, {inside[i], cutTools[j]->solid})
+                        * std::min(squareSize(cutTools[i]->solid), squareSize(cutTools[j]->solid));
                 }
             }
         }
@@ -2566,8 +2615,11 @@ TopoDS_Shape constructShape(
             for (size_t i = 0; i < tools.size(); ++i) {
                 if (tools[i].cut) {
                     toolStage[i] = stages.size();
-                    double expected = volumeOf(commonOf(shape, tools[i].solid));
-                    shape = applyTools(shape, {&tools[i]}, expected, true, stages);
+                    TopoDS_Shape common = commonOf(shape, tools[i].solid);
+                    double expected = volumeOf(common);
+                    double allowance = raisedTolerance(common, {shape, tools[i].solid})
+                        * squareSize(tools[i].solid);
+                    shape = applyTools(shape, {&tools[i]}, expected, true, stages, allowance);
                 }
             }
             continue;
@@ -2730,7 +2782,14 @@ TopoDS_Shape constructShape(
     cutVolume = trimmed ? trimmedVolume : cutVolume - overlapVolume;
     double expected = baseVolume - cutVolume + fusedVolume;
     double measured = volumeOf(shape);
-    if (std::abs(measured - expected) > volumeTolerance * scale) {
+    std::vector<TopoDS_Shape> inputs {base.getShape()};
+    double size = 0.0;
+    for (const auto& tool : tools) {
+        inputs.push_back(tool.solid);
+        size = std::max(size, squareSize(tool.solid));
+    }
+    double allowance = raisedTolerance(shape, inputs) * size + (trimmed ? trimmedAllowance : 0.0);
+    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
         refuse("the result's volume " + describe(measured) + " differs from its closed form "
                + describe(expected));
     }
