@@ -1255,7 +1255,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // Side 2 made blind from its vertex: untapered, its offset in its length
         bool upToVertex2 = false;
         // Up to vertex (FreeCAD-CH ops#640 rank 22, Onshape's): the end lies on the plane
-        // through the vertex, parallel to the profile plane, plus the offset. A straight
+        // through the vertex, parallel to the profile plane, moved by the offset (Onshape's sign:
+        // positive short of the vertex, as for a face; verified in Onshape, oracle 7c, UV1). A straight
         // extrusion of a planar profile ends on such a plane whatever its direction, so the side
         // is the blind one whose length reaches that plane, untapered as a side up to a face is.
         // One side goes towards the vertex; a side of two, or of a symmetric pair, that can't
@@ -1277,7 +1278,18 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                         "The vertex lies on the profile plane: there is nothing to extrude"
                     ));
                 }
-                return length + (length < 0.0 ? -offset : offset);
+                // Onshape's sign, as for a face: a positive offset ends short of the vertex's plane,
+                // towards the profile, a negative one past it. An offset that reaches or crosses
+                // the profile leaves no extrusion towards the vertex
+                const double reach = std::fabs(length) - offset;
+                if (reach < Precision::Confusion()) {
+                    throw Base::ValueError(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "The offset ends the extrusion at or before the profile plane: there is "
+                        "nothing to extrude"
+                    ));
+                }
+                return length < 0.0 ? -reach : reach;
             };
             auto behindSide = [](int side) {
                 return new App::DocumentObjectExecReturn(
