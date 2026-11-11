@@ -17,6 +17,7 @@
 #include "Body.h"
 #include "Feature.h"
 #include "FeatureApply.h"
+#include "Pieces.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 
@@ -91,38 +92,8 @@ Part::TopoShape studioScopeBaseAt(const App::DocumentObject* owner)
 
 std::string studioAddLeftover(const App::DocumentObject* owner)
 {
-    std::vector<Part::TopoShape> bases;
-    for (auto part : studioScopeOf(owner)) {
-        Part::TopoShape shape = studioBaseAt(owner, part);
-        if (!shape.isNull()) {
-            bases.push_back(shape);
-        }
-    }
-    if (bases.empty()) {
-        return {};
-    }
-    Part::TopoShape tool = FeatureApply::toolOf(owner);
-    if (tool.isNull()) {
-        return {};
-    }
-    int index = 0;
-    for (const auto& solid : tool.getSubTopoShapes(TopAbs_SOLID)) {
-        ++index;
-        bool touches = false;
-        for (const auto& base : bases) {
-            BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
-            if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
-                touches = true;
-                break;
-            }
-        }
-        if (!touches) {
-            return "Solid " + std::to_string(index)
-                + " of the tool touches no part of the merge scope: it would become a new part, "
-                  "which is not done yet";
-        }
-    }
-    return {};
+    // Onshape H1a: such a solid is a new part, made by the command (P6p); until then E fails
+    return unclaimedLeftovers(owner);
 }
 
 // FreeCAD-CH ops#654 P5: StudioList.cpp (declared where used)

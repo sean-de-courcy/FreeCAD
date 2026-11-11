@@ -75,6 +75,7 @@
 #include <Mod/PartDesign/App/FeaturePipe.h>
 #include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
+#include <Mod/PartDesign/App/FeatureTransformed.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 
@@ -3040,6 +3041,22 @@ bool TaskDlgFeatureParameters::accept()
                 throw Base::ValueError(why.empty() ? "The studio's list can't take the feature" : why);
             }
         }
+        // FreeCAD-CH (ops#654 P6p): the OK of a studio feature, or of an in-Body pattern of a
+        // listed part, is the command that makes its pieces and leftovers parts
+        // (run once the edit has ended: during it the edited feature isn't recomputed)
+        const bool makesPieces = PartDesign::isStudioOwner(feature)
+            || (feature->isDerivedFrom<PartDesign::Transformed>()
+                && PartDesign::StudioList::holding(feature));
+        auto makePieces = [feature]() {
+            App::Document* document = feature->getDocument();
+            const auto before = document->getObjectsOfType(PartDesign::Body::getClassTypeId()).size();
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                Gui::Command::getObjectCmd(feature).c_str()
+            );
+            return document->getObjectsOfType(PartDesign::Body::getClassTypeId()).size() != before;
+        };
         if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
@@ -3090,10 +3107,36 @@ bool TaskDlgFeatureParameters::accept()
             document->abortTransaction();
             Gui::cmdAppDocument(document, "recompute()");
             Gui::cmdGuiDocument(document, "resetEdit()");
+            // An unchanged OK of a feature whose pieces aren't parts yet makes them (P6p): its
+            // message says to press OK. A step of its own, only when it made a part
+            if (makesPieces) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+                if (makePieces()) {
+                    document->commitTransaction();
+                }
+                else {
+                    document->abortTransaction();
+                }
+            }
             return true;
         }
 
         Gui::cmdGuiDocument(feature, "resetEdit()");
+        if (makesPieces) {
+            // The edit's step may be closed by now: the pieces then make a step of their own
+            App::Document* document = feature->getDocument();
+            const bool own = !document->hasPendingTransaction();
+            if (own) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+            }
+            const bool made = makePieces();
+            if (own && made) {
+                document->commitTransaction();
+            }
+            else if (own) {
+                document->abortTransaction();
+            }
+        }
         // FreeCAD-CH (ops#640, journey J18, F4): the edit's end shows the feature it edited,
         // which hid its Merge again, so a merged part vanished from the view while the merging
         // extrude was the last feature. The part's result is the Merge when it is the tip

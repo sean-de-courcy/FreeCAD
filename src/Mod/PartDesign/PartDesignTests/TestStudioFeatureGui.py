@@ -241,6 +241,31 @@ class TestStudioFeatureGui(StudioDialog, unittest.TestCase):
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertVolumes(A=1000, B=910, C=1000)
 
+    def testOKOfASplittingPocketMakesTwoParts(self):
+        """P6p: a Remove 11 deep through A (x 4..6, y -1..11) splits it: the dialog's OK is the
+        command that makes the two pieces parts (400 each) in the Parts list in place of A; one
+        undo takes them away again."""
+        s = self.sketchInA("Sk", (4, -1, 6, 11))
+        owner = self.runCommand("PartDesign_Pocket", s, active="A")
+        self.setLength(11)
+        self.choose("Remove")
+        for label, on in (("A", True), ("B", False), ("C", False)):
+            self.tick(label, on)
+        self.close(ok=True)
+        made = self.madeParts(owner)
+        self.assertEqual(len(made), 2)
+        for b in made:
+            self.assertAlmostEqual(b.Shape.Volume, 400, places=4, msg=b.Name)
+            self.assertEqual(b.StudioParentId, "A")
+        live = PartDesign.studioLiveParts(self.list)
+        self.assertNotIn(self.body("A"), live)
+        self.assertEqual(sorted(b.Name for b in live), sorted(["B", "C"] + [b.Name for b in made]))
+        names = [b.Name for b in made]
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual([n for n in names if self.doc.getObject(n)], [])
+        self.assertIn(self.body("A"), PartDesign.studioLiveParts(self.list))
+
     def testBothPartsTicked(self):
         """The same cut with A and B ticked: each loses 5*6*3 (910 each)."""
         s = self.sketchInA("Sk", CUT)
@@ -845,8 +870,9 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
     def testLeavingNewWithoutLaterFeatures(self):
         """P without later features: New -> Add deletes P (scope empty, "No merge scope selected");
         back to New makes it again with the same id; OK. Then Add with A ticked (the tool apart
-        from A): the fork's S2 failure, loud (Onshape keeps P with an info); undo brings P back
-        whole, redo takes it again."""
+        from A): Onshape H1a makes the region a new part, and the OK is the command that makes it
+        (P6p): a leftover part, its own undo step after the edit's; undo leaves the edit's loud
+        failure, a second undo brings P back whole, redo takes it again."""
         owner, made = self.makeE()
         pid = made.StudioPartId
         undo = self.doc.UndoCount
@@ -868,12 +894,19 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
         self.choose("Add")
         self.tick("A", True)
         self.close(ok=True)
-        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual(self.doc.UndoCount, undo + 2)
+        [left] = self.madeParts(owner)
+        self.assertEqual(left.StudioParentId, "")
+        self.assertAlmostEqual(left.Shape.Volume, self.PV, places=4)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertVolumes(A=4000)
+
+        self.doc.undo()
+        self.doc.recompute()
         self.assertEqual(self.madeParts(owner), [])
         self.assertFalse(owner.isValid())
         self.assertIn("touches no part", owner.getStatusString())
         self.assertVolumes(A=4000)
-
         self.doc.undo()
         self.doc.recompute()
         [back] = self.madeParts(owner)

@@ -18,6 +18,7 @@
 #include "Body.h"
 #include "FeatureApply.h"
 #include "FeatureBoolean.h"
+#include "Pieces.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 #include "StudioPattern.h"
@@ -46,14 +47,12 @@ bool isBooleanOwner(const App::DocumentObject* owner)
     return boolean && runsAsStudioOwner(boolean);
 }
 
-/// tool's solids that touch or overlap base (a solid inside the other counts: distance 0); all of
-/// them when it has one solid, or when none touches (the step then fails as it would)
+/// tool's solids that touch or overlap base (a solid inside the other counts: distance 0); null
+/// when none touches: a solid touching no part of the scope is a leftover, the owner's to check
+/// and a part of its own once a command made it one (P6p, Onshape H1a and R4)
 Part::TopoShape touching(const Part::TopoShape& tool, const Part::TopoShape& base)
 {
     const std::vector<Part::TopoShape> solids = tool.getSubTopoShapes(TopAbs_SOLID);
-    if (solids.size() < 2) {
-        return tool;
-    }
     std::vector<Part::TopoShape> kept;
     for (const auto& solid : solids) {
         BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
@@ -61,7 +60,10 @@ Part::TopoShape touching(const Part::TopoShape& tool, const Part::TopoShape& bas
             kept.push_back(solid);
         }
     }
-    if (kept.empty() || kept.size() == solids.size()) {
+    if (kept.empty()) {
+        return {};
+    }
+    if (kept.size() == solids.size()) {
         return tool;
     }
     if (kept.size() == 1) {
@@ -148,11 +150,14 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
     try {
         App::DocumentObject* owner = StudioOwner.getValue();
         std::string why;
-        Part::TopoShape tool = toolOf(owner, &why);
+        Body* body = getFeatureBody();
+        // A piece step (P6p): the first step of a part its owner made from a piece or a leftover
+        // takes the one solid of the source its witness selects, as is
+        const bool piece = body && owner && isPieceBody(body) && body->StudioMadeBy.getValue() == owner;
+        Part::TopoShape tool = piece ? pieceShape(body, &why) : toolOf(owner, &why);
         if (tool.isNull()) {
             return new App::DocumentObjectExecReturn(why, this);
         }
-        Body* body = getFeatureBody();
         const std::string part =
             body ? std::string("'") + body->Label.getValue() + "'" : std::string("its part");
 
@@ -176,6 +181,18 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
 
         Part::TopoShape base = getBaseTopoShape(/*silent=*/true);
         Part::TopoShape result;
+        if (piece) {
+            AddSubShape.setValue(Part::TopoShape());
+            if (!base.isNull()) {
+                return new App::DocumentObjectExecReturn(
+                    "Something comes before the first step of " + part + ", a part made from a piece",
+                    this
+                );
+            }
+            rawShape = tool;
+            Shape.setValue(tool);
+            return App::DocumentObject::StdReturn;
+        }
         if (base.isNull()) {
             AddSubShape.setValue(tool);
             if (getBooleanOperation() != BooleanOperation::Union) {
@@ -194,6 +211,13 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
             // below, never dropped
             if (getBooleanOperation() == BooleanOperation::Union && !isBooleanOwner(owner)) {
                 tool = touching(tool, base);
+                if (tool.isNull()) {
+                    // Nothing of the tool touches this part: it stays as it was
+                    AddSubShape.setValue(Part::TopoShape());
+                    rawShape = base;
+                    Shape.setValue(getSolid(base));
+                    return App::DocumentObject::StdReturn;
+                }
             }
             AddSubShape.setValue(tool);
             result = Part::TopoShape(
@@ -241,13 +265,15 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
                 this
             );
         }
+        noteSplitHeld(owner, body, result);
         if (solids > 1) {
-            return new App::DocumentObjectExecReturn(
-                "'" + std::string(owner->Label.getValue()) + "' splits " + part + " into "
-                    + std::to_string(solids)
-                    + " pieces: pieces becoming parts is not done yet",
-                this
-            );
+            // A split (P6p): every piece must be a part, made by a command; the part's chain then
+            // ends here, holding them all (its pieces take theirs)
+            if (std::string unclaimed = unclaimedSplit(owner, body, result); !unclaimed.empty()) {
+                return new App::DocumentObjectExecReturn(unclaimed, this);
+            }
+            Shape.setValue(result);
+            return App::DocumentObject::StdReturn;
         }
         Shape.setValue(getSolid(result));
     }

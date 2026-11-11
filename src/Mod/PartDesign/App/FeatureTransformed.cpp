@@ -72,6 +72,7 @@
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
 #include "FeatureSketchBased.h"
+#include "Pieces.h"
 #include "Retarget.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
@@ -1465,11 +1466,12 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
         }
     }
     if (anyBase && touched.empty()) {
-        return new App::DocumentObjectExecReturn(
-            "Solid 1 of the tool touches no part of the merge scope: it would become a new part, "
-            "which is not done yet",
-            &pattern
-        );
+        // Onshape oracle 9 R4: a copy touching no scope part is a new part, made by the command
+        // (P6p); until then the mirror fails loudly
+        if (std::string left = unclaimedLeftovers(&pattern); !left.empty()) {
+            return new App::DocumentObjectExecReturn(left, &pattern);
+        }
+        return App::DocumentObject::StdReturn;
     }
     if (touched.size() > 1) {
         std::string names;
@@ -2078,17 +2080,18 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     supportShape = refineShapeIfActive((supportShape));
 
-    // FreeCAD-CH ops#654 slice 8: a part of a listed studio never goes on in two solids
-    // (requirement 2, as a step's split: Onshape makes the pieces parts, P6p)
+    // FreeCAD-CH ops#654 slice 8, P6p: a part of a listed studio goes on in two solids only as
+    // pieces a command made parts (Onshape S1): the part's chain then ends here, holding them all
     if (StudioList::holding(this)) {
+        noteSplitHeld(this, getFeatureBody(), supportShape);
         if (const int solids = countSolids(supportShape.getShape()); solids > 1) {
-            const Body* body = getFeatureBody();
-            return new App::DocumentObjectExecReturn(
-                quoted(this) + " splits " + (body ? quoted(body) : std::string("its part"))
-                    + " into " + std::to_string(solids)
-                    + " pieces: pieces becoming parts is not done yet",
-                this
-            );
+            if (std::string why = unclaimedSplit(this, getFeatureBody(), supportShape);
+                !why.empty()) {
+                return new App::DocumentObjectExecReturn(why, this);
+            }
+            this->Shape.setValue(supportShape);
+            rejected.Nullify();
+            return App::DocumentObject::StdReturn;
         }
     }
 

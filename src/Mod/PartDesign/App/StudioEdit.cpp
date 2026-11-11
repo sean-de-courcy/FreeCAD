@@ -11,6 +11,7 @@
 #include <Base/Exception.h>
 
 #include "Body.h"
+#include "Pieces.h"
 #include "StudioEdit.h"
 #include "StudioList.h"
 
@@ -135,6 +136,7 @@ bool studioRemove(App::DocumentObject* entry, std::string* why)
         return false;
     }
     return edited([&] {
+        releasePiecesOf(entry);  // P6p: the parts it made go with it, or stay never live
         list->removeEntry(entry);
         if (Body* body = Body::findBodyOf(entry)) {
             body->removeObject(entry);

@@ -313,10 +313,73 @@ App::DocumentObjectExecReturn* executeStudioBoolean(Boolean& boolean)
             &boolean
         );
     }
+    // A Union's tool parts that touch none of the parts it merges stay parts (P6p, Onshape A-2'
+    // b): decided here, from every tool listed, and read by the projection after the recompute
+    // (StudioApartTools, as the part mirror's StudioConsumesSource)
+    auto apart = freecad_cast<App::PropertyStringList*>(boolean.getPropertyByName("StudioApartTools"));
+    if (!apart) {
+        apart = static_cast<App::PropertyStringList*>(boolean.addDynamicProperty(
+            "App::PropertyStringList",
+            "StudioApartTools",
+            "Studio",
+            "The Union's tool parts that touch none of the parts it merges (ops#654 P6p)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (!apart->getValues().empty()) {
+        apart->setValues(std::vector<std::string>());
+    }
     std::vector<Body*> steps;
     std::vector<Body*> tools;
     std::vector<Body*> both;
     studioBooleanParts(&boolean, steps, tools, both);
+    if (type == "Fuse" && !steps.empty() && !tools.empty()) {
+        std::vector<Part::TopoShape> merged;
+        if (Part::TopoShape first = studioBaseAt(&boolean, steps.front()); !first.isNull()) {
+            merged.push_back(first);
+        }
+        std::vector<std::pair<Body*, Part::TopoShape>> rest;
+        for (auto tool : tools) {
+            rest.emplace_back(tool, studioBaseAt(&boolean, tool));
+        }
+        auto touchesMerged = [&merged](const Part::TopoShape& shape) {
+            return std::ranges::any_of(merged, [&shape](const Part::TopoShape& other) {
+                BRepExtrema_DistShapeShape distance(shape.getShape(), other.getShape());
+                return distance.IsDone() && distance.Value() <= Precision::Confusion();
+            });
+        };
+        for (bool grew = !merged.empty(); grew;) {
+            grew = false;
+            for (auto it = rest.begin(); it != rest.end();) {
+                if (!it->second.isNull() && touchesMerged(it->second)) {
+                    merged.push_back(it->second);
+                    it = rest.erase(it);
+                    grew = true;
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+        std::vector<std::string> ids;
+        for (const auto& [tool, shape] : rest) {
+            if (!shape.isNull()) {
+                ids.push_back(studioPartId(tool));
+            }
+        }
+        if (!ids.empty() && ids.size() == tools.size()) {
+            apart->setValues(ids);  // none consumed (unverified on Onshape: loud)
+            return new App::DocumentObjectExecReturn(
+                "No tool part touches " + quotedLabel(steps.front())
+                    + ": a Union merges parts that touch",
+                &boolean
+            );
+        }
+        if (!ids.empty()) {
+            apart->setValues(ids);
+            studioBooleanParts(&boolean, steps, tools, both);
+        }
+    }
     if (!both.empty()) {
         return new App::DocumentObjectExecReturn(
             quotedLabel(both.front()) + " is a target and a tool of this Boolean",

@@ -49,6 +49,7 @@
 #include "FeatureAddSub.h"
 #include "FeaturePy.h"
 #include "FeatureSketchBased.h"
+#include "Pieces.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 
@@ -249,7 +250,10 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     const bool nothingToReach = result != StdReturn && result
         && (result->Why.find("No faces found in this direction") != std::string::npos
             || result->Why.find("Up to face: No face found") != std::string::npos);
-    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs && !owner
+    // A piece step (P6p) has nothing before it by design: it takes its piece as is
+    const bool pieceStep = body && isPieceBody(body)
+        && body->StudioMadeBy.getValue() == StudioOwner.getValue();
+    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs && !owner && !pieceStep
         && (addSubType == Type::Subtractive || emptyAdd) && getBaseTopoShape(true).isNull()) {
         if (result != StdReturn) {
             delete result;

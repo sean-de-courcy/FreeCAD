@@ -57,3 +57,5 @@ studioLiveParts = _PartDesign.studioLiveParts  # ops#654 P5, P6a
 studioSetToolIds = _PartDesign.studioSetToolIds
 studioBooleanParts = _PartDesign.studioBooleanParts
 studioConsumerOf = _PartDesign.studioConsumerOf
+studioMakePieces = _PartDesign.studioMakePieces  # ops#654 P6p
+studioPieceName = _PartDesign.studioPieceName
