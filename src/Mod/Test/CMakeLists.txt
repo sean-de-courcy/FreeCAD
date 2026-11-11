@@ -47,6 +47,7 @@ SET(Test_SRCS
     TestVariableFieldsGui.py
     TestDocumentTabs.py
     TestDocumentTabsGui.py
+    TestVariableStudioGui.py
 )
 
 SET(TestData_SRCS

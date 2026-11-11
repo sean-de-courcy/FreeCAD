@@ -151,6 +151,7 @@
 #include "ViewProviderVarSet.h"
 #include "WaitCursor.h"
 #include "Workbench.h"
+#include "VariableStudioView.h"
 #include "WorkbenchManager.h"
 #include "WorkbenchManipulator.h"
 #include "WidgetFactory.h"
@@ -2617,6 +2618,9 @@ void Application::initTypes()
     Gui::PythonBaseWorkbench                    ::init();
     Gui::PythonBlankWorkbench                   ::init();
     Gui::PythonWorkbench                        ::init();
+    // FreeCAD-CH (ops#640, tabs slice 4): a Variable Studio tab's window and tools
+    Gui::VariableStudioWorkbench                ::init();
+    Gui::VariableStudioView                     ::init();
 
     // register transaction type
     new App::TransactionProducer<TransactionViewProvider>

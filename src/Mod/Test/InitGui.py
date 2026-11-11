@@ -111,4 +111,5 @@ FreeCAD.__unit_test__ += [
     "TestVariablesGui",
     "TestVariableFieldsGui",
     "TestDocumentTabsGui",
+    "TestVariableStudioGui",
 ]

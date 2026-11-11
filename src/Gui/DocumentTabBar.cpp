@@ -65,6 +65,7 @@
 #include <Base/Tools.h>
 
 #include "DocumentTabBar.h"
+#include "VariableStudioView.h"
 #include "ActiveObjectList.h"
 #include "Application.h"
 #include "BitmapFactory.h"
@@ -1000,8 +1001,16 @@ void Controller::onViewActivated(QMdiSubWindow* window)
             active[doc] = page->second.name;
         }
         else if (auto gdoc = Application::Instance->getDocument(doc)) {
-            // A page opened otherwise than by its tab (the tree): its Drawing tab's view
+            // A page opened otherwise than by its tab (the tree): its Drawing tab's view; a
+            // Variable Studio's window, its tab's
+            auto studioView = qobject_cast<VariableStudioView*>(view);
             for (const auto& tab : AppTabs::tabs(doc)) {
+                if (studioView && tab.kind == AppTabs::Kind::VariableStudio
+                    && tab.object->getNameInDocument() == studioView->studioName()) {
+                    pageViews[view] = {QPointer<MDIView>(view), doc, tab.name()};
+                    active[doc] = tab.name();
+                    break;
+                }
                 auto vp = tab.kind == AppTabs::Kind::Drawing ? gdoc->getViewProvider(tab.object)
                                                              : nullptr;
                 if (vp && vp->getMDIView() == view) {
@@ -1084,6 +1093,8 @@ void Controller::arrive(App::Document* doc, const AppTabs::Tab& tab)
             Application::Instance->activateWorkbench("TechDrawWorkbench");
             break;
         case AppTabs::Kind::VariableStudio:
+            // Its own tools: no Part Design toolbar or Features list (tabs slice 4)
+            Application::Instance->activateWorkbench("VariableStudioWorkbench");
             break;
     }
 }
@@ -1187,16 +1198,15 @@ MDIView* Controller::showTab(App::Document* doc, const AppTabs::Tab& tab)
         active[doc] = name;
         return view;
     }
-    // A Variable Studio: the Variables panel, the VarSet selected (design T5-a)
-    if (auto dock = DockWindowManager::instance()->getDockWindow("Std_VariablesView")) {
-        if (auto dockWidget = qobject_cast<QDockWidget*>(dock->parentWidget())) {
-            dockWidget->show();
-            dockWidget->raise();
-        }
-    }
-    Selection().addSelection(doc->getName(), tab.object->getNameInDocument());
+    // A Variable Studio: its own window, the studio's table (tabs slice 4), kept with the page
+    // views so that viewOf and an activation find it
     active[doc] = name;
-    return nullptr;
+    MDIView* view = VariableStudioView::open(gdoc, tab.object);
+    if (view) {
+        pageViews[view] = {QPointer<MDIView>(view), doc, name};
+    }
+    active[doc] = name;
+    return view;
 }
 
 MDIView* Controller::viewForTab(App::Document* doc, const AppTabs::Tab& tab)
