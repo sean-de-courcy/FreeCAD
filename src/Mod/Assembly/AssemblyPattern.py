@@ -14,6 +14,8 @@
 import math
 import re
 
+import weakref
+
 import FreeCAD as App
 import Part
 
@@ -530,6 +532,34 @@ class ViewProviderInstancePattern:
         return True
 
 
+_made = weakref.WeakValueDictionary()  # id -> widget, of the widgets newWidget() handed out
+
+
+def newWidget(loader, className):
+    """loader.createWidget(className), checked. A widget the loader made for an earlier panel is
+    deleted from C++ with it while its Python wrapper may live on (the old panel still holds it):
+    a later widget that lands at the same address comes back as that very wrapper, and the
+    panel's first connect() raised "Signal source has been deleted", so a double-click on the
+    pattern row sometimes opened nothing (TestAssemblyPatternsGui, 2 in 12 under load). A wrapper
+    handed out before, or an invalid one, is set aside (kept alive, so that the address is not
+    handed out again) and the widget is made again."""
+    import shiboken6
+
+    held = []
+    for _ in range(16):
+        widget = loader.createWidget(className)
+        stale = _made.get(id(widget)) is widget
+        try:
+            valid = shiboken6.isValid(widget)
+        except RuntimeError:
+            valid = False
+        if valid and not stale:
+            _made[id(widget)] = widget
+            return widget
+        held.append(widget)
+    raise RuntimeError("the pattern panel could not make a " + className)
+
+
 def showPanel(panel):
     """Shows the pattern panel; it closes (Cancel) when its transaction or its document goes"""
     dialog = Gui.Control.showDialog(panel)
@@ -578,7 +608,7 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         loader = Gui.UiLoader()
         self.bindings = []
         if circular:
-            self.amount = loader.createWidget("Gui::QuantitySpinBox")
+            self.amount = newWidget(loader, "Gui::QuantitySpinBox")
             self.amount.setProperty("unit", "deg")
             self.bind(self.amount, "Angle")
             layout.addRow(translate("Assembly", "Angle"), self.amount)
@@ -587,14 +617,14 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
             self.equal.toggled.connect(self.onEqual)
             layout.addRow(self.equal)
         else:
-            self.amount = loader.createWidget("Gui::QuantitySpinBox")
+            self.amount = newWidget(loader, "Gui::QuantitySpinBox")
             self.amount.setProperty("unit", "mm")
             self.bind(self.amount, "Distance")
             layout.addRow(translate("Assembly", "Distance"), self.amount)
         self.amount.setObjectName("patternAmount")
         self.amount.setProperty("rawValue", pattern.Angle.Value if circular else pattern.Distance.Value)
         self.amount.valueChanged.connect(self.onAmount)
-        self.count = loader.createWidget("Gui::IntSpinBox")
+        self.count = newWidget(loader, "Gui::IntSpinBox")
         self.count.setObjectName("patternCount")
         self.count.setMinimum(1)
         self.count.setMaximum(100000)

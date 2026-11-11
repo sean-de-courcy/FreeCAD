@@ -105,6 +105,9 @@ class CommandDerivedFromFile:
         from freecad import derived
 
         doc = App.ActiveDocument
+        # The active studio is read first: the hidden read of the source file below must not
+        # decide it (Onshape: always the current Part Studio)
+        studio = _active_studio(doc)
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             Gui.getMainWindow(),
             translate("Derived", "The source document"),
@@ -125,7 +128,7 @@ class CommandDerivedFromFile:
         if not chosen:
             return
         try:
-            derived.derive_from_file(doc, _active_studio(doc), path, chosen[0], chosen[1])
+            derived.derive_from_file(doc, studio, path, chosen[0], chosen[1])
         except Exception as e:
             _error(str(e))
 
