@@ -41,6 +41,29 @@ SubShapeBinder* binderOf(const FeatureBase* member)
     return member ? freecad_cast<SubShapeBinder*>(member->BaseFeature.getValue()) : nullptr;
 }
 
+/// What a member copies: its binder, or its copy of another document's part
+App::DocumentObject* sourceHolderOf(const FeatureBase* member)
+{
+    if (auto binder = binderOf(member)) {
+        return binder;
+    }
+    auto base = member ? member->BaseFeature.getValue() : nullptr;
+    return isDerivedCopy(base) ? base : nullptr;
+}
+
+/// A dynamic string property of a derived copy, empty when it has none
+std::string copyString(const App::DocumentObject* copy, const char* name)
+{
+    auto prop = copy ? freecad_cast<App::PropertyString*>(copy->getPropertyByName(name)) : nullptr;
+    return prop ? std::string(prop->getValue()) : std::string();
+}
+
+/// Where a derived copy came from: its file and studio, the key that one Derived feature shares
+std::string copyOrigin(const App::DocumentObject* copy)
+{
+    return copyString(copy, "DerivedSourcePath") + "|" + copyString(copy, "DerivedSourceStudio");
+}
+
 /// "Derived N", the lowest N no object of doc has as its label
 std::string freeLabel(App::Document* doc)
 {
@@ -225,11 +248,55 @@ FeatureBase* addMember(App::Document* doc, App::Part* studio, Body* source, cons
     return member;
 }
 
+/// A new member labelled label in studio built on copy, a derived copy of another document's part
+/// held in studio (derived-design.md 3): its Body labelled as the source part, the copy its base
+FeatureBase* addCopyMember(App::Document* doc, App::Part* studio, Part::Feature* copy, const std::string& label)
+{
+    auto body = doc->addObject<Body>("Body");
+    if (studio) {
+        studio->addObject(body);
+    }
+    body->Label.setValue(derivedCopyLabel(copy));
+    auto member = doc->addObject<FeatureBase>("Derived");
+    member->Label.setValue(label);
+    member->DerivedFrom.setValue(derivedDescription(copy));
+    body->addObject(member);
+    body->BaseFeature.setValue(copy);
+    if (auto frame = member->sourceFrame()) {
+        member->Placement.setValue(*frame);
+    }
+    return member;
+}
+
+/// The refusals of makeDerivedCopies() and editDerivedCopies(), before anything is written
+void checkCopies(App::Document* doc, App::Part* studio, const std::vector<Part::Feature*>& copies)
+{
+    if (copies.empty()) {
+        throw Base::ValueError("Derived: choose the parts to derive");
+    }
+    for (std::size_t i = 0; i < copies.size(); ++i) {
+        Part::Feature* copy = copies[i];
+        if (!copy || !copy->isAttachedToDocument() || copy->getDocument() != doc
+            || !isDerivedCopy(copy)) {
+            throw Base::ValueError("Derived: the copies must be derived copies of this document");
+        }
+        if (App::GeoFeatureGroupExtension::getGroupOfObject(copy) != studio) {
+            throw Base::ValueError("Derived: a copy must be held by the studio it is derived into");
+        }
+        if (i > 0 && copyOrigin(copy) != copyOrigin(copies.front())) {
+            throw Base::ValueError("Derived: the parts must come from one part studio");
+        }
+        if (std::count(copies.begin(), copies.end(), copy) > 1) {
+            throw Base::ValueError("Derived: a part is chosen twice");
+        }
+    }
+}
+
 /// Removes a member, its binder and its Body when nothing else is left in it
 void removeMember(FeatureBase* member)
 {
     App::Document* doc = member->getDocument();
-    SubShapeBinder* binder = binderOf(member);
+    App::DocumentObject* binder = sourceHolderOf(member);
     Body* body = Body::findBodyOf(member);
     if (body) {
         body->removeObject(member);
@@ -300,6 +367,18 @@ std::string derivedDescription(const App::DocumentObject* source)
     if (!source) {
         return {};
     }
+    if (isDerivedCopy(source)) {
+        std::string file = copyString(source, "DerivedSourceFile");
+        if (file.empty()) {
+            file = copyString(source, "DerivedSourcePath");
+        }
+        const auto slash = file.find_last_of("/\\");
+        if (slash != std::string::npos) {
+            file = file.substr(slash + 1);
+        }
+        return derivedCopyLabel(source) + " (" + copyString(source, "DerivedSourceStudioLabel")
+            + ") in " + file;
+    }
     App::Part* studio = nullptr;
     Part::BodyBase::studioOf(Part::BodyBase::bodyOfObject(source), studio);
     return std::string(source->Label.getValue()) + " ("
@@ -350,7 +429,9 @@ App::DocumentObject* derivedSource(const FeatureBase* member)
 {
     SubShapeBinder* binder = binderOf(member);
     if (!binder) {
-        return nullptr;
+        // A copy of another document's part stands for its source (derived-design.md 3)
+        App::DocumentObject* copy = sourceHolderOf(member);
+        return copy && copy->isAttachedToDocument() ? copy : nullptr;
     }
     for (auto obj : binder->Support.getValues()) {
         if (obj && obj->isAttachedToDocument()) {
@@ -448,6 +529,103 @@ FeatureBase* editDerived(FeatureBase* lead, const std::vector<Body*>& sources)
     return newLead;
 }
 
+bool isDerivedCopy(const App::DocumentObject* obj)
+{
+    return obj && obj->isDerivedFrom<Part::Feature>() && !obj->isDerivedFrom<PartDesign::Feature>()
+        && freecad_cast<App::PropertyString*>(obj->getPropertyByName("DerivedSourcePart"));
+}
+
+std::string derivedCopyLabel(const App::DocumentObject* copy)
+{
+    std::string label = copyString(copy, "DerivedSourceLabel");
+    return label.empty() ? copyString(copy, "DerivedSourcePart") : label;
+}
+
+FeatureBase* makeDerivedCopies(App::Document* doc, App::Part* studio, const std::vector<Part::Feature*>& copies)
+{
+    if (!doc) {
+        throw Base::ValueError("Derived: no document");
+    }
+    checkCopies(doc, studio, copies);
+    const std::string label = freeLabel(doc);
+    std::vector<FeatureBase*> members;
+    for (std::size_t i = 0; i < copies.size(); ++i) {
+        const bool last = i + 1 == copies.size();
+        members.push_back(addCopyMember(
+            doc,
+            studio,
+            copies[i],
+            last ? label : label + " (" + derivedCopyLabel(copies[i]) + ")"
+        ));
+    }
+    FeatureBase* lead = members.back();
+    members.pop_back();
+    lead->DerivedParts.setValues(std::vector<App::DocumentObject*>(members.begin(), members.end()));
+    return lead;
+}
+
+FeatureBase* editDerivedCopies(FeatureBase* lead, const std::vector<Part::Feature*>& copies)
+{
+    if (!lead || !isDerived(lead) || derivedLead(lead) != lead) {
+        throw Base::ValueError("Derived: not a Derived feature");
+    }
+    Body* leadBody = Body::findBodyOf(lead);
+    App::Part* studio = nullptr;
+    if (!leadBody || !Part::BodyBase::studioOf(leadBody, studio)) {
+        throw Base::ValueError("Derived: the feature isn't in a part studio");
+    }
+    App::Document* doc = lead->getDocument();
+    checkCopies(doc, studio, copies);
+    const std::string label = lead->Label.getValue();
+    std::vector<FeatureBase*> kept;
+    std::vector<FeatureBase*> dropped;
+    std::vector<App::DocumentObject*> covered;
+    for (FeatureBase* member : derivedMembers(lead)) {
+        App::DocumentObject* source = derivedSource(member);
+        bool stays = source && std::ranges::find(copies, source) != copies.end()
+            && std::ranges::find(covered, source) == covered.end();
+        if (stays) {
+            kept.push_back(member);
+            covered.push_back(source);
+        }
+        else {
+            dropped.push_back(member);
+        }
+    }
+    if (dropped.empty() && kept.size() == copies.size()) {
+        return lead;
+    }
+    const std::size_t keptCount = kept.size();
+    for (Part::Feature* copy : copies) {
+        if (std::ranges::find(covered, copy) == covered.end()) {
+            kept.push_back(addCopyMember(doc, studio, copy, label + " (" + derivedCopyLabel(copy) + ")"));
+        }
+    }
+    // As editDerived(): the lead keeps its row, or the last member kept takes it over
+    FeatureBase* newLead = lead;
+    if (std::ranges::find(kept, lead) == kept.end()) {
+        newLead = keptCount > 0 ? kept[keptCount - 1] : kept.back();
+        setHistoryKey(newLead, historyKey(lead));
+    }
+    std::vector<App::DocumentObject*> others;
+    for (FeatureBase* member : kept) {
+        if (member != newLead) {
+            others.push_back(member);
+        }
+    }
+    if (newLead != lead) {
+        lead->DerivedParts.setValues(std::vector<App::DocumentObject*>());
+    }
+    newLead->DerivedParts.setValues(others);
+    for (FeatureBase* member : dropped) {
+        removeMember(member);
+    }
+    if (newLead != lead) {
+        newLead->Label.setValue(label);
+    }
+    return newLead;
+}
+
 void deleteDerivedParts(FeatureBase* lead)
 {
     if (!lead || !isDerived(lead)) {
@@ -464,7 +642,7 @@ void deleteDerivedParts(FeatureBase* lead)
     }
     // Lead's binder goes with lead (Std_Delete removes lead after this): taken out of the Body
     // first when lead is all it holds, so the Body can go too
-    SubShapeBinder* binder = binderOf(lead);
+    App::DocumentObject* binder = sourceHolderOf(lead);
     if (Body* body = Body::findBodyOf(lead)) {
         const auto& group = body->Group.getValues();
         if (group.size() == 1 && group.front() == lead) {

@@ -38,6 +38,7 @@
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
 #include "FeatureLoft.h"
+#include "ProfileRegions.h"
 using namespace PartDesign;
 
 PROPERTY_SOURCE(PartDesign::Loft, PartDesign::ProfileBased)
@@ -136,9 +137,62 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
                         );
     // A whole sketch gives its closed loops; open curves are ignored, as in Onshape (ops#631).
     // With no loop left, the open wires stay, and the loft refuses them as before.
-    if (useEntireSketch) {
-        if (auto loops = withoutOpenCurves(compound); !loops.isNull()) {
-            compound = loops;
+    // Loops from regions come outer wire first; the loft pairs every section's loops by role
+    // (outerLoopsFirst below), and stops where regions leave more than one hole to pair
+    bool fromRegions = false;
+    if (useEntireSketch && picksRegions(subs)) {
+        fromRegions = true;
+        // Picked regions (they were left for the whole sketch before): their faces' wires,
+        // adjacent regions merged, in the picks' order (feat/profile-regions)
+        std::vector<TopoShape> faces;
+        for (const auto& sub : subs) {
+            auto face = Part::Feature::getTopoShape(
+                obj,
+                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                    | Part::ShapeOption::Transform,
+                sub.c_str()
+            );
+            if (face.isNull() || !face.hasSubShape(TopAbs_FACE)) {
+                FC_THROWM(Part::NullShapeException, "Failed to get the region " << sub << " of " << name);
+            }
+            faces.push_back(face);
+        }
+        auto picked = Feature::makeTopoShape(obj, TopoDS_Shape(), 0, false).makeElementCompound(faces);
+        auto merged = mergeAdjacentRegions(obj, subs, picked);
+        // Several regions would pair in the picks' order with another section's sketch order:
+        // a second silent find of the pairing (review r2), so the literal rule: one region
+        if (merged.countSubShapes(TopAbs_FACE) > 1) {
+            FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
+        }
+        compound = wiresOfFaces(merged);
+    }
+    else if (useEntireSketch) {
+        WholeSketchRegions rule(obj, compound);
+        bool loopsDone = false;
+        if (rule.sameAsLoops()) {
+            try {
+                if (auto loops = withoutOpenCurves(compound); !loops.isNull()) {
+                    compound = loops;
+                }
+                loopsDone = true;
+            }
+            catch (const Base::Exception&) {
+                // Onshape's regions below
+            }
+        }
+        if (!loopsDone) {
+            // Loops that overlap, touch or nest deeper: Onshape's regions, which pair with
+            // another section's only as one loop
+            if (auto faces = rule.faces(); !faces.isNull()) {
+                fromRegions = true;
+                compound = wiresOfFaces(faces);
+                // One region with at most one hole pairs as the old loops do (outer to outer,
+                // hole to hole); more, and the face maker's order isn't the sketch's
+                if (faces.countSubShapes(TopAbs_FACE) > 1
+                    || compound.countSubShapes(TopAbs_WIRE) > 2) {
+                    FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
+                }
+            }
         }
     }
     auto wires = compound.getSubTopoShapes(TopAbs_WIRE);
@@ -155,6 +209,13 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
     if (!wires.empty()) {
         if (expected_size && expected_size != wires.size()) {
             FC_THROWM(Base::CADKernelError, msg);
+        }
+        // Outer loops first, then holes, in every section: a section of regions (outer wire
+        // first) pairs with one in the sketch's own order (feat/profile-regions review r1)
+        std::size_t holes = 0;
+        wires = outerLoopsFirst(wires, &holes);
+        if (fromRegions && holes > 1) {
+            FC_THROWM(Base::CADKernelError, name << ": " << SectionRegionsMessage);
         }
         return wires;
     }

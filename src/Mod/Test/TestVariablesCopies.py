@@ -366,16 +366,22 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(variables.InList, [])
 
     def test_bind_to_unit_named_variable(self):
-        """A document variable named like a unit (Variables.H, made from Python) can't be used
-        in an expression, even qualified: the plan says so instead of reading `H` as henry."""
+        """A document variable named like a unit (Variables.H) binds like any other: qualified,
+        an expression reads it as the variable, not as henry (rank 54; before, the plan refused
+        it, ops#652)."""
         variables = self.doc.addObject("App::VarSet", "Variables")
         variables.addProperty("App::PropertyLength", "H")
         variables.H = "5 mm"
         self.doc.recompute()
-        a = self.export("Studio A", STUDIO_A)
-        plan = copies.plan_import(self.doc, [a], bindings={"Gap": "Variables.H"})
-        self.assertTrue(any("Variables.H can't be used in an expression" in p
-                            for p in plan.problems), plan.problems)
+        a = self.export(
+            "Studio A",
+            [entry(variable("LENGTH", "Gap", "3 mm"), variable("LENGTH", "Width", "#Gap * 2"))],
+        )
+        plan = copies.plan_import(self.doc, [a], skip=["Gap"], bindings={"Gap": "Variables.H"})
+        self.assertFalse(any("Variables.H" in p for p in plan.problems), plan.problems)
+        result = copies.import_studios(self.doc, [a], skip=["Gap"], bindings={"Gap": "Variables.H"})
+        self.assertAlmostEqual(result.copies[0].Width.Value, 10)
+        self.assertEqual(result.copies[0].Bindings, {"Gap": "Variables.H"})
 
     def test_skip_and_bind(self):
         """Skip the file's Gap and bind #Gap to Variables.Gap: Width uses the document's Gap,

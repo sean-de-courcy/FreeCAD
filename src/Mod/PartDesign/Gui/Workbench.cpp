@@ -659,6 +659,8 @@ Gui::MenuItem* Workbench::setupMenuBar() const
           << "PartDesign_MergeParts"
           << "PartDesign_Split"
           << "PartDesign_Derived"
+          << "PartDesign_DerivedFromFile"  // FreeCAD-CH, notes/derived-design.md
+          << "PartDesign_DerivedRefresh"
           << "Separator"
           << "Materials_InspectAppearance"
           << "Materials_InspectMaterial"

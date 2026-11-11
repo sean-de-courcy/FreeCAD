@@ -115,13 +115,21 @@ Pocket::Pocket()
         App::Prop_None,
         "Face(s) or shape(s) where pocket will end"
     );
-    ADD_PROPERTY_TYPE(Offset, (0.0), "Side1", App::Prop_None, "Offset from face in which pocket will end");
+    ADD_PROPERTY_TYPE(
+        Offset,
+        (0.0),
+        "Side1",
+        App::Prop_None,
+        "Offset from the face, shape or vertex at which the pocket ends (any up-to type): positive "
+        "short of it, towards the profile, negative past it"
+    );
     ADD_PROPERTY_TYPE(
         Offset2,
         (0.0),
         "Side2",
         App::Prop_None,
-        "Offset from face in which pocket will end on side 2"
+        "Offset from the face, shape or vertex at which side 2 ends (any up-to type): positive "
+        "short of it, towards the profile, negative past it"
     );
     Offset.setConstraints(&signedLengthConstraint);
     Offset2.setConstraints(&signedLengthConstraint);

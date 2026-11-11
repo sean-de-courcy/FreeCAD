@@ -65,6 +65,13 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "StudioList.h"
+#include "FeatureApply.h"
+
+namespace PartDesign
+{
+void registerPartMirrorResync();  // StudioList.cpp (ops#654 slice 9; declared where used)
+}  // namespace PartDesign
 
 
 namespace PartDesign
@@ -97,6 +104,9 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::registerHistoryImport();
     // A container moved by an expression mid-recompute reruns its readers then (ops#342)
     PartDesign::registerContainerMoves();
+    // A part mirror's Add that consumes its source re-projects the list after a recompute
+    // (ops#654 slice 9)
+    PartDesign::registerPartMirrorResync();
     Base::Console().log("Loading Part Design module… done\n");
 
 
@@ -180,6 +190,9 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::AdditiveWedge               ::init();
     PartDesign::SubtractiveWedge            ::init();
     PartDesign::FeatureBase                 ::init();
+    // FreeCAD-CH ops#654: studio features
+    PartDesign::StudioList                  ::init();
+    PartDesign::FeatureApply                ::init();
 
     PartDesign::Measure ::initialize();
     // clang-format on

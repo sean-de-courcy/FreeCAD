@@ -37,6 +37,7 @@
 #include <App/PropertyLinks.h>
 #include <App/ReferenceReport.h>
 #include <App/ReferenceRepair.h>
+#include <Base/Vector3D.h>
 #include <Gui/Selection/Selection.h>
 
 #include "EnumFlags.h"
@@ -55,6 +56,11 @@ namespace PartDesignGui
 {
 
 class ReferenceFieldGroup;
+
+/// The edge at  vertex of  obj's shape nearest  click (document coordinates): `Edge7`;
+/// empty when the vertex has no edge. Onshape's Fillet takes a vertex click as its adjacent
+/// edge (selection parity P6b, oracle 8 SQ13).
+std::string nearestEdgeAt(App::DocumentObject* obj, const std::string& vertex, const Base::Vector3d& click);
 
 /** One reference property of a feature's dialog, as a list of entries (FreeCAD-CH, ops#150;
  * notes/reference-list-widget.md).
@@ -175,6 +181,10 @@ public:
         /// SingleElement: an element reads in Onshape's words, "Face of Pad", not "Pad:Face6"
         /// (the Sketch plane field, ops#640 round 6).
         bool elementWords = false;
+        /// Elements: a vertex of the target takes the adjacent edge nearest the click (Onshape's
+        /// Fillet filters vertices and picks the nearest allowed entity: selection parity P6b,
+        /// oracle 8 SQ13).
+        bool vertexToEdge = false;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =
@@ -278,6 +288,9 @@ public:
 
     /// The field armed now, if any: the selection has one gate, so there is at most one.
     static ReferenceField* armedField();
+    /// Whether a section or a profile of a loft or pipe keeps this element of a sketch: a point
+    /// (a point section) or a region (InternalFace<n>); the sketch is taken whole for any other
+    static bool keepsSketchElement(const std::string& sub);
     /// Called by the field's gate when it goes, whoever removed it.
     void gateGone();
 
@@ -495,8 +508,9 @@ public:
     /// One of the dialog's panels.
     bool isPanel(const QWidget* widget) const;
 
-    /// Arms the first empty required field (Q2), once the dialog shows.
-    void armFirstEmpty();
+    /// Arms the first empty required field (Q2), once the dialog shows; the field of
+    /// \a preferred instead, when one is enabled and not hidden (selection parity P1).
+    void armFirstEmpty(const std::string& preferred = {});
     void disarm();
     /// Called by a field about to arm: the others disarm.
     void fieldArming(ReferenceField* field);

@@ -109,11 +109,19 @@ class TestQuantityUnits(ExpressionUnitsBase):
         self.assertAlmostEqual(box.Shape.Volume, 2000.0, places=6)
 
     def testInverseLengthIsAnError(self):
-        # `3/4in` parses as 3 / (4 in), an inverse length.
+        # An inverse length in a length field is an error: `3/(4 in)`, or `3/mm`. Since rank 56
+        # `3/4in` is three quarters of an inch, as Onshape reads it (TestLiteralFractions)
         box = self.addBox()
-        box.setExpression("Length", "3/4in")
+        box.setExpression("Length", "3/(4 in)")
         self.doc.recompute()
         self.assertInvalid(box, "Unit mismatch")
+        box.setExpression("Length", "3/mm")
+        self.doc.recompute()
+        self.assertInvalid(box, "Unit mismatch")
+        box.setExpression("Length", "3/4in")
+        self.doc.recompute()
+        self.assertTrue(box.isValid())
+        self.assertAlmostEqual(box.Length.Value, 19.05, places=9)
         box.setExpression("Length", "3/4 * 1 in")
         self.doc.recompute()
         self.assertTrue(box.isValid())

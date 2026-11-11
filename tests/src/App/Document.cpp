@@ -756,7 +756,9 @@ TEST_F(RecomputeContinuationTest, withoutRuleAFailureFailsItsDependantsNamingThe
     // Act
     int count = doc()->recompute();
 
-    // Assert: none runs; each fails naming its direct input and stays touched (ops#579)
+    // Assert: none runs; each fails naming its direct input (ops#579). The failure stays touched;
+    // its dependants, stopped and judged, are left with nothing pending (round 8, J13: Onshape has
+    // no needs-recompute state)
     EXPECT_EQ(count, 3);
     EXPECT_TRUE(member->isError());
     EXPECT_TRUE(member->isTouched());
@@ -764,10 +766,19 @@ TEST_F(RecomputeContinuationTest, withoutRuleAFailureFailsItsDependantsNamingThe
                              std::pair {later, "Source1 links to 'Dependant', which has an error"}}) {
         EXPECT_EQ(obj->ExecCount.getValue(), 0);
         EXPECT_TRUE(obj->isError());
-        EXPECT_TRUE(obj->isTouched());
+        EXPECT_FALSE(obj->isTouched());
         ASSERT_NE(doc()->getErrorDescription(obj), nullptr);
         EXPECT_STREQ(doc()->getErrorDescription(obj), text);
     }
+
+    // And they run again when what stopped them is repaired: its recompute enforces its in-list
+    member->ExceptionType.setValue(0);
+    doc()->recompute();
+    for (auto obj : {member, dependant, later}) {
+        EXPECT_TRUE(obj->isValid()) << obj->getNameInDocument();
+    }
+    EXPECT_EQ(dependant->ExecCount.getValue(), 1);
+    EXPECT_EQ(later->ExecCount.getValue(), 1);
 }
 
 TEST_F(RecomputeContinuationTest, anUnclaimedFailureFailsItsDependants)
@@ -780,12 +791,13 @@ TEST_F(RecomputeContinuationTest, anUnclaimedFailureFailsItsDependants)
     // Act
     doc()->recompute();
 
-    // Assert: the rule doesn't claim Other, so its dependant fails naming it (ops#579)
+    // Assert: the rule doesn't claim Other, so its dependant fails naming it (ops#579), and is left
+    // with nothing pending (round 8, J13)
     EXPECT_TRUE(other->isError());
     EXPECT_TRUE(other->isTouched());
     EXPECT_EQ(dependant->ExecCount.getValue(), 0);
     EXPECT_TRUE(dependant->isError());
-    EXPECT_TRUE(dependant->isTouched());
+    EXPECT_FALSE(dependant->isTouched());
     ASSERT_NE(doc()->getErrorDescription(dependant), nullptr);
     EXPECT_STREQ(doc()->getErrorDescription(dependant),
                  "Source1 links to 'Other', which has an error");

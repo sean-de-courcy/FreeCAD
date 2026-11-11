@@ -151,28 +151,64 @@ public:
             }
         }
 
+        // FreeCAD-CH (ops#656 F3, Onshape SK11): a whole circle has no ends: it takes a second point,
+        // then splits into two arcs joined at both points. An ellipse still can't be split.
+        if (GeoId >= 0) {
+            const Part::Geometry* geom = sketchgui->getSketchObject()->getGeometry(GeoId);
+            if (geom->is<Part::GeomEllipse>()) {
+                Gui::NotifyUserError(
+                    sketchgui->getObject(),
+                    QT_TRANSLATE_NOOP("Notifications", "Cannot split an ellipse"),
+                    QT_TRANSLATE_NOOP(
+                        "Notifications",
+                        "An ellipse has no ends. Trim it between two crossing curves, or draw arcs."
+                    )
+                );
+                return true;
+            }
+            if (geom->is<Part::GeomCircle>() && firstGeoId != GeoId) {
+                firstGeoId = GeoId;
+                firstPoint = onSketchPos;
+                updateHint();
+                return true;
+            }
+        }
         if (GeoId >= 0) {
             try {
                 openCommand(QT_TRANSLATE_NOOP("Command", "Split edge"));
-                Gui::cmdAppObjectArgs(
-                    sketchgui->getObject(),
-                    "split(%d,App.Vector(%f,%f,0))",
-                    GeoId,
-                    onSketchPos.x,
-                    onSketchPos.y
-                );
+                if (firstGeoId == GeoId) {
+                    Gui::cmdAppObjectArgs(
+                        sketchgui->getObject(),
+                        "split(%d,App.Vector(%f,%f,0),App.Vector(%f,%f,0))",
+                        GeoId,
+                        firstPoint.x,
+                        firstPoint.y,
+                        onSketchPos.x,
+                        onSketchPos.y
+                    );
+                }
+                else {
+                    Gui::cmdAppObjectArgs(
+                        sketchgui->getObject(),
+                        "split(%d,App.Vector(%f,%f,0))",
+                        GeoId,
+                        onSketchPos.x,
+                        onSketchPos.y
+                    );
+                }
                 commitCommand();
                 tryAutoRecompute(sketchgui->getObject<Sketcher::SketchObject>());
             }
-            catch (const Base::Exception&) {
-                Gui::NotifyError(
-                    sketchgui,
-                    QT_TRANSLATE_NOOP("Notifications", "Error"),
-                    QT_TRANSLATE_NOOP("Notifications", "Failed to add edge")
+            catch (const Base::Exception& e) {
+                Gui::NotifyUserError(
+                    sketchgui->getObject(),
+                    QT_TRANSLATE_NOOP("Notifications", "Failed to split the edge"),
+                    e.what()
                 );
-
                 abortCommand();
             }
+            firstGeoId = Sketcher::GeoEnum::GeoUndef;
+            updateHint();
         }
         else {
             sketchgui->purgeHandler();
@@ -201,10 +237,18 @@ private:
 
 private:
     std::vector<Base::Vector2d> EditMarkers;
+    int firstGeoId = Sketcher::GeoEnum::GeoUndef;  // a circle waiting for its second point
+    Base::Vector2d firstPoint;
 
 public:
     std::list<Gui::InputHint> getToolHints() const override
     {
+        if (firstGeoId != Sketcher::GeoEnum::GeoUndef) {
+            return {
+                {tr("%1 select a second point to split the closed curve", "Sketcher Splitting: hint"),
+                 {Gui::InputHint::UserInput::MouseLeft}},
+            };
+        }
         return {
             {tr("%1 pick location on edge to split", "Sketcher Splitting: hint"),
              {Gui::InputHint::UserInput::MouseLeft}},

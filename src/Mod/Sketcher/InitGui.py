@@ -57,3 +57,12 @@ class SketcherWorkbench(Workbench):
 Gui.addWorkbench(SketcherWorkbench())
 
 FreeCAD.__unit_test__ += ["TestSketcherGui"]
+
+# FreeCAD-CH (the DXF lane): Insert DXF in the Sketch toolbar, Export DXF on sketches and planar
+# faces, registered at startup so that every workbench's menus have them
+try:
+    import SketcherDxfGui
+
+    SketcherDxfGui.register()
+except Exception as exc:
+    FreeCAD.Console.PrintWarning(f"Sketcher: the DXF commands are not available: {exc}\n")

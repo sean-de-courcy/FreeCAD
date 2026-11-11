@@ -182,6 +182,9 @@ class TestPipeEndNames(unittest.TestCase):
         pipe = self.body.newObject("PartDesign::" + kind, "Pipe")
         pipe.Profile = profile
         pipe.Spine = (spine, [])
+        # These pipes sweep both ways from a profile in the middle (ops#351's ends), as before
+        # Onshape's one-way default (ops#640, SW0)
+        properties.setdefault("ExtendToFullPath", True)
         for name, value in properties.items():
             setattr(pipe, name, value)
         self.doc.recompute()
@@ -3662,6 +3665,7 @@ class TestLoosePipeWarns(unittest.TestCase):
         pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
         pipe.Profile = profile
         pipe.Spine = (spine, ["Edge1"])
+        pipe.Mode = "Standard"  # not None's Frenet off a plane (ops#640), which builds it tight
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertNotIn("tolerance of", pipe.getStatusString())

@@ -17,13 +17,16 @@ Designed geometry: Body1 a 20 x 10 x 5 block (1000 mm^3) at the origin, Body2 a 
 (300 mm^3) at y = 20; a New part (a 10 x 10 x 4 block at x = 40) made from Body1. Off screen:
 QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md)."""
 
+import sys
 import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
 import PartDesign
 from PySide import QtCore, QtGui, QtWidgets
+from PySide6 import QtTest
 
+from PartDesignTests.TestDressUpDeleteKeyGui import focus
 from PartDesignTests.TestExpressionFieldsGui import taskButton
 from PartDesignTests.TestFeaturesViewGui import BAR, DEFAULT, mouse, pump, waitFor
 from PartDesignTests.TestStudioSequence import faceAt, sketch
@@ -240,6 +243,34 @@ class TestWorkflowGui(unittest.TestCase):
         self.assertEqual(len(self.deleters(body3)), 1)
         self.assertEqual(self.doc.UndoCount, undo + 1)
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1"]), self.partRows())
+
+    def testThePlatformsDeleteKeyTakesTheCurrentEntryOut(self):
+        """The delete key takes the current entry out of the list: on a Mac that key sends
+        Backspace, which is the shortcut there, as everywhere in FreeCAD (Gui::QtTools::
+        deleteKeySequence(); fn+delete, which sends Delete, isn't, ops#652). The key pressed is the
+        platform's."""
+        body3 = self.newPart()
+        self.deleteSelected(self.body2.Name, body3.Name)
+        self.waitDialog()
+        rows = self.visible(QtWidgets.QListWidget, "deletePartEntities")
+        self.assertEqual(rows.count(), 2)
+        remove = [a for a in rows.actions() if a.text() == "Remove"]
+        self.assertEqual(len(remove), 1)
+        standard = (
+            QtGui.QKeySequence.StandardKey.Backspace
+            if sys.platform == "darwin"
+            else QtGui.QKeySequence.StandardKey.Delete
+        )
+        self.assertEqual(remove[0].shortcut(), QtGui.QKeySequence(standard))
+        key = QtCore.Qt.Key_Backspace if sys.platform == "darwin" else QtCore.Qt.Key_Delete
+        rows.setCurrentRow(0)
+        kept = rows.item(1).text()
+        self.assertTrue(focus(rows))
+        # to the window, as the window system delivers it: QTest's QWidget overload skips the
+        # shortcut map (TestDressUpDeleteKeyGui.pressDelete)
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), key)
+        self.assertTrue(waitFor(lambda: self.entities() == [kept]), self.entities())
+        self.close(ok=False)
 
     def testPicksAndTheXChangeTheList(self):
         """A pick of a face adds its part, a pick of a listed part takes it out, its x takes it

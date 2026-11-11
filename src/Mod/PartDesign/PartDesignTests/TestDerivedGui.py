@@ -14,6 +14,9 @@ Designed geometry (as TestDerived): Part Studio 1 holds a Body "Box", a 10 mm cu
 (1000 mm^3), and a Body "Bar" 30 x 10 x 10 from x = 20 (3000 mm^3); Part Studio 2 is an App::Part.
 Off screen: QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md)."""
 
+import os
+import shutil
+import tempfile
 import unittest
 
 import FreeCAD as App
@@ -24,6 +27,7 @@ from PySide import QtCore, QtWidgets
 from PartDesignTests.TestDerived import boxBody
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 from PartDesignTests.TestStudioSequence import sketch
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 PARAM = "User parameter:BaseApp/Preferences/Mod/PartDesign"
 BAR = QtWidgets.QListWidgetItem.UserType + 1  # FeatureList::BarType
@@ -239,6 +243,7 @@ class TestDerivedGui(unittest.TestCase):
         self.assertTrue(waitFor(red), "the row isn't red")
         self.assertIn("Missing source part: Box (Part Studio 1)", self.featureItem("Derived 1").toolTip())
 
+    @siblingEraPath
     def testDerivedAcceptsAnOpenExtrude(self):
         """Review R6-3: with an Extrude (Pad) dialog open on a sketch of Part Studio 2's Plate,
         Derived is enabled; run, it accepts the Pad first (the plate is 20 x 10 x 10 mm, 2000
@@ -284,3 +289,63 @@ class TestDerivedGui(unittest.TestCase):
         self.assertEqual(message.text(), "Choose the parts to derive")
         self.close(ok=False)
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+
+
+class TestDerivedFromFileGui(unittest.TestCase):
+    """D1 (b2 integrator): "Derived from file" goes into the active studio. The hidden read of the
+    source file leaves no active document, so the studio must be read before it, and the caller's
+    document is active again afterwards.
+
+    Designed geometry: the source file holds Body "A", a 10 mm cube (1000 mm^3), at the top
+    level; the owner document has the App::Part "T", the active studio."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="derivedfromfile")
+        self.src = os.path.join(self.dir, "DFSource.FCStd")
+        source = App.newDocument("DFSource")
+        boxBody(source, "A", 10)
+        source.recompute()
+        source.saveAs(self.src)
+        App.closeDocument(source.Name)
+        self.doc = App.newDocument("DFOwner")
+        self.studio = self.doc.addObject("App::Part", "T")
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        Gui.ActiveDocument.ActiveView.setActiveObject("part", self.studio)
+        self.warnings = []
+        self.saved = (QtWidgets.QFileDialog.getOpenFileName, QtWidgets.QMessageBox.warning)
+        QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (self.src, ""))
+        QtWidgets.QMessageBox.warning = staticmethod(
+            lambda parent, title, text, *a: self.warnings.append(text)
+        )
+
+    def tearDown(self):
+        QtWidgets.QFileDialog.getOpenFileName, QtWidgets.QMessageBox.warning = self.saved
+        for name in list(App.listDocuments()):
+            if name.startswith("DF"):
+                App.closeDocument(name)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def testTheDerivedGoesIntoTheActiveStudio(self):
+        import DerivedFromFileGui
+
+        def accept():
+            box = QtWidgets.QApplication.activeModalWidget()
+            if box is not None:
+                box.accept()
+
+        QtCore.QTimer.singleShot(300, accept)
+        DerivedFromFileGui.CommandDerivedFromFile().Activated()
+        pump(0.5)
+        self.assertEqual(self.warnings, [])
+        self.assertIs(App.ActiveDocument, self.doc, "Expected the caller's document active again")
+        self.assertIsNotNone(Gui.ActiveDocument)
+        leads = []
+        for obj in self.doc.Objects:
+            lead = PartDesign.derivedLead(obj)
+            if lead is not None and lead not in leads:
+                leads.append(lead)
+        self.assertEqual(len(leads), 1, [o.Name for o in self.doc.Objects])
+        body = leads[0].getParentGeoFeatureGroup()
+        self.assertIs(body.getParentGeoFeatureGroup(), self.studio, "Expected the copy in studio T")
+        self.assertAlmostEqual(body.Shape.Volume, 1000, places=3)

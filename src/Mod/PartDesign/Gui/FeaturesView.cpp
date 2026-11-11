@@ -44,6 +44,7 @@
 #include <App/OriginGroupExtension.h>
 #include <App/Part.h>
 #include <App/PropertyLinks.h>
+#include <App/PropertyStandard.h>
 #include <App/SuppressibleExtension.h>
 #include <Base/Exception.h>
 #include <Gui/ActiveObjectList.h>
@@ -63,6 +64,7 @@
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
+#include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureChamfer.h>
 #include <Mod/PartDesign/App/FeatureFillet.h>
@@ -71,10 +73,23 @@
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/Studio.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "ViewProviderBody.h"
 
 using namespace PartDesignGui;
+
+namespace PartDesign
+{
+// App/StudioList.cpp (FreeCAD-CH ops#654 P6a; declared where used)
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+}  // namespace PartDesign
+
+namespace PartDesignGui
+{
+// StudioGui.cpp (ops#654 P6a): a part's name in lists, default names positional
+QString studioPartName(const PartDesign::Body* body);
+}  // namespace PartDesignGui
 
 QPointer<FeaturesView> FeaturesView::registered;
 
@@ -326,19 +341,22 @@ QIcon statusIcon(const App::DocumentObject* obj, bool held)
     return QIcon(Gui::BitmapFactory().merge(icon.pixmap(16, 16), px, Gui::BitmapFactoryInst::TopRight));
 }
 
+bool isSuppressed(const App::DocumentObject* obj)
+{
+    if (auto suppressible = obj->getExtensionByType<App::SuppressibleExtension>(true)) {
+        return suppressible->Suppressed.getValue();
+    }
+    // FreeCAD-CH ops#654 S3: a studio feature without the extension has its own Suppressed
+    auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName("Suppressed"));
+    return prop && prop->getValue();
+}
+
 /// Italic for a held object, struck through for a suppressed one, as in the tree
 QFont statusFont(QFont font, const App::DocumentObject* obj, bool held)
 {
     font.setItalic(held);
-    auto suppressible = obj->getExtensionByType<App::SuppressibleExtension>(true);
-    font.setStrikeOut(suppressible && suppressible->Suppressed.getValue());
+    font.setStrikeOut(isSuppressed(obj));
     return font;
-}
-
-bool isSuppressed(const App::DocumentObject* obj)
-{
-    auto suppressible = obj->getExtensionByType<App::SuppressibleExtension>(true);
-    return suppressible && suppressible->Suppressed.getValue();
 }
 
 /// The Merge folded into obj's row: its merge scope, the accepted one right after an Add (Onshape
@@ -392,6 +410,15 @@ const App::DocumentObject* statusObject(const App::DocumentObject* obj)
         for (auto member : foldedDerived(obj)) {
             if (member->isError()) {
                 return member;
+            }
+        }
+        // FreeCAD-CH ops#654 S3: a studio feature's row shows a failing step's status (its steps
+        // have no rows)
+        if (PartDesign::isStudioOwner(obj)) {
+            for (auto step : PartDesign::StudioList::stepsOf(obj)) {
+                if (step->isError()) {
+                    return step;
+                }
             }
         }
     }
@@ -546,8 +573,18 @@ std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* stu
                 && !isSuppressed(obj) && !feature->Shape.getShape().isNull();
         });
     };
+    // A studio with a history list (FreeCAD-CH ops#654 P6a, report 26): only the parts live at
+    // its bar, the App's one query (no part a Boolean consumed or a merge absorbed there)
+    const PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio);
+    std::vector<PartDesign::Body*> live;
+    if (list) {
+        live = PartDesign::studioLivePartsAt(list, -1);
+    }
     std::vector<App::DocumentObject*> parts;
     for (auto body : PartDesign::studioBodies(doc, studio)) {
+        if (list && std::ranges::find(live, body) == live.end()) {
+            continue;
+        }
         if (body->Tip.getValue() && !PartDesign::DeletePart::deleterOf(body) && exists(body)) {
             parts.push_back(body);
         }
@@ -698,6 +735,204 @@ App::DocumentObject* objectInEdit(App::Document* doc)
     auto gdoc = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
     auto vp = gdoc ? freecad_cast<Gui::ViewProviderDocumentObject*>(gdoc->getInEdit()) : nullptr;
     return vp ? vp->getObject() : nullptr;
+}
+
+// FreeCAD-CH ops#654 S3: the rows of a studio with a list (notes/parts-design.md 3.5) are its
+// entries: a studio feature (owner) is one row for all its steps, which have none
+
+/// The row obj is shown in: its owner's for a step, else its own
+App::DocumentObject* entryOfRow(App::DocumentObject* obj)
+{
+    if (PartDesign::StudioList::isStep(obj)) {
+        if (auto owner = static_cast<PartDesign::Feature*>(obj)->StudioOwner.getValue()) {
+            return owner;
+        }
+    }
+    return obj;
+}
+
+/// The rows of a studio with list: studioSequence() (the list's order: members, and each owner's
+/// steps) with the steps folded into their owner's row, and the owners acting on no part after the
+/// entry before them. barRow: the row the bar goes before, the first one the list's bar holds
+std::vector<App::DocumentObject*> listRows(const PartDesign::StudioList* list,
+                                           App::Document* doc,
+                                           App::Part* studio,
+                                           std::size_t& barRow)
+{
+    std::vector<App::DocumentObject*> rows;
+    std::set<const App::DocumentObject*> listed;
+    for (auto obj : PartDesign::studioSequence(doc, studio)) {
+        auto row = entryOfRow(obj);
+        if (listed.insert(row).second) {
+            rows.push_back(row);
+        }
+    }
+    std::vector<App::DocumentObject*> entries;
+    for (auto entry : list->Entries.getValues()) {
+        if (entry) {
+            entries.push_back(entry);
+        }
+    }
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (listed.count(entries[i])) {
+            continue;
+        }
+        std::size_t at = 0;
+        for (std::size_t j = i; j-- > 0;) {
+            auto it = std::ranges::find(rows, entries[j]);
+            if (it != rows.end()) {
+                at = static_cast<std::size_t>(it - rows.begin()) + 1;
+                break;
+            }
+        }
+        rows.insert(rows.begin() + static_cast<std::ptrdiff_t>(at), entries[i]);
+        listed.insert(entries[i]);
+    }
+    const int bar = std::clamp(list->barIndex(), 0, static_cast<int>(entries.size()));
+    const std::set<const App::DocumentObject*> held(entries.begin() + bar, entries.end());
+    barRow = rows.size();
+    for (std::size_t r = 0; r < rows.size(); ++r) {
+        if (held.count(rows[r])) {
+            barRow = r;
+            break;
+        }
+    }
+    return rows;
+}
+
+/// The entry at the list's bar (null at its end, or without a list): a bar or a drag moved it
+const App::DocumentObject* entryAtBar(const PartDesign::StudioList* list)
+{
+    if (!list) {
+        return nullptr;
+    }
+    const auto& entries = list->Entries.getValues();
+    const int bar = list->barIndex();
+    return bar >= 0 && bar < static_cast<int>(entries.size()) ? entries[bar] : nullptr;
+}
+
+/// The rows a menu action acts on: the selected ones, or clicked when it isn't one of them
+std::vector<App::DocumentObject*> rowsActedOn(const std::vector<App::DocumentObject*>& selected,
+                                              App::DocumentObject* clicked)
+{
+    if (!clicked || std::ranges::find(selected, clicked) != selected.end()) {
+        return selected;
+    }
+    return {clicked};
+}
+
+std::string documentCmd(const App::Document* doc)
+{
+    return std::string("App.getDocument('") + doc->getName() + "')";
+}
+
+bool anyOwner(const std::vector<App::DocumentObject*>& rows)
+{
+    return std::ranges::any_of(rows, [](const App::DocumentObject* obj) {
+        return PartDesign::isStudioOwner(obj);
+    });
+}
+
+/** Delete on rows of which one is a studio feature, in one undo step "Delete": an owner leaves the
+ * list, its steps with it (PartDesign.studioRemove), and is deleted; a Body member is deleted as
+ * Std_Delete deletes it (its view provider's onDelete(), then removeObject). Not Std_Delete itself,
+ * which would ask about the steps that read the owner. False when no row is an owner: Std_Delete
+ * runs, as before. Throws Base::Exception (an open edit, a refusal)
+ */
+bool deleteOwnerRows(App::Document* doc, const std::vector<App::DocumentObject*>& rows)
+{
+    if (!doc || !anyOwner(rows)) {
+        return false;
+    }
+    if (ViewProviderBody::isEditLocked(doc)) {
+        throw Base::RuntimeError(editLockedMessage);
+    }
+    // By name: one delete may take another row's object with it
+    std::vector<std::string> names;
+    for (auto obj : rows) {
+        names.emplace_back(obj->getNameInDocument());
+    }
+    int tid = doc->openTransaction(QT_TRANSLATE_NOOP("Command", "Delete"));
+    if (tid == 0 && doc->isStepLocked()) {
+        throw Base::RuntimeError("Finish the open dialog first");
+    }
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        for (const auto& name : names) {
+            App::DocumentObject* obj = doc->getObject(name.c_str());
+            if (!obj) {
+                continue;
+            }
+            if (PartDesign::isStudioOwner(obj)) {
+                Gui::Command::doCommand(
+                    Gui::Command::Doc,
+                    "PartDesign.studioRemove(%s)",
+                    Gui::Command::getObjectCmd(obj).c_str()
+                );
+            }
+            else if (auto vp = viewProviderOf(obj); !vp || !vp->onDelete({})) {
+                continue;
+            }
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "%s.removeObject('%s')",
+                documentCmd(doc).c_str(),
+                name.c_str()
+            );
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", documentCmd(doc).c_str());
+        App::GetApplication().commitTransaction(tid);
+    }
+    catch (const Base::Exception&) {
+        App::GetApplication().abortTransaction(tid);
+        throw;
+    }
+    return true;
+}
+
+/** Suppress or Unsuppress (on) on rows of which one is a studio feature, in one undo step: an owner
+ * by PartDesign.studioSuppress (its steps follow), a Body member by its Suppressed. False when no
+ * row is an owner: Std_ToggleSuppress runs, as before. Throws Base::Exception
+ */
+bool suppressOwnerRows(App::Document* doc, const std::vector<App::DocumentObject*>& rows, bool on)
+{
+    if (!doc || !anyOwner(rows)) {
+        return false;
+    }
+    if (ViewProviderBody::isEditLocked(doc)) {
+        throw Base::RuntimeError(editLockedMessage);
+    }
+    int tid = doc->openTransaction(
+        on ? QT_TRANSLATE_NOOP("Command", "Suppress") : QT_TRANSLATE_NOOP("Command", "Unsuppress")
+    );
+    if (tid == 0 && doc->isStepLocked()) {
+        throw Base::RuntimeError("Finish the open dialog first");
+    }
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        const char* value = on ? "True" : "False";
+        for (auto obj : rows) {
+            const std::string cmd = Gui::Command::getObjectCmd(obj);
+            if (PartDesign::isStudioOwner(obj)) {
+                Gui::Command::doCommand(
+                    Gui::Command::Doc,
+                    "PartDesign.studioSuppress(%s, %s)",
+                    cmd.c_str(),
+                    value
+                );
+            }
+            else if (freecad_cast<App::PropertyBool*>(obj->getPropertyByName("Suppressed"))) {
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.Suppressed = %s", cmd.c_str(), value);
+            }
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", documentCmd(doc).c_str());
+        App::GetApplication().commitTransaction(tid);
+    }
+    catch (const Base::Exception&) {
+        App::GetApplication().abortTransaction(tid);
+        throw;
+    }
+    return true;
 }
 
 }  // namespace
@@ -1076,6 +1311,8 @@ FeaturesView::FeaturesView(QWidget* parent)
         view->viewport()->setMouseTracking(true);
         view->viewport()->installEventFilter(this);
     }
+    // FreeCAD-CH ops#654 S3: the Delete key on a studio feature's row (eventFilter())
+    features->installEventFilter(this);
     connect(features->itemDelegate(), &QAbstractItemDelegate::closeEditor, this, &FeaturesView::endRename);
     connect(parts->itemDelegate(), &QAbstractItemDelegate::closeEditor, this, &FeaturesView::endRename);
     connect(features, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
@@ -1374,7 +1611,7 @@ void FeaturesView::onChangedObject(const App::DocumentObject& obj, const App::Pr
     bool shown = name
         && (strcmp(name, "Group") == 0 || strcmp(name, "Tip") == 0 || strcmp(name, "Label") == 0
             || strcmp(name, "Suppressed") == 0 || strcmp(name, "Visibility") == 0
-            || strcmp(name, "HistoryRank") == 0);
+            || strcmp(name, "HistoryRank") == 0 || strcmp(name, "Bar") == 0);
     if (shown || prop.isDerivedFrom<App::PropertyLinkBase>()) {
         scheduleRebuild();
     }
@@ -1498,7 +1735,12 @@ void FeaturesView::rebuildFeatures()
         editedName.clear();
         return;
     }
-    const auto sequence = PartDesign::studioSequence(doc, studio());
+    // FreeCAD-CH ops#654 S3: a studio with a list shows its entries (steps folded into their
+    // owner's row) and the list's bar; one without, the derived order and its Bodies' bars
+    const PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio());
+    std::size_t barRow = 0;
+    const auto sequence = list ? listRows(list, doc, studio(), barRow)
+                               : PartDesign::studioSequence(doc, studio());
     // Onshape's default geometry at the top (ops#640 rank 33)
     const auto defaults = defaultGeometry(doc, studio());
     // The feature being made or edited is highlighted (ops#640 rank 40)
@@ -1511,12 +1753,13 @@ void FeaturesView::rebuildFeatures()
         folded.push_back(isFoldedMerge(obj) || isFoldedDerived(obj));
     }
     const auto shown = static_cast<int>(std::ranges::count(folded, false));
-    App::DocumentObject* hint = barHint.empty() ? nullptr : doc->getObject(barHint.c_str());
-    bool hinted = barHinted && (barHint.empty() || hint);
-    App::DocumentObject* after = PartDesign::studioBarAfter(sequence, hinted, hint);
-    std::size_t barRow = 0;
-    if (after) {
-        barRow = static_cast<std::size_t>(std::ranges::find(sequence, after) - sequence.begin()) + 1;
+    if (!list) {
+        App::DocumentObject* hint = barHint.empty() ? nullptr : doc->getObject(barHint.c_str());
+        bool hinted = barHinted && (barHint.empty() || hint);
+        App::DocumentObject* after = PartDesign::studioBarAfter(sequence, hinted, hint);
+        if (after) {
+            barRow = static_cast<std::size_t>(std::ranges::find(sequence, after) - sequence.begin()) + 1;
+        }
     }
     // The header: the count, and the error icon while some row above the bar fails (the rows
     // below it are grey, not evaluated: review R6-5)
@@ -1559,7 +1802,8 @@ void FeaturesView::rebuildFeatures()
         else if (pastBar) {
             const App::DocumentObject* obj = sequence[index];
             auto body = PartDesign::Body::findBodyOf(obj);
-            below[index] = !(body && PartDesign::Body::isSolidFeature(obj) && !body->holds(obj));
+            // With a list, every row below its bar is held (ops#654 S3)
+            below[index] = list || !(body && PartDesign::Body::isSolidFeature(obj) && !body->holds(obj));
         }
     }
     for (const auto& [obj, label] : defaults) {
@@ -1580,6 +1824,12 @@ void FeaturesView::rebuildFeatures()
         }
         for (auto member : foldedDerived(obj)) {
             extra += '\x1e' + rowKey(member, false);
+        }
+        // A studio feature's steps: their status shows on its row (ops#654 S3)
+        if (PartDesign::isStudioOwner(obj)) {
+            for (auto step : PartDesign::StudioList::stepsOf(obj)) {
+                extra += '\x1e' + rowKey(step, false);
+            }
         }
         extra += '\x1d' + std::to_string(eyeState(obj));
         if (obj == inEdit) {
@@ -1763,7 +2013,8 @@ void FeaturesView::rebuildParts()
     std::set<QString> taken;
     for (std::size_t i = 0; i < objs.size(); ++i) {
         if (!pieces[i]) {
-            taken.insert(QString::fromUtf8(objs[i]->Label.getValue()));
+            auto part = freecad_cast<PartDesign::Body*>(objs[i]);
+            taken.insert(part ? studioPartName(part) : QString::fromUtf8(objs[i]->Label.getValue()));
         }
     }
     auto nextPartName = [&taken]() {
@@ -1779,8 +2030,9 @@ void FeaturesView::rebuildParts()
         auto body = freecad_cast<PartDesign::Body*>(obj);
         bool held = body && body->isRolledBack();
         auto item = inPlace ? parts->topLevelItem(static_cast<int>(i)) : new QTreeWidgetItem(parts);
-        // A later piece names its Body: its rename is the first row's
-        const QString label = QString::fromUtf8(obj->Label.getValue());
+        // A later piece names its Body: its rename is the first row's. A default name is
+        // positional in a listed studio, as Onshape renumbers it (ops#654 P6a)
+        const QString label = body ? studioPartName(body) : QString::fromUtf8(obj->Label.getValue());
         if (pieces[i]) {
             item->setFlags(item->flags() & ~Qt::ItemIsEditable);
             item->setText(0, partNumbers ? nextPartName()
@@ -1820,6 +2072,32 @@ App::DocumentObject* FeaturesView::memberOf(const QListWidgetItem* item) const
 
 bool FeaturesView::eventFilter(QObject* watched, QEvent* event)
 {
+    // FreeCAD-CH ops#654 S3: Delete on selected rows with a studio feature is the list's delete
+    // (deleteOwnerRows()), taken from Std_Delete's shortcut, which would ask about its steps
+    if (watched == features
+        && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
+        auto key = static_cast<QKeyEvent*>(event);
+        if (key->key() == Qt::Key_Delete && key->modifiers() == Qt::NoModifier) {
+            std::vector<App::DocumentObject*> rows;
+            for (auto item : features->selectedItems()) {
+                if (auto obj = memberOf(item)) {
+                    rows.push_back(obj);
+                }
+            }
+            if (anyOwner(rows)) {
+                event->accept();
+                if (event->type() == QEvent::KeyPress) {
+                    try {
+                        deleteOwnerRows(document(), rows);
+                    }
+                    catch (const Base::Exception& e) {
+                        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
+                    }
+                }
+                return true;
+            }
+        }
+    }
     const bool overFeatures = watched == features->viewport();
     if (watched == assemblyList->viewport()) {
         if (event->type() == QEvent::MouseMove) {
@@ -1976,9 +2254,17 @@ void FeaturesView::syncSelectionFromApp()
         return;
     }
     std::set<std::string> selected;
+    // A face, edge or vertex picked highlights its part's row too (selection parity, Onshape SQ6);
+    // a whole feature picked doesn't (review props602s-r1, finding 1)
+    std::set<std::string> partsOfPicks;
     for (const auto& sel : Gui::Selection().getSelection(doc->getName())) {
         if (sel.pObject && sel.pObject->isAttachedToDocument()) {
             selected.insert(sel.pObject->getNameInDocument());
+            if (sel.SubName && sel.SubName[0]) {
+                if (auto body = PartDesign::Body::findBodyOf(sel.pObject)) {
+                    partsOfPicks.insert(body->getNameInDocument());
+                }
+            }
         }
     }
     // Only the rows that differ: setSelected() on a row commits the range a Shift+click is still
@@ -1998,7 +2284,8 @@ void FeaturesView::syncSelectionFromApp()
     }
     for (int i = 0; i < parts->topLevelItemCount(); ++i) {
         auto item = parts->topLevelItem(i);
-        bool want = selected.count(item->data(0, Qt::UserRole).toByteArray().toStdString()) > 0;
+        const std::string name = item->data(0, Qt::UserRole).toByteArray().toStdString();
+        bool want = selected.count(name) > 0 || partsOfPicks.count(name) > 0;
         if (item->isSelected() != want) {
             item->setSelected(want);
         }
@@ -2043,6 +2330,11 @@ void FeaturesView::rollStudio(App::Document* doc, App::Part* studio, App::Docume
     }
     try {
         Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        // FreeCAD-CH ops#654 S3: the bar is the studio's list's, made from the derived order the
+        // first time (in this step: undone with it)
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioList(%s, True)", studioCmd.c_str());
+        const PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio);
+        const App::DocumentObject* oldBar = entryAtBar(list);
         if (toEnd) {
             Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.rollStudioToEnd(%s)", studioCmd.c_str());
         }
@@ -2055,7 +2347,9 @@ void FeaturesView::rollStudio(App::Document* doc, App::Part* studio, App::Docume
                 memberCmd.c_str()
             );
         }
-        if (!showMovedTips(bodies, oldTips)) {
+        // The list's bar may move past a sketch, no Tip with it
+        bool tipsMoved = showMovedTips(bodies, oldTips);
+        if (!tipsMoved && entryAtBar(list) == oldBar) {
             App::GetApplication().abortTransaction(tid);
             return;
         }
@@ -2221,7 +2515,6 @@ void FeaturesView::moveRows(App::Document* doc,
     for (auto body : bodies) {
         oldTips.push_back(body->Tip.getValue());
     }
-    const auto oldSequence = PartDesign::studioSequence(doc, studio);
     auto objCmd = [](App::DocumentObject* obj) {
         return obj ? Gui::Command::getObjectCmd(obj) : std::string("None");
     };
@@ -2241,6 +2534,13 @@ void FeaturesView::moveRows(App::Document* doc,
     }
     try {
         Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        // FreeCAD-CH ops#654 S3: a drag of the studio's list's entries (the list made from the
+        // derived order the first time, in this step)
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioList(%s, True)", studioCmd.c_str());
+        const PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio);
+        const auto oldSequence = PartDesign::studioSequence(doc, studio);
+        const auto oldEntries = list ? list->Entries.getValues() : std::vector<App::DocumentObject*>();
+        const App::DocumentObject* oldBar = entryAtBar(list);
         Gui::Command::doCommand(
             Gui::Command::Doc,
             "PartDesign.moveInStudio(%s, %s, %s%s)",
@@ -2250,7 +2550,19 @@ void FeaturesView::moveRows(App::Document* doc,
             barCmd.c_str()
         );
         bool tipsMoved = showMovedTips(bodies, oldTips);
-        if (!tipsMoved && PartDesign::studioSequence(doc, studio) == oldSequence) {
+        bool listMoved = list && (list->Entries.getValues() != oldEntries || entryAtBar(list) != oldBar);
+        // FreeCAD-CH ops#654 P6p: a moved studio feature or pattern that now splits a part, or
+        // leaves a solid outside its scope, makes them parts, in this step (Onshape H2)
+        if (listMoved) {
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "for _o in %s:\n"
+                "    if PartDesign.studioScopeIds(_o) or _o.isDerivedFrom('PartDesign::Transformed'):\n"
+                "        PartDesign.studioMakePieces(_o)",
+                rowsCmd.c_str()
+            );
+        }
+        if (!tipsMoved && !listMoved && PartDesign::studioSequence(doc, studio) == oldSequence) {
             App::GetApplication().abortTransaction(tid);
             return;
         }
@@ -2311,6 +2623,28 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     auto runByName = [](const char* command) {
         Gui::Application::Instance->commandManager().runCommandByName(command);
     };
+    // FreeCAD-CH ops#654 S3: Suppress and Delete act on the selected rows, or the clicked one; on a
+    // studio feature, through its list (its steps with it), in one undo step
+    std::vector<App::DocumentObject*> selected;
+    for (auto selectedItem : features->selectedItems()) {
+        if (auto member = memberOf(selectedItem)) {
+            selected.push_back(member);
+        }
+    }
+    std::vector<std::string> actedOn;
+    for (auto row : rowsActedOn(selected, memberOf(item))) {
+        actedOn.emplace_back(row->getNameInDocument());
+    }
+    auto rowsNamed = [self, actedOn]() {
+        std::vector<App::DocumentObject*> rows;
+        auto doc = self ? self->document() : nullptr;
+        for (const auto& rowName : actedOn) {
+            if (auto row = doc ? doc->getObject(rowName.c_str()) : nullptr) {
+                rows.push_back(row);
+            }
+        }
+        return rows;
+    };
     QMenu menu(this);
     if (item->data(FeatureList::DefaultRole).toBool()) {
         // A default geometry row: Show/Hide only, as Onshape's
@@ -2359,9 +2693,19 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     menu.addSeparator();
     auto show = menu.addAction(tr("Show/Hide"), [runByName]() { runByName("Std_ToggleVisibility"); });
     show->setObjectName(QStringLiteral("featureToggleVisibility"));
+    const bool suppressOn = !isSuppressed(obj);
     auto suppress = menu.addAction(
         isSuppressed(obj) ? tr("Unsuppress") : tr("Suppress"),
-        [runByName]() { runByName("Std_ToggleSuppress"); }
+        [self, runByName, rowsNamed, suppressOn]() {
+            try {
+                if (!self || !suppressOwnerRows(self->document(), rowsNamed(), suppressOn)) {
+                    runByName("Std_ToggleSuppress");
+                }
+            }
+            catch (const Base::Exception& e) {
+                Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
+            }
+        }
     );
     suppress->setObjectName(QStringLiteral("featureToggleSuppress"));
     auto dependencies = menu.addAction(tr("Show dependencies"), [self, name]() {
@@ -2374,7 +2718,16 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
     fit->setObjectName(QStringLiteral("featureZoom"));
     menu.addSeparator();
-    auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
+    auto remove = menu.addAction(tr("Delete"), [self, runByName, rowsNamed]() {
+        try {
+            if (!self || !deleteOwnerRows(self->document(), rowsNamed())) {
+                runByName("Std_Delete");
+            }
+        }
+        catch (const Base::Exception& e) {
+            Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
+        }
+    });
     remove->setObjectName(QStringLiteral("featureDelete"));
     menu.exec(features->viewport()->mapToGlobal(pos));
 }
@@ -2383,20 +2736,35 @@ void FeaturesView::showDependencies(App::DocumentObject* obj)
 {
     // Onshape's Show dependencies: the feature's parents (what it uses) and children (what uses
     // it), marked in the list until the selection changes. The base a feature is merged with is
-    // the history's order, not a parent, as Onshape's merge scope
-    auto reads = [](const App::DocumentObject* reader) {
-        std::vector<App::DocumentObject*> found;
+    // the history's order, not a parent, as Onshape's merge scope. FreeCAD-CH ops#654 S3: nor
+    // the other links the list's order writes (an owner's in-scope bases, a step's owner); a
+    // studio feature reads, and is read, with its steps, each read as its row
+    auto linksOf = [](const App::DocumentObject* reader, std::vector<App::DocumentObject*>& found) {
         std::vector<App::Property*> props;
         reader->getPropertyList(props);
         for (auto prop : props) {
             auto link = freecad_cast<App::PropertyLinkBase*>(prop);
             const char* name = prop->getName();
-            if (!link || !name || strcmp(name, "BaseFeature") == 0) {
+            if (!link || !name || strcmp(name, "BaseFeature") == 0 || strcmp(name, "StudioBases") == 0
+                || strcmp(name, "StudioOwner") == 0) {
                 continue;
             }
             std::vector<App::DocumentObject*> objs;
             link->getLinks(objs);
-            found.insert(found.end(), objs.begin(), objs.end());
+            for (auto read : objs) {
+                if (read) {
+                    found.push_back(entryOfRow(read));
+                }
+            }
+        }
+    };
+    auto reads = [&linksOf](const App::DocumentObject* reader) {
+        std::vector<App::DocumentObject*> found;
+        linksOf(reader, found);
+        if (PartDesign::isStudioOwner(reader)) {
+            for (auto step : PartDesign::StudioList::stepsOf(reader)) {
+                linksOf(step, found);
+            }
         }
         return found;
     };
@@ -2405,7 +2773,11 @@ void FeaturesView::showDependencies(App::DocumentObject* obj)
     QStringList parentLabels;
     QStringList childLabels;
     auto doc = document();
-    const auto sequence = doc ? PartDesign::studioSequence(doc, studio()) : std::vector<App::DocumentObject*>();
+    const PartDesign::StudioList* list = doc ? PartDesign::StudioList::of(doc, studio()) : nullptr;
+    std::size_t barRow = 0;
+    const auto sequence = !doc ? std::vector<App::DocumentObject*>()
+        : list                 ? listRows(list, doc, studio(), barRow)
+                               : PartDesign::studioSequence(doc, studio());
     auto member = [&sequence](const App::DocumentObject* other) {
         return std::ranges::find(sequence, other) != sequence.end();
     };

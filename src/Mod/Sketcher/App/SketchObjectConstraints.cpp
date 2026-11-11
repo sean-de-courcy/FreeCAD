@@ -78,6 +78,32 @@ void SketchObject::retrieveSolverDiagnostics()
     lastMalformedConstraints = solvedSketch.getMalformedConstraints();
 }
 
+// FreeCAD-CH (ops#656): whether a Midpoint's point is off the middle of its arc as written
+// (counterclockwise from the start to the end angle)
+static bool midpointsOffTheirArcs(const SketchObject& sketch)
+{
+    for (const Constraint* c : sketch.Constraints.getValues()) {
+        if (c->Type != Midpoint) {
+            continue;
+        }
+        const Part::Geometry* geo = sketch.getGeometry(c->Second);
+        if (!geo || !geo->is<Part::GeomArcOfCircle>()) {
+            continue;
+        }
+        const auto* arc = static_cast<const Part::GeomArcOfCircle*>(geo);
+        double first = 0.0;
+        double last = 0.0;
+        arc->getRange(first, last, /*emulateCCWXY=*/true);
+        const double angle = (first + last) / 2.0;
+        const Base::Vector3d middle = arc->getCenter()
+            + Base::Vector3d(std::cos(angle), std::sin(angle), 0.0) * arc->getRadius();
+        if ((sketch.getPoint(c->First, c->FirstPos) - middle).Length() > 1e-6) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 {
     // no need to check input data validity as this is an sketchobject managed operation.
@@ -137,6 +163,23 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         if (lastSolverStatus != 0) {// solving
             err = -1;
         }
+        else if (err == -2) {
+            // FreeCAD-CH (ops#656): a constraint that repeats what the others impose, and agrees
+            // with them, is accepted as Onshape accepts it: the solve is a success (the geometry
+            // is written, a dimension can be set, the recompute goes on), and the diagnosis still
+            // names the repeated constraints. The solver leaves them out of the solve, so each
+            // must hold at the solution; one that does not is a contradiction and stays an error.
+            // The bar is 1e-7 (mm or rad), well under the solver's own 1e-5: an angle 1e-6 rad
+            // off is 4 um at 4 m and is refused, as a conflict would be (skeptic, 11-10).
+            const bool allHold =
+                std::all_of(lastRedundant.begin(), lastRedundant.end(), [&](int tag) {
+                    const double residual = solvedSketch.calculateConstraintError(tag);
+                    return std::abs(residual) < 1e-7;  // false for NaN
+                });
+            if (allHold) {
+                err = 0;
+            }
+        }
     }
 
     if (lastHasMalformedConstraints) {
@@ -177,6 +220,17 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
             Part::PropertyGeometryList tmp;
             tmp.setValues(std::move(geomlist));
             Geometry.moveValues(std::move(tmp));
+
+            // FreeCAD-CH (ops#656): a solve that takes an arc's sweep through 0 (an Angle on the
+            // arc is solved modulo 2 pi: 270 -> 72 degrees can land on -288) leaves a Midpoint's
+            // point on the far side once the arc is written counterclockwise. Solve once more
+            // from the written geometry, where the Midpoint's unknowns start at the arc's middle
+            // (what the next recompute would do).
+            static thread_local bool solvingAgain = false;
+            if (!solvingAgain && midpointsOffTheirArcs(*this)) {
+                Base::StateLocker again(solvingAgain, true);
+                return solve(true);
+            }
         }
     }
 
@@ -1342,7 +1396,8 @@ int SketchObject::delConstraintOnPoint(int geoId, PointPos posId, bool onlyCoinc
                     || transferToReplacement(constr->Second, constr->SecondPos)
                 );
             }
-            case Sketcher::PointOnObject: {
+            case Sketcher::PointOnObject:
+            case Sketcher::Midpoint: {  // FreeCAD-CH (ops#656): as Point on object
                 return transferToReplacement(constr->First, constr->FirstPos);
             }
             case Sketcher::Tangent:
@@ -1738,6 +1793,52 @@ std::optional<size_t> findPieceContainingPoint(
     return std::nullopt;
 }
 
+// FreeCAD-CH (ops#656): the pieces of a line or of a conic share their carrier (the infinite line, the
+// full circle or ellipse): Trim and Split tie them (collinear, or the same centre and radii), and the
+// solver measures curve-level constraints (point on object, distances, tangency) on the carrier. A
+// constraint on such a curve can go to any piece and keeps measuring the same thing.
+static bool piecesShareCarrier(const Part::Geometry* geo)
+{
+    // Only the curves whose pieces are tied: parabolas and hyperbolas aren't (yet).
+    return geo->is<Part::GeomLineSegment>() || geo->isDerivedFrom<Part::GeomCircle>()
+        || geo->isDerivedFrom<Part::GeomArcOfCircle>() || geo->isDerivedFrom<Part::GeomEllipse>()
+        || geo->isDerivedFrom<Part::GeomArcOfEllipse>();
+}
+
+// FreeCAD-CH (ops#656): the piece that holds `point`'s projection onto the old curve, or else the piece
+// with an end nearest to that projection (the point lies on the part a Trim removed).
+static size_t nearestPiece(
+    const SketchObject* obj,
+    const Part::Geometry* geo,
+    const Base::Vector3d& point,
+    const std::vector<int>& newIds,
+    const std::vector<const Part::Geometry*>& newGeos
+)
+{
+    if (auto idx = findPieceContainingPoint(obj, geo, point, newIds, newGeos)) {
+        return idx.value();
+    }
+    auto* geoAsCurve = static_cast<const Part::GeomCurve*>(geo);
+    double param {};
+    geoAsCurve->closestParameter(point, param);
+    const Base::Vector3d onCurve = geoAsCurve->pointAtParameter(param);
+    size_t best = 0;
+    double bestDistance = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < newGeos.size(); ++i) {
+        auto* piece = static_cast<const Part::GeomCurve*>(newGeos[i]);
+        for (const auto& end :
+             {piece->pointAtParameter(piece->getFirstParameter()),
+              piece->pointAtParameter(piece->getLastParameter())}) {
+            const double d = (end - onCurve).Length();
+            if (d < bestDistance) {
+                bestDistance = d;
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
 bool SketchObject::deriveConstraintsForPieces(
     const int oldId,
     const std::vector<int>& newIds,
@@ -1834,6 +1935,16 @@ bool SketchObject::deriveConstraintsForPieces(
                     return true;
                 }
             }
+            // FreeCAD-CH (ops#656): a tangency that touches none of the pieces (the touching point was
+            // on the removed part, or the intersection of tangent curves isn't found numerically)
+            // still holds on the carrier the pieces share: keep it on the first piece, don't drop it.
+            if (piecesShareCarrier(geo) && con->FirstPos == PointPos::none
+                && con->SecondPos == PointPos::none) {
+                Constraint* trans = con->copy();
+                trans->substituteIndex(oldId, newIds.front());
+                newConstraints.push_back(trans);
+                return true;
+            }
         } break;
         case Angle: {
             const auto [thirdGeo, thirdPos] = con->getElement(2);
@@ -1896,15 +2007,35 @@ bool SketchObject::deriveConstraintsForPieces(
         case DistanceY:
         case Coincident:
         case PointOnObject: {
-            if (con->FirstPos == PointPos::none && con->SecondPos == PointPos::none
-                && newIds.size() > 1) {
-                Constraint* dist = con->copy();
-                dist->First = newIds.front();
-                dist->FirstPos = PointPos::start;
-                dist->Second = newIds.back();
-                dist->SecondPos = PointPos::end;
-                newConstraints.push_back(dist);
-                return true;
+            if (con->FirstPos == PointPos::none && con->SecondPos == PointPos::none) {
+                if (con->Second != GeoEnum::GeoUndef) {
+                    // FreeCAD-CH (ops#656, report 27): a dimension between two whole curves (a
+                    // concentric offset, a circle-to-line distance) stays one between whole curves,
+                    // on one piece: the pieces share the carrier the solver measures on. It used to
+                    // become "first piece's start to last piece's end", a different dimension.
+                    if (!piecesShareCarrier(geo)) {
+                        return false;
+                    }
+                    Constraint* trans = con->copy();
+                    trans->substituteIndex(oldId, newIds.front());
+                    newConstraints.push_back(trans);
+                    return true;
+                }
+                if (newIds.size() > 1) {
+                    // A curve's own length. For a line, the length between the outer ends of its
+                    // pieces is still the old line's length. An arc's length has no equivalent on its
+                    // pieces: drop it, visibly, rather than turn it into a chord.
+                    if (!geo->is<Part::GeomLineSegment>()) {
+                        return false;
+                    }
+                    Constraint* dist = con->copy();
+                    dist->First = newIds.front();
+                    dist->FirstPos = PointPos::start;
+                    dist->Second = newIds.back();
+                    dist->SecondPos = PointPos::end;
+                    newConstraints.push_back(dist);
+                    return true;
+                }
             }
 
             if (conId == GeoEnum::GeoUndef || newGeosLikelyNotCreated) {
@@ -1913,6 +2044,18 @@ bool SketchObject::deriveConstraintsForPieces(
             }
 
             Base::Vector3d conPoint(getPoint(conId, conPos));
+            if (piecesShareCarrier(geo)) {
+                // FreeCAD-CH (ops#656): a point on (or a distance to) a line or conic holds on the
+                // carrier: keep it on the piece nearest the point, even when the point lies on the
+                // part a Trim removed, instead of letting the point come loose.
+                Constraint* trans = con->copy();
+                trans->First = conId;
+                trans->FirstPos = conPos;
+                trans->Second = newIds[nearestPiece(this, geo, conPoint, newIds, newGeos)];
+                trans->SecondPos = PointPos::none;
+                newConstraints.push_back(trans);
+                return true;
+            }
             double conParam;
             auto* geoAsCurve = static_cast<const Part::GeomCurve*>(geo);
             geoAsCurve->closestParameter(conPoint, conParam);
@@ -1951,7 +2094,29 @@ bool SketchObject::deriveConstraintsForPieces(
                 Constraint* trans = con->copy();
                 trans->substituteIndex(oldId, newIds.front());
                 newConstraints.push_back(trans);
-                break;
+                return true;  // FreeCAD-CH (ops#656): carried, not released
+            }
+        } break;
+        case Block: {
+            // FreeCAD-CH (ops#656): a Blocked curve's pieces stay Blocked (they used to come loose).
+            // Each piece needs its own Block: the ties between the pieces don't fix them.
+            for (auto& newId : newIds) {
+                Constraint* trans = con->copy();
+                trans->substituteIndex(oldId, newId);
+                newConstraints.push_back(trans);
+            }
+            return true;
+        }
+        case Symmetric: {
+            // FreeCAD-CH (ops#656): two points symmetric about a line that is cut stay symmetric
+            // about its carrier (the pieces of a line are collinear).
+            const auto [thirdGeo, thirdPos] = con->getElement(2);
+            if (thirdGeo == oldId && thirdPos == PointPos::none && geo->is<Part::GeomLineSegment>()
+                && con->getElement(0).GeoId != oldId && con->getElement(1).GeoId != oldId) {
+                Constraint* trans = con->copy();
+                trans->substituteIndex(oldId, newIds.front());
+                newConstraints.push_back(trans);
+                return true;
             }
         } break;
         default:
@@ -2432,6 +2597,7 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
             break;
         case Tangent:
         case Group:
+        case Midpoint:
             requireSecond = true;
             break;
         case Symmetric:

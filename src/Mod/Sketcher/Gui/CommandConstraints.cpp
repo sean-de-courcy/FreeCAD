@@ -12251,10 +12251,12 @@ void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std:
             return;
         }
         const Part::Geometry* geom = Obj->getGeometry(line.GeoId);
-        if (!geom || !isLineSegment(*geom)) {
+        const bool arc = geom && geom->is<Part::GeomArcOfCircle>();  // FreeCAD-CH (ops#656)
+        if (!geom || (!isLineSegment(*geom) && !arc)) {
             wrongSelection(Obj,
-                           QObject::tr("The midpoint can only be taken of a line. Select a point "
-                                       "and a line, or two points and then the midpoint."));
+                           QObject::tr("The midpoint can only be taken of a line or an arc. Select "
+                                       "a point and a line or arc, or two points and then the "
+                                       "midpoint."));
             return;
         }
         if (point.GeoId == line.GeoId) {
@@ -12271,9 +12273,19 @@ void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std:
         // (0,0)-(10,4) and the point (3,7) met at (4.39, 3.52)): place the point first, by the
         // solver with the sketch's other constraints kept, then the constraint has nothing to
         // move. A fixed point (external, the origin) cannot go: the line is slid onto it.
-        const Base::Vector3d middle = (Obj->getPoint(line.GeoId, Sketcher::PointPos::start)
-                                       + Obj->getPoint(line.GeoId, Sketcher::PointPos::end))
+        Base::Vector3d middle = (Obj->getPoint(line.GeoId, Sketcher::PointPos::start)
+                                 + Obj->getPoint(line.GeoId, Sketcher::PointPos::end))
             * 0.5;
+        if (arc) {
+            // the middle of the arc itself, at the mean of its end angles (not of its chord)
+            const auto* aoc = static_cast<const Part::GeomArcOfCircle*>(geom);
+            double first = 0.0;
+            double last = 0.0;
+            aoc->getRange(first, last, /*emulateCCWXY=*/true);
+            const double angle = (first + last) / 2.0;
+            middle = aoc->getCenter()
+                + Base::Vector3d(std::cos(angle), std::sin(angle), 0.0) * aoc->getRadius();
+        }
         if (!isPointOrSegmentFixed(Obj, point.GeoId)) {
             placePointForMidpoint(Obj, point.GeoId, point.PosId, middle, false);
         }
@@ -12284,14 +12296,24 @@ void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std:
                                   Obj->getPoint(point.GeoId, point.PosId) - middle,
                                   true);
         }
-        Gui::cmdAppObjectArgs(Obj,
-                              "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d,%d))",
-                              line.GeoId,
-                              static_cast<int>(Sketcher::PointPos::start),
-                              line.GeoId,
-                              static_cast<int>(Sketcher::PointPos::end),
-                              point.GeoId,
-                              static_cast<int>(point.PosId));
+        if (arc) {
+            // FreeCAD-CH (ops#656): Sketcher's Midpoint keeps the point at the arc's middle
+            Gui::cmdAppObjectArgs(Obj,
+                                  "addConstraint(Sketcher.Constraint('Midpoint',%d,%d,%d))",
+                                  point.GeoId,
+                                  static_cast<int>(point.PosId),
+                                  line.GeoId);
+        }
+        else {
+            Gui::cmdAppObjectArgs(Obj,
+                                  "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d,%d))",
+                                  line.GeoId,
+                                  static_cast<int>(Sketcher::PointPos::start),
+                                  line.GeoId,
+                                  static_cast<int>(Sketcher::PointPos::end),
+                                  point.GeoId,
+                                  static_cast<int>(point.PosId));
+        }
     }
     else if (picks.size() == 3) {
         for (const SelIdPair& pick : picks) {

@@ -117,6 +117,14 @@ using namespace App;
 using namespace boost;
 using namespace zipios;
 
+namespace App
+{
+// FreeCAD-CH (ops#652): defined in PropertyLinks.cpp, used only here (declared here, not in
+// ElementReferences.h, to keep App's headers as they are): takes the records of the references
+// into an object the recompute stopped, before the rule's afterStop() clears its shape.
+void takeElementReferencesInto(DocumentObject* target);
+}  // namespace App
+
 namespace
 {
 // The fork's naming revision (ops#103), in every V2 element map version. Bump it in any change
@@ -2234,7 +2242,10 @@ void Document::Save(Base::Writer& writer) const
              << Application::Config()["BuildVersionMajor"] << "."
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << "\" FileVersion=\""
-             << writer.getFileVersion() << "\" StringHasher=\"1\"";
+             << writer.getFileVersion() << "\" StringHasher=\"1\""
+             // The highest object ID ever given (FreeCAD-CH ops#657): a reopened document never
+             // gives a deleted object's ID again, which a stored reference by ID would re-bind to
+             << " LastObjectId=\"" << d->lastObjectId << '"';
     // The fork release of the build that writes it (ops#323). A recovery snapshot of a newer
     // document keeps it newer (writer mode "ForkRecovery", set by RecoverySnapshot.cpp): the
     // recovered document reopens at the original path, and its first save must still ask (PR 293
@@ -2342,6 +2353,9 @@ void Document::Restore(Base::XMLReader& reader)
     else {
         reader.FileVersion = 0;
     }
+    // ops#657: the saved high-water object ID (none before it)
+    const long savedLastObjectId =
+        reader.hasAttribute("LastObjectId") ? reader.getAttribute<long>("LastObjectId") : 0;
     // The naming revision of its references (ops#116): none in files saved before, so 0
     // (an unreadable one is newer, noted below: no migration)
     auto& namingRevision = documentNamingRevisions[this];
@@ -2437,6 +2451,9 @@ void Document::Restore(Base::XMLReader& reader)
     else if (scheme >= 3) {
         // read the feature types
         readObjects(reader);
+        if (savedLastObjectId > d->lastObjectId) {
+            d->lastObjectId = savedLastObjectId;  // ops#657
+        }
 
         // tip object handling. First the whole document has to be read, then we
         // can restore the Tip link out of the TipName Property:
@@ -4589,6 +4606,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             unmade.push_back(obj);
                         }
                         if (stopped && continuation) {
+                            // FreeCAD-CH (ops#652): the records into it are taken first, as the
+                            // end of the recompute would, while it still has its last shape
+                            takeElementReferencesInto(obj);
                             // FreeCAD-CH (ops#640, F37): the rule writes what the view shows
                             // of it (PartDesign: a stopped Body, nothing)
                             continuation->afterStop(obj);

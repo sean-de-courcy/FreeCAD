@@ -50,6 +50,7 @@
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/ObjectIdentifier.h>
+#include <App/Part.h>
 #include <App/PropertyUnits.h>
 #include <App/VariableChoice.h>
 #include <App/VariableLookup.h>
@@ -1535,6 +1536,12 @@ ExpressionPtr OperatorExpression::simplify() const
         return std::make_unique<OperatorExpression>(owner, v1.release(), op, v2.release());
 }
 
+namespace {
+// FreeCAD-CH (ops#652): what the printer needs from the fraction rewrite further down.
+bool endsWithNumber(const std::string& s);
+bool startsWithNumberAndUnit(const std::string& s);
+}  // namespace
+
 void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
 {
     bool needsParens;
@@ -1551,6 +1558,13 @@ void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
         //else if (!isCommutative())
         //    needsParens = true;
     }
+    // FreeCAD-CH (ops#652): a power of a quantity keeps its parentheses. `3 mm ^ 2` reads as
+    // 3 mm², not (3 mm)², and `2 (mm ^ 2) ^ 0.5` doesn't parse at all; a sign before the quantity
+    // (`-3 mm ^ 2`) reads the same way.
+    if (op == POW
+        && (leftOperator == UNIT || leftOperator == NEG || leftOperator == POS)) {
+        needsParens = true;
+    }
 
     switch (op) {
     case NEG:
@@ -1563,10 +1577,9 @@ void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
         break;
     }
 
-    if (needsParens)
-        s << "(" << left->toString(persistent) << ")";
-    else
-        s << left->toString(persistent);
+    const std::string leftText = needsParens ? "(" + left->toString(persistent) + ")"
+                                             : left->toString(persistent);
+    s << leftText;
 
     switch (op) {
     case ADD:
@@ -1628,12 +1641,18 @@ void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
             needsParens = true;
     }
 
-    if (needsParens) {
-        s << "(";
-        right->toString(s,persistent);
-        s << ")";
-    }else
-        right->toString(s,persistent);
+    const std::string rightText = right->toString(persistent);
+    // FreeCAD-CH (ops#652): `1 / (2 mm)` keeps its parentheses. Printed as `1 / 2 mm`, the text
+    // would read back through the fraction rewrite (rank 56) as (1/2) mm. Only where the text
+    // before the slash ends with a number, as the rewrite's numerator does: `Width / 4 mm` stays.
+    if (op == DIV && !needsParens && startsWithNumberAndUnit(rightText)) {
+        needsParens = endsWithNumber(leftText);
+    }
+
+    if (needsParens)
+        s << "(" << rightText << ")";
+    else
+        s << rightText;
 }
 
 Expression *OperatorExpression::_copy() const
@@ -4021,6 +4040,33 @@ std::string resolveVariable(const App::DocumentObject* owner, const std::string&
             fmt::format("no variable named {} in this document (in expression '{}')", name, buffer)
         );
     }
+    // FreeCAD-CH (notes/derived-design.md, slice 2): Part Studio variables, Onshape's Variable
+    // feature. A holder inside a part studio (an App::Part) is seen only from that studio, and
+    // before the document's other holders (the nearer scope wins); holders outside every studio
+    // (the Variables set, the Variable Studios) are seen from everywhere
+    {
+        const App::Part* ownerStudio = App::Part::getPartOfObject(owner, true);
+        std::vector<App::VariableRef> mine;
+        std::vector<App::VariableRef> open;
+        for (const auto& ref : refs) {
+            const App::Part* holderStudio = App::Part::getPartOfObject(ref.holder, true);
+            if (!holderStudio) {
+                open.push_back(ref);
+            }
+            else if (holderStudio == ownerStudio) {
+                mine.push_back(ref);
+            }
+        }
+        refs = mine.empty() ? open : mine;
+        if (refs.empty()) {
+            throw ParserError(fmt::format(
+                "no variable named {} in this part studio: another studio's variables can't be "
+                "used here (in expression '{}')",
+                name,
+                buffer
+            ));
+        }
+    }
     // FreeCAD-CH (ops#640, decision 317): the variable the user chose for a name a local set and
     // an imported copy both define (App/VariableChoice.h).
     if (auto chosen = App::chosenVariableHolder(refs)) {
@@ -4200,6 +4246,43 @@ std::size_t unitEnd(const std::string& s, std::size_t i)
         }
     }
     return j;
+}
+
+// FreeCAD-CH (ops#652): whether printed text ends with a number literal (`2`, `0.5`, `1e-05`),
+// which a following `/ M unit` would make the numerator of a literal fraction. A name ending in a
+// digit (`c1`) doesn't; anything wider (`1e-05` read from its `05`) only costs parentheses.
+bool endsWithNumber(const std::string& s)
+{
+    std::size_t start = s.size();
+    while (start > 0) {
+        const auto c = static_cast<unsigned char>(s[start - 1]);
+        if (!std::isalnum(c) && c != '.' && c != '_' && c < 0x80) {
+            break;
+        }
+        --start;
+    }
+    return start < s.size() && numberLength(s, start) == s.size() - start;
+}
+
+// FreeCAD-CH (ops#652): whether printed text starts with `M unit`, the denominator of a literal
+// fraction. While the parser runs, the lexer can't scan the word (parserRunning): any word or
+// unit sign after the number counts then, which costs at most a pair of parentheses.
+bool startsWithNumberAndUnit(const std::string& s)
+{
+    const std::size_t n = numberLength(s, 0);
+    if (n == 0) {
+        return false;
+    }
+    const std::size_t i = skipBlanks(s, n);
+    if (parserRunning) {
+        if (i >= s.size()) {
+            return false;
+        }
+        auto [cp, len] = codePointAt(s, i);
+        return isIdentifierStart(cp) || cp == '"' || cp == '\'' || cp == 0xB0 || cp == 0x2032
+            || cp == 0x2033;
+    }
+    return unitEnd(s, i) != std::string::npos;
 }
 
 std::string rewriteLiteralFractions(const std::string& s)

@@ -30,6 +30,18 @@ SET(Features_SRCS
     Body.h
     Studio.cpp
     Studio.h
+    StudioList.cpp
+    StudioList.h
+    StudioEdit.cpp
+    StudioEdit.h
+    StudioOwner.cpp
+    StudioOwner.h
+    StudioPattern.cpp
+    StudioPattern.h
+    FeatureApply.cpp
+    FeatureApply.h
+    Pieces.cpp
+    Pieces.h
     Derived.cpp
     Derived.h
     ContainerMoves.cpp
@@ -90,6 +102,8 @@ SET(FeaturesSketchBased_SRCS
     FeatureExtrude.h
     FeatureSketchBased.cpp
     FeatureSketchBased.h
+    ProfileRegions.cpp
+    ProfileRegions.h
     FeaturePad.cpp
     FeaturePad.h
     FeaturePocket.cpp

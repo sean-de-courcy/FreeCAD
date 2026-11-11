@@ -3,6 +3,7 @@
 feature, not the Body. Designed geometry. Off screen: QT_QPA_PLATFORM=offscreen, a fresh
 FREECAD_USER_HOME (notes/build.md)."""
 
+import functools
 import math
 import unittest
 
@@ -17,6 +18,29 @@ from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 from PartDesignTests.TestStudio import faceAt, pad, rect, sketch, xyPlane
 
 V = App.Vector
+
+
+def keepSiblingEraPath(case):
+    """ops#654 list on first use: the studio commands make the studio's list and take the owner
+    path. A test of the sibling-era in-Body path (kept in the code until R0 removes it) calls this
+    in its setUp: the hidden test hook StudioListOnFirstUse off, restored at its cleanup, so a
+    studio without a list keeps that path as before. Moving such a test to the listed behaviour
+    drops the call."""
+    param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+    had = param.GetBool("StudioListOnFirstUse", True)
+    param.SetBool("StudioListOnFirstUse", False)
+    case.addCleanup(param.SetBool, "StudioListOnFirstUse", had)
+
+
+def siblingEraPath(test):
+    """A test method of the sibling-era in-Body path: keepSiblingEraPath() for it (ops#654)."""
+
+    @functools.wraps(test)
+    def run(self, *args, **kwargs):
+        keepSiblingEraPath(self)
+        return test(self, *args, **kwargs)
+
+    return run
 
 
 class TestCrossBodyGui(unittest.TestCase):
@@ -438,6 +462,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
     Add to moves it back; Cancel aborts it all. Designed geometry, A1's: the enclosure 40 x 40 x 10
     (16000) and a lid sketch 30 x 30 on its top face; the pad's default length is 10 (9000)."""
 
+    @siblingEraPath
     def testNewPartFromTheResultBox(self):
         """N-t1 in the panel: Pad on the lid sketch offers Add to Enclosure and New part. New
         part moves the pad and its sketch to a new Body at once, and the panel stays open on it,
@@ -485,6 +510,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.assertIs(self.body.Tip, self.base)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
 
+    @siblingEraPath
     def testToggleBackMovesItBack(self):
         """New part, then Add to Enclosure: the pad and its sketch are back where they were and
         the new Body is gone, while the panel stays open. OK: the enclosure with its lid, 25000,
@@ -508,6 +534,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.doc.recompute()
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
 
+    @siblingEraPath
     def testNewPartOfAPlacedBodyInAPart(self):
         """N-t2 and PR 302 round 1 in the panel: the enclosure at (100, 0, 0) turned 20 deg, in
         an App::Part. New part puts the new Body in that Part, placed as the enclosure, and the
@@ -636,6 +663,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         # ops#630: the enclosure shows its new tip, not nothing
         self.assertEqual(shownFeatures(self.body), ["Base"])
 
+    @siblingEraPath
     def testNewPartKeepsTheEnclosureShown(self):
         """ops#630, Onshape's New part: the parts the feature leaves stay shown. The Pad command
         hides the enclosure's tip for the pad; New part takes the pad away, and the enclosure
@@ -652,6 +680,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.assertTrue(self.body.Visibility)
         self.assertTrue(part.Visibility)
 
+    @siblingEraPath
     def testAddToShowsWhatThePadPanelShowed(self):
         """ops#630: New part, then Add to Enclosure: the enclosure shows what the Pad's panel
         showed before the move (the edit's own choice), and after OK the pad alone."""
@@ -711,6 +740,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
     def testHolePanelHasTheBox(self):
         self.assertSubtractiveBox("PartDesign_Hole")
 
+    @siblingEraPath
     def testTwoDocumentsKeepTheirOwnMoves(self):
         """PR 303 round 1: New part in document A's panel, then in document B's. Back in A, Add
         to Enclosure moves A's pad back, and B's stays in its new Body. One record for the open
@@ -755,6 +785,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
             pump()
             self.activate(docA)
 
+    @siblingEraPath
     def testOkBeforeTheMoveRuns(self):
         """PR 303 round 1: New part is chosen and OK is clicked before the queued move runs. OK
         commits the pad where it is, in the enclosure (25000), and the move then does nothing:
@@ -806,6 +837,7 @@ class TestSiblingsGui(ResultBoxGuiCase):
         Gui.getDocument(self.doc.Name).setEdit(obj.Name)
         self.waitForPanel()
 
+    @siblingEraPath
     def testSiblingFromThePartsList(self):
         """R-t1 in the panel: a pocket of the lid sketch, 5 deep, lists Enclosure (ticked, fixed),
         then Below and Far, which it doesn't touch. Its length set to 20 in the panel: once the
@@ -892,6 +924,41 @@ class TestSiblingsGui(ResultBoxGuiCase):
         self.assertEqual(PartDesign.siblingsOf(pocket), [])
         self.assertIsNone(self.doc.getObject(name))
         self.assertAlmostEqual(self.below.Shape.Volume, 16000, places=3)
+
+    def testListedStudioOffersNoSiblingRows(self):
+        """R0 lite (ops#654, notes/parts-design.md 10.11 row 10): once the studio has its history
+        list, its studio features act on other parts, so an in-Body pocket's Result box offers no
+        parts list and an in-Body pad's no merge list; without the list both are there (the
+        sibling path is kept for such studios)."""
+        self.parts()
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.lidSk
+        pocket.Type = "ThroughAll"
+        self.doc.recompute()
+        padSk = self.body.newObject("Sketcher::SketchObject", "PadSk")
+        padSk.AttachmentSupport = [(self.base, faceAt(self.base, 10))]
+        padSk.MapMode = "FlatFace"
+        rect(padSk, 0, 0, 5, 5)
+        lidPad = self.body.newObject("PartDesign::Pad", "LidPad")
+        lidPad.Profile = padSk
+        lidPad.Length = 2
+        self.doc.recompute()
+        mergeList = lambda: self.visible(QtWidgets.QListWidget, "mergeList")  # noqa: E731
+        self.edit(pocket)
+        self.assertIsNotNone(self.partsList(), "unlisted: the parts list")
+        self.close(ok=False)
+        self.edit(lidPad)
+        self.assertIsNotNone(mergeList(), "unlisted: the merge list")
+        self.close(ok=False)
+        self.assertIsNotNone(PartDesign.studioList(None, True))
+        self.doc.recompute()
+        self.edit(pocket)
+        self.assertIsNotNone(self.combo(), "the Result box stays")
+        self.assertIsNone(self.partsList(), "listed: no parts list")
+        self.close(ok=False)
+        self.edit(lidPad)
+        self.assertIsNone(mergeList(), "listed: no merge list")
+        self.close(ok=False)
 
 
 class TestMergeGui(ResultBoxGuiCase):
@@ -1252,6 +1319,7 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertOneUndoStep(16000)
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
 
+    @siblingEraPath
     def testANewPartGoesBackToAdd(self):
         """F12 and report 15: the lid pad made a new part and committed. Its edit is on New part,
         and Add to Enclosure (the part it touches) moves the pad and its sketch into the
@@ -1281,6 +1349,7 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertIsNotNone(self.doc.getObject(partName))
         self.assertAlmostEqual(self.doc.getObject(partName).Shape.Volume, 9000, places=3)
 
+    @siblingEraPath
     def testCancelLeavesTheNewPart(self):
         """The same move, then Cancel: the new part is as it was (9000), the enclosure 16000, and
         no undo step."""
@@ -1299,6 +1368,7 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
         self.assertEqual(len(self.doc.UndoNames), self.undos, self.doc.UndoNames)
 
+    @siblingEraPath
     def testANewPartBecomesAHole(self):
         """The lid as a new part, edited: Remove from Enclosure moves it into the enclosure as a
         cut through it (7000), the tool flipped, and the new Body goes."""
@@ -1361,6 +1431,7 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertEqual(self.bodies(), ["Enclosure"])
         self.assertEqual(lid.Operation, "Union")
 
+    @siblingEraPath
     def testNewPartThenRemoveInTheSameDialog(self):
         """The creation dialog: New part, then Remove from Enclosure takes this dialog's move back
         and cuts: the pad and its sketch are in the enclosure again, the tool flipped. OK: 7000;
@@ -1876,6 +1947,7 @@ class TestOkInErrorGui(ResultBoxGuiCase):
     stays in error, to be repaired later. Designed geometry: the enclosure (16000) and its lid
     sketch."""
 
+    @siblingEraPath
     def testOkCommitsAPadInError(self):
         """The Pad command on the lid sketch, its length set to 0 (no pad of length zero): OK
         closes the dialog with no message box, the pad stays, in error, saying why, and the

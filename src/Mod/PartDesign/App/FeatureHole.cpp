@@ -77,6 +77,7 @@
 #include <Mod/Part/App/Tools.h>
 
 #include "FeatureHole.h"
+#include "StudioOwner.h"
 #include "nlohmann/json.hpp"
 
 #include <numbers>
@@ -2122,6 +2123,21 @@ static gp_Pnt toPnt(gp_Vec dir)
     return {dir.X(), dir.Y(), dir.Z()};
 }
 
+namespace
+{
+/* FreeCAD-CH ops#654 T3 (notes/patterns-design.md 3.3, Reapply): set while a pattern with Reapply
+ * on re-runs this hole at one of its instances, as FeatureExtrude.cpp's ReapplyRun: the seed's
+ * own run against the instance's base carried back onto the seed (toSeed), the up-to face read
+ * where the instance sees it; the tool goes here, nothing of the feature is written */
+struct HoleRun
+{
+    gp_Trsf toSeed;
+    TopoShape base;
+    TopoShape tool;
+};
+thread_local HoleRun* holeRun = nullptr;
+}  // namespace
+
 App::DocumentObjectExecReturn* Hole::execute()
 {
     warnOfUnlistedThreadSize(*this);
@@ -2131,10 +2147,13 @@ App::DocumentObjectExecReturn* Hole::execute()
         | Part::ShapeOption::Transform | Part::ShapeOption::DontSimplifyCompound
     );
 
-    // Find the base shape
+    // Find the base shape. A studio owner's is its in-scope parts at its place (FreeCAD-CH
+    // ops#654 S2): a hole of a given depth needs none, Through all and Up to next fail without
+    // one, below
+    const bool owner = runsAsStudioOwner(this);
     TopoShape base;
     try {
-        base = getBaseTopoShape();
+        base = getBaseTopoShape(/*silent=*/owner);
     }
     catch (const Base::Exception&) {
         std::string text(QT_TRANSLATE_NOOP(
@@ -2156,11 +2175,16 @@ App::DocumentObjectExecReturn* Hole::execute()
         std::string method(DepthType.getValueAsString());
         double length = 0.0;
 
-        this->positionByPrevious();
+        if (!holeRun) {
+            this->positionByPrevious();
+        }
         TopLoc_Location invObjLoc = getInverseLocation(base);
 
         base.move(invObjLoc);
         profileshape.move(invObjLoc);
+        if (holeRun) {
+            base = holeRun->base;  // a pattern's instance (ops#654 T3), carried onto the seed
+        }
 
         /* Build the prototype hole */
 
@@ -2226,10 +2250,36 @@ App::DocumentObjectExecReturn* Hole::execute()
                     QT_TRANSLATE_NOOP("Exception", "Select the face or plane the hole goes up to.")
                 );
             }
-            length = getStartReferenceOffset(profileshape, UpToFace, holeDirection, 0.0, invObjLoc);
+            if (holeRun) {
+                // At a pattern's instance (ops#654 T3): the distance from the instance's profile
+                // to the face, as the seed's moved there (a distance a motion keeps)
+                const gp_Trsf toInstance = holeRun->toSeed.Inverted();
+                length = getStartReferenceOffset(
+                    profileshape.makeElementTransform(toInstance),
+                    UpToFace,
+                    holeDirection.Transformed(toInstance),
+                    0.0,
+                    invObjLoc
+                );
+            }
+            else {
+                length = getStartReferenceOffset(profileshape, UpToFace, holeDirection, 0.0, invObjLoc);
+            }
         }
         else if (method == "ThroughAll") {
-            length = getThroughAllLength();
+            if (holeRun) {
+                // Through the base at a pattern's instance (ops#654 T3)
+                Bnd_Box box;
+                if (!base.isNull()) {
+                    BRepBndLib::Add(base.getShape(), box);
+                }
+                BRepBndLib::Add(profileshape.getShape(), box);
+                box.SetGap(0.0);
+                length = 2.02 * std::sqrt(box.SquareExtent());
+            }
+            else {
+                length = getThroughAllLength();
+            }
         }
         else {
             return new App::DocumentObjectExecReturn(
@@ -2458,10 +2508,22 @@ App::DocumentObjectExecReturn* Hole::execute()
             );
         }
 
+        if (holeRun) {
+            holeRun->tool = compound;  // a pattern's instance (ops#654 T3): its tool only
+            return App::DocumentObject::StdReturn;
+        }
+
         TopoShape result = makeTopoShape(false);
 
         // set the subtractive shape property for later usage in e.g. pattern
         this->AddSubShape.setValue(compound);
+
+        // FreeCAD-CH ops#654 S2: a studio owner computes only its tool (a hole per centre), which
+        // its steps apply; its own shape stays empty, so nothing sees it as a part
+        if (owner) {
+            Shape.setValue(TopoShape());
+            return App::DocumentObject::StdReturn;
+        }
 
         if (base.isNull()) {
             Shape.setValue(compound);
@@ -3187,5 +3249,44 @@ int Hole::baseProfileOption_bitmaskToIdx(int bitmask)
     return -1;
 }
 
+
+}  // namespace PartDesign
+
+namespace PartDesign
+{
+
+/// hole's tool re-solved at a pattern's instance (HoleRun above), in its own frame; null with why
+/// (FreeCAD-CH ops#654 T3; declared where used, FeatureTransformed.cpp)
+PartDesignExport TopoShape reapplyHole(
+    Hole* hole,
+    const gp_Trsf& toSeed,
+    const TopoShape& base,
+    std::string& why
+)
+{
+    HoleRun run {toSeed, base, TopoShape()};
+    HoleRun* outer = holeRun;
+    holeRun = &run;
+    App::DocumentObjectExecReturn* ret = nullptr;
+    try {
+        ret = hole->execute();
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const Standard_Failure& e) {
+        why = e.GetMessageString();
+    }
+    holeRun = outer;
+    if (ret) {
+        why = ret->Why;
+        delete ret;
+        return {};
+    }
+    if (run.tool.isNull() && why.empty()) {
+        why = "it made no tool there";
+    }
+    return why.empty() ? run.tool : TopoShape();
+}
 
 }  // namespace PartDesign

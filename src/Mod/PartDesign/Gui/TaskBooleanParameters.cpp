@@ -48,6 +48,7 @@
 #include <Gui/ViewProvider.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "ui_TaskBooleanParameters.h"
 #include "TaskBooleanParameters.h"
@@ -55,6 +56,14 @@
 
 using namespace PartDesignGui;
 using namespace Gui;
+
+namespace PartDesignGui
+{
+// StudioGui.cpp (FreeCAD-CH ops#654 P5): a Boolean studio feature's Targets and Tools
+QWidget* makeStudioBooleanBox(App::DocumentObject* owner);
+void studioBooleanBoxSetType(QWidget* box, const char* type);
+void studioBooleanBoxSetKeepTools(QWidget* box, bool on);
+}  // namespace PartDesignGui
 
 /* TRANSLATOR PartDesignGui::TaskBooleanParameters */
 
@@ -181,6 +190,19 @@ TaskBooleanParameters::TaskBooleanParameters(ViewProviderBoolean* BooleanView, Q
                 onTypeChanged(i);
             }
         });
+    }
+
+    // A Boolean studio feature (FreeCAD-CH ops#654 P5): its targets and tools are parts of the
+    // studio by id, ticked among the live parts at its place; the Body list and its picks aren't
+    // used
+    studioBox = makeStudioBooleanBox(pcBoolean);
+    if (studioBox) {
+        ui->labelTools->setVisible(false);
+        ui->buttonBodyAdd->setVisible(false);
+        ui->buttonBodyRemove->setVisible(false);
+        ui->listWidgetBodies->setVisible(false);
+        showFieldsOf(index);
+        groupLayout()->addWidget(studioBox);
     }
 
     // A Merge (FreeCAD-CH ops#325, design 2.6): its tool is the merged part's feature, which a
@@ -369,6 +391,13 @@ void TaskBooleanParameters::onButtonBodyRemove(bool checked)
 void TaskBooleanParameters::onTypeChanged(int index)
 {
     PartDesign::Boolean* pcBoolean = BooleanView->getObject<PartDesign::Boolean>();
+    if (studioBox) {
+        // A list edit in the dialog's transaction (ops#654 P5)
+        const char* types[] = {"Fuse", "Cut", "Common"};
+        studioBooleanBoxSetType(studioBox, types[std::clamp(index, 0, 2)]);
+        showFieldsOf(index);
+        return;
+    }
 
     switch (index) {
         case 0:
@@ -394,6 +423,10 @@ void TaskBooleanParameters::onTypeChanged(int index)
 
 void TaskBooleanParameters::onKeepToolsChanged(bool on)
 {
+    if (studioBox) {
+        studioBooleanBoxSetKeepTools(studioBox, on);  // ops#654 P5: it changes what is consumed
+        return;
+    }
     PartDesign::Boolean* pcBoolean = BooleanView->getObject<PartDesign::Boolean>();
     pcBoolean->KeepTools.setValue(on);
     // An Intersect that misses keeps its part with Keep tools
@@ -405,10 +438,17 @@ void TaskBooleanParameters::showFieldsOf(int index)
     // Union and Intersect: Tools, Keep tools; Subtract: Tools, Targets, Offset, Keep tools (A-5)
     const bool merge = BooleanView->getObject<PartDesign::Boolean>()->isMerge();
     const bool subtract = index == 1 && !merge;
+    ui->checkKeepTools->setVisible(!merge);
+    if (studioBox) {
+        // A studio Boolean's targets are its box's (ops#654 P5)
+        ui->labelTargets->setVisible(false);
+        ui->targetsField->setVisible(false);
+        ui->checkOffset->setVisible(false);
+        return;
+    }
     ui->labelTargets->setVisible(subtract);
     ui->targetsField->setVisible(subtract);
     ui->checkOffset->setVisible(subtract);
-    ui->checkKeepTools->setVisible(!merge);
     if (ui->listWidgetBodies->count() > 0) {
         QListWidgetItem* first = ui->listWidgetBodies->item(0);
         if (first->data(ownPartRole).toBool()) {
@@ -561,6 +601,39 @@ bool TaskDlgBooleanParameters::accept()
     auto obj = BooleanView->getObject();
     if (!obj || !obj->isAttachedToDocument()) {
         return false;
+    }
+    // A Boolean studio feature (ops#654 P5): its list edits are made; Keep tools remembered
+    if (PartDesign::isStudioOwner(obj)) {
+        try {
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+                ->SetBool(keepToolsParam, parameter->getKeepTools());
+            Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.recompute()");
+            Gui::Command::doCommand(Gui::Command::Gui, "Gui.activeDocument().resetEdit()");
+            // FreeCAD-CH (ops#654 P6p): the OK is the command that makes a split's pieces parts
+            // (once the edit has ended; a step of its own when the edit's is closed by then)
+            App::Document* document = obj->getDocument();
+            const bool own = !document->hasPendingTransaction();
+            if (own) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+            }
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                Gui::Command::getObjectCmd(obj).c_str()
+            );
+            document->commitTransaction();
+        }
+        catch (const Base::Exception& e) {
+            obj->getDocument()->abortTransaction();
+            QMessageBox::warning(
+                parameter,
+                tr("Boolean: Accept: Input error"),
+                QCoreApplication::translate("Exception", e.what())
+            );
+            return false;
+        }
+        return true;
     }
     BooleanView->Visibility.setValue(true);
 

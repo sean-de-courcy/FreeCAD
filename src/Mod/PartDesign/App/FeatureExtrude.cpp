@@ -28,10 +28,14 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Pnt2d.hxx>
@@ -75,11 +79,22 @@
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include <Mod/Part/App/PartFeature.h>
 
+#include "Body.h"
 #include "FeatureExtrude.h"
+#include "FeaturePad.h"
+#include "FeaturePocket.h"
+#include "StudioList.h"
+#include "StudioOwner.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
 using namespace PartDesign;
+
+namespace PartDesign
+{
+// FeatureSketchBased.cpp: whether an extrusion along `dir` up to `upToFace` goes the other way
+bool upToFaceBehind(const TopoShape& upToFace, const TopoShape& profile, const gp_Dir& dir);
+}  // namespace PartDesign
 
 const char* FeatureExtrude::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", nullptr};
 
@@ -103,7 +118,7 @@ namespace
 // All shapes in the feature's coordinates.
 std::optional<Base::Placement> upToFaceReached(TopoShape face, const TopoShape& profile, gp_Dir dir)
 {
-    if (Part::findAllFacesCutBy(face, profile, dir).empty()) {
+    if (upToFaceBehind(face, profile, dir)) {
         dir.Reverse();
     }
     if (face.shapeType(true) != TopAbs_FACE) {
@@ -240,6 +255,11 @@ const FeatureExtrude* makerOf(const App::GeoFeature* geo, const char* name)
             return dynamic_cast<const FeatureExtrude*>(feature);
         }
         const auto partDesign = dynamic_cast<const PartDesign::Feature*>(feature);
+        // FreeCAD-CH ops#654 S2: a studio step's pieces carry its naming tag, its owner's ID: the
+        // owner made them
+        if (partDesign && partDesign->StudioOwner.getValue() && partDesign->namingTag() == tag) {
+            return dynamic_cast<const FeatureExtrude*>(partDesign->StudioOwner.getValue());
+        }
         feature = partDesign ? partDesign->getBaseObject(true) : nullptr;
     }
     return nullptr;
@@ -1057,11 +1077,236 @@ gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
     }
     return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
 }
+
+// Set while a studio owner builds one region of its profile (ops#654 S2), so that the region's
+// own side is built as today's, against the one part it meets
+thread_local bool ownerRegionRunning = false;
+
+/* FreeCAD-CH ops#654 T3 (notes/patterns-design.md 3.3, Reapply): set while a pattern with Reapply
+ * on re-runs this extrusion at one of its instances. The run is the seed's own, in the feature's
+ * frame, against the instance's surroundings carried back onto the seed by the inverse instance
+ * transform: the base at that instance and the fixed references (the up-to face, shape or vertex:
+ * Onshape re-intersects the same face per instance, O6). The profile, its support face and the
+ * direction stay. The tool the run makes, moved by the instance transform, is the instance
+ * re-solved where it is (a rigid motion or a mirror carries the whole construction). The run
+ * writes nothing of the feature: its tool goes here */
+struct ReapplyRun
+{
+    gp_Trsf toSeed;         ///< the instance's surroundings onto the seed's, in the feature's frame
+    TopoShape base;         ///< the base at the instance, carried onto the seed (feature's frame)
+    std::string partLabel;  ///< the pattern's part, for messages
+    TopoShape tool;         ///< the tool made (out)
+};
+thread_local ReapplyRun* reapplyRun = nullptr;
+
+/** A studio owner's "Up to next" for one region against the one part it meets (FreeCAD-CH ops#654
+ * S2, notes/onshape-facts.md O8h): the region's sweep ahead (reach long) split by the part, keeping
+ * the pieces that start on the region. Starting outside the part they are the gap up to where the
+ * part begins, so a stepped bottom gives a stepped tool; starting inside it, the material up to
+ * where it ends. A region that starts partly inside and partly outside, or part of which meets
+ * nothing ahead, fails the whole feature (the loud choice; unverified on Onshape) */
+TopoShape ownerUpToNext(
+    const FeatureExtrude& owner,
+    const TopoShape& region,
+    const TopoShape& part,
+    const gp_Dir& dir,
+    double reach,
+    const std::string& which
+)
+{
+    const double tol = Precision::Confusion() * 10;
+    TopoDS_Face start = TopoDS::Face(region.getShape());
+    BRepAdaptor_Surface startSurface(start);
+    if (startSurface.GetType() != GeomAbs_Plane) {
+        throw Base::ValueError(which + " is not planar");
+    }
+    const gp_Pln plane = startSurface.Plane();
+    GProp_GProps startProps;
+    BRepGProp::SurfaceProperties(start, startProps);
+    const double startArea = startProps.Mass();
+    auto alongMax = [&](const TopoDS_Shape& shape, double sign = 1.0) {
+        double most = -std::numeric_limits<double>::max();
+        for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+            gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+            most = std::max(most, sign * gp_Vec(p.XYZ()).Dot(gp_Vec(dir)));
+        }
+        return sign * most;
+    };
+    // The nearest the start comes along dir: the sweep's far end lies reach beyond it
+    const double s0 = alongMax(start, -1.0);
+    // The area of solid's faces lying on the region's plane: its share of the start
+    auto areaOnStart = [&](const TopoDS_Shape& solid) {
+        double area = 0.0;
+        for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            const gp_Pln facePlane = surface.Plane();
+            if (!facePlane.Axis().IsParallel(plane.Axis(), Precision::Angular())
+                || plane.Distance(facePlane.Location()) > tol) {
+                continue;
+            }
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(face, props);
+            area += props.Mass();
+        }
+        return area;
+    };
+
+    TopoShape probe = owner.makeTopoShape();
+    probe.makeElementPrism(region, reach * gp_Vec(dir));
+    TopoShape outside = owner.makeTopoShape();
+    outside.makeElementCut({probe, part});
+    TopoShape inside = owner.makeTopoShape();
+    inside.makeElementBoolean(Part::OpCodes::Common, {probe, part});
+
+    auto startingPieces = [&](const TopoShape& shape, double& area) {
+        std::vector<TopoShape> pieces;
+        area = 0.0;
+        if (shape.isNull()) {
+            return pieces;
+        }
+        for (const TopoShape& solid : shape.getSubTopoShapes(TopAbs_SOLID)) {
+            const double share = areaOnStart(solid.getShape());
+            if (share > tol) {
+                area += share;
+                pieces.push_back(solid);
+            }
+        }
+        return pieces;
+    };
+    double outsideArea = 0.0;
+    double insideArea = 0.0;
+    std::vector<TopoShape> gap = startingPieces(outside, outsideArea);
+    std::vector<TopoShape> material = startingPieces(inside, insideArea);
+    const double areaTol = std::max(1e-6, startArea * 1e-6);
+    std::vector<TopoShape> pieces;
+    if (std::abs(outsideArea - startArea) <= areaTol && insideArea <= areaTol) {
+        pieces = std::move(gap);
+    }
+    else if (std::abs(insideArea - startArea) <= areaTol && outsideArea <= areaTol) {
+        pieces = std::move(material);
+    }
+    else {
+        throw Base::ValueError(which + " starts partly inside the part and partly outside it");
+    }
+    for (const TopoShape& piece : pieces) {
+        if (alongMax(piece.getShape()) >= s0 + reach - tol * 100) {
+            throw Base::ValueError(which + ": part of it meets nothing ahead");
+        }
+    }
+    if (pieces.size() == 1) {
+        return pieces.front();
+    }
+    TopoShape tool = owner.makeTopoShape();
+    tool.makeElementFuse(pieces, Part::OpCodes::Extrude);
+    return tool;
+}
+
+/** A studio owner's "Up to next" (UpToFirst) or "Up to last", Onshape's rule (FreeCAD-CH ops#654
+ * S2, notes/onshape-facts.md O8): each region (face) of the profile goes against the one in-scope
+ * part its sweep ahead meets, by side(region, that part's shape); the tool is the regions' prisms
+ * fused. A region that meets no part ahead, or two (touching ones too, O8e), fails the whole
+ * feature: no partial result, one error naming the region. Shapes are in the owner's own frame
+ * (invObjLoc applied), as its profile is */
+template<typename Side>
+TopoShape ownerUpToPerRegion(
+    const FeatureExtrude& owner,
+    const TopoShape& profile,
+    const std::string& method,
+    const gp_Dir& dir,
+    const TopLoc_Location& invObjLoc,
+    Side side
+)
+{
+    const std::string mode = method == "UpToFirst" ? "Up to next" : "Up to last";
+    // The in-scope parts at the owner's place: the document's frame to its container's, then
+    // its own
+    const Base::Placement container =
+        owner.globalPlacement() * owner.Placement.getValue().inverse();
+    std::vector<std::pair<std::string, TopoShape>> parts;
+    Bnd_Box all;
+    BRepBndLib::Add(profile.getShape(), all);
+    auto label = [](const Body* part) {
+        return std::string("'") + part->Label.getValue() + "'";
+    };
+    if (reapplyRun) {
+        // A pattern's instance (ops#654 T3): the pattern's part at the instance, in this frame
+        if (!reapplyRun->base.isNull()) {
+            BRepBndLib::Add(reapplyRun->base.getShape(), all);
+            parts.emplace_back(reapplyRun->partLabel, reapplyRun->base);
+        }
+    }
+    else {
+        for (auto part : studioScopeOf(&owner)) {
+            TopoShape shape = studioBaseAt(&owner, part);
+            if (shape.isNull()) {
+                continue;
+            }
+            shape.transformShape(container.inverse().toMatrix(), false, true);
+            shape.move(invObjLoc);
+            BRepBndLib::Add(shape.getShape(), all);
+            parts.emplace_back(label(part), shape);
+        }
+    }
+    all.SetGap(0.0);
+    const double reach = 2.02 * std::sqrt(all.SquareExtent());
+
+    std::vector<TopoShape> prisms;
+    int index = 0;
+    for (const TopoShape& region : profile.getSubTopoShapes(TopAbs_FACE)) {
+        ++index;
+        // The region's sweep ahead, through all
+        TopoShape probe;
+        probe.makeElementPrism(region, reach * gp_Vec(dir));
+        Bnd_Box probeBox;
+        BRepBndLib::Add(probe.getShape(), probeBox);
+        std::vector<std::size_t> met;
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            Bnd_Box partBox;
+            BRepBndLib::Add(parts[i].second.getShape(), partBox);
+            if (probeBox.IsOut(partBox)) {
+                continue;
+            }
+            BRepAlgoAPI_Common common(probe.getShape(), parts[i].second.getShape());
+            if (!common.IsDone()) {
+                continue;
+            }
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(common.Shape(), props);
+            if (props.Mass() > Precision::Confusion()) {
+                met.push_back(i);
+            }
+        }
+        const std::string which = mode + ": region " + std::to_string(index) + " of the profile";
+        if (met.empty()) {
+            throw Base::ValueError(which + " meets no part ahead");
+        }
+        if (met.size() > 1) {
+            throw Base::ValueError(
+                which + " meets " + parts[met[0]].first + " and " + parts[met[1]].first
+                + ": a region goes up to one part"
+            );
+        }
+        prisms.push_back(side(region, parts[met.front()].second, reach, which));
+    }
+    if (prisms.empty()) {
+        throw Base::ValueError(mode + ": the profile has no region");
+    }
+    if (prisms.size() == 1) {
+        return prisms.front();
+    }
+    TopoShape tool = owner.makeTopoShape();
+    tool.makeElementFuse(prisms, Part::OpCodes::Extrude);
+    return tool;
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions options)
 {
-    if (onlyHaveRefined()) {
+    if (!reapplyRun && onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
 
@@ -1182,14 +1427,23 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
     Base::Vector3d SketchVector = getProfileNormal();
 
     try {
-        this->positionByPrevious();
+        if (!reapplyRun) {
+            this->positionByPrevious();
+        }
         auto invObjLoc = getInverseLocation(base);
 
         auto invTrsf = invObjLoc.Transformation();
 
         base.move(invObjLoc);
+        if (reapplyRun) {
+            // A pattern's instance (ops#654 T3): its base, carried onto the seed, and the
+            // direction the seed's own run computed (no property writes)
+            base = reapplyRun->base;
+        }
 
-        Base::Vector3d paddingDirection = computeDirection(SketchVector, inverseDirection);
+        Base::Vector3d paddingDirection = reapplyRun
+            ? Direction.getValue()
+            : computeDirection(SketchVector, inverseDirection);
 
         // create vector in padding direction with length 1
         gp_Dir dir(paddingDirection.x, paddingDirection.y, paddingDirection.z);
@@ -1221,7 +1475,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
 
         // explicitly set the Direction so that the dialog shows also the used direction
         // if the sketch's normal vector was used
-        Direction.setValue(paddingDirection);
+        if (!reapplyRun) {
+            Direction.setValue(paddingDirection);
+        }
 
         dir.Transform(invTrsf);
         if (Reversed.getValue()) {
@@ -1234,6 +1490,23 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             );
         }
         sketchshape.move(invObjLoc);
+
+        if (reapplyRun && (method == "ThroughAll" || method2 == "ThroughAll")) {
+            // Through all at a pattern's instance (ops#654 T3): through the base there
+            Bnd_Box box;
+            if (!base.isNull()) {
+                BRepBndLib::Add(base.getShape(), box);
+            }
+            BRepBndLib::Add(sketchshape.getShape(), box);
+            box.SetGap(0.0);
+            const double all = 2.02 * std::sqrt(box.SquareExtent()) / factor;
+            if (method == "ThroughAll") {
+                L = all;
+            }
+            if (Sidemethod == "Two sides" && method2 == "ThroughAll") {
+                L2 = all;
+            }
+        }
 
         const char* startType = StartType.getValueAsString();
         const double startOffset = std::strcmp(startType, "Profile plane") == 0 ? 0.0
@@ -1249,7 +1522,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // Side 2 made blind from its vertex: untapered, its offset in its length
         bool upToVertex2 = false;
         // Up to vertex (FreeCAD-CH ops#640 rank 22, Onshape's): the end lies on the plane
-        // through the vertex, parallel to the profile plane, plus the offset. A straight
+        // through the vertex, parallel to the profile plane, moved by the offset (Onshape's sign:
+        // positive short of the vertex, as for a face; verified in Onshape, oracle 7c, UV1). A straight
         // extrusion of a planar profile ends on such a plane whatever its direction, so the side
         // is the blind one whose length reaches that plane, untapered as a side up to a face is.
         // One side goes towards the vertex; a side of two, or of a symmetric pair, that can't
@@ -1263,6 +1537,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             auto lengthTo = [&](const App::PropertyLinkSub& link, const gp_Dir& along, double offset) {
                 gp_Pnt target = upToVertexPoint(link);
                 target.Transform(invTrsf);
+                if (reapplyRun) {
+                    target.Transform(reapplyRun->toSeed);
+                }
                 const double cosine = gp_Vec(along).Dot(gp_Vec(profileNormal));
                 const double length = gp_Vec(onProfile, target).Dot(gp_Vec(profileNormal)) / cosine;
                 if (std::fabs(length) < Precision::Confusion()) {
@@ -1271,7 +1548,18 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                         "The vertex lies on the profile plane: there is nothing to extrude"
                     ));
                 }
-                return length + (length < 0.0 ? -offset : offset);
+                // Onshape's sign, as for a face: a positive offset ends short of the vertex's plane,
+                // towards the profile, a negative one past it. An offset that reaches or crosses
+                // the profile leaves no extrusion towards the vertex
+                const double reach = std::fabs(length) - offset;
+                if (reach < Precision::Confusion()) {
+                    throw Base::ValueError(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "The offset ends the extrusion at or before the profile plane: there is "
+                        "nothing to extrude"
+                    ));
+                }
+                return length < 0.0 ? -reach : reach;
             };
             auto behindSide = [](int side) {
                 return new App::DocumentObjectExecReturn(
@@ -1629,11 +1917,27 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             );
         }
 
+        if (reapplyRun) {
+            // A pattern's instance (ops#654 T3): its tool only, refined as the seed's
+            reapplyRun->tool = refineShapeIfActive(prism);
+            return App::DocumentObject::StdReturn;
+        }
+
         // store shape before refinement
         this->rawShape = prism;
         prism = refineShapeIfActive(prism);
         // set the additive shape property for later usage in e.g. pattern
         this->AddSubShape.setValue(prism);
+
+        // FreeCAD-CH ops#654 S2: a studio owner computes only its tool, which its steps apply;
+        // its own shape stays empty, so nothing (a Body, the BOM, an assembly) sees it as a part
+        if (runsAsStudioOwner(this)) {
+            madeUnder = Placement.getValue();
+            this->rawShape = TopoShape();
+            this->Shape.setValue(TopoShape());
+            updateProperties();
+            return App::DocumentObject::StdReturn;
+        }
 
         // Remove or Intersect (FreeCAD-CH ops#640 H3): one that misses its base changes no
         // geometry and stays healthy, with Onshape's info "Selected tools and targets do not
@@ -1795,6 +2099,48 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 {
     TopoShape prism = makeTopoShape();
 
+    if ((method == "UpToFirst" || method == "UpToLast") && !ownerRegionRunning
+        && runsAsStudioOwner(this)) {
+        Base::StateLocker perRegion(ownerRegionRunning);
+        return ownerUpToPerRegion(*this, sketchshape, method, dir, invObjLoc, [&](
+            const TopoShape& region, const TopoShape& part, double reach, const std::string& which) {
+            auto asToday = [&](double taper, double offset) {
+                return generateSingleExtrusionSide(
+                    region,
+                    method,
+                    length,
+                    taper,
+                    upToFacePropHandle,
+                    upToShapePropHandle,
+                    dir,
+                    offset,
+                    makeFace,
+                    part,
+                    invObjLoc
+                );
+            };
+            if (method != "UpToFirst") {
+                return asToday(taperAngleDeg, offsetVal);
+            }
+            // Onshape's up to next (O8h): every point of the region stops at the part's next face
+            TopoShape tool = ownerUpToNext(*this, region, part, dir, reach, which);
+            if (std::abs(taperAngleDeg) < Precision::Angular()
+                && std::abs(offsetVal) < Precision::Confusion()) {
+                return tool;
+            }
+            // A taper or an offset is today's single face: right only when the next faces are
+            // one, which the plain flat tool's volume tells
+            if (std::abs(volumeOf(asToday(0.0, 0.0)) - volumeOf(tool))
+                > std::max(1e-6, volumeOf(tool) * 1e-7)) {
+                throw Base::ValueError(
+                    which + ": a taper or an offset over next faces at different depths is not "
+                            "supported yet"
+                );
+            }
+            return asToday(taperAngleDeg, offsetVal);
+        });
+    }
+
     if (method == "UpToFirst" || method == "UpToLast" || method == "UpToFace"
         || method == "UpToShape") {
         // Note: This will return an unlimited planar face if support is a datum plane
@@ -1811,10 +2157,16 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
         if (method == "UpToFace") {
             getUpToFaceFromLinkSub(upToShape, upToFacePropHandle);
             upToShape.move(invObjLoc);
+            if (reapplyRun) {
+                upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
+            }
         }
         else if (method == "UpToShape") {
             faceCount = getUpToShapeFromLinkSubList(upToShape, upToShapePropHandle);
             upToShape.move(invObjLoc);
+            if (reapplyRun) {
+                upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
+            }
             if (faceCount == 0) {
                 // No shape selected, use the base
                 upToShape = base;
@@ -1823,7 +2175,10 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 
         if (faceCount == 1) {
             getUpToFace(upToShape, base, sketchshape, method, dir);
-            addOffsetToFace(upToShape, dir, offsetVal);
+            // Onshape's sign (FreeCAD-CH P3, the Onshape fact U1; coordinator c720): a positive
+            // offset ends short of the face, back towards the profile, a negative one past it
+            // (Onshape's "opposite direction"). Up to a face, a shape's face, first and last.
+            addOffsetToFace(upToShape, dir, -offsetVal);
         }
         else {
             if (fabs(offsetVal) > Precision::Confusion()) {
@@ -1835,7 +2190,8 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 
         try {
             TopoShape _base = makeTopoShape();
-            if (addSubType != FeatureAddSub::Type::Subtractive) {
+            // An owner's base is its in-scope parts (ops#654 S2): its tool is the prism alone
+            if (addSubType != FeatureAddSub::Type::Subtractive && !runsAsStudioOwner(this)) {
                 _base = base;  // avoid issue #16690
             }
             prism.makeElementPrismUntil(
@@ -1979,3 +2335,52 @@ bool FeatureExtrude::shapeMadeUnderPlacement() const
 {
     return madeUnder && madeUnder->isSame(Placement.getValue(), Precision::Confusion());
 }
+
+namespace PartDesign
+{
+
+/** FreeCAD-CH ops#654 T3: feature's tool re-solved at a pattern's instance (ReapplyRun above), in
+ * the feature's own frame; null with why when it can't be made there. Declared where used
+ * (FeatureTransformed.cpp) */
+PartDesignExport TopoShape reapplyExtrusion(
+    FeatureExtrude* feature,
+    const gp_Trsf& toSeed,
+    const TopoShape& base,
+    const std::string& partLabel,
+    std::string& why
+)
+{
+    ReapplyRun run {toSeed, base, partLabel, TopoShape()};
+    ReapplyRun* outer = reapplyRun;
+    reapplyRun = &run;
+    App::DocumentObjectExecReturn* ret = nullptr;
+    try {
+        if (auto pad = freecad_cast<Pad*>(feature)) {
+            ret = pad->execute();
+        }
+        else if (auto pocket = freecad_cast<Pocket*>(feature)) {
+            ret = pocket->execute();
+        }
+        else {
+            why = "it isn't a Pad or a Pocket";
+        }
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const Standard_Failure& e) {
+        why = e.GetMessageString();
+    }
+    reapplyRun = outer;
+    if (ret) {
+        why = ret->Why;
+        delete ret;
+        return {};
+    }
+    if (run.tool.isNull() && why.empty()) {
+        why = "it made no tool there";
+    }
+    return why.empty() ? run.tool : TopoShape();
+}
+
+}  // namespace PartDesign

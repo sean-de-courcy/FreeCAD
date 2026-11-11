@@ -103,6 +103,7 @@
 #include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ReferenceField.h"
+#include <Mod/PartDesign/App/StudioList.h>
 #include "ReferenceSelection.h"
 
 using namespace PartDesignGui;
@@ -134,6 +135,12 @@ std::string bareElement(const std::string& sub)
     std::string name = element ? element : sub;
     name.erase(0, name.find_first_not_of('?'));
     return name;
+}
+
+bool isVertex(const char* sub)
+{
+    const char* element = Base::Tools::isNullOrEmpty(sub) ? nullptr : Data::findElementName(sub);
+    return element && std::string_view(element).starts_with("Vertex");
 }
 
 // Onshape's words for an element of an object: "Face of Pad" for Pad's `Face6`; another kind of
@@ -242,6 +249,7 @@ public:
         , kind(options.kind)
         , wholeObject(options.wholeObject)
         , acceptOnly(options.acceptOnly)
+        , vertexToEdge(options.vertexToEdge)
     {}
     ~ReferenceFieldGate() override
     {
@@ -281,11 +289,18 @@ public:
                 return false;
             }
         }
+        else if (vertexToEdge && kind == ReferenceField::Kind::Elements && isVertex(sub)) {
+            // The pick takes the adjacent edge nearest the click (ReferenceField::onSelectionChanged)
+        }
         else if (kind != ReferenceField::Kind::Profile && kind != ReferenceField::Kind::Objects
                  && kind != ReferenceField::Kind::Sections && !acceptOnly) {
             // A profile's gate is its accept test alone (an object of the body, or its elements),
             // and so are a list of objects' and a list of sections'
-            if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
+            // FreeCAD-CH (ops#654 S4): a studio feature has no solid before it; its studio
+            // (its parts' datums, the studio's origin) is the gate's
+            App::DocumentObject* gateSupport =
+                support ? support : (PartDesign::isStudioOwner(own) ? own : nullptr);
+            if (ReferenceSelection selection(gateSupport, flags); !selection.allow(doc, obj, sub)) {
                 notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
                 return false;
             }
@@ -321,6 +336,7 @@ private:
     ReferenceField::Kind kind;
     bool wholeObject;
     bool acceptOnly;
+    bool vertexToEdge;
 };
 
 // The link properties a field writes: PropertyLinkSub, and PropertyLinkSubList (an up-to-shape)
@@ -688,6 +704,60 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
 }
 
 }  // namespace
+
+// Selection parity P6b (oracle 8 SQ13): Onshape's Fillet filters vertices and takes the nearest
+// allowed entity, the adjacent edge
+std::string PartDesignGui::nearestEdgeAt(App::DocumentObject* obj, const std::string& vertex, const Base::Vector3d& click)
+{
+    try {
+        const Part::ShapeOptions shapeOptions
+            = Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
+        const Part::TopoShape shape = Part::Feature::getTopoShape(obj, shapeOptions);
+        const TopoDS_Shape point = shape.getSubShape(vertex.c_str(), /* silent = */ true);
+        if (point.IsNull() || point.ShapeType() != TopAbs_VERTEX) {
+            return {};
+        }
+        // The click into the shape's coordinates: the containers above its Body place it
+        Base::Vector3d local = click;
+        if (auto body = PartDesign::Body::findBodyOf(obj)) {
+            body->globalPlacement().inverse().multVec(click, local);
+        }
+        const TopoDS_Shape at = BRepBuilderAPI_MakeVertex(gp_Pnt(local.x, local.y, local.z)).Shape();
+        const std::string kind = Part::TopoShape::shapeName(TopAbs_EDGE);
+        const int count = static_cast<int>(shape.countSubElements(kind.c_str()));
+        std::string best;
+        double nearest = 0;
+        for (int index = 1; index <= count; ++index) {
+            const std::string name = kind + std::to_string(index);
+            const TopoDS_Edge edge = TopoDS::Edge(shape.getSubShape(name.c_str()));
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            bool touches = false;
+            for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More() && !touches; it.Next()) {
+                touches = it.Current().IsSame(point);
+            }
+            if (!touches) {
+                continue;
+            }
+            BRepExtrema_DistShapeShape distance(edge, at);
+            if (!distance.IsDone()) {
+                continue;
+            }
+            if (best.empty() || distance.Value() < nearest) {
+                best = name;
+                nearest = distance.Value();
+            }
+        }
+        return best;
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+}
 
 /*********************************************************************
  *                          Reference field                          *
@@ -1353,6 +1423,17 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
     if (obj != target() || Base::Tools::isNullOrEmpty(msg.pSubName)) {
         return;
     }
+    if (options.vertexToEdge && isVertex(msg.pSubName)) {
+        const std::string edge =
+            nearestEdgeAt(obj, Data::findElementName(msg.pSubName), Base::Vector3d(msg.x, msg.y, msg.z));
+        if (edge.empty()) {
+            Base::StateLocker lock(busy, true);
+            Gui::Selection().clearSelection();
+            return;
+        }
+        pick(obj, edge);
+        return;
+    }
     pick(obj, msg.pSubName);
 }
 
@@ -1982,14 +2063,20 @@ std::vector<App::PropertyLinkSubList::SubSet> ReferenceField::storedSections() c
     return sections;
 }
 
+bool ReferenceField::keepsSketchElement(const std::string& sub)
+{
+    const std::string element = bareElement(sub);
+    return boost::starts_with(element, "Vertex")
+        || boost::starts_with(element, "InternalFace");
+}
+
 void ReferenceField::pickSection(const Gui::SelectionChanges& msg)
 {
     App::DocumentObject* obj = owner()->getDocument()->getObject(msg.pObjectName);
     std::string sub = msg.pSubName ? msg.pSubName : "";
-    // A sketch is a section whole, unless one of its points is picked: the feature takes the
-    // whole sketch for any other element of it (Loft::getSectionShape)
-    if (obj->isDerivedFrom<Part::Part2DObject>()
-        && !boost::starts_with(bareElement(sub), "Vertex")) {
+    // A sketch is a section whole, unless one of its points or regions is picked: the feature
+    // takes the whole sketch for any other element of it (Loft::getSectionShape)
+    if (obj->isDerivedFrom<Part::Part2DObject>() && !keepsSketchElement(sub)) {
         sub.clear();
     }
     auto list = freecad_cast<App::PropertyLinkSubList*>(property());
@@ -3483,10 +3570,24 @@ std::set<std::string> ReferenceFieldGroup::properties() const
     return result;
 }
 
-void ReferenceFieldGroup::armFirstEmpty()
+void ReferenceFieldGroup::armFirstEmpty(const std::string& preferred)
 {
     // Once the dialog shows, after the panels' own queued focus calls
-    QTimer::singleShot(0, this, [this]() {
+    QTimer::singleShot(0, this, [this, preferred]() {
+        // FreeCAD-CH (selection parity P1): the field armed before a restart of the edit, filled
+        // or not: a multi-pick field stays armed for the next pick, as Onshape's
+        if (!preferred.empty()) {
+            for (ReferenceField* field : fields()) {
+                if (field->propertyName() == preferred && field->isEnabled()
+                    && !field->isHidden()) {
+                    field->setArmed(true);
+                    if (field->isArmed()) {
+                        field->list()->setFocus(Qt::OtherFocusReason);
+                        return;
+                    }
+                }
+            }
+        }
         for (ReferenceField* field : fields()) {
             if (field->isRequired() && field->isEnabled() && field->entries().empty()) {
                 field->setArmed(true);

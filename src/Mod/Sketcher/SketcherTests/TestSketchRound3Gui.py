@@ -222,6 +222,43 @@ class TestSketchModelInferenceGui(Round3GuiCase):
             "Expected the end on the linked edge: %s" % self.describe(),
         )
 
+    def symmetric_on_external(self, geo, pos):
+        for c in self.sketch.Constraints:
+            if c.Type != "Symmetric":
+                continue
+            if c.First <= -3 and c.Second == c.First and c.FirstPos == 1 and c.SecondPos == 2:
+                if c.Third == geo and c.ThirdPos == pos:
+                    return c
+        return None
+
+    def test_a_line_ended_near_a_model_edge_s_middle_snaps_to_it_and_is_symmetric(self):
+        """SQ2: Onshape's model edge midpoint is a pickable point within about 8 px along the edge
+        of its middle (the edge itself within about 5 px). The top edge y = 10 runs x 0..20, its
+        middle (10, 10); the click is 0.15 mm along it (about 4.5 px in a 30 mm view, nearer than
+        the midpoint radius, but off it by more than the sketch's confusion)."""
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(5, 3), (10.15, 10.04)])
+        end = self.world(self.sketch.Geometry[0].EndPoint)
+        self.assertLess((end - V(10, 10, 5)).Length, 1e-6, "The end snapped to the middle")
+        edge = self.pad_edge_between(V(0, 10, 5), V(20, 10, 5))
+        self.assertIn(("Pad", edge), self.links(), self.describe())
+        self.assertIsNotNone(
+            self.symmetric_on_external(0, 2),
+            "Expected the end symmetric about the linked edge's ends: %s" % self.describe(),
+        )
+        self.assertIsNone(self.external_constraint("PointOnObject", 0, 2), self.describe())
+
+    def test_a_line_ended_on_a_model_edge_beyond_its_middle_s_radius_is_on_it(self):
+        """0.4 mm along the edge from its middle (about 12 px) is the edge, not the middle."""
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(5, 3), (10.4, 10.04)])
+        end = self.world(self.sketch.Geometry[0].EndPoint)
+        # the click lands on a pixel: x within a pixel or two of 10.4, y on the edge
+        self.assertLess(abs(end.y - 10), 1e-6, "The end snapped onto the edge")
+        self.assertLess(abs(end.x - 10.4), 0.1, "The end stayed where it was clicked along the edge")
+        self.assertIsNotNone(self.external_constraint("PointOnObject", 0, 2), self.describe())
+        self.assertIsNone(self.symmetric_on_external(0, 2), self.describe())
+
     def test_a_point_away_from_the_model_links_nothing(self):
         self.start_edit()
         self.draw("Sketcher_CreateLine", [(5, 3), (12, 6)])

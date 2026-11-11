@@ -549,6 +549,9 @@ std::vector<QPixmap> DrawSketchHandler::suggestedConstraintsPixmaps(
             case Symmetric:
                 iconType = QStringLiteral("Constraint_Symmetric");
                 break;
+            case Midpoint:  // FreeCAD-CH (ops#656)
+                iconType = QStringLiteral("Constraint_PointOnMidPoint");
+                break;
             case Tangent:
                 iconType = QStringLiteral("Constraint_Tangent");
                 break;
@@ -636,6 +639,25 @@ bool DrawSketchHandler::isLineCenterAutoConstraint(int GeoId, const Base::Vector
     return false;
 }
 
+// FreeCAD-CH (ops#656): the cursor at the middle of an arc of circle (within 5 % of the arc's
+// length, as at a line's middle): the point is kept there by Sketcher's Midpoint, as Onshape infers
+static bool isArcMiddleAutoConstraint(const SketchObject* obj, int geoId, const Base::Vector2d& pos)
+{
+    const Part::Geometry* geo = obj->getGeometry(geoId);
+    if (!geo || !geo->is<Part::GeomArcOfCircle>()) {
+        return false;
+    }
+    const auto* arc = static_cast<const Part::GeomArcOfCircle*>(geo);
+    double first = 0.0;
+    double last = 0.0;
+    arc->getRange(first, last, /*emulateCCWXY=*/true);
+    const double angle = (first + last) / 2.0;
+    const Base::Vector3d centre = arc->getCenter();
+    const double radius = arc->getRadius();
+    const Base::Vector2d middle(centre.x + radius * std::cos(angle), centre.y + radius * std::sin(angle));
+    return (pos - middle).Length() < radius * (last - first) * 0.05;
+}
+
 void DrawSketchHandler::seekPreselectionAutoConstraint(
     std::vector<AutoConstraint>& suggestedConstraints,
     const Base::Vector2d& Pos,
@@ -655,6 +677,10 @@ void DrawSketchHandler::seekPreselectionAutoConstraint(
             if (preSel.posId == PointPos::none) {
                 bool lineCenter = isLineCenterAutoConstraint(preSel.geoId, Pos);
                 constr.Type = lineCenter ? Sketcher::Symmetric : Sketcher::PointOnObject;
+                if (!lineCenter && preSel.geoId >= 0
+                    && isArcMiddleAutoConstraint(sketchgui->getSketchObject(), preSel.geoId, Pos)) {
+                    constr.Type = Sketcher::Midpoint;
+                }
             }
             else {
                 constr.Type = Sketcher::Coincident;
@@ -710,6 +736,12 @@ void DrawSketchHandler::seekModelAutoConstraint(
         constr.PosId = PointPos::start;
         constr.Type = type == AutoConstraint::CURVE ? Sketcher::PointOnObject : Sketcher::Coincident;
     }
+    else if (hit->isMidpoint && type != AutoConstraint::CURVE) {
+        // SQ2: a point at a model edge's middle, as at a sketch line's (Symmetric about its ends)
+        // or a sketch arc's (Midpoint)
+        constr.PosId = PointPos::none;
+        constr.Type = hit->isArc ? Sketcher::Midpoint : Sketcher::Symmetric;
+    }
     else if (type != AutoConstraint::CURVE) {
         constr.PosId = PointPos::none;
         constr.Type = Sketcher::PointOnObject;
@@ -749,7 +781,7 @@ bool DrawSketchHandler::seekLineExtensionAutoConstraint(
 
     for (const auto& constraint : suggestedConstraints) {
         if (constraint.Type == Sketcher::Coincident || constraint.Type == Sketcher::PointOnObject
-            || constraint.Type == Sketcher::Symmetric) {
+            || constraint.Type == Sketcher::Symmetric || constraint.Type == Sketcher::Midpoint) {
             return false;
         }
     }
@@ -1483,6 +1515,17 @@ bool DrawSketchHandler::generateOneAutoConstraintFromSuggestion(
             c->ThirdPos = posId1;
             autoConstraints.push_back(std::move(c));
         } break;
+        case Sketcher::Midpoint: {  // FreeCAD-CH (ops#656): the point at the arc's middle
+            if (posId1 == Sketcher::PointPos::none) {
+                break;
+            }
+            auto c = std::make_unique<Sketcher::Constraint>();
+            c->Type = Sketcher::Midpoint;
+            c->First = geoId1;
+            c->FirstPos = posId1;
+            c->Second = geoId2;
+            autoConstraints.push_back(std::move(c));
+        } break;
         // In special case of Horizontal/Vertical constraint, geoId2 is normally
         // unused and should be 'Constraint::GeoUndef' However it can be used as a
         // way to require the function to apply these constraints on another
@@ -1836,6 +1879,18 @@ void DrawSketchHandler::createAutoConstraints(
                     geoId2,
                     geoId1,
                     static_cast<int>(posId1)
+                );
+            } break;
+            case Sketcher::Midpoint: {  // FreeCAD-CH (ops#656)
+                if (posId1 == Sketcher::PointPos::none) {
+                    continue;
+                }
+                Gui::cmdAppObjectArgs(
+                    sketchgui->getObject(),
+                    "addConstraint(Sketcher.Constraint('Midpoint',%d,%d,%d)) ",
+                    geoId1,
+                    static_cast<int>(posId1),
+                    geoId2
                 );
             } break;
                 // In special case of Horizontal/Vertical constraint, geoId2 is normally unused

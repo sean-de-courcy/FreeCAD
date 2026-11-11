@@ -165,6 +165,13 @@ bool DrawSketchHandlerDragAutoConstraint::isExistingConstraint(
                 }
                 break;
 
+            case Midpoint:  // FreeCAD-CH (ops#656)
+                if (c->Type == Midpoint && isDraggedPoint(c->First, c->FirstPos)
+                    && c->Second == constraint.GeoId) {
+                    return true;
+                }
+                break;
+
             case Symmetric: {
                 if (c->Type != Symmetric || !isDraggedPoint(c->Third, c->ThirdPos)) {
                     break;

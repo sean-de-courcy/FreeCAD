@@ -28,6 +28,9 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <set>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <QAbstractSpinBox>
@@ -65,6 +68,7 @@
 #include <Gui/MainWindow.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Gui/BitmapFactory.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -74,12 +78,14 @@
 #include <Mod/PartDesign/App/FeaturePipe.h>
 #include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
+#include <Mod/PartDesign/App/FeatureTransformed.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 
 #include "ui_TaskPreviewParameters.h"
 
 #include "ReferenceField.h"
+#include "StudioGui.h"
 #include "TaskFeatureParameters.h"
 #include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
@@ -1044,9 +1050,24 @@ void endDialogHistory(const App::Document* doc)
     }
 }
 
-// Other parts in the Body's studio: Bodies of one container placed alike (ops#325)
+// FreeCAD-CH ops#654 R0 lite: in a studio with a history list the studio features (owners) act on
+// other parts, so an in-Body feature's Result box offers no sibling rows there (the parts list, the
+// in-Body merge list); the sibling code stays for studios without a list, and files using it open
+// as before
+static bool inListedStudio(const PartDesign::Body* body)
+{
+    App::Part* studio = nullptr;
+    return body && Part::BodyBase::studioOf(body, studio)
+        && PartDesign::StudioList::of(body->getDocument(), studio);
+}
+
+// Other parts in the Body's studio: Bodies of one container placed alike (ops#325); none offered
+// in a listed studio (R0 lite)
 bool hasStudioSiblings(const PartDesign::Body* body)
 {
+    if (inListedStudio(body)) {
+        return false;
+    }
     for (auto obj : body->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
         if (obj != body
             && Part::BodyBase::areStudioSiblings(body, static_cast<PartDesign::Body*>(obj))) {
@@ -1093,6 +1114,14 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
             history->clear();
         }
     }
+    // FreeCAD-CH (selection parity P1): the field armed now is armed again in the new dialog. A
+    // new Extrude's first region moves it to its part (profileTaken), and the field that took
+    // the pick disarmed with the old dialog, so the second region became a plain selection
+    std::string armedProperty;
+    if (ReferenceField* field = ReferenceField::armedField();
+        field && field->ownerDocument() == doc) {
+        armedProperty = field->propertyName();
+    }
     App::TransactionLocker lock(doc);
     {
         Base::FlagToggler<> restarting(restartingEdit, false);
@@ -1105,12 +1134,15 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
         e.reportException();
     }
     if (App::DocumentObject* feature = featureT.getObject()) {
+        TaskDlgFeatureParameters::armOnOpen(armedProperty);
         try {
             PartDesignGui::setEdit(feature, PartDesign::Body::findBodyOf(feature));
         }
         catch (const Base::Exception& e) {
             e.reportException();
         }
+        // Taken by the dialog's open(), or no dialog came
+        TaskDlgFeatureParameters::armOnOpen({});
     }
     // No panel came back, so no box takes the move over (PR 303 round 2)
     if (!Gui::Control().activeDialog(doc)) {
@@ -2137,6 +2169,9 @@ void TaskResultParameters::addPartsList()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (inListedStudio(body)) {
+        return;  // R0 lite: the studio's owners act on other parts
+    }
     touchCache = std::make_shared<TouchCache>();
     std::map<App::DocumentObject*, PartDesign::FeatureAddSub*> siblings;
     for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
@@ -2193,6 +2228,9 @@ void TaskResultParameters::addMergeList()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (inListedStudio(body)) {
+        return;  // R0 lite: the studio's owners act on other parts
+    }
     touchCache = std::make_shared<TouchCache>();
     PartDesign::Boolean* merge = mergeAfter(feature);
     const bool adding =
@@ -2644,6 +2682,8 @@ namespace
 {
 // The features a command made for the dialog it opens next (TaskDlgFeatureParameters::hasInput)
 std::vector<App::DocumentObjectT> createdForDialog;
+// The field the dialog opened next arms first (TaskDlgFeatureParameters::armOnOpen)
+std::string armOnOpenProperty;
 
 // A property the user gives (a value, a link, a choice): not a result, not the view's
 bool isInputProperty(const App::Property* prop)
@@ -2698,6 +2738,11 @@ void TaskDlgFeatureParameters::noteCreated(App::DocumentObject* feature)
             == createdForDialog.end()) {
         createdForDialog.emplace_back(feature);
     }
+}
+
+void TaskDlgFeatureParameters::armOnOpen(const std::string& property)
+{
+    armOnOpenProperty = property;
 }
 
 bool TaskDlgFeatureParameters::hasInput() const
@@ -2798,7 +2843,7 @@ void TaskDlgFeatureParameters::open()
             references->setCoveredProperties(fieldGroup->properties());
         });
     }
-    fieldGroup->armFirstEmpty();
+    fieldGroup->armFirstEmpty(std::exchange(armOnOpenProperty, std::string()));
     // A new feature's values as the dialog opens: what the user gives from here is its input
     if (App::DocumentObject* feature = created ? getObject() : nullptr) {
         std::vector<App::Property*> props;
@@ -2840,9 +2885,13 @@ void TaskDlgFeatureParameters::open()
                 return;
             }
             titlePending = true;
-            QTimer::singleShot(0, this, [this]() {
+            // Only while the feature is there: a Cancel that aborts its creation deletes it and
+            // its view provider (vp, which getObject() reads) before the dialog goes (ops#654)
+            QTimer::singleShot(0, this, [this, featureT]() {
                 titlePending = false;
-                updateTitle();
+                if (featureT.getObject()) {
+                    updateTitle();
+                }
             });
         };
         titleChanged = feature->getDocument()->signalChangedObject.connect(
@@ -2875,12 +2924,23 @@ void TaskDlgFeatureParameters::modifyStandardButtons(QDialogButtonBox* box)
     requiredConnection = feature->getDocument()->signalChangedObject.connect(
         [this, featureT](const App::DocumentObject& obj, const App::Property&) {
             if (&obj == featureT.getObject()) {
-                QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+                // The rollback of a Cancel changes the feature, then deletes it and its view
+                // provider: the queued update must not read vp then (getObject()), FreeCAD-CH
+                // ops#654 P5 (the Boolean dialog's intermittent "Illegal storage access")
+                QTimer::singleShot(0, this, [this, featureT]() {
+                    if (featureT.getObject()) {
+                        updateOkButton();
+                    }
+                });
             }
         }
     );
     // Once the box is decorated: TaskEditControl::decorateButtons sets its tooltip after this call
-    QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+    QTimer::singleShot(0, this, [this, featureT]() {
+        if (featureT.getObject()) {
+            updateOkButton();
+        }
+    });
 }
 
 void TaskDlgFeatureParameters::updateTitle()
@@ -2940,6 +3000,15 @@ std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
 
 void TaskDlgFeatureParameters::addResultBox()
 {
+    // FreeCAD-CH (ops#654 S4): a studio feature's own Result box, on top as an Extrude's
+    if (QWidget* studioBox = makeStudioResultBox(vp)) {
+        auto at = Content.begin();
+        if (references && !Content.empty() && Content.front() == references) {
+            ++at;
+        }
+        Content.insert(at, studioBox);
+        return;
+    }
     if (!TaskResultParameters::hasRows(getObject())) {
         return;
     }
@@ -2992,6 +3061,8 @@ bool TaskDlgFeatureParameters::accept()
     if (references) {
         references->stopPick();
     }
+    // The pieces' step (P6p), open while they are made: a refusal aborts it
+    bool piecesStep = false;
     try {
         // Iterate over parameter dialogs and apply all parameters from them, the Result box last
         forEachParameters([&isUpdateBlocked](TaskFeatureParameters* param) {
@@ -3005,7 +3076,41 @@ bool TaskDlgFeatureParameters::accept()
             throw Base::TypeError("Bad object processed in the feature dialog.");
         }
 
-        if (isUpdateBlocked) {
+        // FreeCAD-CH (ops#654 S4): a studio feature's edit changes Bodies that don't use it (a
+        // part left out of its scope loses its step): nothing touched is purged
+        if (PartDesign::isStudioOwner(feature)) {
+            // Its steps take its values at reconcile (Operation, Refine)
+            std::string why;
+            if (!PartDesign::StudioList::holding(feature)->reconcile(&why)) {
+                throw Base::ValueError(why.empty() ? "The studio's list can't take the feature" : why);
+            }
+        }
+        // FreeCAD-CH (ops#654 P6p): the OK of a studio feature, or of an in-Body pattern of a
+        // listed part, is the command that makes its pieces and leftovers parts
+        // (run once the edit has ended: during it the edited feature isn't recomputed)
+        const bool makesPieces = PartDesign::isStudioOwner(feature)
+            || (feature->isDerivedFrom<PartDesign::Transformed>()
+                && PartDesign::StudioList::holding(feature));
+        // Whether it made or deleted a part: the Bodies themselves, not their count (one record
+        // deleted and one piece made leave it equal: review prline-b5-r1 T3). A refusal throws
+        auto makePieces = [feature]() {
+            App::Document* document = feature->getDocument();
+            auto bodies = [document]() {
+                std::set<std::string> names;
+                for (auto obj : document->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+                    names.insert(obj->getNameInDocument());
+                }
+                return names;
+            };
+            const auto before = bodies();
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                Gui::Command::getObjectCmd(feature).c_str()
+            );
+            return bodies() != before;
+        };
+        if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
         else {
@@ -3055,10 +3160,39 @@ bool TaskDlgFeatureParameters::accept()
             document->abortTransaction();
             Gui::cmdAppDocument(document, "recompute()");
             Gui::cmdGuiDocument(document, "resetEdit()");
+            // An unchanged OK of a feature whose pieces aren't parts yet makes them (P6p): its
+            // message says to press OK. A step of its own, only when it made a part
+            if (makesPieces) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+                piecesStep = true;
+                if (makePieces()) {
+                    document->commitTransaction();
+                }
+                else {
+                    document->abortTransaction();
+                }
+            }
             return true;
         }
 
         Gui::cmdGuiDocument(feature, "resetEdit()");
+        if (makesPieces) {
+            // The edit's step may be closed by now: the pieces then make a step of their own
+            App::Document* document = feature->getDocument();
+            const bool own = !document->hasPendingTransaction();
+            if (own) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+            }
+            // Not its own, the edit's step: then a refusal fails the OK as a whole
+            piecesStep = true;
+            const bool made = makePieces();
+            if (own && made) {
+                document->commitTransaction();
+            }
+            else if (own) {
+                document->abortTransaction();
+            }
+        }
         // FreeCAD-CH (ops#640, journey J18, F4): the edit's end shows the feature it edited,
         // which hid its Merge again, so a merged part vanished from the view while the merging
         // extrude was the last feature. The part's result is the Merge when it is the tip
@@ -3073,6 +3207,14 @@ bool TaskDlgFeatureParameters::accept()
         endDialogHistory(feature->getDocument());  // FreeCAD-CH (ops#640)
     }
     catch (const Base::Exception& e) {
+        // A refusal of the pieces' command (P6p): its step goes, with what it changed (review
+        // prline-b5-r1 T3)
+        if (App::Document* document = feature->getDocument();
+            piecesStep && document && document->hasPendingTransaction()) {
+            document->abortTransaction();
+            endDialogHistory(document);
+            Gui::cmdAppDocument(document, "recompute()");
+        }
         QString errorText = QString::fromUtf8(e.what());
         QString statusText = QString::fromUtf8(getObject()->getStatusString());
 

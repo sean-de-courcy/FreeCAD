@@ -121,6 +121,7 @@
 #include "FeatureRevolved.h"
 #include "FirstContactConstruction.h"
 #include "FirstContactJumps.h"
+#include "StudioOwner.h"
 
 using namespace PartDesign;
 
@@ -3301,6 +3302,14 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
     TopoShape result = refineShapeIfActive(revolved);
     // set the additive shape property for later usage in e.g. pattern
     this->AddSubShape.setValue(result);
+
+    // FreeCAD-CH ops#654 S2: a studio owner computes only its tool, which its steps apply; its own
+    // shape stays empty, so nothing sees it as a part
+    if (runsAsStudioOwner(this)) {
+        this->rawShape = TopoShape();
+        this->Shape.setValue(TopoShape());
+        return;
+    }
 
     // A Remove or an Intersect with nothing before it makes nothing, never its tool as material,
     // as an Extrude's (ops#640 rank 20, H3); FeatureAddSub::recompute fails it, "Nothing to cut".

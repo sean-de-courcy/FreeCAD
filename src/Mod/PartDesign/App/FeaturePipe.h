@@ -25,12 +25,14 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "FeatureSketchBased.h"
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp_Dir.hxx>
 
 namespace PartDesign
 {
@@ -52,6 +54,18 @@ public:
     App::PropertyEnumeration Transition;
     App::PropertyEnumeration Transformation;
     App::PropertyLinkSubList Sections;
+    /// How the profile is carried along the path, in Onshape's terms (notes\sweep-design.md):
+    /// "None" (its frame turns with the path), "Keep orientation" (Mode "Fixed"), or "Advanced"
+    /// (Mode decides, as in files from before it, and when Mode is set directly)
+    App::PropertyEnumeration ProfileControl;
+    /// A profile in the middle of the path sweeps both ways along all of it (on), or from the
+    /// profile one way (off)
+    App::PropertyBool ExtendToFullPath;
+    /// The other way along the path from the profile, with ExtendToFullPath off (Onshape's
+    /// opposite direction, SW1)
+    App::PropertyBool PathReversed;
+    /// More path edges, from other objects than Spine's: joined with Spine's in any order
+    App::PropertyLinkSubList SpineMore;
     /// Where the spine started and ended at the last successful recompute, the end that carried
     /// the profile's names first, where they lie in the body (ops#379). Read for the input they
     /// were stored for, or where they still are the spine's ends (ops#435)
@@ -83,6 +97,9 @@ public:
 
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;
+    /// A file without ProfileControl reads as "Advanced" (its Mode decides, as before), without
+    /// ExtendToFullPath as on (it swept the whole path)
+    void Restore(Base::XMLReader& reader) override;
     /// returns the type name of the view provider
     const char* getViewProviderName() const override
     {
@@ -112,6 +129,11 @@ protected:
         Part::TopoShape& result
     );
     void setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS_Shape& auxshape);
+    /// ProfileControl sets Mode; Mode set directly makes ProfileControl "Advanced"
+    void onChanged(const App::Property* prop) override;
+    /// The profile's plane normal in the pipe's frame (\a invObjLoc): a sketch's placement Z, a
+    /// planar face's normal; none for another profile
+    std::optional<gp_Dir> profileNormal(const TopLoc_Location& invObjLoc) const;
     /// handle changed property
     void handleChangedPropertyType(
         Base::XMLReader& reader,
@@ -129,6 +151,13 @@ private:
     static const char* TransitionEnums[];
     static const char* ModeEnums[];
     static const char* TransformEnums[];
+    static const char* ProfileControlEnums[];
+    /// Set while ProfileControl sets Mode, or the constructor or Restore set either
+    bool settingMode = false;
+    /// ProfileControl "None" along a path that isn't planar, where OCCT's Frenet frame neither
+    /// turns over nor jumps: the sweep in Mode "Standard" takes Frenet's frame (a helix keeps its
+    /// profile square to its axis). Set by execute for setupAlgorithm
+    bool frenetForNone = false;
 };
 
 class PartDesignExport AdditivePipe: public Pipe

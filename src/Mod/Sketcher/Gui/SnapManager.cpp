@@ -320,7 +320,9 @@ bool SnapManager::snapToObject(Base::Vector2d inputPos, Base::Vector2d& snapPos,
     const bool sketchHit = VtId >= 0 || CrsId >= 0 || CrvId >= 0 || CrvId <= GeoEnum::RefExt;
     if (!sketchHit && viewProvider.getSketchMode() == ViewProviderSketch::STATUS_SKETCH_UseHandler) {
         auto hit = findModelSnap(Obj, inputPos, modelSnapTolerance(viewProvider));
-        const SnapType wanted = hit && hit->isVertex ? SnapType::Point : SnapType::Edge;
+        // an edge's middle (SQ2) is a point, as a vertex is
+        const SnapType wanted =
+            hit && (hit->isVertex || hit->isMidpoint) ? SnapType::Point : SnapType::Edge;
         if (hit && (static_cast<int>(mask) & static_cast<int>(wanted))) {
             snapPos = hit->position;
             return true;

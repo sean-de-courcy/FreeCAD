@@ -112,13 +112,14 @@ QString pipeScalingTitle(ViewProviderPipe* view)
                                    : TaskPipeScaling::tr("Additive Pipe Section Transformation");
 }
 
-// A sketch is taken whole, unless one of its points is picked: the pipe takes the whole sketch
-// for any other element of it (as the loft, Loft::getSectionShape)
+// A sketch is taken whole, unless one of its points or regions is picked: the pipe takes the
+// whole sketch for any other element of it, and a picked region as it is (as the loft,
+// Loft::getSectionShape)
 std::string sectionElement(App::DocumentObject* obj, const char* sub)
 {
     std::string element = Base::Tools::isNullOrEmpty(sub) ? std::string() : std::string(sub);
     if (obj && obj->isDerivedFrom<Part::Part2DObject>()
-        && ReferenceActions::subElementType(element) != "Vertex") {
+        && !ReferenceField::keepsSketchElement(element)) {
         element.clear();
     }
     return element;
@@ -195,6 +196,11 @@ bool usedAsPath(PartDesign::Pipe* pipe, App::DocumentObject* obj, const std::str
     }
     if (usedAlike(obj, element, pipe->Spine.getValue(), pipe->Spine.getSubValues())) {
         return true;
+    }
+    for (const auto& [more, subs] : pipe->SpineMore.getSubListValues()) {
+        if (usedAlike(obj, element, more, subs)) {
+            return true;
+        }
     }
     // The auxiliary path counts in Mode Auxiliary only: in another mode it is a leftover the pipe
     // doesn't use
@@ -298,6 +304,24 @@ TaskPipeParameters::TaskPipeParameters(ViewProviderPipe* PipeView, bool /*newObj
         this,
         &TaskPipeParameters::onTransitionChanged
     );
+    connect(
+        ui->comboBoxProfileControl,
+        qOverload<int>(&QComboBox::currentIndexChanged),
+        this,
+        &TaskPipeParameters::onProfileControlChanged
+    );
+    connect(
+        ui->checkBoxExtendToFullPath,
+        &QCheckBox::toggled,
+        this,
+        &TaskPipeParameters::onExtendToFullPathChanged
+    );
+    connect(
+        ui->checkBoxOppositeDirection,
+        &QCheckBox::toggled,
+        this,
+        &TaskPipeParameters::onOppositeDirectionChanged
+    );
 
     this->groupLayout()->addWidget(proxy);
 
@@ -318,6 +342,7 @@ TaskPipeParameters::TaskPipeParameters(ViewProviderPipe* PipeView, bool /*newObj
         QSignalBlocker blockTransition(ui->comboBoxTransition);
         ui->comboBoxTransition->setCurrentIndex(pipe->Transition.getValue());
     }
+    showProfileControl();
     createFields();
 
     this->blockSelection(false);
@@ -395,11 +420,81 @@ void TaskPipeParameters::createFields()
     spineField = new ReferenceField(getObject(), "Spine", spine, writeSpine, proxy);
     *spineSelf = spineField;
     spineField->takePlaceOf(ui->spineFieldPlaceholder);
+
+    // More path edges from other objects (SpineMore): joined with the path's in any order, as
+    // Onshape picks path edges one by one
+    ReferenceField::Options more = pathOptions(pipeT);
+    more.kind = ReferenceField::Kind::Sections;
+    more.label = tr("More path edges");
+    more.required = false;  // optional: a new or multisection pipe arms its own field first
+    auto moreSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeMore = [this, moreSelf](const std::vector<App::PropertyLinkSubList::SubSet>& list) {
+        if (*moreSelf) {
+            (*moreSelf)->assign(list);
+        }
+        for (const auto& entry : list) {
+            shown.show(entry.first);
+        }
+        recomputeFeature();
+    };
+    spineMoreField = new ReferenceField(
+        getObject(),
+        "SpineMore",
+        more,
+        ReferenceField::SectionsWriter(writeMore),
+        proxy
+    );
+    *moreSelf = spineMoreField;
+    spineMoreField->takePlaceOf(ui->spineMoreFieldPlaceholder);
 }
 
 std::vector<ReferenceField*> TaskPipeParameters::referenceFields() const
 {
-    return {profileField, spineField};
+    return {profileField, spineField, spineMoreField};
+}
+
+void TaskPipeParameters::showProfileControl()
+{
+    auto pipe = getObject<PartDesign::Pipe>();
+    if (!pipe) {
+        return;
+    }
+    QSignalBlocker blockControl(ui->comboBoxProfileControl);
+    QSignalBlocker blockExtend(ui->checkBoxExtendToFullPath);
+    QSignalBlocker blockOpposite(ui->checkBoxOppositeDirection);
+    ui->comboBoxProfileControl->setCurrentIndex(pipe->ProfileControl.getValue());
+    ui->checkBoxExtendToFullPath->setChecked(pipe->ExtendToFullPath.getValue());
+    ui->checkBoxOppositeDirection->setChecked(pipe->PathReversed.getValue());
+    // Only a one-way sweep has a direction to flip (Onshape, SW1: no effect when extended)
+    ui->checkBoxOppositeDirection->setEnabled(!pipe->ExtendToFullPath.getValue());
+}
+
+void TaskPipeParameters::onProfileControlChanged(int idx)
+{
+    if (auto pipe = getObject<PartDesign::Pipe>()) {
+        pipe->ProfileControl.setValue(idx);
+        recomputeFeature();
+    }
+    if (profileControlSet) {
+        profileControlSet();
+    }
+}
+
+void TaskPipeParameters::onExtendToFullPathChanged(bool checked)
+{
+    if (auto pipe = getObject<PartDesign::Pipe>()) {
+        pipe->ExtendToFullPath.setValue(checked);
+        recomputeFeature();
+    }
+    ui->checkBoxOppositeDirection->setEnabled(!checked);
+}
+
+void TaskPipeParameters::onOppositeDirectionChanged(bool checked)
+{
+    if (auto pipe = getObject<PartDesign::Pipe>()) {
+        pipe->PathReversed.setValue(checked);
+        recomputeFeature();
+    }
 }
 
 TaskPipeParameters::~TaskPipeParameters()
@@ -436,13 +531,6 @@ void TaskPipeParameters::onTransitionChanged(int idx)
     }
 }
 
-void TaskPipeParameters::onTangentChanged(bool checked)
-{
-    if (auto pipe = getObject<PartDesign::Pipe>()) {
-        pipe->SpineTangent.setValue(checked);
-        recomputeFeature();
-    }
-}
 
 void TaskPipeParameters::onReferenceSelectionTaken()
 {
@@ -937,11 +1025,25 @@ std::vector<ReferenceField*> TaskPipeOrientation::referenceFields() const
 
 TaskPipeOrientation::~TaskPipeOrientation() = default;
 
+void TaskPipeOrientation::showMode()
+{
+    auto pipe = getObject<PartDesign::Pipe>();
+    if (!pipe) {
+        return;
+    }
+    QSignalBlocker blockMode(ui->comboBoxMode);
+    ui->comboBoxMode->setCurrentIndex(pipe->Mode.getValue());
+    ui->stackedWidget->setCurrentIndex(pipe->Mode.getValue());
+}
+
 void TaskPipeOrientation::onOrientationChanged(int idx)
 {
     if (auto pipe = getObject<PartDesign::Pipe>()) {
         pipe->Mode.setValue(idx);
         recomputeFeature();
+    }
+    if (modeSet) {
+        modeSet();
     }
     // Its page hides: an armed auxiliary path would take picks out of sight (PR 166 review). The
     // constructor sets the mode before the field exists
@@ -1201,6 +1303,15 @@ TaskDlgPipeParameters::TaskDlgPipeParameters(ViewProviderPipe* PipeView, bool ne
     parameter = new TaskPipeParameters(PipeView, newObj);
     orientation = new TaskPipeOrientation(PipeView, newObj);
     scaling = new TaskPipeScaling(PipeView, newObj);
+
+    // ProfileControl sets Mode, and Mode set directly makes it "Advanced": each panel shows the
+    // change the other made
+    parameter->profileControlSet = [this]() {
+        orientation->showMode();
+    };
+    orientation->modeSet = [this]() {
+        parameter->showProfileControl();
+    };
 
     Content.push_back(parameter);
     Content.push_back(orientation);

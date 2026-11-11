@@ -1322,6 +1322,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertNotIn(MAGENTA, colours)
         self.assertEqual(colours.count(CURRENT), 1)
 
+    def testEditedFieldStaysArmedOverTheReferencesPanel(self):
+        """Selection parity 8: an edited dress-up's Base field is armed on open (rank 14) and
+        stays armed once the panel shows, though the dialog has a References panel (a guessed
+        entry). The panel's refresh on the field's show had nothing to highlight (the field
+        covers Base) but still took the selection, which disarmed the field: whether the field
+        ended armed hung on whether the panel showed before or after the arm."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed"])
+        pump(0.5)
+        self.assertTrue(armed(field), "the field disarmed after the dialog opened")
+
     def testGuessStaysGuessedAfterAnotherPick(self):
         """Review 2: the redrawn fillet's guessed entry stays guessed (its record kept) when
         another edge is picked, when that one is deleted again, and through the field's undo."""
@@ -4654,6 +4666,29 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testMirroredReferencePickThenOk(self):
         self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
 
+    def testMirroredPlaneTakesASketchRegion(self):
+        """Selection parity SQ16 (Onshape's Mirror plane takes a sketch region): a region of a
+        sketch standing at x = 3 (normal +X) mirrors the first bump (x 1..2, y 1..2) to x 4..5;
+        the plane is the sketch itself."""
+        first, second = self.bumps()
+        sk = models.sketch(self.doc, "MirrorSk", models.rectangle(-2, -2, 2, 2), self.body,
+                           placement=App.Placement(App.Vector(3, 0, 0),
+                                                   App.Rotation(App.Vector(0, 1, 0), 90)))
+        sk.MakeInternals = True
+        self.doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
+        pattern = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(pattern)
+        self.selectReference("comboPlane")
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sk.Name + ".InternalFace1")
+        pump(0.3)
+        self.assertLink(pattern.MirrorPlane, sk, [])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(pattern.Shape.Volume, 1003, places=6)
+        self.assertTrue(pattern.Shape.isInside(App.Vector(4.5, 1.5, 10.5), 1e-7, True))
+
     def testPatternOriginalsLabelRenamed(self):
         """A listed original renamed while the panel is open shows its new Label (and the other
         one no longer needs its name)."""
@@ -6098,7 +6133,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         so the order isn't told from the shape here.) A point of S30 replaces it, last; moved up
         it is refused with the reason (only the last section can be a point)."""
         pipe = self.rod()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         field = self.sectionsField()
         self.assertTrue(field.isVisible(), "the multisection page isn't shown")
         self.assertTrue(waitFor(lambda: armed(field)), "the sections field isn't armed on open")
@@ -6121,12 +6156,103 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertIn("last section", status.text())
         self.assertEqual(texts(field), ["1. S10", "2. S30:Vertex1"])
 
+    # -- regions-3: a region picked for a loft's or a pipe's profile or section ------------------
+
+    def splitSquare(self, name, half, z):
+        """A square sketch centred on Z, side 2 x half, at height z, split by the line x = 0;
+        returns it and its left region's name (half x 2 half, centre x = -half / 2)."""
+        geometry = models.rectangle(-half, -half, half, half) + models.polyline(
+            [(0, -half), (0, half)]
+        )
+        sketch = models.sketch(self.doc, name, geometry, self.body, z=z)
+        sketch.MakeInternals = True
+        self.doc.recompute()
+        left = [
+            "InternalFace%d" % (i + 1)
+            for i, f in enumerate(sketch.InternalShape.Faces)
+            if abs(f.Area - 2 * half * half) < 1e-6 and f.CenterOfMass.x < 0
+        ]
+        self.assertEqual(len(left), 1, [f.Area for f in sketch.InternalShape.Faces])
+        return sketch, left[0]
+
+    def pickRegionOf(self, sketch, region):
+        """A sketch's region picked in the 3D view, through the body as the view gives it."""
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sketch.Name + "." + region)
+        pump(0.2)
+
+    def flatArea(self, shape, z):
+        """The area of the shape's faces lying in the plane at height z."""
+        return sum(
+            f.Area
+            for f in shape.Faces
+            if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6
+        )
+
+    def testLoftProfileAndSectionRegionPicks(self):
+        """A loft from a 10 x 10 square split at x = 0 (z = 0) to a 20 x 20 one split so (z = 10),
+        both whole: 100 at the bottom, 400 at the top. The profile's left region clicked: the
+        loft's Profile names it and its bottom is 50; the section's left region clicked: its
+        entry names it and the top is 200 (before: the dialogs wrote the whole sketch, silently,
+        though the Python path takes the region)."""
+        self.body = models.body(self.doc)
+        profile, profileLeft = self.splitSquare("Profile", 5, 0)
+        section, sectionLeft = self.splitSquare("Section", 10, 10)
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = profile
+        loft.Sections = [(section, [""])]
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 0), 100, places=4)
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 10), 400, places=4)
+
+        profileField, sectionsField = self.edit(loft, count=2)
+        self.arm(profileField, byFocus=True)
+        self.pickRegionOf(profile, profileLeft)
+        self.assertLink(loft.Profile, profile, [profileLeft])
+        self.arm(sectionsField, byFocus=True)
+        self.pickRegionOf(section, sectionLeft)
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[sectionLeft]])
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 0), 50, places=4)
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 10), 200, places=4)
+
+    def testPipeProfileAndSectionRegionPicks(self):
+        """The Rod's pipe with a 2 x 2 profile split at x = 0 and a 4 x 4 section at z = 10 split
+        so, both whole: 4 at the bottom, the slice at z = 10 16. The profile's left region
+        clicked: the pipe's Profile names it, its bottom is 2; the section's left region clicked:
+        its entry names it, the slice at z = 10 is 8 (before: the whole sketches, silently)."""
+        pipe = self.rod()
+        profile, profileLeft = self.splitSquare("Split", 1, 0)
+        section, sectionLeft = self.splitSquare("Split10", 2, 10)
+        pipe.Profile = profile
+        pipe.Sections = [(section, [""])]
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 4, places=4)
+        self.assertThroughSection(pipe, 10, 16)
+
+        self.edit(pipe, count=4)
+        profileField = findField("fieldProfile")
+        self.assertIsNotNone(profileField, "no profile field")
+        self.arm(profileField, byFocus=True)
+        self.pickRegionOf(profile, profileLeft)
+        self.assertLink(pipe.Profile, profile, [profileLeft])
+        sectionsField = self.sectionsField()
+        self.arm(sectionsField, byFocus=True)
+        self.pickRegionOf(section, sectionLeft)
+        self.assertEqual([list(subs) for obj, subs in pipe.Sections], [[sectionLeft]])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 2, places=4)
+        self.assertThroughSection(pipe, 10, 8)
+
     def testPipeDeleteRemovesAllSelected(self):
         """B11, B12: no Remove Section toggle; Delete removes every selected section."""
         pipe = self.rod()
         pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
         self.assertThroughSection(pipe, 10, 16)
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         buttons = Gui.getMainWindow().findChildren(QtWidgets.QToolButton)
         self.assertFalse([b for b in buttons if b.text() == "Remove Section"])
         field = self.sectionsField()
@@ -6140,7 +6266,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """T35 for the pipe: a constant pipe's sections field is hidden and not armed; switching to
         Multisection arms it (it has no sections)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldSections")
         self.assertFalse(field.isVisible())
         self.assertFalse(armed(field))
@@ -6163,7 +6289,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.spine.ViewObject.Visibility = False
         self.s10.ViewObject.Visibility = False
         self.s30.ViewObject.Visibility = True
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         self.assertTrue(self.s10.ViewObject.Visibility)
         self.assertTrue(self.spine.ViewObject.Visibility)
         button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
@@ -6302,7 +6428,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         again, 120. The Spine's subs follow each pick."""
         pipe = self.rod("Constant")
         self.assertVolume(pipe, 120)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Spine (whole)"])
         self.arm(field, byFocus=False)
@@ -6339,7 +6465,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Spine = (self.spine, ["Edge1", "Edge2"])
         self.doc.recompute()
         self.assertVolume(pipe, 120)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Spine:Edge1", "Spine:Edge2"])
         self.arm(field, byFocus=False)
@@ -6371,7 +6497,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe = self.rod("Constant")
         pipe.Spine = (self.spine, ["Edge1", "Edge2"])
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         buttons = [b.text() for b in Gui.getMainWindow().findChildren(QtWidgets.QToolButton)]
         for text in ("Object", "Add edge", "Remove edge", "Add Edge", "Remove Edge"):
             self.assertNotIn(text, buttons)
@@ -6388,10 +6514,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         replaces it (a 4 x 4 square along the spine: 480); the spine is refused as the profile,
         with the reason."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
-        profile, spine = fields()
+        self.edit(pipe, count=3)
+        profile, spine, more = fields()
         self.assertEqual(profile.objectName(), "fieldProfile")
         self.assertEqual(spine.objectName(), "fieldSpine")
+        self.assertEqual(more.objectName(), "fieldSpineMore")
         self.assertEqual(texts(profile), ["Profile"])
         self.arm(profile, byFocus=False)
         self.pick(self.spine, "Edge1")
@@ -6427,7 +6554,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         # y = +-1.758; without it the prism is exact
         pipe.AuxiliaryCurvilinear = False
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldAuxiliarySpine")
         self.assertIsNotNone(field)
         self.assertFalse(field.isVisible(), "the auxiliary path shows outside Mode Auxiliary")
@@ -6472,7 +6599,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, profile.Name)
         Gui.runCommand("PartDesign_AdditivePipe")
-        self.assertTrue(waitFor(lambda: len(fields()) == 2), "the pipe's fields")
+        self.assertTrue(waitFor(lambda: len(fields()) == 3), "the pipe's fields")
         settle()
         field = self.spineField()
         self.assertTrue(waitFor(lambda: armed(field)), "the new pipe's spine isn't armed")
@@ -6501,7 +6628,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         and as a section, with the reason; a sketch whole is still taken as a section."""
         pipe = self.rod()
         wire, dot = self.wireAndPoint()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         for obj in (wire, dot):
@@ -6536,7 +6663,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         refused (the same element on both sides)."""
         pipe = self.rod()
         block, bottom, corner = self.block()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(block, bottom)
@@ -6560,7 +6687,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         aux = self.auxiliarySketch()
         pipe.AuxiliarySpine = aux
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(aux, "")
@@ -6578,7 +6705,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """Low 1: the auxiliary path, armed, disarms when the mode leaves Auxiliary (its page
         hides)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldAuxiliarySpine")
         box = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "comboBoxMode")
         self.choose(box, 3)
@@ -6594,7 +6721,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         wire, dot = self.wireAndPoint()
         pipe.Spine = (wire, ["Edge1"])
         self.assertVolume(pipe, 40)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Wire:Edge1"])
         clickRow(field, 0)
@@ -6611,7 +6738,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Mode = "Auxiliary"
         pipe.AuxiliarySpine = (aux, ["Edge1"])
         self.doc.recompute()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         field = findField("fieldAuxiliarySpine")
         clear = Gui.getMainWindow().findChild(QtWidgets.QToolButton, "buttonProfileClear")
         self.assertTrue(clear.isVisible())
@@ -6630,7 +6757,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Sections = [(self.s10, [""])]
         self.doc.recompute()
         self.s10.ViewObject.Visibility = True
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         pump(0.2)
@@ -6646,7 +6773,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         aux.ViewObject.Visibility = False
         self.doc.openTransaction("Edit Pipe")  # as the edit command does
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(big, "")

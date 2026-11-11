@@ -616,6 +616,8 @@ public:
 
     /// split a curve
     int split(int geoId, const Base::Vector3d& point);
+    /// FreeCAD-CH (ops#656 F3): split a circle at two points into two arcs that stay one closed circle
+    int split(int geoId, const Base::Vector3d& point1, const Base::Vector3d& point2);
     /*!
       \brief Join one or two curves at the given end points
       \details The combined curve will be a b-spline
