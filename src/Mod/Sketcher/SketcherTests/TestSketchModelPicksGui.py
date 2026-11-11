@@ -583,6 +583,25 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.click_at(V(14, 6, 5))
         self.assertEqual(self.selected(), set())
 
+    def test_escape_keeps_the_selection_and_the_sketch_open(self):
+        """Selection parity P7 (oracle 8, SQ7): Esc in the sketch editor with a sketch line and a
+        model edge selected clears neither, and the sketch stays open (default
+        LeaveSketchWithEscape off)."""
+        self.require_picking()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(5, 2, 5))
+        self.click_at(V(20, 5, 5), QtCore.Qt.ControlModifier)
+        before = self.selected()
+        self.assertIn(("Sketch", "Edge1"), before)
+        self.assertGreaterEqual(len(before), 2, before)
+        self.viewport.setFocus(QtCore.Qt.OtherFocusReason)
+        self.pump(60)
+        self.key_click(self.viewport, QtCore.Qt.Key_Escape)
+        self.pump(100)
+        self.assertEqual(self.selected(), before, "Esc changed the selection")
+        self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit(), "Esc closed the sketch")
+
     def test_box_selection_stays_sketch_only(self):
         """A box from the box's top face around the sketch line selects sketch elements only."""
         self.start_edit()
