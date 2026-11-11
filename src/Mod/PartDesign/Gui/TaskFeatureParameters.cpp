@@ -28,6 +28,8 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <QAbstractSpinBox>
@@ -65,6 +67,7 @@
 #include <Gui/MainWindow.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Gui/BitmapFactory.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -80,6 +83,7 @@
 #include "ui_TaskPreviewParameters.h"
 
 #include "ReferenceField.h"
+#include "StudioGui.h"
 #include "TaskFeatureParameters.h"
 #include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
@@ -1093,6 +1097,14 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
             history->clear();
         }
     }
+    // FreeCAD-CH (selection parity P1): the field armed now is armed again in the new dialog. A
+    // new Extrude's first region moves it to its part (profileTaken), and the field that took
+    // the pick disarmed with the old dialog, so the second region became a plain selection
+    std::string armedProperty;
+    if (ReferenceField* field = ReferenceField::armedField();
+        field && field->ownerDocument() == doc) {
+        armedProperty = field->propertyName();
+    }
     App::TransactionLocker lock(doc);
     {
         Base::FlagToggler<> restarting(restartingEdit, false);
@@ -1105,12 +1117,15 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
         e.reportException();
     }
     if (App::DocumentObject* feature = featureT.getObject()) {
+        TaskDlgFeatureParameters::armOnOpen(armedProperty);
         try {
             PartDesignGui::setEdit(feature, PartDesign::Body::findBodyOf(feature));
         }
         catch (const Base::Exception& e) {
             e.reportException();
         }
+        // Taken by the dialog's open(), or no dialog came
+        TaskDlgFeatureParameters::armOnOpen({});
     }
     // No panel came back, so no box takes the move over (PR 303 round 2)
     if (!Gui::Control().activeDialog(doc)) {
@@ -2644,6 +2659,8 @@ namespace
 {
 // The features a command made for the dialog it opens next (TaskDlgFeatureParameters::hasInput)
 std::vector<App::DocumentObjectT> createdForDialog;
+// The field the dialog opened next arms first (TaskDlgFeatureParameters::armOnOpen)
+std::string armOnOpenProperty;
 
 // A property the user gives (a value, a link, a choice): not a result, not the view's
 bool isInputProperty(const App::Property* prop)
@@ -2698,6 +2715,11 @@ void TaskDlgFeatureParameters::noteCreated(App::DocumentObject* feature)
             == createdForDialog.end()) {
         createdForDialog.emplace_back(feature);
     }
+}
+
+void TaskDlgFeatureParameters::armOnOpen(const std::string& property)
+{
+    armOnOpenProperty = property;
 }
 
 bool TaskDlgFeatureParameters::hasInput() const
@@ -2798,7 +2820,7 @@ void TaskDlgFeatureParameters::open()
             references->setCoveredProperties(fieldGroup->properties());
         });
     }
-    fieldGroup->armFirstEmpty();
+    fieldGroup->armFirstEmpty(std::exchange(armOnOpenProperty, std::string()));
     // A new feature's values as the dialog opens: what the user gives from here is its input
     if (App::DocumentObject* feature = created ? getObject() : nullptr) {
         std::vector<App::Property*> props;
@@ -2840,9 +2862,13 @@ void TaskDlgFeatureParameters::open()
                 return;
             }
             titlePending = true;
-            QTimer::singleShot(0, this, [this]() {
+            // Only while the feature is there: a Cancel that aborts its creation deletes it and
+            // its view provider (vp, which getObject() reads) before the dialog goes (ops#654)
+            QTimer::singleShot(0, this, [this, featureT]() {
                 titlePending = false;
-                updateTitle();
+                if (featureT.getObject()) {
+                    updateTitle();
+                }
             });
         };
         titleChanged = feature->getDocument()->signalChangedObject.connect(
@@ -2875,12 +2901,23 @@ void TaskDlgFeatureParameters::modifyStandardButtons(QDialogButtonBox* box)
     requiredConnection = feature->getDocument()->signalChangedObject.connect(
         [this, featureT](const App::DocumentObject& obj, const App::Property&) {
             if (&obj == featureT.getObject()) {
-                QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+                // The rollback of a Cancel changes the feature, then deletes it and its view
+                // provider: the queued update must not read vp then (getObject()), FreeCAD-CH
+                // ops#654 P5 (the Boolean dialog's intermittent "Illegal storage access")
+                QTimer::singleShot(0, this, [this, featureT]() {
+                    if (featureT.getObject()) {
+                        updateOkButton();
+                    }
+                });
             }
         }
     );
     // Once the box is decorated: TaskEditControl::decorateButtons sets its tooltip after this call
-    QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+    QTimer::singleShot(0, this, [this, featureT]() {
+        if (featureT.getObject()) {
+            updateOkButton();
+        }
+    });
 }
 
 void TaskDlgFeatureParameters::updateTitle()
@@ -2940,6 +2977,15 @@ std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
 
 void TaskDlgFeatureParameters::addResultBox()
 {
+    // FreeCAD-CH (ops#654 S4): a studio feature's own Result box, on top as an Extrude's
+    if (QWidget* studioBox = makeStudioResultBox(vp)) {
+        auto at = Content.begin();
+        if (references && !Content.empty() && Content.front() == references) {
+            ++at;
+        }
+        Content.insert(at, studioBox);
+        return;
+    }
     if (!TaskResultParameters::hasRows(getObject())) {
         return;
     }
@@ -3005,7 +3051,16 @@ bool TaskDlgFeatureParameters::accept()
             throw Base::TypeError("Bad object processed in the feature dialog.");
         }
 
-        if (isUpdateBlocked) {
+        // FreeCAD-CH (ops#654 S4): a studio feature's edit changes Bodies that don't use it (a
+        // part left out of its scope loses its step): nothing touched is purged
+        if (PartDesign::isStudioOwner(feature)) {
+            // Its steps take its values at reconcile (Operation, Refine)
+            std::string why;
+            if (!PartDesign::StudioList::holding(feature)->reconcile(&why)) {
+                throw Base::ValueError(why.empty() ? "The studio's list can't take the feature" : why);
+            }
+        }
+        if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
         else {

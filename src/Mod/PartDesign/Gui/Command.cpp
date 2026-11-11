@@ -71,6 +71,7 @@
 #include <Mod/PartDesign/App/FeatureDefeaturing.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "DlgActiveBody.h"
 #include "ReferenceField.h"
@@ -1846,8 +1847,194 @@ static void openAsOnshape(App::DocumentObject* feature, bool recompute)
     }
 }
 
+/* FreeCAD-CH (ops#654 S4, notes/parts-design.md 3.1, 3.5): in a studio that has a history list
+ * (PartDesign::StudioList), Extrude and Extrude (remove) make a studio feature, an *owner*: the
+ * Pad or Pocket in the studio, outside every Body, whose steps act on the parts of its scope. The
+ * studio is the selected profile's, else the active Body's, else the active Part's (the document's
+ * top level without one). Null without a list: today's path. sketchPart: the Body the selected
+ * profile is in, if any
+ */
+namespace PartDesign
+{
+// App/StudioList.cpp (FreeCAD-CH ops#654 P5, P6a; declared where used)
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+}  // namespace PartDesign
+
+namespace PartDesignGui
+{
+// StudioGui.cpp (FreeCAD-CH ops#654 S4 fix; declared where used)
+bool studioPrefillPart(App::DocumentObject* owner, PartDesign::Body*& part);
+void studioPrefillLive(App::DocumentObject* owner);
+}  // namespace PartDesignGui
+
+static PartDesign::StudioList* ownerStudioList(
+    Gui::Command* cmd,
+    App::Part*& studio,
+    PartDesign::Body*& sketchPart,
+    App::DocumentObject*& profile,
+    std::vector<std::string>& subs
+)
+{
+    studio = nullptr;
+    sketchPart = nullptr;
+    profile = nullptr;
+    subs.clear();
+    App::Document* doc = cmd->getDocument();
+    if (!doc) {
+        return nullptr;
+    }
+    const std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
+    if (!selection.empty() && selection.front().getObject()) {
+        profile = const_cast<App::DocumentObject*>(selection.front().getObject());
+        subs = selection.front().getSubNames();
+        if (profile->getDocument() != doc) {
+            return nullptr;
+        }
+        sketchPart = PartDesign::Body::findBodyOf(profile);
+        if (sketchPart) {
+            if (!Part::BodyBase::studioOf(sketchPart, studio)) {
+                return nullptr;
+            }
+        }
+        else {
+            studio = App::Part::getPartOfObject(profile, /*recursive=*/true);
+        }
+    }
+    else if (PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false)) {
+        if (!Part::BodyBase::studioOf(active, studio)) {
+            return nullptr;
+        }
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    return PartDesign::StudioList::of(doc, studio, false);
+}
+
+/// FreeCAD-CH (ops#654 S4): Extrude in a studio with a list makes an owner, in one step with its
+/// list entry, its scope and its first recompute (Cancel aborts all of it); false: not such a
+/// studio, today's path
+static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, double length)
+{
+    if (which != "Pad" && which != "Pocket") {
+        return false;
+    }
+    App::Part* studio = nullptr;
+    PartDesign::Body* sketchPart = nullptr;
+    App::DocumentObject* profile = nullptr;
+    std::vector<std::string> subs;
+    PartDesign::StudioList* list = ownerStudioList(cmd, studio, sketchPart, profile, subs);
+    if (!list) {
+        return false;
+    }
+    App::Document* doc = cmd->getDocument();
+    // A profile: a sketch, its elements, or planar faces of a part's solid
+    QString leftOut;
+    if (profile && !profile->isDerivedFrom<Part::Feature>()) {
+        leftOut = QObject::tr("Left out of the selection: '%1' can't be a profile.")
+                      .arg(QString::fromUtf8(profile->Label.getValue()));
+        profile = nullptr;
+        subs.clear();
+    }
+    const std::string name = cmd->getUniqueObjectName(which.c_str());
+    cmd->openCommand(std::string("Make ") + which);
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::cmdAppDocument(
+            doc,
+            std::ostringstream() << "addObject('PartDesign::" << which << "','" << name << "')"
+        );
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The studio feature was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        auto sketch = freecad_cast<Part::Part2DObject*>(profile);
+        if (profile) {
+            std::ostringstream ss;
+            for (const auto& sub : subs) {
+                ss << "'" << sub << "',";
+            }
+            FCMD_OBJ_CMD(
+                owner,
+                "Profile = (" << Gui::Command::getObjectCmd(profile) << ", [" << ss.str() << "])"
+            );
+        }
+        FCMD_OBJ_CMD(owner, "Length = " << length);
+        if (sketch) {
+            FCMD_OBJ_CMD(
+                owner,
+                "ReferenceAxis = (" << Gui::Command::getObjectCmd(sketch) << ",['N_Axis'])"
+            );
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        // The scope Onshape's Extrude pre-fills (oracle 6, batch 6 Q1): the tool touching or
+        // intersecting exactly one live part -> Add into it, else New; not the sketch's part or
+        // the active Body. Extrude (remove) is the Extrude switched to Remove (Q1d, Q1e): the
+        // part the tool meets going the Extrude's way (out of the material) stays its scope, else
+        // none ("No merge scope selected"), and it cuts into the material, the Pocket's own way
+        const bool remove = which == "Pocket";
+        auto profileBased = freecad_cast<PartDesign::ProfileBased*>(owner);
+        if (remove && profileBased) {
+            profileBased->Reversed.setValue(true);
+        }
+        PartDesign::Body* target = nullptr;
+        PartDesignGui::studioPrefillPart(owner, target);
+        if (remove && profileBased) {
+            profileBased->Reversed.setValue(false);
+        }
+        if (target) {
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.studioSetScopeIds(%s, ['%s'])",
+                ownerCmd.c_str(),
+                PartDesign::studioPartId(target).c_str()
+            );
+        }
+        else if (!remove) {
+            Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
+        }
+        {
+            // A missing profile isn't printed as an error while the dialog opens asking for it
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                profile == nullptr
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        if (sketch) {
+            FCMD_OBJ_HIDE(sketch);
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        if (!remove) {
+            // Picked again on every change of the tool until the person chooses (Q1f)
+            PartDesignGui::studioPrefillLive(owner);
+        }
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The studio feature's dialog didn't open");
+        }
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+        if (!leftOut.isEmpty()) {
+            noteLeftOut("Profile", leftOut);
+        }
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 void prepareProfileBased(Gui::Command* cmd, const std::string& which, double length)
 {
+    if (prepareStudioOwner(cmd, which, length)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {
@@ -2500,7 +2687,8 @@ bool dressupGetSelected(
     Gui::Command* cmd,
     const std::string& which,
     std::vector<DressUpPick>& picks,
-    bool& noSelection
+    bool& noSelection,
+    Part::Feature** wholePart = nullptr
 )
 {
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
@@ -2574,15 +2762,11 @@ bool dressupGetSelected(
 
         const std::vector<std::string>& subs = it.getSubNames();
         if (subs.empty() || freecad_cast<PartDesign::Body*>(it.getObject())) {
-            // the part whole: for Fillet and Chamfer all its edges (not for Draft or Thickness)
-            if (allEdgesIfWhole && !group->useAllEdges) {
-                group->useAllEdges = true;
-                group->subs.clear();
-                const std::string edge = Part::TopoShape::shapeName(TopAbs_EDGE);
-                const int count = shape.countSubElements(edge.c_str());
-                for (int index = 1; index <= count; ++index) {
-                    group->subs.push_back(edge + std::to_string(index));
-                }
+            // the part whole: Fillet and Chamfer take no edges from it (selection parity P6,
+            // oracle 8 SQ12: a part preselected leaves Onshape's Fillet field empty), they open
+            // empty on it; Draft and Thickness as before
+            if (allEdgesIfWhole && wholePart && !*wholePart) {
+                *wholePart = base;
             }
             continue;
         }
@@ -2592,6 +2776,15 @@ bool dressupGetSelected(
                     group->subs.push_back(sub);
                 }
             }
+        }
+    }
+    if (allEdgesIfWhole) {
+        // a part picked whole stands for nothing; the element picks stay
+        std::erase_if(picks, [](const DressUpPick& pick) { return pick.subs.empty(); });
+        if (picks.empty() && wholePart && *wholePart) {
+            Gui::Selection().clearSelection();
+            noSelection = true;
+            return true;
         }
     }
     if (picks.empty()) {
@@ -2779,12 +2972,15 @@ static void makeDressUps(
 {
     std::vector<DressUpPick> picks;
     bool noSelection = false;
-    if (!dressupGetSelected(cmd, which, picks, noSelection)) {
+    Part::Feature* wholePart = nullptr;
+    if (!dressupGetSelected(cmd, which, picks, noSelection, &wholePart)) {
         return;
     }
     if (noSelection) {
-        PartDesign::Body* body = toolFirstBody();
-        auto base = body ? freecad_cast<Part::Feature*>(body->Tip.getValue()) : nullptr;
+        // a part picked whole opens the dialog empty on that part (selection parity P6)
+        PartDesign::Body* body = wholePart ? nullptr : toolFirstBody();
+        auto base = wholePart ? wholePart
+                              : (body ? freecad_cast<Part::Feature*>(body->Tip.getValue()) : nullptr);
         if (!base) {
             Gui::getMainWindow()->showMessage(
                 QObject::tr("%1 needs a part with a solid").arg(QObject::tr(which.c_str())),
@@ -3113,6 +3309,19 @@ void prepareTransformed(
 
         auto Feat = pcActiveBody->getDocument()->getObject(FeatName.c_str());
 
+        // FreeCAD-CH ops#654 slice 8: in a listed studio the pattern is a member of the list, at
+        // its bar, as every Body member is
+        App::Part* studio = nullptr;
+        if (Feat && Part::BodyBase::studioOf(pcActiveBody, studio)
+            && PartDesign::StudioList::of(Feat->getDocument(), studio, false)) {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.studioInsert(%s, -1)",
+                Gui::Command::getObjectCmd(Feat).c_str()
+            );
+        }
+
         if (features.empty() && waitsForFeatures) {
             // Nothing to transform yet: it shows the solid before it (a transform without
             // originals keeps its shape, as Multi-Transform's start does) until the pick
@@ -3150,18 +3359,23 @@ void prepareTransformed(
     // made a "Whole shape" transform without a word). FreeCAD-CH (ops#640, rank 13): a feature
     // of another body is left out too, said in the Features field's status: it was a modal
     PartDesign::Body* activeBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH ops#654 slice 8: a studio feature (a Features-list row) with a step in the
+    // active Body is taken: its step is copied
+    auto takes = [activeBody](const App::DocumentObject* obj) {
+        if (PartDesign::isStudioOwner(obj)) {
+            return PartDesign::StudioList::stepOf(obj, activeBody) != nullptr;
+        }
+        return obj->isDerivedFrom<PartDesign::Feature>()
+            && activeBody == PartDesignGui::getBodyFor(obj, false);
+    };
     QStringList dropped;
     for (const auto& sel : cmd->getSelection().getSelectionEx()) {
         const App::DocumentObject* obj = sel.getObject();
-        if (obj
-            && (!obj->isDerivedFrom<PartDesign::Feature>()
-                || activeBody != PartDesignGui::getBodyFor(obj, false))) {
+        if (obj && !takes(obj)) {
             dropped << QStringLiteral("'%1'").arg(QString::fromUtf8(obj->Label.getValue()));
         }
     }
-    std::erase_if(features, [activeBody](App::DocumentObject* feature) {
-        return activeBody != PartDesignGui::getBodyFor(feature, false);
-    });
+    std::erase_if(features, [&takes](App::DocumentObject* feature) { return !takes(feature); });
 
     worker(features);
 
@@ -3188,6 +3402,108 @@ void finishTransformed(Gui::Command* cmd, App::DocumentObject* Feat)
 //===========================================================================
 // PartDesign_Mirrored
 //===========================================================================
+
+/** FreeCAD-CH (ops#654 slice 9): Mirror in a studio with a list makes a part mirror (Onshape's
+ * Mirror, Part type) when no feature is picked and either no Body is active or a part is picked
+ * (whole, or by a face of it: its part is the part to mirror). It is a studio feature, in one step
+ * with its list entry, its New part and its first recompute (Cancel aborts all of it): the part's
+ * id in StudioEntities, Operation Union (the Result row's words, New with the part it makes), the
+ * plane picked in its dialog. False: today's path */
+static bool prepareStudioPartMirror(Gui::Command* cmd)
+{
+    App::Document* doc = cmd->getDocument();
+    if (!doc) {
+        return false;
+    }
+    PartDesign::Body* source = nullptr;
+    for (const auto& sel : cmd->getSelection().getSelectionEx()) {
+        auto obj = const_cast<App::DocumentObject*>(sel.getObject());
+        if (!obj || obj->getDocument() != doc) {
+            continue;
+        }
+        if (auto body = freecad_cast<PartDesign::Body*>(obj)) {
+            source = body;
+            continue;
+        }
+        auto body = PartDesign::Body::findBodyOf(obj);
+        const auto& subs = sel.getSubNames();
+        const bool element = std::ranges::any_of(subs, [](const std::string& sub) {
+            return !sub.empty();
+        });
+        if (!body || !element || !obj->isDerivedFrom<PartDesign::Feature>()) {
+            return false;  // a feature (or anything else) picked: today's feature mirror
+        }
+        source = body;
+    }
+    App::Part* studio = nullptr;
+    if (source) {
+        if (!Part::BodyBase::studioOf(source, studio)) {
+            return false;
+        }
+    }
+    else if (PartDesignGui::getBody(/*messageIfNot = */ false)) {
+        return false;  // a Body is active: today's mirror of its features
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
+    if (!list) {
+        return false;
+    }
+    const std::string name = cmd->getUniqueObjectName("Mirrored");
+    cmd->openCommand("Make Mirrored");
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::cmdAppDocument(
+            doc,
+            std::ostringstream() << "addObject('PartDesign::Mirrored','" << name << "')"
+        );
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The part mirror was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        FCMD_OBJ_CMD(owner, "PatternType = 'Part'");
+        FCMD_OBJ_CMD(
+            owner,
+            "addProperty('App::PropertyEnumeration', 'Operation', 'Studio', 'The Result row: New "
+            "or Add (Union), Remove (Subtraction), Intersect (Common)', 0, False, True)"
+        );
+        FCMD_OBJ_CMD(owner, "Operation = ['Union', 'Subtraction', 'Common']");
+        FCMD_OBJ_CMD(owner, "Operation = 'Union'");
+        if (source) {
+            FCMD_OBJ_CMD(owner, "StudioEntities = ['" << PartDesign::studioPartId(source) << "']");
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        // Onshape's part mirror makes a new part by default
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
+        {
+            // No plane yet: its error isn't printed while the dialog opens asking for it
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                true
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The part mirror's dialog didn't open");
+        }
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 DEF_STD_CMD_A(CmdPartDesignMirrored)
 
 CmdPartDesignMirrored::CmdPartDesignMirrored()
@@ -3207,6 +3523,9 @@ void CmdPartDesignMirrored::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    if (prepareStudioPartMirror(this)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {
@@ -3217,7 +3536,8 @@ void CmdPartDesignMirrored::activated(int iMsg)
     auto worker = [cmd,
                    pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
         bool direction = false;
-        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
             Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                              ->getVerifiedSketch(/* silent =*/true);
             if (sketch) {
@@ -3277,7 +3597,8 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
     auto worker =
         [cmd, pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
             bool direction = false;
-            if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+            if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
                 Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                                  ->getVerifiedSketch(/* silent =*/true);
                 if (sketch) {
@@ -3356,7 +3677,8 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
     auto worker = [cmd,
                    pcActiveBody](App::DocumentObject* Feat, std::vector<App::DocumentObject*> features) {
         bool direction = false;
-        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()) {
+        if (!features.empty() && features.front()->isDerivedFrom<PartDesign::ProfileBased>()
+            && !PartDesign::isStudioOwner(features.front())) {
             Part::Part2DObject* sketch = (static_cast<PartDesign::ProfileBased*>(features.front()))
                                              ->getVerifiedSketch(/* silent =*/true);
             if (sketch) {
@@ -3585,9 +3907,120 @@ CmdPartDesignBoolean::CmdPartDesignBoolean()
 }
 
 
+/* FreeCAD-CH (ops#654 P5, notes/parts-design.md 3.5, Onshape O3): in a studio that has a history
+ * list, Boolean makes a studio feature: a PartDesign::Boolean in the studio, outside every Body,
+ * whose targets and tools are parts by id. The studio is the active Body's, else the selected
+ * part's, else the active Part's. Its first target is the active Body, its tools the other parts
+ * selected, each only if live at the bar; it opens on Union (Onshape's default), Keep tools as
+ * last accepted. One transaction with its list entry and its first recompute: Cancel leaves
+ * nothing. False: not such a studio, today's path
+ */
+static bool makeStudioBoolean(Gui::Command* cmd)
+{
+    App::Document* doc = cmd->getDocument();
+    if (!doc) {
+        return false;
+    }
+    std::vector<PartDesign::Body*> picked;
+    for (const auto& selected : cmd->getSelection().getSelectionEx()) {
+        auto obj = const_cast<App::DocumentObject*>(selected.getObject());
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesign::Body::findBodyOf(obj);
+        }
+        if (body && std::ranges::find(picked, body) == picked.end()) {
+            picked.push_back(body);
+        }
+    }
+    PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+    if (active && active->getDocument() != doc) {
+        active = nullptr;
+    }
+    App::Part* studio = nullptr;
+    PartDesign::Body* anchor = active ? active : (picked.empty() ? nullptr : picked.front());
+    if (anchor) {
+        if (!Part::BodyBase::studioOf(anchor, studio)) {
+            return false;
+        }
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
+    if (!list) {
+        return false;
+    }
+    const auto live = PartDesign::studioLivePartsAt(list, -1);
+    auto isLive = [&live](PartDesign::Body* body) {
+        return body && std::ranges::find(live, body) != live.end();
+    };
+    std::vector<std::string> targets;
+    if (isLive(active)) {
+        targets.push_back(PartDesign::studioPartId(active));
+    }
+    std::vector<std::string> tools;
+    for (auto body : picked) {
+        const std::string id = PartDesign::studioPartId(body);
+        if (isLive(body) && std::ranges::find(targets, id) == targets.end()) {
+            tools.push_back(id);
+        }
+    }
+    auto pyList = [](const std::vector<std::string>& ids) {
+        std::string out = "[";
+        for (const auto& id : ids) {
+            out += "'" + id + "',";
+        }
+        return out + "]";
+    };
+    const std::string name = cmd->getUniqueObjectName("Boolean");
+    cmd->openCommand(QT_TRANSLATE_NOOP("Command", "Create Boolean"));
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::cmdAppDocument(doc, std::ostringstream() << "addObject('PartDesign::Boolean','" << name << "')");
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The Boolean was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        FCMD_OBJ_CMD(owner, "Type = 'Fuse'");
+        // A Union lists its parts as tools, merged into the first (the active part)
+        std::vector<std::string> parts = targets;
+        parts.insert(parts.end(), tools.begin(), tools.end());
+        FCMD_OBJ_CMD(owner, "StudioTools = " << pyList(parts));
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        {
+            // A Boolean of fewer than two parts fails until its parts are ticked: not an error
+            // printed while its dialog opens
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                parts.size() < 2
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The Boolean's dialog didn't open");
+        }
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 void CmdPartDesignBoolean::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    if (makeStudioBoolean(this)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(/*messageIfNot = */ true);
     if (!pcActiveBody) {
         return;

@@ -58,6 +58,7 @@
 #include <TColStd_Array1OfReal.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1368,6 +1369,31 @@ void FaceUniter::fixOrientation(const TopoDS_Shell& shell)
 
 // BRepBuilderAPI_RefineModel implement a way to log all modifications on the faces
 
+namespace
+{
+// Adds the members of `shape` of the given type, recursing into its sub-compounds only
+void addFreeMembers(
+    const TopoDS_Shape& shape,
+    TopAbs_ShapeEnum type,
+    BRep_Builder& builder,
+    TopoDS_Compound& comp
+)
+{
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        const TopoDS_Shape& member = it.Value();
+        if (member.IsNull()) {
+            continue;
+        }
+        if (member.ShapeType() == TopAbs_COMPOUND) {
+            addFreeMembers(member, type, builder, comp);
+        }
+        else if (member.ShapeType() == type) {
+            builder.Add(comp, member);
+        }
+    }
+}
+}  // namespace
+
 Part::BRepBuilderAPI_RefineModel::BRepBuilderAPI_RefineModel(const TopoDS_Shape& shape)
 {
     myShape = shape;
@@ -1457,26 +1483,13 @@ void Part::BRepBuilderAPI_RefineModel::Build()
                 LogModifications(uniter);
             }
         }
-        // the rest
-        for (xp.Init(myShape, TopAbs_FACE, TopAbs_SHELL); xp.More(); xp.Next()) {
-            if (!xp.Current().IsNull()) {
-                builder.Add(comp, xp.Current());
-            }
-        }
-        for (xp.Init(myShape, TopAbs_WIRE, TopAbs_FACE); xp.More(); xp.Next()) {
-            if (!xp.Current().IsNull()) {
-                builder.Add(comp, xp.Current());
-            }
-        }
-        for (xp.Init(myShape, TopAbs_EDGE, TopAbs_WIRE); xp.More(); xp.Next()) {
-            if (!xp.Current().IsNull()) {
-                builder.Add(comp, xp.Current());
-            }
-        }
-        for (xp.Init(myShape, TopAbs_VERTEX, TopAbs_EDGE); xp.More(); xp.Next()) {
-            if (!xp.Current().IsNull()) {
-                builder.Add(comp, xp.Current());
-            }
+        // the rest: the compound's own faces, wires, edges and vertices, in that order. Only the
+        // compound's members (its sub-compounds' too), not an explorer's "not under an X": a
+        // solid's or a face's INTERNAL vertex is under no edge, and was added again as a free
+        // vertex beside its solid (a thread's vertex touching the face it was fused onto,
+        // FSLC #30), which made every later fuse with the body "not allowed" (ops#640)
+        for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_WIRE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            addFreeMembers(myShape, type, builder, comp);
         }
 
         myShape = comp;

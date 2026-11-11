@@ -319,6 +319,26 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not self.parts.selectedItems()))
         self.assertEqual([o.Name for o in Gui.Selection.getSelection()], ["Box"])
 
+    def testFacePickHighlightsItsPart(self):
+        """Selection parity SQ6: a face or edge picked highlights its feature's row and its part's
+        row; the selection stays the element; a whole feature picked highlights no part."""
+        self.assertTrue(waitFor(lambda: self.parts.topLevelItemCount() == 2))
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "Body1", "Pocket1.Face1")
+        self.assertTrue(waitFor(lambda: [i.text(0) for i in self.parts.selectedItems()] == ["Body1"]))
+        self.assertEqual([i.text() for i in self.list.selectedItems()], ["Pocket1"])
+        sel = Gui.Selection.getSelectionEx()
+        self.assertEqual([(s.ObjectName, tuple(s.SubElementNames)) for s in sel], [("Pocket1", ("Face1",))])
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "Box", "Edge1")
+        self.assertTrue(waitFor(lambda: [i.text(0) for i in self.parts.selectedItems()] == ["Body2"]))
+        Gui.Selection.clearSelection()
+        self.assertTrue(waitFor(lambda: not self.parts.selectedItems()))
+        Gui.Selection.addSelection(self.doc.Name, "Body1", "Pocket1.")
+        self.assertTrue(waitFor(lambda: [i.text() for i in self.list.selectedItems()] == ["Pocket1"]))
+        pump(0.3)
+        self.assertEqual(self.parts.selectedItems(), [])
+
     def testShiftSelectionShrinks(self):
         """Review props602-r1fix R2: the rows follow the app's selection without committing a
         Shift range, so a second Shift+click shrinks it."""

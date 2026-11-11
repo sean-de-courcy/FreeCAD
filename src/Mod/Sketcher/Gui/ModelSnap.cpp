@@ -461,10 +461,27 @@ std::optional<ModelSnapHit> SketcherGui::findModelSnap(const Sketcher::SketchObj
             edgePoint = closest;
         }
     }
-    if (nearestEdge) {
-        return ModelSnapHit {nearestEdge->object, nearestEdge->subName, false, edgePoint};
+    if (!nearestEdge) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    ModelSnapHit hit {nearestEdge->object, nearestEdge->subName, false, edgePoint};
+    hit.isArc = nearestEdge->kind == Candidate::Kind::Arc;
+    // SQ2: the edge's middle wins along the edge within a wider radius than the edge across it
+    // (Onshape: about 8 px against 5). A whole circle has no middle
+    std::optional<Base::Vector2d> middle;
+    if (nearestEdge->kind == Candidate::Kind::Segment) {
+        middle = (nearestEdge->a + nearestEdge->b) / 2.0;
+    }
+    else if (nearestEdge->span < 2.0 * std::numbers::pi - Precision::Angular()) {
+        const double angle = nearestEdge->first + nearestEdge->span / 2.0;
+        middle = nearestEdge->centre
+            + Base::Vector2d(std::cos(angle), std::sin(angle)) * nearestEdge->radius;
+    }
+    if (middle && (edgePoint - *middle).Length() <= tolerance * modelMidpointRadius) {
+        hit.position = *middle;
+        hit.isMidpoint = true;
+    }
+    return hit;
 }
 
 double SketcherGui::modelSnapTolerance(const ViewProviderSketch& viewProvider)

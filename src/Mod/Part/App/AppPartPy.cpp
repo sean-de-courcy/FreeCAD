@@ -87,6 +87,7 @@
 #include "BSplineSurfacePy.h"
 #include "edgecluster.h"
 #include "FaceMaker.h"
+#include "KernelBudget.h"
 #include "GeometryCurvePy.h"
 #include "GeometryPy.h"
 #include "ImportIges.h"
@@ -487,6 +488,18 @@ public:
             "export(list,string) -- Export a list of objects into a single file."
         );
         add_varargs_method("read", &Module::read, "read(string) -- Load the file and return the shape.");
+        add_varargs_method(
+            "kernelBudget",
+            &Module::kernelBudget,
+            "kernelBudget() -- The time limit for a feature's geometry (FreeCAD-CH kernel safety): "
+            "a dict of the limit in seconds and the abandoned calls still running and in all."
+        );
+        add_varargs_method(
+            "kernelCheck",
+            &Module::kernelCheck,
+            "kernelCheck(shape) -- Whether the shape passes the shape check (FreeCAD-CH kernel "
+            "safety): BRepCheck_Analyzer's verdict, faces with many holes checked by parts."
+        );
         add_varargs_method(
             "show",
             &Module::show,
@@ -976,6 +989,26 @@ private:
         shape.write(EncodedName.c_str());
 
         return Py::None();
+    }
+    Py::Object kernelBudget(const Py::Tuple& args)
+    {
+        if (!PyArg_ParseTuple(args.ptr(), "")) {
+            throw Py::Exception();
+        }
+        Py::Dict result;
+        result.setItem("limit", Py::Float(KernelBudget::limit()));
+        result.setItem("abandonedRunning", Py::Long(KernelBudget::abandonedRunning()));
+        result.setItem("abandonedTotal", Py::Long(KernelBudget::abandonedTotal()));
+        return result;
+    }
+    Py::Object kernelCheck(const Py::Tuple& args)
+    {
+        PyObject* shape = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &TopoShapePy::Type, &shape)) {
+            throw Py::Exception();
+        }
+        const TopoDS_Shape& value = static_cast<TopoShapePy*>(shape)->getTopoShapePtr()->getShape();
+        return Py::Boolean(KernelBudget::checkValid(value));
     }
     Py::Object read(const Py::Tuple& args)
     {

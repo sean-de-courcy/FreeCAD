@@ -69,6 +69,7 @@
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/Studio.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "ViewProviderBody.h"
 #include "RollbackView.h"
@@ -129,8 +130,71 @@ constexpr const char* dragAloneMessage =
  * (never forward: a held feature may not be computed), or it can't be held (other's first member
  * is a solid feature), or other isn't in member's studio
  */
+/** FreeCAD-CH (ops#654 S4): while owner, a studio feature (outside every Body), is edited, other
+ * is rolled back to the owner's place in the studio's list: after other's last solid feature
+ * before it (a step of an earlier owner, or a member), the owner's own step held, or at its top
+ * the member just before its first solid feature. Unlike a member's edit the point is kept when it
+ * holds nothing yet: a part ticked in the dialog gets its step after it, held too. Null when
+ * other isn't in the owner's studio, its first member is a solid feature, or its saved bar holds
+ * as much already
+ */
+App::DocumentObject* studioOwnerEditPointFor(const PartDesign::Body* other, const App::DocumentObject* owner)
+{
+    const PartDesign::StudioList* list = PartDesign::StudioList::holding(owner);
+    App::Part* otherStudio = nullptr;
+    if (!list || !other || other->getDocument() != owner->getDocument()
+        || !Part::BodyBase::studioOf(other, otherStudio) || otherStudio != list->studio()) {
+        return nullptr;
+    }
+    std::unordered_set<const App::DocumentObject*> above;
+    bool found = false;
+    for (auto entry : list->Entries.getValues()) {
+        if (entry == owner) {
+            found = true;
+            break;
+        }
+        if (!entry) {
+            continue;
+        }
+        above.insert(entry);
+        for (auto step : PartDesign::StudioList::stepsOf(entry)) {
+            above.insert(step);
+        }
+    }
+    if (!found) {
+        return nullptr;
+    }
+    const auto& group = other->Group.getValues();
+    auto indexOf = [&group](const App::DocumentObject* obj) {
+        return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
+    };
+    App::DocumentObject* point = nullptr;
+    for (auto obj : group) {
+        if (above.count(obj) && PartDesign::Body::isSolidFeature(obj)) {
+            point = obj;
+        }
+    }
+    if (!point) {
+        auto first = std::ranges::find_if(group, PartDesign::Body::isSolidFeature);
+        if (first == group.begin() || first == group.end()) {
+            return nullptr;
+        }
+        point = *(first - 1);
+    }
+    if (other->isRolledBack()) {
+        App::DocumentObject* tip = other->Tip.getValue();
+        if (!tip || indexOf(tip) <= indexOf(point)) {
+            return nullptr;
+        }
+    }
+    return point;
+}
+
 App::DocumentObject* studioEditPointFor(const PartDesign::Body* other, const App::DocumentObject* member)
 {
+    if (member && PartDesign::isStudioOwner(member)) {
+        return studioOwnerEditPointFor(other, member);
+    }
     auto body = member ? PartDesign::Body::findBodyOf(member) : nullptr;
     if (!other || !body || body == other || body->getDocument() != other->getDocument()) {
         return nullptr;

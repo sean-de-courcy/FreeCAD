@@ -40,6 +40,7 @@ from PartDesignTests.TestMaterial import TestMaterial
 from PartDesignTests.TestActiveObject import TestActiveObject
 from PartDesignTests.TestSuppressed import TestSuppressedStrikethrough
 from PartDesignTests.TestPreviewPython import TestPreviewPython
+from PartDesignTests.TestSolidOpsGui import TestSolidOpsGui  # FreeCAD-CH, lane solid-ops
 from PartDesignTests.TestProfileLinkDialog import TestProfileLinkDialog
 from PartDesignTests.TestReferencePickerGui import TestReferencePickerGui
 from PartDesignTests.TestRollBackBarGui import TestRollBackBarGui
@@ -93,14 +94,25 @@ from PartDesignTests.TestDressUpAnyPartGui import TestDressUpAnyPartGui  # FreeC
 from PartDesignTests.TestOperationSwitchGui import TestOperationSwitchGui  # FreeCAD-CH, ops#640 round 5
 from PartDesignTests.TestOperationSwitchGui import TestMergedSwitchGui  # FreeCAD-CH, ops#640 round 5
 from PartDesignTests.TestDerivedGui import TestDerivedGui  # FreeCAD-CH, ops#640 round 6
+from PartDesignTests.TestDerivedGui import TestDerivedFromFileGui  # FreeCAD-CH, ops#640 D1
 from PartDesignTests.TestWorkflowGui import TestWorkflowGui  # FreeCAD-CH, ops#640 round 7
 from PartDesignTests.TestStudioSketchesShownGui import TestStudioSketchesShownGui  # FreeCAD-CH, ops#654 P3a
 from PartDesignTests.TestStudioSketchesShownGui import (  # FreeCAD-CH, ops#654 P3a
     TestTopLevelStudioSketchesShownGui,
 )
 from PartDesignTests.TestStudioFeatureGui import TestStudioFeatureGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioFeatureGui import (  # FreeCAD-CH, ops#654 S4 fix
+    TestExtrudePrefillGui,
+    TestLeavingNewGui,
+)
 from PartDesignTests.TestStudioHistoryGui import TestStudioHistoryGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioPatternsGui import TestStudioPatternsGui  # FreeCAD-CH, ops#654 slice 8
+from PartDesignTests.TestStudioPartMirrorGui import TestStudioPartMirrorGui  # FreeCAD-CH, ops#654 slice 9
 from PartDesignTests.TestPartsListGui import TestPartsListGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection parity P1, P2
+    TestBoxSelectionGui,
+    TestProfileFieldStaysArmedGui,
+)
 
 
 # timer runs this class in order to access modal dialog

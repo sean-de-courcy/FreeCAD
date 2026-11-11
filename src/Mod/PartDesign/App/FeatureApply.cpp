@@ -17,14 +17,34 @@
 
 #include "Body.h"
 #include "FeatureApply.h"
+#include "FeatureBoolean.h"
 #include "StudioList.h"
+#include "StudioOwner.h"
+#include "StudioPattern.h"
 
 using namespace PartDesign;
+
+namespace PartDesign
+{
+// StudioOwner.cpp (FreeCAD-CH ops#654 P5; declared where used)
+PartDesignExport Part::TopoShape studioBooleanTool(const App::DocumentObject* owner, std::string* why);
+// StudioList.cpp (FreeCAD-CH ops#654 slice 9; declared where used)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
+PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+}  // namespace PartDesign
 
 PROPERTY_SOURCE(PartDesign::FeatureApply, PartDesign::FeatureAddSub)
 
 namespace
 {
+
+/// A Boolean studio feature (P5): its tool is other parts' shapes at its place
+bool isBooleanOwner(const App::DocumentObject* owner)
+{
+    auto boolean = freecad_cast<const Boolean*>(owner);
+    return boolean && runsAsStudioOwner(boolean);
+}
 
 /// tool's solids that touch or overlap base (a solid inside the other counts: distance 0); all of
 /// them when it has one solid, or when none touches (the step then fails as it would)
@@ -79,6 +99,25 @@ Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::stri
         return fail("This step has no studio feature");
     }
     const std::string label = std::string("'") + owner->Label.getValue() + "'";
+    if (isBooleanOwner(owner)) {
+        return studioBooleanTool(owner, why);  // in the document's frame already
+    }
+    if (isStudioPartPattern(owner)) {
+        // The part mirror (slice 9): its source part mirrored, in the document's frame already;
+        // with the source itself when its Add consumes it (Onshape oracle 9, R4)
+        Part::TopoShape copy = studioPatternTool(owner, nullptr, why);
+        const auto sources = studioPartPatternSources(owner);
+        if (copy.isNull() || !studioPartMirrorConsumes(owner) || sources.size() != 1) {
+            return copy;
+        }
+        Part::TopoShape source = studioBaseAt(owner, sources.front());
+        if (source.isNull()) {
+            return copy;
+        }
+        Part::TopoShape fused(owner->getID(), owner->getDocument()->getStringHasher());
+        fused.makeElementFuse({copy, source});
+        return fused;
+    }
     Part::TopoShape tool;
     // The frame the tool's own location is in: an owner's AddSubShape is in the owner's frame; a
     // shape object's Shape carries the object's Placement already, so it is in its container's
@@ -151,7 +190,9 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
             base.move(getInverseLocation(base));
             // FreeCAD-CH ops#654 S2: an Add fuses into this part only the tool's solids that
             // touch it; another region's solid belongs to the part it stops on (Onshape O8b)
-            if (getBooleanOperation() == BooleanOperation::Union) {
+            // A Union Boolean's tools are fused whole (P5): one that touches nothing is refused
+            // below, never dropped
+            if (getBooleanOperation() == BooleanOperation::Union && !isBooleanOwner(owner)) {
                 tool = touching(tool, base);
             }
             AddSubShape.setValue(tool);
@@ -186,6 +227,17 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         if (solids == 0) {
             return new App::DocumentObjectExecReturn(
                 "Applying '" + std::string(owner->Label.getValue()) + "' leaves nothing of " + part,
+                this
+            );
+        }
+        if (solids > 1 && isBooleanOwner(owner)
+            && getBooleanOperation() == BooleanOperation::Union) {
+            // Onshape leaves a tool apart from the others a part of its own (hands-on A-2' b);
+            // until pieces become parts (P6p) the Union fails loudly
+            return new App::DocumentObjectExecReturn(
+                "'" + std::string(owner->Label.getValue()) + "' leaves " + part + " in "
+                    + std::to_string(solids)
+                    + " separate solids: a tool part touches none of the parts it merges with",
                 this
             );
         }

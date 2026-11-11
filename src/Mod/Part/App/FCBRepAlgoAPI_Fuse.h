@@ -44,5 +44,7 @@ public:
     //! <S1>  -argument
     //! <S2>  -tool
     //! <anOperation> - the type of the operation
-    Standard_EXPORT FCBRepAlgoAPI_Fuse(const TopoDS_Shape& S1, const TopoDS_Shape& S2);
+    //! <build> false leaves Build() to the caller (a feature builds on a worker under its time
+    //! limit, FreeCAD-CH kernel safety S1)
+    Standard_EXPORT FCBRepAlgoAPI_Fuse(const TopoDS_Shape& S1, const TopoDS_Shape& S2, bool build = true);
 };

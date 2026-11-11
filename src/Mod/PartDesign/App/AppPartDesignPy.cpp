@@ -37,6 +37,7 @@
 #include <Base/VectorPy.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/BodyBase.h>
+#include <Mod/Part/App/PartFeature.h>
 
 #include "Body.h"
 #include "Derived.h"
@@ -54,6 +55,13 @@ namespace PartDesign
 {
 // FreeCAD-CH (ops#640 round 5): Body.cpp's New part rule (no header names it)
 PartDesignExport std::string newPartRefusal(const App::DocumentObject* feature, bool ignoreMerge);
+// FreeCAD-CH (ops#654 P5, P6a): StudioList.cpp's live parts and Boolean studio features
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
+                                         std::vector<Body*>& steps,
+                                         std::vector<Body*>& tools,
+                                         std::vector<Body*>& both);
+PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
 
 class Module: public Py::ExtensionModule<Module>
 {
@@ -262,6 +270,25 @@ public:
             "lead after the edit. No transaction, no recompute."
         );
         add_varargs_method(
+            "isDerivedCopy",
+            &Module::isDerivedCopy,
+            "isDerivedCopy(obj) -- Whether obj is a derived copy: a Part::Feature holding a part of "
+            "another document's saved studio (DerivedSourcePart), which freecad.derived makes."
+        );
+        add_varargs_method(
+            "makeDerivedCopies",
+            &Module::makeDerivedCopies,
+            "makeDerivedCopies(studio, copies) -- A Derived feature in the studio (a document: its "
+            "top level) on derived copies it holds, of one studio of one file: per copy a Body "
+            "built on it. Returns the lead. No transaction, no recompute."
+        );
+        add_varargs_method(
+            "editDerivedCopies",
+            &Module::editDerivedCopies,
+            "editDerivedCopies(lead, copies) -- The Derived feature on derived copies brings in "
+            "copies instead. Returns the lead after the edit. No transaction, no recompute."
+        );
+        add_varargs_method(
             "deleteDerivedParts",
             &Module::deleteDerivedParts,
             "deleteDerivedParts(lead) -- Removes what the Derived feature made besides lead: its "
@@ -373,6 +400,33 @@ public:
             "Body in its studio with the part id '<owner>:<n>' and StudioMadeBy the owner, whose "
             "first step is the owner's tool. The id joins the owner's scope, its Operation becomes "
             "Union, and the list is reconciled. No transaction, no recompute. Returns the Body."
+        );
+        // FreeCAD-CH ops#654 P5, P6a: Booleans between parts, live parts
+        add_varargs_method(
+            "studioLiveParts",
+            &Module::studioLiveParts,
+            "studioLiveParts(anyEntry, index=-1) -- The parts (Bodies) of the studio anyEntry "
+            "names (an entry, the list, a Body or a studio) that are live just before the list "
+            "entry at index (-1: at the bar): not merged away, not consumed by a Boolean before "
+            "it, not made by it or later."
+        );
+        add_varargs_method(
+            "studioSetToolIds",
+            &Module::studioSetToolIds,
+            "studioSetToolIds(boolean, ids) -- Sets the Boolean studio feature's tool parts "
+            "(StudioTools) to the part ids, in order, and reconciles."
+        );
+        add_varargs_method(
+            "studioBooleanParts",
+            &Module::studioBooleanParts,
+            "studioBooleanParts(boolean) -- (steps, tools): the parts a Boolean studio feature "
+            "has steps in and its tool parts, resolved at its place."
+        );
+        add_varargs_method(
+            "studioConsumerOf",
+            &Module::studioConsumerOf,
+            "studioConsumerOf(body, index=-1) -- The Boolean studio feature that consumes body "
+            "before the list entry at index (-1: at the bar), or None."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -997,6 +1051,66 @@ private:
         return bodies;
     }
 
+    static std::vector<Part::Feature*> copiesArg(PyObject* objects)
+    {
+        std::vector<Part::Feature*> copies;
+        for (auto obj : objectsArg(objects)) {
+            if (!PartDesign::isDerivedCopy(obj)) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of derived copies");
+                throw Py::Exception();
+            }
+            copies.push_back(static_cast<Part::Feature*>(obj));
+        }
+        return copies;
+    }
+
+    Py::Object isDerivedCopy(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        return Py::Boolean(PartDesign::isDerivedCopy(objectArg(pObj)));
+    }
+
+    Py::Object makeDerivedCopies(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pCopies;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pStudio, &pCopies)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        std::vector<Part::Feature*> copies = copiesArg(pCopies);
+        try {
+            return Py::asObject(PartDesign::makeDerivedCopies(doc, studio, copies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    Py::Object editDerivedCopies(const Py::Tuple& args)
+    {
+        PyObject* pLead;
+        PyObject* pCopies;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pLead, &pCopies)) {
+            throw Py::Exception();
+        }
+        PartDesign::FeatureBase* lead = derivedArg(pLead);
+        std::vector<Part::Feature*> copies = copiesArg(pCopies);
+        try {
+            return Py::asObject(PartDesign::editDerivedCopies(lead, copies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
     Py::Object derivedStudios(const Py::Tuple& args)
     {
         PyObject* pDoc;
@@ -1368,6 +1482,91 @@ private:
         return Py::asObject(step->getPyObject());
     }
 
+    // FreeCAD-CH ops#654 P5, P6a
+    Py::Object studioLiveParts(const Py::Tuple& args)
+    {
+        PyObject* pAny;
+        int index = -1;
+        if (!PyArg_ParseTuple(args.ptr(), "O|i", &pAny, &index)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* any = entryArg(pAny);
+        PartDesign::StudioList* list = freecad_cast<PartDesign::StudioList*>(any);
+        if (!list) {
+            list = PartDesign::StudioList::holding(any);
+        }
+        if (!list) {
+            App::Part* studio = freecad_cast<App::Part*>(any);
+            if (auto body = freecad_cast<PartDesign::Body*>(any)) {
+                Part::BodyBase::studioOf(body, studio);
+            }
+            list = PartDesign::StudioList::of(any->getDocument(), studio);
+        }
+        if (!list) {
+            throw Py::ValueError(std::string("'") + any->Label.getValue()
+                                 + "' names no studio history");
+        }
+        return objectList(PartDesign::studioLivePartsAt(list, index));
+    }
+
+    Py::Object studioSetToolIds(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pIds;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pOwner, &pIds)) {
+            throw Py::Exception();
+        }
+        auto boolean = freecad_cast<PartDesign::Boolean*>(entryArg(pOwner));
+        PartDesign::StudioList* list = PartDesign::StudioList::holding(boolean);
+        if (!boolean || !list || !PartDesign::isStudioOwner(boolean)) {
+            throw Py::ValueError("Expected a Boolean studio feature in a studio's history");
+        }
+        std::vector<std::string> ids;
+        Py::Sequence sequence(pIds);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            if (!PyUnicode_Check((*it).ptr())) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of part ids (strings)");
+                throw Py::Exception();
+            }
+            ids.push_back(Py::String(*it).as_std_string("utf-8"));
+        }
+        if (boolean->StudioTools.getValues() != ids) {
+            boolean->StudioTools.setValues(ids);
+        }
+        std::string why;
+        return done(list->reconcile(&why), why);
+    }
+
+    Py::Object studioBooleanParts(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pOwner)) {
+            throw Py::Exception();
+        }
+        std::vector<PartDesign::Body*> steps;
+        std::vector<PartDesign::Body*> tools;
+        std::vector<PartDesign::Body*> both;
+        PartDesign::studioBooleanParts(entryArg(pOwner), steps, tools, both);
+        Py::Tuple out(2);
+        out.setItem(0, objectList(steps));
+        out.setItem(1, objectList(tools));
+        return out;
+    }
+
+    Py::Object studioConsumerOf(const Py::Tuple& args)
+    {
+        PyObject* pBody;
+        int index = -1;
+        if (!PyArg_ParseTuple(args.ptr(), "O|i", &pBody, &index)) {
+            throw Py::Exception();
+        }
+        auto consumer = PartDesign::studioConsumerOf(bodyArg(pBody), index);
+        if (!consumer) {
+            return Py::None();
+        }
+        return Py::asObject(const_cast<App::DocumentObject*>(consumer)->getPyObject());
+    }
+
     // FreeCAD-CH ops#654 S2: a New result, a part the owner makes (notes/parts-design.md 3.1)
     Py::Object studioNewPart(const Py::Tuple& args)
     {
@@ -1404,11 +1603,14 @@ private:
             ids.push_back(id);
         }
         PartDesign::setStudioScopeIds(owner, ids);
+        auto operation = freecad_cast<App::PropertyEnumeration*>(owner->getPropertyByName("Operation"));
         if (auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(owner)) {
-            if (addSub->Operation.isPartOf("Union")
-                && std::string(addSub->Operation.getValueAsString()) != "Union") {
-                addSub->Operation.setValue("Union");
-            }
+            operation = &addSub->Operation;
+        }
+        // An Extrude owner's, or a part mirror's dynamic one (ops#654 slice 9)
+        if (operation && operation->isPartOf("Union")
+            && std::string(operation->getValueAsString()) != "Union") {
+            operation->setValue("Union");
         }
         std::string why;
         if (!list->reconcile(&why)) {

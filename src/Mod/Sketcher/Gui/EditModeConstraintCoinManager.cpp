@@ -1072,6 +1072,7 @@ Restart:
                     asciiText->param2 = Constr->LabelPosition;
                 } break;
                 case PointOnObject:
+                case Midpoint:  // FreeCAD-CH (ops#656): drawn at its point, as PointOnObject
                 case Tangent:
                 case SnellsLaw: {
                     assert(Constr->First >= -extGeoCount && Constr->First < intGeoCount);
@@ -1079,7 +1080,8 @@ Restart:
 
                     Base::Vector3d pos, relPos;
                     if (
-                        Constr->Type == PointOnObject || Constr->Type == SnellsLaw
+                        Constr->Type == PointOnObject || Constr->Type == Midpoint
+                        || Constr->Type == SnellsLaw
                         || (Constr->Type == Tangent && Constr->Third != GeoEnum::GeoUndef)
                         ||  // Tangency via point
                         (Constr->Type == Tangent
@@ -2037,6 +2039,7 @@ void EditModeConstraintCoinManager::rebuildConstraintNodes(
                 vConstrType.push_back(it->Type);
             } break;
             case PointOnObject:
+            case Midpoint:  // FreeCAD-CH (ops#656)
             case Tangent:
             case SnellsLaw: {
                 // #define CONSTRAINT_SEPARATOR_INDEX_MATERIAL_OR_DATUMLABEL 0
@@ -2972,6 +2975,8 @@ QString EditModeConstraintCoinManager::iconTypeFromConstraint(Constraint* constr
             return QStringLiteral("Constraint_Vertical");
         case PointOnObject:
             return QStringLiteral("Constraint_PointOnObject");
+        case Midpoint:  // FreeCAD-CH (ops#656)
+            return QStringLiteral("Constraint_PointOnMidPoint");
         case Tangent:
             return QStringLiteral("Constraint_Tangent");
         case Parallel:

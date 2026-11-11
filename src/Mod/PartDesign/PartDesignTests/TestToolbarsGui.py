@@ -60,6 +60,9 @@ FEATURES = [
     "PartDesign_Fillet",
     "PartDesign_Chamfer",
     "PartDesign_Draft",
+    "PartDesign_Thicken",  # lane solid-ops: Thicken, Scale, Offset surface before Shell
+    "PartDesign_ScalePart",
+    "PartDesign_OffsetSurface",
     "PartDesign_Thickness",
     "PartDesign_Hole",
     SEP,

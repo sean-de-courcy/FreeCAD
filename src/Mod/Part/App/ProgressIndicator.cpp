@@ -24,6 +24,50 @@
 
 #include "PreCompiled.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <QThread>
+
+#include <initializer_list>
+
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Result.hxx>
+#include <BRepCheck_Shell.hxx>
+#include <BRepCheck_Solid.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <BinTools.hxx>
+#include <Bnd_Box2d.hxx>
+#include <Geom_Surface.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopoDS_Wire.hxx>
+#include <Message_ProgressRange.hxx>
+#include <Message_ProgressScope.hxx>
+#include <TopoDS_Shape.hxx>
+
+#include <App/Application.h>
+#include <Base/Exception.h>
+#include <Base/Parameter.h>
+
+#include "KernelBudget.h"
 #include "ProgressIndicator.h"
 
 
@@ -71,3 +115,606 @@ Standard_Boolean ProgressIndicator::UserBreak()
 
 void ProgressIndicator::Reset()
 {}
+
+// ---------------------------------------------------------------------------------------------
+// FreeCAD-CH kernel safety S1: a time limit and Esc for a feature's long geometry calls
+// (KernelBudget.h)
+
+namespace Part::KernelBudget
+{
+namespace
+{
+using Clock = std::chrono::steady_clock;
+
+/// What the caller and the worker share; the worker frees the work's captures on its thread
+struct Call
+{
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done {false};
+    std::exception_ptr error;
+    std::atomic<bool> cancel {false};
+    std::function<void(const Message_ProgressRange&)> work;
+};
+
+/// The worker's progress: no display (no GUI off the main thread), a cancel the caller sets
+class CancelIndicator: public Message_ProgressIndicator
+{
+public:
+    explicit CancelIndicator(std::shared_ptr<Call> call)
+        : call(std::move(call))
+    {}
+    void Show(const Message_ProgressScope& /*theScope*/, const Standard_Boolean /*isForce*/) override
+    {}
+    Standard_Boolean UserBreak() override
+    {
+        return call->cancel.load() ? Standard_True : Standard_False;
+    }
+
+private:
+    std::shared_ptr<Call> call;
+};
+
+/// Abandoned workers. Never destroyed: a worker may outlive every static at exit
+struct Registry
+{
+    std::mutex mutex;
+    std::vector<QThread*> abandoned;
+    int total {0};
+};
+
+Registry& registry()
+{
+    static auto* instance = new Registry;
+    return *instance;
+}
+
+/// Deletes the abandoned workers that have ended
+void sweep()
+{
+    Registry& reg = registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto& list = reg.abandoned;
+    for (auto it = list.begin(); it != list.end();) {
+        if ((*it)->isFinished()) {
+            (*it)->wait();
+            delete *it;
+            it = list.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
+thread_local int scopeDepth = 0;
+thread_local double scopeLimit = 0.0;
+thread_local Clock::time_point scopeDeadline;
+thread_local bool onWorker = false;
+// Why the outermost Scope's limit or Esc stopped a call, where one did (the first)
+thread_local std::string scopeFired;
+// runOptional(): a stop by the limit is the caller's to report, and was it one
+thread_local bool limitStopIsOptional = false;
+thread_local bool limitStopped = false;
+
+// Large: OCCT recurses deeply, and a secondary thread gets 512 KB on macOS by default
+constexpr unsigned workerStackSize = 64U * 1024U * 1024U;
+
+std::string seconds(double value)
+{
+    std::ostringstream text;
+    text.precision(value < 10 ? 2 : 3);
+    text << value;
+    return text.str();
+}
+
+void runWorker(const std::shared_ptr<Call>& call)
+{
+    onWorker = true;
+    try {
+        Handle(CancelIndicator) indicator = new CancelIndicator(call);
+        call->work(indicator->Start());
+    }
+    catch (...) {
+        call->error = std::current_exception();
+    }
+    // The work's captures (makers, shapes) are freed here, on this thread
+    call->work = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(call->mutex);
+        call->done = true;
+    }
+    call->finished.notify_all();
+}
+
+bool waitFor(const std::shared_ptr<Call>& call, std::chrono::milliseconds time)
+{
+    std::unique_lock<std::mutex> lock(call->mutex);
+    return call->finished.wait_for(lock, time, [&call]() { return call->done; });
+}
+}  // namespace
+
+double limit()
+{
+    const double value = App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/General")
+                             ->GetFloat("GeometryTimeLimit", 60.0);
+    // A limit no feature reaches is none (and its deadline would overflow the clock)
+    if (!std::isfinite(value) || value > 1e6) {
+        return 0.0;
+    }
+    return value;
+}
+
+Scope::Scope()
+{
+    if (scopeDepth++ == 0) {
+        outermost = true;
+        scopeLimit = limit();
+        scopeFired.clear();
+        scopeDeadline = Clock::now()
+            + std::chrono::duration_cast<Clock::duration>(
+                            std::chrono::duration<double>(std::max(0.0, scopeLimit))
+            );
+    }
+}
+
+Scope::~Scope()
+{
+    --scopeDepth;
+}
+
+std::string Scope::fired() const
+{
+    return outermost ? scopeFired : std::string();
+}
+
+bool pastDeadline()
+{
+    return scopeDepth > 0 && !onWorker && scopeLimit > 0 && Clock::now() >= scopeDeadline;
+}
+
+bool inScope()
+{
+    return scopeDepth > 0 && !onWorker;
+}
+
+void stopIfPastDeadline(const char* what)
+{
+    if (!pastDeadline()) {
+        return;
+    }
+    Base::CADKernelError error(
+        std::string(what ? what : "The geometry") + " could not start: the feature's geometry took longer than "
+        + seconds(scopeLimit)
+        + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit) already: "
+          "the feature is not built"
+    );
+    if (scopeFired.empty()) {
+        scopeFired = error.what();
+    }
+    throw error;
+}
+
+int abandonedRunning()
+{
+    sweep();
+    Registry& reg = registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    return static_cast<int>(reg.abandoned.size());
+}
+
+int abandonedTotal()
+{
+    Registry& reg = registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    return reg.total;
+}
+
+namespace
+{
+#ifndef _WIN32
+/** At exit, a worker still inside OCCT would meet OCCT's, Qt's and FreeCAD's static destructors
+ * (Windows ends the other threads before its DLLs' destructors run; Linux and macOS don't): the
+ * workers get a cancel and a moment, and if one still runs, the process ends without destructors.
+ */
+void endAbandoned()
+{
+    Registry& reg = registry();
+    const auto until = Clock::now() + std::chrono::seconds(2);
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(reg.mutex);
+            bool running = false;
+            for (auto* thread : reg.abandoned) {
+                running = running || !thread->isFinished();
+            }
+            if (!running) {
+                return;
+            }
+        }
+        if (Clock::now() >= until) {
+            std::fflush(nullptr);
+            std::_Exit(EXIT_SUCCESS);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+#endif
+
+void abandon(QThread* thread)
+{
+    thread->setPriority(QThread::IdlePriority);
+    Registry& reg = registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+#ifndef _WIN32
+    static const bool registered = std::atexit(endAbandoned) == 0;
+    (void)registered;
+#endif
+    reg.abandoned.push_back(thread);
+    ++reg.total;
+}
+
+/// Keeps the GUI repainting and reads Esc while the worker runs; true when the worker ended
+bool waitProcessing(
+    const std::shared_ptr<Call>& call,
+    std::unique_ptr<Base::SequencerLauncher>& launcher,
+    const std::string& name,
+    size_t& step,
+    const std::function<bool()>& stop
+)
+{
+    if (!launcher && !Base::Sequencer().isRunning()) {
+        // Its own progress bar when no recompute shows one
+        launcher = std::make_unique<Base::SequencerLauncher>((name + "...").c_str(), 0);
+    }
+    while (!waitFor(call, std::chrono::milliseconds(40))) {
+        if (stop()) {
+            return false;
+        }
+        // Repaints and reads Esc: the progress bar's filter passes nothing else
+        if (launcher) {
+            launcher->setProgress(++step);
+        }
+        else if (!Base::Sequencer().wasCanceled()) {
+            Base::Sequencer().checkAbort();
+        }
+    }
+    return true;
+}
+
+// How long a worker that reads the document's own shapes is waited for after its cancel: it is
+// abandoned only after this (OCCT reads the cancel at its own checks), since the document's
+// shapes change after the feature fails (its pass-through is redrawn and meshed)
+constexpr auto sharedGrace = std::chrono::seconds(30);
+}  // namespace
+
+void run(const char* what, const std::function<void(const Message_ProgressRange&)>& work, Inputs inputs)
+{
+    if (onWorker) {
+        // Inside a worker's own work: it runs under that worker's limit
+        work(Message_ProgressRange());
+        return;
+    }
+    // A feature's limit; outside one (a script, a command), no limit but Esc
+    const double seconds_ = scopeDepth > 0 ? scopeLimit : std::min(limit(), 0.0);
+    if (seconds_ < 0) {
+        // No worker: as before the time limit (to measure what the worker costs)
+        work(Message_ProgressRange());
+        return;
+    }
+    sweep();
+    const Clock::time_point started = Clock::now();
+    const bool limited = seconds_ > 0;
+    const Clock::time_point deadline = scopeDeadline;
+    const std::string name = what ? what : "The geometry";
+    const std::string limitText = seconds(seconds_)
+        + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
+    // Noted for the feature: whatever its code does with the exception, it fails (kernel-4)
+    auto fire = [](Base::CADKernelError error) {
+        if (scopeDepth > 0 && scopeFired.empty()) {
+            scopeFired = error.what();
+        }
+        return error;
+    };
+    auto limitStop = [&fire](Base::CADKernelError error) {
+        limitStopped = true;
+        return limitStopIsOptional ? error : fire(error);
+    };
+    auto stopped = [&]() {
+        const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
+        return fire(Base::CADKernelError(
+            name + " was stopped with Esc after " + seconds(elapsed) + " s: the feature is not built"
+        ));
+    };
+    if (Base::Sequencer().wasCanceled()) {
+        throw stopped();
+    }
+    if (limited && started >= deadline) {
+        throw limitStop(Base::CADKernelError(
+            name + " could not start: the feature's geometry took longer than " + limitText
+            + " already: the feature is not built"
+        ));
+    }
+
+    auto call = std::make_shared<Call>();
+    call->work = work;
+    QThread* thread = QThread::create([call]() { runWorker(call); });
+    thread->setStackSize(workerStackSize);
+    thread->start();
+
+    bool timeout = false;
+    bool cancelled = false;
+    std::unique_ptr<Base::SequencerLauncher> launcher;
+    size_t step = 0;
+    if (!waitFor(call, std::chrono::milliseconds(150))) {
+        try {
+            waitProcessing(call, launcher, name, step, [&]() {
+                cancelled = Base::Sequencer().wasCanceled();
+                timeout = !cancelled && limited && Clock::now() >= deadline;
+                return cancelled || timeout;
+            });
+        }
+        catch (const Base::AbortException&) {
+            // Esc confirmed in the bar's dialog (checkAbort())
+            cancelled = true;
+        }
+    }
+
+    if (timeout || cancelled) {
+        call->cancel = true;
+        bool ended = waitFor(call, std::chrono::milliseconds(300));
+        if (!ended && inputs == Inputs::Shared) {
+            // It reads the document's shapes: waited for until OCCT reads the cancel
+            const auto until = Clock::now() + sharedGrace;
+            try {
+                ended = waitProcessing(call, launcher, name + " (stopping)", step, [&]() {
+                    return Clock::now() >= until;
+                });
+            }
+            catch (const Base::AbortException&) {
+                ended = waitFor(call, sharedGrace);
+            }
+        }
+        if (ended) {
+            thread->wait();
+            delete thread;
+        }
+        else {
+            abandon(thread);
+        }
+        if (cancelled) {
+            throw stopped();
+        }
+        throw limitStop(Base::CADKernelError(
+            name + " took longer than " + limitText + ", and was stopped: the feature is not built"
+        ));
+    }
+    thread->wait();
+    delete thread;
+    if (call->error) {
+        std::rethrow_exception(call->error);
+    }
+}
+
+bool runOptional(const char* what, const std::function<void(const Message_ProgressRange&)>& work)
+{
+    struct Restore
+    {
+        bool optional = limitStopIsOptional;
+        ~Restore()
+        {
+            limitStopIsOptional = optional;
+        }
+    } restore;
+    limitStopIsOptional = true;
+    limitStopped = false;
+    try {
+        run(what, work, Inputs::Owned);
+    }
+    catch (const Base::CADKernelError&) {
+        if (limitStopped) {
+            limitStopped = false;
+            return false;
+        }
+        throw;
+    }
+    return true;
+}
+
+TopoDS_Shape exactCopy(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return shape;
+    }
+    // Without triangulations: they are the redraw's, and the work doesn't read them
+    std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+    BinTools::Write(shape, stream, false, false, BinTools_FormatVersion_CURRENT);
+    TopoDS_Shape copy;
+    BinTools::Read(copy, stream);
+    return copy;
+}
+
+bool isValid(const TopoDS_Shape& shape, const char* what)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    // A copy: an abandoned check reads nothing the document changes
+    const TopoDS_Shape copy = exactCopy(shape);
+    auto valid = std::make_shared<bool>(false);
+    run(what, [copy, valid](const Message_ProgressRange& /*range*/) { *valid = checkValid(copy); });
+    return *valid;
+}
+
+namespace
+{
+// A face checked by parts from this many wires on: below it OCCT's check of the whole face is as
+// fast (a pocket's floor of 97 wires: 0.07 s whole, 0.4 s by single holes, kernel-9's profile)
+constexpr int manyWires = 300;
+// Holes checked together with the outer wire in one part: OCCT compares each two of them, so a
+// batch checks more pairs than the boxes ask for, and the outer wire once per batch
+constexpr std::size_t holesPerPart = 30;
+
+int wireCount(const TopoDS_Face& face)
+{
+    int count = 0;
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        ++count;
+    }
+    return count;
+}
+
+// Whether a face is checked by parts: many wires, every one a wire, on a surface that is neither
+// periodic nor closed (no seams: the outer wire is one loop), without natural restriction
+bool byParts(const TopoDS_Face& face)
+{
+    if (wireCount(face) < manyWires || BRep_Tool::NaturalRestriction(face)) {
+        return false;
+    }
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_WIRE) {
+            return false;
+        }
+    }
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    return !surface.IsNull() && !surface->IsUPeriodic() && !surface->IsVPeriodic()
+        && !surface->IsUClosed() && !surface->IsVClosed();
+}
+
+// The face with only these wires: the same surface, location, tolerance and orientation, so the
+// wires' edges find their curves on it as on the face
+bool partValid(const TopoDS_Face& face, std::initializer_list<const TopoDS_Shape*> wires)
+{
+    TopoDS_Face part = TopoDS::Face(face.EmptyCopied());
+    BRep_Builder builder;
+    for (const TopoDS_Shape* wire : wires) {
+        builder.Add(part, *wire);
+    }
+    return BRepCheck_Analyzer(part).IsValid() == Standard_True;
+}
+
+bool faceValidByParts(const TopoDS_Face& face)
+{
+    const TopoDS_Wire outer = BRepTools::OuterWire(face);
+    if (outer.IsNull()) {
+        return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+    }
+    std::vector<TopoDS_Shape> holes;
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        if (!it.Value().IsSame(outer)) {
+            holes.push_back(it.Value());
+        }
+    }
+    // The holes in batches with the outer wire: the holes' own checks, their orientation, inside
+    // the outer wire, and each two holes of a batch
+    for (std::size_t first = 0; first < holes.size(); first += holesPerPart) {
+        TopoDS_Face part = TopoDS::Face(face.EmptyCopied());
+        BRep_Builder builder;
+        builder.Add(part, outer);
+        for (std::size_t k = first; k < std::min(holes.size(), first + holesPerPart); ++k) {
+            builder.Add(part, holes[k]);
+        }
+        if (BRepCheck_Analyzer(part).IsValid() != Standard_True) {
+            return false;
+        }
+    }
+    // Two holes whose boxes in the parameters overlap, each two once (a sweep along u): crossing
+    // or nested holes overlap there. The margin, a millionth of the face's span, only adds pairs
+    Bnd_Box2d all;
+    BRepTools::AddUVBounds(face, all);
+    double u0 = 0;
+    double v0 = 0;
+    double u1 = 0;
+    double v1 = 0;
+    all.Get(u0, v0, u1, v1);
+    const double margin = 1e-6 * std::hypot(u1 - u0, v1 - v0) + 1e-9;
+    struct Box
+    {
+        double u0, v0, u1, v1;
+        std::size_t hole;
+    };
+    std::vector<Box> boxes;
+    boxes.reserve(holes.size());
+    for (std::size_t k = 0; k < holes.size(); ++k) {
+        Bnd_Box2d box;
+        BRepTools::AddUVBounds(face, TopoDS::Wire(holes[k]), box);
+        if (box.IsVoid()) {
+            return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        }
+        Box b {0, 0, 0, 0, k};
+        box.Get(b.u0, b.v0, b.u1, b.v1);
+        boxes.push_back({b.u0 - margin, b.v0 - margin, b.u1 + margin, b.v1 + margin, k});
+    }
+    std::sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.u0 < b.u0; });
+    for (std::size_t a = 0; a < boxes.size(); ++a) {
+        for (std::size_t b = a + 1; b < boxes.size() && boxes[b].u0 <= boxes[a].u1; ++b) {
+            if (boxes[b].v0 > boxes[a].v1 || boxes[a].v0 > boxes[b].v1
+                || boxes[a].hole / holesPerPart == boxes[b].hole / holesPerPart) {
+                continue;  // apart, or checked together in their batch
+            }
+            if (!partValid(face, {&outer, &holes[boxes[a].hole], &holes[boxes[b].hole]})) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool statusOk(const Handle(BRepCheck_Result)& result)
+{
+    const auto& list = result->Status();
+    return list.IsEmpty() || list.First() == BRepCheck_NoError;
+}
+}  // namespace
+
+bool checkValid(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    // By parts only for solids (alone or in compounds) with a face that has many wires, every
+    // face in a shell and every shell in a solid; anything else as BRepCheck_Analyzer checks it
+    bool anyByParts = false;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More() && !anyByParts; it.Next()) {
+        anyByParts = byParts(TopoDS::Face(it.Current()));
+    }
+    const bool solidsOnly = TopExp_Explorer(shape, TopAbs_SHELL, TopAbs_SOLID).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_FACE, TopAbs_SHELL).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_EDGE, TopAbs_FACE).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_VERTEX, TopAbs_EDGE).More() == Standard_False;
+    const bool oneFace = shape.ShapeType() == TopAbs_FACE;
+    if (!anyByParts || !(solidsOnly || oneFace)) {
+        return BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+    }
+    if (oneFace) {
+        return faceValidByParts(TopoDS::Face(shape));
+    }
+    // Each face once (shared faces too), as the analyzer checks each sub-shape once
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (int k = 1; k <= faces.Extent(); ++k) {
+        const TopoDS_Face& face = TopoDS::Face(faces(k));
+        const bool valid = byParts(face) ? faceValidByParts(face)
+                                         : BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        if (!valid) {
+            return false;
+        }
+    }
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        Handle(BRepCheck_Solid) solidCheck = new BRepCheck_Solid(TopoDS::Solid(solid.Current()));
+        if (!statusOk(solidCheck)) {
+            return false;
+        }
+        for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
+            Handle(BRepCheck_Shell) shell = new BRepCheck_Shell(TopoDS::Shell(it.Current()));
+            if (!statusOk(shell) || shell->Closed() != BRepCheck_NoError
+                || shell->Orientation() != BRepCheck_NoError) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+}  // namespace Part::KernelBudget

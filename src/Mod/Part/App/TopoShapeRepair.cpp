@@ -66,6 +66,7 @@
 #include <Base/Exception.h>
 
 #include "Geometry.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "TopoShape.h"
 
@@ -403,11 +404,14 @@ namespace
 // The largest relative change of a face's area that checkDressUp() accepts from a repair
 constexpr double repairAreaTolerance = 1e-6;
 
-// The areas of the shape's faces, smallest first
+// The areas of the shape's faces, smallest first. On the calling thread, after the repair: on a
+// part of thousands of B-spline faces they take minutes, so the feature's limit is checked at each
+// face (kernel-4's "meas minute": a 2000-edge fillet with a limit of 60 s ran for 225 s here)
 std::vector<double> faceAreas(const TopoShape& shape)
 {
     std::vector<double> areas;
     for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        KernelBudget::stopIfPastDeadline("The check of the dress-up's repair");
         areas.push_back(MassProperties::area(it.Current()));
     }
     std::sort(areas.begin(), areas.end());
@@ -828,6 +832,8 @@ bool checkResult(TopoShape& shape, const TopoShape& base)
         FC_WARN("Invalid dress-up result with " << found << " solids from " << solids);
         return false;
     }
+    // The result needs the repair: too late for it, the feature fails (kernel safety S1)
+    KernelBudget::stopIfPastDeadline("The repair of the dress-up's result");
     TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
     repaired.makeElementCopy(shape);
     if (!fixKeepingNames(repaired, shape)) {

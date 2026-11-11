@@ -15,6 +15,8 @@ Profile sketch: a 4 x 4 square at (2, 2), fully constrained, its bottom line's l
 dimension, padded 3 up (Boss). The boss's volume is computed: 4 x 4 x 3 = 48, 6 x 4 x 3 = 72
 with the dimension at 6."""
 
+import time
+
 import FreeCAD
 import Part
 import Sketcher
@@ -115,6 +117,16 @@ class TestSketchCancelGui(SketcherGuiTestCase):
         bar = FreeCADGui.getMainWindow().statusBar()
         return " ".join([bar.currentMessage()] + [w.text() for w in bar.findChildren(QtWidgets.QLabel)])
 
+    def wait_for_message(self, text, seconds=2.0):
+        """The recomputes after the close clear the status message when they end; the sketch shows
+        its message again while they run down: wait for it."""
+        end = time.time() + seconds
+        while time.time() < end:
+            if text in self.message():
+                return True
+            self.flush_gui(50)
+        return text in self.message()
+
     def datum(self):
         return self.sketch.Constraints[self.dimension].Value
 
@@ -139,7 +151,7 @@ class TestSketchCancelGui(SketcherGuiTestCase):
         self.assertEqual(self.doc.UndoNames[0], "Modify sketch constraints")
         self.cancel()
         # Onshape's toast "Sketch 2 has been canceled.": here a status-bar message
-        self.assertIn("Profile has been canceled", self.message())
+        self.assertTrue(self.wait_for_message("Profile has been canceled"), self.message())
         self.assertFalse(self.doc.mustExecute(), "Expected nothing left to regenerate")
         self.assert_as_before(undo, [])
         FreeCADGui.runCommand("Std_Undo")

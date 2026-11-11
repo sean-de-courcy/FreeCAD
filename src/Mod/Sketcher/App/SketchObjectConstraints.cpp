@@ -78,6 +78,32 @@ void SketchObject::retrieveSolverDiagnostics()
     lastMalformedConstraints = solvedSketch.getMalformedConstraints();
 }
 
+// FreeCAD-CH (ops#656): whether a Midpoint's point is off the middle of its arc as written
+// (counterclockwise from the start to the end angle)
+static bool midpointsOffTheirArcs(const SketchObject& sketch)
+{
+    for (const Constraint* c : sketch.Constraints.getValues()) {
+        if (c->Type != Midpoint) {
+            continue;
+        }
+        const Part::Geometry* geo = sketch.getGeometry(c->Second);
+        if (!geo || !geo->is<Part::GeomArcOfCircle>()) {
+            continue;
+        }
+        const auto* arc = static_cast<const Part::GeomArcOfCircle*>(geo);
+        double first = 0.0;
+        double last = 0.0;
+        arc->getRange(first, last, /*emulateCCWXY=*/true);
+        const double angle = (first + last) / 2.0;
+        const Base::Vector3d middle = arc->getCenter()
+            + Base::Vector3d(std::cos(angle), std::sin(angle), 0.0) * arc->getRadius();
+        if ((sketch.getPoint(c->First, c->FirstPos) - middle).Length() > 1e-6) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 {
     // no need to check input data validity as this is an sketchobject managed operation.
@@ -137,6 +163,23 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         if (lastSolverStatus != 0) {// solving
             err = -1;
         }
+        else if (err == -2) {
+            // FreeCAD-CH (ops#656): a constraint that repeats what the others impose, and agrees
+            // with them, is accepted as Onshape accepts it: the solve is a success (the geometry
+            // is written, a dimension can be set, the recompute goes on), and the diagnosis still
+            // names the repeated constraints. The solver leaves them out of the solve, so each
+            // must hold at the solution; one that does not is a contradiction and stays an error.
+            // The bar is 1e-7 (mm or rad), well under the solver's own 1e-5: an angle 1e-6 rad
+            // off is 4 um at 4 m and is refused, as a conflict would be (skeptic, 11-10).
+            const bool allHold =
+                std::all_of(lastRedundant.begin(), lastRedundant.end(), [&](int tag) {
+                    const double residual = solvedSketch.calculateConstraintError(tag);
+                    return std::abs(residual) < 1e-7;  // false for NaN
+                });
+            if (allHold) {
+                err = 0;
+            }
+        }
     }
 
     if (lastHasMalformedConstraints) {
@@ -177,6 +220,17 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
             Part::PropertyGeometryList tmp;
             tmp.setValues(std::move(geomlist));
             Geometry.moveValues(std::move(tmp));
+
+            // FreeCAD-CH (ops#656): a solve that takes an arc's sweep through 0 (an Angle on the
+            // arc is solved modulo 2 pi: 270 -> 72 degrees can land on -288) leaves a Midpoint's
+            // point on the far side once the arc is written counterclockwise. Solve once more
+            // from the written geometry, where the Midpoint's unknowns start at the arc's middle
+            // (what the next recompute would do).
+            static thread_local bool solvingAgain = false;
+            if (!solvingAgain && midpointsOffTheirArcs(*this)) {
+                Base::StateLocker again(solvingAgain, true);
+                return solve(true);
+            }
         }
     }
 
@@ -1342,7 +1396,8 @@ int SketchObject::delConstraintOnPoint(int geoId, PointPos posId, bool onlyCoinc
                     || transferToReplacement(constr->Second, constr->SecondPos)
                 );
             }
-            case Sketcher::PointOnObject: {
+            case Sketcher::PointOnObject:
+            case Sketcher::Midpoint: {  // FreeCAD-CH (ops#656): as Point on object
                 return transferToReplacement(constr->First, constr->FirstPos);
             }
             case Sketcher::Tangent:
@@ -2542,6 +2597,7 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
             break;
         case Tangent:
         case Group:
+        case Midpoint:
             requireSecond = true;
             break;
         case Symmetric:

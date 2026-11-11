@@ -525,25 +525,21 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         self.leftClick(QtCore.QPoint(5, 5))
         self.assertEqual(self.selectedNames(), [], "a click on empty space kept the selection")
 
-    def testEscClearsWithNoDialog(self):
-        """Rank 53: Esc in the 3D view with no task dialog open clears the selection."""
+    def testEscKeepsTheSelectionWithNoDialog(self):
+        """Selection parity P7: Esc in the 3D view with no task dialog open keeps the selection,
+        as in Onshape (oracle 8, SQ1: Esc never clears; Space does). Rank 53 had made it clear."""
         self.topAndRight()
         self.assertEqual(len(self.selectedSubs()), 2)
         self.assertFalse(Gui.Control.activeDialog(), "a task dialog is open")
-        for _ in range(20):
-            self.viewport.window().activateWindow()
-            self.viewport.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-            pump(50)
-            focused = QtWidgets.QApplication.focusWidget()
-            if focused is not None and (
-                focused is self.viewport or self.viewport.isAncestorOf(focused)
-            ):
-                break
-        else:
-            self.skipTest("the 3D view doesn't take the focus here")
-        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key.Key_Escape)
+        # The key goes to the viewport itself, as the sketch editor's Esc test does: a window
+        # started in the background never gets the focus on Windows (the test skipped on screen
+        # too), and the viewer's Esc handling (processSoEvent) is reached either way
+        before = self.selectedSubs()
+        for kind in (QtCore.QEvent.Type.KeyPress, QtCore.QEvent.Type.KeyRelease):
+            event = QtGui.QKeyEvent(kind, QtCore.Qt.Key.Key_Escape, QtCore.Qt.KeyboardModifier.NoModifier)
+            QtWidgets.QApplication.sendEvent(self.viewport, event)
         pump(100)
-        self.assertEqual(self.selectedNames(), [], "Esc kept the selection")
+        self.assertEqual(self.selectedSubs(), before, "Esc cleared the selection")
 
     def testClickReplacesWithoutTheForkKeymap(self):
         """Decision 1: under General/Keymap = FreeCAD a second click replaces the selection,

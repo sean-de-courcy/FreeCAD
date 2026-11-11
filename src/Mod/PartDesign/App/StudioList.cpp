@@ -12,10 +12,12 @@
 #include <utility>
 #include <vector>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
 #include <App/PropertyStandard.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Tools.h>
 
@@ -24,6 +26,7 @@
 #include "FeatureAddSub.h"
 #include "FeatureApply.h"
 #include "FeatureBase.h"
+#include "FeatureBoolean.h"
 #include "FeatureMultiTransform.h"
 #include "Retarget.h"
 #include "Studio.h"
@@ -40,6 +43,13 @@ AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* 
 using namespace PartDesign;
 
 PROPERTY_SOURCE(PartDesign::StudioList, App::DocumentObject)
+
+namespace PartDesign
+{
+// Below (slice 9)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
+}  // namespace PartDesign
 
 namespace
 {
@@ -83,12 +93,44 @@ bool suppressedOf(const App::DocumentObject* entry)
     return prop && prop->getValue();
 }
 
+/// A hidden dynamic flag of obj (slice 9), written only when it changes; it touches nothing
+void setFlag(App::DocumentObject* obj, const char* name, bool on)
+{
+    auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName(name));
+    if (!prop) {
+        if (!on || obj->getPropertyByName(name)) {
+            return;
+        }
+        prop = static_cast<App::PropertyBool*>(obj->addDynamicProperty(
+            "App::PropertyBool",
+            name,
+            "Studio",
+            "Whether this part mirror's Add consumes its source part (ops#654 slice 9)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (prop->getValue() != on) {
+        prop->setValue(on);
+    }
+}
+
+bool flagOf(const App::DocumentObject* obj, const char* name)
+{
+    auto prop = freecad_cast<App::PropertyBool*>(obj->getPropertyByName(name));
+    return prop && prop->getValue();
+}
+
 /// The Boolean operation an owner asks for: its Operation (an enumeration or a string), by
 /// FreeCAD's or Onshape's word; Union without one
 const char* operationOf(const App::DocumentObject* owner)
 {
     std::string op;
-    if (auto prop = owner->getPropertyByName("Operation")) {
+    if (auto boolean = freecad_cast<const Boolean*>(owner)) {
+        // A Boolean studio feature (P5): its Type, Fuse / Cut / Common
+        const char* value = boolean->Type.getValueAsString();
+        op = value ? value : "";
+    }
+    else if (auto prop = owner->getPropertyByName("Operation")) {
         if (auto enumeration = freecad_cast<const App::PropertyEnumeration*>(prop)) {
             const char* value = enumeration->getValueAsString();
             op = value ? value : "";
@@ -150,19 +192,30 @@ std::set<const App::DocumentObject*> entriesElsewhere(const StudioList* list)
     return out;
 }
 
+/// When a part is consumed (FreeCAD-CH ops#654 P5): part -> the list index of the Boolean owner
+/// that consumes it. From that place on it is no part: no scope or tool resolves to it
+using Consumed = std::map<const Body*, int>;
+
 /// Whether body is a part at index of entries (positions: each entry's index): not absorbed into
-/// another part (MergedInto, ops#325), and not made by an entry after index (StudioMadeBy)
+/// another part (MergedInto, ops#325), not consumed by a Boolean before index, and not made by an
+/// entry after index (StudioMadeBy). With before, the state just before the entry at index: a part
+/// made by that entry isn't there yet either
 bool liveAt(const Body* body,
             int index,
-            const std::map<const App::DocumentObject*, int>& positions)
+            const std::map<const App::DocumentObject*, int>& positions,
+            const Consumed& consumed,
+            bool before = false)
 {
     auto merged = freecad_cast<App::PropertyLink*>(body->getPropertyByName("MergedInto"));
     if (merged && merged->getValue()) {
         return false;
     }
+    if (auto it = consumed.find(body); it != consumed.end() && it->second < index) {
+        return false;
+    }
     if (auto madeBy = body->StudioMadeBy.getValue()) {
         auto it = positions.find(madeBy);
-        if (it != positions.end() && it->second > index) {
+        if (it != positions.end() && (it->second > index || (before && it->second == index))) {
             return false;
         }
     }
@@ -174,7 +227,8 @@ bool liveAt(const Body* body,
 std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
                            const std::vector<Body*>& bodies,
                            int index,
-                           const std::map<const App::DocumentObject*, int>& positions)
+                           const std::map<const App::DocumentObject*, int>& positions,
+                           const Consumed& consumed)
 {
     std::map<std::string, const Body*> byId;
     for (auto body : bodies) {
@@ -204,9 +258,161 @@ std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
         }
         for (auto body : bodies) {
             if (std::ranges::find(out, body) == out.end() && descends(body, id)
-                && liveAt(body, index, positions)) {
+                && liveAt(body, index, positions, consumed)) {
                 out.push_back(body);
             }
+        }
+    }
+    return out;
+}
+
+/// A Boolean studio feature (P5): a PartDesign::Boolean outside every Body, not a Merge
+const Boolean* booleanOwner(const App::DocumentObject* entry)
+{
+    auto boolean = freecad_cast<const Boolean*>(entry);
+    if (!boolean || Body::findBodyOf(entry) || boolean->isMerge()) {
+        return nullptr;
+    }
+    return boolean;
+}
+
+/// What a Boolean owner at index acts on (FreeCAD-CH ops#654 P5, Onshape O3 and O9b): its steps'
+/// parts, its tool parts and the parts it consumes, all resolved at its place.
+/// - Subtract: a step in each target; the tools (targets left out) are cut from them.
+/// - Union: the parts listed, targets then tools, merge into the first, which has the only step;
+///   the others are its tools.
+/// - Intersect: refused at compute (a new part: P6p); steps in the targets, nothing consumed.
+/// Keep tools off, the tools are consumed; a suppressed Boolean consumes nothing. both: the parts
+/// that are a target and a tool of a Subtract or an Intersect (the Boolean fails)
+struct BooleanParts
+{
+    std::vector<Body*> steps;
+    std::vector<Body*> tools;
+    std::vector<Body*> consumed;
+    std::vector<Body*> both;
+};
+
+BooleanParts booleanPartsAt(const Boolean* owner,
+                            const std::vector<Body*>& bodies,
+                            int index,
+                            const std::map<const App::DocumentObject*, int>& positions,
+                            const Consumed& consumed)
+{
+    BooleanParts out;
+    const auto targets = resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
+    const auto tools =
+        resolveScope(owner->StudioTools.getValues(), bodies, index, positions, consumed);
+    const char* value = owner->Type.getValueAsString();
+    const std::string type = value ? value : "";
+    if (type == "Fuse") {
+        std::vector<Body*> listed = targets;
+        for (auto tool : tools) {
+            if (std::ranges::find(listed, tool) == listed.end()) {
+                listed.push_back(tool);
+            }
+        }
+        if (!listed.empty()) {
+            out.steps.push_back(listed.front());
+            out.tools.assign(listed.begin() + 1, listed.end());
+        }
+    }
+    else {
+        out.steps = targets;
+        for (auto tool : tools) {
+            if (std::ranges::find(targets, tool) == targets.end()) {
+                out.tools.push_back(tool);
+            }
+            else {
+                out.both.push_back(tool);
+            }
+        }
+    }
+    // A Boolean that fails for what it resolves to (no target, no tool, a part both, a Union of
+    // one part) contributes nothing, as Onshape's failed feature: it consumes nothing either. One
+    // that fails on the geometry (a Union of parts apart, a cut that splits) still consumes: the
+    // projection doesn't compute shapes (unverified on Onshape)
+    const bool resolves = type == "Fuse" ? !out.tools.empty()
+                                         : !out.steps.empty() && !out.tools.empty() && out.both.empty();
+    if (type != "Common" && resolves && !owner->KeepTools.getValue() && !suppressedOf(owner)) {
+        out.consumed = out.tools;
+    }
+    return out;
+}
+
+std::vector<Body*> partPatternSourcesAt(const App::DocumentObject* owner,
+                                        const std::vector<Body*>& bodies,
+                                        int index,
+                                        const std::map<const App::DocumentObject*, int>& positions,
+                                        const Consumed& consumed);
+
+/// The parts the Boolean owners of entries consume, each at its owner's place, in list order (a
+/// part a Boolean consumed earlier is no tool of a later one); and the source of a part mirror's
+/// Add that merges it (slice 9, Onshape oracle 9 R4: decided by the mirror's last compute,
+/// StudioConsumesSource), unless suppressed
+Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
+                    const std::vector<Body*>& bodies,
+                    const std::map<const App::DocumentObject*, int>& positions)
+{
+    Consumed out;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i] && isStudioPartPattern(entries[i]) && !suppressedOf(entries[i])
+            && studioPartMirrorConsumes(entries[i])) {
+            auto at = positions.find(entries[i]);
+            if (at != positions.end() && at->second == static_cast<int>(i)) {
+                const auto sources =
+                    partPatternSourcesAt(entries[i], bodies, static_cast<int>(i), positions, out);
+                if (sources.size() == 1) {
+                    out.emplace(sources.front(), static_cast<int>(i));
+                }
+            }
+            continue;
+        }
+        const Boolean* owner = booleanOwner(entries[i]);
+        if (!owner) {
+            continue;
+        }
+        auto at = positions.find(owner);
+        if (at == positions.end() || at->second != static_cast<int>(i)) {
+            continue;
+        }
+        const auto parts = booleanPartsAt(owner, bodies, static_cast<int>(i), positions, out);
+        for (auto body : parts.consumed) {
+            out.emplace(body, static_cast<int>(i));
+        }
+    }
+    return out;
+}
+
+/// The parts owner (at index) has a step in: a Boolean's step parts, else its scope resolved
+std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
+                               const std::vector<Body*>& bodies,
+                               int index,
+                               const std::map<const App::DocumentObject*, int>& positions,
+                               const Consumed& consumed)
+{
+    if (const Boolean* boolean = booleanOwner(owner)) {
+        return booleanPartsAt(boolean, bodies, index, positions, consumed).steps;
+    }
+    return resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
+}
+
+/// A part pattern's source parts (StudioEntities) resolved at its place (index), without the
+/// parts it makes itself (FreeCAD-CH ops#654 slice 9)
+std::vector<Body*> partPatternSourcesAt(const App::DocumentObject* owner,
+                                        const std::vector<Body*>& bodies,
+                                        int index,
+                                        const std::map<const App::DocumentObject*, int>& positions,
+                                        const Consumed& consumed)
+{
+    auto pattern = freecad_cast<const Transformed*>(owner);
+    if (!pattern) {
+        return {};
+    }
+    std::vector<Body*> out;
+    for (auto body :
+         resolveScope(pattern->StudioEntities.getValues(), bodies, index, positions, consumed)) {
+        if (body->StudioMadeBy.getValue() != owner) {
+            out.push_back(body);
         }
     }
     return out;
@@ -509,6 +715,7 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
             out.errors.push_back(quoted(entry) + " is in the history of another studio too");
         }
     }
+    const Consumed consumed = consumedBy(entries, bodies, positions);
     for (int i = 0; i < size; ++i) {
         App::DocumentObject* entry = entries[i];
         if (!entry || positions[entry] != i) {
@@ -539,7 +746,7 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
         // An owner: a step in each part its scope resolves to at its place
         slot.isStep = true;
         const auto ids = studioScopeIds(entry);
-        const auto scope = resolveScope(ids, bodies, i, positions);
+        const auto scope = stepPartsAt(entry, bodies, i, positions, consumed);
         if (!ids.empty() && scope.empty()) {
             out.unresolved.push_back(entry);
         }
@@ -633,6 +840,7 @@ bool StudioList::reconcile(std::string* why)
     // 2. Project, and plan every write; refuse before writing anything
     Projection projection = projectEntries(entries, bar);
     const auto positions = positionsOf(entries);
+    const Consumed consumed = consumedBy(entries, bodies, positions);
     const int size = static_cast<int>(entries.size());
     const int barAt = bar < 0 || bar > size ? size : bar;
 
@@ -860,12 +1068,14 @@ bool StudioList::reconcile(std::string* why)
     }
 
     // 5. The steps' values from their owners; the owners' bases at their place, in scope order
+    std::map<const App::DocumentObject*, std::vector<App::DocumentObject*>> basesByOwner;
     for (auto& [owner, steps] : stepsByOwner) {
         const auto at = positions.find(owner);
-        const auto scope = resolveScope(studioScopeIds(owner),
-                                        bodies,
-                                        at == positions.end() ? size : at->second,
-                                        positions);
+        const auto scope = stepPartsAt(owner,
+                                       bodies,
+                                       at == positions.end() ? size : at->second,
+                                       positions,
+                                       consumed);
         std::ranges::stable_sort(steps, {}, [&scope](const std::pair<Body*, Feature*>& step) {
             return std::ranges::find(scope, step.first) - scope.begin();
         });
@@ -895,18 +1105,76 @@ bool StudioList::reconcile(std::string* why)
                 bases.push_back(base);
             }
         }
-        auto prop = freecad_cast<App::PropertyLinkList*>(owner->getPropertyByName("StudioBases"));
+        basesByOwner[owner] = bases;
+    }
+    // Each owner's bases (none when its steps are all gone); a Boolean's also hold its tool parts'
+    // last solids before it (P5): its tool is their shapes at its place, and it runs again when
+    // one of them changes
+    for (int i = 0; i < size; ++i) {
+        App::DocumentObject* entry = entries[i];
+        if (Body::findBodyOf(entry)) {
+            continue;
+        }
+        std::vector<App::DocumentObject*> bases = basesByOwner[entry];
+        // A part pattern's source parts too (the part mirror, slice 9): its tool is their shapes
+        // at its place
+        std::vector<Body*> read;
+        if (const Boolean* boolean = booleanOwner(entry)) {
+            read = booleanPartsAt(boolean, bodies, i, positions, consumed).tools;
+        }
+        else if (isStudioPartPattern(entry)) {
+            read = partPatternSourcesAt(entry, bodies, i, positions, consumed);
+        }
+        if (!read.empty()) {
+            for (auto tool : read) {
+                App::DocumentObject* last = nullptr;
+                for (const auto& item : orders.at(tool)) {
+                    if (item.key < i && Body::isSolidFeature(item.obj)) {
+                        last = item.obj;
+                    }
+                }
+                if (last && std::ranges::find(bases, last) == bases.end()) {
+                    bases.push_back(last);
+                }
+            }
+        }
+        auto prop = freecad_cast<App::PropertyLinkList*>(entry->getPropertyByName("StudioBases"));
         if (prop && prop->getValues() != bases) {
             prop->setValues(bases);
         }
+        if (isStudioPartPattern(entry)) {
+            // What this projection took of its Add's consumption (resync after a recompute)
+            setFlag(entry, "StudioConsumesSourceSeen", studioPartMirrorConsumes(entry));
+        }
     }
-    // An owner whose steps are all gone has no bases
-    for (auto entry : entries) {
-        if (!Body::findBodyOf(entry) && !stepsByOwner.count(entry)) {
-            auto prop =
-                freecad_cast<App::PropertyLinkList*>(entry->getPropertyByName("StudioBases"));
-            if (prop && prop->getSize() > 0) {
-                prop->setValues(std::vector<App::DocumentObject*>());
+
+    // 5b. A part consumed at the bar is hidden, as Onshape deletes it; live again (the bar above
+    // its Boolean, the Boolean suppressed or deleted), it shows again. Only a Body hidden so is
+    // shown again (its StudioConsumedHidden), never one the user hid (P5)
+    for (auto body : bodies) {
+        auto it = consumed.find(body);
+        const bool gone = it != consumed.end() && it->second < barAt;
+        auto marker =
+            freecad_cast<App::PropertyBool*>(body->getPropertyByName("StudioConsumedHidden"));
+        if (gone) {
+            if (body->Visibility.getValue()) {
+                if (!marker) {
+                    marker = static_cast<App::PropertyBool*>(body->addDynamicProperty(
+                        "App::PropertyBool",
+                        "StudioConsumedHidden",
+                        "Studio",
+                        "Hidden because a Boolean consumes this part at the bar (ops#654)",
+                        App::Prop_Hidden
+                    ));
+                }
+                body->Visibility.setValue(false);
+                marker->setValue(true);
+            }
+        }
+        else if (marker && marker->getValue()) {
+            marker->setValue(false);
+            if (!body->Visibility.getValue()) {
+                body->Visibility.setValue(true);
             }
         }
     }
@@ -1049,7 +1317,102 @@ std::vector<Body*> PartDesign::studioScopeOf(const App::DocumentObject* owner)
     const auto positions = positionsOf(entries);
     auto it = positions.find(owner);
     const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
-    return resolveScope(studioScopeIds(owner), bodies, index, positions);
+    return stepPartsAt(owner, bodies, index, positions, consumedBy(entries, bodies, positions));
+}
+
+// ------------------------------------------------------------------------------------------------
+// Live parts and Boolean studio features (FreeCAD-CH ops#654 P5, P6a). Declared where they are
+// used (no header names them: an App header change rebuilds the module)
+
+namespace PartDesign
+{
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
+                                         std::vector<Body*>& steps,
+                                         std::vector<Body*>& tools,
+                                         std::vector<Body*>& both);
+PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
+}  // namespace PartDesign
+
+/// The parts of list's studio live just before the entry at index (-1: at the bar): made by an
+/// entry before it, not merged away, not consumed by a Boolean before it. The one query every
+/// list of parts and every target or tool pick uses (P6a, report 26)
+std::vector<Body*> PartDesign::studioLivePartsAt(const StudioList* list, int index)
+{
+    std::vector<Body*> out;
+    if (!list || !list->getDocument()) {
+        return out;
+    }
+    const auto bodies = studioBodies(list->getDocument(), list->studio());
+    std::vector<App::DocumentObject*> entries;
+    for (auto entry : list->Entries.getValues()) {
+        if (entry) {
+            entries.push_back(entry);
+        }
+    }
+    const int size = static_cast<int>(entries.size());
+    if (index < 0 || index > size) {
+        index = std::min(list->barIndex(), size);
+    }
+    const auto positions = positionsOf(entries);
+    const Consumed consumed = consumedBy(entries, bodies, positions);
+    for (auto body : bodies) {
+        if (liveAt(body, index, positions, consumed, /*before=*/true)) {
+            out.push_back(body);
+        }
+    }
+    return out;
+}
+
+/// A Boolean studio feature's parts at its place: its steps' parts, its tool parts, and the parts
+/// that are a target and a tool. Empty for anything else
+void PartDesign::studioBooleanParts(const App::DocumentObject* owner,
+                                    std::vector<Body*>& steps,
+                                    std::vector<Body*>& tools,
+                                    std::vector<Body*>& both)
+{
+    steps.clear();
+    tools.clear();
+    both.clear();
+    const Boolean* boolean = booleanOwner(owner);
+    const StudioList* list = StudioList::holding(owner);
+    if (!boolean || !list) {
+        return;
+    }
+    const auto bodies = studioBodies(owner->getDocument(), list->studio());
+    const auto& entries = list->Entries.getValues();
+    const auto positions = positionsOf(entries);
+    auto it = positions.find(owner);
+    const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
+    auto parts =
+        booleanPartsAt(boolean, bodies, index, positions, consumedBy(entries, bodies, positions));
+    steps = parts.steps;
+    tools = parts.tools;
+    both = parts.both;
+}
+
+/// The Boolean studio feature that consumes body before the entry at index of its list (-1: at
+/// the bar), or null
+const App::DocumentObject* PartDesign::studioConsumerOf(const Body* body, int index)
+{
+    App::Part* studio = nullptr;
+    if (!body || !Part::BodyBase::studioOf(body, studio)) {
+        return nullptr;
+    }
+    const StudioList* list = StudioList::of(body->getDocument(), studio);
+    if (!list) {
+        return nullptr;
+    }
+    const auto& entries = list->Entries.getValues();
+    const int size = static_cast<int>(entries.size());
+    if (index < 0 || index > size) {
+        index = std::min(list->barIndex(), size);
+    }
+    const auto positions = positionsOf(entries);
+    const Consumed consumed =
+        consumedBy(entries, studioBodies(body->getDocument(), studio), positions);
+    auto it = consumed.find(body);
+    return it != consumed.end() && it->second < index ? entries[it->second] : nullptr;
 }
 
 void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Body*>& parts)
@@ -1065,6 +1428,116 @@ void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Bo
         ids.push_back(studioPartId(body));
     }
     setStudioScopeIds(owner, ids);
+}
+
+// The part mirror (FreeCAD-CH ops#654 slice 9). Declared where used
+namespace PartDesign
+{
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+}  // namespace PartDesign
+
+/// A part pattern (PatternType Part) outside every Body: a studio feature whose tool is other
+/// parts' shapes at its place
+bool PartDesign::isStudioPartPattern(const App::DocumentObject* obj)
+{
+    auto pattern = freecad_cast<const Transformed*>(obj);
+    return pattern && pattern->isAttachedToDocument() && !Body::findBodyOf(obj)
+        && pattern->PatternType.getValue() == 1;
+}
+
+/// A part pattern's source parts live at its place in its list, in StudioEntities' order
+std::vector<Body*> PartDesign::studioPartPatternSources(const App::DocumentObject* owner)
+{
+    const StudioList* list = StudioList::holding(owner);
+    if (!isStudioPartPattern(owner) || !list) {
+        return {};
+    }
+    const auto bodies = studioBodies(owner->getDocument(), list->studio());
+    const auto& entries = list->Entries.getValues();
+    const auto positions = positionsOf(entries);
+    auto it = positions.find(owner);
+    const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
+    return partPatternSourcesAt(owner,
+                                bodies,
+                                index,
+                                positions,
+                                consumedBy(entries, bodies, positions));
+}
+
+namespace PartDesign
+{
+PartDesignExport void studioSetPartMirrorConsumes(App::DocumentObject* owner, bool consumes);
+void registerPartMirrorResync();
+}  // namespace PartDesign
+
+bool PartDesign::studioPartMirrorConsumes(const App::DocumentObject* owner)
+{
+    return owner && flagOf(owner, "StudioConsumesSource");
+}
+
+void PartDesign::studioSetPartMirrorConsumes(App::DocumentObject* owner, bool consumes)
+{
+    if (owner) {
+        setFlag(owner, "StudioConsumesSource", consumes);
+    }
+}
+
+namespace
+{
+/// After a recompute: a part mirror whose Add decided to consume its source (or no longer) since
+/// the list was last projected changes which parts live after it, so the list is reconciled and
+/// the document computed again (slice 9). Not while undoing, restoring or closing
+void resyncPartMirrors(const App::Document& constDoc)
+{
+    static bool busy = false;
+    auto& doc = const_cast<App::Document&>(constDoc);
+    if (busy || doc.isPerformingTransaction() || doc.testStatus(App::Document::Restoring)
+        || App::GetApplication().isClosingAll()) {
+        return;
+    }
+    std::vector<StudioList*> stale;
+    for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
+        auto list = static_cast<StudioList*>(obj);
+        for (auto entry : list->Entries.getValues()) {
+            if (entry && isStudioPartPattern(entry)
+                && flagOf(entry, "StudioConsumesSource")
+                    != flagOf(entry, "StudioConsumesSourceSeen")) {
+                stale.push_back(list);
+                break;
+            }
+        }
+    }
+    if (stale.empty()) {
+        return;
+    }
+    Base::StateLocker lock(busy, true);
+    for (auto list : stale) {
+        std::string why;
+        if (!list->reconcile(&why)) {
+            Base::Console().warning("%s\n", why.c_str());
+        }
+    }
+    doc.recompute();
+}
+}  // namespace
+
+void PartDesign::registerPartMirrorResync()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    registered = true;
+    auto watch = [](const App::Document& doc) {
+        const_cast<App::Document&>(doc).signalBecameStable.connect(&resyncPartMirrors);
+    };
+    App::GetApplication().signalNewDocument.connect(
+        [watch](const App::Document& doc, bool) { watch(doc); }
+    );
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
 }
 
 long PartDesign::studioTagFor(const App::DocumentObject* owner, const Body* /*body*/)

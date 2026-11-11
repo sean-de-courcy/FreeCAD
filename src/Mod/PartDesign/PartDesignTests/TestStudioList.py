@@ -24,6 +24,32 @@
 # active step identical names on the same geometry, and so does aborting that. The control (a
 # step tagged with its own ID, as a step written like Pocket) must fail G1. STUDIO_PROP_SEEDS
 # (e.g. "1,2,3") and STUDIO_PROP_OPS set the size for a long run.
+#
+# P5 adds Boolean studio features to the random edits (PartDesign::Boolean owners: Subtract and
+# Union, Keep tools on and off, targets in StudioScope and tools in StudioTools): the oracle applies
+# Onshape's O3 rules itself, and its consumed rule (a tool part a Boolean consumes is no part from
+# the Boolean's place on: a later pick of it resolves to nothing) gives the live parts at the bar,
+# compared with PartDesign.studioLiveParts and the Bodies' visibility.
+#
+# Slice 8 adds in-Body patterns of owners' steps (a LinearPattern along the part's y, or a Mirrored
+# about a datum plane at y 5 in each part, with one box owner as the original): the oracle copies
+# the owner's box itself where the pattern applies (the owner resolved at its place to exactly the
+# pattern's part, its step applied, neither suppressed), and nothing otherwise (Onshape's patterns
+# across parts come later: refused loudly).
+#
+# T3 adds Reapply on and off to the patterns, and Up to face Remove owners (a Pocket studio feature
+# on a rectangle at z 10.001, down to a plane slanted along y, z = 6.01 + 0.171 y): with Reapply
+# off a pattern of one copies the seed's prism (oracle 9, R3); with Reapply on each instance is
+# re-solved, the oracle's prism from its own rectangle down to the plane (O6).
+#
+# Slice 9 adds part mirrors (PartDesign::Mirrored owners with PatternType Part, outside every Body):
+# a source part mirrored about a plane x = 15 or x = 35 (a Part::Plane in the studio, outside the
+# list), New (a new part holding the copy), Add or Remove (its scope). The oracle mirrors the
+# source's shape at the mirror's place itself: New gives the new part that copy; Remove cuts it from
+# each scope part (a cut leaving no solid or two changes nothing); Add fuses it into the one scope
+# part it touches, and does nothing when it touches none or two (refused loudly). Onshape oracle 9
+# (R4): an Add's source outside the scope that touches the copy or that part is merged too, and
+# consumed from the mirror's place on. A New mirror's part is compared by its maker's name.
 
 import os
 import random
@@ -97,7 +123,186 @@ def makeOwner(doc, studio, name, rect, depth, op, scope=(), suppressed=False):
     return box
 
 
+def booleanOwner(doc, studio, name, kind, targets=(), tools=(), keep=False, suppressed=False):
+    """A Boolean studio feature (P5) of Type kind (Cut, Fuse), not yet listed."""
+    owner = doc.addObject("PartDesign::Boolean", name)
+    studio.addObject(owner)
+    owner.Type = kind
+    owner.KeepTools = keep
+    owner.Refine = False
+    owner.StudioScope = list(targets)
+    owner.StudioTools = list(tools)
+    if suppressed:
+        owner.Suppressed = True
+    return owner
+
+
+def isPartMirror(obj):
+    """A part mirror (slice 9): a studio feature, not a pattern in a Body."""
+    return obj.TypeId == "PartDesign::Mirrored" and getattr(obj, "PatternType", "") == "Part"
+
+
+def isOwner(obj):
+    return obj.TypeId in ("Part::Box", "PartDesign::Boolean", "PartDesign::Pocket") or isPartMirror(
+        obj
+    )
+
+
+# The slanted plane of the Up to face owners (T3), z = a + b y; digits that put no element's
+# centre on a rounding boundary of elementKey()
+SLANT = (6.0123457, 0.17131729)
+
+
+def slantTool(rect):
+    """The prism an Up to face owner on rect makes: from z 10.001 down to the slanted plane."""
+    x0, y0, x1, y1 = rect
+    a, b = SLANT
+    points = [V(x0, y0, a + b * y0), V(x0, y1, a + b * y1), V(x0, y1, 10.001), V(x0, y0, 10.001)]
+    face = Part.Face(Part.makePolygon(points + [points[0]]))
+    return face.extrude(V(x1 - x0, 0, 0))
+
+
+def makeUpTo(doc, studio, name, rect, scope=(), suppressed=False):
+    """An Up to face Remove owner (T3): a Pocket studio feature on a rectangle sketched at z 10.001,
+    down to the studio's slanted plane (not yet listed)."""
+    from PartDesignTests.TestStudioOwner import studioSketch
+
+    sk = studioSketch(doc, studio, name + "Sk", rects=(tuple(rect),), z=10.001)
+    owner = doc.addObject("PartDesign::Pocket", name)
+    studio.addObject(owner)
+    owner.Profile = sk
+    owner.Type = "UpToFace"
+    owner.UpToFace = (doc.getObject("Slant"), ["Face1"])
+    owner.Refine = False
+    owner.StudioScope = list(scope)
+    if suppressed:
+        owner.Suppressed = True
+    return owner
+
+
+PATTERN_TYPES = {"Linear": "PartDesign::LinearPattern", "Mirror": "PartDesign::Mirrored"}
+
+
+def isPattern(obj):
+    return obj.TypeId in PATTERN_TYPES.values() and not isPartMirror(obj)
+
+
+def makeMirror(doc, studio, name, source, x, op, scope=(), suppressed=False):
+    """A part mirror (slice 9) of the part source about the plane x (15 or 35), op New, Add or
+    Remove, not yet listed (New: studioNewPart after it is listed)."""
+    owner = doc.addObject("PartDesign::Mirrored", name)
+    studio.addObject(owner)
+    owner.PatternType = "Part"
+    owner.StudioEntities = [source]
+    owner.MirrorPlane = (doc.getObject(f"Mx{x}"), ["Face1"])
+    owner.Refine = False
+    owner.addProperty("App::PropertyEnumeration", "Operation", "Studio")
+    owner.Operation = ["Union", "Subtraction", "Common"]
+    owner.Operation = "Subtraction" if op == "Remove" else "Union"
+    owner.StudioScope = [] if op == "New" else list(scope)
+    if suppressed:
+        owner.Suppressed = True
+    return owner
+
+
+def madeBy(owner):
+    return [
+        b for b in owner.Document.Objects
+        if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == owner
+    ]
+
+
+def mirrorRecord(owner):
+    plane = owner.MirrorPlane[0] if owner.MirrorPlane else None
+    new = bool(madeBy(owner))
+    op = "New" if new else ("Remove" if owner.Operation == "Subtraction" else "Add")
+    return dict(
+        name=owner.Name,
+        id=owner.ID,
+        mirror=True,
+        source=list(owner.StudioEntities)[0] if owner.StudioEntities else "",
+        x=int(round(plane.Placement.Base.x)) if plane else 0,
+        op=op,
+        scope=[] if new else list(owner.StudioScope),
+        suppressed=bool(owner.Suppressed),
+    )
+
+
+def makePattern(
+    doc, name, kind, part, originals, length=0, count=2, suppressed=False, reapply=False
+):
+    """A pattern (slice 8) of part's, outside its Body until inserted (insertPattern)."""
+    pat = doc.addObject(PATTERN_TYPES[kind], name)
+    pat.Reapply = reapply
+    body = doc.getObject(part)
+    pat.Originals = [doc.getObject(o) for o in originals if doc.getObject(o)]
+    if kind == "Linear":
+        pat.Direction = (body.Origin.OriginFeatures[1], [""])
+        pat.Mode = "Extent"
+        pat.Length = length
+        pat.Occurrences = count
+    else:
+        pat.MirrorPlane = (doc.getObject(part + "Mid"), [""])
+    pat.Refine = False
+    if suppressed:
+        pat.Suppressed = True
+    return pat
+
+
+def insertPattern(pat, part, index):
+    """pat into part's Body and the list. One with no original (its original deleted in the live
+    document) goes in the chain, red, as a pattern whose original went stays in it (ops#640 F3),
+    not out of it as a new one with nothing picked (ops#590)."""
+    empty = not pat.Originals
+    if empty:
+        pat.TransformMode = "Whole shape"
+    pat.Document.getObject(part).addObject(pat)
+    if empty:
+        pat.TransformMode = "Features"
+    PartDesign.studioInsert(pat, index)
+
+
+def patternRecord(pat):
+    kind = "Mirror" if pat.TypeId == PATTERN_TYPES["Mirror"] else "Linear"
+    record = dict(
+        name=pat.Name,
+        id=pat.ID,
+        pattern=kind,
+        part=pat.getParentGeoFeatureGroup().Name,
+        originals=[o.Name for o in pat.Originals],
+        suppressed=bool(pat.Suppressed),
+        reapply=bool(pat.Reapply),
+    )
+    if kind == "Linear":
+        record["length"] = round(pat.Length.Value, 6)
+        record["count"] = int(pat.Occurrences)
+    return record
+
+
 def ownerRecord(box):
+    if isPartMirror(box):
+        return mirrorRecord(box)
+    if box.TypeId == "PartDesign::Pocket":
+        bound = box.Profile[0].Shape.BoundBox
+        return dict(
+            name=box.Name,
+            id=box.ID,
+            upto=True,
+            rect=[round(v, 6) for v in (bound.XMin, bound.YMin, bound.XMax, bound.YMax)],
+            op="Subtraction",
+            scope=list(box.StudioScope),
+            suppressed=bool(box.Suppressed),
+        )
+    if box.TypeId == "PartDesign::Boolean":
+        return dict(
+            name=box.Name,
+            id=box.ID,
+            kind=box.Type,
+            scope=list(box.StudioScope),
+            tools=list(box.StudioTools),
+            keep=bool(box.KeepTools),
+            suppressed=bool(box.Suppressed),
+        )
     p = box.Placement.Base
     op = box.Operation
     depth = round(box.Height.Value - 0.001, 6)
@@ -123,7 +328,7 @@ def studioList(doc):
 
 
 def owners(doc):
-    return [e for e in studioList(doc).Entries if e.TypeId == "Part::Box"]
+    return [e for e in studioList(doc).Entries if isOwner(e)]
 
 
 def isStep(obj):
@@ -210,9 +415,24 @@ def snapshot(doc, names=True):
             failed=failedUpToTip(body),
             rolledBack=rolled,
             body=None if rolled or body.Shape.isNull() else round(body.Shape.Volume, 4),
+            live=body in PartDesign.studioLiveParts(body),
+            visible=bool(body.Visibility),
         )
         if names:
             out[p]["names"] = elementNames(shape, masker)
+    # A New part mirror's part (slice 9), by its maker's name (its own name depends on the order
+    # the parts were made in)
+    for owner in studioList(doc).Entries:
+        if not isPartMirror(owner):
+            continue
+        for body in madeBy(owner):
+            tip = body.Tip
+            shape = tip.Shape if tip else Part.Shape()
+            out["new:" + owner.Name] = dict(
+                volume=0.0 if shape.isNull() else round(shape.Volume, 4),
+                solids=0 if shape.isNull() else len(shape.Solids),
+                live=body in PartDesign.studioLiveParts(body),
+            )
     return out
 
 
@@ -221,42 +441,204 @@ def listOf(doc):
     lst = studioList(doc)
     entries = list(lst.Entries)
     bar = lst.Bar if 0 <= lst.Bar < len(entries) else len(entries)
-    records = [ownerRecord(e) for e in entries if e.TypeId == "Part::Box"]
-    natives = [e.Name for e in entries if e.TypeId != "Part::Box"]
+    records = [
+        patternRecord(e) if isPattern(e) else ownerRecord(e)
+        for e in entries
+        if isOwner(e) or isPattern(e)
+    ]
+    natives = [e.Name for e in entries if not isOwner(e) and not isPattern(e)]
     return natives, records, bar
 
 
-def oracle(natives, records, bar):
+def oracle(natives, records, bar, live=None):
     """Per part, (volume, solids) by Part booleans from the list as data, never by reconcile
     (the S1 skeptic, 2026-11-10: fromScratch() reconciles too, so it shows only that incremental
     and one-shot reconcile agree). Records apply in list order up to the bar, each to the parts
     its scope names unless suppressed; a step that would split its part contributes nothing.
-    The generator keeps the natives first, so the bar counts them first."""
+    The generator keeps the natives first, so the bar counts them first.
+
+    Boolean records (P5, Onshape O3, O9b): only live parts resolve. Subtract cuts the fused tools
+    (targets left out) from each target; Union fuses the parts listed (targets, then tools) into
+    the first. A Boolean that resolves to no target, no tool, a part both, or a Union of one part
+    does nothing; otherwise, Keep tools off and not suppressed, its tools are consumed (even when
+    the geometry fails it), so no later record acts on them. live, a set, gets the parts live at
+    the bar.
+
+    Pattern records (slice 8): a pattern in part p of one box owner copies the owner's box (its
+    instances at k * length / (count - 1) along y, or its mirror about y 5) into p when the owner
+    comes before it, resolved at its place to exactly [p], its step applied in p, and neither is
+    suppressed; otherwise it does nothing."""
     shapes = {p: Part.makeBox(10, 10, 10, V(x, 0, 0)) for p, x in PARTS}
+    # Slice 9: the part each New mirror makes, by its maker ("new:<name>"); None: empty
+    made = {
+        "new:" + r["name"]: None
+        for i, r in enumerate(records)
+        if r.get("mirror") and r["op"] == "New" and len(natives) + i < bar
+    }
+    consumed = set()
+    resolved = {}  # box owner -> the parts it resolved to at its place
+    applied = set()  # (box owner, part) whose step changed its part
     for i, record in enumerate(records):
         if len(natives) + i >= bar:
             break
         if record["suppressed"]:
             continue
-        length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
-        tool = Part.makeBox(length, width, height, corner)
-        for p in record["scope"]:
-            if p not in shapes:
+        if record.get("mirror"):
+            src = record["source"]
+            if src not in shapes or src in consumed:
+                continue  # no part to mirror: it fails
+            copy = shapes[src].mirror(V(record["x"], 0, 0), V(1, 0, 0))
+            if record["op"] == "New":
+                made["new:" + record["name"]] = copy
                 continue
+            targets = []
+            for p in record["scope"]:
+                if p in shapes and p not in consumed and p not in targets:
+                    targets.append(p)
+            tool = [copy]
+            if record["op"] == "Add":
+                touched = [p for p in targets if copy.distToShape(shapes[p])[0] <= 1e-7]
+                if len(touched) != 1:
+                    continue  # touching none, or two (merging parts: refused)
+                # Oracle 9 R4: the source outside the scope touching the copy or the survivor
+                # is merged with the copy, and consumed
+                survivor = shapes[touched[0]]
+                if src not in targets and (
+                    shapes[src].distToShape(copy)[0] <= 1e-7
+                    or shapes[src].distToShape(survivor)[0] <= 1e-7
+                ):
+                    tool.append(shapes[src])
+                    consumed.add(src)
+            for p in targets:
+                cut = record["op"] == "Remove"
+                if cut:
+                    result = shapes[p].cut(copy)
+                else:
+                    # A step fuses the tool's solids that touch its part (all when none does)
+                    solids = tool[0].fuse(tool[1:]) if len(tool) > 1 else copy
+                    pieces = solids.Solids or [solids]
+                    kept = [t for t in pieces if t.distToShape(shapes[p])[0] <= 1e-7] or pieces
+                    result = shapes[p].fuse(kept)
+                result = result.removeSplitter()
+                if len(result.Solids) == 1:
+                    shapes[p] = result
+            continue
+        if "pattern" in record:
+            p = record["part"]
+            originals = [o for o in record["originals"] if o in resolved]
+            if len(originals) != len(record["originals"]) or len(originals) != 1:
+                continue
+            o = originals[0]
+            if resolved[o] != [p] or (o, p) not in applied:
+                continue
+            owner = next(r for r in records if r["name"] == o)
+            if owner.get("upto"):
+                # T3: with Reapply on, each instance re-solved from its own rectangle; off, copies
+                # of the seed's prism (oracle 9, R3: Reapply off copies an Up to face seed)
+                x0, y0, x1, y1 = owner["rect"]
+                if not record.get("reapply"):
+                    tool = slantTool(owner["rect"])
+                    if record["pattern"] == "Linear":
+                        count = record["count"]
+                        copies = [
+                            tool.translated(V(0, k * record["length"] / (count - 1), 0))
+                            for k in range(1, count)
+                        ]
+                    else:
+                        copies = [tool.mirror(V(0, 5, 0), V(0, 1, 0))]
+                elif record["pattern"] == "Linear":
+                    count = record["count"]
+                    moves = [k * record["length"] / (count - 1) for k in range(1, count)]
+                    rects = [(x0, y0 + d, x1, y1 + d) for d in moves]
+                    copies = [slantTool(r) for r in rects]
+                else:
+                    copies = [slantTool((x0, 10 - y1, x1, 10 - y0))]
+            else:
+                length, width, height, corner = toolBox(owner["rect"], owner["depth"], owner["op"])
+                tool = Part.makeBox(length, width, height, corner)
+                if record["pattern"] == "Linear":
+                    count = record["count"]
+                    copies = [
+                        tool.translated(V(0, k * record["length"] / (count - 1), 0))
+                        for k in range(1, count)
+                    ]
+                else:
+                    copies = [tool.mirror(V(0, 5, 0), V(0, 1, 0))]
+            cut = owner["op"] == "Subtraction"
+            result = (shapes[p].cut(copies) if cut else shapes[p].fuse(copies)).removeSplitter()
+            if len(result.Solids) == 1:
+                shapes[p] = result
+            continue
+        if "kind" in record:
+            targets = [p for p in record["scope"] if p in shapes and p not in consumed]
+            tools = [p for p in record["tools"] if p in shapes and p not in consumed]
+            if record["kind"] == "Fuse":
+                listed = targets + [p for p in tools if p not in targets]
+                if len(listed) < 2:
+                    continue
+                survivor, others = listed[0], listed[1:]
+                result = shapes[survivor].fuse([shapes[p] for p in others]).removeSplitter()
+                if len(result.Solids) == 1:
+                    shapes[survivor] = result
+            else:
+                cutters = [p for p in tools if p not in targets]
+                if not targets or not cutters or len(cutters) < len(tools):
+                    continue
+                tool = shapes[cutters[0]]
+                if len(cutters) > 1:
+                    tool = tool.fuse([shapes[p] for p in cutters[1:]])
+                for p in targets:
+                    result = shapes[p].cut(tool).removeSplitter()
+                    if len(result.Solids) == 1:
+                        shapes[p] = result
+                others = cutters
+            if not record["keep"]:
+                consumed.update(others)
+            continue
+        if record.get("upto"):
+            tool = slantTool(record["rect"])
+        else:
+            length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
+            tool = Part.makeBox(length, width, height, corner)
+        resolved[record["name"]] = []
+        for p in record["scope"]:
+            if p not in shapes or p in consumed or p in resolved[record["name"]]:
+                continue
+            resolved[record["name"]].append(p)
             cut = record["op"] == "Subtraction"
             result = (shapes[p].cut(tool) if cut else shapes[p].fuse(tool)).removeSplitter()
             if len(result.Solids) == 1:
                 shapes[p] = result
-    return {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items()}
+                applied.add((record["name"], p))
+    if live is not None:
+        live.update(p for p in shapes if p not in consumed)
+        live.update(made)
+    out = {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items()}
+    out.update({k: (0.0, 0) if s is None else (round(s.Volume, 4), len(s.Solids)) for k, s in made.items()})
+    return out
+
+
+def liveKey(body):
+    """A part as the oracle names it: its name, or a New mirror's part by its maker."""
+    maker = body.StudioMadeBy
+    return "new:" + maker.Name if maker is not None else body.Name
 
 
 def oracleDifferences(doc):
     """oracle() against each Tip's shape (the state at the bar), and the Body's own shape when
     it is not rolled back; plus hygiene: nothing touched or invalid after a recompute, no step
     without an owner or outside every Body."""
-    want = oracle(*listOf(doc))
+    live = set()
+    want = oracle(*listOf(doc), live=live)
     found = []
     bodies = [doc.getObject(p) for p, _ in PARTS]
+    # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
+    got = sorted(liveKey(b) for b in PartDesign.studioLiveParts(studioList(doc)))
+    if got != sorted(live):
+        found.append(f"live parts {got}, oracle {sorted(live)}")
+    for body in bodies:
+        if bool(body.Visibility) != (body.Name in live):
+            found.append(f"{body.Name}: Visibility {body.Visibility}, oracle live {body.Name in live}")
     for body in bodies:
         tip = body.Tip
         shape = tip.Shape if tip else Part.Shape()
@@ -267,13 +649,26 @@ def oracleDifferences(doc):
             volume = round(body.Shape.Volume, 4)
             if volume != want[body.Name][0]:
                 found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
+    # Slice 9: each listed New mirror's part, at the bar
+    for owner in studioList(doc).Entries:
+        if not isPartMirror(owner):
+            continue
+        key = "new:" + owner.Name
+        for body in madeBy(owner):
+            tip = body.Tip
+            shape = tip.Shape if tip else Part.Shape()
+            got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+            if got != want.get(key, (0.0, 0)):
+                found.append(f"{key}: Tip {got}, oracle {want.get(key, (0.0, 0))}")
     # A held object (after its Body's Tip) and a rolled-back Body are not recomputed: they stay
     # touched until the bar passes them (ops#127 R5/R7)
     held = set()
-    for body in bodies:
+    for body in [o for o in doc.Objects if o.TypeId == "PartDesign::Body"]:  # New parts too
         group = list(body.Group)
         if body.Tip in group:
             held.update(o.Name for o in group[group.index(body.Tip) + 1:])
+        elif body.Tip is None and body not in bodies:
+            held.update(o.Name for o in group)  # a New part whose maker is past the bar
         if body.isRolledBack():
             held.add(body.Name)
     for obj in doc.Objects:
@@ -282,7 +677,9 @@ def oracleDifferences(doc):
         if obj.TypeId == "PartDesign::FeatureApply":
             if obj.StudioOwner is None:
                 found.append(f"{obj.Name}: a step without an owner")
-            if not any(b.hasObject(obj) for b in bodies):
+            if not any(
+                b.hasObject(obj) for b in doc.Objects if b.TypeId == "PartDesign::Body"
+            ):
                 found.append(f"{obj.Name}: a step in no Body")
     return found
 
@@ -408,21 +805,45 @@ def ownIdSteps(doc):
     doc.recompute()
 
 
-def fromScratch(natives, records, bar):
+def fromScratch(natives, records, bar, maker=None):
     """The document built from scratch from the list (G2): the same parts; the owners made in the
     live document's ID order (names depend on the IDs' order, notes/stored-tags.md 4), then
     inserted in the list's order; then the bar."""
-    doc, studio = newStudio("scratch")
+    doc, studio = (maker or newStudio)("scratch")
     try:
         lst = studioList(doc)
         assert [e.Name for e in lst.Entries] == natives, ([e.Name for e in lst.Entries], natives)
         for r in sorted(records, key=lambda r: r["id"]):
-            box = makeOwner(
-                doc, studio, r["name"], r["rect"], r["depth"], r["op"], r["scope"], r["suppressed"]
-            )
+            if "pattern" in r:
+                box = makePattern(
+                    doc, r["name"], r["pattern"], r["part"], r["originals"], r.get("length", 0),
+                    r.get("count", 2), r["suppressed"], r.get("reapply", False),
+                )
+            elif r.get("mirror"):
+                box = makeMirror(
+                    doc, studio, r["name"], r["source"], r["x"], r["op"], r["scope"],
+                    r["suppressed"],
+                )
+            elif r.get("upto"):
+                box = makeUpTo(doc, studio, r["name"], r["rect"], r["scope"], r["suppressed"])
+            elif "kind" in r:
+                box = booleanOwner(
+                    doc, studio, r["name"], r["kind"], r["scope"], r["tools"], r["keep"],
+                    r["suppressed"],
+                )
+            else:
+                box = makeOwner(
+                    doc, studio, r["name"], r["rect"], r["depth"], r["op"], r["scope"],
+                    r["suppressed"],
+                )
             assert box.Name == r["name"], (box.Name, r["name"])
         for r in records:
-            PartDesign.studioInsert(doc.getObject(r["name"]), -1)
+            if "pattern" in r:
+                insertPattern(doc.getObject(r["name"]), r["part"], -1)
+            else:
+                PartDesign.studioInsert(doc.getObject(r["name"]), -1)
+                if r.get("mirror") and r["op"] == "New":
+                    PartDesign.studioNewPart(doc.getObject(r["name"]))
         PartDesign.studioSetBar(lst, bar if bar < len(lst.Entries) else -1)
         doc.recompute()
         return snapshot(doc)
@@ -431,7 +852,7 @@ def fromScratch(natives, records, bar):
 
 
 def differences(got, want):
-    out = []
+    out = [f"{p}: in the document only" for p in got if p not in want]
     for p in want:
         for key in want[p]:
             if got.get(p, {}).get(key) != want[p][key]:
@@ -949,12 +1370,45 @@ def touches(rect):
     return [p for p, x in PARTS if x0 < x + 10 and x1 > x]
 
 
+PROP_NATIVES = NATIVES + len(PARTS)  # and each part's mirror plane
+
+
+def propStudio(name):
+    """newStudio, plus a datum plane at y 5 in each part (a Mirrored's plane, slice 8)."""
+    doc, studio = newStudio(name)
+    for p, _ in PARTS:
+        mid = doc.getObject(p).newObject("PartDesign::Plane", p + "Mid")
+        mid.MapMode = "Deactivated"
+        mid.Placement = App.Placement(V(0, 5, 0), App.Rotation(V(1, 0, 0), -90))
+    # T3: the plane the Up to face owners go down to (SLANT, outside the list)
+    import math
+
+    slant = doc.addObject("Part::Plane", "Slant")
+    studio.addObject(slant)
+    slant.Length, slant.Width = 80, 40
+    angle = math.degrees(math.atan(SLANT[1]))
+    slant.Placement = App.Placement(
+        V(-15, -15, SLANT[0] - 15 * SLANT[1]), App.Rotation(V(1, 0, 0), angle)
+    )
+    # Slice 9: the part mirrors' planes x = 15 and x = 35 (outside the list)
+    for x in (15, 35):
+        plane = doc.addObject("Part::Plane", f"Mx{x}")
+        studio.addObject(plane)
+        plane.Length, plane.Width = 40, 40
+        plane.Placement = App.Placement(V(x, -15, 25), App.Rotation(V(0, 1, 0), 90))
+    doc.recompute()
+    return doc, studio
+
+
 class TestStudioListProperty(unittest.TestCase):
     """After every random edit the document equals the one built from scratch from its list."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="studiolist")
         self.log = []
+        self.consumedSeen = 0  # states after an edit with a part consumed at the bar (P5)
+        self.patternsSeen = 0  # valid patterns of an owner, summed over the states (slice 8)
+        self.mirrorsSeen = 0  # valid part mirrors, summed over the states (slice 9)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -964,9 +1418,61 @@ class TestStudioListProperty(unittest.TestCase):
 
     def edit(self, rng, doc, counter):
         lst = studioList(doc)
+        NATIVES = PROP_NATIVES
         boxes = owners(doc)
-        kinds = ["insert"] * 3 + ["delete", "move", "scope", "depth", "suppress", "bar"]
-        kind = rng.choice(kinds) if boxes else "insert"
+        shapeOwners = [b for b in boxes if b.TypeId in ("Part::Box", "PartDesign::Pocket")]
+        entries = boxes + [e for e in lst.Entries if isPattern(e)]
+        free = len(lst.Entries) - NATIVES  # places after the natives
+        kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern", "mirror", "mirror"]
+        kinds += ["delete", "move", "scope", "depth", "suppress", "bar"]
+        kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
+        if kind == "pattern" and not shapeOwners:
+            kind = "insert"
+        if kind == "mirror":
+            # Slice 9: a part mirror of a part about x = 15 or 35, New, Add or Remove
+            names = [p for p, _ in PARTS]
+            source = rng.choice(names)
+            x = rng.choice([15, 35])
+            op = rng.choice(["New", "Add", "Remove"])
+            scope = [] if op == "New" else rng.sample(names, rng.randint(1, 2))
+            at = rng.randint(0, free)
+            owner = makeMirror(doc, doc.getObject("S"), f"F{counter}", source, x, op, scope)
+            PartDesign.studioInsert(owner, NATIVES + at)
+            if op == "New":
+                PartDesign.studioNewPart(owner)
+            return f"mirror {owner.Name} {op} of {source} about x {x} scope {scope} at {at}"
+        if kind == "pattern":
+            # Slice 8: a Linear (along y) or a Mirror (about y 5) of one box owner, in one of its
+            # scope's parts (or another part: refused), somewhere after it
+            owner = rng.choice(shapeOwners)
+            scope = list(owner.StudioScope) or ["A"]
+            part = rng.choice(scope) if rng.random() < 0.85 else rng.choice([p for p, _ in PARTS])
+            which = rng.choice(["Linear", "Linear", "Mirror"])
+            count = rng.choice([2, 3])
+            length = rng.choice([1, 2]) * (count - 1)
+            after = list(lst.Entries).index(owner) + 1 - NATIVES
+            at = rng.randint(after, free)
+            reapply = rng.random() < 0.5  # T3
+            pat = makePattern(
+                doc, f"F{counter}", which, part, [owner.Name], length, count, reapply=reapply
+            )
+            insertPattern(pat, part, NATIVES + at)
+            return (
+                f"pattern {pat.Name} {which} of {owner.Name} in {part} L{length} n{count} at {at}"
+                f" reapply {reapply}"
+            )
+        if kind == "boolean":
+            # P5: a Subtract or a Union between parts, Keep tools on or off
+            names = [p for p, _ in PARTS]
+            op = rng.choice(["Cut", "Cut", "Fuse"])
+            targets = rng.sample(names, rng.randint(0 if op == "Fuse" else 1, 1))
+            rest = [p for p in names if p not in targets]
+            tools = rng.sample(rest, rng.randint(1, len(rest)))
+            keep = rng.random() < 0.4
+            at = rng.randint(0, free)
+            owner = booleanOwner(doc, doc.getObject("S"), f"F{counter}", op, targets, tools, keep)
+            PartDesign.studioInsert(owner, NATIVES + at)
+            return f"boolean {owner.Name} {op} targets {targets} tools {tools} keep {keep} at {at}"
         if kind == "insert":
             x0 = rng.choice([2, 5, 8, 22, 25, 42, 45, 5, 25])
             w = rng.choice([2, 4, 8, 20, 25])
@@ -976,20 +1482,84 @@ class TestStudioListProperty(unittest.TestCase):
             scope = sorted(rng.sample(parts, rng.randint(1, len(parts))))
             op = rng.choice(["Subtraction", "Subtraction", "Union"])
             depth = rng.choice([1, 2, 3, 4])
-            at = rng.randint(0, len(boxes))
+            at = rng.randint(0, free)
+            if rng.random() < 0.3:
+                # T3: an Up to face Remove owner
+                box = makeUpTo(doc, doc.getObject("S"), f"F{counter}", rect, scope)
+                PartDesign.studioInsert(box, NATIVES + at)
+                return f"insert {box.Name} up to face {rect} scope {scope} at {at}"
             box = makeOwner(doc, doc.getObject("S"), f"F{counter}", rect, depth, op, scope)
             PartDesign.studioInsert(box, NATIVES + at)
             return f"insert {box.Name} {op} {rect} d{depth} scope {scope} at {at}"
-        box = rng.choice(boxes)
+        box = rng.choice(entries)
         name = box.Name
-        if kind == "delete":
+        if isPattern(box) and kind in ("scope", "depth"):
+            if box.TypeId == PATTERN_TYPES["Mirror"] or kind == "scope":
+                # T3: Reapply toggled
+                box.Reapply = not box.Reapply
+                PartDesign.studioReconcile(lst)
+                return f"reapply {name} {box.Reapply}"
+            else:
+                count = rng.choice([2, 3])
+                box.Occurrences = count
+                box.Length = rng.choice([1, 2]) * (count - 1)
+                PartDesign.studioReconcile(lst)
+                return f"count {name} n{count} L{box.Length.Value}"
+        if isPartMirror(box) and kind in ("scope", "depth"):
+            if kind == "depth":
+                x = 50 - int(round(box.MirrorPlane[0].Placement.Base.x))  # 15 <-> 35
+                box.MirrorPlane = (doc.getObject(f"Mx{x}"), ["Face1"])
+                PartDesign.studioReconcile(lst)
+                return f"plane {name} x {x}"
+            names = [p for p, _ in PARTS]
+            if madeBy(box):
+                source = rng.choice(names)
+                box.StudioEntities = [source]
+                PartDesign.studioReconcile(lst)
+                return f"source {name} {source}"
+            scope = sorted(rng.sample(names, rng.randint(1, 2)))
+            PartDesign.studioSetScopeIds(box, scope)
+            return f"scope {name} {scope}"
+        if kind == "delete" and isPartMirror(box):
+            # Its New part goes with it (an empty part of no feature isn't the list's)
+            made = [b.Name for b in madeBy(box)]
             PartDesign.studioRemove(box)
             doc.removeObject(name)
+            for body in made:
+                doc.getObject(body).removeObjectsFromDocument()
+                doc.removeObject(body)
+            return f"delete {name} and {made}"
+        if kind == "delete":
+            profile = box.Profile[0] if box.TypeId == "PartDesign::Pocket" else None
+            PartDesign.studioRemove(box)
+            doc.removeObject(name)
+            if profile is not None:
+                doc.removeObject(profile.Name)
             return f"delete {name}"
         if kind == "move":
-            j = rng.randrange(len(boxes))
-            PartDesign.studioMove(box, NATIVES + j)
+            j = rng.randrange(free)
+            try:
+                PartDesign.studioMove(box, NATIVES + j)
+            except ValueError as e:
+                # Onshape's drag: refused above what it reads or below what reads it (a pattern
+                # reads its original, slice 8); nothing changes
+                if " uses " not in str(e):
+                    raise
+                return f"move {name} -> {j} refused: {e}"
             return f"move {name} -> {j}"
+        if kind in ("scope", "depth") and box.TypeId == "PartDesign::Boolean":
+            names = [p for p, _ in PARTS]
+            if kind == "depth":
+                box.KeepTools = not box.KeepTools
+                PartDesign.studioReconcile(lst)
+                return f"keep {name} {box.KeepTools}"
+            if rng.random() < 0.5:
+                tools = sorted(rng.sample(names, rng.randint(1, 2)))
+                PartDesign.studioSetToolIds(box, tools)
+                return f"tools {name} {tools}"
+            targets = sorted(rng.sample(names, rng.randint(0 if box.Type == "Fuse" else 1, 1)))
+            PartDesign.studioSetScopeIds(box, targets)
+            return f"targets {name} {targets}"
         if kind == "scope":
             scope = list(box.StudioScope)
             p = rng.choice([p for p, _ in PARTS])
@@ -999,6 +1569,8 @@ class TestStudioListProperty(unittest.TestCase):
                 scope = sorted(scope + [p])
             PartDesign.studioSetScopeIds(box, scope)
             return f"scope {name} {scope}"
+        if kind == "depth" and box.TypeId == "PartDesign::Pocket":
+            kind = "suppress"  # an Up to face owner has no depth
         if kind == "depth":
             r = ownerRecord(box)
             depth = rng.choice([1, 2, 3, 4, 5])
@@ -1015,7 +1587,7 @@ class TestStudioListProperty(unittest.TestCase):
 
     def run_sequence(self, seed, nops):
         rng = random.Random(seed)
-        doc, _ = newStudio(f"prop{seed}")
+        doc, _ = propStudio(f"prop{seed}")
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
         studioList(doc)
         bad = 0
@@ -1042,12 +1614,22 @@ class TestStudioListProperty(unittest.TestCase):
                     doc.abortTransaction()
                     what = f"refused: {e}"
                     bad += 1
+                    self.log.append(f"seed {seed} op {step} {what}")
             doc.recompute()
             got = snapshot(doc)
-            want = fromScratch(*listOf(doc))
+            want = fromScratch(*listOf(doc), maker=propStudio)
             found = differences(got, want)
             found += ["oracle " + d for d in oracleDifferences(doc)]
             found += ["G1 " + d for d in gateG1(doc)[:4]]
+            if len(PartDesign.studioLiveParts(studioList(doc))) < len(PARTS):
+                self.consumedSeen += 1
+            self.patternsSeen += sum(
+                1 for e in studioList(doc).Entries if isPattern(e) and e.isValid() and e.Originals
+            )
+            self.mirrorsSeen += sum(
+                1 for e in studioList(doc).Entries
+                if isPartMirror(e) and e.isValid() and not e.Suppressed
+            )
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -1062,6 +1644,13 @@ class TestStudioListProperty(unittest.TestCase):
         nops = int(os.environ.get("STUDIO_PROP_OPS", "25"))
         total = sum(self.run_sequence(seed, nops) for seed in seeds)
         self.assertEqual(total, 0, "\n".join(self.log))
+        # The consumed rule was exercised, not only Booleans that keep their tools
+        self.assertGreater(self.consumedSeen, 0)
+        self.assertGreater(self.patternsSeen, 0)
+        self.assertGreater(self.mirrorsSeen, 0)
+        print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
+              f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
+              f"part mirrors seen")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
     TestSketchSlopedLineDimensionGui,
     TestSketchTangentArcGui,
     TestSketchFilletFieldsGui,
+    TestSketchSplitCircleGui,  # FreeCAD-CH, ops#656 F3
 )
 from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch round 3)
     TestSketchModelInferenceGui,

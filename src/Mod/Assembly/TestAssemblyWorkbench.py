@@ -41,6 +41,7 @@ from AssemblyTests.TestOnshapeAssemblies import (  # FreeCAD-CH, ops#640
     TestSeveralAssemblies,
     TestJointErrors,
 )
+from AssemblyTests.TestAssemblyPatterns import TestAssemblyPatterns  # FreeCAD-CH (asm-patterns)
 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestCore else False
@@ -57,3 +58,4 @@ True if TestVariantTopologyChanged else False
 True if TestRetargetCheckSaved else False
 True if TestSeveralAssemblies else False
 True if TestJointErrors else False
+True if TestAssemblyPatterns else False

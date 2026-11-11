@@ -1322,6 +1322,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertNotIn(MAGENTA, colours)
         self.assertEqual(colours.count(CURRENT), 1)
 
+    def testEditedFieldStaysArmedOverTheReferencesPanel(self):
+        """Selection parity 8: an edited dress-up's Base field is armed on open (rank 14) and
+        stays armed once the panel shows, though the dialog has a References panel (a guessed
+        entry). The panel's refresh on the field's show had nothing to highlight (the field
+        covers Base) but still took the selection, which disarmed the field: whether the field
+        ended armed hung on whether the panel showed before or after the arm."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed"])
+        pump(0.5)
+        self.assertTrue(armed(field), "the field disarmed after the dialog opened")
+
     def testGuessStaysGuessedAfterAnotherPick(self):
         """Review 2: the redrawn fillet's guessed entry stays guessed (its record kept) when
         another edge is picked, when that one is deleted again, and through the field's undo."""
@@ -4654,6 +4666,29 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testMirroredReferencePickThenOk(self):
         self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
 
+    def testMirroredPlaneTakesASketchRegion(self):
+        """Selection parity SQ16 (Onshape's Mirror plane takes a sketch region): a region of a
+        sketch standing at x = 3 (normal +X) mirrors the first bump (x 1..2, y 1..2) to x 4..5;
+        the plane is the sketch itself."""
+        first, second = self.bumps()
+        sk = models.sketch(self.doc, "MirrorSk", models.rectangle(-2, -2, 2, 2), self.body,
+                           placement=App.Placement(App.Vector(3, 0, 0),
+                                                   App.Rotation(App.Vector(0, 1, 0), 90)))
+        sk.MakeInternals = True
+        self.doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
+        pattern = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(pattern)
+        self.selectReference("comboPlane")
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sk.Name + ".InternalFace1")
+        pump(0.3)
+        self.assertLink(pattern.MirrorPlane, sk, [])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(pattern.Shape.Volume, 1003, places=6)
+        self.assertTrue(pattern.Shape.isInside(App.Vector(4.5, 1.5, 10.5), 1e-7, True))
+
     def testPatternOriginalsLabelRenamed(self):
         """A listed original renamed while the panel is open shows its new Label (and the other
         one no longer needs its name)."""
@@ -6120,6 +6155,97 @@ class TestReferenceFieldGui(unittest.TestCase):
         status = field.findChild(QtWidgets.QLabel, "status")
         self.assertIn("last section", status.text())
         self.assertEqual(texts(field), ["1. S10", "2. S30:Vertex1"])
+
+    # -- regions-3: a region picked for a loft's or a pipe's profile or section ------------------
+
+    def splitSquare(self, name, half, z):
+        """A square sketch centred on Z, side 2 x half, at height z, split by the line x = 0;
+        returns it and its left region's name (half x 2 half, centre x = -half / 2)."""
+        geometry = models.rectangle(-half, -half, half, half) + models.polyline(
+            [(0, -half), (0, half)]
+        )
+        sketch = models.sketch(self.doc, name, geometry, self.body, z=z)
+        sketch.MakeInternals = True
+        self.doc.recompute()
+        left = [
+            "InternalFace%d" % (i + 1)
+            for i, f in enumerate(sketch.InternalShape.Faces)
+            if abs(f.Area - 2 * half * half) < 1e-6 and f.CenterOfMass.x < 0
+        ]
+        self.assertEqual(len(left), 1, [f.Area for f in sketch.InternalShape.Faces])
+        return sketch, left[0]
+
+    def pickRegionOf(self, sketch, region):
+        """A sketch's region picked in the 3D view, through the body as the view gives it."""
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sketch.Name + "." + region)
+        pump(0.2)
+
+    def flatArea(self, shape, z):
+        """The area of the shape's faces lying in the plane at height z."""
+        return sum(
+            f.Area
+            for f in shape.Faces
+            if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6
+        )
+
+    def testLoftProfileAndSectionRegionPicks(self):
+        """A loft from a 10 x 10 square split at x = 0 (z = 0) to a 20 x 20 one split so (z = 10),
+        both whole: 100 at the bottom, 400 at the top. The profile's left region clicked: the
+        loft's Profile names it and its bottom is 50; the section's left region clicked: its
+        entry names it and the top is 200 (before: the dialogs wrote the whole sketch, silently,
+        though the Python path takes the region)."""
+        self.body = models.body(self.doc)
+        profile, profileLeft = self.splitSquare("Profile", 5, 0)
+        section, sectionLeft = self.splitSquare("Section", 10, 10)
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = profile
+        loft.Sections = [(section, [""])]
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 0), 100, places=4)
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 10), 400, places=4)
+
+        profileField, sectionsField = self.edit(loft, count=2)
+        self.arm(profileField, byFocus=True)
+        self.pickRegionOf(profile, profileLeft)
+        self.assertLink(loft.Profile, profile, [profileLeft])
+        self.arm(sectionsField, byFocus=True)
+        self.pickRegionOf(section, sectionLeft)
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[sectionLeft]])
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 0), 50, places=4)
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 10), 200, places=4)
+
+    def testPipeProfileAndSectionRegionPicks(self):
+        """The Rod's pipe with a 2 x 2 profile split at x = 0 and a 4 x 4 section at z = 10 split
+        so, both whole: 4 at the bottom, the slice at z = 10 16. The profile's left region
+        clicked: the pipe's Profile names it, its bottom is 2; the section's left region clicked:
+        its entry names it, the slice at z = 10 is 8 (before: the whole sketches, silently)."""
+        pipe = self.rod()
+        profile, profileLeft = self.splitSquare("Split", 1, 0)
+        section, sectionLeft = self.splitSquare("Split10", 2, 10)
+        pipe.Profile = profile
+        pipe.Sections = [(section, [""])]
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 4, places=4)
+        self.assertThroughSection(pipe, 10, 16)
+
+        self.edit(pipe, count=4)
+        profileField = findField("fieldProfile")
+        self.assertIsNotNone(profileField, "no profile field")
+        self.arm(profileField, byFocus=True)
+        self.pickRegionOf(profile, profileLeft)
+        self.assertLink(pipe.Profile, profile, [profileLeft])
+        sectionsField = self.sectionsField()
+        self.arm(sectionsField, byFocus=True)
+        self.pickRegionOf(section, sectionLeft)
+        self.assertEqual([list(subs) for obj, subs in pipe.Sections], [[sectionLeft]])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 2, places=4)
+        self.assertThroughSection(pipe, 10, 8)
 
     def testPipeDeleteRemovesAllSelected(self):
         """B11, B12: no Remove Section toggle; Delete removes every selected section."""

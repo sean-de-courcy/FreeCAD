@@ -40,12 +40,15 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     BridgedRecessTest,
+    CornerWithACircleTest,
+    CurvedWallEndTest,
     DroppedBasePartsTest,
     DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
     LostStepTest,
+    OverflowTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest
@@ -58,6 +61,8 @@ from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
 from parttests.SweepFrenetTest import SweepFrenetTest, SweepApproximationTest
 from parttests.BooleanLocationsTest import BooleanLocationsTest
 from parttests.BooleanLostToolTest import BooleanLostToolTest
+from parttests.KernelBudgetTest import KernelBudgetTest  # FreeCAD-CH kernel safety S1
+from parttests.KernelBudgetTest import KernelCheckTest  # FreeCAD-CH kernel-9
 from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
 

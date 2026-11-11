@@ -172,7 +172,12 @@ from PartDesignTests.TestFilletDeleteKeepsTheSketch import (  # FreeCAD-CH, ops#
 from PartDesignTests.TestBooleanRules import TestBooleanRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-CH, ops#640
+from PartDesignTests.TestProfileRegions import TestProfileRegions  # FreeCAD-CH, feat/profile-regions
 from PartDesignTests.TestDerived import TestDerived  # FreeCAD-CH, ops#640 round 6
+from PartDesignTests.TestDerivedFiles import TestDerivedFiles  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestDerivedFollowUps import TestDerivedFollowUps  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestPartStudioVariables import TestPartStudioVariables  # FreeCAD-CH, derived-design.md
+from PartDesignTests.TestSolidOps import TestThicken, TestThickenOnshapeOptions, TestScale, TestOffsetSurface, TestSolidOpsExpressions  # FreeCAD-CH, lane solid-ops
 
 # Studio features (FreeCAD-CH, ops#654, ops#655)
 from PartDesignTests.TestStudioList import (
@@ -185,6 +190,10 @@ from PartDesignTests.TestStudioHistory import TestStudioHistory
 from PartDesignTests.TestPieces import TestPieces
 from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
+from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
+from PartDesignTests.TestStudioPartMirror import TestStudioPartMirror
+from PartDesignTests.TestResultCheck import TestManyHoles  # FreeCAD-CH, kernel-9
+from PartDesignTests.TestResultCheck import TestThreadEndRevolve  # FreeCAD-CH, kernel safety 10 (FSLC #30)
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

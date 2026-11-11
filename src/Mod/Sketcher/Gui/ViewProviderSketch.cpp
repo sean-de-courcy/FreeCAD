@@ -34,6 +34,8 @@
 #include <Inventor/events/SoKeyboardEvent.h>
 #include <Inventor/lists/SoPickedPointList.h>
 #include <Inventor/nodes/SoCamera.h>
+#include <Inventor/nodes/SoPickStyle.h>
+#include <Inventor/nodes/SoSwitch.h>
 #include <Inventor/nodes/SoShapeHints.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoTransform.h>
@@ -113,7 +115,13 @@
 #include <BRep_Builder.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfListOfShape.hxx>
@@ -658,6 +666,8 @@ ViewProviderSketch::ViewProviderSketch()
     , Mode(STATUS_NONE)
     , pcSketchFaces(new SoSketchFaces)
     , pcSketchFacesToggle(new SoToggleSwitch)
+    , pcSelectedRegionsRoot(new SoSwitch)
+    , pcSelectedRegions(new SoSketchFaces)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -770,6 +780,16 @@ ViewProviderSketch::ViewProviderSketch()
     updateColorPropertiesVisibility();
 
     pcSketchFacesToggle->addChild(pcSketchFaces);
+
+    // FreeCAD-CH (selection parity SQ11): the selected regions, unpickable so the edit mode's
+    // picks still find the sketch's points, curves and constraints under them
+    auto selectedRegions = new SoSeparator;
+    auto unpickable = new SoPickStyle;
+    unpickable->style = SoPickStyle::UNPICKABLE;
+    selectedRegions->addChild(unpickable);
+    selectedRegions->addChild(pcSelectedRegions);
+    pcSelectedRegionsRoot->addChild(selectedRegions);
+    pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
 }
 
 ViewProviderSketch::~ViewProviderSketch()
@@ -1689,6 +1709,16 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
                     if (modelPickedInClick) {
                         modelPickedInClick = false;
                     }
+                    // FreeCAD-CH (selection parity SQ11): a click inside a closed profile
+                    // takes its region, toggled as the sketch's other elements are (Onshape
+                    // picks regions in an open sketch)
+                    else if (const int face = internalFaceAt(x, y); face > 0) {
+                        std::stringstream ss;
+                        ss << "InternalFace" << face;
+                        Base::Vector3d onPlane;
+                        getEditingPlacement().multVec(Base::Vector3d(x, y, 0.0), onPlane);
+                        preselectToSelection(ss, onPlane, true);
+                    }
                     else if (!(QApplication::keyboardModifiers() & Qt::ControlModifier)) {
                         Gui::Selection().clearSelection();
                     }
@@ -1883,11 +1913,9 @@ void ViewProviderSketch::editDoubleClicked()
             editTextDialog.exec();
             setSketchMode(STATUS_NONE);
         }
-        else {
-            // We cannot do toggleWireSelection directly here because the released event with
-            //STATUS_NONE return false which clears the selection.
-            setSketchMode(STATUS_SELECT_Wire);
-        }
+        // FreeCAD-CH (selection parity P6, oracle 8 SQ9): a double click on a sketch line selects
+        // nothing, as in Onshape (its chains come from a menu); upstream selected the whole
+        // closed chain (STATUS_SELECT_Wire). The release that follows clears the selection.
     }
     else if (preselection.isCrossPreselected()) {
         Base::Console().log("double click cross:%d\n",
@@ -2991,6 +3019,18 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
              || msg.Type == Gui::SelectionChanges::RmvSelection)
             && Mode == STATUS_SKETCH_StartRubberBand && msg.Object.getSubObject() != getObject()) {
             modelPickedInClick = true;
+            // FreeCAD-CH (selection parity P3): idle at once. The release goes to the 3D view's
+            // selection, so the press state stayed until the mouse moved, and every constraint
+            // command (active only while idle) did nothing when run right after the pick (a key)
+            setSketchMode(STATUS_NONE);
+        }
+
+        // FreeCAD-CH (selection parity SQ11): the selected regions' shading
+        if (msg.Type == Gui::SelectionChanges::AddSelection
+            || msg.Type == Gui::SelectionChanges::RmvSelection
+            || msg.Type == Gui::SelectionChanges::SetSelection
+            || msg.Type == Gui::SelectionChanges::ClrSelection) {
+            updateSelectedRegions();
         }
 
         std::string temp;
@@ -4142,6 +4182,7 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
                 pcSketchFaces,
                 Deviation.getValue(),
                 AngularDeflection.getValue());
+        updateSelectedRegions();  // FreeCAD-CH (selection parity SQ11)
     }
 
     if (prop != &getSketchObject()->Constraints) {
@@ -4519,6 +4560,8 @@ bool ViewProviderSketch::setEdit(int ModNum)
     selection.reset();
     editCoinManager = std::make_unique<EditModeCoinManager>(*this);
     snapManager = std::make_unique<SnapManager>(*this);
+    pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
+    editCoinManager->getRootEditNode()->addChild(pcSelectedRegionsRoot);
 
 
     App::DocumentObject* editObj = getSketchObject();
@@ -4888,13 +4931,18 @@ void ViewProviderSketch::unsetEdit(int ModNum)
             getSketchObject()->purgeTouched();
         }
         if (editingCancelled && cancelChanged) {
-            // Onshape's toast "Sketch 2 has been canceled." (its Restore link: not here). Once
-            // the close is done: a recompute's progress bar clears the message when it ends
+            // Onshape's toast "Sketch 2 has been canceled." (its Restore link: not here). The
+            // close is followed by a few recomputes (the undo's, the dependents'), each ending
+            // with the progress bar clearing the status message (SequencerBar::resetData), and
+            // they land at no fixed time: a single show cleared by one of them was the flake of
+            // TestSketchCancelGui. The text is shown again while they run down (2026-11-11).
             const QString text =
                 tr("%1 has been canceled").arg(QString::fromUtf8(getObject()->Label.getValue()));
-            QTimer::singleShot(0, Gui::getMainWindow(), [text]() {
-                Gui::getMainWindow()->showMessage(text, 5000);
-            });
+            for (const int delay : {0, 150, 400, 900}) {
+                QTimer::singleShot(delay, Gui::getMainWindow(), [text]() {
+                    Gui::getMainWindow()->showMessage(text, 5000);
+                });
+            }
         }
         if (!editingCancelled) {
             App::AutoTransaction trans(getDocument()->getDocument(), "Sketch recompute");
@@ -5956,6 +6004,9 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
                 menu << "Sketcher_ConstrainCoincidentUnified"
                      << "Sketcher_ConstrainPerpendicular"
                      << "Sketcher_ConstrainTangent";
+                if (selectedConics == 1 && selectedPoints == 1) {
+                    menu << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#656): an arc's middle
+                }
             }
         }
         else if (selectedEdges == 0 && selectedPoints >= 1 && !onlyOrigin) {
@@ -6078,6 +6129,70 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
     QMenu contextMenu(viewer->getGLWidget());
     Gui::MenuManager::getInstance()->setupContextMenu(&menu, contextMenu);
     contextMenu.exec(QCursor::pos());
+}
+
+int ViewProviderSketch::internalFaceAt(double x, double y)
+{
+    auto* sketch = getSketchObject();
+    if (!sketch->MakeInternals.getValue()) {
+        return 0;
+    }
+    // InternalShape is built on recompute; a sketch edited since (a solve, a Python edit) is
+    // recomputed first, so its regions are the ones on screen
+    if (sketch->isTouched() || sketch->mustExecute()) {
+        sketch->recomputeFeature();
+    }
+    const TopoDS_Shape& shape = sketch->InternalShape.getValue();
+    if (shape.IsNull()) {
+        return 0;
+    }
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    int found = 0;
+    double foundArea = 0.0;
+    const gp_Pnt point(x, y, 0.0);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        BRepClass_FaceClassifier classifier(face, point, Precision::Confusion());
+        if (classifier.State() != TopAbs_IN) {
+            continue;
+        }
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        if (found == 0 || props.Mass() < foundArea) {
+            found = i;
+            foundArea = props.Mass();
+        }
+    }
+    return found;
+}
+
+void ViewProviderSketch::updateSelectedRegions()
+{
+    if (!isInEditMode() || !editCoinManager) {
+        return;
+    }
+    const TopoDS_Shape& shape = getSketchObject()->InternalShape.getValue();
+    TopoDS_Compound selected;
+    BRep_Builder builder;
+    builder.MakeCompound(selected);
+    bool any = false;
+    if (!shape.IsNull()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            if (isSelected("InternalFace" + std::to_string(i))) {
+                builder.Add(selected, faces(i));
+                any = true;
+            }
+        }
+    }
+    if (any) {
+        pcSelectedRegions->color.setValue(DrawingParameters::SelectColor);
+        pcSelectedRegions->transparency.setValue(0.5F);
+        setupCoinGeometry(selected, pcSelectedRegions, Deviation.getValue(), AngularDeflection.getValue());
+    }
+    pcSelectedRegionsRoot->whichChild = any ? 0 : SO_SWITCH_NONE;
 }
 
 void ViewProviderSketch::preselectToSelection(const std::stringstream& ss,

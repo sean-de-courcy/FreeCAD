@@ -24,6 +24,7 @@
 
 #include <FCConfig.h>
 
+#include <cstring>
 #include <memory>
 
 #include <Mod/Part/App/FCBRepAlgoAPI_BooleanOperation.h>
@@ -39,6 +40,7 @@
 #include <Base/ProgramVersion.h>
 
 #include "FeaturePartBoolean.h"
+#include "KernelBudget.h"
 #include "TopoShapeOpCode.h"
 #include "modelRefine.h"
 
@@ -189,7 +191,19 @@ App::DocumentObjectExecReturn* Boolean::execute()
             throw NullShapeException("Tool shape is null");
         }
 
-        std::unique_ptr<BRepAlgoAPI_BooleanOperation> mkBool(makeOperation(BaseShape, ToolShape));
+        std::shared_ptr<BRepAlgoAPI_BooleanOperation> mkBool(makeOperation(BaseShape, ToolShape));
+        // A cut, common or fuse is built here, on a worker under the feature's time limit, with
+        // Esc (FreeCAD-CH kernel safety S1); a section builds itself
+        if (auto op = std::dynamic_pointer_cast<FCBRepAlgoAPI_BooleanOperation>(mkBool);
+            op && !op->IsDone()) {
+            KernelBudget::run(
+                strcmp(opCode(), Part::OpCodes::Cut) == 0          ? "The cut"
+                    : strcmp(opCode(), Part::OpCodes::Common) == 0 ? "The intersection"
+                                                                   : "The fuse",
+                [op](const Message_ProgressRange& range) { op->Build(range); },
+                KernelBudget::Inputs::Shared
+            );
+        }
         if (!mkBool->IsDone()) {
             std::stringstream error;
             error << "Boolean operation failed";

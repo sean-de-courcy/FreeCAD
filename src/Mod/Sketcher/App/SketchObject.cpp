@@ -68,6 +68,7 @@
 
 #include "GeoEnum.h"
 #include "SketchObject.h"
+#include "SketchImprint.h"
 #include "Constraint.h"
 #include "SketchObjectPy.h"
 #include "ExternalGeometryFacade.h"
@@ -314,8 +315,9 @@ void SketchObject::setupObject()
             "User parameter:BaseApp/Preferences/Mod/Sketcher");
     ArcFitTolerance.setValue(hGrpp->GetFloat("ArcFitTolerance", Precision::Confusion()*10.0));
     MakeInternals.setValue(hGrpp->GetBool("MakeInternals", true));
-    // New sketches build internal faces with FaceMakerBuildFace.
-    _InternalFaceVersion.setValue(2);
+    // New sketches build internal faces with FaceMakerBuildFace, and take the model edges lying
+    // in their plane into their regions (Onshape's imprint, FreeCAD-CH feat/profile-regions).
+    _InternalFaceVersion.setValue(ImprintInternalFaceVersion);
     inherited::setupObject();
 }
 
@@ -426,7 +428,7 @@ App::DocumentObjectExecReturn* SketchObject::execute()
         appendConflictMsg(lastConflicting, msg);
         return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
-    else if (err == -2) {// redundant constraints
+    else if (err == -2) {// redundant constraints that do not hold at the solution (ops#656)
         std::string msg = "Sketch with redundant constraints\n";
         appendRedundantMsg(lastRedundant, msg);
         return new App::DocumentObjectExecReturn(withExternalError(msg), this);
@@ -439,6 +441,14 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     else if (err == -1) {// Solver failed
         return new App::DocumentObjectExecReturn(withExternalError("Solving the sketch failed"),
                                                this);
+    }
+
+    // FreeCAD-CH (ops#656): repeated constraints that agree with the others solved (solve()
+    // returned 0): the sketch goes on, as in Onshape, and the Report view names them
+    if (lastHasRedundancies) {
+        std::string msg = "Sketch with redundant constraints (they agree, the sketch is solved)\n";
+        appendRedundantMsg(lastRedundant, msg);
+        Base::Console().warning(this->getFullLabel(), "%s", msg.c_str());
     }
 
     // this is not necessary for sketch representation in edit mode, unless we want to trigger an
@@ -748,11 +758,24 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
         }
         else {
             try {
-                result = result.makeElementFace(edges.getSubTopoShapes(TopAbs_WIRE),
+                // The model edges in the sketch's plane bound regions too (Onshape's imprint);
+                // they stay out of the open wires below and out of the sketch's Shape
+                auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
+                const auto imprint = imprintEdges(*this);
+                if (!imprint.isNull()) {
+                    for (auto& edge : imprint.getSubTopoShapes(TopAbs_EDGE)) {
+                        shapes.push_back(std::move(edge));
+                    }
+                }
+                result = result.makeElementFace(shapes,
                         /*op*/"",
                         /*maker*/"Part::FaceMakerBuildFace",
                         /*pln*/nullptr
                 );
+                if (!imprint.isNull()) {
+                    // the model edges split the sketch's regions, and make none of their own
+                    result = withinSketchRegions(result, edges);
+                }
             }
             catch (const Part::NullShapeException&) {
                 // An open-only sketch has no bounded regions, so a null face result is expected.
