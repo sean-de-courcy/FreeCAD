@@ -24,12 +24,15 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSpinBox>
 #include <QTimer>
 
+#include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <Base/Tools.h>
 #include <Gui/Command.h>
@@ -170,12 +173,23 @@ void TaskCurvePatternParameters::setupParameterUI(QWidget* widget)
         FCMD_OBJ_CMD(getObject(), "Orientation = " << index);
         kickUpdateViewTimer();
     });
-    connect(ui->checkReversed, &QCheckBox::toggled, this, [this](bool on) {
+    connect(ui->comboSpacing, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+        const bool distance = index == 1;
+        ui->labelDistance->setVisible(distance);
+        ui->spinDistance->setVisible(distance);
+        if (blockUpdate || !getObject() || index < 0) {
+            return;
+        }
+        setupTransaction();
+        FCMD_OBJ_CMD(getObject(), "SpacingType = " << index);
+        kickUpdateViewTimer();
+    });
+    connect(ui->spinDistance, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         if (blockUpdate || !getObject()) {
             return;
         }
         setupTransaction();
-        FCMD_OBJ_CMD(getObject(), "Reversed = " << (on ? "True" : "False"));
+        FCMD_OBJ_CMD(getObject(), "Distance = " << value);
         kickUpdateViewTimer();
     });
     connect(ui->checkSkip, &QCheckBox::toggled, this, [this](bool on) {
@@ -212,7 +226,11 @@ void TaskCurvePatternParameters::updateUI()
     blockUpdate = true;
     ui->spinOccurrences->setValue(static_cast<int>(pattern->Occurrences.getValue()));
     ui->comboOrientation->setCurrentIndex(pattern->Orientation.getValue());
-    ui->checkReversed->setChecked(pattern->Reversed.getValue());
+    ui->comboSpacing->setCurrentIndex(pattern->SpacingType.getValue());
+    ui->spinDistance->setValue(pattern->Distance.getValue());
+    const bool distance = pattern->SpacingType.getValue() == 1;
+    ui->labelDistance->setVisible(distance);
+    ui->spinDistance->setVisible(distance);
     const auto& skipped = pattern->SkippedInstances.getValues();
     ui->checkSkip->setChecked(!skipped.empty());
     ui->editSkipped->setText(skippedText(skipped));

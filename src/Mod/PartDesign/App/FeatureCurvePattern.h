@@ -31,6 +31,7 @@
 
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
+#include <App/PropertyUnits.h>
 #include "FeatureTransformed.h"
 
 namespace PartDesign
@@ -38,11 +39,13 @@ namespace PartDesign
 
 /** Onshape's Curve pattern (FreeCAD-CH ops#655, T6): the originals repeated along a path, a
  * connected chain of edges (sketch curves or model edges), the instances spaced equally by arc
- * length. The first instance is the original, at the path's start. Each instance is the original
- * moved by the motion that takes the path's frame at its start to the frame at the instance's
- * place: with Follow path, the frame turns with the path's tangent (a rotation-minimizing frame,
- * so a planar path keeps its plane's normal); with Keep orientation, the original is only
- * translated. A closed path spreads the instances over its whole length, none on the original.
+ * length (Equal) or a given distance apart (Distance). The first instance is the original. The
+ * path starts at its end nearest the original (a closed path: at its point nearest the original),
+ * as Onshape's does (oracle 9d, CP2 and CP4); there is no flip. Each instance is the original moved
+ * by the motion that takes the path's frame at its start to the frame at the instance's place:
+ * with Default, the frame turns with the path's tangent (a rotation-minimizing frame, so a planar
+ * path keeps its plane's normal); with Keep orientation, the original is only translated. A
+ * closed path spreads Equal instances over its whole length, none on the original.
  */
 class PartDesignExport CurvePattern: public PartDesign::Transformed
 {
@@ -54,11 +57,13 @@ public:
     /// The path: edges of one sketch or feature, a connected chain in any pick order. A sketch
     /// picked whole (no sub-element) gives all its edges
     App::PropertyLinkSub Path;
+    /// "Equal": the instances share the path's length; "Distance": they are Distance apart
+    App::PropertyEnumeration SpacingType;
+    /// The arc length between two instances next to each other, with Distance spacing
+    App::PropertyLength Distance;
     /// The number of instances, the original included
     App::PropertyIntegerConstraint Occurrences;
-    /// Run along the path from its other end
-    App::PropertyBool Reversed;
-    /// How the instances turn: "Follow path" (with the path's tangent) or "Keep orientation"
+    /// How the instances turn: "Default" (with the path's tangent) or "Keep orientation"
     App::PropertyEnumeration Orientation;
     /// Skip instances: indexes from 0 at the original, as Onshape lists them. The original is
     /// never skipped; an index out of range is ignored
@@ -79,8 +84,8 @@ public:
         return {"Path"};
     }
 
-    /** The path as one wire in this feature's coordinates, its edges ordered and oriented from
-     * the start (Reversed applied). Throws Base::ValueError with the user's message when the
+    /** The path as one wire in this feature's coordinates, its edges ordered and oriented along
+     * the chain (from its first picked edge's start). Throws Base::ValueError with the user's message when the
      * edges are missing, not edges, or don't form one connected chain
      */
     TopoDS_Wire getPathWire() const;
@@ -104,6 +109,10 @@ public:
 private:
     static const App::PropertyIntegerConstraint::Constraints intOccurrences;
     static const char* OrientationEnums[];
+    static const char* SpacingTypeEnums[];
+    /// The centre of the originals' bounding box in this feature's coordinates (with no
+    /// originals, the base's): where the path's start is chosen from. False: nothing to measure
+    bool seedCentre(const std::vector<App::DocumentObject*>& originals, gp_Pnt& centre);
 };
 
 }  // namespace PartDesign
