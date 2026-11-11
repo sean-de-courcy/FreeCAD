@@ -3832,6 +3832,47 @@ bool CmdPartDesignPolarPattern::isActive()
 }
 
 //===========================================================================
+// PartDesign_CurvePattern (FreeCAD-CH ops#655, T6: Onshape's Curve pattern)
+//===========================================================================
+DEF_STD_CMD_A(CmdPartDesignCurvePattern)
+
+CmdPartDesignCurvePattern::CmdPartDesignCurvePattern()
+    : Command("PartDesign_CurvePattern")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Curve pattern");
+    sToolTipText = QT_TR_NOOP("Duplicates the selected features or the active body along a path");
+    sWhatsThis = "PartDesign_CurvePattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_CurvePattern";
+    eType |= AcceptsOpenDialog;
+}
+
+void CmdPartDesignCurvePattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+
+    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    if (!pcActiveBody) {
+        return;
+    }
+
+    Gui::Command* cmd = this;
+    auto worker = [cmd](App::DocumentObject* Feat, std::vector<App::DocumentObject*> /*features*/) {
+        // The path is picked in the panel, its field armed; the count is the feature's default
+        finishTransformed(cmd, Feat);
+    };
+
+    prepareTransformed(pcActiveBody, this, "CurvePattern", worker);
+}
+
+bool CmdPartDesignCurvePattern::isActive()
+{
+    return hasActiveDocument();
+}
+
+//===========================================================================
 // PartDesign_Scaled
 //===========================================================================
 DEF_STD_CMD_A(CmdPartDesignScaled)
@@ -4682,6 +4723,7 @@ void CreatePartDesignCommands()
     rcCmdMgr.addCommand(new CmdPartDesignMirrored());
     rcCmdMgr.addCommand(new CmdPartDesignLinearPattern());
     rcCmdMgr.addCommand(new CmdPartDesignPolarPattern());
+    rcCmdMgr.addCommand(new CmdPartDesignCurvePattern());
     // rcCmdMgr.addCommand(new CmdPartDesignScaled());
     rcCmdMgr.addCommand(new CmdPartDesignMultiTransform());
 

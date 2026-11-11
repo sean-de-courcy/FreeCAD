@@ -540,6 +540,7 @@ void Workbench::activated()
         "PartDesign_Mirrored",
         "PartDesign_LinearPattern",
         "PartDesign_PolarPattern",
+        "PartDesign_CurvePattern",
         "PartDesign_MultiTransform",
         nullptr
     };
@@ -635,6 +636,7 @@ Gui::MenuItem* Workbench::setupMenuBar() const
     *transformations << "PartDesign_Mirrored"
                      << "PartDesign_LinearPattern"
                      << "PartDesign_PolarPattern"
+                     << "PartDesign_CurvePattern"
                      << "PartDesign_MultiTransform";
 
     // dressups
@@ -728,6 +730,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
           << "PartDesign_Mirrored"
           << "PartDesign_LinearPattern"
           << "PartDesign_PolarPattern"
+          << "PartDesign_CurvePattern"
           << "PartDesign_MultiTransform"
           << "Separator"
           << "PartDesign_Boolean"
@@ -792,6 +795,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
     *part << "PartDesign_Mirrored"
           << "PartDesign_LinearPattern"
           << "PartDesign_PolarPattern"
+          << "PartDesign_CurvePattern"
           << "PartDesign_MultiTransform";
 
     return root;

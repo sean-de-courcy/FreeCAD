@@ -41,6 +41,7 @@ set(PartDesignGui_UIC_SRCS
     TaskTransformedParameters.ui
     TaskMirroredParameters.ui
     TaskPatternParameters.ui
+    TaskCurvePatternParameters.ui
     TaskScaledParameters.ui
     TaskMultiTransformParameters.ui
     TaskShapeBinder.ui
@@ -98,6 +99,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProviderLinearPattern.h
     ViewProviderPolarPattern.cpp
     ViewProviderPolarPattern.h
+    ViewProviderCurvePattern.cpp
+    ViewProviderCurvePattern.h
     ViewProviderScaled.cpp
     ViewProviderScaled.h
     ViewProviderMultiTransform.cpp
@@ -187,6 +190,9 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskPatternParameters.ui
     TaskPatternParameters.cpp
     TaskPatternParameters.h
+    TaskCurvePatternParameters.ui
+    TaskCurvePatternParameters.cpp
+    TaskCurvePatternParameters.h
     TaskScaledParameters.ui
     TaskScaledParameters.cpp
     TaskScaledParameters.h
