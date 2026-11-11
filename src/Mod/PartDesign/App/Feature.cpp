@@ -585,10 +585,14 @@ std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& 
         collectFaces(base, baseFaces);
     }
     collectFaces(checked, resultFaces);
-    // Where an input of the boolean was repaired, every face is checked and the base's volume
-    // says nothing about the result's (the repair changed it)
-    // (a dress-up has no boolean: its flag says nothing)
-    const bool allFaces = !inputsValid && !base.IsNull() && !feature.isDerivedFrom<DressUp>();
+    // Where the base may have been repaired, every face is checked and the base's volume says
+    // nothing about the result's (the repair changed it). A base the feature vouches for
+    // (booleanInputCheck() Tools) was valid and is not repaired: only a tool was, the base's
+    // faces and volume are the result's starting point, and the diff and its direction check
+    // apply (kernel-6, debt (a)). An invalid base nobody vouches for (an imported one) still
+    // gets no direction check. (A dress-up has no boolean: its flag says nothing)
+    const bool allFaces = !inputsValid && !base.IsNull() && !feature.isDerivedFrom<DressUp>()
+        && feature.booleanInputCheck() == Part::BooleanInputCheck::All;
     BRep_Builder builder;
     TopoDS_Compound made;
     TopoDS_Compound removed;

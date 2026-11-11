@@ -273,6 +273,35 @@ class TestResultCheck(unittest.TestCase):
             self.assertBuilt(f)
         self.assertAlmostEqual(feats[-1].Shape.Volume, 16000 - 6 * math.pi * 2.25 * 10, places=6)
 
+    def testARepairedToolOnAVouchedBasePasses(self):
+        """A Boolean whose tool Body is an invalid box (its top reversed), on a base the feature
+        vouches for: only the tool is repaired, so the result is checked as any other (the faces it
+        made, the direction of the volume's change: kernel-6, debt (a)) and must not be flagged.
+        The repaired box is 10 x 10 x 6 with 3 above the plate: Fuse adds 300, Cut takes 300."""
+        for kind, change in (("Fuse", 300), ("Cut", -300)):
+            body = self.body()
+            pad = self.pad(body, rect(0, 0, 40, 30, 0), 10, "Pad%s" % kind)
+            hole = self.pocket(body, disk(5, 5, 3, 10), "Hole%s" % kind)
+            box = Part.makeBox(10, 10, 6, V(20, 10, 7))
+            faces = list(box.Faces)
+            faces[5] = faces[5].reversed()
+            invalid = Part.Solid(Part.Shell(faces))
+            self.assertFalse(invalid.isValid())
+            tool = self.doc.addObject("PartDesign::Body", "Tool%s" % kind)
+            tool.BaseFeature = self.profile(invalid, "ToolShape%s" % kind)
+            boolean = body.newObject("PartDesign::Boolean", kind)
+            boolean.Type = kind
+            boolean.addObjects([tool])
+            self.doc.recompute()
+            self.assertBuilt(hole)
+            # The base is vouched for: only the tool is checked and repaired
+            self.assertFalse(boolean.checksBase())
+            self.assertBuilt(boolean)
+            before = 12000 - math.pi * 9 * 10
+            self.assertAlmostEqual(hole.Shape.Volume, before, places=6)
+            self.assertAlmostEqual(boolean.Shape.Volume, before + change, places=6)
+            self.assertTrue(boolean.Shape.isValid())
+
 
 if __name__ == "__main__":
     unittest.main()
