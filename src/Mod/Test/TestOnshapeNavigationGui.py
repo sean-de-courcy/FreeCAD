@@ -531,19 +531,13 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         self.topAndRight()
         self.assertEqual(len(self.selectedSubs()), 2)
         self.assertFalse(Gui.Control.activeDialog(), "a task dialog is open")
-        for _ in range(20):
-            self.viewport.window().activateWindow()
-            self.viewport.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-            pump(50)
-            focused = QtWidgets.QApplication.focusWidget()
-            if focused is not None and (
-                focused is self.viewport or self.viewport.isAncestorOf(focused)
-            ):
-                break
-        else:
-            self.skipTest("the 3D view doesn't take the focus here")
+        # The key goes to the viewport itself, as the sketch editor's Esc test does: a window
+        # started in the background never gets the focus on Windows (the test skipped on screen
+        # too), and the viewer's Esc handling (processSoEvent) is reached either way
         before = self.selectedSubs()
-        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key.Key_Escape)
+        for kind in (QtCore.QEvent.Type.KeyPress, QtCore.QEvent.Type.KeyRelease):
+            event = QtGui.QKeyEvent(kind, QtCore.Qt.Key.Key_Escape, QtCore.Qt.KeyboardModifier.NoModifier)
+            QtWidgets.QApplication.sendEvent(self.viewport, event)
         pump(100)
         self.assertEqual(self.selectedSubs(), before, "Esc cleared the selection")
 
