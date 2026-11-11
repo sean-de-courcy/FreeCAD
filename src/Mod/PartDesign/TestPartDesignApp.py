@@ -192,6 +192,7 @@ from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
 from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
 from PartDesignTests.TestStudioPartMirror import TestStudioPartMirror
+from PartDesignTests.TestStudioTransform import TestStudioTransform  # FreeCAD-CH, ops#655
 from PartDesignTests.TestResultCheck import TestManyHoles  # FreeCAD-CH, kernel-9
 from PartDesignTests.TestResultCheck import TestThreadEndRevolve  # FreeCAD-CH, kernel safety 10 (FSLC #30)
 from PartDesignTests.TestStudioMerge import TestStudioMerge
