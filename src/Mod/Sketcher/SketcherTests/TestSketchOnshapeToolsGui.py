@@ -553,3 +553,47 @@ class TestSketchFilletFieldsGui(SketchToolsTestCase):
         self.assertEqual(len(found), 1, f"Expected the chamfer, got {self.sketch.Geometry}")
         arcs = [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)]
         self.assertEqual(arcs, [], "Expected the even chamfer's construction arc gone")
+
+
+class TestSketchSplitCircleGui(SketchToolsTestCase):
+    """ops#656 F3 (Onshape SK11): Split takes two clicks on a whole circle and leaves two arcs that
+    stay one closed circle. Designed geometry: a circle of radius 5 centred on (5, 5); the clicks at
+    (10, 5) and (0, 5) give two half circles."""
+
+    def build(self):
+        self.sketch.addGeometry(Part.Circle(V(5, 5, 0), V(0, 0, 1), 5), False)
+
+    def click_on_edge(self, x, y):
+        """Hovers and clicks the circle at (x, y); skips where the 3D view doesn't preselect off screen."""
+        self.move_to(x + 0.3, y)
+        self.move_to(x, y)
+        names = []
+        try:
+            names = list(FreeCADGui.Selection.getPreselection().SubElementNames)
+        except Exception:  # no preselection
+            pass
+        if not any(name.startswith("Edge") for name in names):
+            self.skipTest("the 3D view doesn't preselect here (off screen without OpenGL)")
+        self.click_at(x, y)
+
+    def test_two_clicks_split_a_circle_into_two_closed_arcs(self):
+        modals = self.answer_modals()
+        self.start_edit()
+        FreeCADGui.runCommand("Sketcher_Split")
+        self.flush_gui(200)
+        self.click_on_edge(10, 5)
+        self.assertEqual(len(self.sketch.Geometry), 1, "the first click on a circle splits nothing")
+        self.assertIsInstance(self.sketch.Geometry[0], Part.Circle)
+        self.click_on_edge(0, 5)
+        arcs = [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)]
+        self.assertEqual(len(arcs), 2, f"Expected two arcs, got {self.sketch.Geometry}")
+        a, b = arcs
+        for arc in arcs:
+            self.assertAlmostEqual(arc.Radius, 5, places=6)
+            self.assert_near(arc.Center, 5, 5, "the arc's centre", 1e-6)
+        self.assertLess((a.EndPoint - b.StartPoint).Length, 1e-6)
+        self.assertLess((b.EndPoint - a.StartPoint).Length, 1e-6)
+        ends = sorted(round(p.x, 3) for p in (a.StartPoint, a.EndPoint))
+        self.assertEqual(ends, [0.0, 10.0], "Expected the cuts at the two clicks")
+        self.assertEqual(self.sketch.solve(), 0)
+        self.assertEqual(modals["seen"], [])
