@@ -8,6 +8,7 @@ import itertools
 import math
 import os
 import re
+import time
 
 if "BUILD_SKETCHER" in FreeCAD.__cmake__:
     import Sketcher
@@ -1334,6 +1335,115 @@ class RegressionTests(unittest.TestCase):
         # adaptive centre and inertia took 74 s on this sphere)
         # Elementary faces keep OCCT's default, exact there
         self.assertAlmostEqual(sphere.Area, 400 * math.pi, delta=1e-9)
+
+    @staticmethod
+    def _gaussOverSpans(curve, integrand):
+        """The integral of integrand(t) over the curve's parameter range, by 5-point Gauss-Legendre
+        on each knot span: exact for polynomials of degree 9 or less on a span"""
+        nodes = (-0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831, 0.9061798459386640)
+        weights = (0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891)
+        knots = curve.getKnots()
+        total = 0.0
+        for a, b in zip(knots, knots[1:]):
+            total += sum(w * integrand(a + (x + 1) * (b - a) / 2) for x, w in zip(nodes, weights)) * (b - a) / 2
+        return total
+
+    def test_readouts_of_bspline_profiles(self):
+        """A cubic B-spline of 5 spans (8 poles in a zigzag) closed by lines: OCCT's default
+        integration, which the readouts kept on planes, extrusions and revolutions, read the
+        planar face's area, the extrusion's volume and area and the revolution's volume up to
+        2.6e-3 off (44 % at 40 spans; SC7, ops#640). The readouts are adaptive on faces with
+        free-form edges or basis curves: within 1e-6 of the integrals over the spans, exact for a
+        polynomial curve (Onshape: exact)"""
+        poles = [Base.Vector(40.0 * i / 7, 6 + (2 if i % 2 else -2), 0) for i in range(8)]
+        curve = Part.BSplineCurve()
+        curve.buildFromPoles(poles)
+        first, last = poles[0], poles[-1]
+        wire = Part.Wire(
+            [
+                curve.toShape(),
+                Part.makeLine(last, Base.Vector(last.x, 0, 0)),
+                Part.makeLine(Base.Vector(last.x, 0, 0), Base.Vector(0, 0, 0)),
+                Part.makeLine(Base.Vector(0, 0, 0), first),
+            ]
+        )
+        face = Part.Face(wire)
+        # Green's theorem: the lines add nothing to the integral of x dy but the closing side's
+        area = abs(
+            self._gaussOverSpans(curve, lambda t: curve.value(t).x * curve.getDN(t, 1).y)
+            - last.x * last.y
+        )
+        self.assertAlmostEqual(face.Area, area, delta=1e-6 * area)
+        prism = face.extrude(Base.Vector(0, 0, 7))
+        self.assertAlmostEqual(prism.Volume, 7 * area, delta=1e-6 * 7 * area)
+        prismArea = 2 * area + 7 * wire.Length
+        self.assertAlmostEqual(prism.Area, prismArea, delta=1e-6 * prismArea)
+        # Revolved about the y axis 5 to the left: Pappus, 2 pi times the integral of x dA, that is
+        # of x^2 / 2 dy around the boundary
+        shifted = face.copy()
+        shifted.translate(Base.Vector(5, 0, 0))
+        moment = abs(
+            self._gaussOverSpans(
+                curve, lambda t: (curve.value(t).x + 5) ** 2 / 2 * curve.getDN(t, 1).y
+            )
+            - (last.x + 5) ** 2 / 2 * last.y
+            + 5**2 / 2 * first.y
+        )
+        revolved = shifted.revolve(Base.Vector(0, 0, 0), Base.Vector(0, 1, 0), 360)
+        volume = 2 * math.pi * moment
+        self.assertAlmostEqual(revolved.Volume, volume, delta=1e-6 * volume)
+
+    def test_area_of_a_twisted_ruled_loft(self):
+        """A ruled loft between two squares, the second turned 45 degrees: its sides are bilinear
+        B-spline faces. OCCT's adaptive area, which the readouts took on free-form faces, read
+        a side 5.2e-6 off at 1e-9 and OCCT's default 2.8e-11 (SC7, ops#640); whole faces of their
+        surface now integrate on their knot spans, within 1e-10 of a dense quadrature"""
+
+        def square(half, z, angle):
+            rotation = Base.Rotation(Base.Vector(0, 0, 1), angle)
+            points = [
+                rotation.multVec(Base.Vector(x, y, z))
+                for x, y in ((half, half), (-half, half), (-half, -half), (half, -half))
+            ]
+            return Part.makePolygon(points + [points[0]])
+
+        loft = Part.makeLoft([square(10, 0, 0), square(10, 10, 45)], True, True)
+        sides = [f for f in loft.Faces if f.Surface.TypeId == "Part::GeomBSplineSurface"]
+        self.assertEqual(len(sides), 4)
+        nodes = (-0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831, 0.9061798459386640)
+        weights = (0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891)
+        for side in sides:
+            surface = side.Surface
+            u0, u1, v0, v1 = side.ParameterRange
+            panels = 16
+            hu, hv = (u1 - u0) / panels, (v1 - v0) / panels
+            area = 0.0
+            for i in range(panels):
+                for j in range(panels):
+                    for x, wx in zip(nodes, weights):
+                        for y, wy in zip(nodes, weights):
+                            u = u0 + hu * (i + (x + 1) / 2)
+                            v = v0 + hv * (j + (y + 1) / 2)
+                            normal = surface.getDN(u, v, 1, 0).cross(surface.getDN(u, v, 0, 1))
+                            area += normal.Length * wx * wy * hu * hv / 4
+            self.assertAlmostEqual(side.Area, area, delta=1e-10 * area)
+
+    def test_volume_of_a_centred_cut_of_a_rotated_nurbs_torus(self):
+        """A NURBS torus cut in half through its centre, then rotated: the cut face's plane holds
+        OCCT's reference point of the volume integration (the vertices' mean), its term is ~0 and
+        its relative error never converged, so the adaptive volume took over 10 minutes (SC7,
+        ops#640). The reference point now moves clear of every face: under 2 s, the half torus's
+        volume"""
+        torus = Part.makeTorus(10.0, 3.0).toNurbs()
+        half = torus.cut(Part.makeBox(100, 100, 100, Base.Vector(0, -50, -50)))
+        placement = Base.Placement(
+            Base.Vector(3, -2, 5), Base.Rotation(Base.Vector(0.91, 0.9, -0.89), 30.55)
+        )
+        rotated = half.transformGeometry(placement.toMatrix())
+        volume = math.pi**2 * 10 * 9
+        start = time.perf_counter()
+        self.assertAlmostEqual(rotated.Volume, volume, delta=1e-6 * volume)
+        self.assertLess(time.perf_counter() - start, 2.0)
 
     def test_removeSplitter_keeps_a_long_wave_prism_outward(self):
         """Refine orients a long wave prism outwards (ops#426).
