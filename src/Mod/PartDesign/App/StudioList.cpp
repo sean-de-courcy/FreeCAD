@@ -1680,40 +1680,70 @@ void resyncPartMirrors(const App::Document& constDoc)
         || App::GetApplication().isClosingAll()) {
         return;
     }
-    std::vector<StudioList*> stale;
-    for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
-        auto list = static_cast<StudioList*>(obj);
-        for (auto entry : list->Entries.getValues()) {
-            if (entry && isStudioPartPattern(entry)
-                && flagOf(entry, "StudioConsumesSource")
-                    != flagOf(entry, "StudioConsumesSourceSeen")) {
-                stale.push_back(list);
-                break;
-            }
-            if (entry && booleanOwner(entry)
-                && stringsOf(entry, "StudioApartTools")
-                    != stringsOf(entry, "StudioApartToolsSeen")) {
-                stale.push_back(list);
-                break;
-            }
-            if (entry
-                && stringsOf(entry, "StudioSplitLost") != stringsOf(entry, "StudioSplitLostSeen")) {
-                stale.push_back(list);
-                break;
+    auto staleLists = [&doc]() {
+        std::vector<StudioList*> stale;
+        for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
+            auto list = static_cast<StudioList*>(obj);
+            for (auto entry : list->Entries.getValues()) {
+                if (entry && isStudioPartPattern(entry)
+                    && flagOf(entry, "StudioConsumesSource")
+                        != flagOf(entry, "StudioConsumesSourceSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                if (entry && booleanOwner(entry)
+                    && stringsOf(entry, "StudioApartTools")
+                        != stringsOf(entry, "StudioApartToolsSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                if (entry
+                    && stringsOf(entry, "StudioSplitLost")
+                        != stringsOf(entry, "StudioSplitLostSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
             }
         }
-    }
+        return stale;
+    };
+    std::vector<StudioList*> stale = staleLists();
     if (stale.empty()) {
         return;
     }
+    // Until nothing is stale: the recompute after a reconcile can decide anew for an entry later
+    // in the list (a second Union sees its tool, which the first one's resync gave back, and
+    // decides it apart: ops#654 P6p, gate seed 3). Its own signal comes while busy, so this
+    // loop takes it, not the signal. A bound per list entry: each round settles at least the
+    // first stale entry's decision, which later entries don't change
     Base::StateLocker lock(busy, true);
-    for (auto list : stale) {
-        std::string why;
-        if (!list->reconcile(&why)) {
-            Base::Console().warning("%s\n", why.c_str());
-        }
+    std::size_t bound = 1;
+    for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
+        bound += static_cast<StudioList*>(obj)->Entries.getSize();
     }
-    doc.recompute();
+    for (std::size_t round = 0; !stale.empty(); ++round) {
+        if (round == bound) {
+            Base::Console().warning(
+                "%s: the studio's history doesn't settle after a recompute (a Union's tools apart, "
+                "a part mirror's consumption or a lost split keep changing)\n",
+                doc.Label.getValue()
+            );
+            return;
+        }
+        bool refused = false;
+        for (auto list : stale) {
+            std::string why;
+            if (!list->reconcile(&why)) {
+                Base::Console().warning("%s\n", why.c_str());
+                refused = true;
+            }
+        }
+        doc.recompute();
+        if (refused) {
+            return;  // a refused reconcile writes nothing: going on would only refuse again
+        }
+        stale = staleLists();
+    }
 }
 }  // namespace
 

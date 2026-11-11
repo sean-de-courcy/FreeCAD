@@ -475,6 +475,37 @@ class TestPieces(unittest.TestCase):
         self.assertIsNone(PartDesign.studioConsumerOf(c))
         self.assertVolume(c, 1000)
 
+    def testSecondUnionApartIsTakenInTheSameRecompute(self):
+        """Two Unions, each with C apart (C at x 40..50 touches neither A nor B): U1 of A and C,
+        then U2 of B with C. Until U1's compute keeps C, U2 sees C consumed and decides nothing;
+        it decides C apart only in the recompute after U1's resync. One recompute takes both
+        (the resync goes on while it finds an entry stale): C stays a part, consumed by neither
+        (gate seed 3 edit 63, ops#654 P6p open item b)."""
+        self.studio((("A", (0, 0, 10, 10), 10), ("B", (20, 0, 30, 10), 10), ("C", (40, 0, 50, 10), 10)))
+        unions = []
+        for name, target in (("U1", "A"), ("U2", "B")):
+            b = self.doc.addObject("PartDesign::Boolean", name)
+            self.S.addObject(b)
+            b.Type = "Fuse"
+            b.Refine = False
+            b.StudioScope = [target]
+            b.StudioTools = ["C"]
+            unions.append(b)
+        self.doc.openTransaction("unions")
+        for b in unions:
+            PartDesign.studioInsert(b, -1)
+        self.doc.recompute()
+        # Checked before the commit, whose own resync would take what the recompute left
+        c = self.doc.getObject("C")
+        try:
+            for b in unions:
+                self.assertEqual(list(b.StudioApartTools), ["C"], b.Name)
+                self.assertEqual(list(getattr(b, "StudioApartToolsSeen", [])), ["C"], b.Name)
+            self.assertIsNone(PartDesign.studioConsumerOf(c))
+            self.assertIn(c, PartDesign.studioLiveParts(self.list))
+        finally:
+            self.doc.commitTransaction()
+
     def testPatternThatSplitsItsPartMakesPieces(self):
         """An in-Body pattern whose copy meets the seed slot and cuts the plate in two (seed
         x 10..14, y -1..11; copy at y +9): loud until its command, which makes the halves parts."""
