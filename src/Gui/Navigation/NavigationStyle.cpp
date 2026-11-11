@@ -43,10 +43,12 @@
 #include <QByteArray>
 #include <QCursor>
 #include <QMenu>
+#include <QTimer>
 
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
 #include <Base/Interpreter.h>
@@ -60,6 +62,7 @@
 #include "Command.h"
 #include "Action.h"
 #include "Document.h"
+#include "ForkKeymap.h"
 #include "Inventor/SoMouseWheelEvent.h"
 #include "MenuManager.h"
 #include "MouseSelection.h"
@@ -72,6 +75,42 @@
 #include "ViewProviderDocumentObject.h"
 
 using namespace Gui;
+
+namespace Gui
+{
+/// FreeCAD-CH (ops#640 polish P8): Onshape's double click in the 3D view. Under the Onshape keymap
+/// a double click on a preselected element calls this with the element (document, object, its
+/// sub-path), after the clicks' own selection is done; a workbench sets it (PartDesign: tint the
+/// feature that made the element). Declared where it is used (no header names it)
+using DoubleClickElement = std::function<void(const std::string&, const std::string&, const std::string&)>;
+GuiExport void setDoubleClickElement(DoubleClickElement handler);
+}  // namespace Gui
+
+namespace
+{
+Gui::DoubleClickElement& doubleClickElement()
+{
+    static Gui::DoubleClickElement handler;
+    return handler;
+}
+
+/// The element under the second press of a double click, until its release (one at a time)
+struct DoubleClicked
+{
+    bool pending = false;
+    std::string doc, obj, sub;
+};
+DoubleClicked& doubleClicked()
+{
+    static DoubleClicked clicked;
+    return clicked;
+}
+}  // namespace
+
+void Gui::setDoubleClickElement(DoubleClickElement handler)
+{
+    doubleClickElement() = std::move(handler);
+}
 
 NavigationStyleContextMenuReceiver::NavigationStyleContextMenuReceiver(
     ViewProviderDocumentObject* viewProvider,
@@ -2517,13 +2556,36 @@ SbBool NavigationStyle::processClickEvent(const SoMouseButtonEvent* const event)
         if (isDoubleClickCandidate(event)) {
             deferMouseDownEvent(event);
             processed = true;
+            // FreeCAD-CH (ops#640 polish P8): a double click on the first press's element, for
+            // the handler on release
+            auto& clicked = doubleClicked();
+            clicked.pending = ForkKeymap::isOnshape() && doubleClickElement() && !clicked.obj.empty();
         }
         else {
             recordClickCandidate(event);
+            // FreeCAD-CH (ops#640 polish P8): the element under the first press (its click
+            // clears the preselection)
+            const SelectionChanges& pre = Selection().getPreselection();
+            auto& clicked = doubleClicked();
+            clicked.pending = false;
+            clicked.doc = pre.pDocName ? pre.pDocName : "";
+            clicked.obj = pre.pObjectName ? pre.pObjectName : "";
+            clicked.sub = pre.pSubName ? pre.pSubName : "";
         }
     }
     else if (!press) {
         replayDeferredMouseDownEvent();
+        // FreeCAD-CH (ops#640 polish P8): once this release has done its selection (the clicks
+        // toggle the pick twice: nothing stays selected), the handler gets the element
+        auto& clicked = doubleClicked();
+        if (clicked.pending) {
+            clicked.pending = false;
+            QTimer::singleShot(0, [doc = clicked.doc, obj = clicked.obj, sub = clicked.sub]() {
+                if (auto& handler = doubleClickElement()) {
+                    handler(doc, obj, sub);
+                }
+            });
+        }
     }
 
     return processed;

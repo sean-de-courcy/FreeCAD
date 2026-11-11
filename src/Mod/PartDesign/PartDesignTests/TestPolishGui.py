@@ -556,3 +556,100 @@ class TestFlatFeatureDialogGui(PolishCase):
         self.openEdit(self.pad)
         self.assertGreater(len(self.headers()), 1)
         self.assertEqual(len(self.visible(QtWidgets.QCheckBox, "showTransparentPreviewCheckBox")), 1)
+
+
+class TestDoubleClickCreatorGui(PolishCase):
+    """P8: under the Onshape keymap a double click on a face selects nothing and tints the feature
+    that made it, and that feature's sketch, in the Features list (and the feature's faces in the
+    view) until the selection changes. FreeCAD's keymap tints nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        self.savedTree = self.param.GetBool("ShowModelTree", False)
+        if self.savedTree:
+            Gui.runCommand("PartDesign_ToggleModelTree")  # the lists in place of the tree
+        model = Gui.getMainWindow().findChild(QtWidgets.QDockWidget, "Model")
+        if model is not None:
+            model.show()
+        # A 4 x 4 boss on the 10 x 10 pad, up to z = 10: seen from the top its face lies at
+        # (2, 2, 10) and the pad's own top face at (7, 7, 5)
+        self.boss = self.body.newObject("PartDesign::Pad", "Pad001")
+        self.boss.Profile = squareSketch(self.body, 4, "Sketch001")
+        self.boss.Length = 10
+        self.doc.recompute()
+        self.view.viewTop()
+        self.view.fitAll()
+        pump(0.4)
+        features = Gui.getMainWindow().findChild(QtWidgets.QWidget, "FeaturesView")
+        self.assertIsNotNone(features)
+        self.list = features.findChild(QtWidgets.QListWidget, "featureList")
+        self.assertIsNotNone(self.list)
+
+    def tearDown(self):
+        if self.param.GetBool("ShowModelTree", False) != self.savedTree:
+            Gui.runCommand("PartDesign_ToggleModelTree")
+        super().tearDown()
+
+    def point(self, x, y, z):
+        viewport = self.view.graphicsView().viewport()
+        sx, sy = self.view.getPointOnScreen(App.Vector(x, y, z))
+        _, height = self.view.getSize()
+        scale = viewport.devicePixelRatioF()
+        return QtCore.QPoint(int(round(sx / scale)), int(round((height - sy - 1) / scale)))
+
+    def send(self, kind, at, buttons):
+        viewport = self.view.graphicsView().viewport()
+        event = QtGui.QMouseEvent(
+            kind,
+            QtCore.QPointF(at),
+            QtCore.QPointF(viewport.mapToGlobal(at)),
+            QtCore.Qt.LeftButton,
+            buttons,
+            QtCore.Qt.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(viewport, event)
+
+    def doubleClick(self, at):
+        """Press, release, press, release inside the double-click interval, as a user's."""
+        self.hover(at)
+        for _ in range(2):
+            self.send(QtCore.QEvent.MouseButtonPress, at, QtCore.Qt.LeftButton)
+            self.send(QtCore.QEvent.MouseButtonRelease, at, QtCore.Qt.NoButton)
+        pump(0.3)
+
+    def tinted(self):
+        """The Features list's rows with a background, by object name."""
+        names = []
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            name = item.data(QtCore.Qt.UserRole)
+            if name and item.data(QtCore.Qt.BackgroundRole) is not None:
+                names.append(bytes(name).decode())
+        return sorted(names)
+
+    def testOnshapeDoubleClickSelectsNothing(self):
+        self.doubleClick(self.point(7, 7, 5))
+        self.assertEqual(Gui.Selection.getSelectionEx(), [])
+
+    def testOnshapeDoubleClickTintsTheBossAndItsSketch(self):
+        self.doubleClick(self.point(2, 2, 10))
+        self.assertEqual(self.tinted(), ["Pad001", "Sketch001"])
+
+    def testOnshapeDoubleClickTintsThePadUnderTheBoss(self):
+        self.doubleClick(self.point(7, 7, 5))
+        self.assertEqual(self.tinted(), ["Pad", "Sketch"])
+
+    def testSelectionChangeClearsTheTint(self):
+        self.doubleClick(self.point(2, 2, 10))
+        self.assertTrue(self.tinted())
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, "Pad001.Face1")
+        pump(0.3)
+        self.assertEqual(self.tinted(), [])
+
+    def testFreeCADKeymapTintsNothing(self):
+        """The control: FreeCAD's double click keeps its behaviour, no tint."""
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        pump()
+        self.doubleClick(self.point(2, 2, 10))
+        self.assertEqual(self.tinted(), [])
