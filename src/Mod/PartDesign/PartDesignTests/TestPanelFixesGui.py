@@ -810,6 +810,88 @@ class TestPanelFixesGui(unittest.TestCase):
         self.close(ok=False)
         self.assertEqual(pipe.Binormal, V(1, 0, 1))
 
+    def testPipeSweepControls(self):
+        """FreeCAD-CH ops#640 slice 3: the Sweep panel's Lock direction field shows only with its
+        control, the Twist, Scale and Body type boxes write their properties, and the Twist box
+        goes under Lock faces (Onshape shows it only for None and Keep orientation)."""
+        pipe = self.rod()
+        self.doc.recompute()
+        self.edit(pipe)
+        control = self.widget(QtWidgets.QComboBox, "comboBoxProfileControl")
+        self.assertEqual(
+            [control.itemText(i) for i in range(control.count())],
+            ["None", "Keep orientation", "Advanced", "Lock faces", "Lock direction"],
+        )
+        direction = self.widget(QtWidgets.QWidget, "fieldLockDirection")
+        faces = self.widget(QtWidgets.QWidget, "fieldLockFaces")
+        twist = self.widget(QtWidgets.QCheckBox, "checkBoxTwist")
+        self.assertTrue(direction.isHidden())
+        self.assertTrue(faces.isHidden())
+        self.assertFalse(twist.isHidden())
+        control.setCurrentIndex(4)  # Lock direction
+        pump()
+        self.assertEqual(pipe.ProfileControl, "Lock direction")
+        self.assertFalse(direction.isHidden())
+        self.assertTrue(faces.isHidden())
+        self.assertTrue(twist.isHidden())
+        control.setCurrentIndex(3)  # Lock faces
+        pump()
+        self.assertEqual(pipe.ProfileControl, "Lock faces")
+        self.assertFalse(faces.isHidden())
+        self.assertTrue(direction.isHidden())
+        self.assertTrue(twist.isHidden(), "the twist stays under Lock faces")
+        control.setCurrentIndex(1)  # Keep orientation
+        pump()
+        self.assertEqual(pipe.ProfileControl, "Keep orientation")
+        self.assertTrue(faces.isHidden())
+        self.assertFalse(twist.isHidden())
+        # Twist: the box writes HasTwist, shows its rows; the type and the value follow
+        self.assertFalse(pipe.HasTwist)
+        twistType = self.widget(QtWidgets.QComboBox, "comboBoxTwistType")
+        self.assertTrue(twistType.isHidden())
+        twist.setChecked(True)
+        pump()
+        self.assertTrue(pipe.HasTwist)
+        self.assertFalse(twistType.isHidden())
+        twistType.setCurrentIndex(0)  # Turns
+        pump()
+        self.assertEqual(pipe.TwistType, "Turns")
+        turns = self.widget(QtWidgets.QDoubleSpinBox, "doubleSpinBoxTurns")
+        self.assertFalse(turns.isHidden())
+        turns.setValue(2.5)
+        pump()
+        self.assertAlmostEqual(pipe.Turns, 2.5)
+        counter = self.widget(QtWidgets.QCheckBox, "checkBoxTwistCCW")
+        counter.setChecked(True)
+        pump()
+        self.assertTrue(pipe.TwistCCW)
+        # Scale
+        scale = self.widget(QtWidgets.QCheckBox, "checkBoxScale")
+        factor = self.widget(QtWidgets.QDoubleSpinBox, "doubleSpinBoxScaleFactor")
+        self.assertTrue(factor.isHidden())
+        scale.setChecked(True)
+        pump()
+        self.assertTrue(pipe.HasScale)
+        self.assertFalse(factor.isHidden())
+        factor.setValue(0.5)
+        pump()
+        self.assertAlmostEqual(pipe.ScaleFactor, 0.5)
+        # Body type: Thin shows its rows, Midplane takes the second thickness away
+        bodyType = self.widget(QtWidgets.QComboBox, "comboBoxBodyType")
+        midplane = self.widget(QtWidgets.QCheckBox, "checkBoxMidplane")
+        second = self.widget(QtWidgets.QWidget, "quantitySpinBoxThickness2")
+        self.assertTrue(midplane.isHidden())
+        bodyType.setCurrentIndex(1)  # Thin
+        pump()
+        self.assertEqual(pipe.BodyType, "Thin")
+        self.assertFalse(midplane.isHidden())
+        self.assertFalse(second.isHidden())
+        midplane.setChecked(True)
+        pump()
+        self.assertTrue(pipe.Midplane)
+        self.assertTrue(second.isHidden())
+        self.close(ok=False)
+
     def testPipeScalingRecomputes(self):
         """2: choosing Multisection recomputes at once (no OK): the section at z = 10 is the
         4 x 4 section's 16, not the profile's 4. (The feature in edit stays Touched after the

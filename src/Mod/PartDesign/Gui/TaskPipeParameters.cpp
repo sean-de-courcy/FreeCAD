@@ -39,6 +39,7 @@
 #include <fmt/format.h>
 
 #include <QPointer>
+#include <QSignalBlocker>
 #include <QTimer>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -48,6 +49,8 @@
 #include <App/ElementNamingUtils.h>
 #include <App/Origin.h>
 #include <Base/Console.h>
+#include <Base/Quantity.h>
+#include <Base/Unit.h>
 #include <Base/Tools.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
@@ -55,6 +58,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/Tools.h>
 #include <Gui/ViewProvider.h>
+#include <Gui/QuantitySpinBox.h>
 #include <Gui/Widgets.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
@@ -321,6 +325,76 @@ TaskPipeParameters::TaskPipeParameters(ViewProviderPipe* PipeView, bool /*newObj
         this,
         &TaskPipeParameters::onOppositeDirectionChanged
     );
+    connect(ui->checkBoxTwist, &QCheckBox::toggled, this, &TaskPipeParameters::onTwistChanged);
+    connect(
+        ui->comboBoxTwistType,
+        qOverload<int>(&QComboBox::currentIndexChanged),
+        this,
+        &TaskPipeParameters::onTwistTypeChanged
+    );
+    connect(
+        ui->doubleSpinBoxTurns,
+        qOverload<double>(&QDoubleSpinBox::valueChanged),
+        this,
+        &TaskPipeParameters::onTurnsChanged
+    );
+    // The quantity boxes give the value in the property's own unit, whatever the unit schema
+    connect(
+        ui->quantitySpinBoxTwistAngle,
+        qOverload<const Base::Quantity&>(&Gui::QuantitySpinBox::valueChanged),
+        this,
+        [this](const Base::Quantity& value) { onTwistAngleChanged(value.getValue()); }
+    );
+    connect(
+        ui->quantitySpinBoxTwistPitch,
+        qOverload<const Base::Quantity&>(&Gui::QuantitySpinBox::valueChanged),
+        this,
+        [this](const Base::Quantity& value) { onTwistPitchChanged(value.getValue()); }
+    );
+    connect(
+        ui->checkBoxTwistCCW,
+        &QCheckBox::toggled,
+        this,
+        &TaskPipeParameters::onTwistCCWChanged
+    );
+    connect(ui->checkBoxScale, &QCheckBox::toggled, this, &TaskPipeParameters::onScaleChanged);
+    connect(
+        ui->doubleSpinBoxScaleFactor,
+        qOverload<double>(&QDoubleSpinBox::valueChanged),
+        this,
+        &TaskPipeParameters::onScaleFactorChanged
+    );
+    connect(
+        ui->comboBoxBodyType,
+        qOverload<int>(&QComboBox::currentIndexChanged),
+        this,
+        &TaskPipeParameters::onBodyTypeChanged
+    );
+    connect(
+        ui->quantitySpinBoxThickness,
+        qOverload<const Base::Quantity&>(&Gui::QuantitySpinBox::valueChanged),
+        this,
+        [this](const Base::Quantity& value) { onThicknessChanged(value.getValue()); }
+    );
+    connect(
+        ui->quantitySpinBoxThickness2,
+        qOverload<const Base::Quantity&>(&Gui::QuantitySpinBox::valueChanged),
+        this,
+        [this](const Base::Quantity& value) { onThickness2Changed(value.getValue()); }
+    );
+    connect(
+        ui->checkBoxMidplane,
+        &QCheckBox::toggled,
+        this,
+        &TaskPipeParameters::onMidplaneChanged
+    );
+    connect(ui->checkBoxFlipWall, &QCheckBox::toggled, this, &TaskPipeParameters::onFlipWallChanged);
+    connect(
+        ui->checkBoxTrimEnds,
+        &QCheckBox::toggled,
+        this,
+        &TaskPipeParameters::onTrimEndsChanged
+    );
 
     this->groupLayout()->addWidget(proxy);
 
@@ -445,11 +519,57 @@ void TaskPipeParameters::createFields()
     );
     *moreSelf = spineMoreField;
     spineMoreField->takePlaceOf(ui->spineMoreFieldPlaceholder);
+
+    // The faces for ProfileControl "Lock faces": several faces of the solid before the pipe
+    // (Onshape's "Lock faces"); optional, shown with its control only
+    ReferenceField::Options facesOptions;
+    facesOptions.kind = ReferenceField::Kind::Elements;
+    facesOptions.flags = AllowSelection::FACE;
+    facesOptions.target = [this]() -> App::DocumentObject* {
+        auto pipe = getObject<PartDesign::Pipe>();
+        return pipe ? pipe->getBaseObject(/* silent = */ true) : nullptr;
+    };
+    facesOptions.label = tr("Faces to lock to");
+    facesOptions.kinds = tr("Faces");
+    facesOptions.required = false;
+    auto writeFaces = [this](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+        if (lockFacesField) {
+            lockFacesField->assign(obj, subs);
+        }
+        recomputeFeature();
+    };
+    lockFacesField = new ReferenceField(getObject(), "LockFaces", facesOptions, writeFaces, proxy);
+    lockFacesField->takePlaceOf(ui->lockFacesFieldPlaceholder);
+
+    // The direction for "Lock direction": one plane, planar face or straight edge
+    ReferenceField::Options directionOptions;
+    directionOptions.kind = ReferenceField::Kind::SingleElement;
+    directionOptions.flags = AllowSelection::EDGE | AllowSelection::FACE | AllowSelection::PLANAR;
+    directionOptions.label = tr("Direction to lock to");
+    directionOptions.kinds = tr("A plane, a planar face or a straight edge");
+    directionOptions.required = false;
+    auto writeDirection = [this](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+        if (lockDirectionField) {
+            lockDirectionField->assign(obj, subs);
+        }
+        recomputeFeature();
+    };
+    lockDirectionField = new ReferenceField(
+        getObject(),
+        "LockDirection",
+        directionOptions,
+        writeDirection,
+        proxy
+    );
+    lockDirectionField->takePlaceOf(ui->lockDirectionFieldPlaceholder);
+
+    // Hidden until their control is chosen
+    updateSweepWidgets();
 }
 
 std::vector<ReferenceField*> TaskPipeParameters::referenceFields() const
 {
-    return {profileField, spineField, spineMoreField};
+    return {profileField, spineField, spineMoreField, lockFacesField, lockDirectionField};
 }
 
 void TaskPipeParameters::showProfileControl()
@@ -466,6 +586,178 @@ void TaskPipeParameters::showProfileControl()
     ui->checkBoxOppositeDirection->setChecked(pipe->PathReversed.getValue());
     // Only a one-way sweep has a direction to flip (Onshape, SW1: no effect when extended)
     ui->checkBoxOppositeDirection->setEnabled(!pipe->ExtendToFullPath.getValue());
+
+    // The Sweep's twist, scale and thin wall, as the pipe has them
+    QSignalBlocker blockTwist(ui->checkBoxTwist);
+    QSignalBlocker blockTwistType(ui->comboBoxTwistType);
+    QSignalBlocker blockTurns(ui->doubleSpinBoxTurns);
+    QSignalBlocker blockAngle(ui->quantitySpinBoxTwistAngle);
+    QSignalBlocker blockPitch(ui->quantitySpinBoxTwistPitch);
+    QSignalBlocker blockCCW(ui->checkBoxTwistCCW);
+    QSignalBlocker blockScale(ui->checkBoxScale);
+    QSignalBlocker blockFactor(ui->doubleSpinBoxScaleFactor);
+    QSignalBlocker blockBody(ui->comboBoxBodyType);
+    QSignalBlocker blockThickness(ui->quantitySpinBoxThickness);
+    QSignalBlocker blockThickness2(ui->quantitySpinBoxThickness2);
+    QSignalBlocker blockMidplane(ui->checkBoxMidplane);
+    QSignalBlocker blockFlip(ui->checkBoxFlipWall);
+    QSignalBlocker blockTrim(ui->checkBoxTrimEnds);
+    ui->checkBoxTwist->setChecked(pipe->HasTwist.getValue());
+    ui->comboBoxTwistType->setCurrentIndex(pipe->TwistType.getValue());
+    ui->doubleSpinBoxTurns->setValue(pipe->Turns.getValue());
+    ui->quantitySpinBoxTwistAngle->setValue(
+        Base::Quantity(pipe->TwistAngle.getValue(), Base::Unit::Angle)
+    );
+    ui->quantitySpinBoxTwistPitch->setValue(
+        Base::Quantity(pipe->TwistPitch.getValue(), Base::Unit::Length)
+    );
+    ui->checkBoxTwistCCW->setChecked(pipe->TwistCCW.getValue());
+    ui->checkBoxScale->setChecked(pipe->HasScale.getValue());
+    ui->doubleSpinBoxScaleFactor->setValue(pipe->ScaleFactor.getValue());
+    ui->comboBoxBodyType->setCurrentIndex(pipe->BodyType.getValue());
+    ui->quantitySpinBoxThickness->setValue(
+        Base::Quantity(pipe->Thickness1.getValue(), Base::Unit::Length)
+    );
+    ui->quantitySpinBoxThickness2->setValue(
+        Base::Quantity(pipe->Thickness2.getValue(), Base::Unit::Length)
+    );
+    ui->checkBoxMidplane->setChecked(pipe->Midplane.getValue());
+    ui->checkBoxFlipWall->setChecked(pipe->FlipWall.getValue());
+    ui->checkBoxTrimEnds->setChecked(pipe->TrimEnds.getValue());
+    updateSweepWidgets();
+}
+
+void TaskPipeParameters::updateSweepWidgets()
+{
+    // Onshape shows the twist only for a profile that turns with the path or keeps its
+    // orientation (None, Keep orientation)
+    const int control = ui->comboBoxProfileControl->currentIndex();
+    const bool twistShown = control == 0 || control == 1;
+    const bool twisting = twistShown && ui->checkBoxTwist->isChecked();
+    const int twistType = ui->comboBoxTwistType->currentIndex();  // Turns, Angle, Pitch
+    ui->checkBoxTwist->setVisible(twistShown);
+    for (QWidget* widget : {static_cast<QWidget*>(ui->labelTwistType),
+                            static_cast<QWidget*>(ui->comboBoxTwistType),
+                            static_cast<QWidget*>(ui->labelTwistValue),
+                            static_cast<QWidget*>(ui->widgetTwistValue),
+                            static_cast<QWidget*>(ui->checkBoxTwistCCW)}) {
+        widget->setVisible(twisting);
+    }
+    ui->doubleSpinBoxTurns->setVisible(twistType == 0);
+    ui->quantitySpinBoxTwistAngle->setVisible(twistType == 1);
+    ui->quantitySpinBoxTwistPitch->setVisible(twistType == 2);
+    ui->labelTwistValue->setText(
+        twistType == 0 ? tr("Turns") : (twistType == 1 ? tr("Angle") : tr("Pitch"))
+    );
+
+    const bool scaling = ui->checkBoxScale->isChecked();
+    ui->labelScaleFactor->setVisible(scaling);
+    ui->doubleSpinBoxScaleFactor->setVisible(scaling);
+
+    const bool thin = ui->comboBoxBodyType->currentIndex() == 1;
+    const bool midplane = ui->checkBoxMidplane->isChecked();
+    ui->labelThickness->setVisible(thin);
+    ui->quantitySpinBoxThickness->setVisible(thin);
+    ui->checkBoxMidplane->setVisible(thin);
+    ui->checkBoxFlipWall->setVisible(thin);
+    ui->labelThickness2->setVisible(thin && !midplane);
+    ui->quantitySpinBoxThickness2->setVisible(thin && !midplane);
+    ui->checkBoxTrimEnds->setVisible(thin);
+
+    // Each lock field shows with its control; one that goes is disarmed, not left gating picks
+    const std::pair<ReferenceField*, bool> locks[] = {{lockFacesField, control == 3},
+                                                      {lockDirectionField, control == 4}};
+    for (const auto& [field, shownNow] : locks) {
+        if (field) {
+            if (!shownNow) {
+                field->setArmed(false);
+            }
+            field->setVisible(shownNow);
+        }
+    }
+}
+
+void TaskPipeParameters::writePipe(const std::function<void(PartDesign::Pipe*)>& write)
+{
+    if (auto pipe = getObject<PartDesign::Pipe>()) {
+        write(pipe);
+        recomputeFeature();
+    }
+}
+
+void TaskPipeParameters::onTwistChanged(bool checked)
+{
+    writePipe([checked](PartDesign::Pipe* pipe) { pipe->HasTwist.setValue(checked); });
+    updateSweepWidgets();
+}
+
+void TaskPipeParameters::onTwistTypeChanged(int idx)
+{
+    writePipe([idx](PartDesign::Pipe* pipe) { pipe->TwistType.setValue(idx); });
+    updateSweepWidgets();
+}
+
+void TaskPipeParameters::onTurnsChanged(double turns)
+{
+    writePipe([turns](PartDesign::Pipe* pipe) { pipe->Turns.setValue(turns); });
+}
+
+void TaskPipeParameters::onTwistAngleChanged(double degrees)
+{
+    writePipe([degrees](PartDesign::Pipe* pipe) { pipe->TwistAngle.setValue(degrees); });
+}
+
+void TaskPipeParameters::onTwistPitchChanged(double length)
+{
+    writePipe([length](PartDesign::Pipe* pipe) { pipe->TwistPitch.setValue(length); });
+}
+
+void TaskPipeParameters::onTwistCCWChanged(bool checked)
+{
+    writePipe([checked](PartDesign::Pipe* pipe) { pipe->TwistCCW.setValue(checked); });
+}
+
+void TaskPipeParameters::onScaleChanged(bool checked)
+{
+    writePipe([checked](PartDesign::Pipe* pipe) { pipe->HasScale.setValue(checked); });
+    updateSweepWidgets();
+}
+
+void TaskPipeParameters::onScaleFactorChanged(double factor)
+{
+    writePipe([factor](PartDesign::Pipe* pipe) { pipe->ScaleFactor.setValue(factor); });
+}
+
+void TaskPipeParameters::onBodyTypeChanged(int idx)
+{
+    writePipe([idx](PartDesign::Pipe* pipe) { pipe->BodyType.setValue(idx); });
+    updateSweepWidgets();
+}
+
+void TaskPipeParameters::onThicknessChanged(double length)
+{
+    writePipe([length](PartDesign::Pipe* pipe) { pipe->Thickness1.setValue(length); });
+}
+
+void TaskPipeParameters::onThickness2Changed(double length)
+{
+    writePipe([length](PartDesign::Pipe* pipe) { pipe->Thickness2.setValue(length); });
+}
+
+void TaskPipeParameters::onMidplaneChanged(bool checked)
+{
+    writePipe([checked](PartDesign::Pipe* pipe) { pipe->Midplane.setValue(checked); });
+    updateSweepWidgets();
+}
+
+void TaskPipeParameters::onFlipWallChanged(bool checked)
+{
+    writePipe([checked](PartDesign::Pipe* pipe) { pipe->FlipWall.setValue(checked); });
+}
+
+void TaskPipeParameters::onTrimEndsChanged(bool checked)
+{
+    writePipe([checked](PartDesign::Pipe* pipe) { pipe->TrimEnds.setValue(checked); });
 }
 
 void TaskPipeParameters::onProfileControlChanged(int idx)
@@ -474,6 +766,7 @@ void TaskPipeParameters::onProfileControlChanged(int idx)
         pipe->ProfileControl.setValue(idx);
         recomputeFeature();
     }
+    updateSweepWidgets();
     if (profileControlSet) {
         profileControlSet();
     }
