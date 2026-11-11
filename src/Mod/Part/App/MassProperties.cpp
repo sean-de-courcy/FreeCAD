@@ -15,6 +15,7 @@
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierSurface.hxx>
 #include <Geom_OffsetCurve.hxx>
 #include <Geom_OffsetSurface.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
@@ -253,7 +254,12 @@ namespace
 
 // The adaptive volume properties into props, with the centre of mass and inertia when everything
 // is set; false, with props unchanged, when the integration failed
-bool adaptiveVolume(const TopoDS_Shape& shape, GProp_GProps& props, bool everything)
+bool adaptiveVolume(
+    const TopoDS_Shape& shape,
+    GProp_GProps& props,
+    bool everything,
+    double tolerance = adaptiveTolerance
+)
 {
     GProp_GProps adaptive = props;
     const bool onlyClosed = false;
@@ -264,7 +270,7 @@ bool adaptiveVolume(const TopoDS_Shape& shape, GProp_GProps& props, bool everyth
     if (BRepGProp::VolumePropertiesGK(
             shape,
             adaptive,
-            adaptiveTolerance,
+            tolerance,
             onlyClosed,
             useSpans,
             everything,
@@ -284,10 +290,11 @@ void integrateVolume(
     const TopoDS_Shape& shape,
     GProp_GProps& props,
     bool everything,
-    bool forceAdaptive
+    bool forceAdaptive,
+    double tolerance = adaptiveTolerance
 )
 {
-    if ((forceAdaptive || needsAdaptive(shape)) && adaptiveVolume(shape, props, everything)) {
+    if ((forceAdaptive || needsAdaptive(shape)) && adaptiveVolume(shape, props, everything, tolerance)) {
         return;
     }
     // Not screened, or the adaptive method failed: the default, as before
@@ -695,7 +702,11 @@ public:
 // convergence (ops#414: 1.9 % on 41 spans, 4 to a wave; 1.3e-4 on 500), and a NURBS conversion of
 // such a face was approximate (offset curves) or slow to integrate (trimmed faces). False when the
 // adaptive integration fails
-bool adaptiveSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
+bool adaptiveSurfaceProperties(
+    const TopoDS_Shape& shape,
+    GProp_GProps& props,
+    double tolerance = adaptiveTolerance
+)
 {
     BRep_Builder builder;
     TopoDS_Compound others;
@@ -721,10 +732,10 @@ bool adaptiveSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
         }
     }
     if (!anyExact) {
-        return BRepGProp::SurfaceProperties(shape, props, adaptiveTolerance) >= 0.0;
+        return BRepGProp::SurfaceProperties(shape, props, tolerance) >= 0.0;
     }
     GProp_GProps rest;
-    if (BRepGProp::SurfaceProperties(others, rest, adaptiveTolerance) < 0.0) {
+    if (BRepGProp::SurfaceProperties(others, rest, tolerance) < 0.0) {
         return false;
     }
     if (rest.Mass() > 0.0) {
@@ -739,11 +750,16 @@ bool adaptiveSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
 namespace
 {
 
-void integrateSurface(const TopoDS_Shape& shape, GProp_GProps& props, bool forceAdaptive)
+void integrateSurface(
+    const TopoDS_Shape& shape,
+    GProp_GProps& props,
+    bool forceAdaptive,
+    double tolerance = adaptiveTolerance
+)
 {
     if (forceAdaptive || needsAdaptive(shape)) {
         GProp_GProps adaptive = props;
-        if (adaptiveSurfaceProperties(shape, adaptive)) {
+        if (adaptiveSurfaceProperties(shape, adaptive, tolerance)) {
             props = adaptive;
             return;
         }
@@ -779,6 +795,53 @@ double area(const TopoDS_Shape& shape, bool forceAdaptive)
 {
     GProp_GProps props;
     integrateSurface(shape, props, forceAdaptive);
+    return props.Mass();
+}
+
+bool hasFreeForm(const TopoDS_Shape& shape)
+{
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        TopLoc_Location location;
+        const auto surface = unwrapped(BRep_Tool::Surface(TopoDS::Face(faces(i)), location));
+        if (!surface.IsNull()
+            && (surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
+                || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface)))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The area readouts' relative error per face on free-form faces: OCCT's adaptive area at 1e-6
+// was 2.9e-6 off on SC7's scaled sphere, its error estimate being optimistic, and 1e-9 costs
+// little (0.17 s on 100 scaled spheres). Volumes keep adaptiveTolerance: at 1e-9 a volume with
+// its inertia took 82 s on one scaled sphere (Onshape's volumes are within 2e-5)
+constexpr double readoutTolerance = 1e-9;
+
+void readoutVolumeProperties(const TopoDS_Shape& shape, GProp_GProps& props)
+{
+    // Not forced on free-form faces: the adaptive centre and inertia of SC7's scaled sphere took
+    // 74 s (debt, ops#640); the mass readouts take readoutVolume()
+    integrateVolume(shape, props, true, false);
+}
+
+void readoutSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
+{
+    const bool freeForm = hasFreeForm(shape);
+    integrateSurface(shape, props, freeForm, freeForm ? readoutTolerance : adaptiveTolerance);
+}
+
+double readoutVolume(const TopoDS_Shape& shape)
+{
+    return volume(shape, hasFreeForm(shape));
+}
+
+double readoutArea(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    readoutSurfaceProperties(shape, props);
     return props.Mass();
 }
 

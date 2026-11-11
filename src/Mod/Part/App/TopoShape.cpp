@@ -1234,13 +1234,13 @@ bool getShapeProperties(const TopoDS_Shape& shape, GProp_GProps& prop)
 {
     TopExp_Explorer xpSolid(shape, TopAbs_SOLID);
     if (xpSolid.More()) {
-        BRepGProp::VolumeProperties(shape, prop);
+        MassProperties::readoutVolumeProperties(shape, prop);
         return true;
     }
 
     TopExp_Explorer xpFace(shape, TopAbs_FACE);
     if (xpFace.More()) {
-        BRepGProp::SurfaceProperties(shape, prop);
+        MassProperties::readoutSurfaceProperties(shape, prop);
         return true;
     }
 
