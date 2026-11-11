@@ -653,3 +653,105 @@ class TestDoubleClickCreatorGui(PolishCase):
         pump()
         self.doubleClick(self.point(2, 2, 10))
         self.assertEqual(self.tinted(), [])
+
+
+class TestCompactDialogGui(PolishCase):
+    """P6: under the Onshape keymap the overlay panel that holds only the Tasks panel ends under
+    the dialog's last box instead of running the view's full height; a dialog taller than the view
+    keeps the full height and scrolls. FreeCAD's keymap keeps the full-height panel."""
+
+    MARGIN = 40  # px below the last box: the panel's frame and spacing
+
+    def setUp(self):
+        # room for the tallest dialog here (the Sketch one): the offscreen window is short
+        mainWindow = Gui.getMainWindow()
+        self.savedMaximized = mainWindow.isMaximized()
+        self.savedSize = mainWindow.size()
+        mainWindow.showNormal()
+        mainWindow.resize(1600, 1500)
+        pump(0.3)
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        mainWindow = Gui.getMainWindow()
+        mainWindow.resize(self.savedSize)
+        if self.savedMaximized:
+            mainWindow.showMaximized()
+        pump(0.5)
+
+    def mdiBottom(self):
+        return self.bottom(Gui.getMainWindow().findChild(QtWidgets.QMdiArea))
+
+    def tasksOverlay(self):
+        """The visible overlay panel holding the Tasks panel alone, else skip: the profile docks
+        it otherwise."""
+        tasks = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Tasks")
+        for panel in Gui.getMainWindow().findChildren(QtWidgets.QTabWidget):
+            if panel.metaObject().className() != "Gui::OverlayTabWidget":
+                continue
+            if panel.isVisible() and tasks is not None and panel.isAncestorOf(tasks):
+                if panel.count() != 1:
+                    self.skipTest("the Tasks overlay holds other panels here")
+                return panel
+        self.skipTest("the Tasks panel is not an overlay here")
+
+    def openDialog(self, opener):
+        opener()
+        Gui.Control.showTaskView()
+        pump(0.6)
+        self.assertTrue(Gui.Control.activeDialog())
+        return self.tasksOverlay()
+
+    def bottom(self, widget):
+        return widget.mapToGlobal(QtCore.QPoint(0, widget.height())).y()
+
+    def actionPanel(self):
+        tasks = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Tasks")
+        panels = [
+            w
+            for w in tasks.findChildren(QtWidgets.QWidget)
+            if w.metaObject().className() == "QSint::ActionPanel" and w.isVisible()
+        ]
+        self.assertTrue(panels, "a shown task panel")
+        return panels[0]
+
+    def contentBottom(self):
+        boxes = [w for w in self.actionPanel().children() if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
+        return max(self.bottom(w) for w in boxes)
+
+    def scrollRange(self):
+        area = self.actionPanel().parentWidget().parentWidget()  # viewport, then the scroll area
+        return area.verticalScrollBar().maximum()
+
+    def assertFitsContent(self, panel):
+        content = self.contentBottom()
+        if content + self.MARGIN > self.mdiBottom():
+            self.skipTest("the dialog is taller than the view here")
+        self.assertLessEqual(self.bottom(panel), content + self.MARGIN, "the panel ends under its last box")
+        self.assertEqual(self.scrollRange(), 0, "the boxes fit without scrolling")
+
+    def testOnshapePadDialogEndsUnderItsLastBox(self):
+        panel = self.openDialog(lambda: Gui.ActiveDocument.setEdit(self.pad.Name))
+        self.assertFitsContent(panel)
+
+    def testOnshapeSketchDialogEndsUnderItsLastBox(self):
+        panel = self.openDialog(lambda: Gui.ActiveDocument.setEdit(self.sketch.Name))
+        self.assertFitsContent(panel)
+
+    def testOnshapeTallDialogScrolls(self):
+        class Panel:
+            def __init__(self):
+                self.form = QtWidgets.QWidget()
+                self.form.setMinimumHeight(4000)
+
+        panel = self.openDialog(lambda: Gui.Control.showDialog(Panel()))
+        self.assertLessEqual(self.bottom(panel), self.mdiBottom(), "capped at the view")
+        self.assertGreater(self.scrollRange(), 0, "the boxes scroll")
+
+    def testFreeCADKeymapKeepsTheFullHeight(self):
+        """The control: FreeCAD's keymap keeps the panel's full height."""
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        pump()
+        panel = self.openDialog(lambda: Gui.ActiveDocument.setEdit(self.pad.Name))
+        self.assertGreater(self.bottom(panel), self.contentBottom() + 100)

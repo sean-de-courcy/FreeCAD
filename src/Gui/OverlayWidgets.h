@@ -169,6 +169,11 @@ public:
 
     /// Set geometry of this tab widget
     void setRect(QRect rect);
+    /** FreeCAD-CH (ops#640 polish P6): under the Onshape keymap, a panel holding only the Tasks
+     * panel ends under the dialog's last box: the height that fits its content, at most
+     *  maxHeight (a taller dialog scrolls);  maxHeight otherwise.
+     */
+    int fitTaskHeight(int maxHeight) const;
 
     /// Get the geometry of this tab widget
     const QRect& getRect();
