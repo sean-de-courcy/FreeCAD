@@ -602,6 +602,30 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         self.assertEqual(self.selected(), before, "Esc changed the selection")
         self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit(), "Esc closed the sketch")
 
+    def test_a_double_click_on_a_sketch_line_selects_nothing(self):
+        """Selection parity P6 (oracle 8, SQ9): a double click on a line of a chain selects
+        nothing (the fork selected the whole closed chain)."""
+        self.sketch.addGeometry(Part.LineSegment(V(8, 2, 0), V(8, 6, 0)))
+        self.sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
+        self.doc.recompute()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.mouse_at(V(5, 2, 5))
+        at = self.screen_point(V(5, 2, 5))
+        left, none = QtCore.Qt.LeftButton, QtCore.Qt.NoButton
+        for kind, button, buttons in (
+            (QtCore.QEvent.MouseButtonPress, left, left),
+            (QtCore.QEvent.MouseButtonRelease, left, none),
+            (QtCore.QEvent.MouseButtonPress, left, left),
+            (QtCore.QEvent.MouseButtonRelease, left, none),
+        ):
+            event = QtGui.QMouseEvent(
+                kind, at, self.viewport.mapToGlobal(at), button, buttons, QtCore.Qt.NoModifier
+            )
+            QtGui.QApplication.sendEvent(self.viewport, event)
+        self.pump(150)
+        self.assertEqual(self.selected(), set())
+
     def test_box_selection_stays_sketch_only(self):
         """A box from the box's top face around the sketch line selects sketch elements only."""
         self.start_edit()
