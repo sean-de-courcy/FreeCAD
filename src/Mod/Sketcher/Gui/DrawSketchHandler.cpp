@@ -736,6 +736,12 @@ void DrawSketchHandler::seekModelAutoConstraint(
         constr.PosId = PointPos::start;
         constr.Type = type == AutoConstraint::CURVE ? Sketcher::PointOnObject : Sketcher::Coincident;
     }
+    else if (hit->isMidpoint && type != AutoConstraint::CURVE) {
+        // SQ2: a point at a model edge's middle, as at a sketch line's (Symmetric about its ends)
+        // or a sketch arc's (Midpoint)
+        constr.PosId = PointPos::none;
+        constr.Type = hit->isArc ? Sketcher::Midpoint : Sketcher::Symmetric;
+    }
     else if (type != AutoConstraint::CURVE) {
         constr.PosId = PointPos::none;
         constr.Type = Sketcher::PointOnObject;

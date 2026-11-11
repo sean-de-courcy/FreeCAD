@@ -65,9 +65,20 @@ struct ModelSnapHit
     bool isVertex = false;
     /// the snapped position, in sketch coordinates
     Base::Vector2d position;
+    /// SQ2: the position is the middle of the edge (Onshape's midpoint inference)
+    bool isMidpoint = false;
+    /// the edge is a circular arc (its middle is a Midpoint constraint, a line's a Symmetric)
+    bool isArc = false;
 };
 
-/// the model element nearest pos (vertices first) within tolerance (sketch units), if any
+/// an edge's middle wins within this many snap tolerances along the edge (about 8 px against 5)
+constexpr double modelMidpointRadius = 1.6;
+
+/** The model element nearest pos (vertices first) within tolerance (sketch units), if any. An edge
+ * whose nearest point lies within modelMidpointRadius times tolerance of its middle gives the
+ * middle (SQ2: Onshape's midpoint wins about 8 px along the edge, the edge about 5 px across it).
+ * The test is on the edge's nearest point, so the snapped position finds the same hit again.
+ */
 std::optional<ModelSnapHit> findModelSnap(const Sketcher::SketchObject* sketch,
                                           const Base::Vector2d& pos,
                                           double tolerance);
