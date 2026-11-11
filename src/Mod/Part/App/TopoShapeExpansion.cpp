@@ -10708,6 +10708,21 @@ TopoShape& TopoShape::makeElementBoolean(
         FC_THROWM(Base::CADKernelError, "User aborted");
     }
     FCBRepAlgoAPIHelper::checkLostTools(mk.get());
+    if (mk->Shape().IsNull()) {
+        // Say why: OCCT's own report, not the "Null shape" of the element map below
+        std::ostringstream report;
+        if (mk->HasErrors()) {
+            mk->DumpErrors(report);
+        }
+        std::string reason = report.str();
+        while (!reason.empty() && std::isspace(static_cast<unsigned char>(reason.back()))) {
+            reason.pop_back();
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            what << " failed" << (reason.empty() ? std::string() : ": " + reason)
+        );
+    }
     makeElementShape(*mk, fixedInputs, op, elementMapPolicy);
 
     if (buildShell) {

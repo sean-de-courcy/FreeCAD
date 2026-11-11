@@ -551,6 +551,16 @@ std::string checkResult(
     whole = false;
     TopoDS_Shape result = feature.Shape.getShape().getShape();
     if (result.IsNull() || TopExp_Explorer(result, TopAbs_SOLID).More() == Standard_False) {
+        // An additive feature never takes the part away: OCCT's fuse can return an empty
+        // compound without an error (a groove's end wall revolved about its own edge, kernel-10)
+        auto addSub = dynamic_cast<FeatureAddSub*>(&feature);
+        if (addSub && addSub->getAddSubType() == FeatureAddSub::Type::Additive) {
+            TopoDS_Shape base = feature.getBaseTopoShape(true).getShape();
+            if (!base.IsNull() && TopExp_Explorer(base, TopAbs_SOLID).More()) {
+                return std::string("The geometry kernel lost the part: the result has no solid")
+                    + notBuilt;
+            }
+        }
         return {};
     }
     if (inputsValid && !lastVouched.IsNull() && result.IsEqual(lastVouched)) {
