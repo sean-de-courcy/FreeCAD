@@ -343,3 +343,45 @@ class TestSketchDialogCheckboxesGui(SketchCase):
         self.box("showExpressions").setChecked(False)
         pump()
         self.assertNotIn("*", self.labels())
+
+
+class TestShellWordsGui(PolishCase):
+    """P10: Onshape's Shell dialog reads "Faces to remove", Thickness, then "Opposite direction",
+    unticked for the default inward wall (FreeCAD's "Make thickness inwards" was ticked for it).
+    The shell removes the pad's top face (Face6), 1 mm inwards (Reversed)."""
+
+    def setUp(self):
+        super().setUp()
+        self.shell = self.body.newObject("PartDesign::Thickness", "Shell")
+        self.shell.Base = (self.pad, ["Face6"])
+        self.shell.Value = 1
+        self.shell.Reversed = True
+        self.doc.recompute()
+        Gui.ActiveDocument.setEdit(self.shell.Name)
+        pump(0.3)
+
+    def widget(self, cls, name):
+        dialog = Gui.Control.activeDialog()
+        self.assertTrue(dialog, "Expected the Shell dialog open")
+        found = Gui.getMainWindow().findChild(cls, name)
+        self.assertIsNotNone(found, f"Expected {name} in the Shell dialog")
+        return found
+
+    def testOnshapesWords(self):
+        field = self.widget(QtWidgets.QWidget, "fieldBase")
+        self.assertEqual(field.findChild(QtWidgets.QLabel, "label").text(), "Faces to remove")
+        box = self.widget(QtWidgets.QCheckBox, "checkReverse")
+        self.assertEqual(box.text(), "Opposite direction")
+        self.assertFalse(box.isChecked(), "the default inward wall: Opposite direction unticked")
+        value = self.widget(QtWidgets.QWidget, "Value")
+        mode = self.widget(QtWidgets.QComboBox, "modeComboBox")
+        top = lambda w: w.mapTo(Gui.getMainWindow(), QtCore.QPoint(0, 0)).y()
+        self.assertLess(top(value), top(box), "Thickness, then Opposite direction")
+        self.assertLess(top(box), top(mode), "before FreeCAD's own Mode")
+
+    def testOppositeDirectionGrowsOutwards(self):
+        inward = self.shell.Shape.Volume
+        self.widget(QtWidgets.QCheckBox, "checkReverse").setChecked(True)
+        pump(0.2)
+        self.assertFalse(self.shell.Reversed)
+        self.assertGreater(self.shell.Shape.Volume, inward)
