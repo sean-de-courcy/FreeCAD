@@ -521,6 +521,78 @@ class TestThreadCapFollowsEdits(PipeCase):
         self.assertLessEqual(cap.Shape.Volume, before + cap.AddSubShape.Volume + 1e-3)
 
 
+class TestHelixTurnNamesNeverPass(PipeCase):
+    """Batch 4's T1 (ops#640): a helix's side faces are twins, one per turn, turn 1's told apart by
+    the start cap's names. In two turns the last turn took the plain name turn 1 has in one turn,
+    so a reference on turn 1 went to turn 2 when a turn was added, silently (and back). Onshape's
+    side face is one face, and a reference to it follows. Designed: an AdditiveHelix about Z of a
+    3 x 2 rectangle (x 9..12, z 0..2 on XZ), pitch 6; a datum point at the centre of a turn's outer
+    face (r 12, area 2 pi 12 x 2, its centre on the axis at z = 4 + 6 (k - 1) for turn k)."""
+
+    def helix(self, turns):
+        profile = self.sketch("HS", models.rectangle(9, 0, 12, 2), placement=XZ)
+        helix = self.body.newObject("PartDesign::AdditiveHelix", "Helix")
+        helix.Profile = profile
+        helix.ReferenceAxis = (profile, ["V_Axis"])
+        helix.Mode = "pitch-turns-angle"
+        helix.Pitch = 6
+        helix.Turns = turns
+        self.doc.recompute()
+        self.assertTrue(helix.isValid(), helix.getStatusString())
+        return helix
+
+    def outer(self, helix, k):
+        """The outer face of turn k: the B-spline face of area 2 pi 12 x 2 centred at z = 4 + 6 (k - 1)."""
+        z = 4 + 6 * (k - 1)
+        [name] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(helix.Shape.Faces)
+            if f.Surface.__class__.__name__ == "BSplineSurface"
+            and abs(f.Area - 2 * math.pi * 12 * 2) < 3
+            and abs(f.CenterOfMass.z - z) < 0.25
+        ]
+        return name
+
+    def pointOn(self, helix, k):
+        point = self.body.newObject("PartDesign::Point", "OnTurn%d" % k)
+        point.AttachmentSupport = [(helix, self.outer(helix, k))]
+        point.MapMode = "CenterOfMass"
+        self.doc.recompute()
+        self.assertAlmostEqual(point.Placement.Base.z, 4 + 6 * (k - 1), 2)
+        return point
+
+    def assertNotOnTurn(self, point, k):
+        """Broken (loud), or anywhere but turn k's outer face."""
+        if point.isValid():
+            self.assertGreater(abs(point.Placement.Base.z - (4 + 6 * (k - 1))), 1,
+                               "the reference passed to turn %d's face" % k)
+
+    def testTurnOneDoesNotPassToTurnTwo(self):
+        """1 -> 2 turns: the point on turn 1 stays on turn 1 or breaks; it went to turn 2."""
+        helix = self.helix(1)
+        point = self.pointOn(helix, 1)
+        helix.Turns = 2
+        self.doc.recompute()
+        self.assertNotOnTurn(point, 2)
+
+    def testGoneTurnTwoDoesNotPassToTurnOne(self):
+        """2 -> 1 turn: turn 2's face is gone, so the point on it breaks; it went to turn 1."""
+        helix = self.helix(2)
+        point = self.pointOn(helix, 2)
+        helix.Turns = 1
+        self.doc.recompute()
+        self.assertFalse(point.isValid(), "the reference on the gone turn 2 moved to turn 1")
+
+    def testTurnTwoFollowsATurnAdded(self):
+        """2 -> 3 turns: the point on turn 2 stays on turn 2 (integration's twins did, by their count)."""
+        helix = self.helix(2)
+        point = self.pointOn(helix, 2)
+        helix.Turns = 3
+        self.doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertAlmostEqual(point.Placement.Base.z, 10, 2)
+
+
 class TestThreadToothOnTheCylinder(PipeCase):
     """Oracle 9 (ops#665, Onshape's answers): a cylinder r 10, 20 tall; a helix r 10, pitch 2,
     height 10 from z = 2.5; a tooth on XZ swept along it, added (profile control None)."""

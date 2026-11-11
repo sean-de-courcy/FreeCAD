@@ -1782,11 +1782,19 @@ std::string placeAmong(std::size_t k, std::size_t n)
 /// Twins in the maker's order (twinOrder's `makerOrder`, decision 158 Q1) go without ORD
 /// (decision 173 (2)): that order follows the profile and the spine through a rigid motion, so a
 /// moved exact hit on one of them is the same twin, as on `integration`. Twins placed on a closed
-/// first-source edge (twinOrder's `closedSource`) carry the closed edge's flag too.
-std::vector<TwinPlace> twinPlaces(std::size_t count, bool ordered = true, bool closed = false)
+/// first-source edge (twinOrder's `closedSource`) carry the closed edge's flag too. `counted`
+/// gives a lone member the count too (`0of1`): it is the one left of a group whose other members
+/// Connected Names told apart, so its lone `0` would be the name of the group's member when it is
+/// alone (a helix's turn 1 in one turn, the last turn in two: batch 4's T1, ops#640).
+std::vector<TwinPlace> twinPlaces(
+    std::size_t count,
+    bool ordered = true,
+    bool closed = false,
+    bool counted = false
+)
 {
     std::vector<TwinPlace> places(count);
-    if (count > 1) {
+    if (count > 1 || (counted && count == 1)) {
         for (std::size_t k = 0; k < count; ++k) {
             places[k].duplicateCount = placeAmong(k, count);
             places[k].ordered = ordered;
@@ -4057,9 +4065,15 @@ TopoShape& TopoShape::makeShapeWithElementMap(
             // twice) are named by their side of the face, `in` and `out` (ops#468), lone ones
             // included: when an edit changes how many there are (the hole's seam leaving the
             // edge or reaching it), a name never passes to the other crossing.
+            // A member left alone without Connected Names while others of its type have them
+            // keeps the count (`0of1`, twinPlaces' `counted`): its lone `0` is the name the
+            // group's member has when the edit leaves it alone (a helix of one turn, a pipe
+            // along one edge), so a reference would pass between them silently (batch 4's T1).
             const std::vector<NamingMapKey>& members = delayedGeneratedEntry.first;
             std::map<char, std::vector<std::size_t>> placedMembers;
+            std::map<char, std::size_t> membersOfType;
             for (std::size_t i = 0; i < members.size(); ++i) {
+                ++membersOfType[*members[i].newElementName.getType()];
                 auto it = generatedConnectedElementMap.find(members[i].newElementShape);
                 if (it == generatedConnectedElementMap.end() || it->second.empty()) {
                     placedMembers[*members[i].newElementName.getType()].push_back(i);
@@ -4080,9 +4094,21 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 for (std::size_t k : order) {
                     ordered.push_back(shapes[k]);
                 }
+                const bool counted = membersOfType[type] > indexes.size();
+                if (counted && indexes.size() == 1) {
+                    // A lone member's order says nothing: its flags (ORD, the closed edge's) are
+                    // those of its group's members of its type, as twins of more turns have them
+                    std::vector<TopoDS_Shape> all;
+                    for (const NamingMapKey& member : members) {
+                        if (*member.newElementName.getType() == type) {
+                            all.push_back(member.newElementShape);
+                        }
+                    }
+                    twinOrder(all, delayedSources[entryIndex], frame, &makerOrder, &closed);
+                }
                 const std::vector<TwinPlace> typePlaces = type == 'V' && !crossedEdge.IsNull()
                     ? crossingPlaces(ordered, crossedEdge, crossingFace, closed)
-                    : twinPlaces(ordered.size(), !makerOrder, closed);
+                    : twinPlaces(ordered.size(), !makerOrder, closed, counted);
                 for (std::size_t k = 0; k < order.size(); ++k) {
                     places[indexes[order[k]]] = typePlaces[k];
                 }

@@ -181,7 +181,11 @@ namespace
 // 16: ops#502, a result without history (a Part primitive, a Python feature's shape, a PartDesign
 // primitive's tool) names its elements by a verified match against the result it replaces (`MLN`
 // ids from a counter saved with the shape), where its consumers named them by index.
-constexpr int ForkNamingRevision = 16;
+// 17: ops#640 (sweeps slice 2, batch 4's T1 and I-R3), a PartDesign Helix's caps are the profile
+// face and its edges and vertexes, modified (the start) and projected (the end), so turn 1's side
+// faces and edges are told apart by the start cap's names; the one turn left without them keeps
+// the count, `0of1`, where its lone `0` was the name of turn 1 in a helix of one turn.
+constexpr int ForkNamingRevision = 17;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
