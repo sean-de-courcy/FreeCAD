@@ -144,8 +144,8 @@ class KernelBudgetTest(unittest.TestCase):
         body.BaseFeature = box
         pocket = body.newObject("PartDesign::Pocket", "Pocket")
         pocket.Profile = (prof, ["Face1"])
-        # Length, not ThroughAll: a symmetric through-all pocket of this profile takes minutes
-        # (kernel-11's find, its own item); this one about as long as the cut
+        # Length, not ThroughAll: about as long as the cut (testSymmetricThroughAllPocket times
+        # the through-all one)
         pocket.Type = "Length"
         pocket.Length = 20
         pocket.Midplane = True
@@ -166,6 +166,40 @@ class KernelBudgetTest(unittest.TestCase):
         doc.recompute()
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertAlmostEqual(pocket.Shape.Volume, cut.Shape.Volume, delta=1e-6 * cut.Shape.Volume)
+
+    def testSymmetricThroughAllPocket(self):
+        """A symmetric through-all Pocket of an 800-edge profile, refined, in seconds (168 s
+        before: the refine's face mapper fetched every face of the two sides' prism with its
+        element map for each merged face). The result is the plate less the profile's prism:
+        the volume from the polygon's area, the faces the plate's six plus one per edge."""
+        n = 800
+        doc = FreeCAD.newDocument("KernelBudgetSymmetric")
+        self.docs.append(doc)
+        box = doc.addObject("Part::Box", "Plate")
+        box.Length = box.Width = 60
+        box.Height = 5
+        prof = doc.addObject("Part::Feature", "Profile")
+        prof.Shape = wavy(n, 30, 30, -1.0)
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = box
+        doc.recompute()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = (prof, ["Face1"])
+        pocket.Type = "ThroughAll"
+        pocket.Midplane = True
+        pocket.Refine = True
+        self.setLimit(120)
+        start = time.perf_counter()
+        doc.recompute()
+        elapsed = time.perf_counter() - start
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        pts = [v.Point for v in prof.Shape.Wires[0].OrderedVertexes]
+        area = 0.5 * abs(
+            sum(a.x * b.y - b.x * a.y for a, b in zip(pts, pts[1:] + pts[:1]))
+        )
+        self.assertAlmostEqual(pocket.Shape.Volume, (60 * 60 - area) * 5, delta=1e-6 * 60 * 60 * 5)
+        self.assertEqual(len(pocket.Shape.Faces), 6 + n)
+        self.assertLess(elapsed, 30, elapsed)
 
     def testShortCallsUnderTheLimit(self):
         # Ordinary features are unaffected by a short limit
