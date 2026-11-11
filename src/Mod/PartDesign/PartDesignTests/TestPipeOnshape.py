@@ -1013,6 +1013,43 @@ class TestPipeSelfOverlapUnion(PipeCase):
         self.assertLess(pipe.Shape.Volume, naive - 0.5)
         self.assertGreater(pipe.Shape.Volume, naive - 4)
 
+    def multisection(self, radius):
+        """A circle r 1 normal to X at the origin swept along the U path (0,0)-(30,0)-(30,6)-(0,6),
+        with sections r 1 at both corners and r `radius` at the end: only leg 3 (y = 6) grows."""
+        path = self.sketch("Path", models.polyline([(0, 0), (30, 0), (30, 6), (0, 6)]))
+        profile = self.sketch("Profile", [models.circle(0, 0, 1)], placement=YZ)
+        sections = []
+        for k, (x, y, r) in enumerate(((30, 0, 1), (30, 6, 1), (0, 6, radius))):
+            placement = App.Placement(V(x, 0, 0), YZ.Rotation)
+            sections.append(self.sketch(f"Section{k}", [models.circle(y, 0, r)], placement=placement))
+        return self.pipe(profile, path, ProfileControl="None", Transformation="Multisection",
+                         Sections=sections)
+
+    def testALargerSectionFurtherOnIsUnited(self):
+        """The ops#666 skeptic's silent path A for sections: the start profile's reach (r 1) keeps the
+        overlap check off for legs 6 apart, but the end section r 5.5 dips leg 3's tube to y 0.5 at
+        x = 0, into leg 1's (r 1). The sweep came out a self-overlapping solid (BOP SelfIntersect on
+        faces, V 869.6967, the overlap counted twice), Up-to-date. Now the sections' reach arms the
+        check, and the tubes' union is one solid holding the point (1, 0.8, 0), inside both tubes
+        (V 869.2494, 7 faces, BOP finds only the C0 edges it finds at r 4). The overlap lies in leg 1's
+        tube (r 1) where leg 3 reaches below y 1, which needs its radius over 5: x < 3.4 for a radius
+        growing evenly from 1 at x 30. So the union is under the double-counted volume and over it
+        less a 6 long piece of leg 1's tube (twice that reach)."""
+        doubled = 869.6967
+        pipe = self.multisection(5.5)
+        self.assertOneSolid(pipe)
+        self.assertTrue(pipe.Shape.isInside(V(1, 0.8, 0), 1e-6, True))
+        volume = pipe.Shape.Volume
+        self.assertLess(volume, doubled - 0.1)
+        self.assertGreater(volume, doubled - 6 * math.pi)
+        self.assertAlmostEqual(volume, 869.2494, places=2)
+
+    def testASectionClearOfTheOtherLegSweepsAsBefore(self):
+        """The end section r 4 reaches y 2 at x = 0, clear of leg 1's tube (y 1): the check runs (the
+        sections' reach, 4, against legs 6 apart) and finds nothing, and the sweep is as before
+        (V 569.609 on the build without the sections' reach)."""
+        self.assertOneSolid(self.multisection(4), 569.609, places=2)
+
 
 class TestPipeTwist(PipeCase):
     """SW11: twist is linear in the path's length; `TwistCCW` off = clockwise about the path's direction.
