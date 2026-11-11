@@ -2500,7 +2500,8 @@ bool dressupGetSelected(
     Gui::Command* cmd,
     const std::string& which,
     std::vector<DressUpPick>& picks,
-    bool& noSelection
+    bool& noSelection,
+    Part::Feature** wholePart = nullptr
 )
 {
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
@@ -2574,15 +2575,11 @@ bool dressupGetSelected(
 
         const std::vector<std::string>& subs = it.getSubNames();
         if (subs.empty() || freecad_cast<PartDesign::Body*>(it.getObject())) {
-            // the part whole: for Fillet and Chamfer all its edges (not for Draft or Thickness)
-            if (allEdgesIfWhole && !group->useAllEdges) {
-                group->useAllEdges = true;
-                group->subs.clear();
-                const std::string edge = Part::TopoShape::shapeName(TopAbs_EDGE);
-                const int count = shape.countSubElements(edge.c_str());
-                for (int index = 1; index <= count; ++index) {
-                    group->subs.push_back(edge + std::to_string(index));
-                }
+            // the part whole: Fillet and Chamfer take no edges from it (selection parity P6,
+            // oracle 8 SQ12: a part preselected leaves Onshape's Fillet field empty), they open
+            // empty on it; Draft and Thickness as before
+            if (allEdgesIfWhole && wholePart && !*wholePart) {
+                *wholePart = base;
             }
             continue;
         }
@@ -2592,6 +2589,15 @@ bool dressupGetSelected(
                     group->subs.push_back(sub);
                 }
             }
+        }
+    }
+    if (allEdgesIfWhole) {
+        // a part picked whole stands for nothing; the element picks stay
+        std::erase_if(picks, [](const DressUpPick& pick) { return pick.subs.empty(); });
+        if (picks.empty() && wholePart && *wholePart) {
+            Gui::Selection().clearSelection();
+            noSelection = true;
+            return true;
         }
     }
     if (picks.empty()) {
@@ -2779,12 +2785,15 @@ static void makeDressUps(
 {
     std::vector<DressUpPick> picks;
     bool noSelection = false;
-    if (!dressupGetSelected(cmd, which, picks, noSelection)) {
+    Part::Feature* wholePart = nullptr;
+    if (!dressupGetSelected(cmd, which, picks, noSelection, &wholePart)) {
         return;
     }
     if (noSelection) {
-        PartDesign::Body* body = toolFirstBody();
-        auto base = body ? freecad_cast<Part::Feature*>(body->Tip.getValue()) : nullptr;
+        // a part picked whole opens the dialog empty on that part (selection parity P6)
+        PartDesign::Body* body = wholePart ? nullptr : toolFirstBody();
+        auto base = wholePart ? wholePart
+                              : (body ? freecad_cast<Part::Feature*>(body->Tip.getValue()) : nullptr);
         if (!base) {
             Gui::getMainWindow()->showMessage(
                 QObject::tr("%1 needs a part with a solid").arg(QObject::tr(which.c_str())),

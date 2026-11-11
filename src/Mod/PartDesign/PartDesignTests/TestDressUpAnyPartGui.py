@@ -289,3 +289,33 @@ class TestDressUpAnyPartGui(ResultBoxGuiCase):
         self.close(ok=False)
         self.watching = False
         self.assertNoTrace(a, b, padA, padB)
+
+    def checkAPartPreselectedLeavesItEmpty(self, command):
+        """Selection parity P6 (oracle 8, SQ12): a part picked whole, then Fillet or Chamfer:
+        the dialog opens on that part with no edge in the field and not every edge (the fork
+        took all 12 edges); an edge click then adds just that edge."""
+        a, b, padA, padB = self.twoParts()
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", a)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, b.Name)
+        self.watchModals()
+        Gui.runCommand(command)
+        self.waitForPanel()
+        typeId = "PartDesign::" + command.split("_", 1)[1]
+        [dressUp] = self.made(typeId)
+        self.assertEqual(base(dressUp)[1], [], command + ": the part's edges were taken")
+        self.assertFalse(dressUp.UseAllEdges, command + ": UseAllEdges")
+        self.assertEqual(dressUp.BaseFeature, padB, command + ": not on the picked part")
+        edge = verticalEdge(padB, 30, 10)
+        self.click(padB, edge)
+        pump(0.3)
+        self.assertEqual(base(dressUp), (padB, [edge]), command)
+        self.close(ok=False)
+        self.watching = False
+        self.assertEqual(self.modals, [])
+
+    def testAPartPreselectedLeavesFilletEmpty(self):
+        self.checkAPartPreselectedLeavesItEmpty("PartDesign_Fillet")
+
+    def testAPartPreselectedLeavesChamferEmpty(self):
+        self.checkAPartPreselectedLeavesItEmpty("PartDesign_Chamfer")
