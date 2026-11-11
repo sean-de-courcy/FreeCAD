@@ -99,6 +99,14 @@ GuiExport bool switchTo(
     std::string* refusal = nullptr
 );
 
+/** Whether the workbench @p name fits the active document's active tab: a Part Studio takes Part
+ * Design and the Sketcher, an Assembly its own, a Drawing TechDraw, a Variable Studio none besides
+ * the one it has; always when the tabs are off or no document is open. Std_Workbench (the selector,
+ * View > Workbench) asks; a script's activateWorkbench doesn't. @p refusal says why ("This tab is
+ * a Part Studio: use + for an Assembly").
+ */
+GuiExport bool allowsWorkbench(const std::string& name, std::string* refusal = nullptr);
+
 /// MainWindow: the bars, the hidden MDI tab bar, the controller
 GuiExport void setup(MainWindow* mw);
 
