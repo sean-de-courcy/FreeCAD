@@ -290,20 +290,61 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertVolume(pieces[1], 450 - rounded(1))
         self.assertClean(f)
 
-    def testAnEdgeSplitBetweenTwoPiecesIsLoud(self):
-        """10.14 (unverified on Onshape): a slot through B splits the picked top front edge between
-        two pieces: the pick is in two parts, left out, and the owner says so (WARNING when its
-        other pick, on A, rounds)."""
-        a, b = self.body("A"), self.body("B")
-        f = makeDressUp(self.doc, self.S, "F", [pickAt(a, frontTop(0)), pickAt(b, frontTop(20))], 1)
-        e = self.slot((24.5, -1, 25.5, 11), index=list(self.list.Entries).index(f))
+    def pieces(self, e):
+        """E made pieces, in its own step; the live parts that were B, by their lowest x, then z."""
         self.doc.openTransaction("pieces")
         PartDesign.studioMakePieces(e)
         self.doc.commitTransaction()
         self.doc.recompute()
+        return sorted(
+            (p for p in PartDesign.studioLiveParts(self.list) if 15 < p.Shape.BoundBox.XMin < 35),
+            key=lambda p: (round(p.Shape.BoundBox.XMin, 6), round(p.Shape.BoundBox.ZMin, 6)),
+        )
+
+    def testAnEdgeSplitBetweenTwoPiecesRoundsBoth(self):
+        """Onshape (oracle, hub 11 P8a: a pick is its edge's whole history): a slot x 24.5..25.5
+        through B, made pieces before F, splits the picked top front edge between the two pieces:
+        each piece's half is rounded (L 4.5), a step in each, no warning; A's pick rounds A."""
+        a, b = self.body("A"), self.body("B")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(a, frontTop(0)), pickAt(b, frontTop(20))], 1)
+        e = self.slot((24.5, -1, 25.5, 11), index=list(self.list.Entries).index(f))
+        left, right = self.pieces(e)
         self.assertVolume("A", 1000 - rounded(1))
-        self.assertIn("two parts", f.getStatusString())
-        self.assertIn("Warning", f.State)
+        for piece in (left, right):
+            self.assertIsNotNone(self.step(f, piece), piece.Name)
+            self.assertVolume(piece, 450 - rounded(1, 4.5))
+        self.assertClean(f)
+
+    def crossCut(self, f):
+        """A Remove across B at z 4.5..5.5 (a sketch on y = -1, normal -y, cut 12 deep along +y),
+        put before f and made pieces: B's lower and upper halves, 450 each before f."""
+        sk = studioSketch(self.doc, self.S, "ESk", ((19, 4.5, 31, 5.5),))
+        sk.Placement = App.Placement(V(0, -1, 0), App.Rotation(V(1, 0, 0), 90))
+        e = makeOwner(self.doc, self.S, "Pocket", "E", sk, ("B",), Length=12, Refine=False)
+        PartDesign.studioMove(e, list(self.list.Entries).index(f))
+        self.doc.recompute()
+        return self.pieces(e)
+
+    def testAVerticalEdgeCutAcrossRoundsBothHalves(self):
+        """Onshape (oracle, hub 11 P8a, its box 20 x 20 x 10 split at z 5): the studio splits by a
+        Remove, so a 1 mm gap at z 4.5..5.5 cuts B in two; r 2 on B's vertical edge at x 30, y 10,
+        picked before: both halves rounded, (4 - pi) 4.5 off each of 450, no warning."""
+        b = self.body("B")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(b, V(30, 10, 5))], 2)
+        self.assertVolume("B", 1000 - rounded(2))
+        lower, upper = self.crossCut(f)
+        for piece in (lower, upper):
+            self.assertVolume(piece, 450 - rounded(2, 4.5))
+        self.assertClean(f)
+
+    def testAChamferOnAVerticalEdgeCutAcrossDressesBothHalves(self):
+        """The same with a 1 mm chamfer: s^2 L / 2 = 2.25 off each half."""
+        b = self.body("B")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(b, V(30, 10, 5))], 1, "Chamfer")
+        lower, upper = self.crossCut(f)
+        for piece in (lower, upper):
+            self.assertVolume(piece, 450 - 2.25)
+        self.assertClean(f)
 
     def testReorderAboveTheEdgesMakerIsLoud(self):
         """A boss on A's top (x 2..8, z 10..15) makes the edge F rounds; F moved above the boss

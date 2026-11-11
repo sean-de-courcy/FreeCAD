@@ -823,20 +823,17 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
             // with a warning; Onshape ignores it silently (oracle 9 P1)
             notes.push_back(partLabel(owner, pick.id) + ": a picked edge is not found");
         }
-        else if (pick.found.size() > 1) {
-            std::string where;
-            for (const auto& found : pick.found) {
-                where += (where.empty() ? "'" : ", '") + std::string(found.first->Label.getValue())
-                    + "'";
-            }
-            notes.push_back(partLabel(owner, pick.id) + ": a picked edge is in two parts (" + where
-                            + "), so it is left out (unverified on Onshape)");
-        }
         else {
-            auto& names = subs[pick.found.front().first];
-            for (const auto& name : pick.found.front().second) {
-                if (std::ranges::find(names, name) == names.end()) {
-                    names.push_back(name);
+            // Every piece of the picked edge, in whatever part a split put it, is dressed: the
+            // pick is the edge's whole history (Onshape, oracle for hub 11 P8a: a split before the
+            // dress-up leaves its halves in two parts, both rounded, OK, one row; as P2 within one
+            // part)
+            for (const auto& [part, found] : pick.found) {
+                auto& names = subs[part];
+                for (const auto& name : found) {
+                    if (std::ranges::find(names, name) == names.end()) {
+                        names.push_back(name);
+                    }
                 }
             }
         }
@@ -860,7 +857,9 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         // misses is the owner's warning above, never a guess of the reference solver
         std::vector<std::string> wanted;
         for (const auto& pick : picks) {
-            if (pick.found.size() == 1 && pick.found.front().first == part) {
+            if (std::ranges::any_of(pick.found, [part](const auto& found) {
+                    return found.first == part;
+                })) {
                 wanted.push_back(pick.text);
             }
         }
@@ -951,7 +950,8 @@ PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step)
 
 /// The owner's picks as its dialog lists them (P8a-2, 10.14 "the dialog"), one row per pick: the
 /// part holding it at the owner's place and its elements there, "Part 2: Edge7" (a split edge:
-/// "Part 2: Edge7, Edge9"); a pick found nowhere or in two parts says so. Declared where used
+/// "Part 2: Edge7, Edge9"; pieces in two parts: "Part 1: Edge3; Part 2: Edge7"); a pick found
+/// nowhere says so. Declared where used
 PartDesignExport std::vector<std::string> studioDressUpRows(const DressUp* owner)
 {
     std::vector<std::string> rows;
@@ -969,17 +969,18 @@ PartDesignExport std::vector<std::string> studioDressUpRows(const DressUp* owner
             rows.push_back(labelOf(pick.id) + ": not found");
             continue;
         }
-        if (pick.found.size() > 1) {
-            rows.push_back(labelOf(pick.id) + ": in two parts, left out");
-            continue;
+        // One row however many parts hold its pieces: "Part 1: Edge3; Part 2: Edge7"
+        std::string row;
+        for (const auto& [part, found] : pick.found) {
+            std::string elements;
+            for (const auto& sub : found) {
+                const auto dot = sub.rfind('.');
+                elements += (elements.empty() ? "" : ", ")
+                    + (dot == std::string::npos ? sub : sub.substr(dot + 1));
+            }
+            row += (row.empty() ? "" : "; ") + std::string(part->Label.getValue()) + ": " + elements;
         }
-        std::string elements;
-        for (const auto& sub : pick.found.front().second) {
-            const auto dot = sub.rfind('.');
-            elements += (elements.empty() ? "" : ", ")
-                + (dot == std::string::npos ? sub : sub.substr(dot + 1));
-        }
-        rows.push_back(std::string(pick.found.front().first->Label.getValue()) + ": " + elements);
+        rows.push_back(row);
     }
     return rows;
 }
