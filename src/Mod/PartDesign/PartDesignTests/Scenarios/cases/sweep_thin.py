@@ -36,6 +36,8 @@ class _ThinPipe(Scenario):
     thick = 1.0
     points = ((0, 0), (10, 0), (10, -8))
     closed = False
+    midplane = False
+    thick2 = 0.0
 
     def curve1(self):
         return face(surface="plane", contains=(5, 0, 10))
@@ -56,6 +58,8 @@ class _ThinPipe(Scenario):
         pipe.Spine = (self.path, [])
         pipe.BodyType = "Thin"
         pipe.Thickness1 = self.thick
+        pipe.Midplane = self.midplane
+        pipe.Thickness2 = self.thick2
         self.pipe = pipe
         doc.recompute()
         for ref in self.REFS:
@@ -137,4 +141,86 @@ class ThinPipeRingCurveAdded(ThinPipeRingThicker):
 
     def edit(self, doc):
         self.profile.addGeometry(Part.LineSegment(V(20, 0, 0), V(30, 0, 0)), False)
+        doc.recompute()
+
+
+class ThinPipeMidplaneThicker(_ThinPipe):
+    """Midplane: the wall straddles the open polyline, y -thick/2..thick/2 along the first segment
+    and x 10-thick/2..10+thick/2 along the second, so each segment's two sides are offsets of the
+    same curve (twins told apart only by their connected names, sweeps 16). Thickness1 1 -> 2:
+    each side moves out by 0.5 and stays the side it was (Onshape names a thin sweep's sides from
+    the profile's curves)."""
+
+    abstract = False
+    midplane = True
+    REFS = ("upper1", "lower1", "outer2", "inner2")
+
+    def upper1(self):
+        return face(surface="plane", contains=(5, self.thick / 2, 10))
+
+    def lower1(self):
+        return face(surface="plane", contains=(5, -self.thick / 2, 10))
+
+    def outer2(self):
+        return face(surface="plane", contains=(10 + self.thick / 2, -4, 10))
+
+    def inner2(self):
+        return face(surface="plane", contains=(10 - self.thick / 2, -4, 10))
+
+    def edit(self, doc):
+        self.thick = 2.0
+        self.pipe.Thickness1 = 2.0
+        doc.recompute()
+
+
+class ThinPipeMidplaneCurveAdded(ThinPipeMidplaneThicker):
+    """Midplane, and a third segment (10,-8)-(0,-8) added to the profile: the first two segments'
+    sides stay."""
+
+    def edit(self, doc):
+        self.profile.addGeometry(Part.LineSegment(V(10, -8, 0), V(0, -8, 0)), False)
+        doc.recompute()
+
+
+class ThinPipeMidplaneCurveAddedFirst(ThinPipeMidplaneThicker):
+    """Midplane, and a segment (0,-6)-(0,0) added before the first (the wire's first edge now):
+    the old segments' sides stay."""
+
+    def edit(self, doc):
+        self.profile.addGeometry(Part.LineSegment(V(0, -6, 0), V(0, 0, 0)), False)
+        doc.recompute()
+
+
+class ThinPipeMidplaneFlipped(ThinPipeMidplaneThicker):
+    """Midplane, and FlipWall set: the wall straddles the curve as before, so every side stays."""
+
+    def edit(self, doc):
+        self.pipe.FlipWall = True
+        doc.recompute()
+
+
+class ThinPipeTwoSidedCurveAdded(_ThinPipe):
+    """Thickness1 1 and Thickness2 0.5 (Midplane off): the wall is y -1..0.5 along the first
+    segment, x 9..10.5 along the second (Thickness1 to the right of the drawn direction, SW18 (e)),
+    both sides offsets of the curve. A third segment (10,-8)-(0,-8) is added: the first two
+    segments' four sides stay."""
+
+    abstract = False
+    thick2 = 0.5
+    REFS = ("right1", "left1", "right2", "left2")
+
+    def right1(self):
+        return face(surface="plane", contains=(5, -1, 10))
+
+    def left1(self):
+        return face(surface="plane", contains=(5, 0.5, 10))
+
+    def right2(self):
+        return face(surface="plane", contains=(9, -4, 10))
+
+    def left2(self):
+        return face(surface="plane", contains=(10.5, -4, 10))
+
+    def edit(self, doc):
+        self.profile.addGeometry(Part.LineSegment(V(10, -8, 0), V(0, -8, 0)), False)
         doc.recompute()
