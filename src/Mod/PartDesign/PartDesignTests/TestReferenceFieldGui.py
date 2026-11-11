@@ -6197,7 +6197,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 4, places=4)
         self.assertThroughSection(pipe, 10, 16)
 
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profileField = findField("fieldProfile")
         self.assertIsNotNone(profileField, "no profile field")
         self.arm(profileField, byFocus=True)
