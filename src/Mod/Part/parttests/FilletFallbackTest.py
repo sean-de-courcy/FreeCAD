@@ -1971,6 +1971,8 @@ class OverflowTest(unittest.TestCase):
             ("Chamfer", 1.56, 2903.825),
             ("Chamfer", 2.0, 2881.118),
             ("Fillet", 1.55, 2922.310),
+            ("Fillet", 1.57, 2921.9784),  # oracle 9
+            ("Fillet", 1.6, 2921.4703),
         ):
             with self.subTest(kind=kind, size=size):
                 self.assertBuilt(self.dressUp(kind, plate, size, rims), volume, 10)
@@ -2124,7 +2126,7 @@ def lens(thickness):
 class CornerWithACircleTest(unittest.TestCase):
     """Two-edge corners where an edge is a circle, at and past the limit (ops#640, the native
     replica's #15: a chamfer of a keyhole wall's inner top edges, as wide as the wall at the arc
-    and wider than it along the slot; Onshape builds it, removing 25.059).
+    and wider than it along the slot; Onshape builds it).
 
     The expected shape is defined by OCCT's own dress-up, which builds these corners below the
     limit: the same edges on a base whose faces reach farther (a thicker wall, a taller plate), cut
@@ -2151,8 +2153,14 @@ class CornerWithACircleTest(unittest.TestCase):
                     shape, reference = wall.makeFillet(size, edges), wide.makeFillet(size, wideEdges)
                 # The wall's top is consumed: 10 faces, less the top, plus one per edge
                 self.assertSameAs(shape, wall, reference, 14)
-        # The removed volume, against Onshape's #15 (its legs end otherwise: 2e-4)
-        self.assertAlmostEqual(wall.Volume - wall.makeChamfer(1.0, edges).Volume, 25.059, delta=0.01)
+        # Onshape (oracle 9, this wall): removed 25.0539 and 10.6857, area -30.2078 and -21.2981;
+        # 12 faces, its arc being one edge. At 1.05 it refuses (CHAMFER_OVERLAPS_EDGE_LOOP), where
+        # the construction builds the shape above
+        for kind, removed, area in (("Chamfer", 25.0539, -30.2078), ("Fillet", 10.6857, -21.2981)):
+            with self.subTest(onshape=kind):
+                shape = wall.makeChamfer(1.0, edges) if kind == "Chamfer" else wall.makeFillet(1.0, edges)
+                self.assertAlmostEqual(wall.Volume - shape.Volume, removed, delta=2e-4)
+                self.assertAlmostEqual(shape.Area - wall.Area, area, delta=2e-4)
 
     def testKeyholeWallAtItsWidth(self):
         wall, edges = keyhole_ridge(1.0, 1.0)
@@ -2183,3 +2191,46 @@ class CornerWithACircleTest(unittest.TestCase):
                         plate.makeFillet(3.0, edges)
                     else:
                         plate.makeChamfer(3.0, edges)
+
+
+class CurvedWallEndTest(unittest.TestCase):
+    """A full round of a curved wall's flat end (ops#640, the native replica's #150; Onshape's FR1,
+    exact): the end's two straight edges lie between the end face and a cylinder, and rounds of
+    half the wall's thickness share their centre, at the wall's middle radius Rm, r from the end.
+    The end face is consumed: between the end and the centre's meridian the annular sector goes and
+    a half disc stays, h (beta (Ro^2 - Ri^2) / 2 - pi r^2 / 2) with sin beta = r / Rm."""
+
+    def wall(self, inner, outer, height):
+        sector = Part.makeCylinder(outer, height, V(0, 0, 0), V(0, 0, 1), 90).cut(
+            Part.makeCylinder(inner, height + 2, V(0, 0, -1))
+        )
+        edges = [
+            e
+            for e in sector.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.Vertexes[0].Point.y) < 1e-9
+            and abs(e.Vertexes[1].Point.y) < 1e-9
+            and abs(e.Vertexes[0].Point.x - e.Vertexes[1].Point.x) < 1e-9
+        ]
+        self.assertEqual(len(edges), 2)
+        return sector, edges
+
+    def testFullRoundOfACurvedWallsEnd(self):
+        for inner, outer, height, volume in ((10, 11.5, 4, 100.34700), (10, 12, 3, None)):
+            with self.subTest(inner=inner, outer=outer):
+                sector, edges = self.wall(inner, outer, height)
+                r = (outer - inner) / 2
+                beta = math.asin(r / ((inner + outer) / 2))
+                removed = height * (beta * (outer**2 - inner**2) / 2 - math.pi * r * r / 2)
+                if volume is not None:
+                    self.assertAlmostEqual(sector.Volume - removed, volume, delta=1e-5)  # FR1
+                shape = sector.makeFillet(r, edges)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Volume, sector.Volume - removed, delta=1e-6)
+
+    def testChamferOfACurvedWallsEndFails(self):
+        # Not built yet: a chamfer's distances along a cylinder
+        sector, edges = self.wall(10, 11.5, 4)
+        with self.assertRaises(Part.OCCError):
+            sector.makeChamfer(0.75, edges)

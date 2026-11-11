@@ -683,6 +683,9 @@ struct EdgeData
     gp_Circ circle;
     int planeFace = 0;  // circle: which of faces is the plane
     bool convex = true;
+    /// A straight edge with a cylinder parallel to it among its faces (a curved wall's end,
+    /// ops#640, #150): its round is a plane fillet of the faces' traces, swept along the edge
+    bool ruled = false;
 };
 
 /// The maps the construction reads, built once
@@ -772,8 +775,25 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
     BRepAdaptor_Surface s1(data.faces[1], Standard_False);
     if (curve.GetType() == GeomAbs_Line) {
         data.line = true;
-        if (s0.GetType() != GeomAbs_Plane || s1.GetType() != GeomAbs_Plane) {
-            refuse("a straight edge between faces that are not both planes");
+        gp_Dir along = curve.Line().Direction();
+        auto parallelFace = [&](const BRepAdaptor_Surface& surface) {
+            if (surface.GetType() == GeomAbs_Plane) {
+                return true;
+            }
+            if (surface.GetType() != GeomAbs_Cylinder
+                || !parallel(surface.Cylinder().Axis().Direction(), along)) {
+                return false;
+            }
+            data.ruled = true;
+            return true;
+        };
+        bool both = parallelFace(s0);
+        both = parallelFace(s1) && both;
+        if (!both) {
+            refuse("a straight edge between faces that are not planes or cylinders along it");
+        }
+        if (data.ruled && ctx.request.kind != Kind::Fillet) {
+            refuse("a chamfer of a straight edge on a cylinder");
         }
         if (data.start.Distance(data.end) < linearTolerance) {
             refuse("a degenerate edge");
@@ -1007,11 +1027,17 @@ VertexEnd classifyCorner(
         return end;
     }
     bool curved = !data.line;
+    bool ruled = data.ruled;
     for (const auto& edge : otherSelected) {
         auto other = std::find_if(all.begin(), all.end(), [&](const EdgeData& d) {
             return d.edge.IsSame(edge);
         });
         curved = curved || (other != all.end() && !other->line);
+        ruled = ruled || (other != all.end() && other->ruled);
+    }
+    if (ruled) {
+        end.reason = "a corner with a straight edge on a cylinder";
+        return end;
     }
     if (curved) {
         return classifyUnionCorner(ctx, all, data, vertex, otherSelected, std::move(end));
@@ -1210,6 +1236,185 @@ FarSide circleAbout(const gp_Ax1& axis, const gp_Pnt& point)
         side.circ = gp_Circ(gp_Ax2(centre, axis.Direction()), radius);
     }
     return side;
+}
+
+/** The round of a straight edge with a cylinder parallel to it among its faces (EdgeData::ruled):
+ * in the plane normal to the edge, each face is a line or a circle, and the round's arc of radius
+ * r is tangent to both, on the material's side; the tool is the region between the corner, the two
+ * traces and the arc, swept along the edge, whose ends must be square to it (a curved wall's
+ * end, rounded on both edges: Onshape's FR1, exact). Its area in closed form: the triangle of the
+ * corner and the tangent points, plus or minus the circles' segments over the chords, less the
+ * arc's segment
+ */
+Tool ruledTool(const EdgeData& data, const VertexEnd ends[2], double r)
+{
+    gp_Dir direction(gp_Vec(data.start, data.end));
+    double length = data.start.Distance(data.end);
+    for (int i = 0; i < 2; ++i) {
+        if (ends[i].kind != VertexClass::FreeEnd || ends[i].trims.size() != 1
+            || !parallel(ends[i].trims.front().normal, direction)) {
+            refuse("a round of a straight edge on a cylinder that does not end square to it");
+        }
+    }
+    const gp_Pnt& corner = data.start;
+    // Each face's trace in the section plane: a line or a circle
+    struct Trace
+    {
+        bool circle = false;
+        gp_Dir inward;      // along the face, away from the corner
+        gp_Dir material;    // line: the normal into the material
+        gp_Pnt centre;      // circle
+        double radius = 0;  // circle
+        double offset = 0;  // circle: the radius of the locus of the arc's centre
+    };
+    Trace traces[2];
+    for (int k = 0; k < 2; ++k) {
+        Trace& t = traces[k];
+        t.inward = inwardIn(data.faces[k], data.edge, data.first);
+        gp_Dir outward = outwardNormal(data.faces[k], corner);
+        BRepAdaptor_Surface surface(data.faces[k], Standard_False);
+        if (surface.GetType() == GeomAbs_Cylinder) {
+            gp_Cylinder cylinder = surface.Cylinder();
+            const gp_Pnt& a = cylinder.Location();
+            t.circle = true;
+            t.centre = a.Translated(gp_Vec(direction) * gp_Vec(a, corner).Dot(gp_Vec(direction)));
+            t.radius = cylinder.Radius();
+            bool inside = gp_Vec(t.centre, corner).Dot(gp_Vec(outward)) > 0;
+            t.offset = inside ? t.radius - r : t.radius + r;
+            if (t.offset <= linearTolerance) {
+                refuse("a round as big as the cylinder it rolls inside");
+            }
+        }
+        else {
+            t.material = outward.Reversed();
+        }
+    }
+    // The arc's centre: on the line, or the circle, offset by r from each trace; of the two
+    // solutions the one nearer the corner
+    std::vector<gp_Pnt> candidates;
+    auto onLineAndCircle = [&](const Trace& line, const Trace& circle) {
+        gp_Pnt q = corner.Translated(gp_Vec(line.material) * r);
+        gp_Vec u(line.inward);
+        gp_Vec qc(circle.centre, q);
+        double b = u.Dot(qc);
+        double c = qc.SquareMagnitude() - circle.offset * circle.offset;
+        double discriminant = b * b - c;
+        if (discriminant < 0) {
+            return;
+        }
+        for (double sign : {-1.0, 1.0}) {
+            candidates.push_back(q.Translated(u * (-b + sign * std::sqrt(discriminant))));
+        }
+    };
+    if (traces[0].circle && traces[1].circle) {
+        gp_Vec between(traces[0].centre, traces[1].centre);
+        double d = between.Magnitude();
+        if (d <= linearTolerance) {
+            refuse("a round between coaxial cylinders");
+        }
+        double r0 = traces[0].offset;
+        double r1 = traces[1].offset;
+        double a = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+        double h2 = r0 * r0 - a * a;
+        if (h2 >= 0) {
+            gp_Vec x = between / d;
+            gp_Vec y = gp_Vec(direction).Crossed(x);
+            gp_Pnt middle = traces[0].centre.Translated(x * a);
+            candidates.push_back(middle.Translated(y * std::sqrt(h2)));
+            candidates.push_back(middle.Translated(y * -std::sqrt(h2)));
+        }
+    }
+    else if (traces[0].circle) {
+        onLineAndCircle(traces[1], traces[0]);
+    }
+    else {
+        onLineAndCircle(traces[0], traces[1]);
+    }
+    if (candidates.empty()) {
+        refuse("no round of the radius fits between a straight edge's faces");
+    }
+    gp_Pnt centre = candidates.front();
+    for (const auto& p : candidates) {
+        if (p.Distance(corner) < centre.Distance(corner)) {
+            centre = p;
+        }
+    }
+    // The tangent points, on each face's side of the corner
+    gp_Pnt touches[2];
+    for (int k = 0; k < 2; ++k) {
+        const Trace& t = traces[k];
+        if (t.circle) {
+            gp_Vec radial(t.centre, centre);
+            touches[k] = t.centre.Translated(radial.Normalized() * t.radius);
+        }
+        else {
+            double along = gp_Vec(corner, centre).Dot(gp_Vec(t.inward));
+            touches[k] = corner.Translated(gp_Vec(t.inward) * along);
+        }
+        if (gp_Vec(corner, touches[k]).Dot(gp_Vec(t.inward)) <= linearTolerance
+            || std::abs(touches[k].Distance(centre) - r) > linearTolerance) {
+            refuse("a round of a straight edge on a cylinder that does not touch its faces");
+        }
+    }
+    // The section's boundary, and its area
+    auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {
+        return gp_Vec(a, b).Crossed(gp_Vec(a, p)).Dot(gp_Vec(direction));
+    };
+    double area = std::abs(side(corner, touches[0], touches[1])) / 2;
+    TopoDS_Edge walls[2];
+    for (int k = 0; k < 2; ++k) {
+        const Trace& t = traces[k];
+        if (!t.circle) {
+            walls[k] = BRepBuilderAPI_MakeEdge(corner, touches[k]).Edge();
+            continue;
+        }
+        gp_Pnt chordMiddle((corner.XYZ() + touches[k].XYZ()) / 2);
+        gp_Vec out(t.centre, chordMiddle);
+        if (out.Magnitude() <= linearTolerance) {
+            refuse("a round across a half cylinder");
+        }
+        gp_Pnt middle = t.centre.Translated(out.Normalized() * t.radius);
+        walls[k]
+            = BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(corner, middle, touches[k]).Value()).Edge();
+        double chord = corner.Distance(touches[k]);
+        double theta = 2 * std::asin(std::min(1.0, chord / (2 * t.radius)));
+        double segment = t.radius * t.radius * (theta - std::sin(theta)) / 2;
+        // Bulging away from the triangle adds the segment, into it takes it away
+        bool bulges = side(corner, touches[k], middle) * side(corner, touches[k], touches[1 - k]) < 0;
+        area += bulges ? segment : -segment;
+    }
+    gp_Vec toCorner(centre, corner);
+    gp_Pnt arcMiddle = centre.Translated(toCorner.Normalized() * r);
+    if (side(touches[0], touches[1], arcMiddle) * side(touches[0], touches[1], corner) <= 0) {
+        refuse("a round of a straight edge on a cylinder that bulges away from its corner");
+    }
+    double chord = touches[0].Distance(touches[1]);
+    double phi = 2 * std::asin(std::min(1.0, chord / (2 * r)));
+    area -= r * r * (phi - std::sin(phi)) / 2;
+    TopoDS_Edge arc
+        = BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(touches[0], arcMiddle, touches[1]).Value())
+              .Edge();
+    BRepBuilderAPI_MakeWire wire(walls[0], arc, walls[1]);
+    if (!wire.IsDone()) {
+        refuse("building a round's section failed");
+    }
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+    Tool tool;
+    tool.source = data.edge;
+    tool.cut = data.convex;
+    tool.volume = area * length;
+    tool.solid = BRepPrimAPI_MakePrism(face, gp_Vec(direction) * length, Standard_True).Shape();
+    tool.strips.resize(2);
+    for (int k = 0; k < 2; ++k) {
+        tool.strips[k].face = data.faces[k];
+        tool.strips[k].width = corner.Distance(touches[k]);
+        tool.strips[k].farSide.valid = true;
+        tool.strips[k].farSide.lin = gp_Lin(touches[k], direction);
+    }
+    for (int i = 0; i < 2; ++i) {
+        tool.caps.push_back(ends[i].trims.front());
+    }
+    return tool;
 }
 
 /** A prism along a straight edge, bounded by the planes at its ends. None where those planes
@@ -1646,6 +1851,19 @@ bool coincide(const FarSide& a, const FarSide& b)
         && std::abs(a.circ.Radius() - b.circ.Radius()) < linearTolerance;
 }
 
+/// Whether the two tools' sources (edges, or a corner piece's vertex) share a vertex
+bool neighbours(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    TopTools_IndexedMapOfShape vertices;
+    TopExp::MapShapes(a, TopAbs_VERTEX, vertices);
+    for (TopExp_Explorer it(b, TopAbs_VERTEX); it.More(); it.Next()) {
+        if (vertices.Contains(it.Current())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** A cut tool's strip that runs off its face (ops#640, S3) may cross only convex edges, onto
  * faces that turn away from the face's outward side: the air beyond trims the tool (Onshape's
  * KP1-KP4). Across a concave edge, into a wall that rises from the face (a ledge rounded wider
@@ -1748,6 +1966,10 @@ bool checkStrips(
         return 0.0;
     };
     bool atLimit = false;
+    // The tools whose strip runs off its face: a tool with every strip off its face touches none
+    // of them, and no round or chamfer exists (a fillet of r 30 on a 10 x 20 pad's edge);
+    // Onshape's dress-ups past their faces all keep a strip on one (KP1-KP4, K2A-K2E)
+    std::vector<const Strip*> offTheFace;
     for (const auto& group : faces) {
         double covered = 0.0;
         for (size_t k = 0; k < group.strips.size(); ++k) {
@@ -1763,6 +1985,7 @@ bool checkStrips(
                         refuse("a concave dress-up runs past its face");
                     }
                     checkRunOff(group.face, contact, group.owners[k]->source, edgeFaces);
+                    offTheFace.push_back(strip);
                     trimmed = true;
                 }
                 covered += area;
@@ -1786,8 +2009,11 @@ bool checkStrips(
                             }
                             trimmed = true;
                         }
-                        // Two bands that meet exactly (their far sides touch): at the limit
-                        if (expected == 0.0 && !atLimit && area <= tolerance && touch(mine, theirs)) {
+                        // Two bands that meet exactly (their far sides touch): at the limit. The
+                        // strips of neighbours at a corner touch along their common side anyway
+                        if (expected == 0.0 && !atLimit && area <= tolerance
+                            && !neighbours(group.owners[i]->source, group.owners[j]->source)
+                            && touch(mine, theirs)) {
                             atLimit = true;
                         }
                         common += area;
@@ -1824,6 +2050,16 @@ bool checkStrips(
                     atLimit = true;
                 }
             }
+        }
+    }
+    for (const auto& tool : tools) {
+        bool onAFace = tool.strips.empty();
+        for (const auto& strip : tool.strips) {
+            onAFace = onAFace
+                || std::find(offTheFace.begin(), offTheFace.end(), &strip) == offTheFace.end();
+        }
+        if (!onAFace) {
+            refuse("a dress-up runs past both its faces");
         }
     }
     if (limitOnly && !atLimit && !trimmed) {
@@ -2158,6 +2394,9 @@ TopoDS_Shape constructShape(
                     if (other == data.end()) {
                         refuse("a tangent edge that was not analysed");
                     }
+                    if (edgeData.ruled || other->ruled) {
+                        refuse("a tangent continuation of a straight edge on a cylinder");
+                    }
                     double here = 0.0;
                     double there = 0.0;
                     awayFrom(edgeData.edge, vertices[i], &here);
@@ -2175,7 +2414,10 @@ TopoDS_Shape constructShape(
                 }
             }
         }
-        if (edgeData.line) {
+        if (edgeData.ruled) {
+            admit(ruledTool(edgeData, ends, request.size1));
+        }
+        else if (edgeData.line) {
             if (auto tool = lineTool(ctx, edgeData, ends)) {
                 admit(std::move(*tool));
             }
@@ -2258,6 +2500,12 @@ TopoDS_Shape constructShape(
     if (trimmed) {
         if (!overlaps.empty()) {
             refuse("a dress-up past its face at a corner with unequal angles");
+        }
+        // At a three-edge corner the edge tools end on planes through the corner piece's centre:
+        // run past the vertex (an oblique slab's obtuse corners), they leave the material there
+        // in a way the union doesn't model (5.3)
+        if (!corners.empty()) {
+            refuse("a tangent strip runs off its face at a three-edge corner");
         }
         std::vector<const Tool*> cutTools;
         std::vector<TopoDS_Shape> inside;
