@@ -4,6 +4,7 @@
 // notes/parts-design.md 10.12).
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -426,15 +427,16 @@ PieceMatch matchPieces(const Part::TopoShape& source, const std::vector<Body*>& 
     PieceMatch out;
     out.solids.assign(records.size(), -1);
     out.why.assign(records.size(), std::string());
+    out.heldBy.assign(records.size(), -1);
     const auto unique = uniqueNames(source);
     const int count = static_cast<int>(unique.size());
+    const bool split = !records.empty() && std::ranges::none_of(records, [](const Body* r) {
+        return std::string(r->StudioParentId.getValue()).empty();
+    });
     // A split whose source is one solid is gone (Onshape Q13, SPLIT_NO_CHANGE): no piece claims
     // the unsplit part, whatever the witness scores; picks of a piece resolve to the parent
     // (parts-design.md 10.12 amendment). Leftovers keep the rule below
-    if (count == 1 && !records.empty()
-        && std::ranges::none_of(records, [](const Body* r) {
-               return std::string(r->StudioParentId.getValue()).empty();
-           })) {
+    if (count == 1 && split) {
         for (std::size_t r = 0; r < records.size(); ++r) {
             out.why[r] = "The split that made " + quoted(records[r])
                 + " is gone: it is the part it was cut from again";
@@ -479,6 +481,39 @@ PieceMatch matchPieces(const Part::TopoShape& source, const std::vector<Body*>& 
             out.solids[r] = -1;
             out.why[r] = "The faces that told " + quoted(records[r])
                 + " apart lie on two pieces: which one it is can't be told";
+        }
+        return out;
+    }
+    // A partial unsplit (Onshape Q14e): a split source of two or more solids, each held by a
+    // record, some by several. Quiet: the highest score holds it (a tie: the first record), the
+    // others are absorbed into it, and picks of them resolve to it (10.12 amendment). With a
+    // solid unheld the rule below stays (the maker is loud through unclaimedSplit anyway)
+    const bool partial = split && count > 1 && [&]() {
+        for (int j = 0; j < count; ++j) {
+            if (std::ranges::find(out.solids, j) == out.solids.end()) {
+                return false;
+            }
+        }
+        return true;
+    }();
+    if (partial) {
+        for (int j = 0; j < count; ++j) {
+            int holder = -1;
+            for (std::size_t r = 0; r < records.size(); ++r) {
+                if (out.solids[r] == j
+                    && (holder < 0 || best[r] > best[static_cast<std::size_t>(holder)])) {
+                    holder = static_cast<int>(r);
+                }
+            }
+            for (std::size_t r = 0; r < records.size(); ++r) {
+                if (out.solids[r] == j && static_cast<int>(r) != holder) {
+                    out.solids[r] = -1;
+                    out.heldBy[r] = holder;
+                    out.why[r] = quoted(records[r]) + "'s piece is "
+                        + quoted(records[static_cast<std::size_t>(holder)])
+                        + "'s now (its cut is gone): it holds nothing";
+                }
+            }
         }
         return out;
     }
@@ -568,26 +603,45 @@ void noteSplitHeld(App::DocumentObject* maker, const Body* part, const Part::Top
         return;
     }
     const std::string id = studioPartId(part);
-    bool lost = false;
-    if (!result.isNull() && result.countSubShapes(TopAbs_SOLID) == 1) {
-        const auto records = pieceRecords(maker, id);
-        if (!records.empty()) {
-            const PieceMatch match = matchPieces(result, records);
-            lost = std::ranges::all_of(match.solids, [](int j) { return j < 0; });
+    const auto records = pieceRecords(maker, id);
+    // What this source's entries should be: the part's id when its split is gone; for a partial
+    // unsplit (Onshape Q14e), "<piece id>><holder id>" per absorbed piece, in the records' order
+    std::vector<std::string> mine;
+    if (!result.isNull() && !records.empty()) {
+        const PieceMatch match = matchPieces(result, records);
+        if (result.countSubShapes(TopAbs_SOLID) == 1) {
+            if (std::ranges::all_of(match.solids, [](int j) { return j < 0; })) {
+                mine.push_back(id);
+            }
+        }
+        else {
+            for (std::size_t r = 0; r < records.size(); ++r) {
+                if (match.heldBy[r] >= 0) {
+                    mine.push_back(studioPartId(records[r]) + ">"
+                                   + studioPartId(records[static_cast<std::size_t>(match.heldBy[r])]));
+                }
+            }
         }
     }
     auto prop = freecad_cast<App::PropertyStringList*>(maker->getPropertyByName("StudioSplitLost"));
     std::vector<std::string> ids = prop ? prop->getValues() : std::vector<std::string>();
-    const auto at = std::ranges::find(ids, id);
-    if (lost == (at != ids.end())) {
-        return;
+    // This source's entries now: its id, or an absorption of one of its records
+    auto ofThis = [&](const std::string& entry) {
+        if (entry == id) {
+            return true;
+        }
+        const auto mark = entry.find('>');
+        return mark != std::string::npos && std::ranges::any_of(records, [&](const Body* r) {
+                   return studioPartId(r) == entry.substr(0, mark);
+               });
+    };
+    std::vector<std::string> now;
+    std::ranges::copy_if(ids, std::back_inserter(now), ofThis);
+    if (now == mine) {
+        return;  // unchanged: no reordering, so the resync's fixed point settles
     }
-    if (lost) {
-        ids.push_back(id);
-    }
-    else {
-        ids.erase(at);
-    }
+    std::erase_if(ids, ofThis);
+    ids.insert(ids.end(), mine.begin(), mine.end());
     if (!prop) {
         prop = static_cast<App::PropertyStringList*>(maker->addDynamicProperty(
             "App::PropertyStringList",
@@ -704,9 +758,9 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         const PieceMatch match = matchPieces(source.shape, records);
         const int solids = static_cast<int>(source.shape.countSubShapes(TopAbs_SOLID));
         for (std::size_t r = 0; r < records.size(); ++r) {
-            // A gone split's records stay, so its pieces come back with their ids when an edit
-            // cuts again (10.12 amendment, point 4)
-            if (match.solids[r] < 0 && !(source.parent && solids == 1)) {
+            // A gone split's records stay, and an absorbed piece's (a partial unsplit), so its
+            // pieces come back with their ids when an edit cuts again (10.12 amendment, point 4)
+            if (match.solids[r] < 0 && match.heldBy[r] < 0 && !(source.parent && solids == 1)) {
                 emptied.push_back(records[r]);
             }
         }

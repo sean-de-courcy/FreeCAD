@@ -46,11 +46,14 @@ PartDesignExport std::vector<std::string>
 pieceWitness(const Part::TopoShape& source, int index, const Part::TopoShape& base);
 
 /// Which solid of source each record holds (-1: none, with why): each record's best score unique
-/// and non-zero, the tiers compared in order; two records on one solid, the strictly higher wins
+/// and non-zero, the tiers compared in order; two records on one solid, the strictly higher wins.
+/// A split source whose solids are all held (a partial unsplit, Onshape Q14e): the others on a
+/// solid are absorbed into its holder (heldBy, the holder's record index; -1: not absorbed)
 struct PieceMatch
 {
     std::vector<int> solids;
     std::vector<std::string> why;
+    std::vector<int> heldBy;
 };
 PartDesignExport PieceMatch matchPieces(const Part::TopoShape& source,
                                         const std::vector<Body*>& records);
@@ -69,8 +72,9 @@ PartDesignExport std::string unclaimedSplit(const App::DocumentObject* maker,
                                             const Part::TopoShape& result);
 
 /// Notes on maker whether its pieces of part lost their split (the result one solid that no
-/// record holds: a tie): the part is then live again after maker (StudioSplitLost, read by the
-/// projection after the recompute)
+/// record holds): the part is then live again after maker; and which pieces a partial unsplit
+/// absorbed, as "<piece id>><holder id>" (StudioSplitLost, read by the projection after the
+/// recompute)
 PartDesignExport void noteSplitHeld(App::DocumentObject* maker,
                                     const Body* part,
                                     const Part::TopoShape& result);

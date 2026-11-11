@@ -187,7 +187,7 @@ from PartDesignTests.TestStudioList import (
 from PartDesignTests.TestApply import TestApply
 from PartDesignTests.TestStudioOwner import TestStudioOwner
 from PartDesignTests.TestStudioHistory import TestStudioHistory
-from PartDesignTests.TestPieces import TestPieces
+from PartDesignTests.TestPieces import TestPieces, TestStudioUndo
 from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
 from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
