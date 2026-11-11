@@ -241,9 +241,12 @@ std::string studioCopyRefusal(
         return {};
     }
     const std::string name = quoted(owner);
+    // The T3 fix (Onshape oracle 9): an Up to next seed is re-run at each instance with Reapply
+    // off too (R2), and an Up to face seed is copied (R3: Onshape copies it); the others stay
+    // refused where the copy may differ (unverified on Onshape)
     const std::string later =
-        ": a copy at each instance could differ from the instance computed there (Reapply per "
-        "instance comes later)";
+        ": a copy at each instance could differ from the instance computed there (turn Reapply "
+        "on to compute each instance)";
     const bool hole = owner->isDerivedFrom<Hole>();
 
     // A face the feature starts or ends at: its plane must be every instance's own
@@ -305,13 +308,7 @@ std::string studioCopyRefusal(
             return name + " ends Up to a shape" + later;
         }
         if (type == "UpToFace") {
-            if (!keepsFace(linkOf(owner, end.face))) {
-                return name
-                    + " ends Up to face, and an instance doesn't map the face's plane onto "
-                      "itself, so it would meet the face at its own depth"
-                    + later;
-            }
-            continue;
+            continue;  // Reapply off copies it, as Onshape does (oracle 9, R3)
         }
         if (type == "UpToVertex") {
             const TopoDS_Shape shape = referenceShape(linkOf(owner, end.face));

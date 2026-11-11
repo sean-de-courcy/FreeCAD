@@ -41,6 +41,7 @@
 
 #include <array>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <algorithm>
@@ -539,17 +540,36 @@ struct ReapplyItem
     Part::TopoShape tool;                  ///< the seed's tool, in the pattern's frame
     bool additive = true;
     std::vector<InnerLevel> levels;  ///< the patterns among the originals it is in, innermost first
+    /// The T3 fix (oracle 9, R3): how many of levels (innermost first) re-run it, each with Reapply
+    /// on while this pattern's is off; the outer ones copy what they made. 0: none, or all of
+    /// them and this pattern too
+    std::size_t rerunBy = 0;
 
-    /// The move of the patterns among the originals, composed
-    gp_Trsf innerMove() const
+    /// The move of the innermost count of levels, composed (all of them by default)
+    gp_Trsf innerMove(std::size_t count = std::numeric_limits<std::size_t>::max()) const
     {
         gp_Trsf move;
-        for (const InnerLevel& level : levels) {
-            move = level.move.Multiplied(move);
+        for (std::size_t i = 0; i < levels.size() && i < count; ++i) {
+            move = levels[i].move.Multiplied(move);
         }
         return move;
     }
 };
+
+/// Whether computer ends Up to next (Onshape re-runs it at each instance, Reapply on or off:
+/// oracle 9, R2)
+bool endsUpToNext(const App::DocumentObject* computer)
+{
+    if (auto hole = freecad_cast<const Hole*>(computer)) {
+        return std::strcmp(hole->DepthType.getValueAsString(), "UpToFirst") == 0;
+    }
+    if (auto ext = freecad_cast<const FeatureExtrude*>(computer)) {
+        return std::strcmp(ext->Type.getValueAsString(), "UpToFirst") == 0
+            || (std::strcmp(ext->SideType.getValueAsString(), "Two sides") == 0
+                && std::strcmp(ext->Type2.getValueAsString(), "UpToFirst") == 0);
+    }
+    return false;
+}
 
 /// Whether edges a and b coincide: their ends and their middle within tol of each other
 bool sameEdge(const TopoDS_Shape& a, const TopoDS_Shape& b, double tol)
@@ -587,11 +607,17 @@ std::string typeName(const App::DocumentObject* obj)
     return name;
 }
 
-/** The originals of a pattern with Reapply on, flattened as ToolCollector does (Onshape P2, P3),
- * each with how an instance is made (ops#654 T3, notes/patterns-design.md 3.3): an extrusion whose
- * tool depends on the base (Up to next, last, face, vertex or shape, Through all) is re-run at each
- * instance against the part as it grows; a Blind, Two lengths or Symmetric extrusion's tool is the
- * same wherever it goes, so its copy is the re-run. Anything else is refused loudly */
+/** The originals of a pattern, flattened as ToolCollector does (Onshape P2, P3), each with how an
+ * instance is made (ops#654 T3, notes/patterns-design.md 3.3). Where Reapply is on: an extrusion
+ * whose tool depends on the base (Up to next, last, face, vertex or shape, Through all) is re-run
+ * at each instance against the part as it grows; a Blind, Two lengths or Symmetric extrusion's tool
+ * is the same wherever it goes, so its copy is the re-run; anything else is refused loudly. The
+ * T3 fix (Onshape oracle 9): each pattern follows its own Reapply (R3): an original is re-run at
+ * this pattern's instances only when this pattern and every pattern among the originals it goes
+ * through have Reapply on; when only the innermost ones have, it is re-run where they make it and
+ * the others copy that; when the innermost has it off, the seed's tool is copied (refused where
+ * the copy may differ from Onshape's, studioCopyRefusal()). An Up to next seed is re-run at every
+ * instance, Reapply on or off (R2) */
 struct ReapplyCollector
 {
     Transformed& pattern;
@@ -600,6 +626,8 @@ struct ReapplyCollector
     gp_Trsf fromDocument;  ///< the document's frame to the pattern's
     bool nameInstances;
     ToolCollector& tools;
+    bool reapplyOn = false;        ///< this pattern's Reapply
+    std::vector<gp_Trsf> outer;    ///< this pattern's instances (the original left out)
 
     std::string add(
         App::DocumentObject* original,
@@ -632,6 +660,62 @@ struct ReapplyCollector
     }
 
     std::string item(
+        FeatureAddSub* seed,
+        App::DocumentObject* computer,
+        const std::vector<InnerLevel>& levels,
+        std::vector<ReapplyItem>& out
+    )
+    {
+        std::size_t on = 0;
+        for (const InnerLevel& level : levels) {
+            if (!level.inner->Reapply.getValue()) {
+                break;
+            }
+            ++on;
+        }
+        if (endsUpToNext(computer) || (on == levels.size() && reapplyOn)) {
+            return rerunItem(seed, computer, levels, out);
+        }
+        const std::size_t before = out.size();
+        if (on == 0) {
+            // Made with Reapply off: a copy of the seed's tool (R3), unless it may differ from
+            // Onshape's instance
+            if (std::string why = copied(seed, computer, levels, out); !why.empty()) {
+                return why;
+            }
+            if (out.size() == before) {
+                return {};
+            }
+            const ReapplyItem& it = out.back();
+            std::vector<gp_Trsf> checks;
+            const gp_Trsf inner = it.innerMove();
+            for (const gp_Trsf& t : outer) {
+                checks.push_back(t.Multiplied(inner));
+            }
+            return studioCopyRefusal(seed, it.tool, tools.part, checks, fromDocument);
+        }
+        // Re-run by the innermost patterns, whose Reapply is on; copied by the others
+        if (std::string why = rerunItem(seed, computer, levels, out); !why.empty()) {
+            return why;
+        }
+        if (out.size() == before) {
+            return {};
+        }
+        ReapplyItem& it = out.back();
+        if (it.dressUp) {
+            return quoted(computer) + " is re-run at each instance of "
+                + quoted(levels[on - 1].inner) + " (Reapply on), and copying a "
+                + typeName(computer) + " re-run there (" + quoted(&pattern)
+                + ", Reapply off) isn't available yet";
+        }
+        if (it.rerun || it.hole) {
+            it.rerunBy = on;
+        }
+        return {};
+    }
+
+    /// An original as a pattern with Reapply on makes it at each instance
+    std::string rerunItem(
         FeatureAddSub* seed,
         App::DocumentObject* computer,
         const std::vector<InnerLevel>& levels,
@@ -1575,10 +1659,16 @@ App::DocumentObjectExecReturn* Transformed::execute()
             ToolCollector collector {*this, body, trsfInv, fromDocument, supportShape, nameInstances};
             const bool reapply = Reapply.getValue();
             collector.reapply = reapply;
-            if (reapply) {
-                // FreeCAD-CH ops#654 T3 (Onshape's Reapply features, O6, O10): each instance
-                // re-runs the originals there, in order, against the part as it grows
+            {
+                // FreeCAD-CH ops#654 T3 (Onshape's Reapply features, O6, O10): with Reapply on each
+                // instance re-runs the originals there, in order, against the part as it grows.
+                // The T3 fix (oracle 9): instance by instance with Reapply off too (R1); an Up to
+                // next original re-run at each instance either way, an instance that fails
+                // contributing nothing (R2); each pattern among the originals following its own
+                // Reapply (R3)
                 ReapplyCollector reapplied {*this, body, trsfInv, fromDocument, nameInstances, collector};
+                reapplied.reapplyOn = reapply;
+                reapplied.outer = instances;
                 std::vector<ReapplyItem> items;
                 for (auto original : originals) {
                     std::string why = reapplied.add(original, {}, items, 0);
@@ -1587,7 +1677,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     }
                 }
                 const bool rerun = std::ranges::any_of(items, [](const ReapplyItem& item) {
-                    return item.rerun || item.hole || item.dressUp;
+                    return item.rerun || item.hole || item.dressUp || item.rerunBy;
                 });
                 const bool adds = std::ranges::any_of(items, [](const ReapplyItem& item) {
                     return item.additive;
@@ -1600,6 +1690,63 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 if (rerun || (adds && removes)) {
                     const std::string partName = body ? quoted(body) : std::string("the part");
                     const long tag = namingTag() ? namingTag() : getID();
+                    // Re-run by patterns among the originals only (R3, the outer ones copying
+                    // what they made): made once, where the innermost of them makes it, against
+                    // the part at that pattern's place (unverified on Onshape for a tool that
+                    // depends on the base: Onshape's inner pattern grows its part instance by
+                    // instance), then copied as any tool is
+                    for (auto it = items.begin(); it != items.end();) {
+                        if (!it->rerunBy) {
+                            ++it;
+                            continue;
+                        }
+                        Transformed* by = it->levels[it->rerunBy - 1].inner;
+                        Part::TopoShape innerBase;
+                        if (const Part::Feature* support = by->getBaseObject(/*silent=*/true)) {
+                            innerBase = support->Shape.getShape();
+                        }
+                        if (innerBase.isNull()) {
+                            return new App::DocumentObjectExecReturn(
+                                quoted(by) + " has no base", this
+                            );
+                        }
+                        const gp_Trsf at = innerBase.getShape().Location().Transformation();
+                        innerBase.locate(TopLoc_Location());
+                        innerBase = innerBase.makeElementTransform(trsfInv.Multiplied(at));
+                        const gp_Trsf back = it->toPattern.Inverted().Multiplied(
+                            it->innerMove(it->rerunBy).Inverted()
+                        );
+                        const gp_Trsf toSeed = back.Multiplied(it->toPattern);
+                        const Part::TopoShape base = innerBase.makeElementTransform(back);
+                        std::string why;
+                        Part::TopoShape made;
+                        try {
+                            made = it->rerun
+                                ? reapplyExtrusion(it->rerun, toSeed, base, partName, why)
+                                : reapplyHole(it->hole, toSeed, base, why);
+                        }
+                        catch (const Standard_Failure& e) {
+                            why = e.GetMessageString();
+                        }
+                        catch (const Base::Exception& e) {
+                            why = e.what();
+                        }
+                        if (made.isNull()) {
+                            it = items.erase(it);  // it contributes nothing (R2)
+                            continue;
+                        }
+                        it->tool = made.makeElementTransform(it->toPattern);
+                        it->rerun = nullptr;
+                        it->hole = nullptr;
+                        ++it;
+                    }
+                    // Of each original re-run at this pattern's instances, the instances that
+                    // failed; of the copies that add, those tried and made
+                    std::vector<std::size_t> failed(items.size(), 0);
+                    std::vector<std::string> firstWhy(items.size());
+                    std::size_t instancesRun = 0;
+                    std::size_t addsTried = 0;
+                    std::size_t addsMade = 0;
                     try {
                         for (std::size_t position = 1; position < transformations.size();
                              ++position) {
@@ -1611,7 +1758,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                             }
                             const gp_Trsf& outer = transformations[position];
                             const std::string instance = "instance " + std::to_string(position + 1);
-                            for (const ReapplyItem& item : items) {
+                            ++instancesRun;
+                            for (std::size_t index = 0; index < items.size(); ++index) {
+                                const ReapplyItem& item = items[index];
                                 const gp_Trsf full = outer.Multiplied(item.innerMove());
                                 if (item.dressUp) {
                                     // A chamfer or fillet on the instance's edges: the seed's
@@ -1685,10 +1834,12 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                         ? reapplyExtrusion(item.rerun, toSeed, base, partName, why)
                                         : reapplyHole(item.hole, toSeed, base, why);
                                     if (made.isNull()) {
-                                        return new App::DocumentObjectExecReturn(
-                                            quoted(item.named) + " at " + instance + ": " + why,
-                                            this
-                                        );
+                                        // An instance that fails contributes nothing, with no
+                                        // message (oracle 9, R2)
+                                        if (failed[index]++ == 0) {
+                                            firstWhy[index] = instance + ": " + why;
+                                        }
+                                        continue;
                                     }
                                     shape = made.makeElementTransform(item.toPattern);
                                 }
@@ -1741,12 +1892,26 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     &booleanInputsValid
                                 );
                                 // An instance that removes nothing does nothing (Onshape P1); one
-                                // that adds a solid apart from the part is a new part in Onshape
-                                if (item.additive && countSolids(result.getShape()) > before
+                                // that adds a solid apart from the part is a new part in Onshape.
+                                // With Reapply off such a copy is dropped with no message, as the
+                                // copy engine drops it (ops#640 B3-3b), unless the seed made a
+                                // part of its own
+                                const bool copiedHere = !item.rerun && !item.hole;
+                                if (item.additive && copiedHere) {
+                                    ++addsTried;
+                                }
+                                const bool floats = item.additive
+                                    && countSolids(result.getShape()) > before
                                     && !FeatureAddSub::shapesTouch(
                                         placed.getShape(),
                                         supportShape.getShape()
-                                    )) {
+                                    );
+                                if (floats && !reapply) {
+                                    if (!makesItsOwnPart(*item.seed, item.tool, trsfInv)) {
+                                        continue;
+                                    }
+                                }
+                                else if (floats) {
                                     return new App::DocumentObjectExecReturn(
                                         quoted(item.named) + " at " + instance
                                             + " touches nothing of " + partName
@@ -1754,6 +1919,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                               "is not done yet",
                                         this
                                     );
+                                }
+                                if (item.additive && copiedHere) {
+                                    ++addsMade;
                                 }
                                 supportShape = result;
                                 inputCheck = ownResultCheck();
@@ -1765,6 +1933,23 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     }
                     catch (const Base::Exception& e) {
                         return new App::DocumentObjectExecReturn(e.what(), this);
+                    }
+                    // An original re-run at every instance and made at none: loud (unverified on
+                    // Onshape, which drops a failing instance silently, R2)
+                    for (std::size_t index = 0; index < items.size(); ++index) {
+                        if (instancesRun > 0 && failed[index] == instancesRun) {
+                            return new App::DocumentObjectExecReturn(
+                                quoted(items[index].named) + " can't be made at any instance ("
+                                    + firstWhy[index] + ")",
+                                this
+                            );
+                        }
+                    }
+                    // No added copy reached the part, as the copy engine says below
+                    if (addsTried > 0 && addsMade == 0) {
+                        return new App::DocumentObjectExecReturn(
+                            QT_TRANSLATE_NOOP("Exception", "Could not create all instances as entered.")
+                        );
                     }
                     break;
                 }

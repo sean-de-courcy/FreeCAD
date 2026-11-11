@@ -39,9 +39,8 @@
 #
 # T3 adds Reapply on and off to the patterns, and Up to face Remove owners (a Pocket studio feature
 # on a rectangle at z 10.001, down to a plane slanted along y, z = 6.01 + 0.171 y): with Reapply
-# off a pattern of one is refused (its copies would meet the plane at the seed's depth, Onshape
-# O6); with Reapply on each instance is re-solved, the oracle's prism from its own rectangle down
-# to the plane.
+# off a pattern of one copies the seed's prism (oracle 9, R3); with Reapply on each instance is
+# re-solved, the oracle's prism from its own rectangle down to the plane (O6).
 #
 # Slice 9 adds part mirrors (PartDesign::Mirrored owners with PatternType Part, outside every Body):
 # a source part mirrored about a plane x = 15 or x = 35 (a Part::Plane in the studio, outside the
@@ -534,18 +533,26 @@ def oracle(natives, records, bar, live=None):
                 continue
             owner = next(r for r in records if r["name"] == o)
             if owner.get("upto"):
-                # T3: with Reapply off refused (the copies would differ from the instances
-                # re-solved, O6); on, each instance re-solved from its own rectangle
-                if not record.get("reapply"):
-                    continue
+                # T3: with Reapply on, each instance re-solved from its own rectangle; off, copies
+                # of the seed's prism (oracle 9, R3: Reapply off copies an Up to face seed)
                 x0, y0, x1, y1 = owner["rect"]
-                if record["pattern"] == "Linear":
+                if not record.get("reapply"):
+                    tool = slantTool(owner["rect"])
+                    if record["pattern"] == "Linear":
+                        count = record["count"]
+                        copies = [
+                            tool.translated(V(0, k * record["length"] / (count - 1), 0))
+                            for k in range(1, count)
+                        ]
+                    else:
+                        copies = [tool.mirror(V(0, 5, 0), V(0, 1, 0))]
+                elif record["pattern"] == "Linear":
                     count = record["count"]
                     moves = [k * record["length"] / (count - 1) for k in range(1, count)]
                     rects = [(x0, y0 + d, x1, y1 + d) for d in moves]
+                    copies = [slantTool(r) for r in rects]
                 else:
-                    rects = [(x0, 10 - y1, x1, 10 - y0)]
-                copies = [slantTool(r) for r in rects]
+                    copies = [slantTool((x0, 10 - y1, x1, 10 - y0))]
             else:
                 length, width, height, corner = toolBox(owner["rect"], owner["depth"], owner["op"])
                 tool = Part.makeBox(length, width, height, corner)

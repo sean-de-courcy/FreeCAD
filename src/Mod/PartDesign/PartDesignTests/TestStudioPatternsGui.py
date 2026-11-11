@@ -4,7 +4,7 @@
 # A Linear pattern, Polar pattern or Mirror made in a part of a listed studio joins the studio's
 # list at the bar, and its Features field takes studio features: an owner row (a Features-list
 # row), or a face of the part that the owner's step made, which stands for the owner. A pattern
-# that can't copy an original (one acting on two parts, an Up to next one...) says why in its
+# that can't copy an original (one acting on two parts, an Up to last one...) says why in its
 # Features field (TestStudioPatterns has the rules).
 #
 # Designed geometry only: two plates in the studio S, P (x 0..60, y 0..20) and Q (x 0..60,
@@ -234,10 +234,10 @@ class TestStudioPatternsGui(unittest.TestCase):
                 self.assertTrue(pattern.Reapply)
 
     def testReapplyBoxTurnsARefusalIntoInstances(self):
-        """An Up to next hole (refused with Reapply off, Onshape O10); the box ticked, the pattern
+        """An Up to last hole (its copies refused with Reapply off); the box ticked, the pattern
         computes each instance, and its Features field shows no refusal."""
         sk = studioSketch(self.doc, self.S, "NextSk", z=10, circles=((10, 10, 3),))
-        nxt = makeOwner(self.doc, self.S, "Pocket", "Next", sk, ("P",), Type="UpToFirst")
+        nxt = makeOwner(self.doc, self.S, "Pocket", "Next", sk, ("P",), Type="UpToLast")
         self.doc.recompute()
         self.runTool("PartDesign_LinearPattern", nxt)
         pattern = self.pattern()
@@ -249,13 +249,13 @@ class TestStudioPatternsGui(unittest.TestCase):
         pattern.Occurrences = 2
         self.doc.recompute()
         self.assertFalse(pattern.isValid())
-        self.assertIn("Up to next", pattern.getStatusString())
+        self.assertIn("Up to last", pattern.getStatusString())
         self.assertTrue(waitFor(lambda: reapplyBox() is not None))
         reapplyBox().click()
         pump(0.2)
         self.assertTrue(pattern.Reapply)
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
-        self.assertNotIn("Up to next", statusOf(field))
+        self.assertNotIn("Up to last", statusOf(field))
         self.accept()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
 
