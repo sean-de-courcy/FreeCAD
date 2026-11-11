@@ -753,10 +753,21 @@ class TestPipeSelfOverlapUnion(PipeCase):
         self.assertEqual(len(pipe.Shape.Solids), 1)
 
     def testSquareDuctCoincidentFaces(self):
-        """A 2 x 2 square ends at (10, 0.5): leg 4's top and bottom lie on leg 1's (a winding step of
-        2 there) and its sides cross leg 1's side. 2 x 2 x 49.5 less the overlap x 9..11, y 0.5..1,
-        z -1..1 (2): 196."""
-        self.assertOneSolid(self.tube((10, 0.5), models.rectangle(-1, -1, 1, 1)), 196)
+        """SW19 (b): a 2 x 2 square ends at (10, 0.5): leg 4's top and bottom lie on leg 1's (a winding step
+        of 2 there) and its sides cross leg 1's side. 2 x 2 x 49.5 less the overlap x 9..11, y 0.5..1,
+        z -1..1 (2): 196. Refine on (the default) gives Onshape's F 12: the top (z 1) is one face over
+        x 0..21, y -1..11, A 98 (49.5 x 2 less 1), the bottom the same. Refine off keeps FreeCAD's pieces,
+        as on a clear path (each leg's mitred top, and the overlap's patch): 20 faces, the tops still 98."""
+        pipe = self.tube((10, 0.5), models.rectangle(-1, -1, 1, 1))
+        for refine, faces, tops in ((True, 12, 1), (False, 20, 5)):
+            pipe.Refine = refine
+            self.doc.recompute()
+            self.assertOneSolid(pipe, 196)
+            self.assertEqual(len(pipe.Shape.Faces), faces, refine)
+            for z in (1, -1):
+                flat = [f for f in pipe.Shape.Faces if f.Surface.isPlanar() and abs(f.CenterOfMass.z - z) < 1e-6]
+                self.assertEqual(len(flat), tops, (refine, z, [f.Area for f in flat]))
+                self.assertAlmostEqual(sum(f.Area for f in flat), 98, 6)
 
     def testFlushEndCapOnTheSide(self):
         """The square ends at (10, 1): its end cap lies on leg 1's side y = 1 (a step of 0: the
@@ -807,23 +818,10 @@ class TestPipeSelfOverlapUnion(PipeCase):
                 self.assertLess((point.Placement.Base - V(*middles[name])).Length, 0.75,
                                 (end, name, point.Placement.Base))
 
-    def testEndCapSliverAcrossADepthEdit(self):
-        """UNVERIFIED (SW19 pending): the end cap's sliver above leg 1 (z > 0.866) across the end
-        0.5 -> 0.3. FreeCAD-CH's chosen behaviour: the point follows the upper sliver or breaks; it
-        never passes to the lower one."""
-        pipe = self.tube((10, 0.5))
-        self.assertOneSolid(pipe)
-        upper = ["Face%d" % (i + 1) for i, f in enumerate(pipe.Shape.Faces)
-                 if f.Surface.isPlanar() and abs(f.CenterOfMass.y - 0.5) < 1e-6 and f.CenterOfMass.z > 0]
-        self.assertEqual(len(upper), 1)
-        point = self.pointOn(pipe, upper[0], "OnSliver")
-        self.doc.recompute()
-        self.assertGreater(point.Placement.Base.z, 0.866)
-        models.setLines(self.doc.getObject("Path"), {3: ((10, 10), (10, 0.3))})
-        self.doc.recompute()
-        self.assertOneSolid(pipe)
-        if point.isValid():
-            self.assertGreater(point.Placement.Base.z, 0.9, "the reference passed to the lower sliver")
+    def endCap(self, pipe, y):
+        found = ["Face%d" % (i + 1) for i, f in enumerate(pipe.Shape.Faces)
+                 if f.Surface.isPlanar() and abs(f.CenterOfMass.y - y) < 1e-6]
+        return found
 
     def testRingProfileHoleStaysOpen(self):
         """A ring r 1 / 0.4: a point is kept where it lies in some leg's annulus (Onshape's union),
@@ -856,14 +854,22 @@ class TestPipeSelfOverlapUnion(PipeCase):
         pipe = self.pipe(profile, path, ProfileControl="None")
         self.assertOneSolid(pipe, math.pi * 77 - 2.678, places=2)
 
-    def testTwistedSquareOverlapping(self):
-        """UNVERIFIED (SW19 pending): the square twisted 45 degrees along S2's path with its corners
-        rounded r 2 (twist needs a smooth path), end (10, 0.5): one solid, less than the naive
-        4 x (37.5 + 3 pi) (twist keeps the section's area) by at most the end's reach into leg 1."""
-        geometry = models.polyline([(0, 0), (18, 0)]) + [arc3((18, 0, 0), (18, 2, 0), (20, 2, 0))] \
-            + models.polyline([(20, 2), (20, 8)]) + [arc3((20, 8, 0), (18, 8, 0), (18, 10, 0))] \
-            + models.polyline([(18, 10), (12, 10)]) + [arc3((12, 10, 0), (12, 8, 0), (10, 8, 0))] \
-            + models.polyline([(10, 8), (10, 0.5)])
+    def testTwistOnTheSharpPathStops(self):
+        """SW19 (c): a twist of 1 turn on S2's path, sharp at its corners: Onshape refuses it
+        (SWEEP_TWIST_REQUIRE_TANGENT_PATH) with the 2 x 2 square on the overlap and with the circle on
+        the overlapping and the clear path alike."""
+        for end, profile in (((10, 0.5), models.rectangle(-1, -1, 1, 1)), ((10, 0.5), None), ((10, 1.5), None)):
+            with self.subTest(end=end, square=profile is not None):
+                self.body = self.doc.addObject("PartDesign::Body", "Body")  # each case on its own
+                pipe = self.tube(end, profile, HasTwist=True, TwistType="Turns", Turns=1)
+                self.assertStops(pipe, "smooth path")
+
+    def testTwistedSquareOnARoundedPathOverlapping(self):
+        """The square twisted 45 degrees along S2's path with its corners rounded r 2 (smooth, so the
+        twist builds), end (10, 0.5): one solid, less than the naive 4 x (37.5 + 3 pi) (twist keeps the
+        section's area) by at most the end's reach into leg 1. Bounds by geometry; Onshape's value for
+        this case wasn't asked (SW19 (c) covers the sharp path)."""
+        geometry = models.polyline([(0, 0), (18, 0)]) + [arc3((18, 0, 0), (18, 2, 0), (20, 2, 0))]             + models.polyline([(20, 2), (20, 8)]) + [arc3((20, 8, 0), (18, 8, 0), (18, 10, 0))]             + models.polyline([(18, 10), (12, 10)]) + [arc3((12, 10, 0), (12, 8, 0), (10, 8, 0))]             + models.polyline([(10, 8), (10, 0.5)])
         path = self.sketch("Path", geometry)
         profile = self.sketch("Profile", models.rectangle(-1, -1, 1, 1), placement=YZ)
         pipe = self.pipe(profile, path, ProfileControl="None",
@@ -1130,7 +1136,7 @@ class TestPipeThin(PipeCase):
         self.assertBox(pipe.Shape, -2, 0, 0, 2, 1, 20)
 
     def testThickness2IsTheOtherSide(self):
-        """Thickness 1 to the right, 0.5 to the left: y -1..0.5, 120 (SW18 (e) asks Onshape)."""
+        """SW18 (e): thickness 1 to the right, 0.5 to the left (Midplane off): y -1..0.5, 120."""
         pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=1, Thickness2=0.5)
         self.assertSweeps(pipe, 120)
         self.assertBox(pipe.Shape, -2, -1, 0, 2, 0.5, 20)
@@ -1163,18 +1169,47 @@ class TestPipeThin(PipeCase):
         self.assertAlmostEqual(pipe.Shape.BoundBox.YMin, -1, 4)
         self.assertAlmostEqual(pipe.Shape.BoundBox.YMax, 0, 4)
 
+    def corner(self):
+        return self.strip(((-2, 0), (2, 0), (2, 3)))
+
     def testWallInsideACorner(self):
-        """Polyline (-2, 0) -> (2, 0) -> (2, 3), the wall on its left (inside the corner): 6 x 20."""
-        pipe = self.pipe(self.strip(((-2, 0), (2, 0), (2, 3))), self.line(0, 20), BodyType="Thin",
-                         Thickness1=1, FlipWall=True)
+        """SW18 (b): polyline (-2, 0) -> (2, 0) -> (2, 3), the wall on its left (inside the corner): 120."""
+        pipe = self.pipe(self.corner(), self.line(0, 20), BodyType="Thin", Thickness1=1, FlipWall=True)
         self.assertSweeps(pipe, 120)
         self.assertBox(pipe.Shape, -2, 0, 0, 2, 3, 20)
 
-    def testWallOutsideACornerStops(self):
-        """The wall round the corner's outside: sharp (160) or round (155.708) is SW18, pending; loud."""
-        pipe = self.pipe(self.strip(((-2, 0), (2, 0), (2, 3))), self.line(0, 20), BodyType="Thin",
-                         Thickness1=1)
-        self.assertStops(pipe, "corner")
+    def testWallOutsideACornerIsSharp(self):
+        """SW18 (a): the wall round the corner's outside is mitred, never rounded: 4 + 3 + the 1 x 1
+        corner, x 20 = 160, F 8, no cylinder."""
+        pipe = self.pipe(self.corner(), self.line(0, 20), BodyType="Thin", Thickness1=1)
+        self.assertSweeps(pipe, 160)
+        self.assertBox(pipe.Shape, -2, -1, 0, 3, 3, 20)
+        self.assertEqual(len(pipe.Shape.Faces), 8)
+        self.assertTrue(all(f.Surface.TypeId == "Part::GeomPlane" for f in pipe.Shape.Faces))
+        self.assertHasVertices(pipe.Shape, [(3, -1, 0), (3, -1, 20)], 1e-6)
+
+    def square(self):
+        return self.sketch("Profile", models.rectangle(-2, -2, 2, 2))
+
+    def testClosedSquareOutwardIsSharp(self):
+        """SW18 (c): square (-2, -2)..(2, 2), thickness 0.5: (25 - 16) x 20 = 180, F 10, box +-2.5."""
+        pipe = self.pipe(self.square(), self.line(0, 20), BodyType="Thin", Thickness1=0.5)
+        self.assertSweeps(pipe, 180)
+        self.assertBox(pipe.Shape, -2.5, -2.5, 0, 2.5, 2.5, 20)
+        self.assertEqual(len(pipe.Shape.Faces), 10)
+        self.assertTrue(all(f.Surface.TypeId == "Part::GeomPlane" for f in pipe.Shape.Faces))
+
+    def testClosedSquareFlippedIsInward(self):
+        """SW18 (c): flipWall: (16 - 9) x 20 = 140, inward, box +-2."""
+        pipe = self.pipe(self.square(), self.line(0, 20), BodyType="Thin", Thickness1=0.5, FlipWall=True)
+        self.assertSweeps(pipe, 140)
+        self.assertBox(pipe.Shape, -2, -2, 0, 2, 2, 20)
+
+    def testLineDrawnBackwardsWallsToItsRight(self):
+        """SW18 (d): a line drawn (2, 0) -> (-2, 0): its right seen from +Z is +Y: y 0..1, 80."""
+        pipe = self.pipe(self.strip(((2, 0), (-2, 0))), self.line(0, 20), BodyType="Thin", Thickness1=1)
+        self.assertSweeps(pipe, 80)
+        self.assertBox(pipe.Shape, -2, 0, 0, 2, 1, 20)
 
     def testZeroThicknessStops(self):
         pipe = self.pipe(self.strip(), self.line(0, 20), BodyType="Thin", Thickness1=0)

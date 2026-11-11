@@ -6686,8 +6686,7 @@ double areaOf(const TopoDS_Shape& faces)
     return std::abs(props.Mass());
 }
 
-/// The thin wall of  pipe's profile (SW14), in place of its curves; it stops where the wall's
-/// corners would be sharp or round depending on a choice Onshape hasn't been asked about yet (SW18)
+/// The thin wall of \a pipe's profile (SW14), in place of its curves, its corners mitred (SW18)
 Part::TopoShape thinProfileOf(const Pipe& pipe)
 {
     App::DocumentObject* profile = pipe.Profile.getValue();
@@ -6730,19 +6729,12 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
     if (pipe.FlipWall.getValue()) {
         std::swap(right, left);
     }
-    const TopoDS_Shape sharp = thinWall(curves, plane, right, left, GeomAbs_Intersection);
-    const TopoDS_Shape round = thinWall(curves, plane, right, left, GeomAbs_Arc);
-    const double area = areaOf(sharp);
-    if (area < Precision::Confusion()) {
+    // SW18: Onshape mitres the wall's corners, the outside of a corner included; never rounds them
+    const TopoDS_Shape wall = thinWall(curves, plane, right, left, GeomAbs_Intersection);
+    if (areaOf(wall) < Precision::Confusion()) {
         throw Base::ValueError("Pipe: the thin profile has no curves to put a wall around");
     }
-    if (std::abs(area - areaOf(round)) > 1e-7 * std::max(1.0, area)) {
-        throw Base::ValueError(
-            "Pipe: the thin wall goes round the outside of a corner of the profile; whether it's sharp "
-            "or round there isn't built yet. Put the wall on the corner's inside, or round the corner."
-        );
-    }
-    return Part::TopoShape(sharp.Located(location));
+    return Part::TopoShape(wall.Located(location));
 }
 }  // namespace
 
