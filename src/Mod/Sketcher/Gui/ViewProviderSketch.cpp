@@ -4890,13 +4890,18 @@ void ViewProviderSketch::unsetEdit(int ModNum)
             getSketchObject()->purgeTouched();
         }
         if (editingCancelled && cancelChanged) {
-            // Onshape's toast "Sketch 2 has been canceled." (its Restore link: not here). Once
-            // the close is done: a recompute's progress bar clears the message when it ends
+            // Onshape's toast "Sketch 2 has been canceled." (its Restore link: not here). The
+            // close is followed by a few recomputes (the undo's, the dependents'), each ending
+            // with the progress bar clearing the status message (SequencerBar::resetData), and
+            // they land at no fixed time: a single show cleared by one of them was the flake of
+            // TestSketchCancelGui. The text is shown again while they run down (2026-11-11).
             const QString text =
                 tr("%1 has been canceled").arg(QString::fromUtf8(getObject()->Label.getValue()));
-            QTimer::singleShot(0, Gui::getMainWindow(), [text]() {
-                Gui::getMainWindow()->showMessage(text, 5000);
-            });
+            for (const int delay : {0, 150, 400, 900}) {
+                QTimer::singleShot(delay, Gui::getMainWindow(), [text]() {
+                    Gui::getMainWindow()->showMessage(text, 5000);
+                });
+            }
         }
         if (!editingCancelled) {
             App::AutoTransaction trans(getDocument()->getDocument(), "Sketch recompute");

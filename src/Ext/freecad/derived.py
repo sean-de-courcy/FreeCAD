@@ -100,6 +100,7 @@ class _SavedSource:
         self.path = path
         self.doc = None
         self.tmp = None
+        self.active = None
 
     def __enter__(self):
         if not os.path.isfile(self.path):
@@ -108,6 +109,8 @@ class _SavedSource:
         self.tmp = tempfile.mkdtemp(prefix="fcderived")
         copy = os.path.join(self.tmp, os.path.basename(self.path))
         shutil.copyfile(self.path, copy)
+        # The hidden open and close leave no active document: keep the caller's (D1)
+        self.active = App.ActiveDocument.Name if App.ActiveDocument else None
         self.doc = App.openDocument(copy, hidden=True)
         return self
 
@@ -117,6 +120,12 @@ class _SavedSource:
                 App.closeDocument(self.doc.Name)
             except Exception:
                 pass
+        if self.active and App.ActiveDocument is None and self.active in App.listDocuments():
+            App.setActiveDocument(self.active)
+            if App.GuiUp:
+                import FreeCADGui
+
+                FreeCADGui.setActiveDocument(self.active)
         if self.tmp:
             shutil.rmtree(self.tmp, ignore_errors=True)
         return False
