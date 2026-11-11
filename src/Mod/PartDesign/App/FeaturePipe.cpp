@@ -1250,15 +1250,20 @@ double extentAlong(const TopoDS_Shape& shape, const gp_Ax1& axis)
 
 /// A helix in \a path whose turns \a profile, swept along it, overlaps from one turn to the next:
 /// the profile's extent along the axis beyond the pitch (Onshape refuses it, SWEEP_FAILED; ops#660).
-/// Turns that only touch sweep. The helix's pitch and the profile's extent, or none.
+/// Turns that only touch sweep. The helix's pitch and the profile's extent, or none. \a scale:
+/// the largest the scale law makes the profile (1 without one): a profile scaled up along the
+/// helix overlaps the turn before where it grows past the pitch (it swept a self-intersecting
+/// solid, Up-to-date, before the ops#666 skeptic's review). Taking the largest size, the check
+/// refuses a few scales whose turns would only nearly overlap: loud, never silent.
 std::optional<std::pair<double, double>> overlappingTurns(
     const TopoDS_Shape& path,
-    const TopoDS_Shape& profile
+    const TopoDS_Shape& profile,
+    double scale = 1.0
 )
 {
     for (TopExp_Explorer it(path, TopAbs_EDGE); it.More(); it.Next()) {
         if (const auto winding = helixWinding(TopoDS::Edge(it.Current()))) {
-            const double extent = extentAlong(profile, winding->axis);
+            const double extent = extentAlong(profile, winding->axis) * std::max(1.0, scale);
             if (extent > winding->pitch + 1e-6) {
                 return std::make_pair(winding->pitch, extent);
             }
@@ -6594,7 +6599,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 ));
             }
             const TopoDS_Shape placedProfile = profileShape.getShape().Moved(invObjLoc);
-            if (const auto turns = overlappingTurns(wire, placedProfile)) {
+            if (const auto turns = overlappingTurns(
+                    wire,
+                    placedProfile,
+                    HasScale.getValue() ? ScaleFactor.getValue() : 1.0
+                )) {
                 return new App::DocumentObjectExecReturn(fmt::format(
                     "Pipe: the helix's turns overlap: its pitch, {:.6g} mm, is less than the "
                     "profile's {:.6g} mm along its axis. Make the pitch larger or the profile "
@@ -6616,6 +6625,40 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     for (const double y : {yMin, yMax}) {
                         for (const double z : {zMin, zMax}) {
                             reach = std::max(reach, start.Distance(gp_Pnt(x, y, z)));
+                        }
+                    }
+                }
+                // A profile scaled up along the path, or a larger section further on, reaches
+                // further than the start profile does (the ops#666 skeptic's silent path A): a
+                // scaled profile's reach grows with the factor, and a section reaches no further
+                // than its distance from the path plus its extent
+                if (HasScale.getValue()) {
+                    reach *= std::max(1.0, ScaleFactor.getValue());
+                }
+                if (Transformation.getValue() == 1) {
+                    for (const auto& subSet : Sections.getSubListValues()) {
+                        try {
+                            const Part::TopoShape section
+                                = getSectionShape("Section", subSet.first, subSet.second);
+                            if (section.isNull()) {
+                                continue;
+                            }
+                            const TopoDS_Shape placed = section.getShape().Moved(invObjLoc);
+                            Bnd_Box extent;
+                            BRepBndLib::Add(placed, extent);
+                            BRepExtrema_DistShapeShape gap(placed, wire);
+                            if (!extent.IsVoid()) {
+                                reach = std::max(
+                                    reach,
+                                    (gap.IsDone() ? gap.Value() : 0.0)
+                                        + std::sqrt(extent.SquareExtent())
+                                );
+                            }
+                        }
+                        catch (const Standard_Failure&) {
+                        }
+                        catch (const Base::Exception&) {
+                            // the sections' own checks below say what's wrong with it
                         }
                     }
                 }

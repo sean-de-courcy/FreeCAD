@@ -701,6 +701,20 @@ class TestPipeSelfOverlap(PipeCase):
         self-intersecting solid, Up-to-date. Until it builds the union, it stops with an error."""
         self.assertStops(self.tube((10, 0.5)), "overlaps itself")
 
+    def testScaledTurnsOverlappingStop(self):
+        """The ops#666 skeptic's silent path A: pitch 4 clears the 3-tall profile, but scaled 1.6x
+        along the helix it is 4.8 tall at the end and overlaps the turn before. The turn check read
+        only the start profile, and the sweep came out self-intersecting (BOP SelfIntersect, V
+        810.53), Up-to-date. Scaled 1.2x (3.6 tall) it stays clear and sweeps."""
+        helix = self.doc.addObject("Part::Helix", "Helix")
+        helix.Pitch, helix.Height, helix.Radius = 4, 10, 10
+        profile = self.sketch("Profile", models.rectangle(9.5, -1.5, 10.5, 1.5), placement=XZ)
+        pipe = self.pipe(profile, helix, ProfileControl="None", HasScale=True, ScaleFactor=1.6)
+        self.assertStops(pipe, "turns overlap")
+        pipe.ScaleFactor = 1.2
+        self.doc.recompute()
+        self.assertSweeps(pipe)
+
     def testTubesClearOfEachOtherSweep(self):
         """The path ends at (10, 1.5): the tubes miss each other: pi x the path's length."""
         self.assertSweeps(self.tube((10, 1.5)), math.pi * 48.5, places=2)
