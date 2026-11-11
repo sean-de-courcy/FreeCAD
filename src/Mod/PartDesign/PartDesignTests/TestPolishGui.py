@@ -427,3 +427,82 @@ class TestShellWordsGui(PolishCase):
         pump(0.2)
         self.assertFalse(self.shell.Reversed)
         self.assertGreater(self.shell.Shape.Volume, inward)
+
+
+class TestWindowLeftoversGui(PolishCase):
+    """P9: Onshape's window has no Properties panel beside the Feature list, a short Help menu,
+    and no command boxes in the panel when no dialog is open (FreeCAD's PartDesign task watchers,
+    e.g. the face tools for a selected face). The menu and the watchers are built when the
+    workbench is activated, so the keymap is set first and the workbench activated again."""
+
+    def reactivate(self, keymap=None):
+        if keymap:
+            App.ParamGet(KEYMAP).SetString("Keymap", keymap)
+        Gui.activateWorkbench("NoneWorkbench")
+        pump()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        pump(0.2)
+
+    def tearDown(self):
+        super().tearDown()
+        self.reactivate()  # the default keymap's menu and watchers for the next tests
+
+    def helpCommands(self):
+        for action in Gui.getMainWindow().menuBar().actions():
+            menu = action.menu()
+            if menu and action.text().replace("&", "") == "Help":
+                return [a.objectName() for a in menu.actions() if not a.isSeparator()]
+        self.fail("Expected a Help menu")
+
+    def watcherBoxes(self):
+        """The task panel's visible boxes while no dialog is open."""
+        self.assertIsNone(Gui.Control.activeDialog())
+        boxes = []
+        for widget in QtWidgets.QApplication.allWidgets():
+            name = widget.metaObject().className()
+            if name.endswith("TaskBox") and widget.isVisible():
+                boxes.append(widget)
+        return boxes
+
+    def selectTopFace(self):
+        Gui.Selection.addSelection(self.doc.Name, self.pad.Name, "Face6")
+        pump(0.3)
+
+    def testOnshapeHelpMenuIsShort(self):
+        self.reactivate()
+        commands = self.helpCommands()
+        self.assertIn("Std_About", commands)
+        for command in ("Std_WhatsThis", "Std_FreeCADDonation", "Std_DevHandbook"):
+            self.assertNotIn(command, commands)
+
+    def testFreeCADKeymapKeepsTheHelpMenu(self):
+        self.reactivate("FreeCAD")
+        commands = self.helpCommands()
+        self.assertIn("Std_WhatsThis", commands)
+        self.assertIn("Std_FreeCADDonation", commands)
+
+    def testOnshapeShowsNoWatcherBoxes(self):
+        self.reactivate()
+        self.selectTopFace()
+        self.assertEqual(self.watcherBoxes(), [], "no command boxes with no dialog open")
+
+    def testFreeCADKeymapShowsTheFaceTools(self):
+        """The control: FreeCAD's keymap shows its watcher boxes for a selected face."""
+        self.reactivate("FreeCAD")
+        self.selectTopFace()
+        self.assertTrue(self.watcherBoxes(), "Expected FreeCAD's watcher boxes for a face")
+
+    def testNoPropertyPanelInTheModelPanel(self):
+        """The left panel's property editor is hidden. The combo view is built at start-up,
+        under the keymap of the test's user home: the default, Onshape's."""
+        combos = [
+            w for w in QtWidgets.QApplication.allWidgets()
+            if w.metaObject().className().endswith("ComboView")
+        ]
+        self.assertTrue(combos, "Expected the Model panel (combo view)")
+        props = [
+            w for w in combos[0].findChildren(QtWidgets.QWidget)
+            if w.metaObject().className() == "Gui::PropertyView"
+        ]
+        self.assertTrue(props, "Expected the combo view's property editor")
+        self.assertTrue(props[0].isHidden())

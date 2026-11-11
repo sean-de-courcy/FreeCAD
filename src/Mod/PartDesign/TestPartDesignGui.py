@@ -82,6 +82,7 @@ from PartDesignTests.TestPolishGui import TestHoverStatusGui  # FreeCAD-CH, ops#
 from PartDesignTests.TestPolishGui import TestShowConstraintsGui  # FreeCAD-CH, ops#640 polish 1
 from PartDesignTests.TestPolishGui import TestSketchDialogCheckboxesGui  # FreeCAD-CH, ops#640 polish 2
 from PartDesignTests.TestPolishGui import TestShellWordsGui  # FreeCAD-CH, ops#640 polish 2
+from PartDesignTests.TestPolishGui import TestWindowLeftoversGui  # FreeCAD-CH, ops#640 polish 3
 from PartDesignTests.TestEscCancelsGui import TestEscCancelsGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSketchPlaneGui import TestSketchPlaneGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBooleanDialogGui import TestBooleanDialogGui  # FreeCAD-CH, ops#640

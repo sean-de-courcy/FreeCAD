@@ -922,6 +922,12 @@ MenuItem* StdWorkbench::setupMenuBar() const
     // Help
     auto help = new MenuItem(menuBar);
     help->setCommand("&Help");
+    if (ForkKeymap::isOnshape()) {
+        // FreeCAD-CH (ops#640 polish P9): Onshape's Help menu is short. Std_FreeCADUserHub
+        // stays first: the Start module inserts its entry before it (Start/Gui/Manipulator.cpp)
+        *help << "Std_FreeCADUserHub" << "Std_FreeCADForum" << "Separator" << "Std_About";
+        return menuBar;
+    }
     *help << "Std_WhatsThis"
           << "Separator"
           // Start page and additional separator are dynamically inserted here
