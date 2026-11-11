@@ -64,9 +64,9 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
         if (sketch->DisableImprinting.getValue() == checked) {
             return;
         }
-        Gui::Command::openCommand(QT_TRANSLATE_NOOP("Command", "Disable imprinting"));
+        this->sketchView->getDocument()->openCommand(QT_TRANSLATE_NOOP("Command", "Disable imprinting"));
         Gui::cmdAppObjectArgs(sketch, "DisableImprinting = %s", checked ? "True" : "False");
-        Gui::Command::commitCommand();
+        this->sketchView->getDocument()->commitCommand();
         tryAutoRecomputeIfNotSolve(sketch);
     });
 
