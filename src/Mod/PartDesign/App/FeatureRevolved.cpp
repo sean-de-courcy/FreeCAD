@@ -2687,7 +2687,11 @@ TopoShape seatAxisTouches(const TopoShape& profile, const gp_Ax1& axis)
             const TopoDS_Shape& wire = wires.Value();
             TopoDS_Wire rebuilt;
             builder.MakeWire(rebuilt);
-            for (TopoDS_Iterator it(wire); it.More(); it.Next()) {
+            // The edges as the wire holds them (cumOri false): the wire's own orientation is set on
+            // the rebuilt wire below. Composed here as well, a sketch face's Reversed wire (as the
+            // face makers leave it) was turned twice: the face's area came out negative, its revolve
+            // inside out, and S2 stopped a base-less revolve touching the axis (F1, kernel-8)
+            for (TopoDS_Iterator it(wire, false, true); it.More(); it.Next()) {
                 const TopoDS_Shape& edge = it.Value();
                 const TopoDS_Shape forward = edge.Oriented(TopAbs_FORWARD);
                 if (!pieces.IsBound(forward)) {
