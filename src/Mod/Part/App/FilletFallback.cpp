@@ -3077,6 +3077,32 @@ std::optional<gp_Pnt> materialIn(const TopoDS_Shape& result, const TopoDS_Shape&
     crossings.Load(region, tolerance);
     BRepClass3d_SolidClassifier inRegion(region);
     BRepClass3d_SolidClassifier inResult(result);
+    // A point is reported only where the region is thicker than 20 tolerances along every axis
+    // through it: a sheet thinner than that is noise, whichever way the lines run
+    auto deepIn = [&](const gp_Pnt& point) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const gp_Lin line(point, axis == 0 ? gp::DX() : axis == 1 ? gp::DY() : gp::DZ());
+            crossings.Perform(line, -Precision::Infinite(), Precision::Infinite());
+            if (!crossings.IsDone()) {
+                return false;
+            }
+            double below = -Precision::Infinite();
+            double above = Precision::Infinite();
+            for (int k = 1; k <= crossings.NbPnt(); ++k) {
+                const double w = crossings.WParameter(k);
+                if (w <= 0.0) {
+                    below = std::max(below, w);
+                }
+                else {
+                    above = std::min(above, w);
+                }
+            }
+            if (above - below <= 20.0 * tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
     constexpr int lines = 9;
     for (int axis = 0; axis < 3; ++axis) {
         const int u = (axis + 1) % 3;
@@ -3112,7 +3138,7 @@ std::optional<gp_Pnt> materialIn(const TopoDS_Shape& result, const TopoDS_Shape&
                         continue;
                     }
                     inResult.Perform(point, tolerance);
-                    if (inResult.State() == TopAbs_IN) {
+                    if (inResult.State() == TopAbs_IN && deepIn(point)) {
                         return point;
                     }
                 }
