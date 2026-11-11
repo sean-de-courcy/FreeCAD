@@ -2564,6 +2564,30 @@ TopoDS_Shape fusedStadium()
 
 }  // namespace
 
+TEST_F(FilletFallbackTest, materialInFindsWhatACutLeftInARegion)
+{
+    // ops#669: the check that a cut removed the lens two tools share, by points, not by volumes
+    const TopoDS_Shape block = box(10, 10, 10);
+    const TopoDS_Shape region = box(2, 3, 4, gp_Pnt(4, 3, 2));
+    EXPECT_FALSE(FF::materialIn(BRepAlgoAPI_Cut(block, region).Shape(), region));
+    auto left = FF::materialIn(block, region);
+    ASSERT_TRUE(left);
+    EXPECT_GT(left->X(), 4);
+    EXPECT_LT(left->X(), 6);
+    EXPECT_GT(left->Z(), 2);
+    EXPECT_LT(left->Z(), 6);
+    // Half of it removed: the point is in the half left
+    const TopoDS_Shape half = BRepAlgoAPI_Cut(block, box(2, 3, 2, gp_Pnt(4, 3, 4))).Shape();
+    left = FF::materialIn(half, region);
+    ASSERT_TRUE(left);
+    EXPECT_LT(left->Z(), 4);
+    // A lens 1e-3 thin is found; one thinner than 20 tolerances (1e-7) is not looked into
+    const TopoDS_Shape sheet = box(6, 6, 1e-3, gp_Pnt(2, 2, 5));
+    EXPECT_TRUE(FF::materialIn(block, sheet));
+    EXPECT_FALSE(FF::materialIn(BRepAlgoAPI_Cut(block, sheet).Shape(), sheet));
+    EXPECT_FALSE(FF::materialIn(block, box(6, 6, 1e-6, gp_Pnt(2, 2, 5))));
+}
+
 TEST_F(FilletFallbackTest, thinFacesOfOcctsResult)
 {
     // The fused stadium's whole top outline at r = 2: OCCT keeps the top face with area 0
