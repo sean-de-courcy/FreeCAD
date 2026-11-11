@@ -3660,6 +3660,26 @@ class TestLoosePipeWarns(unittest.TestCase):
         pipe.Profile = profile
         pipe.Spine = (spine, ["Edge1"])
         self.assertWarns(pipe)
+        # Each edge's tolerance holds its curves' deviation with a margin (ops#667): OCCT stored
+        # the end circles' at 1.05 times it on Windows, and macOS's slightly different sweep went
+        # past it, failing a face's check there alone. Measured here at 400 points of each
+        # face's curve on surface against the edge's curve, at the same parameter
+        shape = pipe.Shape
+        for k, face in enumerate(shape.Faces):
+            for edge in face.Edges:
+                if edge.Degenerated:
+                    continue
+                curve2d, first, last = face.curveOnSurface(edge)
+                deviation = 0.0
+                for i in range(401):
+                    u = first + (last - first) * i / 400
+                    p = curve2d.value(u)
+                    deviation = max(deviation, (face.Surface.value(p.x, p.y) - edge.valueAt(u)).Length)
+                self.assertGreaterEqual(
+                    edge.Tolerance,
+                    1.5 * deviation,
+                    "face %d: tolerance %.4g, deviation %.4g" % (k + 1, edge.Tolerance, deviation),
+                )
 
     def testTwistedSquareAlongAnAuxiliarySpine(self):
         """A square of side 2 along a 50 mm line up Z, a helix of radius 5 and pitch 50 as

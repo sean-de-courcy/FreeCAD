@@ -107,11 +107,14 @@ PartExport bool inScope();
  * feature's limit has passed.  what names the step ("The repair of the shape"). */
 PartExport void stopIfPastDeadline(const char* what);
 
-/** One deadline for every run() inside it, the outermost one's. */
+/** One deadline for every run() inside it, the outermost one's.  timeLimited: whether the
+ * outermost one has the time limit; else Esc only, as outside any Scope. The limit is PartDesign
+ * features' only (the coordinator's ruling, 11-11): a Part, Arch/BIM or other workbench's object
+ * runs as long as it takes, as a script's call does (bimtests.TestArchCovering). */
 class PartExport Scope
 {
 public:
-    Scope();
+    explicit Scope(bool timeLimited = true);
     ~Scope();
     /** The outermost Scope: why the limit or Esc stopped a run() inside it, else empty. The
      * feature then fails with it, whatever its code did with the exception (a script's feature
