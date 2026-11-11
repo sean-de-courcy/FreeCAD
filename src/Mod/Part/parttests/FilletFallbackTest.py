@@ -2010,8 +2010,9 @@ class OverflowTest(unittest.TestCase):
         self.assertTrue(shape.isValid())
         self.assertEqual(len(shape.Solids), 1)
         self.assertEqual(len(shape.Faces), 10)
-        # The plate less the two rounds (Pappus) plus the lens, to the measurement's noise
-        self.assertAlmostEqual(shape.Volume, 23371762.554, delta=0.2)
+        # The plate less the two rounds (Pappus) plus the lens, to the measurement's noise: the
+        # adaptive readout (SC7, ops#640) reads 0.28 under (1.2e-8), the default was 0.099 off
+        self.assertAlmostEqual(shape.Volume, 23371762.554, delta=0.4)
         half = math.sqrt(61**2 - 58.6**2) + 0.4  # the lens's half length (to x 301.4), plus 0.4
         box = Part.makeBox(2.8, 2 * half, 32, V(298.6, 200 - half, 68))
         self.assertAlmostEqual(shape.common(box).Volume, 3105.6097, delta=0.01)
@@ -2259,7 +2260,11 @@ class CornerWithACircleTest(unittest.TestCase):
         self.assertTrue(shape.isValid())
         self.assertEqual(len(shape.Solids), 1)
         expected = reference.common(base)
-        self.assertAlmostEqual(shape.Volume, expected.Volume, delta=1e-6)
+        # 1e-5: the readouts integrate adaptively only on free-form faces, and the reference's faces
+        # may be analytic where the result's aren't. The chamfered lens: closed form 132.5514217
+        # (the shrunken lenses' areas integrated over the depth), the result 1e-7 off it, the
+        # reference's default integration 3.4e-6 off (SC7, ops#640)
+        self.assertAlmostEqual(shape.Volume, expected.Volume, delta=1e-5)
         self.assertLess(symmetric_difference(shape, expected), 1e-6)
         self.assertEqual(len(shape.Faces), faces)
 
