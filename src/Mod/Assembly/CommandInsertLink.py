@@ -291,6 +291,8 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 
                     if UtilsAssembly.isMergedPart(obj):
                         continue  # FreeCAD-CH (ops#325): a part merged into another is in that one
+                    if UtilsAssembly.isConsumedPart(obj):
+                        continue  # FreeCAD-CH (ops#654 P6a): a Boolean consumed it (ghost part)
 
                     if (
                         obj.isDerivedFrom("Part::Feature")

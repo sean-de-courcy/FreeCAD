@@ -57,3 +57,7 @@ studioNewPart = _PartDesign.studioNewPart  # ops#654 S2
 isDerivedCopy = _PartDesign.isDerivedCopy
 makeDerivedCopies = _PartDesign.makeDerivedCopies
 editDerivedCopies = _PartDesign.editDerivedCopies
+studioLiveParts = _PartDesign.studioLiveParts  # ops#654 P5, P6a
+studioSetToolIds = _PartDesign.studioSetToolIds
+studioBooleanParts = _PartDesign.studioBooleanParts
+studioConsumerOf = _PartDesign.studioConsumerOf

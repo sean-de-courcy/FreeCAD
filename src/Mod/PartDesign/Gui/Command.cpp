@@ -1854,6 +1854,12 @@ static void openAsOnshape(App::DocumentObject* feature, bool recompute)
  * top level without one). Null without a list: today's path. sketchPart: the Body the selected
  * profile is in, if any
  */
+namespace PartDesign
+{
+// App/StudioList.cpp (FreeCAD-CH ops#654 P5, P6a; declared where used)
+PartDesignExport std::vector<Body*> studioLivePartsAt(const StudioList* list, int index);
+}  // namespace PartDesign
+
 static PartDesign::StudioList* ownerStudioList(
     Gui::Command* cmd,
     App::Part*& studio,
@@ -3751,9 +3757,120 @@ CmdPartDesignBoolean::CmdPartDesignBoolean()
 }
 
 
+/* FreeCAD-CH (ops#654 P5, notes/parts-design.md 3.5, Onshape O3): in a studio that has a history
+ * list, Boolean makes a studio feature: a PartDesign::Boolean in the studio, outside every Body,
+ * whose targets and tools are parts by id. The studio is the active Body's, else the selected
+ * part's, else the active Part's. Its first target is the active Body, its tools the other parts
+ * selected, each only if live at the bar; it opens on Union (Onshape's default), Keep tools as
+ * last accepted. One transaction with its list entry and its first recompute: Cancel leaves
+ * nothing. False: not such a studio, today's path
+ */
+static bool makeStudioBoolean(Gui::Command* cmd)
+{
+    App::Document* doc = cmd->getDocument();
+    if (!doc) {
+        return false;
+    }
+    std::vector<PartDesign::Body*> picked;
+    for (const auto& selected : cmd->getSelection().getSelectionEx()) {
+        auto obj = const_cast<App::DocumentObject*>(selected.getObject());
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesign::Body::findBodyOf(obj);
+        }
+        if (body && std::ranges::find(picked, body) == picked.end()) {
+            picked.push_back(body);
+        }
+    }
+    PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+    if (active && active->getDocument() != doc) {
+        active = nullptr;
+    }
+    App::Part* studio = nullptr;
+    PartDesign::Body* anchor = active ? active : (picked.empty() ? nullptr : picked.front());
+    if (anchor) {
+        if (!Part::BodyBase::studioOf(anchor, studio)) {
+            return false;
+        }
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    PartDesign::StudioList* list = PartDesign::StudioList::of(doc, studio, false);
+    if (!list) {
+        return false;
+    }
+    const auto live = PartDesign::studioLivePartsAt(list, -1);
+    auto isLive = [&live](PartDesign::Body* body) {
+        return body && std::ranges::find(live, body) != live.end();
+    };
+    std::vector<std::string> targets;
+    if (isLive(active)) {
+        targets.push_back(PartDesign::studioPartId(active));
+    }
+    std::vector<std::string> tools;
+    for (auto body : picked) {
+        const std::string id = PartDesign::studioPartId(body);
+        if (isLive(body) && std::ranges::find(targets, id) == targets.end()) {
+            tools.push_back(id);
+        }
+    }
+    auto pyList = [](const std::vector<std::string>& ids) {
+        std::string out = "[";
+        for (const auto& id : ids) {
+            out += "'" + id + "',";
+        }
+        return out + "]";
+    };
+    const std::string name = cmd->getUniqueObjectName("Boolean");
+    cmd->openCommand(QT_TRANSLATE_NOOP("Command", "Create Boolean"));
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::cmdAppDocument(doc, std::ostringstream() << "addObject('PartDesign::Boolean','" << name << "')");
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The Boolean was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        FCMD_OBJ_CMD(owner, "Type = 'Fuse'");
+        // A Union lists its parts as tools, merged into the first (the active part)
+        std::vector<std::string> parts = targets;
+        parts.insert(parts.end(), tools.begin(), tools.end());
+        FCMD_OBJ_CMD(owner, "StudioTools = " << pyList(parts));
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        {
+            // A Boolean of fewer than two parts fails until its parts are ticked: not an error
+            // printed while its dialog opens
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                parts.size() < 2
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The Boolean's dialog didn't open");
+        }
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 void CmdPartDesignBoolean::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    if (makeStudioBoolean(this)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(/*messageIfNot = */ true);
     if (!pcActiveBody) {
         return;

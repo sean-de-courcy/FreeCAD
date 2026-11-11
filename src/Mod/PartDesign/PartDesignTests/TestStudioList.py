@@ -24,6 +24,12 @@
 # active step identical names on the same geometry, and so does aborting that. The control (a
 # step tagged with its own ID, as a step written like Pocket) must fail G1. STUDIO_PROP_SEEDS
 # (e.g. "1,2,3") and STUDIO_PROP_OPS set the size for a long run.
+#
+# P5 adds Boolean studio features to the random edits (PartDesign::Boolean owners: Subtract and
+# Union, Keep tools on and off, targets in StudioScope and tools in StudioTools): the oracle applies
+# Onshape's O3 rules itself, and its consumed rule (a tool part a Boolean consumes is no part from
+# the Boolean's place on: a later pick of it resolves to nothing) gives the live parts at the bar,
+# compared with PartDesign.studioLiveParts and the Bodies' visibility.
 
 import os
 import random
@@ -97,7 +103,35 @@ def makeOwner(doc, studio, name, rect, depth, op, scope=(), suppressed=False):
     return box
 
 
+def booleanOwner(doc, studio, name, kind, targets=(), tools=(), keep=False, suppressed=False):
+    """A Boolean studio feature (P5) of Type kind (Cut, Fuse), not yet listed."""
+    owner = doc.addObject("PartDesign::Boolean", name)
+    studio.addObject(owner)
+    owner.Type = kind
+    owner.KeepTools = keep
+    owner.Refine = False
+    owner.StudioScope = list(targets)
+    owner.StudioTools = list(tools)
+    if suppressed:
+        owner.Suppressed = True
+    return owner
+
+
+def isOwner(obj):
+    return obj.TypeId in ("Part::Box", "PartDesign::Boolean")
+
+
 def ownerRecord(box):
+    if box.TypeId == "PartDesign::Boolean":
+        return dict(
+            name=box.Name,
+            id=box.ID,
+            kind=box.Type,
+            scope=list(box.StudioScope),
+            tools=list(box.StudioTools),
+            keep=bool(box.KeepTools),
+            suppressed=bool(box.Suppressed),
+        )
     p = box.Placement.Base
     op = box.Operation
     depth = round(box.Height.Value - 0.001, 6)
@@ -123,7 +157,7 @@ def studioList(doc):
 
 
 def owners(doc):
-    return [e for e in studioList(doc).Entries if e.TypeId == "Part::Box"]
+    return [e for e in studioList(doc).Entries if isOwner(e)]
 
 
 def isStep(obj):
@@ -210,6 +244,8 @@ def snapshot(doc, names=True):
             failed=failedUpToTip(body),
             rolledBack=rolled,
             body=None if rolled or body.Shape.isNull() else round(body.Shape.Volume, 4),
+            live=body in PartDesign.studioLiveParts(body),
+            visible=bool(body.Visibility),
         )
         if names:
             out[p]["names"] = elementNames(shape, masker)
@@ -221,32 +257,68 @@ def listOf(doc):
     lst = studioList(doc)
     entries = list(lst.Entries)
     bar = lst.Bar if 0 <= lst.Bar < len(entries) else len(entries)
-    records = [ownerRecord(e) for e in entries if e.TypeId == "Part::Box"]
-    natives = [e.Name for e in entries if e.TypeId != "Part::Box"]
+    records = [ownerRecord(e) for e in entries if isOwner(e)]
+    natives = [e.Name for e in entries if not isOwner(e)]
     return natives, records, bar
 
 
-def oracle(natives, records, bar):
+def oracle(natives, records, bar, live=None):
     """Per part, (volume, solids) by Part booleans from the list as data, never by reconcile
     (the S1 skeptic, 2026-11-10: fromScratch() reconciles too, so it shows only that incremental
     and one-shot reconcile agree). Records apply in list order up to the bar, each to the parts
     its scope names unless suppressed; a step that would split its part contributes nothing.
-    The generator keeps the natives first, so the bar counts them first."""
+    The generator keeps the natives first, so the bar counts them first.
+
+    Boolean records (P5, Onshape O3, O9b): only live parts resolve. Subtract cuts the fused tools
+    (targets left out) from each target; Union fuses the parts listed (targets, then tools) into
+    the first. A Boolean that resolves to no target, no tool, a part both, or a Union of one part
+    does nothing; otherwise, Keep tools off and not suppressed, its tools are consumed (even when
+    the geometry fails it), so no later record acts on them. live, a set, gets the parts live at
+    the bar."""
     shapes = {p: Part.makeBox(10, 10, 10, V(x, 0, 0)) for p, x in PARTS}
+    consumed = set()
     for i, record in enumerate(records):
         if len(natives) + i >= bar:
             break
         if record["suppressed"]:
             continue
+        if "kind" in record:
+            targets = [p for p in record["scope"] if p in shapes and p not in consumed]
+            tools = [p for p in record["tools"] if p in shapes and p not in consumed]
+            if record["kind"] == "Fuse":
+                listed = targets + [p for p in tools if p not in targets]
+                if len(listed) < 2:
+                    continue
+                survivor, others = listed[0], listed[1:]
+                result = shapes[survivor].fuse([shapes[p] for p in others]).removeSplitter()
+                if len(result.Solids) == 1:
+                    shapes[survivor] = result
+            else:
+                cutters = [p for p in tools if p not in targets]
+                if not targets or not cutters or len(cutters) < len(tools):
+                    continue
+                tool = shapes[cutters[0]]
+                if len(cutters) > 1:
+                    tool = tool.fuse([shapes[p] for p in cutters[1:]])
+                for p in targets:
+                    result = shapes[p].cut(tool).removeSplitter()
+                    if len(result.Solids) == 1:
+                        shapes[p] = result
+                others = cutters
+            if not record["keep"]:
+                consumed.update(others)
+            continue
         length, width, height, corner = toolBox(record["rect"], record["depth"], record["op"])
         tool = Part.makeBox(length, width, height, corner)
         for p in record["scope"]:
-            if p not in shapes:
+            if p not in shapes or p in consumed:
                 continue
             cut = record["op"] == "Subtraction"
             result = (shapes[p].cut(tool) if cut else shapes[p].fuse(tool)).removeSplitter()
             if len(result.Solids) == 1:
                 shapes[p] = result
+    if live is not None:
+        live.update(p for p in shapes if p not in consumed)
     return {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items()}
 
 
@@ -254,9 +326,17 @@ def oracleDifferences(doc):
     """oracle() against each Tip's shape (the state at the bar), and the Body's own shape when
     it is not rolled back; plus hygiene: nothing touched or invalid after a recompute, no step
     without an owner or outside every Body."""
-    want = oracle(*listOf(doc))
+    live = set()
+    want = oracle(*listOf(doc), live=live)
     found = []
     bodies = [doc.getObject(p) for p, _ in PARTS]
+    # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
+    got = sorted(b.Name for b in PartDesign.studioLiveParts(studioList(doc)))
+    if got != sorted(live):
+        found.append(f"live parts {got}, oracle {sorted(live)}")
+    for body in bodies:
+        if bool(body.Visibility) != (body.Name in live):
+            found.append(f"{body.Name}: Visibility {body.Visibility}, oracle live {body.Name in live}")
     for body in bodies:
         tip = body.Tip
         shape = tip.Shape if tip else Part.Shape()
@@ -417,9 +497,16 @@ def fromScratch(natives, records, bar):
         lst = studioList(doc)
         assert [e.Name for e in lst.Entries] == natives, ([e.Name for e in lst.Entries], natives)
         for r in sorted(records, key=lambda r: r["id"]):
-            box = makeOwner(
-                doc, studio, r["name"], r["rect"], r["depth"], r["op"], r["scope"], r["suppressed"]
-            )
+            if "kind" in r:
+                box = booleanOwner(
+                    doc, studio, r["name"], r["kind"], r["scope"], r["tools"], r["keep"],
+                    r["suppressed"],
+                )
+            else:
+                box = makeOwner(
+                    doc, studio, r["name"], r["rect"], r["depth"], r["op"], r["scope"],
+                    r["suppressed"],
+                )
             assert box.Name == r["name"], (box.Name, r["name"])
         for r in records:
             PartDesign.studioInsert(doc.getObject(r["name"]), -1)
@@ -955,6 +1042,7 @@ class TestStudioListProperty(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="studiolist")
         self.log = []
+        self.consumedSeen = 0  # states after an edit with a part consumed at the bar (P5)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -965,8 +1053,20 @@ class TestStudioListProperty(unittest.TestCase):
     def edit(self, rng, doc, counter):
         lst = studioList(doc)
         boxes = owners(doc)
-        kinds = ["insert"] * 3 + ["delete", "move", "scope", "depth", "suppress", "bar"]
-        kind = rng.choice(kinds) if boxes else "insert"
+        kinds = ["insert"] * 3 + ["boolean"] + ["delete", "move", "scope", "depth", "suppress", "bar"]
+        kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
+        if kind == "boolean":
+            # P5: a Subtract or a Union between parts, Keep tools on or off
+            names = [p for p, _ in PARTS]
+            op = rng.choice(["Cut", "Cut", "Fuse"])
+            targets = rng.sample(names, rng.randint(0 if op == "Fuse" else 1, 1))
+            rest = [p for p in names if p not in targets]
+            tools = rng.sample(rest, rng.randint(1, len(rest)))
+            keep = rng.random() < 0.4
+            at = rng.randint(0, len(boxes))
+            owner = booleanOwner(doc, doc.getObject("S"), f"F{counter}", op, targets, tools, keep)
+            PartDesign.studioInsert(owner, NATIVES + at)
+            return f"boolean {owner.Name} {op} targets {targets} tools {tools} keep {keep} at {at}"
         if kind == "insert":
             x0 = rng.choice([2, 5, 8, 22, 25, 42, 45, 5, 25])
             w = rng.choice([2, 4, 8, 20, 25])
@@ -990,6 +1090,19 @@ class TestStudioListProperty(unittest.TestCase):
             j = rng.randrange(len(boxes))
             PartDesign.studioMove(box, NATIVES + j)
             return f"move {name} -> {j}"
+        if kind in ("scope", "depth") and box.TypeId == "PartDesign::Boolean":
+            names = [p for p, _ in PARTS]
+            if kind == "depth":
+                box.KeepTools = not box.KeepTools
+                PartDesign.studioReconcile(lst)
+                return f"keep {name} {box.KeepTools}"
+            if rng.random() < 0.5:
+                tools = sorted(rng.sample(names, rng.randint(1, 2)))
+                PartDesign.studioSetToolIds(box, tools)
+                return f"tools {name} {tools}"
+            targets = sorted(rng.sample(names, rng.randint(0 if box.Type == "Fuse" else 1, 1)))
+            PartDesign.studioSetScopeIds(box, targets)
+            return f"targets {name} {targets}"
         if kind == "scope":
             scope = list(box.StudioScope)
             p = rng.choice([p for p, _ in PARTS])
@@ -1048,6 +1161,8 @@ class TestStudioListProperty(unittest.TestCase):
             found = differences(got, want)
             found += ["oracle " + d for d in oracleDifferences(doc)]
             found += ["G1 " + d for d in gateG1(doc)[:4]]
+            if len(PartDesign.studioLiveParts(studioList(doc))) < len(PARTS):
+                self.consumedSeen += 1
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -1062,6 +1177,10 @@ class TestStudioListProperty(unittest.TestCase):
         nops = int(os.environ.get("STUDIO_PROP_OPS", "25"))
         total = sum(self.run_sequence(seed, nops) for seed in seeds)
         self.assertEqual(total, 0, "\n".join(self.log))
+        # The consumed rule was exercised, not only Booleans that keep their tools
+        self.assertGreater(self.consumedSeen, 0)
+        print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
+              "with a consumed part")
 
 
 if __name__ == "__main__":

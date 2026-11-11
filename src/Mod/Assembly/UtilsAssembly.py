@@ -154,6 +154,23 @@ def isMergedPart(obj):
     )
 
 
+def isConsumedPart(obj):
+    """FreeCAD-CH (ops#654 P6a): whether obj is a part a Boolean consumed (Keep tools off), which
+    isn't a part any more, as Onshape deletes it: in a studio with a history list, at its bar
+    (PartDesign.studioConsumerOf); else by an in-Body Boolean (PartDesign.consumerOf). A link
+    counts as the part it links."""
+    if hasattr(obj, "getLinkedObject"):
+        obj = obj.getLinkedObject(True)
+    if obj is None or obj.TypeId != "PartDesign::Body":
+        return False
+    import PartDesign
+
+    try:
+        return PartDesign.studioConsumerOf(obj) is not None or PartDesign.consumerOf(obj) is not None
+    except Exception:
+        return False
+
+
 def getObject(ref):
     if len(ref) != 2 or ref[0] is None:
         return None
