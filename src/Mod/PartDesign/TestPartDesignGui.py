@@ -99,6 +99,10 @@ from PartDesignTests.TestStudioSketchesShownGui import (  # FreeCAD-CH, ops#654 
     TestTopLevelStudioSketchesShownGui,
 )
 from PartDesignTests.TestStudioFeatureGui import TestStudioFeatureGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioFeatureGui import (  # FreeCAD-CH, ops#654 S4 fix
+    TestExtrudePrefillGui,
+    TestLeavingNewGui,
+)
 from PartDesignTests.TestStudioHistoryGui import TestStudioHistoryGui  # FreeCAD-CH, ops#654
 from PartDesignTests.TestPartsListGui import TestPartsListGui  # FreeCAD-CH, ops#654
 
