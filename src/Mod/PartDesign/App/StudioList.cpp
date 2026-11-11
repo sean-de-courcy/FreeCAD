@@ -879,6 +879,11 @@ std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, con
                 || propName == "StudioPieceSource") {
                 continue;
             }
+            // P8a: a studio dress-up step's Base is its chain's previous feature, written by its
+            // owner as BaseFeature is by reconcile
+            if (member && propName == "Base" && isDressUpOwner(ownerOfStep(in))) {
+                continue;
+            }
             std::vector<App::DocumentObject*> linked;
             link->getLinks(linked, /*all=*/true);
             if (std::ranges::find(linked, step) != linked.end()) {
