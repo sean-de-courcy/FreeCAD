@@ -10658,7 +10658,7 @@ TopoShape& TopoShape::makeElementBoolean(
             "The check of the boolean's inputs",
             [toCheck, validity](const Message_ProgressRange& /*range*/) {
                 for (std::size_t k = 0; k < toCheck.size(); ++k) {
-                    (*validity)[k] = BRepCheck_Analyzer(toCheck[k]).IsValid() ? 1 : 0;
+                    (*validity)[k] = KernelBudget::checkValid(toCheck[k]) ? 1 : 0;
                 }
             }
         );
@@ -10708,6 +10708,21 @@ TopoShape& TopoShape::makeElementBoolean(
         FC_THROWM(Base::CADKernelError, "User aborted");
     }
     FCBRepAlgoAPIHelper::checkLostTools(mk.get());
+    if (mk->Shape().IsNull()) {
+        // Say why: OCCT's own report, not the "Null shape" of the element map below
+        std::ostringstream report;
+        if (mk->HasErrors()) {
+            mk->DumpErrors(report);
+        }
+        std::string reason = report.str();
+        while (!reason.empty() && std::isspace(static_cast<unsigned char>(reason.back()))) {
+            reason.pop_back();
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            what << " failed" << (reason.empty() ? std::string() : ": " + reason)
+        );
+    }
     makeElementShape(*mk, fixedInputs, op, elementMapPolicy);
 
     if (buildShell) {

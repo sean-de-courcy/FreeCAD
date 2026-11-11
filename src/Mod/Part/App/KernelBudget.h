@@ -86,6 +86,14 @@ PartExport TopoDS_Shape exactCopy(const TopoDS_Shape& shape);
 /** BRepCheck_Analyzer(shape).IsValid() under the limit, on an exact copy of the shape. */
 PartExport bool isValid(const TopoDS_Shape& shape, const char* what = "Shape check");
 
+/** BRepCheck_Analyzer(shape).IsValid(), in time that grows with the faces' holes and not with their
+ * square (kernel-9, ops#640): OCCT 8.0.1's face check compares every two wires of a face, minutes
+ * for a plate with thousands of holes. A face with many wires on a surface that isn't periodic is
+ * checked as its outer wire with each hole, and with each two holes whose boxes in the surface's
+ * parameters overlap (holes apart can't cross or nest); its solids' shells and solids by
+ * BRepCheck_Shell and BRepCheck_Solid. Any other shape: BRepCheck_Analyzer itself. Runs here. */
+PartExport bool checkValid(const TopoDS_Shape& shape);
+
 /** Whether this thread's feature (its outermost Scope) has a limit that has passed. A step on the
  * calling thread that can't be stopped, and that the result doesn't need (a refine, a check), is
  * skipped then, with a warning on the feature. */

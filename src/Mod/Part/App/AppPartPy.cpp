@@ -495,6 +495,12 @@ public:
             "a dict of the limit in seconds and the abandoned calls still running and in all."
         );
         add_varargs_method(
+            "kernelCheck",
+            &Module::kernelCheck,
+            "kernelCheck(shape) -- Whether the shape passes the shape check (FreeCAD-CH kernel "
+            "safety): BRepCheck_Analyzer's verdict, faces with many holes checked by parts."
+        );
+        add_varargs_method(
             "show",
             &Module::show,
             "show(shape,[string]) -- Add the shape to the active document or create one if no "
@@ -994,6 +1000,15 @@ private:
         result.setItem("abandonedRunning", Py::Long(KernelBudget::abandonedRunning()));
         result.setItem("abandonedTotal", Py::Long(KernelBudget::abandonedTotal()));
         return result;
+    }
+    Py::Object kernelCheck(const Py::Tuple& args)
+    {
+        PyObject* shape = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &TopoShapePy::Type, &shape)) {
+            throw Py::Exception();
+        }
+        const TopoDS_Shape& value = static_cast<TopoShapePy*>(shape)->getTopoShapePtr()->getShape();
+        return Py::Boolean(KernelBudget::checkValid(value));
     }
     Py::Object read(const Py::Tuple& args)
     {

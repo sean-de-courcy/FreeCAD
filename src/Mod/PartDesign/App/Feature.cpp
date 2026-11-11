@@ -531,7 +531,7 @@ struct Check
 
         for (TopoDS_Iterator it(faces); it.More(); it.Next()) {
             ++facesChecked;
-            if (!BRepCheck_Analyzer(it.Value()).IsValid()) {
+            if (!Part::KernelBudget::checkValid(it.Value())) {
                 ++facesInvalid;
             }
         }
@@ -556,11 +556,28 @@ std::string number(double value)
 const char* notBuilt = ": the feature is not built";
 
 /// Empty when the result passes, else what is wrong. \a lastVouched: the result this feature's
-/// last recompute vouched for; the same result again needs no check
-std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& lastVouched)
+/// last recompute vouched for; the same result again needs no check.  whole: set when it passes
+/// with every face of the result checked (a feature with no base, kernel-9)
+std::string checkResult(
+    Feature& feature,
+    bool inputsValid,
+    const TopoDS_Shape& lastVouched,
+    bool& whole
+)
 {
+    whole = false;
     TopoDS_Shape result = feature.Shape.getShape().getShape();
     if (result.IsNull() || TopExp_Explorer(result, TopAbs_SOLID).More() == Standard_False) {
+        // An additive feature never takes the part away: OCCT's fuse can return an empty
+        // compound without an error (a groove's end wall revolved about its own edge, kernel-10)
+        auto addSub = dynamic_cast<FeatureAddSub*>(&feature);
+        if (addSub && addSub->getAddSubType() == FeatureAddSub::Type::Additive) {
+            TopoDS_Shape base = feature.getBaseTopoShape(true).getShape();
+            if (!base.IsNull() && TopExp_Explorer(base, TopAbs_SOLID).More()) {
+                return std::string("The geometry kernel lost the part: the result has no solid")
+                    + notBuilt;
+            }
+        }
         return {};
     }
     if (inputsValid && !lastVouched.IsNull() && result.IsEqual(lastVouched)) {
@@ -768,6 +785,7 @@ std::string checkResult(Feature& feature, bool inputsValid, const TopoDS_Shape& 
     if (!allFaces) {
         rememberVolume(result, after);
     }
+    whole = base.IsNull() && !roundsOrChamfers && checked.IsEqual(result);
     return {};
 }
 }  // namespace
@@ -886,6 +904,7 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // The feature's execute and the check of its result share one deadline (kernel safety S1)
     Part::KernelBudget::Scope budget;
     auto ret = Part::Feature::recompute();
+    bool checkedWhole = false;
     // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature. A
     // BaseFeature builds nothing: the first feature on it checks the base it passes on
     if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
@@ -893,7 +912,7 @@ App::DocumentObjectExecReturn* Feature::recompute()
         && !ResultCheck::skippedForTheLimit(this, "The check of the result")) {
         std::string why;
         try {
-            why = checkResult(*this, booleanInputsValid, lastVouched);
+            why = checkResult(*this, booleanInputsValid, lastVouched, checkedWhole);
         }
         catch (const Base::Exception& e) {
             why = e.what();
@@ -911,7 +930,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
         ret = new App::DocumentObjectExecReturn(fired, this);
     }
     refineNotes.erase(this);
-    if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {
+    // A result with every face checked, of a feature with no base, is vouched for as one made from
+    // valid inputs is: the next feature's boolean doesn't check it again (kernel-9: a plate's two
+    // faces with thousands of holes, checked once here, then again in the next cut's input check)
+    if (ret == App::DocumentObject::StdReturn && (booleanInputsValid || checkedWhole)) {
         vouchedShape = Shape.getShape().getShape();
     }
     else if (ret != App::DocumentObject::StdReturn

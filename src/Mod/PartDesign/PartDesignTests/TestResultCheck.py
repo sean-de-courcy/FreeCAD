@@ -12,6 +12,7 @@ features must not be flagged. Designed geometry; expected volumes are closed for
 """
 
 import math
+import time
 import unittest
 
 import FreeCAD
@@ -350,6 +351,235 @@ class TestResultCheck(unittest.TestCase):
             self.assertAlmostEqual(hole.Shape.Volume, before, places=6)
             self.assertAlmostEqual(boolean.Shape.Volume, before + change, places=6)
             self.assertTrue(boolean.Shape.isValid())
+
+
+
+class TestManyHoles(unittest.TestCase):
+    """A Pocket of 25 regions into a part with thousands of faces (kernel-9, ops#640): Onshape cuts
+    such a sketch into a ~3800-face part in ~3.5 s; ours passed the 60 s limit, most of it OCCT's
+    shape check comparing each two holes of the plate's faces (the boolean's input check, S2 and
+    the refine's). Designed: a 300 x 300 x 20 plate with 40 x 40 holes (1606 faces) as the Body's
+    BaseFeature, a sketch of 5 x 5 squares on its top, each over 36 holes, pocketed 10 deep with
+    Refine: every square's floor keeps its holes, the top loses those inside the squares."""
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("ManyHoles")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def testPocketOfManyRegionsIntoAPlateWithManyHoles(self):
+        n, side = 40, 300.0
+        step = side / n
+        outer = Part.makePolygon([V(0, 0, 0), V(side, 0, 0), V(side, side, 0), V(0, side, 0), V(0, 0, 0)])
+        holes = [
+            Part.Wire([Part.makeCircle(step * 0.25, V(step * (i + 0.5), step * (j + 0.5), 0), V(0, 0, 1))]).reversed()
+            for i in range(n)
+            for j in range(n)
+        ]
+        plate = Part.Face(Part.Plane(), [outer] + holes).extrude(V(0, 0, 20))
+        base = self.doc.addObject("Part::Feature", "Plate")
+        base.Shape = plate
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        sketch = body.newObject("Sketcher::SketchObject", "Squares")
+        sketch.Placement = FreeCAD.Placement(V(0, 0, 20), FreeCAD.Rotation())
+        cell = side / 5
+        for i in range(5):
+            for j in range(5):
+                x0, y0 = cell * (i + 0.1), cell * (j + 0.1)
+                x1, y1 = x0 + cell * 0.8, y0 + cell * 0.8
+                p = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+                for k in range(4):
+                    sketch.addGeometry(Part.LineSegment(p[k], p[(k + 1) % 4]))
+        self.doc.recompute()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = sketch
+        pocket.Length = 10
+        pocket.Refine = True
+        start = time.time()
+        self.doc.recompute()
+        took = time.time() - start
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        # each square 48 x 48 over 6 x 6 holes of radius 1.875: the material of 25 squares' boxes
+        # less their holes, 10 deep
+        removed = 25 * (48.0 * 48.0 - 36 * math.pi * 1.875**2) * 10
+        self.assertAlmostEqual(plate.Volume - pocket.Shape.Volume, removed, delta=1e-6 * plate.Volume)
+        # seconds here (2026-11; at 60 x 60 holes 35 s now, 88 s and stopped before)
+        self.assertLess(took, 30.0)
+
+
+class TestThreadEndRevolve(unittest.TestCase):
+    """A revolve of a thread's end cap about one of the cap's own edges, added to the body
+    (rehearsal FSLC #30, ops#640; Onshape builds it). A cylinder r 10 padded 20, an AdditiveHelix
+    (pitch 4, height 12) of a triangle (9.5, 0) (11.5, 1) (9.5, 2) in the XZ plane, Refine on:
+    the triangle's corner (9.5, 0, 0) lies on the cylinder's bottom face, which OCCT's fuse keeps as
+    an INTERNAL vertex of the solid. The refine added it again beside the solid (a compound of
+    the solid and a vertex), and every later fuse with the body was refused ("not allowed": a
+    fuse of a solid with a compound holding a vertex). The cap's edges are straight B-splines but
+    for the one on the cylinder (x = 10): those were refused as an axis, which Onshape takes."""
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("ThreadEnd")
+        self.body = self.doc.addObject("PartDesign::Body", "Body")
+        base = self.body.newObject("Sketcher::SketchObject", "Base")
+        base.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10))
+        pad = self.body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = base
+        pad.Length = 20
+        self.helix = self.thread("Helix", [V(9.5, 0, 0), V(11.5, 1, 0), V(9.5, 2, 0)])
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def thread(self, name, points):
+        sketch = self.body.newObject("Sketcher::SketchObject", name + "Profile")
+        sketch.Placement = FreeCAD.Placement(V(0, 0, 0), FreeCAD.Rotation(V(1, 0, 0), 90))
+        for k in range(len(points)):
+            sketch.addGeometry(Part.LineSegment(points[k], points[(k + 1) % len(points)]))
+        helix = self.body.newObject("PartDesign::AdditiveHelix", name)
+        helix.Profile = sketch
+        helix.ReferenceAxis = (sketch, ["V_Axis"])
+        helix.Pitch = 4
+        helix.Height = 12
+        helix.Refine = True
+        self.doc.recompute()
+        self.assertTrue(helix.isValid(), helix.getStatusString())
+        return helix
+
+    def startCap(self, shape):
+        """The planar end face at the helix's start (in the plane y = 0, the lower of the two
+        after three whole turns), and its edges."""
+        caps = [
+            k + 1
+            for k, f in enumerate(shape.Faces)
+            if "Plane" in f.Surface.TypeId and f.Area < 10 and abs(f.CenterOfMass.y) < 1e-6
+        ]
+        self.assertEqual(len(caps), 2)
+        caps.sort(key=lambda k: shape.Faces[k - 1].CenterOfMass.z)
+        self.assertAlmostEqual(shape.Faces[caps[0] - 1].CenterOfMass.z, 1.0, delta=1e-6)
+        face = shape.Faces[caps[0] - 1]
+        edges = [[j + 1 for j, e in enumerate(shape.Edges) if e.isSame(fe)][0] for fe in face.Edges]
+        return caps[0], face, edges
+
+    def revolve(self, base, faceIdx, axis, angle):
+        rev = self.body.newObject("PartDesign::Revolution", "Revolution")
+        rev.Profile = (base, ["Face%d" % faceIdx])
+        rev.ReferenceAxis = axis
+        rev.Angle = angle
+        self.doc.recompute()
+        return rev
+
+    def testTheBodyHasNoLooseVertex(self):
+        shape = self.helix.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        loose = [s for s in shape.SubShapes if s.ShapeType == "Vertex"] if shape.ShapeType == "Compound" else []
+        self.assertEqual(loose, [])
+        # and a box padded beside the thread fuses with it: exactly the box's volume added
+        sketch = self.body.newObject("Sketcher::SketchObject", "Box")
+        sketch.Placement = FreeCAD.Placement(V(0, 0, 20), FreeCAD.Rotation())
+        p = [V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0)]
+        for k in range(4):
+            sketch.addGeometry(Part.LineSegment(p[k], p[(k + 1) % 4]))
+        box = self.body.newObject("PartDesign::Pad", "BoxPad")
+        box.Profile = sketch
+        box.Length = 3
+        self.doc.recompute()
+        self.assertTrue(box.isValid(), box.getStatusString())
+        # (relative: the volume readout of B-spline faces is OCCT's default, ~3e-7 here; SC7)
+        self.assertAlmostEqual(box.Shape.Volume - shape.Volume, 48.0, delta=1e-6 * shape.Volume)
+
+    def testTheCapRevolvedAboutItsEdgeOnTheCylinderIsAdded(self):
+        shape = self.helix.Shape
+        faceIdx, cap, edges = self.startCap(shape)
+        # the cap's edge on the cylinder: the line x = 10 from z = 0.25 to 1.75
+        onCylinder = [
+            e for e in edges if all(abs(v.Point.x - 10) < 1e-6 for v in shape.Edges[e - 1].Vertexes)
+        ]
+        self.assertEqual(len(onCylinder), 1)
+        # the cap is the triangle's part outside the cylinder: x = 10..11.5, area 1.125, its
+        # centroid 0.5 from the axis; a half turn sweeps pi * 0.5 * 1.125 (Pappus)
+        self.assertAlmostEqual(cap.Area, 1.125, delta=1e-6)
+        piece = math.pi * 0.5 * 1.125
+        for angle in (180, -180):
+            rev = self.revolve(self.helix, faceIdx, (self.helix, ["Edge%d" % onCylinder[0]]), angle)
+            self.assertTrue(rev.isValid(), "%g: %s" % (angle, rev.getStatusString()))
+            self.assertEqual(len(rev.Shape.Solids), 1)
+            self.assertTrue(rev.Shape.isValid())
+            # the piece is added, some of it inside the thread and the cylinder: between nothing
+            # and all of it
+            added = rev.Shape.Volume - shape.Volume
+            self.assertGreater(added, 0.0)
+            self.assertLess(added, piece + 1e-6)
+            self.body.removeObject(rev)
+            self.doc.removeObject(rev.Name)
+            self.doc.recompute()
+
+    def testAFuseThatLosesThePartFails(self):
+        # A groove (SubtractiveHelix of a rectangle (8.5, 0)-(10.5, 2)) whose end wall, revolved
+        # half a turn about its top edge (x 8.5..10 at z 2), OCCT's fuse with the body returns
+        # as an empty compound without an error; it was taken as the result. Onshape builds the
+        # revolve; ours fails it loudly (debt: the fuse itself)
+        groove = self.body.newObject("Sketcher::SketchObject", "GrooveProfile")
+        groove.Placement = FreeCAD.Placement(V(0, 0, 0), FreeCAD.Rotation(V(1, 0, 0), 90))
+        p = [V(8.5, 0, 0), V(10.5, 0, 0), V(10.5, 2, 0), V(8.5, 2, 0)]
+        for k in range(4):
+            groove.addGeometry(Part.LineSegment(p[k], p[(k + 1) % 4]))
+        self.body.removeObject(self.helix)
+        self.doc.removeObject(self.helix.Name)
+        cut = self.body.newObject("PartDesign::SubtractiveHelix", "Groove")
+        cut.Profile = groove
+        cut.ReferenceAxis = (groove, ["V_Axis"])
+        cut.Pitch = 4
+        cut.Height = 12
+        cut.Refine = True
+        self.doc.recompute()
+        self.assertTrue(cut.isValid(), cut.getStatusString())
+        shape = cut.Shape
+        walls = [
+            k + 1
+            for k, f in enumerate(shape.Faces)
+            if "Plane" in f.Surface.TypeId and abs(f.Area - 3.0) < 1e-6 and f.CenterOfMass.z < 2
+        ]
+        self.assertEqual(len(walls), 1)
+        wall = shape.Faces[walls[0] - 1]
+        top = [
+            j + 1
+            for j, e in enumerate(shape.Edges)
+            if any(e.isSame(we) for we in wall.Edges)
+            and all(abs(v.Point.z - 2) < 1e-6 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(top), 1)
+        rev = self.revolve(cut, walls[0], (cut, ["Edge%d" % top[0]]), 180)
+        if rev.isValid():
+            # built: then it must hold the part and the revolved piece's volume at most
+            self.assertEqual(len(rev.Shape.Solids), 1)
+            self.assertGreater(rev.Shape.Volume, shape.Volume - 1e-6 * shape.Volume)
+            self.assertLess(rev.Shape.Volume, shape.Volume + math.pi * 3.0 + 1e-6 * shape.Volume)
+        else:
+            self.assertIn("no solid", rev.getStatusString())
+
+    def testAStraightFreeFormEdgeOfTheCapIsAnAxis(self):
+        shape = self.helix.Shape
+        faceIdx, cap, edges = self.startCap(shape)
+        free = [e for e in edges if "BSpline" in shape.Edges[e - 1].Curve.TypeId]
+        self.assertEqual(len(free), 2)
+        edge = shape.Edges[free[0] - 1]
+        # the same axis as a datum line through the edge's ends, in the curve's direction: the
+        # same solid
+        a, b = edge.valueAt(edge.FirstParameter), edge.valueAt(edge.LastParameter)
+        line = self.body.newObject("PartDesign::Line", "AxisLine")
+        line.MapMode = "Deactivated"
+        line.Placement = FreeCAD.Placement(a, FreeCAD.Rotation(V(0, 0, 1), b - a))
+        byEdge = self.revolve(self.helix, faceIdx, (self.helix, ["Edge%d" % free[0]]), 90)
+        self.assertTrue(byEdge.isValid(), byEdge.getStatusString())
+        volume = byEdge.Shape.Volume
+        self.body.removeObject(byEdge)
+        self.doc.removeObject(byEdge.Name)
+        byLine = self.revolve(self.helix, faceIdx, (line, [""]), 90)
+        self.assertTrue(byLine.isValid(), byLine.getStatusString())
+        self.assertGreater(volume, shape.Volume)
+        self.assertAlmostEqual(volume, byLine.Shape.Volume, delta=1e-9 * volume)
 
 
 if __name__ == "__main__":
