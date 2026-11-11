@@ -212,6 +212,20 @@ class TestConfigurations(unittest.TestCase):
         PartDesign.configSetActive(self.studio, {"Size": "Large"})
         self.assertTrue(self.E.Suppressed)
 
+    def testDeletedOwnersNameGivenAgainIsNotConfigured(self):
+        """A deleted configured owner keeps its entry (its undo brings the configuration back);
+        a new owner that gets its name is not configured by it (the entry holds the object ID)"""
+        self.configureSizes()
+        self.edit(lambda: (PartDesign.studioRemove(self.E), self.doc.removeObject("E")))
+        again = makeOwner(self.doc, self.studio, "E", (2, 2, 5, 5), 1, "Subtraction", ["A"])
+        self.assertEqual(again.Name, "E")
+        self.edit(lambda: PartDesign.studioInsert(again, -1))
+        self.assertFalse(PartDesign.configIsConfigured(again))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.assertFalse(bool(getattr(again, "Suppressed", False)))
+        self.assertEqual(PartDesign.configReconcile(self.studio), "")
+
     def testBodyMemberSuppressionIsRefused(self):
         with self.assertRaises(ValueError):
             PartDesign.configConfigureSuppression(self.APad, self.size)

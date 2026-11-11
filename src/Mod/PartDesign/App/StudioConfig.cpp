@@ -307,20 +307,38 @@ std::shared_ptr<App::Expression> cellExpression(const App::DocumentObject* obj, 
     }
 }
 
-json* findParam(json& table, const std::string& object, const std::string& path)
+/// Whether a table entry is obj's: its name and its object ID. A configured object that was deleted
+/// keeps its entry (its undo brings the configuration back), and a later object given the same name
+/// is not configured by it
+bool isEntryOf(const json& e, const App::DocumentObject* obj)
+{
+    if (!obj || !obj->isAttachedToDocument() || str(e, "object") != obj->getNameInDocument()) {
+        return false;
+    }
+    return !e.contains("id") || !e["id"].is_number_integer() || e["id"].get<long>() == obj->getID();
+}
+
+/// The object a table entry configures, or null (deleted, or its name now another object's)
+App::DocumentObject* entryObject(App::Document* doc, const json& e)
+{
+    App::DocumentObject* obj = doc->getObject(str(e, "object").c_str());
+    return isEntryOf(e, obj) ? obj : nullptr;
+}
+
+json* findParam(json& table, const App::DocumentObject* obj, const std::string& path)
 {
     for (auto& p : table["params"]) {
-        if (str(p, "object") == object && str(p, "path") == path) {
+        if (isEntryOf(p, obj) && str(p, "path") == path) {
             return &p;
         }
     }
     return nullptr;
 }
 
-json* findSuppress(json& table, const std::string& object)
+json* findSuppress(json& table, const App::DocumentObject* obj)
 {
     for (auto& s : table["suppress"]) {
-        if (str(s, "object") == object) {
+        if (isEntryOf(s, obj)) {
             return &s;
         }
     }
@@ -393,7 +411,7 @@ std::string reconcileCells(StudioConfig* cfg, bool checkOnly, std::set<App::Docu
     };
 
     for (const auto& p : table["params"]) {
-        App::DocumentObject* obj = doc->getObject(str(p, "object").c_str());
+        App::DocumentObject* obj = entryObject(doc, p);
         const json* cell = activeCell(p);
         if (!obj || !cell || !cell->is_string()) {
             continue;
@@ -425,7 +443,7 @@ std::string reconcileCells(StudioConfig* cfg, bool checkOnly, std::set<App::Docu
     }
 
     for (const auto& s : table["suppress"]) {
-        App::DocumentObject* obj = doc->getObject(str(s, "object").c_str());
+        App::DocumentObject* obj = entryObject(doc, s);
         const json* cell = activeCell(s);
         if (!obj || !cell || !cell->is_boolean()) {
             continue;
@@ -722,7 +740,7 @@ bool hookWrite(App::DocumentObject* owner,
     }
     json table = tableOf(cfg);
     const std::string pathText = path.toString();
-    json* p = findParam(table, owner->getNameInDocument(), pathText);
+    json* p = findParam(table, owner, pathText);
     if (!p) {
         return false;
     }
@@ -1145,7 +1163,7 @@ bool configIsConfigured(const App::DocumentObject* obj, const std::string& path)
     }
     try {
         json table = tableOf(cfg);
-        return findParam(table, obj->getNameInDocument(), canonical(obj, path)) != nullptr;
+        return findParam(table, obj, canonical(obj, path)) != nullptr;
     }
     catch (const Base::Exception&) {
         return false;
@@ -1159,7 +1177,7 @@ bool configSuppressionIsConfigured(const App::DocumentObject* owner)
         return false;
     }
     json table = tableOf(cfg);
-    return findSuppress(table, owner->getNameInDocument()) != nullptr;
+    return findSuppress(table, owner) != nullptr;
 }
 
 bool configConfigure(App::DocumentObject* obj,
@@ -1185,7 +1203,7 @@ bool configConfigure(App::DocumentObject* obj,
             return refuse(why, "A parameter is configured with a List or a Checkbox ('" + input + "')");
         }
         json table = tableOf(cfg);
-        if (findParam(table, obj->getNameInDocument(), canon)) {
+        if (findParam(table, obj, canon)) {
             return refuse(why, quoted(obj) + "'s " + canon + " is configured already: unconfigure it first");
         }
         const std::string text = currentText(obj, canon);
@@ -1194,6 +1212,7 @@ bool configConfigure(App::DocumentObject* obj,
             cells[key] = text;  // Onshape copies the current value into every row (CF3)
         }
         table["params"].push_back({{"object", obj->getNameInDocument()},
+                                   {"id", obj->getID()},
                                    {"path", canon},
                                    {"input", str(*in, "id")},
                                    {"cells", cells}});
@@ -1214,7 +1233,7 @@ bool configUnconfigure(App::DocumentObject* obj, const std::string& path, std::s
     try {
         const std::string canon = canonical(obj, path);
         json table = tableOf(cfg);
-        json* p = findParam(table, obj->getNameInDocument(), canon);
+        json* p = findParam(table, obj, canon);
         if (!p) {
             return refuse(why, quoted(obj) + "'s " + canon + " is not configured");
         }
@@ -1253,7 +1272,7 @@ bool configSetCell(App::DocumentObject* obj,
     try {
         const std::string canon = canonical(obj, path);
         json table = tableOf(cfg);
-        json* p = findParam(table, obj->getNameInDocument(), canon);
+        json* p = findParam(table, obj, canon);
         if (!p) {
             return refuse(why, quoted(obj) + "'s " + canon + " is not configured");
         }
@@ -1307,7 +1326,7 @@ bool configConfigureSuppression(App::DocumentObject* owner, const std::string& i
         return refuse(why, "Suppression is configured with a List or a Checkbox ('" + input + "')");
     }
     json table = tableOf(cfg);
-    if (findSuppress(table, owner->getNameInDocument())) {
+    if (findSuppress(table, owner)) {
         return refuse(why, quoted(owner) + "'s suppression is configured already");
     }
     auto prop = suppressedProperty(owner, false);
@@ -1316,7 +1335,10 @@ bool configConfigureSuppression(App::DocumentObject* owner, const std::string& i
     for (const auto& key : cellKeys(*in)) {
         cells[key] = now;
     }
-    table["suppress"].push_back({{"object", owner->getNameInDocument()}, {"input", str(*in, "id")}, {"cells", cells}});
+    table["suppress"].push_back({{"object", owner->getNameInDocument()},
+                                     {"id", owner->getID()},
+                                     {"input", str(*in, "id")},
+                                     {"cells", cells}});
     store(cfg->Table, table);
     return rebind(cfg, why);
 }
@@ -1328,7 +1350,7 @@ bool configUnconfigureSuppression(App::DocumentObject* owner, std::string* why)
         return refuse(why, quoted(owner) + "'s suppression is not configured");
     }
     json table = tableOf(cfg);
-    json* s = findSuppress(table, owner->getNameInDocument());
+    json* s = findSuppress(table, owner);
     if (!s) {
         return refuse(why, quoted(owner) + "'s suppression is not configured");
     }
@@ -1345,7 +1367,7 @@ bool configSetSuppressionCell(App::DocumentObject* owner, const std::string& row
         return refuse(why, quoted(owner) + "'s suppression is not configured");
     }
     json table = tableOf(cfg);
-    json* s = findSuppress(table, owner->getNameInDocument());
+    json* s = findSuppress(table, owner);
     if (!s) {
         return refuse(why, quoted(owner) + "'s suppression is not configured");
     }

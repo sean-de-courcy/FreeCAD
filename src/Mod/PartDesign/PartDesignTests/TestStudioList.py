@@ -1736,6 +1736,14 @@ def propStudio(name):
     return doc, studio
 
 
+def activeKey(studio):
+    """The studio's active configuration key, or "" without configuration inputs (ops#671)"""
+    try:
+        return PartDesign.configKey(studio)
+    except Exception:
+        return ""
+
+
 class TestStudioListProperty(unittest.TestCase):
     """After every random edit the document equals the one built from scratch from its list."""
 
@@ -1748,6 +1756,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.piecesSeen = 0  # states with a live part made from a piece (P6p)
         self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
         self.mergesSeen = 0  # states with a part an Add merged into another at the bar (10.13)
+        self.switchesSeen = 0  # switches of the active configuration (ops#671 C1)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1963,6 +1972,11 @@ class TestStudioListProperty(unittest.TestCase):
         if kind == "depth":
             r = ownerRecord(box)
             depth = rng.choice([1, 2, 3, 4, 5])
+            if PartDesign.configIsConfigured(box, "Height"):
+                # ops#671: a configured field's edit writes the active row's cell (CF3)
+                box.setExpression("Height", f"{depth + 0.001} mm")
+                PartDesign.studioReconcile(lst)
+                return f"depth {name} {depth} (its active cell)"
             setBox(box, r["rect"], depth, r["op"])
             PartDesign.studioReconcile(lst)
             return f"depth {name} {depth}"
@@ -1973,6 +1987,56 @@ class TestStudioListProperty(unittest.TestCase):
         bar = rng.randint(NATIVES, len(lst.Entries))
         PartDesign.studioSetBar(lst, bar if bar < len(lst.Entries) else -1)
         return f"bar {bar}"
+
+    def switch(self, rng, doc):
+        """ops#671 C1's edit: configure an owner (a Union box's height, or any owner's
+        suppression) by the List Size (Small, Large), then switch the active row. The document at
+        the new row is then compared with the from-scratch build of its list like after any edit,
+        and its names after a switch and back with the names before (G1). None while the studio
+        has no list."""
+        studio = doc.getObject("S")
+        if PartDesign.studioList(studio) is None:
+            return None
+        key = activeKey(studio)
+        if not key:
+            PartDesign.configAddList(studio, "Size", ["Small", "Large"])
+            key = activeKey(studio)
+        size, row = key.split(";")[0].split("=")
+        other = "Large" if row == "Default" else "Small"
+        unions = [
+            b for b in owners(doc)
+            if b.TypeId == "Part::Box" and b.Operation == "Union" and round(b.Placement.Base.y) not in (-1, 3)
+            and not PartDesign.configIsConfigured(b, "Height")
+        ]
+        plain = [
+            b for b in owners(doc)
+            if not isPartMirror(b) and not PartDesign.configIsConfigured(b)
+        ]
+        done = []
+        roll = rng.random()
+        if unions and roll < 0.4:
+            b = rng.choice(unions)
+            PartDesign.configConfigure(b, "Height", size)
+            depth = rng.choice([1, 2, 3, 4, 5])
+            PartDesign.configSetCell(b, "Height", other, f"{depth + 0.001} mm")
+            done.append(f"{b.Name}.Height {other} d{depth}")
+        elif plain and roll < 0.7:
+            b = rng.choice(plain)
+            PartDesign.configConfigureSuppression(b, size)
+            on = not bool(getattr(b, "Suppressed", False))
+            PartDesign.configSetSuppressionCell(b, other, on)
+            done.append(f"{b.Name} suppressed {on} in {other}")
+        doc.recompute()
+        before = snapshot(doc)
+        PartDesign.configSetActive(studio, {"Size": other})
+        PartDesign.configSetActive(studio, {"Size": "Small" if other == "Large" else "Large"})
+        doc.recompute()
+        found = differences(snapshot(doc), before)
+        if found:
+            raise AssertionError("the names after a switch and back differ: " + "; ".join(found[:6]))
+        PartDesign.configSetActive(studio, {"Size": other})
+        self.switchesSeen += 1
+        return f"switch to {other}" + (f" after configuring {done}" if done else "")
 
     def run_sequence(self, seed, nops):
         rng = random.Random(seed)
@@ -1989,7 +2053,20 @@ class TestStudioListProperty(unittest.TestCase):
         if not unlisted:
             studioList(doc)
         bad = 0
+        switching = os.environ.get("STUDIO_PROP_SWITCH", "1") == "1"
         for step in range(nops):
+            switched = None
+            side = random.Random(seed * 100003 + step)
+            if switching and step and side.random() < 0.2:
+                doc.openTransaction("switch")
+                try:
+                    switched = self.switch(side, doc)
+                    doc.recompute()
+                    doc.commitTransaction()
+                except Exception as e:
+                    doc.abortTransaction()
+                    bad += 1
+                    self.log.append(f"seed {seed} op {step} switch failed: {e}")
             roll = rng.random()
             if roll < 0.12 and doc.UndoCount:
                 doc.undo()
@@ -2043,6 +2120,8 @@ class TestStudioListProperty(unittest.TestCase):
                 self.unlistedSeen += 1
                 doc.redo()
                 doc.recompute()
+            if switched:
+                what = f"{switched}, then {what}"
             got = snapshot(doc)
             if PartDesign.studioList(doc.getObject("S")) is None:
                 self.unlistedSeen += 1
@@ -2055,6 +2134,10 @@ class TestStudioListProperty(unittest.TestCase):
                 continue
             want = fromScratch(*listOf(doc), maker=propStudio)
             found = differences(got, want)
+            if activeKey(doc.getObject("S")):
+                check = PartDesign.configReconcile(doc.getObject("S"))
+                if check:
+                    found.append("configuration check: " + check)
             found += ["oracle " + d for d in oracleDifferences(doc)]
             found += ["G1 " + d for d in gateG1(doc)[:4]]
             # A part consumed at the bar by a Boolean or a part mirror (a split's parent, P6p,
@@ -2093,13 +2176,16 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.mirrorsSeen, 0)
         self.assertGreater(self.piecesSeen, 0)
         self.assertGreater(self.mergesSeen, 0)
+        if os.environ.get("STUDIO_PROP_SWITCH", "1") == "1":
+            self.assertGreater(self.switchesSeen, 0)  # ops#671: a switch was compared
         unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
         if any(str(s) in unlisted for s in seeds):
             self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
         print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
-              f"states without a list, {self.mergesSeen} states with a merge")
+              f"states without a list, {self.mergesSeen} states with a merge, "
+              f"{self.switchesSeen} switches")
 
 
 if __name__ == "__main__":
