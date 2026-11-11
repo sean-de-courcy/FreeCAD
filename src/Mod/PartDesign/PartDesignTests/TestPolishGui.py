@@ -505,3 +505,54 @@ class TestWindowLeftoversGui(PolishCase):
         self.reactivate("FreeCAD")
         self.selectTopFace()
         self.assertTrue(self.watcherBoxes(), "Expected FreeCAD's watcher boxes for a face")
+
+
+class TestFlatFeatureDialogGui(PolishCase):
+    """P5: under the Onshape keymap a feature dialog is one flat form under its title row: only
+    the title box shows a header, the overlay switch is gone (its opacity is the Preview row), and
+    Final is offered only while a later feature exists. FreeCAD's keymap keeps its boxes."""
+
+    def openEdit(self, feature):
+        Gui.ActiveDocument.setEdit(feature.Name)
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), f"Expected {feature.Name}'s dialog open")
+
+    def visible(self, cls, name=None):
+        found = Gui.getMainWindow().findChildren(cls, name) if name else Gui.getMainWindow().findChildren(cls)
+        return [w for w in found if w.isVisible()]
+
+    def headers(self):
+        return [
+            w for w in self.visible(QtWidgets.QFrame) if w.metaObject().className() == "QSint::TaskHeader"
+        ]
+
+    def testOnshapeShowsOneHeader(self):
+        self.openEdit(self.pad)
+        headers = self.headers()
+        self.assertEqual(len(headers), 1, "only the title row")
+        names = [b.text() for b in headers[0].findChildren(QtWidgets.QToolButton)]
+        self.assertIn(self.pad.Label, names, "the title row is the feature's name")
+        self.assertEqual(self.visible(QtWidgets.QCheckBox, "showTransparentPreviewCheckBox"), [])
+        label = Gui.getMainWindow().findChild(QtWidgets.QLabel, "opacityLabel")
+        self.assertTrue(label.isVisible())
+        self.assertEqual(label.text(), "Preview")
+
+    def testOnshapeOffersNoFinalOnTheLastFeature(self):
+        self.openEdit(self.pad)
+        self.assertEqual(self.visible(QtWidgets.QCheckBox, "showFinalCheckBox"), [], "the last feature: no Final")
+
+    def testOnshapeOffersFinalMidList(self):
+        later = self.body.newObject("PartDesign::Pocket", "Pocket")
+        later.Profile = squareSketch(self.body, 4, "Sketch001")
+        self.doc.recompute()
+        self.openEdit(self.pad)
+        final = self.visible(QtWidgets.QCheckBox, "showFinalCheckBox")
+        self.assertEqual(len(final), 1, "a later feature: Final offered")
+        self.assertEqual(final[0].text(), "Final")
+
+    def testFreeCADKeymapKeepsTheBoxes(self):
+        """The control: FreeCAD's keymap keeps the parameter, Result and Preview headers."""
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        self.openEdit(self.pad)
+        self.assertGreater(len(self.headers()), 1)
+        self.assertEqual(len(self.visible(QtWidgets.QCheckBox, "showTransparentPreviewCheckBox")), 1)

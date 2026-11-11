@@ -63,6 +63,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/InputHint.h>
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/MainWindow.h>
@@ -174,6 +175,16 @@ TaskPreviewParameters::TaskPreviewParameters(ViewProvider* vp, QWidget* parent)
 }
 
 TaskPreviewParameters::~TaskPreviewParameters() = default;
+
+void TaskPreviewParameters::setOnshapeLayout(bool finalOffered)
+{
+    // Onshape's dialog has no overlay switch: the overlay stays on, its opacity is the preview row
+    ui->showTransparentPreviewCheckBox->setChecked(true);
+    ui->showTransparentPreviewCheckBox->hide();
+    ui->opacityLabel->setText(tr("Preview"));
+    ui->showFinalCheckBox->setText(tr("Final"));
+    ui->showFinalCheckBox->setVisible(finalOffered);
+}
 
 void TaskPreviewParameters::onShowFinalChanged(bool show)
 {
@@ -2902,6 +2913,7 @@ void TaskDlgFeatureParameters::open()
         );
         updateTitle();
     }
+    flattenForOnshape();
     // A sibling follows its primary: only the Result box, with Unlink, is editable (ops#325)
     if (TaskResultParameters::primaryOf(getObject())) {
         forEachParameters([](TaskFeatureParameters* param) {
@@ -2963,6 +2975,40 @@ void TaskDlgFeatureParameters::updateTitle()
             title->setProperty("featureInError", invalid);
         }
     }
+}
+
+void TaskDlgFeatureParameters::flattenForOnshape()
+{
+    if (!Gui::ForkKeymap::isOnshape()) {
+        return;
+    }
+    for (QWidget* wgt : Content) {
+        auto box = qobject_cast<Gui::TaskView::TaskBox*>(wgt);
+        if (!box) {
+            continue;
+        }
+        if (wgt == titleBox.data()) {
+            box->setExpandable(false);
+        }
+        else {
+            box->setHeader(false);
+        }
+    }
+    if (preview) {
+        preview->setOnshapeLayout(hasLaterFeature());
+    }
+}
+
+bool TaskDlgFeatureParameters::hasLaterFeature() const
+{
+    App::DocumentObject* feature = getObject();
+    PartDesign::Body* body = feature ? PartDesign::Body::findBodyOf(feature) : nullptr;
+    if (!body) {
+        return false;
+    }
+    const std::vector<App::DocumentObject*>& members = body->Group.getValues();
+    auto it = std::find(members.begin(), members.end(), feature);
+    return it != members.end() && std::next(it) != members.end();
 }
 
 void TaskDlgFeatureParameters::updateOkButton()
