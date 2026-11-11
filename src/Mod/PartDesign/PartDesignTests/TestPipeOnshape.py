@@ -483,7 +483,9 @@ class TestThreadCapFollowsEdits(PipeCase):
         cylinder (the fuse trims the start face to x >= 10); the cap a Revolution of that face about
         its edge on the cylinder, 180 degrees one way, swinging into the cylinder and the thread. The fuse of the two came out
         empty (no solid) while the Revolution was Up-to-date. Onshape builds it: the thread, the cap
-        adding at most its own 0.476. Until it builds so, the Revolution stops with an error."""
+        adding at most its own 0.476. The thread's path now sweeps turn by turn (ops#665), and the
+        fuse builds: the cap lies almost wholly inside the thread and the cylinder, so it adds next
+        to nothing (the boolean's noise is about 1e-4)."""
         base = self.circle(r=10, name="Base")
         models.pad(self.body, base, 20, "Cylinder")
         tooth = self.sketch("Tooth", models.polygon([(9.9, 2), (11, 2.5), (9.9, 3)]), placement=XZ)
@@ -513,9 +515,120 @@ class TestThreadCapFollowsEdits(PipeCase):
         cap.Angle = 180
         cap.Refine = False
         self.doc.recompute()
-        if cap.isValid():
-            self.assertEqual(len(cap.Shape.Solids), 1, "the cap's result lost the part")
-            self.assertGreaterEqual(cap.Shape.Volume, before - 1e-6)
-            self.assertLessEqual(cap.Shape.Volume, before + cap.AddSubShape.Volume + 1e-6)
-        else:
-            self.assertIn("volume", cap.getStatusString().lower())
+        self.assertTrue(cap.isValid(), cap.getStatusString())
+        self.assertEqual(len(cap.Shape.Solids), 1, "the cap's result lost the part")
+        self.assertGreaterEqual(cap.Shape.Volume, before - 1e-3)
+        self.assertLessEqual(cap.Shape.Volume, before + cap.AddSubShape.Volume + 1e-3)
+
+
+class TestThreadToothOnTheCylinder(PipeCase):
+    """Oracle 9 (ops#665, Onshape's answers): a cylinder r 10, 20 tall; a helix r 10, pitch 2,
+    height 10 from z = 2.5; a tooth on XZ swept along it, added (profile control None)."""
+
+    CYLINDER = math.pi * 10**2 * 20
+
+    def thread(self, tooth):
+        base = self.circle(r=10, name="Base")
+        models.pad(self.body, base, 20, "Cylinder")
+        profile = self.sketch("Tooth", models.polygon(tooth), placement=XZ)
+        path = self.doc.addObject("Part::Helix", "Helix")
+        path.Pitch, path.Height, path.Radius = 2, 10, 10
+        path.Placement = App.Placement(V(0, 0, 2.5), App.Rotation())
+        return self.pipe(profile, path, ProfileControl="None")
+
+    def assertSolids(self, pipe, volumes):
+        self.assertSweeps(pipe)
+        solids = sorted(pipe.Shape.Solids, key=lambda s: s.Volume)
+        self.assertEqual(len(solids), len(volumes), [s.Volume for s in solids])
+        for solid, volume in zip(solids, sorted(volumes)):
+            self.assertTrue(solid.isValid())
+            self.assertAlmostEqual(solid.Volume, volume, delta=0.02)
+
+    def testBaseOnTheCylinderFusesIntoOnePart(self):
+        """The tooth's base edge (10, 2)-(10, 3) lies on the cylinder, so the swept base face does:
+        one part, 6445.4938 (Onshape). The Pipe along a one-edge helix gave 2 solids with BOP
+        errors; AdditiveHelix, whose path breaks at each turn, gave the one part."""
+        pipe = self.thread([(10, 2), (11, 2.5), (10, 3)])
+        self.assertSolids(pipe, [6445.4938])
+        shape = pipe.Shape.copy()
+        try:
+            shape.check(True)
+        except ValueError as error:
+            self.fail(str(error))
+
+    def testApexOnTheCylinderLeavesTwoParts(self):
+        """True line contact, the tooth's apex on the cylinder: two parts, no error (Onshape: the
+        cylinder 6283.1853 and the thread 167.5426)."""
+        pipe = self.thread([(10, 2.5), (11, 2), (11, 3)])
+        self.assertSolids(pipe, [self.CYLINDER, 167.5426])
+
+    def testSunkToothFusesIntoOnePart(self):
+        """The control, sunk 0.1 into the cylinder: one part, 6430.7378 (Onshape)."""
+        pipe = self.thread([(9.9, 2), (11, 2.5), (9.9, 3)])
+        self.assertSolids(pipe, [6430.7378])
+
+    def testBaseOnTheCylinderStaysOnePartAtPartTurns(self):
+        """Height 10 -> 11 (5.5 turns, the last piece half a turn): still one part, its volume between
+        the cylinder's and the cylinder's plus the thread tool's."""
+        pipe = self.thread([(10, 2), (11, 2.5), (10, 3)])
+        self.doc.getObject("Helix").Height = 11
+        self.doc.recompute()
+        self.assertSweeps(pipe)
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertGreater(pipe.Shape.Volume, self.CYLINDER + 160)
+        self.assertLess(pipe.Shape.Volume, self.CYLINDER + pipe.AddSubShape.Volume + 1e-6)
+
+
+YZ = App.Placement(V(0, 0, 0), App.Rotation(V(0, 1, 0), 90) * App.Rotation(V(0, 0, 1), 90))  # (x, y) -> (0, x, y)
+
+
+class TestPipeSelfOverlap(PipeCase):
+    """Oracle 9 (ops#660, Onshape's answers): Onshape refuses a helix whose turns overlap
+    (SWEEP_FAILED) and a path that touches or crosses itself (SWEEP_PATH_FAILED); it builds turns
+    that only touch, and tubes that overlap while the path stays clear of itself (their exact
+    union: FreeCAD-CH stops there with an error until it builds the union)."""
+
+    def coil(self, pitch):
+        """A 1 x 3 rectangle (radial x axial) on XZ centred on the start of a helix r 10, height 10."""
+        helix = self.doc.addObject("Part::Helix", "Helix")
+        helix.Pitch, helix.Height, helix.Radius = pitch, 10, 10
+        profile = self.sketch("Profile", models.rectangle(9.5, -1.5, 10.5, 1.5), placement=XZ)
+        return self.pipe(profile, helix, ProfileControl="None")
+
+    def testOverlappingTurnsStop(self):
+        """Pitch 2 under a profile 3 tall: each turn overlaps the next (Onshape: SWEEP_FAILED). The
+        sweep came out a self-intersecting solid of the naive 942.48, Up-to-date."""
+        self.assertStops(self.coil(2), "turns overlap")
+
+    def testTouchingTurnsSweep(self):
+        """Pitch 3 = the profile's height: the turns touch (Onshape builds it): 3 x 1 x the path's
+        length, 2 pi 10 x 10 / 3 turns."""
+        self.assertSweeps(self.coil(3), 3 * 2 * math.pi * 10 * 10 / 3, places=2)
+
+    def testClearTurnsSweep(self):
+        """Pitch 4: 3 x 1 x 2 pi 10 x 2.5 turns."""
+        self.assertSweeps(self.coil(4), 3 * 2 * math.pi * 10 * 2.5, places=2)
+
+    def tube(self, end):
+        """A circle r 1 normal to X at the origin swept along (0,0)-(20,0)-(20,10)-(10,10)-end."""
+        path = self.sketch("Path", models.polyline([(0, 0), (20, 0), (20, 10), (10, 10), end]))
+        profile = self.sketch("Profile", [models.circle(0, 0, 1)], placement=YZ)
+        return self.pipe(profile, path, ProfileControl="None")
+
+    def testPathCrossingItselfStops(self):
+        """The last segment crosses the first at (10, 0) (Onshape: SWEEP_PATH_FAILED)."""
+        self.assertStops(self.tube((10, -10)), "path", "crosses or touches itself")
+
+    def testPathTouchingItselfStops(self):
+        """The path ends on its first segment (Onshape: an error too)."""
+        self.assertStops(self.tube((10, 0)), "path", "crosses or touches itself")
+
+    def testTubesOverlappingWhileThePathIsClearStop(self):
+        """The path ends at (10, 0.5): the last tube runs 0.5 into the first, the path clear of itself.
+        Onshape builds the exact union (154.3944, not the naive 155.509); FreeCAD-CH built the naive
+        self-intersecting solid, Up-to-date. Until it builds the union, it stops with an error."""
+        self.assertStops(self.tube((10, 0.5)), "overlaps itself")
+
+    def testTubesClearOfEachOtherSweep(self):
+        """The path ends at (10, 1.5): the tubes miss each other: pi x the path's length."""
+        self.assertSweeps(self.tube((10, 1.5)), math.pi * 48.5, places=2)
