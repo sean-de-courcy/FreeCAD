@@ -82,6 +82,7 @@
 #include "Workbench.h"
 #include "WorkbenchManager.h"
 #include "Selection/Selection.h"
+#include "ToolBarManager.h"
 
 namespace Gui::DocumentTabs
 {
@@ -184,6 +185,11 @@ public:
     void reconcile(App::Document* doc);
     void refreshBars();
     void applyKeymap();
+    void placeStrip();
+    void sizeButtons();
+
+    /// The kind rule behind DocumentTabs::allowsWorkbench()
+    bool allowsWorkbench(const std::string& name, std::string* refusal) const;
 
     std::string activeTab(const App::Document* doc) const;
     bool switchTo(
@@ -261,6 +267,10 @@ private:
     QTabBar* documents;
     QToolBar* bar;
     QTabBar* typed;
+    QToolButton* managerButton = nullptr;
+    QToolButton* plusButton = nullptr;
+    bool selectorHidden = false;  // applyKeymap() hid the Workbench toolbar
+    bool stripPlaced = false;  // placeStrip() has put the strip first once
     QTimer timer;
     std::set<const App::Document*> dirty;
     std::set<const App::Document*> closing;  // their views go: an activation meanwhile is no switch
@@ -310,8 +320,8 @@ Controller::Controller(MainWindow* mw)
     documents->setExpanding(false);
     documents->setDocumentMode(true);
     strip->addWidget(documents);
-    mw->addToolBarBreak(Qt::TopToolBarArea);
     mw->addToolBar(Qt::TopToolBarArea, strip);
+    placeStrip();
     connect(documents, &QTabBar::tabBarClicked, this, &Controller::onDocumentClicked);
     connect(documents, &QTabBar::tabCloseRequested, this, &Controller::onDocumentClose);
 
@@ -320,16 +330,20 @@ Controller::Controller(MainWindow* mw)
     bar->setObjectName(QStringLiteral("FreeCADCH_TypedTabs"));
     bar->setWindowTitle(QApplication::translate("DocumentTabs", "Tabs"));
     bar->setMovable(false);
-    auto managerButton = new QToolButton(bar);
+    managerButton = new QToolButton(bar);
     managerButton->setObjectName(QStringLiteral("FreeCADCH_TabManager"));
     managerButton->setText(QStringLiteral("☰"));
     managerButton->setToolTip(QApplication::translate("DocumentTabs", "Tab manager (Alt+T)"));
     connect(managerButton, &QToolButton::clicked, this, [this] { openManager(); });
     bar->addWidget(managerButton);
     auto plus = new QToolButton(bar);
+    plusButton = plus;
     plus->setObjectName(QStringLiteral("FreeCADCH_NewTab"));
     plus->setText(QStringLiteral("+"));
-    plus->setToolTip(QApplication::translate("DocumentTabs", "Insert new tab"));
+    plus->setToolTip(QApplication::translate(
+        "DocumentTabs",
+        "Insert a Part Studio, Assembly, Drawing or Variable Studio"
+    ));
     plus->setPopupMode(QToolButton::InstantPopup);
     auto menu = new QMenu(plus);
     const std::pair<const char*, const char*> kinds[] = {
@@ -359,6 +373,7 @@ Controller::Controller(MainWindow* mw)
     typed->setMovable(true);  // a drag reorders the tabs, saved, no undo step [guess]
     bar->addWidget(typed);
     mw->addToolBar(Qt::BottomToolBarArea, bar);
+    sizeButtons();
     connect(typed, &QTabBar::tabMoved, this, [this](int, int) { saveBarOrder(); });
     connect(typed, &QTabBar::tabBarClicked, this, &Controller::onTabClicked);
     connect(typed, &QTabBar::tabBarDoubleClicked, this, &Controller::renameInteractive);
@@ -521,6 +536,22 @@ void Controller::applyKeymap()
     const bool on = isOn();
     strip->setVisible(on);
     bar->setVisible(on);
+    if (on) {
+        placeStrip();
+        sizeButtons();
+    }
+    // A tab's kind fixes its tools: no workbench selector under the Onshape keymap (the toolbar is
+    // made hidden and unavailable then; this covers a switch at runtime and an old settings folder)
+    if (auto toolbars = ToolBarManager::getInstance()) {
+        if (on) {
+            selectorHidden = true;
+            toolbars->setState(QStringLiteral("Workbench"), ToolBarManager::State::ForceHidden);
+        }
+        else if (selectorHidden) {
+            selectorHidden = false;  // FreeCAD's keymap: as it was, nothing more to do
+            toolbars->setState(QStringLiteral("Workbench"), ToolBarManager::State::RestoreDefault);
+        }
+    }
     if (auto mdi = mw->findChild<QMdiArea*>()) {
         if (auto tabs = mdi->findChild<QTabBar*>(QStringLiteral("mdiAreaTabBar"))) {
             // A hidden tab bar still takes its height from the area (QMdiArea sizes the viewport by
@@ -537,6 +568,139 @@ void Controller::applyKeymap()
     if (on) {
         refreshBars();
     }
+}
+
+void Controller::placeStrip()
+{
+    // The strip alone on a full-width row above every toolbar (Onshape's document tabs), whatever
+    // toolbars a workbench adds later or an old window layout restored: it goes before the first
+    // toolbar of the top area, with a break after it. Toolbars added later land on the last row.
+    QToolBar* first = nullptr;
+    int bestY = 0;
+    int bestX = 0;
+    for (QToolBar* toolbar : mw->findChildren<QToolBar*>(QString(), Qt::FindDirectChildrenOnly)) {
+        if (toolbar == strip || toolbar->isHidden()
+            || mw->toolBarArea(toolbar) != Qt::TopToolBarArea) {
+            continue;
+        }
+        const QPoint at = toolbar->geometry().topLeft();
+        if (!first || at.y() < bestY || (at.y() == bestY && at.x() < bestX)) {
+            first = toolbar;
+            bestY = at.y();
+            bestX = at.x();
+        }
+    }
+    if (!first) {
+        if (!stripPlaced) {
+            stripPlaced = true;
+            mw->removeToolBar(strip);
+            mw->addToolBar(Qt::TopToolBarArea, strip);
+            mw->addToolBarBreak(Qt::TopToolBarArea);
+            strip->setVisible(isOn());
+        }
+        return;
+    }
+    // Already the first row, alone (as laid out): nothing to move
+    const QRect at = strip->geometry();
+    if (stripPlaced && strip->isVisible() && at.height() > 0 && first->geometry().height() > 0
+        && at.bottom() < first->geometry().top()) {
+        return;
+    }
+    stripPlaced = true;
+    mw->removeToolBar(strip);
+    mw->insertToolBar(first, strip);
+    mw->insertToolBarBreak(first);
+    strip->setVisible(isOn());
+}
+
+void Controller::sizeButtons()
+{
+    // "+" and the Tab manager button are at least a tab high, with a glyph that can be found (a
+    // plain small text button was missed in the first hands-on check)
+    int height = 30;
+    if (typed) {
+        height = std::max(
+            height,
+            typed->count() > 0 ? typed->tabRect(0).height() : typed->sizeHint().height()
+        );
+        height = std::max(height, typed->fontMetrics().height() + 14);
+    }
+    for (QToolButton* button : {managerButton, plusButton}) {
+        if (!button) {
+            continue;
+        }
+        QFont font = mw->font();
+        if (font.pointSizeF() > 0) {
+            font.setPointSizeF(font.pointSizeF() * 1.6);
+        }
+        else if (font.pixelSize() > 0) {
+            font.setPixelSize(font.pixelSize() * 8 / 5);
+        }
+        font.setBold(true);
+        button->setFont(font);
+        button->setFixedSize(height, height);
+        button->setStyleSheet(QStringLiteral(
+            "QToolButton { border: 1px solid palette(mid); border-radius: 4px;"
+            " background: palette(button); }"
+            " QToolButton:hover { background: palette(midlight); }"
+            " QToolButton::menu-indicator { image: none; width: 0px; }"
+        ));
+    }
+}
+
+bool Controller::allowsWorkbench(const std::string& name, std::string* refusal) const
+{
+    // Under the Onshape keymap a tab's kind fixes its tools (decision 355): a Part Studio takes
+    // Part Design (and the Sketcher, which a sketch edit enters), an Assembly its own, a Drawing
+    // TechDraw; a Variable Studio keeps what it has. Start and no open document are free.
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    AppTabs::Tab tab {};
+    if (!isOn() || arriving || !doc || closing.count(doc) || name == "StartWorkbench"
+        || !AppTabs::findTab(doc, activeTab(doc), tab)) {
+        return true;
+    }
+    const char* tabIs = nullptr;
+    bool fits = false;
+    switch (tab.kind) {
+        case AppTabs::Kind::PartStudio:
+            tabIs = QT_TRANSLATE_NOOP("DocumentTabs", "a Part Studio");
+            fits = name == "PartDesignWorkbench" || name == "SketcherWorkbench";
+            break;
+        case AppTabs::Kind::Assembly:
+            tabIs = QT_TRANSLATE_NOOP("DocumentTabs", "an Assembly");
+            fits = name == "AssemblyWorkbench";
+            break;
+        case AppTabs::Kind::Drawing:
+            tabIs = QT_TRANSLATE_NOOP("DocumentTabs", "a Drawing");
+            fits = name == "TechDrawWorkbench";
+            break;
+        case AppTabs::Kind::VariableStudio: {
+            tabIs = QT_TRANSLATE_NOOP("DocumentTabs", "a Variable Studio");
+            Workbench* current = WorkbenchManager::instance()->active();
+            fits = current && current->name() == name;
+            break;
+        }
+    }
+    if (fits) {
+        return true;
+    }
+    if (refusal) {
+        const char* wanted = QT_TRANSLATE_NOOP("DocumentTabs", "a new tab");
+        if (name == "AssemblyWorkbench") {
+            wanted = QT_TRANSLATE_NOOP("DocumentTabs", "an Assembly");
+        }
+        else if (name == "TechDrawWorkbench") {
+            wanted = QT_TRANSLATE_NOOP("DocumentTabs", "a Drawing");
+        }
+        else if (name == "PartDesignWorkbench" || name == "SketcherWorkbench") {
+            wanted = QT_TRANSLATE_NOOP("DocumentTabs", "a Part Studio");
+        }
+        *refusal = QApplication::translate("DocumentTabs", "This tab is %1: use + for %2")
+                       .arg(QApplication::translate("DocumentTabs", tabIs))
+                       .arg(QApplication::translate("DocumentTabs", wanted))
+                       .toStdString();
+    }
+    return false;
 }
 
 void Controller::schedule(const App::Document* doc)
@@ -787,6 +951,7 @@ void Controller::refreshBars()
             typed->setCurrentIndex(index);
         }
     }
+    sizeButtons();
     if (manager && manager->isVisible()) {
         manager->populate();
     }
@@ -1859,6 +2024,11 @@ public:
             "isOn() -> whether the typed tabs are on (the Onshape keymap)"
         );
         add_varargs_method(
+            "allowsWorkbench",
+            &Module::pyAllowsWorkbench,
+            "allowsWorkbench(name) -> (allowed, refusal): whether the active tab's kind takes the workbench"
+        );
+        add_varargs_method(
             "activeTab",
             &Module::pyActiveTab,
             "activeTab(doc) -> the active tab's name"
@@ -1928,6 +2098,19 @@ private:
     Py::Object pyIsOn(const Py::Tuple& /*args*/)
     {
         return Py::Boolean(DocumentTabs::isOn());
+    }
+    Py::Object pyAllowsWorkbench(const Py::Tuple& args)
+    {
+        const char* name = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "s", &name)) {
+            throw Py::Exception();
+        }
+        std::string refusal;
+        const bool allowed = controller().allowsWorkbench(name, &refusal);
+        Py::Tuple result(2);
+        result.setItem(0, Py::Boolean(allowed));
+        result.setItem(1, Py::String(refusal));
+        return result;
     }
     Py::Object pyActiveTab(const Py::Tuple& args)
     {
@@ -2222,6 +2405,12 @@ void DocumentTabs::newDocumentStudio(App::Document* doc)
 std::string DocumentTabs::activeTab(const App::Document* doc)
 {
     return Controller::instance() ? Controller::instance()->activeTab(doc) : std::string();
+}
+
+bool DocumentTabs::allowsWorkbench(const std::string& name, std::string* refusal)
+{
+    Controller* ctl = Controller::instance();
+    return !ctl || ctl->allowsWorkbench(name, refusal);
 }
 
 bool DocumentTabs::switchTo(App::Document* doc, const std::string& name, std::string* refusal)

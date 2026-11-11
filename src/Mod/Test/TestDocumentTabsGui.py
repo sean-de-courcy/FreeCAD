@@ -1127,6 +1127,238 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
         self.assertIsNone(self.manager())
 
+    # -- tabs 3: a tab's kind fixes its tools; the strip and "+" (ops#640) ------------------------------
+
+    def workbenchAction(self, name):
+        """The checkable QAction of the workbench selector's group (what the toolbar's combo box
+        and View > Workbench trigger), by workbench name."""
+        from PySide import QtGui
+
+        for action in QtWidgets.QApplication.instance().findChildren(QtGui.QAction):
+            if action.objectName() == name and action.isCheckable():
+                return action
+        self.fail("no workbench action " + name)
+
+    def userActivates(self, name):
+        """A click on the workbench in the selector or the menu: the action is triggered, which
+        runs Std_Workbench."""
+        self.workbenchAction(name).trigger()
+        pump(0.3)
+
+    def viewMenu(self):
+        mw = Gui.getMainWindow()
+        for action in mw.menuBar().actions():
+            if action.text().replace("&", "") == "View":
+                return action.menu()
+        self.fail("no View menu")
+
+    def workbenchSubmenuVisible(self):
+        return any(
+            a.menu() is not None and a.text().replace("&", "") == "Workbench" and a.isVisible()
+            for a in self.viewMenu().actions()
+        )
+
+    def workbenchToolbarVisible(self):
+        bar = Gui.getMainWindow().findChild(QtWidgets.QToolBar, "Workbench")
+        return bar is not None and bar.isVisible()
+
+    def testTheWorkbenchSelectorIsNotOffered(self):
+        """Under the Onshape keymap the "Workbench" toolbar and the View > Workbench submenu are
+        gone, on every workbench; under FreeCAD's keymap they are there."""
+        self.model()
+        for name, tab in (("PartDesignWorkbench", "*"), ("AssemblyWorkbench", "Assembly")):
+            self.switch(tab)
+            self.assertEqual(Gui.activeWorkbench().name(), name)
+            self.assertFalse(self.workbenchToolbarVisible(), name)
+            self.assertFalse(self.workbenchSubmenuVisible(), name)
+        group = App.ParamGet("User parameter:BaseApp/Preferences/General")
+        saved = group.GetString("Keymap") if "Keymap" in group.GetStrings() else None
+        try:
+            group.SetString("Keymap", "FreeCAD")
+            pump(0.5)
+            self.assertFalse(GuiTabs.isOn())
+            self.assertTrue(self.workbenchSubmenuVisible())
+            self.assertTrue(self.workbenchToolbarVisible())
+            # FreeCAD's keymap switches freely, by the selector too
+            self.userActivates("PartDesignWorkbench")
+            self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+            self.userActivates("AssemblyWorkbench")
+            self.assertEqual(Gui.activeWorkbench().name(), "AssemblyWorkbench")
+        finally:
+            if saved is None:
+                group.RemString("Keymap")
+            else:
+                group.SetString("Keymap", saved)
+            pump(0.5)
+        self.assertTrue(GuiTabs.isOn())
+        self.assertFalse(self.workbenchSubmenuVisible())
+        self.assertFalse(self.workbenchToolbarVisible())
+
+    def testAWorkbenchThatDoesNotFitTheTabIsTurnedBack(self):
+        """A Part Studio tab takes Part Design (and the Sketcher); Assembly from the selector or
+        the menu is turned back, with the reason in the status bar. An assembly tab takes
+        Assembly only. A script's activateWorkbench stays usable."""
+        self.model()
+        self.switch("*")
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+        self.userActivates("AssemblyWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+        self.assertTrue(self.workbenchAction("PartDesignWorkbench").isChecked())
+        self.assertFalse(self.workbenchAction("AssemblyWorkbench").isChecked())
+        self.assertIn("This tab is a Part Studio: use + for an Assembly", statusMessage())
+        self.userActivates("TechDrawWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+        self.assertIn("This tab is a Part Studio: use + for a Drawing", statusMessage())
+        self.assertEqual(GuiTabs.activeTab(self.doc), "*")
+        # the Sketcher and Part Design are the studio's
+        self.userActivates("SketcherWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "SketcherWorkbench")
+        self.userActivates("PartDesignWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+        # the assembly tab: Assembly yes, Part Design no
+        self.switch("Assembly")
+        self.assertEqual(Gui.activeWorkbench().name(), "AssemblyWorkbench")
+        self.userActivates("PartDesignWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "AssemblyWorkbench")
+        self.assertIn("This tab is an Assembly: use + for a Part Studio", statusMessage())
+        self.assertEqual(GuiTabs.activeTab(self.doc), "Assembly")
+        # a script is not the selector
+        Gui.activateWorkbench("PartDesignWorkbench")
+        pump(0.2)
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+        self.switch("*")
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+
+    def testWhichWorkbenchesAKindTakes(self):
+        """The rule by kind: a Part Studio takes PartDesign and Sketcher, an Assembly its own
+        workbench, a Variable Studio none besides the one it has."""
+        self.model()
+        for tab, allowed, refused in (
+            ("*", ["PartDesignWorkbench", "SketcherWorkbench"], ["AssemblyWorkbench", "TechDrawWorkbench"]),
+            ("Assembly", ["AssemblyWorkbench"], ["PartDesignWorkbench", "TechDrawWorkbench"]),
+        ):
+            self.switch(tab)
+            for name in allowed:
+                self.assertTrue(GuiTabs.allowsWorkbench(name)[0], (tab, name))
+            for name in refused:
+                ok, why = GuiTabs.allowsWorkbench(name)
+                self.assertFalse(ok, (tab, name))
+                self.assertIn("This tab is", why)
+        name = GuiTabs.create(self.doc, "VariableStudio")
+        pump(0.3)
+        self.assertEqual(GuiTabs.activeTab(self.doc), name)
+        current = Gui.activeWorkbench().name()
+        self.assertTrue(GuiTabs.allowsWorkbench(current)[0])
+        for other in ("PartDesignWorkbench", "AssemblyWorkbench", "TechDrawWorkbench"):
+            if other != current:
+                ok, why = GuiTabs.allowsWorkbench(other)
+                self.assertFalse(ok, other)
+                self.assertIn("This tab is a Variable Studio", why)
+
+    def testASketchOpensAndLeavesInAStudioTab(self):
+        """Editing a sketch enters the Sketcher and leaving it comes back to Part Design, in a
+        Part Studio tab; the selector's refusal doesn't block it or loop."""
+        objects = self.model(assembly=False)
+        self.switch("*")
+        sketch = self.doc.getObject("Profile")
+        Gui.ActiveDocument.setEdit(sketch.Name)
+        pump(0.5)
+        self.assertEqual(Gui.activeWorkbench().name(), "SketcherWorkbench")
+        self.assertEqual(GuiTabs.activeTab(self.doc), "*")
+        self.userActivates("AssemblyWorkbench")  # turned back while the sketch is open
+        self.assertEqual(Gui.activeWorkbench().name(), "SketcherWorkbench")
+        Gui.ActiveDocument.resetEdit()
+        pump(0.5)
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+        self.assertEqual(GuiTabs.activeTab(self.doc), "*")
+
+    def testNoDocumentTakesAnyWorkbench(self):
+        """With no document open there is no tab: any workbench can be activated."""
+        for name in list(App.listDocuments()):
+            App.closeDocument(name)
+        pump(0.3)
+        self.assertTrue(GuiTabs.allowsWorkbench("AssemblyWorkbench")[0])
+        self.userActivates("AssemblyWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "AssemblyWorkbench")
+        self.userActivates("PartDesignWorkbench")
+        self.assertEqual(Gui.activeWorkbench().name(), "PartDesignWorkbench")
+
+    def stripGeometry(self):
+        """The document strip's row: its top, left, width and height in the main window, and the
+        top-area toolbars that share its row or lie above it."""
+        from PySide import QtCore
+
+        mw = Gui.getMainWindow()
+        strip = mw.findChild(QtWidgets.QToolBar, "FreeCADCH_DocumentStrip")
+        self.assertIsNotNone(strip)
+        self.assertTrue(strip.isVisible())
+        self.assertEqual(mw.toolBarArea(strip), QtCore.Qt.TopToolBarArea)
+        origin = strip.mapTo(mw, QtCore.QPoint(0, 0))
+        geometry = (origin.x(), origin.y(), strip.width(), strip.height())
+        beside = []
+        for bar in mw.findChildren(QtWidgets.QToolBar):
+            if bar is strip or not bar.isVisible() or mw.toolBarArea(bar) != QtCore.Qt.TopToolBarArea:
+                continue
+            top = bar.mapTo(mw, QtCore.QPoint(0, 0)).y()
+            if top < origin.y() + strip.height():
+                beside.append(bar.objectName())
+        return geometry, beside
+
+    def testTheStripHasItsOwnRowAboveTheTools(self):
+        """The document strip is alone on a full-width row above every toolbar, and it neither
+        moves nor changes width when the tab or the workbench changes or a sketch is edited."""
+        self.model()
+        mw = Gui.getMainWindow()
+        self.switch("*")
+        pump(0.3)
+        before, beside = self.stripGeometry()
+        self.assertEqual(beside, [], "toolbars on or above the strip's row")
+        self.assertGreaterEqual(before[2], mw.width() * 0.9, before)  # a full-width row
+        self.switch("Assembly")
+        pump(0.3)
+        self.assertEqual(self.stripGeometry(), (before, []))
+        self.switch("Part")
+        pump(0.3)
+        self.assertEqual(self.stripGeometry(), (before, []))
+        self.switch("*")
+        Gui.ActiveDocument.setEdit(self.doc.getObject("Profile").Name)
+        pump(0.5)
+        self.assertEqual(Gui.activeWorkbench().name(), "SketcherWorkbench")
+        self.assertEqual(self.stripGeometry(), (before, []))
+        Gui.ActiveDocument.resetEdit()
+        pump(0.5)
+        self.assertEqual(self.stripGeometry(), (before, []))
+        # a toolbar a workbench makes later lands below the strip, not on its row
+        Gui.activateWorkbench("TechDrawWorkbench")
+        pump(0.5)
+        self.assertEqual(self.stripGeometry(), (before, []))
+        Gui.activateWorkbench("PartDesignWorkbench")
+        pump(0.3)
+
+    def testTheNewTabButtonIsAsEasyToSeeAsATab(self):
+        """"+" and the Tab manager button are at least a tab high, "+" shows its glyph and says
+        what it inserts."""
+        self.model()
+        self.switch("*")
+        pump(0.3)
+        mw = Gui.getMainWindow()
+        typed = mw.findChild(QtWidgets.QTabBar, "FreeCADCH_TypedTabBar")
+        plus = mw.findChild(QtWidgets.QToolButton, "FreeCADCH_NewTab")
+        manager = mw.findChild(QtWidgets.QToolButton, "FreeCADCH_TabManager")
+        self.assertGreater(typed.count(), 0)
+        tabHeight = typed.tabRect(0).height()
+        self.assertGreater(tabHeight, 0)
+        for button in (plus, manager):
+            self.assertTrue(button.isVisible(), button.objectName())
+            self.assertGreaterEqual(button.height(), tabHeight, button.objectName())
+            self.assertGreaterEqual(button.width(), tabHeight, button.objectName())
+        self.assertEqual(plus.text(), "+")
+        self.assertEqual(
+            plus.toolTip(), "Insert a Part Studio, Assembly, Drawing or Variable Studio"
+        )
+        # the glyph is big enough to see: its font is larger than the toolbar's own
+        self.assertGreater(plus.font().pointSizeF(), mw.font().pointSizeF())
+
 
     # -- J1T: a studio's Top, Front and Right are sketch planes (ops#640 round 8) ---------------------
 
