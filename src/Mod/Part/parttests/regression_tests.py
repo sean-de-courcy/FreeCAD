@@ -7,6 +7,7 @@ import Part
 import itertools
 import math
 import os
+import re
 
 if "BUILD_SKETCHER" in FreeCAD.__cmake__:
     import Sketcher
@@ -1114,7 +1115,10 @@ class RegressionTests(unittest.TestCase):
                 else:
                     place, size = element.CenterOfMass, element.Length
                 key = (kind,) + tuple(round(c, 6) + 0.0 for c in (place.x, place.y, place.z, size))
-                result.setdefault(key, set()).add(mapped.replace(";%d;" % tag, ";*;"))
+                # The feature's own tag only where it is a section's tag (before its op code),
+                # never an MLN index equal to it (object ids start at random: ops#669)
+                name = re.sub(r"(?<=;)%d(?=;[A-Z]{2,};)" % tag, "*", mapped)
+                result.setdefault(key, set()).add(name)
             return result
 
         def assertSameNames(case, shape, tag, reference, referenceTag, counts):
