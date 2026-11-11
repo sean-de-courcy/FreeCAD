@@ -778,7 +778,8 @@ class DocumentBasicCases(unittest.TestCase):
         c2.touch()
         self.Doc.recompute()
         # ops#349: the recompute reports the cycle as a link's error; the other link depends on
-        # it, so it fails without running, naming that link (ops#579), and stays touched
+        # it, so it fails without running, naming that link (ops#579), and is left with nothing
+        # pending (round 8, J13: a stopped object isn't left touched)
         cyclic = [link for link in (c1, c2) if "Cyclic link" in link.getStatusString()]
         self.assertTrue(cyclic, (c1.getStatusString(), c2.getStatusString()))
         for link in (c1, c2):
@@ -786,7 +787,7 @@ class DocumentBasicCases(unittest.TestCase):
             if link not in cyclic:
                 other = c2 if link is c1 else c1
                 self.assertIn(f"links to '{other.Label}'", link.getStatusString(), link.Name)
-                self.assertIn("Touched", link.State, link.Name)
+                self.assertNotIn("Touched", link.State, link.Name)
         # the open document still refuses a new cycle
         c3 = self.Doc.addObject("App::Link", "C3")
         c3.LinkedObject = c2

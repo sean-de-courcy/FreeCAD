@@ -188,9 +188,12 @@ TEST_F(VariableLookupTest, bareUnitNameInItsOwnSet)
     EXPECT_DOUBLE_EQ(evaluated(varSet, ".t + 1 mm").getValue(), 4.0);
     // after a number it is still the unit: two tonnes
     EXPECT_EQ(evaluated(varSet, "2 t").getUnit(), Base::Unit::Mass);
-    // with any other owner, or none, a bare `t` stays the unit
-    EXPECT_EQ(evaluated(owner, "2 * t").getUnit(), Base::Unit::Mass);
-    EXPECT_EQ(evaluated(nullptr, "t").getUnit(), Base::Unit::Mass);
+    // with any other owner, or none, a bare `t` stays the unit. The grammar takes a unit after a
+    // number, or alone as a unit (parseUnit), never as `2 * t`: the test asked for that since it
+    // came with rank 54 (ops#652)
+    EXPECT_EQ(evaluated(owner, "2 t").getUnit(), Base::Unit::Mass);
+    EXPECT_EQ(evaluated(nullptr, "3 t").getUnit(), Base::Unit::Mass);
+    EXPECT_EQ(App::ExpressionParser::parseUnit(nullptr, "t")->getUnit(), Base::Unit::Mass);
     // and a property path names the variable from anywhere
     EXPECT_DOUBLE_EQ(evaluated(owner, "VarSet.t * 2").getValue(), 6.0);
 }
@@ -204,9 +207,11 @@ TEST_F(VariableLookupTest, checkVariableNameAcceptsWhatExpressionsCanUse)
         varSet->addDynamicProperty("App::PropertyLength", name);
         EXPECT_EQ(parseError(owner, std::string("VarSet.") + name + " * 2"), "") << name;
     }
-    // without a holder only the name counts: "Width" is free
+    // without a holder only the name counts: "Width" is free, and since rank 54 a unit's name is
+    // too (`VarSet.mm` reads as the variable); a reserved word still isn't
     EXPECT_EQ(App::VariableLookup::checkVariableName(nullptr, "Width"), "");
-    EXPECT_NE(App::VariableLookup::checkVariableName(nullptr, "mm"), "");
+    EXPECT_EQ(App::VariableLookup::checkVariableName(nullptr, "mm"), "");
+    EXPECT_NE(App::VariableLookup::checkVariableName(nullptr, "True"), "");
 }
 
 }  // namespace

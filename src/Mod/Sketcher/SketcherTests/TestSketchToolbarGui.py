@@ -40,6 +40,7 @@ SKETCH = [
     "Sketcher_Offset",
     "Sketcher_Symmetry",
     "Sketcher_CompExternal",
+    "Sketcher_InsertDxf",  # FreeCAD-CH, the DXF lane: SketcherDxfGui's manipulator puts it here
     "Sketcher_ToggleConstruction",
     SEP,
     "Sketcher_CompDimensionTools",

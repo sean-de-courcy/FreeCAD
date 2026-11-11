@@ -117,6 +117,14 @@ using namespace App;
 using namespace boost;
 using namespace zipios;
 
+namespace App
+{
+// FreeCAD-CH (ops#652): defined in PropertyLinks.cpp, used only here (declared here, not in
+// ElementReferences.h, to keep App's headers as they are): takes the records of the references
+// into an object the recompute stopped, before the rule's afterStop() clears its shape.
+void takeElementReferencesInto(DocumentObject* target);
+}  // namespace App
+
 namespace
 {
 // The fork's naming revision (ops#103), in every V2 element map version. Bump it in any change
@@ -4598,6 +4606,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             unmade.push_back(obj);
                         }
                         if (stopped && continuation) {
+                            // FreeCAD-CH (ops#652): the records into it are taken first, as the
+                            // end of the recompute would, while it still has its last shape
+                            takeElementReferencesInto(obj);
                             // FreeCAD-CH (ops#640, F37): the rule writes what the view shows
                             // of it (PartDesign: a stopped Body, nothing)
                             continuation->afterStop(obj);
