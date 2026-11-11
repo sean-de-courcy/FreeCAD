@@ -25,7 +25,6 @@
 #include <QSplitter>
 
 #include "ComboView.h"
-#include "ForkKeymap.h"
 #include "PropertyView.h"
 #include "Tree.h"
 
@@ -56,11 +55,6 @@ ComboView::ComboView(Gui::Document* pcDocument, QWidget* parent)
     // property view
     prop = new PropertyView(this);
     splitter->addWidget(prop);
-    // FreeCAD-CH (ops#640 polish P9): Onshape has no Properties panel beside its Feature list;
-    // hidden, not left out, as MainWindow finds the PropertyView widgets by type
-    if (ForkKeymap::isOnshape()) {
-        prop->hide();
-    }
 }
 
 ComboView::~ComboView() = default;

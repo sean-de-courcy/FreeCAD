@@ -155,6 +155,11 @@ class SketcherGuiTestCases(unittest.TestCase):
         return counts["target_constraint"] / total_hits
 
     def setUp(self):
+        # FreeCAD-CH (ops#640 polish P1): the Onshape keymap draws no constraint glyph until
+        # Show constraints is on; these cases pick the glyphs
+        self.general = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Sketcher/General")
+        self.general.SetBool("ShowConstraints", True)
+        self.addCleanup(self.general.RemBool, "ShowConstraints")
         self.doc = FreeCAD.newDocument("SketchGuiTest")
         self.sketch = self.doc.addObject("Sketcher::SketchObject", "Sketch")
         self.doc.recompute()

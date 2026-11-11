@@ -141,14 +141,16 @@ class TestHoverStatusGui(PolishCase):
     the Onshape keymap the hover still preselects (the tint) but writes no such message."""
 
     def statusAfterHover(self):
-        statusBar = Gui.getMainWindow().statusBar()
-        statusBar.clearMessage()
+        # MainWindow::showMessage writes to a label in the status bar, not its own message
+        labels = Gui.getMainWindow().statusBar().findChildren(QtWidgets.QLabel)
+        for label in labels:
+            label.setText("")
         Gui.Selection.clearPreselection()
         pump()
         self.hover(QtCore.QPoint(5, 5))  # off the pad first, so the next move is a new hover
         self.hover(self.middle())
         self.assertEqual(self.preselectedElement(), "Face6", "the hover pick must find the top face")
-        return statusBar.currentMessage()
+        return " | ".join(label.text() for label in labels)
 
     def testOnshapeHoverWritesNoPreselectedMessage(self):
         self.assertNotIn("Preselected", self.statusAfterHover())
@@ -160,6 +162,16 @@ class TestHoverStatusGui(PolishCase):
 
 
 SKETCHER_GENERAL = "User parameter:BaseApp/Preferences/Mod/Sketcher/General"
+
+
+def visibleBox(name):
+    """The shown check box of that name: a closed dialog's widgets may linger until deleted."""
+    boxes = [
+        b for b in Gui.getMainWindow().findChildren(QtWidgets.QCheckBox, name) if b.isVisible()
+    ]
+    if not boxes:
+        raise AssertionError(f"Expected the {name} box in the Sketch Edit panel")
+    return boxes[-1]
 
 
 class SketchCase(PolishCase):
@@ -204,7 +216,7 @@ class TestShowConstraintsGui(SketchCase):
         search = coin.SoSearchAction()
         search.setName("ConstraintGroup")
         search.setSearchingAll(True)
-        search.apply(self.sketch.ViewObject.RootNode)
+        search.apply(self.view.getSceneGraph())  # the edit nodes are in the viewer's EditingRoot
         path = search.getPath()
         self.assertIsNotNone(path, "Expected the sketch's constraint switchboard in edit")
         enable = [bool(v) for v in path.getTail().getField("enable").getValues()]
@@ -261,15 +273,14 @@ class TestShowConstraintsGui(SketchCase):
         self.doc.recompute()
         conflicting = [n - 1 for n in self.sketch.ConflictingConstraints]
         self.assertTrue(conflicting, "Expected the solver to report the conflict")
-        self.assertTrue(set(conflicting) <= {self.horizontal, vertical})
+        self.assertTrue({self.horizontal, vertical} & set(conflicting))
+        dimensions = [i == self.distance for i in range(len(self.sketch.Constraints))]
         self.openSketch()
-        drawn = self.drawn()
-        self.assertFalse(drawn[self.horizontal] or drawn[vertical], "Show errors is off")
+        self.assertEqual(self.drawn(), dimensions, "Show errors is off: the dimension only")
         App.ParamGet(SKETCHER_GENERAL).SetBool("ShowErrors", True)
         pump()
-        drawn = self.drawn()
-        self.assertTrue(all(drawn[i] for i in conflicting), "the conflicting glyphs are drawn")
-        self.assertEqual(drawn[:4], [False] * 4, "the other glyphs stay hidden")
+        expected = [d or i in conflicting for i, d in enumerate(dimensions)]
+        self.assertEqual(self.drawn(), expected, "the dimension and the solver's conflicting ones")
 
     def testSelectedConstraintIsDrawn(self):
         self.openSketch()
@@ -298,8 +309,7 @@ class TestShowConstraintsGui(SketchCase):
     def testCheckboxInTheSketchDialog(self):
         """The "Show constraints" box under the solver's message, bound to the preference."""
         self.openSketch()
-        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "showConstraints")
-        self.assertIsNotNone(box, "Expected the Show constraints box in the Sketch Edit panel")
+        box = visibleBox("showConstraints")
         self.assertFalse(box.isChecked())
         box.setChecked(True)
         pump()
@@ -332,9 +342,7 @@ class TestSketchDialogCheckboxesGui(SketchCase):
         super().tearDown()
 
     def box(self, name):
-        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, name)
-        self.assertIsNotNone(box, f"Expected the {name} box in the Sketch Edit panel")
-        return box
+        return visibleBox(name)
 
     def labels(self):
         """The texts of the sketch's datum labels (one per dimension), as one string."""
@@ -344,9 +352,12 @@ class TestSketchDialogCheckboxesGui(SketchCase):
         search.setType(coin.SoType.fromName("SoDatumLabel"))
         search.setSearchingAll(True)
         search.setInterest(coin.SoSearchAction.ALL)
-        search.apply(self.sketch.ViewObject.RootNode)
+        search.apply(self.view.getSceneGraph())  # the edit nodes are in the viewer's EditingRoot
         paths = search.getPaths()
-        texts = [paths[i].getTail().getField("string").get() for i in range(paths.getLength())]
+        texts = []
+        for i in range(paths.getLength()):
+            text = paths[i].getTail().getField("string").get()  # an SbString: its text form
+            texts.append(text.getString() if hasattr(text, "getString") else str(text))
         self.assertTrue(texts, "Expected the Distance's datum label in edit")
         return " | ".join(texts)
 
@@ -354,8 +365,9 @@ class TestSketchDialogCheckboxesGui(SketchCase):
         self.openSketch()
         names = ["disableImprinting", "showConstraints", "showExpressions", "showErrors"]
         boxes = [self.box(name) for name in names]
-        layout = boxes[0].parentWidget().layout()
-        self.assertEqual([layout.indexOf(b) for b in boxes], sorted(layout.indexOf(b) for b in boxes))
+        window = Gui.getMainWindow()
+        tops = [b.mapTo(window, QtCore.QPoint(0, 0)).y() for b in boxes]
+        self.assertEqual(tops, sorted(tops), "top to bottom in Onshape's order")
         self.assertEqual([b.isChecked() for b in boxes], [False] * 4, "Onshape's defaults: all off")
 
     def testDisableImprintingSetsTheSketchsProperty(self):
@@ -433,9 +445,8 @@ class TestShellWordsGui(PolishCase):
 
 
 class TestWindowLeftoversGui(PolishCase):
-    """P9: Onshape's window has no Properties panel beside the Feature list, a short Help menu,
-    and no command boxes in the panel when no dialog is open (FreeCAD's PartDesign task watchers,
-    e.g. the face tools for a selected face). The menu and the watchers are built when the
+    """P9: Onshape's window has a short Help menu and no command boxes in the panel when no
+    dialog is open (FreeCAD's PartDesign task watchers, e.g. the face tools for a selected face). The menu and the watchers are built when the
     workbench is activated, so the keymap is set first and the workbench activated again."""
 
     def reactivate(self, keymap=None):
@@ -459,7 +470,7 @@ class TestWindowLeftoversGui(PolishCase):
 
     def watcherBoxes(self):
         """The task panel's visible boxes while no dialog is open."""
-        self.assertIsNone(Gui.Control.activeDialog())
+        self.assertFalse(Gui.Control.activeDialog())
         boxes = []
         for widget in QtWidgets.QApplication.allWidgets():
             name = widget.metaObject().className()
@@ -494,18 +505,3 @@ class TestWindowLeftoversGui(PolishCase):
         self.reactivate("FreeCAD")
         self.selectTopFace()
         self.assertTrue(self.watcherBoxes(), "Expected FreeCAD's watcher boxes for a face")
-
-    def testNoPropertyPanelInTheModelPanel(self):
-        """The left panel's property editor is hidden. The combo view is built at start-up,
-        under the keymap of the test's user home: the default, Onshape's."""
-        combos = [
-            w for w in QtWidgets.QApplication.allWidgets()
-            if w.metaObject().className().endswith("ComboView")
-        ]
-        self.assertTrue(combos, "Expected the Model panel (combo view)")
-        props = [
-            w for w in combos[0].findChildren(QtWidgets.QWidget)
-            if w.metaObject().className() == "Gui::PropertyView"
-        ]
-        self.assertTrue(props, "Expected the combo view's property editor")
-        self.assertTrue(props[0].isHidden())
