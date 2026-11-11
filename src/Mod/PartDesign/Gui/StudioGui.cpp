@@ -68,6 +68,9 @@ PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
                                          std::vector<Body*>& steps,
                                          std::vector<Body*>& tools,
                                          std::vector<Body*>& both);
+// App/Pieces.cpp (FreeCAD-CH ops#654 10.13): the contact test of an Add's merge, its leftovers
+// and this pre-fill
+PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b);
 }  // namespace PartDesign
 
 namespace PartDesignGui
@@ -221,8 +224,9 @@ Part::TopoShape partSolidBefore(const App::DocumentObject* owner, const PartDesi
     return shape;
 }
 
-/** The live parts at owner's place that its tool touches or intersects (face contact counts):
- * false when it has no tool. A tool its last recompute didn't keep (an Add touching no part of
+/** The live parts at owner's place that its tool touches or intersects (face contact counts, an
+ * edge or a vertex in common doesn't: the compute's own test, ops#654 10.13 skeptic 3): false
+ * when it has no tool. A tool its last recompute didn't keep (an Add touching no part of
  * its scope, an empty scope) is computed for this and dropped again.
  */
 bool toolContacts(App::DocumentObject* owner, std::vector<PartDesign::Body*>& out)
@@ -271,8 +275,7 @@ bool toolContacts(App::DocumentObject* owner, std::vector<PartDesign::Body*>& ou
         bool touches = false;
         for (const auto& partSolid : solid.getSubTopoShapes(TopAbs_SOLID)) {
             for (const auto& toolSolid : toolSolids) {
-                BRepExtrema_DistShapeShape distance(toolSolid.getShape(), partSolid.getShape());
-                if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+                if (PartDesign::studioSolidsJoin(toolSolid.getShape(), partSolid.getShape())) {
                     touches = true;
                     break;
                 }
@@ -318,7 +321,11 @@ QStringList laterFeatures(const App::DocumentObject* owner, const std::vector<Pa
 }
 
 /** The owner's Result box (ops#654 S4, parts-design 3.5): New / Add / Remove / Intersect and one
- * tick per live part of the studio, any of which can be cleared (report 21). Each change is a list
+ * tick per live part of the studio, any of which can be cleared (report 21). With two or more
+ * ticked, each ticked row is numbered in the scope's order ("1 Part 2"): an Add that joins them
+ * keeps the first (10.13, Onshape O9b). Merge with all (StudioMergeAll, off by default as
+ * Onshape's Q1 shows it): the scope is every live part at its place, ordered by each part's first
+ * feature in the history (M3), its ticks greyed. Each change is a list
  * edit (PartDesign.studioSetScopeIds, studioNewPart) in the dialog's transaction; a refusal is said
  * under the ticks and the box shows the owner as it is. Operation stays the owner's: Union (Add,
  * or New when the scope is parts it made), Subtraction (Remove), Common (Intersect).
@@ -353,6 +360,10 @@ public:
         layout->addWidget(combo, 1);
         groupLayout()->addWidget(proxy);
 
+        mergeAll = new QCheckBox(trStudio("Merge with all"), this);
+        mergeAll->setObjectName(QStringLiteral("studioMergeAll"));
+        mergeAll->setToolTip(trStudio("The feature acts on every part at its place in the history"));
+        groupLayout()->addWidget(mergeAll);
         scopeLabel = new QLabel(trStudio("Parts:"), this);
         groupLayout()->addWidget(scopeLabel);
         ticks = new QListWidget(this);
@@ -389,6 +400,9 @@ public:
         QObject::connect(ticks, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
             onTicked(item);
         });
+        QObject::connect(mergeAll, &QCheckBox::toggled, this, [this](bool on) {
+            onMergeAll(on);
+        });
     }
 
 private:
@@ -415,20 +429,49 @@ private:
             QSignalBlocker block(combo);
             combo->setCurrentIndex(index);
         }
-        const auto ids = PartDesign::studioScopeIds(owner);
+        const bool all = mergesWithAll(owner);
+        // The scope's order: its ticks', or with Merge with all the App's resolved order
+        std::vector<std::string> ids = PartDesign::studioScopeIds(owner);
+        if (all) {
+            ids.clear();
+            for (PartDesign::Body* body : PartDesign::studioScopeOf(owner)) {
+                ids.push_back(PartDesign::studioPartId(body));
+            }
+        }
+        {
+            QSignalBlocker block(mergeAll);
+            mergeAll->setChecked(all);
+        }
         {
             QSignalBlocker block(ticks);
             ticks->clear();
-            for (PartDesign::Body* body : liveStudioParts(owner)) {
+            const auto parts = liveStudioParts(owner);
+            std::vector<std::string> ticked;  // the ticked rows' ids, in the scope's order
+            for (const auto& id : ids) {
+                if (std::ranges::any_of(parts, [&id](PartDesign::Body* body) {
+                        return PartDesign::studioPartId(body) == id;
+                    })
+                    && std::ranges::find(ticked, id) == ticked.end()) {
+                    ticked.push_back(id);
+                }
+            }
+            for (PartDesign::Body* body : parts) {
                 const std::string id = PartDesign::studioPartId(body);
-                auto item = new QListWidgetItem(studioPartNameAt(body, owner), ticks);
+                const auto at = std::ranges::find(ticked, id);
+                QString label = studioPartNameAt(body, owner);
+                if (ticked.size() >= 2 && at != ticked.end()) {
+                    label = QStringLiteral("%1 %2").arg(at - ticked.begin() + 1).arg(label);
+                }
+                auto item = new QListWidgetItem(label, ticks);
                 item->setData(Qt::UserRole, QString::fromStdString(id));
-                item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
-                item->setCheckState(
-                    std::ranges::find(ids, id) != ids.end() ? Qt::Checked : Qt::Unchecked
+                item->setFlags(
+                    all ? Qt::ItemFlags(Qt::ItemIsUserCheckable)
+                        : Qt::ItemFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable)
                 );
+                item->setCheckState(at != ticked.end() ? Qt::Checked : Qt::Unchecked);
             }
         }
+        mergeAll->setVisible(!isNew);
         scopeLabel->setVisible(!isNew);
         ticks->setVisible(!isNew);
         QString text = refusal;
@@ -544,6 +587,9 @@ private:
             if (wasNew) {
                 return;
             }
+            if (mergesWithAll(owner)) {
+                commands.push_back("PartDesign.studioSetMergeAll(" + ownerCmd + ", False)");
+            }
             commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
             commands.push_back("PartDesign.studioNewPart(" + ownerCmd + ")");
         }
@@ -621,6 +667,26 @@ private:
         );
     }
 
+    /// Whether owner's Merge with all is on (StudioMergeAll, 10.13)
+    static bool mergesWithAll(const App::DocumentObject* owner)
+    {
+        auto prop = freecad_cast<App::PropertyBool*>(owner->getPropertyByName("StudioMergeAll"));
+        return prop && prop->getValue();
+    }
+
+    void onMergeAll(bool on)
+    {
+        App::DocumentObject* owner = ownerT.getObject();
+        if (updating || !owner || on == mergesWithAll(owner)) {
+            return;
+        }
+        live = false;  // the person chose the scope: never picked for them again
+        run({"PartDesign.studioSetMergeAll(" + Gui::Command::getObjectCmd(owner) + ", "
+             + (on ? "True" : "False") + ")"});
+        recompute();
+        refresh();
+    }
+
     void scheduleDecision()
     {
         if (pending) {
@@ -683,6 +749,7 @@ private:
 
     App::DocumentObjectT ownerT;
     QComboBox* combo = nullptr;
+    QCheckBox* mergeAll = nullptr;
     QLabel* scopeLabel = nullptr;
     QListWidget* ticks = nullptr;
     QLabel* note = nullptr;

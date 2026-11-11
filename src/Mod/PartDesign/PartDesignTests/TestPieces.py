@@ -302,6 +302,35 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(y, 1000)
         self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 3)
 
+    def testRemoveMissingItsScopePartMakesNoPart(self):
+        """A Remove only takes material away: a slot through P (x 30..31) scoped to Q alone (x 200..
+        210), which it misses, cuts nothing at the command and makes no part of its own tool (the
+        gate's seed 5 op 49, 10.13 gate round: the command made the cutter, 1 x 12 x 11, a part)."""
+        self.studio((("P", (0, 0, 100, 10), 10), ("Q", (200, 0, 210, 10), 10)))
+        bodies = sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body")
+        e = self.pocket("E", (SLOT,), ("Q",))
+        self.assertEqual(self.command(e), [])
+        self.assertEqual(
+            sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body"), bodies
+        )
+        self.assertVolume(self.doc.getObject("P"), 10000)
+        self.assertVolume(self.doc.getObject("Q"), 1000)
+        self.assertEqual(sorted(b.Name for b in PartDesign.studioLiveParts(self.list)), ["P", "Q"])
+
+    def testMirrorRemoveCopyMissingItsScopePartMakesNoPart(self):
+        """R4's mirror with Remove: Y's copy (x -10..0) misses the scope part X (x -30..-20); the
+        command makes no part of the copy, X and Y keep 1000."""
+        self.studio((("Y", (0, 0, 10, 10), 10), ("X", (-30, 0, -20, 10), 10)))
+        y, x = self.doc.getObject("Y"), self.doc.getObject("X")
+        m = partMirror(
+            self.doc, self.S, "Mir", "Y", (originPlane(y, "YZ_Plane"), [""]), "Remove", ("X",)
+        )
+        self.doc.recompute()
+        self.assertEqual(self.command(m), [])
+        self.assertVolume(x, 1000)
+        self.assertVolume(y, 1000)
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
+
     # ------------------------------------------------------------------------------- the skeptic
     def testBossesRespacedAcrossTheSlotDontSwapTheSides(self):
         """Skeptic 1: bosses on P at x 10..20 and x 80..90 (z 10..15), the slot at 50..51; both

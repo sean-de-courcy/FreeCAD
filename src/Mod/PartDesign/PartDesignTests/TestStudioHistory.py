@@ -112,18 +112,20 @@ class TestStudioHistory(StudioCase):
 
     # -------------------------------------------------------------------------------- drag
     def testDragAnOwnerBelowALaterFeature(self):
-        """F1 cuts A and B through where F2 bosses both: dragged below F2 (the Features list's
-        drag, moveInStudio), every part of its scope computes F2 then F1, in one undo step; undo
-        brings list and chains back together."""
+        """F1 cuts A and B through where F2 bosses B (scope A and B: a no-op in A; a boss over
+        both would merge them, 10.13): dragged below F2 (the Features list's drag, moveInStudio),
+        every part of its scope computes F2 then F1, in one undo step; undo brings list and chains
+        back together."""
         f1 = makeOwner(self.doc, self.studio, "F1", CUT, 4, "Subtraction", ["A", "B"])
         f1.Height = 14  # z 6..20: through the later boss too, so the order shows in the volume
         self.transaction("F1", lambda: PartDesign.studioInsert(f1, -1))
-        f2 = self.owner("F2", [4, 1, 26, 9], 2, "Union", ["A", "B"])
+        f2 = self.owner("F2", [21, 1, 26, 9], 2, "Union", ["A", "B"])
         tool1 = Part.makeBox(20, 6, 14, V(5, 2, 6))
-        tool2 = self.tool([4, 1, 26, 9], 2, "Union")
-        cutThenBoss = {p: self.partBox(p).cut(tool1).fuse(tool2).Volume for p in "AB"}
-        bossThenCut = {p: self.partBox(p).fuse(tool2).cut(tool1).Volume for p in "AB"}
-        self.assertGreater(abs(cutThenBoss["A"] - bossThenCut["A"]), 1)  # the case tells them apart
+        tool2 = self.tool([21, 1, 26, 9], 2, "Union")
+        cut = self.partBox("A").cut(tool1).Volume
+        cutThenBoss = {"A": cut, "B": self.partBox("B").cut(tool1).fuse(tool2).Volume}
+        bossThenCut = {"A": cut, "B": self.partBox("B").fuse(tool2).cut(tool1).Volume}
+        self.assertGreater(abs(cutThenBoss["B"] - bossThenCut["B"]), 1)  # the case tells them apart
         self.assertVolumes(cutThenBoss)
         before = self.state()
         undo = self.doc.UndoCount
@@ -147,7 +149,7 @@ class TestStudioHistory(StudioCase):
         in both its parts and F3 stays held (a bar kept by its index would take F3 in)."""
         f1 = self.owner("F1", CUT, 2, "Subtraction", ["A", "B"])
         self.owner("F2", [22, 2, 45, 8], 3, "Subtraction", ["B", "C"])
-        self.owner("F3", [2, 2, 48, 4], 1, "Union", ["A", "C"])
+        self.owner("F3", [42, 2, 48, 4], 1, "Union", ["A", "C"])
         self.transaction("bar", lambda: PartDesign.rollStudioTo(self.studio, self.doc.getObject("F2")))
         self.assertEqual(self.list.Bar, NATIVES + 2)
         self.transaction("drag", lambda: PartDesign.studioMove(f1, NATIVES + 2))
@@ -200,10 +202,11 @@ class TestStudioHistory(StudioCase):
         bar after a step is after its owner: never one part cut and the other not."""
         f1 = self.owner("F1", CUT, 2, "Subtraction", ["A", "B"])
         f2 = self.owner("F2", [22, 2, 45, 8], 3, "Subtraction", ["B", "C"])
-        self.owner("F3", [2, 2, 48, 4], 1, "Union", ["A", "C"])
+        # F3 bosses C (scope A and C: a no-op in A; a boss over both would merge them, 10.13)
+        self.owner("F3", [42, 2, 48, 4], 1, "Union", ["A", "C"])
         tool1 = self.tool(CUT, 2, "Subtraction")
         tool2 = self.tool([22, 2, 45, 8], 3, "Subtraction")
-        tool3 = self.tool([2, 2, 48, 4], 1, "Union")
+        tool3 = self.tool([42, 2, 48, 4], 1, "Union")
         self.assertFalse(PartDesign.isStudioRolledBack(self.studio))
         undo = self.doc.UndoCount
 
@@ -231,7 +234,7 @@ class TestStudioHistory(StudioCase):
         self.assertEqual(self.tips(), {"A": "F3", "B": "F2", "C": "F3"})
         self.assertVolumes(
             {
-                "A": self.partBox("A").cut(tool1).fuse(tool3).Volume,
+                "A": self.partBox("A").cut(tool1).Volume,
                 "C": self.partBox("C").cut(tool2).fuse(tool3).Volume,
             }
         )
@@ -356,17 +359,19 @@ class TestStudioHistory(StudioCase):
 
     # ------------------------------------------------------------------------------ crossing
     def testCrossingOwnersComputeInTheListsOrder(self):
-        """X cuts A and B (scope A, B), Y bosses B and A (scope B, A): both parts compute X then Y,
+        """X cuts A and B (scope A, B), Y bosses B (scope B, A: a no-op in A; a boss over both
+        would merge them, 10.13): both parts compute X then Y,
         the list's order, whatever each scope's order; the bar after X holds Y in both parts; Y
         dragged above X, both compute Y then X."""
         x = makeOwner(self.doc, self.studio, "X", [5, 3, 25, 7], 2, "Subtraction", ["A", "B"])
         x.Height = 14  # z 8..22: through Y's boss too
         self.transaction("X", lambda: PartDesign.studioInsert(x, -1))
-        y = self.owner("Y", [4, 2, 26, 5], 2, "Union", ["B", "A"])
+        y = self.owner("Y", [21, 2, 26, 5], 2, "Union", ["B", "A"])
         toolX = Part.makeBox(20, 4, 14, V(5, 3, 8))
-        toolY = self.tool([4, 2, 26, 5], 2, "Union")
-        xThenY = {p: self.partBox(p).cut(toolX).fuse(toolY).Volume for p in "AB"}
-        yThenX = {p: self.partBox(p).fuse(toolY).cut(toolX).Volume for p in "AB"}
+        toolY = self.tool([21, 2, 26, 5], 2, "Union")
+        cut = self.partBox("A").cut(toolX).Volume
+        xThenY = {"A": cut, "B": self.partBox("B").cut(toolX).fuse(toolY).Volume}
+        yThenX = {"A": cut, "B": self.partBox("B").fuse(toolY).cut(toolX).Volume}
         self.assertGreater(abs(xThenY["B"] - yThenX["B"]), 1)
         for p in "AB":
             self.assertEqual(chainOf(self.doc.getObject(p))[2:], ["X", "Y"], p)

@@ -119,6 +119,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestPartStudioVariables.py
     PartDesignTests/TestResultCheck.py
     PartDesignTests/TestStudioPartMirror.py
+    PartDesignTests/TestStudioMerge.py
 )
 
 if(BUILD_GUI)

@@ -10,8 +10,10 @@
 #include <tuple>
 #include <vector>
 
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 
@@ -36,6 +38,43 @@
 
 namespace PartDesign
 {
+
+// StudioList.cpp (slice 9; declared where used)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+// StudioList.cpp (10.13 gate round; declared where used)
+PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
+
+/// Whether two solids join (FreeCAD-CH ops#654 10.13, skeptic 3): their fuse has fewer solids
+/// than its inputs, so they share a face or overlap; an edge or a vertex in common is no join
+/// (Onshape M2, R9 S1). The one contact test of an Add's merge, its leftovers and the dialog's
+/// pre-fill (declared where used)
+PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    if (a.IsNull() || b.IsNull()) {
+        return false;
+    }
+    BRepExtrema_DistShapeShape distance(a, b);
+    if (!distance.IsDone() || distance.Value() > Precision::Confusion()) {
+        return false;
+    }
+    auto count = [](const TopoDS_Shape& shape) {
+        int n = 0;
+        for (TopExp_Explorer xp(shape, TopAbs_SOLID); xp.More(); xp.Next()) {
+            ++n;
+        }
+        return n;
+    };
+    try {
+        BRepAlgoAPI_Fuse fuse(a, b);
+        if (!fuse.IsDone()) {
+            return false;
+        }
+        return count(fuse.Shape()) < count(a) + count(b);
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
 
 namespace
 {
@@ -159,11 +198,14 @@ Score scoreOf(const std::vector<std::string>& witness, const std::set<std::strin
     return {hits[0], hits[1], hits[2]};
 }
 
-bool touchesAny(const Part::TopoShape& solid, const std::vector<Part::TopoShape>& bases)
+bool touchesAny(const Part::TopoShape& solid, const std::vector<Part::TopoShape>& bases, bool join)
 {
     for (const auto& base : bases) {
-        BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
-        if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+        if (join ? studioSolidsJoin(solid.getShape(), base.getShape())
+                 : [&]() {
+                       BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
+                       return distance.IsDone() && distance.Value() <= Precision::Confusion();
+                   }()) {
             return true;
         }
     }
@@ -249,6 +291,12 @@ Part::TopoShape leftoverSolids(const App::DocumentObject* owner)
     if (!owner || Body::findBodyOf(owner)) {
         return {};
     }
+    // Only an Add's tool has leftovers (H1a, R4): a Remove or an Intersect whose tool meets no
+    // scope part takes nothing away there, and its tool is no material (10.13 gate round: seed 5
+    // op 49's command made a Remove's cutter a part)
+    if (std::string(studioOperationOf(owner)) != "Union") {
+        return {};
+    }
     std::vector<Part::TopoShape> bases;
     for (auto part : studioScopeOf(owner)) {
         Part::TopoShape shape = studioBaseAt(owner, part);
@@ -263,9 +311,12 @@ Part::TopoShape leftoverSolids(const App::DocumentObject* owner)
     if (tool.isNull()) {
         return {};
     }
+    // An Add owner's tool solid is a leftover when it joins no scope part: face contact, never an
+    // edge or a vertex (10.13, Onshape M2); a part mirror's copy when it touches none (R4)
+    const bool join = !isStudioPartPattern(owner);
     std::vector<Part::TopoShape> kept;
     for (const auto& solid : tool.getSubTopoShapes(TopAbs_SOLID)) {
-        if (!touchesAny(solid, bases)) {
+        if (!touchesAny(solid, bases, join)) {
             kept.push_back(solid);
         }
     }
