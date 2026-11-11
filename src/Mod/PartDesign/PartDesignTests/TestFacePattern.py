@@ -148,9 +148,11 @@ class TestFacePattern(unittest.TestCase):
         self.assertTrue(shape.isValid())
         self.assertAlmostEqual(shape.Volume, volume, places=3)
 
-    def assertFails(self, feature):
+    def assertFails(self, feature, why=None):
         self.doc.recompute()
         self.assertFalse(feature.isValid())
+        if why:
+            self.assertIn(why, feature.getStatusString())
 
     def topsAt(self, shape, z):
         """The x of the centres of the shape's 6 x 6 planar faces facing +z at height z."""
@@ -274,7 +276,139 @@ class TestFacePattern(unittest.TestCase):
         self.assertSolid(pattern, PLATE + 2 * BOSS)
         self.assertEqual(self.topsAt(pattern.Shape, 15), [-25, 25])
 
-    # -- the copy meets a different neighbour (FP6, oracle-sb5 pending) ---------------------------
+    # -- picks that can't be lifted cleanly (the desktop's condition (d)) --------------------------
+
+    def lBoss(self):
+        """An L-shaped boss on the plate: x 2..8, y 7..13 and x 8..14, y 7..10, z 10..15 (270)."""
+        self.plate()
+        sketch = models.sketch(
+            self.doc,
+            "LSketch",
+            models.polygon([(2, 7), (14, 7), (14, 10), (8, 10), (8, 13), (2, 13)]),
+            self.body,
+            z=10,
+        )
+        return models.pad(self.body, sketch, 5, name="LBoss")
+
+    def testPicksTakingANeighbourFail(self):
+        # The square part's sides and the L's top and long side: defeaturing removes the whole L,
+        # whose short arm's faces, unpicked, would be copied too
+        boss = self.lBoss()
+        picks = self.faces(
+            boss,
+            lambda c, f: f.BoundBox.ZMax > 10 + 1e-6
+            and (f.BoundBox.XMax < 8 + 1e-6 or abs(c.z - 15) < TOL or abs(c.y - 7) < TOL),
+        )
+        self.assertFails(self.linear(boss, picks, 20, 2), "lifted cleanly")
+
+    def testPicksReshapingThePartFail(self):
+        # The L's top and one side: the heal cuts into the plate down to its bottom
+        boss = self.lBoss()
+        picks = self.faces(
+            boss, lambda c, f: f.BoundBox.ZMax > 10 + 1e-6 and (abs(c.z - 15) < TOL or abs(c.x - 2) < TOL)
+        )
+        self.assertFails(self.linear(boss, picks, 20, 2), "lifted cleanly")
+
+    # -- faces flush with the part's own sides, unpicked inner loops (the skeptic's items 1, 4) ----
+
+    def testFullWidthRib(self):
+        # A rib across the plate (x 20..26, y 0..20): its ends, merged into the plate's sides, are
+        # flush faces, and each copy's ends continue those sides
+        self.plate()
+        sketch = models.sketch(self.doc, "RibSketch", models.rectangle(20, 0, 26, 20), self.body, z=10)
+        rib = models.pad(self.body, sketch, 5, name="Rib")
+        rib.Refine = True
+        picks = self.faces(rib, lambda c, f: inBox(c, 20, 26, 0.1, 19.9, 10.1, 15))
+        self.assertEqual(len(picks), 3)
+        pattern = self.linear(rib, picks, 12, 3)
+        self.assertSolid(pattern, PLATE + 3 * 6 * 20 * 5)
+
+    def testBossAgainstASide(self):
+        # A boss against the plate's y = 0 side (x 2..8, y 0..6), that side of it merged into the
+        # plate's: a flush face, and each copy along +x continues the plate's side
+        self.plate()
+        sketch = models.sketch(self.doc, "SideSketch", models.rectangle(2, 0, 8, 6), self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, name="SideBoss")
+        boss.Refine = True
+        picks = self.faces(boss, lambda c, f: inBox(c, 2, 8, 0.1, 6, 10.1, 15))
+        self.assertEqual(len(picks), 4)
+        pattern = self.linear(boss, picks, 20, 3)
+        self.assertSolid(pattern, PLATE + 3 * BOSS)
+
+    def testCornerBossAlongAnEdgeFails(self):
+        # A boss at the corner (x 0..6, y 0..6) patterned along +x: its copies' x side, flush with
+        # the plate's end at the seed, stands free. Onshape's result isn't known (asked); the copy
+        # would make a face the seed doesn't have, so the feature stops (decision 150)
+        self.plate()
+        sketch = models.sketch(self.doc, "CornerSketch", models.rectangle(0, 0, 6, 6), self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, name="CornerBoss")
+        boss.Refine = True
+        picks = self.faces(boss, lambda c, f: inBox(c, 0.1, 6, 0.1, 6, 10.1, 15))
+        self.assertEqual(len(picks), 3)
+        self.assertFails(self.linear(boss, picks, 20, 3), "doesn't sit on the part")
+
+    def testCounterboreWithoutItsHoleFails(self):
+        # A counterbore r6, 3 deep, over a through hole r3 at (20, 10); its wall and floor picked but
+        # not the hole: the copies would be grooves with a pin in them
+        self.plate()
+        hole = models.sketch(self.doc, "HoleSketch", [models.circle(20, 10, 3)], self.body, z=10)
+        models.pocketThroughAll(self.body, hole, name="Hole")
+        bore = models.sketch(self.doc, "BoreSketch", [models.circle(20, 10, 6)], self.body, z=10)
+        counterbore = models.pocket(self.body, bore, 3, name="Counterbore")
+        picks = self.faces(
+            counterbore,
+            lambda c, f: (f.Surface.__class__.__name__ == "Cylinder" and f.Surface.Radius > 5)
+            or (abs(c.z - 7) < TOL and f.Area < 200),
+        )
+        self.assertEqual(len(picks), 2)
+        self.assertFails(self.linear(counterbore, picks, 20, 2), "doesn't open onto the part")
+
+    def testTubeBossWithoutItsBoreFails(self):
+        # A tube boss r6, 5 high, at (20, 10), bored r3 through it and the plate; its side and top
+        # picked, not the bore: the copies would have no hole in the plate
+        self.plate()
+        sketch = models.sketch(self.doc, "TubeSketch", [models.circle(20, 10, 6)], self.body, z=10)
+        models.pad(self.body, sketch, 5, name="Tube")
+        bore = models.sketch(self.doc, "BoreSketch", [models.circle(20, 10, 3)], self.body, z=15)
+        tube = models.pocketThroughAll(self.body, bore, name="Bore")
+        picks = self.faces(
+            tube,
+            lambda c, f: (f.Surface.__class__.__name__ == "Cylinder" and f.Surface.Radius > 5)
+            or abs(c.z - 15) < TOL,
+        )
+        self.assertEqual(len(picks), 2)
+        self.assertFails(self.linear(tube, picks, 20, 2), "doesn't sit on the part")
+
+    # -- the copy meets a different neighbour (the desktop's conditions (b), (c)) ------------------
+
+    def step(self):
+        """The plate with its x 30..60 half raised to z 12."""
+        self.plate()
+        sketch = models.sketch(self.doc, "StepSketch", models.rectangle(30, 0, 60, 20), self.body, z=10)
+        return models.pad(self.body, sketch, 2, name="Step")
+
+    def testPocketOntoAHigherStepFails(self):
+        # The copy's lid would be inside the step: a closed void, where Onshape opens the pocket
+        self.step()
+        pocket = self.pocket()
+        self.assertFails(self.linear(pocket, self.pocketFaces(pocket), 40, 2))
+
+    def testBossOverALowerStepFails(self):
+        # Seed on the high step (z 12..17), the copy over the low one: Onshape most likely stretches it
+        # down (FP6, oracle-sb5 pending); a copy would float, so the feature stops
+        self.step()
+        sketch = models.sketch(self.doc, "HighSketch", models.rectangle(32, 7, 38, 13), self.body, z=12)
+        boss = models.pad(self.body, sketch, 5, name="HighBoss")
+        pattern = self.linear(boss, self.bossFaces(boss, x0=32, x1=38, z=12), 30, 2)
+        pattern.Reversed = True
+        self.assertFails(pattern)
+
+    def testPocketPartlyOffThePartsEdge(self):
+        # The third pocket, x 52..58 on a plate ending at x 55, cuts what it meets: 3 x 6 x 4
+        self.plate(x1=55)
+        pocket = self.pocket()
+        pattern = self.linear(pocket, self.pocketFaces(pocket), 25, 3)
+        self.assertSolid(pattern, 55 * 20 * 10 - 2 * POCKET - 3 * 6 * 4)
 
     def testCopyOntoAHigherStepIsTrimmed(self):
         self.plate()

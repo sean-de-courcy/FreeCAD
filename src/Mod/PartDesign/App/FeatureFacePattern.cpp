@@ -22,9 +22,12 @@
 #include <string>
 
 #include <cmath>
+#include <memory>
 #include <utility>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -33,11 +36,17 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
@@ -68,6 +77,13 @@ double volumeOf(const TopoDS_Shape& shape)
     }
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
+double areaOf(const TopoDS_Shape& face)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(face, props);
     return props.Mass();
 }
 
@@ -107,10 +123,24 @@ std::vector<std::pair<gp_Pnt, gp_Dir>> gridOn(const TopoDS_Face& face)
     return points;
 }
 
-bool isApart(const TopoDS_Shape& a, const TopoDS_Shape& b)
+/// Whether the copy is off the solid: its boundary apart from the solid's, and not inside it (the
+/// boundaries of a copy buried in a taller step are apart too)
+bool isApart(const TopoDS_Shape& copy, const TopoDS_Shape& solid)
 {
-    BRepExtrema_DistShapeShape distance(a, b);
-    return distance.IsDone() && distance.Value() > Precision::Confusion();
+    BRepExtrema_DistShapeShape distance(copy, solid);
+    if (!distance.IsDone() || distance.Value() <= Precision::Confusion()) {
+        return false;
+    }
+    TopExp_Explorer vertex(copy, TopAbs_VERTEX);
+    if (!vertex.More()) {
+        return true;
+    }
+    BRepClass3d_SolidClassifier inSolid(
+        solid,
+        BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())),
+        Precision::Confusion()
+    );
+    return inSolid.State() != TopAbs_IN;
 }
 
 /// Whether the volumes overlap: their union is smaller than the sum of their volumes
@@ -137,29 +167,49 @@ bool overlap(const std::vector<TopoDS_Shape>& volumes, double tiny)
     return sum - volumeOf(fuse.Shape()) > std::max(tiny, 1e-7 * sum);
 }
 
-/// Where the added volume stands on the base: points just outside it across its faces that are
-/// not the picked faces' (a boss's foot on the plate). The base must be under each copy's points.
-struct Footing
+/// An interior point of the face and its outward normal (the middle of gridOn()'s), if any
+bool interiorPoint(const TopoDS_Face& face, gp_Pnt& point, gp_Dir& normal)
 {
-    std::vector<gp_Pnt> points;
-
-    bool standsOn(const TopoDS_Shape& base, const gp_Trsf& trsf) const
-    {
-        for (gp_Pnt point : points) {
-            point.Transform(trsf);
-            BRepClass3d_SolidClassifier inBase(base, point, Precision::Confusion());
-            if (inBase.State() != TopAbs_IN) {
-                return false;
-            }
-        }
-        return true;
+    const auto grid = gridOn(face);
+    if (grid.empty()) {
+        return false;
     }
+    point = grid[grid.size() / 2].first;
+    normal = grid[grid.size() / 2].second;
+    return true;
+}
+
+TopAbs_State stateIn(const TopoDS_Shape& solid, const gp_Pnt& point)
+{
+    BRepClass3d_SolidClassifier classifier(solid, point, Precision::Confusion());
+    return classifier.State();
+}
+
+/// A feature volume (what the picks add, or what they remove) and its faces that are not pieces of
+/// the picks (notes/face-pattern-design.md, the footing): a boss's footing on the healed base (the
+/// base just beyond it), a pocket's or hole's lid (air beyond it), or a boss face flush with the
+/// base's own unpicked boundary (a rib's end against the plate's side). Any other face means the
+/// picks can't be lifted cleanly.
+struct FeatureVolume
+{
+    Part::TopoShape shape;
+    std::vector<int> others;  // indexes in TopExp::MapShapes(shape, TopAbs_FACE)
+    std::vector<bool> flush;  // per others
+    std::vector<std::pair<gp_Pnt, gp_Dir>> footing;  // points on a boss's footing faces
+    bool clean = true;
 };
 
-Footing footingOf(const Part::TopoShape& added, const std::vector<Part::TopoShape>& picks)
+FeatureVolume classify(
+    const Part::TopoShape& shape,
+    const TopoDS_Shape& base,
+    const std::vector<Part::TopoShape>& picks,
+    bool adds
+)
 {
+    FeatureVolume volume;
+    volume.shape = shape;
     Bnd_Box box;
-    BRepBndLib::Add(added.getShape(), box);
+    BRepBndLib::Add(shape.getShape(), box);
     const double nudge = std::max(1e-4 * std::sqrt(box.SquareExtent()), 10 * Precision::Confusion());
     auto onAPick = [&](const gp_Pnt& point) {
         const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
@@ -168,17 +218,164 @@ Footing footingOf(const Part::TopoShape& added, const std::vector<Part::TopoShap
             return distance.IsDone() && distance.Value() < 10 * Precision::Confusion();
         });
     };
-    Footing footing;
-    for (TopExp_Explorer xp(added.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
-        const auto grid = gridOn(TopoDS::Face(xp.Current()));
-        if (grid.empty() || onAPick(grid[grid.size() / 2].first)) {
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape.getShape(), TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        gp_Pnt point;
+        gp_Dir normal;
+        if (!interiorPoint(face, point, normal)) {
+            volume.clean = false;
             continue;
         }
-        for (const auto& [point, normal] : grid) {
-            footing.points.push_back(point.Translated(gp_Vec(normal) * nudge));
+        if (onAPick(point)) {
+            continue;
+        }
+        const TopAbs_State beyond = stateIn(base, point.Translated(gp_Vec(normal) * nudge));
+        bool flush = false;
+        if (!adds) {
+            volume.clean = volume.clean && beyond == TopAbs_OUT;
+        }
+        else if (beyond == TopAbs_IN) {
+            const auto grid = gridOn(face);
+            volume.footing.insert(volume.footing.end(), grid.begin(), grid.end());
+        }
+        else if (beyond == TopAbs_OUT && stateIn(base, point) == TopAbs_ON) {
+            flush = true;
+        }
+        else {
+            volume.clean = false;
+        }
+        volume.others.push_back(i);
+        volume.flush.push_back(flush);
+    }
+    return volume;
+}
+
+/// Whether the base lies anywhere along the normals from the points (a boss over a lower part of
+/// the base, rather than off it)
+bool over(const std::vector<std::pair<gp_Pnt, gp_Dir>>& points, const TopoDS_Shape& base, const gp_Trsf& trsf)
+{
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(base, Precision::Confusion());
+    for (const auto& [point, normal] : points) {
+        intersector.Perform(gp_Lin(point.Transformed(trsf), normal.Transformed(trsf)), 0.0, Precision::Infinite());
+        if (intersector.IsDone() && intersector.NbPnt() > 0) {
+            return true;
         }
     }
-    return footing;
+    return false;
+}
+
+/// Defeaturing changed only the picks' neighbours: no unpicked face of the base is deleted, and each
+/// one modified shares an edge with a pick (a heal reshaping a farther face would be copied)
+bool liftsCleanly(const TopoDS_Shape& base, const std::vector<Part::TopoShape>& picks)
+{
+    BRepAlgoAPI_Defeaturing defeaturing;
+    defeaturing.SetRunParallel(true);
+    defeaturing.SetToFillHistory(true);
+    defeaturing.SetShape(base);
+    TopTools_IndexedMapOfShape pickFaces;
+    TopTools_IndexedMapOfShape pickEdges;
+    for (const Part::TopoShape& pick : picks) {
+        defeaturing.AddFaceToRemove(pick.getShape());
+        pickFaces.Add(pick.getShape());
+        TopExp::MapShapes(pick.getShape(), TopAbs_EDGE, pickEdges);
+    }
+    defeaturing.Build();
+    if (!defeaturing.IsDone()) {
+        return false;
+    }
+    for (TopExp_Explorer xp(base, TopAbs_FACE); xp.More(); xp.Next()) {
+        const TopoDS_Shape& face = xp.Current();
+        if (pickFaces.Contains(face)) {
+            continue;
+        }
+        if (defeaturing.IsDeleted(face)) {
+            return false;
+        }
+        // The history lists rebuilt copies of unchanged faces as modified too: a face counts as
+        // changed when its one image has another area, or it has several
+        const TopTools_ListOfShape& images = defeaturing.Modified(face);
+        if (images.IsEmpty()) {
+            continue;
+        }
+        if (images.Extent() == 1) {
+            const double area = areaOf(face);
+            if (std::abs(areaOf(images.First()) - area) <= 1e-7 * std::max(area, 1.0)) {
+                continue;
+            }
+        }
+        bool nextToAPick = false;
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More() && !nextToAPick; edges.Next()) {
+            nextToAPick = pickEdges.Contains(edges.Current());
+        }
+        if (!nextToAPick) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The faces a boolean made of the face of one of its inputs (none if it deleted it)
+void piecesOf(BRepAlgoAPI_BooleanOperation* op, const TopoDS_Shape& face, TopTools_ListOfShape& pieces)
+{
+    if (!op) {
+        pieces.Append(face);
+        return;
+    }
+    if (op->IsDeleted(face)) {
+        return;
+    }
+    const TopTools_ListOfShape& modified = op->Modified(face);
+    if (modified.IsEmpty()) {
+        pieces.Append(face);
+        return;
+    }
+    for (const TopoDS_Shape& piece : modified) {
+        pieces.Append(piece);
+    }
+}
+
+/// Whether the face continues a face of the base it touches: on the same surface, facing the same way
+bool continuesAFaceOf(const TopoDS_Face& piece, const TopoDS_Shape& base)
+{
+    gp_Pnt point;
+    gp_Dir normal;
+    if (!interiorPoint(piece, point, normal)) {
+        return false;
+    }
+    const double tol = 10 * Precision::Confusion();
+    for (TopExp_Explorer xp(base, TopAbs_FACE); xp.More(); xp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xp.Current());
+        BRepExtrema_DistShapeShape touching(piece, face);
+        if (!touching.IsDone() || touching.Value() > tol) {
+            continue;
+        }
+        GeomAPI_ProjectPointOnSurf onSurface(point, BRep_Tool::Surface(face));
+        if (onSurface.NbPoints() == 0 || onSurface.LowerDistance() > tol) {
+            continue;
+        }
+        double u = 0.0;
+        double v = 0.0;
+        onSurface.LowerDistanceParameters(u, v);
+        BRepAdaptor_Surface surface(face);
+        gp_Pnt at;
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(u, v, at, du, dv);
+        gp_Vec faceNormal = du.Crossed(dv);
+        if (faceNormal.Magnitude() < Precision::Confusion()) {
+            continue;
+        }
+        if (face.Orientation() == TopAbs_REVERSED) {
+            faceNormal.Reverse();
+        }
+        if (gp_Dir(faceNormal).Dot(normal) > 0.999) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -302,9 +499,30 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 "Face pattern: the picked faces don't bound a boss, pocket or hole: pick all of its faces"
             ));
         }
-        const Footing footing = adds ? footingOf(add, faces) : Footing();
+        const TopoDS_Shape& base = baseShape.getShape();
+        // The volumes' unpicked faces, each a footing, a lid or flush; and defeaturing changed only
+        // the picks' neighbours. Else a heal that reshaped another face would be copied everywhere
+        const FeatureVolume added = classify(add, base, faces, true);
+        const FeatureVolume removed = classify(sub, base, faces, false);
+        if ((adds && !added.clean) || (subs && !removed.clean) || !liftsCleanly(base, faces)) {
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Face pattern: the picked faces can't be lifted cleanly from the part"
+            ));
+        }
 
         const bool nameInstances = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+        auto failAt = [](std::size_t position, const char* what) {
+            const std::string text = "Face pattern: instance " + std::to_string(position + 1) + " " + what;
+            return new App::DocumentObjectExecReturn(text.c_str());
+        };
+        struct Kept
+        {
+            std::size_t position;
+            int added;    // in addCopies, or -1
+            int removed;  // in subCopies, or -1
+        };
+        std::vector<Kept> kept;
         std::vector<Part::TopoShape> addCopies {baseShape};
         std::vector<Part::TopoShape> subCopies;
         std::vector<TopoDS_Shape> checked;  // the seed's and the kept copies' volumes
@@ -319,6 +537,8 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 continue;
             }
             const gp_Trsf& trsf = transforms[position];
+            // The op index is the pattern's index (the seed is 0, as Onshape's CP8), so a dropped
+            // or skipped instance renames none of the others
             auto copyOf = [&](const Part::TopoShape& volume) {
                 Part::TopoShape copy = makeTopoShape(false);
                 copy.makeElementTransform(volume, trsf);
@@ -327,35 +547,113 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 }
                 return copy;
             };
-            // Onshape (FP4): an instance entirely off the part is dropped silently
+            // Apart from the base: dropped silently (Onshape FP4), unless a boss hovers over a
+            // lower part of it, which Onshape stretches down and a copy can't (decision 150)
             Part::TopoShape addCopy = adds ? copyOf(add) : Part::TopoShape();
             Part::TopoShape subCopy = subs ? copyOf(sub) : Part::TopoShape();
-            const bool addOff = adds && isApart(addCopy.getShape(), baseShape.getShape());
-            const bool subOff = subs && isApart(subCopy.getShape(), baseShape.getShape());
-            if ((!adds || addOff) && (!subs || subOff)) {
+            const bool addKept = adds && !isApart(addCopy.getShape(), base);
+            const bool subKept = subs && !isApart(subCopy.getShape(), base);
+            if (adds && !addKept && over(added.footing, base, trsf)) {
+                return failAt(position, "stands over the part, not on it");
+            }
+            if (adds && subs && addKept != subKept) {
+                return failAt(position, "is partly off the part");
+            }
+            if (!addKept && !subKept) {
                 continue;
             }
-            // Onshape stretches a boss partly off the part down to meet it (FP4, 11720); a copy
-            // can't, so that stops here (decision 150)
-            if (adds && !addOff && !footing.standsOn(baseShape.getShape(), trsf)) {
-                std::string text = "Face pattern: instance " + std::to_string(position + 1)
-                    + " is partly off the part";
-                return new App::DocumentObjectExecReturn(text.c_str());
-            }
-            if (adds && !addOff) {
+            Kept instance {position, -1, -1};
+            if (addKept) {
+                instance.added = static_cast<int>(addCopies.size());
                 addCopies.push_back(addCopy);
                 checked.push_back(addCopy.getShape());
             }
-            if (subs && !subOff) {
+            if (subKept) {
+                instance.removed = static_cast<int>(subCopies.size());
                 subCopies.push_back(subCopy);
                 checked.push_back(subCopy.getShape());
             }
+            kept.push_back(instance);
         }
         // Onshape (FP5): overlapping instances fail, PATTERN_FACE_FAILED; touching is fine
         if (overlap(checked, tiny)) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Face pattern: instances overlap")
             );
+        }
+
+        // Each copy must sit as the seed does: after the booleans, no face of the result comes
+        // from a copy's unpicked face, but a flush face continuing a face of the base. Else the
+        // copy hovers, overhangs, is buried, or leaves a pocket closed (a void) or a bore wall bare
+        std::unique_ptr<BRepAlgoAPI_Fuse> fuse;
+        TopoDS_Shape fused = base;
+        if (addCopies.size() > 1) {
+            TopTools_ListOfShape arguments;
+            TopTools_ListOfShape tools;
+            arguments.Append(base);
+            for (std::size_t k = 1; k < addCopies.size(); ++k) {
+                tools.Append(addCopies[k].getShape());
+            }
+            fuse = std::make_unique<BRepAlgoAPI_Fuse>();
+            fuse->SetArguments(arguments);
+            fuse->SetTools(tools);
+            fuse->SetToFillHistory(true);
+            fuse->Build();
+            if (!fuse->IsDone()) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Face pattern: the instances can't be added")
+                );
+            }
+            fused = fuse->Shape();
+        }
+        std::unique_ptr<BRepAlgoAPI_Cut> cut;
+        if (!subCopies.empty()) {
+            TopTools_ListOfShape arguments;
+            TopTools_ListOfShape tools;
+            arguments.Append(fused);
+            for (const Part::TopoShape& copy : subCopies) {
+                tools.Append(copy.getShape());
+            }
+            cut = std::make_unique<BRepAlgoAPI_Cut>();
+            cut->SetArguments(arguments);
+            cut->SetTools(tools);
+            cut->SetToFillHistory(true);
+            cut->Build();
+            if (!cut->IsDone()) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Face pattern: the instances can't be cut")
+                );
+            }
+        }
+        for (const Kept& instance : kept) {
+            if (instance.added >= 0) {
+                TopTools_IndexedMapOfShape copyFaces;
+                TopExp::MapShapes(addCopies[instance.added].getShape(), TopAbs_FACE, copyFaces);
+                for (std::size_t j = 0; j < added.others.size(); ++j) {
+                    TopTools_ListOfShape afterFuse;
+                    piecesOf(fuse.get(), copyFaces(added.others[j]), afterFuse);
+                    TopTools_ListOfShape pieces;
+                    for (const TopoDS_Shape& piece : afterFuse) {
+                        piecesOf(cut.get(), piece, pieces);
+                    }
+                    for (const TopoDS_Shape& piece : pieces) {
+                        if (!added.flush[j] || !continuesAFaceOf(TopoDS::Face(piece), base)) {
+                            return failAt(instance.position, "doesn't sit on the part as the original does");
+                        }
+                    }
+                }
+            }
+            if (instance.removed >= 0) {
+                TopTools_IndexedMapOfShape copyFaces;
+                TopExp::MapShapes(subCopies[instance.removed].getShape(), TopAbs_FACE, copyFaces);
+                for (int index : removed.others) {
+                    TopTools_ListOfShape pieces;
+                    piecesOf(cut.get(), copyFaces(index), pieces);
+                    if (!pieces.IsEmpty()) {
+                        return failAt(instance.position, "doesn't open onto the part as the original does");
+                    }
+                }
+            }
         }
 
         Part::TopoShape result = baseShape;
