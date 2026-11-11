@@ -68,6 +68,33 @@ class SolidOpsBase(unittest.TestCase):
         for got, want in ((b.XMin, xmin), (b.XMax, xmax), (b.YMin, ymin), (b.YMax, ymax), (b.ZMin, zmin), (b.ZMax, zmax)):
             self.assertAlmostEqual(got, want, delta=tol)
 
+    def xzPad(self, body):
+        """A 20 x 10 rectangle on the Body's XZ plane padded 5: x 0..20, y -5..0, z 0..10 (round 3, SO1)."""
+        plane = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"][0]
+        sk = body.newObject("Sketcher::SketchObject", "XZSketch")
+        sk.AttachmentSupport = [(plane, "")]
+        sk.MapMode = "FlatFace"
+        pts = [App.Vector(0, 0, 0), App.Vector(20, 0, 0), App.Vector(20, 10, 0), App.Vector(0, 10, 0)]
+        for i in range(4):
+            sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        pad = body.newObject("PartDesign::Pad", "XZPad")
+        pad.Profile = sk
+        pad.Length = 5
+        self.doc.recompute()
+        self.assertBox(pad.Shape, 0, 20, -5, 0, 0, 10)
+        return pad
+
+    def faceAtZ(self, feature, z):
+        for i, f in enumerate(feature.Shape.Faces):
+            if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6:
+                return (feature, ["Face%d" % (i + 1)])
+        raise AssertionError("no face at z = %g" % z)
+
+    def globalBox(self, feature, body, *box):
+        shape = feature.Shape.copy()
+        shape.Placement = body.Placement.multiply(shape.Placement)
+        self.assertBox(shape, *box)
+
     def assertInvalid(self, feature, text):
         self.doc.recompute()
         self.assertIn("Invalid", feature.State, "expected a loud failure")
@@ -169,6 +196,25 @@ class TestThicken(SolidOpsBase):
         self.assertEqual(len(t.Shape.Solids), 2)
 
     # ---- loud failures
+    def testFaceOfAPlacedBodyThickensInPlace(self):
+        """SO3: the face's own Body is placed; the slab lies on the face, in a part at the origin
+        and in a placed one (Onshape has no Body placement)."""
+        self.src.Placement = App.Placement(App.Vector(100, 0, 0), App.Rotation())
+        self.doc.recompute()
+        t = S.make_thicken(self.newPart(), [self.top()], 2.0, 0.0)
+        part2 = self.newPart()
+        part2.Placement = App.Placement(App.Vector(0, 50, 0), App.Rotation())
+        t2 = S.make_thicken(part2, [self.top()], 2.0, 0.0)
+        self.doc.recompute()
+        self.assertBox(t.Shape, 100, 120, 0, 20, 10, 12)
+        self.globalBox(t2, part2, 100, 120, 0, 20, 10, 12)
+
+    def testFaceOfAnXZPadThickensInPlace(self):
+        pad = self.xzPad(self.addBody("XZ"))
+        t = S.make_thicken(self.newPart(), [self.faceAtZ(pad, 10)], 2.0, 0.0)
+        self.doc.recompute()
+        self.assertBox(t.Shape, 0, 20, -5, 0, 10, 12)
+
     def testZeroThicknessFails(self):
         t = S.make_thicken(self.newPart(), [self.top()], 0.0, 0.0)
         self.assertInvalid(t, "thickness is zero")
@@ -283,6 +329,62 @@ class TestScale(SolidOpsBase):
         self.assertAlmostEqual(s.Shape.Volume, 4800.0 * 8, 3)
 
     # ---- loud failures
+    def testScaleOfAPadOnTheXZPlaneStaysInPlace(self):
+        """SO1: the Pad's Placement is the XZ sketch's; factor 1 changes nothing, 2 doubles about
+        the origin, (2, 1, 1) stretches along x only."""
+        for factors, box in (
+            ((1.0, 1.0, 1.0), (0, 20, -5, 0, 0, 10)),
+            ((2.0, 2.0, 2.0), (0, 40, -10, 0, 0, 20)),
+            ((2.0, 1.0, 1.0), (0, 40, -5, 0, 0, 10)),
+        ):
+            with self.subTest(factors=factors):
+                body = self.addBody("XZ")
+                self.xzPad(body)
+                if factors[0] == factors[1] == factors[2]:
+                    s = S.make_scale(body, App.Vector(), factor=factors[0])
+                else:
+                    s = S.make_scale(body, App.Vector(), factors=factors)
+                self.doc.recompute()
+                self.assertEqual(s.State, ["Up-to-date"])
+                self.assertBox(s.Shape, *box)
+                self.assertBox(body.Shape, *box)
+
+    def testPocketThroughANonUniformlyScaledCylinder(self):
+        """Rehearsal 3's F1 against Onshape (oracle 5): cylinder r10 h20 scaled (2, 1, 1) about the
+        origin, then a Pocket through all of a slot x 15..25, |y| < 5 and a hole r3. Onshape: valid,
+        11174.645, x max 17.321 (the ellipse at y = 5). The geometry is exact; the volume is checked on
+        a fine tessellation, since OCCT's volume integral of a rational B-spline is about 0.9 % high."""
+        body = self.addBody("Ellipse")
+        cyl = self.doc.addObject("PartDesign::AdditiveCylinder", "Round")
+        cyl.Radius, cyl.Height = 10, 20
+        body.addObject(cyl)
+        S.make_scale(body, App.Vector(), factors=(2.0, 1.0, 1.0))
+        plane = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+        sk = body.newObject("Sketcher::SketchObject", "Cuts")
+        sk.AttachmentSupport = [(plane, "")]
+        sk.MapMode = "FlatFace"
+        pts = [App.Vector(15, -5, 0), App.Vector(25, -5, 0), App.Vector(25, 5, 0), App.Vector(15, 5, 0)]
+        for i in range(4):
+            sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        sk.addGeometry(Part.Circle(App.Vector(), App.Vector(0, 0, 1), 3))
+        pocket = body.newObject("PartDesign::Pocket", "Through")
+        pocket.Profile = sk
+        pocket.Type = "ThroughAll"
+        pocket.Midplane = True
+        self.doc.recompute()
+        self.assertEqual(pocket.State, ["Up-to-date"])
+        shape = pocket.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        # exact: the ellipse x = 20 sqrt(1 - y^2 / 100), less the slot beyond x = 15 for |y| < 5, less the hole
+        slot = 200 * (0.5 * math.sqrt(0.75) + math.asin(0.5)) - 150
+        want = 20 * (math.pi * 200 - slot - math.pi * 9)
+        pts, tris = shape.tessellate(0.001)
+        got = sum(pts[a].dot(pts[b].cross(pts[c])) for a, b, c in tris) / 6
+        self.assertAlmostEqual(got, want, delta=1e-4 * want)
+        self.assertAlmostEqual(want, 11174.645, delta=0.5)  # Onshape's figure
+        self.assertAlmostEqual(shape.optimalBoundingBox().XMax, 20 * math.sqrt(0.75), delta=1e-3)
+
     def testZeroFactorFails(self):
         s = S.make_scale(self.src, App.Vector(), 0.0)
         self.assertInvalid(s, "must be between")
@@ -392,6 +494,31 @@ class TestOffsetSurface(SolidOpsBase):
     def testNoFaceFails(self):
         o = S.make_offset_surface(self.newPart(), [], 1.0)
         self.assertInvalid(o, "select a face")
+
+    def testZeroDistanceCopyOfAnXZPadFaceStaysInPlace(self):
+        """SO2: a copy (distance 0) and an offset (3) of the top of a Pad on the XZ plane."""
+        pad = self.xzPad(self.addBody("XZ"))
+        copy = S.make_offset_surface(self.newPart(), [self.faceAtZ(pad, 10)], 0.0)
+        moved = S.make_offset_surface(self.newPart(), [self.faceAtZ(pad, 10)], 3.0)
+        self.doc.recompute()
+        self.assertBox(copy.Shape, 0, 20, -5, 0, 10, 10)
+        self.assertBox(moved.Shape, 0, 20, -5, 0, 13, 13)
+
+    def testFaceOfAPlacedBodyOffsetsInPlace(self):
+        """SO3 for Offset surface: the sheet lies above the face, wherever the two Bodies are."""
+        self.src.Placement = App.Placement(App.Vector(100, 0, 0), App.Rotation())
+        part = self.newPart()
+        part.Placement = App.Placement(App.Vector(0, 50, 0), App.Rotation())
+        o = S.make_offset_surface(part, [self.top()], 3.0)
+        self.doc.recompute()
+        self.globalBox(o, part, 100, 120, 0, 20, 13, 13)
+
+    def testLinksToAnotherBodyAreInScope(self):
+        """Rehearsal 3's F4: the face of another Body is a global link, so no out-of-scope warning."""
+        o = S.make_offset_surface(self.newPart(), [self.top()], 3.0)
+        t = S.make_thicken(self.newPart(), [self.top()], 3.0)
+        for f in (o, t):
+            self.assertEqual(f.getTypeIdOfProperty("Base"), "App::PropertyLinkSubListGlobal")
 
     def testInwardBeyondTheRadiusFails(self):
         o = S.make_offset_surface(self.newPart(), [self.lateral()], 12.0, flip=True)

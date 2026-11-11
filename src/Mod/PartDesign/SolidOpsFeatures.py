@@ -24,27 +24,43 @@ class SolidOpsError(Exception):
 # ---------------------------------------------------------------- helpers
 
 
+def _container_placement(obj):
+    """The global placement of the Body (or other group) that holds obj; identity if none."""
+    group = obj.getParentGeoFeatureGroup() if hasattr(obj, "getParentGeoFeatureGroup") else None
+    return group.getGlobalPlacement() if group is not None else App.Placement()
+
+
 def _resolve_faces(obj):
-    """The faces (Part.Face) and surfaces the Base links name, in global coordinates."""
+    """The faces (Part.Face) and surfaces the Base links name, in the coordinates of obj's Body.
+
+    Part.getShape puts a face in its own Body's frame; a face of another Body moves by the two Bodies'
+    placements, so the result lies where the face is (Onshape has no Body placement: SO3)."""
+    to_here = _container_placement(obj).inverse()
     faces = []
     for link, subs in obj.Base or []:
         if link is None:
             continue
+        move = to_here.multiply(_container_placement(link))
         names = [s for s in subs if s]
         if not names:
             # A whole sheet or face body: take its faces
             shape = Part.getShape(link)
             if shape.isNull():
                 continue
-            faces.extend(shape.Faces)
-            continue
-        for sub in names:
-            shape = Part.getShape(link, sub, needSubElement=True)
-            if shape.isNull() or shape.ShapeType != "Face":
-                raise SolidOpsError(
-                    "%s.%s is not a face" % (link.Label, sub)
-                )
-            faces.append(shape)
+            found = shape.Faces
+        else:
+            found = []
+            for sub in names:
+                shape = Part.getShape(link, sub, needSubElement=True)
+                if shape.isNull() or shape.ShapeType != "Face":
+                    raise SolidOpsError(
+                        "%s.%s is not a face" % (link.Label, sub)
+                    )
+                found.append(shape)
+        if not move.isIdentity():
+            for f in found:
+                f.Placement = move.multiply(f.Placement)
+        faces.extend(found)
     if not faces:
         raise SolidOpsError("Select a face or surface")
     return faces
@@ -165,6 +181,14 @@ def scale_shape(shape, point, sx, sy, sz):
     return mapped if len(mapped.ElementMap) else res
 
 
+def _set_shape(obj, shape):
+    """Give obj the shape where it lies. During a recompute Part::Feature replaces the shape's own
+    location with the feature's Placement (PartFeature.cpp, onChanged), so a copy of a placed shape
+    (a Pad on the XZ plane) would move: the location becomes the Placement first (SO1, SO2)."""
+    obj.Placement = shape.Placement
+    obj.Shape = shape
+
+
 def _base_shape(obj):
     base = obj.BaseFeature
     if base is None:
@@ -199,7 +223,7 @@ class Thicken(_Proxy):
         super().__init__(obj)
         obj.Operation = ["Union", "Subtraction", "Common"]
         obj.Operation = "Union"
-        obj.addProperty("App::PropertyLinkSubList", "Base", "Thicken", "Faces or surfaces to thicken")
+        obj.addProperty("App::PropertyLinkSubListGlobal", "Base", "Thicken", "Faces or surfaces to thicken")
         obj.addProperty("App::PropertyLength", "Thickness1", "Thicken", "Thickness along the face normal")
         obj.addProperty("App::PropertyLength", "Thickness2", "Thicken", "Thickness against the face normal")
         obj.addProperty("App::PropertyBool", "Flip", "Thicken", "Opposite direction: Thickness 1 against the face normal")
@@ -227,7 +251,7 @@ class Thicken(_Proxy):
                     "No merge scope selected. Nothing to %s: a Remove needs a part before it"
                     % ("cut" if op == "Subtraction" else "intersect")
                 )
-            obj.Shape = tool
+            _set_shape(obj, tool)
             return
         if op == "Union":
             res = base.fuse(tool)
@@ -239,7 +263,7 @@ class Thicken(_Proxy):
             raise SolidOpsError("The result has no solid")
         if obj.Refine and op != "Common":
             res = res.removeSplitter()
-        obj.Shape = res
+        _set_shape(obj, res)
 
 
 class Scale(_Proxy):
@@ -266,7 +290,7 @@ class Scale(_Proxy):
             sx, sy, sz = obj.FactorX, obj.FactorY, obj.FactorZ
         if min(sx, sy, sz) < SCALE_MIN or max(sx, sy, sz) > SCALE_MAX:
             raise SolidOpsError("Scale factor must be between %g and %g" % (SCALE_MIN, SCALE_MAX))
-        obj.Shape = scale_shape(base, obj.Point, sx, sy, sz)
+        _set_shape(obj, scale_shape(base, obj.Point, sx, sy, sz))
 
 
 class OffsetSurface(_Proxy):
@@ -274,7 +298,7 @@ class OffsetSurface(_Proxy):
 
     def __init__(self, obj):
         super().__init__(obj)
-        obj.addProperty("App::PropertyLinkSubList", "Base", "Offset", "Faces or surfaces to offset")
+        obj.addProperty("App::PropertyLinkSubListGlobal", "Base", "Offset", "Faces or surfaces to offset")
         obj.addProperty("App::PropertyDistance", "Distance", "Offset", "Offset along the face normal")
         obj.addProperty("App::PropertyBool", "Flip", "Offset", "Offset against the face normal")
         obj.Distance = 5.0  # Onshape's default
@@ -284,7 +308,7 @@ class OffsetSurface(_Proxy):
         if obj.Distance.Value < 0:
             raise SolidOpsError("Offset distance must not be negative: use Flip to offset the other way")
         d = obj.Distance.Value * (-1 if obj.Flip else 1)
-        obj.Shape = offset_surface(faces, d)
+        _set_shape(obj, offset_surface(faces, d))
 
 
 # ---------------------------------------------------------------- creation (no GUI)

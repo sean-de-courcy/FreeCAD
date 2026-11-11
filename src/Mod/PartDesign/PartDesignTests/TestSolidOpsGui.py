@@ -159,6 +159,36 @@ class TestSolidOpsGui(unittest.TestCase):
         panel.accept()
         self.assertAlmostEqual(self.body.Shape.Volume, 4000.0 + 1200.0, 3)
 
+    def testEditingAfterSaveAndReopenOpensThePanel(self):
+        """Rehearsal 3's F2: a restored view provider had no `kind`, so no icon and no dialog."""
+        import os
+        import tempfile
+
+        self.selectTop()
+        Gui.runCommand("PartDesign_Thicken")
+        G.Panel.current.widgets["Operation"].setCurrentIndex(1)  # Add
+        self.assertTrue(G.Panel.current.accept())
+        Gui.runCommand("PartDesign_ScalePart")
+        self.assertTrue(G.Panel.current.accept())
+        self.selectTop()
+        Gui.runCommand("PartDesign_OffsetSurface")
+        self.assertTrue(G.Panel.current.accept())
+        kinds = {o.Name: type(o.Proxy).__name__ for o in self.doc.Objects if hasattr(o, "Proxy") and o.isDerivedFrom("PartDesign::Feature")}
+        self.assertEqual(sorted(kinds.values()), ["OffsetSurface", "Scale", "Thicken"])
+        path = os.path.join(tempfile.mkdtemp(), "SolidOpsReopen.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        for name, kind in kinds.items():
+            vobj = self.doc.getObject(name).ViewObject
+            self.assertEqual(vobj.Proxy.getIcon(), G.KINDS[kind]["icon"])
+            Gui.getDocument(self.doc.Name).setEdit(name, 0)
+            panel = G.Panel.current
+            self.assertIsNotNone(panel, "no dialog for %s after reopening" % kind)
+            self.assertEqual((panel.obj.Name, panel.kind), (name, kind))
+            panel.reject()
+            self.pump(0.1)
+
     # -- expression fields: `#variable` typed into a field binds it (Onshape's variables)
 
     def pump(self, seconds=0.2):
@@ -172,13 +202,14 @@ class TestSolidOpsGui(unittest.TestCase):
         from PySide import QtCore
 
         spin = panel.widgets[name]
-        if spin.property("unresolvedVariable") is None:
-            self.skipTest("this build's fields do not take #variable (ops#640)")
         spin.show()
         spin.setFocus()
         self.pump(0.1)
         spin.findChild(QtWidgets.QLineEdit).selectAll()
         QTest.keyClicks(spin, text)
+        # ops#640's fields set this property on a text update only, so it is read after typing
+        if spin.property("unresolvedVariable") is None:
+            self.skipTest("this build's fields do not take #variable (ops#640)")
         QTest.keyClick(spin, QtCore.Qt.Key_Return)
         self.pump(0.2)
 
@@ -204,10 +235,11 @@ class TestSolidOpsGui(unittest.TestCase):
         self.assertEqual(self.exprs(feature).get("Thickness1"), "Variables.Thick")
         self.assertAlmostEqual(feature.Thickness1.Value, 2.0, 6)
         self.assertAlmostEqual(feature.Shape.Volume, 4800.0, 3)
+        panel.widgets["Operation"].setCurrentIndex(1)  # Add: the panel starts on New (Onshape's)
         self.assertTrue(panel.accept())
         vs.Thick = 3.0
         self.doc.recompute()
-        self.assertAlmostEqual(self.body.Shape.Volume, 4000.0 + 1200.0 * 1.5, 3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000.0 + 400.0 * 3.0, 3)
 
     def testOffsetFieldTakesAVariable(self):
         self.addVariables()

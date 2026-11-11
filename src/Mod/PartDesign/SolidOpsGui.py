@@ -84,7 +84,8 @@ class ViewProviderSolidOp:
         self.Object = vobj.Object
 
     def _kind(self):
-        return self.kind or type(self.Object.Proxy).__name__
+        # A restored view provider has no `kind`: loads() keeps no state and __init__ doesn't run
+        return getattr(self, "kind", None) or type(self.Object.Proxy).__name__
 
     def getIcon(self):
         return KINDS.get(self._kind(), KINDS["Thicken"])["icon"]
