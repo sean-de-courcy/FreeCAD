@@ -1920,7 +1920,13 @@ OrthographicCamera {{
                 )
                 under = QtWidgets.QApplication.widgetAt(target)
                 if under is not None and taskView is not None and taskView.isAncestorOf(under):
-                    if under.metaObject().className() not in ("QWidget", "QScrollArea"):
+                    # an opaque control: not a plain container (a transparent spot of the panel
+                    # lets the click through to the view, by design); a list's viewport is one
+                    parent = under.parentWidget()
+                    opaque = isinstance(
+                        parent, QtWidgets.QAbstractScrollArea
+                    ) and parent.metaObject().className() != "QScrollArea"
+                    if opaque or under.metaObject().className() not in ("QWidget", "QScrollArea"):
                         spot = target
                         break
             if spot is not None:
