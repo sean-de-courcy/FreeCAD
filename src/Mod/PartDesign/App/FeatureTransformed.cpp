@@ -1666,9 +1666,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 // next original re-run at each instance either way, an instance that fails
                 // contributing nothing (R2); each pattern among the originals following its own
                 // Reapply (R3)
-                ReapplyCollector reapplied {*this, body, trsfInv, fromDocument, nameInstances, collector};
-                reapplied.reapplyOn = reapply;
-                reapplied.outer = instances;
+                ReapplyCollector reapplied {
+                    *this, body, trsfInv, fromDocument, nameInstances, collector, reapply, instances
+                };
                 std::vector<ReapplyItem> items;
                 for (auto original : originals) {
                     std::string why = reapplied.add(original, {}, items, 0);
