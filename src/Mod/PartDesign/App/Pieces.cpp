@@ -41,6 +41,8 @@ namespace PartDesign
 
 // StudioList.cpp (slice 9; declared where used)
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+// StudioList.cpp (10.13 gate round; declared where used)
+PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
 
 /// Whether two solids join (FreeCAD-CH ops#654 10.13, skeptic 3): their fuse has fewer solids
 /// than its inputs, so they share a face or overlap; an edge or a vertex in common is no join
@@ -287,6 +289,12 @@ std::vector<Body*> pieceRecords(const App::DocumentObject* maker, const std::str
 Part::TopoShape leftoverSolids(const App::DocumentObject* owner)
 {
     if (!owner || Body::findBodyOf(owner)) {
+        return {};
+    }
+    // Only an Add's tool has leftovers (H1a, R4): a Remove or an Intersect whose tool meets no
+    // scope part takes nothing away there, and its tool is no material (10.13 gate round: seed 5
+    // op 49's command made a Remove's cutter a part)
+    if (std::string(studioOperationOf(owner)) != "Union") {
         return {};
     }
     std::vector<Part::TopoShape> bases;

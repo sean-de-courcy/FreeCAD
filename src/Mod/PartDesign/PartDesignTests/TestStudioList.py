@@ -859,12 +859,18 @@ def spans(doc, y):
 
 
 def clear(offsets, width, taken, base):
-    """The offsets whose span (base + offset, width long) crosses none of taken; all of them when
-    none does. A merge bar over a slot keeps a split's two walls on one solid, where P6p's witness
-    scores (the strictly higher claims it) and the oracle's walls (two: the split is lost) differ:
-    a P6p question the gate leaves out (10.13, unverified on Onshape)"""
+    """The offsets whose span (base + offset, width long) bridges none of taken (one strictly
+    inside the other: a merge bar over a slot, from wall to wall and past both); all of them when
+    each does. Known debt, 10.13 gate round (work/hub7/gate/probe-cross.txt, X8 and X10): a bar
+    over a slot before it in the list keeps both sides of the cut on one solid, so the split is
+    lost (no material is separated: the oracle's two walls on one solid); P6p's matchPieces gives
+    that solid to the record with the strictly higher witness score and fails the other loudly
+    ("'s piece is ...'s now"), where the scores differ. Wrong but loud; the gate leaves the bridge
+    out until the lost-split rule follows the walls (unverified on Onshape; its Q13a keeps the
+    unsplit part's id). A bar that ends on a wall, or lies beside the slot, is no bridge."""
     free = [d for d in offsets
-            if not any(base + d < x1 and base + d + width > x0 for x0, x1 in taken)]
+            if not any((base + d < x0 and base + d + width > x1)
+                       or (x0 < base + d and x1 > base + d + width) for x0, x1 in taken)]
     return free or offsets
 
 

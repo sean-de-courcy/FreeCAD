@@ -1733,6 +1733,7 @@ namespace PartDesign
 PartDesignExport bool studioSetMergeAll(App::DocumentObject* owner, bool on, std::string* why);
 PartDesignExport std::string studioMergedAwayWhy(const App::DocumentObject* owner);
 PartDesignExport bool studioIsMergingAdd(const App::DocumentObject* owner);
+PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
 PartDesignExport std::vector<std::string> studioMembersAfter(const App::DocumentObject* owner,
                                                              const Body* part);
 }  // namespace PartDesign
@@ -1740,6 +1741,12 @@ PartDesignExport std::vector<std::string> studioMembersAfter(const App::Document
 bool PartDesign::studioIsMergingAdd(const App::DocumentObject* owner)
 {
     return isMergingAdd(owner);
+}
+
+/// The Boolean operation owner asks for, Union, Subtraction or Common (operationOf)
+const char* PartDesign::studioOperationOf(const App::DocumentObject* owner)
+{
+    return operationOf(owner);
 }
 
 /// The labels of part's Body members placed after owner in owner's list (a part an Add merges
