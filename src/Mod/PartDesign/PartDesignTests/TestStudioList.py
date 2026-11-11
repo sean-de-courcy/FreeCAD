@@ -945,62 +945,69 @@ def oracleDifferences(doc):
     pieceBodies = [
         b for b in doc.Objects if b.TypeId == "PartDesign::Body" and b.StudioPieceWitness
     ]
-    # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
-    got = sorted(liveKey(b) for b in PartDesign.studioLiveParts(studioList(doc)))
-    if live is not None and got != sorted(live):
-        found.append(f"live parts {got}, oracle {sorted(live)}")
-    for body in bodies:
-        if bool(body.Visibility) != (body.Name in live):
-            found.append(f"{body.Name}: Visibility {body.Visibility}, oracle live {body.Name in live}")
-    for body in bodies:
-        tip = body.Tip
-        shape = tip.Shape if tip else Part.Shape()
-        got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
-        if activeFillet(body):
-            if got[1] != want[body.Name][1]:
-                found.append(f"{body.Name}: Tip solids {got[1]}, oracle {want[body.Name][1]}")
-            continue  # P8a: rounded, which the oracle doesn't model
-        if got != want[body.Name]:
-            found.append(f"{body.Name}: Tip {got}, oracle {want[body.Name]}")
-        if not body.isRolledBack() and not body.Shape.isNull():
-            volume = round(body.Shape.Volume, 4)
-            if volume != want[body.Name][0]:
-                found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
-    # P6p: each part made from a piece, live at the bar: its Tip's solid, or failing when its
-    # record holds nothing (a piece's Tip fails too when a later feature in it fails: then only
-    # the solid is checked, as for any part)
-    for body in pieceBodies:
-        key = "piece:" + body.StudioPartId
-        if key not in live:
-            continue
-        tip = body.Tip
-        expected = want.get(key)
-        if expected == "failed":
-            if tip is not None and tip.isValid() and tip.StudioOwner == body.StudioMadeBy:
-                found.append(f"{key} ({body.Name}): piece step valid, oracle: holds nothing")
-            continue
-        shape = tip.Shape if tip else Part.Shape()
-        got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
-        if activeFillet(body) and expected:
-            got, expected = got[1], expected[1]  # P8a: the solids only
-        if got != expected:
-            found.append(f"{key} ({body.Name}): Tip {got}, oracle {expected}")
-        parent = body.StudioParentId
-        if parent and not any(
-            b.StudioPartId == parent for b in doc.Objects if b.TypeId == "PartDesign::Body"
-        ):
-            found.append(f"{key}: its parent {parent} is gone")
-    # Slice 9: each listed New mirror's part, at the bar
-    for owner in studioList(doc).Entries:
-        if not isPartMirror(owner) or live is None:
-            continue
-        key = "new:" + owner.Name
-        for body in madeBy(owner):
+    # P8a: the Part oracle doesn't model a fillet, and a rounded part changes what later
+    # records do with it (a merge's contact, a copy's shape): with a fillet active anywhere,
+    # G1, G2, the step counts and the hygiene below check the state
+    geometric = not any(
+        activeFillet(b) for b in doc.Objects if b.TypeId == "PartDesign::Body"
+    )
+    if geometric:
+        # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
+        got = sorted(liveKey(b) for b in PartDesign.studioLiveParts(studioList(doc)))
+        if live is not None and got != sorted(live):
+            found.append(f"live parts {got}, oracle {sorted(live)}")
+        for body in bodies:
+            if bool(body.Visibility) != (body.Name in live):
+                found.append(f"{body.Name}: Visibility {body.Visibility}, oracle live {body.Name in live}")
+        for body in bodies:
             tip = body.Tip
             shape = tip.Shape if tip else Part.Shape()
             got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
-            if got != want.get(key, (0.0, 0)):
-                found.append(f"{key}: Tip {got}, oracle {want.get(key, (0.0, 0))}")
+            if activeFillet(body):
+                if got[1] != want[body.Name][1]:
+                    found.append(f"{body.Name}: Tip solids {got[1]}, oracle {want[body.Name][1]}")
+                continue  # P8a: rounded, which the oracle doesn't model
+            if got != want[body.Name]:
+                found.append(f"{body.Name}: Tip {got}, oracle {want[body.Name]}")
+            if not body.isRolledBack() and not body.Shape.isNull():
+                volume = round(body.Shape.Volume, 4)
+                if volume != want[body.Name][0]:
+                    found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
+        # P6p: each part made from a piece, live at the bar: its Tip's solid, or failing when its
+        # record holds nothing (a piece's Tip fails too when a later feature in it fails: then only
+        # the solid is checked, as for any part)
+        for body in pieceBodies:
+            key = "piece:" + body.StudioPartId
+            if key not in live:
+                continue
+            tip = body.Tip
+            expected = want.get(key)
+            if expected == "failed":
+                if tip is not None and tip.isValid() and tip.StudioOwner == body.StudioMadeBy:
+                    found.append(f"{key} ({body.Name}): piece step valid, oracle: holds nothing")
+                continue
+            shape = tip.Shape if tip else Part.Shape()
+            got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+            if activeFillet(body) and expected:
+                got, expected = got[1], expected[1]  # P8a: the solids only
+            if got != expected:
+                found.append(f"{key} ({body.Name}): Tip {got}, oracle {expected}")
+            parent = body.StudioParentId
+            if parent and not any(
+                b.StudioPartId == parent for b in doc.Objects if b.TypeId == "PartDesign::Body"
+            ):
+                found.append(f"{key}: its parent {parent} is gone")
+        # Slice 9: each listed New mirror's part, at the bar
+        for owner in studioList(doc).Entries:
+            if not isPartMirror(owner) or live is None:
+                continue
+            key = "new:" + owner.Name
+            for body in madeBy(owner):
+                tip = body.Tip
+                shape = tip.Shape if tip else Part.Shape()
+                got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+                if got != want.get(key, (0.0, 0)):
+                    found.append(f"{key}: Tip {got}, oracle {want.get(key, (0.0, 0))}")
     # A held object (after its Body's Tip) and a rolled-back Body are not recomputed: they stay
     # touched until the bar passes them (ops#127 R5/R7)
     held = set()

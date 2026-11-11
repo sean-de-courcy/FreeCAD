@@ -1566,6 +1566,9 @@ bool StudioList::reconcile(std::string* why)
                 auto base = body->getPrevSolidFeature(step);
                 if (base && dressUp->Base.getValue() != base) {
                     dressUp->Base.setValue(base, std::vector<std::string>());
+                    // The owner writes the picks: it runs again (a step made again by G1 or a
+                    // merge, a base reordered)
+                    const_cast<App::DocumentObject*>(owner)->touch();
                 }
             }
             else if (auto addSub = freecad_cast<FeatureAddSub*>(step)) {
