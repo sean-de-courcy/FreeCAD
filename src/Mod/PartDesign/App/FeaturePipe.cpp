@@ -2991,7 +2991,12 @@ std::optional<gp_Pnt> fixedTurnsBack(const TopoDS_Wire& spine, const gp_Dir& nor
             if (edge.Orientation() == TopAbs_REVERSED) {
                 tangent.Reverse();
             }
-            if (side * normal.Dot(gp_Dir(tangent)) < 1e-9) {
+            const double along = side * normal.Dot(gp_Dir(tangent));
+            // Edge-on at the spine's very end, not past: sound (Onshape, SW2: Keep orientation
+            // along a quarter arc that ends edge-on, 251.326)
+            const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+            const bool atEnd = &edge == &edges.back() && i == (reversed ? 0 : looks);
+            if (along < 1e-9 && !(atEnd && along > -1e-9)) {
                 return point;
             }
         }
@@ -5321,7 +5326,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
             Part::TopoShape piece = makeTopoShape(false);
             buildPipePath(shape, subedge, piece);
             std::vector<Part::TopoShape> edges = piece.getSubTopoShapes(TopAbs_EDGE);
-            for (const auto& [object, subs] : SpineMore.getSubListValues()) {
+            for (auto [object, subs] : SpineMore.getSubListValues()) {
+                // (object, "") stands for the whole object: Python's (object, []) adds no entry
+                std::erase(subs, std::string());
                 if (!(object && object->isDerivedFrom<Part::Feature>())) {
                     return new App::DocumentObjectExecReturn(
                         "Pipe: a path object in SpineMore isn't a shape"
@@ -6486,7 +6493,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
             );
             shells.push_back(shell);
 
-            if (sheared || fixedMode || binormalSections) {
+            // Standard and Frenet with one profile too: the fold check along curves needs it
+            if (sheared || fixedMode || binormalSections
+                || ((mode == 0 || mode == 2) && profilePoint.isNull() && multisections.empty())) {
                 TopTools_ListOfShape simulated;
                 mkPS.Simulate(2, simulated);
                 sweptStarts.push_back(simulated.First());

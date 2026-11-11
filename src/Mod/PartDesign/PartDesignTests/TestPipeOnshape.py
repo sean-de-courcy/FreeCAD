@@ -50,7 +50,7 @@ class PipeCase(unittest.TestCase):
         pipe.Profile = profile
         pipe.Spine = spine if isinstance(spine, tuple) else (spine, [])
         if more:
-            pipe.SpineMore = [m if isinstance(m, tuple) else (m, []) for m in more]
+            pipe.SpineMore = [m if isinstance(m, tuple) else (m, "") for m in more]  # (m, []) adds nothing
         for name, value in properties.items():
             setattr(pipe, name, value)
         self.doc.recompute()
@@ -339,7 +339,7 @@ class TestPipeEndAfterThePathGrows(PipeCase):
 
     def testPadOnTheEndFaceFollowsPastACorner(self):
         """The probe's case (q02e): the path gets a second edge at a 45 degree corner ("Right corner");
-        the pad on the end face follows to the new end, 5 along the new edge's direction."""
+        the pad on the end face follows to the new end face's plane, 5 along the new edge's direction."""
         path = self.line(0, 20)
         pipe = self.pipe(self.circle(), (path, ["Edge1"]))
         end = [f"Face{i}" for i, f in enumerate(pipe.Shape.Faces, 1)
@@ -357,9 +357,11 @@ class TestPipeEndAfterThePathGrows(PipeCase):
         self.doc.recompute()
         self.assertSweeps(pipe)
         self.assertTrue(pad.isValid(), pad.getStatusString())
-        tip = V(10, 0, 30) + V(1, 0, 1).normalize() * 5
-        box = pad.AddSubShape.BoundBox
-        self.assertLess((box.Center - (V(10, 0, 30) + tip) * 0.5).Length, 1e-3, box)
+        # FlatFace puts the sketch's origin where the global origin projects onto the face: the pad
+        # stands on the new end face's plane, 5 along its normal
+        normal = V(1, 0, 1).normalize()
+        centre = pad.AddSubShape.BoundBox.Center
+        self.assertAlmostEqual(centre.dot(normal), V(10, 0, 30).dot(normal) + 2.5, 4)
 
     def testPadOnTheEndFaceFollowsATangentArc(self):
         """SW6 (c): a tangent quarter arc appended to the path (centre (10, 0, 20), to (10, 0, 30)); Onshape's
@@ -381,5 +383,8 @@ class TestPipeEndAfterThePathGrows(PipeCase):
         self.doc.recompute()
         self.assertSweeps(pipe, AREA * (20 + 5 * math.pi))
         self.assertTrue(pad.isValid(), pad.getStatusString())
+        # On the new end face's plane x = 10, 5 along +X (FlatFace: the sketch origin at the
+        # global origin's projection, (10, 0, 0); Onshape's concentric constraint put it at the end)
         box = pad.AddSubShape.BoundBox
-        self.assertLess((box.Center - V(12.5, 0, 30)).Length, 1e-3, box)
+        self.assertAlmostEqual(box.XMin, 10, 4)
+        self.assertAlmostEqual(box.XMax, 15, 4)
