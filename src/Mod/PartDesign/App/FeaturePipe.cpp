@@ -44,7 +44,10 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
+#include <BOPAlgo_ArgumentAnalyzer.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
@@ -63,9 +66,14 @@
 #include <ElCLib.hxx>
 #include <Extrema_ExtPC.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -81,6 +89,7 @@
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
 #include <gp_Hypr.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Parab.hxx>
 #include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
@@ -1146,6 +1155,337 @@ gp_Dir tangentAlong(const TopoDS_Edge& edge, bool atStart)
 bool isLine(const TopoDS_Edge& edge)
 {
     return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
+}
+
+/// A Part helix's edge that winds more than one turn: a line on a cylinder (makeHelix) or on a
+/// surface of revolution (makeSpiralHelix, Part::Helix's) keeping its distance from the axis, its
+/// 3D curve built from that line. Conical helices and spirals aren't (their turns change radius).
+struct HelixWinding
+{
+    gp_Ax1 axis;         ///< where the edge is
+    double pitch = 0.0;  ///< the advance along the axis per turn
+    double span = 0.0;   ///< the angle wound, more than one turn
+    double first = 0.0;  ///< the edge's parameters (its 2D and 3D curves share them)
+    double last = 0.0;
+};
+
+std::optional<HelixWinding> helixWinding(const TopoDS_Edge& edge)
+{
+    Handle(Geom2d_Curve) curve2d;
+    Handle(Geom_Surface) surface;
+    TopLoc_Location surfaceLocation;
+    double first = 0.0;
+    double last = 0.0;
+    BRep_Tool::CurveOnSurface(edge, curve2d, surface, surfaceLocation, first, last);
+    if (curve2d.IsNull() || surface.IsNull() || !BRep_Tool::SameParameter(edge)) {
+        return {};
+    }
+    Handle(Geom_Surface) basis = surface;
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(basis)) {
+        basis = trimmed->BasisSurface();
+    }
+    Handle(Geom2d_Curve) line = curve2d;
+    if (auto trimmed = Handle(Geom2d_TrimmedCurve)::DownCast(line)) {
+        line = trimmed->BasisCurve();
+    }
+    std::optional<gp_Ax1> axis;
+    if (auto cylinder = Handle(Geom_CylindricalSurface)::DownCast(basis)) {
+        axis = cylinder->Axis();
+    }
+    else if (auto revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(basis)) {
+        axis = revolution->Axis();
+    }
+    if (!axis || Handle(Geom2d_Line)::DownCast(line).IsNull()) {
+        return {};
+    }
+    // The edge keeps its distance from the axis (a 2D line on the surface, so the distance
+    // changes linearly along it if at all)
+    const gp_Trsf placement = surfaceLocation.Transformation();
+    const gp_Ax1 placed = axis->Transformed(placement);
+    const gp_Lin axisLine(placed);
+    auto pointAt = [&](double t) {
+        const gp_Pnt2d uv = curve2d->Value(t);
+        return surface->Value(uv.X(), uv.Y()).Transformed(placement);
+    };
+    const double radius = axisLine.Distance(pointAt(first));
+    if (radius < Precision::Confusion()
+        || std::fabs(axisLine.Distance(pointAt(last)) - radius) > Precision::Confusion()
+        || std::fabs(axisLine.Distance(pointAt((first + last) / 2)) - radius)
+            > Precision::Confusion()) {
+        return {};
+    }
+    constexpr double turn = 2.0 * std::numbers::pi;
+    const double span = std::fabs(curve2d->Value(last).X() - curve2d->Value(first).X());
+    if (span <= turn * (1.0 + 1e-6)) {
+        return {};
+    }
+    const gp_Vec advance(pointAt(first), pointAt(first + (last - first) * turn / span));
+    return HelixWinding {placed, std::fabs(advance.Dot(gp_Vec(placed.Direction()))), span, first, last};
+}
+
+/// The extent of \a shape along \a axis's direction
+double extentAlong(const TopoDS_Shape& shape, const gp_Ax1& axis)
+{
+    gp_Trsf toAxis;
+    toAxis.SetTransformation(gp_Ax3(axis.Location(), axis.Direction()));
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape.Moved(TopLoc_Location(toAxis)), box, false, false);
+    if (box.IsVoid()) {
+        return 0.0;
+    }
+    double xMin, yMin, zMin, xMax, yMax, zMax;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    return zMax - zMin;
+}
+
+/// A helix in \a path whose turns \a profile, swept along it, overlaps from one turn to the next:
+/// the profile's extent along the axis beyond the pitch (Onshape refuses it, SWEEP_FAILED; ops#660).
+/// Turns that only touch sweep. The helix's pitch and the profile's extent, or none.
+std::optional<std::pair<double, double>> overlappingTurns(
+    const TopoDS_Shape& path,
+    const TopoDS_Shape& profile
+)
+{
+    for (TopExp_Explorer it(path, TopAbs_EDGE); it.More(); it.Next()) {
+        if (const auto winding = helixWinding(TopoDS::Edge(it.Current()))) {
+            const double extent = extentAlong(profile, winding->axis);
+            if (extent > winding->pitch + 1e-6) {
+                return std::make_pair(winding->pitch, extent);
+            }
+        }
+    }
+    return {};
+}
+
+/// A helix edge (\a winding its winding) cut at each whole turn from its start, as AdditiveHelix
+/// breaks its path at each turn: a sweep along one edge of five turns, its profile's base on the
+/// cylinder, fused with the cylinder into 2 solids with BOP errors, where Onshape (and the broken
+/// path) gives one part (ops#665). Empty when it can't be cut.
+std::vector<TopoDS_Edge> helixTurns(const TopoDS_Edge& edge, const HelixWinding& winding)
+{
+    constexpr double turn = 2.0 * std::numbers::pi;
+    const double first = winding.first;
+    const double last = winding.last;
+    const double span = winding.span;
+    // A piece shorter than this at the end would be a sliver: the last turn takes it
+    const double sliver = 1e-6 * turn;
+    TopLoc_Location location;
+    double first3d = 0.0;
+    double last3d = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first3d, last3d);
+    if (curve.IsNull() || std::fabs(first3d - first) > Precision::PConfusion()
+        || std::fabs(last3d - last) > Precision::PConfusion()) {
+        return {};
+    }
+    if (!location.IsIdentity()) {
+        curve = Handle(Geom_Curve)::DownCast(curve->Transformed(location.Transformation()));
+    }
+    TopoDS_Vertex start;
+    TopoDS_Vertex end;
+    TopExp::Vertices(edge, start, end);  // by parameter, whatever the edge's orientation
+    std::vector<double> at {first};
+    for (int k = 1; k * turn < span - sliver; ++k) {
+        at.push_back(first + (last - first) * (k * turn / span));
+    }
+    at.push_back(last);
+    const double tolerance = BRep_Tool::Tolerance(edge);
+    std::vector<TopoDS_Edge> pieces;
+    TopoDS_Vertex from = start;
+    BRep_Builder builder;
+    for (size_t k = 1; k < at.size(); ++k) {
+        TopoDS_Vertex to = end;
+        if (k + 1 < at.size()) {
+            to = BRepBuilderAPI_MakeVertex(curve->Value(at[k])).Vertex();
+            builder.UpdateVertex(to, tolerance);
+        }
+        BRepBuilderAPI_MakeEdge piece(curve, from, to, at[k - 1], at[k]);
+        if (!piece.IsDone()) {
+            return {};
+        }
+        TopoDS_Edge made = piece.Edge();
+        builder.UpdateEdge(made, tolerance);
+        pieces.push_back(made);
+        from = to;
+    }
+    return pieces;
+}
+
+/// \a path with every helix edge cut at its turns (helixTurns), each piece named as modified from
+/// its edge and the new vertices as generated from it, made a wire as \a wire; \a path itself when
+/// no edge is cut. A helix whose turns \a profile makes touch stays whole: OCCT's sweep along its
+/// pieces fails (FindFromKey), along the one edge it builds, as Onshape does.
+Part::TopoShape withHelixTurns(
+    const Part::TopoShape& path,
+    Part::TopoShape wire,
+    const TopoDS_Shape& profile
+)
+{
+    Part::ShapeMapper mapper;
+    BRep_Builder builder;
+    TopoDS_Compound edges;
+    builder.MakeCompound(edges);
+    bool cut = false;
+    for (const Part::TopoShape& edge : path.getSubTopoShapes(TopAbs_EDGE)) {
+        const TopoDS_Edge& whole = TopoDS::Edge(edge.getShape());
+        const std::optional<HelixWinding> winding = helixWinding(whole);
+        std::vector<TopoDS_Edge> pieces;
+        if (winding && extentAlong(profile, winding->axis) < winding->pitch * (1.0 - 1e-4)) {
+            pieces = helixTurns(whole, *winding);
+        }
+        if (pieces.empty()) {
+            builder.Add(edges, edge.getShape());
+            continue;
+        }
+        cut = true;
+        std::vector<Part::TopoShape> named;
+        for (size_t k = 0; k < pieces.size(); ++k) {
+            builder.Add(edges, pieces[k]);
+            named.emplace_back(pieces[k]);
+            if (k > 0) {
+                mapper.populate(
+                    Part::MappingStatus::Generated,
+                    edge,
+                    std::vector<Part::TopoShape> {TopExp::FirstVertex(pieces[k], true)}
+                );
+            }
+        }
+        mapper.populate(Part::MappingStatus::Modified, edge, named);
+    }
+    if (!cut) {
+        return path;
+    }
+    Part::TopoShape split(wire);
+    split.makeShapeWithElementMap(edges, mapper, {path}, Part::OpCodes::Split);
+    wire.makeElementWires(split.getSubTopoShapes(TopAbs_EDGE));
+    if (wire.isNull() || wire.getShape().ShapeType() != TopAbs_WIRE) {
+        return path;
+    }
+    return wire;
+}
+
+/// Pairs of \a wire's edges, adjacent or not, by the points where adjacent ones meet: \a visit
+/// gets the two edges, whether they follow each other along the wire, and the ends they share
+/// (within \a tolerance), for the pairs whose boxes come within \a reach of each other. Stops at
+/// the first visit that returns a point.
+template<typename Visit>
+std::optional<gp_Pnt> edgePairs(const TopoDS_Wire& wire, double reach, Visit visit)
+{
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(wire);
+    const size_t n = edges.size();
+    std::vector<Bnd_Box> boxes(n);
+    std::vector<std::array<gp_Pnt, 2>> ends(n);
+    for (size_t i = 0; i < n; ++i) {
+        BRepBndLib::Add(edges[i], boxes[i]);
+        boxes[i].Enlarge(reach / 2);
+        ends[i] = {
+            BRep_Tool::Pnt(TopExp::FirstVertex(edges[i], true)),
+            BRep_Tool::Pnt(TopExp::LastVertex(edges[i], true))
+        };
+    }
+    const bool closed = n > 1 && ends[0][0].Distance(ends[n - 1][1]) <= Precision::Confusion();
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            if (boxes[i].IsOut(boxes[j])) {
+                continue;
+            }
+            const bool adjacent = j == i + 1 || (closed && i == 0 && j == n - 1);
+            std::vector<gp_Pnt> shared;
+            if (adjacent) {
+                for (const gp_Pnt& a : ends[i]) {
+                    for (const gp_Pnt& b : ends[j]) {
+                        if (a.Distance(b) <= Precision::Confusion()) {
+                            shared.push_back(a);
+                        }
+                    }
+                }
+            }
+            if (std::optional<gp_Pnt> found = visit(edges[i], edges[j], adjacent, shared)) {
+                return found;
+            }
+        }
+    }
+    return {};
+}
+
+/// Where \a wire touches or crosses itself: two edges meeting other than at the ends where
+/// adjacent edges join, or an edge turning straight back along the one before. Onshape refuses
+/// such a path (SWEEP_PATH_FAILED; oracle 9, ops#660). One edge crossing itself isn't looked for.
+std::optional<gp_Pnt> pathTouchesItself(const TopoDS_Wire& wire)
+{
+    constexpr double tolerance = 1e-6;
+    return edgePairs(
+        wire,
+        2 * tolerance,
+        [](const TopoDS_Edge& a, const TopoDS_Edge& b, bool adjacent, const std::vector<gp_Pnt>& shared
+        ) -> std::optional<gp_Pnt> {
+            BRepExtrema_DistShapeShape distance(a, b);
+            if (!distance.IsDone() || distance.Value() > tolerance) {
+                return {};
+            }
+            for (int k = 1; k <= distance.NbSolution(); ++k) {
+                const gp_Pnt at = distance.PointOnShape1(k);
+                if (std::ranges::none_of(shared, [&](const gp_Pnt& p) {
+                        return p.Distance(at) <= tolerance;
+                    })) {
+                    return at;
+                }
+            }
+            // Straight back: at a joint, the second edge leaves along the first's way in
+            if (adjacent && shared.size() == 1) {
+                const bool aEndsThere = BRep_Tool::Pnt(TopExp::LastVertex(a, true)).Distance(shared[0])
+                    <= Precision::Confusion();
+                const bool bStartsThere
+                    = BRep_Tool::Pnt(TopExp::FirstVertex(b, true)).Distance(shared[0])
+                    <= Precision::Confusion();
+                const gp_Dir in = tangentAlong(a, !aEndsThere);
+                const gp_Dir out = tangentAlong(b, bStartsThere);
+                // Along the wire, the first edge runs into the joint and the second away from it
+                const double turn = (aEndsThere ? 1.0 : -1.0) * (bStartsThere ? 1.0 : -1.0)
+                    * in.Dot(out);
+                if (turn < -1.0 + 1e-9) {
+                    return shared[0];
+                }
+            }
+            return {};
+        }
+    );
+}
+
+/// Where non-adjacent edges of \a wire pass within twice \a reach of each other (the profile's
+/// reach about the path), and how near: tubes swept along them may overlap there
+std::optional<std::pair<gp_Pnt, double>> pathPassesNearItself(const TopoDS_Wire& wire, double reach)
+{
+    double nearest = 0.0;
+    const std::optional<gp_Pnt> at = edgePairs(
+        wire,
+        2 * reach,
+        [&](const TopoDS_Edge& a, const TopoDS_Edge& b, bool adjacent, const std::vector<gp_Pnt>&
+        ) -> std::optional<gp_Pnt> {
+            if (adjacent) {
+                return {};
+            }
+            BRepExtrema_DistShapeShape distance(a, b);
+            if (!distance.IsDone() || distance.Value() >= 2 * reach || distance.NbSolution() < 1) {
+                return {};
+            }
+            nearest = distance.Value();
+            return distance.PointOnShape1(1);
+        }
+    );
+    if (!at) {
+        return {};
+    }
+    return std::make_pair(*at, nearest);
+}
+
+/// Whether \a shape intersects itself, by OCCT's self-interference check
+bool intersectsItself(const TopoDS_Shape& shape)
+{
+    BOPAlgo_ArgumentAnalyzer check;
+    check.SetShape1(BRepBuilderAPI_Copy(shape).Shape());
+    check.SelfInterMode() = true;
+    check.Perform();
+    return check.HasFaulty();
 }
 
 /// The first wire of \a shape (a section the sweep reports), or a null one
@@ -5364,6 +5704,49 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 ));
             }
         }
+        // Paths Onshape refuses (oracle 9, ops#660), and where the tubes may overlap
+        std::optional<std::pair<gp_Pnt, double>> passesNear;
+        if (!path.isNull() && path.shapeType() == TopAbs_WIRE) {
+            const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
+            const TopoDS_Wire& wire = TopoDS::Wire(path.getShape());
+            if (const std::optional<gp_Pnt> at = pathTouchesItself(wire)) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the path crosses or touches itself at {}; Onshape refuses such a path "
+                    "too. Move its edges apart.",
+                    pointText(at->Transformed(toBody))
+                ));
+            }
+            const TopoDS_Shape placedProfile = profileShape.getShape().Moved(invObjLoc);
+            if (const auto turns = overlappingTurns(wire, placedProfile)) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the helix's turns overlap: its pitch, {:.6g} mm, is less than the "
+                    "profile's {:.6g} mm along its axis. Make the pitch larger or the profile "
+                    "smaller.",
+                    turns->first,
+                    turns->second
+                ));
+            }
+            // The profile's reach about the path's start: tubes along edges nearer each other than
+            // twice that may overlap
+            Bnd_Box box;
+            BRepBndLib::Add(placedProfile, box);
+            if (!box.IsVoid()) {
+                const gp_Pnt start = BRep_Tool::Pnt(TopExp::FirstVertex(edgesInOrder(wire).front(), true));
+                double xMin, yMin, zMin, xMax, yMax, zMax;
+                box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+                double reach = 0.0;
+                for (const double x : {xMin, xMax}) {
+                    for (const double y : {yMin, yMax}) {
+                        for (const double z : {zMin, zMax}) {
+                            reach = std::max(reach, start.Distance(gp_Pnt(x, y, z)));
+                        }
+                    }
+                }
+                passesNear = pathPassesNearItself(wire, reach);
+            }
+            // A helix of several turns sweeps turn by turn, as AdditiveHelix's (ops#665)
+            path = withHelixTurns(path, makeTopoShape(false), placedProfile);
+        }
 
         // auxiliary
         Part::TopoShape auxpath = makeTopoShape(false);
@@ -6945,6 +7328,19 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 return new App::DocumentObjectExecReturn(invalidPipe());
             }
             AddSubShape.setValue(result);
+        }
+
+        // Tubes overlapping where the path passes near itself (oracle 9, ops#660): Onshape builds
+        // their exact union; the sweep is one solid counting the overlap twice. Until the union
+        // is built, a stop.
+        if (passesNear && intersectsItself(result.getShape())) {
+            return new App::DocumentObjectExecReturn(fmt::format(
+                "Pipe: the swept body overlaps itself where the path passes {:.6g} mm from itself "
+                "near {}. Onshape builds the union there; FreeCAD-CH doesn't yet. Move the "
+                "path's edges apart or make the profile smaller.",
+                passesNear->second,
+                pointText(passesNear->first.Transformed(invObjLoc.Inverted().Transformation()))
+            ));
         }
 
         // A loose pipe may be a poor approximation of the swept surface, which OCCT reports only
