@@ -21,16 +21,23 @@
 
 """Onshape's Face pattern (FreeCAD-CH ops#655 T8, notes/face-pattern-design.md).
 
-The expected results are Onshape's (`notes/onshape-facts.md` "Face pattern, FP1-FP5, FP8"):
+The expected results are Onshape's (`notes/onshape-facts.md` "Face pattern", FP1-FP18):
 - FP2: a boss's five faces, +x 20, count 3: 12540, one solid. Its top alone, or its sides alone:
   the feature fails and the part is unchanged.
 - FP3: a pocket's five faces, +x 20, 3: 11568.
 - FP4: an instance entirely off the part is dropped silently (12360). An instance partly off the
   part: Onshape stretches its sides down (11720); the route can't, so the feature fails
   (decision 150).
-- FP5: overlapping instances: the feature fails.
+- FP5, FP16: overlapping or touching instances (the seed included): the feature fails.
+- FP6: a copy over a lower step: Onshape stretches it down (13632); the route can't, so the feature
+  fails (debt). FP7: picks on two parts: an error for now (the parts hub's T1a).
 - FP8: a circular pattern of a through hole (its cylinder) and of a blind hole (cylinder and floor),
   4 over 360 degrees.
+- FP9: Skip, index 0 the seed. FP10: Mirror.
+- FP11-FP18: picks that don't close against the part fail (a counterbore without its hole, a tube boss
+  without its bore, a blind pocket onto a thinner section, a boss copy inside a taller step, a corner
+  boss along an edge, a side's merged face picked). A through hole onto a thicker step: Onshape extends
+  it (17151.77); the route can't, so the feature fails (debt).
 
 Designed models, built by each test (mm, volumes in mm^3):
 - Plate: x 0..60, y 0..20, z 0..10 (12000). Boss: x 2..8, y 7..13, z 10..15 (180).
@@ -229,13 +236,27 @@ class TestFacePattern(unittest.TestCase):
     def testOverlappingInstancesFail(self):
         self.plate()
         boss = self.boss()
-        self.assertFails(self.linear(boss, self.bossFaces(boss), 4, 3))
+        pattern = self.linear(boss, self.bossFaces(boss), 4, 3)
+        self.assertFails(pattern, "instance 2 touches or overlaps instance 1")
 
-    def testTouchingInstancesMerge(self):
+    def testTouchingInstancesFail(self):
+        # FP16: Onshape fails with PATTERN_FACE_FAILED, as for an overlap (the seed included)
         self.plate()
         boss = self.boss()
         pattern = self.linear(boss, self.bossFaces(boss), 6, 3)  # x 2..8, 8..14, 14..20
-        self.assertSolid(pattern, PLATE + 3 * BOSS)
+        self.assertFails(pattern, "instance 2 touches or overlaps instance 1")
+
+    def testCopiesTouchingAlongAnEdgeFail(self):
+        # Two directions, pitch = the boss's size: diagonal neighbours share an edge
+        self.plate()
+        boss = self.boss()
+        pattern = self.linear(boss, self.bossFaces(boss), 6, 2)
+        pattern.Direction2 = (models.originFeature(self.body, "Y_Axis"), [""])
+        pattern.Mode2 = "Extent"
+        pattern.Occurrences2 = 2
+        pattern.Length2 = 6
+        pattern.SkippedInstances = [1, 0, 0, 1]  # the seed and its diagonal one, x 8..14, y 13..19
+        self.assertFails(pattern, "instance 4 touches or overlaps instance 1")
 
     # -- FP8: circular, holes ---------------------------------------------------------------------
 
@@ -260,14 +281,17 @@ class TestFacePattern(unittest.TestCase):
     # -- Skip, mirror -----------------------------------------------------------------------------
 
     def testSkip(self):
+        # FP9: count 4, distance 15, index1 1 skipped: bosses at x 2, 32, 47 (12540; index 0 is the
+        # seed, as CP8)
         self.plate()
         boss = self.boss()
-        pattern = self.linear(boss, self.bossFaces(boss), 20, 3)
-        pattern.SkippedInstances = [1, 0]  # the first copy (index 0 is the seed, as CP8)
-        self.assertSolid(pattern, PLATE + 2 * BOSS)
-        self.assertEqual(self.topsAt(pattern.Shape, 15), [5, 45])
+        pattern = self.linear(boss, self.bossFaces(boss), 15, 4)
+        pattern.SkippedInstances = [1, 0]
+        self.assertSolid(pattern, PLATE + 3 * BOSS)
+        self.assertEqual(self.topsAt(pattern.Shape, 15), [5, 35, 50])
 
     def testMirror(self):
+        # FP10: Onshape's boss at x 2..8 mirrored about x = 30 (12360); here the same, shifted by -30
         self.plate(x0=-30, x1=30)
         boss = self.boss(x0=-28, x1=-22)
         pattern = self.body.newObject("PartDesign::FaceMirrored", "FaceMirrored")
@@ -347,6 +371,30 @@ class TestFacePattern(unittest.TestCase):
         self.assertEqual(len(picks), 3)
         self.assertFails(self.linear(boss, picks, 20, 3), "doesn't sit on the part")
 
+    def testCornerBossWithItsMergedFacesFails(self):
+        # FP18: the corner boss's own faces and the plate's two sides they merge into: Onshape fails
+        self.plate()
+        sketch = models.sketch(self.doc, "CornerSketch", models.rectangle(0, 0, 6, 6), self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, name="CornerBoss")
+        boss.Refine = True
+        picks = self.faces(
+            boss,
+            lambda c, f: inBox(c, 0.1, 6, 0.1, 6, 10.1, 15) or abs(c.x) < TOL or abs(c.y) < TOL,
+        )
+        self.assertEqual(len(picks), 5)
+        self.assertFails(self.linear(boss, picks, 20, 3))
+
+    def testBossAgainstASideWithItsMergedFaceFails(self):
+        # FP18: the side boss's own 4 faces build (testBossAgainstASide); with the plate's y = 0 side,
+        # which its outer side merges into, picked too, Onshape fails
+        self.plate()
+        sketch = models.sketch(self.doc, "SideSketch", models.rectangle(10, 0, 16, 6), self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, name="SideBoss")
+        boss.Refine = True
+        picks = self.faces(boss, lambda c, f: inBox(c, 10, 16, 0.1, 6, 10.1, 15) or abs(c.y) < TOL)
+        self.assertEqual(len(picks), 5)
+        self.assertFails(self.linear(boss, picks, 20, 3))
+
     def testCounterboreWithoutItsHoleFails(self):
         # A counterbore r6, 3 deep, over a through hole r3 at (20, 10); its wall and floor picked but
         # not the hole: the copies would be grooves with a pin in them
@@ -394,21 +442,23 @@ class TestFacePattern(unittest.TestCase):
         self.assertFails(self.linear(pocket, self.pocketFaces(pocket), 40, 2))
 
     def testBossOverALowerStepFails(self):
-        # Seed on the high step (z 12..17), the copy over the low one: Onshape most likely stretches it
-        # down (FP6, oracle-sb5 pending); a copy would float, so the feature stops
+        # FP6: seed on the high step (z 12..17), the copy over the low one. Onshape stretches it down
+        # to z 10 (13632); the copy can't, so the feature stops naming the instance (debt)
         self.step()
         sketch = models.sketch(self.doc, "HighSketch", models.rectangle(32, 7, 38, 13), self.body, z=12)
         boss = models.pad(self.body, sketch, 5, name="HighBoss")
         pattern = self.linear(boss, self.bossFaces(boss, x0=32, x1=38, z=12), 30, 2)
         pattern.Reversed = True
-        self.assertFails(pattern)
+        self.assertFails(pattern, "instance 2 stands over the part")
 
-    def testPocketPartlyOffThePartsEdge(self):
-        # The third pocket, x 52..58 on a plate ending at x 55, cuts what it meets: 3 x 6 x 4
+    def testPocketPartlyOffThePartsEdgeFails(self):
+        # The third pocket, x 52..58 on a plate ending at x 55: its x 58 wall, a picked face, is in
+        # the air, so the copy doesn't close against the part (the rule of FP11-FP17). It would cut
+        # 3 x 6 x 4; Onshape's result isn't known (asked), so the feature stops: loud (debt)
         self.plate(x1=55)
         pocket = self.pocket()
         pattern = self.linear(pocket, self.pocketFaces(pocket), 25, 3)
-        self.assertSolid(pattern, 55 * 20 * 10 - 2 * POCKET - 3 * 6 * 4)
+        self.assertFails(pattern, "instance 3 has a picked face missing")
 
     def testCopyOntoAHigherStepIsTrimmed(self):
         self.plate()
@@ -418,6 +468,69 @@ class TestFacePattern(unittest.TestCase):
         pattern = self.linear(boss, self.bossFaces(boss), 40, 2)  # the copy at x 42..48 on z 12
         self.assertSolid(pattern, PLATE + 30 * 20 * 2 + BOSS + 6 * 6 * 3)
         self.assertEqual(self.topsAt(pattern.Shape, 15), [5, 45])
+
+    # -- each picked face's image in each instance (FP15, FP17), two parts (FP7), FP14 ------------
+
+    def thinSection(self, z0):
+        """The plate's x 0..30 half, 10 thick, and an x 30..60 section 3 thick at z0..z0 + 3; a blind
+        pocket x 7..13, y 7..13, z 5..10 in the thick half (base 7620)"""
+        self.plate(x1=30)
+        sketch = models.sketch(self.doc, "ThinSketch", models.rectangle(30, 0, 60, 20), self.body, z=z0)
+        models.pad(self.body, sketch, 3, name="Thin")
+        sketch = models.sketch(self.doc, "PocketSketch", models.rectangle(7, 7, 13, 13), self.body, z=10)
+        pocket = models.pocket(self.body, sketch, 5, name="Pocket")
+        picks = self.faces(pocket, lambda c, f: inBox(c, 7, 13, 7, 13, 5, 10 - 1e-3))
+        self.assertEqual(len(picks), 5)
+        return pocket, picks
+
+    def testBlindPocketOverAThinnerSectionFails(self):
+        # FP15 (x 30..60 is z 0..3): the copy at x 32..38, z 5..10 lies over the section, not in it.
+        # Onshape: PATTERN_FACE_FAILED; dropping it would be silent
+        pocket, picks = self.thinSection(0)
+        self.assertFails(self.linear(pocket, picks, 25, 2), "instance 2 lies over the part")
+
+    def testBlindPocketOntoAThinnerLedgeFails(self):
+        # FP15's rule on a ledge at z 7..10: the copy would cut through it, its floor in the air (a
+        # through pocket where the seed is blind)
+        pocket, picks = self.thinSection(7)
+        self.assertFails(self.linear(pocket, picks, 25, 2), "instance 2 has a picked face missing")
+
+    def testBossCopyInsideATallerStepFails(self):
+        # FP17: step x 20..60, z 10..25 (base 24180), the copy at x 22..28, z 10..15 inside it.
+        # Onshape: PATTERN_NOT_ON_BODY; the fuse would silently do nothing
+        self.plate()
+        sketch = models.sketch(self.doc, "StepSketch", models.rectangle(20, 0, 60, 20), self.body, z=10)
+        models.pad(self.body, sketch, 15, name="Step")
+        boss = self.boss()
+        pattern = self.linear(boss, self.bossFaces(boss), 20, 2)
+        self.assertFails(pattern, "instance 2 has a picked face missing")
+
+    def testThroughHoleOntoAThickerStepFails(self):
+        # FP14: step x 30..60, z 10..20 (base 17717.2567), hole r3 at (10, 10) through 10, +x 25.
+        # Onshape extends the copy through all 20 (17151.77); the copy can't, so it fails (debt)
+        self.plate()
+        sketch = models.sketch(self.doc, "StepSketch", models.rectangle(30, 0, 60, 20), self.body, z=10)
+        models.pad(self.body, sketch, 10, name="Step")
+        hole = models.sketch(self.doc, "HoleSketch", [models.circle(10, 10, 3)], self.body, z=10)
+        hole = models.pocketThroughAll(self.body, hole, name="Hole")
+        picks = self.faces(hole, lambda c, f: f.Surface.__class__.__name__ == "Cylinder")
+        self.assertEqual(len(picks), 1)
+        self.assertFails(self.linear(hole, picks, 25, 2), "instance 2 doesn't open onto the part")
+
+    def testPicksOnTwoPartsFail(self):
+        # FP7: Onshape patterns each part's faces in it; here an error for now (the parts hub's T1a)
+        self.body = models.body(self.doc)
+        plates = models.rectangle(0, 0, 60, 20) + models.rectangle(0, 30, 60, 50)
+        sketch = models.sketch(self.doc, "PlatesSketch", plates, self.body)
+        models.pad(self.body, sketch, 10, name="Plates")
+        bosses = models.rectangle(2, 7, 8, 13) + models.rectangle(2, 37, 8, 43)
+        sketch = models.sketch(self.doc, "BossesSketch", bosses, self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, name="Bosses")
+        self.doc.recompute()
+        self.assertEqual(len(boss.Shape.Solids), 2)
+        picks = self.faces(boss, lambda c, f: c.z > 10 + 1e-3)
+        self.assertEqual(len(picks), 10)
+        self.assertFails(self.linear(boss, picks, 20, 3), "pick faces of one part")
 
 
 if __name__ == "__main__":

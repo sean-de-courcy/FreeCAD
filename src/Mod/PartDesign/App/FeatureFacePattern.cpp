@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <BRepAdaptor_Surface.hxx>
@@ -143,28 +144,62 @@ bool isApart(const TopoDS_Shape& copy, const TopoDS_Shape& solid)
     return inSolid.State() != TopAbs_IN;
 }
 
-/// Whether the volumes overlap: their union is smaller than the sum of their volumes
-bool overlap(const std::vector<TopoDS_Shape>& volumes, double tiny)
+/// Whether two volumes meet: they touch (a shared face, edge or point) or overlap, one inside the
+/// other included (their boundaries are apart then)
+bool meet(const TopoDS_Shape& a, const TopoDS_Shape& b)
 {
-    if (volumes.size() < 2) {
-        return false;
+    BRepExtrema_DistShapeShape distance(a, b);
+    if (!distance.IsDone() || distance.Value() <= 10 * Precision::Confusion()) {
+        return true;
     }
-    double sum = 0.0;
-    TopTools_ListOfShape first;
-    TopTools_ListOfShape rest;
-    for (const TopoDS_Shape& volume : volumes) {
-        sum += volumeOf(volume);
-        (first.IsEmpty() ? first : rest).Append(volume);
+    auto inside = [](const TopoDS_Shape& shape, const TopoDS_Shape& solid) {
+        TopExp_Explorer vertex(shape, TopAbs_VERTEX);
+        if (!vertex.More()) {
+            return false;
+        }
+        BRepClass3d_SolidClassifier inSolid(
+            solid,
+            BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())),
+            Precision::Confusion()
+        );
+        return inSolid.State() == TopAbs_IN;
+    };
+    return inside(a, b) || inside(b, a);
+}
+
+/// One instance's volumes (what it adds and what it removes) and their bounding box
+struct Copy
+{
+    std::size_t position;
+    std::vector<TopoDS_Shape> volumes;
+    Bnd_Box box;
+};
+
+/// The first two instances that meet, if any (Onshape FP5, FP16: overlapping or touching instances
+/// fail, PATTERN_FACE_FAILED). The volumes of one instance meet each other, which is fine
+std::optional<std::pair<std::size_t, std::size_t>> meeting(std::vector<Copy>& copies)
+{
+    for (Copy& copy : copies) {
+        for (const TopoDS_Shape& volume : copy.volumes) {
+            BRepBndLib::Add(volume, copy.box);
+        }
+        copy.box.Enlarge(10 * Precision::Confusion());
     }
-    BRepAlgoAPI_Fuse fuse;
-    fuse.SetRunParallel(true);
-    fuse.SetArguments(first);
-    fuse.SetTools(rest);
-    fuse.Build();
-    if (!fuse.IsDone()) {
-        throw Base::RuntimeError("Face pattern: the instances can't be compared");
+    for (std::size_t i = 0; i < copies.size(); ++i) {
+        for (std::size_t j = i + 1; j < copies.size(); ++j) {
+            if (copies[i].box.IsOut(copies[j].box)) {
+                continue;
+            }
+            for (const TopoDS_Shape& a : copies[i].volumes) {
+                for (const TopoDS_Shape& b : copies[j].volumes) {
+                    if (meet(a, b)) {
+                        return std::make_pair(copies[i].position, copies[j].position);
+                    }
+                }
+            }
+        }
     }
-    return sum - volumeOf(fuse.Shape()) > std::max(tiny, 1e-7 * sum);
+    return std::nullopt;
 }
 
 /// An interior point of the face and its outward normal (the middle of gridOn()'s), if any
@@ -193,9 +228,12 @@ TopAbs_State stateIn(const TopoDS_Shape& solid, const gp_Pnt& point)
 struct FeatureVolume
 {
     Part::TopoShape shape;
-    std::vector<int> others;  // indexes in TopExp::MapShapes(shape, TopAbs_FACE)
+    std::vector<int> picked;  // pieces of the picks: indexes in MapShapes(shape, TopAbs_FACE)
+    std::vector<int> others;  // the other faces, same indexes
     std::vector<bool> flush;  // per others
-    std::vector<std::pair<gp_Pnt, gp_Dir>> footing;  // points on a boss's footing faces
+    // Points on a boss's footing (with its outward normal) or a pocket's lid (with its inward one):
+    // each direction points into the base
+    std::vector<std::pair<gp_Pnt, gp_Dir>> intoBase;
     bool clean = true;
 };
 
@@ -229,16 +267,20 @@ FeatureVolume classify(
             continue;
         }
         if (onAPick(point)) {
+            volume.picked.push_back(i);
             continue;
         }
         const TopAbs_State beyond = stateIn(base, point.Translated(gp_Vec(normal) * nudge));
         bool flush = false;
         if (!adds) {
             volume.clean = volume.clean && beyond == TopAbs_OUT;
+            for (const auto& [at, outward] : gridOn(face)) {
+                volume.intoBase.emplace_back(at, outward.Reversed());
+            }
         }
         else if (beyond == TopAbs_IN) {
             const auto grid = gridOn(face);
-            volume.footing.insert(volume.footing.end(), grid.begin(), grid.end());
+            volume.intoBase.insert(volume.intoBase.end(), grid.begin(), grid.end());
         }
         else if (beyond == TopAbs_OUT && stateIn(base, point) == TopAbs_ON) {
             flush = true;
@@ -252,8 +294,8 @@ FeatureVolume classify(
     return volume;
 }
 
-/// Whether the base lies anywhere along the normals from the points (a boss over a lower part of
-/// the base, rather than off it)
+/// Whether the base lies anywhere along the directions from the points (a boss over a lower part of
+/// the base, or a pocket over it, rather than off it)
 bool over(const std::vector<std::pair<gp_Pnt, gp_Dir>>& points, const TopoDS_Shape& base, const gp_Trsf& trsf)
 {
     IntCurvesFace_ShapeIntersector intersector;
@@ -463,6 +505,31 @@ App::DocumentObjectExecReturn* FacePattern::execute()
         );
     }
 
+    // Onshape (FP7) patterns each part's picks in that part; for now one part only (the parts hub's
+    // T1a owns patterns across parts)
+    {
+        TopTools_IndexedMapOfShape solids;
+        TopExp::MapShapes(baseShape.getShape(), TopAbs_SOLID, solids);
+        if (solids.Extent() > 1) {
+            int part = 0;
+            for (int k = 1; k <= solids.Extent(); ++k) {
+                TopTools_IndexedMapOfShape solidFaces;
+                TopExp::MapShapes(solids(k), TopAbs_FACE, solidFaces);
+                for (const Part::TopoShape& face : faces) {
+                    if (!solidFaces.Contains(face.getShape())) {
+                        continue;
+                    }
+                    if (part != 0 && part != k) {
+                        return new App::DocumentObjectExecReturn(
+                            QT_TRANSLATE_NOOP("Exception", "Face pattern: pick faces of one part")
+                        );
+                    }
+                    part = k;
+                }
+            }
+        }
+    }
+
     std::vector<gp_Trsf> transforms;
     std::vector<std::size_t> skipped;
     try {
@@ -525,12 +592,12 @@ App::DocumentObjectExecReturn* FacePattern::execute()
         std::vector<Kept> kept;
         std::vector<Part::TopoShape> addCopies {baseShape};
         std::vector<Part::TopoShape> subCopies;
-        std::vector<TopoDS_Shape> checked;  // the seed's and the kept copies' volumes
+        std::vector<Copy> checked {{0, {}, {}}};  // the seed's and the kept copies' volumes
         if (adds) {
-            checked.push_back(add.getShape());
+            checked[0].volumes.push_back(add.getShape());
         }
         if (subs) {
-            checked.push_back(sub.getShape());
+            checked[0].volumes.push_back(sub.getShape());
         }
         for (std::size_t position = 1; position < transforms.size(); ++position) {
             if (std::ranges::find(skipped, position) != skipped.end()) {
@@ -548,13 +615,17 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 return copy;
             };
             // Apart from the base: dropped silently (Onshape FP4), unless a boss hovers over a
-            // lower part of it, which Onshape stretches down and a copy can't (decision 150)
+            // lower part of it, which Onshape stretches down and a copy can't (FP6, debt; decision
+            // 150), or a pocket lies over it, which Onshape fails (FP15)
             Part::TopoShape addCopy = adds ? copyOf(add) : Part::TopoShape();
             Part::TopoShape subCopy = subs ? copyOf(sub) : Part::TopoShape();
             const bool addKept = adds && !isApart(addCopy.getShape(), base);
             const bool subKept = subs && !isApart(subCopy.getShape(), base);
-            if (adds && !addKept && over(added.footing, base, trsf)) {
+            if (adds && !addKept && over(added.intoBase, base, trsf)) {
                 return failAt(position, "stands over the part, not on it");
+            }
+            if (subs && !subKept && over(removed.intoBase, base, trsf)) {
+                return failAt(position, "lies over the part, not in it");
             }
             if (adds && subs && addKept != subKept) {
                 return failAt(position, "is partly off the part");
@@ -563,23 +634,25 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 continue;
             }
             Kept instance {position, -1, -1};
+            Copy volumes {position, {}, {}};
             if (addKept) {
                 instance.added = static_cast<int>(addCopies.size());
                 addCopies.push_back(addCopy);
-                checked.push_back(addCopy.getShape());
+                volumes.volumes.push_back(addCopy.getShape());
             }
             if (subKept) {
                 instance.removed = static_cast<int>(subCopies.size());
                 subCopies.push_back(subCopy);
-                checked.push_back(subCopy.getShape());
+                volumes.volumes.push_back(subCopy.getShape());
             }
             kept.push_back(instance);
+            checked.push_back(std::move(volumes));
         }
-        // Onshape (FP5): overlapping instances fail, PATTERN_FACE_FAILED; touching is fine
-        if (overlap(checked, tiny)) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Face pattern: instances overlap")
-            );
+        // Onshape (FP5, FP16): instances that overlap or touch, the seed included, fail
+        if (const auto pair = meeting(checked)) {
+            const std::string other
+                = "touches or overlaps instance " + std::to_string(pair->first + 1);
+            return failAt(pair->second, other.c_str());
         }
 
         // Each copy must sit as the seed does: after the booleans, no face of the result comes
@@ -625,17 +698,37 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 );
             }
         }
+        // And each picked face's image is in each instance's result (Onshape FP15, FP17): else the
+        // copy is buried in a taller step (a no-op), or a blind pocket breaks through a thinner one
+        auto piecesInResult = [&](const TopoDS_Shape& face, bool added) {
+            TopTools_ListOfShape afterFuse;
+            if (added) {
+                piecesOf(fuse.get(), face, afterFuse);
+            }
+            else {
+                afterFuse.Append(face);
+            }
+            TopTools_ListOfShape pieces;
+            for (const TopoDS_Shape& piece : afterFuse) {
+                piecesOf(cut.get(), piece, pieces);
+            }
+            return pieces;
+        };
         for (const Kept& instance : kept) {
             if (instance.added >= 0) {
                 TopTools_IndexedMapOfShape copyFaces;
                 TopExp::MapShapes(addCopies[instance.added].getShape(), TopAbs_FACE, copyFaces);
-                for (std::size_t j = 0; j < added.others.size(); ++j) {
-                    TopTools_ListOfShape afterFuse;
-                    piecesOf(fuse.get(), copyFaces(added.others[j]), afterFuse);
-                    TopTools_ListOfShape pieces;
-                    for (const TopoDS_Shape& piece : afterFuse) {
-                        piecesOf(cut.get(), piece, pieces);
+                for (int index : added.picked) {
+                    if (piecesInResult(copyFaces(index), true).IsEmpty()) {
+                        return failAt(
+                            instance.position,
+                            "has a picked face missing: it doesn't stand out of the part"
+                        );
                     }
+                }
+                for (std::size_t j = 0; j < added.others.size(); ++j) {
+                    const TopTools_ListOfShape pieces
+                        = piecesInResult(copyFaces(added.others[j]), true);
                     for (const TopoDS_Shape& piece : pieces) {
                         if (!added.flush[j] || !continuesAFaceOf(TopoDS::Face(piece), base)) {
                             return failAt(instance.position, "doesn't sit on the part as the original does");
@@ -646,10 +739,17 @@ App::DocumentObjectExecReturn* FacePattern::execute()
             if (instance.removed >= 0) {
                 TopTools_IndexedMapOfShape copyFaces;
                 TopExp::MapShapes(subCopies[instance.removed].getShape(), TopAbs_FACE, copyFaces);
+                for (int index : removed.picked) {
+                    if (piecesInResult(copyFaces(index), false).IsEmpty()) {
+                        return failAt(
+                            instance.position,
+                            "has a picked face missing: it doesn't cut into the part as the original "
+                            "does"
+                        );
+                    }
+                }
                 for (int index : removed.others) {
-                    TopTools_ListOfShape pieces;
-                    piecesOf(cut.get(), copyFaces(index), pieces);
-                    if (!pieces.IsEmpty()) {
+                    if (!piecesInResult(copyFaces(index), false).IsEmpty()) {
                         return failAt(instance.position, "doesn't open onto the part as the original does");
                     }
                 }
