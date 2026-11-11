@@ -36,6 +36,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderCoordinateSystem.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/FeatureMirrored.h>
 
 #include "ui_TaskMirroredParameters.h"
@@ -150,6 +151,11 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
     getReferencedSelection(pcMirrored, msg, selObj, mirrorPlanes);
     if (!selObj) {
         return;
+    }
+    // A sketch region (InternalFaceN, which the gate takes) is the sketch's plane: the sketch
+    // without a sub, its normal (selection parity SQ16, as Onshape's Mirror plane takes a region)
+    if (selObj->isDerivedFrom<Part::Part2DObject>()) {
+        mirrorPlanes = {std::string()};
     }
 
     if (selectionMode == SelectionMode::Reference || selObj->isDerivedFrom<App::Plane>()) {

@@ -4654,6 +4654,29 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testMirroredReferencePickThenOk(self):
         self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
 
+    def testMirroredPlaneTakesASketchRegion(self):
+        """Selection parity SQ16 (Onshape's Mirror plane takes a sketch region): a region of a
+        sketch standing at x = 3 (normal +X) mirrors the first bump (x 1..2, y 1..2) to x 4..5;
+        the plane is the sketch itself."""
+        first, second = self.bumps()
+        sk = models.sketch(self.doc, "MirrorSk", models.rectangle(-2, -2, 2, 2), self.body,
+                           placement=App.Placement(App.Vector(3, 0, 0),
+                                                   App.Rotation(App.Vector(0, 1, 0), 90)))
+        sk.MakeInternals = True
+        self.doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
+        pattern = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(pattern)
+        self.selectReference("comboPlane")
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sk.Name + ".InternalFace1")
+        pump(0.3)
+        self.assertLink(pattern.MirrorPlane, sk, [])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(pattern.Shape.Volume, 1003, places=6)
+        self.assertTrue(pattern.Shape.isInside(App.Vector(4.5, 1.5, 10.5), 1e-7, True))
+
     def testPatternOriginalsLabelRenamed(self):
         """A listed original renamed while the panel is open shows its new Label (and the other
         one no longer needs its name)."""
