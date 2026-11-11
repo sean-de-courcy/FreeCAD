@@ -319,3 +319,78 @@ class TestDressUpAnyPartGui(ResultBoxGuiCase):
 
     def testAPartPreselectedLeavesChamferEmpty(self):
         self.checkAPartPreselectedLeavesItEmpty("PartDesign_Chamfer")
+
+    # -- a part picked whole in an open dialog (selection parity P6a, oracle 8 SQ12)
+
+    def partRowPicks(self, a, b, padB):
+        """The picks a Parts-list row and a feature row make (FeaturesView::pushSelection, the
+        tree): each part whole, and B's pad whole on its path through B."""
+        return [(a.Name, ""), (b.Name, ""), (b.Name, padB.Name + ".")]
+
+    def assertRowsSelectable(self, a, b, padB):
+        """With no dialog open each row pick selects: a refusal later is the dialog's."""
+        for obj, sub in self.partRowPicks(a, b, padB):
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.doc.Name, obj, sub)
+            self.assertEqual(len(Gui.Selection.getSelectionEx("", 0)), 1, "%s.%s selects nothing" % (obj, sub))
+        Gui.Selection.clearSelection()
+
+    def checkAPartRowIsRefused(self, command):
+        """SQ12: with Fillet (Chamfer) open, a Parts-list row click is refused (Onshape: silently).
+        The field keeps its entry and stays armed, nothing is selected, and an edge click still
+        adds."""
+        a, b, padA, padB = self.twoParts()
+        self.assertRowsSelectable(a, b, padB)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", b)
+        edge = verticalEdge(padB, 30, 10)
+        Gui.Selection.clearSelection()
+        self.click(padB, edge)
+        self.watchModals()
+        Gui.runCommand(command)
+        self.waitForPanel()
+        typeId = "PartDesign::" + command.split("_", 1)[1]
+        [dressUp] = self.made(typeId)
+        pump(0.3)
+        self.assertEqual(base(dressUp), (padB, [edge]), command)
+        [field] = fields()
+        self.assertTrue(field.property("armed"), command + ": the field is not armed")
+        for obj, sub in self.partRowPicks(a, b, padB):
+            Gui.Selection.addSelection(self.doc.Name, obj, sub)
+            pump(0.2)
+            self.assertEqual(base(dressUp), (padB, [edge]), "%s: %s.%s changed Base" % (command, obj, sub))
+            self.assertEqual(Gui.Selection.getSelectionEx("", 0), [], "%s: %s.%s is selected" % (command, obj, sub))
+            self.assertTrue(field.property("armed"), "%s: %s.%s disarmed the field" % (command, obj, sub))
+        other = verticalEdge(padB, 20, 0)
+        self.click(padB, other)
+        pump(0.3)
+        self.assertEqual(sorted(base(dressUp)[1]), sorted([edge, other]), command)
+        self.close(ok=False)
+        self.watching = False
+        self.assertEqual(self.modals, [])
+
+    def testAPartRowIsRefusedInAnOpenFillet(self):
+        self.checkAPartRowIsRefused("PartDesign_Fillet")
+
+    def testAPartRowIsRefusedInAnOpenChamfer(self):
+        self.checkAPartRowIsRefused("PartDesign_Chamfer")
+
+    def testAPartRowDoesNotPlaceAToolFirstFillet(self):
+        """SQ12: Fillet with nothing selected waits for its first pick; a Parts-list row click is
+        refused (the fillet stays where it waits, Base empty), and an edge click of B places it."""
+        a, b, padA, padB = self.twoParts()
+        self.assertRowsSelectable(a, b, padB)
+        fillet = self.toolFirst("PartDesign_Fillet", a)
+        for obj, sub in self.partRowPicks(a, b, padB):
+            Gui.Selection.addSelection(self.doc.Name, obj, sub)
+            pump(0.2)
+            self.assertTrue(a.hasObject(fillet), "%s.%s moved the fillet" % (obj, sub))
+            self.assertEqual(base(fillet)[1], [], "%s.%s entered Base" % (obj, sub))
+            self.assertEqual(Gui.Selection.getSelectionEx("", 0), [], "%s.%s is selected" % (obj, sub))
+        edge = verticalEdge(padB, 30, 10)
+        self.click(padB, edge)
+        self.placedIn(fillet, b)
+        self.assertEqual(base(fillet), (padB, [edge]))
+        self.close(ok=False)
+        self.watching = False
+        self.assertNoTrace(a, b, padA, padB)
+
