@@ -1,0 +1,21 @@
+{
+"entries": {
+"ThinPipeCurveAddedFirst|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeCurveAddedFirst|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeCurveAddedFirst|offset1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeCurveAdded|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeCurveAdded|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeCurveAdded|offset1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeRingCurveAdded|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeRingCurveAdded|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeRingCurveAdded|offset1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeRingThicker|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeRingThicker|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeRingThicker|offset1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeThicker|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeThicker|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeThicker|offset1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeWallFlipped|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeWallFlipped|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"}
+}
+}

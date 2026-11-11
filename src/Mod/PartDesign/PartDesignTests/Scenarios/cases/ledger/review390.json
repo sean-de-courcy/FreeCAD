@@ -1,6 +1,6 @@
 {
 "entries": {
-"HelixDownToOneTurn|t0|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
+"HelixDownToOneTurn|t0|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
 "HelixDownToOneTurn|t1|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
 "HelixMadeLeftHandedTurnAdded|t0|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
 "HelixMadeLeftHandedTurnAdded|t1|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
@@ -31,6 +31,6 @@
 "HelixTurnRemovedAtTheEnd|t0|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
 "HelixTurnRemovedAtTheEnd|t1|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
 "HelixTurnRemovedAtTheEnd|t2|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"},
-"HelixUpFromOneTurn|t0|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"}
+"HelixUpFromOneTurn|t0|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r1", "issue": "ops#468", "tier": "F"}
 }
 }
