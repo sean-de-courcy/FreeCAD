@@ -812,6 +812,14 @@ class TestPipeLock(PipeCase):
         self.assertSweeps(pipe, 16 * 10 * math.pi, places=3)
         self.assertEqual(pipe.Mode, "Binormal")
 
+    def testLockDirectionIgnoresTwist(self):
+        """SW0: Onshape shows Twist only for None and Keep orientation; a twist left set does nothing."""
+        plane = models.originFeature(self.body, "XZ_Plane")
+        pipe = self.pipe(self.square(), self.quarterArc(), ProfileControl="Lock direction",
+                         LockDirection=(plane, [""]), HasTwist=True, TwistType="Angle", TwistAngle=45)
+        self.assertSweeps(pipe, 16 * 10 * math.pi, places=3)
+        self.assertHasVertices(pipe.Shape, [(20, 2, 18), (20, -2, 22)], 1e-5)
+
     def testLockDirectionInThePathsPlaneStops(self):
         plane = models.originFeature(self.body, "YZ_Plane")
         pipe = self.pipe(self.square(), self.quarterArc(), ProfileControl="Lock direction",

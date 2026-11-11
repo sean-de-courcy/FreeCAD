@@ -5634,7 +5634,8 @@ std::optional<std::string> Pipe::prepareSlice3(
 {
     frameGuide.Nullify();
     const long control = ProfileControl.getValue();
-    const bool twist = HasTwist.getValue();
+    // Onshape offers twist only with None and Keep orientation (SW0): the lock modes ignore it
+    const bool twist = HasTwist.getValue() && control != 3 && control != 4;
     const bool scaled = HasScale.getValue();
     const bool lockFaces = control == 3;
     if (!twist && !scaled && !lockFaces) {
