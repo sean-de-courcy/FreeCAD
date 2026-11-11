@@ -605,11 +605,12 @@ class TestPipeHelixTurnsCountFromTheStart(PipeCase):
     face lies at r 12 (area 2 pi 12 x 2) and its centre of mass on the axis at
     z = pitch (k - 1/2)."""
 
-    def build(self, height=12.0, pitch=6.0):
+    def build(self, height=12.0, pitch=6.0, half=1.0):
         self.helixPath = self.doc.addObject("Part::Helix", "Path")
         self.helixPath.Pitch, self.helixPath.Height, self.helixPath.Radius = pitch, height, 10.5
         self.doc.recompute()
-        profile = self.sketch("HS", models.rectangle(9, -1, 12, 1), placement=XZ)
+        profile = self.sketch("HS", models.rectangle(9, -half, 12, half), placement=XZ)
+        self.profile = profile
         pipe = self.pipe(profile, (self.helixPath, ["Edge1"]), Mode="Frenet")
         self.assertSweeps(pipe)
         return pipe
@@ -695,6 +696,65 @@ class TestPipeHelixTurnsCountFromTheStart(PipeCase):
             for k in (1, 2):
                 self.assertGreater(abs(point.Placement.Base.z - 6.0 * (k - 0.5)), 1,
                                    "the reference on the gone turn 3 passed to turn %d" % k)
+
+    def turnPoint(self, k, pitch=6.0):
+        """On turn k's part of the outer side face (r 12): angle 2 pi (k - 1) + pi / 2,
+        z = pitch (k - 3/4), a quarter turn on from the profile's start."""
+        a = 2 * math.pi * (k - 1) + math.pi / 2
+        return V(12 * math.cos(a), 12 * math.sin(a), pitch * (k - 0.75))
+
+    def faceAt(self, pipe, point):
+        names = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(pipe.Shape.Faces)
+            if f.distToShape(Part.Vertex(point))[0] < 1e-6
+        ]
+        self.assertEqual(len(names), 1, names)
+        return names[0]
+
+    def bindAt(self, pipe, k):
+        binder = self.body.newObject("PartDesign::SubShapeBinder", "OnTurn%d" % k)
+        binder.Support = [(pipe, (self.faceAt(pipe, self.turnPoint(k)),))]
+        self.doc.recompute()
+        return binder
+
+    def holds(self, binder, point):
+        """The binder holds one face, the one through `point`."""
+        faces = binder.Shape.Faces
+        return len(faces) == 1 and faces[0].distToShape(Part.Vertex(point))[0] < 1e-6
+
+    def testTouchingTurnsKeepTheTurnsFaces(self):
+        """The profile grows from 2 to 6 tall, the pitch: the turns touch, and the path is swept
+        whole (withHelixTurns' switch point, OCCT's sweep fails along the turns): one outer face
+        holds both turns' points. References picked on turn 1's and turn 2's outer faces follow it,
+        as Onshape's references to its one side face do; they broke (the review's
+        PipeHelixProfileToTouching)."""
+        pipe = self.build()
+        binders = [self.bindAt(pipe, k) for k in (1, 2)]
+        models.moveRectangle(self.profile, 9, -3, 12, 3)
+        self.doc.recompute()
+        self.assertSweeps(pipe)
+        outer = self.faceAt(pipe, self.turnPoint(1))
+        self.assertEqual(self.faceAt(pipe, self.turnPoint(2)), outer)
+        for k, binder in zip((1, 2), binders):
+            self.assertTrue(binder.isValid(), binder.getStatusString())
+            self.assertTrue(self.holds(binder, self.turnPoint(k)), (k, binder.Support))
+
+    def testFromTouchingTurnsNeverPassToAnotherFace(self):
+        """Built 6 tall (the turns touch, one outer face); shrunk to 2 tall: the path is cut at its
+        turns again, and the one face is two. The references picked at turn 1's and turn 2's points
+        are one and the same (the one face), so they can't both follow their points: each breaks
+        (loud) or holds the face its point is on, never another face."""
+        pipe = self.build(half=3.0)
+        binders = [self.bindAt(pipe, k) for k in (1, 2)]
+        self.assertEqual(binders[0].Support[0][1], binders[1].Support[0][1])
+        models.moveRectangle(self.profile, 9, -1, 12, 1)
+        self.doc.recompute()
+        self.assertSweeps(pipe)
+        self.assertNotEqual(self.faceAt(pipe, self.turnPoint(1)), self.faceAt(pipe, self.turnPoint(2)))
+        for k, binder in zip((1, 2), binders):
+            if binder.isValid():
+                self.assertTrue(self.holds(binder, self.turnPoint(k)), (k, binder.Support))
 
 
 class TestThreadToothOnTheCylinder(PipeCase):
@@ -961,17 +1021,13 @@ class TestPipeSelfOverlapUnion(PipeCase):
         """A ring r 1 / 0.4: a point is kept where it lies in some leg's annulus (Onshape's union),
         open where it lies only in holes. (10, 0.75, 0): leg 1's wall and leg 4's hole: in.
         (10, 0.3, 0) leg 1's hole only, (10, 2, 0) leg 4's hole only, (5, 0, 0): out. (A bore of
-        r 0.5 would leave the end cap at y 0.5 tangent to leg 1's bore.)
-        DEBT (sweeps 10): OCCT's BOPAlgo_MakerVolume leaves every face of this holed tube unused
-        (BOPAlgo_AlertSolidBuilderUnusedFaces), so FreeCAD-CH stops, loud; the union is expected
-        once that is solved."""
+        r 0.5 would leave the end cap at y 0.5 tangent to leg 1's bore.) The volume by geometry: the
+        naive 0.84 pi x 49.5 less the annuli's overlap, the integral over |z| < sqrt(0.75) of
+        2 (b - a) (b - 0.5), b = sqrt(1 - z^2), a = sqrt(0.16 - z^2) (0 for |z| > 0.4): 0.876804.
+        OCCT's maker builds this union only with the tubes cut at the path's corners (sweeps 15)."""
         ring = [models.circle(0, 0, 1), models.circle(0, 0, 0.4)]
         pipe = self.tube((10, 0.5), ring)
-        if not pipe.isValid():
-            self.assertStops(pipe, "overlaps itself", "couldn't build it")
-            raise unittest.SkipTest("debt: MakerVolume leaves a holed tube's faces unused")
-        self.assertOneSolid(pipe)
-        self.assertLess(pipe.Shape.Volume, 0.84 * math.pi * 49.5 - 1e-3)
+        self.assertOneSolid(pipe, 0.84 * math.pi * 49.5 - 0.876804, places=4)
         solid = pipe.Shape.Solids[0]
         self.assertTrue(solid.isInside(V(10, 0.75, 0), 1e-6, False))
         for outside in ((10, 0.3, 0), (10, 2, 0), (5, 0, 0)):
