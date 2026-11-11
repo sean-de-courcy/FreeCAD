@@ -3731,17 +3731,8 @@ bool View3DInventorViewer::processSoEvent(const SoEvent* ev)
                 if (inherited::processSoEvent(ev)) {
                     return true;
                 }
-                // FreeCAD-CH (ops#640, rank 53): under the fork's keymap Esc in the 3D view
-                // clears the selection, as in Onshape, when nothing else takes it: no task
-                // dialog open (its Esc is the dialog's), no edit mode, no box selection
-                if (ForkKeymap::isOnshape() && ke->getState() == SoButtonEvent::DOWN && !isEditing()
-                    && !isSelecting()
-                    && !Gui::Control().activeDialog(
-                        guiDocument ? guiDocument->getDocument() : nullptr
-                    )) {
-                    Gui::Selection().clearSelection();
-                    return true;
-                }
+                // FreeCAD-CH (selection parity P7): Esc never clears a selection, as in Onshape
+                // (oracle 8, SQ1/SQ7; ops#640 rank 53 had made it clear one); Space clears.
                 return false;
             case SoKeyboardEvent::Q:  // ignore 'Q' keys (to prevent app from being closed)
                 return inherited::processSoEvent(ev);
