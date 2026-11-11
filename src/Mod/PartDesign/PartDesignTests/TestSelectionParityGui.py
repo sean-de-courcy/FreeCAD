@@ -148,16 +148,28 @@ class TestBoxSelectionGui(unittest.TestCase):
         return body
 
     def look(self, direction):
+        # A fit right after the new document's recompute fits nothing (the camera stayed at its
+        # 4 mm default, off screen and on): let the view take the shapes in first
+        pump(0.2)
         direction()
         self.view.fitAll()
+        # The fit fills the height only, and a little short: on the portrait viewport off screen
+        # (400 x 615) it cut the sides. Zoom out by the aspect and a margin, so every point the
+        # tests drag from lies in the viewport.
+        width, height = self.view.getSize()
+        camera = self.view.getCameraNode()
+        camera.height.setValue(camera.height.getValue() * max(1.0, height / width) * 1.3)
         pump(0.4)
 
     def point(self, x, y, z=5):
-        """The viewport point of the world point."""
+        """The viewport point of the world point; it must lie in the viewport (a drag outside it
+        is not what a user does, and off screen it selected nothing)."""
         sx, sy = self.view.getPointOnScreen(App.Vector(x, y, z))
         _, height = self.view.getSize()
         scale = self.viewport.devicePixelRatioF()
-        return QtCore.QPoint(int(round(sx / scale)), int(round((height - sy - 1) / scale)))
+        at = QtCore.QPoint(int(round(sx / scale)), int(round((height - sy - 1) / scale)))
+        self.assertTrue(self.viewport.rect().contains(at), "(%g, %g, %g) is off the viewport at %s" % (x, y, z, at))
+        return at
 
     def send(self, kind, at, button, buttons):
         event = QtGui.QMouseEvent(
