@@ -6098,7 +6098,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         so the order isn't told from the shape here.) A point of S30 replaces it, last; moved up
         it is refused with the reason (only the last section can be a point)."""
         pipe = self.rod()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         field = self.sectionsField()
         self.assertTrue(field.isVisible(), "the multisection page isn't shown")
         self.assertTrue(waitFor(lambda: armed(field)), "the sections field isn't armed on open")
@@ -6126,7 +6126,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe = self.rod()
         pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
         self.assertThroughSection(pipe, 10, 16)
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         buttons = Gui.getMainWindow().findChildren(QtWidgets.QToolButton)
         self.assertFalse([b for b in buttons if b.text() == "Remove Section"])
         field = self.sectionsField()
@@ -6140,7 +6140,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """T35 for the pipe: a constant pipe's sections field is hidden and not armed; switching to
         Multisection arms it (it has no sections)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldSections")
         self.assertFalse(field.isVisible())
         self.assertFalse(armed(field))
@@ -6163,7 +6163,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.spine.ViewObject.Visibility = False
         self.s10.ViewObject.Visibility = False
         self.s30.ViewObject.Visibility = True
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         self.assertTrue(self.s10.ViewObject.Visibility)
         self.assertTrue(self.spine.ViewObject.Visibility)
         button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
@@ -6302,7 +6302,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         again, 120. The Spine's subs follow each pick."""
         pipe = self.rod("Constant")
         self.assertVolume(pipe, 120)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Spine (whole)"])
         self.arm(field, byFocus=False)
@@ -6339,7 +6339,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Spine = (self.spine, ["Edge1", "Edge2"])
         self.doc.recompute()
         self.assertVolume(pipe, 120)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Spine:Edge1", "Spine:Edge2"])
         self.arm(field, byFocus=False)
@@ -6371,7 +6371,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe = self.rod("Constant")
         pipe.Spine = (self.spine, ["Edge1", "Edge2"])
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         buttons = [b.text() for b in Gui.getMainWindow().findChildren(QtWidgets.QToolButton)]
         for text in ("Object", "Add edge", "Remove edge", "Add Edge", "Remove Edge"):
             self.assertNotIn(text, buttons)
@@ -6388,10 +6388,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         replaces it (a 4 x 4 square along the spine: 480); the spine is refused as the profile,
         with the reason."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
-        profile, spine = fields()
+        self.edit(pipe, count=3)
+        profile, spine, more = fields()
         self.assertEqual(profile.objectName(), "fieldProfile")
         self.assertEqual(spine.objectName(), "fieldSpine")
+        self.assertEqual(more.objectName(), "fieldSpineMore")
         self.assertEqual(texts(profile), ["Profile"])
         self.arm(profile, byFocus=False)
         self.pick(self.spine, "Edge1")
@@ -6427,7 +6428,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         # y = +-1.758; without it the prism is exact
         pipe.AuxiliaryCurvilinear = False
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldAuxiliarySpine")
         self.assertIsNotNone(field)
         self.assertFalse(field.isVisible(), "the auxiliary path shows outside Mode Auxiliary")
@@ -6472,7 +6473,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, profile.Name)
         Gui.runCommand("PartDesign_AdditivePipe")
-        self.assertTrue(waitFor(lambda: len(fields()) == 2), "the pipe's fields")
+        self.assertTrue(waitFor(lambda: len(fields()) == 3), "the pipe's fields")
         settle()
         field = self.spineField()
         self.assertTrue(waitFor(lambda: armed(field)), "the new pipe's spine isn't armed")
@@ -6501,7 +6502,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         and as a section, with the reason; a sketch whole is still taken as a section."""
         pipe = self.rod()
         wire, dot = self.wireAndPoint()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         for obj in (wire, dot):
@@ -6536,7 +6537,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         refused (the same element on both sides)."""
         pipe = self.rod()
         block, bottom, corner = self.block()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(block, bottom)
@@ -6560,7 +6561,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         aux = self.auxiliarySketch()
         pipe.AuxiliarySpine = aux
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(aux, "")
@@ -6578,7 +6579,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """Low 1: the auxiliary path, armed, disarms when the mode leaves Auxiliary (its page
         hides)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldAuxiliarySpine")
         box = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "comboBoxMode")
         self.choose(box, 3)
@@ -6594,7 +6595,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         wire, dot = self.wireAndPoint()
         pipe.Spine = (wire, ["Edge1"])
         self.assertVolume(pipe, 40)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Wire:Edge1"])
         clickRow(field, 0)
@@ -6611,7 +6612,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Mode = "Auxiliary"
         pipe.AuxiliarySpine = (aux, ["Edge1"])
         self.doc.recompute()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         field = findField("fieldAuxiliarySpine")
         clear = Gui.getMainWindow().findChild(QtWidgets.QToolButton, "buttonProfileClear")
         self.assertTrue(clear.isVisible())
@@ -6630,7 +6631,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Sections = [(self.s10, [""])]
         self.doc.recompute()
         self.s10.ViewObject.Visibility = True
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         pump(0.2)
@@ -6646,7 +6647,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         aux.ViewObject.Visibility = False
         self.doc.openTransaction("Edit Pipe")  # as the edit command does
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(big, "")
