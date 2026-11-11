@@ -592,6 +592,25 @@ class TestHelixTurnNamesNeverPass(PipeCase):
         self.assertTrue(point.isValid(), point.getStatusString())
         self.assertAlmostEqual(point.Placement.Base.z, 10, 2)
 
+    def testTurnOneFollowsASecondTurn(self):
+        """1 -> 2 turns: the point on the one turn stays on turn 1, which sits where it was (sweeps
+        16; Onshape follows its one face). It broke, the twin count having changed."""
+        helix = self.helix(1)
+        point = self.pointOn(helix, 1)
+        helix.Turns = 2
+        self.doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertAlmostEqual(point.Placement.Base.z, 4, 2)
+
+    def testTurnOneFollowsTheSecondTurnGone(self):
+        """2 -> 1 turn: the point on turn 1 stays on the one turn left (sweeps 16). It broke."""
+        helix = self.helix(2)
+        point = self.pointOn(helix, 1)
+        helix.Turns = 1
+        self.doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertAlmostEqual(point.Placement.Base.z, 4, 2)
+
 
 class TestPipeHelixTurnsCountFromTheStart(PipeCase):
     """Batch 6's R1 (ops#640): a Pipe along a Part::Helix of several turns is swept turn by turn
@@ -1105,6 +1124,47 @@ class TestPipeSelfOverlapUnion(PipeCase):
         sections' reach, 4, against legs 6 apart) and finds nothing, and the sweep is as before
         (V 569.609 on the build without the sections' reach)."""
         self.assertOneSolid(self.multisection(4), 569.609, places=2)
+
+
+class TestPipeSelfOverlapUntouched(PipeCase):
+    """Legs that pass near each other arm the self-overlap check, and the union's maker finds no
+    face splitting another (sweeps 16, b9-stops): OCCT's self-interference check decides then, as
+    before the union, since an overlap within one face (a looping edge) is never checked against
+    itself. A 2 x 0.2 rectangle normal to X at the origin, swept in Mode Standard: legs whose tubes
+    face each other edge-on don't meet, and the sweep is the plain one (its area 0.4 x the path's
+    length: the legs meet in mitres)."""
+
+    def strip(self, points, wide, spline=None):
+        """`wide`: 2 across the path in its plane (0.2 out of it); else 0.2 across, 2 out of it."""
+        geometry = models.polyline(points) if len(points) > 1 else []
+        if spline:
+            curve = Part.BSplineCurve()
+            curve.interpolate([V(x, y, 0) for x, y in spline])
+            geometry.append(curve)
+        path = self.sketch("Path", geometry)
+        start = (points or spline)[0]
+        rectangle = models.rectangle(-1, -0.1, 1, 0.1) if wide else models.rectangle(-0.1, -1, 0.1, 1)
+        placement = App.Placement(V(start[0], start[1], 0), YZ.Rotation)
+        profile = self.sketch("Profile", rectangle, placement=placement)
+        return self.pipe(profile, path, Refine=False)
+
+    def testEdgeOnLegsSweepPlainly(self):
+        """Legs 1 and 3 1.5 apart (the profile's reach about 1.005 arms the check), each 0.1 thick
+        toward the other: 0.4 x (20 + 1.5 + 19)."""
+        self.assertSweeps(self.strip([(0, 0), (20, 0), (20, 1.5), (1, 1.5)], False), 0.4 * 40.5, places=4)
+
+    def testLegsJustClearSweepPlainly(self):
+        """Legs 1 and 3 2.005 apart, each reaching 1 toward the other (a 0.005 gap), and a last leg
+        folding back from leg 3 at 20 degrees: 0.4 x (20 + 2.005 + 19 + 11 / cos 20)."""
+        t = math.tan(math.radians(20))
+        pipe = self.strip([(0, 0), (20, 0), (20, 2.005), (1, 2.005), (12, 2.005 + 11 * t)], True)
+        self.assertSweeps(pipe, 0.4 * (41.005 + 11 / math.cos(math.radians(20))), places=4)
+
+    def testALoopingEdgeStops(self):
+        """One B-spline edge loops back 1.4 from itself under the profile's 2 across: its tube overlaps
+        within its own face (Onshape not asked; FreeCAD-CH stops)."""
+        loop = [(10, 2.005), (6, 2.005), (2, 3), (1, 6), (4, 8.5), (7, 7), (7, 4.6), (4, 4.0)]
+        self.assertStops(self.strip([], True, spline=loop), "valid solid")
 
 
 class TestPipeTwist(PipeCase):

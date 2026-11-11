@@ -1601,6 +1601,9 @@ struct SweepUnion
     occ::handle<BRepTools_History> history;
     std::string error;
     bool unusedFaces = false;  // the maker left faces out of every cell
+    // No face split another: the tubes don't meet, or they overlap within one face, which the maker
+    // never checks against itself (a looping edge); OCCT's self-interference check decides then
+    bool untouched = false;
 };
 
 /// A shape's volume, integrated adaptively (the default integration is badly wrong on faces of many
@@ -1807,7 +1810,8 @@ SweepUnion unionOfOverlaps(
         return out;
     }
     if (!history->HasModified() && !history->HasGenerated()) {
-        return out;  // nothing touched: no overlap
+        out.untouched = true;
+        return out;
     }
 
     // The pieces: each original face's images, or the face itself when left whole
@@ -9045,7 +9049,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     overlap = unionOfOverlaps(solids, depths, cuts);
                 }
             }
-            notUnited = overlap.error;
+            notUnited = overlap.untouched ? std::string("the overlap lies within one of its faces")
+                                          : overlap.error;
             if (!overlap.solid.IsNull()) {
                 Part::TopoShape naive = makeTopoShape();
                 naive.makeElementCompound(
