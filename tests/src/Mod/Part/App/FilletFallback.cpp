@@ -22,6 +22,7 @@
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -2282,17 +2283,58 @@ TEST_F(FilletFallbackTest, refusesANearlyStraightContinuation)
     }
 }
 
-TEST_F(FilletFallbackTest, refusesARoundUnderAnOverhang)
+TEST_F(FilletFallbackTest, trimsADressUpPastTheRisersFootByTheTread)
 {
-    // The step's convex edge with r = 5: the round's tangent line on the riser lies 1 below
-    // the riser's foot, inside the material. The volume is right, but the result would cut
-    // under the tread: its strip runs off the riser (the contact check after the cut is the
-    // second line of defence)
+    // The step's convex edge (riser 4 high) with size 5: the strip on the riser runs 1 past its
+    // foot, into the material under the tread. Onshape trims the dress-up by the tread's plane
+    // run on under it: the tread grows, the riser is used up, no step is left (Q-LEDGE LD1-LD3,
+    // notes/onshape-facts.md; S4 there is this case scaled: r 1 over a wall 0.5 high)
     TopoShape base(step(), 1L);
+    TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
+    // The round, centre (y 15, z 9): the material it keeps in y 10..15, z 10..14 is the quarter
+    // disc above z = 10; it meets the tread at y = 15 - sqrt(24)
+    double kept = 25 * pi / 4 - (std::sqrt(24.0) / 2 + 12.5 * std::asin(0.2));
+    // The chamfer, from (15, 14) to (10, 9): its triangle less the part under the tread
+    double chamfered = 12.5 - 0.5;
+    struct Case
+    {
+        FF::Request request;
+        double volume;
+        double treadTo;
+    };
+    for (const auto& c : {Case {fillet(5), 7200 - (20 - kept) * 30, 15 - std::sqrt(24.0)},
+                          Case {chamfer(5), 7200 - chamfered * 30, 11.0}}) {
+        TopoShape result = forced(base, {convex}, c.request);
+        EXPECT_TRUE(exact(result, c.volume));
+        EXPECT_EQ(result.countSubElements("Face"), 8);
+        // The tread: one plane face at z = 10, from y = 0 to where the dress-up meets it
+        int treads = 0;
+        for (const auto& face : result.getSubTopoShapes(TopAbs_FACE)) {
+            Bnd_Box box;
+            BRepBndLib::Add(face.getShape(), box);
+            double xMin, yMin, zMin, xMax, yMax, zMax;
+            box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+            if (zMax - zMin < 1e-6 && std::abs(zMin - 10) < 1e-6) {
+                ++treads;
+                EXPECT_NEAR(yMin, 0.0, 1e-6);
+                EXPECT_NEAR(yMax, c.treadTo, 1e-6);
+            }
+        }
+        EXPECT_EQ(treads, 1);
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesADressUpPastAConcaveEdgeIntoASlopedWall)
+{
+    // The same strip past the riser's foot, but the tread slopes: its plane isn't square to the
+    // riser, so the trim by its surface run on behind the riser isn't the base's section swept
+    // back. That stays refused
+    TopoShape base(profileAlongX({{0, 0}, {20, 0}, {20, 14}, {10, 14}, {10, 10}, {0, 11}}, 30),
+                   1L);
     std::string reason;
     TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
-    EXPECT_TRUE(forced(base, {convex}, fillet(5), &reason).isNull());
-    EXPECT_NE(reason.find("runs off its face"), std::string::npos) << reason;
+    EXPECT_TRUE(forced(base, {convex}, chamfer(5), &reason).isNull());
+    EXPECT_NE(reason.find("runs off its face into a wall"), std::string::npos) << reason;
 }
 
 TEST_F(FilletFallbackTest, refusesATangentChainOntoUnselectedEdges)
