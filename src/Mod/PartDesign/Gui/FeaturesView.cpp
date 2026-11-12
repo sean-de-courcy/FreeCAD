@@ -2680,7 +2680,9 @@ void FeaturesView::rebuildConfigBar()
     auto layout = configBar->layout();
     while (auto item = layout->takeAt(0)) {
         if (auto widget = item->widget()) {
+            // Out of the bar now (a lookup by name finds the new control), deleted later
             widget->hide();
+            widget->setObjectName(QString());
             widget->deleteLater();
         }
         delete item;

@@ -208,13 +208,14 @@ class ConfigurationsPanel(QtWidgets.QWidget):
             while self.tabs.count():
                 w = self.tabs.widget(0)
                 self.tabs.removeTab(0)
+                # Out of the panel now (a name lookup finds the new tab), deleted later
+                w.setParent(None)
                 w.deleteLater()
             if self.studio is None:
                 self.title.setText(_tr("No part studio"))
                 inputs = []
             else:
-                label = self.studio.Label if not isinstance(self.studio, FreeCAD.Document) else self.studio.Label
-                self.title.setText(label)
+                self.title.setText(self.studio.Label)
                 inputs = inputsOf(self.studio)
             entries = PartDesign.configEntries(self.studio) if inputs else []
             for inp in inputs:
