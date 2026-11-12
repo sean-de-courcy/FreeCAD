@@ -273,6 +273,57 @@ class TestPartsListGui(unittest.TestCase):
         self.assertRows([("Part 1", "A"), ("Part 2", "B"), ("Part 3", "C")])
         self.assertAlmostEqual(self.body("A").Shape.Volume, 500, places=3)
 
+    # ------------------------------------------------- a leftover merged back (10.12 amendment 5)
+    def moveSketch(self, sk, dx):
+        self.doc.openTransaction("move")
+        sk.Placement = App.Placement(sk.Placement.Base + App.Vector(dx, 0, 0), App.Rotation())
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        pump(0.2)
+
+    def testAMergedBackLeftoverIsHiddenAndShownOnLeavingAgain(self):
+        """An Add on A whose profile an edit moves off every part: its tool a new part (a row,
+        shown). Moved back onto A it merges again (Onshape U2: the new part gone): its Body, kept
+        empty for the record's return (Q2c), is no row and hidden, as a part a Boolean consumes.
+        Moved off again: the same Body is a row again, shown."""
+        from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
+
+        class Top:  # the studio is the document's top level here
+            @staticmethod
+            def addObject(obj):
+                return None
+
+        self.doc.openTransaction("boss")
+        sk = studioSketch(self.doc, Top, "ESk", ((2, 2, 8, 8),), z=10)
+        e = makeOwner(self.doc, Top, "Pad", "E", sk, ("A",), Length=3)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(e.isValid(), e.getStatusString())
+        names = lambda: [name for _, name in self.rows()]  # noqa: E731
+        self.assertTrue(waitFor(lambda: names() == ["A", "B", "C"]), self.rows())
+
+        # Off every part (x 62..68): a new part, made by E
+        self.moveSketch(sk, 60)
+        [left] = [b for b in self.doc.Objects
+                  if b.TypeId == "PartDesign::Body" and getattr(b, "StudioMadeBy", None) == e]
+        self.assertTrue(waitFor(lambda: names() == ["A", "B", "C", left.Name]), self.rows())
+        self.assertTrue(left.Visibility)
+
+        # Back onto A: merged, the Body dormant: no row, hidden
+        self.moveSketch(sk, -60)
+        self.assertTrue(e.isValid(), e.getStatusString())
+        self.assertAlmostEqual(self.body("A").Shape.Volume, 1108, places=3)
+        self.assertIsNotNone(self.doc.getObject(left.Name))
+        self.assertNotIn(left, PartDesign.studioLiveParts(self.list))
+        self.assertTrue(waitFor(lambda: names() == ["A", "B", "C"]), self.rows())
+        self.assertFalse(left.Visibility)
+
+        # Off again: the same Body, a row and shown again
+        self.moveSketch(sk, 60)
+        self.assertTrue(waitFor(lambda: names() == ["A", "B", "C", left.Name]), self.rows())
+        self.assertTrue(left.Visibility)
+        self.assertAlmostEqual(left.Shape.Volume, 108, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()
