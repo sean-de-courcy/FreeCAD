@@ -890,18 +890,31 @@ class TestThickenPipe(unittest.TestCase):
         V = App.Vector
         a, b = Part.makeBox(10, 10, 10), Part.makeBox(10, 10, 10, V(10, 0, 0))
         res = S._fused([a, b], [V(5, 5, 5), V(15, 5, 5)])
+        self.assertFalse(S._self_intersects(res, False))
         self.assertAlmostEqual(res.Volume, 2000.0, 6)
         with self.assertRaises(S.SolidOpsError):
             S._fused([a, b], [V(5, 5, 5), V(25, 5, 5)])  # a point the union misses: refused
 
     def testHornAtSeveralAngles(self):
-        for angle in (90.0, 120.0, 135.0, 170.0):
+        for angle in (90.0, 120.0, 135.0):
             for t1, t2 in ((0.75, 0.75), (0.75, 0.0), (0.0, 0.75)):
                 with self.subTest(angle=angle, t1=t1, t2=t2):
                     t = self.thicken(self.pipe(4.0, angle, 5.0), t1=t1, t2=t2)
                     self.assertOneSolid(t, self.expected(4.0 - t2, 4.0 + t1))
                     App.closeDocument(self.doc.Name)
                     self.doc = App.newDocument("ThickenPipe")
+
+    def testUTurnBendsAreRightOrLoud(self):
+        # review r2: from about 165 degrees with legs, a fuse self-intersected yet passed isValid and the
+        # probes (179 degrees outward: 457.6411 for 457.6189); BOPAlgo's check now refuses it
+        for angle, t1, t2 in ((179.0, 0.75, 0.0), (175.0, 0.75, 0.75), (165.0, 0.75, 0.0)):
+            with self.subTest(angle=angle, t1=t1, t2=t2):
+                t = self.thicken(self.pipe(4.0, angle, 5.0), t1=t1, t2=t2)
+                self.assertRightOrLoud(t, self.expected(4.0 - t2, 4.0 + t1))
+                if "Invalid" not in t.State:
+                    self.assertFalse(S._self_intersects(t.Shape, False))
+                App.closeDocument(self.doc.Name)
+                self.doc = App.newDocument("ThickenPipe")
 
     def testLoneHornBendCrossingItsAxisIsNotCutShort(self):
         # review r1 T2: with no leg beside it, the ring's part past the axis was dropped (238.1069 for
