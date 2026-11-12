@@ -992,6 +992,156 @@ void foldSplits(const Context& ctx,
     faces = std::move(folded);
 }
 
+/// Whether the edge lies in the plane: a line with its ends in it, or a circle or an ellipse in
+/// it. Any other curve is not counted, so a fold that needs it stays refused
+bool edgeInPlane(const TopoDS_Edge& edge, const gp_Pln& plane)
+{
+    for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+        if (plane.Distance(BRep_Tool::Pnt(TopoDS::Vertex(it.Current()))) > linearTolerance) {
+            return false;
+        }
+    }
+    BRepAdaptor_Curve curve(edge);
+    const gp_Dir& normal = plane.Axis().Direction();
+    switch (curve.GetType()) {
+        case GeomAbs_Line:
+            return true;
+        case GeomAbs_Circle:
+            return parallel(curve.Circle().Axis().Direction(), normal)
+                && plane.Distance(curve.Circle().Location()) <= linearTolerance;
+        case GeomAbs_Ellipse:
+            return parallel(curve.Ellipse().Axis().Direction(), normal)
+                && plane.Distance(curve.Ellipse().Location()) <= linearTolerance;
+        default:
+            return false;
+    }
+}
+
+/// Whether the face lies wholly on the far side of the plane through the point, the side away from
+/// the direction. A bound, not a sample: the face's box is taken from its surface over its
+/// parameter range (no triangulation), so it holds the face, and each of its corners must lie
+/// beyond the plane within the box's own enlargement
+bool whollyBeyond(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& toward)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(face, box, Standard_False);
+    if (box.IsVoid() || box.IsOpen()) {
+        return false;
+    }
+    double x[2];
+    double y[2];
+    double z[2];
+    box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
+    double slack = linearTolerance
+        + box.GetGap() * (std::abs(toward.X()) + std::abs(toward.Y()) + std::abs(toward.Z()));
+    for (double cx : x) {
+        for (double cy : y) {
+            for (double cz : z) {
+                if (gp_Vec(point, gp_Pnt(cx, cy, cz)).Dot(gp_Vec(toward)) > slack) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/// ops#640, the replica's #150 (a round at the end of a wall that stands flush on a chamfered
+/// rim): besides the selected edge's two faces and one plane P, the vertex has faces that lie
+/// wholly beyond P from the selected edge and meet the vertex only through edges in P. The tool,
+/// bounded by P, never reaches them: they are left out, P counts as the end face, and their edges
+/// at the vertex count as one (the rim). Called only for a vertex that would be refused; the fold
+/// is taken only when it leaves three edges and three faces and exactly one plane qualifies, so
+/// anything less clear-cut stays refused
+void foldFarFaces(const Context& ctx,
+                  const EdgeData& data,
+                  const TopoDS_Vertex& vertex,
+                  std::vector<TopoDS_Shape>& edges,
+                  std::vector<TopoDS_Shape>& faces)
+{
+    gp_Pnt point = BRep_Tool::Pnt(vertex);
+    gp_Dir away = awayFrom(data.edge, vertex);
+    auto own = [&](const TopoDS_Shape& face) {
+        return face.IsSame(data.faces[0]) || face.IsSame(data.faces[1]);
+    };
+    auto touches = [&](const TopoDS_Shape& edge, const std::vector<TopoDS_Shape>& among) {
+        for (const auto& face : ctx.list(ctx.edgeFaces, edge)) {
+            for (const auto& other : among) {
+                if (face.IsSame(other)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    std::vector<TopoDS_Shape> foldedEdges;
+    std::vector<TopoDS_Shape> foldedFaces;
+    int found = 0;
+    for (const auto& candidate : faces) {
+        if (own(candidate)) {
+            continue;
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(candidate), Standard_False);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        gp_Pln plane = surface.Plane();
+        gp_Dir toward = plane.Axis().Direction();
+        double side = toward.Dot(away);
+        if (std::abs(side) < 1e-6 || plane.Distance(point) > linearTolerance) {
+            continue;
+        }
+        if (side < 0) {
+            toward.Reverse();
+        }
+        std::vector<TopoDS_Shape> beyondFaces;
+        std::vector<TopoDS_Shape> keptFaces;
+        bool holds = true;
+        for (const auto& face : faces) {
+            if (own(face) || face.IsSame(candidate)) {
+                keptFaces.push_back(face);
+            }
+            else if (whollyBeyond(TopoDS::Face(face), point, toward)) {
+                beyondFaces.push_back(face);
+            }
+            else {
+                holds = false;
+                break;
+            }
+        }
+        if (!holds || beyondFaces.empty()) {
+            continue;
+        }
+        std::vector<TopoDS_Shape> keptEdges;
+        bool rim = false;
+        for (const auto& edge : edges) {
+            if (!touches(edge, beyondFaces)) {
+                keptEdges.push_back(edge);
+                continue;
+            }
+            if (edge.IsSame(data.edge) || ctx.selected.Contains(edge)
+                || !edgeInPlane(TopoDS::Edge(edge), plane)) {
+                holds = false;
+                break;
+            }
+            if (!rim) {
+                rim = true;
+                keptEdges.push_back(edge);
+            }
+        }
+        if (!holds || keptEdges.size() != 3 || keptFaces.size() != 3) {
+            continue;
+        }
+        ++found;
+        foldedEdges = std::move(keptEdges);
+        foldedFaces = std::move(keptFaces);
+    }
+    if (found == 1) {
+        edges = std::move(foldedEdges);
+        faces = std::move(foldedFaces);
+    }
+}
+
 struct VertexEnd
 {
     VertexClass kind = VertexClass::Refuse;
@@ -1270,6 +1420,9 @@ VertexEnd classify(
     auto edges = ctx.list(ctx.vertexEdges, vertex);
     auto faces = ctx.list(ctx.vertexFaces, vertex);
     foldSplits(ctx, data, vertex, edges, faces);
+    if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)) {
+        foldFarFaces(ctx, data, vertex, edges, faces);
+    }
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
     bool insideCurve = edges.size() == 2 && faces.size() == 2;
