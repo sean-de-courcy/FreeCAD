@@ -239,7 +239,9 @@ bool vanishedPiece(const Body* body,
                    const std::map<const App::DocumentObject*, int>& positions,
                    const Consumed& consumed)
 {
-    if (!isPieceBody(body) || std::string(body->StudioParentId.getValue()).empty()) {
+    // A leftover's part merged back (StudioLeftoverLost, 10.12 amendment point 5) is consumed at
+    // its maker's place too: dormant, a part nowhere, and a pick of it resolves to nothing
+    if (!isPieceBody(body)) {
         return false;
     }
     auto it = consumed.find(body);
@@ -814,6 +816,22 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                             && id == piece->StudioParentId.getValue()) {
                             out.emplace(piece, static_cast<int>(i));
                         }
+                    }
+                }
+            }
+        }
+        // 10.12 amendment point 5 (Onshape U2, Q2c): a part the entry made from a leftover whose
+        // solid merged back onto its part is no part from the entry's place on, by its last
+        // compute's record (StudioLeftoverLost); the record stays for the leftover's return
+        if (const auto lost = stringsOf(entries[i], "StudioLeftoverLost");
+            !lost.empty() && static_cast<int>(i) < barAt && !suppressedOf(entries[i])) {
+            auto at = positions.find(entries[i]);
+            if (at != positions.end() && at->second == static_cast<int>(i)) {
+                for (auto piece : bodies) {
+                    if (isPieceBody(piece) && piece->StudioMadeBy.getValue() == entries[i]
+                        && std::string(piece->StudioParentId.getValue()).empty()
+                        && std::ranges::find(lost, studioPartId(piece)) != lost.end()) {
+                        out.emplace(piece, static_cast<int>(i));
                     }
                 }
             }
@@ -1952,6 +1970,24 @@ bool StudioList::reconcile(std::string* why)
             }
             seen->setValues(taken);
         }
+        // The leftovers merged back (10.12 amendment point 5), as the lost splits above
+        if (const auto lost = entry ? stringsOf(entry, "StudioLeftoverLost")
+                                    : std::vector<std::string>();
+            entry && lost != stringsOf(entry, "StudioLeftoverLostSeen")) {
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioLeftoverLostSeen")
+            );
+            if (!seen) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioLeftoverLostSeen",
+                    "Studio",
+                    "The leftovers merged back the projection last took (ops#654 10.12)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            seen->setValues(lost);
+        }
         if (Body::findBodyOf(entry)) {
             continue;
         }
@@ -2595,6 +2631,13 @@ void resyncPartMirrors(const App::Document& constDoc)
                 if (entry
                     && stringsOf(entry, "StudioSplitLost")
                         != stringsOf(entry, "StudioSplitLostSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                // 10.12 amendment point 5: an Add's leftovers merged back
+                if (entry
+                    && stringsOf(entry, "StudioLeftoverLost")
+                        != stringsOf(entry, "StudioLeftoverLostSeen")) {
                     stale.push_back(list);
                     break;
                 }

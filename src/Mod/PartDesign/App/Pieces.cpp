@@ -716,17 +716,67 @@ void noteSplitHeld(App::DocumentObject* maker, const Body* part, const Part::Top
     prop->setValues(ids);
 }
 
+/// Writes the leftover records of owner whose solid is gone (StudioLeftoverLost, their ids; 10.12
+/// amendment point 5, Onshape U2 and Q2c) when it changed: the tool merged back onto its part, the
+/// new part is gone, its record kept for the tool's leaving again. consumedBy reads it (the Body
+/// is a part nowhere), the projection takes it after the recompute (its Seen twin)
+static void noteLeftoversLost(const App::DocumentObject* owner, const std::vector<std::string>& ids)
+{
+    auto entry = const_cast<App::DocumentObject*>(owner);
+    auto prop =
+        freecad_cast<App::PropertyStringList*>(entry->getPropertyByName("StudioLeftoverLost"));
+    if (!prop && ids.empty()) {
+        return;
+    }
+    if (prop && prop->getValues() == ids) {
+        return;
+    }
+    if (!prop) {
+        prop = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+            "App::PropertyStringList",
+            "StudioLeftoverLost",
+            "Studio",
+            "The parts this entry made from a leftover whose solid is gone, merged back (ops#654 "
+            "10.12)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    prop->setValues(ids);
+}
+
 std::string unclaimedLeftovers(const App::DocumentObject* owner)
 {
     if (!owner || commandEntry == owner) {
         return {};
     }
     const Part::TopoShape left = leftoverSolids(owner);
+    const auto records = pieceRecords(owner, std::string());
     if (left.isNull()) {
+        // Every leftover merged back (Onshape U2: E OK, the new part gone): its record stays,
+        // dormant, so leaving again gives the same id (Q2c)
+        std::vector<std::string> lost;
+        for (auto record : records) {
+            lost.push_back(studioPartId(record));
+        }
+        noteLeftoversLost(owner, lost);
         return {};
     }
     const int solids = static_cast<int>(left.countSubShapes(TopAbs_SOLID));
-    const PieceMatch match = matchPieces(left, pieceRecords(owner, std::string()));
+    const PieceMatch match = matchPieces(left, records);
+    // A record that finds nothing beside solids that are all claimed merged back; beside a solid
+    // that is no part it is undecided (a different leftover, or no witness): none is dormant then,
+    // and the entry stays loud below
+    std::vector<std::string> lost;
+    bool allClaimed = true;
+    for (int j = 0; j < solids; ++j) {
+        allClaimed = allClaimed && std::ranges::find(match.solids, j) != match.solids.end();
+    }
+    for (std::size_t r = 0; allClaimed && r < records.size(); ++r) {
+        if (match.solids[r] < 0) {
+            lost.push_back(studioPartId(records[r]));
+        }
+    }
+    noteLeftoversLost(owner, lost);
     for (int j = 0; j < solids; ++j) {
         if (std::ranges::find(match.solids, j) == match.solids.end()) {
             markPieces(owner, true);  // the resync makes it a part (Onshape U2, H1a, R4)
@@ -821,12 +871,11 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
                                                        : studioBaseAt(entry, body);
         sources.push_back({inDocument(shape, body), base, body});
     }
+    // A leftover record that finds nothing stays (merged back, 10.12 amendment point 5, Onshape
+    // Q2c): dormant until the tool leaves its part again, with the same id
     std::vector<Body*> emptied;
     if (Part::TopoShape left = leftoverSolids(entry); !left.isNull()) {
         sources.push_back({left, Part::TopoShape(), nullptr});
-    }
-    else {
-        emptied = pieceRecords(entry, std::string());
     }
 
     // Every new piece and its witness first: a piece that can't become a part refuses the
@@ -845,7 +894,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         for (std::size_t r = 0; r < records.size(); ++r) {
             // A gone split's records stay, and an absorbed piece's (a partial unsplit), so its
             // pieces come back with their ids when an edit cuts again (10.12 amendment, point 4)
-            if (match.solids[r] < 0 && match.heldBy[r] < 0 && !(source.parent && solids == 1)) {
+            if (match.solids[r] < 0 && match.heldBy[r] < 0 && source.parent && solids != 1) {
                 emptied.push_back(records[r]);
             }
         }

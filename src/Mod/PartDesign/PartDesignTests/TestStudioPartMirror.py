@@ -10,7 +10,8 @@
 # copy into the scope part it touches (the survivor); Remove cuts it from them; Intersect keeps
 # their common part. Onshape oracle 9 (R4): an Add consumes the source part, outside the scope,
 # exactly when the copy merges into a scope part and the source touches the merged result; the
-# copy touching no scope part would be a new part (refused loudly until P6p). Remove, Intersect and
+# copy touching no scope part would be a new part (made inside the step that records it; loud
+# only where no step can hold it, 10.12). Remove, Intersect and
 # New never consume the source.
 #
 # Designed geometry only: boxes and cylinders a few mm across, each a Body with a sketch and a Pad.
@@ -290,24 +291,51 @@ class TestStudioPartMirror(unittest.TestCase):
         self.assertEqual(self.live(), ["X", "Y"])
         self.assertIsNone(PartDesign.studioConsumerOf(y))
 
-    def testAddCopyTouchingOnlyTheSourceIsRefused(self):
-        """R4: Y touches its copy, X (x -30..-20) is apart: Onshape makes the copy a new part
-        (P6p): refused loudly; Y not merged, X unchanged."""
+    def testAddCopyTouchingOnlyTheSourceMakesANewPart(self):
+        """R4 and U2: Y touches its copy, X (x -30..-20) is apart: the copy touches no part of the
+        merge scope, so inside the mirror's step it is a new part made by Mir (1000, centre
+        x -5), Mir OK; Y is not consumed (the copy merged into no scope part), X unchanged.
+        Undo takes the new part away with the mirror."""
         y, x = self.cubes(0, -30)
+        before = sorted(b.Name for b in self.studio.Group if b.TypeId == "PartDesign::Body")
         m = self.mirror("Mir", "Y", (originPlane(y, "YZ_Plane"), [""]), "Add", ("X",))
-        self.assertFalse(m.isValid())
-        self.assertIn("touches no part of the merge scope", m.getStatusString())
+        self.assertValid(m)
+        [new] = self.made(m)
+        self.assertValid(PartDesign.studioStepOf(m, new))
+        self.assertAlmostEqual(new.Shape.Volume, 1000, places=3)
+        self.assertCentre(new.Shape, (-5, 5, 5))
         self.assertVolume("X", 1000)
         self.assertVolume("Y", 1000)
-        self.assertEqual(self.live(), ["X", "Y"])
+        self.assertEqual(self.live(), sorted(["X", "Y", new.Name]))
+        self.assertIsNone(PartDesign.studioConsumerOf(y))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(
+            sorted(b.Name for b in self.studio.Group if b.TypeId == "PartDesign::Body"), before
+        )
 
-    def testAddTouchingNoScopePartIsRefused(self):
-        """S2's refusal: the mirrored copy touches no part of the scope (it would be a new part,
-        P6p): the mirror fails, no part changes."""
+    def testAddTouchingNoScopePartMakesANewPart(self):
+        """S2 and U2: the mirrored copy (x 50..60) touches no part of the scope: inside the
+        mirror's step it is a new part made by Mir (1000, centre (55, 10, 2.5)), Mir OK, Src
+        unchanged."""
         s, d, plane = self.blockAndPlane()
         m = self.mirror("Mir", "Src", (plane, [""]), "Add", ("Src",))
+        self.assertValid(m)
+        [new] = self.made(m)
+        self.assertAlmostEqual(new.Shape.Volume, 1000, places=3)
+        self.assertCentre(new.Shape, (55, 10, 2.5))
+        self.assertVolume("Src", 1000)
+        self.assertIn(new.Name, self.live())
+
+    def testAddTouchingNoScopePartWithNoStepRecordedStaysLoud(self):
+        """The loud path: a script that records no step (no transaction) has no step to hold the
+        new part, so the mirror fails with the command's hint and no part is made."""
+        s, d, plane = self.blockAndPlane()
+        m = partMirror(self.doc, self.studio, "Mir", "Src", (plane, [""]), "Add", ("Src",))
+        self.doc.recompute()
         self.assertFalse(m.isValid())
         self.assertIn("touches no part of the merge scope", m.getStatusString())
+        self.assertEqual(self.made(m), [])
         self.assertVolume("Src", 1000)
 
     def testAddTouchingTwoScopePartsIsRefused(self):

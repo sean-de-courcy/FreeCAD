@@ -1231,21 +1231,73 @@ class TestPieces(unittest.TestCase):
         self.assertLeftover(e, "E:1")
         self.assertIsNone(self.byId("E:2"))
 
-    @unittest.expectedFailure
-    def testU2BackOntoThePartIsOnePart(self):
-        """U2: the circle back onto A: one part, A 1108, E OK, nothing failing (Onshape: E3 OK,
-        the new part gone). Today E:1's Body stays a live part whose piece step finds nothing
-        (loud): a leftover record holding nothing has no "live nowhere" rule yet (a gone
-        split's has). Debt of this slice."""
-        e = self.bossOnA()
-        self.moveSketch(e, 60)
-        self.assertLeftover(e)
-        self.moveSketch(e, -60)
+    def assertMergedBack(self, e, partId="E:1"):
+        """U2 merged back (Onshape: E OK, the new part gone): one part, A 1108, E OK, nothing
+        failing; partId's record kept, dormant: its Body no live part and without a step of E."""
         self.assertValid(e)
         self.assertVolume(self.doc.getObject("A"), 1108)
         self.assertEqual([b.Name for b in PartDesign.studioLiveParts(self.list)], ["A"])
         failed = [o.Name for o in self.doc.Objects if hasattr(o, "Shape") and not o.isValid()]
         self.assertEqual(failed, [])
+        kept = self.byId(partId)
+        self.assertIsNotNone(kept)
+        self.assertIsNone(self.step(e, kept))
+        return kept
+
+    def testU2BackOntoThePartIsOnePart(self):
+        """U2: the circle back onto A: one part, A 1108, E OK, nothing failing (Onshape: E3 OK,
+        the new part gone); E:1's record stays, dormant."""
+        e = self.bossOnA()
+        self.moveSketch(e, 60)
+        self.assertLeftover(e)
+        self.moveSketch(e, -60)
+        self.assertMergedBack(e)
+
+    def testU2ACommandWhileMergedKeepsTheRecord(self):
+        """Q2c: the piece command on E while merged back makes nothing and deletes no record;
+        off again, the same id E:1 (no E:2)."""
+        e = self.bossOnA()
+        self.moveSketch(e, 60)
+        name = self.assertLeftover(e).Name
+        self.moveSketch(e, -60)
+        self.assertEqual(self.command(e), [])
+        self.assertEqual(self.assertMergedBack(e).Name, name)
+        self.moveSketch(e, 60)
+        self.assertEqual(self.assertLeftover(e, "E:1").Name, name)
+        self.assertIsNone(self.byId("E:2"))
+
+    def testU2MergedBackUndoRedo(self):
+        """Undo of the move back: E:1 a part again with its step; redo: merged back again."""
+        e = self.bossOnA()
+        self.moveSketch(e, 60)
+        name = self.assertLeftover(e).Name
+        self.moveSketch(e, -60)
+        self.assertMergedBack(e)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.assertLeftover(e).Name, name)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertMergedBack(e)
+
+    def testU2MergedBackSaveAndReopen(self):
+        """Saved merged back: reopened, one part and nothing fails; off again, the same id."""
+        e = self.bossOnA()
+        self.moveSketch(e, 60)
+        name = self.assertLeftover(e).Name
+        self.moveSketch(e, -60)
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "merged.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = PartDesign.studioList(self.doc.getObject("S"))
+        self.doc.recompute()
+        e = self.doc.getObject("E")
+        self.assertMergedBack(e)
+        self.moveSketch(e, 60)
+        self.assertEqual(self.assertLeftover(e, "E:1").Name, name)
+        self.assertIsNone(self.byId("E:2"))
 
     def testU2APartMirrorCopyLeftByItsScopeMakesANewPart(self):
         """U2 through a Transform owner (R4): Mir, Y's copy (x -12..-2) joins X (x -22..-12);
