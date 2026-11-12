@@ -25,6 +25,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <cctype>
 #include <cstring>
 #include <exception>
@@ -120,6 +122,7 @@
 #include <ShapeConstruct_Curve.hxx>
 #include <ShapeUpgrade_ShellSewing.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <ShapeFix_Face.hxx>
@@ -9455,17 +9458,63 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // helix's loose edges (FeatureHelix widens them to about 2e-4 mm so its fusion succeeds)
     // came back open, or the uniter failed, and every later feature of the body kept split
     // coplanar faces, silently: Onshape merges them (rehearsal 5, rb43). OCCT's
-    // UnifySameDomain merges in place, without sewing; its result counts only when it stays as
-    // closed as the shape and valid. Elsewhere the face uniter alone decides, as before.
+    // UnifySameDomain merges in place, without sewing. It merges only the face uniter's kinds
+    // (planes, cylinders, B-splines: the others are kept), so a helix earlier in the body never
+    // decides whether cones or tori merge (review replc r1, T3); it runs on a fresh copy, as the
+    // uniter may have changed its own (T2); and its result counts only when it is valid, as
+    // closed as the shape, with as many solids, and the same area and volume (T1: a frustum's
+    // fillet once came out 7 % larger). Elsewhere the face uniter alone decides, as before.
+    // It unifies edges too, as the uniter's BRepLib_FuseEdges does (faces only broke a fillet's
+    // reference in V2 as well as V2s: review replc r1, ThreadFrustumFillet).
+    // FREECAD_CH_REFINE_FALLBACK=off turns it off, to compare a build with itself.
+    static const bool fallbackOff = [] {
+        const char* value = std::getenv("FREECAD_CH_REFINE_FALLBACK");
+        return value && std::string(value) == "off";
+    }();
     try {
-        if (input.getShape().IsNull() || input.getShape().IsSame(shape.getShape())) {
-            input.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
+        if (fallbackOff) {
+            throw Standard_Failure("refine fallback off");
         }
-        ShapeUpgrade_UnifySameDomain unify(input.getShape(), true, true, false);
+        TopoShape fresh(shape);
+        fresh.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
+        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, false);
+        TopTools_MapOfShape keep;
+        for (TopExp_Explorer xp(fresh.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(TopoDS::Face(xp.Current())).GetType();
+            if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_BSplineSurface) {
+                keep.Add(xp.Current());
+            }
+        }
+        unify.KeepShapes(keep);
         unify.Build();
         const TopoDS_Shape& unified = unify.Shape();
-        if (!unified.IsNull() && BRepCheck_Analyzer(unified).IsValid()) {
-            makeShapeWithElementMap(unified, MapperHistory(unify.History()), {input}, op);
+        auto props = [](const TopoDS_Shape& s, bool volume) {
+            GProp_GProps gprops;
+            if (volume) {
+                BRepGProp::VolumeProperties(s, gprops);
+            }
+            else {
+                BRepGProp::SurfaceProperties(s, gprops);
+            }
+            return gprops.Mass();
+        };
+        auto same = [](double a, double b) {
+            return std::fabs(a - b) <= 1e-7 * std::fabs(b) + Precision::Confusion();
+        };
+        auto count = [](const TopoDS_Shape& s, TopAbs_ShapeEnum type) {
+            int n = 0;
+            for (TopExp_Explorer xp(s, type); xp.More(); xp.Next()) {
+                ++n;
+            }
+            return n;
+        };
+        if (!unified.IsNull() && count(unified, TopAbs_FACE) < count(shape.getShape(), TopAbs_FACE)
+            && count(unified, TopAbs_SOLID) == count(shape.getShape(), TopAbs_SOLID)
+            && same(props(unified, false), props(shape.getShape(), false))
+            && (!closed
+                || same(std::fabs(props(unified, true)), std::fabs(props(shape.getShape(), true))))
+            && BRepCheck_Analyzer(unified).IsValid()) {
+            makeShapeWithElementMap(unified, MapperHistory(unify.History()), {fresh}, op);
             fixSolidOrientation();
             if (isClosed() == closed) {
                 return *this;
