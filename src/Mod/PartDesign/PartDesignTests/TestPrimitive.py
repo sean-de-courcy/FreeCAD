@@ -175,8 +175,10 @@ class TestBaseAfterARefine(unittest.TestCase):
     Designed models: a 20 mm AdditiveBox, then a 5 mm SubtractiveBox at its corner or the default
     SubtractiveEllipsoid with Radius3 = 0 (one B-spline face), then a 2 mm SubtractiveBox. Refine on
     the middle feature only. Cut from the box, the degenerate ellipsoid's result is valid; refined,
-    its B-spline face is rebuilt invalid (UnorientableShape). The next feature then repairs it: its
-    result is valid and has the volume of the Part cut of the repaired base."""
+    its B-spline face is rebuilt invalid (UnorientableShape). Since ops#640 (replica) a refine that
+    merges nothing must not make a valid result invalid: the cut keeps its unrefined result, which
+    the next feature trusts. An invalid rebuilt face on a result that was already invalid still
+    makes the next feature check it."""
 
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestBaseAfterARefine")
@@ -225,16 +227,25 @@ class TestBaseAfterARefine(unittest.TestCase):
         self.assertTrue(cut.Shape.isValid())
         self.assertFalse(nextFeature.checksBase())
 
-    def testInvalidRefinedEllipsoidIsRepaired(self):
+    def testInvalidRefinedEllipsoidKeepsTheUnrefinedResult(self):
+        # ops#640 (replica): the refine rebuilds the degenerate ellipsoid's B-spline face invalid while
+        # the unrefined result is valid. Nothing merged, so the unrefined result has the same faces: the
+        # cut keeps it, its own Shape is valid, and the next feature trusts it
+        cut, nextFeature = self.build("Ellipsoid", refine=False)
+        # the Shape itself, not a copy: BRepBuilderAPI_Copy of the degenerate face reads invalid
+        unrefined = cut.Shape
+        self.assertTrue(unrefined.isValid())
+        self.tearDown()
+        self.setUp()
         cut, nextFeature = self.build("Ellipsoid", refine=True)
-        if cut.Shape.isValid():
-            self.skipTest("Refine keeps the degenerate ellipsoid's result valid on this platform")
-        self.assertTrue(nextFeature.checksBase())
-        repaired = cut.Shape.copy()
-        repaired.fix(1e-7, 1e-7, 1e-7)
+        self.assertTrue(cut.isValid(), cut.getStatusString())
+        self.assertTrue(cut.Shape.isValid())
+        self.assertEqual(len(cut.Shape.Faces), len(unrefined.Faces))
+        self.assertAlmostEqual(cut.Shape.Volume, unrefined.Volume, places=6)
+        self.assertFalse(nextFeature.checksBase())
         tool = nextFeature.AddSubShape.copy()
         tool.Placement = nextFeature.Placement.multiply(tool.Placement)
-        expected = repaired.cut(tool)
+        expected = unrefined.cut(tool)
         self.assertTrue(nextFeature.isValid(), nextFeature.getStatusString())
         self.assertTrue(nextFeature.Shape.isValid())
         self.assertAlmostEqual(nextFeature.Shape.Volume, expected.Volume, places=4)
