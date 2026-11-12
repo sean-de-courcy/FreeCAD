@@ -359,9 +359,13 @@ protected:
     /// OK's tooltip, as missingRequired() says; called when the feature changes.
     void updateOkButton();
     /// FreeCAD-CH (ops#640 rank 36, hands-on B-4): the first parameter box's title is the
-    /// feature's name, red while the feature is in error; renamed in the lists only. Called
-    /// after the feature changes or recomputes.
+    /// feature's name, red while the feature is in error, with Onshape's "did not regenerate
+    /// properly" tooltip (polish P13). Called after the feature changes or recomputes.
     void updateTitle();
+    /// FreeCAD-CH (ops#640 polish P13, PL3a): under the Onshape keymap a pencil shown while the
+    /// title row is hovered turns the title into a text box that renames the feature. Called
+    /// from flattenForOnshape().
+    void addTitleRename();
     /// FreeCAD-CH (ops#640 polish P5): under the Onshape keymap the dialog is one flat form under
     /// its title row: the other boxes lose their headers, the title row doesn't fold, and the
     /// Preview row is Onshape's. Called from open(), after the title box is chosen.

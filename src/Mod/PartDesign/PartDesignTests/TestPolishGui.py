@@ -558,6 +558,97 @@ class TestFlatFeatureDialogGui(PolishCase):
         self.assertEqual(len(self.visible(QtWidgets.QCheckBox, "showTransparentPreviewCheckBox")), 1)
 
 
+class TestTitleRenameGui(PolishCase):
+    """P13 (notes/onshape-facts.md PL3a): Onshape renames a feature in its dialog. A pencil, hidden
+    until the title row is hovered, turns the title into a text box: Enter renames, Esc keeps the
+    name and the dialog. A feature in error: the title red (#AA252D) with the tooltip "<name> did
+    not regenerate properly: <why>". FreeCAD's keymap has no pencil."""
+
+    def openEdit(self, feature):
+        Gui.ActiveDocument.setEdit(feature.Name)
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), f"Expected {feature.Name}'s dialog open")
+
+    def titleRow(self):
+        for frame in Gui.getMainWindow().findChildren(QtWidgets.QFrame):
+            if frame.isVisible() and frame.metaObject().className() == "QSint::TaskHeader":
+                return frame
+        self.fail("Expected the dialog's title row")
+
+    def pencil(self):
+        return self.titleRow().findChild(QtWidgets.QToolButton, "FreeCAD-CH rename title")
+
+    def titles(self):
+        return [b.text() for b in self.titleRow().findChildren(QtWidgets.QToolButton) if b.isVisible()]
+
+    def startRename(self):
+        self.openEdit(self.pad)
+        pencil = self.pencil()
+        self.assertIsNotNone(pencil, "Expected the rename pencil in the title row")
+        self.assertFalse(pencil.isVisible(), "hidden until the title row is hovered")
+        QtWidgets.QApplication.sendEvent(self.titleRow(), QtCore.QEvent(QtCore.QEvent.Enter))
+        pump()
+        self.assertTrue(pencil.isVisible(), "shown while the title row is hovered")
+        pencil.click()
+        pump()
+        box = self.titleRow().findChild(QtWidgets.QLineEdit, "FreeCAD-CH rename box")
+        self.assertTrue(box.isVisible(), "the pencil opens the rename box")
+        self.assertEqual(box.text(), "Pad")
+        self.assertNotIn("Pad", self.titles(), "the box takes the title's place")
+        return box
+
+    def testEnterRenamesAndOkKeepsIt(self):
+        from PySide6 import QtTest
+        from PartDesignTests.TestExpressionFieldsGui import taskButton, waitFor
+
+        box = self.startRename()
+        box.selectAll()
+        QtTest.QTest.keyClicks(box, "Lid")
+        QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
+        pump(0.2)
+        self.assertEqual(self.pad.Label, "Lid")
+        self.assertFalse(box.isVisible())
+        self.assertTrue(waitFor(lambda: "Lid" in self.titles()), "the title shows the new name")
+        self.assertTrue(Gui.Control.activeDialog(), "Enter in the box doesn't accept the dialog")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        self.assertEqual(self.pad.Label, "Lid", "OK keeps the new name")
+
+    def testEscKeepsTheNameAndTheDialog(self):
+        from PySide6 import QtTest
+
+        box = self.startRename()
+        box.setText("Lid")
+        QtTest.QTest.keyClick(box, QtCore.Qt.Key_Escape)
+        pump(0.2)
+        self.assertEqual(self.pad.Label, "Pad")
+        self.assertFalse(box.isVisible())
+        self.assertIn("Pad", self.titles())
+        self.assertTrue(Gui.Control.activeDialog(), "Esc in the box doesn't close the dialog")
+
+    def testFeatureInErrorHasOnshapesRedAndTooltip(self):
+        self.pad.Length = 0
+        self.doc.recompute()
+        self.assertFalse(self.pad.isValid(), "a zero-length pad is in error")
+        self.openEdit(self.pad)
+        [title] = [
+            b for b in self.titleRow().findChildren(QtWidgets.QToolButton)
+            if b.isVisible() and b.text() == "Pad"
+        ]
+        self.assertIn("#AA252D", title.styleSheet())
+        self.assertTrue(
+            title.toolTip().startswith("Pad did not regenerate properly: "), title.toolTip()
+        )
+
+    def testFreeCADKeymapHasNoPencil(self):
+        """The control: FreeCAD's keymap renames in the lists only."""
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        self.openEdit(self.pad)
+        self.assertIsNone(
+            Gui.getMainWindow().findChild(QtWidgets.QToolButton, "FreeCAD-CH rename title")
+        )
+
+
 class TestDoubleClickCreatorGui(PolishCase):
     """P8: under the Onshape keymap a double click on a face selects nothing and tints the feature
     that made it, and that feature's sketch, in the Features list (and the feature's faces in the
