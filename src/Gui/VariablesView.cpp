@@ -1669,7 +1669,7 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
                "Assemblies\" is off")
         );
         insertStudioAction->setMenu(insertMenu);
-        connect(insertStudioAction, &QAction::triggered, this, [this, insertMenu] {
+        connect(insertStudioAction, &QAction::triggered, this, [insertMenu] {
             insertMenu->popup(QCursor::pos());
         });
     }

@@ -95,6 +95,10 @@ Property* VarSet::addDynamicProperty(
         // A new variable goes last, also under a name a removed one left in the order (review
         // polish13-r1 T3); a type change puts it back in its place itself
         std::vector<std::string> order = VariableOrder.getValues();
+        if (order.empty()) {
+            // A studio from before the order (review r2 R2-2): its rows as listed now, then the new
+            order = getDynamicPropertyNames();
+        }
         std::erase(order, std::string(prop->getName()));
         order.emplace_back(prop->getName());
         if (order != VariableOrder.getValues()) {

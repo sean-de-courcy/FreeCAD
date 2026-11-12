@@ -826,7 +826,10 @@ DocumentObject* DocumentTabs::duplicate(Document* doc, const Tab& tab)
     }
     copy->Label.setValue(copyLabel);
     placeAfter(doc, copy->getNameInDocument(), original);
-    // The copy inserts what the original inserted by hand (review polish13-r1 T2)
+    // The copy inserts what the original inserted by hand (review polish13-r1 T2), and nothing a
+    // deleted tab of its internal name did (r2 R2-1: copyObject imports, which the tab bar's
+    // new-object hook doesn't see)
+    forgetName(doc, copy->getNameInDocument());
     for (const auto& studio : insertedStudios(doc, original)) {
         setInserted(doc, copy->getNameInDocument(), studio, true);
     }

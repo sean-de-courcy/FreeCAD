@@ -746,3 +746,15 @@ class TestVariableStudioInsert(unittest.TestCase):
         self.doc.redo()
         self.doc.recompute()
         self.assertIn("Invalid", vs.State)
+
+    def testDuplicateReusingADeletedTabNameStartsClean(self):
+        """Part Studio 2 duplicated into the internal name of a deleted Part Studio that had
+        inserted the off studio: the copy inserts nothing (review r2 R2-1)."""
+        Tabs.setInsertsEverywhere(self.vs2, False)
+        other = self.doc.addObject("App::Part", "Part001")
+        self.doc.recompute()
+        Tabs.setInserted(self.doc, "Part001", self.vs2.Name)
+        self.doc.removeObject("Part001")
+        copy = Tabs.duplicate(self.doc, "Part")
+        self.assertEqual(copy, "Part001")
+        self.assertEqual(Tabs.insertedStudios(self.doc, copy), [])
