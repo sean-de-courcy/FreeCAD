@@ -59,6 +59,8 @@ PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
     const Body* body
 );
 PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
+PartDesignExport Feature* studioPatternSourceStep(const App::DocumentObject* original,
+                                                  const Body* body);
 }  // namespace PartDesign
 
 namespace
@@ -806,6 +808,19 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                         out.emplace(parent, static_cast<int>(i));
                     }
                     if (stale) {
+                        // T1b (10.16 settled 7): the parent a piece whose own split is gone (a
+                        // pattern's pieces cut from a seed's piece, the seed's cut no longer
+                        // through): the parent is no part, so neither are the pieces cut from it.
+                        // They vanish at this maker's place, a pick of them resolving up to the
+                        // unsplit part; their records stay for the split's return (point 4)
+                        if (vanishedPiece(parent, positions, out)) {
+                            for (auto piece : bodies) {
+                                if (isPieceBody(piece) && piece->StudioMadeBy.getValue() == entries[i]
+                                    && parentId == piece->StudioParentId.getValue()) {
+                                    out.emplace(piece, static_cast<int>(i));
+                                }
+                            }
+                        }
                         continue;
                     }
                     // The split is gone (10.12 amendment): its pieces vanish at their maker's
@@ -1004,7 +1019,8 @@ std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, con
                 continue;
             }
             // T1a: a feature pattern step's Originals are written by reconcile from its owner's
-            if (member && propName == "Originals" && isFeaturePatternOwner(ownerOfStep(in))) {
+            // (T1b: a step in a piece reads its original's step in the part it was cut from)
+            if (propName == "Originals" && isFeaturePatternOwner(ownerOfStep(in))) {
                 continue;
             }
             std::vector<App::DocumentObject*> linked;
@@ -2568,6 +2584,29 @@ bool PartDesign::studioIsNewFeature(const App::DocumentObject* obj)
     return isNewFeature(obj);
 }
 
+/// The step of original a feature pattern's step in body copies (T1b, 10.16 settled 7): its step
+/// there; in a piece original split off (its piece step holds a solid, no tool), original's step
+/// in the part the piece was cut from, whose tool the pattern copies onto the piece. Null when it
+/// has none
+Feature* PartDesign::studioPatternSourceStep(const App::DocumentObject* original, const Body* body)
+{
+    Feature* step = StudioList::stepOf(original, body);
+    if (!step || !isPieceBody(body) || body->StudioMadeBy.getValue() != original) {
+        return step;
+    }
+    const std::string parentId = body->StudioParentId.getValue();
+    if (parentId.empty()) {
+        return step;  // a leftover's: no part it was cut from (its refusal stays)
+    }
+    for (auto obj : body->getDocument()->getObjectsOfType(Body::getClassTypeId())) {
+        auto parent = static_cast<Body*>(obj);
+        if (parent != body && studioPartId(parent) == parentId) {
+            return StudioList::stepOf(original, parent);
+        }
+    }
+    return nullptr;
+}
+
 /// The Originals of owner's step in body (settled 1): each original of the owner mapped to body:
 /// a member of body itself, an owner's (a pattern owner's too) step in body; a member of another
 /// Body, or an owner with no step in body, contributes nothing there (T1.4)
@@ -2590,7 +2629,7 @@ std::vector<App::DocumentObject*> PartDesign::studioPatternStepOriginals(
             mapped = body->hasObject(original) ? original : nullptr;
         }
         else {
-            mapped = StudioList::stepOf(original, body);
+            mapped = studioPatternSourceStep(original, body);
         }
         if (mapped && std::ranges::find(out, mapped) == out.end()) {
             out.push_back(mapped);

@@ -94,6 +94,8 @@ PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
     const Body* body
 );
 PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
+PartDesignExport Feature* studioPatternSourceStep(const App::DocumentObject* original,
+                                                  const Body* body);
 PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
 // T1b (10.16 settled 2, 3, 8): StudioList.cpp, Pieces.cpp; and below, for Pieces.cpp
 PartDesignExport bool studioIsNewFeature(const App::DocumentObject* obj);
@@ -416,14 +418,17 @@ std::string studioStepOf(
         return name + " acts on " + quoted(parts.front()) + ", not on " + quoted(body)
             + ", the pattern's part" + again;
     }
-    step = freecad_cast<FeatureAddSub*>(StudioList::stepOf(owner, body));
+    // T1b (settled 7): in a piece owner split off, its step in the part the piece was cut from
+    step = freecad_cast<FeatureAddSub*>(
+        overParts ? studioPatternSourceStep(owner, body) : StudioList::stepOf(owner, body)
+    );
     if (!step) {
         return name + " has no step in " + quoted(body);
     }
     const auto& group = body->Group.getValues();
     const auto stepAt = std::ranges::find(group, step);
     const auto patternAt = std::ranges::find(group, &pattern);
-    if (patternAt != group.end() && stepAt > patternAt) {
+    if (stepAt != group.end() && patternAt != group.end() && stepAt > patternAt) {
         return name + " comes after the pattern";
     }
     if (step->Suppressed.getValue()) {
@@ -535,7 +540,16 @@ struct ToolCollector
         if (fuseShape.isNull() && cutShape.isNull()) {
             return QT_TRANSLATE_NOOP("Exception", "Shape of additive/subtractive feature is empty");
         }
-        gp_Trsf trsf = frame.Multiplied(feature->getLocation().Transformation());
+        gp_Trsf trsf = frame;
+        // T1b (settled 7): a step in the part a piece was cut from (another Body): its Body's
+        // frame carried into the pattern's Body's
+        if (const Body* home = feature->getFeatureBody(); home && body && home != body) {
+            trsf.Multiply(trsfOf(
+                App::GeoFeature::getGlobalPlacement(body).inverse()
+                * App::GeoFeature::getGlobalPlacement(home)
+            ));
+        }
+        trsf.Multiply(feature->getLocation().Transformation());
         if (!fuseShape.isNull()) {
             fuseShape = fuseShape.makeElementTransform(trsf);
         }
@@ -1926,6 +1940,19 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
     if (originals.empty()) {
         return nothingToTransform(pattern);
     }
+    // Onshape (oracle 9j, answer d): every original suppressed, or a studio feature acting on no
+    // part, is an error in Onshape's words; its steps pass their parts through. One of several
+    // suppressed: it contributes nothing (unverified)
+    if (std::ranges::all_of(originals, [](const App::DocumentObject* original) {
+            auto feature = freecad_cast<const Feature*>(original);
+            if (feature && feature->Suppressed.getValue()) {
+                return true;
+            }
+            return isStudioOwner(original) && StudioList::holding(original)
+                && StudioList::stepsOf(original).empty();
+        })) {
+        return fail("Selected features do not create any geometry that may be patterned.");
+    }
     const StudioList* list = StudioList::holding(&pattern);
     const auto& entries = list->Entries.getValues();
     auto placeOf = [&entries](const App::DocumentObject* obj) {
@@ -1934,8 +1961,6 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
     };
     const int here = placeOf(&pattern);
     const bool reapply = pattern.Reapply.getValue();
-    const std::string notYet =
-        ", with Reapply features on, is not yet done (T1b): pattern it per part, or turn Reapply off";
     // T1b: a New original's instances and an Add over parts are copies of its whole tool, never
     // re-run against a part (a tool that depends on one, an Up to extent: loud, settled 9)
     const auto copiedWhole = [](const App::DocumentObject* original) -> std::string {
@@ -1988,15 +2013,16 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
             }
             continue;
         }
-        // Settled 7: a seed that split its part (P6p records of it)
-        for (const auto& id : studioScopeIds(original)) {
-            if (pieceRecords(original, id).empty()) {
-                continue;
+        // Settled 7: a seed that split its part (P6p records of it): Reapply off, refused in
+        // Onshape's words (O7); on, each piece's step copies the seed's tool from the part it
+        // was cut from (studioPatternSourceStep), pieces it cuts further made by the command
+        // with the pattern as their maker
+        if (!reapply) {
+            for (const auto& id : studioScopeIds(original)) {
+                if (!pieceRecords(original, id).empty()) {
+                    return fail(switchToPerInstance(name + " splits its part"));
+                }
             }
-            if (!reapply) {
-                return fail(switchToPerInstance(name + " splits its part"));
-            }
-            return fail("A pattern of " + name + ", which splits its part" + notYet);
         }
         // Settled 2: an Add seed over two or more parts
         if (parts.size() > 1 && std::string(studioOperationOf(original)) == "Union") {
@@ -2809,10 +2835,15 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     // FreeCAD-CH ops#654 slice 8, P6p: a part of a listed studio goes on in two solids only as
     // pieces a command made parts (Onshape S1): the part's chain then ends here, holding them all
-    if (StudioList::holding(this)) {
-        noteSplitHeld(this, getFeatureBody(), supportShape);
+    // T1b (settled 7): a feature pattern step's split is its owner's, the pieces' maker
+    App::DocumentObject* maker = StudioList::holding(this) ? this : nullptr;
+    if (const Transformed* owner = studioPatternOwnerOf(*this)) {
+        maker = const_cast<Transformed*>(owner);
+    }
+    if (maker) {
+        noteSplitHeld(maker, getFeatureBody(), supportShape);
         if (const int solids = countSolids(supportShape.getShape()); solids > 1) {
-            if (std::string why = unclaimedSplit(this, getFeatureBody(), supportShape);
+            if (std::string why = unclaimedSplit(maker, getFeatureBody(), supportShape);
                 !why.empty()) {
                 return new App::DocumentObjectExecReturn(why, this);
             }

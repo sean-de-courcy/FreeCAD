@@ -17,7 +17,10 @@
 # instances join (settled 2, Onshape Q2: one part with the first part's id; the pattern's own merge
 # record, read by the list: settled 8); an instance joining no part is a new part (Q7). A New seed's
 # instances are new parts, never in the seed's part (settled 3, Q1), made by the command (P6p, ids
-# "<pattern>:k"). Not yet: a seed that split its part, with Reapply on (refused loudly).
+# "<pattern>:k"). A seed that split its part, with Reapply on: every piece is cut at every
+# instance (settled 7, O7 through: 8 parts); a piece an instance cuts further is split by the
+# pattern, its pieces parts "<pattern>:k" made by the command (P6p). A pattern whose every original
+# is suppressed fails in Onshape's words (oracle 9j).
 #
 # Designed geometry only: plates and bosses whose volumes come from their dimensions.
 
@@ -229,11 +232,185 @@ class TestStudioFeaturePattern(unittest.TestCase):
         lp = linearOwner(self.doc, self.S, "LP", [g], 40, 3)
         self.assertRefused(lp, "Reapply features", "PATTERN_SWITCH_TO_PER_INSTANCE")
 
-    def testSplittingSeedWithReapplyOnIsNotYet(self):
-        """Acceptance 5 with Reapply on (8 parts in Onshape) is T1b's: refused loudly, not yet."""
+    def liveParts(self):
+        """Each live part's id -> its volume."""
+        return {
+            b.StudioPartId: b.Shape.Volume for b in PartDesign.studioLiveParts(self.list)
+        }
+
+    def assertParts(self, expected):
+        """The live parts: per plate, the volumes expected (sorted), ids of the seed's pieces
+        ("Groove:") or the pattern's ("LP:")."""
+        parts = self.liveParts()
+        self.assertEqual(len(parts), len(expected), parts)
+        self.assertEqual(
+            sorted(round(v, 3) for v in parts.values()), sorted(float(v) for v in expected), parts
+        )
+        return parts
+
+    def splitPattern(self, length=40, count=3):
+        """Acceptance 5's state: the through groove's pattern, Reapply on, its pieces made."""
         g = self.splitPlates()
+        lp = linearOwner(self.doc, self.S, "LP", [g], length, count, reapply=True)
+        return g, lp
+
+    # Each plate's pieces with the through groove at x 2, 22, 42: x 0..2, 8..22, 28..42, 48..60
+    EIGHT = (400, 2800, 2800, 2400) * 2
+
+    def testSplittingSeedWithReapplyOnCutsEveryPiece(self):
+        """Acceptance 5 (O7 through, settled 7): the pattern of a seed that split both plates,
+        Reapply on: loud until the command (the instances split the x 8..60 pieces further), then
+        8 parts. The x 0..2 pieces, which no instance reaches, keep the seed's ids; the pieces cut
+        further are gone, their pieces new parts '<pattern>:k' (S1: both sides new ids)."""
+        g, lp = self.splitPattern()
+        self.assertValid(lp)
+        cut = [b for b in PartDesign.studioLiveParts(self.list) if b.Shape.Volume > 1000]
+        self.assertEqual(len(cut), 2)
+        for body in cut:
+            s = PartDesign.studioStepOf(lp, body)
+            self.assertIsNotNone(s, body.StudioPartId)
+            self.assertEqual(s.TypeId, "PartDesign::LinearPattern")
+            self.assertEqual(list(s.Originals), [self.step(g, "A" if body.StudioParentId == "A" else "B")])
+            self.assertRefused(s, "press OK")
+        made = self.makePieces(lp)
+        self.assertEqual(len(made), 6)
+        self.assertValid(lp)
+        parts = self.assertParts(self.EIGHT)
+        seeds = sorted(i for i in parts if i.startswith("Groove:"))
+        self.assertEqual(len(seeds), 2)
+        for i in seeds:
+            self.assertAlmostEqual(parts[i], 400, places=3)
+        self.assertEqual(len([i for i in parts if i.startswith("LP:")]), 6)
+        for body in made:
+            self.assertEqual(body.StudioMadeBy, lp)
+            self.assertIn(body.StudioParentId, [b.StudioPartId for b in cut])
+        for body in cut:
+            self.assertNotIn(body.StudioPartId, parts)
+
+    def testSplitSeedPatternWithAnInstanceOffThePartMakesNoExtraPiece(self):
+        """An instance that reaches no part (the 4th, x 62..68) cuts nothing and makes no piece:
+        the same 8 parts, 6 made."""
+        g, lp = self.splitPattern(length=60, count=4)
+        self.assertEqual(len(self.makePieces(lp)), 6)
+        self.assertValid(lp)
+        self.assertParts(self.EIGHT)
+
+    def testSplitSeedPatternCountChangeKeepsIds(self):
+        """Count 4 -> 3 -> 4 at a spacing of 15 (unverified on Onshape; 10.12's rules): with 3
+        the x 38..60 solid holds two records, the one whose walls it keeps holds it and the
+        other is absorbed (Q14e, quiet); with 4 again every id is back on its side."""
+        g, lp = self.splitPattern(length=45, count=4)
+        self.makePieces(lp)
+        self.assertValid(lp)
+        four = self.assertParts((400, 1800, 1800, 1800, 1400) * 2)
+        lp.Occurrences = 3
+        lp.Length = 30
+        self.doc.recompute()
+        self.assertValid(lp)
+        three = self.assertParts((400, 1800, 1800, 4400) * 2)
+        self.assertLess(set(three), set(four))
+        for i, v in three.items():
+            if abs(v - 4400) > 1e-3:
+                self.assertAlmostEqual(v, four[i], places=3)
+        lp.Occurrences = 4
+        lp.Length = 45
+        self.doc.recompute()
+        self.assertValid(lp)
+        again = self.liveParts()
+        self.assertEqual(set(again), set(four))
+        for i, v in again.items():
+            self.assertAlmostEqual(v, four[i], places=3, msg=i)
+
+    def testSplitSeedStoppedByAnEditWithThePatternOverIt(self):
+        """10.12's amendment ("a split that stops") under the pattern: the groove made 5 deep,
+        the seed's split is gone and so are the pieces the pattern cut from its pieces: A and B
+        are parts again, each grooved 3 times (12000 - 3 x 600), nothing failed. Through again,
+        the 8 parts come back with their ids."""
+        g, lp = self.splitPattern()
+        self.makePieces(lp)
+        eight = self.liveParts()
+        g.Length = 5
+        self.doc.recompute()
+        self.assertValid(g, lp)
+        parts = self.assertParts((PLATE - 3 * 600,) * 2)
+        self.assertEqual(set(parts), {"A", "B"})
+        for p in ("A", "B"):
+            self.assertValid(self.step(lp, p))
+        g.Length = 10
+        self.doc.recompute()
+        self.assertValid(g, lp)
+        back = self.liveParts()
+        self.assertEqual(set(back), set(eight))
+        for i, v in back.items():
+            self.assertAlmostEqual(v, eight[i], places=3, msg=i)
+
+    def testSplitSeedPatternUndoRedoAndSaveReopen(self):
+        """Acceptance 11 for a split seed: the pattern and its pieces made in one transaction go
+        with undo (4 parts) and come back with redo (8); saved and opened again, the same parts
+        with equal element names."""
+        g = self.splitPlates()
+        self.doc.openTransaction("pattern")
         lp = linearOwner(self.doc, self.S, "LP", [g], 40, 3, reapply=True)
-        self.assertRefused(lp, "not yet")
+        PartDesign.studioMakePieces(lp)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertParts(self.EIGHT)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("LP"))
+        self.assertParts((400, 10400) * 2)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertValid(self.doc.getObject("LP"))
+        self.assertParts(self.EIGHT)
+
+        def names():
+            return {
+                b.StudioPartId: elementNames(b.Shape)
+                for b in PartDesign.studioLiveParts(self.list)
+            }
+
+        before = names()
+        self.reopen()
+        self.assertValid(self.doc.getObject("LP"))
+        self.assertParts(self.EIGHT)
+        self.assertEqual(names(), before)
+
+    def testLaterFeatureScopedToTheSplitPartReachesEveryPiece(self):
+        """A Remove scoped to A after the pattern (a groove along x, y 9..11, 2 deep) resolves to
+        A's four pieces and cuts each (width x 2 x 2); B's untouched."""
+        g, lp = self.splitPattern()
+        self.makePieces(lp)
+        sk = studioSketch(self.doc, self.S, "LongSk", rects=((-5, 9, 65, 11),), z=10)
+        long = makeOwner(self.doc, self.S, "Pocket", "Long", sk, ("A",), Length=2, Refine=True)
+        self.doc.recompute()
+        self.assertValid(long)
+        steps = [
+            b for b in PartDesign.studioLiveParts(self.list)
+            if PartDesign.studioStepOf(long, b) is not None
+        ]
+        self.assertEqual(len(steps), 4)
+        self.assertParts(
+            (400 - 2 * 4, 2800 - 14 * 4, 2800 - 14 * 4, 2400 - 12 * 4) + (400, 2800, 2800, 2400)
+        )
+
+    # ------------------------------------------------------------------------------- oracle 9j (d)
+    def testEveryOriginalSuppressedIsAnError(self):
+        """Onshape (oracle 9j, answer d): a feature pattern whose only original is suppressed
+        fails in Onshape's words; its copies are gone with the seed."""
+        self.twoPlates()
+        g = self.groove()
+        lp = linearOwner(self.doc, self.S, "LP", [g], 40, 3)
+        self.assertValid(lp)
+        g.Suppressed = True
+        self.doc.recompute()
+        self.assertRefused(lp, "Selected features do not create any geometry that may be patterned.")
+        self.assertVolume("A", PLATE)
+        self.assertVolume("B", PLATE)
+        g.Suppressed = False
+        self.doc.recompute()
+        self.assertValid(lp)
+        self.assertVolume("A", PLATE - 3 * 600)
 
     def testDeletedOriginalTurnsTheOwnerRed(self):
         """Acceptance 9 (H1 R2): the only original deleted: the owner is red in Onshape's words,
