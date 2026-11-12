@@ -503,6 +503,14 @@ PieceMatch matchPieces(const Part::TopoShape& source, const std::vector<Body*>& 
             out.why[r] = "None of the faces that told " + quoted(records[r])
                 + " apart is on a piece any more: it holds nothing";
         }
+        else if (ties > 0 && !split) {
+            // A leftover record that can't be told (ops#654 T2, the gate's seed 2 op 47: a copy
+            // split in two, an end face of its witness on each half) holds nothing, as one merged
+            // back: dormant. The other records still claim theirs; were they all failed too, the
+            // solids would be no part again at every pass, each pass making new parts for them
+            out.why[r] = "The faces that told " + quoted(records[r])
+                + " apart lie on two pieces: which one it is can't be told";
+        }
         else if (ties > 0) {
             ambiguous = true;
         }
