@@ -3459,7 +3459,7 @@ class MultiDocumentUndo(unittest.TestCase):
         FreeCAD.closeDocument("Doc2")
 
 
-import fnmatch, shutil, subprocess, sys
+import fnmatch, shutil, subprocess, sys, time
 
 
 def _freecadCmd():
@@ -3559,12 +3559,18 @@ class DocumentSafeSaveCases(unittest.TestCase):
         with open(script, "w", encoding="utf-8") as fh:
             fh.write(self.CHILD.format(path=self.path))
         env = dict(os.environ)
-        env["FREECAD_CH_SAVE_FAULT"] = step + (":throw" if mode == "throw" else "")
+        env["FREECAD_CH_SAVE_FAULT"] = step + ("" if mode == "crash" else ":" + mode)
         run = subprocess.run([_freecadCmd(), script], cwd=self.scratch, env=env, timeout=300,
                              check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out = run.stdout.decode("utf-8", "replace")
-        if mode == "throw":
+        if mode == "throw" and self.STEPS.index(step) >= self.STEPS.index("replaced"):
+            # The file is in place: the error is a warning and the save counts (A1 fix review 2)
+            self.assertIn("SAFESAVE saved", out, out[-2000:])
+            self.assertIn("saved, but: Save fault injected at " + step, out)
+        elif mode == "throw":
             self.assertIn("SAFESAVE raised Save fault injected at " + step, out)
+        elif mode == "cut":
+            self.assertIn("SAFESAVE raised", out, out[-2000:])
         else:
             self.assertEqual(run.returncode, 86, out[-2000:])
             self.assertNotIn("SAFESAVE", out)
@@ -3583,7 +3589,7 @@ class DocumentSafeSaveCases(unittest.TestCase):
             # The previous file is kept, whole
             self.assertEqual(len(backups), 1, where)
             self.assertEqual(self._marker(os.path.join(self.folder, backups[0])), 1, where)
-        if mode == "throw":
+        if mode != "crash":
             self.assertEqual([n for n in names if n.endswith(".fctmp")], [],
                              "a failed save leaves its temporary file, " + where)
 
@@ -3657,6 +3663,53 @@ class DocumentSafeSaveCases(unittest.TestCase):
         doc.saveAs(self.path)
         self.assertEqual(doc.Uid, uid)
 
+    def testSaveAsOntoOwnFileKeepsTheId(self):
+        # Review A11: the same file under another spelling is still this document's file
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        spellings = [os.path.join(self.folder, "..", "team", self.NAME)]
+        if sys.platform == "win32":
+            spellings += [self.path.replace("/", "\\"), os.path.join(self.folder, "plate.FCStd")]
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                doc.saveAs(spelling)
+                self.assertEqual(doc.Uid, uid)
+
+    def testRestoreBackupKeepsTheId(self):
+        # Review A15: a backup opened and saved onto the document's name is the document again
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        doc.getObject("Marker").Integer = 2
+        doc.save()
+        self._close(doc)
+        backups = [n for n in os.listdir(self.folder) if n.endswith(".FCBak")]
+        self.assertEqual(len(backups), 1, backups)
+        restored = self._open(os.path.join(self.folder, backups[0]))
+        self.assertEqual(restored.getObject("Marker").Integer, 1)
+        restored.saveAs(self.path)
+        self.assertEqual(restored.Uid, uid)
+        self._close(restored)
+        self.assertEqual(self._marker(self.path), 1)
+
+    @unittest.skipUnless(sys.platform == "win32", "the path limit is Windows'")
+    def testLongPathSaves(self):
+        # Review A13: the temporary and backup names stay short, so a path of 236 characters
+        # saves twice (a backup then exists) under the system's limit of 260
+        os.makedirs(self.folder)
+        pad = 236 - len(os.path.join(self.folder, "")) - len(".FCStd")
+        self.assertGreater(pad, 0)
+        path = os.path.join(self.folder, "p" * pad + ".FCStd")
+        doc = FreeCAD.newDocument("SafeSaveLong")
+        self.opened.append(doc.Name)
+        doc.addObject("App::FeatureTest", "Marker").Integer = 1
+        doc.saveAs(path)
+        doc.getObject("Marker").Integer = 2
+        doc.save()
+        self._close(doc)
+        self.assertEqual(self._marker(path), 2)
+
     def testAuthorIsAlwaysWritten(self):
         self._freshFolder()
         self.group.SetBool("prefSetAuthorOnSave", False)
@@ -3671,3 +3724,152 @@ class DocumentSafeSaveCases(unittest.TestCase):
         self.assertEqual(doc.LastModifiedBy, "Designer")
         self._close(doc)
         self.assertEqual(self._open(self.path).LastModifiedBy, "Designer")
+
+    def _child(self, code, fault):
+        """Runs `code` in a child FreeCADCmd with FREECAD_CH_SAVE_FAULT set to `fault`"""
+        script = os.path.join(self.scratch, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("import os, sys, FreeCAD\n" + code + "sys.stdout.flush()\nos._exit(0)\n")
+        env = dict(os.environ)
+        env["FREECAD_CH_SAVE_FAULT"] = fault
+        run = subprocess.run([_freecadCmd(), script], cwd=self.scratch, env=env, timeout=300,
+                             check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return run.stdout.decode("utf-8", "replace")
+
+    def testLostTemporaryFileFailsTheSave(self):
+        # A1 fix review 3: a save whose temporary file is gone before the rename (quarantined)
+        # fails: the document's name keeps the old file, and the backup is kept
+        self._freshFolder()
+        self._faultedSave("kept", "cut")
+        self._checkFolder("kept", "cut")
+
+    def testShortWriteIsRefused(self):
+        # A1 fix review 2: a stream that went bad while writing (a short write) fails the save
+        self._freshFolder()
+        self._faultedSave("write", "cut")
+        self._checkFolder("write", "cut")
+
+    def testSaveAsFailingAfterItsFileKeepsIt(self):
+        # A1 fix review 2: an error after the new file is in place (managing the backups) leaves
+        # the document on its new file and id: the Save As happened
+        self._freshFolder()
+        other = os.path.join(self.folder, "Other.FCStd")
+        out = self._child(
+            "doc = FreeCAD.openDocument({path!r})\n"
+            "uid = doc.Uid\n"
+            "doc.saveAs({other!r})\n"
+            "print('SAFESAVE file ' + str(os.path.samefile(doc.FileName, {other!r})))\n"
+            "print('SAFESAVE newid ' + str(doc.Uid != uid))\n"
+            "print('SAFESAVE uid ' + doc.Uid)\n".format(path=self.path, other=other),
+            "replaced:throw")
+        self.assertIn("SAFESAVE file True", out, out[-2000:])
+        self.assertIn("SAFESAVE newid True", out)
+        uid = out.split("SAFESAVE uid ")[1].split()[0]
+        self.assertEqual(self._open(other).Uid, uid)
+
+    def testFailedSaveAsKeepingTheIdLeavesTheTarget(self):
+        # A1 fix review 2: a Save As that keeps the id (a backup restored onto the document's
+        # name) and fails leaves the transient directory to the old file: the target, opened
+        # next, keeps the id its file holds
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        doc.getObject("Marker").Integer = 2
+        doc.save()
+        self._close(doc)
+        backups = [n for n in os.listdir(self.folder) if n.endswith(".FCBak")]
+        self.assertEqual(len(backups), 1, backups)
+        out = self._child(
+            "doc = FreeCAD.openDocument({backup!r})\n"
+            "try:\n"
+            "    doc.saveAs({path!r})\n"
+            "    print('SAFESAVE saved')\n"
+            "except Exception:\n"
+            "    print('SAFESAVE raised')\n"
+            "target = FreeCAD.openDocument({path!r})\n"
+            "print('SAFESAVE target ' + target.Uid)\n".format(
+                backup=os.path.join(self.folder, backups[0]), path=self.path),
+            "kept:throw")
+        self.assertIn("SAFESAVE raised", out, out[-2000:])
+        self.assertIn("SAFESAVE target " + uid, out, out[-2000:])
+        self.assertEqual(self._marker(self.path), 2)
+
+    def testCutShortFileIsRefused(self):
+        # A1 fix review: a temporary file that lost its end (a short write zipios never reports)
+        # never replaces the document's file
+        self._freshFolder()
+        self._faultedSave("written", "cut")
+        self._checkFolder("written", "cut")
+
+    def testFailedSaveAsLeavesTheDocument(self):
+        # A1 fix review: a Save As that fails keeps the document's file, name and id, so the next
+        # save goes to its own file under its own id
+        self._freshFolder()
+        other = os.path.join(self.folder, "Other.FCStd")
+        script = os.path.join(self.scratch, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import os, sys, FreeCAD\n"
+                "doc = FreeCAD.openDocument({path!r})\n"
+                "before = (doc.Uid, doc.FileName, doc.Label)\n"
+                "try:\n"
+                "    doc.saveAs({other!r})\n"
+                "    print('SAFESAVE saved')\n"
+                "except Exception as error:\n"
+                "    print('SAFESAVE raised')\n"
+                "after = (doc.Uid, doc.FileName, doc.Label)\n"
+                "print('SAFESAVE same ' + str(before == after))\n"
+                "sys.stdout.flush()\n"
+                "os._exit(0)\n".format(path=self.path, other=other))
+        env = dict(os.environ)
+        env["FREECAD_CH_SAVE_FAULT"] = "kept:throw"
+        run = subprocess.run([_freecadCmd(), script], cwd=self.scratch, env=env, timeout=300,
+                             check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = run.stdout.decode("utf-8", "replace")
+        self.assertIn("SAFESAVE raised", out)
+        self.assertIn("SAFESAVE same True", out, out[-2000:])
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(sorted(os.listdir(self.folder)), [self.NAME])
+
+    def testBackupThatCannotBeKeptLeavesTheOthers(self):
+        # A1 fix review: the new backup is kept before the extra ones go, so a save refused for
+        # want of its backup leaves the earlier backup (one backup wanted: it would be the one
+        # removed) and the document's file
+        self._freshFolder()
+        names = ("CreateBackupFiles", "UseFCBakExtension", "CountBackupFiles",
+                 "SaveBackupDateFormat")
+        saved = (self.group.GetBool(names[0], True), self.group.GetBool(names[1], True),
+                 self.group.GetInt(names[2], 1), self.group.GetString(names[3], "%Y%m%d-%H%M%S"))
+        self.group.SetBool(names[0], True)
+        self.group.SetBool(names[1], True)
+        self.group.SetInt(names[2], 1)
+        self.group.SetString(names[3], "%Y%m%d-%H%M%S")
+        try:
+            past = time.time() - 7200
+            os.utime(self.path, (past, past))
+            doc = self._open(self.path)
+            doc.getObject("Marker").Integer = 2
+            doc.save()
+            first = [n for n in os.listdir(self.folder) if n.endswith(".FCBak")]
+            self.assertEqual(len(first), 1, first)
+            # Every name the next backup could take is a folder: it can't be kept
+            later = past + 3600
+            os.utime(self.path, (later, later))
+            stem = os.path.join(self.folder, "Plate." + time.strftime("%Y%m%d-%H%M%S",
+                                                                       time.localtime(later)))
+            os.makedirs(stem + ".FCBak")
+            for n in range(1, 11):
+                os.makedirs("{}-{}.FCBak".format(stem, n))
+            doc.getObject("Marker").Integer = 3
+            with self.assertRaises(Exception):
+                doc.save()
+            self._close(doc)
+            self.assertTrue(os.path.isfile(os.path.join(self.folder, first[0])))
+            self.assertEqual(self._marker(os.path.join(self.folder, first[0])), 1)
+            self.assertEqual(self._marker(self.path), 2)
+            self.assertEqual([n for n in os.listdir(self.folder) if n.endswith(".fctmp")], [])
+        finally:
+            self.group.SetBool(names[0], saved[0])
+            self.group.SetBool(names[1], saved[1])
+            self.group.SetInt(names[2], saved[2])
+            self.group.SetString(names[3], saved[3])

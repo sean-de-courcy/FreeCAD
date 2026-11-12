@@ -40,6 +40,7 @@
 #include <format>
 #include <optional>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 
@@ -81,6 +82,7 @@
 #include "Application.h"
 #include "AutoTransaction.h"
 #include "BackupPolicy.h"
+#include "ProjectFile.h"
 #include "ElementSolverBatch.h"
 #include "ElementSolverEdits.h"
 #include "ExpressionParser.h"
@@ -250,6 +252,80 @@ std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> impor
 // The id each running Save a Copy gives its file (ops#640, A1): a copy is a document of its own
 std::map<const Document*, std::string> copyUids;
 
+// The ids each open document had before a Save As gave it a new one (ops#640, A1 review T4): a
+// clipboard taken before the Save As still pastes as from the document itself (importedWithin)
+std::map<const Document*, std::set<std::string>> formerUids;
+
+// Whether target already holds doc (ops#640, A1 review A11, A15): its own file under another
+// spelling, or a file with its id, as when a backup is restored onto the document's name. A Save
+// As onto it keeps the document's id
+bool holdsDocument(const Document& doc, const std::string& target)
+{
+    try {
+        std::error_code error;
+        const auto to = Base::FileInfo::stringToPath(target);
+        if (!std::filesystem::exists(to, error)) {
+            return false;
+        }
+        const std::string& own = doc.FileName.getStrValue();
+        if (!own.empty()
+            && std::filesystem::equivalent(Base::FileInfo::stringToPath(own), to, error)) {
+            return true;
+        }
+        ProjectFile project(target);
+        return project.loadDocument() && project.getMetadata().uuid == doc.Uid.getValueStr();
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// FreeCAD-CH (ops#640, A1 fix review): whether a written zip ends with its end record and the
+// record's central directory sits right before it: a file cut short, or with bytes lost before
+// its end, fails this. Reads only the file's last 64 KB
+bool zipEndIsWhole(const std::string& name)
+{
+    constexpr std::size_t endSize = 22;  // the end of central directory record, without comment
+    constexpr std::size_t maxComment = 0xffff;
+    Base::FileInfo fi(name);
+    Base::ifstream in(fi, std::ios::in | std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    in.seekg(0, std::ios::end);
+    const auto size = static_cast<std::uint64_t>(in.tellg());
+    if (size < endSize) {
+        return false;
+    }
+    const std::uint64_t tail = std::min<std::uint64_t>(size, endSize + maxComment);
+    std::vector<unsigned char> bytes(static_cast<std::size_t>(tail));
+    in.seekg(static_cast<std::streamoff>(size - tail));
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(tail));
+    if (!in) {
+        return false;
+    }
+    auto read16 = [&](std::size_t at) {
+        return static_cast<std::uint64_t>(bytes[at] | (bytes[at + 1] << 8));
+    };
+    auto read32 = [&](std::size_t at) {
+        return read16(at) | (read16(at + 2) << 16);
+    };
+    for (std::size_t at = bytes.size() - endSize + 1; at-- > 0;) {
+        if (bytes[at] != 0x50 || bytes[at + 1] != 0x4b || bytes[at + 2] != 0x05
+            || bytes[at + 3] != 0x06) {
+            continue;
+        }
+        const std::uint64_t where = size - tail + at;
+        const std::uint64_t cdirSize = read32(at + 12);
+        const std::uint64_t cdirStart = read32(at + 16);
+        const std::uint64_t comment = read16(at + 20);
+        if (where + endSize + comment == size && cdirStart + cdirSize == where) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Who saves when the preferences name no author (ops#640, A1)
 std::string systemUserName()
 {
@@ -351,8 +427,10 @@ bool App::importedWithin(const ImportedSource& source, const Document& doc)
     // original keeps the UUID; PR 266 review M1). Still alike: a file of the same name in another
     // folder that, once the first is closed, opens under the same name (both copies of one file)
     const auto at = source.name.find('@');
-    return !source.document.empty() && source.document == doc.Uid.getValueStr()
-        && at != std::string::npos
+    auto former = formerUids.find(&doc);
+    const bool ownId = source.document == doc.Uid.getValueStr()
+        || (former != formerUids.end() && former->second.contains(source.document));
+    return !source.document.empty() && ownId && at != std::string::npos
         && source.name.compare(at + 1, std::string::npos, doc.getName()) == 0;
 }
 
@@ -2199,6 +2277,8 @@ Document::Document(const char* documentName)
 Document::~Document()
 {
     App::forgetEditsSinceOpen(this);
+    formerUids.erase(this);
+    copyUids.erase(this);
 #ifdef FC_LOGUPDATECHAIN
     Console().log("-App::Document: %s %p\n", getName(), this);
 #endif
@@ -2816,6 +2896,9 @@ void Document::writeObjects(const std::vector<DocumentObject*>& objs,
     if (writer.hasFailed()) {
         std::cerr << "Output stream is in error state. As a result the "
                      "Document.xml file may be incomplete.\n";
+        // FreeCAD-CH (ops#640, A1 fix review 2): a save that sees this error fails (its file never
+        // replaces the document's); the flags are still reset for the data files that follow
+        writer.addError("the output stream failed: Document.xml is incomplete");
         // reset the error flags to try to safe the data files
         writer.clear();
     }
@@ -3329,22 +3412,55 @@ bool Document::saveAs(const char* _file)
 {
     const std::string file = checkFileName(_file);
     const Base::FileInfo fi(file.c_str());
-    if (this->FileName.getStrValue() != file) {
-        const bool hadFile = !this->FileName.getStrValue().empty();
-        this->FileName.setValue(file);
-        this->Label.setValue(fi.fileNamePure());
-        if (hadFile) {
-            // FreeCAD-CH (ops#640, A1): the new file is a document of its own, with its own id
-            // (its history and its links are found by it); the old file keeps the old one. A
-            // document that had no file keeps its id: no other file has it
-            this->Uid.setValue(Base::Uuid());  // renames the transient directory too
-        }
-        else {
-            this->Uid.touch();  // this forces a rename of the transient directory
-        }
+    if (this->FileName.getStrValue() == file) {
+        return save();
+    }
+    const bool newId = !this->FileName.getStrValue().empty() && !holdsDocument(*this, file);
+    const std::string oldFile = this->FileName.getStrValue();
+    const std::string oldLabel = this->Label.getStrValue();
+    const Base::Uuid oldUid = this->Uid.getValue();
+    bool recorded = false;
+    this->FileName.setValue(file);
+    this->Label.setValue(fi.fileNamePure());
+    if (newId) {
+        // FreeCAD-CH (ops#640, A1): the new file is a document of its own, with its own id
+        // (its history and its links are found by it); the old file keeps the old one. A
+        // document that had no file keeps its id: no other file has it; so does a Save As
+        // onto the file that already holds this document (holdsDocument)
+        recorded = formerUids[this].insert(oldUid.getValue()).second;
+        this->Uid.setValue(Base::Uuid());  // renames the transient directory too
+    }
+    else {
+        this->Uid.touch();  // this forces a rename of the transient directory
     }
 
-    return save();
+    // A Save As that fails leaves the document as it was: its file, its name and its id, so the
+    // next save goes where it went before (A1 fix review)
+    auto undo = [&]() {
+        this->FileName.setValue(oldFile);
+        this->Label.setValue(oldLabel);
+        if (newId) {
+            this->Uid.setValue(oldUid);
+            if (recorded) {
+                formerUids[this].erase(oldUid.getValue());
+            }
+        }
+        else {
+            this->Uid.touch();  // the transient directory goes back to the old file's name
+        }
+    };
+    bool saved = false;
+    try {
+        saved = save();
+    }
+    catch (...) {
+        undo();
+        throw;
+    }
+    if (!saved) {
+        undo();
+    }
+    return saved;
 }
 
 bool Document::saveCopy(const char* file) const
@@ -3475,7 +3591,18 @@ bool Document::saveToFile(const char* filename) const
     // Upstream's "BackupPolicy" switch, which wrote straight into the document's file, is no
     // longer read; "CreateBackupFiles", "CountBackupFiles", "UseFCBakExtension" and
     // "SaveBackupDateFormat" still choose the backups.
-    const std::string fn = nativePath + "." + Base::Uuid::createUuid() + ".fctmp";
+    // Short, so that a path near the system's limit still saves (A1 review A13)
+    std::string fn;
+    do {
+        fn = nativePath + "." + Base::Uuid::createUuid().substr(0, 8) + ".fctmp";
+    } while (Base::FileInfo(fn).exists());
+    // Once BackupPolicy::apply has put the file under the document's name, the save happened,
+    // whatever error follows (A1 fix review 2); apply says so itself, the file system's state is
+    // no proof (a network share gone, A1 fix review 3)
+    bool applying = false;
+    auto replaced = [&]() {
+        return applying && saveReplacedFile();
+    };
     try {
 
     // open extra scope to close ZipWriter properly
@@ -3483,7 +3610,8 @@ bool Document::saveToFile(const char* filename) const
         Base::FileInfo tmp(fn);
         Base::ofstream file(tmp, std::ios::out | std::ios::binary);
 
-        Base::ZipWriter writer(file);
+        auto zip = std::make_unique<Base::ZipWriter>(file);
+        Base::ZipWriter& writer = *zip;
         if (!file.is_open()) {
             throw Base::FileException("Failed to open file", tmp);
         }
@@ -3509,7 +3637,9 @@ bool Document::saveToFile(const char* filename) const
         // to them by index (ops#6 T2)
         Data::NameRefCollector collector;
         Document::Save(writer);
-        saveFaultPoint("write");
+        if (saveFaultPoint("write")) {
+            writer.Stream().setstate(std::ios::badbit);  // as a short write would leave it
+        }
 
         // Special handling for Gui document.
         signalSaveDocument(writer);
@@ -3525,8 +3655,29 @@ bool Document::saveToFile(const char* filename) const
         }
 
         GetApplication().signalSaveDocument(*this);
+
+        // The zip's end and the file's close can fail too (a full disk): such a file never
+        // replaces the document's (A1 review)
+        if (writer.isBad()) {
+            throw Base::FileException("Failed to write the file", tmp);
+        }
+        zip.reset();
+        file.close();
+        if (file.fail()) {
+            throw Base::FileException("Failed to write the file", tmp);
+        }
     }
-    saveFaultPoint("written");
+    if (saveFaultPoint("written")) {
+        std::error_code error;
+        const auto path = Base::FileInfo::stringToPath(fn);
+        fs::resize_file(path, fs::file_size(path, error) / 2, error);
+    }
+    // The zip's own end says how long the file should be: a write that went short is caught here
+    // (zipios writes its end through a stream of its own, whose errors reach no one; A1 fix review)
+    if (!zipEndIsWhole(fn)) {
+        throw Base::FileException("Failed to write the file: it is incomplete",
+                                  Base::FileInfo(fn));
+    }
 
     {
         int count_bak = static_cast<int>(GetApplication()
@@ -3557,14 +3708,37 @@ bool Document::saveToFile(const char* filename) const
             backupPolicy.setPolicy(BackupPolicy::Standard);
         }
         backupPolicy.setNumberOfFiles(count_bak);
+        applying = true;
         backupPolicy.apply(fn, nativePath);
     }
     }
+    catch (const Base::Exception& error) {
+        // A save that fails before its file is in place leaves nothing beside the document. An
+        // error after it (managing the backups) is reported, but the document is saved: a Save As
+        // must not be undone then (A1 fix review 2)
+        if (!replaced()) {
+            std::error_code ignored;
+            fs::remove(Base::FileInfo::stringToPath(fn), ignored);
+            throw;
+        }
+        Base::Console().warning("%s saved, but: %s\n", filename, error.what());
+    }
+    catch (const std::exception& error) {
+        // The same for the standard library's errors
+        if (!replaced()) {
+            std::error_code ignored;
+            fs::remove(Base::FileInfo::stringToPath(fn), ignored);
+            throw;
+        }
+        Base::Console().warning("%s saved, but: %s\n", filename, error.what());
+    }
     catch (...) {
-        // A save that fails before its file is in place leaves nothing beside the document
-        std::error_code error;
-        fs::remove(Base::FileInfo::stringToPath(fn), error);
-        throw;
+        if (!replaced()) {
+            std::error_code ignored;
+            fs::remove(Base::FileInfo::stringToPath(fn), ignored);
+            throw;
+        }
+        Base::Console().warning("%s saved, but an error followed\n", filename);
     }
 
     signalFinishSave(*this, filename);
