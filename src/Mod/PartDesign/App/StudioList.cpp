@@ -27,6 +27,8 @@
 #include "FeatureApply.h"
 #include "FeatureBase.h"
 #include "FeatureBoolean.h"
+#include "FeatureChamfer.h"
+#include "FeatureFillet.h"
 #include "FeatureMultiTransform.h"
 #include "Pieces.h"
 #include "Retarget.h"
@@ -447,11 +449,88 @@ std::vector<Body*> partPatternSourcesAt(const App::DocumentObject* owner,
                                         const std::map<const App::DocumentObject*, int>& positions,
                                         const Consumed& consumed);
 
+/// A Fillet or Chamfer studio feature (FreeCAD-CH ops#654 P8a, parts-design.md 10.14): outside
+/// every Body; its scope is the parts its picks resolve to, its steps are of its own type
+bool isDressUpOwner(const App::DocumentObject* entry)
+{
+    return entry && (entry->isDerivedFrom<Fillet>() || entry->isDerivedFrom<Chamfer>())
+        && !Body::findBodyOf(entry);
+}
+
+/// The part ids of a dress-up owner's picks (StudioPickIds, "<part id>|<element name>"), in
+/// order, without repeats
+std::vector<std::string> pickPartIds(const App::DocumentObject* owner)
+{
+    std::vector<std::string> ids;
+    for (const auto& pick : stringsOf(owner, "StudioPickIds")) {
+        const std::string id = pick.substr(0, pick.find('|'));
+        if (!id.empty() && std::ranges::find(ids, id) == ids.end()) {
+            ids.push_back(id);
+        }
+    }
+    return ids;
+}
+
+bool isMergingAdd(const App::DocumentObject* entry);
+
+/// The part id a pick of the part id holds at index (P8a, Onshape Q2c): the part itself, or,
+/// absorbed before index by an Add's merge (its record names the survivor, 10.13) or by a Union
+/// Boolean (its first part, P5), the part it went into, followed on. A split part's id stays: it
+/// resolves to its pieces (resolveScope)
+std::string absorbedPickPart(std::string id,
+                             const std::vector<Body*>& bodies,
+                             int index,
+                             const std::map<const App::DocumentObject*, int>& positions,
+                             const Consumed& consumed)
+{
+    std::set<std::string> seen;
+    while (seen.insert(id).second) {
+        const Body* body = nullptr;
+        for (auto candidate : bodies) {
+            if (studioPartId(candidate) == id) {
+                body = candidate;
+            }
+        }
+        auto at = body ? consumed.find(body) : consumed.end();
+        if (at == consumed.end() || at->second >= index) {
+            break;
+        }
+        const App::DocumentObject* consumer = nullptr;
+        for (const auto& [entry, place] : positions) {
+            if (place == at->second) {
+                consumer = entry;
+            }
+        }
+        std::string next;
+        if (consumer && isMergingAdd(consumer)) {
+            for (const auto& text : stringsOf(consumer, "StudioMergedParts")) {
+                const auto arrow = text.find(" -> ");
+                if (arrow != std::string::npos && text.substr(0, arrow) == id) {
+                    next = text.substr(arrow + 4);
+                }
+            }
+        }
+        else if (const Boolean* boolean = booleanOwner(consumer);
+                 boolean && std::string(boolean->Type.getValueAsString()) == "Fuse") {
+            const auto parts = booleanPartsAt(boolean, bodies, at->second, positions, consumed);
+            if (!parts.steps.empty()) {
+                next = studioPartId(parts.steps.front());
+            }
+        }
+        if (next.empty()) {
+            break;
+        }
+        id = next;
+    }
+    return id;
+}
+
 /// An Add owner whose tool can merge the parts of its scope (FreeCAD-CH ops#654 10.13): outside
-/// every Body, Union, not a Boolean, not a pattern (a part mirror merges by its own rule, R4)
+/// every Body, Union, not a Boolean, not a pattern (a part mirror merges by its own rule, R4), not
+/// a dress-up (P8a)
 bool isMergingAdd(const App::DocumentObject* entry)
 {
-    return entry && !Body::findBodyOf(entry) && !booleanOwner(entry)
+    return entry && !Body::findBodyOf(entry) && !booleanOwner(entry) && !isDressUpOwner(entry)
         && !freecad_cast<const Transformed*>(entry) && !entry->isDerivedFrom<Part::BodyBase>()
         && !entry->isDerivedFrom<App::Part>() && std::string(operationOf(entry)) == "Union"
         && entry->getPropertyByName("StudioScope");
@@ -466,6 +545,17 @@ std::vector<std::string> scopeIdsAt(const App::DocumentObject* owner,
                                     const std::map<const App::DocumentObject*, int>& positions,
                                     const Consumed& consumed)
 {
+    if (isDressUpOwner(owner)) {
+        // P8a: the parts its picks name, each followed into the part that absorbed it
+        std::vector<std::string> ids;
+        for (const auto& named : pickPartIds(owner)) {
+            const std::string id = absorbedPickPart(named, bodies, index, positions, consumed);
+            if (std::ranges::find(ids, id) == ids.end()) {
+                ids.push_back(id);
+            }
+        }
+        return ids;
+    }
     if (!flagOf(owner, "StudioMergeAll") || booleanOwner(owner) || isStudioPartPattern(owner)) {
         return studioScopeIds(owner);
     }
@@ -787,6 +877,11 @@ std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, con
             const std::string propName = name ? name : "";
             if ((member && propName == "BaseFeature") || propName == "StudioBases"
                 || propName == "StudioPieceSource") {
+                continue;
+            }
+            // P8a: a studio dress-up step's Base is its chain's previous feature, written by its
+            // owner as BaseFeature is by reconcile
+            if (member && propName == "Base" && isDressUpOwner(ownerOfStep(in))) {
                 continue;
             }
             std::vector<App::DocumentObject*> linked;
@@ -1464,7 +1559,19 @@ bool StudioList::reconcile(std::string* why)
             if (step->StudioOwner.getValue() != owner) {
                 step->StudioOwner.setValue(const_cast<App::DocumentObject*>(owner));
             }
-            if (auto addSub = freecad_cast<FeatureAddSub*>(step)) {
+            if (auto dressUp = freecad_cast<DressUp*>(step); dressUp && isDressUpOwner(owner)) {
+                // P8a: its base is the part's feature before it; the picks of its part are
+                // written into Base by the step's own compute when they or the base change
+                // (StudioPicksSeen, FeatureDressUp.cpp), where that base has its shape
+                auto base = body->getPrevSolidFeature(step);
+                if (base && dressUp->Base.getValue() != base) {
+                    dressUp->Base.setValue(base, std::vector<std::string>());
+                    // The owner writes the picks: it runs again (a step made again by G1 or a
+                    // merge, a base reordered)
+                    const_cast<App::DocumentObject*>(owner)->touch();
+                }
+            }
+            else if (auto addSub = freecad_cast<FeatureAddSub*>(step)) {
                 const char* op = operationOf(owner);
                 const char* current = addSub->Operation.getValueAsString();
                 if (addSub->Operation.isPartOf(op) && (!current || std::string(current) != op)) {
@@ -2214,8 +2321,44 @@ long PartDesign::studioTagFor(const App::DocumentObject* owner, const Body* /*bo
     return owner ? owner->getID() : 0;
 }
 
-std::string PartDesign::studioStepType(const App::DocumentObject* /*owner*/)
+std::string PartDesign::studioStepType(const App::DocumentObject* owner)
 {
-    // Every tool-making owner, and S1's shape owners; dress-ups get their own type in P8a
+    // A Fillet or a Chamfer: its own type (P8a); every tool-making owner, and S1's shape owners:
+    // an applier
+    if (isDressUpOwner(owner)) {
+        return std::string(owner->getTypeId().getName());
+    }
     return "PartDesign::FeatureApply";
 }
+
+namespace PartDesign
+{
+/// The parts a pick of the part id resolves to at owner's place (P8a): the part, the part that
+/// absorbed it, or the pieces it was split into, that are live there (declared where used,
+/// FeatureDressUp.cpp)
+PartDesignExport std::vector<Body*> studioPickPartsAt(const App::DocumentObject* owner,
+                                                      const std::string& id)
+{
+    if (!owner || !owner->getDocument()) {
+        return {};
+    }
+    const StudioList* list = StudioList::holding(owner);
+    App::Part* studio = list ? list->studio() : studioOfObject(owner);
+    const auto bodies = studioBodies(owner->getDocument(), studio);
+    std::vector<App::DocumentObject*> entries;
+    if (list) {
+        entries = list->Entries.getValues();
+    }
+    const auto positions = positionsOf(entries);
+    auto it = positions.find(owner);
+    const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
+    const int barAt = list ? std::min(list->barIndex(), static_cast<int>(entries.size()))
+                           : static_cast<int>(entries.size());
+    const Consumed consumed = consumedBy(entries, bodies, positions, barAt);
+    return resolveScope({absorbedPickPart(id, bodies, index, positions, consumed)},
+                        bodies,
+                        index,
+                        positions,
+                        consumed);
+}
+}  // namespace PartDesign

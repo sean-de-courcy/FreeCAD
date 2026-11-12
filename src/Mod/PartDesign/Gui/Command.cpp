@@ -38,6 +38,7 @@
 
 #include <App/Document.h>
 #include <App/DocumentObserver.h>
+#include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Origin.h>
@@ -1873,7 +1874,8 @@ void studioPrefillLive(App::DocumentObject* owner);
  * patterns and Mirror, part mirror, Boolean) makes it, adopted from studioSequence(), in the
  * command's own transaction: undo or Cancel takes it back with the feature. Body members it
  * doesn't hold (sketches, datums, fillets made later) are adopted at reconcile. Sketch, datum,
- * Body, Fillet and Chamfer don't make it (no owner of theirs reads it yet)
+ * Body, Fillet and Chamfer don't make it (Fillet and Chamfer make a studio feature in a listed studio,
+ * P8a; unlisted, they keep the per-Body path until R0)
  */
 
 /// An assembly is no studio: it never gets a list (an active Part or a profile's container may be one)
@@ -3068,6 +3070,85 @@ static PartDesign::Body* toolFirstBody()
     return nullptr;
 }
 
+/// FreeCAD-CH (ops#654 P8a-2, parts-design.md 10.14): Fillet or Chamfer in a studio that has a
+/// list makes one studio feature, outside every Body, whose picks are on any of its parts: the
+/// owner, its list entry, a step in each picked part and its first recompute in one step, which
+/// Cancel aborts whole. The dialog takes more picks of any part. False: no list (the per-Body path,
+/// until R0), an assembly, or no studio
+static bool makeStudioDressUp(
+    Gui::Command* cmd,
+    const std::string& which,
+    const std::vector<DressUpPick>& picks
+)
+{
+    App::Document* doc = cmd->getDocument();
+    PartDesign::Body* body = picks.empty() ? PartDesignGui::getBody(/*messageIfNot = */ false)
+                                           : PartDesign::Body::findBodyOf(picks.front().base);
+    App::Part* studio = nullptr;
+    if (body) {
+        if (!Part::BodyBase::studioOf(body, studio)) {
+            return false;
+        }
+    }
+    else {
+        studio = PartDesignGui::getActivePart();
+    }
+    if (!doc || isAssemblyStudio(studio) || !PartDesign::StudioList::of(doc, studio, false)) {
+        return false;
+    }
+    const std::string name = cmd->getUniqueObjectName(which.c_str());
+    cmd->openCommand(std::string("Make ") + which);
+    try {
+        makeStudioList(doc, studio);
+        Gui::cmdAppDocument(
+            doc,
+            std::ostringstream() << "addObject('PartDesign::" << which << "','" << name << "')"
+        );
+        App::DocumentObject* owner = doc->getObject(name.c_str());
+        if (!owner) {
+            throw Base::RuntimeError("The studio feature was not made");
+        }
+        const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+        if (studio) {
+            Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+        }
+        std::ostringstream ids;
+        for (const DressUpPick& pick : picks) {
+            for (const auto& sub : pick.subs) {
+                ids << "PartDesign.studioPickId(" << Gui::Command::getObjectCmd(pick.base) << ", '"
+                    << Data::oldElementName(sub.c_str()) << "'),";
+            }
+        }
+        Gui::Command::doCommand(
+            Gui::Command::Doc,
+            "%s.StudioPickIds = [%s]",
+            ownerCmd.c_str(),
+            ids.str().c_str()
+        );
+        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
+        {
+            // No picks yet: the dialog asks for them; its error isn't printed meanwhile
+            Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                App::Document::IgnoreErrorOnRecompute,
+                doc,
+                picks.empty()
+            );
+            Gui::cmdAppDocument(doc, "recompute()");
+        }
+        PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
+        if (!PartDesignGui::setEdit(owner)) {
+            throw Base::RuntimeError("The studio feature's dialog didn't open");
+        }
+        cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
+    }
+    catch (const Base::Exception& e) {
+        cmd->abortCommand();
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+        Base::Console().error("%s\n", e.what());
+    }
+    return true;
+}
+
 // Makes `which` on the picks: the first part's dress-up opens its dialog, the others follow it
 // (FreeCAD-CH ops#640, rank 14). `filter` drops the elements the dress-up doesn't take, into
 // `dropped`; a part left with nothing makes no dress-up
@@ -3082,6 +3163,9 @@ static void makeDressUps(
     bool noSelection = false;
     Part::Feature* wholePart = nullptr;
     if (!dressupGetSelected(cmd, which, picks, noSelection, &wholePart)) {
+        return;
+    }
+    if ((which == "Fillet" || which == "Chamfer") && makeStudioDressUp(cmd, which, picks)) {
         return;
     }
     if (noSelection) {

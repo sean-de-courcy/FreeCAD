@@ -143,9 +143,33 @@ def isPartMirror(obj):
 
 
 def isOwner(obj):
-    return obj.TypeId in ("Part::Box", "PartDesign::Boolean", "PartDesign::Pocket") or isPartMirror(
-        obj
+    return (
+        obj.TypeId in ("Part::Box", "PartDesign::Boolean", "PartDesign::Pocket")
+        or isPartMirror(obj)
+        or isFillet(obj)
     )
+
+
+def isFillet(obj):
+    """A Fillet studio feature (P8a): outside every Body, so no step (a step has an owner)."""
+    return obj.TypeId == "PartDesign::Fillet" and getattr(obj, "StudioOwner", None) is None
+
+
+def makeFillet(doc, studio, name, radius, picks, suppressed=False):
+    """A Fillet owner (P8a) on picks ("<part id>|<name>"), not yet listed."""
+    owner = doc.addObject("PartDesign::Fillet", name)
+    studio.addObject(owner)
+    owner.Radius = radius
+    owner.StudioPickIds = list(picks)
+    owner.Suppressed = suppressed
+    return owner
+
+
+def activeFillet(body):
+    """Whether body holds a step of a Fillet owner up to its Tip, not suppressed, whose owner
+    isn't in error: the Part oracle doesn't model a fillet (P8a: G1, G2, the solids and the step
+    count check those parts)."""
+    return any(isFillet(o.StudioOwner) and o.StudioOwner.isValid() for o in activeSteps(body))
 
 
 # The slanted plane of the Up to face owners (T3), z = a + b y; digits that put no element's
@@ -282,6 +306,21 @@ def patternRecord(pat):
 def ownerRecord(box):
     if isPartMirror(box):
         return mirrorRecord(box)
+    if isFillet(box):
+        # P8a: the picks' names with their object IDs as names (the scratch build has its own)
+        masker = Masker(box.Document)
+        picks = []
+        for text in box.StudioPickIds:
+            part, _, name = text.partition("|")
+            picks.append(part + "|" + masker.v2(name))
+        return dict(
+            name=box.Name,
+            id=box.ID,
+            fillet=True,
+            radius=round(box.Radius.Value, 6),
+            picks=picks,
+            suppressed=bool(box.Suppressed),
+        )
     if box.TypeId == "PartDesign::Pocket":
         bound = box.Profile[0].Shape.BoundBox
         return dict(
@@ -375,7 +414,10 @@ def isStep(obj):
 
 # ------------------------------------------------------------------------------------- the names
 def _number(value):
-    text = f"{value:.4f}"
+    # Nudged off the half: the designed boxes put centres on binary fractions such as 4.40625,
+    # exactly half way at four places, where noise of 1e-15 between two constructions of the same
+    # face flips the last digit (seed 5, op 73, ops#654 P8a-2)
+    text = f"{value + 1e-7:.4f}"
     return "0.0000" if text == "-0.0000" else text
 
 
@@ -603,8 +645,8 @@ def oracle(natives, records, bar, live=None):
     for i, record in enumerate(records):
         if len(natives) + i >= bar:
             break
-        if record["suppressed"]:
-            continue
+        if record["suppressed"] or record.get("fillet"):
+            continue  # P8a: a fillet isn't modelled (activeFillet)
         if record.get("mirror"):
             sources = resolve([record["source"]])
             if len(sources) != 1 or sources[0] not in shapes:
@@ -906,56 +948,69 @@ def oracleDifferences(doc):
     pieceBodies = [
         b for b in doc.Objects if b.TypeId == "PartDesign::Body" and b.StudioPieceWitness
     ]
-    # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
-    got = sorted(liveKey(b) for b in PartDesign.studioLiveParts(studioList(doc)))
-    if live is not None and got != sorted(live):
-        found.append(f"live parts {got}, oracle {sorted(live)}")
-    for body in bodies:
-        if bool(body.Visibility) != (body.Name in live):
-            found.append(f"{body.Name}: Visibility {body.Visibility}, oracle live {body.Name in live}")
-    for body in bodies:
-        tip = body.Tip
-        shape = tip.Shape if tip else Part.Shape()
-        got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
-        if got != want[body.Name]:
-            found.append(f"{body.Name}: Tip {got}, oracle {want[body.Name]}")
-        if not body.isRolledBack() and not body.Shape.isNull():
-            volume = round(body.Shape.Volume, 4)
-            if volume != want[body.Name][0]:
-                found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
-    # P6p: each part made from a piece, live at the bar: its Tip's solid, or failing when its
-    # record holds nothing (a piece's Tip fails too when a later feature in it fails: then only
-    # the solid is checked, as for any part)
-    for body in pieceBodies:
-        key = "piece:" + body.StudioPartId
-        if key not in live:
-            continue
-        tip = body.Tip
-        expected = want.get(key)
-        if expected == "failed":
-            if tip is not None and tip.isValid() and tip.StudioOwner == body.StudioMadeBy:
-                found.append(f"{key} ({body.Name}): piece step valid, oracle: holds nothing")
-            continue
-        shape = tip.Shape if tip else Part.Shape()
-        got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
-        if got != expected:
-            found.append(f"{key} ({body.Name}): Tip {got}, oracle {expected}")
-        parent = body.StudioParentId
-        if parent and not any(
-            b.StudioPartId == parent for b in doc.Objects if b.TypeId == "PartDesign::Body"
-        ):
-            found.append(f"{key}: its parent {parent} is gone")
-    # Slice 9: each listed New mirror's part, at the bar
-    for owner in studioList(doc).Entries:
-        if not isPartMirror(owner) or live is None:
-            continue
-        key = "new:" + owner.Name
-        for body in madeBy(owner):
+    # P8a: the Part oracle doesn't model a fillet, and a rounded part changes what later
+    # records do with it (a merge's contact, a copy's shape): with a fillet active anywhere,
+    # G1, G2, the step counts and the hygiene below check the state
+    geometric = not any(
+        activeFillet(b) for b in doc.Objects if b.TypeId == "PartDesign::Body"
+    )
+    if geometric:
+        # The consumed rule: the live parts at the bar, and a consumed part hidden (no test hides one)
+        got = sorted(liveKey(b) for b in PartDesign.studioLiveParts(studioList(doc)))
+        if live is not None and got != sorted(live):
+            found.append(f"live parts {got}, oracle {sorted(live)}")
+        for body in bodies:
+            if bool(body.Visibility) != (body.Name in live):
+                found.append(f"{body.Name}: Visibility {body.Visibility}, oracle live {body.Name in live}")
+        for body in bodies:
             tip = body.Tip
             shape = tip.Shape if tip else Part.Shape()
             got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
-            if got != want.get(key, (0.0, 0)):
-                found.append(f"{key}: Tip {got}, oracle {want.get(key, (0.0, 0))}")
+            if activeFillet(body):
+                if got[1] != want[body.Name][1]:
+                    found.append(f"{body.Name}: Tip solids {got[1]}, oracle {want[body.Name][1]}")
+                continue  # P8a: rounded, which the oracle doesn't model
+            if got != want[body.Name]:
+                found.append(f"{body.Name}: Tip {got}, oracle {want[body.Name]}")
+            if not body.isRolledBack() and not body.Shape.isNull():
+                volume = round(body.Shape.Volume, 4)
+                if volume != want[body.Name][0]:
+                    found.append(f"{body.Name}: Body {volume}, oracle {want[body.Name][0]}")
+        # P6p: each part made from a piece, live at the bar: its Tip's solid, or failing when its
+        # record holds nothing (a piece's Tip fails too when a later feature in it fails: then only
+        # the solid is checked, as for any part)
+        for body in pieceBodies:
+            key = "piece:" + body.StudioPartId
+            if key not in live:
+                continue
+            tip = body.Tip
+            expected = want.get(key)
+            if expected == "failed":
+                if tip is not None and tip.isValid() and tip.StudioOwner == body.StudioMadeBy:
+                    found.append(f"{key} ({body.Name}): piece step valid, oracle: holds nothing")
+                continue
+            shape = tip.Shape if tip else Part.Shape()
+            got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+            if activeFillet(body) and expected:
+                got, expected = got[1], expected[1]  # P8a: the solids only
+            if got != expected:
+                found.append(f"{key} ({body.Name}): Tip {got}, oracle {expected}")
+            parent = body.StudioParentId
+            if parent and not any(
+                b.StudioPartId == parent for b in doc.Objects if b.TypeId == "PartDesign::Body"
+            ):
+                found.append(f"{key}: its parent {parent} is gone")
+        # Slice 9: each listed New mirror's part, at the bar
+        for owner in studioList(doc).Entries:
+            if not isPartMirror(owner) or live is None:
+                continue
+            key = "new:" + owner.Name
+            for body in madeBy(owner):
+                tip = body.Tip
+                shape = tip.Shape if tip else Part.Shape()
+                got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
+                if got != want.get(key, (0.0, 0)):
+                    found.append(f"{key}: Tip {got}, oracle {want.get(key, (0.0, 0))}")
     # A held object (after its Body's Tip) and a rolled-back Body are not recomputed: they stay
     # touched until the bar passes them (ops#127 R5/R7)
     held = set()
@@ -967,6 +1022,18 @@ def oracleDifferences(doc):
             held.update(o.Name for o in group)  # a New part whose maker is past the bar
         if body.isRolledBack():
             held.add(body.Name)
+    # P8a: a Fillet owner has one step in each part its scope resolves to, none elsewhere
+    for owner in studioList(doc).Entries:
+        if isFillet(owner):
+            scope = sorted(b.Name for b in PartDesign.studioScopeOf(owner))
+            steps = sorted(
+                b.Name
+                for b in doc.Objects
+                if b.TypeId == "PartDesign::Body"
+                and any(getattr(o, "StudioOwner", None) == owner for o in b.Group)
+            )
+            if scope != steps:
+                found.append(f"{owner.Name}: steps in {steps}, scope {scope}")
     for obj in doc.Objects:
         if "Touched" in obj.State and obj.Name not in held:
             found.append(f"{obj.Name} touched after a recompute")
@@ -1143,6 +1210,12 @@ def fromScratch(natives, records, bar, maker=None):
                 )
             elif r.get("upto"):
                 box = makeUpTo(doc, studio, r["name"], r["rect"], r["scope"], r["suppressed"])
+            elif r.get("fillet"):
+                picks = []
+                for text in r["picks"]:
+                    part, _, name = text.partition("|")
+                    picks.append(part + "|" + unmasked(name, doc))
+                box = makeFillet(doc, studio, r["name"], r["radius"], picks, r["suppressed"])
             elif "kind" in r:
                 box = booleanOwner(
                     doc, studio, r["name"], r["kind"], r["scope"], r["tools"], r["keep"],
@@ -1742,6 +1815,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
         self.mergesSeen = 0  # states with a part an Add merged into another at the bar (10.13)
         self.lateSeen = 0  # edits committed, then recomputed outside the transaction (10.15)
+        self.filletsSeen = 0  # states with a part a Fillet owner rounds at the bar (P8a)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1758,10 +1832,28 @@ class TestStudioListProperty(unittest.TestCase):
         free = len(lst.Entries) - NATIVES  # places after the natives
         kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern", "mirror", "mirror"]
         kinds += ["delete", "move", "scope", "depth", "suppress", "bar", "split", "split"]
-        kinds += ["merge", "merge"]
+        kinds += ["merge", "merge", "fillet", "fillet"]
         kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
         if kind == "pattern" and not shapeOwners:
             kind = "insert"
+        if kind == "fillet":
+            # P8a: a Fillet owner r 0.5 or 1 on a random edge of one or two random parts (their
+            # shapes at the bar, as a pick is made), anywhere in the list
+            names = [p for p, _ in PARTS if not doc.getObject(p).Shape.isNull()]
+            picks = []
+            for p in rng.sample(names, min(rng.randint(1, 2), len(names))):
+                body = doc.getObject(p)
+                edge = f"Edge{rng.randint(1, len(body.Shape.Edges))}"
+                try:
+                    picks.append(PartDesign.studioPickId(body, edge))
+                except ValueError:
+                    pass
+            radius = rng.choice([0.5, 1])
+            at = rng.randint(0, free)
+            owner = makeFillet(doc, doc.getObject("S"), f"F{counter}", radius, picks)
+            PartDesign.studioInsert(owner, NATIVES + at)
+            parts = [t.split("|")[0] for t in picks]
+            return f"fillet {owner.Name} r{radius} picks {parts} at {at}"
         if kind == "mirror":
             # Slice 9: a part mirror of a part about x = 15 or 35, New, Add or Remove
             names = [p for p, _ in PARTS]
@@ -1865,6 +1957,10 @@ class TestStudioListProperty(unittest.TestCase):
                 box.Length = rng.choice([1, 2]) * (count - 1)
                 PartDesign.studioReconcile(lst)
                 return f"count {name} n{count} L{box.Length.Value}"
+        if isFillet(box) and kind in ("scope", "depth"):
+            # P8a: its radius, read by its steps when they run
+            box.Radius = 1.5 - box.Radius.Value  # 0.5 <-> 1
+            return f"radius {name} {box.Radius.Value}"
         if isPartMirror(box) and kind in ("scope", "depth"):
             if kind == "depth":
                 x = 50 - int(round(box.MirrorPlane[0].Placement.Base.x))  # 15 <-> 35
@@ -2078,6 +2174,8 @@ class TestStudioListProperty(unittest.TestCase):
                 self.mergesSeen += 1
             if any(b.StudioPieceWitness for b in PartDesign.studioLiveParts(studioList(doc))):
                 self.piecesSeen += 1
+            if any(activeFillet(b) for b in doc.Objects if b.TypeId == "PartDesign::Body"):
+                self.filletsSeen += 1
             self.patternsSeen += sum(
                 1 for e in studioList(doc).Entries if isPattern(e) and e.isValid() and e.Originals
             )
@@ -2106,6 +2204,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.piecesSeen, 0)
         self.assertGreater(self.mergesSeen, 0)
         self.assertGreater(self.lateSeen, 0)
+        self.assertGreater(self.filletsSeen, 0)
         unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
         if any(str(s) in unlisted for s in seeds):
             self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
@@ -2113,7 +2212,7 @@ class TestStudioListProperty(unittest.TestCase):
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
               f"states without a list, {self.mergesSeen} states with a merge, {self.lateSeen} "
-              f"edits committed before their recompute")
+              f"edits committed before their recompute, {self.filletsSeen} states with a fillet")
 
 
 if __name__ == "__main__":

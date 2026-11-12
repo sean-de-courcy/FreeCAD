@@ -195,6 +195,7 @@ from PartDesignTests.TestStudioPartMirror import TestStudioPartMirror
 from PartDesignTests.TestResultCheck import TestManyHoles  # FreeCAD-CH, kernel-9
 from PartDesignTests.TestResultCheck import TestThreadEndRevolve  # FreeCAD-CH, kernel safety 10 (FSLC #30)
 from PartDesignTests.TestStudioMerge import TestStudioMerge
+from PartDesignTests.TestStudioDressUp import TestStudioDressUp
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

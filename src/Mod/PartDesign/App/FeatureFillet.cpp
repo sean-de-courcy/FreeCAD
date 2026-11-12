@@ -49,6 +49,10 @@ namespace PartDesign
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
 PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
+PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
+PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
+PartDesignExport bool runsAsStudioOwner(const Feature* feature);
 }  // namespace PartDesign
 
 
@@ -87,6 +91,16 @@ App::DocumentObjectExecReturn* Fillet::execute()
     Part::TopoShape reapplyBase;
     std::vector<Part::TopoShape> reapplyEdges;
     const bool reapplying = dressUpReapplying(reapplyBase, reapplyEdges);
+    // FreeCAD-CH ops#654 P8a: a studio feature over several parts computes no shape of its own;
+    // its steps read its parameters, and one whose part failed passes its base through (O2)
+    if (!reapplying && runsAsStudioOwner(this)) {
+        return studioDressUpOwnerRun(this);
+    }
+    if (!reapplying && StudioOwner.getValue() && studioDressUpStepPassesThrough(this)) {
+        this->positionByBaseFeature();
+        Shape.setValue(getBaseTopoShape(/*silent=*/true));
+        return App::DocumentObject::StdReturn;
+    }
     if (!reapplying && onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }

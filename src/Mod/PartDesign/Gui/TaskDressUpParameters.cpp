@@ -26,8 +26,11 @@
 
 #include <cstring>
 
+#include <functional>
+
 #include <QAction>
 #include <QApplication>
+#include <QBoxLayout>
 #include <QLayout>
 #include <QListWidget>
 #include <QPointer>
@@ -49,7 +52,13 @@
 #include <Gui/Tools.h>
 #include <Gui/ViewProviderDocumentObject.h>
 #include <Gui/WaitCursor.h>
+#include <App/ElementNamingUtils.h>
+#include <Base/Console.h>
+#include <Gui/MainWindow.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/FeatureChamfer.h>
+#include <Mod/PartDesign/App/FeatureFillet.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/PartDesign/Gui/ReferenceSelection.h>
 
 #include "ReferenceField.h"
@@ -290,6 +299,159 @@ void moveDressUp(const App::DocumentObjectT& featureT, const App::DocumentObject
 }  // namespace
 
 
+namespace PartDesign
+{
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a-2; declared where used)
+PartDesignExport std::vector<std::string> studioDressUpRows(const DressUp* owner);
+PartDesignExport std::string studioDressUpPickOf(const DressUp* owner,
+                                                 App::DocumentObject* obj,
+                                                 const std::string& element,
+                                                 std::string& why);
+}  // namespace PartDesign
+
+namespace
+{
+/// A Fillet or Chamfer studio feature (FreeCAD-CH ops#654 P8a, parts-design.md 10.14): outside
+/// every Body, in a studio's list
+bool isStudioDressUpOwner(const App::DocumentObject* obj)
+{
+    return obj
+        && (obj->isDerivedFrom<PartDesign::Fillet>() || obj->isDerivedFrom<PartDesign::Chamfer>())
+        && PartDesign::isStudioOwner(obj);
+}
+
+/** The edges of a dress-up studio feature (FreeCAD-CH ops#654 P8a-2, 10.14 "the dialog"): its
+ * picks, of any live part of its studio, one row each, "Part 2: Edge7" (SQ13's fix: no "other
+ * part" refusal). A pick of an edge or face in the 3D view or the tree adds it, a pick of a listed
+ * one takes it out; Delete takes out the selected rows. Each change sets the picks
+ * (StudioPickIds) in the dialog's transaction, reconciles the list (the scope follows the picks)
+ * and recomputes. */
+class StudioPicksField: public QListWidget, public Gui::SelectionObserver
+{
+public:
+    StudioPicksField(PartDesign::DressUp* owner, std::function<void()> beforeWrite, QWidget* parent)
+        : QListWidget(parent)
+        , Gui::SelectionObserver(true)
+        , owner(owner)
+        , beforeWrite(std::move(beforeWrite))
+    {
+        setObjectName(QStringLiteral("studioPicks"));
+        setSelectionMode(QAbstractItemView::ExtendedSelection);
+        setMinimumHeight(60);
+        auto remove = new QAction(QObject::tr("Remove"), this);
+        remove->setShortcut(QKeySequence::Delete);
+        remove->setShortcutContext(Qt::WidgetShortcut);
+        addAction(remove);
+        setContextMenuPolicy(Qt::ActionsContextMenu);
+        QObject::connect(remove, &QAction::triggered, this, [this]() { removeSelectedRows(); });
+        reload();
+    }
+
+    void reload()
+    {
+        auto dressUp = freecad_cast<PartDesign::DressUp*>(owner.getObject());
+        clear();
+        if (!dressUp) {
+            return;
+        }
+        for (const auto& row : PartDesign::studioDressUpRows(dressUp)) {
+            addItem(QString::fromStdString(row));
+        }
+    }
+
+    void removeSelectedRows()
+    {
+        auto dressUp = freecad_cast<PartDesign::DressUp*>(owner.getObject());
+        if (!dressUp) {
+            return;
+        }
+        const std::vector<std::string> picks = dressUp->StudioPickIds.getValues();
+        std::vector<std::string> kept;
+        for (int i = 0; i < static_cast<int>(picks.size()); ++i) {
+            if (i >= count() || !item(i)->isSelected()) {
+                kept.push_back(picks[i]);
+            }
+        }
+        if (kept.size() != picks.size()) {
+            write(kept);
+        }
+    }
+
+private:
+    void onSelectionChanged(const Gui::SelectionChanges& msg) override
+    {
+        if (msg.Type != Gui::SelectionChanges::AddSelection || !isEnabled() || !isVisible()) {
+            return;
+        }
+        auto dressUp = freecad_cast<PartDesign::DressUp*>(owner.getObject());
+        App::DocumentObject* obj = msg.Object.getSubObject();
+        if (!dressUp || !obj || obj->getDocument() != dressUp->getDocument() || !msg.pSubName) {
+            return;
+        }
+        const char* element = Data::findElementName(msg.pSubName);
+        const std::string name = Data::oldElementName(element ? element : "");
+        if (!name.starts_with("Edge") && !name.starts_with("Face")) {
+            return;
+        }
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesign::Body::findBodyOf(obj);
+        }
+        // A part of another studio: refused, as the per-Body path does (two studios need a
+        // Derived feature in Onshape)
+        const PartDesign::StudioList* history = PartDesign::StudioList::holding(dressUp);
+        App::Part* studio = nullptr;
+        if (!body || !history || !Part::BodyBase::studioOf(body, studio)
+            || studio != history->studio()) {
+            Gui::getMainWindow()->showMessage(
+                QObject::tr("Pick edges of the parts of this part studio"),
+                10000
+            );
+            return;
+        }
+        std::string why;
+        const std::string pick = PartDesign::studioDressUpPickOf(dressUp, obj, name, why);
+        if (pick.empty()) {
+            Gui::getMainWindow()->showMessage(
+                QObject::tr("Not taken: %1").arg(QString::fromStdString(why)),
+                10000
+            );
+            return;
+        }
+        std::vector<std::string> picks = dressUp->StudioPickIds.getValues();
+        if (auto it = std::ranges::find(picks, pick); it != picks.end()) {
+            picks.erase(it);
+        }
+        else {
+            picks.push_back(pick);
+        }
+        // After this notification: the selection is cleared, as the reference fields do
+        QTimer::singleShot(0, []() { Gui::Selection().clearSelection(); });
+        write(picks);
+    }
+
+    void write(const std::vector<std::string>& picks)
+    {
+        auto dressUp = freecad_cast<PartDesign::DressUp*>(owner.getObject());
+        if (!dressUp) {
+            return;
+        }
+        beforeWrite();
+        dressUp->StudioPickIds.setValues(picks);
+        std::string why;
+        PartDesign::StudioList* history = PartDesign::StudioList::holding(dressUp);
+        if (history && !history->reconcile(&why)) {
+            Base::Console().error("%s\n", why.c_str());
+        }
+        dressUp->getDocument()->recompute();
+        reload();
+    }
+
+    App::DocumentObjectT owner;
+    std::function<void()> beforeWrite;
+};
+}  // namespace
+
 /* TRANSLATOR PartDesignGui::TaskDressUpParameters */
 
 TaskDressUpParameters::TaskDressUpParameters(
@@ -481,7 +643,7 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
     options.target = [this]() -> App::DocumentObject* {
         // Waiting for the first pick, of any part: no target, so the field doesn't arm
         // (ops#640 rank 14; the first pick's gate is the panel's, startPlacing())
-        if (placing) {
+        if (placing || isStudioDressUpOwner(getObject())) {
             return nullptr;
         }
         if (ViewProviderDressUp* view = getDressUpView()) {
@@ -509,6 +671,28 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
     };
     baseField = new ReferenceField(getObject(), "Base", options, write, proxy);
     baseField->takePlaceOf(placeholder);
+    // FreeCAD-CH ops#654 P8a-2: a studio feature's edges are its picks, of any part (10.14): its
+    // own list beside the Base field, which stays, hidden and never armed, for the panel's code
+    // that reads it
+    if (isStudioDressUpOwner(getObject())) {
+        baseField->setVisible(false);
+        auto picks = new StudioPicksField(
+            getObject<PartDesign::DressUp>(),
+            [this]() { setupTransaction(); },
+            proxy
+        );
+        QWidget* holder = baseField->parentWidget();
+        QLayout* layout = holder ? holder->layout() : nullptr;
+        auto box = qobject_cast<QBoxLayout*>(layout);
+        const int at = layout ? layout->indexOf(baseField) : -1;
+        if (box && at >= 0) {
+            box->insertWidget(at + 1, picks);
+        }
+        else if (layout) {
+            layout->addWidget(picks);
+        }
+        return;
+    }
     connect(baseField, &ReferenceField::picked, this, [this]() { onBaseChanged(); });
     // Onshape's "Clear missing references": the entries whose element is gone leave the field in
     // one write, the others stay (FreeCAD-CH ops#640 rank 12, blind test F19)
@@ -662,6 +846,10 @@ void TaskDressUpParameters::updateFeature(
 const std::vector<std::string> TaskDressUpParameters::getReferences() const
 {
     PartDesign::DressUp* pcDressUp = DressUpView->getObject<PartDesign::DressUp>();
+    // A studio feature's are its picks (ops#654 P8a-2)
+    if (isStudioDressUpOwner(pcDressUp)) {
+        return pcDressUp->StudioPickIds.getValues();
+    }
     std::vector<std::string> result = pcDressUp->Base.getSubValues();
     return result;
 }
