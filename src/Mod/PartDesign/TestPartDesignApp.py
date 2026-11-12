@@ -69,6 +69,16 @@ from PartDesignTests.TestPipeOnshape import (  # FreeCAD-CH, sweeps as Onshape's
     TestPipeProfilePlacement,
     TestPipePathFromSeveralObjects,
     TestPipeEndAfterThePathGrows,
+    TestThreadCapFollowsEdits,
+    TestHelixTurnNamesNeverPass,
+    TestPipeHelixTurnsCountFromTheStart,
+    TestThreadToothOnTheCylinder,
+    TestPipeSelfOverlap,
+    TestPipeSelfOverlapUnion,
+    TestPipeTwist,
+    TestPipeScale,
+    TestPipeLock,
+    TestPipeThin,
 )
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
@@ -177,13 +187,14 @@ from PartDesignTests.TestStudioList import (
 from PartDesignTests.TestApply import TestApply
 from PartDesignTests.TestStudioOwner import TestStudioOwner
 from PartDesignTests.TestStudioHistory import TestStudioHistory
-from PartDesignTests.TestPieces import TestPieces
+from PartDesignTests.TestPieces import TestPieces, TestStudioUndo
 from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
 from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
 from PartDesignTests.TestStudioPartMirror import TestStudioPartMirror
 from PartDesignTests.TestResultCheck import TestManyHoles  # FreeCAD-CH, kernel-9
 from PartDesignTests.TestResultCheck import TestThreadEndRevolve  # FreeCAD-CH, kernel safety 10 (FSLC #30)
+from PartDesignTests.TestStudioMerge import TestStudioMerge
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

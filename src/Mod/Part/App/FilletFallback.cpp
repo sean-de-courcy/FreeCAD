@@ -20,6 +20,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -37,6 +38,7 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Precision.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <NCollection_Map.hxx>
@@ -118,6 +120,41 @@ double volumeOf(const TopoDS_Shape& shape)
 double areaOf(const TopoDS_Shape& shape)
 {
     return MassProperties::area(shape);
+}
+
+/** How far a Boolean opened the faces' loops: the sum, over the result's vertices that none of its
+ * inputs holds, of their tolerances past linearTolerance. OCCT integrates a face's volume over its
+ * pcurve loop, and where a Boolean leaves a vertex off its edges (two rims' rounds meeting the top
+ * face nearly tangentially at their lens tips: tolerances up to 4e-5) the loop is open by that
+ * much and the measured volume is off by up to 30 times this sum times the tools' size squared,
+ * far more than volumeTolerance of the tools (ops#669: 1.3e-4 relative; macOS's cut is a
+ * different such variant than Windows'). The error is the same wherever OCCT's reference point
+ * lies, and can be as large as the lens two tools share: the lenses are checked by points
+ * (materialIn)
+ */
+double raisedTolerance(const TopoDS_Shape& result, const std::vector<TopoDS_Shape>& inputs)
+{
+    TopTools_IndexedMapOfShape old;
+    for (const auto& input : inputs) {
+        TopExp::MapShapes(input, TopAbs_VERTEX, old);
+    }
+    TopTools_IndexedMapOfShape now;
+    TopExp::MapShapes(result, TopAbs_VERTEX, now);
+    double excess = 0.0;
+    for (int i = 1; i <= now.Extent(); ++i) {
+        if (!old.Contains(now(i))) {
+            excess += std::max(0.0, BRep_Tool::Tolerance(TopoDS::Vertex(now(i))) - linearTolerance);
+        }
+    }
+    return excess;
+}
+
+/// The square of a shape's bounding box's diagonal
+double squareSize(const TopoDS_Shape& shape)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    return box.IsVoid() ? 0.0 : box.SquareExtent();
 }
 
 int countSolids(const TopoDS_Shape& shape)
@@ -2131,23 +2168,28 @@ std::vector<TopoDS_Shape> imagesThrough(
 
 /** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
  * the caller's: the tools' closed forms less the overlaps at unequal corners, or, for a trimmed
- * tool, its common part with the shape. The tolerance scales with the tools' closed forms
+ * tool, its common part with the shape. The tolerance scales with the tools' closed forms, and
+ * grows only by what the Booleans' raised tolerances can cost the measurement (raisedTolerance):
+ * the stage's own and the caller's (expectedAllowance, for a measured expectation)
  */
 TopoDS_Shape applyTools(
     const TopoDS_Shape& shape,
     const std::vector<const Tool*>& tools,
     double expected,
     bool cut,
-    std::vector<Stage>& stages
+    std::vector<Stage>& stages,
+    double expectedAllowance = 0.0
 )
 {
     TopTools_ListOfShape arguments;
     arguments.Append(shape);
     TopTools_ListOfShape toolShapes;
     double scale = 0.0;
+    double size = 0.0;
     for (const auto* tool : tools) {
         toolShapes.Append(tool->solid);
         scale += tool->volume;
+        size = std::max(size, squareSize(tool->solid));
     }
     std::unique_ptr<BRepAlgoAPI_BooleanOperation> operation;
     if (cut) {
@@ -2171,7 +2213,12 @@ TopoDS_Shape applyTools(
     if (cut) {
         change = -change;
     }
-    if (std::abs(change - expected) > volumeTolerance * scale) {
+    std::vector<TopoDS_Shape> inputs {shape};
+    for (const auto* tool : tools) {
+        inputs.push_back(tool->solid);
+    }
+    double raised = raisedTolerance(result, inputs);
+    if (std::abs(change - expected) > volumeTolerance * scale + raised * size + expectedAllowance) {
         refuse(std::string(cut ? "the cut removed " : "the fuse added ") + describe(change)
                + " instead of " + describe(expected));
     }
@@ -2497,6 +2544,8 @@ TopoDS_Shape constructShape(
     // other Booleans than the cut's: OCCT 8.0.1's cut by two barely overlapping tori (two rims'
     // fillets 1.56 on rims 3.1 apart) leaves more than either tool alone does
     double trimmedVolume = 0.0;
+    double trimmedAllowance = 0.0;  // what raised tolerances can cost trimmedVolume's measurements
+    std::vector<TopoDS_Shape> lenses;  // the pairs' common parts in the base: the cut removes them
     if (trimmed) {
         if (!overlaps.empty()) {
             refuse("a dress-up past its face at a corner with unequal angles");
@@ -2517,6 +2566,8 @@ TopoDS_Shape constructShape(
             cutTools.push_back(&tool);
             inside.push_back(commonOf(base.getShape(), tool.solid));
             trimmedVolume += volumeOf(inside.back());
+            trimmedAllowance += raisedTolerance(inside.back(), {base.getShape(), tool.solid})
+                * squareSize(tool.solid);
             boxes.emplace_back();
             BRepBndLib::Add(tool.solid, boxes.back());
         }
@@ -2529,10 +2580,14 @@ TopoDS_Shape constructShape(
                 if (boxes[i].IsOut(boxes[j])) {
                     continue;
                 }
-                double both = volumeOf(commonOf(inside[i], cutTools[j]->solid));
+                TopoDS_Shape common = commonOf(inside[i], cutTools[j]->solid);
+                double both = volumeOf(common);
                 if (both > overlapTolerance(i, j)) {
                     pairs[i][j] = true;
+                    lenses.push_back(common);
                     trimmedVolume -= both;
+                    trimmedAllowance += raisedTolerance(common, {inside[i], cutTools[j]->solid})
+                        * std::min(squareSize(cutTools[i]->solid), squareSize(cutTools[j]->solid));
                 }
             }
         }
@@ -2566,8 +2621,11 @@ TopoDS_Shape constructShape(
             for (size_t i = 0; i < tools.size(); ++i) {
                 if (tools[i].cut) {
                     toolStage[i] = stages.size();
-                    double expected = volumeOf(commonOf(shape, tools[i].solid));
-                    shape = applyTools(shape, {&tools[i]}, expected, true, stages);
+                    TopoDS_Shape common = commonOf(shape, tools[i].solid);
+                    double expected = volumeOf(common);
+                    double allowance = raisedTolerance(common, {shape, tools[i].solid})
+                        * squareSize(tools[i].solid);
+                    shape = applyTools(shape, {&tools[i]}, expected, true, stages, allowance);
                 }
             }
             continue;
@@ -2730,9 +2788,24 @@ TopoDS_Shape constructShape(
     cutVolume = trimmed ? trimmedVolume : cutVolume - overlapVolume;
     double expected = baseVolume - cutVolume + fusedVolume;
     double measured = volumeOf(shape);
-    if (std::abs(measured - expected) > volumeTolerance * scale) {
+    std::vector<TopoDS_Shape> inputs {base.getShape()};
+    double size = 0.0;
+    for (const auto& tool : tools) {
+        inputs.push_back(tool.solid);
+        size = std::max(size, squareSize(tool.solid));
+    }
+    double allowance = raisedTolerance(shape, inputs) * size + (trimmed ? trimmedAllowance : 0.0);
+    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
         refuse("the result's volume " + describe(measured) + " differs from its closed form "
                + describe(expected));
+    }
+    // The allowance can be as large as a lens two tools share, and the measurement off by as much
+    // (ops#669: two rims' fillets 1.6 on holes 120 apart at 20x scale measure 0.099 off against a
+    // lens of 0.105, the shape right): that the cut removed each lens is checked by points instead
+    for (const auto& lens : lenses) {
+        if (materialIn(shape, lens)) {
+            refuse("the cut left material where two tools overlap");
+        }
     }
 
     // The fillet's history, composed from the stages' (section 3): the base's elements are
@@ -2987,6 +3060,92 @@ bool build(
         *reason = why;
     }
     return false;
+}
+
+std::optional<gp_Pnt> materialIn(const TopoDS_Shape& result, const TopoDS_Shape& region)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(region, box);
+    if (box.IsVoid()) {
+        return std::nullopt;
+    }
+    double lo[3];
+    double hi[3];
+    box.Get(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    const double tolerance = std::max(largestTolerance(result), largestTolerance(region));
+    IntCurvesFace_ShapeIntersector crossings;
+    crossings.Load(region, tolerance);
+    BRepClass3d_SolidClassifier inRegion(region);
+    BRepClass3d_SolidClassifier inResult(result);
+    // A point is reported only where the region is thicker than 20 tolerances along every axis
+    // through it: a sheet thinner than that is noise, whichever way the lines run
+    auto deepIn = [&](const gp_Pnt& point) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const gp_Lin line(point, axis == 0 ? gp::DX() : axis == 1 ? gp::DY() : gp::DZ());
+            crossings.Perform(line, -Precision::Infinite(), Precision::Infinite());
+            if (!crossings.IsDone()) {
+                return false;
+            }
+            double below = -Precision::Infinite();
+            double above = Precision::Infinite();
+            for (int k = 1; k <= crossings.NbPnt(); ++k) {
+                const double w = crossings.WParameter(k);
+                if (w <= 0.0) {
+                    below = std::max(below, w);
+                }
+                else {
+                    above = std::min(above, w);
+                }
+            }
+            if (above - below <= 20.0 * tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+    constexpr int lines = 9;
+    for (int axis = 0; axis < 3; ++axis) {
+        const int u = (axis + 1) % 3;
+        const int v = (axis + 2) % 3;
+        double direction[3] = {0.0, 0.0, 0.0};
+        direction[axis] = 1.0;
+        for (int i = 0; i < lines; ++i) {
+            for (int j = 0; j < lines; ++j) {
+                double origin[3];
+                origin[axis] = lo[axis];
+                origin[u] = lo[u] + (hi[u] - lo[u]) * (i + 0.5) / lines;
+                origin[v] = lo[v] + (hi[v] - lo[v]) * (j + 0.5) / lines;
+                const gp_Lin line(
+                    gp_Pnt(origin[0], origin[1], origin[2]),
+                    gp_Dir(direction[0], direction[1], direction[2])
+                );
+                crossings.Perform(line, -Precision::Infinite(), Precision::Infinite());
+                if (!crossings.IsDone()) {
+                    continue;
+                }
+                std::vector<double> at;
+                for (int k = 1; k <= crossings.NbPnt(); ++k) {
+                    at.push_back(crossings.WParameter(k));
+                }
+                std::sort(at.begin(), at.end());
+                for (size_t k = 1; k < at.size(); ++k) {
+                    if (at[k] - at[k - 1] <= 20.0 * tolerance) {
+                        continue;
+                    }
+                    const gp_Pnt point = ElCLib::Value((at[k] + at[k - 1]) / 2.0, line);
+                    inRegion.Perform(point, tolerance);
+                    if (inRegion.State() != TopAbs_IN) {
+                        continue;
+                    }
+                    inResult.Perform(point, tolerance);
+                    if (inResult.State() == TopAbs_IN && deepIn(point)) {
+                        return point;
+                    }
+                }
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace Part::FilletFallback

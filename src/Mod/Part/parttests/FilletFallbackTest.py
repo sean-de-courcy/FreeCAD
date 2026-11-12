@@ -1977,6 +1977,49 @@ class OverflowTest(unittest.TestCase):
             with self.subTest(kind=kind, size=size):
                 self.assertBuilt(self.dressUp(kind, plate, size, rims), volume, 10)
 
+    def testRimsWhoseTipVerticesHaveRaisedTolerances(self):
+        # ops#669: two rims' rounds meet the top face nearly tangentially at their lens's tips;
+        # OCCT 8.0.1's cut leaves vertices of tolerance up to 4e-5 there, the faces' pcurve loops
+        # open by that much, and the integrated volume is up to 1.3e-4 of the tool off: more than
+        # 1e-6 of it (macOS refused K2A's fillet 1.6 so; on Windows these). The volumes: the plate
+        # less the two rounds (Pappus) plus their lens (quadrature)
+        for gap, size, volume in (
+            (6.0, 1.62, 2921.1248),
+            (6.0, 1.625, 2921.0376),
+            (5.9, 1.54, 2922.4743),
+            (5.9, 1.545, 2922.3925),
+            (5.9, 1.565, 2922.0619),
+            (5.8, 1.5, 2923.1168),
+            (5.8, 1.505, 2923.0377),
+        ):
+            with self.subTest(gap=gap, size=size):
+                plate, rims = plate_with_holes(
+                    (30, 20, 5), [(15 - gap / 2, 10), (15 + gap / 2, 10)]
+                )
+                self.assertBuilt(plate.makeFillet(size, rims), volume, 10)
+
+    def testRimsAtTwentyTimesWhoseLensIsBelowTheVolumesNoise(self):
+        # ops#669: K2A's fillet 1.6 at 20x (holes r 29, 120 apart, fillet 32). The raised tolerances
+        # (3.2e-4) put the integrated volume 0.099 off the closed form, and the lens the rounds share
+        # is 0.105: the volume check can't tell a lens left from a lens removed (the construction
+        # checks it by points). The shape is right: the material in a box around the lens is the
+        # analytic 3105.6097 (midpoint quadrature of the material's height over x, y; 4000 x 4000
+        # and 2000 x 2000 agree to 2e-7), and nothing of the lens is left
+        plate, rims = plate_with_holes((600, 400, 100), [(240, 200), (360, 200)], 29)
+        shape = plate.makeFillet(32, rims)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), 10)
+        # The plate less the two rounds (Pappus) plus the lens, to the measurement's noise
+        self.assertAlmostEqual(shape.Volume, 23371762.554, delta=0.2)
+        half = math.sqrt(61**2 - 58.6**2) + 0.4  # the lens's half length (to x 301.4), plus 0.4
+        box = Part.makeBox(2.8, 2 * half, 32, V(298.6, 200 - half, 68))
+        self.assertAlmostEqual(shape.common(box).Volume, 3105.6097, delta=0.01)
+        # Points inside the lens (removed by both rounds; it is 0.0156 thick at its middle, x 300,
+        # y 200, and ends 11 to either side): outside the result
+        for x, y, z in ((300, 200, 99.995), (300, 198, 99.995), (300.3, 200, 99.995)):
+            self.assertFalse(shape.isInside(V(x, y, z), 1e-6, True), (x, y, z))
+
     def testRimsWhoseRoundsBarelyOverlapFail(self):
         # Debt (ops#640): Onshape builds K2A's fillet 1.56 (2922.145). Where two rounds overlap by
         # less than about 0.02, each is within 1e-5 of the plate's top in the lens they share, and

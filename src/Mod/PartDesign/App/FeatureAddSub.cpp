@@ -62,6 +62,8 @@ namespace PartDesign
 {
 
 extern bool getPDRefineModelParameter();
+// StudioList.cpp (FreeCAD-CH ops#654 10.13; declared where used)
+PartDesignExport std::string studioMergedAwayWhy(const App::DocumentObject* owner);
 
 namespace
 {
@@ -219,7 +221,13 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     const bool owner = runsAsStudioOwner(this);
     if (owner && runs && studioScopeOf(this).empty()) {
         purgeTouched();  // as a failure that ran (Feature::recompute())
-        return new App::DocumentObjectExecReturn("No merge scope selected", this);
+        // 10.13: a scope of parts merged away says by what (F3: it does not follow them)
+        const std::string merged = studioMergedAwayWhy(this);
+        return new App::DocumentObjectExecReturn(
+            merged.empty() ? std::string("No merge scope selected")
+                           : "No merge scope selected: " + merged,
+            this
+        );
     }
     App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
     if (result == StdReturn && runs) {

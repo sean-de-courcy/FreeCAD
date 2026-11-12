@@ -204,6 +204,36 @@ std::set<const App::DocumentObject*> entriesElsewhere(const StudioList* list)
 /// that consumes it. From that place on it is no part: no scope or tool resolves to it
 using Consumed = std::map<const Body*, int>;
 
+/// The holder a partial unsplit absorbed pieceId into, from its maker's lost splits (entries
+/// "<piece id>><holder id>", noteSplitHeld; Onshape Q14e); empty when it absorbed none
+std::string absorbedInto(const std::vector<std::string>& lost, const std::string& pieceId)
+{
+    const std::string head = pieceId + ">";
+    for (const auto& entry : lost) {
+        if (entry.starts_with(head)) {
+            return entry.substr(head.size());
+        }
+    }
+    return {};
+}
+
+/// Whether body is a piece whose split is gone (10.12 amendment, Onshape Q13), or that a partial
+/// unsplit absorbed into another piece (Onshape Q14e): consumedBy takes it at its own maker's
+/// place, where nothing else consumes a part the maker made. It is a part nowhere (liveAt), and a
+/// pick of it resolves to the part it was cut from, or to its holder (resolveScope). Its maker is
+/// in positions whenever this is true: resolveScope's positions.at relies on it
+bool vanishedPiece(const Body* body,
+                   const std::map<const App::DocumentObject*, int>& positions,
+                   const Consumed& consumed)
+{
+    if (!isPieceBody(body) || std::string(body->StudioParentId.getValue()).empty()) {
+        return false;
+    }
+    auto it = consumed.find(body);
+    auto maker = positions.find(body->StudioMadeBy.getValue());
+    return it != consumed.end() && maker != positions.end() && it->second == maker->second;
+}
+
 /// Whether body is a part at index of entries (positions: each entry's index): not absorbed into
 /// another part (MergedInto, ops#325), not consumed by a Boolean before index, and not made by an
 /// entry after index (StudioMadeBy). With before, the state just before the entry at index: a part
@@ -219,6 +249,9 @@ bool liveAt(const Body* body,
         return false;
     }
     if (auto it = consumed.find(body); it != consumed.end() && it->second < index) {
+        return false;
+    }
+    if (vanishedPiece(body, positions, consumed)) {
         return false;
     }
     if (auto madeBy = body->StudioMadeBy.getValue()) {
@@ -292,7 +325,22 @@ std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
         }
     };
     std::vector<Body*> out;
-    for (const auto& id : ids) {
+    for (const auto& named : ids) {
+        // A pick of a piece whose split is gone resolves to the part it was cut from, up through
+        // nested gone splits (10.12 amendment, Onshape Q13); one a partial unsplit absorbed, to
+        // its holder (Onshape Q14e), then on up
+        std::string id = named;
+        std::set<std::string> seen;
+        while (!id.empty() && seen.insert(id).second) {
+            auto it = byId.find(id);
+            if (it == byId.end() || !vanishedPiece(it->second, positions, consumed)
+                || positions.at(it->second->StudioMadeBy.getValue()) >= index) {
+                break;
+            }
+            const std::string holder =
+                absorbedInto(stringsOf(it->second->StudioMadeBy.getValue(), "StudioSplitLost"), id);
+            id = holder.empty() ? std::string(it->second->StudioParentId.getValue()) : holder;
+        }
         if (id.empty()) {
             continue;
         }
@@ -337,7 +385,8 @@ BooleanParts booleanPartsAt(const Boolean* owner,
                             const std::vector<Body*>& bodies,
                             int index,
                             const std::map<const App::DocumentObject*, int>& positions,
-                            const Consumed& consumed)
+                            const Consumed& consumed,
+                            bool computed = true)
 {
     BooleanParts out;
     const auto targets = resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
@@ -355,8 +404,10 @@ BooleanParts booleanPartsAt(const Boolean* owner,
         if (!listed.empty()) {
             out.steps.push_back(listed.front());
             // A tool part touching none of the parts merged stays a part (P6p): decided by the
-            // Union's last compute (StudioApartTools)
-            const auto apart = stringsOf(owner, "StudioApartTools");
+            // Union's last compute (StudioApartTools); none for one at or after the bar (not
+            // computed there: consumedBy)
+            const auto apart =
+                computed ? stringsOf(owner, "StudioApartTools") : std::vector<std::string>();
             for (auto it = listed.begin() + 1; it != listed.end(); ++it) {
                 if (std::ranges::find(apart, studioPartId(*it)) == apart.end()) {
                     out.tools.push_back(*it);
@@ -396,13 +447,130 @@ std::vector<Body*> partPatternSourcesAt(const App::DocumentObject* owner,
                                         const std::map<const App::DocumentObject*, int>& positions,
                                         const Consumed& consumed);
 
+/// An Add owner whose tool can merge the parts of its scope (FreeCAD-CH ops#654 10.13): outside
+/// every Body, Union, not a Boolean, not a pattern (a part mirror merges by its own rule, R4)
+bool isMergingAdd(const App::DocumentObject* entry)
+{
+    return entry && !Body::findBodyOf(entry) && !booleanOwner(entry)
+        && !freecad_cast<const Transformed*>(entry) && !entry->isDerivedFrom<Part::BodyBase>()
+        && !entry->isDerivedFrom<App::Part>() && std::string(operationOf(entry)) == "Union"
+        && entry->getPropertyByName("StudioScope");
+}
+
+/// owner's scope ids at index: its StudioScope, or with Merge with all (StudioMergeAll, 10.13)
+/// every part live just before it, ordered by its first feature's place in the history (Onshape
+/// M3: a part's maker, or its first member in the list)
+std::vector<std::string> scopeIdsAt(const App::DocumentObject* owner,
+                                    const std::vector<Body*>& bodies,
+                                    int index,
+                                    const std::map<const App::DocumentObject*, int>& positions,
+                                    const Consumed& consumed)
+{
+    if (!flagOf(owner, "StudioMergeAll") || booleanOwner(owner) || isStudioPartPattern(owner)) {
+        return studioScopeIds(owner);
+    }
+    std::vector<std::pair<int, Body*>> keyed;
+    for (auto body : bodies) {
+        if (!liveAt(body, index, positions, consumed, /*before=*/true)) {
+            continue;
+        }
+        int first = static_cast<int>(positions.size());
+        auto take = [&](const App::DocumentObject* obj) {
+            if (auto it = positions.find(obj); obj && it != positions.end()) {
+                first = std::min(first, it->second);
+            }
+        };
+        take(body->StudioMadeBy.getValue());
+        for (auto member : body->Group.getValues()) {
+            take(member);
+            take(ownerOfStep(member));
+        }
+        keyed.emplace_back(first, body);
+    }
+    std::ranges::stable_sort(keyed, {}, &std::pair<int, Body*>::first);
+    std::vector<std::string> ids;
+    for (const auto& [first, body] : keyed) {
+        ids.push_back(studioPartId(body));
+    }
+    return ids;
+}
+
+/// A merge record of an Add owner (StudioMergedParts): "<absorbed id> -> <survivor id>"
+std::pair<std::string, std::string> mergeRecord(const std::string& text)
+{
+    const auto at = text.find(" -> ");
+    if (at == std::string::npos) {
+        return {};
+    }
+    return {text.substr(0, at), text.substr(at + 4)};
+}
+
+/// The merges owner's last compute recorded (StudioMergedParts, 10.13) where both parts still
+/// resolve in its scope at its place (index); none when suppressed. consumedBy decides from it
+std::vector<std::pair<Body*, Body*>>
+recordedMerges(const App::DocumentObject* owner,
+               const std::vector<Body*>& bodies,
+               int index,
+               const std::map<const App::DocumentObject*, int>& positions,
+               const Consumed& consumed)
+{
+    std::vector<std::pair<Body*, Body*>> out;
+    if (!isMergingAdd(owner) || suppressedOf(owner)) {
+        return out;
+    }
+    const auto records = stringsOf(owner, "StudioMergedParts");
+    if (records.empty()) {
+        return out;
+    }
+    const auto scope =
+        resolveScope(scopeIdsAt(owner, bodies, index, positions, consumed), bodies, index, positions, consumed);
+    auto find = [&scope](const std::string& id) -> Body* {
+        for (auto body : scope) {
+            if (studioPartId(body) == id) {
+                return body;
+            }
+        }
+        return nullptr;
+    };
+    for (const auto& text : records) {
+        const auto [absorbed, survivor] = mergeRecord(text);
+        Body* gone = find(absorbed);
+        Body* kept = find(survivor);
+        if (gone && kept && gone != kept
+            && std::ranges::find_if(out, [gone](const auto& m) { return m.first == gone; })
+                == out.end()) {
+            out.emplace_back(gone, kept);
+        }
+    }
+    return out;
+}
+
+/// The parts owner (an Add owner at index) merges into another part of its scope, each with its
+/// survivor: its recorded merges that consumedBy took (an owner at or after the bar takes none:
+/// it is not computed there, so its record is no decision of the document's at the bar)
+std::vector<std::pair<Body*, Body*>>
+mergedBy(const App::DocumentObject* owner,
+         const std::vector<Body*>& bodies,
+         int index,
+         const std::map<const App::DocumentObject*, int>& positions,
+         const Consumed& consumed)
+{
+    auto out = recordedMerges(owner, bodies, index, positions, consumed);
+    std::erase_if(out, [&consumed, index](const auto& merge) {
+        auto it = consumed.find(merge.first);
+        return it == consumed.end() || it->second != index;
+    });
+    return out;
+}
+
 /// The parts the Boolean owners of entries consume, each at its owner's place, in list order (a
 /// part a Boolean consumed earlier is no tool of a later one); and the source of a part mirror's
 /// Add that merges it (slice 9, Onshape oracle 9 R4: decided by the mirror's last compute,
 /// StudioConsumesSource), unless suppressed
 Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                     const std::vector<Body*>& bodies,
-                    const std::map<const App::DocumentObject*, int>& positions)
+                    const std::map<const App::DocumentObject*, int>& positions,
+                    int barAt)
 {
     Consumed out;
     const auto split = splitParents(bodies);
@@ -410,16 +578,54 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
         if (auto it = split.find(entries[i]); it != split.end() && !suppressedOf(entries[i])) {
             auto at = positions.find(entries[i]);
             if (at != positions.end() && at->second == static_cast<int>(i)) {
-                const auto lost = stringsOf(entries[i], "StudioSplitLost");
+                // A record decided by a compute (a split lost, a Union's tools apart, a part
+                // mirror's consumption, an Add's merges, 10.13) counts only before the bar: an
+                // entry at or after it is not computed there, and the list built from scratch
+                // has none (gate G2)
+                const auto lost = static_cast<int>(i) < barAt
+                    ? stringsOf(entries[i], "StudioSplitLost")
+                    : std::vector<std::string>();
                 for (auto parent : it->second) {
-                    if (std::ranges::find(lost, studioPartId(parent)) == lost.end()) {
+                    const std::string parentId = studioPartId(parent);
+                    // A lost split counts only while the parent is a part at the maker's place:
+                    // consumed before it (a merge, a Boolean), the maker doesn't compute there,
+                    // and a record from an earlier compute is stale (gate seed 6, hub 8)
+                    auto before = out.find(parent);
+                    const bool stale = before != out.end() && before->second < static_cast<int>(i);
+                    const bool gone = !stale && std::ranges::find(lost, parentId) != lost.end();
+                    if (!gone) {
                         out.emplace(parent, static_cast<int>(i));
+                    }
+                    if (stale) {
+                        continue;
+                    }
+                    // The split is gone (10.12 amendment): its pieces vanish at their maker's
+                    // own place (vanishedPiece), so they are parts nowhere; so does a piece a
+                    // partial unsplit absorbed into another (Onshape Q14e), the parent split
+                    for (auto piece : bodies) {
+                        if (isPieceBody(piece) && piece->StudioMadeBy.getValue() == entries[i]
+                            && parentId == piece->StudioParentId.getValue()
+                            && (gone || !absorbedInto(lost, studioPartId(piece)).empty())) {
+                            out.emplace(piece, static_cast<int>(i));
+                        }
                     }
                 }
             }
         }
+        if (isMergingAdd(entries[i])) {
+            // 10.13: the parts an Add merges into another of its scope, from its place on
+            auto at = positions.find(entries[i]);
+            if (at != positions.end() && at->second == static_cast<int>(i)
+                && static_cast<int>(i) < barAt) {
+                for (const auto& [gone, kept] :
+                     recordedMerges(entries[i], bodies, static_cast<int>(i), positions, out)) {
+                    out.emplace(gone, static_cast<int>(i));
+                }
+            }
+            continue;
+        }
         if (entries[i] && isStudioPartPattern(entries[i]) && !suppressedOf(entries[i])
-            && studioPartMirrorConsumes(entries[i])) {
+            && static_cast<int>(i) < barAt && studioPartMirrorConsumes(entries[i])) {
             auto at = positions.find(entries[i]);
             if (at != positions.end() && at->second == static_cast<int>(i)) {
                 const auto sources =
@@ -438,7 +644,8 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
         if (at == positions.end() || at->second != static_cast<int>(i)) {
             continue;
         }
-        const auto parts = booleanPartsAt(owner, bodies, static_cast<int>(i), positions, out);
+        const auto parts = booleanPartsAt(
+            owner, bodies, static_cast<int>(i), positions, out, static_cast<int>(i) < barAt);
         for (auto body : parts.consumed) {
             out.emplace(body, static_cast<int>(i));
         }
@@ -446,26 +653,49 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
     return out;
 }
 
-/// The parts owner (at index) has a step in: a Boolean's step parts, else its scope resolved
-std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
-                               const std::vector<Body*>& bodies,
-                               int index,
-                               const std::map<const App::DocumentObject*, int>& positions,
-                               const Consumed& consumed)
+/// The parts owner (at index) acts on: a Boolean's step parts, else its scope resolved (the
+/// parts an Add merges away included: its compute reads them)
+std::vector<Body*> scopePartsAt(const App::DocumentObject* owner,
+                                const std::vector<Body*>& bodies,
+                                int index,
+                                const std::map<const App::DocumentObject*, int>& positions,
+                                const Consumed& consumed)
 {
     std::vector<Body*> out;
     if (const Boolean* boolean = booleanOwner(owner)) {
         out = booleanPartsAt(boolean, bodies, index, positions, consumed).steps;
     }
     else {
-        out = resolveScope(studioScopeIds(owner), bodies, index, positions, consumed);
+        out = resolveScope(scopeIdsAt(owner, bodies, index, positions, consumed),
+                           bodies,
+                           index,
+                           positions,
+                           consumed);
     }
     // And each part it made from a piece or a leftover (P6p): its piece step
     for (auto body : bodies) {
         if (isPieceBody(body) && body->StudioMadeBy.getValue() == owner
             && std::ranges::find(out, body) == out.end()
-            && liveAt(body, index, positions, consumed)) {
+            && liveAt(body, index, positions, consumed)
+            && !vanishedPiece(body, positions, consumed)) {
             out.push_back(body);
+        }
+    }
+    return out;
+}
+
+/// The parts owner (at index) has a step in: the parts it acts on, without those an Add merges
+/// into another part (10.13: their chains end before it; the survivor's step reads them)
+std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
+                               const std::vector<Body*>& bodies,
+                               int index,
+                               const std::map<const App::DocumentObject*, int>& positions,
+                               const Consumed& consumed)
+{
+    std::vector<Body*> out = scopePartsAt(owner, bodies, index, positions, consumed);
+    for (const auto& [gone, kept] : mergedBy(owner, bodies, index, positions, consumed)) {
+        if (auto it = std::ranges::find(out, gone); it != out.end()) {
+            out.erase(it);
         }
     }
     return out;
@@ -791,7 +1021,7 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
             out.errors.push_back(quoted(entry) + " is in the history of another studio too");
         }
     }
-    const Consumed consumed = consumedBy(entries, bodies, positions);
+    const Consumed consumed = consumedBy(entries, bodies, positions, barAt);
     // Where each split part stops being one (P6p): its maker's place
     std::map<const Body*, int> splitAt;
     for (const auto& [maker, parents] : splitParents(bodies)) {
@@ -799,15 +1029,29 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
         if (at == positions.end() || suppressedOf(maker)) {
             continue;
         }
-        const auto lost = stringsOf(maker, "StudioSplitLost");
+        const auto lost = at->second < barAt ? stringsOf(maker, "StudioSplitLost")
+                                             : std::vector<std::string>();  // as consumedBy
         for (auto parent : parents) {
-            if (std::ranges::find(lost, studioPartId(parent)) != lost.end()) {
+            auto before = consumed.find(parent);
+            const bool stale = before != consumed.end() && before->second < at->second;
+            if (!stale && std::ranges::find(lost, studioPartId(parent)) != lost.end()) {
                 continue;
             }
             auto [it, added] = splitAt.emplace(parent, at->second);
             if (!added) {
                 it->second = std::min(it->second, at->second);
             }
+        }
+    }
+    // Where each part merged away stops being one (10.13): its Add's place, and its survivor
+    std::map<const Body*, std::pair<int, const Body*>> mergeAt;
+    for (int i = 0; i < size; ++i) {
+        App::DocumentObject* entry = entries[i];
+        if (!entry || positions[entry] != i || !isMergingAdd(entry)) {
+            continue;
+        }
+        for (const auto& [gone, kept] : mergedBy(entry, bodies, i, positions, consumed)) {
+            mergeAt.emplace(gone, std::make_pair(i, kept));
         }
     }
     for (int i = 0; i < size; ++i) {
@@ -842,11 +1086,26 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
                                      + " split before it: put it in one of the pieces");
                 continue;
             }
+            // 10.13: a member placed in a part after the Add that merged it into another
+            if (auto merged = mergeAt.find(body); merged != mergeAt.end() && merged->second.first < i) {
+                out.errors.push_back(quoted(entry) + " is in " + quoted(body) + ", which "
+                                     + quoted(entries[merged->second.first]) + " merged into "
+                                     + quoted(merged->second.second)
+                                     + " before it: move it above, or into the part it merged into");
+                continue;
+            }
             if (auto maker = body->StudioMadeBy.getValue(); maker && isPieceBody(body)) {
                 auto at = positions.find(maker);
                 if (at != positions.end() && at->second > i) {
                     out.errors.push_back(quoted(entry) + " is in " + quoted(body) + ", which "
                                          + quoted(maker) + " makes after it");
+                    continue;
+                }
+                // 10.12 amendment: a member of a piece whose split is gone has no part
+                if (vanishedPiece(body, positions, consumed)) {
+                    out.errors.push_back(quoted(entry) + " is in " + quoted(body)
+                                         + ", made by the split of " + quoted(maker)
+                                         + ", which is gone: move it into the part it was cut from");
                     continue;
                 }
             }
@@ -855,7 +1114,8 @@ StudioList::Projection StudioList::projectEntries(const std::vector<App::Documen
             // it made
             for (auto piece : bodies) {
                 if (piece != body && isPieceBody(piece) && piece->StudioMadeBy.getValue() == entry
-                    && liveAt(piece, i, positions, consumed)) {
+                    && liveAt(piece, i, positions, consumed)
+                    && !vanishedPiece(piece, positions, consumed)) {
                     Slot step = slot;
                     step.isStep = true;
                     out.chains[piece].push_back(step);
@@ -960,9 +1220,9 @@ bool StudioList::reconcile(std::string* why)
     // 2. Project, and plan every write; refuse before writing anything
     Projection projection = projectEntries(entries, bar);
     const auto positions = positionsOf(entries);
-    const Consumed consumed = consumedBy(entries, bodies, positions);
     const int size = static_cast<int>(entries.size());
     const int barAt = bar < 0 || bar > size ? size : bar;
+    const Consumed consumed = consumedBy(entries, bodies, positions, barAt);
 
     // Each existing step is reused (its key, (owner, part), is in the projection; the first one
     // of a key), or unwanted: its owner is gone, out of the list, or no longer acts on the part.
@@ -1294,6 +1554,12 @@ bool StudioList::reconcile(std::string* why)
         else if (isStudioPartPattern(entry)) {
             read = partPatternSourcesAt(entry, bodies, i, positions, consumed);
         }
+        else if (isMergingAdd(entry)) {
+            // 10.13: the parts it merges away have no step of it; its compute reads their solids
+            for (const auto& [gone, kept] : mergedBy(entry, bodies, i, positions, consumed)) {
+                read.push_back(gone);
+            }
+        }
         if (!read.empty()) {
             for (auto tool : read) {
                 App::DocumentObject* last = nullptr;
@@ -1310,6 +1576,34 @@ bool StudioList::reconcile(std::string* why)
         auto prop = freecad_cast<App::PropertyLinkList*>(entry->getPropertyByName("StudioBases"));
         if (prop && prop->getValues() != bases) {
             prop->setValues(bases);
+        }
+        if (isMergingAdd(entry)) {
+            // An owner without bases of its own (a shape owner): its steps hold every scope
+            // part's solid before it, so each step computes the merge after all of them (10.13)
+            const std::vector<App::DocumentObject*> stepBases =
+                prop ? std::vector<App::DocumentObject*>() : bases;
+            for (const auto& [body, step] : stepsByOwner[entry]) {
+                if (step->StudioBases.getValues() != stepBases) {
+                    step->StudioBases.setValues(stepBases);
+                }
+            }
+            // What this projection took of its merges (resync after a recompute)
+            const auto merges = stringsOf(entry, "StudioMergedParts");
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioMergedPartsSeen")
+            );
+            if (!seen && !merges.empty()) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioMergedPartsSeen",
+                    "Studio",
+                    "The merges the projection last took (ops#654 10.13)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            if (seen && seen->getValues() != merges) {
+                seen->setValues(merges);
+            }
         }
         if (isStudioPartPattern(entry)) {
             // What this projection took of its Add's consumption (resync after a recompute)
@@ -1505,7 +1799,137 @@ std::vector<Body*> PartDesign::studioScopeOf(const App::DocumentObject* owner)
     const auto positions = positionsOf(entries);
     auto it = positions.find(owner);
     const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
-    return stepPartsAt(owner, bodies, index, positions, consumedBy(entries, bodies, positions));
+    const int barAt = list ? std::min(list->barIndex(), static_cast<int>(entries.size()))
+                           : static_cast<int>(entries.size());
+    return scopePartsAt(
+        owner, bodies, index, positions, consumedBy(entries, bodies, positions, barAt));
+}
+
+// ------------------------------------------------------------------------------------------------
+// An Add merges the parts its tool joins (FreeCAD-CH ops#654 10.13). Declared where used
+namespace PartDesign
+{
+PartDesignExport bool studioSetMergeAll(App::DocumentObject* owner, bool on, std::string* why);
+PartDesignExport std::string studioMergedAwayWhy(const App::DocumentObject* owner);
+PartDesignExport bool studioIsMergingAdd(const App::DocumentObject* owner);
+PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
+PartDesignExport std::vector<std::string> studioMembersAfter(const App::DocumentObject* owner,
+                                                             const Body* part);
+}  // namespace PartDesign
+
+bool PartDesign::studioIsMergingAdd(const App::DocumentObject* owner)
+{
+    return isMergingAdd(owner);
+}
+
+/// The Boolean operation owner asks for, Union, Subtraction or Common (operationOf)
+const char* PartDesign::studioOperationOf(const App::DocumentObject* owner)
+{
+    return operationOf(owner);
+}
+
+/// The labels of part's Body members placed after owner in owner's list (a part an Add merges
+/// away has no part after it: its members there are loud)
+std::vector<std::string> PartDesign::studioMembersAfter(const App::DocumentObject* owner,
+                                                        const Body* part)
+{
+    std::vector<std::string> out;
+    const StudioList* list = StudioList::holding(owner);
+    if (!list || !part) {
+        return out;
+    }
+    const auto& entries = list->Entries.getValues();
+    const int at = positionOf(entries, owner);
+    if (at < 0) {
+        return out;
+    }
+    for (std::size_t i = at + 1; i < entries.size(); ++i) {
+        if (entries[i] && !StudioList::isStep(entries[i]) && part->hasObject(entries[i])) {
+            out.emplace_back(entries[i]->Label.getValue());
+        }
+    }
+    return out;
+}
+
+/// Sets owner's Merge with all (StudioMergeAll: its scope is every live part at its place) and
+/// reconciles its list; false with why on a refusal. No transaction, no recompute
+bool PartDesign::studioSetMergeAll(App::DocumentObject* owner, bool on, std::string* why)
+{
+    StudioList* list = StudioList::holding(owner);
+    if (!owner || !list || Body::findBodyOf(owner) || booleanOwner(owner)
+        || isStudioPartPattern(owner)) {
+        if (why) {
+            *why = quoted(owner) + " is no studio feature with a merge scope";
+        }
+        return false;
+    }
+    auto prop = freecad_cast<App::PropertyBool*>(owner->getPropertyByName("StudioMergeAll"));
+    if (!prop) {
+        if (!on) {
+            return list->reconcile(why);
+        }
+        if (owner->getPropertyByName("StudioMergeAll")) {
+            if (why) {
+                *why = quoted(owner) + "'s StudioMergeAll is no switch";
+            }
+            return false;
+        }
+        prop = static_cast<App::PropertyBool*>(owner->addDynamicProperty(
+            "App::PropertyBool",
+            "StudioMergeAll",
+            "Studio",
+            "Merge with all: the scope is every part live at this feature's place (ops#654 10.13)",
+            App::Prop_Hidden
+        ));
+    }
+    if (prop->getValue() != on) {
+        prop->setValue(on);
+    }
+    return list->reconcile(why);
+}
+
+/// Why owner's scope resolves to nothing because an Add merged its parts away (Onshape F3: a
+/// reference to an absorbed part does not follow it): "'B' was merged into 'A' by 'E'"; empty
+/// when no part of its scope was merged away
+std::string PartDesign::studioMergedAwayWhy(const App::DocumentObject* owner)
+{
+    const StudioList* list = StudioList::holding(owner);
+    if (!list) {
+        return {};
+    }
+    const auto bodies = studioBodies(owner->getDocument(), list->studio());
+    std::vector<App::DocumentObject*> entries;
+    for (auto entry : list->Entries.getValues()) {
+        if (entry) {
+            entries.push_back(entry);
+        }
+    }
+    const auto positions = positionsOf(entries);
+    const auto at = positions.find(owner);
+    const int index = at == positions.end() ? static_cast<int>(entries.size()) : at->second;
+    const Consumed consumed = consumedBy(
+        entries, bodies, positions, std::min(list->barIndex(), static_cast<int>(entries.size())));
+    for (const auto& id : studioScopeIds(owner)) {
+        for (auto body : bodies) {
+            if (studioPartId(body) != id) {
+                continue;
+            }
+            auto it = consumed.find(body);
+            if (it == consumed.end() || it->second >= index) {
+                continue;
+            }
+            App::DocumentObject* by = entries[it->second];
+            if (!isMergingAdd(by)) {
+                continue;
+            }
+            for (const auto& [gone, kept] : mergedBy(by, bodies, it->second, positions, consumed)) {
+                if (gone == body) {
+                    return quoted(body) + " was merged into " + quoted(kept) + " by " + quoted(by);
+                }
+            }
+        }
+    }
+    return {};
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1543,7 +1967,8 @@ std::vector<Body*> PartDesign::studioLivePartsAt(const StudioList* list, int ind
         index = std::min(list->barIndex(), size);
     }
     const auto positions = positionsOf(entries);
-    const Consumed consumed = consumedBy(entries, bodies, positions);
+    const Consumed consumed =
+        consumedBy(entries, bodies, positions, std::min(list->barIndex(), size));
     for (auto body : bodies) {
         if (liveAt(body, index, positions, consumed, /*before=*/true)) {
             out.push_back(body);
@@ -1573,7 +1998,11 @@ void PartDesign::studioBooleanParts(const App::DocumentObject* owner,
     auto it = positions.find(owner);
     const int index = it == positions.end() ? static_cast<int>(entries.size()) : it->second;
     auto parts =
-        booleanPartsAt(boolean, bodies, index, positions, consumedBy(entries, bodies, positions));
+        booleanPartsAt(boolean,
+                       bodies,
+                       index,
+                       positions,
+                       consumedBy(entries, bodies, positions, list->barIndex()));
     steps = parts.steps;
     tools = parts.tools;
     both = parts.both;
@@ -1598,7 +2027,10 @@ const App::DocumentObject* PartDesign::studioConsumerOf(const Body* body, int in
     }
     const auto positions = positionsOf(entries);
     const Consumed consumed =
-        consumedBy(entries, studioBodies(body->getDocument(), studio), positions);
+        consumedBy(entries,
+                   studioBodies(body->getDocument(), studio),
+                   positions,
+                   list->barIndex());
     auto it = consumed.find(body);
     return it != consumed.end() && it->second < index ? entries[it->second] : nullptr;
 }
@@ -1650,7 +2082,7 @@ std::vector<Body*> PartDesign::studioPartPatternSources(const App::DocumentObjec
                                 bodies,
                                 index,
                                 positions,
-                                consumedBy(entries, bodies, positions));
+                                consumedBy(entries, bodies, positions, list->barIndex()));
 }
 
 namespace PartDesign
@@ -1704,6 +2136,13 @@ void resyncPartMirrors(const App::Document& constDoc)
                 if (entry
                     && stringsOf(entry, "StudioSplitLost")
                         != stringsOf(entry, "StudioSplitLostSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                // 10.13: an Add's merges
+                if (entry
+                    && stringsOf(entry, "StudioMergedParts")
+                        != stringsOf(entry, "StudioMergedPartsSeen")) {
                     stale.push_back(list);
                     break;
                 }

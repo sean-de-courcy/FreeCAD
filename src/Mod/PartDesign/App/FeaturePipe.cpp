@@ -24,12 +24,14 @@
 
 
 #include <algorithm>
+#include <sstream>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <numeric>
 #include <optional>
@@ -42,17 +44,33 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
+#include <BOPAlgo_ArgumentAnalyzer.hxx>
+#include <BOPAlgo_BuilderSolid.hxx>
+#include <BOPAlgo_MakerVolume.hxx>
+#include <BOPTools_AlgoTools3D.hxx>
+#include <BRepTools_History.hxx>
+#include <Message_Report.hxx>
+#include <TopoDS_AlertWithShape.hxx>
+#include <IntTools_Context.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRepLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <Geom_Plane.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepLProp_CLProps.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
@@ -65,13 +83,20 @@
 #include <ElCLib.hxx>
 #include <Extrema_ExtPC.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <GeomConvert_BSplineCurveToBezierCurve.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GeomFill_Frenet.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -80,13 +105,17 @@
 #include <GProp_PEquation.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
 #include <gp_Hypr.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Parab.hxx>
 #include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
 #include <Law_Function.hxx>
+#include <Law_Linear.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_Edge.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
@@ -109,7 +138,9 @@
 #include <App/NameTable.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
+#include <Base/Tools.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/PipeShellApproximation.h>
 #include <Mod/Part/App/SweepFrenet.h>
 
@@ -1152,6 +1183,727 @@ bool isLine(const TopoDS_Edge& edge)
     return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
 }
 
+/// A Part helix's edge that winds more than one turn: a line on a cylinder (makeHelix) or on a
+/// surface of revolution (makeSpiralHelix, Part::Helix's) keeping its distance from the axis, its
+/// 3D curve built from that line. Conical helices and spirals aren't (their turns change radius).
+struct HelixWinding
+{
+    gp_Ax1 axis;         ///< where the edge is
+    double pitch = 0.0;  ///< the advance along the axis per turn
+    double span = 0.0;   ///< the angle wound, more than one turn (any, with partTurn)
+    double first = 0.0;  ///< the edge's parameters (its 2D and 3D curves share them)
+    double last = 0.0;
+};
+
+/// \a edge's winding, if it is one (HelixWinding). With \a partTurn, an edge that winds one turn
+/// or less is one too, its pitch the advance a whole turn would make: withHelixTurns names it
+/// turn 1, so a reference on turn 1 holds when an edit leaves one turn (2 -> 1).
+std::optional<HelixWinding> helixWinding(const TopoDS_Edge& edge, bool partTurn = false)
+{
+    Handle(Geom2d_Curve) curve2d;
+    Handle(Geom_Surface) surface;
+    TopLoc_Location surfaceLocation;
+    double first = 0.0;
+    double last = 0.0;
+    BRep_Tool::CurveOnSurface(edge, curve2d, surface, surfaceLocation, first, last);
+    if (curve2d.IsNull() || surface.IsNull() || !BRep_Tool::SameParameter(edge)) {
+        return {};
+    }
+    Handle(Geom_Surface) basis = surface;
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(basis)) {
+        basis = trimmed->BasisSurface();
+    }
+    Handle(Geom2d_Curve) line = curve2d;
+    if (auto trimmed = Handle(Geom2d_TrimmedCurve)::DownCast(line)) {
+        line = trimmed->BasisCurve();
+    }
+    std::optional<gp_Ax1> axis;
+    if (auto cylinder = Handle(Geom_CylindricalSurface)::DownCast(basis)) {
+        axis = cylinder->Axis();
+    }
+    else if (auto revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(basis)) {
+        axis = revolution->Axis();
+    }
+    if (!axis || Handle(Geom2d_Line)::DownCast(line).IsNull()) {
+        return {};
+    }
+    // The edge keeps its distance from the axis (a 2D line on the surface, so the distance
+    // changes linearly along it if at all)
+    const gp_Trsf placement = surfaceLocation.Transformation();
+    const gp_Ax1 placed = axis->Transformed(placement);
+    const gp_Lin axisLine(placed);
+    auto pointAt = [&](double t) {
+        const gp_Pnt2d uv = curve2d->Value(t);
+        return surface->Value(uv.X(), uv.Y()).Transformed(placement);
+    };
+    const double radius = axisLine.Distance(pointAt(first));
+    if (radius < Precision::Confusion()
+        || std::fabs(axisLine.Distance(pointAt(last)) - radius) > Precision::Confusion()
+        || std::fabs(axisLine.Distance(pointAt((first + last) / 2)) - radius)
+            > Precision::Confusion()) {
+        return {};
+    }
+    constexpr double turn = 2.0 * std::numbers::pi;
+    const double span = std::fabs(curve2d->Value(last).X() - curve2d->Value(first).X());
+    if ((span <= turn * (1.0 + 1e-6) && !partTurn) || span < Precision::Angular()) {
+        return {};
+    }
+    const gp_Vec advance(pointAt(first), pointAt(first + (last - first) * turn / span));
+    return HelixWinding {placed, std::fabs(advance.Dot(gp_Vec(placed.Direction()))), span, first, last};
+}
+
+/// The extent of \a shape along \a axis's direction
+double extentAlong(const TopoDS_Shape& shape, const gp_Ax1& axis)
+{
+    gp_Trsf toAxis;
+    toAxis.SetTransformation(gp_Ax3(axis.Location(), axis.Direction()));
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape.Moved(TopLoc_Location(toAxis)), box, false, false);
+    if (box.IsVoid()) {
+        return 0.0;
+    }
+    double xMin, yMin, zMin, xMax, yMax, zMax;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    return zMax - zMin;
+}
+
+/// A helix in \a path whose turns \a profile, swept along it, overlaps from one turn to the next:
+/// the profile's extent along the axis beyond the pitch (Onshape refuses it, SWEEP_FAILED; ops#660).
+/// Turns that only touch sweep. The helix's pitch and the profile's extent, or none. \a scale:
+/// the largest the scale law makes the profile (1 without one): a profile scaled up along the
+/// helix overlaps the turn before where it grows past the pitch (it swept a self-intersecting
+/// solid, Up-to-date, before the ops#666 skeptic's review). Taking the largest size, the check
+/// refuses a few scales whose turns would only nearly overlap: loud, never silent.
+std::optional<std::pair<double, double>> overlappingTurns(
+    const TopoDS_Shape& path,
+    const TopoDS_Shape& profile,
+    double scale = 1.0
+)
+{
+    for (TopExp_Explorer it(path, TopAbs_EDGE); it.More(); it.Next()) {
+        if (const auto winding = helixWinding(TopoDS::Edge(it.Current()))) {
+            const double extent = extentAlong(profile, winding->axis) * std::max(1.0, scale);
+            if (extent > winding->pitch + 1e-6) {
+                return std::make_pair(winding->pitch, extent);
+            }
+        }
+    }
+    return {};
+}
+
+/// A helix edge (\a winding its winding) cut at each whole turn from its start, as AdditiveHelix
+/// breaks its path at each turn: a sweep along one edge of five turns, its profile's base on the
+/// cylinder, fused with the cylinder into 2 solids with BOP errors, where Onshape (and the broken
+/// path) gives one part (ops#665). Empty when it can't be cut.
+std::vector<TopoDS_Edge> helixTurns(const TopoDS_Edge& edge, const HelixWinding& winding)
+{
+    constexpr double turn = 2.0 * std::numbers::pi;
+    const double first = winding.first;
+    const double last = winding.last;
+    const double span = winding.span;
+    // A piece shorter than this at the end would be a sliver: the last turn takes it
+    const double sliver = 1e-6 * turn;
+    TopLoc_Location location;
+    double first3d = 0.0;
+    double last3d = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first3d, last3d);
+    if (curve.IsNull() || std::fabs(first3d - first) > Precision::PConfusion()
+        || std::fabs(last3d - last) > Precision::PConfusion()) {
+        return {};
+    }
+    if (!location.IsIdentity()) {
+        curve = Handle(Geom_Curve)::DownCast(curve->Transformed(location.Transformation()));
+    }
+    TopoDS_Vertex start;
+    TopoDS_Vertex end;
+    TopExp::Vertices(edge, start, end);  // by parameter, whatever the edge's orientation
+    std::vector<double> at {first};
+    for (int k = 1; k * turn < span - sliver; ++k) {
+        at.push_back(first + (last - first) * (k * turn / span));
+    }
+    at.push_back(last);
+    const double tolerance = BRep_Tool::Tolerance(edge);
+    std::vector<TopoDS_Edge> pieces;
+    TopoDS_Vertex from = start;
+    BRep_Builder builder;
+    for (size_t k = 1; k < at.size(); ++k) {
+        TopoDS_Vertex to = end;
+        if (k + 1 < at.size()) {
+            to = BRepBuilderAPI_MakeVertex(curve->Value(at[k])).Vertex();
+            builder.UpdateVertex(to, tolerance);
+        }
+        BRepBuilderAPI_MakeEdge piece(curve, from, to, at[k - 1], at[k]);
+        if (!piece.IsDone()) {
+            return {};
+        }
+        TopoDS_Edge made = piece.Edge();
+        builder.UpdateEdge(made, tolerance);
+        pieces.push_back(made);
+        from = to;
+    }
+    return pieces;
+}
+
+std::string withoutTags(const std::string& name);
+long lastTag(const std::string& name);
+std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element);
+std::string field(const std::string& text);
+std::string hashed(const std::string& text);
+
+/// \a path with every helix edge cut at its turns (helixTurns), made a wire as \a wire; \a path
+/// itself when no edge is cut. A helix whose turns \a profile makes touch stays whole: OCCT's
+/// sweep along its pieces fails (FindFromKey), along the one edge it builds, as Onshape does.
+/// Turn k (counted from the helix's start, by parameter) is named by its edge's name and k, `TRN`,
+/// and the vertex k turns from the start by the edge's name and k, `TRV`; the helix's own ends
+/// keep their names. Named as pieces modified from the edge (batch 6's R1, ops#640), the turns
+/// were twins and the last was told apart by the end vertex alone, so a reference on turn 2 of 2
+/// followed the end piece when an edit added turns. By its place from the start, turn k keeps
+/// its name whatever the number of turns, and a turn that goes takes its name with it.
+Part::TopoShape withHelixTurns(
+    const Part::TopoShape& path,
+    Part::TopoShape wire,
+    const TopoDS_Shape& profile
+)
+{
+    std::vector<Part::TopoShape> edges;
+    bool cut = false;
+    for (const Part::TopoShape& edge : path.getSubTopoShapes(TopAbs_EDGE)) {
+        const TopoDS_Edge& whole = TopoDS::Edge(edge.getShape());
+        const std::optional<HelixWinding> winding = helixWinding(whole, true);
+        std::vector<TopoDS_Edge> pieces;
+        if (winding && extentAlong(profile, winding->axis) < winding->pitch * (1.0 - 1e-4)) {
+            pieces = helixTurns(whole, *winding);
+        }
+        if (pieces.empty()) {
+            edges.push_back(edge);
+            continue;
+        }
+        cut = true;
+        const std::string name = firstName(path, whole);
+        const std::string bare = withoutTags(name);
+        const long tag = lastTag(name);
+        auto turnName = [&](const char* op, char type, size_t k) {
+            return Data::MappedName(Data::MappedName::makeEncodedSection(
+                {hashed(field(bare) + field(op) + field(std::to_string(k)))},
+                {},
+                static_cast<int>(tag),
+                op,
+                0,
+                type,
+                0,
+                {Data::MAPPER_FLAG_SOURCE}
+            ));
+        };
+        TopoDS_Vertex start;
+        TopoDS_Vertex end;
+        TopExp::Vertices(whole, start, end);  // by parameter, as helixTurns cuts
+        for (size_t k = 0; k < pieces.size(); ++k) {
+            Part::TopoShape named(pieces[k], edge.Tag, edge.Hasher, edge.getHistoryAlgorithm());
+            named.setElementName(
+                Data::IndexedName::fromConst("Edge", 1),
+                turnName("TRN", 'E', k + 1),
+                edge.Tag
+            );
+            TopoDS_Vertex from;
+            TopoDS_Vertex to;
+            TopExp::Vertices(pieces[k], from, to);
+            for (const auto& [vertex, cutAt] : {std::pair {from, k}, std::pair {to, k + 1}}) {
+                const int at = named.findShape(vertex);
+                if (at <= 0) {
+                    continue;
+                }
+                const Data::IndexedName element = Data::IndexedName::fromConst("Vertex", at);
+                const TopoDS_Vertex& own = cutAt == 0 ? start : end;
+                if (cutAt == 0 || cutAt == pieces.size()) {
+                    // The helix's own end: its name as it was
+                    const int index = path.findShape(own);
+                    if (index <= 0) {
+                        continue;
+                    }
+                    for (const auto& [mapped, sids] :
+                         path.getElementMappedNames(Data::IndexedName::fromConst("Vertex", index))) {
+                        named.setElementName(element, mapped, edge.Tag, &sids);
+                    }
+                    continue;
+                }
+                named.setElementName(element, turnName("TRV", 'V', cutAt), edge.Tag);
+            }
+            edges.push_back(named);
+        }
+    }
+    if (!cut) {
+        return path;
+    }
+    wire.makeElementWires(edges);
+    if (wire.isNull() || wire.getShape().ShapeType() != TopAbs_WIRE) {
+        return path;
+    }
+    return wire;
+}
+
+/// Pairs of \a wire's edges, adjacent or not, by the points where adjacent ones meet: \a visit
+/// gets the two edges, whether they follow each other along the wire, and the ends they share
+/// (within \a tolerance), for the pairs whose boxes come within \a reach of each other. Stops at
+/// the first visit that returns a point.
+template<typename Visit>
+std::optional<gp_Pnt> edgePairs(const TopoDS_Wire& wire, double reach, Visit visit)
+{
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(wire);
+    const size_t n = edges.size();
+    std::vector<Bnd_Box> boxes(n);
+    std::vector<std::array<gp_Pnt, 2>> ends(n);
+    for (size_t i = 0; i < n; ++i) {
+        BRepBndLib::Add(edges[i], boxes[i]);
+        boxes[i].Enlarge(reach / 2);
+        ends[i] = {
+            BRep_Tool::Pnt(TopExp::FirstVertex(edges[i], true)),
+            BRep_Tool::Pnt(TopExp::LastVertex(edges[i], true))
+        };
+    }
+    const bool closed = n > 1 && ends[0][0].Distance(ends[n - 1][1]) <= Precision::Confusion();
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            if (boxes[i].IsOut(boxes[j])) {
+                continue;
+            }
+            const bool adjacent = j == i + 1 || (closed && i == 0 && j == n - 1);
+            std::vector<gp_Pnt> shared;
+            if (adjacent) {
+                for (const gp_Pnt& a : ends[i]) {
+                    for (const gp_Pnt& b : ends[j]) {
+                        if (a.Distance(b) <= Precision::Confusion()) {
+                            shared.push_back(a);
+                        }
+                    }
+                }
+            }
+            if (std::optional<gp_Pnt> found = visit(edges[i], edges[j], adjacent, shared)) {
+                return found;
+            }
+        }
+    }
+    return {};
+}
+
+/// Where \a wire touches or crosses itself: two edges meeting other than at the ends where
+/// adjacent edges join, or an edge turning straight back along the one before. Onshape refuses
+/// such a path (SWEEP_PATH_FAILED; oracle 9, ops#660). One edge crossing itself isn't looked for.
+std::optional<gp_Pnt> pathTouchesItself(const TopoDS_Wire& wire)
+{
+    constexpr double tolerance = 1e-6;
+    return edgePairs(
+        wire,
+        2 * tolerance,
+        [](const TopoDS_Edge& a, const TopoDS_Edge& b, bool adjacent, const std::vector<gp_Pnt>& shared
+        ) -> std::optional<gp_Pnt> {
+            BRepExtrema_DistShapeShape distance(a, b);
+            if (!distance.IsDone() || distance.Value() > tolerance) {
+                return {};
+            }
+            for (int k = 1; k <= distance.NbSolution(); ++k) {
+                const gp_Pnt at = distance.PointOnShape1(k);
+                if (std::ranges::none_of(shared, [&](const gp_Pnt& p) {
+                        return p.Distance(at) <= tolerance;
+                    })) {
+                    return at;
+                }
+            }
+            // Straight back: at a joint, the second edge leaves along the first's way in
+            if (adjacent && shared.size() == 1) {
+                const bool aEndsThere = BRep_Tool::Pnt(TopExp::LastVertex(a, true)).Distance(shared[0])
+                    <= Precision::Confusion();
+                const bool bStartsThere
+                    = BRep_Tool::Pnt(TopExp::FirstVertex(b, true)).Distance(shared[0])
+                    <= Precision::Confusion();
+                const gp_Dir in = tangentAlong(a, !aEndsThere);
+                const gp_Dir out = tangentAlong(b, bStartsThere);
+                // Along the wire, the first edge runs into the joint and the second away from it
+                const double turn = (aEndsThere ? 1.0 : -1.0) * (bStartsThere ? 1.0 : -1.0)
+                    * in.Dot(out);
+                if (turn < -1.0 + 1e-9) {
+                    return shared[0];
+                }
+            }
+            return {};
+        }
+    );
+}
+
+/// Where non-adjacent edges of \a wire pass within twice \a reach of each other (the profile's
+/// reach about the path), and how near: tubes swept along them may overlap there
+std::optional<std::pair<gp_Pnt, double>> pathPassesNearItself(const TopoDS_Wire& wire, double reach)
+{
+    double nearest = 0.0;
+    const std::optional<gp_Pnt> at = edgePairs(
+        wire,
+        2 * reach,
+        [&](const TopoDS_Edge& a, const TopoDS_Edge& b, bool adjacent, const std::vector<gp_Pnt>&
+        ) -> std::optional<gp_Pnt> {
+            if (adjacent) {
+                return {};
+            }
+            BRepExtrema_DistShapeShape distance(a, b);
+            if (!distance.IsDone() || distance.Value() >= 2 * reach || distance.NbSolution() < 1) {
+                return {};
+            }
+            nearest = distance.Value();
+            return distance.PointOnShape1(1);
+        }
+    );
+    if (!at) {
+        return {};
+    }
+    return std::make_pair(*at, nearest);
+}
+
+/// Whether \a shape intersects itself, by OCCT's self-interference check
+bool intersectsItself(const TopoDS_Shape& shape)
+{
+    BOPAlgo_ArgumentAnalyzer check;
+    check.SetShape1(BRepBuilderAPI_Copy(shape).Shape());
+    check.SelfInterMode() = true;
+    check.Perform();
+    return check.HasFaulty();
+}
+
+/// The union of a sweep's tubes where they overlap (ops#666, `notes\sweep-design.md` 13): the solid
+/// and the history from the sweep's faces, or why it couldn't be built (any doubt is an error, never a
+/// guess), or neither when the faces don't touch each other (the sweep stays as it is)
+struct SweepUnion
+{
+    TopoDS_Shape solid;
+    occ::handle<BRepTools_History> history;
+    std::string error;
+};
+
+/// A shape's volume, integrated adaptively (the default integration is badly wrong on faces of many
+/// B-spline spans, ops#414)
+double volumeOf(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props, 1e-7, true);
+    return props.Mass();
+}
+
+/// The union of the swept \a solids (each turned outward), each counted +1, or -1 at an odd \a depth
+/// (a hole's shell of a closed spine's holed profile). The faces split one another
+/// (BOPAlgo_MakerVolume, each face an argument of its own: an argument isn't checked against
+/// itself), the cells they bound are numbered by their winding number from the exterior (0), and the
+/// cells of number >= 1 are kept, as Onshape keeps a point in some section's area
+SweepUnion unionOfOverlaps(const std::vector<TopoDS_Shape>& solids, const std::vector<int>& depths)
+{
+    SweepUnion out;
+    struct Original
+    {
+        TopoDS_Face face;  // oriented as in its solid: its normal points out of the solid
+        int sign;
+    };
+    std::vector<Original> originals;
+    NCollection_List<TopoDS_Shape> arguments;
+    double fuzzy = 0.0;
+    double naive = 0.0;
+    for (size_t i = 0; i < solids.size(); ++i) {
+        const int sign = depths[i] % 2 ? -1 : 1;
+        naive += sign * volumeOf(solids[i]);
+        for (TopExp_Explorer it(solids[i], TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            originals.push_back({face, sign});
+            arguments.Append(face);
+            fuzzy = std::max(fuzzy, BRep_Tool::Tolerance(face));
+        }
+    }
+    BOPAlgo_MakerVolume maker;
+    maker.SetArguments(arguments);
+    maker.SetIntersect(true);
+    maker.SetNonDestructive(true);  // the start cap shares the sketch's edges
+    maker.SetToFillHistory(true);
+    maker.SetFuzzyValue(fuzzy);  // a loose sweep (ops#448)
+    maker.Perform();
+    if (maker.HasErrors() || maker.HasWarnings()) {
+        std::ostringstream alerts;
+        maker.DumpErrors(alerts);
+        maker.DumpWarnings(alerts);
+        std::string text = alerts.str();
+        std::replace(text.begin(), text.end(), '\n', ' ');
+        // How many faces an alert names (a holed profile's tube left all of its faces unused)
+        int named = 0;
+        for (const occ::handle<Message_Alert>& alert :
+             maker.GetReport()->GetAlerts(Message_Warning)) {
+            const auto withShape = occ::down_cast<TopoDS_AlertWithShape>(alert);
+            for (TopExp_Explorer it(withShape.IsNull() ? TopoDS_Shape() : withShape->GetShape(),
+                                    TopAbs_FACE);
+                 it.More();
+                 it.Next()) {
+                ++named;
+            }
+        }
+        out.error = fmt::format("OCCT's volume maker: {}, {} faces", text, named);
+        return out;
+    }
+    const occ::handle<BRepTools_History> history = maker.History();
+    if (history.IsNull()) {
+        out.error = "no history";
+        return out;
+    }
+    if (!history->HasModified() && !history->HasGenerated()) {
+        return out;  // nothing touched: no overlap
+    }
+
+    // The pieces: each original face's images, or the face itself when left whole
+    TopTools_IndexedMapOfShape pieces;
+    std::vector<std::vector<size_t>> sources;  // per piece, the originals it lies on
+    for (size_t k = 0; k < originals.size(); ++k) {
+        const TopoDS_Face& face = originals[k].face;
+        if (history->IsRemoved(face)) {
+            out.error = "a face of the sweep was removed";
+            return out;
+        }
+        NCollection_List<TopoDS_Shape> images = history->Modified(face);
+        if (images.IsEmpty()) {
+            images.Append(face);
+        }
+        for (const TopoDS_Shape& image : images) {
+            if (image.ShapeType() != TopAbs_FACE) {
+                out.error = "a face's image isn't a face";
+                return out;
+            }
+            const int index = pieces.Add(image);
+            if (index > static_cast<int>(sources.size())) {
+                sources.emplace_back();
+            }
+            sources[index - 1].push_back(k);
+        }
+    }
+
+    // The cells and the pieces bounding them, each with the orientation its cell gives it
+    std::vector<TopoDS_Shape> cells;
+    for (TopExp_Explorer it(maker.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        cells.push_back(it.Current());
+    }
+    struct Side
+    {
+        size_t cell;
+        TopoDS_Face face;  // its normal points out of the cell
+    };
+    std::vector<std::vector<Side>> sides(pieces.Extent());
+    std::vector<std::optional<Side>> inner(pieces.Extent());
+    for (size_t c = 0; c < cells.size(); ++c) {
+        for (TopExp_Explorer it(cells[c], TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            const int index = pieces.FindIndex(face);
+            if (index == 0) {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(face, props);
+                const gp_Pnt at = props.CentreOfMass();
+                out.error = fmt::format(
+                    "a cell is bounded by a face that isn't a piece of the sweep (area {:.6g} at "
+                    "({:.4g}, {:.4g}, {:.4g}))",
+                    props.Mass(), at.X(), at.Y(), at.Z());
+                return out;
+            }
+            // A piece inside its cell (OCCT's maker leaves an end cap flush on another tube's side
+            // inside the one cell of both): the same number on both sides, so a step of 0 (below)
+            std::vector<Side>& found = sides[index - 1];
+            const auto same = std::find_if(found.begin(), found.end(), [&](const Side& side) {
+                return side.cell == c;
+            });
+            if (face.Orientation() == TopAbs_INTERNAL || face.Orientation() == TopAbs_EXTERNAL
+                || same != found.end()) {
+                if (inner[index - 1] || (same == found.end() && !found.empty())) {
+                    out.error = "a piece lies inside a cell and bounds another";
+                    return out;
+                }
+                if (same != found.end()) {
+                    found.erase(same);
+                }
+                inner[index - 1] = Side {c, face};
+                continue;
+            }
+            if (inner[index - 1]) {
+                out.error = "a piece lies inside a cell and bounds another";
+                return out;
+            }
+            found.push_back({c, face});
+        }
+    }
+
+    // A piece's winding step seen from one of its cells: the sum over the originals it lies on of
+    // +1 where the original's normal agrees with the cell's outward one (crossing out of the cell
+    // leaves that tube), -1 where it doesn't; signed by the original's depth
+    const occ::handle<IntTools_Context> context = new IntTools_Context();
+    auto stepOf = [&](size_t piece, const Side& side) -> std::optional<int> {
+        gp_Pnt point;
+        gp_Pnt2d uv;
+        if (BOPTools_AlgoTools3D::PointInFace(side.face, point, uv, context) != 0) {
+            return {};
+        }
+        gp_Pnt on;
+        gp_Vec normal;
+        BRepGProp_Face(side.face).Normal(uv.X(), uv.Y(), on, normal);
+        if (normal.Magnitude() < Precision::Confusion()) {
+            return {};
+        }
+        int step = 0;
+        for (const size_t k : sources[piece]) {
+            const TopoDS_Face& face = originals[k].face;
+            GeomAPI_ProjectPointOnSurf projection(point, BRep_Tool::Surface(face));
+            if (!projection.IsDone() || projection.NbPoints() < 1
+                || projection.LowerDistance() > std::max(1e-6, 10 * BRep_Tool::Tolerance(face))) {
+                return {};
+            }
+            double u = 0.0;
+            double v = 0.0;
+            projection.LowerDistanceParameters(u, v);
+            gp_Vec outward;
+            BRepGProp_Face(face).Normal(u, v, on, outward);
+            if (outward.Magnitude() < Precision::Confusion()) {
+                return {};
+            }
+            const double cosine = normal.Normalized().Dot(outward.Normalized());
+            if (std::abs(cosine) < 0.99) {
+                return {};  // a piece lies on its originals; their normals agree or oppose
+            }
+            step += (cosine > 0 ? 1 : -1) * originals[k].sign;
+        }
+        return step;
+    };
+
+    // Number the cells from the exterior, breadth first
+    std::vector<std::optional<int>> number(cells.size());
+    std::vector<size_t> queue;
+    auto assign = [&](size_t cell, int value) {
+        if (value < 0 || (number[cell] && *number[cell] != value)) {
+            return false;
+        }
+        if (!number[cell]) {
+            number[cell] = value;
+            queue.push_back(cell);
+        }
+        return true;
+    };
+    std::vector<std::vector<int>> steps(pieces.Extent());
+    for (size_t p = 0; p < sides.size(); ++p) {
+        if (inner[p]) {
+            if (!sides[p].empty() || stepOf(p, *inner[p]) != std::optional<int>(0)) {
+                out.error = "a piece inside a cell changes the winding number";
+                return out;
+            }
+            continue;
+        }
+        if (sides[p].empty() || sides[p].size() > 2) {
+            out.error = "a piece bounds no cell, or more than two";
+            return out;
+        }
+        for (const Side& side : sides[p]) {
+            const std::optional<int> step = stepOf(p, side);
+            if (!step) {
+                out.error = "a piece's normal couldn't be compared with its faces'";
+                return out;
+            }
+            steps[p].push_back(*step);
+        }
+        if (sides[p].size() == 2 && steps[p][0] != -steps[p][1]) {
+            out.error = "a piece's two sides disagree";
+            return out;
+        }
+        // The exterior (0) beyond a piece of one cell: the cell's number is its step
+        if (sides[p].size() == 1 && !assign(sides[p][0].cell, steps[p][0])) {
+            out.error = "a cell numbered twice, or below 0";
+            return out;
+        }
+    }
+    for (size_t next = 0; next < queue.size(); ++next) {
+        const size_t cell = queue[next];
+        for (size_t p = 0; p < sides.size(); ++p) {
+            if (sides[p].size() != 2) {
+                continue;
+            }
+            for (size_t s = 0; s < 2; ++s) {
+                if (sides[p][s].cell == cell
+                    && !assign(sides[p][1 - s].cell, *number[cell] - steps[p][s])) {
+                    out.error = "a cell numbered twice, or below 0";
+                    return out;
+                }
+            }
+        }
+    }
+    double counted = 0.0;
+    double kept = 0.0;
+    std::vector<double> volumes(cells.size());
+    for (size_t c = 0; c < cells.size(); ++c) {
+        if (!number[c]) {
+            out.error = "a cell left unnumbered";
+            return out;
+        }
+        volumes[c] = volumeOf(cells[c]);
+        counted += *number[c] * volumes[c];
+        kept += *number[c] >= 1 ? volumes[c] : 0.0;
+    }
+    // The winding number integrates to the naive sweep's volume (the divergence theorem)
+    auto agrees = [](double a, double b) {
+        return std::abs(a - b) <= 1e-5 * std::max(std::abs(a), std::abs(b)) + 1e-7;
+    };
+    if (!agrees(counted, naive)) {
+        out.error = fmt::format("the cells' volumes, {:.9g}, don't add up to the sweep's, {:.9g}",
+                                counted, naive);
+        return out;
+    }
+
+    // The union's boundary: the pieces between a kept cell and one of number 0 or the exterior,
+    // oriented out of the kept cell
+    NCollection_List<TopoDS_Shape> boundary;
+    for (size_t p = 0; p < sides.size(); ++p) {
+        std::vector<size_t> inKept;
+        for (size_t s = 0; s < sides[p].size(); ++s) {
+            if (*number[sides[p][s].cell] >= 1) {
+                inKept.push_back(s);
+            }
+        }
+        if (inKept.size() == 1) {
+            boundary.Append(sides[p][inKept.front()].face);
+        }
+    }
+    BOPAlgo_BuilderSolid builder;
+    builder.SetShapes(boundary);
+    builder.SetContext(context);
+    builder.Perform();
+    if (builder.HasErrors() || builder.HasWarnings() || builder.Areas().Extent() != 1) {
+        out.error = "the union's faces don't make one solid";
+        return out;
+    }
+    out.solid = builder.Areas().First();
+    if (!agrees(volumeOf(out.solid), kept)) {
+        out.error = "the union's volume isn't its cells'";
+        out.solid.Nullify();
+        return out;
+    }
+    // The history as a fuse's: only the images in the union (the maker's lists every cell's pieces),
+    // so a face whose one piece is kept keeps its name, as a face a fuse notches does
+    TopTools_IndexedMapOfShape inUnion;
+    TopExp::MapShapes(out.solid, inUnion);
+    out.history = new BRepTools_History();
+    for (const TopoDS_Shape& solid : solids) {
+        for (const TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(solid, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                const TopoDS_Shape& element = elements(i);
+                for (const TopoDS_Shape& image : history->Modified(element)) {
+                    if (inUnion.Contains(image)) {
+                        out.history->AddModified(element, image);
+                    }
+                }
+                for (const TopoDS_Shape& image : history->Generated(element)) {
+                    if (inUnion.Contains(image)) {
+                        out.history->AddGenerated(element, image);
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
 /// The first wire of \a shape (a section the sweep reports), or a null one
 TopoDS_Wire firstWire(const TopoDS_Shape& shape)
 {
@@ -1182,6 +1934,44 @@ std::vector<gp_Pnt> pointsAlong(const TopoDS_Wire& wire)
         }
     }
     return points;
+}
+
+/// How far the multisection pipe's \a sections reach about the path \a wire: for each, the largest
+/// distance from its points (each wire's, or its vertices') to its own path point, the point of the
+/// path nearest their middle. A section's box diagonal reaches 2.6 times a hexagon's circumradius
+/// and armed the overlap check on multisection helix pipes whose tubes stay clear (sweeps 11).
+double sectionsReach(const TopoDS_Wire& wire, const std::vector<TopoDS_Shape>& sections)
+{
+    double reach = 0.0;
+    for (const TopoDS_Shape& section : sections) {
+        std::vector<gp_Pnt> points;
+        for (TopExp_Explorer it(section, TopAbs_WIRE); it.More(); it.Next()) {
+            const std::vector<gp_Pnt> along = pointsAlong(TopoDS::Wire(it.Current()));
+            points.insert(points.end(), along.begin(), along.end());
+        }
+        if (points.empty()) {
+            for (TopExp_Explorer it(section, TopAbs_VERTEX); it.More(); it.Next()) {
+                points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+            }
+        }
+        if (points.empty()) {
+            continue;
+        }
+        gp_XYZ sum(0, 0, 0);
+        for (const gp_Pnt& point : points) {
+            sum += point.XYZ();
+        }
+        const gp_Pnt middle(sum / static_cast<double>(points.size()));
+        BRepExtrema_DistShapeShape nearest(BRepBuilderAPI_MakeVertex(middle).Vertex(), wire);
+        if (!nearest.IsDone() || nearest.NbSolution() < 1) {
+            continue;
+        }
+        const gp_Pnt onPath = nearest.PointOnShape2(1);
+        for (const gp_Pnt& point : points) {
+            reach = std::max(reach, onPath.Distance(point));
+        }
+    }
+    return reach;
 }
 
 /// The normal of the plane of \a points, oriented by their order around it (Newell's method):
@@ -4614,6 +5404,164 @@ CornerTilts foldsAlongCurves(
     }
     return tilts;
 }
+// Onshape's Sweep, slice 3 (notes\sweep-design.md 3): twist, scale and lock faces
+
+/// A place on a path, its edges in order: the point, the tangent the way the path runs, the
+/// second derivative there (by the arc length's direction, not normalized) and the length from
+/// the path's start
+struct PathSample
+{
+    gp_Pnt point;
+    gp_Dir tangent;
+    gp_Vec second;
+    double length = 0.0;
+};
+
+/// Samples of \a edges (a wire's, in order), at least \a perEdge each and one per \a turn radians
+/// of the edge's bend and \a perLength per unit of its length; each joint once
+std::vector<PathSample> samplesAlong(
+    const std::vector<TopoDS_Edge>& edges,
+    int perEdge,
+    double turn,
+    double perLength = 0.0
+)
+{
+    std::vector<PathSample> samples;
+    double done = 0.0;
+    for (const TopoDS_Edge& edge : edges) {
+        BRepAdaptor_Curve curve(edge);
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const double length = GCPnts_AbscissaPoint::Length(curve, first, last);
+        int count = std::max(perEdge, static_cast<int>(std::ceil(length * perLength)));
+        if (curve.GetType() != GeomAbs_Line) {
+            // The bend: the tangent's turn summed over a fine sampling
+            double bend = 0.0;
+            gp_Pnt p;
+            gp_Vec before;
+            curve.D1(first, p, before);
+            for (int i = 1; i <= 64; ++i) {
+                gp_Vec now;
+                curve.D1(first + (last - first) * i / 64, p, now);
+                if (before.Magnitude() > gp::Resolution() && now.Magnitude() > gp::Resolution()) {
+                    bend += before.Angle(now);
+                }
+                before = now;
+            }
+            count = std::max(count, static_cast<int>(std::ceil(bend / turn)));
+        }
+        const size_t from = samples.empty() ? 0 : 1;
+        for (int i = static_cast<int>(from); i <= count; ++i) {
+            const double t = static_cast<double>(i) / count;
+            const double at = reversed ? last - t * (last - first) : first + t * (last - first);
+            gp_Pnt point;
+            gp_Vec d1, d2;
+            curve.D2(at, point, d1, d2);
+            if (reversed) {
+                d1.Reverse();
+            }
+            if (d1.Magnitude() < gp::Resolution()) {
+                continue;
+            }
+            PathSample sample;
+            sample.point = point;
+            sample.tangent = gp_Dir(d1);
+            // The curvature vector: d2 less its part along d1, over |d1|^2
+            const double speed2 = d1.SquareMagnitude();
+            sample.second = (d2 - d1 * (d2.Dot(d1) / speed2)) / speed2;
+            sample.length = done
+                + (reversed ? GCPnts_AbscissaPoint::Length(curve, at, last)
+                            : GCPnts_AbscissaPoint::Length(curve, first, at));
+            samples.push_back(sample);
+        }
+        done += length;
+    }
+    return samples;
+}
+
+/// Where \a edges (in order) turn at a joint by more than a hundredth of a degree: the joint
+std::optional<gp_Pnt> sharpJoint(const std::vector<TopoDS_Edge>& edges, bool closed)
+{
+    for (size_t i = 0; i < edges.size(); ++i) {
+        if (i + 1 == edges.size() && !closed) {
+            break;
+        }
+        const TopoDS_Edge& next = edges[(i + 1) % edges.size()];
+        if (tangentAlong(edges[i], false).Angle(tangentAlong(next, true)) > 1.0e-2 * M_PI / 180.0) {
+            return BRep_Tool::Pnt(TopExp::FirstVertex(next, true));
+        }
+    }
+    return std::nullopt;
+}
+
+/// The frame's normal before the twist, one per sample, from \a normalAt where given, else
+/// rotation-minimizing: carried from the start with the least turn (double reflection), which
+/// on a plane is the plane's normal crossed with the tangent, as OCCT's corrected Frenet frame
+std::vector<gp_Dir> carriedNormals(const std::vector<PathSample>& samples)
+{
+    std::vector<gp_Dir> normals;
+    if (samples.empty()) {
+        return normals;
+    }
+    const gp_Dir& t0 = samples.front().tangent;
+    gp_Vec start = gp_Vec(t0).Crossed(gp_Vec(0, 0, 1));
+    if (start.Magnitude() < 1.0e-3) {
+        start = gp_Vec(t0).Crossed(gp_Vec(1, 0, 0));
+    }
+    normals.emplace_back(start);
+    for (size_t i = 1; i < samples.size(); ++i) {
+        const gp_Vec v1(samples[i - 1].point, samples[i].point);
+        const double c1 = v1.SquareMagnitude();
+        gp_Vec r = gp_Vec(normals.back());
+        gp_Vec t = gp_Vec(samples[i - 1].tangent);
+        if (c1 > gp::Resolution()) {
+            r -= v1 * (2.0 / c1 * v1.Dot(r));
+            t -= v1 * (2.0 / c1 * v1.Dot(t));
+        }
+        const gp_Vec v2 = gp_Vec(samples[i].tangent) - t;
+        const double c2 = v2.SquareMagnitude();
+        if (c2 > gp::Resolution()) {
+            r -= v2 * (2.0 / c2 * v2.Dot(r));
+        }
+        // Square to the tangent again, against rounding
+        r -= gp_Vec(samples[i].tangent) * r.Dot(gp_Vec(samples[i].tangent));
+        normals.emplace_back(r);
+    }
+    return normals;
+}
+
+/// A guide through each sample at \a reach along its normal \a normals[i] turned by \a angles[i]
+/// about the tangent: one B-spline edge through them all
+std::optional<TopoDS_Wire> guideThrough(
+    const std::vector<PathSample>& samples,
+    const std::vector<gp_Dir>& normals,
+    const std::vector<double>& angles,
+    double reach
+)
+{
+    if (samples.size() < 2) {
+        return std::nullopt;
+    }
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, static_cast<int>(samples.size()));
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const gp_Vec n(normals[i]);
+        const gp_Vec b = gp_Vec(samples[i].tangent).Crossed(n);
+        const gp_Vec offset = (n * std::cos(angles[i]) + b * std::sin(angles[i])) * reach;
+        points->SetValue(static_cast<int>(i) + 1, samples[i].point.Translated(offset));
+    }
+    GeomAPI_Interpolate interpolate(points, false, Precision::Confusion());
+    interpolate.Perform();
+    if (!interpolate.IsDone()) {
+        return std::nullopt;
+    }
+    BRepBuilderAPI_MakeEdge edge(interpolate.Curve());
+    if (!edge.IsDone()) {
+        return std::nullopt;
+    }
+    return BRepBuilderAPI_MakeWire(edge.Edge()).Wire();
+}
+
 }  // namespace
 
 PipeCapFacing PartDesign::pipeCapsFacing(
@@ -4730,7 +5678,10 @@ const char* Pipe::TransitionEnums[] = {"Transformed", "Right corner", "Round cor
 const char* Pipe::ModeEnums[] = {"Standard", "Fixed", "Frenet", "Auxiliary", "Binormal", nullptr};
 const char* Pipe::TransformEnums[]
     = {"Constant", "Multisection", "Linear", "S-shape", "Interpolation", nullptr};
-const char* Pipe::ProfileControlEnums[] = {"None", "Keep orientation", "Advanced", nullptr};
+const char* Pipe::ProfileControlEnums[]
+    = {"None", "Keep orientation", "Advanced", "Lock faces", "Lock direction", nullptr};
+const char* Pipe::TwistTypeEnums[] = {"Turns", "Angle", "Pitch", nullptr};
+const char* Pipe::BodyTypeEnums[] = {"Solid", "Thin", nullptr};
 
 
 PROPERTY_SOURCE(PartDesign::Pipe, PartDesign::ProfileBased)
@@ -4862,6 +5813,121 @@ Pipe::Pipe()
         App::Prop_None,
         "More path edges, from other objects: joined with the Spine's in any order"
     );
+    // Slice 3 (notes\sweep-design.md 3; Onshape's defaults where known)
+    ADD_PROPERTY_TYPE(
+        LockFaces,
+        (nullptr),
+        "Sweep",
+        App::Prop_None,
+        "Faces the path lies on: with 'Lock faces' the profile keeps its angle to their normal"
+    );
+    ADD_PROPERTY_TYPE(
+        LockDirection,
+        (nullptr),
+        "Sweep",
+        App::Prop_None,
+        "A plane, planar face or straight edge: with 'Lock direction' the profile's plane keeps containing its direction"
+    );
+    ADD_PROPERTY_TYPE(
+        HasTwist,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The profile turns about the path, linearly in its length"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistType,
+        (long(1)),
+        "Sweep",
+        App::Prop_None,
+        "The twist given as Turns, an Angle, or a Pitch (the length of one turn)"
+    );
+    ADD_PROPERTY_TYPE(
+        Turns,
+        (1.0),
+        "Sweep",
+        App::Prop_None,
+        "The twist's turns from the profile to the path's end"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistAngle,
+        (30.0),
+        "Sweep",
+        App::Prop_None,
+        "The twist's angle from the profile to the path's end"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistPitch,
+        (10.0),
+        "Sweep",
+        App::Prop_None,
+        "The path's length for one turn of the twist"
+    );
+    ADD_PROPERTY_TYPE(
+        TwistCCW,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "Counter-clockwise about the path's direction (off: clockwise)"
+    );
+    ADD_PROPERTY_TYPE(
+        HasScale,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The profile scales linearly in the path's length"
+    );
+    ADD_PROPERTY_TYPE(
+        ScaleFactor,
+        (1.0),
+        "Sweep",
+        App::Prop_None,
+        "The profile's scale at the path's end"
+    );
+    ADD_PROPERTY_TYPE(
+        BodyType,
+        (long(0)),
+        "Sweep",
+        App::Prop_None,
+        "Solid, or Thin: a wall around the profile's curves"
+    );
+    ADD_PROPERTY_TYPE(
+        Thickness1,
+        (1.0),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall's thickness"
+    );
+    ADD_PROPERTY_TYPE(
+        Thickness2,
+        (0.0),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall's thickness on the other side"
+    );
+    ADD_PROPERTY_TYPE(
+        Midplane,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall centred on the profile's curves"
+    );
+    ADD_PROPERTY_TYPE(
+        FlipWall,
+        (false),
+        "Sweep",
+        App::Prop_None,
+        "The thin wall on the other side of the profile's curves"
+    );
+    ADD_PROPERTY_TYPE(
+        TrimEnds,
+        (true),
+        "Sweep",
+        App::Prop_None,
+        "Onshape's Thin option: no effect, as in Onshape"
+    );
+    TwistType.setEnums(TwistTypeEnums);
+    BodyType.setEnums(BodyTypeEnums);
     Mode.setEnums(ModeEnums);
     Transition.setEnums(TransitionEnums);
     Transformation.setEnums(TransformEnums);
@@ -4877,9 +5943,10 @@ void Pipe::onChanged(const App::Property* prop)
         if (prop == &ProfileControl) {
             // None sweeps in Standard (with Frenet's frame where it is steady off a plane), Keep
             // orientation in Fixed: a translation, whatever the profile's plane
-            const long mode = ProfileControl.getValue() == 0 ? 0
-                : ProfileControl.getValue() == 1             ? 1
-                                                             : -1;
+            // Lock faces sweeps in Standard along a guide (execute), Lock direction in Binormal
+            static const long modes[] = {0, 1, -1, 0, 4};
+            const long control = ProfileControl.getValue();
+            const long mode = control >= 0 && control < 5 ? modes[control] : -1;
             if (mode >= 0 && Mode.getValue() != mode) {
                 settingMode = true;
                 Mode.setValue(mode);
@@ -4928,6 +5995,321 @@ std::optional<gp_Dir> Pipe::profileNormal(const TopLoc_Location& invObjLoc) cons
     return normal.Transformed(invObjLoc.Transformation());
 }
 
+namespace
+{
+/// The shape of \a object's \a sub (all of it when empty), in the Body's coordinates
+Part::TopoShape linkedShape(App::DocumentObject* object, const std::string& sub)
+{
+    if (!object) {
+        return {};
+    }
+    return Part::Feature::getTopoShape(
+        object,
+        Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            | Part::ShapeOption::NeedSubElement,
+        sub.empty() ? nullptr : sub.c_str()
+    );
+}
+
+/// LockDirection's direction: a plane's or planar face's normal, a straight edge's direction
+std::optional<gp_Dir> directionOf(const Part::TopoShape& shape)
+{
+    if (shape.isNull()) {
+        return std::nullopt;
+    }
+    TopExp_Explorer faces(shape.getShape(), TopAbs_FACE);
+    if (faces.More()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(faces.Current()));
+        if (surface.GetType() == GeomAbs_Plane) {
+            return surface.Plane().Axis().Direction();
+        }
+        return std::nullopt;
+    }
+    TopExp_Explorer edges(shape.getShape(), TopAbs_EDGE);
+    if (edges.More()) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+        if (curve.GetType() == GeomAbs_Line) {
+            return curve.Line().Direction();
+        }
+    }
+    return std::nullopt;
+}
+
+/// The surface normal of the nearest of \a faces at \a point, with its distance
+std::pair<double, gp_Vec> nearestNormal(const std::vector<TopoDS_Face>& faces, const gp_Pnt& point)
+{
+    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
+    double best = std::numeric_limits<double>::max();
+    gp_Vec normal;
+    for (const TopoDS_Face& face : faces) {
+        BRepExtrema_DistShapeShape distance(vertex, face);
+        if (!distance.IsDone() || distance.NbSolution() < 1 || distance.Value() >= best) {
+            continue;
+        }
+        GeomAPI_ProjectPointOnSurf onSurface(distance.PointOnShape2(1), BRep_Tool::Surface(face));
+        if (onSurface.NbPoints() < 1) {
+            continue;
+        }
+        double u = 0, v = 0;
+        onSurface.LowerDistanceParameters(u, v);
+        gp_Pnt at;
+        gp_Vec du, dv;
+        BRep_Tool::Surface(face)->D1(u, v, at, du, dv);
+        gp_Vec n = du.Crossed(dv);
+        if (n.Magnitude() < gp::Resolution()) {
+            continue;
+        }
+        if (face.Orientation() == TopAbs_REVERSED) {
+            n.Reverse();
+        }
+        best = distance.Value();
+        normal = n;
+    }
+    return {best, normal};
+}
+}  // namespace
+
+std::optional<std::string> Pipe::prepareSlice3(
+    const Part::TopoShape& path,
+    const std::vector<TopoDS_Shape>& profileWires,
+    const TopLoc_Location& invObjLoc,
+    Handle(Law_Function)& scale
+)
+{
+    frameGuide.Nullify();
+    const long control = ProfileControl.getValue();
+    // Onshape offers twist only with None and Keep orientation (SW0): the lock modes ignore it
+    const bool twist = HasTwist.getValue() && control != 3 && control != 4;
+    const bool scaled = HasScale.getValue();
+    const bool lockFaces = control == 3;
+    if (!twist && !scaled && !lockFaces) {
+        return std::nullopt;
+    }
+    const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
+    auto inPlace = [&](const gp_Pnt& point) {
+        return pointText(point.Transformed(toBody));
+    };
+    if (path.shapeType() != TopAbs_WIRE || profileWires.empty()) {
+        return std::string(
+            "Pipe: twist, scale and 'Lock faces' sweep one profile along a path, without Sections"
+        );
+    }
+    const TopoDS_Wire& wire = TopoDS::Wire(path.getShape());
+    const bool closed = BRep_Tool::IsClosed(wire);
+    if ((twist || scaled) && closed) {
+        return std::string(
+            "Pipe: twist and scale run from the profile to the path's end, and this path is "
+            "closed. Open the path, or turn twist and scale off."
+        );
+    }
+    if (twist && control != 0 && control != 3 && control != 4) {
+        return std::string(
+            "Pipe: twist turns the profile about the path from the frame it is carried in: use "
+            "the profile control None, Lock faces or Lock direction ('Keep orientation' and "
+            "'Advanced' have no such frame)."
+        );
+    }
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(wire);
+    if (twist || lockFaces) {
+        if (const std::optional<gp_Pnt> joint = sharpJoint(edges, closed)) {
+            const char* what = twist ? "twist" : "'Lock faces'";
+            return fmt::format(
+                "Pipe: {} needs a smooth path, and the path turns sharply at {}. Round the corner, "
+                "or turn {} off.",
+                what,
+                inPlace(*joint),
+                what
+            );
+        }
+    }
+    std::vector<PathSample> samples = samplesAlong(edges, 16, M_PI / 32);
+    if (samples.size() < 2) {
+        return std::string("Pipe: the path has no length");
+    }
+    const double total = samples.back().length;
+
+    // Where the profile lies along the path, and the end the scale and twist reach their values
+    // at: the far end from a profile at one end; from one in the middle (Extend to full path
+    // on), the end it would sweep to with the option off, and they go on linearly past the
+    // profile the other way (Onshape, SW12)
+    const ProfileFoot foot = profileFoot(profileWires, wire);
+    size_t nearest = 0;
+    for (size_t i = 1; i < samples.size(); ++i) {
+        if (samples[i].point.Distance(foot.at) < samples[nearest].point.Distance(foot.at)) {
+            nearest = i;
+        }
+    }
+    double from = samples[nearest].length;
+    double before = 0.0;
+    for (const TopoDS_Edge& edge : edges) {
+        // The foot's own place, more exactly than the nearest sample
+        BRepAdaptor_Curve curve(edge);
+        const double length = GCPnts_AbscissaPoint::Length(curve);
+        Extrema_ExtPC extrema(foot.at, curve);
+        if (extrema.IsDone()) {
+            for (int i = 1; i <= extrema.NbExt(); ++i) {
+                if (extrema.SquareDistance(i) > tieTolerance * tieTolerance) {
+                    continue;
+                }
+                const double at = extrema.Point(i).Parameter();
+                from = before
+                    + (edge.Orientation() == TopAbs_REVERSED
+                           ? GCPnts_AbscissaPoint::Length(curve, at, curve.LastParameter())
+                           : GCPnts_AbscissaPoint::Length(curve, curve.FirstParameter(), at));
+            }
+        }
+        before += length;
+    }
+    if (foot.atEnd) {
+        from = from < total / 2 ? 0.0 : total;
+    }
+    double to = from < total / 2 ? total : 0.0;
+    if (!foot.atEnd) {
+        // Twist too (SW17): reached at the one-way end, going on past the profile the other way
+        const std::optional<gp_Dir> normal = profileNormal(invObjLoc);
+        if (!normal) {
+            return std::string(
+                "Pipe: twist and scale with the profile in the middle of the path run to the end "
+                "the profile's plane faces away from, and this profile has no plane"
+            );
+        }
+        to = samples[nearest].tangent.Dot(*normal) > 0 ? 0.0 : total;
+    }
+    const double span = std::abs(to - from);
+    if (span < Precision::Confusion()) {
+        return std::string("Pipe: the profile lies at the path's end it would sweep to");
+    }
+
+    // The twist's rate in radians per unit of length, and samples to follow it, 64 a turn
+    double rate = 0.0;
+    if (twist) {
+        switch (TwistType.getValue()) {
+            case 0:  // Turns
+                rate = 2 * M_PI * Turns.getValue() / span;
+                break;
+            case 1:  // Angle
+                rate = Base::toRadians(TwistAngle.getValue()) / span;
+                break;
+            default:  // Pitch: the length of one turn
+                if (TwistPitch.getValue() < Precision::Confusion()) {
+                    return std::string("Pipe: the twist's pitch must be more than zero");
+                }
+                rate = 2 * M_PI / TwistPitch.getValue();
+                break;
+        }
+        rate *= TwistCCW.getValue() ? 1.0 : -1.0;
+        samples = samplesAlong(edges, 16, M_PI / 32, std::abs(rate) / (M_PI / 32));
+    }
+
+    if (scaled) {
+        const double factor = ScaleFactor.getValue();
+        auto at = [&](double length) {
+            return 1.0 + (factor - 1.0) * (length - from) / (to - from);
+        };
+        const double first = at(0.0);
+        const double last = at(total);
+        if (factor <= 0.0 || first <= Precision::Confusion() || last <= Precision::Confusion()) {
+            return fmt::format(
+                "Pipe: the scale reaches zero or less along the path (from {:.6g} to {:.6g}), and "
+                "Onshape refuses this too. Use a scale factor nearer 1, or move the profile.",
+                first,
+                last
+            );
+        }
+        Handle(Law_Linear) law = new Law_Linear();
+        law->Set(0.0, first, 1.0, last);
+        scale = law;
+    }
+
+    if (!twist && !lockFaces) {
+        return std::nullopt;
+    }
+    std::vector<gp_Dir> normals;
+    if (lockFaces) {
+        std::vector<TopoDS_Face> faces;
+        for (const auto& [object, subs] : LockFaces.getSubListValues()) {
+            const std::vector<std::string> names = subs.empty() ? std::vector<std::string> {""} : subs;
+            for (const std::string& sub : names) {
+                Part::TopoShape shape = linkedShape(object, sub);
+                if (shape.isNull()) {
+                    continue;
+                }
+                shape.move(invObjLoc);
+                for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+                    faces.push_back(TopoDS::Face(it.Current()));
+                }
+            }
+        }
+        if (faces.empty()) {
+            return std::string("Pipe: 'Lock faces' needs the faces the path lies on");
+        }
+        for (const PathSample& sample : samples) {
+            auto [distance, normal] = nearestNormal(faces, sample.point);
+            if (distance > 1.0e-4) {
+                return fmt::format(
+                    "Pipe: the path leaves the lock faces at {} ({:.3g} mm off them). The path "
+                    "must lie on the faces picked for 'Lock faces'.",
+                    inPlace(sample.point),
+                    distance
+                );
+            }
+            normal -= gp_Vec(sample.tangent) * normal.Dot(gp_Vec(sample.tangent));
+            if (normal.Magnitude() < 1.0e-6) {
+                return fmt::format(
+                    "Pipe: at {} the path runs along the lock face's normal",
+                    inPlace(sample.point)
+                );
+            }
+            normals.emplace_back(normal);
+        }
+    }
+    else if (control == 4) {
+        const std::optional<gp_Dir> binormal = sweptBinormal(binormalInBody, getLocation());
+        for (const PathSample& sample : samples) {
+            const gp_Vec n = binormal ? gp_Vec(*binormal).Crossed(gp_Vec(sample.tangent)) : gp_Vec();
+            if (n.Magnitude() < 1.0e-6) {
+                return fmt::format(
+                    "Pipe: at {} the path runs along the lock direction",
+                    inPlace(sample.point)
+                );
+            }
+            normals.emplace_back(n);
+        }
+    }
+    else if (frenetForNone) {
+        // A helix: its profile stays square to its axis, in Frenet's frame
+        for (const PathSample& sample : samples) {
+            if (sample.second.Magnitude() < gp::Resolution()) {
+                normals.clear();
+                break;
+            }
+            normals.emplace_back(sample.second);
+        }
+    }
+    if (normals.empty()) {
+        normals = carriedNormals(samples);
+    }
+
+    // About the path's tangent the way it runs: a twist's hand doesn't depend on the way the
+    // profile sweeps (SW11: clockwise about the path's direction is Onshape's default)
+    std::vector<double> angles(samples.size(), 0.0);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        angles[i] = rate * (samples[i].length - from);
+    }
+    double curvature = 0.0;
+    for (const PathSample& sample : samples) {
+        curvature = std::max(curvature, sample.second.Magnitude());
+    }
+    const double reach
+        = 0.2 * std::min(total, curvature > gp::Resolution() ? 1.0 / curvature : total);
+    const std::optional<TopoDS_Wire> guide = guideThrough(samples, normals, angles, reach);
+    if (!guide) {
+        return std::string("Pipe: the profile's frame along the path couldn't be built");
+    }
+    frameGuide = *guide;
+    return std::nullopt;
+}
+
 void Pipe::Restore(Base::XMLReader& reader)
 {
     settingMode = true;
@@ -4953,6 +6335,14 @@ short Pipe::mustExecute() const
     }
     if (ProfileControl.isTouched() || ExtendToFullPath.isTouched() || PathReversed.isTouched()
         || SpineMore.isTouched()) {
+        return 1;
+    }
+    if (LockFaces.isTouched() || LockDirection.isTouched() || HasTwist.isTouched()
+        || TwistType.isTouched() || Turns.isTouched() || TwistAngle.isTouched()
+        || TwistPitch.isTouched() || TwistCCW.isTouched() || HasScale.isTouched()
+        || ScaleFactor.isTouched() || BodyType.isTouched() || Thickness1.isTouched()
+        || Thickness2.isTouched() || Midplane.isTouched() || FlipWall.isTouched()
+        || TrimEnds.isTouched()) {
         return 1;
     }
     return ProfileBased::mustExecute();
@@ -5202,6 +6592,297 @@ std::array<gp_Trsf, 2> profileFramesOf(const TopoDS_Shape& profile)
     return {placement, placement};
 }
 
+/// Where an open wire starts or ends in its own order, and its direction of travel there
+std::pair<gp_Pnt, gp_Vec> wireEnd(const TopoDS_Wire& wire, bool atEnd)
+{
+    std::vector<TopoDS_Edge> edges;
+    for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
+        edges.push_back(it.Current());
+    }
+    if (edges.empty()) {
+        throw Base::ValueError("Pipe: an empty curve in the thin profile");
+    }
+    const TopoDS_Edge& edge = atEnd ? edges.back() : edges.front();
+    BRepAdaptor_Curve curve(edge);
+    const bool forward = edge.Orientation() != TopAbs_REVERSED;
+    const double u = (forward != atEnd) ? curve.FirstParameter() : curve.LastParameter();
+    gp_Pnt point;
+    gp_Vec tangent;
+    curve.D1(u, point, tangent);
+    if (!forward) {
+        tangent.Reverse();
+    }
+    return {point, tangent};
+}
+
+/// \a wire, open and in \a plane, offset by \a distance to its right seen from the plane's normal
+/// (to its left when negative): its edges, its start and its end
+struct OffsetCurve
+{
+    std::vector<TopoDS_Edge> edges;
+    gp_Pnt start;
+    gp_Pnt end;
+};
+
+OffsetCurve offsetOpenWire(const TopoDS_Wire& wire, const gp_Pln& plane, double distance, GeomAbs_JoinType join)
+{
+    const auto [start, startTangent] = wireEnd(wire, false);
+    const auto [end, endTangent] = wireEnd(wire, true);
+    OffsetCurve result;
+    if (std::abs(distance) < Precision::Confusion()) {
+        for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next()) {
+            result.edges.push_back(TopoDS::Edge(it.Current()));
+        }
+        result.start = start;
+        result.end = end;
+        return result;
+    }
+    const gp_Vec normal(plane.Axis().Direction());
+    auto rightOf = [&](const gp_Vec& tangent) {
+        gp_Vec right = tangent.Crossed(normal);
+        if (right.Magnitude() < Precision::Confusion()) {
+            throw Base::ValueError("Pipe: a thin profile's curve leaves its plane");
+        }
+        return right.Normalized();
+    };
+    const gp_Pnt wantStart = start.Translated(rightOf(startTangent) * distance);
+    const gp_Pnt wantEnd = end.Translated(rightOf(endTangent) * distance);
+    // OCCT finds no plane for a straight wire: give it the profile's, as its own open-wire case does
+    BRep_Builder builder;
+    TopoDS_Face face;
+    builder.MakeFace(face, new Geom_Plane(plane), Precision::Confusion());
+    builder.Add(face, wire);
+    TopTools_ListOfShape edges;
+    for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next()) {
+        edges.Append(it.Current());
+    }
+    BRepLib::BuildPCurveForEdgesOnPlane(edges, face);
+    // OCCT's sign for an open wire's side: try one, check it against the right, else the other
+    for (const double sign : {1.0, -1.0}) {
+        BRepOffsetAPI_MakeOffset offset(face, join, true);
+        try {
+            offset.Perform(sign * distance);
+        }
+        catch (const Standard_Failure&) {
+            continue;
+        }
+        if (!offset.IsDone() || offset.Shape().IsNull()) {
+            continue;
+        }
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopoDS_Wire built;
+        for (TopExp_Explorer it(offset.Shape(), TopAbs_WIRE); it.More(); it.Next()) {
+            if (!built.IsNull()) {
+                built.Nullify();  // more than one wire: not a plain parallel
+                break;
+            }
+            built = TopoDS::Wire(it.Current());
+        }
+        if (built.IsNull()) {
+            continue;
+        }
+        TopExp::Vertices(built, first, last);
+        if (first.IsNull() || last.IsNull()) {
+            continue;
+        }
+        gp_Pnt a = BRep_Tool::Pnt(first);
+        gp_Pnt b = BRep_Tool::Pnt(last);
+        if (a.Distance(wantEnd) < b.Distance(wantEnd) && b.Distance(wantStart) < a.Distance(wantStart)) {
+            std::swap(a, b);
+        }
+        const double tolerance = 1e-6 * std::max(1.0, std::abs(distance));
+        if (a.Distance(wantStart) > tolerance || b.Distance(wantEnd) > tolerance) {
+            continue;
+        }
+        for (TopExp_Explorer it(built, TopAbs_EDGE); it.More(); it.Next()) {
+            result.edges.push_back(TopoDS::Edge(it.Current()));
+        }
+        result.start = a;
+        result.end = b;
+        return result;
+    }
+    throw Base::CADKernelError("Pipe: the thin wall's offset of an open curve failed");
+}
+
+/// The thin wall of \a curves in \a plane (SW14): around each open wire, a strip from \a left to its
+/// left to \a right to its right (seen from the plane's normal); each region of the closed wires,
+/// a ring from \a right outward to \a left inward. Faces, in a compound.
+TopoDS_Shape thinWall(const TopoDS_Shape& curves, const gp_Pln& plane, double right, double left, GeomAbs_JoinType join)
+{
+    BRep_Builder builder;
+    TopoDS_Compound wall;
+    builder.MakeCompound(wall);
+    std::vector<Part::TopoShape> closed;
+    for (TopExp_Explorer it(curves, TopAbs_WIRE); it.More(); it.Next()) {
+        const TopoDS_Wire& wire = TopoDS::Wire(it.Current());
+        if (BRep_Tool::IsClosed(wire)) {
+            closed.emplace_back(wire);
+            continue;
+        }
+        const OffsetCurve a = offsetOpenWire(wire, plane, -left, join);
+        const OffsetCurve b = offsetOpenWire(wire, plane, right, join);
+        std::vector<Part::TopoShape> edges;
+        for (const TopoDS_Edge& edge : a.edges) {
+            edges.emplace_back(edge);
+        }
+        for (const TopoDS_Edge& edge : b.edges) {
+            edges.emplace_back(edge);
+        }
+        edges.emplace_back(BRepBuilderAPI_MakeEdge(a.start, b.start).Edge());
+        edges.emplace_back(BRepBuilderAPI_MakeEdge(a.end, b.end).Edge());
+        const Part::TopoShape joined = Part::TopoShape(-1).makeElementWires(edges);
+        if (joined.isNull() || joined.shapeType() != TopAbs_WIRE || !BRep_Tool::IsClosed(TopoDS::Wire(joined.getShape()))) {
+            throw Base::CADKernelError("Pipe: the thin wall of an open curve doesn't close");
+        }
+        BRepBuilderAPI_MakeFace face(plane, TopoDS::Wire(joined.getShape()), true);
+        if (!face.IsDone()) {
+            throw Base::CADKernelError("Pipe: the thin wall of an open curve has no face");
+        }
+        builder.Add(wall, face.Face());
+    }
+    if (!closed.empty()) {
+        const Part::TopoShape regions = Part::TopoShape(-1).makeElementFace(closed);
+        const Part::JoinType joinType = join == GeomAbs_Arc ? Part::JoinType::arc : Part::JoinType::intersection;
+        auto grown = [&](double distance) {
+            if (std::abs(distance) < Precision::Confusion()) {
+                return regions;
+            }
+            return regions.makeElementOffset2D(
+                distance,
+                joinType,
+                Part::FillType::noFill,
+                Part::OpenResult::noOpenResult
+            );
+        };
+        const Part::TopoShape outer = grown(right);
+        const Part::TopoShape inner = grown(-left);
+        if (outer.isNull() || inner.isNull() || inner.countSubShapes(TopAbs_FACE) == 0) {
+            throw Base::ValueError("Pipe: the thin wall is thicker than the region it goes into");
+        }
+        FCBRepAlgoAPI_Cut ring(outer.getShape(), inner.getShape());
+        if (!ring.IsDone()) {
+            throw Base::CADKernelError("Pipe: the thin wall's ring failed");
+        }
+        for (TopExp_Explorer it(ring.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+            builder.Add(wall, it.Current());
+        }
+    }
+    return wall;
+}
+
+double areaOf(const TopoDS_Shape& faces)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(faces, props);
+    return std::abs(props.Mass());
+}
+
+/// The thin wall of \a pipe's profile (SW14), in place of its curves, its corners mitred (SW18)
+Part::TopoShape thinProfileOf(const Pipe& pipe)
+{
+    App::DocumentObject* profile = pipe.Profile.getValue();
+    const std::vector<std::string>& subs = pipe.Profile.getSubValues();
+    TopoDS_Shape curves;
+    gp_Pln plane;
+    TopLoc_Location location;
+    if (auto sketch = freecad_cast<Part::Part2DObject*>(profile)) {
+        // All the sketch's curves, open ones included: in the sketch's own plane
+        location = sketch->Shape.getShape().getShape().Location();
+        curves = sketch->Shape.getShape().getShape().Located(TopLoc_Location());
+        plane = gp_Pln(gp::XOY());
+    }
+    else if (auto feature = freecad_cast<Part::Feature*>(profile)) {
+        if (subs.empty() || subs.front().empty()) {
+            throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
+        }
+        const Part::TopoShape face = feature->Shape.getShape().getSubTopoShape(subs.front().c_str(), true);
+        if (face.isNull() || face.shapeType() != TopAbs_FACE) {
+            throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()));
+        if (surface.GetType() != GeomAbs_Plane) {
+            throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
+        }
+        plane = surface.Plane();
+        curves = face.getShape();
+    }
+    else {
+        throw Base::TypeError("Pipe: Invalid profile/section");
+    }
+    const double thickness1 = pipe.Thickness1.getValue();
+    const double thickness2 = pipe.Thickness2.getValue();
+    if (thickness1 <= Precision::Confusion() || thickness2 < 0.0) {
+        throw Base::ValueError("Pipe: the thin wall's thickness must be more than zero");
+    }
+    // To the right (an open curve) or outward (a region) by default
+    double right = pipe.Midplane.getValue() ? thickness1 / 2 : thickness1;
+    double left = pipe.Midplane.getValue() ? thickness1 / 2 : thickness2;
+    if (pipe.FlipWall.getValue()) {
+        std::swap(right, left);
+    }
+    // SW18: Onshape mitres the wall's corners, the outside of a corner included; never rounds them
+    const TopoDS_Shape wall = thinWall(curves, plane, right, left, GeomAbs_Intersection);
+    if (areaOf(wall) < Precision::Confusion()) {
+        throw Base::ValueError("Pipe: the thin profile has no curves to put a wall around");
+    }
+    return Part::TopoShape(wall.Located(location));
+}
+
+// Whether every section is one circle centred on a one-edge spine with its axis along the spine's
+// tangent there: a solid of revolution about the spine, the same whatever the frame law turns
+// the sections by
+bool circlesAboutSpine(const std::vector<Part::TopoShape>& sections, const TopoDS_Shape& spine)
+{
+    TopTools_IndexedMapOfShape spineEdges;
+    TopExp::MapShapes(spine, TopAbs_EDGE, spineEdges);
+    if (spineEdges.Extent() != 1 || sections.empty()) {
+        return false;
+    }
+    const TopoDS_Edge& path = TopoDS::Edge(spineEdges(1));
+    const BRepAdaptor_Curve along(path);
+    for (const Part::TopoShape& section : sections) {
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(section.getShape(), TopAbs_EDGE, edges);
+        if (edges.Extent() != 1) {
+            return false;
+        }
+        const BRepAdaptor_Curve curve(TopoDS::Edge(edges(1)));
+        if (curve.GetType() != GeomAbs_Circle) {
+            return false;
+        }
+        const gp_Circ circle = curve.Circle();
+        BRepExtrema_DistShapeShape distance(
+            BRepBuilderAPI_MakeVertex(circle.Location()).Vertex(),
+            path
+        );
+        if (!distance.IsDone() || distance.NbSolution() < 1
+            || distance.Value() > Precision::Confusion()
+            || (distance.SupportTypeShape2(1) == BRepExtrema_IsVertex
+                && !(distance.SupportOnShape2(1).IsSame(TopExp::FirstVertex(path))
+                     || distance.SupportOnShape2(1).IsSame(TopExp::LastVertex(path))))) {
+            return false;
+        }
+        double parameter = 0.0;
+        if (distance.SupportTypeShape2(1) == BRepExtrema_IsOnEdge) {
+            distance.ParOnEdgeS2(1, parameter);
+        }
+        else {
+            parameter = distance.SupportOnShape2(1).IsSame(TopExp::FirstVertex(path))
+                ? along.FirstParameter()
+                : along.LastParameter();
+        }
+        gp_Pnt point;
+        gp_Vec tangent;
+        along.D1(parameter, point, tangent);
+        if (tangent.Magnitude() < gp::Resolution()
+            || !circle.Axis().Direction().IsParallel(gp_Dir(tangent), Precision::Angular())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Honest edge tolerances (ops#667). OCCT's sweep stores an edge's tolerance from the deviation of
 // its curves on the faces as it measured them, with little margin: the end circles of a long
 // B-spline pipe had 3.36e-6 against a deviation of 3.20e-6 on Windows, and the slightly different
@@ -5255,6 +6936,26 @@ int raiseTightEdgeTolerances(Part::TopoShape& shape)
 App::DocumentObjectExecReturn* Pipe::execute()
 {
     frenetForNone = false;
+    frameGuide.Nullify();
+    binormalInBody = Binormal.getValue();
+    if (ProfileControl.getValue() == 4) {
+        // Lock direction: Binormal mode with the picked direction, in the Body's coordinates
+        const std::vector<std::string>& subs = LockDirection.getSubValues();
+        const std::optional<gp_Dir> direction = directionOf(
+            linkedShape(LockDirection.getValue(), subs.empty() ? std::string() : subs.front())
+        );
+        if (!direction) {
+            return new App::DocumentObjectExecReturn(
+                "Pipe: 'Lock direction' needs a plane, a planar face or a straight edge"
+            );
+        }
+        binormalInBody = Base::Vector3d(direction->X(), direction->Y(), direction->Z());
+    }
+    if (BodyType.getValue() == 1 && !Sections.getValues().empty()) {
+        return new App::DocumentObjectExecReturn(
+            "Pipe: a thin sweep takes no sections; Onshape's Sweep has none either"
+        );
+    }
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
@@ -5376,8 +7077,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
 
         // setup the profile section
-        Part::TopoShape profileShape
-            = getSectionShape("Profile", Profile.getValue(), Profile.getSubValues());
+        // Thin: the wall around the profile's curves, open ones included, swept as a solid profile
+        Part::TopoShape profileShape = BodyType.getValue() == 1
+            ? thinProfileOf(*this)
+            : getSectionShape("Profile", Profile.getValue(), Profile.getSubValues());
         if (profileShape.isNull()) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Pipe: Could not obtain profile shape")
@@ -5443,6 +7146,81 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     gap->first.Distance(gap->second)
                 ));
             }
+        }
+        // Paths Onshape refuses (oracle 9, ops#660), and where the tubes may overlap
+        std::optional<std::pair<gp_Pnt, double>> passesNear;
+        if (!path.isNull() && path.shapeType() == TopAbs_WIRE) {
+            const gp_Trsf toBody = invObjLoc.Inverted().Transformation();
+            const TopoDS_Wire& wire = TopoDS::Wire(path.getShape());
+            if (const std::optional<gp_Pnt> at = pathTouchesItself(wire)) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the path crosses or touches itself at {}; Onshape refuses such a path "
+                    "too. Move its edges apart.",
+                    pointText(at->Transformed(toBody))
+                ));
+            }
+            const TopoDS_Shape placedProfile = profileShape.getShape().Moved(invObjLoc);
+            if (const auto turns = overlappingTurns(
+                    wire,
+                    placedProfile,
+                    HasScale.getValue() ? ScaleFactor.getValue() : 1.0
+                )) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the helix's turns overlap: its pitch, {:.6g} mm, is less than the "
+                    "profile's {:.6g} mm along its axis. Make the pitch larger or the profile "
+                    "smaller.",
+                    turns->first,
+                    turns->second
+                ));
+            }
+            // The profile's reach about the path's start: tubes along edges nearer each other than
+            // twice that may overlap
+            Bnd_Box box;
+            BRepBndLib::Add(placedProfile, box);
+            if (!box.IsVoid()) {
+                const gp_Pnt start = BRep_Tool::Pnt(TopExp::FirstVertex(edgesInOrder(wire).front(), true));
+                double xMin, yMin, zMin, xMax, yMax, zMax;
+                box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+                double reach = 0.0;
+                for (const double x : {xMin, xMax}) {
+                    for (const double y : {yMin, yMax}) {
+                        for (const double z : {zMin, zMax}) {
+                            reach = std::max(reach, start.Distance(gp_Pnt(x, y, z)));
+                        }
+                    }
+                }
+                // A profile scaled up along the path reaches further than the start profile does
+                // (the ops#666 skeptic's silent path A): its reach grows with the factor
+                if (HasScale.getValue()) {
+                    reach *= std::max(1.0, ScaleFactor.getValue());
+                }
+                // So does a larger section further on: a U path whose last section grows to r 5.5
+                // swept a self-overlapping solid, Up-to-date. Its reach is the largest distance
+                // from its points to its own path point (the path's point nearest their middle),
+                // not its box's diagonal: that one armed the check on multisection helix pipes
+                // whose tubes stay clear (sweeps 11)
+                if (Transformation.getValue() == 1) {
+                    std::vector<TopoDS_Shape> sections;
+                    for (const auto& subSet : Sections.getSubListValues()) {
+                        try {
+                            const Part::TopoShape section
+                                = getSectionShape("Section", subSet.first, subSet.second);
+                            if (!section.isNull()) {
+                                sections.push_back(section.getShape().Moved(invObjLoc));
+                            }
+                        }
+                        catch (const Standard_Failure&) {
+                        }
+                        catch (const Base::Exception&) {
+                            // the sections' own checks below say what's wrong with it
+                        }
+                    }
+                    reach = std::max(reach, sectionsReach(wire, sections));
+                }
+                passesNear = pathPassesNearItself(wire, reach);
+            }
+            // A helix of several turns sweeps turn by turn, as AdditiveHelix's (ops#665)
+            path = withHelixTurns(path, makeTopoShape(false), placedProfile);
         }
 
         // auxiliary
@@ -6205,12 +7983,12 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // tangent runs along it, which no profile survives (ops#406)
         std::optional<gp_Dir> binormal;
         auto binormalText = [&]() {
-            Base::Vector3d direction = Binormal.getValue();
+            Base::Vector3d direction = binormalInBody;
             direction.Normalize();
             return pointText(gp_Pnt(direction.x, direction.y, direction.z));
         };
         if (mode == 4) {
-            binormal = sweptBinormal(Binormal.getValue(), getLocation());
+            binormal = sweptBinormal(binormalInBody, getLocation());
             if (!binormal) {
                 return new App::DocumentObjectExecReturn(
                     QT_TRANSLATE_NOOP(
@@ -6501,31 +8279,90 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
         };
 
+        // Slice 3: twist, scale, lock faces (the frame's guide and the scale's law)
+        if (HasTwist.getValue() || HasScale.getValue() || ProfileControl.getValue() == 3) {
+            if (!profilePoint.isNull() || (Transformation.getValue() == 1 && !multisections.empty())
+                || Transformation.getValue() > 1) {
+                return new App::DocumentObjectExecReturn(
+                    "Pipe: twist, scale and 'Lock faces' sweep one profile, without Sections or "
+                    "a section transformation"
+                );
+            }
+            std::vector<TopoDS_Shape> profileWires;
+            for (const auto& wires : wiresections) {
+                if (!wires.empty()) {
+                    profileWires.push_back(wires.front().getShape().Moved(invObjLoc));
+                }
+            }
+            if (const std::optional<std::string> error
+                = prepareSlice3(path, profileWires, invObjLoc, scalinglaw)) {
+                return new App::DocumentObjectExecReturn(*error);
+            }
+        }
+
         std::vector<Part::TopoShape> frontwires, backwires;
         for (auto& wires : wiresections) {
-            BRepOffsetAPI_MakePipeShell mkPS(TopoDS::Wire(path.getShape()));
-            setupAlgorithm(mkPS, auxpath.getShape());
-
-            if (!scalinglaw) {
-                if (!profilePoint.isNull()) {
-                    mkPS.Add(copyProfilePoint.getShape());
+            for (size_t i = 0; i < wires.size(); ++i) {
+                place(wires[i], i);
+            }
+            auto addSections = [&](BRepOffsetAPI_MakePipeShell& pipe) {
+                if (!scalinglaw) {
+                    if (!profilePoint.isNull()) {
+                        pipe.Add(copyProfilePoint.getShape());
+                    }
+                    for (const auto& wire : wires) {
+                        pipe.Add(wire.getShape());
+                    }
                 }
-
-                for (size_t i = 0; i < wires.size(); ++i) {
-                    place(wires[i], i);
-                    mkPS.Add(wires[i].getShape());
+                else {
+                    if (!profilePoint.isNull()) {
+                        pipe.SetLaw(copyProfilePoint.getShape(), scalinglaw);
+                    }
+                    for (const auto& wire : wires) {
+                        pipe.SetLaw(wire.getShape(), scalinglaw);
+                    }
+                }
+            };
+            auto standard
+                = std::make_unique<BRepOffsetAPI_MakePipeShell>(TopoDS::Wire(path.getShape()));
+            setupAlgorithm(*standard, auxpath.getShape());
+            addSections(*standard);
+            // A loose Standard sweep of circles about the spine is built again with the Frenet
+            // frame, the same solid (ops#667): OCCT's corrected Frenet law drifts along a long 3D
+            // spine (a circle of radius 0.5 along a 50-turn spiral of 1000 points: 0.4 mm off the
+            // tube, tolerances of 2 mm, and one face that failed the shape check on macOS alone),
+            // where the Frenet frame built it 6e-6 off with tolerances of 5e-5. Taken only when
+            // valid and no longer loose; other sweeps are unchanged
+            if (mode == 0 && !scalinglaw && profilePoint.isNull()
+                && circlesAboutSpine(wires, path.getShape())) {
+                const auto tolerance = [](const TopoDS_Shape& shape) {
+                    return ShapeAnalysis_ShapeTolerance().Tolerance(shape, 1);
+                };
+                try {
+                    standard->Build();
+                    if (standard->IsDone()
+                        && tolerance(standard->Shape())
+                            > Part::PipeShellApproximation::warningTolerance) {
+                        auto frenet = std::make_unique<BRepOffsetAPI_MakePipeShell>(
+                            TopoDS::Wire(path.getShape())
+                        );
+                        setupAlgorithm(*frenet, auxpath.getShape());
+                        frenet->SetMode(true);
+                        addSections(*frenet);
+                        frenet->Build();
+                        if (frenet->IsDone()
+                            && tolerance(frenet->Shape())
+                                <= Part::PipeShellApproximation::warningTolerance
+                            && Part::KernelBudget::checkValid(frenet->Shape())) {
+                            standard = std::move(frenet);
+                        }
+                    }
+                }
+                catch (const Standard_Failure&) {
+                    // The Standard sweep as it builds below, with its own errors
                 }
             }
-            else {
-                if (!profilePoint.isNull()) {
-                    mkPS.SetLaw(copyProfilePoint.getShape(), scalinglaw);
-                }
-
-                for (size_t i = 0; i < wires.size(); ++i) {
-                    place(wires[i], i);
-                    mkPS.SetLaw(wires[i].getShape(), scalinglaw);
-                }
-            }
+            BRepOffsetAPI_MakePipeShell& mkPS = *standard;
 
             if (!mkPS.IsReady()) {
                 return new App::DocumentObjectExecReturn(
@@ -6764,6 +8601,13 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
         Part::TopoShape result = makeTopoShape();
 
+        if (!tilts.pieceStarts.empty() && (!frameGuide.IsNull() || scalinglaw)) {
+            return new App::DocumentObjectExecReturn(
+                "Pipe: with twist, scale or 'Lock faces' the path's corners must turn the profile "
+                "less than 90 degrees in 'Transformed' (it would be swept in pieces). Use 'Right "
+                "corner' or 'Round corner'."
+            );
+        }
         if (!tilts.pieceStarts.empty()) {
             // Past 90 degrees: the union. The first piece starts from the profile where it lies
             // at the spine's start, or else from the one sweep's start section with its names.
@@ -6978,7 +8822,47 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
         }
         const int deepest = shapes.empty() ? 0 : *std::max_element(depths.begin(), depths.end());
-        if (deepest == 0) {
+
+        // Tubes overlapping where the path passes near itself (oracle 9, ops#660, ops#666): Onshape
+        // builds their exact union, and so does FreeCAD-CH, from the sweep's cells numbered by their
+        // winding number (unionOfOverlaps), before the holes' shells are cut (a cut of solids that
+        // interfere with themselves is unpredictable). Named from the sweep through the history, as
+        // a fuse is: a face the overlap doesn't reach keeps its name. Thin keeps the stop below.
+        bool united = false;
+        std::string notUnited;
+        if (passesNear && BodyType.getValue() != 1) {
+            std::vector<TopoDS_Shape> solids;
+            for (const auto& s : shapes) {
+                solids.push_back(s.getShape());
+            }
+            const SweepUnion overlap = unionOfOverlaps(solids, depths);
+            notUnited = overlap.error;
+            if (!overlap.solid.IsNull()) {
+                Part::TopoShape naive = makeTopoShape();
+                naive.makeElementCompound(
+                    shapes,
+                    nullptr,
+                    Part::TopoShape::SingleShapeCompoundCreationPolicy::returnShape
+                );
+                Part::TopoShape unionShape = makeTopoShape();
+                unionShape.makeShapeWithElementMap(
+                    overlap.solid,
+                    Part::MapperHistory(overlap.history),
+                    {naive},
+                    Part::OpCodes::Fuse
+                );
+                if (!isValidSolid(unionShape)) {
+                    return new App::DocumentObjectExecReturn(invalidPipe());
+                }
+                result = unionShape;
+                AddSubShape.setValue(result);
+                united = true;
+            }
+        }
+        if (united) {
+            // The union replaces the fuse and the holes' cut
+        }
+        else if (deepest == 0) {
             AddSubShape.setValue(result.makeElementCompound(
                 shapes,
                 nullptr,
@@ -7027,6 +8911,21 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 return new App::DocumentObjectExecReturn(invalidPipe());
             }
             AddSubShape.setValue(result);
+        }
+
+        // Where the union couldn't be built, or for Thin, the sweep counts an overlap twice: a stop
+        // when OCCT's check finds one
+        if (passesNear && !united && (BodyType.getValue() == 1 || !notUnited.empty())
+            && intersectsItself(result.getShape())) {
+            return new App::DocumentObjectExecReturn(fmt::format(
+                "Pipe: the swept body overlaps itself where the path passes {:.6g} mm from itself "
+                "near {}. Onshape builds the union there; FreeCAD-CH {}. Move the path's edges "
+                "apart or make the profile smaller.",
+                passesNear->second,
+                pointText(passesNear->first.Transformed(invObjLoc.Inverted().Transformation())),
+                notUnited.empty() ? std::string("doesn't for a thin body")
+                                  : "couldn't build it (" + notUnited + ")"
+            ));
         }
 
         // A loose pipe may be a poor approximation of the swept surface, which OCCT reports only
@@ -7175,8 +9074,16 @@ void Pipe::setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS
             break;
     }
 
+    // Twist and lock faces: the guide orients the frame, its normal pointing from the path to
+    // the guide in each plane square to the path (OCCT's guide in a plane is exact here, where
+    // the curvilinear equivalence approximated the twisted faces to 1e-2 mm)
+    if (!frameGuide.IsNull()) {
+        mkPipeShell.SetMode(frameGuide, false, BRepFill_NoContact);
+        return;
+    }
+
     bool auxiliary = false;
-    const Base::Vector3d& bVec = Binormal.getValue();
+    const Base::Vector3d& bVec = binormalInBody;
     switch (Mode.getValue()) {
         case 0:
             // ProfileControl "None" off a plane, where Frenet's frame is steady (execute)

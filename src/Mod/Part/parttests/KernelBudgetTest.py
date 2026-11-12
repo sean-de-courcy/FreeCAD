@@ -257,24 +257,29 @@ class KernelBudgetTest(unittest.TestCase):
         class Holes:
             def __init__(self, obj):
                 obj.Proxy = self
+                self.caught = []
 
             def execute(self, obj):
                 shape = Part.makeBox(60, 60, 5)
                 try:
                     shape = shape.cut(wavy(800, 30, 30, -1.0).extrude(V(0, 0, 7)))
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.caught.append(str(e))
                 obj.Shape = shape
 
         doc = FreeCAD.newDocument("KernelBudgetSwallow")
         self.docs.append(doc)
         body = doc.addObject("PartDesign::Body", "Body")
         holes = body.newObject("PartDesign::FeaturePython", "Holes")
-        Holes(holes)
+        proxy = Holes(holes)
         loose = doc.addObject("Part::FeaturePython", "LooseHoles")
         Holes(loose)
-        self.setLimit(0.3)
+        # A limit no machine meets, so the stop doesn't depend on its speed: at 0.3 s a macOS
+        # runner finished the cut in time (ops#669). The cut's first call under it stops
+        self.setLimit(1e-6)
         doc.recompute()
+        self.assertEqual(len(proxy.caught), 1, proxy.caught)  # the script swallowed the stop
+        self.assertIn("took longer than", proxy.caught[0])
         self.assertFalse(holes.isValid())
         self.assertIn("took longer than", holes.getStatusString())
         self.assertTrue(loose.isValid(), loose.getStatusString())
@@ -367,6 +372,32 @@ class KernelCheckTest(unittest.TestCase):
         start = time.time()
         self.assertTrue(Part.kernelCheck(solid))
         self.assertLess(time.time() - start, 20.0)
+
+    def testBullseyeFaceOfThousandsOfHolesInSeconds(self):
+        """kernel-9 (a): the bull's-eye face maker (a sketch's faces) classified each circle against
+        the face with every earlier hole, quadratic: 40 x 40 circles took 15.6 s, 60 x 60 63.5 s
+        (a Pad of a 3600-circle sketch 89 s). Now against the outer wire and the holes near the
+        point. One circle holds an island with a hole: two faces"""
+        n = 40
+        side = 10 * n + 10
+        outer = Part.makePolygon(
+            [V(0, 0, 0), V(side, 0, 0), V(side, side, 0), V(0, side, 0), V(0, 0, 0)]
+        )
+        circles = [
+            Part.Wire(Part.makeCircle(4, V(10 + 10 * i, 10 + 10 * j, 0)))
+            for i in range(n)
+            for j in range(n)
+        ]
+        island = [Part.Wire(Part.makeCircle(r, V(10, 10, 0))) for r in (2, 1)]
+        start = time.time()
+        faces = Part.makeFace([outer] + circles + island, "Part::FaceMakerBullseye")
+        elapsed = time.time() - start
+        self.assertEqual(len(faces.Faces), 2)
+        self.assertEqual(sorted(len(f.Wires) for f in faces.Faces), [2, 1 + n * n])
+        area = side**2 - n * n * math.pi * 16 + math.pi * (4 - 1)
+        self.assertAlmostEqual(faces.Area, area, delta=1e-9 * area)
+        self.assertTrue(faces.isValid())
+        self.assertLess(elapsed, 5.0)
 
 if __name__ == "__main__":
     unittest.main()

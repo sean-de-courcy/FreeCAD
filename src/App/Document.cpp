@@ -181,7 +181,14 @@ namespace
 // 16: ops#502, a result without history (a Part primitive, a Python feature's shape, a PartDesign
 // primitive's tool) names its elements by a verified match against the result it replaces (`MLN`
 // ids from a counter saved with the shape), where its consumers named them by index.
-constexpr int ForkNamingRevision = 16;
+// 17: ops#640 (sweeps slice 2, batch 4's T1 and I-R3), a PartDesign Helix's caps are the profile
+// face and its edges and vertexes, modified (the start) and projected (the end), so turn 1's side
+// faces and edges are told apart by the start cap's names; the one turn left without them keeps
+// the count, `0of1`, where its lone `0` was the name of turn 1 in a helix of one turn. A Pipe
+// along a helix edge (a Part::Helix) sweeps turn by turn, the path cut at each whole turn, and
+// turn k and the vertex k turns from the start are named by the edge's name and k (`TRN`, `TRV`;
+// batch 6's R1), where the whole edge's name was the side faces'.
+constexpr int ForkNamingRevision = 17;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
@@ -4744,7 +4751,79 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
 
     signalRecomputed(*this, topoSortedObjects);
     recomputingStatus.reset();
-    signalBecameStable(*this);
+
+    // FreeCAD-CH (ops#654 10.15): what the observers write here (PartDesign's studio resync, after
+    // a record decided at compute changed) goes into the last undo step when the recompute ran
+    // outside any transaction (a commit, then a recompute): the step is reopened for the signal
+    // and put back after it as it is, its id unchanged, nothing signalled, no commit. Undoing the
+    // edit then undoes what the resync made of it. Booked Recompute is set aside (the seventh
+    // settled point): a booked step that only recorded this recompute's outputs (Std_Refresh's
+    // "Recompute") is set aside meanwhile and restored after; it changes no input and its close
+    // drops it. One whose recompute changed an input (a record written at compute) is a step of
+    // its own, and the observers record into it. Not inside an undo or redo, nor with Redo
+    // non-empty: a write there is unrecorded, and a later redo would put its steps beside the
+    // resync's, so it clears Redo, loudly. On the main thread: a recompute on the worker hops
+    // there for the signal, and the move and the put-back go inside the hop (the Gui's undo list
+    // reads the stack there)
+    const auto becameStable = [this]() {
+        Transaction* const active = d->activeUndoTransaction;
+        const bool bookedOutputsOnly = active && active->getID() == d->bookedTransaction
+            && !active->changesInputs();
+        const bool join = (!active || bookedOutputsOnly) && !mUndoTransactions.empty()
+            && mRedoTransactions.empty() && d->undoRedoDepth == 0 && !isPerformingTransaction()
+            && !d->committing && !testStatus(Restoring) && !isStepLocked()
+            && GetApplication().getGlobalTransaction() == NullTransaction
+            && !GetApplication().isClosingAll();
+        Transaction* reopened = nullptr;
+        Transaction* setAside = nullptr;
+        if (join) {
+            setAside = active;
+            reopened = mUndoTransactions.back();
+            mUndoTransactions.pop_back();
+            d->activeUndoTransaction = reopened;
+        }
+        bool wrote = false;
+        const auto mark = [&wrote](const DocumentObject&) {
+            wrote = true;
+        };
+        const fastsignals::scoped_connection created = signalNewObject.connect(mark);
+        const fastsignals::scoped_connection deleted = signalDeletedObject.connect(mark);
+        const fastsignals::scoped_connection changed = signalChangedObject.connect(
+            [&wrote](const DocumentObject&, const Property&) {
+                wrote = true;
+            }
+        );
+        const Base::ScopeGuard after([&]() {
+            if (reopened) {
+                if (d->activeUndoTransaction == reopened
+                    && (mUndoTransactions.empty() || mUndoTransactions.back() != reopened)) {
+                    mUndoTransactions.push_back(reopened);
+                    d->activeUndoTransaction = setAside;
+                }
+                else {
+                    FC_WARN(getName() << ": the undo step reopened for the regeneration was "
+                                         "closed or replaced during it; left as it is");
+                }
+                return;
+            }
+            if (wrote && !d->activeUndoTransaction && !mRedoTransactions.empty()
+                && !isPerformingTransaction() && !d->committing) {
+                FC_WARN(getName() << ": the studio's history changed after an unrecorded edit; "
+                                     "Redo cleared");
+                _clearRedos();
+            }
+        });
+        signalBecameStable(*this);
+    };
+    if (MainThreadSignalConfig::isMainThread()) {
+        becameStable();
+    }
+    else {
+        // The emission's own hop (GIL released, the worker's wait served), around the whole of it
+        MainThreadSignal<void()> hop;
+        const fastsignals::scoped_connection inHop = hop.connect(becameStable);
+        hop();
+    }
 
     tracker.checkpoint("Recompute total");
 

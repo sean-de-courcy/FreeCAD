@@ -535,7 +535,13 @@ def oracle(natives, records, bar, live=None):
     from the parts its command made, with the side of its slot each was made on) make parts at
     its place: each holds the solid on its side of the split, the parent is no part after it,
     and scopes resolve an id to its living descendants. Out: "piece:<id>" -> (volume, solids),
-    or "failed" when the record holds nothing."""
+    or "failed" when the record holds nothing.
+
+    Merges (10.13, Onshape O9, O9b, M1, M2): a Union box record whose tool joins two or more of
+    its resolved parts (their fuse has fewer solids than its inputs: overlap or a face, never an
+    edge) makes them one: the first in its scope's order survives, holding the fuse of all, the
+    others are consumed from its place on (no later record acts on them, and their shapes stay
+    as they were before it)."""
     shapes = {p: Part.makeBox(10, 10, 10, V(x, 0, 0)) for p, x in PARTS}
     # Slice 9: the part each New mirror makes, by its maker ("new:<name>"); None: empty
     made = {
@@ -548,7 +554,8 @@ def oracle(natives, records, bar, live=None):
     applied = set()  # (box owner, part) whose step changed its part
     # P6p: the parts made from pieces, by part id. A maker's pieces are parts from its place on
     # (not suppressed, before the bar); a split parent is none after it (dead), unless the split
-    # is lost (no record holds its one solid). A piece whose record holds nothing is a part that
+    # is gone (its result is one solid, Onshape Q13): then its pieces are no parts (vanished) and
+    # a pick of one resolves to the parent. A piece whose record holds nothing is a part that
     # fails (failed): a scope still resolves to it, and what acts on it fails there (a Boolean
     # with it still consumes its tools). A scope resolves to an id's part and its living
     # descendants, in the Bodies' order
@@ -568,6 +575,7 @@ def oracle(natives, records, bar, live=None):
     madePieces = set()  # made: live unless consumed or dead
     dead = set()
     failed = set()
+    vanished = set()  # the pieces of a split that is gone (10.12 amendment)
 
     def descends(key, ident):
         seen = set()
@@ -581,6 +589,10 @@ def oracle(natives, records, bar, live=None):
     def resolve(ids):
         out = []
         for ident in ids:
+            seen = set()
+            while ident in vanished and ident not in seen:  # a gone split's piece: its parent
+                seen.add(ident)
+                ident = parentOf.get(ident, ident)
             for key in order:
                 if (
                     key not in out and (key in shapes or key in failed) and key not in consumed
@@ -730,7 +742,21 @@ def oracle(natives, records, bar, live=None):
             tool = Part.makeBox(length, width, height, corner)
         own = pieceRecs.get(record["name"], {})
         resolved[record["name"]] = []
-        for p in resolve(record["scope"]):
+        merging = False
+        if record["op"] == "Union" and not record.get("upto"):
+            scope = resolve(record["scope"])
+            joined = [p for p in scope if p in shapes and joins(tool, shapes[p])]
+            if len(joined) >= 2:
+                resolved[record["name"]] = scope
+                survivor, others = joined[0], joined[1:]
+                result = shapes[survivor].fuse([tool] + [shapes[p] for p in others])
+                result = result.removeSplitter()
+                if len(result.Solids) == 1:
+                    shapes[survivor] = result
+                    applied.add((record["name"], survivor))
+                consumed.update(others)
+                merging = True
+        for p in [] if merging else resolve(record["scope"]):
             resolved[record["name"]].append(p)
             if p not in shapes:
                 continue  # a part that fails: its step fails
@@ -761,26 +787,17 @@ def oracle(natives, records, bar, live=None):
                     claims = {}
                 dead.add(p)
             else:
-
-                def wall(pid):
-                    x = x0 if own[pid][1] == "L" else x1
-                    return any(
-                        abs(face.BoundBox.XMin - x) < 1e-6 and abs(face.BoundBox.XMax - x) < 1e-6
-                        for face in result.Faces
-                    )
-
-                holders = [pid for pid in recs if own[pid][1] in ("L", "R") and wall(pid)]
+                # 10.12 amendment (Onshape Q13, SPLIT_NO_CHANGE): one solid, the split is gone:
+                # p goes on with it, the pieces are no parts and picks of them resolve to p
                 shapes[p] = result
                 applied.add((record["name"], p))
-                if len(holders) == 1:
-                    claims[holders[0]] = result
-                    dead.add(p)
+                vanished.update(recs)
             for pid in recs:
                 parentOf[pid] = p
                 madePieces.add(pid)
                 if pid in claims:
                     shapes[pid] = claims[pid]
-                else:
+                elif pid not in vanished:
                     failed.add(pid)
         # Its records of a parent it doesn't act on hold nothing (the parent stays split); a
         # leftover (H1a) holds the tool when it touches no part of the scope
@@ -807,17 +824,66 @@ def oracle(natives, records, bar, live=None):
             p for p in shapes if p not in consumed and p not in dead and p not in madePieces
         )
         live.update(made)
-        live.update("piece:" + pid for pid in madePieces if pid not in consumed and pid not in dead)
+        live.update(
+            "piece:" + pid for pid in madePieces
+            if pid not in consumed and pid not in dead and pid not in vanished
+        )
     out = {p: (round(s.Volume, 4), len(s.Solids)) for p, s in shapes.items() if p not in madePieces}
     out.update(
         {
             "piece:" + pid: "failed" if pid in failed or pid not in shapes else
             (round(shapes[pid].Volume, 4), len(shapes[pid].Solids))
-            for pid in madePieces
+            for pid in madePieces if pid not in vanished
         }
     )
     out.update({k: (0.0, 0) if s is None else (round(s.Volume, 4), len(s.Solids)) for k, s in made.items()})
     return out
+
+
+def joins(a, b):
+    """Whether solids a and b join (10.13, skeptic 3): they meet, and their fuse has fewer solids
+    than its inputs (an overlap or a face in common, never an edge or a vertex)."""
+    if a.distToShape(b)[0] > 1e-7:
+        return False
+    return len(a.fuse(b).Solids) < len(a.Solids) + len(b.Solids)
+
+
+def spans(doc, y):
+    """The x spans of the gate's slots (y -1, P6p) or merge bars (y 3, 10.13) in doc"""
+    return [
+        (r["rect"][0], r["rect"][2])
+        for r in (ownerRecord(o) for o in doc.Objects
+                  if o.TypeId == "Part::Box" and hasattr(o, "Operation")
+                  and round(o.Placement.Base.y) == y)
+    ]
+
+
+def clear(offsets, width, taken, base):
+    """All the offsets: a merge bar may bridge a slot again. The 10.13 gate round left bridges out
+    (work/hub7/gate/probe-cross.txt, X8 and X10: a bar over a slot before it in the list keeps
+    both sides of the cut on one solid, and P6p's matchPieces gave that solid to the stronger
+    record and failed the other loudly); the 10.12 amendment (Onshape Q13) makes such a split gone:
+    the unsplit part keeps its id and picks of either piece resolve to it."""
+    return offsets
+
+
+def stranded(doc):
+    """Raises when an Add the edit's recompute made merge a part leaves a Body member of that part
+    after it (10.13: no part to act on, a projection error, loud by design: every list edit is
+    refused until it moves). The gate takes it as the edit refused: aborted, nothing changes."""
+    lst = PartDesign.studioList(doc.getObject("S"))
+    if lst is None:
+        return
+    try:
+        PartDesign.studioProject(lst)
+    except Exception as e:
+        if "merged into" in str(e):
+            raise ValueError(f"stranded by a merge: {e}") from None
+
+
+def merges(owner):
+    """owner's merge record (StudioMergedParts, 10.13; none until it first merges)."""
+    return list(getattr(owner, "StudioMergedParts", []))
 
 
 def liveKey(body):
@@ -1674,6 +1740,8 @@ class TestStudioListProperty(unittest.TestCase):
         self.mirrorsSeen = 0  # valid part mirrors, summed over the states (slice 9)
         self.piecesSeen = 0  # states with a live part made from a piece (P6p)
         self.unlistedSeen = 0  # states without a list after an edit, undo or reopen (ops#654)
+        self.mergesSeen = 0  # states with a part an Add merged into another at the bar (10.13)
+        self.lateSeen = 0  # edits committed, then recomputed outside the transaction (10.15)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1690,6 +1758,7 @@ class TestStudioListProperty(unittest.TestCase):
         free = len(lst.Entries) - NATIVES  # places after the natives
         kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern", "mirror", "mirror"]
         kinds += ["delete", "move", "scope", "depth", "suppress", "bar", "split", "split"]
+        kinds += ["merge", "merge"]
         kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
         if kind == "pattern" and not shapeOwners:
             kind = "insert"
@@ -1738,10 +1807,25 @@ class TestStudioListProperty(unittest.TestCase):
             owner = booleanOwner(doc, doc.getObject("S"), f"F{counter}", op, targets, tools, keep)
             PartDesign.studioInsert(owner, NATIVES + at)
             return f"boolean {owner.Name} {op} targets {targets} tools {tools} keep {keep} at {at}"
+        if kind == "merge":
+            # 10.13: an Add bar (y 3..7, 15 long) over two neighbouring parts, both in its scope in
+            # a random order (the first listed survives); its x decides whether it joins one part
+            # or both (the random parameter)
+            pair = rng.choice([("A", "B"), ("B", "C")])
+            base = dict(PARTS)[pair[0]]
+            x0 = base + rng.choice(clear([2, 6, 8, 12, 14], 15, spans(doc, -1), base))
+            rect = [x0, 3, x0 + 15, 7]
+            scope = list(pair)
+            rng.shuffle(scope)
+            at = rng.randint(0, free)
+            box = makeOwner(doc, doc.getObject("S"), f"F{counter}", rect, rng.choice([1, 2]),
+                            "Union", scope)
+            PartDesign.studioInsert(box, NATIVES + at)
+            return f"merge {box.Name} {rect} scope {scope} at {at}"
         if kind == "split":
             # P6p: a slot through a part (its x the random parameter), and its command
             p, px = rng.choice(PARTS)
-            x = px + rng.choice([3, 4, 5, 6])
+            x = px + rng.choice(clear([3, 4, 5, 6], 1, spans(doc, 3), px))
             rect = [x, -1, x + 1, 11]
             at = rng.randint(0, free)
             box = makeOwner(doc, doc.getObject("S"), f"F{counter}", rect, 11, "Subtraction", [p])
@@ -1854,12 +1938,22 @@ class TestStudioListProperty(unittest.TestCase):
             # P6p: the slot moved (its edit's OK is the command)
             r = ownerRecord(box)
             p = r["scope"][0]
-            x = dict(PARTS)[p] + rng.choice([3, 4, 5, 6])
+            px = dict(PARTS)[p]
+            x = px + rng.choice(clear([3, 4, 5, 6], 1, spans(doc, 3), px))
             setBox(box, [x, -1, x + 1, 11], 11, "Subtraction")
             PartDesign.studioReconcile(lst)
             made = PartDesign.studioMakePieces(box)
             labelPieces(made, box)
             return f"slot {name} at x {x}: {len(made)} new parts"
+        if kind == "depth" and box.TypeId == "Part::Box" and round(box.Placement.Base.y) == 3:
+            # 10.13: the Add bar moved, which can join a second part or let it go (its edit's OK
+            # is the command)
+            r = ownerRecord(box)
+            x0 = r["rect"][0] + rng.choice(clear([-6, -4, 4, 6], 15, spans(doc, -1), r["rect"][0]))
+            setBox(box, [x0, 3, x0 + 15, 7], r["depth"], "Union")
+            PartDesign.studioReconcile(lst)
+            labelPieces(PartDesign.studioMakePieces(box), box)
+            return f"bar {name} at x {x0}"
         if kind == "depth":
             r = ownerRecord(box)
             depth = rng.choice([1, 2, 3, 4, 5])
@@ -1876,6 +1970,7 @@ class TestStudioListProperty(unittest.TestCase):
 
     def run_sequence(self, seed, nops):
         rng = random.Random(seed)
+        late = random.Random(f"late{seed}")
         doc, _ = propStudio(f"prop{seed}")
         path = os.path.join(self.dir, f"prop{seed}.FCStd")
         # ops#654 list on first use: these seeds start from the document without a list (its
@@ -1904,24 +1999,44 @@ class TestStudioListProperty(unittest.TestCase):
                 doc.UndoMode = 1
                 what = "save, close, reopen"
             else:
+                # 10.15: some edits are committed first and recomputed after, outside the
+                # transaction (Python's commitTransaction() then recompute(), the property
+                # editor's commit then recompute). Drawn from a stream of its own, so the seeds'
+                # edits stay as they were
+                committedFirst = late.random() < 0.25
+                committed = False
                 doc.openTransaction("edit")
                 try:
                     what = self.edit(rng, doc, step + 1)
-                    # The command's recompute is in its transaction, as every GUI command and
-                    # dialog OK does it (recompute, then commit): what the recompute decides
-                    # and the projection takes after it (a Union's tools apart, a part mirror's
-                    # consumption, a lost split) then goes with the edit's undo step. Committed
-                    # first, the resync's steps were made outside any transaction, and an undo
-                    # restored the edit's deleted steps under suffixed names beside them (seed 3,
-                    # edit 63, ops#654 P6p open item a)
-                    doc.recompute()
-                    doc.commitTransaction()
+                    if committedFirst:
+                        # The resync after the recompute records into the edit's step, so its
+                        # undo takes what the resync made of it too (ops#654 10.15)
+                        doc.commitTransaction()
+                        committed = True
+                        doc.recompute()
+                        what += " (committed, then recomputed)"
+                        self.lateSeen += 1
+                        stranded(doc)
+                    else:
+                        # The command's recompute is in its transaction, as every GUI command
+                        # and dialog OK does it (recompute, then commit): what the recompute
+                        # decides and the projection takes after it (a Union's tools apart, a
+                        # part mirror's consumption, a lost split) goes with the edit's undo
+                        # step (seed 3, edit 63, ops#654 P6p open item a)
+                        doc.recompute()
+                        stranded(doc)
+                        doc.commitTransaction()
                 except Exception as e:
-                    doc.abortTransaction()
+                    if committed:
+                        doc.undo()  # refused after its commit: its undo takes it all back
+                    else:
+                        doc.abortTransaction()
                     what = f"refused: {e}"
                     # P6p: a member placed in a part after its split, or in a piece before the
-                    # split, is refused loudly by design (nothing changes)
-                    if "split before it" not in str(e) and "makes after it" not in str(e):
+                    # split, is refused loudly by design (nothing changes); so is one placed in a
+                    # part after an Add merged it into another (10.13)
+                    refusals = ("split before it", "makes after it", "merged into")
+                    if not any(r in str(e) for r in refusals):
                         bad += 1
                         self.log.append(f"seed {seed} op {step} {what}")
             doc.recompute()
@@ -1959,6 +2074,8 @@ class TestStudioListProperty(unittest.TestCase):
             consumers = [PartDesign.studioConsumerOf(doc.getObject(p)) for p, _ in PARTS]
             if any(c is not None and c.TypeId != "Part::Box" for c in consumers):
                 self.consumedSeen += 1
+            if any(c is not None and merges(c) for c in consumers):
+                self.mergesSeen += 1
             if any(b.StudioPieceWitness for b in PartDesign.studioLiveParts(studioList(doc))):
                 self.piecesSeen += 1
             self.patternsSeen += sum(
@@ -1987,13 +2104,16 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.patternsSeen, 0)
         self.assertGreater(self.mirrorsSeen, 0)
         self.assertGreater(self.piecesSeen, 0)
+        self.assertGreater(self.mergesSeen, 0)
+        self.assertGreater(self.lateSeen, 0)
         unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
         if any(str(s) in unlisted for s in seeds):
             self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
         print(f"testRandomEdits: {len(seeds)} seeds x {nops} edits, {self.consumedSeen} states "
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
-              f"states without a list")
+              f"states without a list, {self.mergesSeen} states with a merge, {self.lateSeen} "
+              f"edits committed before their recompute")
 
 
 if __name__ == "__main__":

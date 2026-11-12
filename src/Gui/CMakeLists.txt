@@ -479,6 +479,7 @@ SET(Command_CPP_SRCS
     ShortcutManager.cpp
     ForkKeymap.cpp
     DocumentTabBar.cpp
+    VariableStudioView.cpp
     CommandCompleter.cpp
     CommandActionPy.cpp
 )
@@ -491,6 +492,7 @@ SET(Command_SRCS
     ShortcutManager.h
     ForkKeymap.h
     DocumentTabBar.h
+    VariableStudioView.h
     CommandCompleter.h
     CommandActionPy.h
 )

@@ -695,7 +695,9 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
             }
             continue;
         }
-        if (slot.guess.empty()) {
+        // An attachment kept on a piece of a split face (kind `equivalent`, SW20) is a result, as
+        // Onshape's sketch on the split top is: its record only keeps the way back
+        if (slot.guess.empty() || slot.guess.kind == "equivalent") {
             continue;
         }
         if (foundInPlace(obj, slot)) {

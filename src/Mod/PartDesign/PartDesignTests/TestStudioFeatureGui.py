@@ -319,6 +319,78 @@ class TestStudioFeatureGui(StudioDialog, unittest.TestCase):
         self.assertOwner(owner, ["A", "B"])
         self.assertVolumes(A=910, B=910, C=1000)
 
+    def mergeAllBox(self):
+        return self.visible(QtWidgets.QCheckBox, "studioMergeAll")
+
+    def enabledRows(self):
+        rows = self.scopeList()
+        return [bool(rows.item(i).flags() & QtCore.Qt.ItemIsEnabled) for i in range(rows.count())]
+
+    def testTickedRowsAreNumberedInScopeOrder(self):
+        """10.13 (Onshape O9b): an Add over A and B (x 5..25 on their tops, 10 high). With two or
+        more ticked, each ticked row shows its place in the scope's order (tick order); one tick
+        keeps its plain name; unticking renumbers. B ticked first, then A: B survives; untick B
+        and tick it again: A first. OK: B merged into A (2000 + 20*6*10), B no part, C untouched."""
+        s = self.sketchInA("Sk", CUT)
+        owner = self.runCommand("PartDesign_Pad", s, active=None)
+        self.assertEqual(self.combo().currentText(), "New")  # Q1: two parts touched
+        self.choose("Add")
+        self.assertEqual(self.ticks(), [("A", False), ("B", False), ("C", False)])
+        self.tick("B", True)
+        self.assertEqual(self.ticks(), [("A", False), ("B", True), ("C", False)])
+        self.tick("A", True)
+        self.assertEqual(self.ticks(), [("2 A", True), ("1 B", True), ("C", False)])
+        self.tick("1 B", False)
+        self.assertEqual(self.ticks(), [("A", True), ("B", False), ("C", False)])
+        self.tick("B", True)
+        self.assertEqual(self.ticks(), [("1 A", True), ("2 B", True), ("C", False)])
+        self.tick("C", True)
+        self.assertEqual(self.ticks(), [("1 A", True), ("2 B", True), ("3 C", True)])
+        self.tick("3 C", False)
+        self.assertFalse(self.mergeAllBox().isChecked())
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["A", "B"])
+        self.assertEqual(list(owner.StudioMergedParts), ["B -> A"])
+        self.assertVolumes(A=2000 + 1200, C=1000)
+        live = [b.Name for b in PartDesign.studioLiveParts(self.list)]
+        self.assertEqual(live, ["A", "C"])
+        self.assertIsNone(PartDesign.studioStepOf(owner, self.body("B")))
+
+    def testMergeWithAll(self):
+        """10.13 (Onshape Q1b, M3): Merge with all, off by default, makes the scope every live
+        part, numbered by each part's first feature in the history (A, B, C), the ticks greyed.
+        OK: the Add over A and B makes them one (A survives), C untouched. Off again (edit), the
+        ticks are the feature's own again: none, "No merge scope selected"."""
+        s = self.sketchInA("Sk", CUT)
+        owner = self.runCommand("PartDesign_Pad", s, active=None)
+        self.choose("Add")
+        box = self.mergeAllBox()
+        self.assertIsNotNone(box, "no Merge with all")
+        self.assertFalse(box.isChecked())
+        self.assertEqual(self.enabledRows(), [True, True, True])
+        box.setChecked(True)
+        pump(0.3)
+        self.assertTrue(owner.StudioMergeAll)
+        self.assertEqual(self.ticks(), [("1 A", True), ("2 B", True), ("3 C", True)])
+        self.assertEqual(self.enabledRows(), [False, False, False])
+        self.assertEqual(self.note(), "")
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(list(owner.StudioMergedParts), ["B -> A"])
+        self.assertVolumes(A=2000 + 1200, C=1000)
+        self.assertEqual([b.Name for b in PartDesign.studioLiveParts(self.list)], ["A", "C"])
+        # Off: the feature's own (empty) scope again
+        self.doc.openTransaction("off")
+        PartDesign.studioSetMergeAll(owner, False)
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertFalse(owner.isValid())
+        self.assertIn("No merge scope selected", owner.getStatusString())
+        self.assertEqual([b.Name for b in PartDesign.studioLiveParts(self.list)], ["A", "B", "C"])
+        self.assertVolumes(A=1000, B=1000, C=1000)
+
     def testOneTargetThatIsNotTheSketchsPart(self):
         """The team's case (10.11): an Add on a sketch of A, over B, into B alone. B 1000 +
         6*6*10, A untouched."""
@@ -936,7 +1008,8 @@ class TestExtrudePrefillGui(StudioDialog, unittest.TestCase):
         self.setLength(2)
         pump(0.5)
         self.waitForResult("Add")
-        self.assertEqual(self.ticks(), [("A", True), ("B", True)])
+        # Two ticked: numbered in scope order (10.13), B (the pick's) first, A ticked after it
+        self.assertEqual(self.ticks(), [("2 A", True), ("1 B", True)])
         self.assertEqual(self.madeParts(owner), [])
         self.close(ok=False)
 

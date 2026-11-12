@@ -697,10 +697,13 @@ void WorkbenchGroup::addTo(QWidget* widget)
         auto menu = qobject_cast<QMenu*>(widget);
         menu = menu->addMenu(action()->text());
         menu->addActions(getEnabledWbActions());
+        // FreeCAD-CH (tabs 3): no selector under the Onshape keymap, a tab's kind fixes its tools
+        menu->menuAction()->setVisible(!ForkKeymap::isOnshape());
 
         connect(this, &WorkbenchGroup::workbenchListRefreshed, this, [menu](QList<QAction*> actions) {
             menu->clear();
             menu->addActions(actions);
+            menu->menuAction()->setVisible(!ForkKeymap::isOnshape());
         });
     }
 }

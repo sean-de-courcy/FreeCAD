@@ -738,21 +738,61 @@ void VariablesModel::rebuild(const App::Document* doc)
         return;
     }
     // listVariables gives the variables per object, in the document's object order.
-    const App::DocumentObject* holder = nullptr;
-    std::vector<std::string> names;
+    std::vector<std::pair<const App::DocumentObject*, std::vector<std::string>>> groups;
     for (const auto& var : App::VariableLookup::listVariables(doc)) {
-        if (var.holder != holder) {
-            if (holder) {
-                addHolderRows(holder, names);
+        if (!scope.empty() && var.holder->getNameInDocument() != scope) {
+            // FreeCAD-CH (ops#640, tabs slice 4): a Variable Studio's table lists its own
+            // variables, then the document's attached copies, read-only (the studios of other
+            // files every studio can use, as Onshape's Variable Studio references)
+            auto copy = freecad_cast<const App::VarSetCopy*>(var.holder);
+            if (!copy || !copy->isAttached()) {
+                continue;
             }
-            holder = var.holder;
-            names.clear();
         }
-        names.push_back(var.name);
+        if (groups.empty() || groups.back().first != var.holder) {
+            groups.emplace_back(var.holder, std::vector<std::string>());
+        }
+        groups.back().second.push_back(var.name);
     }
-    if (holder) {
+    if (!scope.empty()) {
+        std::stable_partition(groups.begin(), groups.end(), [this](const auto& group) {
+            return group.first->getNameInDocument() == scope;
+        });
+    }
+    bool newRow = !scope.empty();
+    for (const auto& [holder, names] : groups) {
+        if (newRow && holder->getNameInDocument() != scope) {
+            addNewRow(doc);
+            newRow = false;
+        }
         addHolderRows(holder, names);
     }
+    if (newRow) {
+        addNewRow(doc);
+    }
+}
+
+void VariablesModel::addNewRow(const App::Document* doc)
+{
+    // The studio's own rows end with an empty row, as Onshape's table (VS3): a name typed in it
+    // adds a Length with no value
+    App::DocumentObject* studio = doc->getObject(scope.c_str());
+    if (!studio || freecad_cast<App::VarSetCopy*>(studio)) {
+        return;
+    }
+    QList<QStandardItem*> row;
+    for (int column = 0; column < ColumnCount; ++column) {
+        auto item = new QStandardItem();
+        item->setData(NewKind, KindRole);
+        item->setData(QString::fromLatin1(doc->getName()), DocumentRole);
+        item->setData(QString::fromLatin1(studio->getNameInDocument()), HolderRole);
+        row << item;
+    }
+    row.front()->setText(tr("Name"));
+    row.front()->setData(QString(), EditTextRole);
+    row.front()->setForeground(Qt::gray);
+    row.front()->setToolTip(tr("Type a name to add a Length variable"));
+    insertRow(rowCount(), row);
 }
 
 void VariablesModel::addHolderRows(
@@ -799,7 +839,15 @@ void VariablesModel::addHolderRows(
         item->setData(HeaderKind, KindRole);
         headerRow << item;
     }
-    appendRow(headerRow);
+    // A Variable Studio's own variables are top-level rows, with no header (tabs slice 4)
+    QStandardItem* parent = header;
+    if (!scope.empty() && holder->getNameInDocument() == scope) {
+        qDeleteAll(headerRow);
+        parent = invisibleRootItem();
+    }
+    else {
+        appendRow(headerRow);
+    }
 
     for (const auto& name : names) {
         QString varName = QString::fromStdString(name);
@@ -876,7 +924,7 @@ void VariablesModel::addHolderRows(
                 item->setToolTip(tr("%1: %2").arg(varName, orphan->second));
             }
         }
-        header->appendRow(row);
+        parent->appendRow(row);
     }
 }
 
@@ -885,6 +933,9 @@ Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
     Qt::ItemFlags result = QStandardItemModel::flags(index) & ~Qt::ItemIsEditable;
     if (isReadOnly(index)) {
         return result;
+    }
+    if (kind(index) == NewKind) {
+        return index.column() == NameColumn ? result | Qt::ItemIsEditable : result;
     }
     if (kind(index) != HeaderKind
         && (index.column() == NameColumn || index.column() == ExpressionColumn)) {
@@ -919,7 +970,7 @@ App::DocumentObject* VariablesModel::holder(const QModelIndex& index)
 App::Property* VariablesModel::property(const QModelIndex& index)
 {
     App::DocumentObject* obj = holder(index);
-    if (!obj || kind(index) == HeaderKind) {
+    if (!obj || kind(index) == HeaderKind || kind(index) == NewKind) {
         return nullptr;
     }
     return obj->getPropertyByName(index.data(VariableRole).toString().toStdString().c_str());
@@ -941,6 +992,16 @@ bool VariablesModel::setData(const QModelIndex& index, const QVariant& value, in
     }
     error.clear();
     warning.clear();
+    if (kind(index) == NewKind) {
+        const QString name = value.toString().trimmed();
+        if (index.column() != NameColumn || name.isEmpty()) {
+            return name.isEmpty();
+        }
+        if (!addNamed) {
+            return false;
+        }
+        return addNamed(name, error);
+    }
     if (index.column() == NameColumn) {
         return rename(index, value.toString().trimmed());
     }
@@ -1332,9 +1393,13 @@ void VariablesDelegate::setModelData(
 
 // ----------------------------------------------------------------------------------------------
 
-VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
+VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentObject* studio)
     : DockWindow(doc, parent)
 {
+    if (studio && studio->isAttachedToDocument()) {
+        studioName = studio->getNameInDocument();
+        documentName = studio->getDocument()->getName();
+    }
     auto layout = new QVBoxLayout(this);
     layout->setSpacing(2);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -1434,8 +1499,39 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     delegate = new VariablesDelegate(this);
     tree = new VariablesTree(this);
     tree->setObjectName(QStringLiteral("variablesTree"));
+    model->setScope(studioName);
+    model->addNamed = [this](const QString& name, QString& error) {
+        App::DocumentObject* obj = this->studio();
+        if (!obj || !currentDocument()) {
+            error = tr("The Variable Studio is gone.");
+            return false;
+        }
+        return addFromDialog(
+            currentDocument()->getName(),
+            obj->getNameInDocument(),
+            name,
+            "App::PropertyDistance",
+            QString(),
+            QString(),
+            error
+        );
+    };
     tree->setModel(model);
     tree->setItemDelegate(delegate);
+    if (!studioName.empty()) {
+        // The studio itself is every own row's source; the Onshape import makes copies, which
+        // the dock lists
+        tree->setColumnHidden(VariablesModel::SourceColumn, true);
+        importAction->setVisible(false);
+        tree->setRootIsDecorated(false);
+        // Onshape's "Insert Variable Studio" (VS8): here another file's VarSet, as a copy that
+        // Refresh reads again (a studio of this document needs no insert: every studio sees it)
+        copyAction->setText(tr("Insert Variable Studio..."));
+        copyAction->setToolTip(
+            tr("Insert a Variable Studio of a saved FreeCAD document, as a read-only copy that "
+               "Refresh reads again")
+        );
+    }
     tree->setUniformRowHeights(true);
     tree->setAlternatingRowColors(true);
     tree->setEditTriggers(
@@ -1454,7 +1550,11 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     tree->addAction(locateAction);
     layout->addWidget(tree);
 
-    hint = new QLabel(tr("Add a variable, or type #name in any expression."), this);
+    hint = new QLabel(
+        studioName.empty() ? tr("Add a variable, or type #name in any expression.")
+                           : tr("Add a variable: every Part Studio uses it as #name."),
+        this
+    );
     hint->setObjectName(QStringLiteral("hint"));
     hint->setWordWrap(true);
     hint->setAlignment(Qt::AlignCenter);
@@ -1620,10 +1720,14 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
         std::bind(&VariablesView::onDeleteDocument, this, sp::_1)
     ));
 
-    if (Gui::Document* active = Application::Instance->activeDocument()) {
+    if (Gui::Document* active = Application::Instance->activeDocument();
+        active && studioName.empty()) {
         documentName = active->getDocument()->getName();
     }
     rebuild();
+    if (!studioName.empty()) {
+        return;  // the rest is the dock's: the Variable tool and the keymap's first showing
+    }
 
     // FreeCAD-CH (ops#640, rank 15): the Variable tool, made with the panel it opens
     CommandManager& commands = Application::Instance->commandManager();
@@ -1650,6 +1754,12 @@ VariablesView::~VariablesView() = default;
 App::Document* VariablesView::currentDocument() const
 {
     return documentName.empty() ? nullptr : App::GetApplication().getDocument(documentName.c_str());
+}
+
+App::DocumentObject* VariablesView::studio() const
+{
+    App::Document* doc = studioName.empty() ? nullptr : currentDocument();
+    return doc ? doc->getObject(studioName.c_str()) : nullptr;
 }
 
 bool VariablesView::isRelevant(const App::DocumentObject* obj) const
@@ -1690,6 +1800,9 @@ void VariablesView::onProperty(const App::Property& prop)
 
 void VariablesView::onActiveDocument(const Gui::Document& doc)
 {
+    if (!studioName.empty()) {
+        return;  // a Variable Studio's table stays on its document
+    }
     std::string name = doc.getDocument()->getName();
     if (name != documentName) {
         documentName = name;
@@ -1764,6 +1877,9 @@ void VariablesView::rebuild()
     };
     for (int row = 0; row < model->rowCount(); ++row) {
         QModelIndex header = model->index(row, 0);
+        if (VariablesModel::kind(header) != VariablesModel::HeaderKind) {
+            continue;  // a Variable Studio's own row
+        }
         if (tree->isExpanded(header)) {
             collapsed.erase(headerKey(header));
         }
@@ -1776,6 +1892,15 @@ void VariablesView::rebuild()
 
     for (int row = 0; row < model->rowCount(); ++row) {
         QModelIndex header = model->index(row, 0);
+        if (VariablesModel::kind(header) != VariablesModel::HeaderKind) {
+            // A Variable Studio's own row (tabs slice 4): flat, the current row kept
+            if (!currentVariable.isEmpty()
+                && header.data(VariablesModel::HolderRole).toString() == currentHolder
+                && header.data(VariablesModel::VariableRole).toString() == currentVariable) {
+                tree->setCurrentIndex(model->index(row, currentColumn));
+            }
+            continue;
+        }
         tree->setFirstColumnSpanned(row, QModelIndex(), true);
         QString holder = header.data(VariablesModel::HolderRole).toString();
         tree->setExpanded(header, !collapsed.contains(headerKey(header)));
@@ -1801,7 +1926,8 @@ void VariablesView::updateActions()
 {
     QModelIndex current = tree->currentIndex();
     bool variable = current.isValid()
-        && VariablesModel::kind(current) != VariablesModel::HeaderKind;
+        && VariablesModel::kind(current) != VariablesModel::HeaderKind
+        && VariablesModel::kind(current) != VariablesModel::NewKind;
     addAction->setEnabled(currentDocument() != nullptr);
     importAction->setEnabled(currentDocument() != nullptr);
     // A copy's Refresh and Locate (ops#317 PR G2): on an attached copy's header or variable.
@@ -1871,6 +1997,10 @@ App::DocumentObject* VariablesView::addTarget() const
     if (!doc) {
         return nullptr;
     }
+    if (!studioName.empty()) {
+        App::DocumentObject* obj = studio();
+        return isEditableSet(obj) ? obj : nullptr;  // a Variable Studio adds to itself
+    }
     // The selected row's VarSet, else the document's "Variables" VarSet; never a copy that is
     // still attached to its source (ops#317: its variables are read-only).
     if (App::DocumentObject* obj = VariablesModel::holder(tree->currentIndex())) {
@@ -1899,6 +2029,9 @@ void VariablesView::addVariable()
         return;
     }
     App::DocumentObject* target = addTarget();
+    if (!studioName.empty() && !target) {
+        return;  // the studio is gone
+    }
     std::string docName = doc->getName();
 
     auto dialog = new QDialog(getMainWindow());
@@ -1931,6 +2064,9 @@ void VariablesView::addVariable()
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
         if (!isEditableSet(obj)) {
             continue;  // an attached copy (ops#317)
+        }
+        if (!studioName.empty() && obj != target) {
+            continue;  // a Variable Studio's Add: the studio only
         }
         setBox->addItem(
             QString::fromUtf8(obj->Label.getValue()),
@@ -2410,6 +2546,7 @@ void VariablesView::deleteVariable()
     QModelIndex current = tree->currentIndex();
     App::DocumentObject* obj = VariablesModel::holder(current);
     if (!obj || VariablesModel::kind(current) == VariablesModel::HeaderKind
+        || VariablesModel::kind(current) == VariablesModel::NewKind
         || VariablesModel::isReadOnly(current)) {
         return;
     }
@@ -2497,7 +2634,8 @@ void VariablesView::importVariables()
 void VariablesView::showUses()
 {
     QModelIndex current = tree->currentIndex();
-    if (VariablesModel::kind(current) == VariablesModel::HeaderKind) {
+    if (VariablesModel::kind(current) == VariablesModel::HeaderKind
+        || VariablesModel::kind(current) == VariablesModel::NewKind) {
         return;
     }
     QString qName = current.data(VariablesModel::VariableRole).toString();

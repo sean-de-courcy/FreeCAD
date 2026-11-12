@@ -133,6 +133,69 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(point.AttachmentSupport, [(groove, (halves[0],))])
         self.assertEqual(App.getReferenceReport(point), [])
 
+    def testASketchOnATopALaterFeatureSplitsKeepsAPieceAndComesBack(self):
+        """SW20 (the narrowed SW19 (a) rule, naming-design.md): a box 0..40 x 0..20 x 0..10 with a
+        pocket 2 deep at x 18..22, y 5..15 (inside the top: the top stays one face), a sketch
+        (FlatFace) and a datum point (CenterOfMass) on the pocket's top. The top was made by the
+        Pad, a feature before the pocket that splits it: the pocket made a slot across
+        (y -5..25) cuts it in two coplanar pieces, and the sketch stays on the plane z 10 on a
+        piece, as Onshape's does; the point breaks (the pieces' centres differ; Onshape's
+        centroid connector fails). Made a pocket inside again, both come back on the whole top
+        (SW20 (3))."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 40, 20), body)
+        models.pad(body, profile, 10)
+        slot = models.sketch(doc, "SlotSketch", models.rectangle(18, 5, 22, 15), body, z=10)
+        pocket = models.pocket(body, slot, 2, "Slot")
+        doc.recompute()
+        top = face("plane", normal=Z, through=(0, 0, 10))
+        [name] = top.select(pocket.Shape)
+        onTop = body.newObject("Sketcher::SketchObject", "OnTop")
+        onTop.AttachmentSupport = [(pocket, name)]
+        onTop.MapMode = "FlatFace"
+        point = body.newObject("PartDesign::Point", "Centre")
+        point.AttachmentSupport = [(pocket, name)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertTrue(onTop.isValid() and point.isValid())
+        centre = point.Placement.Base
+
+        # Act: the slot across
+        models.moveRectangle(slot, 18, -5, 22, 25)
+        doc.recompute()
+
+        # Assert
+        pieces = top.select(pocket.Shape)
+        self.assertEqual(len(pieces), 2)
+        self.assertTrue(onTop.isValid(), onTop.getStatusString())
+        [(target, (held,))] = onTop.AttachmentSupport
+        self.assertIn(held, pieces)
+        self.assertAlmostEqual(onTop.Placement.Base.z, 10, 9)
+        self.assertFalse(point.isValid(), point.AttachmentSupport)
+        [entry] = App.getReferenceReport(point)
+        self.assertEqual(entry["status"], "broken")
+        self.assertTrue(entry["sub"].startswith("?Face"), entry["sub"])
+
+        # Act: a recompute with the top still split keeps the sketch on its piece
+        onTop.touch()
+        doc.recompute()
+        self.assertTrue(onTop.isValid(), onTop.getStatusString())
+        self.assertEqual(onTop.AttachmentSupport, [(pocket, (held,))])
+
+        # Act: the pocket inside the top again
+        models.moveRectangle(slot, 18, 5, 22, 15)
+        doc.recompute()
+
+        # Assert
+        [whole] = top.select(pocket.Shape)
+        for consumer in (onTop, point):
+            self.assertTrue(consumer.isValid(), (consumer.Name, consumer.getStatusString()))
+            self.assertEqual(consumer.AttachmentSupport, [(pocket, (whole,))], consumer.Name)
+        self.assertAlmostEqual(onTop.Placement.Base.z, 10, 9)
+        self.assertLess((point.Placement.Base - centre).Length, 1e-7)
+
     def testAttacherPlacementOnCoplanarPieces(self):
         """What the attachment's equivalence relies on (Task 2 PR 5): a groove across a pad's
         top face splits it into two coplanar pieces; FlatFace gives the same placement on

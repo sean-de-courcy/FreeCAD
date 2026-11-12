@@ -26,9 +26,11 @@
 #define PART_FILLETFALLBACK_H
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include <gp_Pnt.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopTools_DataMapOfShapeReal.hxx>
 
@@ -171,6 +173,15 @@ PartExport void finish(
  * correctly (the rib's top at r = 2 - 1e-7 is 2e-7 wide), and is kept. Null if there is none.
  */
 PartExport TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base);
+
+/** A point well inside the solid `region` that `result` holds, found without integrating a face:
+ * the midpoints of the intervals that lines across region's box (9 x 9 along each axis) spend
+ * inside it, kept when longer than 20 times the shapes' largest tolerance and classified IN
+ * region, then classified against result. None if result holds no such point (or region is too
+ * thin for one). The check that a cut removed where two tools overlap: there the volume check's
+ * allowance for raised tolerances can be as large as the overlap itself (ops#669).
+ */
+PartExport std::optional<gp_Pnt> materialIn(const TopoDS_Shape& result, const TopoDS_Shape& region);
 
 /** Collects what the exact construction builds on this thread while it exists, for the feature's
  * Report-view line (decision 54). Recorders nest; the innermost collects.

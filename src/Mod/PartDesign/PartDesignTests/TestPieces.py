@@ -302,6 +302,35 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(y, 1000)
         self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 3)
 
+    def testRemoveMissingItsScopePartMakesNoPart(self):
+        """A Remove only takes material away: a slot through P (x 30..31) scoped to Q alone (x 200..
+        210), which it misses, cuts nothing at the command and makes no part of its own tool (the
+        gate's seed 5 op 49, 10.13 gate round: the command made the cutter, 1 x 12 x 11, a part)."""
+        self.studio((("P", (0, 0, 100, 10), 10), ("Q", (200, 0, 210, 10), 10)))
+        bodies = sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body")
+        e = self.pocket("E", (SLOT,), ("Q",))
+        self.assertEqual(self.command(e), [])
+        self.assertEqual(
+            sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body"), bodies
+        )
+        self.assertVolume(self.doc.getObject("P"), 10000)
+        self.assertVolume(self.doc.getObject("Q"), 1000)
+        self.assertEqual(sorted(b.Name for b in PartDesign.studioLiveParts(self.list)), ["P", "Q"])
+
+    def testMirrorRemoveCopyMissingItsScopePartMakesNoPart(self):
+        """R4's mirror with Remove: Y's copy (x -10..0) misses the scope part X (x -30..-20); the
+        command makes no part of the copy, X and Y keep 1000."""
+        self.studio((("Y", (0, 0, 10, 10), 10), ("X", (-30, 0, -20, 10), 10)))
+        y, x = self.doc.getObject("Y"), self.doc.getObject("X")
+        m = partMirror(
+            self.doc, self.S, "Mir", "Y", (originPlane(y, "YZ_Plane"), [""]), "Remove", ("X",)
+        )
+        self.doc.recompute()
+        self.assertEqual(self.command(m), [])
+        self.assertVolume(x, 1000)
+        self.assertVolume(y, 1000)
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
+
     # ------------------------------------------------------------------------------- the skeptic
     def testBossesRespacedAcrossTheSlotDontSwapTheSides(self):
         """Skeptic 1: bosses on P at x 10..20 and x 80..90 (z 10..15), the slot at 50..51; both
@@ -447,9 +476,32 @@ class TestPieces(unittest.TestCase):
             self.assertFalse(step.isValid(), name)
             self.assertIn("press OK", step.getStatusString())
 
-    def testSplitStoppedTheStrongerRecordClaims(self):
-        """The slot made shallow (z 5..10): one solid. The left piece, which carries a boss (more
-        unsplit faces), claims it; the right piece's step fails loudly."""
+    # ----------------------------------------------- a split that stops (10.12 amendment, Q13)
+    def shallow(self, e, length=5):
+        self.doc.openTransaction("depth")
+        e.Length = length
+        self.doc.commitTransaction()
+        self.doc.recompute()
+
+    def assertNothingFails(self):
+        self.assertEqual(
+            [(o.Name, o.getStatusString()) for o in self.doc.Objects if not o.isValid()], []
+        )
+
+    def assertGone(self, e, p, volume, *pieces):
+        """The split is gone (Onshape SPLIT_NO_CHANGE): P is the one part, with volume; the pieces
+        are no parts and have no step of E; nothing fails."""
+        self.assertEqual(PartDesign.studioLiveParts(self.list), [p])
+        self.assertVolume(p, volume)
+        for piece in pieces:
+            self.assertIsNone(self.step(e, piece), piece.Name)
+        self.assertEqual(list(getattr(e, "StudioSplitLost", [])), ["P"])
+        self.assertNothingFails()
+
+    def testSplitStoppedResolvesToTheParent(self):
+        """Q13: the slot made shallow (z 5..10), one solid. Neither piece claims it, though the
+        left one carries a boss (more unsplit faces): P is the one part again (the boss's volume
+        included), the pieces are no parts, and nothing fails."""
         self.studio()
         p = self.doc.getObject("P")
         boss = pad(p, "B1", sketch(p, "B1Sk", xyPlane(p), (10, 2, 20, 8), z=10), 5)
@@ -457,28 +509,338 @@ class TestPieces(unittest.TestCase):
         self.doc.recompute()
         e = self.pocket("E", (SLOT,), ("P",))
         left, right = self.leftRight(self.command(e))
-        self.doc.openTransaction("shallow")
-        e.Length = 5
-        self.doc.commitTransaction()
-        self.doc.recompute()
-        self.assertValid(self.step(e, left))
-        self.assertVolume(left, 10000 + 300 - 50)
-        self.assertFalse(self.step(e, right).isValid())
+        self.shallow(e)
+        self.assertGone(e, p, 10000 + 300 - 50, left, right)
+        self.assertValid(e)
 
-    def testSplitStoppedATieMakesTheParentLive(self):
-        """The slot made shallow with nothing to tell the pieces apart: both piece steps fail and
-        P is live again after E (records name it, none holds a solid)."""
+    def testSplitStoppedWithATieResolvesToTheParent(self):
+        """The slot made shallow with nothing to tell the pieces apart: as above."""
         e, made = self.slotSplit()
         left, right = self.leftRight(made)
-        self.doc.openTransaction("shallow")
+        self.shallow(e)
+        self.assertGone(e, self.doc.getObject("P"), 10000 - 50, left, right)
+
+    def addOwner(self, name, rect, scope, height=5):
+        sk = studioSketch(self.doc, self.S, name + "Sk", (rect,), z=10)
+        owner = makeOwner(self.doc, self.S, "Pad", name, sk, scope, Length=height)
+        self.doc.recompute()
+        return owner
+
+    def testQ13aAnAddScopedToAVanishedPieceMergesIntoTheParent(self):
+        """Q13a: F, an Add on the right piece (a 10 x 6 x 5 boss at x 70..80) scoped to it. The
+        split stopped: F stays OK and adds to P."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        f = self.addOwner("F", (70, 2, 80, 8), (right.StudioPartId,))
+        self.assertVolume(right, 6900 + 300)
+        self.shallow(e)
+        p = self.doc.getObject("P")
+        self.assertGone(e, p, 10000 - 50 + 300, left, right)
+        self.assertValid(f, self.step(f, p))
+        self.assertIsNone(self.step(f, right))
+
+    def testQ13bAScopeOfBothPiecesResolvesToTheParentOnce(self):
+        """Q13b: F bridges the slot (x 25..36, 11 x 6 x 5), scope the right piece then the left:
+        it rejoins them (the right survives, 10.13). The split stopped: F adds to P once."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        f = self.addOwner("F", (25, 2, 36, 8), (right.StudioPartId, left.StudioPartId))
+        self.assertVolume(right, 3000 + 6900 + 330)
+        self.shallow(e)
+        p = self.doc.getObject("P")
+        self.assertGone(e, p, 10000 - 50 + 330, left, right)
+        self.assertValid(f, self.step(f, p))
+
+    def testTheSplitComesBackWithItsIds(self):
+        """Gone, then cutting again: the pieces are parts again with their ids, and G (a hole
+        2 x 2 x 2 at x 70..72 scoped to the right piece) goes back to it, having cut P meanwhile.
+        A command on E while the split is gone deletes no record (Onshape Q14a)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        ids = (left.StudioPartId, right.StudioPartId)
+        g = self.pocket("G", ((70, 2, 72, 4),), (right.StudioPartId,), length=2)
+        self.assertVolume(right, 6900 - 8)
+        self.shallow(e)
+        p = self.doc.getObject("P")
+        self.assertGone(e, p, 10000 - 50 - 8, left, right)
+        self.assertEqual(self.command(e), [])
+        self.assertGone(e, p, 10000 - 50 - 8, left, right)
+        self.shallow(e, 11)
+        self.assertEqual(self.live(), [left, right])
+        self.assertEqual((left.StudioPartId, right.StudioPartId), ids)
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900 - 8)
+        self.assertValid(e, g, self.step(g, right))
+        self.assertIsNone(self.step(g, p))
+        self.assertEqual(list(getattr(e, "StudioSplitLost", [])), [])
+
+    def testABodyMemberOfAVanishedPieceIsLoud(self):
+        """A Pad in the right piece's Body (a FreeCAD construct, no Onshape analogue), then the
+        split stopped: the reconcile refuses, naming the member and the gone split, and the
+        piece's step stays in error: loud, never a silent part (skeptic 5, 10.12 amendment)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        rb = pad(right, "RB", sketch(right, "RBSk", xyPlane(right), (70, 2, 80, 8), z=10), 2)
+        self.doc.recompute()
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        self.assertVolume(right, 6900 + 120)
+        self.shallow(e)
+        with self.assertRaises(Exception) as refused:
+            PartDesign.studioReconcile(self.list)
+        self.assertIn("'RB' is in", str(refused.exception))
+        self.assertIn("which is gone", str(refused.exception))
+        self.assertFalse(self.step(e, right).isValid())
+
+    def testSplitStoppedUndoRedo(self):
+        """Undo of the edit that stops the split: the pieces are parts again; redo: P again. The
+        recompute inside the edit's transaction, as a dialog's OK (a recompute after the commit
+        is 10.15's)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        p = self.doc.getObject("P")
+        self.doc.openTransaction("depth")
         e.Length = 5
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertGone(e, p, 10000 - 50, left, right)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), [left, right])
+        self.assertVolume(left, 3000)
+        self.assertValid(self.step(e, left), self.step(e, right))
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertGone(e, p, 10000 - 50, left, right)
+
+    def testSplitStoppedSaveAndReopen(self):
+        """Saved with the split gone: reopened, P is the one part and nothing fails."""
+        e, made = self.slotSplit()
+        self.shallow(e)
+        names = [b.Name for b in made]
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "gone.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = studioList(self.doc)
+        self.doc.recompute()
+        e = self.doc.getObject("E")
+        pieces = [self.doc.getObject(name) for name in names]
+        self.assertGone(e, self.doc.getObject("P"), 10000 - 50, *pieces)
+
+    def testPartMirrorOfAVanishedPieceMirrorsTheParent(self):
+        """M, a part mirror (New) of the right piece about x = 0. The split stopped: M mirrors P
+        (Onshape Q14c: a part pattern there, the part mirror here, our one part pattern)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        p = self.doc.getObject("P")
+        m = partMirror(self.doc, self.S, "M", right.StudioPartId, (originPlane(p, "YZ_Plane"), [""]))
+        self.doc.recompute()
+        copy = [b for b in self.live() if b not in (left, right)]
+        self.assertEqual(len(copy), 1)
+        self.assertVolume(copy[0], 6900)
+        self.shallow(e)
+        self.assertEqual(sorted(b.Name for b in PartDesign.studioLiveParts(self.list)), sorted([p.Name, copy[0].Name]))
+        self.assertVolume(copy[0], 10000 - 50)
+        self.assertValid(m)
+        self.assertNothingFails()
+
+    # ------------------------------------- a partial unsplit, the split back (Onshape Q14b-f)
+    def setRect(self, owner, k, r, inside=False):
+        """The k-th rectangle of owner's sketch moved to r (its lines edited, so they keep their
+        ids, as a drag in the sketcher); with inside, recomputed inside the edit's transaction."""
+        sk = owner.Profile[0] if isinstance(owner.Profile, tuple) else owner.Profile
+        x0, y0, x1, y1 = r
+        points = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+        geometry = sk.Geometry
+        for i in range(4):
+            line = geometry[4 * k + i]
+            line.StartPoint = points[i]
+            line.EndPoint = points[(i + 1) % 4]
+            geometry[4 * k + i] = line
+        self.doc.openTransaction("rect")
+        sk.Geometry = geometry
+        if inside:
+            self.doc.recompute()
         self.doc.commitTransaction()
         self.doc.recompute()
-        self.assertFalse(self.step(e, left).isValid())
-        self.assertFalse(self.step(e, right).isValid())
+
+    def threePieces(self):
+        """Q14e's model: one Remove E with two through slots, x 29..31 and x 69..71: three pieces
+        x 0..29 (2900), x 31..69 (3800), x 71..100 (2900), in x order."""
+        self.studio()
+        e = self.pocket("E", ((29, -1, 31, 11), (69, -1, 71, 11)), ("P",))
+        made = sorted(self.command(e), key=lambda b: b.Shape.BoundBox.XMin)
+        self.assertEqual(len(made), 3)
+        for body, volume in zip(made, (2900, 3800, 2900)):
+            self.assertVolume(body, volume)
+        return e, made
+
+    def assertAbsorbed(self, e, holder, piece, live):
+        """A partial unsplit (Onshape Q14e): piece's solid is holder's now; piece is no part and
+        has no step of E, the live parts are live, E records the absorption, nothing fails."""
+        self.assertEqual(self.live(), live)
+        self.assertIsNone(self.step(e, piece))
+        self.assertValid(e, self.step(e, holder))
+        self.assertEqual(
+            list(getattr(e, "StudioSplitLost", [])),
+            [piece.StudioPartId + ">" + holder.StudioPartId],
+        )
+        self.assertNothingFails()
+
+    def testQ14eAPartialUnsplitIsQuietAndItsPicksGoToTheHolder(self):
+        """Onshape Q14e: three pieces; Adds scoped to the middle piece (x 40..50) and to the right
+        one (x 80..90), 10 x 6 x 5 each. The second slot shrunk to y 2..8 (a hole inside the part,
+        no cut across): two parts, x 0..29 and x 31..100. The right piece vanishes quietly into the
+        middle one, which holds the merged solid (ours: the stronger witness, two slot walls to
+        one; Onshape kept the x 71..100 piece's id, unverified here and seen only in which Body
+        holds the part); both Adds stay OK in it. The slot widened back: three parts with their
+        ids, each Add on its piece again."""
+        e, (left, middle, right) = self.threePieces()
+        ids = [b.StudioPartId for b in (left, middle, right)]
+        am = self.addOwner("AM", (40, 2, 50, 8), (middle.StudioPartId,))
+        ar = self.addOwner("AR", (80, 2, 90, 8), (right.StudioPartId,))
+        self.assertVolume(middle, 3800 + 300)
+        self.assertVolume(right, 2900 + 300)
+        self.setRect(e, 1, (69, 2, 71, 8))
+        self.assertAbsorbed(e, middle, right, [left, middle])
+        self.assertVolume(left, 2900)
+        self.assertVolume(middle, 6900 - 2 * 6 * 10 + 600)
+        self.assertEqual(len(middle.Shape.Solids), 1)
+        self.assertValid(am, ar, self.step(am, middle), self.step(ar, middle))
+        self.assertIsNone(self.step(ar, right))
+        self.assertNotIn(right, PartDesign.studioLiveParts(self.list))
+        # A command on E while the split is partly gone keeps the absorbed record (point 4)
+        self.assertEqual(self.command(e), [])
+        self.assertAbsorbed(e, middle, right, [left, middle])
+        self.setRect(e, 1, (69, -1, 71, 11))
+        self.assertEqual(self.live(), [left, middle, right])
+        self.assertEqual([b.StudioPartId for b in (left, middle, right)], ids)
+        self.assertVolume(middle, 3800 + 300)
+        self.assertVolume(right, 2900 + 300)
+        self.assertValid(am, ar, self.step(ar, right))
+        self.assertIsNone(self.step(ar, middle))
+        self.assertEqual(list(getattr(e, "StudioSplitLost", [])), [])
+        self.assertNothingFails()
+
+    def testQ14eTwoSlotsTheSecondShallowMergesIntoTheFirstsPiece(self):
+        """Onshape Q14e's variant: E1 splits P at x 29..31, E2 splits its right piece at x 69..71;
+        Adds scoped to each of E2's pieces. E2 made 5 deep: its split is gone (one solid), both
+        its pieces vanish and both Adds merge into E1's right piece (Onshape: JMD, the id that
+        piece has after slot 1 alone)."""
+        self.studio()
+        e1 = self.pocket("E1", ((29, -1, 31, 11),), ("P",))
+        left1, right1 = self.leftRight(self.command(e1))
+        e2 = self.pocket("E2", ((69, -1, 71, 11),), (right1.StudioPartId,))
+        mid, right = self.leftRight(self.command(e2))
+        a1 = self.addOwner("A1", (40, 2, 50, 8), (mid.StudioPartId,))
+        a2 = self.addOwner("A2", (80, 2, 90, 8), (right.StudioPartId,))
+        self.assertEqual(self.live(), [left1, mid, right])
+        self.shallow(e2)
+        self.assertEqual(self.live(), [left1, right1])
+        self.assertVolume(right1, 6900 - 2 * 10 * 5 + 600)
+        self.assertVolume(left1, 2900)
+        self.assertValid(a1, a2, self.step(a1, right1), self.step(a2, right1))
+        for piece in (mid, right):
+            self.assertIsNone(self.step(e2, piece))
+        self.assertEqual(list(getattr(e2, "StudioSplitLost", [])), [right1.StudioPartId])
+        self.assertNothingFails()
+
+    def testQ14bTheSplitComesBackElsewhereWithItsSides(self):
+        """Onshape Q14b: G, an Add (x 70..80) scoped to the right piece. The slot made shallow (the
+        split gone), moved to x 10..11, then through again: the ids keep their sides of the slot
+        (the +x piece keeps the +x id), and G is on the +x piece again."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        ids = (left.StudioPartId, right.StudioPartId)
+        g = self.addOwner("G", (70, 2, 80, 8), (right.StudioPartId,))
+        self.shallow(e)
         p = self.doc.getObject("P")
-        self.assertIn(p, PartDesign.studioLiveParts(self.list))
-        self.assertVolume(p, 10000 - 50)
+        self.assertGone(e, p, 10000 - 50 + 300, left, right)
+        self.moveSketch(e, -20)
+        self.assertGone(e, p, 10000 - 50 + 300, left, right)
+        self.shallow(e, 11)
+        self.assertEqual(self.live(), [left, right])
+        self.assertEqual((left.StudioPartId, right.StudioPartId), ids)
+        self.assertVolume(left, 1000)
+        self.assertVolume(right, 8900 + 300)
+        self.assertValid(e, g, self.step(g, right))
+        self.assertNothingFails()
+
+    def testQ14eAPartMirrorOfAnAbsorbedPieceMirrorsItsHolder(self):
+        """A part mirror (New) of the right piece about x = 0 (Onshape Q14c's principle with Q14e's
+        partial unsplit): the right piece absorbed, M mirrors the merged middle part."""
+        e, (left, middle, right) = self.threePieces()
+        p = self.doc.getObject("P")
+        m = partMirror(self.doc, self.S, "M", right.StudioPartId, (originPlane(p, "YZ_Plane"), [""]))
+        self.doc.recompute()
+        copy = [b for b in self.live() if b not in (left, middle, right)]
+        self.assertEqual(len(copy), 1)
+        self.assertVolume(copy[0], 2900)
+        self.setRect(e, 1, (69, 2, 71, 8))
+        self.assertAbsorbed(e, middle, right, [copy[0], left, middle])
+        self.assertVolume(copy[0], 6900 - 120)
+        self.assertValid(m)
+
+    def testQ14fABooleanWithAVanishedToolConsumesTheWholePart(self):
+        """Onshape Q14f: T a part touching P's end (x 100..110); U, a Union of T (target) with the
+        right piece (tool), Keep tools off: T 1000 + 6900, the right piece consumed. The split made
+        shallow: U consumes all of P into T (V = P + T), OK; T is the one part."""
+        self.studio((("P", (0, 0, 100, 10), 10), ("T", (100, 0, 110, 10), 10)))
+        e = self.pocket("E", (SLOT,), ("P",))
+        left, right = self.leftRight(self.command(e))
+        u = self.doc.addObject("PartDesign::Boolean", "U")
+        self.S.addObject(u)
+        u.Type = "Fuse"
+        u.Refine = False
+        u.StudioScope = ["T"]
+        u.StudioTools = [right.StudioPartId]
+        self.doc.openTransaction("union")
+        PartDesign.studioInsert(u, -1)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        t, p = self.doc.getObject("T"), self.doc.getObject("P")
+        self.assertVolume(t, 1000 + 6900)
+        self.assertEqual(self.live(), [left, t])
+        self.shallow(e)
+        self.assertEqual(PartDesign.studioLiveParts(self.list), [t])
+        self.assertVolume(t, 1000 + 10000 - 50)
+        self.assertEqual(len(t.Shape.Solids), 1)
+        self.assertValid(u, self.step(u, t))
+        self.assertNothingFails()
+
+    def testPartialUnsplitUndoRedo(self):
+        """Undo of the edit that shrinks the second slot: three parts again; redo: two, the right
+        piece absorbed (recomputed inside the edit's transaction, as testSplitStoppedUndoRedo)."""
+        e, (left, middle, right) = self.threePieces()
+        self.setRect(e, 1, (69, 2, 71, 8), inside=True)
+        self.assertAbsorbed(e, middle, right, [left, middle])
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), [left, middle, right])
+        self.assertVolume(right, 2900)
+        self.assertValid(self.step(e, middle), self.step(e, right))
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertAbsorbed(e, middle, right, [left, middle])
+        self.assertVolume(middle, 6900 - 120)
+
+    def testPartialUnsplitSaveAndReopen(self):
+        """Saved with the right piece absorbed: reopened, the same two parts and nothing fails."""
+        e, made = self.threePieces()
+        self.setRect(e, 1, (69, 2, 71, 8))
+        names = [b.Name for b in made]
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "partial.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = studioList(self.doc)
+        self.doc.recompute()
+        left, middle, right = [self.doc.getObject(name) for name in names]
+        self.assertAbsorbed(self.doc.getObject("E"), middle, right, [left, middle])
+        self.assertVolume(middle, 6900 - 120)
 
     def testSuppressedSplitListsTheParentNotThePieces(self):
         """E suppressed: P and C listed (two parts, not three); unsuppressed: the pieces and C."""
@@ -655,6 +1017,244 @@ class TestPieces(unittest.TestCase):
         self.assertValid(lp)
         # The plate less the seed slot and its copy: x 10..14, y 0..16 (y 5..16 the copy's)
         self.assertVolume(p, 60 * 20 * 10 - 4 * 16 * 10)
+
+
+class TestStudioUndo(unittest.TestCase):
+    """ops#654 10.15: the resync after a recompute outside any transaction records into the undo
+    step it follows (the last one), so undoing the edit undoes the steps the resync made or
+    deleted with it.
+
+    Designed geometry: Y (x 2..12, y 0..10, 10 high) and X (x -20..-10), a part mirror Mir of Y
+    about Y's YZ plane (x = 0), Add, scope X: the copy x -12..-2 joins X and stays apart from Y.
+    E, a Pocket in Y (x 4..8, y 2..8, 3 deep), after Mir. Y's sketch moved by -2 (x 0..10): Y
+    touches its copy at x = 0, Mir consumes it, and E's step in Y goes (decided at compute)."""
+
+    def setUp(self):
+        self.doc = None
+        self.observer = None
+
+    def tearDown(self):
+        if self.observer is not None:
+            App.removeDocumentObserver(self.observer)
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestStudioUndo"):
+                App.closeDocument(doc.Name)
+
+    # ------------------------------------------------------------------------------- the model
+    def model(self):
+        from PartDesignTests.TestStudioPartMirror import boxPart
+
+        doc = self.doc = App.newDocument("TestStudioUndo")
+        doc.UndoMode = 1
+        # As the Gui has it (ops#640): an undo or redo regenerates before its own signal, so the
+        # resync there sees the records the regeneration re-derives. Without it (FreeCADCmd's
+        # default) the resync at undo()'s own signal reads a record written outside the step
+        # against the restored inputs (ops#654 10.15, left open)
+        doc.RegenerateOnCommit = True
+        self.S = doc.addObject("App::Part", "S")
+        self.y = boxPart(doc, self.S, "Y", 2, 0, 12, 10, 0, 10)
+        self.x = boxPart(doc, self.S, "X", -20, 0, -10, 10, 0, 10)
+        doc.recompute()
+        self.list = PartDesign.studioList(self.S, True)
+        doc.openTransaction("mirror")
+        self.mir = partMirror(
+            doc, self.S, "Mir", "Y", (originPlane(self.y, "YZ_Plane"), [""]), "Add", ("X",)
+        )
+        doc.recompute()
+        doc.commitTransaction()
+        doc.openTransaction("pocket")
+        sk = studioSketch(doc, self.S, "ESk", ((4, 2, 8, 8),), z=10)
+        self.e = makeOwner(doc, self.S, "Pocket", "E", sk, ("Y",), Length=3)
+        doc.recompute()
+        doc.commitTransaction()
+        self.assertIsNone(PartDesign.studioConsumerOf(self.y))
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        return doc
+
+    def moveY(self, dx):
+        sk = self.doc.getObject("YSk")
+        sk.AttachmentOffset = App.Placement(V(dx, 0, 0), App.Rotation())
+
+    def state(self):
+        """Every Body's Group (its origin left out), the list, the live parts, and every step's
+        name and Body (None: a step in no Body)."""
+        out = {}
+        steps = []
+        bodies = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
+        for body in bodies:
+            out[body.Name] = [g.Name for g in body.Group if g.TypeId != "App::Origin"]
+        for o in self.doc.Objects:
+            if getattr(o, "StudioOwner", None) is not None:
+                holder = [b.Name for b in bodies if o in b.Group]
+                steps.append((o.Name, holder[0] if holder else None))
+        out["list"] = [e.Name for e in self.list.Entries]
+        out["live"] = sorted(b.Name for b in PartDesign.studioLiveParts(self.list))
+        out["steps"] = sorted(steps)
+        return out
+
+    def assertNoStray(self, state):
+        stray = [name for name, body in state["steps"] if body is None]
+        self.assertEqual(stray, [], "steps in no Body")
+        names = [name for name, _ in state["steps"]]
+        self.assertFalse([n for n in names if n[-3:].isdigit()], f"suffixed steps: {names}")
+
+    def consoleOutput(self, action):
+        """What action() prints through FreeCADCmd's console observer (stderr), warnings on."""
+        if "Console" not in App.Console.GetObservers():
+            self.skipTest("no console observer to catch the warnings (the GUI)")
+        status = App.Console.GetStatus("Console", "Wrn")
+        App.Console.SetStatus("Console", "Wrn", True)
+        saved = os.dup(2)
+        with tempfile.TemporaryFile() as caught:
+            os.dup2(caught.fileno(), 2)
+            try:
+                action()
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+                App.Console.SetStatus("Console", "Wrn", bool(status))
+            caught.seek(0)
+            return caught.read().decode("utf-8", "replace")
+
+    # ------------------------------------------------------------------------------- the tests
+    def testCommitThenRecomputeUndoesTheResyncWithTheEdit(self):
+        """The move committed, then recomputed outside it: Mir consumes Y and E's step in Y goes,
+        inside the move's step (no step of the resync's own). Undo: every Body, the list and every
+        step as before the move, and a reconcile succeeds; redo: the moved state again."""
+        doc = self.model()
+        before = self.state()
+        doc.openTransaction("move")
+        self.moveY(-2)
+        doc.commitTransaction()
+        doc.recompute()
+        after = self.state()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+        doc.undo()
+        doc.recompute()
+        self.assertEqual(self.state(), before)
+        self.assertIsNone(PartDesign.studioConsumerOf(self.y))
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        PartDesign.studioReconcile(self.list)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), after)
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+        self.assertEqual(doc.RedoCount, 0)
+
+    def testUnrecordedChangeThenUndoClearsRedoLoudly(self):
+        """The skeptic's F1: the move made with no transaction (Python), recomputed: the resync
+        joins the pocket's step. Undo it: the resync in the undo's regeneration (the move stayed,
+        unrecorded) can't join a step (Redo isn't empty), so its writes clear Redo with a
+        warning; redo then does nothing. No step in no Body, no suffixed duplicate, at any point."""
+        doc = self.model()
+        self.moveY(-2)
+        doc.recompute()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])  # no "Delete" step of its own
+        self.assertNoStray(self.state())
+
+        def undoAndRecompute():
+            doc.undo()
+            doc.recompute()
+
+        printed = self.consoleOutput(undoAndRecompute)
+        self.assertIn("Redo cleared", printed)
+        self.assertEqual(doc.RedoCount, 0)
+        self.assertEqual(doc.UndoNames, ["mirror"])
+        undone = self.state()
+        self.assertNoStray(undone)
+        self.assertIsNone(doc.getObject("E"))
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), undone)
+        self.assertNoStray(self.state())
+        PartDesign.studioReconcile(self.list)
+
+    def testBookedRecomputeMakesNoStepOfItsOwn(self):
+        """Std_Refresh books "Recompute" before its recompute. With nothing stale it records
+        only outputs and is set aside for the signal, then dropped at its close: no step. After
+        an unrecorded move its recompute writes Mir's consumption record, an input: "Recompute"
+        is a step, and the resync records into it, beside the record (no "Delete" step of its
+        own, no step in no Body)."""
+        doc = self.model()
+        App.setActiveTransaction("Recompute")
+        doc.getObject("ESk").touch()
+        doc.recompute()
+        App.closeActiveTransaction()
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        self.moveY(-2)
+        App.setActiveTransaction("Recompute")
+        doc.recompute()
+        App.closeActiveTransaction()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertEqual(doc.UndoNames, ["Recompute", "pocket", "mirror"])
+        self.assertNoStray(self.state())
+
+    def testObserverCreatingDuringTheResyncRecordsIntoTheSameStep(self):
+        """Y moved in its own step (consumed), then moved back committed and recomputed: the
+        resync makes E's step in Y again. A document observer that creates an object when it sees
+        that step created records into the same step: undo takes both away."""
+        doc = self.model()
+        doc.openTransaction("move")
+        self.moveY(-2)
+        doc.recompute()
+        doc.commitTransaction()
+        consumed = self.state()
+        self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
+        test = self
+
+        class Observer:
+            made = []
+
+            def slotCreatedObject(self, obj):
+                if obj.Document == test.doc and obj.Name.startswith("E_at_") and not self.made:
+                    self.made.append(test.doc.addObject("App::DocumentObjectGroup", "Witness"))
+
+        self.observer = Observer()
+        App.addDocumentObserver(self.observer)
+        doc.openTransaction("back")
+        self.moveY(0)
+        doc.commitTransaction()
+        doc.recompute()
+        App.removeDocumentObserver(self.observer)
+        self.observer = None
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        self.assertIsNotNone(doc.getObject("Witness"))
+        self.assertEqual(doc.UndoNames, ["back", "move", "pocket", "mirror"])
+        doc.undo()
+        doc.recompute()
+        self.assertIsNone(doc.getObject("Witness"))
+        self.assertEqual(self.state(), consumed)
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+
+    def testPlainRecomputeLeavesTheUndoStackAsItWas(self):
+        """Nothing stale: a recompute after a touch leaves the undo steps as they were (count and
+        names), and undoing the last one still undoes the whole pocket."""
+        doc = self.model()
+        pre = self.state()
+        doc.openTransaction("noop")
+        doc.commitTransaction()
+        self.doc.getObject("ESk").touch()
+        doc.recompute()
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        self.assertEqual(doc.UndoCount, 2)
+        self.assertEqual(doc.RedoCount, 0)
+        self.assertEqual(self.state(), pre)
+        doc.undo()
+        doc.recompute()
+        self.assertIsNone(doc.getObject("E"))
+        self.assertIsNone(doc.getObject("E_at_Y"))
+        self.assertEqual(doc.UndoNames, ["mirror"])
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), pre)
 
 
 if __name__ == "__main__":

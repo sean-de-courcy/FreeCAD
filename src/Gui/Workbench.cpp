@@ -960,7 +960,12 @@ ToolBarItem* StdWorkbench::setupToolBars() const
     *clipboard << "Std_Cut" << "Std_Copy" << "Std_Paste";
 
     // Workbench switcher
-    auto wb = new ToolBarItem(root);
+    // FreeCAD-CH (tabs 3): under the Onshape keymap a tab's kind fixes its tools, so no selector
+    auto wb = new ToolBarItem(
+        root,
+        ForkKeymap::isOnshape() ? ToolBarItem::DefaultVisibility::UnavailableHidden
+                                : ToolBarItem::DefaultVisibility::Visible
+    );
     wb->setCommand("Workbench");
     *wb << "Std_Workbench";
 

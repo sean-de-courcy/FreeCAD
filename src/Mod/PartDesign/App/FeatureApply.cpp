@@ -3,6 +3,9 @@
 // The generic step of a tool-making studio feature (FreeCAD-CH ops#654, notes/parts-design.md
 // 3.1 and 10.8): its owner's tool, applied to its base by Operation, then refined.
 
+#include <algorithm>
+#include <numeric>
+#include <string>
 #include <vector>
 
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -12,6 +15,7 @@
 
 #include <App/Document.h>
 #include <App/GeoFeature.h>
+#include <App/PropertyStandard.h>
 #include <Base/Exception.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
@@ -33,6 +37,11 @@ PartDesignExport Part::TopoShape studioBooleanTool(const App::DocumentObject* ow
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
 PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
 PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+// StudioList.cpp and Pieces.cpp (FreeCAD-CH ops#654 10.13; declared where used)
+PartDesignExport bool studioIsMergingAdd(const App::DocumentObject* owner);
+PartDesignExport std::vector<std::string> studioMembersAfter(const App::DocumentObject* owner,
+                                                             const Body* part);
+PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b);
 }  // namespace PartDesign
 
 PROPERTY_SOURCE(PartDesign::FeatureApply, PartDesign::FeatureAddSub)
@@ -72,6 +81,114 @@ Part::TopoShape touching(const Part::TopoShape& tool, const Part::TopoShape& bas
     Part::TopoShape out = tool;  // its Tag, hasher and history algorithm
     out.makeElementCompound(kept);
     return out;
+}
+
+/// What an Add owner's tool joins at its place (FreeCAD-CH ops#654 10.13, Onshape O9 and M1-M4):
+/// the contact graph of its scope parts (their shapes at its place, in scope order) and its tool's
+/// solids, with edges only between a tool solid and a part, contact by studioSolidsJoin (face
+/// contact or overlap, never an edge or a vertex). Each component holding a part is one part: its
+/// first listed part survives, the others are merged into it. A tool solid in no component is a
+/// leftover (P6p)
+struct Merge
+{
+    std::vector<Body*> parts;
+    std::vector<Part::TopoShape> shapes;  ///< each part's shape at the owner's place (document)
+    std::vector<int> partComponent;
+    std::vector<int> toolComponent;    ///< each tool solid's component, -1: none
+    std::vector<std::string> records;  ///< "<merged id> -> <survivor id>", in scope order
+
+    int indexOf(const Body* body) const
+    {
+        auto it = std::ranges::find(parts, body);
+        return it == parts.end() ? -1 : static_cast<int>(it - parts.begin());
+    }
+    /// The first listed part of component
+    int survivorOf(int component) const
+    {
+        for (std::size_t k = 0; k < parts.size(); ++k) {
+            if (partComponent[k] == component) {
+                return static_cast<int>(k);
+            }
+        }
+        return -1;
+    }
+};
+
+Merge mergeOf(const App::DocumentObject* owner, const Part::TopoShape& tool)
+{
+    Merge out;
+    for (auto part : studioScopeOf(owner)) {
+        // Not a part it makes itself from a leftover (P6p): it has no shape before it
+        if (isPieceBody(part) && part->StudioMadeBy.getValue() == owner) {
+            continue;
+        }
+        Part::TopoShape shape = studioBaseAt(owner, part);
+        if (!shape.isNull()) {
+            out.parts.push_back(part);
+            out.shapes.push_back(shape);
+        }
+    }
+    const std::vector<Part::TopoShape> solids = tool.getSubTopoShapes(TopAbs_SOLID);
+    const int parts = static_cast<int>(out.parts.size());
+    // Union-find over the parts (0..parts-1) and the tool's solids (parts..); a component's root
+    // is its first listed part
+    std::vector<int> root(parts + solids.size());
+    std::iota(root.begin(), root.end(), 0);
+    auto find = [&root](int k) {
+        while (root[k] != k) {
+            root[k] = root[root[k]];
+            k = root[k];
+        }
+        return k;
+    };
+    for (std::size_t j = 0; j < solids.size(); ++j) {
+        for (int k = 0; k < parts; ++k) {
+            if (studioSolidsJoin(solids[j].getShape(), out.shapes[k].getShape())) {
+                const int a = find(parts + static_cast<int>(j));
+                const int b = find(k);
+                root[std::max(a, b)] = std::min(a, b);
+            }
+        }
+    }
+    for (int k = 0; k < parts; ++k) {
+        out.partComponent.push_back(find(k));
+    }
+    for (std::size_t j = 0; j < solids.size(); ++j) {
+        const int r = find(parts + static_cast<int>(j));
+        out.toolComponent.push_back(r < parts ? r : -1);
+    }
+    for (int k = 0; k < parts; ++k) {
+        const int survivor = out.survivorOf(out.partComponent[k]);
+        if (survivor != k) {
+            out.records.push_back(studioPartId(out.parts[k]) + " -> "
+                                  + studioPartId(out.parts[survivor]));
+        }
+    }
+    return out;
+}
+
+/// Writes owner's merge record (StudioMergedParts) when it changed; the projection takes it after
+/// the recompute (resyncPartMirrors)
+void noteMerges(App::DocumentObject* owner, const std::vector<std::string>& records)
+{
+    auto prop =
+        freecad_cast<App::PropertyStringList*>(owner->getPropertyByName("StudioMergedParts"));
+    if (!prop) {
+        if (records.empty() || owner->getPropertyByName("StudioMergedParts")) {
+            return;
+        }
+        prop = static_cast<App::PropertyStringList*>(owner->addDynamicProperty(
+            "App::PropertyStringList",
+            "StudioMergedParts",
+            "Studio",
+            "The parts this Add merges into another part of its scope, each '<id> -> <survivor "
+            "id>' (ops#654 10.13)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (prop->getValues() != records) {
+        prop->setValues(records);
+    }
 }
 
 }  // namespace
@@ -155,6 +272,17 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         // takes the one solid of the source its witness selects, as is
         const bool piece = body && owner && isPieceBody(body) && body->StudioMadeBy.getValue() == owner;
         Part::TopoShape tool = piece ? pieceShape(body, &why) : toolOf(owner, &why);
+        // 10.13: an Add owner merges the parts its tool joins; decided here, in the document's
+        // frame, by every step alike (the record is written when it changes)
+        const bool merging = !piece && owner && studioIsMergingAdd(owner)
+            && getBooleanOperation() == BooleanOperation::Union;
+        Merge merge;
+        if (merging) {
+            if (!tool.isNull()) {
+                merge = mergeOf(owner, tool);
+            }
+            noteMerges(owner, merge.records);
+        }
         if (tool.isNull()) {
             return new App::DocumentObjectExecReturn(why, this);
         }
@@ -195,6 +323,15 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         }
         if (base.isNull()) {
             AddSubShape.setValue(tool);
+            if ((merging && !merge.parts.empty()) || (body && isPieceBody(body))) {
+                // 10.13: nothing before it in a piece (its split held nothing for it), or in a
+                // part of an Add over parts with solids: a part that fails, and so does what
+                // acts on it (P6p); never the tool as a part of its own (unverified on Onshape)
+                return new App::DocumentObjectExecReturn(
+                    "Nothing comes before this step in " + part + ": it has no solid to add to",
+                    this
+                );
+            }
             if (getBooleanOperation() != BooleanOperation::Union) {
                 return new App::DocumentObjectExecReturn(
                     "No merge scope selected: nothing comes before this step in " + part,
@@ -209,7 +346,63 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
             // touch it; another region's solid belongs to the part it stops on (Onshape O8b)
             // A Union Boolean's tools are fused whole (P5): one that touches nothing is refused
             // below, never dropped
-            if (getBooleanOperation() == BooleanOperation::Union && !isBooleanOwner(owner)) {
+            std::vector<Part::TopoShape> merged;  // the parts merged into this one (10.13)
+            const int k = merging ? merge.indexOf(body) : -1;
+            if (k >= 0) {
+                // Only the tool's solids of this part's component, and only in its survivor; the
+                // parts merged into it enter the fuse whole (skeptic 4 and 5: no per-solid filter)
+                const int component = merge.partComponent[k];
+                std::vector<Part::TopoShape> kept;
+                if (merge.survivorOf(component) == k) {
+                    const auto solids = tool.getSubTopoShapes(TopAbs_SOLID);
+                    for (std::size_t j = 0; j < solids.size() && j < merge.toolComponent.size();
+                         ++j) {
+                        if (merge.toolComponent[j] == component) {
+                            kept.push_back(solids[j]);
+                        }
+                    }
+                }
+                if (kept.empty()) {
+                    // Nothing of the tool joins this part, or it is merged into another: it stays
+                    // as it was here
+                    AddSubShape.setValue(Part::TopoShape());
+                    rawShape = base;
+                    Shape.setValue(getSolid(base));
+                    return App::DocumentObject::StdReturn;
+                }
+                if (kept.size() < tool.countSubShapes(TopAbs_SOLID)) {
+                    Part::TopoShape some = tool;  // its Tag, hasher and history algorithm
+                    some.makeElementCompound(kept);
+                    tool = some;
+                }
+                const Base::Placement toStep = (bodyFrame * Placement.getValue()).inverse();
+                for (std::size_t m = 0; m < merge.parts.size(); ++m) {
+                    if (static_cast<int>(m) == k || merge.partComponent[m] != component) {
+                        continue;
+                    }
+                    // A feature of the merged part after the owner has no part to act on: loud,
+                    // never a silent follow (P8a's picks)
+                    const auto later = studioMembersAfter(owner, merge.parts[m]);
+                    if (!later.empty()) {
+                        std::string names;
+                        for (const auto& name : later) {
+                            names += (names.empty() ? "'" : ", '") + name + "'";
+                        }
+                        const std::string gone =
+                            std::string("'") + merge.parts[m]->Label.getValue() + "'";
+                        return new App::DocumentObjectExecReturn(
+                            "'" + std::string(owner->Label.getValue()) + "' merges " + gone
+                                + " into " + part + ", but " + names + " after it in " + gone
+                                + " would have no part: move it above, or into " + part,
+                            this
+                        );
+                    }
+                    Part::TopoShape other = merge.shapes[m];
+                    other.transformShape(toStep.toMatrix(), false, true);
+                    merged.push_back(other);
+                }
+            }
+            else if (getBooleanOperation() == BooleanOperation::Union && !isBooleanOwner(owner)) {
                 tool = touching(tool, base);
                 if (tool.isNull()) {
                     // Nothing of the tool touches this part: it stays as it was
@@ -226,9 +419,11 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
                 getSelectedHistoryAlgorithm()
             );
             try {
+                std::vector<Part::TopoShape> operands {base, tool};
+                operands.insert(operands.end(), merged.begin(), merged.end());
                 result.makeElementBoolean(
                     getBooleanMaker(),
-                    {base, tool},
+                    operands,
                     nullptr,
                     FuzzyTolerance.getValue(),
                     Part::ElementMapPolicy::Propagate,
