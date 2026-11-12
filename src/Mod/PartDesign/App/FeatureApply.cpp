@@ -37,6 +37,10 @@ PartDesignExport Part::TopoShape studioBooleanTool(const App::DocumentObject* ow
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
 PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
 PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+// StudioPattern.cpp, StudioList.cpp (ops#654 T2; declared where used)
+PartDesignExport bool isInstancePartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<std::string> studioPartPatternConsumed(const App::DocumentObject* owner);
+PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
 // StudioList.cpp and Pieces.cpp (FreeCAD-CH ops#654 10.13; declared where used)
 PartDesignExport bool studioIsMergingAdd(const App::DocumentObject* owner);
 PartDesignExport std::vector<std::string> studioMembersAfter(const App::DocumentObject* owner,
@@ -274,6 +278,41 @@ Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::stri
     const std::string label = std::string("'") + owner->Label.getValue() + "'";
     if (isBooleanOwner(owner)) {
         return studioBooleanTool(owner, why);  // in the document's frame already
+    }
+    if (isInstancePartPattern(owner)) {
+        // T2: a Linear or Polar part pattern's copies; New (no scope) as they are, each a part;
+        // with the sources it consumes (instance 1 is the source itself, Onshape Q3, Q5), fused
+        // for an Add or a Remove, apart for an Intersect (Q6: per instance)
+        Part::TopoShape copies = studioPatternTool(owner, nullptr, why);
+        if (copies.isNull() || studioScopeIds(owner).empty()) {
+            return copies;
+        }
+        const auto consumed = studioPartPatternConsumed(owner);
+        std::vector<Part::TopoShape> shapes;
+        for (auto source : studioPartPatternSources(owner)) {
+            if (std::ranges::find(consumed, studioPartId(source)) == consumed.end()) {
+                continue;
+            }
+            Part::TopoShape base = studioBaseAt(owner, source);
+            for (const auto& solid : base.getSubTopoShapes(TopAbs_SOLID)) {
+                shapes.push_back(solid);
+            }
+        }
+        for (const auto& solid : copies.getSubTopoShapes(TopAbs_SOLID)) {
+            shapes.push_back(solid);
+        }
+        Part::TopoShape out(owner->getID(), owner->getDocument()->getStringHasher());
+        if (std::string(studioOperationOf(owner)) == "Common" || shapes.size() < 2) {
+            out.makeElementCompound(
+                shapes,
+                nullptr,
+                Part::TopoShape::SingleShapeCompoundCreationPolicy::forceCompound
+            );
+        }
+        else {
+            out.makeElementFuse(shapes);
+        }
+        return out;
     }
     if (isStudioPartPattern(owner)) {
         // The part mirror (slice 9): its source part mirrored, in the document's frame already;

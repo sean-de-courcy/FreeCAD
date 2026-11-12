@@ -550,10 +550,11 @@ class TestStudioPartMirror(unittest.TestCase):
         self.assertIn("plane", m.getStatusString())
         self.assertVolume("P", 4000)
 
-    def testPartLinearPatternIsRefused(self):
-        """A part pattern other than the mirror is not done yet: loud."""
+    def testPartPatternOfAnotherTypeIsRefused(self):
+        """A part pattern other than the mirror, Linear and Polar (T2: the curve pattern's place,
+        a MultiTransform here) is not done yet: loud."""
         p, c = self.plateAndCylinder()
-        pat = self.doc.addObject("PartDesign::LinearPattern", "Pat")
+        pat = self.doc.addObject("PartDesign::MultiTransform", "Pat")
         self.studio.addObject(pat)
         pat.PatternType = "Part"
         pat.StudioEntities = ["C"]
@@ -565,6 +566,436 @@ class TestStudioPartMirror(unittest.TestCase):
         self.assertFalse(pat.isValid())
         self.assertIn("not done yet", pat.getStatusString())
         self.assertVolume("P", 4000)
+
+
+# ----------------------------------------------------------------------------------------------
+# FreeCAD-CH ops#654 T2 (notes/parts-design.md 10.16 T2 and settled 9): the part pattern, Linear
+# and Polar. A LinearPattern or PolarPattern in the studio, outside every Body, PatternType "Part":
+# its sources' ids in StudioEntities, its Operation as the mirror's. Its copies are each source as it
+# is just before the pattern, moved by every instance but the first. New (Operation Union, no
+# scope): each copy a new part made by the pattern ("<pattern>:k", P6p), following the source.
+# Add: the copies through 10.13's graph against the scope (a copy touching nothing a new part, one
+# bridging two scope parts merges them); each source consumed when it touches the result (Onshape
+# O5, Q3), kept when it touches neither copy nor result (Q10). Remove and Intersect consume the
+# source (Q5: instance 1 is the source itself, a tool); Intersect is per scope part and per
+# instance, unfused (Q6: pieces with new ids).
+
+X_AXIS, Y_AXIS, Z_AXIS = range(3)
+
+
+def partPattern(doc, studio, kind, name, sources, operation="New", scope=(), index=-1, **values):
+    """A part pattern (PartDesign::<kind>, PatternType Part) of the part ids sources, listed at
+    index; New has no scope (its parts are the ones it makes). No recompute."""
+    owner = doc.addObject("PartDesign::" + kind, name)
+    studio.addObject(owner)
+    owner.PatternType = "Part"
+    owner.StudioEntities = list(sources)
+    for key, value in values.items():
+        setattr(owner, key, value)
+    owner.Refine = False
+    owner.addProperty("App::PropertyEnumeration", "Operation", "Studio")
+    owner.Operation = ["Union", "Subtraction", "Common"]
+    owner.Operation = OPERATIONS[operation]
+    owner.StudioScope = [] if operation == "New" else list(scope)
+    PartDesign.studioInsert(owner, index)
+    return owner
+
+
+class TestStudioPartPattern(unittest.TestCase):
+    def setUp(self):
+        self.doc = App.newDocument("TestStudioPartMirrorT2")
+        self.doc.UndoMode = 1
+        self.studio = self.doc.addObject("App::Part", "S")
+        self.dir = None
+
+    def tearDown(self):
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestStudioPartMirror"):
+                App.closeDocument(doc.Name)
+        if self.dir:
+            shutil.rmtree(self.dir, ignore_errors=True)
+
+    # ------------------------------------------------------------------------------- helpers
+    def box(self, name, x0, y0, x1, y1, z0, height):
+        return boxPart(self.doc, self.studio, name, x0, y0, x1, y1, z0, height)
+
+    def listed(self):
+        self.doc.recompute()
+        self.list = PartDesign.studioList(self.studio, True)
+        return self.list
+
+    def axis(self, index):
+        return (self.studio.Origin.OriginFeatures[index], [""])
+
+    def edit(self, label, change):
+        """change() in one transaction, computed inside it (the command path: the resync makes
+        the parts a step needs there)."""
+        self.doc.openTransaction(label)
+        result = change()
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        return result
+
+    def linear(self, name, sources, operation, scope=(), length=20, count=3, direction=X_AXIS):
+        return self.edit(name, lambda: partPattern(
+            self.doc, self.studio, "LinearPattern", name, sources, operation, scope,
+            Direction=self.axis(direction), Mode="Extent", Length=length, Occurrences=count,
+        ))
+
+    def polar(self, name, sources, operation, scope=(), count=4):
+        return self.edit(name, lambda: partPattern(
+            self.doc, self.studio, "PolarPattern", name, sources, operation, scope,
+            Axis=self.axis(Z_AXIS), Angle=360, Occurrences=count,
+        ))
+
+    def made(self, owner):
+        return sorted(
+            (b for b in self.doc.Objects
+             if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == owner),
+            key=lambda b: b.StudioPartId,
+        )
+
+    def live(self):
+        return sorted(b.Name for b in PartDesign.studioLiveParts(self.list))
+
+    def shape(self, part):
+        body = self.doc.getObject(part) if isinstance(part, str) else part
+        return body.Tip.Shape if body.Tip else Part.Shape()
+
+    def assertVolume(self, part, expected, places=3):
+        self.assertAlmostEqual(self.shape(part).Volume, expected, places=places, msg=str(part))
+
+    def assertValid(self, *objects):
+        for obj in objects:
+            self.assertTrue(obj.isValid(), f"{obj.Name}: {obj.getStatusString()}")
+
+    def assertCentres(self, bodies, expected):
+        got = sorted(tuple(round(c, 4) for c in self.shape(b).CenterOfMass) for b in bodies)
+        self.assertEqual(got, sorted(tuple(float(c) for c in e) for e in expected))
+
+    def reopen(self):
+        self.dir = self.dir or tempfile.mkdtemp(prefix="partpattern")
+        path = os.path.join(self.dir, "pattern.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.doc.UndoMode = 1
+        self.studio = self.doc.getObject("S")
+        self.list = PartDesign.studioList(self.studio, False)
+        self.doc.recompute()
+
+    def names(self, *bodies):
+        from PartDesignTests.TestStudioList import elementNames
+
+        return {b.StudioPartId: elementNames(self.shape(b)) for b in bodies}
+
+    # ------------------------------------------------------------------------------- New
+    def cube(self):
+        """Source S: a cube x 0..10, y 0..10, z 0..10 (1000)."""
+        s = self.box("Src", 0, 0, 10, 10, 0, 10)
+        self.listed()
+        return s
+
+    def testNewMakesAPartPerCopyFollowingTheSource(self):
+        """Acceptance T2 (2): New +x 20 x 3: two new parts 'Pat:1', 'Pat:2' of 1000 at x 20..30
+        and 40..50, the source kept; the source's pad 10 -> 5 high: both copies follow (500)."""
+        s = self.cube()
+        pat = self.linear("Pat", ["Src"], "New", length=40)
+        self.assertValid(pat)
+        made = self.made(pat)
+        self.assertEqual([b.StudioPartId for b in made], ["Pat:1", "Pat:2"])
+        self.assertCentres(made, [(25, 5, 5), (45, 5, 5)])
+        for body in made:
+            self.assertVolume(body, 1000)
+        self.assertVolume("Src", 1000)
+        self.assertEqual(self.live(), sorted(["Src"] + [b.Name for b in made]))
+        self.assertIsNone(PartDesign.studioConsumerOf(s))
+        self.doc.getObject("SrcPad").Length = 5
+        self.doc.recompute()
+        self.assertValid(pat)
+        for body in made:
+            self.assertVolume(body, 500)
+
+    def testNewCountChangeAddsAndDeletesParts(self):
+        """Acceptance T2 (2): count 3 -> 5 in an edit adds two parts; 5 -> 2 with the command's
+        OK deletes the Bodies left empty."""
+        self.cube()
+        pat = self.linear("Pat", ["Src"], "New", length=40)
+        self.assertEqual(len(self.made(pat)), 2)
+
+        def more():
+            pat.Occurrences = 5
+            pat.Length = 80
+
+        self.edit("count", more)
+        self.assertValid(pat)
+        self.assertEqual(len(self.made(pat)), 4)
+        self.assertCentres(self.made(pat), [(25, 5, 5), (45, 5, 5), (65, 5, 5), (85, 5, 5)])
+
+        def fewer():
+            pat.Occurrences = 2
+            pat.Length = 20
+            PartDesign.studioMakePieces(pat)
+
+        self.edit("count", fewer)
+        self.assertValid(pat)
+        self.assertEqual(len(self.made(pat)), 1)
+        self.assertCentres(self.made(pat), [(25, 5, 5)])
+        self.assertEqual(len(self.live()), 2)
+
+    def testNewCopiesOverlappingEachOtherStaySeparateParts(self):
+        """Onshape Q4: cube x 0..10, +5 x 3: three separate parts, the source and two copies of
+        1000 at x 5..15 and 10..20, in instance order."""
+        self.cube()
+        pat = self.linear("Pat", ["Src"], "New", length=10)
+        self.assertValid(pat)
+        made = self.made(pat)
+        self.assertEqual(len(made), 2)
+        self.assertCentres(made, [(10, 5, 5), (15, 5, 5)])
+        self.assertVolume("Src", 1000)
+        for body in made:
+            self.assertVolume(body, 1000)
+
+    def testPolarNewFourAboutZ(self):
+        """Acceptance T2 (4): a cube x 10..20, y -5..5, z 0..10 patterned about the studio's Z,
+        4 over 360: three new parts of 1000 centred at (0, 15), (-15, 0), (0, -15)."""
+        self.box("Src", 10, -5, 20, 5, 0, 10)
+        self.listed()
+        pat = self.polar("Pat", ["Src"], "New")
+        self.assertValid(pat)
+        made = self.made(pat)
+        self.assertEqual(len(made), 3)
+        self.assertCentres(made, [(0, 15, 5), (-15, 0, 5), (0, -15, 5)])
+        for body in made:
+            self.assertVolume(body, 1000)
+
+    def testNewUndoRedoAndSaveReopen(self):
+        """Undo takes the pattern and its parts away, redo brings them back; saved and opened
+        again, the same parts and element names."""
+        self.cube()
+        pat = self.linear("Pat", ["Src"], "New", length=40)
+        self.assertEqual(len(self.made(pat)), 2)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("Pat"))
+        self.assertFalse([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"
+                          and b.StudioPartId.startswith("Pat:")])
+        self.doc.redo()
+        self.doc.recompute()
+        pat = self.doc.getObject("Pat")
+        self.assertValid(pat)
+        before = self.names(*self.made(pat))
+        self.assertEqual(sorted(before), ["Pat:1", "Pat:2"])
+        self.reopen()
+        pat = self.doc.getObject("Pat")
+        self.assertValid(pat)
+        self.assertEqual(self.names(*self.made(pat)), before)
+
+    def testSuppressAndDelete(self):
+        """Acceptance T2 (8): suppressed, the copies are no parts; back on, they are; deleted,
+        their Bodies go with it in one step (undo brings them back)."""
+        self.cube()
+        pat = self.linear("Pat", ["Src"], "New", length=40)
+        made = [b.Name for b in self.made(pat)]
+        self.assertEqual(len(made), 2)
+        self.edit("suppress", lambda: PartDesign.studioSuppress(pat, True))
+        self.assertEqual(self.live(), ["Src"])
+        self.edit("unsuppress", lambda: PartDesign.studioSuppress(pat, False))
+        self.assertEqual(self.live(), sorted(["Src"] + made))
+
+        def delete():
+            PartDesign.studioRemove(pat)
+            self.doc.removeObject("Pat")
+
+        self.edit("delete", delete)
+        self.assertEqual(self.live(), ["Src"])
+        for name in made:
+            self.assertIsNone(self.doc.getObject(name))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), sorted(["Src"] + made))
+
+    # ------------------------------------------------------------------------------- Add
+    def o5(self):
+        """Onshape O5: plate P x 0..30, y 0..20, z 0..5 (3000); source S 10 x 10 x 5 at x 0..10,
+        y 5..15 on P's top (500), a part of its own."""
+        p = self.box("P", 0, 0, 30, 20, 0, 5)
+        s = self.box("Src", 0, 5, 10, 15, 5, 5)
+        self.listed()
+        return p, s
+
+    def testO5AddConsumesTheSourceAndMakesTheLoneCopyAPart(self):
+        """Acceptance T2 (1), O5: +x 20 x 3, Add, scope P: P 4000 with its id (S and instance 2
+        merged in), S consumed, instance 3 (x 40..50, touching nothing) a new part of 500."""
+        p, s = self.o5()
+        pat = self.linear("Pat", ["Src"], "Add", ("P",), length=40)
+        self.assertValid(pat, PartDesign.studioStepOf(pat, p))
+        self.assertVolume("P", 4000)
+        self.assertEqual(len(self.shape("P").Solids), 1)
+        self.assertEqual(p.StudioPartId, "P")
+        self.assertIs(PartDesign.studioConsumerOf(s), pat)
+        [new] = self.made(pat)
+        self.assertEqual(new.StudioPartId, "Pat:1")
+        self.assertVolume(new, 500)
+        self.assertCentres([new], [(45, 10, 7.5)])
+        self.assertEqual(self.live(), sorted(["P", new.Name]))
+
+    def testO5UndoRedoAndSaveReopen(self):
+        """Undo: S and P as they were, no new part; redo: as made; saved and opened again: the
+        first recompute agrees (S consumed, P 4000), the same element names."""
+        p, s = self.o5()
+        pat = self.linear("Pat", ["Src"], "Add", ("P",), length=40)
+        self.assertVolume("P", 4000)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), ["P", "Src"])
+        self.assertVolume("P", 3000)
+        self.doc.redo()
+        self.doc.recompute()
+        pat = self.doc.getObject("Pat")
+        self.assertValid(pat)
+        self.assertVolume("P", 4000)
+        [new] = self.made(pat)
+        self.assertEqual(self.live(), sorted(["P", new.Name]))
+        before = self.names(self.doc.getObject("P"), new)
+        self.reopen()
+        pat = self.doc.getObject("Pat")
+        self.assertValid(pat)
+        self.assertVolume("P", 4000)
+        self.assertIs(PartDesign.studioConsumerOf(self.doc.getObject("Src")), pat)
+        [new] = self.made(pat)
+        self.assertEqual(self.live(), sorted(["P", new.Name]))
+        self.assertEqual(self.names(self.doc.getObject("P"), new), before)
+
+    def testQ3AddOfTwoSourcesConsumesBoth(self):
+        """Onshape Q3: P x 0..60 (12000); S1 x 0..10 and S2 x 20..30, y 0..10, z 10..20 on P's
+        top; +5 x 2, Add, scope P: one part, P 15000, both sources consumed."""
+        p = self.box("P", 0, 0, 60, 20, 0, 10)
+        s1 = self.box("S1", 0, 0, 10, 10, 10, 10)
+        s2 = self.box("S2", 20, 0, 30, 10, 10, 10)
+        self.listed()
+        pat = self.linear("Pat", ["S1", "S2"], "Add", ("P",), length=5, count=2)
+        self.assertValid(pat)
+        self.assertVolume("P", 15000)
+        self.assertEqual(len(self.shape("P").Solids), 1)
+        self.assertIs(PartDesign.studioConsumerOf(s1), pat)
+        self.assertIs(PartDesign.studioConsumerOf(s2), pat)
+        self.assertEqual(self.live(), ["P"])
+        self.assertFalse(self.made(pat))
+
+    def testQ10SourceTouchingNeitherCopyNorResultIsKept(self):
+        """Onshape Q10 (designed the other way along x): P x 0..20 (4000); S x -25..-20,
+        y 0..5, z 0..15 (375); +40 x 2, Add, scope P: the copy (x 15..20) sticks out of P's top:
+        P 4125, S kept as its own part."""
+        p = self.box("P", 0, 0, 20, 20, 0, 10)
+        s = self.box("Src", -25, 0, -20, 5, 0, 15)
+        self.listed()
+        pat = self.linear("Pat", ["Src"], "Add", ("P",), length=40, count=2)
+        self.assertValid(pat)
+        self.assertVolume("P", 4125)
+        self.assertVolume("Src", 375)
+        self.assertIsNone(PartDesign.studioConsumerOf(s))
+        self.assertEqual(self.live(), ["P", "Src"])
+
+    def testAddCopyBridgingTwoScopePartsMergesThem(self):
+        """Acceptance T2 (6): A x 0..10 and B x 20..30, y 0..10, z 0..10 (1000 each); S x
+        -35..-15, y 0..10, z 10..15 (1000), apart from both; +40 x 2, Add, scope A, B: the copy
+        (x 5..25) lies on both tops and merges B into A (3000, A's id); S kept (Q10)."""
+        a = self.box("A", 0, 0, 10, 10, 0, 10)
+        b = self.box("B", 20, 0, 30, 10, 0, 10)
+        s = self.box("Src", -35, 0, -15, 10, 10, 5)
+        self.listed()
+        pat = self.linear("Pat", ["Src"], "Add", ("A", "B"), length=40, count=2)
+        self.assertValid(pat)
+        self.assertVolume("A", 3000)
+        self.assertEqual(len(self.shape("A").Solids), 1)
+        self.assertIs(PartDesign.studioConsumerOf(b), pat)
+        self.assertIsNone(PartDesign.studioConsumerOf(s))
+        self.assertEqual(self.live(), ["A", "Src"])
+
+    # ------------------------------------------------------------------------------- Remove
+    def q5(self):
+        """Onshape Q5: P 60 x 20 x 10 (12000); pin S 5 x 5 at x 5..10, y 5..10, z 0..20."""
+        p = self.box("P", 0, 0, 60, 20, 0, 10)
+        s = self.box("Src", 5, 5, 10, 10, 0, 20)
+        self.listed()
+        return p, s
+
+    def testQ5RemoveConsumesTheSourceAndCutsEveryInstance(self):
+        """Acceptance T2 (3) with Q5: +15 x 3, Remove, scope P: P 11250 (three holes, the one at
+        the source's own place included), S consumed."""
+        p, s = self.q5()
+        pat = self.linear("Pat", ["Src"], "Remove", ("P",), length=30)
+        self.assertValid(pat, PartDesign.studioStepOf(pat, p))
+        self.assertVolume("P", 11250)
+        for x in (7.5, 22.5, 37.5):
+            self.assertFalse(self.shape("P").isInside(V(x, 7.5, 5), 1e-6, True), x)
+        self.assertTrue(self.shape("P").isInside(V(15, 7.5, 5), 1e-6, True))
+        self.assertIs(PartDesign.studioConsumerOf(s), pat)
+        self.assertEqual(self.live(), ["P"])
+
+    def testQ5IntersectMakesAPartPerInstance(self):
+        """Acceptance T2 (5) with Q5: Intersect, scope P: P is replaced by three new parts of
+        250 (the overlaps, the one at the source's place included), S consumed."""
+        p, s = self.q5()
+        pat = self.linear("Pat", ["Src"], "Intersect", ("P",), length=30)
+        self.assertValid(pat)
+        made = self.made(pat)
+        self.assertEqual(len(made), 3)
+        for body in made:
+            self.assertVolume(body, 250)
+        self.assertCentres(made, [(7.5, 7.5, 5), (22.5, 7.5, 5), (37.5, 7.5, 5)])
+        self.assertIs(PartDesign.studioConsumerOf(s), pat)
+        self.assertEqual(self.live(), sorted(b.Name for b in made))
+
+    def q6(self):
+        """Onshape Q6: A x 0..20, B x 30..50 (y 0..20, z 0..10); bar S x -5..55, y 2..7,
+        z 2..7; +y 6 x 2, Intersect, scope A, B."""
+        self.box("A", 0, 0, 20, 20, 0, 10)
+        self.box("B", 30, 0, 50, 20, 0, 10)
+        s = self.box("Src", -5, 2, 55, 7, 2, 5)
+        self.listed()
+        pat = self.linear("Pat", ["Src"], "Intersect", ("A", "B"), length=6, count=2,
+                          direction=Y_AXIS)
+        return s, pat
+
+    def testQ6IntersectWithTwoScopePartsIsPerPartAndPerInstance(self):
+        """Onshape Q6: four parts of 500 (A and B each with S and with its copy), not fused, new
+        ids; S consumed, A and B no parts."""
+        s, pat = self.q6()
+        self.assertValid(pat)
+        made = self.made(pat)
+        self.assertEqual(len(made), 4)
+        for body in made:
+            self.assertVolume(body, 500)
+        self.assertCentres(
+            made, [(10, 4.5, 4.5), (10, 10.5, 4.5), (40, 4.5, 4.5), (40, 10.5, 4.5)]
+        )
+        self.assertIs(PartDesign.studioConsumerOf(s), pat)
+        self.assertEqual(self.live(), sorted(b.Name for b in made))
+
+    def testQ6UndoRedoAndSaveReopen(self):
+        """Undo: A, B and S back; redo: the four pieces; saved and opened again, the same
+        pieces and element names."""
+        s, pat = self.q6()
+        self.assertEqual(len(self.made(pat)), 4)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), ["A", "B", "Src"])
+        self.assertVolume("A", 4000)
+        self.doc.redo()
+        self.doc.recompute()
+        pat = self.doc.getObject("Pat")
+        self.assertValid(pat)
+        made = self.made(pat)
+        self.assertEqual(self.live(), sorted(b.Name for b in made))
+        before = self.names(*made)
+        self.reopen()
+        pat = self.doc.getObject("Pat")
+        self.assertValid(pat)
+        self.assertEqual(self.names(*self.made(pat)), before)
+        self.assertEqual(len(self.live()), 4)
 
 
 if __name__ == "__main__":

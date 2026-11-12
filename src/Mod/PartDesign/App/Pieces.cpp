@@ -45,6 +45,7 @@ PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
 // FeatureTransformed.cpp, StudioList.cpp (T1b): a feature pattern's instances that are no part's
 PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
 PartDesignExport Part::TopoShape studioPatternLeftovers(const App::DocumentObject* obj);
+PartDesignExport bool isInstancePartPattern(const App::DocumentObject* obj);
 // StudioList.cpp (10.13 gate round; declared where used)
 PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
 
@@ -321,6 +322,10 @@ Part::TopoShape leftoverSolids(const App::DocumentObject* owner)
     if (isStudioFeaturePattern(owner)) {
         return studioPatternLeftovers(owner);
     }
+    // A Linear or Polar part pattern's New (T2, no scope): every copy, each a part of its own
+    if (isInstancePartPattern(owner) && studioScopeIds(owner).empty()) {
+        return FeatureApply::toolOf(owner);
+    }
     // Only an Add's tool has leftovers (H1a, R4): a Remove or an Intersect whose tool meets no
     // scope part takes nothing away there, and its tool is no material (10.13 gate round: seed 5
     // op 49's command made a Remove's cutter a part)
@@ -343,7 +348,7 @@ Part::TopoShape leftoverSolids(const App::DocumentObject* owner)
     }
     // An Add owner's tool solid is a leftover when it joins no scope part: face contact, never an
     // edge or a vertex (10.13, Onshape M2); a part mirror's copy when it touches none (R4)
-    const bool join = !isStudioPartPattern(owner);
+    const bool join = !isStudioPartPattern(owner) || isInstancePartPattern(owner);
     std::vector<Part::TopoShape> kept;
     for (const auto& solid : tool.getSubTopoShapes(TopAbs_SOLID)) {
         if (!touchesAny(solid, bases, join)) {
@@ -874,7 +879,8 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     // An Add's leftover record that finds nothing stays (merged back, 10.12 amendment point 5,
     // Onshape Q2c): dormant until the tool leaves its part again, with the same id. A feature
     // pattern's whose instance is gone goes (fewer occurrences: its Body left empty)
-    const bool keepLeftovers = !isStudioFeaturePattern(entry);
+    const bool keepLeftovers = !isStudioFeaturePattern(entry)
+        && !(isInstancePartPattern(entry) && studioScopeIds(entry).empty());  // T2 New likewise
     std::vector<Body*> emptied;
     if (Part::TopoShape left = leftoverSolids(entry); !left.isNull()) {
         sources.push_back({left, Part::TopoShape(), nullptr});

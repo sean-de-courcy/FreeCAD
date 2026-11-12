@@ -60,6 +60,9 @@ PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
     const Body* body
 );
 PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
+// StudioPattern.cpp and below (ops#654 T2)
+PartDesignExport bool isInstancePartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<std::string> studioPartPatternConsumed(const App::DocumentObject* owner);
 PartDesignExport Feature* studioPatternSourceStep(const App::DocumentObject* original,
                                                   const Body* body);
 // Pieces.cpp (declared where used: 10.12 amendment, the resync's new parts)
@@ -675,6 +678,10 @@ bool isMergingAdd(const App::DocumentObject* entry)
     if (auto pattern = freecad_cast<const Transformed*>(entry); pattern && isFeaturePatternOwner(entry)) {
         return pattern->Reapply.getValue();
     }
+    // T2: a Linear or Polar part pattern's Add merges what its copies join (New has no scope)
+    if (isInstancePartPattern(entry)) {
+        return std::string(operationOf(entry)) == "Union" && !studioScopeIds(entry).empty();
+    }
     return entry && !Body::findBodyOf(entry) && !booleanOwner(entry) && !isDressUpOwner(entry)
         && !freecad_cast<const Transformed*>(entry) && !entry->isDerivedFrom<Part::BodyBase>()
         && !entry->isDerivedFrom<App::Part>() && std::string(operationOf(entry)) == "Union"
@@ -905,6 +912,20 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
                             && (gone || !absorbedInto(lost, studioPartId(piece)).empty())) {
                             out.emplace(piece, static_cast<int>(i));
                         }
+                    }
+                }
+            }
+        }
+        if (entries[i] && isInstancePartPattern(entries[i]) && !suppressedOf(entries[i])
+            && static_cast<int>(i) < barAt) {
+            // T2 (settled 9): the sources its last compute consumed (StudioConsumedSources)
+            auto at = positions.find(entries[i]);
+            const auto ids = studioPartPatternConsumed(entries[i]);
+            if (!ids.empty() && at != positions.end() && at->second == static_cast<int>(i)) {
+                for (auto source :
+                     partPatternSourcesAt(entries[i], bodies, static_cast<int>(i), positions, out)) {
+                    if (std::ranges::find(ids, studioPartId(source)) != ids.end()) {
+                        out.emplace(source, static_cast<int>(i));
                     }
                 }
             }
@@ -2032,7 +2053,7 @@ bool StudioList::reconcile(std::string* why)
         else if (isStudioPartPattern(entry)) {
             read = partPatternSourcesAt(entry, bodies, i, positions, consumed);
         }
-        else if (isMergingAdd(entry)) {
+        if (isMergingAdd(entry) && !booleanOwner(entry)) {
             // 10.13: the parts it merges away have no step of it; its compute reads their solids
             for (const auto& [gone, kept] : mergedBy(entry, bodies, i, positions, consumed)) {
                 read.push_back(gone);
@@ -2086,6 +2107,25 @@ bool StudioList::reconcile(std::string* why)
         if (isStudioPartPattern(entry)) {
             // What this projection took of its Add's consumption (resync after a recompute)
             setFlag(entry, "StudioConsumesSourceSeen", studioPartMirrorConsumes(entry));
+        }
+        if (isInstancePartPattern(entry)) {
+            // T2: what this projection took of the sources it consumes (the same resync)
+            const auto taken = studioPartPatternConsumed(entry);
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioConsumedSourcesSeen")
+            );
+            if (!seen && !taken.empty()) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioConsumedSourcesSeen",
+                    "Studio",
+                    "The consumed sources the projection last took (ops#654 T2)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            if (seen && seen->getValues() != taken) {
+                seen->setValues(taken);
+            }
         }
         if (booleanOwner(entry)) {
             // What this projection took of the Union's tools apart (P6p, the same resync)
@@ -2585,6 +2625,45 @@ void PartDesign::studioSetPartMirrorConsumes(App::DocumentObject* owner, bool co
     }
 }
 
+namespace PartDesign
+{
+PartDesignExport void studioSetPartPatternConsumed(App::DocumentObject* owner,
+                                                   const std::vector<std::string>& ids);
+}  // namespace PartDesign
+
+/// T2: the ids of the sources a Linear or Polar part pattern's last compute consumed
+std::vector<std::string> PartDesign::studioPartPatternConsumed(const App::DocumentObject* owner)
+{
+    return owner ? stringsOf(owner, "StudioConsumedSources") : std::vector<std::string>();
+}
+
+/// T2: writes the pattern's consumed sources (StudioConsumedSources) when they changed; the
+/// projection takes them after the recompute (its Seen twin)
+void PartDesign::studioSetPartPatternConsumed(App::DocumentObject* owner,
+                                              const std::vector<std::string>& ids)
+{
+    if (!owner) {
+        return;
+    }
+    auto prop =
+        freecad_cast<App::PropertyStringList*>(owner->getPropertyByName("StudioConsumedSources"));
+    if (!prop) {
+        if (ids.empty() || owner->getPropertyByName("StudioConsumedSources")) {
+            return;
+        }
+        prop = static_cast<App::PropertyStringList*>(owner->addDynamicProperty(
+            "App::PropertyStringList",
+            "StudioConsumedSources",
+            "Studio",
+            "The source parts this part pattern consumes, their ids (ops#654 T2)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (prop->getValues() != ids) {
+        prop->setValues(ids);
+    }
+}
+
 namespace
 {
 /// Whether doc needs a recompute: an object touched that a recompute would compute (one held by
@@ -2679,6 +2758,13 @@ void resyncPartMirrors(const App::Document& constDoc)
                 if (entry
                     && stringsOf(entry, "StudioTakenParts")
                         != stringsOf(entry, "StudioTakenPartsSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                // T2: a part pattern's consumed sources
+                if (entry
+                    && stringsOf(entry, "StudioConsumedSources")
+                        != stringsOf(entry, "StudioConsumedSourcesSeen")) {
                     stale.push_back(list);
                     break;
                 }

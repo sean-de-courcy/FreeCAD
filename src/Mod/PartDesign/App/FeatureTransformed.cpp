@@ -30,6 +30,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <TopoDS.hxx>
@@ -1621,6 +1622,164 @@ void Transformed::onChanged(const App::Property* prop)
 // StudioList.cpp (FreeCAD-CH ops#654 slice 9; declared where used)
 PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
 PartDesignExport void studioSetPartMirrorConsumes(App::DocumentObject* owner, bool consumes);
+// StudioList.cpp, StudioPattern.cpp (ops#654 T2; declared where used)
+PartDesignExport void studioSetPartPatternConsumed(App::DocumentObject* owner,
+                                                   const std::vector<std::string>& ids);
+PartDesignExport bool isInstancePartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<gp_Trsf> studioOwnerTransforms(const App::DocumentObject* owner,
+                                                            std::string& why);
+
+/// T2: a Linear or Polar part pattern owner's transformations in the document's frame (as a
+/// feature pattern owner's, T1a settled 4), the first the identity
+std::vector<gp_Trsf> studioOwnerTransforms(const App::DocumentObject* owner, std::string& why)
+{
+    auto pattern = freecad_cast<const Transformed*>(owner);
+    if (!pattern) {
+        why = "Not a pattern";
+        return {};
+    }
+    return ownerTransforms(*pattern, why);
+}
+
+namespace
+{
+
+/** T2 (10.16 T2 and settled 9): a Linear or Polar part pattern as a studio feature. Its tool
+ * (FeatureApply::toolOf) is its copies, with the sources it consumes. New (Union, no scope): each
+ * copy a part made by the pattern (P6p leftovers), loud until made. Add: its steps merge through
+ * 10.13's graph (isMergingAdd); a source is consumed when it touches the result: it joins a
+ * component holding a scope part (Onshape O5, Q3), else it is kept (Q10). Remove and Intersect
+ * consume every source (Q5: instance 1 is the source itself, a tool); Intersect's instances are
+ * kept apart (Q6), refused loudly when they overlap. The decision is the pattern's own record
+ * (StudioConsumedSources), read by the list's projection after the recompute */
+App::DocumentObjectExecReturn* executeInstancePartPattern(Transformed& pattern,
+                                                          const Part::TopoShape& copies)
+{
+    auto fail = [&pattern](const std::string& why) {
+        studioSetPartPatternConsumed(&pattern, {});  // a failed feature contributes nothing
+        return new App::DocumentObjectExecReturn(why, &pattern);
+    };
+    const std::string operation = studioOperationOf(&pattern);
+    const std::vector<std::string> ids = studioScopeIds(&pattern);
+    const std::vector<Body*> sources = studioPartPatternSources(&pattern);
+    if (ids.empty()) {
+        if (operation != "Union") {
+            return fail("No merge scope selected");
+        }
+        // New: every copy is a part of its own (Onshape Q4: separate even where they overlap)
+        studioSetPartPatternConsumed(&pattern, {});
+        if (std::string left = unclaimedLeftovers(&pattern); !left.empty()) {
+            return fail(left);
+        }
+        return App::DocumentObject::StdReturn;
+    }
+    std::vector<Body*> scope;
+    std::vector<Part::TopoShape> bases;
+    for (auto part : studioScopeOf(&pattern)) {
+        if (isPieceBody(part) && part->StudioMadeBy.getValue() == &pattern) {
+            continue;  // a part it made: nothing of it comes before the pattern
+        }
+        Part::TopoShape base = studioBaseAt(&pattern, part);
+        if (!base.isNull()) {
+            scope.push_back(part);
+            bases.push_back(base);
+        }
+    }
+    if (scope.empty()) {
+        return fail("No merge scope selected: no part of it has a solid before the pattern");
+    }
+    std::vector<std::pair<const Body*, Part::TopoShape>> apart;  // the sources outside the scope
+    for (auto source : sources) {
+        if (std::ranges::find(scope, source) == scope.end()) {
+            Part::TopoShape base = studioBaseAt(&pattern, source);
+            if (!base.isNull()) {
+                apart.emplace_back(source, base);
+            }
+        }
+    }
+    std::vector<std::string> consumed;
+    if (operation != "Union") {
+        for (const auto& [source, base] : apart) {
+            consumed.push_back(studioPartId(source));
+        }
+        if (operation == "Common") {
+            // Q6: each instance intersects each scope part on its own; overlapping instances
+            // would make overlapping parts (unverified on Onshape): refused
+            std::vector<Part::TopoShape> instances;
+            for (const auto& [source, base] : apart) {
+                for (const auto& solid : base.getSubTopoShapes(TopAbs_SOLID)) {
+                    instances.push_back(solid);
+                }
+            }
+            for (const auto& solid : copies.getSubTopoShapes(TopAbs_SOLID)) {
+                instances.push_back(solid);
+            }
+            for (std::size_t i = 0; i < instances.size(); ++i) {
+                for (std::size_t j = 0; j < i; ++j) {
+                    BRepAlgoAPI_Common common(instances[i].getShape(), instances[j].getShape());
+                    GProp_GProps props;
+                    if (common.IsDone()) {
+                        BRepGProp::VolumeProperties(common.Shape(), props);
+                    }
+                    if (!common.IsDone() || props.Mass() > Precision::Confusion()) {
+                        return fail(
+                            "Instances " + std::to_string(j + 1) + " and " + std::to_string(i + 1)
+                            + " of " + quoted(&pattern)
+                            + " overlap: an Intersect with overlapping instances is not done "
+                              "(unverified on Onshape)"
+                        );
+                    }
+                }
+            }
+        }
+        studioSetPartPatternConsumed(&pattern, consumed);
+        return App::DocumentObject::StdReturn;
+    }
+    // Add: a source is consumed when it joins a component holding a scope part, through the
+    // copies, the other sources and the parts (studioSolidsJoin: face contact or overlap)
+    std::vector<TopoDS_Shape> nodes;  // the scope parts, the sources apart, then the copies
+    for (const auto& base : bases) {
+        nodes.push_back(base.getShape());
+    }
+    for (const auto& [source, base] : apart) {
+        nodes.push_back(base.getShape());
+    }
+    for (const auto& solid : copies.getSubTopoShapes(TopAbs_SOLID)) {
+        nodes.push_back(solid.getShape());
+    }
+    const int parts = static_cast<int>(bases.size());
+    std::vector<int> root(nodes.size());
+    std::iota(root.begin(), root.end(), 0);
+    auto find = [&root](int k) {
+        while (root[k] != k) {
+            root[k] = root[root[k]];
+            k = root[k];
+        }
+        return k;
+    };
+    for (int j = parts; j < static_cast<int>(nodes.size()); ++j) {
+        for (int i = 0; i < j; ++i) {
+            if (find(i) != find(j) && studioSolidsJoin(nodes[j], nodes[i])) {
+                const int a = find(i);
+                const int b = find(j);
+                root[std::max(a, b)] = std::min(a, b);
+            }
+        }
+    }
+    for (std::size_t s = 0; s < apart.size(); ++s) {
+        if (find(parts + static_cast<int>(s)) < parts) {
+            consumed.push_back(studioPartId(apart[s].first));
+        }
+    }
+    // Before the leftovers: the tool they are read from holds the consumed sources
+    studioSetPartPatternConsumed(&pattern, consumed);
+    if (std::string left = unclaimedLeftovers(&pattern); !left.empty()) {
+        return fail(left);
+    }
+    return App::DocumentObject::StdReturn;
+}
+
+}  // namespace
 
 namespace
 {
@@ -1648,6 +1807,24 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
     pattern.Shape.setValue(Part::TopoShape());
     studioSetPartMirrorConsumes(&pattern, false);  // a failed feature contributes nothing
     std::string why;
+    if (isInstancePartPattern(&pattern)) {
+        try {
+            const Part::TopoShape copies = studioPatternTool(&pattern, nullptr, &why);
+            if (copies.isNull()) {
+                studioSetPartPatternConsumed(&pattern, {});
+                return new App::DocumentObjectExecReturn(why, &pattern);
+            }
+            return executeInstancePartPattern(pattern, copies);
+        }
+        catch (const Base::Exception& e) {
+            studioSetPartPatternConsumed(&pattern, {});
+            return new App::DocumentObjectExecReturn(e.what(), &pattern);
+        }
+        catch (const Standard_Failure& e) {
+            studioSetPartPatternConsumed(&pattern, {});
+            return new App::DocumentObjectExecReturn(e.GetMessageString(), &pattern);
+        }
+    }
     const Part::TopoShape tool = studioPatternTool(&pattern, nullptr, &why);
     if (tool.isNull()) {
         return new App::DocumentObjectExecReturn(why, &pattern);

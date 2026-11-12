@@ -3,6 +3,7 @@
 // Patterns as studio features (FreeCAD-CH ops#655, T1-T3). Scaffolding (B1); the copy rule of
 // in-Body patterns of studio features (ops#654 slice 8).
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <string>
@@ -34,12 +35,15 @@
 #include <Base/Exception.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
 #include "FeatureAddSub.h"
 #include "FeatureExtrude.h"
 #include "FeatureHole.h"
+#include "FeatureLinearPattern.h"
 #include "FeatureMirrored.h"
+#include "FeaturePolarPattern.h"
 #include "StudioOwner.h"
 #include "StudioPattern.h"
 
@@ -366,10 +370,84 @@ std::string studioCopyRefusal(
 // StudioList.cpp (declared where used)
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
 PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
+// FeatureTransformed.cpp (ops#654 T2; declared where used)
+PartDesignExport std::vector<gp_Trsf> studioOwnerTransforms(const App::DocumentObject* owner,
+                                                            std::string& why);
 
-/// A part pattern's tool (the part mirror, slice 9): its source part as it is just before the
+PartDesignExport bool isInstancePartPattern(const App::DocumentObject* obj);
+
+/// T2 (10.16): a part pattern of instances (Linear, Polar; the curve pattern's line goes here),
+/// not the part mirror
+bool isInstancePartPattern(const App::DocumentObject* obj)
+{
+    return isStudioPartPattern(obj)
+        && (obj->isDerivedFrom<LinearPattern>() || obj->isDerivedFrom<PolarPattern>());
+}
+
+namespace
+{
+
+/// T2: the copies of a Linear or Polar part pattern: each source as it is just before the pattern
+/// (studioBaseAt) moved by every instance transform but the first and the skipped ones, in the
+/// document's frame, each named with the pattern's tag and its instance's number in a section;
+/// a compound of the copies' solids, unfused, sources first then instances
+Part::TopoShape instanceCopies(const Transformed& pattern, std::string* why)
+{
+    auto fail = [why](const std::string& text) {
+        if (why) {
+            *why = text;
+        }
+        return Part::TopoShape();
+    };
+    const std::vector<Body*> sources = studioPartPatternSources(&pattern);
+    if (sources.empty()) {
+        return fail(
+            "No part to pattern: the source part is gone, merged or consumed at the pattern's place"
+        );
+    }
+    std::string trouble;
+    const std::vector<gp_Trsf> transforms = studioOwnerTransforms(&pattern, trouble);
+    if (!trouble.empty()) {
+        return fail(trouble);
+    }
+    const auto skipped = pattern.getSkippedPositions();
+    const long tag = pattern.getID();
+    std::vector<Part::TopoShape> solids;
+    for (const Body* source : sources) {
+        const Part::TopoShape base = studioBaseAt(&pattern, source);
+        if (base.isNull()) {
+            return fail(quoted(source) + " has no solid before the pattern");
+        }
+        for (std::size_t position = 1; position < transforms.size(); ++position) {
+            if (std::ranges::find(skipped, position) != skipped.end()) {
+                continue;
+            }
+            Part::TopoShape copy(tag, pattern.getDocument()->getStringHasher());
+            copy.makeElementTransform(base, transforms[position]);
+            copy.appendElementSection(tag, Part::OpCodes::Transformed, std::to_string(position + 1));
+            for (const auto& solid : copy.getSubTopoShapes(TopAbs_SOLID)) {
+                solids.push_back(solid);
+            }
+        }
+    }
+    if (solids.empty()) {
+        return fail(quoted(&pattern) + " makes no copy: give it two instances or more");
+    }
+    Part::TopoShape out(tag, pattern.getDocument()->getStringHasher());
+    out.makeElementCompound(
+        solids,
+        nullptr,
+        Part::TopoShape::SingleShapeCompoundCreationPolicy::forceCompound
+    );
+    return out;
+}
+
+}  // namespace
+
+/// A part pattern's tool: the part mirror's (slice 9), its source part as it is just before the
 /// pattern (studioBaseAt), mirrored about MirrorPlane, in the document's frame, named with the
-/// pattern's tag; null with why. Other part patterns, and feature patterns as owners, not yet
+/// pattern's tag; a Linear or Polar part pattern's (T2), its copies (instanceCopies); null with
+/// why. Other part patterns not yet
 Part::TopoShape studioPatternTool(
     const App::DocumentObject* pattern,
     const Body* /*part*/,
@@ -385,10 +463,21 @@ Part::TopoShape studioPatternTool(
     if (!isStudioPartPattern(pattern)) {
         return fail("not yet (T1)");
     }
+    if (isInstancePartPattern(pattern)) {
+        try {
+            return instanceCopies(*static_cast<const Transformed*>(pattern), why);
+        }
+        catch (const Base::Exception& e) {
+            return fail(e.what());
+        }
+        catch (const Standard_Failure& e) {
+            return fail(e.GetMessageString());
+        }
+    }
     if (!freecad_cast<const Mirrored*>(pattern)) {
         return fail(
-            "A part pattern other than the part mirror is not done yet: pattern the part's "
-            "features, or mirror it"
+            "A part pattern other than the part mirror, the Linear and the Polar pattern is not "
+            "done yet: pattern the part's features, or the part with one of those"
         );
     }
     const std::vector<Body*> sources = studioPartPatternSources(pattern);
