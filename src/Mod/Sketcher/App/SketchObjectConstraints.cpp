@@ -58,6 +58,10 @@ FC_LOG_LEVEL_INIT("Sketch", true, true)
 
 int SketchObject::hasConflicts() const
 {
+    // FreeCAD-CH (ops#640): a conflict solved around blocks nothing (Onshape lets a dimension of
+    // a sketch that could not be solved be edited, which is how a conflict is fixed)
+    if (lastSolvedAroundConflict)
+        return 0;
     if (lastDoF < 0)// over-constrained sketch
         return -2;
     if (solvedSketch.hasConflicts())// conflicting constraints
@@ -104,6 +108,92 @@ static bool midpointsOffTheirArcs(const SketchObject& sketch)
     return false;
 }
 
+// FreeCAD-CH (ops#640): leaves the constraints of a conflict out of the solve and solves the rest.
+// The solver's conflicting set is a superset of the conflict (it can hold the corners'
+// coincidences and dimensions the conflict does not involve), so:
+// 1. every driving dimension of the set is left out at once (Onshape SK7b, SK8b: both lengths of
+//    the line are left out), kept only when that alone resolves the conflict;
+// 2. otherwise the newest constraint still in conflict is left out, one per diagnosis (at most 10
+//    such steps, then all that is still in conflict).
+// A redundant constraint that does not hold is left out the same way. Returns false, with nothing
+// left out, when the rest still fails (malformed, no convergence).
+bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
+{
+    const std::vector<Constraint*>& constraints = Constraints.getValues();
+    const int count = static_cast<int>(constraints.size());
+    auto indicesOf = [&](const std::vector<int>& list, const std::set<int>& skipped) {
+        std::vector<int> indices;  // 0-based, not yet left out
+        for (int tag : list) {
+            const int index = tag - 1;
+            if (index >= 0 && index < count && !skipped.count(index)) {
+                indices.push_back(index);
+            }
+        }
+        return indices;
+    };
+    std::vector<int> pending;  // tags still in conflict (or failing repeats) after an attempt
+    auto attempt = [&](const std::set<int>& skipped) {
+        solvedSketch.setSkippedConstraints(skipped);
+        solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+        pending.clear();
+        if (solvedSketch.hasMalformedConstraints()) {
+            return false;
+        }
+        if (solvedSketch.hasConflicts()) {
+            pending = solvedSketch.getConflicting();
+            return false;
+        }
+        const int status = solvedSketch.solve();
+        if (status == 0) {
+            const std::vector<int>& redundant = solvedSketch.getRedundant();
+            const bool allHold = std::all_of(redundant.begin(), redundant.end(), [&](int tag) {
+                return std::abs(solvedSketch.calculateConstraintError(tag)) < 1e-7;
+            });
+            if (allHold) {
+                lastSolverStatus = status;
+                lastSolvedAroundConflict = true;
+                return true;
+            }
+        }
+        if (solvedSketch.hasRedundancies()) {
+            pending = solvedSketch.getRedundant();
+        }
+        return false;
+    };
+
+    std::set<int> dimensions;
+    for (int index : indicesOf(tags, {})) {
+        if (constraints[index]->isDimensional() && constraints[index]->isDriving) {
+            dimensions.insert(index);
+        }
+    }
+    if (!dimensions.empty() && attempt(dimensions)) {
+        return true;
+    }
+
+    std::set<int> skipped;
+    pending = tags;
+    for (int step = 0; step < 32; ++step) {
+        const std::vector<int> candidates = indicesOf(pending, skipped);
+        if (candidates.empty()) {
+            break;
+        }
+        if (step < 10) {
+            skipped.insert(*std::max_element(candidates.begin(), candidates.end()));
+        }
+        else {
+            skipped.insert(candidates.begin(), candidates.end());
+        }
+        if (attempt(skipped)) {
+            return true;
+        }
+    }
+    // the rest fails too: the sketch stays in error, set up as the diagnosis found it
+    solvedSketch.setSkippedConstraints({});
+    solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+    return false;
+}
+
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 {
     // no need to check input data validity as this is an sketchobject managed operation.
@@ -111,6 +201,8 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 
     // Reset the initial movement in case of a dragging operation was ongoing on the solver.
     solvedSketch.resetInitMove();
+    lastSolvedAroundConflict = false;
+    solvedSketch.setSkippedConstraints({});
 
     // if updateGeoAfterSolving=false, the solver information is updated, but the Sketch is nothing
     // updated. It is useful to avoid triggering an OnChange when the goeometry did not change but
@@ -182,6 +274,23 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         }
     }
 
+    // FreeCAD-CH (ops#640, sketch conflicts): as Onshape does, a conflict does not stop the
+    // sketch: its constraints are left out and the rest is solved (Onshape SK7b, SK8b). The same
+    // for a repeated constraint that contradicts the others (a redundant one that does not hold).
+    // The diagnosis above is kept: it names the constraints the marks show.
+    if (!lastHasMalformedConstraints) {
+        if ((err == -3 || err == -4) && lastHasConflict) {
+            if (solveAroundConflict(lastConflicting)) {
+                err = 0;
+            }
+        }
+        else if ((err == -2 || err == -1) && lastHasRedundancies) {
+            if (solveAroundConflict(lastRedundant)) {
+                err = 0;
+            }
+        }
+    }
+
     if (lastHasMalformedConstraints) {
         Base::Console().error(
             this->getFullLabel(),
@@ -213,7 +322,7 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
     // does not converge. We avoid marking a sketch as fully constrained when no convergence is
     // achieved.
     if (err == 0) {
-        FullyConstrained.setValue(lastDoF == 0);
+        FullyConstrained.setValue(lastDoF == 0 && !lastSolvedAroundConflict);
         if (updateGeoAfterSolving) {
             // set the newly solved geometry
             std::vector<Part::Geometry*> geomlist = solvedSketch.extractGeometry();
@@ -829,6 +938,9 @@ int SketchObject::setVisibility(int ConstrId, bool isVisible)
 
 int SketchObject::setUpSketch()
 {
+    // FreeCAD-CH (ops#640): the full diagnosis (constraint numbers may have changed since the
+    // last solve left some out); the next solve leaves a conflict out again
+    solvedSketch.setSkippedConstraints({});
     lastDoF = solvedSketch.setUpSketch(
         getCompleteGeometry(), Constraints.getValues(), getExternalGeometryCount());
 

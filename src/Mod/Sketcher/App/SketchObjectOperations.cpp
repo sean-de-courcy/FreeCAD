@@ -62,17 +62,22 @@ int SketchObject::moveGeometries(const std::vector<GeoElementId>& geoEltIds, con
 
 
     if (updateGeoBeforeMoving || solverNeedsUpdate) {
-        lastDoF = solvedSketch.setUpSketch(
+        // FreeCAD-CH (ops#640): a conflict solved around stays left out while dragging (the
+        // skip set of the last solve), and its diagnosis stays the one the marks show
+        const int dof = solvedSketch.setUpSketch(
             getCompleteGeometry(), Constraints.getValues(), getExternalGeometryCount());
 
-        retrieveSolverDiagnostics();
+        if (!lastSolvedAroundConflict) {
+            lastDoF = dof;
+            retrieveSolverDiagnostics();
+        }
 
         solverNeedsUpdate = false;
     }
 
-    if (lastDoF < 0)// over-constrained sketch
+    if (solvedSketch.hasConflicts())  // conflicting constraints in what the solver holds
         return -1;
-    if (lastHasConflict)// conflicting constraints
+    if (!lastSolvedAroundConflict && (lastDoF < 0 || lastHasConflict))  // over-constrained
         return -1;
 
     // move the point and solve

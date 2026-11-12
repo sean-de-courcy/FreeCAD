@@ -25,7 +25,7 @@
 
 Every model is designed here: a 20 x 20 x 10 block (4000 mm^3) and features whose effect on the
 volume and the geometry is known. A feature is made to fail by itself (a pocket of length zero, a
-sketch with conflicting constraints, a split the Body doesn't allow, an expression in error), never
+sketch with a malformed constraint, a split the Body doesn't allow, an expression in error), never
 by a user's file. Each test runs with the reference solver (V2s), and in plain V2 (a file saved
 before the solver) with FREECAD_OLD_FILE_TESTS set (decision 179)."""
 
@@ -223,7 +223,7 @@ class FailurePassThroughBase:
     # -- T3 ------------------------------------------------------------------------------------
 
     def testProfileInErrorFailsItsFeature(self):
-        """The hole's sketch has conflicting constraints: the sketch is red, the hole fails naming
+        """The hole's sketch has a malformed constraint: the sketch is red, the hole fails naming
         it and passes the block through, and a later boss computes (T3)."""
         block = self.block()
         hole = self.hole()
@@ -233,7 +233,7 @@ class FailurePassThroughBase:
 
         sketch = hole.Profile[0]
         sketch.addConstraint(Sketcher.Constraint("Radius", 0, 3))
-        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 4))
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 3, 0))  # malformed (ops#640)
         self.recompute()
         self.assertFailed(sketch)
         self.assertFailed(hole, "Profile", sketch.Label)
@@ -435,8 +435,9 @@ class FailurePassThroughBase:
 
     @staticmethod
     def breakProfile(sketch):
-        """A second radius, in conflict: the sketch fails by itself."""
-        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 4))
+        """A malformed constraint (a Midpoint of the circle on itself): the sketch fails by
+        itself. (A second radius in conflict no longer fails a sketch since ops#640.)"""
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 3, 0))
 
     @staticmethod
     def repairProfile(sketch):
@@ -454,7 +455,7 @@ class FailurePassThroughBase:
         return prism
 
     def testDependantsOfAFreeSketchFailNamingTheirInput(self):
-        """A free sketch fails (conflicting constraints). Each dependant fails without running,
+        """A free sketch fails (a malformed constraint). Each dependant fails without running,
         naming its direct input, keeps its shape and stays touched: a sketch with the circle as
         external geometry, a Part extrusion of it, a plane attached to the extrusion's top and a
         sketch on that plane. The folder holding them isn't failed. The failure persists over a
@@ -599,7 +600,7 @@ class FailurePassThroughBase:
         self.assertBody(BLOCK + 1 + BOSS)
 
     def testClaimedFailureKeepsItsTextWhenItsBodyStops(self):
-        """A sketch in the Body has conflicting constraints: the Body's rule claims it, and it
+        """A sketch in the Body has a malformed constraint: the Body's rule claims it, and it
         isn't re-run while nothing it reads changes. Then the BaseFeature fails and the Body stops
         (decision 254): the sketch keeps its own error text through that recompute and the repair,
         not a bare "Error" (review pr579-r3 T-R3-2, decision 255 (3))."""
@@ -607,7 +608,7 @@ class FailurePassThroughBase:
         base, boss, mirror = self.bossOnBase(stock, BLOCK)
         sketch = models.sketch(self.doc, "Note", [models.circle(15, 15, 1)], self.body, z=10)
         sketch.addConstraint(Sketcher.Constraint("Radius", 0, 1))
-        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 2))
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 3, 0))  # malformed (ops#640)
         self.recompute()
         text = self.assertFailed(sketch)
         self.assertNotEqual(text, "Error")

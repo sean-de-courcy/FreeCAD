@@ -868,6 +868,12 @@ public:
     {
         return lastHasMalformedConstraints;
     }
+    /// FreeCAD-CH (ops#640): the last solve left conflicting (or redundant, contradicting)
+    /// constraints out and solved the rest, as Onshape does; the diagnosis lists still name them
+    inline bool getLastSolvedAroundConflict() const
+    {
+        return lastSolvedAroundConflict;
+    }
     /// gets solver status of last solver execution
     inline int getLastSolverStatus() const
     {
@@ -1218,6 +1224,8 @@ protected:
 
     // retrieves redundant, conflicting and malformed constraint information from the solver
     void retrieveSolverDiagnostics();
+    /// FreeCAD-CH (ops#640): solve leaving out the constraints of a conflict (tags 1-based)
+    bool solveAroundConflict(const std::vector<int>& tags);
 
     // retrieves whether a geometry blocked state corresponds to this constraint
     // returns true of the constraint is of Block type, false otherwise
@@ -1311,6 +1319,7 @@ private:
     bool lastHasMalformedConstraints;
     int lastSolverStatus;
     float lastSolveTime;
+    bool lastSolvedAroundConflict {false};
 
     std::vector<int> lastConflicting;
     std::vector<int> lastRedundant;

@@ -296,10 +296,12 @@ class TestSketchModelInferenceOnFaceGui(TestSketchModelInferenceGui):
     on_face = True
 
 
-class TestSketchConflictRefusedGui(Round3GuiCase):
-    """Rank 45: a constraint that conflicts is refused, not solved by shrinking a line to a point
-    and called "Redundant" (gap S9). Lines 0 and 1 are horizontal, 10 long, 5 apart; a
-    Perpendicular between them can only hold with a line of length 0."""
+class TestSketchConflictKeptGui(Round3GuiCase):
+    """ops#640 (sketch conflicts; rank 45 before it): a constraint that conflicts is kept, as
+    Onshape keeps it (PL1d): the solve leaves it out and solves the rest, so no line shrinks to a
+    point (gap S9), and the conflict list names it for the red marks. Lines 0 and 1 are
+    horizontal, 10 long, 5 apart; a Perpendicular between them can only hold with a line of
+    length 0."""
 
     def setUp(self):
         super().setUp()
@@ -320,15 +322,18 @@ class TestSketchConflictRefusedGui(Round3GuiCase):
     def lengths(self):
         return [geo.length() for geo in self.sketch.Geometry]
 
-    def test_a_perpendicular_between_two_horizontal_lines_is_refused(self):
+    def test_a_perpendicular_between_two_horizontal_lines_is_kept(self):
         self.constrain("Sketcher_ConstrainPerpendicular", "Edge1", "Edge2")
         self.assertEqual(
-            [c.Type for c in self.sketch.Constraints], ["Horizontal", "Horizontal"], self.describe()
+            [c.Type for c in self.sketch.Constraints],
+            ["Horizontal", "Horizontal", "Perpendicular"],
+            self.describe(),
         )
+        self.assertIn(3, self.sketch.ConflictingConstraints, self.describe())
         for length in self.lengths():
             self.assertAlmostEqual(length, 10.0, places=6)
 
-    def test_a_parallel_between_a_horizontal_and_a_vertical_line_is_refused(self):
+    def test_a_parallel_between_a_horizontal_and_a_vertical_line_is_kept(self):
         """Parallel has no pre-check of its own (Vertical on a Horizontal line has one), so the
         solver sees it: line 2 is vertical, 10 long, and only a line of length 0 is both."""
         self.sketch.addGeometry(Part.LineSegment(V(15, 0, 0), V(15, 10, 0)))
@@ -337,22 +342,31 @@ class TestSketchConflictRefusedGui(Round3GuiCase):
         self.constrain("Sketcher_ConstrainParallel", "Edge1", "Edge3")
         self.assertEqual(
             [c.Type for c in self.sketch.Constraints],
-            ["Horizontal", "Horizontal", "Vertical"],
+            ["Horizontal", "Horizontal", "Vertical", "Parallel"],
             self.describe(),
         )
+        self.assertIn(4, self.sketch.ConflictingConstraints, self.describe())
         for length in self.lengths():
             self.assertAlmostEqual(length, 10.0, places=6)
 
-    def test_redo_does_not_bring_a_refused_constraint_back(self):
-        """Review check-r3 (1): the refusal undid the command and left it on the Redo stack, so
-        Ctrl+Y put the conflict back. As in Onshape, a refused constraint is no step at all."""
+    def test_a_kept_conflict_is_one_undo_step(self):
+        """The kept constraint is an ordinary step: Undo takes it away, Redo puts it back."""
         self.constrain("Sketcher_ConstrainPerpendicular", "Edge1", "Edge2")
-        self.assertEqual(self.doc.RedoCount, 0, self.doc.RedoNames)
-        FreeCADGui.runCommand("Std_Redo")
+        self.assertEqual(self.sketch.ConstraintCount, 3, self.describe())
+        FreeCADGui.runCommand("Std_Undo")
         self.flush_gui(300)
         self.assertEqual(
             [c.Type for c in self.sketch.Constraints], ["Horizontal", "Horizontal"], self.describe()
         )
+        FreeCADGui.runCommand("Std_Redo")
+        self.flush_gui(300)
+        self.assertEqual(self.sketch.ConstraintCount, 3, self.describe())
+
+    def test_the_sketch_with_a_kept_conflict_recomputes_as_a_warning(self):
+        self.constrain("Sketcher_ConstrainPerpendicular", "Edge1", "Edge2")
+        self.doc.recompute()
+        self.assertNotIn("Invalid", self.sketch.State, self.describe())
+        self.assertIn("Warning", self.sketch.State, self.describe())
 
     def test_a_constraint_that_fits_is_kept(self):
         """Control: an Equal between the two lines holds without collapsing anything."""

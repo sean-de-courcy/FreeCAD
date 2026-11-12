@@ -218,15 +218,14 @@ void SketcherGui::checkAddedConstraint(ViewProviderSketch& viewProvider)
         return;
     }
 
-    const auto& conflicting = sketch->getLastConflicting();  // 1-based constraint numbers
-    bool conflicts = sketch->getLastHasConflicts()
-        && std::ranges::find(conflicting, index + 1) != conflicting.end();
-    if (!conflicts) {
-        for (int geoId : collapsedGeometry(sketch)) {
-            if (!pending.collapsedBefore.contains(geoId)) {
-                conflicts = true;
-                break;
-            }
+    // FreeCAD-CH (ops#640, sketch conflicts): a conflicting constraint is kept, as Onshape keeps
+    // it (PL1d): the solve leaves it out and solves the rest, and the marks show it. Only a
+    // constraint that collapses a curve to a point is still refused.
+    bool conflicts = false;
+    for (int geoId : collapsedGeometry(sketch)) {
+        if (!pending.collapsedBefore.contains(geoId)) {
+            conflicts = true;
+            break;
         }
     }
     if (!conflicts) {

@@ -281,6 +281,12 @@ int Sketch::setUpSketch(
     std::vector<bool> onlyBlockedGeometry(intGeoList.size(), false);
     // these constraints are unenforceable due to a Blocked constraint
     std::vector<bool> unenforceableConstraints(ConstraintList.size(), false);
+    // FreeCAD-CH (ops#640): constraints a conflict is solved around are left out like these
+    for (int index : skippedConstraints) {
+        if (index >= 0 && index < static_cast<int>(unenforceableConstraints.size())) {
+            unenforceableConstraints[index] = true;
+        }
+    }
 
     /* This implements the old block constraint. I have decided not to remove it at this time while
      * the new is tested, just in case the change needs to be reverted */

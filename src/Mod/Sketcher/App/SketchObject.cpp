@@ -443,9 +443,22 @@ App::DocumentObjectExecReturn* SketchObject::execute()
                                                this);
     }
 
+    // FreeCAD-CH (ops#640): a conflict solved around (solve() left its constraints out and
+    // solved the rest): the sketch goes on as a warning, as Onshape's SKETCH_SOLVE_FAILED does
+    std::string conflictWarning;
+    if (lastSolvedAroundConflict) {
+        conflictWarning = "Sketch could not be solved: the constraints in conflict are left out, "
+                          "the rest is solved\n";
+        if (lastHasConflict) {
+            appendConflictMsg(lastConflicting, conflictWarning);
+        }
+        else {
+            appendRedundantMsg(lastRedundant, conflictWarning);
+        }
+    }
     // FreeCAD-CH (ops#656): repeated constraints that agree with the others solved (solve()
     // returned 0): the sketch goes on, as in Onshape, and the Report view names them
-    if (lastHasRedundancies) {
+    else if (lastHasRedundancies) {
         std::string msg = "Sketch with redundant constraints (they agree, the sketch is solved)\n";
         appendRedundantMsg(lastRedundant, msg);
         Base::Console().warning(this->getFullLabel(), "%s", msg.c_str());
@@ -487,6 +500,16 @@ App::DocumentObjectExecReturn* SketchObject::execute()
             return new App::DocumentObjectExecReturn(externalError, this);
         }
         FC_LOG(getFullName() << ": " << externalError);
+    }
+
+    if (!conflictWarning.empty()) {
+        if (App::Document* doc = getDocument()) {
+            const char* previous = isWarning() ? doc->getWarningDescription(this) : nullptr;
+            doc->setWarning(this,
+                            previous && *previous ? std::string(previous) + "\n" + conflictWarning
+                                                  : conflictWarning);
+        }
+        Base::Console().warning(this->getFullLabel(), "%s", conflictWarning.c_str());
     }
 
     return App::DocumentObject::StdReturn;

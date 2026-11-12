@@ -44,7 +44,7 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
 from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch round 3)
     TestSketchModelInferenceGui,
     TestSketchModelInferenceOnFaceGui,
-    TestSketchConflictRefusedGui,
+    TestSketchConflictKeptGui,
     TestSketchOverdefinedRedGui,
     TestSketchOnshapeConstraintsGui,
     TestSketchOnshapeShapesGui,
@@ -92,7 +92,7 @@ from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH,
     and TestSketchConstraintToolsGui
     and TestSketchModelInferenceGui
     and TestSketchModelInferenceOnFaceGui
-    and TestSketchConflictRefusedGui
+    and TestSketchConflictKeptGui
     and TestSketchOverdefinedRedGui
     and TestSketchOnshapeConstraintsGui
     and TestSketchOnshapeShapesGui

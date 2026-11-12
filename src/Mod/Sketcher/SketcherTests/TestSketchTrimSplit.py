@@ -650,19 +650,23 @@ class TestSketchRepeatedConstraints(unittest.TestCase):
         self.assertAlmostEqual(self.sk.Geometry[1].length(), 12.0, delta=TOL)
         self.assertAlmostEqual(_face_area(self.sk), 240.0, delta=1e-5)
 
-    def testContradictingRepeatIsRefused(self):
+    def testContradictingRepeatIsKept(self):
+        """ops#640 (Onshape SK8b): a repeat set to contradict keeps its value; the pair is left
+        out of the solve, the width stays where it was, and the sketch is a warning."""
         self._repeated_rectangle()
         self.doc.recompute()
         bottom = 9  # the bottom's DistanceX (four coincidences, the corner, two H, two V before it)
         self.assertEqual(self.sk.Constraints[bottom].Type, "DistanceX")
-        with self.assertRaises(ValueError):
-            self.sk.setDatum(bottom, App.Units.Quantity("25 mm"))
+        self.sk.setDatum(bottom, App.Units.Quantity("25 mm"))
         self.doc.recompute()
-        self.assertTrue(self.sk.isValid())
-        self.assertAlmostEqual(self.sk.Constraints[bottom].Value, 20.0, delta=TOL)
+        self.assertTrue(self.sk.isValid(), self.sk.State)
+        self.assertIn("Warning", self.sk.State)
+        self.assertAlmostEqual(self.sk.Constraints[bottom].Value, 25.0, delta=TOL)
         self.assertAlmostEqual(self.sk.Geometry[0].length(), 20.0, delta=TOL)
 
-    def testConflictStillFailsTheRecompute(self):
+    def testConflictSolvesTheRest(self):
+        """ops#640 (Onshape SK7): the conflicting pair is left out, the line keeps its drawn 20,
+        the recompute goes on as a warning."""
         sk = self.sk
         b, r, t, l = _rectangle(sk, 20, 10)
         sk.addConstraint(Sketcher.Constraint("Horizontal", b))
@@ -670,7 +674,9 @@ class TestSketchRepeatedConstraints(unittest.TestCase):
         sk.addConstraint(Sketcher.Constraint("DistanceX", b, 1, b, 2, 30))
         self.doc.recompute()
         self.assertTrue(sk.ConflictingConstraints)
-        self.assertFalse(sk.isValid())
+        self.assertTrue(sk.isValid(), sk.State)
+        self.assertIn("Warning", sk.State)
+        self.assertAlmostEqual(sk.Geometry[b].length(), 20.0, delta=TOL)
 
     def testDuplicateConstraintIsAccepted(self):
         """The same Horizontal twice on one line, the rehearsals' commonest case."""
