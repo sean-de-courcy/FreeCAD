@@ -147,7 +147,13 @@ std::string valueAttributes(const MaterialProperty& prop)
     stream.imbue(std::locale::classic());
     switch (prop.getType()) {
         case MaterialValue::Quantity: {
-            auto quantity = prop.getValue().value<Base::Quantity>();
+            auto value = prop.getValue();
+            if (value.userType() != qMetaTypeId<Base::Quantity>()) {
+                // a text that did not parse as a quantity is kept as text, as the card has it
+                stream << " value=\"" << encode(value.toString()) << "\"";
+                break;
+            }
+            auto quantity = value.value<Base::Quantity>();
             stream << " value=\"" << exactDouble(quantity.getValue()) << "\" unit=\""
                    << Base::Persistence::encodeAttribute(quantity.getUnit().getString()) << "\"";
             break;
@@ -364,9 +370,11 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
             continue;
         }
         try {
-            material.addPhysical(model);
+            material.addPhysical(model);  // ignores a model unknown here
         }
         catch (const Base::Exception&) {
+        }
+        if (!material.hasPhysicalModel(model)) {
             lost.push_back("model " + model.toStdString());
         }
     }
@@ -377,7 +385,15 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
             lost.push_back(valueName.toStdString());
             continue;
         }
-        restoreValue(material, valueName, reader);
+        try {
+            restoreValue(material, valueName, reader);
+        }
+        catch (const Base::Exception&) {
+            lost.push_back(valueName.toStdString());
+        }
+        catch (const std::exception&) {
+            lost.push_back(valueName.toStdString());
+        }
     }
     if (hasChildren) {
         reader.readEndElement("PropertyMaterial");

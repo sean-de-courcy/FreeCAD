@@ -37,7 +37,12 @@ def density(mat, unit):
     if not mat.hasPhysicalProperty("Density"):
         return None
     value = mat.getPhysicalValue("Density")
-    return FreeCAD.Units.Quantity(value).getValueAs(unit).Value
+    if value is None or value == "":
+        return None
+    try:
+        return FreeCAD.Units.Quantity(value).getValueAs(unit).Value
+    except Exception:  # an empty value reads as a dimensionless 0
+        return None
 
 out = {"userAppData": FreeCAD.getUserAppDataDir(), "objects": {}}
 doc = FreeCAD.openDocument(os.environ["E1_DOC"]) if os.environ.get("E1_DOC") else None
@@ -128,6 +133,8 @@ class MaterialInFileTestCases(unittest.TestCase):
         out = os.path.join(self.work, "child-{}.json".format(uuid.uuid4().hex[:8]))
         env = dict(os.environ)
         env["FREECAD_USER_HOME"] = home
+        for inherited in ("FREECAD_USER_DATA", "FREECAD_USER_TEMP"):
+            env.pop(inherited, None)  # they override FREECAD_USER_HOME's folders
         env["E1_OUT"] = out
         env.pop("E1_DOC", None)
         env.pop("E1_UUID", None)
@@ -334,3 +341,43 @@ class MaterialInFileTestCases(unittest.TestCase):
         self.assertEqual(
             str(mat.getPhysicalValue("Density")), str(steel.getPhysicalValue("Density"))
         )
+
+    def testValuesThatDoNotFitAreReported(self):
+        """A stored value whose unit does not fit the model and a model unknown here: the part keeps
+        the rest of its material, a warning names what was not restored, the document is whole"""
+        doc = self.newDoc("E1Unfit")
+        box = self.cube(doc, "Box")
+        box.ShapeMaterial = self.plaster()
+        made = box.ShapeMaterial.UUID
+        self.cube(doc, "Box2", 20)
+        doc.recompute()
+        path = os.path.join(self.work, "unfit.FCStd")
+        doc.saveAs(path)
+        unknownModel = str(uuid.uuid4())
+
+        def unfit(xml):
+            start = xml.index('<PropertyMaterial uuid="{}"'.format(made))
+            end = xml.index("</PropertyMaterial>", start)
+            element = xml[start:end]
+            changed = element.replace('models="1"', 'models="2"', 1)
+            changed = changed.replace(
+                '<Model uuid="{}"/>'.format(DENSITY_MODEL),
+                '<Model uuid="{}"/>\n<Model uuid="{}"/>'.format(DENSITY_MODEL, unknownModel),
+                1,
+            )
+            changed = changed.replace('unit="kg/mm^3"', 'unit="mm"', 1)
+            self.assertNotEqual(changed, element)
+            return xml[:start] + changed + xml[end:]
+
+        self.rewriteDocumentXml(path, unfit)
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertEqual(entry["uuid"], made)
+        self.assertEqual(entry["name"], PLASTER)
+        self.assertIsNone(entry["density"])
+        self.assertCube(entry, "Box")
+        self.assertCube(result["objects"]["Box2"], "Box2")
+        warning = [line for line in log.splitlines() if "not restored" in line and "Box" in line]
+        self.assertTrue(warning, log[-2000:])
+        self.assertIn("Density", warning[0])
+        self.assertIn(unknownModel, warning[0])
