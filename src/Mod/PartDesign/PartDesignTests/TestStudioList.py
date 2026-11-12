@@ -364,9 +364,16 @@ def madeBy(owner):
     ]
 
 
+def madeNew(owner):
+    """The New part owner made (studioNewPart): a Body it made with no witness (a leftover's part,
+    10.12 amendment, has one)."""
+    return [b for b in madeBy(owner) if not b.StudioPieceWitness]
+
+
 def mirrorRecord(owner):
     plane = owner.MirrorPlane[0] if owner.MirrorPlane else None
-    new = bool(madeBy(owner))
+    new = bool(madeNew(owner))
+    pieces, sides = madePieceRecords(owner)
     op = "New" if new else ("Remove" if owner.Operation == "Subtraction" else "Add")
     return dict(
         name=owner.Name,
@@ -377,6 +384,8 @@ def mirrorRecord(owner):
         op=op,
         scope=[] if new else list(owner.StudioScope),
         suppressed=bool(owner.Suppressed),
+        pieces=pieces,
+        sides=sides,
     )
 
 
@@ -518,6 +527,29 @@ def labelPieces(made, box):
         body.OracleSide = side
 
 
+def labelMade(doc):
+    """Labels each part made from a piece or a leftover that no command labelled: the ones the
+    resync made in an edit's step (10.12 amendment, Onshape U1), as its maker's command labels
+    them. Returns them."""
+    out = []
+    for body in doc.Objects:
+        if (
+            body.TypeId != "PartDesign::Body" or not body.StudioPieceWitness
+            or hasattr(body, "OracleSide") or body.StudioMadeBy is None
+        ):
+            continue
+        maker = body.StudioMadeBy
+        if isFeatureOwner(maker):
+            labelPatternPieces([body], maker)
+        elif maker.TypeId == "Part::Box":
+            labelPieces([body], maker)
+        else:
+            body.addProperty("App::PropertyString", "OracleSide", "Test")
+            body.OracleSide = "?" if body.StudioParentId else "N"
+        out.append(body)
+    return out
+
+
 def studioList(doc):
     return PartDesign.studioList(doc.getObject("S"), True)
 
@@ -647,7 +679,7 @@ def snapshot(doc, names=True):
     for owner in lst.Entries if lst is not None else []:
         if not isPartMirror(owner):
             continue
-        for body in madeBy(owner):
+        for body in madeNew(owner):
             tip = body.Tip
             shape = tip.Shape if tip else Part.Shape()
             out["new:" + owner.Name] = dict(
@@ -893,20 +925,44 @@ def oracle(natives, records, bar, live=None):
                     failed.add(pid)
             continue
         if record.get("mirror"):
+            # 10.12 amendment (Onshape U1, U2): an Add's copy touching no part of its scope is a
+            # leftover, the part its record names (made in the edit's step, or by a command);
+            # merged back onto a part, the record is dormant (no part, nothing fails); with the
+            # step failing or refused, it holds nothing
+            own = pieceRecs.get(record["name"], {})
+            leftover = None  # the copy, when it is a leftover
+            merged = False
             sources = resolve([record["source"]])
+            if len(sources) == 1 and sources[0] in shapes:
+                src = sources[0]
+                copy = shapes[src].mirror(V(record["x"], 0, 0), V(1, 0, 0))
+                targets = [p for p in resolve(record["scope"]) if p in shapes]
+                if record["op"] == "Add":
+                    touched = [p for p in targets if copy.distToShape(shapes[p])[0] <= 1e-7]
+                    if not touched and targets:
+                        leftover = copy
+                    merged = len(touched) == 1
+            for pid, (parent, _) in sorted(own.items()):
+                madePieces.add(pid)
+                if parent:
+                    parentOf[pid] = parent
+                    failed.add(pid)  # a piece of a split: not modelled, it fails
+                elif leftover is not None:
+                    shapes[pid] = leftover
+                    leftover = None  # one solid: the first record holds it
+                elif merged:
+                    vanished.add(pid)
+                else:
+                    failed.add(pid)
             if len(sources) != 1 or sources[0] not in shapes:
                 continue  # no part to mirror, or a split part's pieces: it fails
-            src = sources[0]
-            copy = shapes[src].mirror(V(record["x"], 0, 0), V(1, 0, 0))
             if record["op"] == "New":
                 made["new:" + record["name"]] = copy
                 continue
-            targets = [p for p in resolve(record["scope"]) if p in shapes]
             tool = [copy]
             if record["op"] == "Add":
-                touched = [p for p in targets if copy.distToShape(shapes[p])[0] <= 1e-7]
                 if len(touched) != 1:
-                    continue  # touching none, or two (merging parts: refused)
+                    continue  # touching none (a leftover, or failing), or two (refused)
                 # Oracle 9 R4: the source outside the scope touching the copy or the survivor
                 # is merged with the copy, and consumed
                 survivor = shapes[touched[0]]
@@ -1117,6 +1173,7 @@ def oracle(natives, records, bar, live=None):
             record["op"] != "Subtraction" and bool(bases)
             and all(tool.distToShape(base)[0] > 1e-7 for base in bases)
         )
+        mergedBack = record["op"] != "Subtraction" and bool(bases) and not left
         for pid, (parent, _) in sorted(own.items()):
             if pid in madePieces:
                 continue
@@ -1128,6 +1185,10 @@ def oracle(natives, records, bar, live=None):
             elif left:
                 shapes[pid] = tool
                 left = False  # one solid: the first record holds it
+            elif mergedBack:
+                # 10.12 amendment point 5 (Onshape U2, Q2c): the tool merged back onto a part of
+                # its scope: the leftover's record is dormant (no part, nothing fails)
+                vanished.add(pid)
             else:
                 failed.add(pid)
     if live is not None:
@@ -1283,7 +1344,7 @@ def oracleDifferences(doc):
             if not (isPartMirror(owner) or isNewBox(owner)) or live is None:
                 continue
             key = "new:" + owner.Name
-            for body in madeBy(owner):
+            for body in madeNew(owner):
                 tip = body.Tip
                 shape = tip.Shape if tip else Part.Shape()
                 got = (0.0 if shape.isNull() else round(shape.Volume, 4), len(shape.Solids))
@@ -2115,6 +2176,8 @@ class TestStudioListProperty(unittest.TestCase):
         self.patternPartsSeen = 0  # states with a live part a feature pattern made (T1b)
         self.patternMergesSeen = 0  # states with a feature pattern's merge record (T1b)
         self.newSeen = 0  # states with a New box owner's part live (T1b)
+        self.resyncMade = set()  # (seed, part id): leftovers the resync made in an edit's step
+        self.leftoversSeen = 0  # states with a live leftover part the resync made (10.12 amendment)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -2334,7 +2397,7 @@ class TestStudioListProperty(unittest.TestCase):
                 PartDesign.studioReconcile(lst)
                 return f"plane {name} x {x}"
             names = [p for p, _ in PARTS]
-            if madeBy(box):
+            if madeNew(box):
                 source = rng.choice(names)
                 box.StudioEntities = [source]
                 PartDesign.studioReconcile(lst)
@@ -2346,7 +2409,7 @@ class TestStudioListProperty(unittest.TestCase):
             kind = "suppress"  # T1b: a New box owner keeps its own part as its scope
         if kind == "delete" and (isPartMirror(box) or isNewBox(box)):
             # Its New part goes with it (an empty part of no feature isn't the list's)
-            made = [b.Name for b in madeBy(box)]
+            made = [b.Name for b in madeNew(box)]
             PartDesign.studioRemove(box)
             doc.removeObject(name)
             for body in made:
@@ -2481,6 +2544,9 @@ class TestStudioListProperty(unittest.TestCase):
                         what += " (committed, then recomputed)"
                         self.lateSeen += 1
                         stranded(doc)
+                        self.resyncMade.update(
+                            (seed, b.StudioPartId) for b in labelMade(doc) if not b.StudioParentId
+                        )
                     else:
                         # The command's recompute is in its transaction, as every GUI command
                         # and dialog OK does it (recompute, then commit): what the recompute
@@ -2489,6 +2555,11 @@ class TestStudioListProperty(unittest.TestCase):
                         # step (seed 3, edit 63, ops#654 P6p open item a)
                         doc.recompute()
                         stranded(doc)
+                        # 10.12 amendment: the parts the resync made in the edit's step, labelled
+                        # in it as a command labels its own
+                        self.resyncMade.update(
+                            (seed, b.StudioPartId) for b in labelMade(doc) if not b.StudioParentId
+                        )
                         doc.commitTransaction()
                 except Exception as e:
                     if committed:
@@ -2563,6 +2634,9 @@ class TestStudioListProperty(unittest.TestCase):
                 self.patternMergesSeen += 1
             if any(b.StudioMadeBy is not None and isNewBox(b.StudioMadeBy) for b in liveNow):
                 self.newSeen += 1
+            if any((seed, b.StudioPartId) in self.resyncMade for b in liveNow
+                   if b.StudioPieceWitness):
+                self.leftoversSeen += 1
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -2624,7 +2698,7 @@ class TestStudioListProperty(unittest.TestCase):
               f"edits committed before their recompute, {self.filletsSeen} states with a fillet, "
               f"{self.ownersSeen} valid feature pattern owners, {self.patternPartsSeen} states with a "
               f"pattern's part, {self.patternMergesSeen} with a pattern's merge, {self.newSeen} with "
-              f"a New box's part")
+              f"a New box's part, {self.leftoversSeen} with a leftover the resync made")
 
 
 if __name__ == "__main__":
