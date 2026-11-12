@@ -408,7 +408,8 @@ class TestMeasuredVariablesGui(unittest.TestCase):
                            and e.BoundBox.XMax < 1e-6 and e.BoundBox.ZMax < 1e-6)
         panel.refs = []
         self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, short))
-        self.assertTrue(panel.accept(), panel.errorLabel.text())
+        error = panel.errorLabel.text()  # read first: an accepted dialog deletes itself
+        self.assertTrue(panel.accept(), error)
         pump(0.2)
         self.assertAlmostEqual(holder.w.Value, 10, places=6)
 

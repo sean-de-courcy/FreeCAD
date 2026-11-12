@@ -673,12 +673,14 @@ def resolve_pick(root, subname, wire_body=False):
         if obj.hasExtension("App::LinkBaseExtension"):  # Link, LinkElement, LinkGroup, Draft link arrays
             raise MeasureError("{} is picked through the link {}: pick the original".format(
                 owner.Label, obj.Label))
-    if element and not element[0].isalpha():
-        # a mapped name: its indexed form in the owner's shape
+    if element:
+        # a mapped name (what the selection hands observers when the shape has an element map;
+        # it may start with a letter, "g1;..."): its indexed form in the owner's shape
+        # (direction 0; 1 would return the mapped form). An indexed name comes back as it is.
         try:
             import Part
 
-            element = Part.getShape(owner).getElementName(element, 1) or element
+            element = Part.getShape(owner).getElementName(element) or element
         except Exception:
             pass
     if wire_body and not element:

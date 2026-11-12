@@ -456,6 +456,19 @@ class TestMeasuredVariables(unittest.TestCase):
         self.assertIs(feature, self.sketchA)
         self.assertEqual(element, line)
 
+    def testPickByMappedNameResolvesToTheIndexedName(self):
+        """The selection hands its observers the mapped name of a shape with an element map
+        (Gui::SelectionSingleton::checkSelection), with or without the ';' prefix: it is read
+        as the edge it names."""
+        edge = edge_named(self.padA.Shape, bottom_long)
+        mapped = self.padA.Shape.getElementName(edge, 1)
+        self.assertNotEqual(mapped, edge, "the pad's shape has no element map")
+        for name in (mapped, ";" + mapped.lstrip(";")):
+            feature, element = self.measured.resolve_pick(
+                self.studio, "{}.{}.{}".format(self.bodyA.Name, self.padA.Name, name))
+            self.assertIs(feature, self.padA)
+            self.assertEqual(element, edge)
+
     def testPickOfAWholeObjectRefused(self):
         with self.assertRaises(self.measured.MeasureError):
             self.measured.resolve_pick(self.studio, "{}.{}.".format(self.bodyA.Name, self.padA.Name))
