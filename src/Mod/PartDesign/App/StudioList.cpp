@@ -1067,8 +1067,9 @@ bool patternOriginalsGoneFrom(const App::DocumentObject* owner,
         }
         const auto parts = scopePartsAt(original, bodies, at->second, positions, consumed);
         // An Add over two or more parts merges what its instances join, wherever (T1b settled
-        // 2); an Add over one part acts on that part only (the gate's seed 1 op 57, again)
-        if (isMergingAdd(original) && parts.size() > 1) {
+        // 2), with Reapply on only (off, the pattern is refused and merges nothing: the gate's
+        // seed 1 op 26); an Add over one part acts on that part only (seed 1 op 57, again)
+        if (isMergingAdd(original) && parts.size() > 1 && pattern->Reapply.getValue()) {
             return false;
         }
         if (std::ranges::find(parts, part) == parts.end()) {
