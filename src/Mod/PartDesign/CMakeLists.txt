@@ -180,6 +180,7 @@ if(BUILD_GUI)
         PartDesignTests/TestStudioPatternsGui.py
         PartDesignTests/TestStudioPartMirrorGui.py
         PartDesignTests/TestStudioTransformGui.py
+        PartDesignTests/TestFacePatternGui.py
     )
 endif(BUILD_GUI)
 

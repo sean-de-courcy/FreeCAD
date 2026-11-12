@@ -118,6 +118,7 @@ from PartDesignTests.TestStudioHistoryGui import TestStudioHistoryGui  # FreeCAD
 from PartDesignTests.TestStudioPatternsGui import TestStudioPatternsGui  # FreeCAD-CH, ops#654 slice 8
 from PartDesignTests.TestStudioPartMirrorGui import TestStudioPartMirrorGui  # FreeCAD-CH, ops#654 slice 9
 from PartDesignTests.TestStudioTransformGui import TestStudioTransformGui  # FreeCAD-CH, ops#655
+from PartDesignTests.TestFacePatternGui import TestFacePatternGui  # FreeCAD-CH, ops#655 T8
 from PartDesignTests.TestPartsListGui import TestPartsListGui  # FreeCAD-CH, ops#654
 from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection parity P1, P2
     TestBoxSelectionGui,
