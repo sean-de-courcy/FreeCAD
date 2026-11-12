@@ -145,6 +145,13 @@ public:
         /// Elements: the object picks come from (null: the field doesn't arm). SingleElement:
         /// the object shown while armed, and the gate's support (null: the active body's).
         std::function<App::DocumentObject*()> target;
+        /// Objects: shapes besides the target whose element picks stand for the feature that
+        /// made the element, as the target's do (a pattern over parts: every part's solid).
+        std::function<bool(const App::DocumentObject*)> elementShapes;
+        /// Objects: deleted objects the property held, each a red "Missing feature" row first
+        /// (their Labels, for the tooltip); removeMissing(k) takes the k-th out.
+        std::function<std::vector<std::string>()> missingRows;
+        std::function<void(int)> removeMissing;
         /// The field's own test, after the flags; \a why says what it refuses.
         std::function<bool(App::DocumentObject*, const char* sub, std::string& why)> accept;
         /// Also refuse what depends on the owner (NoDependentsSelection).

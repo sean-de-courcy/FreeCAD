@@ -1745,9 +1745,15 @@ App::DocumentObjectExecReturn* Body::execute()
         tipShape = static_cast<Part::Feature*>(tip)->Shape.getShape();
 
         if (tipShape.getShape().IsNull()) {
-            if (tip->isError() || tip->isDerivedFrom<DeletePart>() || DeletePart::deleterOf(this)) {
+            auto tipFeature = static_cast<PartDesign::Feature*>(tip);
+            App::Part* studio = nullptr;
+            if (tip->isError() || tip->isDerivedFrom<DeletePart>() || DeletePart::deleterOf(this)
+                || ((tipFeature->Suppressed.getValue() || tipFeature->StudioOwner.getValue())
+                    && studioOf(this, studio))) {
                 // A failed first feature passed an empty base through, or the part is deleted
-                // (ops#635): the Body is empty and valid (ops#126)
+                // (ops#635): the Body is empty and valid (ops#126). FreeCAD-CH ops#654 (10.12
+                // amendment point 7): so is a studio step that took all of its part (Onshape U3),
+                // and a suppressed feature passing an empty result through
                 lastTipShape = Part::TopoShape();
                 Shape.setValue(Part::TopoShape());
                 return App::DocumentObject::StdReturn;

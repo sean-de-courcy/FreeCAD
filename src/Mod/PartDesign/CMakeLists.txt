@@ -129,6 +129,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestStudioMerge.py
     PartDesignTests/TestStudioDressUp.py
     PartDesignTests/TestConfigurations.py
+    PartDesignTests/TestStudioFeaturePattern.py
 )
 
 if(BUILD_GUI)

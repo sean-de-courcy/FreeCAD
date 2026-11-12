@@ -45,6 +45,12 @@
 #include "TaskMultiTransformParameters.h"
 
 using namespace PartDesignGui;
+
+namespace PartDesignGui
+{
+// TaskTransformedParameters.cpp (ops#654 T1a; declared where used)
+App::Origin* transformedOrigin(App::DocumentObject* pattern);
+}  // namespace PartDesignGui
 using namespace Gui;
 
 /* TRANSLATOR PartDesignGui::TaskMirroredParameters */
@@ -89,18 +95,19 @@ void TaskMirroredParameters::setupParameterUI(QWidget* widget)
         this->fillPlanesCombo(planeLinks, nullptr);
     }
 
-    // show the parts coordinate system planes for selection
-    PartDesign::Body* body = PartDesign::Body::findBodyOf(getObject());
-    if (body) {
+    // show the parts coordinate system planes for selection (a studio feature's: its studio's,
+    // ops#654 T1a)
+    {
         try {
-            App::Origin* origin = body->getOrigin();
-            auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
-                Gui::Application::Instance->getViewProvider(origin)
-            );
-            // FreeCAD-CH (ops#640, rank 52): a new part studio's planes are shown through the same
-            // temporary visibility; they are shown again when the dialog closes
-            setProperty("studioPlanes", vpOrigin->isTemporaryVisibility());
-            vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+            if (App::Origin* origin = transformedOrigin(getObject())) {
+                auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
+                    Gui::Application::Instance->getViewProvider(origin)
+                );
+                // FreeCAD-CH (ops#640, rank 52): a new part studio's planes are shown through the
+                // same temporary visibility; they are shown again when the dialog closes
+                setProperty("studioPlanes", vpOrigin->isTemporaryVisibility());
+                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+            }
         }
         catch (const Base::Exception& ex) {
             Base::Console().error("%s\n", ex.what());
@@ -262,9 +269,7 @@ TaskMirroredParameters::~TaskMirroredParameters()
 {
     // hide the parts coordinate system axis for selection
     try {
-        PartDesign::Body* body = PartDesign::Body::findBodyOf(getObject());
-        if (body) {
-            App::Origin* origin = body->getOrigin();
+        if (App::Origin* origin = transformedOrigin(getObject())) {
             auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
                 Gui::Application::Instance->getViewProvider(origin)
             );
