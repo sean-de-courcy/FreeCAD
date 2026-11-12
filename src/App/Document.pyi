@@ -113,7 +113,9 @@ class Document(PropertyContainer):
 
         Returns a dict: "changed" (the file is no longer the one this document read or
         last saved, so save() refuses to overwrite it), "by" and "when" (who saved the
-        file on disk and when, from its LastModifiedBy and LastModifiedDate).
+        file on disk and when, from its LastModifiedBy and LastModifiedDate), "known"
+        (False when this document has no sure record of its file: its read failed, the
+        file changed during the read, or it was read from a recovery copy).
         """
         ...
 

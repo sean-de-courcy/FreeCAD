@@ -182,3 +182,25 @@ class TestSaveGuardGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: self._bars() == []))
         self.assertFalse(os.path.exists(other))
         self.assertEqual(len([n for n in os.listdir(self.folder) if n.startswith("Plate (Sean ")]), 1)
+
+    def testReloadAfterEditAsks(self):
+        # A2 review R6: an edit made after the bar appeared: Reload asks instead of dropping it
+        self._theirSave()
+        self._activate()
+        self.assertTrue(waitFor(lambda: self._action("FileChangeReload") is not None))
+        self.doc.getObject("Marker").Integer = 2
+        Gui.getDocument(self.doc.Name).Modified = True
+        asked = []
+
+        def answer():
+            box = QtWidgets.QApplication.activeModalWidget()
+            if box is None or box.objectName() != "FileChangeQuestion":
+                QtCore.QTimer.singleShot(100, answer)
+                return
+            asked.append(box.text())
+            box.reject()
+
+        QtCore.QTimer.singleShot(100, answer)
+        self._action("FileChangeReload").trigger()
+        self.assertTrue(asked, "the question was not asked")
+        self.assertEqual(self.doc.getObject("Marker").Integer, 2, "the edit is still there")
