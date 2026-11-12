@@ -294,7 +294,7 @@ Property* DynamicProperty::addDynamicProperty(
     pcProperty->syncType(attr);
     pcProperty->StatusBits.set((size_t)Property::PropDynamic);
     // A digest folds every property (ops#640)
-    forgetPlacementDigest(dynamic_cast<DocumentObject*>(&pc));
+    forgetPlacementDigestOf(&pc);
 
     GetApplication().signalAppendDynamicProperty(*pcProperty);
 
@@ -350,7 +350,8 @@ bool DynamicProperty::removeDynamicProperty(const char* name)
             throw Base::RuntimeError("property is not dynamic");
         }
         Property* prop = it->property;
-        forgetPlacementDigest(dynamic_cast<DocumentObject*>(prop->getContainer()));
+        PropertyContainer* container = prop->getContainer();
+        forgetPlacementDigestOf(container);
         GetApplication().signalRemoveDynamicProperty(*prop);
 
         // Handle possible recursive calls of removeDynamicProperty
@@ -360,6 +361,8 @@ bool DynamicProperty::removeDynamicProperty(const char* name)
             // memory of myName has been freed
             prop->myName = nullptr;
         }
+        // Again once it is gone: a digest made by a handler above still held it (ops#640)
+        forgetPlacementDigestOf(container);
         return true;
     }
 

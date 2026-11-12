@@ -3,6 +3,7 @@
 #include "ElementSolverBatch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -118,6 +119,9 @@ DigestCache& digestCache()
     return cache;
 }
 
+// The cache's depth, read without its mutex by forgetPlacementDigestOf()
+std::atomic<int> digestDepth {0};
+
 // FREECAD_CH_DIGEST_CACHE, or empty
 std::string digestCacheMode()
 {
@@ -162,6 +166,7 @@ PlacementDigestScope::PlacementDigestScope()
         return;
     }
     ++cache.depth;
+    ++digestDepth;
     active = true;
 }
 
@@ -171,17 +176,38 @@ PlacementDigestScope::~PlacementDigestScope()
         return;
     }
     auto& cache = digestCache();
-    std::lock_guard<std::mutex> lock(cache.mutex);
-    if (--cache.depth > 0) {
-        return;
+    // Logged after the mutex is released: a console observer may change a property (a forget)
+    std::uint64_t calls = 0;
+    std::uint64_t made = 0;
+    std::uint64_t reused = 0;
+    std::uint64_t differed = 0;
+    double seconds = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        --digestDepth;
+        if (--cache.depth > 0) {
+            return;
+        }
+        cache.digests.clear();
+        calls = cache.calls;
+        made = cache.made;
+        reused = cache.reused;
+        differed = cache.differed;
+        seconds = cache.seconds;
     }
-    cache.digests.clear();
-    if (cache.calls > 0) {
-        FC_LOG("placement sources: " << cache.calls << " calls, " << cache.seconds << " s; digests made "
-                                     << cache.made << ", reused " << cache.reused);
+    if (calls > 0) {
+        FC_LOG("placement sources: " << calls << " calls, " << seconds << " s; digests made " << made
+                                     << ", reused " << reused);
     }
-    if (cache.differed > 0) {
-        FC_ERR("placement digests: " << cache.differed << " kept digests differ from a fresh one");
+    if (differed > 0) {
+        FC_ERR("placement digests: " << differed << " kept digests differ from a fresh one");
+    }
+}
+
+void forgetPlacementDigestOf(const PropertyContainer* container)
+{
+    if (container && digestDepth.load(std::memory_order_relaxed) > 0) {
+        forgetPlacementDigest(dynamic_cast<const DocumentObject*>(container));
     }
 }
 
@@ -640,12 +666,12 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
         bool keepable = true;
         const std::uint64_t digest = digestOf(object, keepable);
+        bool differs = false;
         if (keep) {
             std::lock_guard<std::mutex> lock(cache.mutex);
             if (verify && kept && *kept != digest) {
                 ++cache.differed;
-                FC_ERR("placement digest of " << object->getFullName() << " kept " << *kept
-                                              << ", made " << digest);
+                differs = true;
             }
             if (!kept) {
                 ++cache.made;
@@ -653,6 +679,10 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
             if (keepable && cache.epoch == epoch && digestCacheActive(cache)) {
                 cache.digests[key] = digest;
             }
+        }
+        if (differs) {
+            FC_ERR("placement digest of " << object->getFullName() << " kept " << *kept
+                                          << ", made " << digest);
         }
         return digest;
     };

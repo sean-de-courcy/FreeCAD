@@ -13,6 +13,7 @@ namespace App
 class Document;
 class DocumentObject;
 class Property;
+class PropertyContainer;
 
 /// A document starts restoring, or is made or deleted: it has no edits.
 void forgetEditsSinceOpen(const Document* doc);
@@ -49,6 +50,9 @@ private:
 /// \a obj's properties changed (a value, a status, the list) or \a obj is going: its kept
 /// digests are dropped.
 void forgetPlacementDigest(const void* obj);
+/// The same for a property's container (a document object's, else nothing), at the cost of an
+/// atomic read while no scope is open: Property's setters call it.
+void forgetPlacementDigestOf(const PropertyContainer* container);
 
 }  // namespace App
 

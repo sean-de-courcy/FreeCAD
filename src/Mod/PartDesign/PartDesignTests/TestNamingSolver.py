@@ -3758,12 +3758,44 @@ class TestNamingSolver(unittest.TestCase):
                 return found[0]
         self.fail("no object data for " + holder.Name)
 
-    def _checkDigestCacheSees(self, change):
+    def _frozenCopy(self, doc, name):
+        """`doc` saved and opened again with the object `name` frozen (Python can't freeze one)."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Frozen.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {item: archive.read(item) for item in archive.namelist()}
+        xml, count = re.subn(
+            r'(<Object [^>]*name="%s"[^>]*?)(/?>)' % name,
+            r'\1 Freeze="1"\2',
+            files["Document.xml"].decode("utf-8"),
+            count=1,
+        )
+        self.assertEqual(count, 1)
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for item, data in files.items():
+                archive.writestr(item, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        self.assertIn("Freeze", doc.getObject(name).State)  # the setup: frozen
+        return doc
+
+    def _checkDigestCacheSees(self, change, frozen=False):
         """`change(base sketch)` runs while the block made taller recomputes, when the first
         pad's sketch is done: the block's records took the base sketch's digest by then, Second's
         reference into First takes it after. Its record holds the new digest, the one a later
-        recompute (a new cache) makes again."""
+        recompute (a new cache) makes again. `frozen`: the base sketch is frozen first (its
+        onChanged() then returns at once)."""
         doc, body, baseSketch, block, firstSketch, first, secondSketch = self._digestCacheModel()
+        if frozen:
+            doc = self._frozenCopy(doc, baseSketch.Name)
+            get = doc.getObject
+            body, baseSketch, block = get(body.Name), get(baseSketch.Name), get(block.Name)
+            firstSketch, first = get(firstSketch.Name), get(first.Name)
+            secondSketch = get(secondSketch.Name)
         before = self._digestIn(doc, secondSketch, baseSketch)
 
         class Observer:
@@ -3792,13 +3824,27 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(self._digestIn(doc, secondSketch, baseSketch), inside)
 
     def testDigestCacheSeesValueChangeInsideRecompute(self):
-        """An upstream sketch's property set while the recompute runs (its touch cleared)."""
+        """An upstream sketch's property set while the recompute runs. (Not purgeTouched(): it
+        clears a status, which drops the digest by itself.)"""
 
         def change(sketch):
             sketch.Note = "after"
-            sketch.purgeTouched()
 
         self._checkDigestCacheSees(change)
+
+    def testDigestCacheSeesFrozenObjectChangeInsideRecompute(self):
+        """The same on a frozen sketch, whose onChanged() returns before the document hears of
+        the change (review prmemo-r1 T1)."""
+
+        def change(sketch):
+            sketch.Note = "after"
+
+        self._checkDigestCacheSees(change, frozen=True)
+
+    def testDigestCacheSeesAddedExtensionInsideRecompute(self):
+        """An extension added to an upstream sketch while the recompute runs: its properties join
+        the list (review prmemo-r1 T2)."""
+        self._checkDigestCacheSees(lambda sketch: sketch.addExtension("App::GroupExtensionPython"))
 
     def testDigestCacheSeesStatusChangeInsideRecompute(self):
         """An upstream sketch's property made an output (which a digest leaves out) while the
@@ -3810,6 +3856,5 @@ class TestNamingSolver(unittest.TestCase):
 
         def change(sketch):
             sketch.addProperty("App::PropertyString", "Added")
-            sketch.purgeTouched()
 
         self._checkDigestCacheSees(change)
