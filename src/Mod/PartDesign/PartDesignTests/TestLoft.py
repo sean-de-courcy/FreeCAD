@@ -480,6 +480,58 @@ class TestLoft(unittest.TestCase):
         self.assertGreater(body.Shape.Volume, 9220.0)  # 9221.776241582389 post-Loft
         self.Doc.recompute()
 
+    # FreeCAD-CH (replica PS164C rb39): a loft between two planar profiles has a plane wherever a side
+    # is flat and a line wherever an edge is straight, as Onshape's has (its chamfers and fillets pick
+    # those edges as lines). Designed model: a 40 x 30 rectangle on XY and a 30 x 20 one 10 above it,
+    # centred (a prismatoid: V = h/6 (A1 + A2 + 4 Am) = 10/6 (1200 + 600 + 4 * 875) = 8833.333...)
+    def _frustumLoft(self, angle=0):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        bottom = body.newObject("Sketcher::SketchObject", "Bottom")
+        bottom.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        bottom.MapMode = "FlatFace"
+        TestSketcherApp.CreateRectangleSketch(bottom, (-20, -15), (40, 30))
+        top = body.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        top.MapMode = "FlatFace"
+        top.AttachmentOffset = FreeCAD.Placement(
+            FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle))
+        TestSketcherApp.CreateRectangleSketch(top, (-15, -10), (30, 20))
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = bottom
+        loft.Sections = [top]
+        self.Doc.recompute()
+        self.assertTrue(loft.Shape.isValid())
+        return body, loft
+
+    def testLoftSidesArePlanesAndLines(self):
+        body, loft = self._frustumLoft()
+        shape = loft.Shape
+        self.assertAlmostEqual(shape.Volume, 8833.333333333, places=6)
+        self.assertEqual(len(shape.Faces), 6)
+        self.assertEqual(sorted({type(f.Surface).__name__ for f in shape.Faces}), ["Plane"])
+        self.assertEqual(sorted({type(e.Curve).__name__ for e in shape.Edges}), ["Line"])
+
+    def testTwistedLoftKeepsItsCurvedSides(self):
+        # Turned 20 degrees, the sides are not flat: they stay B-spline surfaces
+        body, loft = self._frustumLoft(20)
+        kinds = [type(f.Surface).__name__ for f in loft.Shape.Faces]
+        self.assertEqual(kinds.count("Plane"), 2)
+        self.assertEqual(kinds.count("BSplineSurface"), 4)
+
+    def testChamferOnALoftSideEdge(self):
+        # The edge a chamfer picks on the loft is a line, and the chamfer builds on it
+        body, loft = self._frustumLoft()
+        edges = [i for i, e in enumerate(loft.Shape.Edges, 1)
+                 if abs(e.Vertexes[0].Point.z - e.Vertexes[1].Point.z) > 1]
+        self.assertEqual(len(edges), 4)
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (loft, ["Edge%d" % edges[0]])
+        chamfer.Size = 1
+        self.Doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertEqual(len(chamfer.Shape.Faces), 7)
+        self.assertLess(chamfer.Shape.Volume, loft.Shape.Volume)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestLoft")
