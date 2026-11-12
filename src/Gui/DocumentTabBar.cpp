@@ -59,6 +59,7 @@
 #include <App/DocumentPy.h>
 #include <App/DocumentTabs.h>
 #include <App/GeoFeature.h>
+#include <App/PropertyLinks.h>
 #include <App/Link.h>
 #include <App/VarSet.h>
 #include <Base/Console.h>
@@ -1802,7 +1803,19 @@ bool Controller::writeDrawings(
 {
     // TechDrawGui writes the page without its window being open (PagePrinter::ensureScene)
     const QString file = QString::fromUtf8(path.c_str());
-    QFile::remove(file);  // a stale file must not pass for the export
+    for (auto obj : pages) {
+        // a page without its template can't render
+        auto link = dynamic_cast<App::PropertyLink*>(obj->getPropertyByName("Template"));
+        if (!link || !link->getValue()) {
+            error = std::string(obj->Label.getValue()) + " has no template to export";
+            return false;
+        }
+    }
+    // a stale file must not pass for the export: replace it, or say it can't be (a viewer holds it)
+    if (QFile::exists(file) && !QFile::remove(file)) {
+        error = "Can't replace " + path + ": is it open in another program?";
+        return false;
+    }
     try {
         Base::PyGILStateLocker lock;
         PyObject* imported = PyImport_ImportModule("TechDrawGui");

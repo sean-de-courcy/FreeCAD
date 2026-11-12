@@ -1091,7 +1091,7 @@ class TestDocumentTabsGui(unittest.TestCase):
         page = self.doc.getObject(name)
         page.ViewObject.hide()
         pump(0.3)
-        pdf = os.path.join(folder, "one.pdf")
+        pdf = os.path.join(folder, "Bob's one.pdf")  # an apostrophe in the name
         done, error = GuiTabs.exportTab(self.doc, name, pdf)
         self.assertTrue(done, error)
         data = open(pdf, "rb").read()

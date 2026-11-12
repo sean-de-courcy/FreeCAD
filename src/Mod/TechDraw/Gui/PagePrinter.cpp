@@ -369,9 +369,9 @@ void PagePrinter::printPdf(ViewProviderPage* vpPage, const std::string& file)
         return;
     }
 
-    auto filespec = Base::Tools::escapeEncodeFilename(file);
-    filespec = DU::cleanFilespecBackslash(filespec);
-    QString outputFile = QString::fromStdString(filespec);
+    // the path as it is: the writer opens the file itself, and the escaping made for a Python
+    // command line turned an apostrophe in a name into a folder separator (ops#640, E1)
+    QString outputFile = QString::fromUtf8(file.c_str());
 
     // set up the pdfwriter
     QPdfWriter pdfWriter(outputFile);
@@ -426,9 +426,7 @@ void PagePrinter::printPagesPdf(const std::vector<TechDraw::DrawPage*>& pages,
         return;
     }
 
-    auto filespec = Base::Tools::escapeEncodeFilename(file);
-    filespec = DU::cleanFilespecBackslash(filespec);
-    QPdfWriter pdfWriter(QString::fromStdString(filespec));
+    QPdfWriter pdfWriter(QString::fromUtf8(file.c_str()));
     pdfWriter.setPdfVersion(Gui::Dialog::DlgSettingsPDF::evaluatePDFVersion());
     pdfWriter.setTitle(QString::fromUtf8(pages.front()->getDocument()->getName()));
     pdfWriter.setCreator(QString::fromStdString(App::Application::getNameWithVersion())
