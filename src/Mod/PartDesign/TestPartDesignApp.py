@@ -180,7 +180,7 @@ from PartDesignTests.TestDerivedFiles import TestDerivedFiles  # FreeCAD-CH, der
 from PartDesignTests.TestDerivedFollowUps import TestDerivedFollowUps  # FreeCAD-CH, derived-design.md
 from PartDesignTests.TestPartStudioVariables import TestPartStudioVariables  # FreeCAD-CH, derived-design.md
 from PartDesignTests.TestMeasuredVariables import TestMeasuredVariables  # FreeCAD-CH, ops#640
-from PartDesignTests.TestSolidOps import TestThicken, TestThickenOnshapeOptions, TestScale, TestOffsetSurface, TestSolidOpsExpressions  # FreeCAD-CH, lane solid-ops
+from PartDesignTests.TestSolidOps import TestThicken, TestThickenOnshapeOptions, TestScale, TestOffsetSurface, TestSolidOpsExpressions, TestThickenBend  # FreeCAD-CH, lane solid-ops
 
 # Studio features (FreeCAD-CH, ops#654, ops#655)
 from PartDesignTests.TestStudioList import (

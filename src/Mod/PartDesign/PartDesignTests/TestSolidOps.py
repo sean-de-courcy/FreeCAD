@@ -628,3 +628,177 @@ class TestSolidOpsExpressions(SolidOpsBase):
         self.assertAlmostEqual(t.Shape.Volume, 2000.0, 4)
         self.assertAlmostEqual(sc.Shape.Volume, 27000.0, 2)
         self.assertAlmostEqual(o.Shape.BoundBox.ZMin, 14.0, 5)
+
+
+# ---------------------------------------------------------------- Thicken of a bent bore (ops#640)
+
+
+def ring_moment(R, d):
+    """The integral of (d - x) over the part of the disc of radius R (centre at x = 0) with x <= d:
+    the revolved volume per radian of that part about the line x = d (Pappus)."""
+    if R <= d:
+        return math.pi * R * R * d
+    s = math.sqrt(R * R - d * d)
+    area = d * s + R * R * math.asin(d / R) + R * R * math.pi / 2
+    return d * area + 2.0 / 3.0 * s ** 3
+
+
+def annular_tube(centre, axis, r_in, r_out, length):
+    t = Part.makeCylinder(r_out, length, centre, axis)
+    return t.cut(Part.makeCylinder(r_in, length, centre, axis))
+
+
+class TestThickenBend(unittest.TestCase):
+    """A bore of radius 4 in a 40 x 30 x 20 box: down from the top, a bend about a line at distance
+    `major` from the bore's centre, then a straight leg. The sheet is the bore's three faces (offset
+    surface at 0); their normals point toward the bore's axis. At major 4 the bend is a horn torus.
+
+    The rule (Onshape, notes/onshape-facts.md TK1-TK4): the result is the union of the ring swept along
+    the bore, filled up to the bend's axis and nothing beyond it. Its volume: the two straight annular
+    tubes, plus the near side of the ring revolved through the bend (Pappus, ring_moment), minus the
+    tubes' overlap at the inner corner (their parts past the axis)."""
+
+    def setUp(self):
+        self.doc = App.newDocument("ThickenBend")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def bore(self, major, angle=90.0, leg=40.0):
+        V = App.Vector
+        z0 = 6.0 + major
+        self.geo = (major, angle, leg, z0)
+        ap, ad = V(15 + major, 0, z0), V(0, -1, 0)
+        rot = App.Rotation(ad, angle)
+        self.legStart = ap + rot.multVec(V(15, 15, z0) - ap)
+        self.legDir = rot.multVec(V(0, 0, -1))
+        disc = lambda c, n: Part.Face(Part.Wire(Part.makeCircle(4.0, c, n)))
+        cut = [disc(V(15, 15, 20), V(0, 0, 1)).extrude(V(0, 0, z0 - 20)),
+               disc(V(15, 15, z0), V(0, 0, 1)).revolve(ap, ad, angle),
+               disc(self.legStart, self.legDir).extrude(self.legDir * leg)]
+        a = self.doc.addObject("Part::Feature", "A")
+        a.Shape = Part.makeBox(40, 30, 20).cut(cut).removeSplitter()
+        names = tuple("Face%d" % (k + 1) for k, f in enumerate(a.Shape.Faces) if f.Surface.__class__.__name__ != "Plane")
+        self.assertEqual(len(names), 3)
+        srf = S.make_offset_surface(self.doc.addObject("PartDesign::Body", "S"), [(a, names)], 0.0, name="Srf")
+        return srf
+
+    def thicken(self, srf, t1=0.0, t2=0.0, midplane=None):
+        t = S.make_thicken(self.doc.addObject("PartDesign::Body", "T"), [(srf, "")], 0.75, 0.0, name="Thk")
+        if midplane is not None:
+            t.Midplane, t.Thickness = True, midplane
+        else:
+            t.Thickness1, t.Thickness2 = t1, t2
+        self.doc.recompute()
+        self.assertEqual(srf.State, ["Up-to-date"], srf.getStatusString())
+        return t
+
+    def expected(self, r_in, r_out):
+        major, angle, leg, z0 = self.geo
+        V = App.Vector
+        a = annular_tube(V(15, 15, z0), V(0, 0, 1), r_in, r_out, 20 - z0)
+        b = annular_tube(self.legStart, self.legDir, r_in, r_out, 40 - (15 + major) if angle == 90.0 else leg)
+        bend = math.radians(angle) * (ring_moment(r_out, major) - ring_moment(r_in, major))
+        return a.Volume + b.Volume + bend - a.common(b).Volume
+
+    def assertOneSolid(self, t, volume):
+        self.assertEqual(t.State, ["Up-to-date"], t.getStatusString())
+        s = t.Shape
+        self.assertTrue(s.isValid())
+        self.assertEqual(len(s.Solids), 1)
+        self.assertAlmostEqual(s.Volume, volume, delta=2e-3)
+
+    def assertBox(self, shape, *box):
+        b = shape.optimalBoundingBox()  # BoundBox is loose on the B-spline caps
+        for got, want in zip((b.XMin, b.XMax, b.YMin, b.YMax, b.ZMin, b.ZMax), box):
+            self.assertAlmostEqual(got, want, delta=1e-4)
+
+    def testFormulaGivesOnshapesVolume(self):
+        self.bore(4.0)
+        self.assertAlmostEqual(self.expected(3.25, 4.75), 1405.2049, delta=2e-3)  # TK1
+        self.assertAlmostEqual(self.expected(3.25, 4.0), 636.8867, delta=2e-3)  # TK2
+        self.assertAlmostEqual(self.expected(4.0, 4.75), 768.3182, delta=2e-3)  # TK3
+
+    def testHornMidplaneIsTheSweptRing(self):
+        t = self.thicken(self.bore(4.0), midplane=1.5)
+        self.assertOneSolid(t, 1405.2049)  # Onshape TK1
+        self.assertBox(t.Shape, 10.25, 40, 10.25, 19.75, 1.25, 20)
+        # Onshape: 8 faces, 2 planes, 4 cylinders, 2 tori (the caps are planar B-splines here, as before)
+        faces = t.Shape.Faces
+        self.assertEqual(len(faces), 8)
+        self.assertEqual(sum(1 for f in faces if f.findPlane() is not None), 2)
+        self.assertEqual(sum(1 for f in faces if f.Surface.__class__.__name__ == "Cylinder"), 4)
+
+    def testHornThinMidplane(self):
+        t = self.thicken(self.bore(4.0), midplane=0.5)
+        self.assertOneSolid(t, self.expected(3.75, 4.25))
+        self.assertBox(t.Shape, 10.75, 40, 10.75, 19.25, 1.75, 20)
+
+    def testHornTowardTheAxis(self):
+        t = self.thicken(self.bore(4.0), t1=0.75)
+        self.assertOneSolid(t, 636.8867)  # Onshape TK2
+        self.assertBox(t.Shape, 11, 40, 11, 19, 2, 20)
+
+    def testHornIntoTheMaterial(self):
+        t = self.thicken(self.bore(4.0), t2=0.75)
+        self.assertOneSolid(t, 768.3182)  # Onshape TK3
+        self.assertBox(t.Shape, 10.25, 40, 10.25, 19.75, 1.25, 20)
+
+    def testHornFlipIsTheOtherSide(self):
+        t = self.thicken(self.bore(4.0), t1=0.75)
+        t.Flip = True
+        self.doc.recompute()
+        self.assertOneSolid(t, 768.3182)
+
+    def testHornAtSixtyDegrees(self):
+        t = self.thicken(self.bore(4.0, angle=60.0, leg=5.0), midplane=1.5)
+        self.assertOneSolid(t, self.expected(3.25, 4.75))
+
+    def testRingPastTheAxisIsNotFolded(self):
+        # major 4.5, 0.75 into the material: the outer ring (4.75) passes the axis. The whole-sheet offset
+        # passed as valid though it folds over itself near the axis (764.2319, the union is 764.2100).
+        t = self.thicken(self.bore(4.5), t2=0.75)
+        self.assertOneSolid(t, self.expected(4.0, 4.75))
+        self.assertBox(t.Shape, 10.25, 40, 10.25, 19.75, 1.25, 20)
+
+    def testRingTorusIsUnchanged(self):
+        t = self.thicken(self.bore(8.0), midplane=1.5)
+        self.assertOneSolid(t, 1340.8206)  # Onshape TK4; pi (4.75^2 - 3.25^2) (6 + 4 pi + 17)
+
+    def testSharpSheetWithABendAtItsAxisFails(self):
+        srf = self.bore(4.0)
+        a = self.doc.getObject("A")
+        top = [k for k, f in enumerate(a.Shape.Faces) if abs(f.BoundBox.ZMin - 20) < 1e-6][0]
+        srf.Base = [(a, srf.Base[0][1] + ("Face%d" % (top + 1),))]
+        t = self.thicken(srf, midplane=1.5)
+        self.assertIn("Invalid", t.State, "a sharp edge next to the bend must fail loudly")
+        self.assertIn("sharp edge", t.getStatusString())
+
+    def testUndoRedo(self):
+        self.doc.UndoMode = 1
+        t = self.thicken(self.bore(4.0), midplane=1.5)
+        self.doc.openTransaction("thinner")
+        t.Thickness = 0.5
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertOneSolid(t, self.expected(3.75, 4.25))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertOneSolid(t, 1405.2049)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertOneSolid(t, self.expected(3.75, 4.25))
+
+    def testSurvivesSaveAndReopen(self):
+        import os, tempfile
+
+        self.thicken(self.bore(4.0), midplane=1.5)
+        path = os.path.join(tempfile.mkdtemp(), "bend.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        t = self.doc.getObject("Thk")
+        self.assertAlmostEqual(t.Shape.Volume, 1405.2049, delta=2e-3)
+        t.touch()
+        self.doc.recompute()
+        self.assertOneSolid(t, 1405.2049)
