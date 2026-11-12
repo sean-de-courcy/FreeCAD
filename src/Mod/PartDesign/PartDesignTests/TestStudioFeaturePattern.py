@@ -638,6 +638,30 @@ class TestStudioFeaturePattern(unittest.TestCase):
         self.assertVolume("A", 10000)
         self.assertEqual(elementNames(self.part("A").Tip.Shape), before)
 
+    @unittest.expectedFailure
+    def testMergeInstanceBridgingTwoPiecesOfASplitMergesThem(self):
+        """The gate's seed 1 op 8 (T1b gate half, open): the seed Add x 15..35, y 0..4 merges B
+        into A; a through slot x 40..41 then splits A in two (pieces made); the pattern of the
+        seed +x 10, Reapply on: its instance x 25..45 bridges the slot, so the right piece merges
+        into the left one (the pattern's record says so) and one part is live, its pattern step
+        valid. Today the step in the left piece fails "Nothing comes before ...: it has no solid
+        to add to" (its base not computed yet when it runs) while the record consumes the right
+        piece: one part live, holding only the left piece."""
+        self.gapPlates()
+        seed = self.boss("A", (15, 0, 35, 4), "Seed", length=10, z=0, scope=("A", "B"))
+        self.doc.recompute()
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 1)
+        sk = studioSketch(self.doc, self.S, "SlotSk", rects=((40, -1, 41, 21),), z=10)
+        slot = makeOwner(self.doc, self.S, "Pocket", "Slot", sk, ("A",), Length=11)
+        self.doc.recompute()
+        self.assertEqual(len(self.makePieces(slot)), 2)
+        lp = linearOwner(self.doc, self.S, "LP", [seed], 10, 2, reapply=True)
+        self.doc.recompute()
+        live = PartDesign.studioLiveParts(self.list)
+        self.assertEqual(len(live), 1)
+        self.assertValid(lp, PartDesign.studioStepOf(lp, live[0]))
+        self.assertAlmostEqual(live[0].Shape.Volume, 8240, places=2)
+
     def reopen(self):
         self.dir = self.dir or tempfile.mkdtemp()
         path = os.path.join(self.dir, "pattern.FCStd")
