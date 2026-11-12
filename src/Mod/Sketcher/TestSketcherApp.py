@@ -62,6 +62,10 @@ from SketcherTests.TestSketchExtend import (  # FreeCAD-CH, Onshape's Extend, Tr
     TestSketchMirrorLinked,
 )
 from SketcherTests.TestSketchConflicts import TestSketchConflicts  # FreeCAD-CH, ops#640
+from SketcherTests.TestSketchPattern import (  # FreeCAD-CH, Onshape's sketch patterns
+    TestSketchCircularPattern,
+    TestSketchLinearPattern,
+)
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py
