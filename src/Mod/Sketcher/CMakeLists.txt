@@ -36,6 +36,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchTrimSplitAttacks.py
     SketcherTests/TestSketchPierce.py
     SketcherTests/TestSketchExtend.py
+    SketcherTests/TestSketchPattern.py
     SketcherTests/TestSketchDxf.py
 )
 
