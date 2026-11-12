@@ -952,6 +952,38 @@ class TestThickenPipe(unittest.TestCase):
                     self.doc = App.newDocument("ThickenPipe")
         self.assertTrue(min(axes) < 0 < max(axes), axes)  # both torus frames were met
 
+    def testObliqueLoneBendTouchingItsAxis(self):
+        # review r4 TK-R4-OBLIQUE: a lone bend whose ring touches its axis, turned 30 degrees about x and
+        # moved, came out one valid solid of 654.0505 for 461.4811 (OCC's revolve about the oblique axis).
+        # Each revolved piece must now hold its exact (Pappus) volume: right, or it stops.
+        V = App.Vector
+        pl = App.Placement(V(7, -3, 11), App.Rotation(V(1, 0, 0), 30))
+        o, ax = V(4.75, 0, 0), V(0, 1, 0)
+        at = lambda a: pl.multVec(o + App.Rotation(ax, a).multVec(V(-9.125, 0, 0)))  # the wall's middle
+        for angle in (270.0, 200.0):
+            for baked in (True, False):
+                with self.subTest(angle=angle, baked=baked):
+                    disc = Part.Face(Part.Wire(Part.makeCircle(4.0, V(0, 0, 0), V(0, 0, 1))))
+                    sol = disc.revolve(o, ax, angle)
+                    sheet = Part.Shell([f for f in sol.Faces if f.Surface.__class__.__name__ != "Plane"])
+                    a = self.doc.addObject("Part::Feature", "A")
+                    if baked:
+                        sheet.transformShape(pl.toMatrix(), True)
+                        a.Shape = sheet
+                    else:
+                        part = self.doc.addObject("App::Part", "Part")
+                        part.Placement = pl
+                        a.Shape = sheet
+                        part.addObject(a)
+                    t = self.thicken(a, t1=0.75)
+                    volume = math.radians(angle) * math.pi * 4.75 * (4.75 ** 2 - 16)
+                    self.assertRightOrLoud(t, volume)
+                    if "Invalid" not in t.State:
+                        self.assertTrue(t.Shape.isInside(at(0.5 * angle), 1e-6, True))
+                        self.assertFalse(t.Shape.isInside(at(0.5 * (angle + 360.0)), 1e-6, True))
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument("ThickenPipe")
+
     def testSelfCheckThatCannotRunRefuses(self):
         # review r3 F-OPEN: a BOPAlgo check that aborts or gives no report must not pass the fuse
         class Stub:

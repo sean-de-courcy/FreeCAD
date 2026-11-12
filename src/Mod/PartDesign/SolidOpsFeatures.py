@@ -226,7 +226,10 @@ def _bend_solids(face, info, t1, t2):
     solids, probes = [], []
     for region in regions:
         solid = region.revolve(info["foot"], info["axis"], angle)
-        if not solid.isValid() or solid.Volume <= TOL:
+        # each region lies on one side of the axis, so its sweep's volume is exact (Pappus): OCC's revolve
+        # of a region touching an oblique axis gave a valid wrong solid (654.0505 for 461.4811, review r4)
+        exact = math.radians(angle) * region.Area * _axis_distance(region.CenterOfMass, info["foot"], info["axis"])
+        if not solid.isValid() or solid.Volume <= TOL or abs(solid.Volume - exact) > 1e-6 * max(1.0, exact):
             raise SolidOpsError("Thicken failed: the bend could not be thickened")
         solids.append(solid)
         # points inside the piece: the region's inner points, turned through half the angle
