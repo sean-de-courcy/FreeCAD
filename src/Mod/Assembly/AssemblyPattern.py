@@ -7,7 +7,10 @@
 # instance list and the BOM count it as Onshape does. Copy i of a seed is placed at
 #   Linear:   Translate(i * Distance * d) * seed
 #   Circular: Rotate(axis, i * step) * seed
-# with d and the axis read in the assembly's frame from the Direction reference. The solver
+# with d and the axis read in the assembly's frame from the Direction reference. A linear pattern
+# with SecondDirection on (Onshape's enableDirection2) owns a copy for each grid cell (i, j) but the
+# seed's (0, 0), j in 0..Count2-1, at Translate(i * Distance * d + j * Distance2 * d2) * seed
+# (PatternIndex i, PatternIndex2 j; a copy with no PatternIndex2 is on the seed's row). The solver
 # (AssemblyObject.cpp) gives a seed and its copies one solver body, and calls placeInstances()
 # before and after each solve, so the copies follow their seed and mates to copies hold.
 
@@ -109,11 +112,15 @@ def patternLabel(assembly, kind):
     return f"{base} {n}"
 
 
-def referenceAxis(fp):
-    """(point, unit direction) of the pattern's Direction reference in the assembly's frame.
-    Raises RuntimeError with the reason when the reference is missing or its element is gone."""
-    ref = fp.Direction
-    what = "axis" if fp.PatternType == "Circular" else "direction"
+def referenceAxis(fp, second=False):
+    """(point, unit direction) of the pattern's Direction reference (Direction2 with second) in the
+    assembly's frame. Raises RuntimeError with the reason when the reference is missing or its
+    element is gone."""
+    ref = getattr(fp, "Direction2", None) if second else fp.Direction
+    if second:
+        what = "second direction"
+    else:
+        what = "axis" if fp.PatternType == "Circular" else "direction"
     if not ref or ref[0] is None:
         raise RuntimeError(translate("Assembly", "{0}: pick a {1}").format(fp.Label, what))
     obj, subs = ref[0], ref[1]
@@ -212,6 +219,33 @@ class InstancePattern:
         if fp.Angle.Value == 0:
             fp.Angle = 360.0
             fp.EqualSpacing = True
+        self.addSecondDirection(fp)
+
+    def addSecondDirection(self, fp):
+        """Onshape's second direction of a linear pattern (enableDirection2): its own direction,
+        distance, count (the seed's row included) and flip. Off, or at count 1, the pattern is the
+        one-direction pattern it was."""
+        def add(kind, name, doc):
+            if not hasattr(fp, name):
+                fp.addProperty(kind, name, "Second direction", doc)
+                return True
+            return False
+
+        add("App::PropertyBool", "SecondDirection", QT_TRANSLATE_NOOP("App::Property", "Pattern in a second direction too (Linear)"))
+        add(
+            "App::PropertyXLinkSub",
+            "Direction2",
+            QT_TRANSLATE_NOOP("App::Property", "The second direction: a straight or circular edge, a plane, a cylinder (Linear)"),
+        )
+        if add("App::PropertyLength", "Distance2", QT_TRANSLATE_NOOP("App::Property", "The distance between neighbouring instances in the second direction (Linear)")):
+            fp.Distance2 = 25.0
+        if add("App::PropertyIntegerConstraint", "Count2", QT_TRANSLATE_NOOP("App::Property", "The number of instances in the second direction, the seed's row included (Linear)")):
+            fp.Count2 = (1, 1, 100000, 1)
+        add("App::PropertyBool", "Reversed2", QT_TRANSLATE_NOOP("App::Property", "Pattern the other way in the second direction (Linear)"))
+
+    def onDocumentRestored(self, fp):
+        # Patterns saved before the second direction get its properties (off)
+        self.addSecondDirection(fp)
 
     def dumps(self):
         return None
@@ -221,15 +255,29 @@ class InstancePattern:
 
     # --- what the pattern makes -------------------------------------------------------------------
 
+    def secondCount(self, fp):
+        """The count in the second direction, 1 when it is off (or the pattern is circular)"""
+        if fp.PatternType != "Linear" or not getattr(fp, "SecondDirection", False):
+            return 1
+        return max(int(fp.Count2), 1)
+
+    def cells(self, fp, count=None):
+        """The grid cells (i, j) of the copies, the seed's (0, 0) left out: direction 1's index i
+        runs fastest, so a one-direction pattern's cells are (1, 0)..(Count - 1, 0)"""
+        count = int(fp.Count) if count is None else count
+        rows = self.secondCount(fp) if count > 0 else 0
+        return [(i, j) for j in range(rows) for i in range(count) if (i, j) != (0, 0)]
+
     def transforms(self, fp):
-        """The placements that take a seed to copies 1..Count-1"""
+        """[((i, j), placement)]: the placements that take a seed to each copy's cell"""
         count = int(fp.Count)
-        if count < 2:
+        rows = self.secondCount(fp)
+        if count < 2 and rows < 2:
             return []
-        point, direction = referenceAxis(fp)
         sign = -1.0 if fp.Reversed else 1.0
         result = []
         if fp.PatternType == "Circular":
+            point, direction = referenceAxis(fp)
             angle = fp.Angle.Value
             if fp.EqualSpacing:
                 full = abs(abs(angle) - 360.0) < 1e-9
@@ -238,11 +286,17 @@ class InstancePattern:
                 step = angle
             for i in range(1, count):
                 rotation = App.Rotation(direction, sign * step * i)
-                result.append(App.Placement(App.Vector(), rotation, point))
-        else:
-            spacing = direction * (sign * fp.Distance.Value)
-            for i in range(1, count):
-                result.append(App.Placement(spacing * i, App.Rotation()))
+                result.append(((i, 0), App.Placement(App.Vector(), rotation, point)))
+            return result
+        spacing = App.Vector()
+        if count >= 2:
+            spacing = referenceAxis(fp)[1] * (sign * fp.Distance.Value)
+        spacing2 = App.Vector()
+        if rows >= 2:
+            sign2 = -1.0 if fp.Reversed2 else 1.0
+            spacing2 = referenceAxis(fp, second=True)[1] * (sign2 * fp.Distance2.Value)
+        for i, j in self.cells(fp):
+            result.append(((i, j), App.Placement(spacing * i + spacing2 * j, App.Rotation())))
         return result
 
     def seeds(self, fp):
@@ -255,14 +309,14 @@ class InstancePattern:
         return [s for s in fp.Seeds if s is not None and isPatternCopy(s) and s.PatternOwner != fp]
 
     def copiesBySeed(self, fp):
-        """{seed name: {index: copy}} of the copies the pattern holds that its count wants"""
+        """{seed name: {(i, j): copy}} of the copies the pattern holds that its counts want"""
         result = {}
-        count = int(fp.Count)
+        wanted = set(self.cells(fp))
         for copy in fp.Instances:
-            if copy is None or not hasattr(copy, "PatternIndex") or not 0 < copy.PatternIndex < count:
+            if copy is None or not hasattr(copy, "PatternIndex") or cellOf(copy) not in wanted:
                 continue
             seed = copy.PatternSeed
-            result.setdefault(seed.Name if seed else "", {}).setdefault(copy.PatternIndex, copy)
+            result.setdefault(seed.Name if seed else "", {}).setdefault(cellOf(copy), copy)
         return result
 
     def clusters(self, fp):
@@ -274,7 +328,7 @@ class InstancePattern:
         for seed in self.seeds(fp):
             copies = held.get(seed.Name, {})
             if copies:
-                clusters.append([seed] + [copies[i] for i in sorted(copies)])
+                clusters.append([seed] + [copies[c] for c in sorted(copies, key=lambda c: (c[1], c[0]))])
         return clusters
 
     def placeInstances(self, fp):
@@ -289,8 +343,8 @@ class InstancePattern:
         for seed in self.seeds(fp):
             copies = held.get(seed.Name, {})
             reach = reachOf(seed)
-            for i, transform in enumerate(transforms, start=1):
-                copy = copies.get(i)
+            for cell, transform in transforms:
+                copy = copies.get(cell)
                 if copy is None:
                     continue
                 target = transform.multiply(seed.Placement)
@@ -302,7 +356,8 @@ class InstancePattern:
                     copy.purgeTouched()
         return moved
 
-    def makeCopy(self, fp, assembly, seed, index):
+    def makeCopy(self, fp, assembly, seed, cell):
+        index, index2 = cell
         source = sourceOf(seed)
         kind = "Assembly::AssemblyLink" if seed.isDerivedFrom("Assembly::AssemblyLink") else "App::Link"
         copy = assembly.newObject(kind, source.Name)
@@ -311,10 +366,17 @@ class InstancePattern:
         copy.addProperty("App::PropertyLinkHidden", "PatternSeed", "Pattern", "The seed this copy repeats")
         copy.addProperty("App::PropertyInteger", "PatternIndex", "Pattern", "The copy's number in its pattern")
         copy.addProperty("App::PropertyLinkHidden", "PatternOwner", "Pattern", "The pattern that made this copy")
+        names = ["PatternSeed", "PatternIndex", "PatternOwner"]
+        if index2:
+            # Only copies off the seed's row carry the second index (a one-direction pattern's copies
+            # are as they were)
+            copy.addProperty("App::PropertyInteger", "PatternIndex2", "Pattern", "The copy's number in its pattern's second direction")
+            copy.PatternIndex2 = index2
+            names.append("PatternIndex2")
         copy.PatternSeed = seed
         copy.PatternIndex = index
         copy.PatternOwner = fp
-        for name in ("PatternSeed", "PatternIndex", "PatternOwner"):
+        for name in names:
             copy.setPropertyStatus(name, ["ReadOnly"])
         copy.Placement = seed.Placement
         return copy
@@ -334,9 +396,9 @@ class InstancePattern:
         if assembly is None:
             raise RuntimeError(translate("Assembly", "{0} is in no assembly").format(fp.Label))
         doc = fp.Document
-        count = 0 if fp.Suppressed else int(fp.Count)
+        cells = self.cells(fp, 0 if fp.Suppressed else int(fp.Count))
         seeds = self.seeds(fp)
-        wanted = {(s.Name, i) for s in seeds for i in range(1, count)}
+        wanted = {(s.Name, c) for s in seeds for c in cells}
         # The copies are the ones listed and any other link of the assembly that names this pattern
         # its owner: an undo outside the recompute's transaction can bring one back unlisted
         listed = [c for c in fp.Instances if c is not None and hasattr(c, "PatternIndex")]
@@ -344,7 +406,7 @@ class InstancePattern:
             o for o in assembly.Group if getattr(o, "PatternOwner", None) == fp and o not in listed
         ]
         def keyOf(copy):
-            return (copy.PatternSeed.Name if copy.PatternSeed else "", copy.PatternIndex)
+            return (copy.PatternSeed.Name if copy.PatternSeed else "", cellOf(copy))
 
         listedKeys = {keyOf(c) for c in listed}
         keep = {}
@@ -355,18 +417,17 @@ class InstancePattern:
                 # A duplicate of a listed copy (pasted, or copied with its properties): a plain
                 # instance of its own, whatever the pattern now asks for (an undo brings back only
                 # copies no listed copy stands for)
-                for name in ("PatternOwner", "PatternSeed", "PatternIndex"):
-                    copy.removeProperty(name)
+                stripPattern(copy)
             elif key in wanted and key not in keep:
                 keep[key] = copy
             else:
                 extra.append(copy)
         # A copy a mate uses isn't removed: the pattern says so and changes nothing (a mate would
         # otherwise lose its part without an error)
-        direction = fp.Direction[0] if fp.Direction else None
+        directions = [ref[0] for ref in (fp.Direction, getattr(fp, "Direction2", None)) if ref]
         for copy in extra:
             users = usersOf(assembly, copy, fp)
-            if copy == direction:
+            if copy in directions:
                 users.append(fp)
             if users:
                 raise RuntimeError(
@@ -378,10 +439,10 @@ class InstancePattern:
             doc.removeObject(copy.Name)
         ordered = []
         for seed in seeds:
-            for i in range(1, count):
-                copy = keep.get((seed.Name, i))
+            for cell in cells:
+                copy = keep.get((seed.Name, cell))
                 if copy is None:
-                    copy = self.makeCopy(fp, assembly, seed, i)
+                    copy = self.makeCopy(fp, assembly, seed, cell)
                 else:
                     self.matchSeed(copy, seed)
                 ordered.append(copy)
@@ -444,8 +505,7 @@ class InstancePattern:
                 continue
             if assembly is not None and usersOf(assembly, copy, fp):
                 # A copy a mate uses stays, as a plain instance where it is: its mates keep their part
-                for name in ("PatternOwner", "PatternSeed", "PatternIndex"):
-                    copy.removeProperty(name)
+                stripPattern(copy)
                 continue
             doc.removeObject(copy.Name)
 
@@ -458,7 +518,7 @@ def usersOf(assembly, obj, pattern=None):
     for other in UtilsAssembly.getJointGroup(assembly).Group:
         if other == pattern:
             continue
-        refs = [getattr(other, name, None) for name in ("Reference1", "Reference2", "Direction")]
+        refs = [getattr(other, name, None) for name in ("Reference1", "Reference2", "Direction", "Direction2")]
         if (
             any(ref and ref[0] == obj for ref in refs)
             or getattr(other, "ObjectToGround", None) == obj
@@ -471,6 +531,18 @@ def usersOf(assembly, obj, pattern=None):
 
 def isPatternCopy(obj):
     return obj is not None and hasattr(obj, "PatternOwner") and obj.PatternOwner is not None
+
+
+def cellOf(copy):
+    """A copy's grid cell (i, j); copies of a one-direction pattern have no second index (j 0)"""
+    return (copy.PatternIndex, getattr(copy, "PatternIndex2", 0))
+
+
+def stripPattern(copy):
+    """A copy becomes a plain instance: its pattern properties go"""
+    for name in ("PatternOwner", "PatternSeed", "PatternIndex", "PatternIndex2"):
+        if hasattr(copy, name):
+            copy.removeProperty(name)
 
 
 def makePattern(assembly, kind="Linear", seeds=(), direction=None):
@@ -560,6 +632,14 @@ def newWidget(loader, className):
     raise RuntimeError("the pattern panel could not make a " + className)
 
 
+def referenceText(ref):
+    """"Part 1.Edge3" for a picked reference, a hint when there is none"""
+    if ref and ref[0] is not None:
+        sub = ref[1][0] if ref[1] else ""
+        return f"{ref[0].Label}.{sub.split('.')[-1]}" if sub else ref[0].Label
+    return translate("Assembly", "(pick an edge or a face)")
+
+
 def showPanel(panel):
     """Shows the pattern panel; it closes (Cancel) when its transaction or its document goes"""
     dialog = Gui.Control.showDialog(panel)
@@ -636,6 +716,9 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         self.reversed.setChecked(pattern.Reversed)
         self.reversed.toggled.connect(self.onReversed)
         layout.addRow(self.reversed)
+        self.second = None
+        if not circular:
+            self.addSecondDirection(loader, layout)
         self.message = QtWidgets.QLabel()
         self.message.setWordWrap(True)
         self.message.setStyleSheet("color: #c00000")
@@ -646,6 +729,50 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         Gui.Selection.clearSelection()
         # Picks with their whole path from the root, as the joint dialog takes them
         Gui.Selection.addObserver(self, Gui.Selection.ResolveMode.NoResolve)
+
+    def addSecondDirection(self, loader, layout):
+        """Onshape's "Second direction" box: ticked, its own direction, distance, count and flip show.
+        Ticking copies nothing from the first direction (an empty direction, count 1)."""
+        pattern = self.pattern
+        if not hasattr(pattern, "SecondDirection"):
+            pattern.Proxy.addSecondDirection(pattern)
+        self.second = QtWidgets.QCheckBox(translate("Assembly", "Second direction"))
+        self.second.setObjectName("patternSecondDirection")
+        self.second.setChecked(pattern.SecondDirection)
+        layout.addRow(self.second)
+        self.secondBox = QtWidgets.QWidget()
+        self.secondBox.setObjectName("patternSecondBox")
+        box = QtWidgets.QFormLayout(self.secondBox)
+        box.setContentsMargins(0, 0, 0, 0)
+        self.direction2Button = QtWidgets.QPushButton(translate("Assembly", "Direction"))
+        self.direction2Button.setObjectName("patternDirection2")
+        self.direction2Button.setCheckable(True)
+        self.direction2Label = QtWidgets.QLabel()
+        box.addRow(self.direction2Button, self.direction2Label)
+        self.direction2Button.clicked.connect(lambda: self.setField("direction2"))
+        self.amount2 = newWidget(loader, "Gui::QuantitySpinBox")
+        self.amount2.setObjectName("patternAmount2")
+        self.amount2.setProperty("unit", "mm")
+        self.bind(self.amount2, "Distance2")
+        self.amount2.setProperty("rawValue", pattern.Distance2.Value)
+        self.amount2.valueChanged.connect(self.onAmount2)
+        box.addRow(translate("Assembly", "Distance"), self.amount2)
+        self.count2 = newWidget(loader, "Gui::IntSpinBox")
+        self.count2.setObjectName("patternCount2")
+        self.count2.setMinimum(1)
+        self.count2.setMaximum(100000)
+        self.count2.setValue(int(pattern.Count2))
+        self.bind(self.count2, "Count2")
+        self.count2.valueChanged.connect(self.onCount2)
+        box.addRow(translate("Assembly", "Instance count"), self.count2)
+        self.reversed2 = QtWidgets.QCheckBox(translate("Assembly", "Flip"))
+        self.reversed2.setObjectName("patternReversed2")
+        self.reversed2.setChecked(pattern.Reversed2)
+        self.reversed2.toggled.connect(self.onReversed2)
+        box.addRow(self.reversed2)
+        layout.addRow(self.secondBox)
+        self.secondBox.setVisible(pattern.SecondDirection)
+        self.second.toggled.connect(self.onSecond)
 
     def bind(self, widget, name):
         binding = Gui.ExpressionBinding(widget)
@@ -658,18 +785,17 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         self.field = field
         self.seedsButton.setChecked(field == "seeds")
         self.directionButton.setChecked(field == "direction")
+        if self.second is not None:
+            self.direction2Button.setChecked(field == "direction2")
 
     def refresh(self):
         self.seedsList.clear()
         for seed in self.pattern.Seeds:
             if seed is not None:
                 self.seedsList.addItem(seed.Label)
-        ref = self.pattern.Direction
-        if ref and ref[0] is not None:
-            sub = ref[1][0] if ref[1] else ""
-            self.directionLabel.setText(f"{ref[0].Label}.{sub.split('.')[-1]}" if sub else ref[0].Label)
-        else:
-            self.directionLabel.setText(translate("Assembly", "(pick an edge or a face)"))
+        self.directionLabel.setText(referenceText(self.pattern.Direction))
+        if self.second is not None:
+            self.direction2Label.setText(referenceText(self.pattern.Direction2))
 
     def update(self):
         self.pattern.touch()
@@ -714,6 +840,30 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         self.pattern.EqualSpacing = checked
         self.update()
 
+    def onSecond(self, checked):
+        self.pattern.SecondDirection = checked
+        self.secondBox.setVisible(checked)
+        if checked and not self.pattern.Direction2:
+            self.setField("direction2")
+        elif not checked and self.field == "direction2":
+            self.setField("")
+        self.update()
+
+    def onAmount2(self, *args):
+        value = self.amount2.property("rawValue")
+        if not hasExpression(self.pattern, "Distance2") and abs(self.pattern.Distance2.Value - value) > 1e-12:
+            self.pattern.Distance2 = value
+        self.update()
+
+    def onCount2(self, value):
+        if not hasExpression(self.pattern, "Count2") and int(self.pattern.Count2) != int(value):
+            self.pattern.Count2 = int(value)
+        self.update()
+
+    def onReversed2(self, checked):
+        self.pattern.Reversed2 = checked
+        self.update()
+
     # picks
     def addSelection(self, doc_name, obj_name, sub_name, mousePos=None):
         # An error in a selection observer is lost: report it
@@ -740,10 +890,13 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         comp, sub = UtilsAssembly.getComponentReference(self.assembly, root, sub_name)
         if comp is None:
             return
-        if self.field == "direction":
+        if self.field in ("direction", "direction2"):
             if not sub:
                 return
-            self.pattern.Direction = (comp, [sub])
+            if self.field == "direction":
+                self.pattern.Direction = (comp, [sub])
+            else:
+                self.pattern.Direction2 = (comp, [sub])
             self.setField("")
         elif self.field == "seeds":
             seeds = [s for s in self.pattern.Seeds if s is not None]

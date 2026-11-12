@@ -24,6 +24,7 @@ import UtilsAssembly
 from AssemblyTests.TestCore import AssemblyTestBase
 
 X = App.Vector(1, 0, 0)
+Y = App.Vector(0, 1, 0)
 
 
 class TestAssemblyPatterns(AssemblyTestBase):
@@ -108,6 +109,50 @@ class TestAssemblyPatterns(AssemblyTestBase):
 
     def copiesInAssembly(self):
         return [o for o in self.assembly.Group if AssemblyPattern.isPatternCopy(o)]
+
+    # second direction (ops#640 C7): the plate's X edge and its Y edge, a grid of cells (i, j)
+
+    def grid(self, count, distance, count2, distance2, seeds=None):
+        """A linear pattern along the plate's X edge with a second direction along its Y edge, all
+        set before the first recompute (as the dialog's OK makes it)"""
+        edge = self.edgeAlong(self.plateSrc.Shape, X)
+        edge2 = self.edgeAlong(self.plateSrc.Shape, Y)
+        pattern = AssemblyPattern.makePattern(self.assembly, "Linear", seeds or [self.seed], (self.plate, [edge]))
+        pattern.Count, pattern.Distance = count, distance
+        pattern.SecondDirection = True
+        pattern.Direction2 = (self.plate, [edge2])
+        pattern.Count2, pattern.Distance2 = count2, distance2
+        self.doc.recompute()
+        return pattern
+
+    def localXY(self):
+        """The plate's X and Y edge directions in its own frame (first vertex to last)"""
+        self.edgeAlong(self.plateSrc.Shape, Y)
+        along = self.alongX
+        self.edgeAlong(self.plateSrc.Shape, X)
+        return self.alongX, along
+
+    def plateY(self):
+        """The plate's Y edge direction in the assembly"""
+        self.edgeAlong(self.plateSrc.Shape, Y)
+        along = self.alongX
+        self.edgeAlong(self.plateSrc.Shape, X)  # self.alongX stays the X edge's for the other helpers
+        return self.plate.Placement.Rotation.multVec(along)
+
+    def assertGrid(self, pattern, seed, count, distance, count2, distance2, d1, d2):
+        """count x count2 instances, the seed's (0, 0) included: copy (i, j) at
+        Translate(i * distance * d1 + j * distance2 * d2) * seed, each cell once"""
+        copies = [c for c in pattern.Instances if c.PatternSeed == seed]
+        self.assertEqual(len(copies), count * count2 - 1, "copies of " + seed.Label)
+        cells = sorted(AssemblyPattern.cellOf(c) for c in copies)
+        expectedCells = sorted((i, j) for i in range(count) for j in range(count2) if (i, j) != (0, 0))
+        self.assertEqual(cells, expectedCells)
+        for copy in copies:
+            i, j = AssemblyPattern.cellOf(copy)
+            offset = d1 * (distance * i) + d2 * (distance2 * j)
+            expected = App.Placement(offset, App.Rotation()).multiply(seed.Placement)
+            self.assertPlacement(copy, expected, f"copy ({i}, {j})")
+        return copies
 
     # --- tests ------------------------------------------------------------------------------------
 
@@ -533,6 +578,207 @@ class TestAssemblyPatterns(AssemblyTestBase):
             self.doc.removeObject(pattern.Name)
             self.doc.removeObject(twin.Name)
             self.doc.recompute()
+
+    # --- second direction (ops#640 C7; Onshape's enableDirection2, all 21 of the team's linear
+    # assembly patterns use it) -------------------------------------------------------------------
+
+    def test_second_direction_grid(self):
+        """3 x 2 at 20 mm along the plate's X edge and 15 mm along its Y edge: 5 copies on the grid,
+        the seed counted once, named on as Insert names instances, solved with the seed's joint;
+        the plate turned, the grid turns with it"""
+        pattern = self.grid(3, 20.0, 2, 15.0)
+        self.assertNotIn("Invalid", pattern.State)
+        copies = self.assertGrid(pattern, self.seed, 3, 20.0, 2, 15.0, self.plateX(), self.plateY())
+        self.assertEqual(sorted(c.Label for c in copies), sorted(f"Block <{n}>" for n in range(2, 7)))
+        self.assertEqual(sorted(c.Name for c in self.copiesInAssembly()), sorted(c.Name for c in copies))
+        # The seed's own row first, as a one-direction pattern's, then the next row
+        self.assertEqual([AssemblyPattern.cellOf(c) for c in pattern.Instances], [(1, 0), (2, 0), (0, 1), (1, 1), (2, 1)])
+        self.assertEqual(self.assembly.solve(), 0)
+        self.assertGrid(pattern, self.seed, 3, 20.0, 2, 15.0, self.plateX(), self.plateY())
+        self.plate.Placement = App.Placement(App.Vector(10, -40, 7), App.Rotation(30, 0, 0))
+        self.assertEqual(self.assembly.solve(), 0)
+        self.assertGrid(pattern, self.seed, 3, 20.0, 2, 15.0, self.plateX(), self.plateY())
+        # One solver body per seed: the seed and its 5 copies
+        clusters = pattern.Proxy.clusters(pattern)
+        self.assertEqual([len(c) for c in clusters], [6])
+
+    def test_second_direction_counts_distances_and_flips(self):
+        """A count or distance changed in either direction moves, adds or removes copies on the
+        grid; the copies that stay keep their cells and names; Flip reverses each direction alone"""
+        pattern = self.grid(3, 20.0, 2, 15.0)
+        names = {AssemblyPattern.cellOf(c): c.Name for c in pattern.Instances}
+        pattern.Count2 = 3
+        self.doc.recompute()
+        copies = self.assertGrid(pattern, self.seed, 3, 20.0, 3, 15.0, self.plateX(), self.plateY())
+        for copy in copies:
+            cell = AssemblyPattern.cellOf(copy)
+            if cell in names:
+                self.assertEqual(copy.Name, names[cell], f"cell {cell} kept its copy")
+        pattern.Distance2 = 40.0
+        self.doc.recompute()
+        self.assertGrid(pattern, self.seed, 3, 20.0, 3, 40.0, self.plateX(), self.plateY())
+        gone = [c.Name for c in pattern.Instances if AssemblyPattern.cellOf(c)[0] == 2]
+        pattern.Count = 2
+        pattern.Distance = 30.0
+        self.doc.recompute()
+        self.assertGrid(pattern, self.seed, 2, 30.0, 3, 40.0, self.plateX(), self.plateY())
+        for name in gone:
+            self.assertIsNone(self.doc.getObject(name), name + " stays")
+        pattern.Reversed2 = True
+        self.doc.recompute()
+        self.assertGrid(pattern, self.seed, 2, 30.0, 3, 40.0, self.plateX(), -self.plateY())
+        pattern.Reversed, pattern.Reversed2 = True, False
+        self.doc.recompute()
+        self.assertGrid(pattern, self.seed, 2, 30.0, 3, 40.0, -self.plateX(), self.plateY())
+        self.assertEqual(len(self.copiesInAssembly()), 5)
+
+    def test_second_direction_off_is_one_direction(self):
+        """Unticked (or at count 1) the second direction changes nothing: the seed's row stays, the
+        other rows go; ticked again, they come back"""
+        pattern = self.grid(4, 20.0, 3, 15.0)
+        row = sorted(c.Name for c in pattern.Instances if AssemblyPattern.cellOf(c)[1] == 0)
+        pattern.SecondDirection = False
+        self.doc.recompute()
+        self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
+        self.assertEqual(sorted(c.Name for c in pattern.Instances), row)
+        self.assertEqual(len(self.copiesInAssembly()), 3)
+        pattern.SecondDirection = True
+        self.doc.recompute()
+        self.assertGrid(pattern, self.seed, 4, 20.0, 3, 15.0, self.plateX(), self.plateY())
+        pattern.Count2 = 1
+        self.doc.recompute()
+        self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
+        self.assertEqual(sorted(c.Name for c in pattern.Instances), row)
+
+    def test_one_direction_pattern_unchanged(self):
+        """A one-direction pattern is as before: its second direction off at count 1, its copies
+        with no second index; a second count set while the box is off changes nothing"""
+        pattern = self.linear(4, 20.0)
+        self.assertFalse(pattern.SecondDirection)
+        self.assertEqual((int(pattern.Count2), pattern.Distance2.Value), (1, 25.0))
+        for copy in pattern.Instances:
+            self.assertFalse(hasattr(copy, "PatternIndex2"), copy.Label)
+        names = [c.Name for c in pattern.Instances]
+        pattern.Count2 = 3
+        pattern.Direction2 = (self.plate, [self.edgeAlong(self.plateSrc.Shape, Y)])
+        self.doc.recompute()
+        self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
+        self.assertEqual([c.Name for c in pattern.Instances], names)
+
+    def test_second_direction_alone(self):
+        """Count 1 in the first direction, 3 in the second: copies along the second direction only
+        (the first direction needs no reference then)"""
+        pattern = self.grid(1, 20.0, 3, 15.0)
+        self.assertGrid(pattern, self.seed, 1, 20.0, 3, 15.0, self.plateX(), self.plateY())
+        pattern.Direction = None
+        self.doc.recompute()
+        self.assertNotIn("Invalid", pattern.State)
+        self.assertGrid(pattern, self.seed, 1, 20.0, 3, 15.0, self.plateX(), self.plateY())
+
+    def test_second_direction_needs_its_reference(self):
+        """Ticked with no second direction: fine at count 1 (the first direction's copies only); at
+        count 2 the pattern says to pick one and its copies stay (Onshape: "Select a pattern
+        direction.", the field red)"""
+        pattern = self.linear(3, 20.0)
+        pattern.SecondDirection = True
+        self.doc.recompute()
+        self.assertNotIn("Invalid", pattern.State)
+        self.assertLinear(pattern, self.seed, 3, 20.0, self.plateX())
+        names = [c.Name for c in pattern.Instances]
+        pattern.Count2 = 2
+        self.doc.recompute()
+        self.assertIn("Invalid", pattern.State)
+        with self.assertRaisesRegex(RuntimeError, "second direction"):
+            pattern.Proxy.transforms(pattern)
+        self.assertEqual([c.Name for c in pattern.Instances], names)
+        pattern.Direction2 = (self.plate, [self.edgeAlong(self.plateSrc.Shape, Y)])
+        self.doc.recompute()
+        self.assertNotIn("Invalid", pattern.State)
+        self.assertGrid(pattern, self.seed, 3, 20.0, 2, 25.0, self.plateX(), self.plateY())
+
+    def test_second_direction_several_seeds(self):
+        """Two seeds on a 2 x 2 grid: 3 copies each, one solver body each"""
+        second = self.instance(self.block)
+        self.fixedJoint(second, self.plate, App.Vector(150, 30, 0), name="Fixed2")
+        self.doc.recompute()
+        pattern = self.grid(2, 20.0, 2, 50.0, seeds=[self.seed, second])
+        for seed in (self.seed, second):
+            self.assertGrid(pattern, seed, 2, 20.0, 2, 50.0, self.plateX(), self.plateY())
+        self.assertEqual([len(c) for c in pattern.Proxy.clusters(pattern)], [4, 4])
+
+    def test_second_direction_mate_to_a_copy(self):
+        """A peg fastened to the copy at (1, 1) follows it when the second distance changes; a
+        second count that would remove it is refused"""
+        pattern = self.grid(2, 20.0, 2, 15.0)
+        corner = [c for c in pattern.Instances if AssemblyPattern.cellOf(c) == (1, 1)][0]
+        peg = self.instance(self.block, App.Placement(App.Vector(-50, -50, 40), App.Rotation(10, 20, 30)))
+        self.fixedJoint(peg, corner, name="PegOnCorner")
+        self.doc.recompute()
+        self.assertPlacement(peg, corner.Placement, "the peg on (1, 1)")
+        pattern.Distance2 = 45.0
+        self.doc.recompute()
+        self.assertGrid(pattern, self.seed, 2, 20.0, 2, 45.0, self.plateX(), self.plateY())
+        self.assertPlacement(peg, corner.Placement, "the peg follows (1, 1)")
+        pattern.Count2 = 1
+        self.doc.recompute()
+        self.assertIn("Invalid", pattern.State)
+        self.assertIsNotNone(self.doc.getObject(corner.Name), "the mated copy stays")
+
+    def test_second_direction_save_and_reopen(self):
+        """The grid's copies, their cells and placements survive save and reopen, and its counts
+        still act after it"""
+        pattern = self.grid(3, 20.0, 2, 15.0)
+        expected = {c.Name: (AssemblyPattern.cellOf(c), c.Placement) for c in pattern.Instances}
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "grid.FCStd")
+            local = self.localXY()
+            self.doc.saveAs(path)
+            names = pattern.Name, self.seed.Name, self.plate.Name
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            pattern, seed, plate = (self.doc.getObject(n) for n in names)
+            self.assertTrue(pattern.SecondDirection)
+            self.assertEqual({c.Name for c in pattern.Instances}, set(expected))
+            for copy in pattern.Instances:
+                cell, plc = expected[copy.Name]
+                self.assertEqual(AssemblyPattern.cellOf(copy), cell)
+                self.assertPlacement(copy, plc, "reopened")
+            pattern.Count2 = 3
+            self.doc.recompute()
+            d1, d2 = (plate.Placement.Rotation.multVec(v) for v in local)
+            self.assertGrid(pattern, seed, 3, 20.0, 3, 15.0, d1, d2)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_pattern_saved_without_second_direction(self):
+        """A pattern saved before the second direction (its properties removed) reopens with them,
+        off, and its copies where they were; ticked, it makes the grid"""
+        pattern = self.linear(3, 20.0)
+        for name in ("SecondDirection", "Direction2", "Distance2", "Count2", "Reversed2"):
+            pattern.removeProperty(name)
+        self.assertFalse(hasattr(pattern, "SecondDirection"))
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "old.FCStd")
+            local = self.localXY()
+            edge2 = self.edgeAlong(self.plateSrc.Shape, Y)
+            self.doc.saveAs(path)
+            names = pattern.Name, self.seed.Name, self.plate.Name
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            pattern, seed, plate = (self.doc.getObject(n) for n in names)
+            self.assertFalse(pattern.SecondDirection)
+            self.assertEqual(int(pattern.Count2), 1)
+            d1, d2 = (plate.Placement.Rotation.multVec(v) for v in local)
+            self.assertLinear(pattern, seed, 3, 20.0, d1)
+            pattern.SecondDirection = True
+            pattern.Direction2 = (plate, [edge2])
+            pattern.Count2 = 2
+            self.doc.recompute()
+            self.assertGrid(pattern, seed, 3, 20.0, 2, 25.0, d1, d2)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def test_time_four_patterns_of_thirty(self):
         """4 seeds fastened to the plate, each patterned 30 times (120 copies, 124 instances): the
