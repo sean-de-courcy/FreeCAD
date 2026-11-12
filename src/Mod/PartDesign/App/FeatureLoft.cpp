@@ -60,6 +60,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <Precision.hxx>
 
@@ -808,6 +809,89 @@ std::vector<double> partnerFractions(const std::vector<double>& fewer, const std
     ));
 }
 
+/// Whether the closed polygon blended index by index from `pa` (t = 0) to `pb` (t = 1), seen along
+/// `normal`, crosses itself for some t in (0, 1): crossed connections make two side edges or faces
+/// meet (oracle 14 LC4). Each orientation test of two blended segments is quadratic in t, so its
+/// roots cut (0, 1) into intervals of constant sign and one test per interval is exact.
+bool blendCrossesItself(const std::vector<gp_Pnt>& pa, const std::vector<gp_Pnt>& pb, const gp_Vec& normal)
+{
+    const size_t n = std::min(pa.size(), pb.size());
+    if (n < 4) {
+        return false;
+    }
+    const gp_Ax3 frame(gp::Origin(), gp_Dir(normal));
+    const gp_XYZ ux = frame.XDirection().XYZ();
+    const gp_XYZ uy = frame.YDirection().XYZ();
+    std::vector<gp_XY> a(n), d(n);
+    double size = 0;
+    for (size_t i = 0; i < n; ++i) {
+        a[i] = gp_XY(pa[i].XYZ().Dot(ux), pa[i].XYZ().Dot(uy));
+        const gp_XY b(pb[i].XYZ().Dot(ux), pb[i].XYZ().Dot(uy));
+        d[i] = b - a[i];
+        size = std::max({size, std::abs(a[i].X() - a[0].X()), std::abs(a[i].Y() - a[0].Y()),
+                         std::abs(b.X() - a[0].X()), std::abs(b.Y() - a[0].Y())});
+    }
+    const double tol = 1e-9 * size * size;
+    // orient(p, q, r)(t) = (q - p) x (r - p), as c0 + c1 t + c2 t^2
+    auto orient = [&](size_t p, size_t q, size_t r) {
+        const gp_XY u0 = a[q] - a[p], u1 = d[q] - d[p];
+        const gp_XY w0 = a[r] - a[p], w1 = d[r] - d[p];
+        return std::array<double, 3> {u0 ^ w0, (u0 ^ w1) + (u1 ^ w0), u1 ^ w1};
+    };
+    auto value = [](const std::array<double, 3>& c, double t) {
+        return c[0] + t * (c[1] + t * c[2]);
+    };
+    auto roots = [](const std::array<double, 3>& c, std::vector<double>& out) {
+        const double scale = std::max({std::abs(c[0]), std::abs(c[1]), std::abs(c[2])});
+        if (scale == 0) {
+            return;
+        }
+        if (std::abs(c[2]) < 1e-12 * scale) {
+            if (std::abs(c[1]) >= 1e-12 * scale) {
+                out.push_back(-c[0] / c[1]);
+            }
+            return;
+        }
+        const double disc = c[1] * c[1] - 4 * c[2] * c[0];
+        if (disc < 0) {
+            return;
+        }
+        const double s = std::sqrt(disc);
+        out.push_back((-c[1] - s) / (2 * c[2]));
+        out.push_back((-c[1] + s) / (2 * c[2]));
+    };
+    auto opposite = [tol](double x, double y) {
+        return (x > tol && y < -tol) || (x < -tol && y > tol);
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const size_t i1 = (i + 1) % n;
+        for (size_t j = i + 2; j < n; ++j) {
+            const size_t j1 = (j + 1) % n;
+            if (j1 == i) {
+                continue;  // the segments share a vertex
+            }
+            const std::array<std::array<double, 3>, 4> o {
+                orient(i, i1, j), orient(i, i1, j1), orient(j, j1, i), orient(j, j1, i1)};
+            std::vector<double> cuts {0.0, 1.0};
+            for (const auto& c : o) {
+                roots(c, cuts);
+            }
+            std::sort(cuts.begin(), cuts.end());
+            for (size_t k = 0; k + 1 < cuts.size(); ++k) {
+                const double t0 = std::max(cuts[k], 0.0), t1 = std::min(cuts[k + 1], 1.0);
+                if (t1 - t0 < 1e-12) {
+                    continue;
+                }
+                const double t = (t0 + t1) / 2;
+                if (opposite(value(o[0], t), value(o[1], t)) && opposite(value(o[2], t), value(o[3], t))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 /// Whether the joint where `in` ends and `out` starts (both in traversal order) is tangent (G1).
 bool tangentJoint(const TopoDS_Edge& in, const TopoDS_Edge& out)
 {
@@ -828,14 +912,17 @@ bool tangentJoint(const TopoDS_Edge& in, const TopoDS_Edge& out)
     return a.Angle(b) < 1e-4;
 }
 
-/// Onshape leaves tangent (G1) joints unmatched (oracle 14 LC3: a slot to a rounded rectangle builds
-/// 4 side faces, a side face spanning several edges). Edge i must pair with edge i here, so a chain
-/// pair that needs new vertices while the shorter chain has a tangent inner joint stops (decision
-/// 150; merging such runs into one edge is a later step).
-void tangentJointsStop(const std::vector<TopoDS_Edge>& shorter)
+/// Onshape leaves some tangent (G1) joints unmatched, a side face spanning several edges: a slot to a
+/// rounded rectangle (oracle 14 LC3, the shorter chain has a tangent joint), and a rounded corner's
+/// arc and line against one rectangle edge between two connections (LC2, the shorter chain is one
+/// edge). It matches them when the shorter chain's joints are sharp (LC1). Edge i must pair with
+/// edge i here, so a chain pair that needs new vertices stops in the first two cases (decision 150;
+/// merging such runs into one edge is ops#729).
+void tangentJointsStop(const std::vector<TopoDS_Edge>& shorter, const std::vector<TopoDS_Edge>& longer)
 {
-    for (size_t k = 1; k < shorter.size(); ++k) {
-        if (tangentJoint(shorter[k - 1], shorter[k])) {
+    const auto& inner = shorter.size() > 1 ? shorter : longer;
+    for (size_t k = 1; k < inner.size(); ++k) {
+        if (tangentJoint(inner[k - 1], inner[k])) {
             throw Base::CADKernelError(QT_TRANSLATE_NOOP(
                 "Exception",
                 "Loft: between two connections the profiles have different edge counts and a tangent "
@@ -930,7 +1017,12 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
             double lengthA = 0, lengthB = 0;
             const auto fa = innerFractions(chainA, lengthA);
             const auto fb = innerFractions(chainB, lengthB);
-            tangentJointsStop(chainA.size() < chainB.size() ? chainA : chainB);
+            if (chainA.size() < chainB.size()) {
+                tangentJointsStop(chainA, chainB);
+            }
+            else {
+                tangentJointsStop(chainB, chainA);
+            }
             if (chainA.size() < chainB.size()) {
                 chainA = chainWithVertices(chainA, partnerFractions(fa, fb), mapperA);
             }
@@ -943,8 +1035,9 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
     }
 
     // Onshape's LOFT_INVALID (oracle 14 LC1, LC4): pairs that turn the loft through itself, a half
-    // turn or crossed connections. The ruled section between paired points must keep the profiles'
-    // sense: its area along the profile's normal stays above 1 % of the smaller profile's.
+    // turn or crossed connections. The ruled section between paired points, seen along the normal
+    // halfway between the profiles' (so an elbow's profiles both stay open), must keep the profiles'
+    // sense, its area above 1 % of the smaller profile's, and must never cross itself.
     {
         auto sampled = [](const std::vector<TopoDS_Edge>& edges) {
             std::vector<gp_Pnt> points;
@@ -964,8 +1057,8 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
         };
         const auto pa = sampled(edgesA);
         const auto pb = sampled(edgesB);
-        const gp_Vec normal = na.Normalized();
-        const double smaller = std::min(na.Magnitude(), std::abs(nb.Dot(normal)));
+        const gp_Vec normal = (na.Normalized() + (sense < 0 ? -nb : nb).Normalized()).Normalized();
+        const double smaller = std::min(std::abs(na.Dot(normal)), std::abs(nb.Dot(normal)));
         // Newell's area of the blended polygon is exactly quadratic in t (each p_i x p_i+1 is), so
         // three samples give it everywhere and its minimum over [0, 1] is exact: a half turn between
         // profiles of different size only touches zero, between any fixed samples.
@@ -988,7 +1081,7 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
                 lowest = (1 - t) * (1 - t) * a0 + 2 * t * (1 - t) * mid + t * t * a1;
             }
         }
-        if (lowest < 0.01 * smaller) {
+        if (lowest < 0.01 * smaller || blendCrossesItself(pa, pb, normal)) {
             throw Base::CADKernelError(QT_TRANSLATE_NOOP(
                 "Exception",
                 "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
