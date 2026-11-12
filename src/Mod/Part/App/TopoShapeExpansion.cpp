@@ -22,11 +22,23 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <BRepBuilderAPI_ModifyShape.hxx>
+#include <BRepTools_Modification.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
+#include <GeomProjLib.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <Geom_BezierSurface.hxx>
+#include <Geom_Line.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <gp_Lin.hxx>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <map>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -8237,6 +8249,284 @@ TopoShape& TopoShape::makeElementShape(
 }
 
 
+namespace
+{
+// FreeCAD-CH (replica PS164C rb39): Onshape's loft has a plane wherever a side is flat and a line
+// wherever an edge is straight; OCCT's ThruSections leaves both as B-splines, so a chamfer or fillet
+// that picks such an edge as a line (or a sketch on such a face) finds nothing. After the loft, the
+// B-spline faces that are planar become planes, and the straight B-spline edges whose every face is a
+// plane become lines. The topology and its order stay as they were, so the element map (the names)
+// is kept as it is.
+class LoftCanonicalModification: public BRepTools_Modification
+{
+public:
+    explicit LoftCanonicalModification(const TopoDS_Shape& shape)
+    {
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+            if (surface.IsNull()
+                || !(surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
+                     || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface)))) {
+                continue;
+            }
+            // A degenerate edge (a loft to a point) has no 3D curve to project a new pcurve from
+            bool degenerate = false;
+            for (TopExp_Explorer e(face, TopAbs_EDGE); e.More() && !degenerate; e.Next()) {
+                degenerate = BRep_Tool::Degenerated(TopoDS::Edge(e.Current()));
+            }
+            if (degenerate) {
+                continue;
+            }
+            GeomLib_IsPlanarSurface check(surface, Precision::Confusion());
+            if (!check.IsPlanar()) {
+                continue;
+            }
+            // The plane's normal points as the surface's did, so the face keeps its side
+            gp_Ax3 axes = check.Plan().Position();
+            double u1 {}, u2 {}, v1 {}, v2 {};
+            surface->Bounds(u1, u2, v1, v2);
+            gp_Pnt point;
+            gp_Vec du;
+            gp_Vec dv;
+            surface->D1((u1 + u2) / 2, (v1 + v2) / 2, point, du, dv);
+            const gp_Vec normal = du.Crossed(dv);
+            if (normal.Magnitude() < Precision::Confusion()) {
+                continue;
+            }
+            if (gp_Vec(axes.Direction()).Dot(normal) < 0) {
+                axes.ZReverse();
+            }
+            planes[face.TShape().get()] = new Geom_Plane(axes);
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
+            TopLoc_Location location;
+            double first {}, last {};
+            const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+            if (curve.IsNull()
+                || !(curve->IsKind(STANDARD_TYPE(Geom_BSplineCurve))
+                     || curve->IsKind(STANDARD_TYPE(Geom_BezierCurve)))) {
+                continue;
+            }
+            bool allPlanes = !edgeFaces(i).IsEmpty();
+            for (const TopoDS_Shape& face : edgeFaces(i)) {
+                TopLoc_Location faceLocation;
+                const Handle(Geom_Surface) surface =
+                    BRep_Tool::Surface(TopoDS::Face(face), faceLocation);
+                if (!planes.count(face.TShape().get())
+                    && (surface.IsNull() || !surface->IsKind(STANDARD_TYPE(Geom_Plane)))) {
+                    allPlanes = false;
+                }
+            }
+            const gp_Pnt start = curve->Value(first);
+            const gp_Pnt end = curve->Value(last);
+            if (!allPlanes || start.Distance(end) < Precision::Confusion()) {
+                continue;
+            }
+            const gp_Dir direction(gp_Vec(start, end));
+            const gp_Lin line(start, direction);
+            bool straight = true;
+            double previous = 0;
+            for (int k = 1; k < 16 && straight; ++k) {
+                const gp_Pnt point = curve->Value(first + (last - first) * k / 16);
+                const double along = gp_Vec(start, point).Dot(gp_Vec(direction));
+                straight = line.Distance(point) < Precision::Confusion() && along > previous;
+                previous = along;
+            }
+            if (straight) {
+                lines[edge.TShape().get()] = new Geom_Line(line);
+            }
+        }
+    }
+
+    bool isEmpty() const
+    {
+        return planes.empty() && lines.empty();
+    }
+
+    Standard_Boolean NewSurface(const TopoDS_Face& face,
+                                Handle(Geom_Surface)& surface,
+                                TopLoc_Location& location,
+                                Standard_Real& tolerance,
+                                Standard_Boolean& reverseWires,
+                                Standard_Boolean& reverseFace) override
+    {
+        const auto plane = planes.find(face.TShape().get());
+        if (plane == planes.end()) {
+            return Standard_False;
+        }
+        BRep_Tool::Surface(face, location);
+        surface = plane->second;
+        tolerance = BRep_Tool::Tolerance(face);
+        reverseWires = Standard_False;
+        reverseFace = Standard_False;
+        return Standard_True;
+    }
+
+    Standard_Boolean NewCurve(const TopoDS_Edge& edge,
+                              Handle(Geom_Curve)& curve,
+                              TopLoc_Location& location,
+                              Standard_Real& tolerance) override
+    {
+        const auto line = lines.find(edge.TShape().get());
+        if (line == lines.end()) {
+            return Standard_False;
+        }
+        double first {}, last {};
+        BRep_Tool::Curve(edge, location, first, last);
+        curve = line->second;
+        tolerance = BRep_Tool::Tolerance(edge);
+        return Standard_True;
+    }
+
+    Standard_Boolean NewPoint(const TopoDS_Vertex&, gp_Pnt&, Standard_Real&) override
+    {
+        return Standard_False;
+    }
+
+    Standard_Boolean NewCurve2d(const TopoDS_Edge& edge,
+                                const TopoDS_Face& face,
+                                const TopoDS_Edge&,
+                                const TopoDS_Face&,
+                                Handle(Geom2d_Curve)& curve2d,
+                                Standard_Real& tolerance) override
+    {
+        const auto plane = planes.find(face.TShape().get());
+        const auto line = lines.find(edge.TShape().get());
+        if (plane == planes.end() && line == lines.end()) {
+            return Standard_False;
+        }
+        // The plane and the curve each in its own frame: the curve is brought into the plane's
+        TopLoc_Location surfaceLocation;
+        const Handle(Geom_Surface) oldSurface = BRep_Tool::Surface(face, surfaceLocation);
+        Handle(Geom_Plane) surface;
+        if (plane != planes.end()) {
+            surface = plane->second;
+        }
+        else {
+            surface = Handle(Geom_Plane)::DownCast(oldSurface);
+            if (surface.IsNull()) {
+                return Standard_False;
+            }
+        }
+        TopLoc_Location curveLocation;
+        double first {}, last {};
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, curveLocation, first, last);
+        if (curve.IsNull()) {
+            return Standard_False;
+        }
+        if (line != lines.end()) {
+            first = parameterOn(line->second, curve->Value(first));
+            last = parameterOn(line->second, curve->Value(last));
+            curve = line->second;
+        }
+        if (!curveLocation.IsEqual(surfaceLocation)) {
+            curve = Handle(Geom_Curve)::DownCast(
+                curve->Transformed((surfaceLocation.Inverted() * curveLocation).Transformation()));
+        }
+        curve2d = GeomProjLib::Curve2d(curve, first, last, surface);
+        tolerance = BRep_Tool::Tolerance(edge);
+        return !curve2d.IsNull();
+    }
+
+    Standard_Boolean NewParameter(const TopoDS_Vertex& vertex,
+                                  const TopoDS_Edge& edge,
+                                  Standard_Real& parameter,
+                                  Standard_Real& tolerance) override
+    {
+        const auto line = lines.find(edge.TShape().get());
+        if (line == lines.end()) {
+            return Standard_False;
+        }
+        // Through the old curve, so the point is in the line's frame
+        TopLoc_Location location;
+        double first {}, last {};
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        if (curve.IsNull()) {
+            return Standard_False;
+        }
+        parameter = parameterOn(line->second, curve->Value(BRep_Tool::Parameter(vertex, edge)));
+        tolerance = BRep_Tool::Tolerance(vertex);
+        return Standard_True;
+    }
+
+    GeomAbs_Shape Continuity(const TopoDS_Edge& edge,
+                             const TopoDS_Face& face1,
+                             const TopoDS_Face& face2,
+                             const TopoDS_Edge&,
+                             const TopoDS_Face&,
+                             const TopoDS_Face&) override
+    {
+        return BRep_Tool::Continuity(edge, face1, face2);
+    }
+
+private:
+    static double parameterOn(const Handle(Geom_Line)& line, const gp_Pnt& point)
+    {
+        return gp_Vec(line->Lin().Location(), point).Dot(gp_Vec(line->Lin().Direction()));
+    }
+
+    std::map<const TopoDS_TShape*, Handle(Geom_Plane)> planes;
+    std::map<const TopoDS_TShape*, Handle(Geom_Line)> lines;
+};
+
+class LoftCanonicalMaker: public BRepBuilderAPI_ModifyShape
+{
+public:
+    LoftCanonicalMaker(const TopoDS_Shape& shape, const Handle(BRepTools_Modification)& modification)
+    {
+        myModification = modification;
+        DoModif(shape);
+    }
+};
+
+// The same shape with its flat faces as planes and its straight edges as lines, when the result is
+// valid, has the same topology in the same order (so the names stay), and the same vertices
+void makeLoftCanonical(TopoShape& loft)
+{
+    const TopoDS_Shape& shape = loft.getShape();
+    if (shape.IsNull()) {
+        return;
+    }
+    Handle(LoftCanonicalModification) modification = new LoftCanonicalModification(shape);
+    if (modification->isEmpty()) {
+        return;
+    }
+    try {
+        LoftCanonicalMaker maker(shape, modification);
+        if (!maker.IsDone()) {
+            return;
+        }
+        const TopoDS_Shape result = maker.Shape();
+        if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid()) {
+            return;
+        }
+        for (const TopAbs_ShapeEnum kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape before;
+            TopTools_IndexedMapOfShape after;
+            TopExp::MapShapes(shape, kind, before);
+            TopExp::MapShapes(result, kind, after);
+            if (before.Extent() != after.Extent()) {
+                return;
+            }
+            for (int i = 1; i <= before.Extent(); ++i) {
+                if (!maker.ModifiedShape(before(i)).IsSame(after(i))) {
+                    return;  // another order: the names would point elsewhere
+                }
+            }
+        }
+        loft.setShape(result, false);
+    }
+    catch (const Standard_Failure&) {
+        // The loft as OCCT made it
+    }
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementLoft(
     const std::vector<TopoShape>& shapes,
     IsSolid isSolid,
@@ -8355,12 +8645,14 @@ TopoShape& TopoShape::makeElementLoft(
 #else
     aGenerator.Build();
 #endif
-    return makeShapeWithElementMap(
+    makeShapeWithElementMap(
         aGenerator.Shape(),
         MapperThruSections(aGenerator, profiles),
         shapes,
         op
     );
+    makeLoftCanonical(*this);  // FreeCAD-CH (replica PS164C rb39): planes and lines, as Onshape's
+    return *this;
 }
 
 TopoShape& TopoShape::makeElementPrism(const TopoShape& base, const gp_Vec& vec, const char* op)

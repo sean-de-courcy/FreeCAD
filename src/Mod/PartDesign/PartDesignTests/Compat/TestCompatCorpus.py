@@ -239,7 +239,7 @@ class _Step:
                 stage,
                 names=names,
                 touched=touched,
-                deltas=self.intended.get(stem),
+                deltas=CompatRecord.deltasFor(self.intended.get(stem), passName),
             )
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
@@ -322,7 +322,7 @@ class _Step:
                 compared[1],
                 "recompute",
                 names=names,
-                deltas=self.intended.get(stem),
+                deltas=CompatRecord.deltasFor(self.intended.get(stem), "recompute"),
                 allDeltas=False,
             )
             lines += [f"{stem}: {line}" for line in found]
