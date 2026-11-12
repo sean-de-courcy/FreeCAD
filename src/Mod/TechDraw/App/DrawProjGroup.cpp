@@ -254,7 +254,7 @@ void DrawProjGroup::refitForScale(double newScale)
     // geometry current at the old scale (no update pending, no hidden-line run going); and a free
     // view of the sheet may stand on one of the group's rows (Project View places it so, and so
     // does view snapping), which a moved group would leave.
-    if (!page->KeepUpdated.getValue()) {
+    if (!page->canUpdate()) {  // the page's KeepUpdated and TechDraw's global update preference
         return;
     }
     for (auto* obj : Views.getValues()) {
