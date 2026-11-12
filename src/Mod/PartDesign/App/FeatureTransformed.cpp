@@ -1829,21 +1829,32 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
     studioSetPartMirrorConsumes(&pattern, false);  // a failed feature contributes nothing
     std::string why;
     if (isInstancePartPattern(&pattern)) {
+        // No copies (no source, a failed transform): every record fails, loud, none dormant. A
+        // leftover lost (merged back) at an earlier compute is no record of this one, or the
+        // live document would keep what a build from scratch never had (ops#654 T2, the gate's
+        // seed 2 op 33)
+        auto failed = [&pattern](const std::string& text) {
+            studioSetPartPatternConsumed(&pattern, {});
+            auto lost = freecad_cast<App::PropertyStringList*>(
+                pattern.getPropertyByName("StudioLeftoverLost")
+            );
+            if (lost && !lost->getValues().empty()) {
+                lost->setValues(std::vector<std::string>());
+            }
+            return new App::DocumentObjectExecReturn(text, &pattern);
+        };
         try {
             const Part::TopoShape copies = studioPatternTool(&pattern, nullptr, &why);
             if (copies.isNull()) {
-                studioSetPartPatternConsumed(&pattern, {});
-                return new App::DocumentObjectExecReturn(why, &pattern);
+                return failed(why);
             }
             return executeInstancePartPattern(pattern, copies);
         }
         catch (const Base::Exception& e) {
-            studioSetPartPatternConsumed(&pattern, {});
-            return new App::DocumentObjectExecReturn(e.what(), &pattern);
+            return failed(e.what());
         }
         catch (const Standard_Failure& e) {
-            studioSetPartPatternConsumed(&pattern, {});
-            return new App::DocumentObjectExecReturn(e.GetMessageString(), &pattern);
+            return failed(e.GetMessageString());
         }
     }
     const Part::TopoShape tool = studioPatternTool(&pattern, nullptr, &why);

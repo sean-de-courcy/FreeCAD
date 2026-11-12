@@ -1058,6 +1058,91 @@ class TestStudioPartPattern(unittest.TestCase):
             len([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"]), bodies
         )
 
+    def testARecomputeAfterAnAbortLeavesAPartPatternsPartsAsTheyWere(self):
+        """ops#654 T2 gate (seed 1, op 14; R1, c750): P x 0..30, y 0..20, z 0..5; S x 40..60,
+        y 0..10, z 0..10 split by a slot at x 49..50 (S:1, S:2); a Polar Add of S over P, 2
+        copies about the studio's z: the copies touch nothing, two parts. The slot moved after
+        the pattern by the drag's command (the move, then the slot's piece command): S is whole at
+        the pattern's place, the old records hold nothing, and the pattern stays loud (as built).
+        Then a recompute with no step recorded, and a transaction that deletes and remakes the
+        pattern's steps, aborted and recomputed: the parts list and every Body's chain stay as
+        they were (no part made outside a step, no Body emptied)."""
+        from PartDesignTests.TestStudioList import makeOwner
+
+        self.box("P", 0, 0, 30, 20, 0, 5)
+        self.box("Src", 40, 0, 60, 10, 0, 10)
+        self.listed()
+
+        def slot():
+            owner = makeOwner(self.doc, self.studio, "Slot", [49, -1, 50, 11], 11,
+                              "Subtraction", ["Src"])
+            PartDesign.studioInsert(owner, -1)
+            PartDesign.studioMakePieces(owner)
+            return owner
+
+        owner = self.edit("slot", slot)
+        pat = self.polar("Pat", ["Src"], "Add", ("P",), count=2)
+        self.assertValid(pat)
+        self.assertEqual(len(self.made(pat)), 2)
+
+        def move():
+            PartDesign.studioMove(owner, len(self.list.Entries) - 1)
+            PartDesign.studioMakePieces(owner)
+
+        self.edit("move", move)
+
+        def state():
+            return sorted(
+                (b.Name, b.StudioPartId, tuple(m.Name for m in b.Group))
+                for b in self.doc.Objects if b.TypeId == "PartDesign::Body"
+            )
+
+        before = state()
+        undo = self.doc.UndoNames
+        pat.touch()
+        self.doc.recompute()
+        self.assertEqual(state(), before, "a recompute with no step recorded")
+        self.doc.openTransaction("regenerate")
+        try:
+            for body in self.made(pat):
+                for step in [o for o in body.Group if o.TypeId == "PartDesign::FeatureApply"]:
+                    body.removeObject(step)
+                    self.doc.removeObject(step.Name)
+            PartDesign.studioReconcile(self.list)
+            self.doc.recompute()
+        finally:
+            self.doc.abortTransaction()
+        self.doc.recompute()
+        self.assertEqual(state(), before, "a recompute after an abort")
+        self.assertEqual(self.doc.UndoNames, undo)
+
+    def testAPatternWithNoSourceLeftFailsInEveryRecordEvenOneMergedBack(self):
+        """ops#654 T2 gate (seed 2, op 33): P x 60..90, y 0..20, z 0..5; S x 40..50, y 0..10,
+        z 0..10. An Add of S over P, +x 60 x 2: the copy (x 100..110) touches nothing, a part.
+        The spacing made 40: the copy (x 80..90) merges into P, its part's record dormant (10.12
+        amendment point 5). Then a Remove pattern of S before it consumes S (Q5): the Add has no
+        source, loud, and its record fails in its Body, a live part (as a build from scratch has
+        it), never an empty Body left from the earlier merge."""
+        self.box("P", 60, 0, 90, 20, 0, 5)
+        self.box("Src", 40, 0, 50, 10, 0, 10)
+        self.listed()
+        pat = self.linear("Pat", ["Src"], "Add", ("P",), length=60, count=2)
+        self.assertValid(pat)
+        self.assertEqual(len(self.made(pat)), 1)
+        self.edit("spacing", lambda: setattr(pat, "Length", 40))
+        self.assertValid(pat)
+        self.assertEqual(list(pat.StudioLeftoverLost), [self.made(pat)[0].StudioPartId])
+        self.edit("remove", lambda: partPattern(
+            self.doc, self.studio, "LinearPattern", "Rem", ["Src"], "Remove", ("P",),
+            index=list(self.list.Entries).index(pat),
+            Direction=self.axis(X_AXIS), Mode="Extent", Length=100, Occurrences=2,
+        ))
+        self.assertFalse(pat.isValid())
+        self.assertIn("No part to pattern", pat.getStatusString())
+        record = self.made(pat)[0]
+        self.assertEqual([m.StudioOwner.Name for m in record.Group], ["Pat"])
+        self.assertIn(record.Name, self.live())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1054,7 +1054,12 @@ def oracle(natives, records, bar, live=None, capture=None):
                     continue
                 if side in leftovers and side not in claims.values():
                     claims[pid] = side
-                elif op == "Add" and side and side != "?":
+                elif op == "Add" and side == "?":
+                    # A record labelled when its chain held nothing (its source whole again at
+                    # the pattern's place, seed 1 op 15): it holds no copy, dormant once every
+                    # leftover is held (the App's StudioLeftoverLost), loud below otherwise
+                    dormant.add(pid)
+                elif op == "Add" and side:
                     mine = set(side.split(","))
                     loose = {x for label in leftovers for x in label.split(",")}
                     if not mine & loose:
@@ -1749,6 +1754,11 @@ def gateG1(doc, regenerate=None):
     names checked again. Returns the differences."""
     before = g1Record(doc)
     doc.openTransaction("gate G1")
+    # The step held as an open dialog holds it (ops#654 T2, R1): deleting and remaking every
+    # step is no edit a command or a user makes, and its recompute computes again an entry an
+    # edit left loud (a drag whose piece command took the decision, seed 1 op 14), which the
+    # resync would make parts of in this step. G1 checks names: nothing is made here
+    doc.lockStep()
     try:
         deleteSteps(doc, active=True)
         PartDesign.studioReconcile(studioList(doc))
@@ -1757,6 +1767,7 @@ def gateG1(doc, regenerate=None):
         doc.recompute()
         regenerated = g1Record(doc)
     finally:
+        doc.unlockStep()
         doc.abortTransaction()
     doc.recompute()
     back = g1Record(doc)

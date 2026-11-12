@@ -2689,6 +2689,23 @@ bool needsRecompute(const App::Document& doc)
     });
 }
 
+/// What the resync knows of a document's steps (ops#654 T2, R1): whether the last recompute ran
+/// inside an open step (its own), whether a signal comes from a recompute, and whether the last
+/// step was committed before its recompute (Python's commitTransaction() then recompute(), the
+/// property editor's commit then recompute), so that recompute is still that edit's
+struct ResyncSteps
+{
+    bool ownStep = false;
+    bool recomputed = false;
+    bool awaitingRecompute = false;
+};
+
+ResyncSteps& resyncSteps(const App::Document& doc)
+{
+    static std::map<std::string, ResyncSteps> steps;
+    return steps[doc.getName()];
+}
+
 /// After a recompute: a part mirror whose Add decided to consume its source (or no longer) since
 /// the list was last projected changes which parts live after it, so the list is reconciled and
 /// the document computed again (slice 9). Not while undoing, restoring or closing, nor while the
@@ -2702,6 +2719,10 @@ void resyncPartMirrors(const App::Document& constDoc)
     if (busy) {
         return;  // the loop below takes its own recomputes' decisions
     }
+    // Whether this signal ends a recompute that ran outside any step (R1 below), taken at every
+    // signal so it never outlives its recompute
+    ResyncSteps& steps = resyncSteps(doc);
+    const bool joined = std::exchange(steps.recomputed, false) && !steps.ownStep;
     // The entries whose solids are no part (10.12 amendment, points 2-4), taken at every signal
     // so a decision never outlives its recompute
     std::vector<App::DocumentObject*> due = takePiecesDue(&doc);
@@ -2720,7 +2741,18 @@ void resyncPartMirrors(const App::Document& constDoc)
     // undo or redo) the entry stays loud with its message, and an open dialog's step makes
     // nothing (its OK does). Undo can't be off in this build (Document.UndoMode is fixed at 1): a
     // script that records no step is 10.15's guard false, loud as today
-    const bool canMake = !doc.isStepLocked() && doc.hasPendingTransaction();
+    // R1 (ops#654 T2, the coordinator's ruling c750): a recompute with no step recorded, and the
+    // one after an abort, never change the parts list or a Body's chain. 10.15 reopens the last
+    // step for a recompute outside any transaction; it is that edit's only when the edit was
+    // committed before its recompute (the first recompute after such a commit). Any later one
+    // (a refresh, the recompute after an abort restored the inputs) re-decides an entry the edit
+    // left loud (a drag whose piece command took the recompute's decision, the gate's seed 1
+    // op 14): it stays loud, as the edit left it, until a step of its own
+    const bool edits = !joined || steps.awaitingRecompute;
+    if (joined) {
+        steps.awaitingRecompute = false;
+    }
+    const bool canMake = !doc.isStepLocked() && doc.hasPendingTransaction() && edits;
     if (!canMake) {
         due.clear();
     }
@@ -2875,7 +2907,23 @@ void PartDesign::registerPartMirrorResync()
     }
     registered = true;
     auto watch = [](const App::Document& doc) {
-        const_cast<App::Document&>(doc).signalBecameStable.connect(&resyncPartMirrors);
+        auto& d = const_cast<App::Document&>(doc);
+        // R1's record (resyncSteps), before the resync's own connection
+        d.signalBeforeRecompute.connect([](const App::Document& doc) {
+            resyncSteps(doc).ownStep = doc.hasPendingTransaction();
+        });
+        d.signalRecomputed.connect(
+            [](const App::Document& doc, const std::vector<App::DocumentObject*>&) {
+                resyncSteps(doc).recomputed = true;
+            }
+        );
+        d.signalCommitTransaction.connect([](const App::Document& doc) {
+            resyncSteps(doc).awaitingRecompute = needsRecompute(doc);
+        });
+        d.signalAbortTransaction.connect([](const App::Document& doc) {
+            resyncSteps(doc).awaitingRecompute = false;
+        });
+        d.signalBecameStable.connect(&resyncPartMirrors);
     };
     App::GetApplication().signalNewDocument.connect(
         [watch](const App::Document& doc, bool) { watch(doc); }
