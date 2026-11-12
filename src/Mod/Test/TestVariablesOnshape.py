@@ -118,6 +118,12 @@ ACCEPTED = [
     ("#Rail / in", "NUMBER", 4, "Rail / (1 in)"),
     ("#Rail / inches * 2", "NUMBER", 8, None),
     ("90 deg / rad", "NUMBER", math.pi / 2, None),
+    # and after *, as Onshape (oracle 14 V3, ops#720)
+    ("2.9*mm", "LENGTH", 2.9, "2.9 * (1 mm)"),
+    ("-0.0254*m", "LENGTH", -25.4, "(-0.0254) * (1 m)"),
+    ("1.5e-3*m", "LENGTH", 1.5, "1.5e-3 * (1 m)"),
+    ("#Count * mm", "LENGTH", 3, "Count * (1 mm)"),
+    ("0.5*rad", "ANGLE", math.degrees(0.5), "0.5 * (1 rad)"),
     # a fraction with a unit after *, as Onshape (the reference studio, row 21)
     ("2 * 3/4 in", "LENGTH", 38.1, "2 * (3 / 4 * 1 in)"),
     ("#Count*3/4 in", "LENGTH", 57.15, "Count * (3 / 4 * 1 in)"),
@@ -195,7 +201,8 @@ REFUSED = [
     ("ceil(2.5 mm)", "LENGTH", "ceil() of a value with a unit"),
     ("#Width / mm^2", "NUMBER", "a unit name after / followed by '^'"),
     ("#Width / mm mm", "NUMBER", "a unit name after / followed by 'mm'"),
-    ("#Width * mm", "NUMBER", "needs a number"),
+    ("#Width * mm", "NUMBER", "length^2"),
+    ("2 * mm 3", "LENGTH", "a unit name after * followed by '3'"),
     ("#Width in", "LENGTH", "a unit after #Width"),
     ("10 mm mm", "LENGTH", "two units"),
     ("mm", "LENGTH", "needs a number"),
@@ -595,6 +602,49 @@ class TestReferenceStudioImport(unittest.TestCase):
                     value = value.Value  # mm or deg, FreeCAD's internal units
                 self.assertLessEqual(abs(value - number), SHOWN_TOLERANCE,
                                      f"{name}: Onshape shows {shown}, the copy {value}")
+
+
+@unittest.skipIf(FreeCAD is None, "needs FreeCAD")
+class TestUnitRuleInFreeCAD(unittest.TestCase):
+    """Oracle 14 V3 in FreeCAD (ops#720): imported variables drive pads. Designed model: 10 x 10
+    mm squares padded by imported lengths."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesOnshape")
+        self.doc = FreeCAD.newDocument("TestUnitRule")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def pad(self, name, length):
+        import Part
+
+        body = self.doc.addObject("PartDesign::Body", "Body" + name)
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch" + name)
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((0, 0), (10, 0), (10, 10), (0, 10))]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        pad = body.newObject("PartDesign::Pad", "Pad" + name)
+        pad.Profile = sketch
+        pad.setExpression("Length", length)
+        return pad
+
+    def import_studio(self, variables):
+        from freecad.variables import copies
+
+        path = os.path.join(self.folder, "Unit Rule Studio.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(export(variables))
+        return copies.import_studios(self.doc, [path]).copies[0]
+
+    def test_a_bare_unit_after_times(self):
+        """ops#720 (G1): L = 2.9*mm imports as 2.9 mm, and a pad by #L is 290 mm³."""
+        copy = self.import_studio([("LENGTH", "L", "2.9*mm")])
+        pad = self.pad("L", "#L")
+        self.doc.recompute()
+        self.assertAlmostEqual(copy.L.Value, 2.9, places=9)
+        self.assertAlmostEqual(pad.Shape.Volume, 290, places=6)
 
 
 if __name__ == "__main__":

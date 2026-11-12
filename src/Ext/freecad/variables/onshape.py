@@ -31,7 +31,7 @@ check FreeCAD's value against the translator's. It needs no document.
 express, is refused with the reason (`Refused`). The reference studio the user built in Onshape
 (decision 68, D3; notes/variables-studio.md 5.1) settled these readings: `2 * 3/4 in` is 1.5 in,
 `-2^2` is (-2)^2, `2 mm^2` is 2 mm², `round` takes halves up, `-7 % 3` is 2, `#a/mm` is #a
-counted in mm, `2^3^2` is 2^9, `1.5e2` is 150. Their neighbours it doesn't settle stay refused: a
+counted in mm, `2^3^2` is 2^9, `1.5e2` is 150; oracle 14 V3 (ops#720) that `2.9*mm` is 2.9 mm. Their neighbours it doesn't settle stay refused: a
 fraction with a unit next to `/` or `^` or before `*` (`1/3/4 in`, `3/4 in * 2`), a minus before
 `^` on anything but a number (`-#a^2`) or after `^` or an operator (`2^-1^2`, `2 * -2^2`), a
 unit before `^` after a group or a call (`sqrt(4) mm^2`), `%` with units or by a negative
@@ -245,7 +245,8 @@ class WithUnit:
 
 @dataclass(frozen=True)
 class BareUnit:
-    """A unit name after `/`, standing for one of it: `#a/mm` is #a counted in millimetres."""
+    """A unit name after `/` or `*`, standing for one of it: `#a/mm` is #a counted in
+    millimetres, `2.9*mm` is 2.9 mm."""
 
     unit: str
 
@@ -368,19 +369,20 @@ class _Parser:
         while self.at_op("*", "/", "%"):
             ops.append(self.take().text)
             token = self.peek()
-            if ops[-1] == "/" and token.kind == "name" and token.text in UNITS:
-                factors.append(self.bare_unit())
+            if ops[-1] in ("*", "/") and token.kind == "name" and token.text in UNITS:
+                factors.append(self.bare_unit(ops[-1]))
             else:
                 factors.append(self.unary())
         return _fold_term(factors, ops)
 
-    def bare_unit(self):
+    def bare_unit(self, op: str):
         """`#a/mm`: Onshape's floor(#Len_frac/mm) is 69 for 2.75 in (the reference studio,
-        row 26). Only after `/`, as a factor of its own."""
+        row 26). `2.9*mm`: Onshape's is 2.9 mm, `0.5*rad` 0.5 rad (oracle 14 V3, ops#720).
+        Only after `/` or `*`, as a factor of its own."""
         unit = self.take().text
         token = self.peek()
         if (token.kind == "op" and token.text in ("^", "(")) or token.kind in ("name", "number"):
-            raise Refused(f"a unit name after / followed by {token.text!r}: {UNDOCUMENTED}")
+            raise Refused(f"a unit name after {op} followed by {token.text!r}: {UNDOCUMENTED}")
         return BareUnit(unit)
 
     def unary(self):
