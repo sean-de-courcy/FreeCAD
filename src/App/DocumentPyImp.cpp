@@ -183,6 +183,72 @@ PyObject* DocumentPy::saveCopy(PyObject* args)
     PY_CATCH
 }
 
+// FreeCAD-CH (ops#640, slice A2): the save guard and the conflict copies
+PyObject* DocumentPy::fileChangeOnDisk(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        const Document::FileChange change = getDocumentPtr()->fileChangeOnDisk();
+        Py::Dict dict;
+        dict.setItem("changed", Py::Boolean(change.changed));
+        dict.setItem("by", Py::String(change.by));
+        dict.setItem("when", Py::String(change.when));
+        return Py::new_reference_to(dict);
+    }
+    PY_CATCH
+}
+
+PyObject* DocumentPy::resolveFileChange(PyObject* args)
+{
+    char* choice;
+    if (!PyArg_ParseTuple(args, "s", &choice)) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        return Py::new_reference_to(Py::String(getDocumentPtr()->resolveFileChange(choice)));
+    }
+    PY_CATCH
+}
+
+PyObject* DocumentPy::conflictCopies(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        Py::List list;
+        for (const auto& copy : getDocumentPtr()->conflictCopies()) {
+            list.append(Py::String(copy));
+        }
+        return Py::new_reference_to(list);
+    }
+    PY_CATCH
+}
+
+PyObject* DocumentPy::resolveConflictCopy(PyObject* args)
+{
+    char* path;
+    char* choice;
+    if (!PyArg_ParseTuple(args, "etet", "utf-8", &path, "utf-8", &choice)) {
+        return nullptr;
+    }
+    const std::string pathString(path);
+    const std::string choiceString(choice);
+    PyMem_Free(path);
+    PyMem_Free(choice);
+    PY_TRY
+    {
+        return Py::new_reference_to(
+            Py::String(getDocumentPtr()->resolveConflictCopy(pathString, choiceString)));
+    }
+    PY_CATCH
+}
+
 PyObject* DocumentPy::canWriteRecoverySnapshot(PyObject* args)
 {
     if (!PyArg_ParseTuple(args, "")) {

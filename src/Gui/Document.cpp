@@ -34,12 +34,18 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
+#include <QLabel>
+#include <QLocale>
 #include <QMessageBox>
 #include <QOpenGLWidget>
 #include <QTextStream>
 #include <QStatusBar>
+#include <QTimer>
+#include <QToolBar>
 #include <Inventor/actions/SoSearchAction.h>
 #include <Inventor/nodes/SoSeparator.h>
 
@@ -60,6 +66,7 @@
 #include <Base/Tools.h>
 
 #include "Document.h"
+#include <App/ProjectFile.h>
 #include "DocumentPy.h"
 #include "Application.h"
 #include "Command.h"
@@ -688,6 +695,306 @@ private:
 
 namespace
 {
+// FreeCAD-CH (ops#640, slice A2): the save guard's question and notices
+QString fileChangeText(const char* text)
+{
+    return QCoreApplication::translate("Gui::FileChange", text);
+}
+
+QString whoText(const std::string& by)
+{
+    return by.empty() ? fileChangeText("Someone") : QString::fromStdString(by);
+}
+
+// A saved file's date (ISO, UTC) as the person's local time: the time alone today
+QString whenText(const std::string& iso)
+{
+    QDateTime time = QDateTime::fromString(QString::fromStdString(iso), Qt::ISODate);
+    if (!time.isValid()) {
+        return {};
+    }
+    time = time.toLocalTime();
+    if (time.date() == QDate::currentDate()) {
+        return time.toString(QStringLiteral("HH:mm"));
+    }
+    return QLocale().toString(time, QLocale::ShortFormat);
+}
+
+// Watches the open documents' files and folders and the application's activation, and shows
+// each document's notice: its file changed on disk, or a sync tool's conflict copy beside it
+// (design section 3 item 3, section 4). Its objects belong to the application.
+class FileChangeMonitor
+{
+public:
+    static FileChangeMonitor& instance()
+    {
+        static auto* monitor = new FileChangeMonitor();  // NOLINT: lives as long as the app
+        return *monitor;
+    }
+
+    void checkSoon()
+    {
+        timer->start();
+    }
+
+private:
+    FileChangeMonitor()
+        : timer(new QTimer(qApp))
+        , watcher(new QFileSystemWatcher(qApp))
+    {
+        timer->setSingleShot(true);
+        timer->setInterval(300);  // a sync tool's rename comes with several folder changes
+        QObject::connect(timer, &QTimer::timeout, [this]() {
+            checkAll();
+        });
+        QObject::connect(watcher, &QFileSystemWatcher::directoryChanged, [this](const QString&) {
+            checkSoon();
+        });
+        QObject::connect(watcher, &QFileSystemWatcher::fileChanged, [this](const QString&) {
+            checkSoon();
+        });
+        QObject::connect(qApp,
+                         &QGuiApplication::applicationStateChanged,
+                         [this](Qt::ApplicationState state) {
+                             if (state == Qt::ApplicationActive) {
+                                 checkSoon();
+                             }
+                         });
+    }
+
+    void checkAll()
+    {
+        QStringList paths;
+        for (App::Document* doc : App::GetApplication().getDocuments()) {
+            Gui::Document* gui = Gui::Application::Instance->getDocument(doc);
+            if (!gui) {
+                continue;
+            }
+            const std::string file = doc->FileName.getStrValue();
+            if (!file.empty()) {
+                const QFileInfo info(QString::fromStdString(file));
+                paths << info.absolutePath();
+                if (info.exists()) {
+                    paths << info.absoluteFilePath();
+                }
+            }
+            showNotice(gui);
+        }
+        // A replaced file is no longer watched: watch the names again
+        paths.removeDuplicates();
+        if (!watcher->files().isEmpty()) {
+            watcher->removePaths(watcher->files());
+        }
+        if (!watcher->directories().isEmpty()) {
+            watcher->removePaths(watcher->directories());
+        }
+        if (!paths.isEmpty()) {
+            watcher->addPaths(paths);
+        }
+    }
+
+    void showNotice(Gui::Document* gui)
+    {
+        App::Document* doc = gui->getDocument();
+        App::Document::FileChange change;
+        std::vector<std::string> conflicts;
+        try {
+            change = doc->fileChangeOnDisk();
+            conflicts = doc->conflictCopies();
+        }
+        catch (...) {
+            return;
+        }
+        for (Gui::MDIView* view : gui->getMDIViews()) {
+            auto* bar = view->findChild<QToolBar*>(QStringLiteral("FileChangeBar"),
+                                                   Qt::FindDirectChildrenOnly);
+            if (!change.changed && conflicts.empty()) {
+                if (bar) {
+                    view->removeToolBar(bar);
+                    delete bar;  // in the timer, never inside one of its actions
+                }
+                continue;
+            }
+            if (bar) {
+                bar->clear();
+            }
+            else {
+                bar = new QToolBar(view);
+                bar->setObjectName(QStringLiteral("FileChangeBar"));
+                bar->setMovable(false);
+                bar->setFloatable(false);
+                bar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+                view->addToolBar(Qt::TopToolBarArea, bar);
+            }
+            fillNotice(bar, gui, change, conflicts);
+        }
+    }
+
+    void fillNotice(QToolBar* bar,
+                    Gui::Document* gui,
+                    const App::Document::FileChange& change,
+                    const std::vector<std::string>& conflicts)
+    {
+        App::Document* doc = gui->getDocument();
+        const std::string docName = doc->getName();
+        auto* label = new QLabel(bar);
+        label->setObjectName(QStringLiteral("FileChangeText"));
+        bar->addWidget(label);
+        // The document is found again by name: an action may outlive it
+        auto withDocument = [docName](auto&& act) {
+            return [docName, act]() {
+                App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+                Gui::Document* gui = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
+                if (!gui) {
+                    return;
+                }
+                try {
+                    act(doc, gui);
+                }
+                catch (const Base::Exception& error) {
+                    QMessageBox::critical(Gui::getMainWindow(),
+                                          fileChangeText("Document changed on disk"),
+                                          QString::fromUtf8(error.what()));
+                }
+                FileChangeMonitor::instance().checkSoon();
+            };
+        };
+        if (change.changed) {
+            const QString when = whenText(change.when);
+            QString text = when.isEmpty()
+                ? fileChangeText("%1 saved a newer version.").arg(whoText(change.by))
+                : fileChangeText("%1 saved a newer version at %2.").arg(whoText(change.by), when);
+            if (gui->isModified()) {
+                // An edit made before reloading meets the guard's question at its save
+                text += QLatin1Char(' ')
+                    + fileChangeText("Saving asks which version to keep; neither is lost.");
+            }
+            else {
+                QAction* reload = bar->addAction(fileChangeText("Reload"));
+                reload->setObjectName(QStringLiteral("FileChangeReload"));
+                QObject::connect(reload,
+                                 &QAction::triggered,
+                                 withDocument([](App::Document* doc, Gui::Document*) {
+                                     doc->restore();
+                                 }));
+            }
+            label->setText(text);
+            return;
+        }
+        const std::string other = conflicts.front();
+        App::ProjectFile::Metadata mine;
+        App::ProjectFile::Metadata theirs;
+        try {
+            mine = App::ProjectFile(doc->FileName.getStrValue()).getMetadata();
+            theirs = App::ProjectFile(other).getMetadata();
+        }
+        catch (...) {
+        }
+        label->setText(fileChangeText("Two versions of this document exist: this one (%1, %2) and "
+                                      "one saved by %3 at %4.")
+                           .arg(whoText(mine.lastModifiedBy),
+                                whenText(mine.lastModifiedDate),
+                                whoText(theirs.lastModifiedBy),
+                                whenText(theirs.lastModifiedDate)));
+        QAction* open = bar->addAction(fileChangeText("Open the other"));
+        open->setObjectName(QStringLiteral("FileChangeOpenOther"));
+        QObject::connect(open, &QAction::triggered, [other]() {
+            Gui::Application::Instance->open(other.c_str(), "FreeCAD");
+        });
+        QAction* keepThis = bar->addAction(fileChangeText("Keep this one"));
+        keepThis->setObjectName(QStringLiteral("FileChangeKeepThis"));
+        QObject::connect(keepThis,
+                         &QAction::triggered,
+                         withDocument([other](App::Document* doc, Gui::Document*) {
+                             const std::string kept = doc->resolveConflictCopy(other, "KeepThis");
+                             Base::Console().message("The other version is kept as %s\n",
+                                                     kept.c_str());
+                         }));
+        QAction* keepOther = bar->addAction(fileChangeText("Keep the other"));
+        keepOther->setObjectName(QStringLiteral("FileChangeKeepOther"));
+        QObject::connect(
+            keepOther,
+            &QAction::triggered,
+            withDocument([other](App::Document* doc, Gui::Document* gui) {
+                if (gui->isModified()
+                    && QMessageBox::question(
+                           Gui::getMainWindow(),
+                           fileChangeText("Document changed on disk"),
+                           fileChangeText("This document has changes that are not saved. Read "
+                                          "the other version and drop them?"))
+                        != QMessageBox::Yes) {
+                    return;
+                }
+                const std::string kept = doc->resolveConflictCopy(other, "KeepOther");
+                Base::Console().message("This version is kept as %s\n", kept.c_str());
+            }));
+    }
+
+    QTimer* timer;
+    QFileSystemWatcher* watcher;
+};
+
+// The notices are looked at again soon; nothing without a GUI application (FreeCADGui set up
+// without a GUI)
+void checkFileChangesSoon()
+{
+    if (qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
+        FileChangeMonitor::instance().checkSoon();
+    }
+}
+
+// The save's three ways out when the file changed on disk (design section 4); false when the
+// person cancels or the choice fails
+bool askOnFileChange(Gui::Document* gui, const App::Document::FileChange& change)
+{
+    const QString who = whoText(change.by);
+    const QString when = whenText(change.when);
+    QMessageBox box(Gui::getMainWindow());
+    box.setObjectName(QStringLiteral("FileChangeQuestion"));
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(fileChangeText("Document changed on disk"));
+    box.setText(when.isEmpty()
+                    ? fileChangeText("%1 saved this document after you opened it.").arg(who)
+                    : fileChangeText("%1 saved this document at %2, after you opened it.")
+                          .arg(who, when));
+    box.setInformativeText(fileChangeText("Neither version is lost, whichever you choose."));
+    QPushButton* keepCopy =
+        box.addButton(fileChangeText("Keep mine as a copy"), QMessageBox::AcceptRole);
+    keepCopy->setObjectName(QStringLiteral("KeepMineAsCopy"));
+    QPushButton* takeTheirs =
+        box.addButton(fileChangeText("Take %1's (mine is kept)").arg(who), QMessageBox::AcceptRole);
+    takeTheirs->setObjectName(QStringLiteral("TakeTheirs"));
+    QPushButton* saveOver = box.addButton(
+        fileChangeText("Save mine over it (%1's is kept)").arg(who), QMessageBox::AcceptRole);
+    saveOver->setObjectName(QStringLiteral("SaveMineOver"));
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(keepCopy);
+    box.exec();
+    auto* clicked = box.clickedButton();
+    if (!clicked || clicked->objectName().isEmpty()) {
+        return false;
+    }
+    try {
+        const std::string choice = clicked->objectName().toStdString();
+        const std::string copy = gui->getDocument()->resolveFileChange(choice);
+        gui->setModified(false);
+        Base::Console().message(choice == "SaveMineOver" ? "The other version is kept as %s\n"
+                                                          : "This version is kept as %s\n",
+                                copy.c_str());
+        checkFileChangesSoon();
+        return true;
+    }
+    catch (const Base::Exception& error) {
+        QMessageBox::critical(Gui::getMainWindow(),
+                              fileChangeText("Saving failed"),
+                              QString::fromUtf8(error.what()));
+        return false;
+    }
+}
+}  // namespace
+
+namespace
+{
 /// FreeCAD-CH (ops#640): each Gui document's pimpl, for hasUndoStep() (no header names it)
 std::map<const Document*, DocumentP*> stepDocuments;  // NOLINT
 }  // namespace
@@ -702,6 +1009,7 @@ int Document::_iDocCount = 0;
 
 Document::Document(App::Document* pcDocument, Application* app)
 {
+    checkFileChangesSoon();  // FreeCAD-CH (ops#640, A2)
     d = new DocumentP;
     stepDocuments[this] = d;  // FreeCAD-CH (ops#640)
     d->_iWinCount = 1;
@@ -2123,6 +2431,13 @@ bool Document::warnIfOlderVersion()
 bool Document::save()
 {
     if (d->_pcDocument->isSaved()) {
+        // FreeCAD-CH (ops#640, A2): the file changed on disk since it was read or saved here:
+        // the three ways out, none losing a version
+        const App::Document::FileChange change = getDocument()->fileChangeOnDisk();
+        if (change.changed) {
+            return askOnFileChange(this, change);
+        }
+
         // A file of a newer fork release (ops#323)
         switch (askBeforeSavingNewer({getDocument()}, true)) {
             case NewerSave::Copy:
@@ -2642,6 +2957,7 @@ void Document::slotFinishRestoreDocument(const App::Document& doc)
     if (d->_pcDocument != &doc) {
         return;
     }
+    checkFileChangesSoon();  // FreeCAD-CH (ops#640, A2)
     d->connectActObjectBlocker.unblock();
     App::DocumentObject* act = doc.getActiveObject();
     if (act) {

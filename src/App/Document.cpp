@@ -56,6 +56,7 @@
 
 #include <QCryptographicHash>
 #include <QCoreApplication>
+#include <QDateTime>
 
 #include <FCConfig.h>
 
@@ -338,6 +339,117 @@ std::string systemUserName()
     }
     return name.toStdString();
 #endif
+}
+
+// FreeCAD-CH (ops#640, slice A2): the save guard. What this process last saw of each document's
+// file, when it read it and after each of its own saves: the file's size and time. The sync tool
+// carries the saver's time across, so a file that arrived from the other computer never matches.
+struct FileStamp
+{
+    std::string path;
+    std::uintmax_t size = 0;
+    std::filesystem::file_time_type time {};
+};
+std::map<const Document*, FileStamp> fileStamps;
+// Documents whose next save goes over a changed file on purpose (resolveFileChange)
+std::set<const Document*> guardSkipped;
+
+std::optional<FileStamp> stampOf(const std::string& path)
+{
+    std::error_code error;
+    const auto where = Base::FileInfo::stringToPath(path);
+    FileStamp stamp;
+    stamp.path = path;
+    stamp.size = std::filesystem::file_size(where, error);
+    if (error) {
+        return std::nullopt;
+    }
+    stamp.time = std::filesystem::last_write_time(where, error);
+    if (error) {
+        return std::nullopt;
+    }
+    return stamp;
+}
+
+void recordFile(const Document& doc)
+{
+    if (auto stamp = stampOf(doc.FileName.getStrValue())) {
+        fileStamps[&doc] = *stamp;
+    }
+    else {
+        fileStamps.erase(&doc);
+    }
+}
+
+bool samePath(const std::string& first, const std::string& second)
+{
+    if (first == second) {
+        return true;
+    }
+    std::error_code error;
+    return std::filesystem::equivalent(Base::FileInfo::stringToPath(first),
+                                       Base::FileInfo::stringToPath(second),
+                                       error);
+}
+
+// The author a save writes (A1): the preferences' name, else the system's user name
+std::string saveAuthor()
+{
+    std::string author = App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+                             ->GetASCII("prefAuthor", "");
+    return author.empty() ? systemUserName() : author;
+}
+
+// A saved file's date (ISO, UTC) as the person's local time, for names and messages
+QDateTime localTime(const std::string& iso)
+{
+    QDateTime time = QDateTime::fromString(QString::fromStdString(iso), Qt::ISODate);
+    return time.isValid() ? time.toLocalTime() : QDateTime::currentDateTime();
+}
+
+// A free name beside `file` for a kept version: `<stem> (<who> <yyyy-mm-dd hh-mm>).<ext>`, which no
+// sync tool's conflict pattern and no ignore pattern matches, so it travels as a document
+std::string namedCopy(const std::string& file, const std::string& who, const std::string& when)
+{
+    const Base::FileInfo fi(file);
+    std::string person = who.empty() ? std::string("unknown") : who;
+    for (char& ch : person) {
+        if (std::string_view("<>:\"/\\|?*").find(ch) != std::string_view::npos
+            || static_cast<unsigned char>(ch) < 0x20) {
+            ch = '-';
+        }
+    }
+    const std::string tag =
+        person + " " + localTime(when).toString(QStringLiteral("yyyy-MM-dd HH-mm")).toStdString();
+    const std::string dir = fi.dirPath();
+    const std::string ext = fi.extension().empty() ? std::string("FCStd") : fi.extension();
+    for (int n = 1;; ++n) {
+        const std::string name = (dir.empty() ? std::string() : dir + "/") + fi.fileNamePure() + " ("
+            + tag + (n > 1 ? " " + std::to_string(n) : std::string()) + ")." + ext;
+        if (!Base::FileInfo(name).exists()) {
+            return name;
+        }
+    }
+}
+
+// The sync tools' names for the losing side of a conflict (design section 3, item 3): Syncthing's
+// `<stem>.sync-conflict-<date>-<time>-<device>.<ext>`; Dropbox's `<stem> (<who>'s conflicted copy
+// <date>).<ext>` and Nextcloud's `<stem> (conflicted copy <date> <time>).<ext>`. OneDrive's
+// `<stem>-<computer>.<ext>` is not matched: it can't be told from a document's own name.
+bool isConflictCopy(const std::string& name, const std::string& stem, const std::string& ext)
+{
+    const std::string quotedStem = boost::regex_replace(
+        stem, boost::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\\$&)", boost::match_default | boost::format_perl);
+    const std::string quotedExt = boost::regex_replace(
+        ext, boost::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\\$&)", boost::match_default | boost::format_perl);
+    const boost::regex syncthing("^" + quotedStem + R"(\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}\.)"
+                                     + quotedExt + "$",
+                                 boost::regex::icase);
+    const boost::regex conflictedCopy("^" + quotedStem + R"( \([^)]*conflicted copy[^)]*\)\.)"
+                                          + quotedExt + "$",
+                                      boost::regex::icase);
+    return boost::regex_match(name, syncthing) || boost::regex_match(name, conflictedCopy);
 }
 // The UUIDs of the documents each running import's objects were copied from, by document name
 // (exportObjects writes them, ops#171); under "" the one UUID of a copy of one document's objects
@@ -2278,6 +2390,8 @@ Document::~Document()
 {
     App::forgetEditsSinceOpen(this);
     formerUids.erase(this);
+    fileStamps.erase(this);
+    guardSkipped.erase(this);
     copyUids.erase(this);
 #ifdef FC_LOGUPDATECHAIN
     Console().log("-App::Document: %s %p\n", getName(), this);
@@ -3482,6 +3596,153 @@ bool Document::saveCopy(const char* file) const
     return saveToFile(checked.c_str());
 }
 
+// FreeCAD-CH (ops#640, slice A2): the save guard and the conflict copies
+
+Document::FileChange Document::fileChangeOnDisk() const
+{
+    FileChange change;
+    const std::string file = FileName.getStrValue();
+    const auto known = fileStamps.find(this);
+    if (file.empty() || known == fileStamps.end() || !samePath(known->second.path, file)) {
+        return change;  // nothing read or written here under this name: nothing to compare
+    }
+    const auto now = stampOf(file);
+    if (!now) {
+        return change;  // gone: a save overwrites nothing
+    }
+    if (now->size == known->second.size && now->time == known->second.time) {
+        return change;
+    }
+    change.changed = true;
+    try {
+        const ProjectFile project(file);
+        const ProjectFile::Metadata meta = project.getMetadata();
+        change.by = meta.lastModifiedBy;
+        change.when = meta.lastModifiedDate;
+    }
+    catch (...) {
+        // Not a document we can read: who and when stay unknown
+    }
+    return change;
+}
+
+std::string Document::resolveFileChange(const std::string& choice)
+{
+    const FileChange change = fileChangeOnDisk();
+    if (!change.changed) {
+        throw Base::RuntimeError("The document's file has not changed on disk: nothing to resolve");
+    }
+    const std::string file = FileName.getStrValue();
+    if (choice == "KeepMineAsCopy") {
+        // Mine becomes a document of its own beside theirs (a new id, A1)
+        const std::string copy = namedCopy(file, saveAuthor(), std::string());
+        if (!saveAs(copy.c_str())) {
+            throw Base::FileException("Cannot save this version as a copy", copy);
+        }
+        return copy;
+    }
+    if (choice == "TakeTheirs") {
+        // Mine is kept as a copy (a new id), then theirs is read
+        const std::string copy = namedCopy(file, saveAuthor(), std::string());
+        if (!saveCopy(copy.c_str())) {
+            throw Base::FileException("Cannot save this version as a copy", copy);
+        }
+        restore();
+        return copy;
+    }
+    if (choice == "SaveMineOver") {
+        // Theirs is kept under its author's name and time, then mine is saved over it
+        const std::string kept = namedCopy(file, change.by, change.when);
+        if (!keepFileAs(file, kept)) {
+            throw Base::FileException("Cannot keep the other version: not saved", kept);
+        }
+        guardSkipped.insert(this);
+        struct Restore
+        {
+            const Document* doc;
+            ~Restore()
+            {
+                guardSkipped.erase(doc);
+            }
+        } restoreGuard {this};
+        if (!save()) {
+            throw Base::FileException("Cannot save this version", file);
+        }
+        return kept;
+    }
+    throw Base::ValueError(
+        ("Unknown choice '" + choice + "': KeepMineAsCopy, TakeTheirs or SaveMineOver").c_str());
+}
+
+std::vector<std::string> Document::conflictCopies() const
+{
+    std::vector<std::string> copies;
+    const std::string file = FileName.getStrValue();
+    if (file.empty()) {
+        return copies;
+    }
+    const Base::FileInfo fi(file);
+    const std::string stem = fi.fileNamePure();
+    const std::string ext = fi.extension();
+    std::error_code error;
+    const auto dir = Base::FileInfo::stringToPath(fi.dirPath());
+    for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end;
+         it.increment(error)) {
+        const std::string name = Base::FileInfo::pathToString(it->path().filename());
+        if (isConflictCopy(name, stem, ext) && it->is_regular_file(error)) {
+            copies.push_back(Base::FileInfo::pathToString(it->path()));
+        }
+    }
+    std::sort(copies.begin(), copies.end());
+    return copies;
+}
+
+std::string Document::resolveConflictCopy(const std::string& path, const std::string& choice)
+{
+    const auto copies = conflictCopies();
+    const auto other = std::find_if(copies.begin(), copies.end(), [&](const std::string& copy) {
+        return samePath(copy, path);
+    });
+    if (other == copies.end()) {
+        throw Base::ValueError(("Not a conflict copy of this document: " + path).c_str());
+    }
+    const std::string file = FileName.getStrValue();
+    auto metadataOf = [](const std::string& name) {
+        try {
+            return ProjectFile(name).getMetadata();
+        }
+        catch (...) {
+            return ProjectFile::Metadata {};
+        }
+    };
+    if (choice == "KeepThis") {
+        // The other stays, under its author's name and time: no conflict name any more
+        const ProjectFile::Metadata meta = metadataOf(*other);
+        const std::string kept = namedCopy(file, meta.lastModifiedBy, meta.lastModifiedDate);
+        std::error_code error;
+        std::filesystem::rename(Base::FileInfo::stringToPath(*other),
+                                Base::FileInfo::stringToPath(kept),
+                                error);
+        if (error) {
+            throw Base::FileException("Cannot rename the other version", *other);
+        }
+        return kept;
+    }
+    if (choice == "KeepOther") {
+        // This one is kept under its author's name and time, the other takes the document's
+        // name, and the document reads it
+        const ProjectFile::Metadata meta = metadataOf(file);
+        const std::string kept = namedCopy(file, meta.lastModifiedBy, meta.lastModifiedDate);
+        if (!keepFileAs(file, kept)) {
+            throw Base::FileException("Cannot keep this version: nothing changed", kept);
+        }
+        replaceFileWith(*other, file);
+        restore();
+        return kept;
+    }
+    throw Base::ValueError(("Unknown choice '" + choice + "': KeepThis or KeepOther").c_str());
+}
+
 bool Document::canWriteRecoverySnapshot() const
 {
     return !testStatus(Document::PartialDoc) && !testStatus(Document::TempDoc)
@@ -3511,14 +3772,30 @@ bool Document::save()
         // FreeCAD-CH (ops#640, A1): every save writes who made it (the save guard and the
         // history read it from the file): the author the preferences name, else the system's
         // user name. Upstream's switch "prefSetAuthorOnSave" is no longer read.
-        std::string author =
-            GetApplication()
-                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                ->GetASCII("prefAuthor", "");
-        if (author.empty()) {
-            author = systemUserName();
+        // FreeCAD-CH (ops#640, A2): the save guard. A file that is no longer the one this
+        // document read or last wrote (the other computer's save, carried by the sync) is not
+        // overwritten: the save stops, and resolveFileChange() offers the three ways out (a
+        // script is guarded too)
+        if (!guardSkipped.contains(this)) {
+            const FileChange change = fileChangeOnDisk();
+            if (change.changed) {
+                const std::string who = change.by.empty() ? std::string("Someone") : change.by;
+                const std::string when = change.when.empty()
+                    ? std::string()
+                    : " at "
+                        + localTime(change.when)
+                              .toString(QStringLiteral("yyyy-MM-dd HH:mm"))
+                              .toStdString();
+                throw Base::FileException(
+                    (who + " saved this document" + when
+                     + ", after it was opened here: not saved, so as not to overwrite it. Keep "
+                       "this version as a copy, take the other (this one is kept), or save this "
+                       "one over it (the other is kept)")
+                        .c_str(),
+                    Base::FileInfo(FileName.getValue()));
+            }
         }
-        LastModifiedBy.setValue(author.c_str());
+        LastModifiedBy.setValue(saveAuthor().c_str());
 
         // A newer file (ops#323): the GUI asked first; a script saves, with a warning
         if (isNewerFormat(this)) {
@@ -3526,6 +3803,7 @@ bool Document::save()
         }
         bool result = saveToFile(FileName.getValue());
         if (result) {
+            recordFile(*this);  // the file this document knows now (A2)
             d->programVersion = Application::Config()["BuildVersionMajor"] + "."
                 + Application::Config()["BuildVersionMinor"] + "R"
                 + Application::Config()["BuildRevision"];
@@ -3850,6 +4128,14 @@ void Document::restore(const char* filename,
     }
     Base::FileInfo fi(filename);
     Base::ifstream file(fi, std::ios::in | std::ios::binary);
+    // The file this document knows (A2): its own file as it is read now; another file (a recovery
+    // copy) leaves the guard nothing to compare with
+    if (samePath(filename, FileName.getStrValue())) {
+        recordFile(*this);
+    }
+    else {
+        fileStamps.erase(this);
+    }
     std::streambuf* buf = file.rdbuf();
     std::streamoff size = buf->pubseekoff(0, std::ios::end, std::ios::in);
     buf->pubseekoff(0, std::ios::beg, std::ios::in);

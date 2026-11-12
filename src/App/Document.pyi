@@ -107,6 +107,43 @@ class Document(PropertyContainer):
         """
         ...
 
+    def fileChangeOnDisk(self) -> dict:
+        """
+        FreeCAD-CH (ops#640, slice A2): the save guard's view of the document's file.
+
+        Returns a dict: "changed" (the file is no longer the one this document read or
+        last saved, so save() refuses to overwrite it), "by" and "when" (who saved the
+        file on disk and when, from its LastModifiedBy and LastModifiedDate).
+        """
+        ...
+
+    def resolveFileChange(self, choice: str, /) -> str:
+        """
+        FreeCAD-CH (ops#640, slice A2): the ways out when the document's file changed on
+        disk; none loses a version. "KeepMineAsCopy" saves this document beside the
+        other as a document of its own; "TakeTheirs" keeps this version as a copy and
+        reads the other; "SaveMineOver" keeps the other as a copy and saves this one.
+        Returns the copy's file name.
+        """
+        ...
+
+    def conflictCopies(self) -> list:
+        """
+        FreeCAD-CH (ops#640, slice A2): the siblings a sync tool made of the document's
+        file in a conflict (Syncthing's ".sync-conflict-" names, the "conflicted copy"
+        names of Dropbox and Nextcloud).
+        """
+        ...
+
+    def resolveConflictCopy(self, path: str, choice: str, /) -> str:
+        """
+        FreeCAD-CH (ops#640, slice A2): settles a conflict copy; neither version is lost.
+        "KeepThis" gives the other its author's name and time; "KeepOther" keeps this
+        version under its author's name and time, puts the other under the document's
+        name and reads it. Returns the renamed or kept file's name.
+        """
+        ...
+
     def canWriteRecoverySnapshot(self) -> bool:
         """
         Return whether the document is in an App-side state that allows writing
