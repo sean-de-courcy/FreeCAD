@@ -65,6 +65,7 @@ prints the differences of two record files.
 import json
 import math
 import os
+import re
 import sys
 
 FORMAT = 1
@@ -908,13 +909,15 @@ DELTA_TOLERANCE = (1e-9, 1e-12)
 
 def deltaEntries(expected, actual, stage, rel=DELTA_TOLERANCE[0]):
     """{where: entry} for every float leaf that differs, old from `expected`, new from `actual`;
-    a difference that isn't a float is returned apart, as lines (a delta can't hold it)."""
-    entries, others = {}, []
+    and, as lines, every difference those entries don't cover: whatever `compare` (names, refs,
+    guesses, objects, types included) still reports with the entries as the record's deltas. A
+    delta can't hold those, and a caller that writes delta files must stop on them (ops#640:
+    make_delta skipped a names change and the corpus failed after it)."""
+    entries = {}
     for where, e, a in differences(expected, actual, stage):
         if isinstance(e, float) and isinstance(a, (int, float)) and not isinstance(a, bool):
             entries[where] = {"old": e, "new": float(a), "rel": rel}
-        else:
-            others.append(f"{where}: expected {_short(e)}, got {_short(a)}")
+    others, _ = compare(expected, actual, stage, deltas=entries, allDeltas=False)
     return entries, others
 
 
@@ -999,16 +1002,50 @@ def applyDelta(base, changes):
     return out
 
 
+# A names line's `m=` field (the element's area or length) is a measure printed beside the name,
+# not the area record: the float records and their deltas own areas, volumes and centres at their
+# own tolerance. Names lines compare their `m=` within this relative tolerance, the rest of the
+# line exactly (the coordinator's ruling c742, ops#640).
+NAMES_MEASURE_REL = 1e-3
+_MEASURE = re.compile(r"(.*? m=)(-?\d+(?:\.\d+)?)( : .*)", re.S)
+
+
+def unmatchedNameLines(expected, actual, rel=NAMES_MEASURE_REL):
+    """(gone, new): the lines of `expected` with no partner in `actual`, and the reverse, sorted.
+    A partner is the same line except for its `m=` value, which may differ by `rel` relative;
+    each line partners at most one (equal lines counted differently don't match)."""
+    def groups(lines):
+        out = {}
+        for line in lines:
+            m = _MEASURE.fullmatch(line)
+            key = (m.group(1), m.group(3)) if m else (line, None)
+            out.setdefault(key, []).append((float(m.group(2)) if m else 0.0, line))
+        return out
+
+    eg, ag = groups(expected), groups(actual)
+    gone, new = [], []
+    for key in set(eg) | set(ag):
+        es, acts = sorted(eg.get(key, [])), sorted(ag.get(key, []))
+        for i in range(max(len(es), len(acts))):
+            if i < len(es) and i < len(acts):
+                e, a = es[i][0], acts[i][0]
+                if abs(e - a) <= rel * max(abs(e), abs(a)):
+                    continue
+            if i < len(es):
+                gone.append(es[i][1])
+            if i < len(acts):
+                new.append(acts[i][1])
+    return sorted(gone), sorted(new)
+
+
 def _compareNames(c, name, expected, actual, limit=8):
     if expected == actual:
         return
     if expected is None or actual is None:
         c.differ(f"{name}.names", expected is not None, actual is not None)
         return
-    gone = sorted(set(expected) - set(actual))
-    new = sorted(set(actual) - set(expected))
+    gone, new = unmatchedNameLines(expected, actual)
     if not gone and not new:
-        c.lines.append(f"{name}.names: the same lines, counted differently")
         return
     lines = [f"{name}.names: {len(gone)} lines gone, {len(new)} new"]
     lines += ["  - " + line for line in gone[:limit]]

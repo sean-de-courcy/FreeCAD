@@ -297,6 +297,7 @@ set(PartDesign_NamingGolden
 # The CI reopen gate (FreeCAD-CH, ops#323): its scripts and the committed generations
 set(PartDesign_Compat
     PartDesignTests/Compat/__init__.py
+    PartDesignTests/Compat/make_delta.py
     PartDesignTests/Compat/make_generation.py
     PartDesignTests/Compat/models.py
     PartDesignTests/Compat/models_assembly.py

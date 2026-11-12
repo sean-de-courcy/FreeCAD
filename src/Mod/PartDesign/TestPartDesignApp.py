@@ -189,3 +189,4 @@ from PartDesignTests.TestStudioMerge import TestStudioMerge
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus
 from PartDesignTests.Compat.TestCompatRecord import TestCompatRecord  # ops#343
+from PartDesignTests.Compat.TestCompatRecord import TestCompatDeltas, TestCompatNamesMeasure  # ops#640
