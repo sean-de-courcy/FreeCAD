@@ -503,6 +503,67 @@ class TestQuickMeasureGui(unittest.TestCase):
         self.assertEqual(text, "")
         self.assertIn("X: " + self.length(20), tip)
 
+    # FreeCAD-CH (ops#673, selection parity 11): an edge picked at its middle (the midpoint
+    # marker's 8 px) measures as that point, as in Onshape (SP10-Q9: "Point", then "Min dist"
+    # 10 mm with a corner). Box A's top edge on y = 0 runs from (0,0,10) to (10,0,10).
+    def topEdge(self):
+        shape = self.doc.getObject("A").Shape
+        for i, edge in enumerate(shape.Edges, 1):
+            ends = {tuple(round(c, 6) for c in v.Point) for v in edge.Vertexes}
+            if ends == {(0.0, 0.0, 10.0), (10.0, 0.0, 10.0)}:
+                return "Edge%d" % i
+        self.fail("no top edge on y = 0")
+
+    def corner(self):
+        shape = self.doc.getObject("A").Shape
+        for i, vertex in enumerate(shape.Vertexes, 1):
+            if (vertex.Point - App.Vector(0, 0, 10)).Length < 1e-9:
+                return "Vertex%d" % i
+        self.fail("no corner (0,0,10)")
+
+    def selectPicked(self, *picks):
+        """Like select, with picks (obj, sub, point or None) made in the 3D view."""
+        import time
+
+        view = Gui.ActiveDocument.ActiveView
+        view.viewIsometric()
+        view.fitAll()
+        Gui.Selection.clearSelection()
+        for obj, sub, point in picks:
+            if point is None:
+                Gui.Selection.addSelection(self.doc.Name, obj, sub)
+            else:
+                Gui.Selection.addSelection(self.doc.Name, obj, sub, point.x, point.y, point.z)
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end:
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.02)
+        label = Gui.getMainWindow().statusBar().findChild(QtWidgets.QLabel, "rightSideLabel")
+        self.assertIsNotNone(label, "no Quick Measure label")
+        return label.text(), label.toolTip()
+
+    def testEdgeMiddleIsAPoint(self):
+        text, tip = self.selectPicked(("A", self.topEdge(), App.Vector(5, 0, 10)))
+        self.assertEqual(text, "")
+        self.assertIn("X: " + self.length(5), tip)
+        self.assertIn("Z: " + self.length(10), tip)
+
+    def testEdgeMiddleAndCorner(self):
+        text, _ = self.selectPicked(
+            ("A", self.topEdge(), App.Vector(5, 0, 10)), ("A", self.corner(), None)
+        )
+        self.assertIn("Distance: " + self.length(5), text)
+
+    def testEdgeAwayFromMiddleIsTheEdge(self):
+        # 4 mm from the middle is far more than 8 px with the model fitted
+        text, _ = self.selectPicked(("A", self.topEdge(), App.Vector(1, 0, 10)))
+        self.assertIn("Length: " + self.length(10), text)
+
+    def testEdgeWithoutPickIsTheEdge(self):
+        # a selection made without a 3D pick carries (0,0,0)
+        text, _ = self.selectPicked(("A", self.topEdge(), None))
+        self.assertIn("Length: " + self.length(10), text)
+
 
 class TestMassPropertiesNoMaterial(unittest.TestCase):
     """Rank 16 (ops#640, hands-on D-3): a part with no material is not weighed as water.

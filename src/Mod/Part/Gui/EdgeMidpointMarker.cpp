@@ -22,11 +22,14 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <cmath>
 
 #include <QMouseEvent>
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <Precision.hxx>
 #include <TopExp.hxx>
@@ -161,7 +164,8 @@ App::DocumentObject* objectInEdit(const char* docName)
 /// the middle of the model edge a 3D pick names (document, object, full subname), if it has one
 std::optional<Base::Vector3d> edgeMiddle(const char* docName,
                                          const char* objName,
-                                         const char* subName)
+                                         const char* subName,
+                                         const Base::Vector3d* picked = nullptr)
 {
     App::Document* document = docName ? App::GetApplication().getDocument(docName) : nullptr;
     App::DocumentObject* object = document && objName ? document->getObject(objName) : nullptr;
@@ -184,7 +188,21 @@ std::optional<Base::Vector3d> edgeMiddle(const char* docName,
         if (inEdit && owner == inEdit) {
             return std::nullopt;
         }
-        return EdgeMidpointMarker::middleOf(TopoDS::Edge(shape));
+        const TopoDS_Edge& edge = TopoDS::Edge(shape);
+        std::optional<Base::Vector3d> middle = EdgeMidpointMarker::middleOf(edge);
+        // FreeCAD-CH (ops#673): a 3D pick lies on the edge (on its tessellation); a selection
+        // made without one (Python, the tree) carries (0,0,0), which must not count as a pick
+        if (middle && picked) {
+            BRepExtrema_DistShapeShape distance(
+                BRepBuilderAPI_MakeVertex(gp_Pnt(picked->x, picked->y, picked->z)).Vertex(),
+                edge);
+            const double length = GCPnts_AbscissaPoint::Length(BRepAdaptor_Curve(edge));
+            if (!distance.IsDone()
+                || distance.Value() > std::max(0.1 * length, Precision::Confusion())) {
+                return std::nullopt;
+            }
+        }
+        return middle;
     }
     catch (const Base::Exception&) {
         return std::nullopt;
@@ -217,7 +235,7 @@ std::optional<Base::Vector3d> EdgeMidpointMarker::pickedMiddle(const char* docNa
                                                                const Base::Vector3d& picked)
 {
     Gui::View3DInventorViewer* viewer = viewerOf(docName);
-    const std::optional<Base::Vector3d> middle = edgeMiddle(docName, objName, subName);
+    const std::optional<Base::Vector3d> middle = edgeMiddle(docName, objName, subName, &picked);
     if (!viewer || !middle
         || pixelDistance(viewer, onViewport(viewer, *middle), onViewport(viewer, picked))
             > radiusPixels) {
