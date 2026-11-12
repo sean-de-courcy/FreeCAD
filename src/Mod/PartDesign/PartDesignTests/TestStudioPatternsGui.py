@@ -510,6 +510,214 @@ class TestStudioPatternsGui(unittest.TestCase):
             App.setActiveDocument(self.doc.Name)
             Gui.setActiveDocument(self.doc.Name)
 
+    # ------------------------------------------------------------------------------ T1b
+    # Merging, New and split seeds (10.16 settled 2, 3, 7): their instances make parts or split
+    # one, which only the command makes (P6p); the dialog's OK is that command.
+    def liveParts(self):
+        return PartDesign.studioLiveParts(studioList(self.doc))
+
+    def madeBy(self, owner):
+        return [o for o in self.doc.Objects
+                if o.TypeId == "PartDesign::Body" and getattr(o, "StudioMadeBy", None) == owner]
+
+    def newSeed(self):
+        """N: a New Pad 10 x 10 x 5 (500) at x 0..10, y 70..80, its own part."""
+        sk = studioSketch(self.doc, self.S, "NSk", rects=((0, 70, 10, 80),), z=0)
+        n = makeOwner(self.doc, self.S, "Pad", "N", sk, (), Length=5)
+        self.doc.openTransaction("new part")
+        PartDesign.studioNewPart(n)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(n.isValid(), n.getStatusString())
+        return n
+
+    def slot(self):
+        """Slot: a 4 wide Remove through both plates at x 30..34 (over Across), splitting each;
+        its pieces made: four parts."""
+        sk = studioSketch(self.doc, self.S, "SlotSk", rects=((30, -5, 34, 65),), z=10)
+        slot = makeOwner(self.doc, self.S, "Pocket", "Slot", sk, ("P", "Q"), Length=10)
+        self.doc.recompute()
+        self.doc.openTransaction("pieces")
+        PartDesign.studioMakePieces(slot)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(len(self.liveParts()), 4)
+        return slot
+
+    def bosses(self):
+        """Bosses: an Add on P and on Q, 4 x 4 x 2 on top of each plate at x 40..44."""
+        sk = studioSketch(
+            self.doc, self.S, "BossesSk", rects=((40, 5, 44, 9), (40, 45, 44, 49)), z=10
+        )
+        bosses = makeOwner(self.doc, self.S, "Pad", "Bosses", sk, ("P", "Q"), Length=2)
+        self.doc.recompute()
+        return bosses
+
+    def tickReapply(self):
+        self.assertTrue(waitFor(lambda: reapplyBox() is not None), "no Reapply box")
+        box = reapplyBox()
+        self.assertTrue(box.isEnabled())
+        self.assertFalse(box.isChecked())
+        box.click()
+        pump(0.3)
+
+    def testOkMakesTheNewSeedsParts(self):
+        """Acceptance 6 through the panel (settled 3): the New seed patterned (two instances 25
+        apart along x): OK makes the instance a part of its own, made by the pattern, 500 at
+        x 25..35, with no second step; the pattern valid; one undo step takes the pattern and
+        its part back; redo brings them again."""
+        n = self.newSeed()
+        undo, names = self.doc.UndoCount, sorted(o.Name for o in self.doc.Objects)
+        live = len(self.liveParts())
+        self.runTool("PartDesign_LinearPattern", n)
+        pattern = self.pattern()
+        self.assertEqual(pattern.Originals, [n])
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        made = self.madeBy(pattern)
+        self.assertEqual(len(made), 1, [b.Name for b in made])
+        self.assertAlmostEqual(made[0].Shape.Volume, 500, places=3)
+        self.assertAlmostEqual(made[0].Shape.BoundBox.Center.x, 30, places=6)
+        self.assertEqual(len(self.liveParts()), live + 1)
+        self.assertTip("P", PLATE - HOLE - ACROSS)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertEqual(len(self.liveParts()), live)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(len(self.madeBy(pattern)), 1)
+
+    def testCancelOnANewSeedLeavesNothing(self):
+        """The New seed's pattern cancelled: no object, no part, no undo step."""
+        n = self.newSeed()
+        undo, names = self.doc.UndoCount, sorted(o.Name for o in self.doc.Objects)
+        live = len(self.liveParts())
+        self.runTool("PartDesign_LinearPattern", n)
+        self.pattern()
+        self.cancel()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertEqual(len(self.liveParts()), live)
+        self.assertEqual(self.doc.UndoCount, undo)
+
+    def testSplitSeedRefusedUntilReapplyThenOkMakesThePieces(self):
+        """Acceptance 5 through the panel (settled 7, facts U6): the Slot that split both plates,
+        patterned: with Reapply off the Features field shows Onshape's words; Reapply ticked,
+        the live preview clears them; OK cuts every piece at the instance (x 55..59) and makes
+        the pieces parts: six, valid; one undo step takes them back to the Slot's four."""
+        slot = self.slot()
+        undo, names = self.doc.UndoCount, sorted(o.Name for o in self.doc.Objects)
+        self.runTool("PartDesign_LinearPattern", slot)
+        pattern = self.pattern()
+        field = self.field()
+        self.assertFalse(pattern.isValid())
+        self.assertIn("Could not create all instances as entered.", statusOf(field))
+        self.assertIn('Try selecting "Reapply features" option.', statusOf(field))
+        self.tickReapply()
+        self.assertTrue(pattern.Reapply)
+        self.assertNotIn("Could not create all instances", statusOf(field))
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        volumes = sorted(round(b.Shape.Volume, 3) for b in self.liveParts())
+        self.assertEqual(
+            volumes, sorted([round(6000 - HOLE, 3), 6000.0, 4200.0, 4200.0, 200.0, 200.0])
+        )
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertEqual(len(self.liveParts()), 4)
+
+    def testAddOnTwoPartsRefusedUntilReapplyThenOkMakesItsParts(self):
+        """Settled 2 and Q7 through the panel: Bosses (an Add on P and Q) patterned, Reapply off:
+        Onshape's words in the field; ticked, they go; the instances (x 65..69) join no part, and
+        OK makes each a part of its own (32 each), the pattern valid, the plates untouched."""
+        bosses = self.bosses()
+        before = {p: self.doc.getObject(p).Tip.Shape.Volume for p in "PQ"}
+        self.runTool("PartDesign_LinearPattern", bosses)
+        pattern = self.pattern()
+        field = self.field()
+        self.assertIn("Could not create all instances as entered.", statusOf(field))
+        self.tickReapply()
+        self.assertNotIn("Could not create all instances", statusOf(field))
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        made = self.madeBy(pattern)
+        self.assertEqual(len(made), 2, [b.Name for b in made])
+        for body in made:
+            self.assertAlmostEqual(body.Shape.Volume, 32, places=3)
+        for p in "PQ":
+            self.assertAlmostEqual(self.doc.getObject(p).Tip.Shape.Volume, before[p], places=3)
+
+    def lateOnQ(self):
+        """HoleQ, an r3 hole in Q at (10, 50), then Late, a boss on Q after it: Q's Tip is
+        Late's step, whose hole wall HoleQ made."""
+        sk = studioSketch(self.doc, self.S, "HoleQSk", z=10, circles=((10, 50, 3),))
+        holeQ = makeOwner(self.doc, self.S, "Pocket", "HoleQ", sk, ("Q",), Length=5)
+        sk = studioSketch(self.doc, self.S, "LateSk", rects=((50, 45, 55, 50),), z=10)
+        late = makeOwner(self.doc, self.S, "Pad", "Late", sk, ("Q",), Length=2)
+        self.doc.recompute()
+        self.assertEqual(self.doc.getObject("Q").Tip, self.step(late, "Q"))
+        return holeQ, late
+
+    def testFaceOfAnotherPartPicksTheFeatureThatMadeIt(self):
+        """T1b cross-part picks: with P active, a pick of the hole wall in Q's solid adds HoleQ
+        (the feature that made the face), not Late (Q's last feature)."""
+        holeQ, late = self.lateOnQ()
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        pattern = self.pattern()
+        field = self.field()
+        field.setProperty("armed", True)
+        pump(0.1)
+        self.assertTrue(waitFor(lambda: armed(field)), "the field isn't armed")
+        qTip = self.doc.getObject("Q").Tip
+        self.pick(qTip, self.holeFace(qTip))
+        self.assertEqual(pattern.Originals, [self.hole, holeQ])
+
+    def testPartsListRowIsRefused(self):
+        """A pick of a part (a Parts-list row: its Body) is no original: refused with a status
+        line, the Features list unchanged."""
+        from PartDesignTests.TestDressUpDeleteKeyGui import statusText
+
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        pattern = self.pattern()
+        field = self.field()
+        field.setProperty("armed", True)
+        pump(0.1)
+        self.assertTrue(waitFor(lambda: armed(field)), "the field isn't armed")
+        self.pick(self.doc.getObject("Q"))
+        self.assertEqual(pattern.Originals, [self.hole])
+        self.assertEqual(entries(field).count(), 1)
+        text = statusText() + " " + statusOf(field)
+        self.assertIn("not a part", text)
+
+    def testAPartGivenAStepInTheDialogIsPreviewed(self):
+        """T1b preview: the Hole patterned, then HoleQ added in the open dialog: Q gets a step,
+        shown in place of Q's solid before it, as P's step is shown."""
+        sk = studioSketch(self.doc, self.S, "HoleQSk", z=10, circles=((10, 50, 3),))
+        holeQ = makeOwner(self.doc, self.S, "Pocket", "HoleQ", sk, ("Q",), Length=5)
+        self.doc.recompute()
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        pattern = self.pattern()
+        field = self.field()
+        field.setProperty("armed", True)
+        pump(0.1)
+        self.assertTrue(waitFor(lambda: armed(field)), "the field isn't armed")
+        self.pick(holeQ)
+        pump(0.3)
+        for part in "PQ":
+            with self.subTest(part):
+                step = self.step(pattern, part)
+                self.assertIsNotNone(step, part)
+                self.assertTrue(step.ViewObject.Visibility, f"{part}'s step is hidden")
+                base = step.BaseFeature
+                self.assertIsNotNone(base)
+                self.assertFalse(base.ViewObject.Visibility, f"{part}'s solid before is shown")
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+
 
 if __name__ == "__main__":
     unittest.main()
