@@ -3384,10 +3384,6 @@ static void makeFacePattern(Gui::Command* cmd, const std::string& which)
                 Feat,
                 "Direction = (" << Gui::Command::getObjectCmd(origin->getX()) << ",[''])"
             );
-            FCMD_OBJ_CMD(
-                Feat,
-                "Direction2 = (" << Gui::Command::getObjectCmd(origin->getY()) << ",[''])"
-            );
             // Distance is the spacing between neighbouring instances; count 2
             FCMD_OBJ_CMD(Feat, "Mode = 'Spacing'");
             FCMD_OBJ_CMD(Feat, "Offset = 20");
