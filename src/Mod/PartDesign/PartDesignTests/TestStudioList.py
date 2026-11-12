@@ -936,12 +936,14 @@ def oracle(natives, records, bar, live=None):
             solids = sorted(result.Solids, key=lambda solid: solid.BoundBox.Center.x)
             x0, _, x1, _ = record["rect"]
             claims = {}
-            if len(solids) > 1:
-                for pid in recs:
+            # Seed 5: a cut that takes all of p (no solid left) holds nothing either: the step
+            # fails, p is split (no part) and its pieces fail, as the split step reports it
+            if len(solids) != 1:
+                for pid in recs if solids else ():
                     if own[pid][1] in ("L", "R"):
                         claims[pid] = solids[0] if own[pid][1] == "L" else solids[-1]
                 held = {id(solid) for solid in claims.values()}
-                if len(claims) == len(held) == len(solids):
+                if solids and len(claims) == len(held) == len(solids):
                     shapes[p] = result
                 else:
                     claims = {}
