@@ -1313,6 +1313,33 @@ class RegressionTests(unittest.TestCase):
                     normals[(axis, round(low, 6))] = face.normalAt(0, 0)
         return normals
 
+    def test_centre_of_a_drilled_cylinder_is_quick(self):
+        """A cylinder drilled by 60 radial through-holes, 10 to a ring, every face taking the
+        adaptive integration: its centre of mass took 6.5 s against the volume's 0.4 s (SC7 b,
+        ops#640); the moments now take a looser tolerance, the mass the volume's. Each hole is
+        symmetric about the axis and about its ring's plane, and the rings differ by a turn
+        about the axis, so the centre is on the axis, at the cylinder's moment less the rings'
+        (the volume removed, centred on the rings' mean x 90) over the volume"""
+        import time
+        cylinder = Part.makeCylinder(50.0, 200.0, Base.Vector(), Base.Vector(1, 0, 0))
+        holes = []
+        for i in range(6):
+            for j in range(10):
+                angle = 2 * math.pi * j / 10 + 0.3 * i
+                d = Base.Vector(0, math.cos(angle), math.sin(angle))
+                holes.append(Part.makeCylinder(
+                    3.0 + 0.3 * j, 120.0, Base.Vector(15 + 30 * i, 0, 0) - d * 60, d))
+        solid = cylinder.cut(Part.makeCompound(holes)).Solids[0]
+        volume = solid.Volume
+        whole = math.pi * 50.0**2 * 200.0
+        expected = Base.Vector((whole * 100.0 - (whole - volume) * 90.0) / volume, 0, 0)
+        start = time.perf_counter()
+        centre = solid.CenterOfMass
+        elapsed = time.perf_counter() - start
+        self.assertLess((centre - expected).Length, 2e-4)
+        self.assertAlmostEqual(solid.Mass / volume, 1.0, delta=1e-9)
+        self.assertLess(elapsed, 4.5, "the centre of mass took %.2f s" % elapsed)
+
     def test_readouts_of_a_scaled_sphere(self):
         """A sphere scaled by (1, 1, 1.6), a rational B-spline of few spans (the native replica's
         #97, oracle 7's SC7): OCCT's default integration read its area 3.4e-3 high. The readouts

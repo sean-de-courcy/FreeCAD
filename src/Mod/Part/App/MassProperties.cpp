@@ -1258,11 +1258,44 @@ bool hasFreeForm(const TopoDS_Shape& shape)
 // its inertia took 82 s on one scaled sphere (Onshape's volumes are within 2e-5)
 constexpr double readoutTolerance = 1e-9;
 
+// The centre and inertia readouts' relative tolerance, the mass keeping adaptiveTolerance (SC7 b,
+// ops#640). On a cylinder drilled by 60 holes the centre took 6.5 s at 1e-6, 3.8 s at 1e-5,
+// 1.8 s at 1e-4 (5e-5 mm from a 1e-8 run; the inertia 7e-7 relative) and 0.7 s at 1e-3: OCCT's
+// error estimate covers every moment, the near-zero ones too
+constexpr double momentsTolerance = 1e-4;
+
+namespace
+{
+
+// Props with its mass replaced by a more accurate one, the inertia (about the location) scaled
+// alike and the centre kept
+class WithMass: public GProp_GProps
+{
+public:
+    WithMass(const GProp_GProps& props, double mass)
+        : GProp_GProps(props)
+    {
+        if (dim != 0.0) {
+            inertia *= mass / dim;
+        }
+        dim = mass;
+    }
+};
+
+}  // namespace
+
 void readoutVolumeProperties(const TopoDS_Shape& shape, GProp_GProps& props)
 {
-    // Not forced on free-form faces: the adaptive centre and inertia of SC7's scaled sphere took
-    // 74 s (debt, ops#640); the mass readouts take readoutVolume()
-    integrateVolume(shape, props, true, false);
+    // Not forced on free-form faces (debt, ops#640): the adaptive centre of SC7's scaled sphere
+    // took 92 s even at 1e-4 (75 s at 1e-5), its moments about the centre being near zero, while
+    // the default integration put a drilled cylinder's centre 7.7e-4 mm off its axis
+    if (!needsAdaptive(shape)) {
+        integrateVolume(shape, props, true, false);
+        return;
+    }
+    GProp_GProps moments = props;
+    integrateVolume(shape, moments, true, true, momentsTolerance);
+    props = WithMass(moments, volume(shape, true));
 }
 
 void readoutSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
