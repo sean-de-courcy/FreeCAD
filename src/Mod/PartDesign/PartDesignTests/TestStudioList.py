@@ -856,7 +856,7 @@ def listOf(doc):
     return natives, records, bar
 
 
-def oracle(natives, records, bar, live=None, capture=None):
+def oracle(natives, records, bar, live=None, capture=None, gaps=None):
     """Per part, (volume, solids) by Part booleans from the list as data, never by reconcile
     (the S1 skeptic, 2026-11-10: fromScratch() reconciles too, so it shows only that incremental
     and one-shot reconcile agree). Records apply in list order up to the bar, each to the parts
@@ -879,7 +879,9 @@ def oracle(natives, records, bar, live=None, capture=None):
     from the parts its command made, with the side of its slot each was made on) make parts at
     its place: each holds the solid on its side of the split, the parent is no part after it,
     and scopes resolve an id to its living descendants. Out: "piece:<id>" -> (volume, solids),
-    or "failed" when the record holds nothing.
+    or "failed" when the record holds nothing. A pattern's or a mirror's split (its records name
+    a parent) is not modelled: gaps, a set, gets those pieces, and the geometric checks skip the
+    state (seed 4 op 78: a Remove mirror of C splitting C once an Add before it grew C).
 
     Merges (10.13, Onshape O9, O9b, M1, M2): a Union box record whose tool joins two or more of
     its resolved parts (their fuse has fewer solids than its inputs: overlap or a face, never an
@@ -1071,6 +1073,8 @@ def oracle(natives, records, bar, live=None, capture=None):
             if parent:
                 parentOf[pid] = parent
                 failed.add(pid)  # a piece of a split: not modelled
+                if gaps is not None:
+                    gaps.add(pid)
             elif leftovers is not None and pid in claims:
                 shapes[pid] = leftovers[claims[pid]]
             elif leftovers is not None and pid in dormant:
@@ -1207,6 +1211,8 @@ def oracle(natives, records, bar, live=None, capture=None):
                 if parent:
                     parentOf[pid] = parent
                     failed.add(pid)  # a piece of a split: the gate's slots make none
+                    if gaps is not None:
+                        gaps.add(pid)
                 elif side in leftovers:
                     shapes[pid] = leftovers[side]
                 else:
@@ -1238,6 +1244,8 @@ def oracle(natives, records, bar, live=None, capture=None):
                 if parent:
                     parentOf[pid] = parent
                     failed.add(pid)  # a piece of a split: not modelled, it fails
+                    if gaps is not None:
+                        gaps.add(pid)
                 elif leftover is not None:
                     shapes[pid] = leftover
                     leftover = None  # one solid: the first record holds it
@@ -1567,12 +1575,13 @@ def liveKey(body):
     return "new:" + maker.Name if maker is not None else body.Name
 
 
-def oracleDifferences(doc):
+def oracleDifferences(doc, gaps=None):
     """oracle() against each Tip's shape (the state at the bar), and the Body's own shape when
     it is not rolled back; plus hygiene: nothing touched or invalid after a recompute, no step
     without an owner or outside every Body."""
     live = set()
-    want = oracle(*listOf(doc), live=live)
+    gaps = set() if gaps is None else gaps
+    want = oracle(*listOf(doc), live=live, gaps=gaps)
     found = []
     bodies = [doc.getObject(p) for p, _ in PARTS]
     pieceBodies = [
@@ -1581,7 +1590,7 @@ def oracleDifferences(doc):
     # P8a: the Part oracle doesn't model a fillet, and a rounded part changes what later
     # records do with it (a merge's contact, a copy's shape): with a fillet active anywhere,
     # G1, G2, the step counts and the hygiene below check the state
-    geometric = not any(
+    geometric = not gaps and not any(
         activeFillet(b) for b in doc.Objects if b.TypeId == "PartDesign::Body"
     )
     if geometric:
@@ -2548,6 +2557,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.resyncMade = set()  # (seed, part id): leftovers the resync made in an edit's step
         self.leftoversSeen = 0  # states with a live leftover part the resync made (10.12 amendment)
         self.copiesSeen = 0  # states with a live part a part pattern made (T2)
+        self.gapsSeen = 0  # states with a pattern's or a mirror's split the oracle doesn't model
         self.sourcesSeen = 0  # states with a source a part pattern consumed (T2)
         self.kinds = {}  # the edit kinds drawn
 
@@ -3030,7 +3040,10 @@ class TestStudioListProperty(unittest.TestCase):
                 continue
             want = fromScratch(*listOf(doc), maker=propStudio)
             found = differences(got, want)
-            found += ["oracle " + d for d in oracleDifferences(doc)]
+            gaps = set()
+            found += ["oracle " + d for d in oracleDifferences(doc, gaps)]
+            if gaps:
+                self.gapsSeen += 1
             found += ["G1 " + d for d in gateG1(doc)[:4]]
             # A part consumed at the bar by a Boolean or a part mirror (a split's parent, P6p,
             # is no consumed part here)
@@ -3133,7 +3146,8 @@ class TestStudioListProperty(unittest.TestCase):
               f"pattern's part, {self.patternMergesSeen} with a pattern's merge, {self.newSeen} with "
               f"a New box's part, {self.leftoversSeen} with a leftover the resync made, "
               f"{self.copiesSeen} with a part pattern's part, {self.sourcesSeen} with a part "
-              f"pattern's consumed source; kinds {sorted(self.kinds.items())}")
+              f"pattern's consumed source, {self.gapsSeen} with a split the oracle doesn't "
+              f"model; kinds {sorted(self.kinds.items())}")
 
 
 if __name__ == "__main__":
