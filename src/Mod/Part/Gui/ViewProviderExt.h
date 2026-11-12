@@ -210,6 +210,8 @@ protected:
     void onChanged(const App::Property* prop) override;
     bool loadParameter();
     void updateVisual();
+    /// FreeCAD-CH (ops#640): shows or hides the edges behind faces as the view setting says
+    void updateHiddenEdges();
     void handleChangedPropertyName(
         Base::XMLReader& reader,
         const char* TypeName,
@@ -225,6 +227,8 @@ protected:
     SoDrawStyle* pcLineStyle;
     SoDrawStyle* pcPointStyle;
     SoShapeHints* pShapeHints;
+    /// FreeCAD-CH (ops#640): the dashed edges behind faces, drawn after the faces
+    SoSwitch* pcHiddenEdges {nullptr};
 
     SoCoordinate3* coords;
     SoBrepFaceSet* faceset;
@@ -253,6 +257,8 @@ private:
 
     // shape that was last rendered so if it does not change we don't re-render it without need
     TopoDS_Shape lastRenderedShape;
+    // FreeCAD-CH (ops#640): whether the tangent edges had lines in that rendering
+    bool lastTangentEdges {true};
 };
 
 }  // namespace PartGui

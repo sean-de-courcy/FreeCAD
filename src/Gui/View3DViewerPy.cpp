@@ -171,6 +171,12 @@ void View3DInventorViewerPy::init_type()
         "setOverrideMode(mode): sets the display override mode."
     );
 
+    add_noargs_method(
+        "getOverrideMode",
+        &View3DInventorViewerPy::getOverrideMode,
+        "getOverrideMode() -> str: the display override mode."
+    );
+
     add_varargs_method(
         "setEnabledNaviCube",
         &View3DInventorViewerPy::setEnabledNaviCube,
@@ -796,6 +802,11 @@ Py::Object View3DInventorViewerPy::setOverrideMode(const Py::Tuple& args)
 
     _viewer->setOverrideMode(std::string(mode));
     return Py::None();
+}
+
+Py::Object View3DInventorViewerPy::getOverrideMode()
+{
+    return Py::String(_viewer->getOverrideMode());
 }
 
 Py::Object View3DInventorViewerPy::setEnabledNaviCube(const Py::Tuple& args)

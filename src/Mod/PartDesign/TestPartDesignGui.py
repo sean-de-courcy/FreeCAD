@@ -115,6 +115,7 @@ from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection pa
     TestProfileFieldStaysArmedGui,
 )
 from PartDesignTests.TestViewToolsGui import (  # FreeCAD-CH, ops#640 view tools
+    TestDisplayStylesGui,
     TestNamedViewsGui,
     TestSectionViewGui,
 )

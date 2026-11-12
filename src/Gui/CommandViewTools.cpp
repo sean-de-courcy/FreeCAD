@@ -29,14 +29,19 @@
 #include <vector>
 
 #include <Inventor/SbVec3f.h>
+#include <QCoreApplication>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
 #include <QPointer>
 #include <QStringList>
 
+#include <App/Application.h>
+#include <Base/Parameter.h>
+
 #include "Action.h"
 #include "Application.h"
+#include "BitmapFactory.h"
 #include "Command.h"
 #include "Document.h"
 #include "MainWindow.h"
@@ -44,6 +49,7 @@
 #include "SectionView.h"
 #include "View3DInventor.h"
 #include "View3DInventorViewer.h"
+#include "ViewProviderDocumentObject.h"
 
 using namespace Gui;
 
@@ -358,6 +364,228 @@ bool StdCmdNamedViews::isActive()
 }
 
 //===========================================================================
+// Std_DisplayStyle and Std_TangentEdges: Onshape's display menu
+//===========================================================================
+
+namespace
+{
+// The display settings of the Part shapes (the view provider reads them where it renders):
+// the same parameters ViewProviderPartExt reads.
+ParameterGrp::handle displayParameters()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Part/View"
+    );
+}
+
+/** The shapes of every open document take a changed display setting. */
+void refreshDisplay()
+{
+    for (App::Document* appDoc : App::GetApplication().getDocuments()) {
+        Gui::Document* doc = Application::Instance->getDocument(appDoc);
+        if (!doc) {
+            continue;
+        }
+        for (ViewProvider* vp :
+             doc->getViewProvidersOfType(ViewProviderDocumentObject::getClassTypeId())) {
+            static_cast<ViewProviderDocumentObject*>(vp)->updateView();
+        }
+    }
+}
+
+// the viewer's override mode of each style of the menu
+const char* const displayModes[] = {"Shaded", "Flat Lines", "Flat Lines", "Wireframe"};
+constexpr int hiddenEdgesStyle = 2;
+}  // namespace
+
+class StdCmdDisplayStyle: public Gui::Command
+{
+public:
+    StdCmdDisplayStyle();
+    ~StdCmdDisplayStyle() override = default;
+    const char* className() const override
+    {
+        return "StdCmdDisplayStyle";
+    }
+    void languageChange() override;
+
+protected:
+    void activated(int iMsg) override;
+    bool isActive() override;
+    Action* createAction() override;
+};
+
+StdCmdDisplayStyle::StdCmdDisplayStyle()
+    : Command("Std_DisplayStyle")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("&Display");
+    sToolTipText = QT_TR_NOOP("Changes how the faces and edges of the model are drawn");
+    sStatusTip = sToolTipText;
+    sWhatsThis = "Std_DisplayStyle";
+    sPixmap = "DrawStyleFlatLines";
+    eType = Alter3DView;
+}
+
+Action* StdCmdDisplayStyle::createAction()
+{
+    auto pcAction = new ActionGroup(this, getMainWindow());
+    pcAction->setDropDownMenu(true);
+    pcAction->setIsMode(true);
+    applyCommandData(this->className(), pcAction);
+
+    const char* const names[] = {
+        "Std_DisplayShaded",
+        "Std_DisplayShadedEdges",
+        "Std_DisplayHiddenEdges",
+        "Std_DisplayWireframe",
+    };
+    const char* const icons[] = {
+        "DrawStyleShaded",
+        "DrawStyleFlatLines",
+        "DrawStyleHiddenLine",
+        "DrawStyleWireFrame",
+    };
+    for (int i = 0; i < 4; ++i) {
+        QAction* item = pcAction->addAction(QString());
+        item->setCheckable(true);
+        item->setIcon(BitmapFactory().iconFromTheme(icons[i]));
+        item->setObjectName(QString::fromLatin1(names[i]));
+        item->setWhatsThis(QString::fromLatin1(getWhatsThis()));
+    }
+    pcAction->setCheckedAction(1);  // shaded with edges is the default
+    pcAction->setIcon(pcAction->actions()[1]->icon());
+
+    _pcAction = pcAction;
+    languageChange();
+    return pcAction;
+}
+
+void StdCmdDisplayStyle::languageChange()
+{
+    Command::languageChange();
+
+    auto pcAction = qobject_cast<ActionGroup*>(_pcAction);
+    if (!pcAction) {
+        return;
+    }
+    const QList<QAction*> items = pcAction->actions();
+    if (items.size() < 4) {
+        return;
+    }
+    items[0]->setText(QCoreApplication::translate("Std_DisplayStyle", "Shaded"));
+    items[0]->setToolTip(QCoreApplication::translate("Std_DisplayStyle", "Faces without edge lines"));
+    items[1]->setText(QCoreApplication::translate("Std_DisplayStyle", "Shaded with edges"));
+    items[1]->setToolTip(QCoreApplication::translate("Std_DisplayStyle", "Faces and edge lines"));
+    items[2]->setText(QCoreApplication::translate("Std_DisplayStyle", "Hidden edges visible"));
+    items[2]->setToolTip(QCoreApplication::translate(
+        "Std_DisplayStyle",
+        "Faces and edge lines, and the edges behind faces drawn dashed and dim"
+    ));
+    items[3]->setText(QCoreApplication::translate("Std_DisplayStyle", "Wireframe"));
+    items[3]->setToolTip(QCoreApplication::translate("Std_DisplayStyle", "Edge lines only"));
+}
+
+void StdCmdDisplayStyle::activated(int iMsg)
+{
+    if (iMsg < 0 || iMsg > 3) {
+        return;
+    }
+    Gui::Document* doc = getActiveGuiDocument();
+    if (!doc) {
+        return;
+    }
+
+    displayParameters()->SetBool("ShowHiddenEdges", iMsg == hiddenEdgesStyle);
+
+    // the first view sets the mode of the shapes, the others follow it
+    bool first = true;
+    for (MDIView* mdi : doc->getMDIViews()) {
+        auto view = qobject_cast<View3DInventor*>(mdi);
+        if (!view || !view->getViewer()) {
+            continue;
+        }
+        if (first) {
+            view->getViewer()->setOverrideMode(displayModes[iMsg]);
+        }
+        else {
+            view->getViewer()->updateOverrideMode(displayModes[iMsg]);
+        }
+        first = false;
+    }
+    refreshDisplay();
+}
+
+bool StdCmdDisplayStyle::isActive()
+{
+    Gui::Document* doc = getActiveGuiDocument();
+    if (!doc) {
+        return false;
+    }
+    auto group = qobject_cast<ActionGroup*>(_pcAction);
+    auto view = qobject_cast<View3DInventor*>(doc->getActiveView());
+    if (group && view && view->getViewer()) {
+        const std::string mode = view->getViewer()->getOverrideMode();
+        const bool hidden = displayParameters()->GetBool("ShowHiddenEdges", false);
+        int style = -1;
+        if (mode == "Shaded") {
+            style = 0;
+        }
+        else if (mode == "Wireframe") {
+            style = 3;
+        }
+        else if (mode == "Flat Lines" || mode == "As Is") {
+            style = hidden ? hiddenEdgesStyle : 1;
+        }
+        // another draw style (points, no shading, hidden line) leaves the menu as it was
+        if (style >= 0 && group->checkedAction() != style) {
+            group->setCheckedAction(style);
+        }
+    }
+    return true;
+}
+
+DEF_STD_CMD_AC(StdCmdTangentEdges)
+
+StdCmdTangentEdges::StdCmdTangentEdges()
+    : Command("Std_TangentEdges")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("&Tangent edges");
+    sToolTipText = QT_TR_NOOP(
+        "Shows the edges where two faces meet tangentially; hidden, only the creases remain"
+    );
+    sWhatsThis = "Std_TangentEdges";
+    sStatusTip = sToolTipText;
+    eType = Alter3DView;
+}
+
+Action* StdCmdTangentEdges::createAction()
+{
+    Action* pcAction = Command::createAction();
+    pcAction->setCheckable(true);
+    return pcAction;
+}
+
+void StdCmdTangentEdges::activated(int iMsg)
+{
+    displayParameters()->SetBool("ShowTangentEdges", iMsg == 1);
+    refreshDisplay();
+}
+
+bool StdCmdTangentEdges::isActive()
+{
+    if (!getActiveGuiDocument()) {
+        return false;
+    }
+    const bool shown = displayParameters()->GetBool("ShowTangentEdges", true);
+    if (_pcAction && _pcAction->isChecked() != shown) {
+        _pcAction->setChecked(shown);
+    }
+    return true;
+}
+
+//===========================================================================
 // registration
 //===========================================================================
 
@@ -369,5 +597,7 @@ void CreateViewToolCommands()
     rcCmdMgr.addCommand(new StdCmdSectionView());
     rcCmdMgr.addCommand(new StdCmdSaveNamedView());
     rcCmdMgr.addCommand(new StdCmdNamedViews());
+    rcCmdMgr.addCommand(new StdCmdDisplayStyle());
+    rcCmdMgr.addCommand(new StdCmdTangentEdges());
 }
 }  // namespace Gui

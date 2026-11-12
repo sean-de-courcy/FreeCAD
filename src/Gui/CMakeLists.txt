@@ -1090,6 +1090,7 @@ SET(Inventor_CPP_SRCS
     Inventor/SoFCBackgroundGradient.cpp
     Inventor/SoFCBoundingBox.cpp
     Inventor/SoSectionCap.cpp
+    Inventor/SoFCDelayedGroup.cpp
     Inventor/SoNaviCube.cpp
     Inventor/SoMouseWheelEvent.cpp
     Inventor/SoFCTransform.cpp
@@ -1133,6 +1134,7 @@ SET(Inventor_SRCS
     Inventor/SoFCBackgroundGradient.h
     Inventor/SoFCBoundingBox.h
     Inventor/SoSectionCap.h
+    Inventor/SoFCDelayedGroup.h
     Inventor/SoNaviCube.h
     Inventor/SoMouseWheelEvent.h
     Inventor/SoFCTransform.h
