@@ -54,6 +54,9 @@ enum class Event
     Other  // undo, redo, abort
 };
 std::map<const App::Document*, Event> lastEvent;
+/// The documents whose objects a document's last recompute ran (by name): a recompute also runs the
+/// objects of other documents its objects depend on, and only the document recomputed signals it (C3h)
+std::map<const App::Document*, std::set<std::string>> recomputedDocs;
 
 const char* GroupMark = "ConfigCacheGroup";
 
@@ -700,6 +703,11 @@ void onStable(const App::Document& doc)
 {
     const Event ev = lastEvent[&doc];
     lastEvent.erase(&doc);
+    std::set<std::string> ran;
+    if (auto it = recomputedDocs.find(&doc); it != recomputedDocs.end()) {
+        ran.swap(it->second);
+        recomputedDocs.erase(it);
+    }
     if (isTemp(&doc) || inPass) {
         return;
     }
@@ -707,9 +715,17 @@ void onStable(const App::Document& doc)
     if ((ev != Event::Recompute && ev != Event::Commit) || doc.isPerformingTransaction()) {
         return;
     }
-    if (ev == Event::Recompute && studioEditDocs.erase(doc.getName())) {
-        touchWaitingInstances();  // a studio edit never runs the pass (ruling 1)
-        return;
+    if (ev == Event::Recompute) {
+        // The studio edits this recompute ended, in its own document or in one it reached (C3h)
+        ran.insert(doc.getName());
+        bool ended = false;
+        for (const auto& name : ran) {
+            ended = studioEditDocs.erase(name) > 0 || ended;
+        }
+        if (ended) {
+            touchWaitingInstances();  // a studio edit never runs the pass (ruling 1)
+            return;
+        }
     }
     if (!requests.empty()) {
         schedulePass();
@@ -722,8 +738,14 @@ void connectDocument(const App::Document& cdoc)
         return;
     }
     auto& doc = const_cast<App::Document&>(cdoc);
-    doc.signalRecomputed.connect([](const App::Document& d, const std::vector<App::DocumentObject*>&) {
+    doc.signalRecomputed.connect([](const App::Document& d, const std::vector<App::DocumentObject*>& objs) {
         lastEvent[&d] = Event::Recompute;
+        auto& ran = recomputedDocs[&d];
+        for (auto obj : objs) {
+            if (obj->isAttachedToDocument() && obj->getDocument() != &d) {
+                ran.insert(obj->getDocument()->getName());
+            }
+        }
     });
     doc.signalCommitTransaction.connect([](const App::Document& d) { lastEvent[&d] = Event::Commit; });
     doc.signalAbortTransaction.connect([](const App::Document& d) { lastEvent[&d] = Event::Other; });
@@ -947,6 +969,7 @@ void registerConfigCacheHooks()
     app.signalNewDocument.connect([](const App::Document& doc, bool) { connectDocument(doc); });
     app.signalDeleteDocument.connect([](const App::Document& doc) {
         lastEvent.erase(&doc);
+        recomputedDocs.erase(&doc);
         studioEditDocs.erase(doc.getName());
         requests.erase(doc.getName());
     });

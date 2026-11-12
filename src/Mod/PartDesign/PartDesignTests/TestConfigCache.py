@@ -224,11 +224,12 @@ class TestConfigCache(unittest.TestCase):
 
     # C3f found: with the syntax fixed, the fill's temporary copy re-opens the VarSet's document by a path
     # under the temporary folder and FreeCAD crashes (Illegal storage access). Skipped so the suite runs;
-    # fixed in C3g (work\configs-c3\handoff6.md).
-    @unittest.skip("C3g: the crash is fixed (PropertyLinks.cpp); the entry stays stale after the refresh (C3h)")
+    # fixed in C3g (work\configs-c3\handoff6.md). C3h: other.recompute() runs only the VarSet; the studio's
+    # recompute is the edit's, which touches the instance (ruling 1), and the one after it refreshes.
     def testCrossDocumentVarSetMarksEntriesStale(self):
         """Review 2: a VarSet in another document drives BPad by expression; its edit marks the
-        studio's entries stale, and the next recompute refreshes them"""
+        studio's entries stale, the studio's recompute touches the instance (ruling 1), and the
+        next recompute refreshes them"""
         folder = tempfile.mkdtemp(prefix="cfgc")
         self.addCleanup(shutil.rmtree, folder, True)
         self.configureSizes()
@@ -247,9 +248,37 @@ class TestConfigCache(unittest.TestCase):
         self.assertTrue(PartDesign.configCacheEntries(self.doc)[0]["stale"])
         other.recompute()
         self.doc.recompute()
+        self.assertTrue(PartDesign.configCacheEntries(self.doc)[0]["stale"])
+        self.assertIn("Touched", link.State)
+        self.doc.recompute()
         self.assertFalse(PartDesign.configCacheEntries(self.doc)[0]["stale"])
         self.assertFalse(invalid(link))
         self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
+
+    def testStudioEditEndedByTheAssemblysRecompute(self):
+        """C3h: the assembly's recompute runs the studio's edited objects (its instance on the shown
+        configuration depends on them), which ends the studio edit though the studio's document
+        never recomputed: the instance on an entry is touched, and the next recompute shows the edit"""
+        folder = tempfile.mkdtemp(prefix="cfgc")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.configureSizes()
+        self.doc.saveAs(os.path.join(folder, "TestConfigurationsStudio.FCStd"))
+        asm = App.newDocument("TestConfigurationsAssembly")
+        asm.saveAs(os.path.join(folder, "TestConfigurationsAssembly.FCStd"))
+        shown = self.instance({"Size": "Small"}, asm)
+        link = self.instance({"Size": "Large"}, asm)
+        self.assertAlmostEqual(linkHeight(shown), 10, delta=TOL)
+        self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
+        self.doc.openTransaction("edit")
+        PartDesign.configSetCell(self.APad, "Length", "Small", "12 mm")
+        PartDesign.configSetCell(self.APad, "Length", "Large", "30 mm")
+        self.doc.commitTransaction()
+        asm.recompute()
+        self.assertAlmostEqual(linkHeight(shown), 12, delta=TOL)
+        self.assertIn("Touched", link.State)
+        asm.recompute()
+        self.assertFalse(invalid(link))
+        self.assertAlmostEqual(linkHeight(link), 30, delta=TOL)
 
     def testPartiallyLoadedStudioNeverGivesAWrongRow(self):
         """Review 3: the assembly reopened alone loads the studio partly; the saved entry shows,
