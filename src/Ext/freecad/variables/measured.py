@@ -238,6 +238,16 @@ def measurement_of(holder, name):
     return None
 
 
+def holder_of(m):
+    """The VarSet holding the variable that reads the measurement `m`, or None."""
+    for holder in m.InList:
+        if holder.isDerivedFrom("App::VarSet"):
+            for prop, _expr in holder.ExpressionEngine:
+                if measurement_of(holder, prop) is m:
+                    return holder
+    return None
+
+
 def is_measured_holder(vs):
     """Whether the VarSet `vs` is a measured variable's own holder: every variable it has is a
     measured one (design section 2: one VarSet per measured variable, so that a measurement of a
@@ -415,6 +425,17 @@ def resolve_pick(root, subname):
     element = element or ""
     if owner is None:
         raise MeasureError("nothing at {}".format(subname))
+    # A link's instance sits where the link places it, its original elsewhere: a reference to
+    # the original would measure the wrong place, silently. Refused, loudly.
+    try:
+        path = root.getSubObjectList(subname)
+    except Exception:
+        path = []
+    for obj in path:
+        if obj.isDerivedFrom("App::Link") or obj.isDerivedFrom("App::LinkElement") \
+                or obj.isDerivedFrom("App::LinkGroup"):
+            raise MeasureError("{} is picked through the link {}: pick the original".format(
+                owner.Label, obj.Label))
     if element and not element[0].isalpha():
         # a mapped name: its indexed form in the owner's shape
         try:

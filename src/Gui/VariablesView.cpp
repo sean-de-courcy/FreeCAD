@@ -60,6 +60,7 @@
 #include <App/DocumentTabs.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
 #include <App/PropertyPythonObject.h>
 #include <App/PropertyStandard.h>
@@ -306,7 +307,7 @@ App::DocumentObject* studioSetOf(const App::DocumentObject* holder)
         return obj && obj->getTypeId() == App::VarSet::getClassTypeId()
             && !App::DocumentTabs::isVariableStudio(obj) && !isMeasuredHolder(obj);
     };
-    if (App::DocumentObject* group = App::GroupExtension::getGroupOfObject(holder)) {
+    if (App::DocumentObject* group = App::GeoFeatureGroupExtension::getGroupOfObject(holder)) {
         if (auto ext = group->getExtensionByType<App::GroupExtension>(true)) {
             for (auto obj : ext->Group.getValues()) {
                 if (isOwnSet(obj)) {
@@ -318,11 +319,11 @@ App::DocumentObject* studioSetOf(const App::DocumentObject* holder)
     }
     App::Document* doc = holder->getDocument();
     App::DocumentObject* named = doc->getObject("Variables");
-    if (isOwnSet(named) && !App::GroupExtension::getGroupOfObject(named)) {
+    if (isOwnSet(named) && !App::GeoFeatureGroupExtension::getGroupOfObject(named)) {
         return named;
     }
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-        if (isOwnSet(obj) && !App::GroupExtension::getGroupOfObject(obj)
+        if (isOwnSet(obj) && !App::GeoFeatureGroupExtension::getGroupOfObject(obj)
             && std::string(obj->Label.getValue()) == "Variables") {
             return obj;
         }
@@ -358,8 +359,19 @@ void foldMeasuredHolders(QStandardItemModel* model, const App::Document* doc)
             continue;
         }
         App::DocumentObject* set = studioSetOf(holder);
-        QStandardItem* target = set ? headerOf(set) : nullptr;
-        if (!target || target == header) {
+        if (!set) {
+            continue;
+        }
+        QStandardItem* target = headerOf(set);
+        if (!target) {
+            // The studio's set has no variables of its own, so no header: this one becomes it
+            const QString label = QString::fromUtf8(set->Label.getValue());
+            header->setText(label);
+            header->setData(QString::fromLatin1(set->getNameInDocument()), Model::HolderRole);
+            header->setToolTip(QString::fromLatin1(set->getNameInDocument()));
+            continue;
+        }
+        if (target == header) {
             continue;
         }
         while (header->rowCount() > 0) {
@@ -2152,16 +2164,17 @@ void VariablesView::rebuild()
         tree->setFirstColumnSpanned(row, QModelIndex(), true);
         QString holder = header.data(VariablesModel::HolderRole).toString();
         tree->setExpanded(header, !collapsed.contains(headerKey(header)));
-        if (holder != currentHolder) {
-            continue;
-        }
         if (currentVariable.isEmpty()) {
-            tree->setCurrentIndex(header);
+            if (holder == currentHolder) {
+                tree->setCurrentIndex(header);
+            }
             continue;
         }
+        // Each row's own holder: a measured variable's row sits under its studio's set (ops#640)
         for (int child = 0; child < model->rowCount(header); ++child) {
             QModelIndex index = model->index(child, currentColumn, header);
-            if (index.data(VariablesModel::VariableRole).toString() == currentVariable) {
+            if (index.data(VariablesModel::HolderRole).toString() == currentHolder
+                && index.data(VariablesModel::VariableRole).toString() == currentVariable) {
                 tree->setCurrentIndex(index);
             }
         }
@@ -2229,7 +2242,8 @@ void VariablesView::onDoubleClicked(const QModelIndex& index)
 {
     // FreeCAD-CH (ops#640, measured variables 2): a measured variable reopens its dialog, as an
     // Onshape Variable feature opens for editing (the name stays editable in place).
-    if (index.data(MeasuredRole).toBool() && index.column() != VariablesModel::NameColumn) {
+    if (index.data(MeasuredRole).toBool() && index.column() != VariablesModel::NameColumn
+        && index.column() != VariablesModel::DescriptionColumn) {
         App::DocumentObject* obj = VariablesModel::holder(index);
         if (!obj) {
             return;

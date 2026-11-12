@@ -200,10 +200,11 @@ class MeasuredPanel:
             self.valueError = ""
             if not self.errorLabel.text().startswith(_tr("Pick")):
                 self.errorLabel.setText("")
-        except measured.MeasureError as e:
+        except Exception as e:  # MeasureError, or an OCC failure on an odd element: never OK
+            self.value = None
             self.valueLabel.setText("")
-            self.valueError = str(e)
-            self.errorLabel.setText(str(e))
+            self.valueError = str(e) or type(e).__name__
+            self.errorLabel.setText(self.valueError)
 
     def message(self, text):
         self.errorLabel.setText(text)
@@ -226,6 +227,11 @@ class MeasuredPanel:
         ref = (feature, element)
         if any(o.Name == feature.Name and s == element for o, s in self.refs):
             return ref
+        holder = measured.holder_of(self.measurement) if self.measurement is not None else None
+        if holder is not None and (feature is holder or holder in feature.OutListRecursive):
+            self.message(_tr("{} uses #{}: measuring it would be a cycle.").format(
+                feature.Label, self.name))
+            return None
         kind = self.kind()
         low, high = measured._COUNTS[kind]
         if high is not None and len(self.refs) >= high:
@@ -265,19 +271,33 @@ class MeasuredPanel:
                 self.addPick(sel.Object, sub)
 
     # selection observer (NoResolve: top-level object and full subname)
+    def alive(self):
+        """Whether the document is still open; a dead panel stops observing."""
+        try:
+            return App.getDocument(self.doc.Name) is self.doc
+        except Exception:
+            self.observe(False)
+            return False
+
     def addSelection(self, docName, objName, sub, pnt=None):
-        if docName != self.doc.Name or not sub:
-            return
-        root = self.doc.getObject(objName)
-        if root is not None:
-            self.addPick(root, sub)
+        try:
+            if not self.alive() or docName != self.doc.Name or not sub:
+                return
+            root = self.doc.getObject(objName)
+            if root is not None:
+                self.addPick(root, sub)
+        except Exception as e:  # never out of a selection callback
+            self.message(str(e))
 
     def removeSelection(self, docName, objName, sub):
-        if docName != self.doc.Name or not sub:
-            return
-        root = self.doc.getObject(objName)
-        if root is not None:
-            self.removePick(root, sub)
+        try:
+            if not self.alive() or docName != self.doc.Name or not sub:
+                return
+            root = self.doc.getObject(objName)
+            if root is not None:
+                self.removePick(root, sub)
+        except Exception as e:
+            self.message(str(e))
 
     def observe(self, on):
         if on and not self.observing:
@@ -349,9 +369,19 @@ class MeasuredPanel:
             pass
 
 
+def _drop_stale():
+    """A panel whose task dialog was closed some other way (a document closed, another dialog's
+    closeDialog) stops observing."""
+    global current
+    if current is not None and not Gui.Control.activeDialog():
+        current.observe(False)
+        current = None
+
+
 def start(doc, name, kind, description=""):
     """From the Variables panel's Add: open the dialog for a new measured variable `name` of `kind`
     in the active part studio. Returns "" or why it can't open (the Add dialog shows it)."""
+    _drop_stale()
     if isinstance(doc, str):
         doc = App.getDocument(doc)
     studio, reason = active_studio(doc)
@@ -379,6 +409,7 @@ def measurement_of(holder, name):
 def edit(holder, name):
     """From the Variables panel (double-click on a measured variable): reopen the dialog on its
     measurement. Returns "" or why it can't open."""
+    _drop_stale()
     if isinstance(holder, (list, tuple)):
         holder = App.getDocument(holder[0]).getObject(holder[1])
     m = measurement_of(holder, name)

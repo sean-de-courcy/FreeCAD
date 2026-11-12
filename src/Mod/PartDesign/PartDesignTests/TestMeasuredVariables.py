@@ -439,5 +439,21 @@ class TestMeasuredVariables(unittest.TestCase):
             self.measured.resolve_pick(self.studio, "{}.{}.".format(self.bodyA.Name, self.padA.Name))
 
 
+    def testPickThroughALinkRefused(self):
+        """A link's instance is elsewhere than its original: a pick through it is refused rather
+        than measuring the original's place."""
+        box = self.doc.addObject("Part::Box", "Block")
+        self.studio.addObject(box)
+        link = self.doc.addObject("App::Link", "BlockLink")
+        link.LinkedObject = box
+        link.Placement = App.Placement(V(50, 0, 0), App.Rotation())
+        self.studio.addObject(link)
+        self.doc.recompute()
+        feature, element = self.measured.resolve_pick(self.studio, "Block.Edge1")
+        self.assertIs(feature, box)
+        with self.assertRaisesRegex(self.measured.MeasureError, "link"):
+            self.measured.resolve_pick(self.studio, "BlockLink.Edge1")
+
+
 if __name__ == "__main__":
     unittest.main()

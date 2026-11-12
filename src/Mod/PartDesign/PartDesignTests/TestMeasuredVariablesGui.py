@@ -281,7 +281,9 @@ class TestMeasuredVariablesGui(unittest.TestCase):
         self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, x1))
         self.assertAlmostEqual(panel.value, 20, places=6)
         # a third pick is refused, loudly
-        self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, "Face1"))
+        top = ["Face%d" % i for i, f in enumerate(self.padA.Shape.Faces, 1)
+               if f.BoundBox.ZMin > 5 - 1e-6][0]
+        self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, top))
         self.assertEqual(len(panel.references()), 2)
         self.assertTrue(panel.errorLabel.text())
         panel.distanceBox.setCurrentIndex(panel.distanceBox.findData("Center"))
