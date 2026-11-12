@@ -6083,13 +6083,7 @@ Pipe::Pipe()
         App::Prop_None,
         "The thin wall's thickness on the other side"
     );
-    ADD_PROPERTY_TYPE(
-        Midplane,
-        (false),
-        "Sweep",
-        App::Prop_None,
-        "The thin wall centred on the profile's curves"
-    );
+    // The thin wall centred on the profile's curves: ProfileBased's Midplane (FeaturePipe.h)
     ADD_PROPERTY_TYPE(
         FlipWall,
         (false),
@@ -6519,8 +6513,7 @@ short Pipe::mustExecute() const
         || TwistType.isTouched() || Turns.isTouched() || TwistAngle.isTouched()
         || TwistPitch.isTouched() || TwistCCW.isTouched() || HasScale.isTouched()
         || ScaleFactor.isTouched() || BodyType.isTouched() || Thickness1.isTouched()
-        || Thickness2.isTouched() || Midplane.isTouched() || FlipWall.isTouched()
-        || TrimEnds.isTouched()) {
+        || Thickness2.isTouched() || FlipWall.isTouched() || TrimEnds.isTouched()) {
         return 1;
     }
     return ProfileBased::mustExecute();
