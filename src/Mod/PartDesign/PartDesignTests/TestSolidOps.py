@@ -833,7 +833,8 @@ class TestThickenPipe(unittest.TestCase):
     def tearDown(self):
         App.closeDocument(self.doc.Name)
 
-    def pipe(self, major, angle, leg):
+    def pipe(self, major, angle, leg, along=False):
+        """along: the bend's profile disc faces along the motion, which gives OCC's torus the other frame."""
         V = App.Vector
         ax = V(0, -1, 0)
         self.geo = (major, angle, leg)
@@ -841,7 +842,7 @@ class TestThickenPipe(unittest.TestCase):
         rot = App.Rotation(ax, angle)
         self.c1, self.d1 = rot.multVec(self.c0), rot.multVec(V(0, 0, -1))
         disc = lambda c, n: Part.Face(Part.Wire(Part.makeCircle(4.0, c, n)))
-        sol = disc(self.c0, V(0, 0, 1)).revolve(V(0, 0, 0), ax, angle)
+        sol = disc(self.c0, V(0, 0, -1 if along else 1)).revolve(V(0, 0, 0), ax, angle)
         if leg:
             sol = sol.fuse([disc(self.c0 + V(0, 0, leg), V(0, 0, -1)).extrude(V(0, 0, -leg)),
                             disc(self.c1, self.d1).extrude(self.d1 * leg)]).removeSplitter()
@@ -929,6 +930,48 @@ class TestThickenPipe(unittest.TestCase):
         # the ring touches the axis at a point only: one solid, the ring revolved
         t = self.thicken(self.pipe(4.0, 90.0, 0.0), t2=0.75)
         self.assertOneSolid(t, self.expected(3.25, 4.0))
+
+    def testBendWithReversedTorusFrame(self):
+        # review r3 TK-R3-HAND: with the profile facing along the motion, the torus's Axis is the sweep's
+        # reversed; the ring was revolved the mirrored way (loud at 90 degrees; from about 240 degrees a
+        # valid wrong solid, 513.1220 for 564.5646 at 270). The bend's ring just touches its axis here.
+        axes = []
+        for angle in (90.0, 270.0):
+            for along in (False, True):
+                with self.subTest(angle=angle, along=along):
+                    p = self.pipe(4.75, angle, 0.0, along)
+                    axes.append(p.Shape.Faces[0].Surface.Axis.y)
+                    t = self.thicken(p, t1=0.75)
+                    self.assertOneSolid(t, self.expected(4.0, 4.75))
+                    V = App.Vector
+                    # the wall's middle, 9.125 from the bend's axis: inside at 45 degrees, outside past the bend
+                    at = lambda a: App.Rotation(V(0, -1, 0), a).multVec(V(-9.125, 0, 0))
+                    self.assertTrue(t.Shape.isInside(at(45.0), 1e-6, True))
+                    self.assertFalse(t.Shape.isInside(at(angle + 45.0), 1e-6, True))
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument("ThickenPipe")
+        self.assertTrue(min(axes) < 0 < max(axes), axes)  # both torus frames were met
+
+    def testSelfCheckThatCannotRunRefuses(self):
+        # review r3 F-OPEN: a BOPAlgo check that aborts or gives no report must not pass the fuse
+        class Stub:
+            def __init__(self, text):
+                self.text = text
+
+            def check(self, _):
+                if self.text is not None:
+                    raise RuntimeError(self.text)
+
+        head = "BOP check found the following errors:\n"
+        self.assertFalse(S._self_intersects(Stub(None), False))
+        self.assertTrue(S._self_intersects(Stub("Standard_Failure"), False))
+        self.assertTrue(S._self_intersects(Stub(head), False))
+        self.assertTrue(S._self_intersects(Stub(head + "Error in Face: BOPAlgo OperationAborted"), True))
+        self.assertTrue(S._self_intersects(Stub(head + "Error in Solid: BOPAlgo CheckUnknown"), True))
+        self.assertTrue(S._self_intersects(Stub(head + "Error in Face: BOPAlgo SelfIntersect"), True))
+        self.assertTrue(S._self_intersects(Stub(head + "Error in Edge: BOPAlgo SelfIntersect"), False))
+        self.assertFalse(S._self_intersects(Stub(head + "Error in Edge: BOPAlgo SelfIntersect"), True))
+        self.assertFalse(S._self_intersects(Stub(head + "Error in Edge: BOPAlgo_InvalidCurveOnSurface"), False))
 
     def testHornTorusWithItsSeamAwayFromTheAxis(self):
         # review r1 T3: the face's middle (in v) is the horn's apex, where it has no normal

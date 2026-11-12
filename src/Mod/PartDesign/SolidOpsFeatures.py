@@ -138,6 +138,17 @@ def _revolved_circle(face):
     d = out.Length
     if d <= TOL or abs(circ.Axis.dot(out)) > 1e-7 * d or abs(circ.Axis.dot(axis)) > 1e-7:
         return None  # the meridian circle does not lie in a plane through the axis
+    # the axis must turn u0's meridian toward u1's: a Reversed face's torus can be parametrised the other
+    # way round (Axis -y for a sweep about +y), and the ring revolved about it would be mirrored (review r3)
+    vs = max((v0 + (v1 - v0) * k / 8.0 for k in range(9)),
+             key=lambda v: _axis_distance(surf.value(u0, v), base, axis))
+    du = min(0.1, 0.5 * (u1 - u0))
+    p0, p1 = surf.value(u0, vs) - foot, surf.value(u0 + du, vs)
+    ahead = lambda s: (foot + App.Rotation(axis * s, math.degrees(du)).multVec(p0) - p1).Length
+    if ahead(-1.0) < ahead(1.0):
+        axis = -axis
+    elif not ahead(1.0) <= 1e-6 * max(1.0, d + circ.Radius):
+        return None  # u is not the revolution angle about this axis
     # sample the face where it is farthest from the axis: a horn torus has no normal at its apex
     um = 0.5 * (u0 + u1)
     vm = max((v0 + (v1 - v0) * k / 8.0 for k in range(1, 8)),
@@ -290,12 +301,17 @@ def _self_intersects(shape, pinched):
     each ring only touches its bend's axis, the pieces meet at a pinch point, which BOPAlgo reports
     as a vertex or edge self-intersection on a right result (Onshape TK2): those count only when no
     ring merely touches. Tolerance reports (InvalidCurveOnSurface, TooSmallEdge) are left to the
-    volume and probe checks."""
+    volume and probe checks. A check that could not run (no BOPAlgo report, OperationAborted,
+    CheckUnknown) counts as a self-intersection (review r3). The report names no sub-shape
+    (TopoShape::analyze), so the pinch allowance can't be limited to the axis."""
     try:
         shape.check(True)
         return False
     except Exception as e:
-        lines = [l for l in str(e).splitlines() if "SelfIntersect" in l]
+        report = str(e).splitlines()
+    if not any("BOPAlgo" in l for l in report) or any("OperationAborted" in l or "CheckUnknown" in l for l in report):
+        return True
+    lines = [l for l in report if "SelfIntersect" in l]
     if pinched:
         lines = [l for l in lines if not ("Vertex" in l or "Edge" in l)]
     return bool(lines)
