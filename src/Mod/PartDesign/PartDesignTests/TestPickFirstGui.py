@@ -153,7 +153,13 @@ class TestPickFirstGui(unittest.TestCase):
         )
 
     def only(self, typeId):
-        found = [o for o in self.doc.Objects if o.TypeId == typeId]
+        """The one feature of typeId the user made: for a pattern in a listed studio its owner,
+        outside every Body; its per-part steps (StudioOwner set) are a projection."""
+        found = [
+            o
+            for o in self.doc.Objects
+            if o.TypeId == typeId and getattr(o, "StudioOwner", None) is None
+        ]
         self.assertEqual(len(found), 1, [o.Name for o in found])
         return found[0]
 
@@ -360,7 +366,10 @@ class TestPickFirstGui(unittest.TestCase):
 
     def testMirrorWithNothingSelectedStaysInFeaturesMode(self):
         """Mirror with nothing selected: Features mode (it was Whole shape), no originals, the
-        Features field armed, the cube still shown (1000). The cube picked: mirrored in XY, 2000."""
+        Features field armed, the cube still shown (1000). The cube picked: mirrored in XY, 2000.
+        T1a: the mirror is an owner outside every Body; what the user sees is the Body (its Tip).
+        Red at 5debeaab7d (ops#654): the step the pick makes stays held by the Body's edit roll
+        (Touched, no shape) while the panel is open, so no 2000 until OK."""
         self.cube()
         self.runTool("PartDesign_Mirrored")
         mirror = self.only("PartDesign::Mirrored")
@@ -369,12 +378,14 @@ class TestPickFirstGui(unittest.TestCase):
         self.assertTrue(
             waitFor(lambda: armed(visibleField("fieldOriginals"))), "Features isn't armed"
         )
-        self.assertAlmostEqual(mirror.Shape.Volume, 1000, places=4)
+        self.assertTrue(self.body.Tip.isValid(), self.body.Tip.getStatusString())
+        self.assertAlmostEqual(self.body.Tip.Shape.Volume, 1000, places=4)
         Gui.Selection.addSelection(self.doc.Name, self.box.Name)
         self.assertTrue(waitFor(lambda: mirror.Originals == [self.box]), mirror.Originals)
         self.doc.recompute()
         self.assertTrue(mirror.isValid(), mirror.getStatusString())
-        self.assertAlmostEqual(mirror.Shape.Volume, 2000, places=4)
+        self.assertTrue(self.body.Tip.isValid(), self.body.Tip.getStatusString())
+        self.assertAlmostEqual(self.body.Tip.Shape.Volume, 2000, places=4)
 
     @siblingEraPath
     def testLinearPatternWithNothingSelectedArmsItsFeatures(self):
@@ -402,10 +413,12 @@ class TestPickFirstGui(unittest.TestCase):
             waitFor(lambda: armed(visibleField("fieldOriginals"))), "Features isn't armed"
         )
 
-    def testMirrorOfAFeatureOfAnotherBodyLeavesItOut(self):
-        """A feature of another body selected, then Mirror: no message box ("Selection is not in
-        the active body"); the mirror opens empty, in Features mode, and says the feature is
-        left out."""
+    def testMirrorOfAFeatureOfAnotherBodyTakesIt(self):
+        """A feature of another body of the studio selected, then Mirror: no message box
+        ("Selection is not in the active body"). T1a (parts-design.md 10.16): a mirror's originals
+        are members of any of the studio's parts (it left the feature out when the mirror was a
+        Body feature): the owner, outside every Body, takes it; its step is in that body, which
+        shows the cube mirrored in XY (2000); the active body is untouched (1000)."""
         self.cube()
         other = models.body(self.doc)
         otherBox = self.doc.addObject("PartDesign::AdditiveBox", "OtherCube")
@@ -414,14 +427,15 @@ class TestPickFirstGui(unittest.TestCase):
         self.activate(self.body)
         self.runTool("PartDesign_Mirrored", otherBox)
         mirror = self.only("PartDesign::Mirrored")
-        self.assertEqual(mirror.Originals, [])
+        self.assertEqual(mirror.Originals, [otherBox])
         self.assertEqual(mirror.TransformMode, "Features")
-        self.assertTrue(self.body.hasObject(mirror))
-        self.assertTrue(
-            waitFor(
-                lambda: any(
-                    "left out of the selection: 'OtherCube'" in t for t in notes("fieldOriginals")
-                )
-            ),
-            notes("fieldOriginals"),
+        self.assertFalse(self.body.hasObject(mirror))
+        self.assertFalse(other.hasObject(mirror))
+        self.assertEqual(
+            [t for t in notes("fieldOriginals") if "left out of the selection" in t], []
         )
+        self.doc.recompute()
+        self.assertTrue(mirror.isValid(), mirror.getStatusString())
+        self.assertTrue(other.Tip.isValid(), other.Tip.getStatusString())
+        self.assertAlmostEqual(other.Tip.Shape.Volume, 2000, places=4)
+        self.assertAlmostEqual(self.body.Tip.Shape.Volume, 1000, places=4)

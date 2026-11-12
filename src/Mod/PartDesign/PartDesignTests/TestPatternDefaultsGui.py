@@ -98,7 +98,13 @@ class TestPatternDefaultsGui(unittest.TestCase):
         pump(0.5)
 
     def only(self, typeId):
-        found = [o for o in self.doc.Objects if o.TypeId == typeId]
+        """The one pattern of typeId the user made: in a listed studio its owner, outside every
+        Body; its per-part steps (`<Pattern>_at_<Body>`, StudioOwner set) are a projection."""
+        found = [
+            o
+            for o in self.doc.Objects
+            if o.TypeId == typeId and getattr(o, "StudioOwner", None) is None
+        ]
         self.assertEqual(len(found), 1, [o.Name for o in found])
         return found[0]
 

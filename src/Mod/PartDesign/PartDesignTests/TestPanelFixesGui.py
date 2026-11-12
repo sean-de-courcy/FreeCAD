@@ -4058,7 +4058,12 @@ class TestPanelFixesGui(unittest.TestCase):
         Gui.Selection.addSelection(self.doc.Name, sketch.Name)
         Gui.runCommand("PartDesign_Mirrored")
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
-        [mirror] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Mirrored"]
+        # T1a: the mirror is an owner outside every Body; its per-part step is a projection
+        [mirror] = [
+            o
+            for o in self.doc.Objects
+            if o.TypeId == "PartDesign::Mirrored" and getattr(o, "StudioOwner", None) is None
+        ]
         self.assertEqual(mirror.Originals, [box])
         notes = self.leftOutNotes("fieldOriginals")
         self.assertTrue(any("left out of the selection: 'First sketch'." in t for t in notes), notes)
