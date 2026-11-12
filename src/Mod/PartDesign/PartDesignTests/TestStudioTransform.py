@@ -278,6 +278,47 @@ class TestStudioTransform(unittest.TestCase):
         self.assertValid(t2)
         self.assertEqual(faceAtZ(step, 17), top[1][0])
 
+    def testSketchOnAMovedFaceKeepsItsWorldPositionInThePlane(self):
+        """ops#679, Onshape TR11: a sketch on the moved A's top face keeps its world position within
+        the face's plane, and only the plane follows the face. A by Y 30, a 6 x 6 boss (Add 5, scope
+        A) sketched at x 2..8, y 32..38 on A's top: A 1180. The Transform to Y 60: the sketch stays at
+        y 32..38 on z 10, off A. Onshape makes the boss a new part there (INFO BOOLEAN_UNION_NO_OP);
+        the fork's Add fails loudly instead, as for any tool off its scope (parts are made by
+        command, never by recompute). To Y 30, Z 5: the sketch rises with the face to z 15 and the
+        boss is on A again. The rule is the new sketch's default MapOrigin "Body" (ops#311); the
+        stock "Feature" origin moves the sketch along with the face."""
+        from PartDesignTests.TestStudio import rect
+        from PartDesignTests.TestStudioOwner import makeOwner
+
+        t = self.transform([self.A], Y=30)
+        step = PartDesign.studioStepOf(t, self.A)
+        sk = self.doc.addObject("Sketcher::SketchObject", "Sk")
+        self.studio.addObject(sk)
+        sk.AttachmentSupport = [(step, faceAtZ(step, 10))]
+        sk.MapMode = "FlatFace"
+        self.assertEqual(sk.MapOrigin, "Body")
+        rect(sk, 2, 32, 8, 38)
+        self.doc.recompute()
+        boss = makeOwner(self.doc, self.studio, "Pad", "Boss", sk, ("A",), Length=5)
+        self.doc.recompute()
+        self.assertValid(boss)
+        self.assertBounds(sk.Shape, (2, 32, 10, 8, 38, 10))
+        self.assertAlmostEqual(self.A.Shape.Volume, 1180, places=6)
+
+        t.Y = 60
+        self.doc.recompute()
+        self.assertBounds(self.A.Shape, (0, 60, 0, 10, 70, 10))
+        self.assertBounds(sk.Shape, (2, 32, 10, 8, 38, 10))
+        self.assertFalse(boss.isValid())
+        self.assertIn("touches no part of the merge scope", boss.getStatusString())
+
+        t.Y, t.Z = 30, 5
+        self.doc.recompute()
+        self.assertBounds(sk.Shape, (2, 32, 15, 8, 38, 15))
+        self.assertValid(boss)
+        self.assertBounds(self.A.Shape, (0, 30, 5, 10, 40, 20))
+        self.assertAlmostEqual(self.A.Shape.Volume, 1180, places=6)
+
     # ------------------------------------------------------------------------------ Copy part
     def testCopyPart(self):
         t = self.transform([self.A], copy=True, Y=20)
