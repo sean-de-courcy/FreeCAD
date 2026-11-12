@@ -789,14 +789,14 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
             // The model edges in the sketch's plane bound regions too (Onshape's imprint);
             // they stay out of the open wires below and out of the sketch's Shape
             const auto imprint = imprintEdges(*this);
-            // near: only the model edges that can reach the sketch's regions (perf profile 2b)
-            auto regions = [&](bool near) {
+            // nearOnly: only the model edges that can reach the sketch's regions (perf profile 2b)
+            auto regions = [&](bool nearOnly) {
                 Part::TopoShape made = makeTopoShape(getID());
                 try {
                     auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
                     bool leftOutLoop = false;
                     if (!imprint.isNull()) {
-                        auto model = near ? nearImprintEdges(imprint, edges, leftOutLoop)
+                        auto model = nearOnly ? nearImprintEdges(imprint, edges, leftOutLoop)
                                           : imprint.getSubTopoShapes(TopAbs_EDGE);
                         for (auto& edge : model) {
                             shapes.push_back(std::move(edge));
@@ -822,9 +822,9 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
                 result = regions(!imprint.isNull());
             }
             else {
-                const auto near = regions(true);
+                const auto nearRegions = regions(true);
                 result = regions(false);
-                if (const std::string difference = regionsDifference(near, result);
+                if (const std::string difference = regionsDifference(nearRegions, result);
                     !difference.empty()) {
                     FC_ERR(getFullName() << ": imprint near edges: the regions differ: "
                                          << difference);

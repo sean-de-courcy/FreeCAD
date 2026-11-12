@@ -245,10 +245,10 @@ std::vector<Part::TopoShape> Sketcher::nearImprintEdges(
         }
         active.push_back(i);
     }
-    std::vector<char> near(n, 0);
+    std::vector<char> reaches(n, 0);
     for (std::size_t i = 0; i < n; ++i) {
         if (!boxes[i].IsOut(own)) {
-            near[root(i)] = 1;
+            reaches[root(i)] = 1;
         }
     }
     // A group left out with a closed loop (as many edges as distinct vertices, or more) would have
@@ -257,7 +257,7 @@ std::vector<Part::TopoShape> Sketcher::nearImprintEdges(
     std::vector<Part::TopoShape> kept;
     for (std::size_t i = 0; i < n; ++i) {
         const std::size_t group = root(i);
-        if (near[group]) {
+        if (reaches[group]) {
             kept.push_back(all[i]);
             continue;
         }
