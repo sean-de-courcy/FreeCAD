@@ -3489,7 +3489,7 @@ class DocumentSafeSaveCases(unittest.TestCase):
     # The ignore list the team folder ships (design section 3, item 2)
     IGNORED = ("*.fctmp", "*.FCBak", ".DS_Store", "._*", "Thumbs.db", "desktop.ini")
     # The save's steps in their order (App/BackupPolicy.h, saveFaultPoint)
-    STEPS = ("write", "written", "flushed", "kept", "replaced", "pruned")
+    STEPS = ("write", "written", "flushed", "kept", "replaced", "done")
     NAME = "Plate.FCStd"
 
     CHILD = (

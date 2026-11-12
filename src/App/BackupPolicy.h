@@ -69,6 +69,10 @@ private:
 /// environment variable FREECAD_CH_SAVE_FAULT set to `<step>` the process ends there at once, as
 /// if it were killed; with `<step>:throw` the save throws a Base::FileException there. The steps
 /// in their order: write (the temporary file half written), written, flushed, kept (the old file
-/// kept as a backup), replaced (the new file under the document's name), pruned. Not exported.
+/// kept as a backup), replaced (the new file under the document's name), done. Not exported.
 void saveFaultPoint(const char* step);
+
+/// FreeCAD-CH (ops#640, slice A1): the writer mode `<copyUidMode><uuid>` that Save a Copy sets,
+/// so that the copy's Document.xml holds a document id of its own (PropertyUUID::Save)
+constexpr const char* copyUidMode = "CopyUid=";
 }  // namespace App

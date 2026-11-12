@@ -35,7 +35,109 @@
 
 #include "BackupPolicy.h"
 
+#include <filesystem>
+#include <system_error>
+#include <thread>
+#ifdef _WIN32
+# include <windows.h>
+#else
+# include <fcntl.h>
+# include <unistd.h>
+#endif
+
 using namespace App;
+
+// FreeCAD-CH (ops#640, slice A1, notes/files-saving-history-design.md section 3): a save writes
+// its file under a temporary name, flushes it to the disk, keeps the old file by a hard link and
+// puts the new one in place with one replacing rename. The document's name holds one complete
+// file at every moment, the old or the new, also after a crash or a power cut.
+namespace
+{
+void flushToDisk(const std::string& path)
+{
+#ifdef _WIN32
+    HANDLE handle = CreateFileW(Base::FileInfo(path).toStdWString().c_str(),
+                                GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw Base::FileException("Cannot open the saved file to flush it", Base::FileInfo(path));
+    }
+    const bool flushed = FlushFileBuffers(handle) != 0;
+    CloseHandle(handle);
+#else
+    const int fd = ::open(path.c_str(), O_RDWR);
+    if (fd < 0) {
+        throw Base::FileException("Cannot open the saved file to flush it", Base::FileInfo(path));
+    }
+# ifdef F_FULLFSYNC
+    // macOS: fsync() leaves the data in the drive's cache
+    bool flushed = ::fcntl(fd, F_FULLFSYNC) == 0 || ::fsync(fd) == 0;
+# else
+    bool flushed = ::fsync(fd) == 0;
+# endif
+    ::close(fd);
+#endif
+    if (!flushed) {
+        throw Base::FileException("Cannot flush the saved file to the disk", Base::FileInfo(path));
+    }
+}
+
+// One rename that replaces the target: no moment without a file under its name
+void replaceFile(const std::string& source, const std::string& target)
+{
+#ifdef _WIN32
+    const std::wstring from = Base::FileInfo(source).toStdWString();
+    const std::wstring to = Base::FileInfo(target).toStdWString();
+    // A virus scanner, an indexer or the sync tool can hold the target for a moment
+    for (int attempt = 0;; ++attempt) {
+        if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            return;
+        }
+        const DWORD error = GetLastError();
+        if (attempt >= 10 || (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+#else
+    if (::rename(source.c_str(), target.c_str()) == 0) {
+        // The rename itself on the disk
+        const std::string dir = Base::FileInfo(target).dirPath();
+        const int fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            ::fsync(fd);
+            ::close(fd);
+        }
+        return;
+    }
+#endif
+    throw Base::FileException("Save interrupted: Cannot rename temporary file to project file",
+                              Base::FileInfo(target));
+}
+
+// Keeps file under name as well, by a hard link (a copy where the filesystem has none), never
+// over an existing file. The document's file stays where it is meanwhile.
+bool keepFileNoErase(const Base::FileInfo& file, const std::string& name)
+{
+    if (name.empty() || Base::FileInfo(name).exists()) {
+        return false;
+    }
+    const auto from = Base::FileInfo::stringToPath(file.filePath());
+    const auto to = Base::FileInfo::stringToPath(name);
+    std::error_code error;
+    std::filesystem::create_hard_link(from, to, error);
+    if (!error) {
+        return true;
+    }
+    error.clear();
+    std::filesystem::copy_file(from, to, std::filesystem::copy_options::none, error);
+    return !error;
+}
+}  // namespace
 
 void App::saveFaultPoint(const char* step)
 {
@@ -74,6 +176,8 @@ void BackupPolicy::setDateFormat(const std::string& fmt)
 }
 void BackupPolicy::apply(const std::string& sourcename, const std::string& targetname)
 {
+    flushToDisk(sourcename);
+    saveFaultPoint("flushed");
     switch (policy) {
         case Standard:
             applyStandard(sourcename, targetname);
@@ -82,7 +186,7 @@ void BackupPolicy::apply(const std::string& sourcename, const std::string& targe
             applyTimeStamp(sourcename, targetname);
             break;
     }
-    saveFaultPoint("pruned");
+    saveFaultPoint("done");
 }
 
 void BackupPolicy::applyStandard(const std::string& sourcename, const std::string& targetname) const
@@ -130,20 +234,15 @@ void BackupPolicy::applyStandard(const std::string& sourcename, const std::strin
                 fn = str.str();
             }
 
-            if (!fi.renameFile(fn.c_str())) {
-                Base::Console().warning("Cannot rename project file to backup file\n");
+            if (!keepFileNoErase(fi, fn)) {
+                Base::Console().warning("Cannot keep the project file as a backup file\n");
             }
         }
-        else {
-            fi.deleteFile();
-        }
+        // No backups: the rename below replaces the file
     }
 
     saveFaultPoint("kept");
-    if (Base::FileInfo tmp(sourcename); !tmp.renameFile(targetname.c_str())) {
-        throw Base::FileException("Cannot rename tmp save file to project file",
-                                  Base::FileInfo(targetname));
-    }
+    replaceFile(sourcename, targetname);
     saveFaultPoint("replaced");
 }
 
@@ -289,7 +388,7 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
                         }
                     }
                     else {
-                        if (!renameFileNoErase(fi, fn + ".FCBak")) {
+                        if (!keepFileNoErase(fi, fn + ".FCBak")) {
                             fn = fn + "-";
                         }
                         else {
@@ -299,7 +398,7 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
 
                     if (!done) {
                         while (ext2 < numberOfFiles + 10) {
-                            if (renameFileNoErase(fi, fn + std::to_string(ext2) + ".FCBak")) {
+                            if (keepFileNoErase(fi, fn + std::to_string(ext2) + ".FCBak")) {
                                 break;
                             }
                             ext2++;
@@ -312,7 +411,7 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
                     while (ext2 < numberOfFiles + 10) {
                         // linux just replace the file if exists, and then the existence is to
                         // be tested before rename
-                        if (renameFileNoErase(fi, fi.filePath() + std::to_string(ext2))) {
+                        if (keepFileNoErase(fi, fi.filePath() + std::to_string(ext2))) {
                             break;
                         }
                         ext2++;
@@ -321,31 +420,17 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
 
                 if (ext2 >= numberOfFiles + 10) {
                     Base::Console().error(
-                        "File not saved: Cannot rename project file to backup file\n");
+                        "Cannot keep the project file as a backup file\n");
                     // throw Base::FileException("File not saved: Cannot rename project file to
                     // backup file", fi);
                 }
             }
         }
-        else {
-            try {
-                fi.deleteFile();
-            }
-            catch (...) {
-                Base::Console().warning("Cannot remove backup file: %s\n",
-                                        fi.fileName().c_str());
-                backupManagementError = true;
-            }
-        }
+        // No backups: the rename below replaces the file
     }
 
     saveFaultPoint("kept");
-    Base::FileInfo tmp(sourcename);
-    if (!tmp.renameFile(targetname.c_str())) {
-        throw Base::FileException(
-            "Save interrupted: Cannot rename temporary file to project file",
-            tmp);
-    }
+    replaceFile(sourcename, targetname);
     saveFaultPoint("replaced");
 
     if (backupManagementError) {

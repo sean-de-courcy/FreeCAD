@@ -246,6 +246,23 @@ std::map<const Document*, DocumentForkRelease> documentForkReleases;
 // The saved names and IDs of the objects each document's running import read (importedSource,
 // ops#158)
 std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> importedSources;
+
+// The id each running Save a Copy gives its file (ops#640, A1): a copy is a document of its own
+std::map<const Document*, std::string> copyUids;
+
+// Who saves when the preferences name no author (ops#640, A1)
+std::string systemUserName()
+{
+#ifdef FC_OS_WIN32
+    return qEnvironmentVariable("USERNAME").toStdString();
+#else
+    QString name = qEnvironmentVariable("USER");
+    if (name.isEmpty()) {
+        name = qEnvironmentVariable("LOGNAME");
+    }
+    return name.toStdString();
+#endif
+}
 // The UUIDs of the documents each running import's objects were copied from, by document name
 // (exportObjects writes them, ops#171); under "" the one UUID of a copy of one document's objects
 // (SourceDocument). None for a saved project or a copy made by a build before ops#171
@@ -3313,9 +3330,18 @@ bool Document::saveAs(const char* _file)
     const std::string file = checkFileName(_file);
     const Base::FileInfo fi(file.c_str());
     if (this->FileName.getStrValue() != file) {
+        const bool hadFile = !this->FileName.getStrValue().empty();
         this->FileName.setValue(file);
         this->Label.setValue(fi.fileNamePure());
-        this->Uid.touch();  // this forces a rename of the transient directory
+        if (hadFile) {
+            // FreeCAD-CH (ops#640, A1): the new file is a document of its own, with its own id
+            // (its history and its links are found by it); the old file keeps the old one. A
+            // document that had no file keeps its id: no other file has it
+            this->Uid.setValue(Base::Uuid());  // renames the transient directory too
+        }
+        else {
+            this->Uid.touch();  // this forces a rename of the transient directory
+        }
     }
 
     return save();
@@ -3324,7 +3350,20 @@ bool Document::saveAs(const char* _file)
 bool Document::saveCopy(const char* file) const
 {
     const std::string checked = checkFileName(file);
-    return this->FileName.getStrValue() != checked ? saveToFile(checked.c_str()) : false;
+    if (this->FileName.getStrValue() == checked) {
+        return false;
+    }
+    // FreeCAD-CH (ops#640, A1): the copy gets an id of its own; the open document keeps its id
+    copyUids[this] = Base::Uuid::createUuid();
+    struct Forget
+    {
+        const Document* doc;
+        ~Forget()
+        {
+            copyUids.erase(doc);
+        }
+    } forget {this};
+    return saveToFile(checked.c_str());
 }
 
 bool Document::canWriteRecoverySnapshot() const
@@ -3353,18 +3392,17 @@ bool Document::save()
 
         const std::string LastModifiedDateString = Base::Tools::currentDateTimeString();
         LastModifiedDate.setValue(LastModifiedDateString.c_str());
-        // set author if needed
-        const bool saveAuthor =
+        // FreeCAD-CH (ops#640, A1): every save writes who made it (the save guard and the
+        // history read it from the file): the author the preferences name, else the system's
+        // user name. Upstream's switch "prefSetAuthorOnSave" is no longer read.
+        std::string author =
             GetApplication()
                 .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                ->GetBool("prefSetAuthorOnSave", false);
-        if (saveAuthor) {
-            const std::string Author =
-                GetApplication()
-                    .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                    ->GetASCII("prefAuthor", "");
-            LastModifiedBy.setValue(Author.c_str());
+                ->GetASCII("prefAuthor", "");
+        if (author.empty()) {
+            author = systemUserName();
         }
+        LastModifiedBy.setValue(author.c_str());
 
         // A newer file (ops#323): the GUI asked first; a script saves, with a warning
         if (isNewerFormat(this)) {
@@ -3392,10 +3430,6 @@ bool Document::saveToFile(const char* filename) const
         "User parameter:BaseApp/Preferences/Document");
     int compression = static_cast<int>(hGrp->GetInt("CompressionLevel", 7));
     compression = Base::clamp<int>(compression, Z_NO_COMPRESSION, Z_BEST_COMPRESSION);
-
-    bool policy = GetApplication()
-                      .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                      ->GetBool("BackupPolicy", true);
 
     auto canonical_path = [](const char* filename) {
         try {
@@ -3435,16 +3469,14 @@ bool Document::saveToFile(const char* filename) const
         throw Base::FileWritePermissionException(originalFileInfo);
     }
 
-    // make a tmp. file where to save the project data first and then rename to
-    // the actual file name. This may be useful if overwriting an existing file
-    // fails so that the data of the work up to now isn't lost.
-    std::string uuid = Base::Uuid::createUuid();
-    std::string fn = nativePath;
-    if (policy) {
-        fn += ".";
-        fn += uuid;
-    }
-
+    // FreeCAD-CH (ops#640, slice A1): the file is written under a temporary name beside the
+    // document, then flushed, the old file kept and the new one renamed into place
+    // (BackupPolicy::apply). The name ends in `.fctmp`, which the team folder's sync ignores.
+    // Upstream's "BackupPolicy" switch, which wrote straight into the document's file, is no
+    // longer read; "CreateBackupFiles", "CountBackupFiles", "UseFCBakExtension" and
+    // "SaveBackupDateFormat" still choose the backups.
+    const std::string fn = nativePath + "." + Base::Uuid::createUuid() + ".fctmp";
+    try {
 
     // open extra scope to close ZipWriter properly
     {
@@ -3458,6 +3490,10 @@ bool Document::saveToFile(const char* filename) const
 
         writer.setComment("FreeCAD Document");
         writer.setLevel(compression);
+        // Save a Copy: the copy's own document id (PropertyUUID::Save)
+        if (auto copy = copyUids.find(this); copy != copyUids.end()) {
+            writer.setMode(std::string(copyUidMode) + copy->second);
+        }
         writer.putNextEntry("Document.xml");
 
         if (hGrp->GetBool("SaveBinaryBrep", false)) {
@@ -3491,10 +3527,8 @@ bool Document::saveToFile(const char* filename) const
         GetApplication().signalSaveDocument(*this);
     }
     saveFaultPoint("written");
-    saveFaultPoint("flushed");
 
-    if (policy) {
-        // if saving the project data succeeded rename to the actual file name
+    {
         int count_bak = static_cast<int>(GetApplication()
                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
                             ->GetInt("CountBackupFiles", 1));
@@ -3524,6 +3558,13 @@ bool Document::saveToFile(const char* filename) const
         }
         backupPolicy.setNumberOfFiles(count_bak);
         backupPolicy.apply(fn, nativePath);
+    }
+    }
+    catch (...) {
+        // A save that fails before its file is in place leaves nothing beside the document
+        std::error_code error;
+        fs::remove(Base::FileInfo::stringToPath(fn), error);
+        throw;
     }
 
     signalFinishSave(*this, filename);
