@@ -188,7 +188,11 @@ namespace
 // along a helix edge (a Part::Helix) sweeps turn by turn, the path cut at each whole turn, and
 // turn k and the vertex k turns from the start are named by the edge's name and k (`TRN`, `TRV`;
 // batch 6's R1), where the whole edge's name was the side faces'.
-constexpr int ForkNamingRevision = 17;
+// 18: ops#640 (batch 11: sweeps 15 and 16), a PartDesign Pipe along a helix whose turns touch (swept
+// whole) names its side faces as the merge of its turns; a Thin pipe names its wall's edges and side
+// faces from the profile's curves (by index before); the solver keeps a helix's turn 1 and the lone
+// face of one turn as one element at the same place (a 1 <-> 2 turn edit).
+constexpr int ForkNamingRevision = 18;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
