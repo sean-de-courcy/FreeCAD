@@ -1143,6 +1143,59 @@ class TestStudioPartPattern(unittest.TestCase):
         self.assertEqual([m.StudioOwner.Name for m in record.Group], ["Pat"])
         self.assertIn(record.Name, self.live())
 
+    def splitUnderACopy(self):
+        """P x 0..30, y 0..20, z 0..5; S x 40..60, y 0..10, z 0..10 (2000); an Add of S over P,
+        +x 40 x 2: the copy (x 80..100) touches nothing, a part (its record's witness: the copy's
+        faces). Then a slot at x 49..50 through S, inserted before the pattern in an edit: S is two
+        solids there, so the copy is two (900, 1000), and the record's witness lies on both
+        halves alike (an end face each): which one it is can't be told."""
+        from PartDesignTests.TestStudioList import makeOwner
+
+        self.box("P", 0, 0, 30, 20, 0, 5)
+        self.box("Src", 40, 0, 60, 10, 0, 10)
+        self.listed()
+        pat = self.linear("Pat", ["Src"], "Add", ("P",), length=40, count=2)
+        self.assertValid(pat)
+        self.assertEqual(len(self.made(pat)), 1)
+
+        def slot():
+            owner = makeOwner(self.doc, self.studio, "Slot", [49, -1, 50, 11], 11,
+                              "Subtraction", ["Src"])
+            PartDesign.studioInsert(owner, list(self.list.Entries).index(pat))
+            return owner
+
+        self.edit("slot", slot)
+        return pat
+
+    def testOneRecomputeMakesNoMorePartsThanItsEntriesAccountFor(self):
+        """ops#654 T2 gate (seed 2, op 47, a runaway): splitUnderACopy. Whatever the record
+        decides, one recompute makes at most the two halves' parts beside the record: the
+        resync's fixed point never makes an entry's parts twice in one recompute (it stops, loud,
+        naming the entry), so a document can't grow Bodies without end."""
+        pat = self.splitUnderACopy()
+        self.assertLessEqual(len(self.made(pat)), 3)
+        count = len(self.made(pat))
+        self.doc.recompute()
+        self.assertLessEqual(len(self.made(pat)), count + 2)
+
+    def testARecordThatCantBeToldMakesNoFurtherParts(self):
+        """ops#654 T2 gate (seed 2, op 47): splitUnderACopy. The record that can't be told holds
+        nothing and stays a record (dormant, as a leftover merged back); each half is a new part,
+        as a build of the same list from scratch gives two parts; a recompute after it makes
+        nothing more."""
+        pat = self.splitUnderACopy()
+        made = self.made(pat)
+        self.assertEqual(len(made), 3, [b.StudioPartId for b in made])
+        held = sorted(round(self.shape(b).Volume) for b in made if b.Tip and b.Tip.isValid())
+        self.assertEqual(held, [900, 1000])
+        self.assertValid(pat)
+        bodies = len([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"])
+        self.doc.recompute()
+        self.assertEqual(
+            len([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"]), bodies
+        )
+        self.assertEqual(len(self.made(pat)), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

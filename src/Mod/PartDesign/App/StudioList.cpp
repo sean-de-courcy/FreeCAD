@@ -2825,11 +2825,26 @@ void resyncPartMirrors(const App::Document& constDoc)
     // An entry the piece command refused (no face tells a piece apart) isn't asked again here: it
     // stays loud with the command's reason
     std::set<std::string> refusedPieces;
+    // The bound (ops#654 T2, the gate's seed 2 op 47): an entry makes its parts once in a
+    // recompute, a part for each of its solids no record holds. Due again after that, its
+    // records don't hold what it made: making more would only grow Bodies without end. It
+    // stops there, loud, and makes nothing more in this recompute
+    std::set<std::string> madePieces;
     auto makeDue = [&]() {
         bool madeAny = false;
         for (auto entry : due) {
             if (!entry->isAttachedToDocument() || refusedPieces.count(entry->getNameInDocument())
                 || !StudioList::holding(entry)) {
+                continue;
+            }
+            if (madePieces.count(entry->getNameInDocument())) {
+                refusedPieces.insert(entry->getNameInDocument());
+                Base::Console().error(
+                    "%s makes parts again in one recompute: its parts don't hold the solids it "
+                    "made them for, so it would grow Bodies without end: stopped, nothing more "
+                    "made\n",
+                    entry->Label.getValue()
+                );
                 continue;
             }
             std::string why;
@@ -2842,6 +2857,7 @@ void resyncPartMirrors(const App::Document& constDoc)
                 continue;
             }
             madeAny = true;
+            madePieces.insert(entry->getNameInDocument());
             // Onshape's INFO (U2, BOOLEAN_UNION_NO_OP): there is no info state on a feature, so a
             // log line; a split's new pieces have none (U1)
             if (std::ranges::any_of(made, [](const Body* body) {
