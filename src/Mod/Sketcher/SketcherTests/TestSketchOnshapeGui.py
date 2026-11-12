@@ -314,6 +314,7 @@ class TestSketchShiftInferenceGui(SketcherGuiTestCase):
         FreeCADGui.ActiveDocument.setEdit(self.sketch.Name)
         self.pump(200)
         self.view = FreeCADGui.ActiveDocument.ActiveView
+        self.fix_view_height(self.view)
         self.view.setCamera(TOP_VIEW_CAMERA)
         self.flush_gui(100)
         self.viewport = self.view.graphicsView().viewport()
