@@ -1896,13 +1896,18 @@ std::string configReaderKey(const App::DocumentObject* reader, const App::Docume
     if (!cfg || !reader) {
         return {};
     }
-    if (reader->getDocument() == cfg->getDocument() && studioOfObject(reader) == cfg->studio()) {
-        return {};  // inside the studio
+    // The reader's own key: getPropertyByName would answer for an App::Link with its linked
+    // entry's ConfigKey (C3f)
+    auto own = freecad_cast<App::PropertyString*>(reader->getDynamicPropertyByName("ConfigKey"));
+    const bool keyed = own && own->getValue()[0];
+    if (reader->getDocument() == cfg->getDocument() && studioOfObject(reader) == cfg->studio()
+        && !(keyed && !cfg->studio())) {
+        // Inside the studio. A document's own studio holds every root object, but an instance
+        // given a row there is a consumer: it shows that row (C3f; Onshape inserts any row)
+        return {};
     }
-    if (auto key = freecad_cast<App::PropertyString*>(reader->getPropertyByName("ConfigKey"))) {
-        if (key->getValue()[0]) {
-            return key->getValue();
-        }
+    if (keyed) {
+        return own->getValue();
     }
     // Onshape's Insert and Derived pick the default row, not the shown one (CF8)
     return cfg->defaultKey();
@@ -1921,7 +1926,7 @@ bool configSetReaderKey(App::DocumentObject* reader,
     if (!resolveValues(cfg, values, resolved, why)) {
         return false;
     }
-    auto prop = freecad_cast<App::PropertyString*>(reader->getPropertyByName("ConfigKey"));
+    auto prop = freecad_cast<App::PropertyString*>(reader->getDynamicPropertyByName("ConfigKey"));
     if (!prop) {
         prop = static_cast<App::PropertyString*>(reader->addDynamicProperty(
             "App::PropertyString", "ConfigKey", "Configuration",

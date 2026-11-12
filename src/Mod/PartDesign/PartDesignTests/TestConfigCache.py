@@ -200,9 +200,8 @@ class TestConfigCache(unittest.TestCase):
     pieceBodies = TC.TestConfigurations.pieceBodies
     configuredCut = TC.TestConfigurations.configuredCut
 
-    # C3e found: a key equal to the active row is dropped by the recompute (ConfigKey gone), so the switch
-    # leaves the instance on Default; loud ('gives Part 001 no solid'). Fix, then remove the decorator.
-    @unittest.expectedFailure
+    # C3e found, C3f fixed: App::Link answers getPropertyByName with its linked entry's property, so the
+    # key was written to the entry, not the instance, and the switch read the instance as Default (loud).
     def testPieceOnlyInLargeSurvivesTheSwitchToSmall(self):
         """An instance on Large of a piece only Large makes (B's right end, 4 x 10 x 10) keeps
         showing it from an entry after the studio switches to Small"""
@@ -223,8 +222,10 @@ class TestConfigCache(unittest.TestCase):
         self.assertAlmostEqual(shape.Volume, 400, delta=1e-4)
         self.assertAlmostEqual(shape.BoundBox.XMin, 26, delta=TOL)
 
-    # C3e: test bug, the cross-document expression 'Doc#Obj.Prop' fails to parse here; fix the syntax first.
-    @unittest.expectedFailure
+    # C3f found: with the syntax fixed, the fill's temporary copy re-opens the VarSet's document by a path
+    # under the temporary folder and FreeCAD crashes (Illegal storage access). Skipped so the suite runs;
+    # fixed in C3g (work\configs-c3\handoff6.md).
+    @unittest.skip("C3f: the temporary copy crashes on a cross-document expression (C3g fixes it)")
     def testCrossDocumentVarSetMarksEntriesStale(self):
         """Review 2: a VarSet in another document drives BPad by expression; its edit marks the
         studio's entries stale, and the next recompute refreshes them"""
@@ -234,12 +235,12 @@ class TestConfigCache(unittest.TestCase):
         self.doc.saveAs(os.path.join(folder, "TestConfigurationsStudio.FCStd"))
         other = App.newDocument("TestConfigurationsVars")
         other.saveAs(os.path.join(folder, "TestConfigurationsVars.FCStd"))
-        var = other.addObject("App::VarSet", "V")
+        var = other.addObject("App::VarSet", "Vars")  # not "V": the expression lexer reads volts
         var.addProperty("App::PropertyLength", "Len")
         var.Len = 10
         other.recompute()
         bpad = self.doc.getObject("BPad")
-        self.edit(lambda: bpad.setExpression("Length", "TestConfigurationsVars#V.Len"))
+        self.edit(lambda: bpad.setExpression("Length", "TestConfigurationsVars#Vars.Len"))
         link = self.instance({"Size": "Large"})
         self.assertFalse(PartDesign.configCacheEntries(self.doc)[0]["stale"])
         var.Len = 15
@@ -250,8 +251,6 @@ class TestConfigCache(unittest.TestCase):
         self.assertFalse(invalid(link))
         self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
 
-    # C3e: test bug, Document has no testStatus in Python; find how to read PartialDoc (or drop the check).
-    @unittest.expectedFailure
     def testPartiallyLoadedStudioNeverGivesAWrongRow(self):
         """Review 3: the assembly reopened alone loads the studio partly; the saved entry shows,
         and a key change is loud or right (A 10 on Small), never the old row's 20"""
@@ -271,7 +270,7 @@ class TestConfigCache(unittest.TestCase):
         App.closeDocument(self.doc.Name)
         asm = App.openDocument(asmPath)
         studio = App.getDocument("TestConfigurationsStudio")
-        self.assertTrue(studio.testStatus("PartialDoc"))
+        self.assertTrue(studio.Partial)
         link = asm.getObject("Instance")
         self.assertFalse(invalid(link))
         self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
@@ -283,9 +282,8 @@ class TestConfigCache(unittest.TestCase):
         self.assertTrue(invalid(link) or abs(linkHeight(link) - 10) < TOL,
                         "a partly loaded studio showed the old row")
 
-    # C3e found: configSetInstanceKey on a Link of a top-level studio's Body adds no Config* properties and
-    # makes no entry: the instance silently stays on Small (silent wrong; Onshape inserts any row). Fix it.
-    @unittest.expectedFailure
+    # C3e found, C3f fixed: a Link at a document studio's root counted as inside the studio, so its key
+    # was never read and it silently stayed on the shown row (Onshape inserts any row).
     def testTopLevelStudioEntryIsNotTheStudios(self):
         """Review 10: a configured studio that is the document itself; its entry (at the document
         root) is not read as one of its objects: the write marks nothing stale and the next

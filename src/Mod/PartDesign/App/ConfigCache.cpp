@@ -7,6 +7,7 @@
 #include <chrono>
 #include <optional>
 #include <set>
+#include <string_view>
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -83,9 +84,11 @@ App::PropertyXLink* linkedProperty(App::Link* link)
     return freecad_cast<App::PropertyXLink*>(link->getLinkedObjectProperty());
 }
 
+/// The instance's own property: never getPropertyByName, which an App::Link answers with its
+/// linked object's property when it has none (an entry's ConfigKey, C3f)
 App::PropertyString* stringProperty(App::DocumentObject* obj, const char* name, bool add)
 {
-    auto prop = freecad_cast<App::PropertyString*>(obj->getPropertyByName(name));
+    auto prop = freecad_cast<App::PropertyString*>(obj->getDynamicPropertyByName(name));
     if (!prop && add) {
         prop = static_cast<App::PropertyString*>(obj->addDynamicProperty(
             "App::PropertyString", name, "Configuration",
@@ -96,14 +99,15 @@ App::PropertyString* stringProperty(App::DocumentObject* obj, const char* name, 
 
 std::string stringValue(const App::DocumentObject* obj, const char* name)
 {
-    auto prop = freecad_cast<App::PropertyString*>(obj->getPropertyByName(name));
+    auto prop = freecad_cast<App::PropertyString*>(obj->getDynamicPropertyByName(name));
     return prop ? prop->getValue() : std::string();
 }
 
 void setString(App::DocumentObject* obj, const char* name, const std::string& value)
 {
-    if (stringValue(obj, name) != value) {
-        stringProperty(obj, name, true)->setValue(value);
+    auto prop = stringProperty(obj, name, false);
+    if (!prop || prop->getValue() != value) {
+        stringProperty(obj, name, true)->setValue(value);  // "" too: a document's own studio
     }
 }
 
@@ -255,6 +259,11 @@ void onChanged(const App::DocumentObject& obj, const App::Property& prop)
 {
     if (prop.testStatus(App::Property::Output) || prop.testStatus(App::Property::Transient)
         || (obj.getPropertyType(&prop) & (App::Prop_Output | App::Prop_Transient))) {
+        return;
+    }
+    // An instance's own bookkeeping (its key, what it stands for) is no studio edit, even at the
+    // root of a document's own studio, where every object is the studio's (C3f, review 10)
+    if (instanceLink(&obj) && prop.getName() && std::string_view(prop.getName()).starts_with("Config")) {
         return;
     }
     onEdit(obj);
