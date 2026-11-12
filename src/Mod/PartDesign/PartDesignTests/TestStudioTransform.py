@@ -382,3 +382,85 @@ class TestStudioTransform(unittest.TestCase):
         t.Y = 40
         self.doc.recompute()
         self.assertBounds(copy.Shape, (3, 40, 0, 13, 50, 10))
+
+    # ------------------------------------------------------------------------------ Scale (ops#677)
+    def scaleAbout(self, parts, point, copy=False, **values):
+        return self.transform(parts, copy=copy, TransformType="Scale", ScalePoint=point, **values)
+
+    def origin(self):
+        pad = self.doc.getObject("APad")
+        return (pad, [vertexAt(pad, (0, 0, 0))])
+
+    def testTypesInOnshapesOrder(self):
+        self.assertEqual(
+            T.TYPES,
+            ["Translate by line", "Translate by distance", "Translate by XYZ",
+             "Transform by mate connectors", "Rotate", "Copy in place", "Scale"],
+        )
+
+    def testScaleUniformlyAboutAVertex(self):
+        t = self.scaleAbout([self.A], self.origin(), Scale=2)
+        self.assertValid(t, self.A)
+        self.assertBounds(self.A.Shape, (0, 0, 0, 20, 20, 20))
+        self.assertAlmostEqual(self.A.Shape.Volume, 8000, places=6)
+        self.assertBounds(self.B.Shape, (20, 0, 0, 30, 10, 10))
+
+    def testScaleUniformlyIsTheDefault(self):
+        t = self.scaleAbout([self.A], self.origin(), Scale=3, ScaleX=5)
+        self.assertTrue(t.ScaleUniformly)
+        self.assertBounds(self.A.Shape, (0, 0, 0, 30, 30, 30))
+
+    def testScaleAboutAMateConnector(self):
+        c = self.doc.addObject("App::LocalCoordinateSystem", "Centre")
+        self.studio.addObject(c)
+        c.Placement = App.Placement(V(5, 5, 5), App.Rotation())
+        t = self.scaleAbout([self.A], (c, [""]), Scale=2)
+        self.assertValid(t)
+        self.assertBounds(self.A.Shape, (-5, -5, -5, 15, 15, 15))
+
+    def testScaleNonUniformly(self):
+        t = self.scaleAbout([self.A], self.origin(), ScaleUniformly=False, ScaleX=2, ScaleY=1, ScaleZ=3)
+        self.assertValid(t, self.A)
+        self.assertBounds(self.A.Shape, (0, 0, 0, 20, 10, 30))
+        self.assertAlmostEqual(self.A.Shape.Volume, 6000, places=6)
+
+    def testScaleNonUniformlyAlongTheConnectorsAxes(self):
+        # the connector's X runs along the world Y: factor 2 on X stretches A in y
+        c = self.doc.addObject("App::LocalCoordinateSystem", "Turned")
+        self.studio.addObject(c)
+        c.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), 90))
+        t = self.scaleAbout([self.A], (c, [""]), ScaleUniformly=False, ScaleX=2, ScaleY=1, ScaleZ=1)
+        self.assertValid(t)
+        self.assertBounds(self.A.Shape, (0, 0, 0, 10, 20, 10))
+
+    def testScaledPartKeepsItsNames(self):
+        pad = self.doc.getObject("APad")
+        before = set(pad.Shape.ElementMap.keys())
+        self.scaleAbout([self.A], self.origin(), Scale=2)
+        self.assertEqual(set(self.A.Tip.Shape.ElementMap.keys()), before)
+
+    def testScaleCopyPart(self):
+        t = self.scaleAbout([self.A], self.origin(), copy=True, Scale=2)
+        self.assertValid(t)
+        copies = T.made_parts(t)
+        self.assertEqual(len(copies), 1)
+        self.assertValid(copies[0])
+        self.assertBounds(self.A.Shape, (0, 0, 0, 10, 10, 10))
+        self.assertBounds(copies[0].Shape, (0, 0, 0, 20, 20, 20))
+        self.assertFalse(set(copies[0].Shape.ElementMap.keys()) & set(self.A.Shape.ElementMap.keys()))
+
+    def testScaleZeroIsOutOfRange(self):
+        t = self.scaleAbout([self.A], self.origin(), Scale=0)
+        self.assertFalse(t.isValid())
+        self.assertIn("PARAMETER_OUT_OF_RANGE", t.getStatusString())
+
+    def testScaleWithoutAPointFails(self):
+        t = self.transform([self.A], TransformType="Scale", Scale=2)
+        self.assertFalse(t.isValid())
+        self.assertIn("point", t.getStatusString())
+
+    def testScaleSuppressedPutsThePartBack(self):
+        t = self.scaleAbout([self.A], self.origin(), Scale=2)
+        t.Suppressed = True
+        self.doc.recompute()
+        self.assertBounds(self.A.Shape, (0, 0, 0, 10, 10, 10))

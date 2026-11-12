@@ -73,6 +73,25 @@ class TestStudioTransformGui(unittest.TestCase):
         self.assertEqual({o.Name for o in self.doc.Objects}, names)
         self.assertEqual(self.bounds("A"), [0, 0, 0, 10, 10, 10])
 
+    def testScaleThroughThePanel(self):
+        """ops#677: Scale with the uniform tick off, about a coordinate system picked in the view."""
+        c = self.doc.addObject("App::LocalCoordinateSystem", "Centre")
+        self.studio.addObject(c)
+        c.Placement = App.Placement(App.Vector(5, 5, 5), App.Rotation())
+        self.doc.recompute()
+        panel = self.open("A")
+        panel.type.setCurrentIndex(T.TYPES.index("Scale"))
+        self.assertTrue(panel.uniform.isChecked())  # Onshape's default
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(c)
+        panel.pick("ScalePoint")
+        panel.uniform.setChecked(False)
+        panel.spins["ScaleX"].setValue(2)
+        panel.spins["ScaleZ"].setValue(3)
+        self.assertTrue(panel.accept())
+        # about (5, 5, 5): x -5..15, y 0..10, z -10..20
+        self.assertEqual(self.bounds("A"), [-5, 0, -10, 15, 10, 20])
+
     def testRotateAboutAnAxisPickedInTheView(self):
         panel = self.open("B")
         panel.type.setCurrentIndex(T.TYPES.index("Rotate"))

@@ -116,6 +116,7 @@ REFERENCES = {
     "Transform by mate connectors": [("FromConnector", "From"), ("ToConnector", "To")],
     "Translate by XYZ": [],
     "Copy in place": [],
+    "Scale": [("ScalePoint", "Point or mate connector")],
 }
 VALUES = {
     "Translate by line": [],
@@ -124,7 +125,12 @@ VALUES = {
     "Transform by mate connectors": [],
     "Translate by XYZ": [("X", "X"), ("Y", "Y"), ("Z", "Z")],
     "Copy in place": [],
+    "Scale": [("Scale", "Scale"), ("ScaleX", "X"), ("ScaleY", "Y"), ("ScaleZ", "Z")],
 }
+
+
+def _number(value):
+    return getattr(value, "Value", value)  # a quantity's value, or a float
 
 
 class Panel:
@@ -152,19 +158,25 @@ class Panel:
         layout.addRow(_tr("Type"), self.type)
         self.rows = {}
         for prop, text in [("Line", "Line"), ("Direction", "Direction"), ("Axis", "Axis"),
-                           ("FromConnector", "From"), ("ToConnector", "To")]:
+                           ("FromConnector", "From"), ("ToConnector", "To"),
+                           ("ScalePoint", "Point or mate connector")]:
             button = QtWidgets.QPushButton()
             button.clicked.connect(lambda _=False, p=prop: self.pick(p))
             layout.addRow(_tr(text), button)
             self.rows[prop] = button
+        self.uniform = QtWidgets.QCheckBox(_tr("Scale uniformly"))
+        self.uniform.setChecked(obj.ScaleUniformly)
+        self.uniform.toggled.connect(self.setUniform)
+        layout.addRow("", self.uniform)
         self.spins = {}
-        for prop in ("Distance", "Angle", "X", "Y", "Z"):
+        labels = {"ScaleX": "X", "ScaleY": "Y", "ScaleZ": "Z"}
+        for prop in ("Distance", "Angle", "X", "Y", "Z", "Scale", "ScaleX", "ScaleY", "ScaleZ"):
             spin = QtWidgets.QDoubleSpinBox()
             spin.setRange(-1e6, 1e6)
             spin.setDecimals(6)
-            spin.setValue(getattr(obj, prop).Value)
+            spin.setValue(_number(getattr(obj, prop)))
             spin.valueChanged.connect(lambda v, p=prop: self.setValue(p, v))
-            layout.addRow(_tr(prop), spin)
+            layout.addRow(_tr(labels.get(prop, prop)), spin)
             self.spins[prop] = spin
         self.opposite = QtWidgets.QCheckBox(_tr("Opposite direction"))
         self.opposite.setChecked(obj.OppositeDirection)
@@ -189,6 +201,9 @@ class Panel:
             else:
                 button.setText(f"{value[0].Label} {' '.join(value[1])}" if value else _tr("Select, then click"))
         values = {p for p, _ in VALUES[kind]}
+        if kind == "Scale":
+            values -= {"ScaleX", "ScaleY", "ScaleZ"} if self.obj.ScaleUniformly else {"Scale"}
+        self.layout.setRowVisible(self.uniform, kind == "Scale")
         for prop, spin in self.spins.items():
             self.layout.setRowVisible(spin, prop in values)
         self.layout.setRowVisible(self.opposite, kind in ("Translate by line", "Translate by distance", "Rotate"))
@@ -224,6 +239,10 @@ class Panel:
 
     def setValue(self, prop, value):
         setattr(self.obj, prop, value)
+        self.recompute()
+
+    def setUniform(self, on):
+        self.obj.ScaleUniformly = on
         self.recompute()
 
     def setOpposite(self, on):

@@ -13,8 +13,8 @@ import PartDesign
 
 V = FreeCAD.Vector
 
-# Onshape's order and default (TR1, Translate by line). Onshape's Scale (its 7th type) is the line's
-# Scale feature (SolidOpsFeatures.py)
+# Onshape's order and default (TR1, Translate by line). The line's separate Scale feature
+# (SolidOpsFeatures.py) stays as it is
 TYPES = [
     "Translate by line",
     "Translate by distance",
@@ -22,6 +22,7 @@ TYPES = [
     "Transform by mate connectors",
     "Rotate",
     "Copy in place",
+    "Scale",
 ]
 TOL = 1e-7
 # Onshape's error codes (TR3, TR5, TR6), kept in the messages
@@ -195,6 +196,37 @@ def frame_of(obj, what):
     return obj.getGlobalPlacement()
 
 
+def point_frame(link, what):
+    """(origin, rotation) of Scale's Point or mate connector (TR1): a coordinate system's frame, or
+    a vertex or datum point with the world's axes."""
+    if not link or link[0] is None:
+        _fail(f"Select the {what}")
+    obj, subs = link
+    if not [s for s in (subs or []) if s] and _frame_z(obj):
+        pl = obj.getGlobalPlacement()
+        return pl.Base, pl.Rotation
+    items = picks(link, what)
+    if len(items) == 1:
+        shape = items[0][1]
+        if len(shape.Vertexes) == 1 and not shape.Edges:
+            return shape.Vertexes[0].Point, FreeCAD.Rotation()
+    _fail(f"The {what} must be a vertex, a point or a coordinate system")
+
+
+def scale_matrix(obj):
+    """Scale's matrix in the document's frame (TR1): uniform by Scale, or by X/Y/Z along the
+    connector's axes (the world's for a point), about the point or connector's origin."""
+    origin, rotation = point_frame(obj.ScalePoint, "point or mate connector")
+    factors = (obj.Scale,) * 3 if obj.ScaleUniformly else (obj.ScaleX, obj.ScaleY, obj.ScaleZ)
+    if any(f <= TOL for f in factors):
+        _fail(f"A scale must be more than 0 ({OUT_OF_RANGE})")
+    scale = FreeCAD.Matrix()
+    scale.scale(V(*factors))
+    turn = FreeCAD.Placement(V(), rotation).toMatrix()
+    shift = FreeCAD.Placement(origin, FreeCAD.Rotation()).toMatrix()
+    return shift * turn * scale * turn.inverse() * shift.inverse()
+
+
 def motion(obj):
     """The Transform's motion, in the document's frame."""
     kind = obj.TransformType
@@ -222,6 +254,8 @@ def motion(obj):
         if not obj.MakeCopy:
             _fail("Copy in place makes copies, but Copy part is off")
         return FreeCAD.Placement()
+    if kind == "Scale":
+        return FreeCAD.Placement()  # the scale is StudioScale's (scale_matrix)
     _fail(f"Unknown transform type '{kind}'")
 
 
@@ -238,8 +272,10 @@ class Transform:
 
     def setupProperties(self, obj):
         def add(kind, name, group, tip, mode=0):
-            if name not in obj.PropertiesList:
-                obj.addProperty(kind, name, group, tip, mode)
+            if name in obj.PropertiesList:
+                return False
+            obj.addProperty(kind, name, group, tip, mode)
+            return True
 
         new = "TransformType" not in obj.PropertiesList
         add("App::PropertyEnumeration", "TransformType", "Transform", "How the parts move (Onshape's order)")
@@ -258,10 +294,19 @@ class Transform:
             obj.Angle = 30  # Onshape's default (TR1)
         add("App::PropertyLinkGlobal", "FromConnector", "Transform", "Transform by mate connectors: from")
         add("App::PropertyLinkGlobal", "ToConnector", "Transform", "Transform by mate connectors: to")
+        if add("App::PropertyBool", "ScaleUniformly", "Transform", "Scale: one factor (on) or X/Y/Z factors"):
+            obj.ScaleUniformly = True  # Onshape's default (TR1)
+        for name, tip in (("Scale", "Scale: the factor"), ("ScaleX", "Scale: along the connector's X"),
+                          ("ScaleY", "Scale: along the connector's Y"), ("ScaleZ", "Scale: along the connector's Z")):
+            if add("App::PropertyFloat", name, "Transform", tip):
+                setattr(obj, name, 1.0)
+        add("App::PropertyLinkSubGlobal", "ScalePoint", "Transform", "Scale: a point or mate connector")
         add("App::PropertyBool", "OppositeDirection", "Transform", "Flip the direction or the sense")
         add("App::PropertyBool", "MakeCopy", "Transform", "Copy part: new parts, the picked ones stay")
         add("App::PropertyPlacement", "StudioTransform", "Studio", "The motion (output)",
             4 | 8 | 16)  # read-only output, hidden
+        add("App::PropertyMatrix", "StudioScale", "Studio", "Scale's matrix, identity otherwise (output)",
+            4 | 8 | 16)
         add("App::PropertyStringList", "StudioCopies", "Studio", "'<copy id>=<source id>' per copy made",
             16)
 
@@ -283,8 +328,11 @@ class Transform:
             if i not in live:
                 _fail(f"The part '{i}' is not a part where '{obj.Label}' is in the history")
         placement = motion(obj)
+        matrix = scale_matrix(obj) if obj.TransformType == "Scale" else FreeCAD.Matrix()
         if not obj.StudioTransform.isSame(placement, TOL):
             obj.StudioTransform = placement
+        if obj.StudioScale != matrix:
+            obj.StudioScale = matrix
         obj.Shape = Part.Shape()
 
 

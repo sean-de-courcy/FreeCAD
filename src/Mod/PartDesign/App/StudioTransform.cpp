@@ -22,6 +22,30 @@ namespace PartDesign
 namespace
 {
 
+/// shape scaled by mat (Scale, ops#677) as new geometry under owner's tag: its location is folded
+/// into the matrix first, so a non-uniform scale (BRepBuilderAPI_GTransform) gets a shape without
+/// one. No op: copyElementMap passes the mapped names through
+Part::TopoShape scaledShape(
+    const App::DocumentObject* owner,
+    long tag,
+    const Part::TopoShape& shape,
+    const Base::Matrix4D& mat
+)
+{
+    Part::TopoShape local = shape;
+    const Base::Matrix4D place = shape.getPlacement().toMatrix();
+    local.setPlacement(Base::Placement());
+    Part::TopoShape out(tag, owner->getDocument()->getStringHasher());
+    out.makeElementTransform(
+        local,
+        mat * place,
+        nullptr,
+        Part::CheckScale::checkScale,
+        Part::CopyType::copy
+    );
+    return out;
+}
+
 /// The source part id of the copy made, from owner's "StudioCopies" ("<made id>=<source id>")
 std::string copySourceId(const App::DocumentObject* owner, const std::string& made)
 {
@@ -83,6 +107,10 @@ Part::TopoShape studioTransformStep(
         static_cast<App::PropertyPlacement*>(owner->getPropertyByName("StudioTransform"))->getValue();
     const bool copy = static_cast<App::PropertyBool*>(owner->getPropertyByName("MakeCopy"))->getValue();
     const Base::Placement bodyFrame = App::GeoFeature::getGlobalPlacement(body);
+    // Scale (ops#677): its matrix in the document's frame; identity for the other types
+    const auto* scaleProp = freecad_cast<App::PropertyMatrix*>(owner->getPropertyByName("StudioScale"));
+    const bool scaled = scaleProp && scaleProp->getValue().hasScale(1e-9) != Base::ScaleType::NoScaling;
+    const Base::Matrix4D docToBody = bodyFrame.inverse().toMatrix();
 
     if (body->StudioMadeBy.getValue() == owner) {
         // A copy (Copy part): the source's solid where the Transform is in the history, moved, as
@@ -105,13 +133,18 @@ Part::TopoShape studioTransformStep(
             );
         }
         Part::TopoShape out(tag, owner->getDocument()->getStringHasher());
-        out.makeElementTransform(
-            solid,
-            (bodyFrame.inverse() * motion).toMatrix(),
-            nullptr,
-            Part::CheckScale::noScaleCheck,
-            Part::CopyType::copy
-        );
+        if (scaled) {
+            out = scaledShape(owner, tag, solid, docToBody * scaleProp->getValue());
+        }
+        else {
+            out.makeElementTransform(
+                solid,
+                (bodyFrame.inverse() * motion).toMatrix(),
+                nullptr,
+                Part::CheckScale::noScaleCheck,
+                Part::CopyType::copy
+            );
+        }
         // Names of its own (I-A7): the owner's copy section on every name. V2 keeps a child's
         // mapped names as they are, so an op given to makeElementTransform() adds nothing here
         out.appendElementSection(owner->getID(), Part::OpCodes::Copy, "1");
@@ -122,6 +155,11 @@ Part::TopoShape studioTransformStep(
     }
     if (copy) {
         return base;  // the source of a copy stays where it is
+    }
+    if (scaled) {
+        // Scaled: new geometry (a scale can't be a location), the base's names kept as a move keeps
+        // them
+        return scaledShape(owner, tag, base, docToBody * scaleProp->getValue() * bodyFrame.toMatrix());
     }
     // Moved: its location composed with the motion in the Body's frame; geometry and element map
     // are the base's, so what refers to its faces follows (Onshape: a moved part keeps its ids)
