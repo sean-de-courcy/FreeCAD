@@ -2421,6 +2421,55 @@ TEST_F(FilletFallbackTest, refusesATrimByAFinInFrontOfTheWall)
     }
 }
 
+TEST_F(FilletFallbackTest, refusesATrimByAFinInAnotherLedgesPlane)
+{
+    // Review r2's case: a front ledge (riser y 4, floor z 9.037) and a back ledge (riser y 16,
+    // floor z 9.537), both top edges dressed up 1.0 in one feature, and a fin 0.02 in front of the
+    // front riser whose top lies in the back ledge's plane. The front riser's own wall is its
+    // floor at 9.037: the fin's top isn't, so the trim is refused (it was taken for the back wall)
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 20, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 22, 5, 2).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(-1, 16, 9.537), 22, 5, 2).Shape())
+                .Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(0, 3.48, 9.037), 20, 0.5, 0.5).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    TopoShape front = edgeBetween(base, {0, 4, 10}, {20, 4, 10});
+    TopoShape back = edgeBetween(base, {0, 16, 10}, {20, 16, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {front, back}, request, &reason).isNull());
+        EXPECT_NE(reason.find("not the wall"), std::string::npos) << reason;
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesATrimByWallsAtTwoHeights)
+{
+    // Review r2's T2: one riser (y 4) whose foot meets the ledge at z 9.037 for x 0..10 and at
+    // z 9.537 for x 10..20. Its strip runs into two walls on two planes: which plane trims where
+    // isn't the base's section in front of the face, so it stays refused (the literal rule)
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 11, 5, 2).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(10, -1, 9.537), 11, 5, 2).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    // The top edge is split where the two ledges meet (x 10): both halves are dressed up
+    TopoShape left = edgeBetween(base, {0, 4, 10}, {10, 4, 10});
+    TopoShape right = edgeBetween(base, {10, 4, 10}, {20, 4, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {left, right}, request, &reason).isNull()) << reason;
+    }
+}
+
 TEST_F(FilletFallbackTest, refusesADressUpPastAConcaveEdgeIntoASlopedWall)
 {
     // The same strip past the riser's foot, but the tread slopes: its plane isn't square to the

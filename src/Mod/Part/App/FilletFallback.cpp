@@ -2199,8 +2199,9 @@ Tool miterTool(
  * off its face must run into the base's material (checkFusedRunOff), and is listed in fusedOff:
  * the air beyond the face would have nothing to trim it. A cut tool's strip that runs off its face
  * across an edge that is not selected (checkRunOff) is listed in pastLoop. A cut tool's strip that
- * runs off into a wall straight back from its face lists that face in walled, and the walls in
- * wallFaces: the caller trims the tools there by the walls' surfaces (clipTool).
+ * runs off into a wall straight back from its face lists that face in walled, its own walls in
+ * wallsOf (the same index), and every walled face's walls in wallFaces: the caller trims the tools
+ * there by the walls' surfaces (clipTool).
  */
 bool checkStrips(
     const std::vector<Tool>& tools,
@@ -2212,6 +2213,7 @@ bool checkStrips(
     std::vector<const Tool*>& fusedOff,
     std::vector<const Strip*>& pastLoop,
     std::vector<TopoDS_Face>& walled,
+    std::vector<std::vector<TopoDS_Face>>& wallsOf,
     std::vector<TopoDS_Face>& wallFaces
 )
 {
@@ -2284,9 +2286,11 @@ bool checkStrips(
                         auto isFace = [&](const TopoDS_Face& f) {
                             return f.IsSame(group.face);
                         };
-                        if (!walls.empty()
-                            && std::none_of(walled.begin(), walled.end(), isFace)) {
+                        auto at = std::find_if(walled.begin(), walled.end(), isFace);
+                        if (!walls.empty() && at == walled.end()) {
                             walled.push_back(group.face);
+                            wallsOf.emplace_back();
+                            at = walled.end() - 1;
                         }
                         for (const auto& wall : walls) {
                             auto isWall = [&](const TopoDS_Face& f) {
@@ -2294,6 +2298,10 @@ bool checkStrips(
                             };
                             if (std::none_of(wallFaces.begin(), wallFaces.end(), isWall)) {
                                 wallFaces.push_back(wall);
+                            }
+                            auto& own = wallsOf[at - walled.begin()];
+                            if (std::none_of(own.begin(), own.end(), isWall)) {
+                                own.push_back(wall);
                             }
                         }
                     }
@@ -2948,6 +2956,7 @@ TopoDS_Shape constructShape(
     std::vector<const Tool*> fusedOff;
     std::vector<const Strip*> pastLoop;
     std::vector<TopoDS_Face> walled;
+    std::vector<std::vector<TopoDS_Face>> wallsOf;
     std::vector<TopoDS_Face> wallFaces;
     const bool trimmed = checkStrips(
                              tools,
@@ -2959,6 +2968,7 @@ TopoDS_Shape constructShape(
                              fusedOff,
                              pastLoop,
                              walled,
+                             wallsOf,
                              wallFaces
                          )
         || unionCorners;
@@ -2966,7 +2976,17 @@ TopoDS_Shape constructShape(
     // tools on that face by the wall's surface run on behind the face (Q-LEDGE, Case Base row
     // 15). The section in front of the face is taken at a tenth of the strip's width there, and
     // again at a twentieth: anything else in front of the face within that would change the trim
-    for (const auto& face : walled) {
+    for (size_t w = 0; w < walled.size(); ++w) {
+        const TopoDS_Face& face = walled[w];
+        // The face's own walls, on one surface (review r2, the design's literal rule after a second
+        // silent find here): a fin in another walled face's plane, or a face whose walls stand at
+        // two heights, can't tell the wall's run on from other material: both refuse
+        const std::vector<TopoDS_Face>& own = wallsOf[w];
+        if (std::any_of(own.begin(), own.end(), [&](const TopoDS_Face& wall) {
+                return !sameDomain(wall, own.front());
+            })) {
+            refuse("the walls behind a tangent strip's face are not one surface");
+        }
         for (auto& tool : tools) {
             const auto strip
                 = std::find_if(tool.strips.begin(), tool.strips.end(), [&](const Strip& s) {
@@ -3010,9 +3030,7 @@ TopoDS_Shape constructShape(
                 bool ofTool = std::any_of(toolSurfaces.begin(), toolSurfaces.end(), [&](const auto& s) {
                     return s == surface;
                 });
-                bool ofWall = std::any_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& w) {
-                    return sameDomain(side, w);
-                });
+                bool ofWall = sameDomain(side, own.front());
                 if (!ofTool && !ofWall) {
                     refuse("material in front of a tangent strip's face that is not the wall would trim "
                            "the dress-up");
