@@ -37,6 +37,7 @@
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
@@ -57,6 +58,7 @@
 #include <TopoDS_Iterator.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
@@ -2199,10 +2201,39 @@ double lengthAlong(const TopoDS_Edge& edge, const TopoDS_Shape& off)
     return length;
 }
 
-/** A cut tool's strip that runs off its face (ops#640, S3) may cross only convex edges, onto
- * faces that turn away from the face's outward side: the air beyond trims the tool (Onshape's
- * KP1-KP4). Across a concave edge, into a wall that rises from the face (a ledge rounded wider
- * than the ledge), the tool would cut the wall, and Onshape fails too (fillet-parity 3.5x).
+/** The wall runs straight back from the planar face: a plane whose normal is square to the face's,
+ * or a cylinder whose axis is the face's normal (a groove's floor, behind the groove's wall).
+ * Behind the face, such a wall's surface is the base's section in front of the face swept back
+ * (behindWalls), the region that Onshape's trim of a chamfer there leaves to the material
+ */
+bool wallAlongNormal(const TopoDS_Face& face, const TopoDS_Face& wall)
+{
+    BRepAdaptor_Surface surface(face, Standard_False);
+    if (surface.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    const gp_Dir normal = surface.Plane().Axis().Direction();
+    BRepAdaptor_Surface other(wall, Standard_False);
+    switch (other.GetType()) {
+        case GeomAbs_Plane:
+            return std::abs(other.Plane().Axis().Direction().Dot(normal)) < angularTolerance;
+        case GeomAbs_Cylinder:
+            return parallel(other.Cylinder().Axis().Direction(), normal);
+        default:
+            return false;
+    }
+}
+
+/** A cut tool's strip that runs off its face (ops#640, S3) across a convex edge, onto a face that
+ * turns away from the face's outward side, is trimmed by the air beyond (Onshape's KP1-KP4).
+ *
+ * Across a concave edge, into a wall that rises from the face, Onshape trims the tool by the
+ * wall's surface run on behind the face: the wall's face grows under the dress-up and no step is
+ * left (Q-LEDGE LD1-LD3: a step's top edge chamfered or rounded 1.0 over a wall 0.963 or 0.5
+ * high; Case Base row 15, a keyhole groove's lip chamfered 1.0 over a groove wall 0.963 to 1.0
+ * wide). The fallback builds that where the wall runs straight back from a planar face
+ * (wallAlongNormal), listing the wall in walls for the caller's trim (clipTool), and refuses any
+ * other wall.
  *
  * Returns whether it runs off across an edge that is not selected, along a stretch of it: past
  * the face's far side (a keyhole wall's top, its outer loop), not over a neighbouring selected
@@ -2213,7 +2244,8 @@ bool checkRunOff(
     const TopoDS_Shape& contact,
     const TopoDS_Shape& source,
     const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
-    const TopTools_IndexedMapOfShape& selected
+    const TopTools_IndexedMapOfShape& selected,
+    std::vector<TopoDS_Face>& walls
 )
 {
     BRepAlgoAPI_Cut outside(contact, face);
@@ -2244,7 +2276,14 @@ bool checkRunOff(
         double middle = (curve.FirstParameter() + curve.LastParameter()) / 2;
         gp_Dir away = inwardIn(next, edge, middle);
         if (away.Dot(outwardNormal(face, curve.Value(middle))) > -1e-6) {
-            refuse("a tangent strip runs off its face into a wall");
+            if (!wallAlongNormal(face, next)) {
+                refuse("a tangent strip runs off its face into a wall");
+            }
+            if (std::none_of(walls.begin(), walls.end(), [&](const TopoDS_Face& wall) {
+                    return wall.IsSame(next);
+                })) {
+                walls.push_back(next);
+            }
         }
         // Along more than the tolerance of a grazing contact, by a margin
         if (!pastUnselected && !selected.Contains(edge)
@@ -2410,7 +2449,10 @@ Tool miterTool(
  * forms). A fused tool (a concave edge) that overlaps another is refused; one whose strip runs
  * off its face must run into the base's material (checkFusedRunOff), and is listed in fusedOff:
  * the air beyond the face would have nothing to trim it. A cut tool's strip that runs off its face
- * across an edge that is not selected (checkRunOff) is listed in pastLoop.
+ * across an edge that is not selected (checkRunOff) is listed in pastLoop. A cut tool's strip that
+ * runs off into a wall straight back from its face lists that face in walled, its own walls in
+ * wallsOf (the same index), and every walled face's walls in wallFaces: the caller trims the tools
+ * there by the walls' surfaces (clipTool).
  */
 bool checkStrips(
     const std::vector<Tool>& tools,
@@ -2420,7 +2462,10 @@ bool checkStrips(
     const TopTools_IndexedMapOfShape& selected,
     const TopoDS_Shape& base,
     std::vector<const Tool*>& fusedOff,
-    std::vector<const Strip*>& pastLoop
+    std::vector<const Strip*>& pastLoop,
+    std::vector<TopoDS_Face>& walled,
+    std::vector<std::vector<TopoDS_Face>>& wallsOf,
+    std::vector<TopoDS_Face>& wallFaces
 )
 {
     bool trimmed = false;
@@ -2475,16 +2520,41 @@ bool checkStrips(
                         checkFusedRunOff(group.face, contact, base);
                         fusedOff.push_back(group.owners[k]);
                     }
-                    else if (checkRunOff(
-                                 group.face,
-                                 contact,
-                                 group.owners[k]->source,
-                                 edgeFaces,
-                                 selected
-                             )
-                             && std::find(pastLoop.begin(), pastLoop.end(), strip)
-                                 == pastLoop.end()) {
-                        pastLoop.push_back(strip);
+                    else {
+                        std::vector<TopoDS_Face> walls;
+                        if (checkRunOff(
+                                group.face,
+                                contact,
+                                group.owners[k]->source,
+                                edgeFaces,
+                                selected,
+                                walls
+                            )
+                            && std::find(pastLoop.begin(), pastLoop.end(), strip)
+                                == pastLoop.end()) {
+                            pastLoop.push_back(strip);
+                        }
+                        auto isFace = [&](const TopoDS_Face& f) {
+                            return f.IsSame(group.face);
+                        };
+                        auto at = std::find_if(walled.begin(), walled.end(), isFace);
+                        if (!walls.empty() && at == walled.end()) {
+                            walled.push_back(group.face);
+                            wallsOf.emplace_back();
+                            at = walled.end() - 1;
+                        }
+                        for (const auto& wall : walls) {
+                            auto isWall = [&](const TopoDS_Face& f) {
+                                return f.IsSame(wall);
+                            };
+                            if (std::none_of(wallFaces.begin(), wallFaces.end(), isWall)) {
+                                wallFaces.push_back(wall);
+                            }
+                            auto& own = wallsOf[at - walled.begin()];
+                            if (std::none_of(own.begin(), own.end(), isWall)) {
+                                own.push_back(wall);
+                            }
+                        }
                     }
                     offTheFace.push_back(strip);
                     trimmed = true;
@@ -2630,6 +2700,95 @@ std::vector<TopoDS_Shape> imagesThrough(
     return current;
 }
 
+/** The material behind a planar face's walls (wallAlongNormal), near the tool: the base's section
+ * in the plane in front of the face by offset (in the air the face bounds), swept back through
+ * the tool. Behind the face it is bounded by the walls' surfaces run on (a groove's floor under
+ * the groove's wall); in front of the face's own area there is no material to sweep
+ */
+TopoDS_Shape behindWalls(
+    const TopoDS_Face& face,
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& tool,
+    double offset
+)
+{
+    BRepAdaptor_Surface surface(face, Standard_False);
+    const gp_Pln plane = surface.Plane();
+    const gp_Dir outward = outwardNormal(face, plane.Location());
+    Bnd_Box box;
+    BRepBndLib::Add(tool, box);
+    const double size = std::sqrt(box.SquareExtent());
+    double xMin = 0.0;
+    double yMin = 0.0;
+    double zMin = 0.0;
+    double xMax = 0.0;
+    double yMax = 0.0;
+    double zMax = 0.0;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    gp_Pnt centre((xMin + xMax) / 2, (yMin + yMax) / 2, (zMin + zMax) / 2);
+    double u = 0.0;
+    double v = 0.0;
+    ElSLib::Parameters(plane, centre, u, v);
+    gp_Pnt origin = ElSLib::Value(u, v, plane).Translated(gp_Vec(outward) * offset);
+    gp_Pln front(gp_Ax3(origin, outward, plane.Position().XDirection()));
+    TopoDS_Face sheet = BRepBuilderAPI_MakeFace(front, -2 * size, 2 * size, -2 * size, 2 * size);
+    TopoDS_Shape section = commonOf(base, sheet);
+    if (TopExp_Explorer(section, TopAbs_FACE).More() == Standard_False) {
+        return {};
+    }
+    BRepPrimAPI_MakePrism sweep(section, gp_Vec(outward) * -(offset + 2 * size), Standard_True);
+    if (!sweep.IsDone()) {
+        refuse("sweeping the walls behind a tangent strip failed");
+    }
+    return sweep.Shape();
+}
+
+/** A cut tool trimmed by the material behind walls (Onshape's chamfer past a concave edge, Case
+ * Base row 15): its solid becomes the cut's result, and the faces it keeps for the checks become
+ * their images. Its volume is then measured, as every trimmed tool's is
+ */
+void clipTool(Tool& tool, const TopoDS_Shape& behind)
+{
+    TopTools_ListOfShape arguments;
+    arguments.Append(tool.solid);
+    TopTools_ListOfShape tools;
+    tools.Append(behind);
+    BRepAlgoAPI_Cut cut;
+    cut.SetArguments(arguments);
+    cut.SetTools(tools);
+    cut.SetNonDestructive(Standard_True);
+    cut.SetRunParallel(Standard_False);
+    cut.Build();
+    if (!cut.IsDone() || cut.HasErrors()) {
+        refuse("trimming a tool by the walls behind its strip failed");
+    }
+    TopoDS_Shape solid = cut.Shape();
+    if (countSolids(solid) != 1) {
+        refuse("a tool trimmed by the walls behind its strip is not one solid");
+    }
+    if (solid.ShapeType() != TopAbs_SOLID) {
+        solid = TopExp_Explorer(solid, TopAbs_SOLID).Current();
+    }
+    const Stage stage(cut.History(), solid);
+    auto remap = [&](std::vector<TopoDS_Shape>& shapes) {
+        std::vector<TopoDS_Shape> images;
+        for (const auto& shape : shapes) {
+            for (const auto& image : stage.images(shape)) {
+                images.push_back(image);
+            }
+        }
+        shapes = std::move(images);
+    };
+    remap(tool.contactFaces);
+    remap(tool.capFaces);
+    remap(tool.unionEndFaces);
+    for (auto& strip : tool.strips) {
+        remap(strip.contacts);
+    }
+    tool.solid = solid;
+    tool.volume = volumeOf(solid);
+}
+
 /** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
  * the caller's: the tools' closed forms less the overlaps at unequal corners, or, for a trimmed
  * tool, its common part with the shape. The tolerance scales with the tools' closed forms, and
@@ -2682,7 +2841,19 @@ TopoDS_Shape applyTools(
         inputs.push_back(tool->solid);
     }
     double raised = raisedTolerance(result, inputs);
-    if (std::abs(change - expected) > volumeTolerance * scale + raised * size + expectedAllowance) {
+    double bound = volumeTolerance * scale + raised * size + expectedAllowance;
+    if (std::abs(change - expected) > bound) {
+        // OCCT's default integration is not exact on free-form faces, and its error there moves
+        // with the shape it integrates (about a point it takes from the shape): the faces the stage
+        // left alone then don't cancel. On the replica's Case Base (#108) the body measures 0.43
+        // over, and a cut that rebuilt only analytic faces 2.45e-4 short of its closed form, eight
+        // times the bound. Measured adaptively, the change is right to 7e-7
+        change = MassProperties::volume(result, true) - MassProperties::volume(shape, true);
+        if (cut) {
+            change = -change;
+        }
+    }
+    if (std::abs(change - expected) > bound) {
         refuse(std::string(cut ? "the cut removed " : "the fuse added ") + describe(change)
                + " instead of " + describe(expected));
     }
@@ -3035,6 +3206,9 @@ TopoDS_Shape constructShape(
     // The tools at a corner with a circle overlap: their volumes are measured, as past the limit
     std::vector<const Tool*> fusedOff;
     std::vector<const Strip*> pastLoop;
+    std::vector<TopoDS_Face> walled;
+    std::vector<std::vector<TopoDS_Face>> wallsOf;
+    std::vector<TopoDS_Face> wallFaces;
     const bool trimmed = checkStrips(
                              tools,
                              overlaps,
@@ -3043,9 +3217,79 @@ TopoDS_Shape constructShape(
                              ctx.selected,
                              base.getShape(),
                              fusedOff,
-                             pastLoop
+                             pastLoop,
+                             walled,
+                             wallsOf,
+                             wallFaces
                          )
         || unionCorners;
+    // A dress-up past a concave edge into a wall straight back from its face: Onshape trims the
+    // tools on that face by the wall's surface run on behind the face (Q-LEDGE, Case Base row
+    // 15). The section in front of the face is taken at a tenth of the strip's width there, and
+    // again at a twentieth: anything else in front of the face within that would change the trim
+    for (size_t w = 0; w < walled.size(); ++w) {
+        const TopoDS_Face& face = walled[w];
+        // The face's own walls, on one surface (review r2, the design's literal rule after a second
+        // silent find here): a fin in another walled face's plane, or a face whose walls stand at
+        // two heights, can't tell the wall's run on from other material: both refuse
+        const std::vector<TopoDS_Face>& own = wallsOf[w];
+        if (std::any_of(own.begin(), own.end(), [&](const TopoDS_Face& wall) {
+                return !sameDomain(wall, own.front());
+            })) {
+            refuse("the walls behind a tangent strip's face are not one surface");
+        }
+        for (auto& tool : tools) {
+            const auto strip
+                = std::find_if(tool.strips.begin(), tool.strips.end(), [&](const Strip& s) {
+                      return s.face.IsSame(face);
+                  });
+            if (!tool.cut || strip == tool.strips.end()) {
+                continue;
+            }
+            const double offset = 0.1 * strip->width;
+            if (offset <= 1000 * linearTolerance) {
+                refuse("a tangent strip into a wall has no width");
+            }
+            TopoDS_Shape behind = behindWalls(face, base.getShape(), tool.solid, offset);
+            if (behind.IsNull()) {
+                continue;
+            }
+            // Any piece behind the walls, however thin (a round 0.01 past the wall: about 1e-6 of
+            // a 215 tool), would leave the tool's contact face standing beside the wall
+            TopoDS_Shape piece = commonOf(tool.solid, behind);
+            if (!TopExp_Explorer(piece, TopAbs_SOLID).More()) {
+                continue;
+            }
+            double clipped = volumeOf(piece);
+            TopoDS_Shape nearer = behindWalls(face, base.getShape(), tool.solid, offset / 2);
+            double again = nearer.IsNull() ? 0.0 : volumeOf(commonOf(tool.solid, nearer));
+            if (std::abs(again - clipped) > volumeTolerance * tool.volume) {
+                refuse("the walls behind a tangent strip don't run straight back from its face");
+            }
+            // The piece is bounded by the tool's own surfaces and the walls' run on, and by nothing
+            // else: material in front of the face that isn't the wall (a fin on a ledge, closer to
+            // the wall than both offsets) would trim the tool at its own height (review r1)
+            std::vector<Handle(Geom_Surface)> toolSurfaces;
+            for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+                TopLoc_Location location;
+                toolSurfaces.push_back(BRep_Tool::Surface(TopoDS::Face(it.Current()), location));
+            }
+            for (TopExp_Explorer it(piece, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face& side = TopoDS::Face(it.Current());
+                TopLoc_Location location;
+                Handle(Geom_Surface) surface = BRep_Tool::Surface(side, location);
+                bool ofTool = std::any_of(toolSurfaces.begin(), toolSurfaces.end(), [&](const auto& s) {
+                    return s == surface;
+                });
+                bool ofWall = sameDomain(side, own.front());
+                if (!ofTool && !ofWall) {
+                    refuse("material in front of a tangent strip's face that is not the wall would trim "
+                           "the dress-up");
+                }
+            }
+            clipTool(tool, behind);
+        }
+    }
     // Onshape, oracle 9e (ops#640, K1): CHAMFER/FILLET_OVERLAPS_EDGE_LOOP. Where two selected
     // edges meet at a corner convex in the material and the strips on both sides of it, on the
     // face that holds both edges, run past that face's outer loop (a keyhole wall's top chamfered
@@ -3284,7 +3528,7 @@ TopoDS_Shape constructShape(
     const bool miters = std::any_of(tools.begin(), tools.end(), [](const Tool& tool) {
         return tool.miter;
     });
-    if (!caps.empty() || miters) {
+    if (!caps.empty() || miters || !wallFaces.empty()) {
         collectBaseImages();
         NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
         TopTools_IndexedMapOfShape unlocked;
@@ -3330,6 +3574,14 @@ TopoDS_Shape constructShape(
             }
             for (const auto& cap : caps) {
                 if (inPlane(face, cap)) {
+                    TopExp::MapShapes(face, TopAbs_EDGE, unlocked);
+                    break;
+                }
+            }
+            // A trimmed tool's face on a wall's surface, run on under the dress-up, merges into
+            // the wall: Onshape's wall grows there (Q-LEDGE LD1-LD3, F unchanged)
+            for (const auto& wall : wallFaces) {
+                if (face.ShapeType() == TopAbs_FACE && sameDomain(TopoDS::Face(face), wall)) {
                     TopExp::MapShapes(face, TopAbs_EDGE, unlocked);
                     break;
                 }
@@ -3422,6 +3674,12 @@ TopoDS_Shape constructShape(
         size = std::max(size, squareSize(tool.solid));
     }
     double allowance = raisedTolerance(shape, inputs) * size + (trimmed ? trimmedAllowance : 0.0);
+    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
+        // As in applyTools: OCCT's default integration of free-form faces doesn't cancel between
+        // the base and the result; both again, adaptively
+        measured = MassProperties::volume(shape, true);
+        expected = MassProperties::volume(base.getShape(), true) - cutVolume + fusedVolume;
+    }
     if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
         refuse("the result's volume " + describe(measured) + " differs from its closed form "
                + describe(expected));

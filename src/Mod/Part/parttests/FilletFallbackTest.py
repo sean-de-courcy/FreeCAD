@@ -1519,22 +1519,41 @@ class LostStepTest(unittest.TestCase):
                     )
 
     def testErrorSaysWhyTheConstructionRefused(self):
-        # r = 5.01 at the exact step: OCCT fails, and the exact construction refuses because the
-        # round would climb the step's wall (ops#601)
+        # r = 5.01 at the exact step on the four edges: OCCT fails, and the exact construction
+        # refuses: at the ledge's corners two picked edges meet with both strips past the ledge's
+        # outer loop, Onshape's *_OVERLAPS_EDGE_LOOP (K1; ops#601; Onshape fails too,
+        # notes/fillet-parity.md 3.5x)
         for kind in ("Fillet", "Chamfer"):
-            for which in ("four", "one"):
-                with self.subTest(kind=kind, which=which):
-                    feature, _ = stepped_body(self.doc, kind, 5.01, 5, which)
-                    self.assertFalse(feature.isValid())
-                    status = feature.getStatusString()
-                    self.assertTrue(
-                        status.startswith(
-                            "BRep_API: command not done (exact construction refused: "
-                        ),
-                        status,
-                    )
-                    self.assertTrue(status.endswith(")"), status)
-                    self.assertIn("runs off its face", status)
+            with self.subTest(kind=kind):
+                feature, _ = stepped_body(self.doc, kind, 5.01, 5, "four")
+                self.assertFalse(feature.isValid())
+                status = feature.getStatusString()
+                self.assertTrue(
+                    status.startswith("BRep_API: command not done (exact construction refused: "),
+                    status,
+                )
+                self.assertTrue(status.endswith(")"), status)
+                self.assertIn("run past the face's outer loop", status)
+
+    def testOneEdgeJustPastTheStepIsTrimmedByTheWall(self):
+        # r = 5.01 on the one edge: its strip runs 0.01 past the ledge onto the step's wall (x 5..35,
+        # y 5). Onshape trims the dress-up by the wall's plane run on under the ledge (Q-LEDGE
+        # LD1-LD3): the base less the dress-up of Pad1 alone, but for the tool's sliver past y 5
+        # under the wall, which stays
+        r, a = 5.01, 0.01
+        for kind, kept in (
+            ("Chamfer", a * a / 2),
+            ("Fillet", r * a - (a / 2 * math.sqrt(r * r - a * a) + r * r / 2 * math.asin(a / r))),
+        ):
+            with self.subTest(kind=kind):
+                feature, base = stepped_body(self.doc, kind, r, 5, "one")
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertTrue(feature.Shape.isValid())
+                self.assertAlmostEqual(
+                    feature.Shape.Volume,
+                    stepped_expected(kind, r, "one", base) + 30 * kept,
+                    delta=1e-6,
+                )
 
 
 def front_top(shape):
@@ -2110,6 +2129,28 @@ class OverflowTest(unittest.TestCase):
         for size, volume in ((5.5, 3740.483), (6, 3692.089)):
             with self.subTest(size=size):
                 self.assertBuilt(self.dressUp("Fillet", box, size, edges), volume, 7)
+
+    def testPastAConcaveEdgeTheWallGrows(self):
+        # Q-LEDGE S1-S5 (oracle 12, notes/onshape-facts.md LD1-LD3): a step, top z 10 over y 4..10,
+        # wall y 4 down to z 10 - h, ledge z 10 - h; the top's edge above the wall dressed up 1.0.
+        # Past h the strip runs onto the ledge, and Onshape trims the dress-up by the ledge's plane:
+        # the ledge grows under it, F stays 8. Volumes are Onshape's
+        for case, h, kind, volume, ledge in (
+            ("S1", 0.963, "Chamfer", 1912.97369, 4.037),
+            ("S2", 0.5, "Chamfer", 1952.50000, 4.5),
+            ("S3", 0.963, "Fillet", 1918.66813, 5 - math.sqrt(1 - 0.037**2)),
+            ("S4", 0.5, "Fillet", 1956.14185, 5 - math.sqrt(0.75)),
+            ("S5", 1.0, "Chamfer", 1910.00000, 4.0),
+        ):
+            with self.subTest(case=case):
+                base = Part.makeBox(20, 10, 10).cut(Part.makeBox(22, 5, h + 1, V(-1, -1, 10 - h)))
+                shape = self.dressUp(kind, base, 1.0, [edge_between(base, (0, 4, 10), (20, 4, 10))])
+                self.assertBuilt(shape, volume, 8)
+                self.assertAlmostEqual(shape.Volume, volume, delta=1e-5)
+                floor = [f for f in shape.Faces if abs(f.BoundBox.ZMin - (10 - h)) < 1e-9
+                         and f.BoundBox.ZLength < 1e-9]
+                self.assertEqual(len(floor), 1)
+                self.assertAlmostEqual(floor[0].BoundBox.YMax, ledge, delta=1e-6)
 
     def testConcavePastItsFaceFails(self):
         # Not built yet: a concave round past its face (the rib's top) has no face to trim it.

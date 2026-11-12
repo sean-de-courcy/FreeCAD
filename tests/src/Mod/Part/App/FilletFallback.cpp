@@ -17,11 +17,13 @@
 #include "src/App/InitApplication.h"
 #include <App/ElementNamingUtils.h>
 #include <Mod/Part/App/FilletFallback.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -40,12 +42,14 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <TopoDS.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
@@ -2282,17 +2286,201 @@ TEST_F(FilletFallbackTest, refusesANearlyStraightContinuation)
     }
 }
 
-TEST_F(FilletFallbackTest, refusesARoundUnderAnOverhang)
+TEST_F(FilletFallbackTest, trimsADressUpPastTheRisersFootByTheTread)
 {
-    // The step's convex edge with r = 5: the round's tangent line on the riser lies 1 below
-    // the riser's foot, inside the material. The volume is right, but the result would cut
-    // under the tread: its strip runs off the riser (the contact check after the cut is the
-    // second line of defence)
+    // The step's convex edge (riser 4 high) with size 5: the strip on the riser runs 1 past its
+    // foot, into the material under the tread. Onshape trims the dress-up by the tread's plane
+    // run on under it: the tread grows, the riser is used up, no step is left (Q-LEDGE LD1-LD3,
+    // notes/onshape-facts.md; S4 there is this case scaled: r 1 over a wall 0.5 high)
     TopoShape base(step(), 1L);
+    TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
+    // The round, centre (y 15, z 9): the material it keeps in y 10..15, z 10..14 is the quarter
+    // disc above z = 10; it meets the tread at y = 15 - sqrt(24)
+    double kept = 25 * pi / 4 - (std::sqrt(24.0) / 2 + 12.5 * std::asin(0.2));
+    // The chamfer, from (15, 14) to (10, 9): its triangle less the part under the tread
+    double chamfered = 12.5 - 0.5;
+    struct Case
+    {
+        FF::Request request;
+        double volume;
+        double treadTo;
+    };
+    for (const auto& c : {Case {fillet(5), 7200 - (20 - kept) * 30, 15 - std::sqrt(24.0)},
+                          Case {chamfer(5), 7200 - chamfered * 30, 11.0}}) {
+        TopoShape result = forced(base, {convex}, c.request);
+        EXPECT_TRUE(exact(result, c.volume));
+        EXPECT_EQ(result.countSubElements("Face"), 8);
+        // The tread: one plane face at z = 10, from y = 0 to where the dress-up meets it
+        int treads = 0;
+        for (const auto& face : result.getSubTopoShapes(TopAbs_FACE)) {
+            Bnd_Box box;
+            BRepBndLib::Add(face.getShape(), box);
+            double xMin, yMin, zMin, xMax, yMax, zMax;
+            box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+            if (zMax - zMin < 1e-6 && std::abs(zMin - 10) < 1e-6) {
+                ++treads;
+                EXPECT_NEAR(yMin, 0.0, 1e-6);
+                EXPECT_NEAR(yMax, c.treadTo, 1e-6);
+            }
+        }
+        EXPECT_EQ(treads, 1);
+    }
+}
+
+/// A closed B-spline through n points about the centre at height z: radius r + w cos(4 t), turned by
+/// the angle
+TopoDS_Wire wavyLoop(gp_Pnt centre, double r, double w, double turn)
+{
+    const int n = 16;
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, n);
+    for (int i = 0; i < n; ++i) {
+        double t = 2 * pi * i / n + turn;
+        double rho = r + w * std::cos(4 * t);
+        points->SetValue(i + 1, centre.Translated(gp_Vec(rho * std::cos(t), rho * std::sin(t), 0)));
+    }
+    GeomAPI_Interpolate curve(points, Standard_True, 1e-9);
+    curve.Perform();
+    return BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(curve.Curve()).Edge()).Wire();
+}
+
+/// Case Base #108's class, designed: a channel 2 deep (x < 10) beside a block 30 x 30 x 10, and a
+/// finger notch, the cylinder r 4 about (10, 0) cut down to the channel's floor (z 8): its rim is a
+/// half circle from (10, -4) to (10, 4), split at the cylinder's seam (14, 0). With freeForm, a
+/// boss lofted between two wavy B-spline loops stands on the top, away from the notch: its side is
+/// a B-spline surface, which OCCT's default volume integration doesn't get exactly
+TopoDS_Shape fingerNotch(bool freeForm)
+{
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -15, 0), 30, 30, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -16, 8), 11, 32, 3).Shape()
+    ).Shape();
+    gp_Ax2 axis(gp_Pnt(10, 0, 8), gp::DZ(), gp::DX());
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(axis, 4, 3).Shape()).Shape();
+    if (freeForm) {
+        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False);
+        loft.AddWire(wavyLoop(gp_Pnt(22, 6, 10), 4, 1.2, 0));
+        loft.AddWire(wavyLoop(gp_Pnt(22, 6, 25), 2.5, 1.0, pi / 8));
+        loft.Build();
+        shape = BRepAlgoAPI_Fuse(shape, loft.Shape()).Shape();
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    return unify.Shape();
+}
+
+TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
+{
+    // Case Base #108: the chamfer 2 of the notch's rim (both pieces), down to the floor: the
+    // triangle 2 x 2 revolved half way at the centroid radius 4 + 2 / 3. The construction measured
+    // its stages by OCCT's default integration, whose error on a free-form face moves with the
+    // shape integrated (the point it integrates about is the shape's): the boss's side, which the
+    // cut leaves alone, then made the cut measure short. On the replica: 2.45e-4, eight times the
+    // bound (ops#640). The volumes here are adaptive: the default can't be the test's reference
+    for (bool freeForm : {false, true}) {
+        TopoShape base(fingerNotch(freeForm), 1L);
+        auto rim = edgesWhere(base, atHeight(10), true);
+        ASSERT_EQ(rim.size(), 2U) << freeForm;
+        GProp_GProps before;
+        BRepGProp::VolumeProperties(base.getShape(), before);
+        double defaultError = before.Mass() - Part::MassProperties::volume(base.getShape(), true);
+        std::string reason;
+        TopoShape result = forced(base, rim, chamfer(2), &reason);
+        ASSERT_FALSE(result.isNull()) << freeForm << ": " << reason << " (default error "
+                                      << defaultError << ")";
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+        EXPECT_NEAR(
+            Part::MassProperties::volume(base.getShape(), true)
+                - Part::MassProperties::volume(result.getShape(), true),
+            pi * (4 + 2.0 / 3) * 2,
+            1e-6 * pi * (4 + 2.0 / 3) * 2
+        ) << freeForm << " (default error " << defaultError << ")";
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesATrimByAFinInFrontOfTheWall)
+{
+    // Review r1's case: a step (top z 10 over y 4..10, wall y 4 down to the ledge z 9.037) with a
+    // fin 0.5 thick standing on the ledge 0.02 in front of the wall, its top 0.5 above the ledge.
+    // The top's edge dressed up 1.0 runs past the wall's foot: the fin's section, closer to the
+    // wall than both offsets, would have trimmed the dress-up at the fin's top. Refused
+    const double h = 0.963;
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 10 - h), 22, 5, h + 1).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(0, 3.48, 10 - h), 20, 0.5, 0.5).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    TopoShape top = edgeBetween(base, {0, 4, 10}, {20, 4, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {top}, request, &reason).isNull());
+        EXPECT_NE(reason.find("not the wall"), std::string::npos) << reason;
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesATrimByAFinInAnotherLedgesPlane)
+{
+    // Review r2's case: a front ledge (riser y 4, floor z 9.037) and a back ledge (riser y 16,
+    // floor z 9.537), both top edges dressed up 1.0 in one feature, and a fin 0.02 in front of the
+    // front riser whose top lies in the back ledge's plane. The front riser's own wall is its
+    // floor at 9.037: the fin's top isn't, so the trim is refused (it was taken for the back wall)
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 20, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 22, 5, 2).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(-1, 16, 9.537), 22, 5, 2).Shape())
+                .Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(0, 3.48, 9.037), 20, 0.5, 0.5).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    TopoShape front = edgeBetween(base, {0, 4, 10}, {20, 4, 10});
+    TopoShape back = edgeBetween(base, {0, 16, 10}, {20, 16, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {front, back}, request, &reason).isNull());
+        EXPECT_NE(reason.find("not the wall"), std::string::npos) << reason;
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesATrimByWallsAtTwoHeights)
+{
+    // Review r2's T2: one riser (y 4) whose foot meets the ledge at z 9.037 for x 0..10 and at
+    // z 9.537 for x 10..20. Its strip runs into two walls on two planes: which plane trims where
+    // isn't the base's section in front of the face, so it stays refused (the literal rule)
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 11, 5, 2).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(10, -1, 9.537), 11, 5, 2).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    // The top edge is split where the two ledges meet (x 10): both halves are dressed up
+    TopoShape left = edgeBetween(base, {0, 4, 10}, {10, 4, 10});
+    TopoShape right = edgeBetween(base, {10, 4, 10}, {20, 4, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {left, right}, request, &reason).isNull()) << reason;
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesADressUpPastAConcaveEdgeIntoASlopedWall)
+{
+    // The same strip past the riser's foot, but the tread slopes: its plane isn't square to the
+    // riser, so the trim by its surface run on behind the riser isn't the base's section swept
+    // back. That stays refused
+    TopoShape base(profileAlongX({{0, 0}, {20, 0}, {20, 14}, {10, 14}, {10, 10}, {0, 11}}, 30),
+                   1L);
     std::string reason;
     TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
-    EXPECT_TRUE(forced(base, {convex}, fillet(5), &reason).isNull());
-    EXPECT_NE(reason.find("runs off its face"), std::string::npos) << reason;
+    EXPECT_TRUE(forced(base, {convex}, chamfer(5), &reason).isNull());
+    EXPECT_NE(reason.find("runs off its face into a wall"), std::string::npos) << reason;
 }
 
 TEST_F(FilletFallbackTest, refusesATangentChainOntoUnselectedEdges)
