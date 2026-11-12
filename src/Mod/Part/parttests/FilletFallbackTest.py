@@ -2429,11 +2429,20 @@ class WallOnAChamferedRimTest(unittest.TestCase):
             return sum(f.Area for f in s.Faces if f.Surface.TypeId == "Part::GeomCone")
         self.assertGreater(cones(shape), 0)
         self.assertAlmostEqual(cones(result), cones(shape), delta=1e-6)
+        # The PartDesign feature refines; the raw result keeps the boolean's splits
+        self.assertEqual(len(result.removeSplitter().Faces), len(shape.Faces))
+        return result, cones(result)
 
     def testFullRoundOfAWallFlushOnAChamferedRim(self):
         for chamfer in (1.5875, 0.8):
             with self.subTest(chamfer=chamfer):
-                self.check(0.0, chamfer, [3, 3, 4, 4])
+                result, cone = self.check(0.0, chamfer, [3, 3, 4, 4])
+                if chamfer == 1.5875:
+                    # Onshape's numbers (oracle 14, notes/onshape-facts.md PB2): faces 13 -> 13,
+                    # A 1276.733058 -> 1271.269152, the cone's area 71.480181 unchanged
+                    self.assertEqual(len(result.removeSplitter().Faces), 13)
+                    self.assertAlmostEqual(result.Area, 1271.269152, delta=1e-6 * 1271.269152)
+                    self.assertAlmostEqual(cone, 71.480181, delta=1e-6 * 71.480181)
 
     def testFullRoundOfAWallInsideAChamferedRim(self):
         # The control: the wall 0.2 inside the rim, three edges at every foot (F1 built it)
