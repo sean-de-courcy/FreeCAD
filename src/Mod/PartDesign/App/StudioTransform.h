@@ -31,6 +31,8 @@ PartDesignExport bool isStudioTransform(const App::DocumentObject* owner);
 ///   names under tag; nothing may come before it
 /// - a picked part, MakeCopy off: base moved (its location only: geometry and names are base's)
 /// - a picked part, MakeCopy on: base as it is (the source stays)
+/// A part whose shape is a sheet or a wire body moves and copies as a solid does (ops#678): with
+/// base null (the caller's base is solids only), the step's previous feature's shape is taken.
 /// Null with why when it can't be made.
 PartDesignExport Part::TopoShape studioTransformStep(
     const App::DocumentObject* owner,

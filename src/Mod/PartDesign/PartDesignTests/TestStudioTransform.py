@@ -505,3 +505,91 @@ class TestStudioTransform(unittest.TestCase):
         t.Suppressed = True
         self.doc.recompute()
         self.assertBounds(self.A.Shape, (0, 0, 0, 10, 10, 10))
+
+    # ------------------------------------------------------------------- surfaces (ops#678, TR10)
+    def sheetPart(self):
+        """Part D, a sheet: an Offset surface 5 above A's top face (x 0..10, y 0..10 at z 15)."""
+        try:
+            from PartDesign import SolidOpsFeatures as S
+        except ImportError:
+            import SolidOpsFeatures as S
+        pad = self.doc.getObject("APad")
+        D = self.doc.addObject("PartDesign::Body", "D")
+        self.studio.addObject(D)
+        S.make_offset_surface(D, [(pad, [faceAtZ(pad, 10)])], 5.0)
+        self.doc.recompute()
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        self.assertIn(D, PartDesign.studioLiveParts(self.A))
+        self.assertEqual((len(D.Shape.Solids), len(D.Shape.Faces)), (0, 1))
+        return D
+
+    def assertSheet(self, shape, expected, area):
+        self.assertBounds(shape, expected)
+        self.assertEqual((len(shape.Solids), len(shape.Faces)), (0, 1))
+        self.assertAlmostEqual(shape.Area, area, places=6)
+
+    def testSheetPartMoves(self):
+        """TR10: Onshape's Transform moves a surface as it moves a solid; the sheet keeps its names."""
+        D = self.sheetPart()
+        before = sorted(D.Tip.Shape.ElementMap.items())
+        t = self.transform([D], X=30)
+        self.assertValid(t, D.Tip)
+        self.assertSheet(D.Shape, (30, 0, 15, 40, 10, 15), 100)
+        self.assertEqual(sorted(D.Tip.Shape.ElementMap.items()), before)
+
+    def testSheetPartRotates(self):
+        D = self.sheetPart()
+        t = self.transform([D], TransformType="Rotate", Axis=(D.Origin.OriginFeatures[2], [""]), Angle=90)
+        self.assertValid(t, D.Tip)
+        self.assertSheet(D.Shape, (-10, 0, 15, 0, 10, 15), 100)
+
+    def testSheetPartCopy(self):
+        D = self.sheetPart()
+        t = self.transform([D], copy=True, Y=30)
+        self.assertValid(t, D.Tip)
+        self.assertSheet(D.Shape, (0, 0, 15, 10, 10, 15), 100)
+        copy = T.made_parts(t)[0]
+        self.assertValid(copy.Tip)
+        self.assertSheet(copy.Shape, (0, 30, 15, 10, 40, 15), 100)
+
+    def testSheetPartScales(self):
+        D = self.sheetPart()
+        t = self.scaleAbout([D], self.origin(), Scale=2)
+        self.assertValid(t, D.Tip)
+        self.assertSheet(D.Shape, (0, 0, 30, 20, 20, 30), 400)
+
+    def testWirePartMoves(self):
+        """TR10: a curve (wire body) moves too. No feature of the line makes one yet; a polyline
+        feature stands in: (0,0,20)-(10,0,20)-(10,10,20)."""
+        E = self.doc.addObject("PartDesign::Body", "E")
+        self.studio.addObject(E)
+        wire = self.doc.addObject("PartDesign::FeaturePython", "Polyline")
+        _Polyline(wire)
+        E.addObject(wire)
+        self.doc.recompute()
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        self.assertIn(E, PartDesign.studioLiveParts(self.A))
+        t = self.transform([E], X=5, Z=-20)
+        self.assertValid(t, E.Tip)
+        self.assertBounds(E.Shape, (5, 0, 0, 15, 10, 0))
+        self.assertEqual((len(E.Shape.Faces), len(E.Shape.Edges)), (0, 2))
+
+
+class _Polyline:
+    """A wire body, for testWirePartMoves."""
+
+    def __init__(self, obj):
+        obj.Proxy = self
+
+    def execute(self, obj):
+        import Part
+
+        obj.Shape = Part.makePolygon([V(0, 0, 20), V(10, 0, 20), V(10, 10, 20)])
+
+    def dumps(self):
+        return None
+
+    def loads(self, state):
+        return None

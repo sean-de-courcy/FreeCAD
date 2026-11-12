@@ -12,6 +12,7 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
+#include "Feature.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 #include "StudioTransform.h"
@@ -62,6 +63,28 @@ std::string copySourceId(const App::DocumentObject* owner, const std::string& ma
     return {};
 }
 
+/// part's shape just before owner's step, in part's frame, of any kind: a solid, a sheet or a
+/// wire body (ops#678, Onshape TR10: Transform moves surfaces and curves too). The usual bases
+/// (getBaseTopoShape, studioBaseAt) keep solids only. Null when there is no step or nothing
+/// with an edge before it
+Part::TopoShape anyBaseOf(const App::DocumentObject* owner, const Body* part)
+{
+    Feature* step = StudioList::stepOf(owner, part);
+    if (!step) {
+        return {};
+    }
+    auto previous =
+        freecad_cast<const Part::Feature*>(const_cast<Body*>(part)->getPrevSolidFeature(step));
+    if (!previous) {
+        return {};
+    }
+    Part::TopoShape shape = previous->Shape.getShape();
+    if (shape.isNull() || !shape.hasSubShape(TopAbs_EDGE)) {
+        return {};
+    }
+    return shape;
+}
+
 const Body* partWithId(const App::Document* doc, const std::string& id)
 {
     if (id.empty()) {
@@ -87,7 +110,7 @@ bool isStudioTransform(const App::DocumentObject* owner)
 Part::TopoShape studioTransformStep(
     const App::DocumentObject* owner,
     const Body* body,
-    const Part::TopoShape& base,
+    const Part::TopoShape& solidBase,
     long tag,
     std::string* why
 )
@@ -111,6 +134,8 @@ Part::TopoShape studioTransformStep(
     const auto* scaleProp = freecad_cast<App::PropertyMatrix*>(owner->getPropertyByName("StudioScale"));
     const bool scaled = scaleProp && scaleProp->getValue().hasScale(1e-9) != Base::ScaleType::NoScaling;
     const Base::Matrix4D docToBody = bodyFrame.inverse().toMatrix();
+    // A sheet or a wire body moves as a solid does (ops#678, TR10); the caller's base is solids only
+    const Part::TopoShape base = solidBase.isNull() ? anyBaseOf(owner, body) : solidBase;
 
     if (body->StudioMadeBy.getValue() == owner) {
         // A copy (Copy part): the source's solid where the Transform is in the history, moved, as
@@ -128,8 +153,15 @@ Part::TopoShape studioTransformStep(
         }
         Part::TopoShape solid = studioBaseAt(owner, source);  // in the document's frame
         if (solid.isNull()) {
+            // A sheet or a wire body (ops#678), in the document's frame as studioBaseAt's is
+            solid = anyBaseOf(owner, source);
+            if (!solid.isNull()) {
+                solid.transformShape(source->globalPlacement().toMatrix(), false, true);
+            }
+        }
+        if (solid.isNull()) {
             return fail(
-                std::string("'") + source->Label.getValue() + "' has no solid before " + label
+                std::string("'") + source->Label.getValue() + "' has no shape before " + label
             );
         }
         Part::TopoShape out(tag, owner->getDocument()->getStringHasher());
@@ -151,7 +183,7 @@ Part::TopoShape studioTransformStep(
         return out;
     }
     if (base.isNull()) {
-        return fail("Nothing comes before " + label + " in " + part + ": it has no solid to move");
+        return fail("Nothing comes before " + label + " in " + part + ": it has nothing to move");
     }
     if (copy) {
         return base;  // the source of a copy stays where it is
