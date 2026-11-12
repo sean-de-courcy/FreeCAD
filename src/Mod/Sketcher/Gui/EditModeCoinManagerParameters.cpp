@@ -90,7 +90,9 @@ SbColor DrawingParameters::FullyConstraintConstructionElementColor(0.56f, 0.66f,
 
 SbColor DrawingParameters::ConstrDimColor(1.0f, 0.149f, 0.0f);  // #FF2600 -> (255, 38,  0)
 SbColor DrawingParameters::ConstrIcoColor(1.0f, 0.149f, 0.0f);  // #FF2600 -> (255, 38,  0)
-SbColor DrawingParameters::NonDrivingConstrDimColor(0.0f, 0.149f, 1.0f);  // #0026FF -> (  0, 38,255)
+// Onshape's driven dimension is grey (PL1c); driving and expression dimensions follow the
+// fully constrained colour, black or white by the background (updateConstrainedColor)
+SbColor DrawingParameters::NonDrivingConstrDimColor(0.525f, 0.557f, 0.588f);  // #868E96 -> (134,142,150)
 SbColor DrawingParameters::ExprBasedConstrDimColor(1.0f, 0.5f, 0.149f);  // #FF7F26 -> (255, 127,38)
 SbColor DrawingParameters::DeactivatedConstrDimColor(0.5f, 0.5f, 0.5f);  // ##7f7f7f -> (127,127,127)
 SbColor DrawingParameters::CursorTextColor(0.0f, 0.0f, 1.0f);            // #0000FF -> (0,0,255)

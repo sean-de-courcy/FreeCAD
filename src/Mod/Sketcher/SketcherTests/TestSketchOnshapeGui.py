@@ -449,6 +449,56 @@ class TestSketchColoursGui(SketcherGuiTestCase):
         self.doc.recompute()
         self.assert_colour(self.line_colour(), self.WHITE)
 
+    # Onshape's dimensions (PL1c): black text and arrows, white on a dark background like the
+    # fully constrained curves; a driven dimension grey.
+    GREY = (0.525, 0.557, 0.588)
+
+    def dimension_colours(self):
+        from pivy import coin
+
+        for name in ("ConstrainedDimColor", "NonDrivingConstrDimColor", "ExprBasedConstrDimColor"):
+            if name in self.view_params.GetUnsigneds():
+                self.skipTest("a colour is set in the preferences: " + name)
+        FreeCADGui.ActiveDocument.setEdit(self.sketch.Name)
+        self.flush_gui(150)
+        datum_type = coin.SoType.fromName("SoDatumLabel")
+        labels = []
+
+        def visit(node):
+            if node.isOfType(datum_type):
+                labels.append(node)
+            if node.isOfType(coin.SoGroup.getClassTypeId()):
+                for index in range(node.getNumChildren()):
+                    visit(node.getChild(index))
+
+        visit(FreeCADGui.ActiveDocument.ActiveView.getViewer().getSoRenderManager().getSceneGraph())
+        return [tuple(label.textColor.getValue().getValue()) for label in labels]
+
+    def test_a_dimension_is_black_on_a_light_background(self):
+        self.background(0xFFFFFFFF)
+        self.sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 10.0))
+        self.doc.recompute()
+        colours = self.dimension_colours()
+        self.assertEqual(len(colours), 1, colours)
+        self.assert_colour(colours[0], self.BLACK)
+
+    def test_a_dimension_is_white_on_a_dark_background(self):
+        self.background(0x1F1F1FFF)
+        self.sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 10.0))
+        self.doc.recompute()
+        colours = self.dimension_colours()
+        self.assertEqual(len(colours), 1, colours)
+        self.assert_colour(colours[0], self.WHITE)
+
+    def test_a_driven_dimension_is_grey(self):
+        self.background(0xFFFFFFFF)
+        index = self.sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 10.0))
+        self.sketch.setDriving(index, False)
+        self.doc.recompute()
+        colours = self.dimension_colours()
+        self.assertEqual(len(colours), 1, colours)
+        self.assert_colour(colours[0], self.GREY)
+
 
 class TestSketchClosestMatchGui(SketcherGuiTestCase):
     """A missing sketch reference offers its closest match from inside the sketch (ops#644, the

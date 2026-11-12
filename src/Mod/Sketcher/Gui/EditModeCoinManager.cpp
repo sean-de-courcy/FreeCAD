@@ -665,7 +665,7 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          }},
         {"ConstrainedDimColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.ConstrDimColor, param);
+             updateConstrainedColor(drawingParameters.ConstrDimColor, param);
          }},
         {"ConstrainedIcoColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
@@ -677,7 +677,7 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          }},
         {"ExprBasedConstrDimColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.ExprBasedConstrDimColor, param);
+             updateConstrainedColor(drawingParameters.ExprBasedConstrDimColor, param);
          }},
         {"DeactivatedConstrDimColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
