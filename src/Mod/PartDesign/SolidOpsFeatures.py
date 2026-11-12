@@ -10,6 +10,8 @@
 # (Union) or a Remove (Subtraction) otherwise; the command moves a New one into a new part with
 # PartDesign.newPartFrom, as a native Pad's dialog does.
 
+import math
+
 import FreeCAD as App
 import Part
 
@@ -105,6 +107,148 @@ def _check_offset(src, res, what):
         )
 
 
+def _revolved_circle(face):
+    """A face on a surface of revolution whose meridian is a circle (a bent tube's bend): its frame,
+    or None. The face must be the whole (u, v) patch of its surface (u the revolution angle)."""
+    surf = face.Surface
+    kind = surf.__class__.__name__
+    if kind == "Toroid":
+        base, axis = surf.Center, surf.Axis
+    elif kind == "SurfaceOfRevolution":
+        base, axis = surf.Location, surf.Direction
+    else:
+        return None
+    u0, u1, v0, v1 = face.ParameterRange
+    if u1 - u0 <= TOL:
+        return None
+    try:
+        merid = surf.uIso(u0)
+        patch = surf.toShape(u0, u1, v0, v1)
+    except Exception:
+        return None
+    circ = merid.Circle if isinstance(merid, Part.ArcOfCircle) else merid
+    if not isinstance(circ, Part.Circle):
+        return None
+    if abs(patch.Area - face.Area) > 1e-6 * max(1.0, face.Area):
+        return None  # trimmed inside its patch: not a plain bend
+    axis = App.Vector(axis).normalize()
+    centre = circ.Center
+    foot = base + axis * (centre - base).dot(axis)
+    out = centre - foot
+    d = out.Length
+    if d <= TOL or abs(circ.Axis.dot(out)) > 1e-7 * d or abs(circ.Axis.dot(axis)) > 1e-7:
+        return None  # the meridian circle does not lie in a plane through the axis
+    um, vm = 0.5 * (u0 + u1), 0.5 * (v0 + v1)
+    p, n = face.valueAt(um, vm), face.normalAt(um, vm)
+    radial = p - surf.uIso(um).Center
+    return {
+        "circle": circ, "u0": u0, "u1": u1, "v0": v0, "v1": v1, "full": v1 - v0 >= 2 * math.pi - 1e-9,
+        "axis": axis, "foot": foot, "out": out.normalize(), "d": d, "r": circ.Radius,
+        "outward": n.dot(radial) > 0,  # the face normal points away from the meridian circle's centre
+        "mid": p,
+    }
+
+
+def _bend_radii(info, t1, t2):
+    """The thick ring's inner and outer radius about the meridian circle's centre."""
+    t_out, t_in = (t1, t2) if info["outward"] else (t2, t1)
+    return info["r"] - t_in, info["r"] + t_out
+
+
+def _reaches_axis(info, t1, t2):
+    return _bend_radii(info, t1, t2)[1] >= info["d"] - TOL
+
+
+def _bend_solid(face, info, t1, t2):
+    """The bend thickened: the ring between the two radii in the meridian plane at u0, the part on
+    the near side of the axis, revolved through the face's angle. Its union with the neighbours' pieces
+    is the union of the swept ring (Onshape TK1-TK4): filled up to the axis, nothing beyond it."""
+    r_in, r_out = _bend_radii(info, t1, t2)
+    if r_in < -TOL:
+        raise SolidOpsError("Thicken failed: the thickness toward the bend's centre exceeds its radius")
+    circ = info["circle"]
+
+    def arc(radius):
+        c = circ.copy()
+        c.Radius = radius
+        return c if info["full"] else Part.ArcOfCircle(c, info["v0"], info["v1"])
+
+    if info["full"]:
+        ring = Part.Face(Part.Wire(arc(r_out).toShape()))
+        if r_in > TOL:
+            ring = ring.cut(Part.Face(Part.Wire(arc(r_in).toShape()))).Faces[0]
+    else:
+        outer = arc(r_out).toShape()
+        if r_in > TOL:
+            inner = arc(r_in).toShape()
+            ends = [Part.LineSegment(inner.Vertexes[0].Point, outer.Vertexes[0].Point).toShape(),
+                    Part.LineSegment(inner.Vertexes[-1].Point, outer.Vertexes[-1].Point).toShape()]
+            ring = Part.Face(Part.Wire(Part.__sortEdges__([outer, inner] + ends)))
+        else:
+            c = circ.Center
+            ends = [Part.LineSegment(c, outer.Vertexes[0].Point).toShape(),
+                    Part.LineSegment(c, outer.Vertexes[-1].Point).toShape()]
+            ring = Part.Face(Part.Wire(Part.__sortEdges__([outer] + ends)))
+    if r_out > info["d"] - TOL:
+        # keep the near side: a rectangle in the meridian plane from the axis outward
+        size = 2.0 * (info["d"] + r_out) + 1.0
+        a, e, foot = info["axis"], info["out"], info["foot"]
+        pts = [foot - a * size, foot + a * size, foot + a * size + e * size, foot - a * size + e * size]
+        half = Part.Face(Part.makePolygon(pts + [pts[0]]))
+        ring = ring.common(half)
+        if not ring.Faces:
+            raise SolidOpsError("Thicken failed: nothing of the bend lies on its side of the axis")
+        ring = ring.Faces[0] if len(ring.Faces) == 1 else Part.makeCompound(ring.Faces)
+    angle = math.degrees(info["u1"] - info["u0"])
+    solid = ring.revolve(info["foot"], info["axis"], angle)
+    if not solid.isValid() or solid.Volume <= TOL or not solid.isInside(info["mid"], 1e-5, True):
+        raise SolidOpsError("Thicken failed: the bend could not be thickened")
+    return solid
+
+
+def _tangent_joins(group):
+    """True when every edge two faces of the group share is smooth (the normals agree along it)."""
+    for i, a in enumerate(group):
+        for b in group[i + 1:]:
+            for ea in a.Edges:
+                if not any(ea.isSame(eb) for eb in b.Edges):
+                    continue
+                p0, p1 = ea.ParameterRange
+                for k in (0.1, 0.5, 0.9):
+                    p = ea.valueAt(p0 + k * (p1 - p0))
+                    na = a.normalAt(*a.Surface.parameter(p))
+                    nb = b.normalAt(*b.Surface.parameter(p))
+                    if na.dot(nb) < 1.0 - 1e-6:
+                        return False
+    return True
+
+
+def _thicken_per_face(group, infos, t1, t2):
+    """The union of each face's own thick piece, for a smooth sheet with a bend whose ring reaches the
+    bend's axis (the whole-sheet offset folds over itself or fails there)."""
+    if not _tangent_joins(group):
+        raise SolidOpsError("Thicken failed: a bend's thickness reaches its axis where the sheet has a sharp edge")
+    pieces = []
+    for f, info in zip(group, infos):
+        if info is not None:
+            pieces.append(_bend_solid(f, info, t1, t2))
+            continue
+        try:
+            start = f.makeOffsetShape(-t2, TOL) if t2 > TOL else f
+            piece = start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
+        except Exception as e:
+            raise SolidOpsError("Thicken failed: %s" % e)
+        _check_offset(f, piece, "Thicken")
+        if not piece.Solids:
+            raise SolidOpsError("Thicken failed: the result has no solid")
+        pieces.append(piece)
+    res = pieces[0] if len(pieces) == 1 else pieces[0].fuse(pieces[1:])
+    res = res.removeSplitter()
+    if not res.isValid() or len(res.Solids) != 1 or res.Volume <= TOL:
+        raise SolidOpsError("Thicken failed: the thickened bend is not one valid solid")
+    return res
+
+
 def thicken_tool(faces, t1, t2):
     """Solid thickened from the faces: t1 along each face's normal, t2 against it."""
     if t1 < 0 or t2 < 0:
@@ -113,6 +257,12 @@ def thicken_tool(faces, t1, t2):
         raise SolidOpsError("Thickness is zero")
     pieces = []
     for group in _components(faces):
+        infos = [_revolved_circle(f) for f in group]
+        if any(i is not None and _reaches_axis(i, t1, t2) for i in infos):
+            # a bend's ring reaches its axis: the whole-sheet offset is a spindle torus there, which
+            # throws or folds over itself while still passing as valid (Onshape TK1-TK4 fill it to the axis)
+            pieces.append(_thicken_per_face(group, infos, t1, t2))
+            continue
         surf = _as_surface(group)
         try:
             start = surf.makeOffsetShape(-t2, TOL) if t2 > TOL else surf
