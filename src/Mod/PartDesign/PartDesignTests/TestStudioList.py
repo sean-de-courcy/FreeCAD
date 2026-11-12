@@ -917,6 +917,11 @@ def oracle(natives, records, bar, live=None):
                 cut = record["op"] == "Remove"
                 if cut:
                     result = shapes[p].cut(copy)
+                    if not result.Solids:
+                        # 10.12 amendment 7 (Onshape U3): a Remove taking all of p: gone after it
+                        shapes[p] = Part.makeCompound([])
+                        consumed.add(p)
+                        continue
                 else:
                     # A step fuses the tool's solids that touch its part (all when none does)
                     solids = tool[0].fuse(tool[1:]) if len(tool) > 1 else copy
@@ -1053,6 +1058,19 @@ def oracle(natives, records, bar, live=None):
             cut = record["op"] == "Subtraction"
             result = (shapes[p].cut(tool) if cut else shapes[p].fuse(tool)).removeSplitter()
             recs = sorted(pid for pid, (parent, _) in own.items() if parent == p)
+            if cut and not result.Solids:
+                # 10.12 amendment 7 (Onshape U3, U4): a Remove taking all of p (a part or a
+                # piece) is OK and p is gone after it; a split's parent so goes with its pieces
+                shapes[p] = Part.makeCompound([])
+                if recs:
+                    dead.add(p)
+                    for pid in recs:
+                        parentOf[pid] = p
+                        madePieces.add(pid)
+                        vanished.add(pid)
+                else:
+                    consumed.add(p)
+                continue
             if not recs:
                 if len(result.Solids) == 1:
                     shapes[p] = result
@@ -1066,8 +1084,6 @@ def oracle(natives, records, bar, live=None):
             solids = sorted(result.Solids, key=lambda solid: solid.BoundBox.Center.x)
             x0, _, x1, _ = record["rect"]
             claims = {}
-            # Seed 5: a cut that takes all of p (no solid left) holds nothing either: the step
-            # fails, p is split (no part) and its pieces fail, as the split step reports it
             if len(solids) != 1:
                 for pid in recs if solids else ():
                     if own[pid][1] in ("L", "R"):
