@@ -121,6 +121,7 @@
 #include <Precision.hxx>
 #include <ShapeAnalysis_Edge.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -6935,7 +6936,31 @@ TopoDS_Shape thinWall(
         if (!face.IsDone()) {
             throw Base::CADKernelError("Pipe: the thin wall of an open curve has no face");
         }
-        builder.Add(wall, face.Face());
+        // OCCT's offset of an open wire splits the offset of its last edge at the middle (sweeps 19):
+        // two pieces of one side would be twins, renamed when a curve follows. Join a side's pieces
+        // where they meet away from the profile's vertices; a vertex within the wall's thickness of
+        // one (the offsets of a joint between collinear curves, or the curves themselves) is kept, so
+        // each side stays one edge per curve
+        ShapeUpgrade_UnifySameDomain unify(face.Face(), true, false, false);
+        const double reach = std::max(right, left) + 1e-6 * std::max(1.0, right + left);
+        for (TopExp_Explorer v(face.Face(), TopAbs_VERTEX); v.More(); v.Next()) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(v.Current()));
+            for (TopExp_Explorer p(wire, TopAbs_VERTEX); p.More(); p.Next()) {
+                if (point.Distance(BRep_Tool::Pnt(TopoDS::Vertex(p.Current()))) <= reach) {
+                    unify.KeepShape(v.Current());
+                    break;
+                }
+            }
+        }
+        unify.Build();
+        int faces = 0;
+        for (TopExp_Explorer it(unify.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+            builder.Add(wall, it.Current());
+            ++faces;
+        }
+        if (faces != 1) {
+            throw Base::CADKernelError("Pipe: the thin wall of an open curve has no face");
+        }
     }
     if (!closed.empty()) {
         const Part::TopoShape regions = Part::TopoShape(-1).makeElementFace(closed);
