@@ -172,6 +172,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPartsListGui.py
         PartDesignTests/TestStudioPatternsGui.py
         PartDesignTests/TestStudioPartMirrorGui.py
+        PartDesignTests/TestFacePatternGui.py
     )
 endif(BUILD_GUI)
 

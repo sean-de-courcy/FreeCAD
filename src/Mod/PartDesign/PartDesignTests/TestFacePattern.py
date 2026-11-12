@@ -21,7 +21,7 @@
 
 """Onshape's Face pattern (FreeCAD-CH ops#655 T8, notes/face-pattern-design.md).
 
-The expected results are Onshape's (`notes/onshape-facts.md` "Face pattern", FP1-FP18):
+The expected results are Onshape's (`notes/onshape-facts.md` "Face pattern", FP1-FP19):
 - FP2: a boss's five faces, +x 20, count 3: 12540, one solid. Its top alone, or its sides alone:
   the feature fails and the part is unchanged.
 - FP3: a pocket's five faces, +x 20, 3: 11568.
@@ -38,6 +38,7 @@ The expected results are Onshape's (`notes/onshape-facts.md` "Face pattern", FP1
   without its bore, a blind pocket onto a thinner section, a boss copy inside a taller step, a corner
   boss along an edge, a side's merged face picked). A through hole onto a thicker step: Onshape extends
   it (17151.77); the route can't, so the feature fails (debt).
+- FP19: a pocket copy partly off the part's edge cuts what it meets (10640), a notch open there.
 
 Designed models, built by each test (mm, volumes in mm^3):
 - Plate: x 0..60, y 0..20, z 0..10 (12000). Boss: x 2..8, y 7..13, z 10..15 (180).
@@ -451,11 +452,33 @@ class TestFacePattern(unittest.TestCase):
         pattern.Reversed = True
         self.assertFails(pattern, "instance 2 stands over the part")
 
-    def testPocketPartlyOffThePartsEdgeFails(self):
-        # The third pocket, x 52..58 on a plate ending at x 55: its x 58 wall, a picked face, is in
-        # the air, so the copy doesn't close against the part (the rule of FP11-FP17). It would cut
-        # 3 x 6 x 4; Onshape's result isn't known (asked), so the feature stops: loud (debt)
+    def testPocketPartlyOffThePartsEdgeCutsANotch(self):
+        # FP19: the third pocket, x 52..58 on a plate ending at x 55. Its x 58 wall, a picked face,
+        # lies wholly beside the part; Onshape cuts what the copy meets, a 3 x 6 x 4 notch open at
+        # the plate's end: 11000 - 2 x 144 - 72 = 10640, one part, no warning
         self.plate(x1=55)
+        pocket = self.pocket()
+        pattern = self.linear(pocket, self.pocketFaces(pocket), 25, 3)
+        self.assertSolid(pattern, 55 * 20 * 10 - 2 * POCKET - 3 * 6 * 4)
+        floors = [
+            face
+            for face in pattern.Shape.Faces
+            if face.Surface.__class__.__name__ == "Plane"
+            and abs(face.CenterOfMass.z - 6) < TOL
+            and inBox(face.CenterOfMass, 52, 55, 7, 13, 6, 6)
+        ]
+        self.assertEqual(len(floors), 1)
+        self.assertAlmostEqual(floors[0].Area, 3 * 6, places=6)
+        self.assertAlmostEqual(floors[0].BoundBox.XMax, 55, places=6)
+
+    def testPocketPartlyOffBesideAPartBeyondItFails(self):
+        # The FP19 exemption holds only where the whole part lies inside the missing face's plane:
+        # here a tab y 15..20 runs on to x 65, past the copy's x 58 wall, so the wall's plane cuts
+        # the part and the copy errors as before (loud; Onshape not asked)
+        self.body = models.body(self.doc)
+        outline = [(0, 0), (55, 0), (55, 15), (65, 15), (65, 20), (0, 20)]
+        sketch = models.sketch(self.doc, "PlateSketch", models.polygon(outline), self.body)
+        models.pad(self.body, sketch, 10, name="Plate")
         pocket = self.pocket()
         pattern = self.linear(pocket, self.pocketFaces(pocket), 25, 3)
         self.assertFails(pattern, "instance 3 has a picked face missing")

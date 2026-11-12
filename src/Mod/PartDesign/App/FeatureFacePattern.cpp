@@ -47,13 +47,16 @@
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Pnt2d.hxx>
 
 #include <App/Datums.h>
@@ -379,6 +382,38 @@ void piecesOf(BRepAlgoAPI_BooleanOperation* op, const TopoDS_Shape& face, TopToo
     }
 }
 
+/// Whether a pocket copy's picked face lies wholly beside the solid (Onshape FP19): the face is planar
+/// and the whole solid lies on the copy's side of its plane. The copy then runs off the part's edge
+/// there and cuts what it meets, a notch open at that end. A face with part of the solid beyond its
+/// plane (a floor under a thinner ledge, FP15's rule) is not beside it
+bool besideThe(const TopoDS_Shape& solid, const TopoDS_Face& face)
+{
+    if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    gp_Pnt point;
+    gp_Dir outward;
+    if (!interiorPoint(face, point, outward)) {
+        return false;
+    }
+    // In the frame with the face's plane at z 0 and its outward normal along +z, the solid's top
+    gp_Trsf toPlane;
+    toPlane.SetTransformation(gp_Ax3(point, outward));
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(solid.Moved(TopLoc_Location(toPlane)), box, false, false);
+    if (box.IsVoid()) {
+        return false;
+    }
+    double x0 = 0.0;
+    double y0 = 0.0;
+    double z0 = 0.0;
+    double x1 = 0.0;
+    double y1 = 0.0;
+    double z1 = 0.0;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    return z1 <= 10 * Precision::Confusion();
+}
+
 /// Whether the face continues a face of the base it touches: on the same surface, facing the same way
 bool continuesAFaceOf(const TopoDS_Face& piece, const TopoDS_Shape& base)
 {
@@ -699,7 +734,8 @@ App::DocumentObjectExecReturn* FacePattern::execute()
             }
         }
         // And each picked face's image is in each instance's result (Onshape FP15, FP17): else the
-        // copy is buried in a taller step (a no-op), or a blind pocket breaks through a thinner one
+        // copy is buried in a taller step (a no-op), or a blind pocket breaks through a thinner one.
+        // A pocket's pick lying wholly beside the part is the exception (FP19)
         auto piecesInResult = [&](const TopoDS_Shape& face, bool added) {
             TopTools_ListOfShape afterFuse;
             if (added) {
@@ -740,7 +776,10 @@ App::DocumentObjectExecReturn* FacePattern::execute()
                 TopTools_IndexedMapOfShape copyFaces;
                 TopExp::MapShapes(subCopies[instance.removed].getShape(), TopAbs_FACE, copyFaces);
                 for (int index : removed.picked) {
-                    if (piecesInResult(copyFaces(index), false).IsEmpty()) {
+                    // A pick whose copy lies wholly beside the part leaves the cut open there:
+                    // Onshape cuts what the copy meets (FP19)
+                    if (piecesInResult(copyFaces(index), false).IsEmpty()
+                        && !besideThe(fused, TopoDS::Face(copyFaces(index)))) {
                         return failAt(
                             instance.position,
                             "has a picked face missing: it doesn't cut into the part as the original "
