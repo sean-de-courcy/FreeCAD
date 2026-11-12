@@ -65,6 +65,7 @@ import os
 import random
 import shutil
 import tempfile
+import time
 import unittest
 
 import FreeCAD as App
@@ -704,6 +705,12 @@ def oracle(natives, records, bar, live=None):
     consumedAt = {}  # T1a: each consumed part -> the index of the record that consumed it
     places = {r["name"]: i for i, r in enumerate(records)}
     for i, record in enumerate(records):
+        # ops#654 T1a hang: the shapes carried from record to record are plain (no element map),
+        # or their names grow exponentially through the records (plain Part has no hasher) and
+        # each Boolean or distance on them slows from milliseconds to minutes (seed 6)
+        for p, shape in list(shapes.items()):
+            if shape.ElementMapSize:
+                shapes[p] = plain(shape)
         for p in consumed:
             consumedAt.setdefault(p, i - 1)
         if len(natives) + i >= bar:
@@ -990,6 +997,15 @@ def oracle(natives, records, bar, live=None):
         }
     )
     out.update({k: (0.0, 0) if s is None else (round(s.Volume, 4), len(s.Solids)) for k, s in made.items()})
+    return out
+
+
+def plain(shape):
+    """shape without its element map (ops#654 T1a hang): Part's Booleans outside a document have
+    no string hasher, so each one nests its inputs' mapped names in its own, and after a handful
+    of them a name is megabytes long and every operation on the shape crawls."""
+    out = Part.Shape()
+    out.importBrepFromString(shape.exportBrepToString())
     return out
 
 
@@ -2360,6 +2376,34 @@ class TestStudioListProperty(unittest.TestCase):
                     break
         App.closeDocument(doc.Name)
         return bad
+
+    def testOracleStaysQuickThroughManyRecords(self):
+        """ops#654 T1a hang (seed 6): six Unions into B, each across the plane x 35, then a part
+        mirror of B about it into B. Part's Booleans outside a document nest their inputs' names,
+        so a shape carried through the records got megabyte names and the mirror's touch test ran
+        for minutes; the oracle carries plain shapes, and ends in seconds with B and its mirror
+        fused."""
+        rects = [(22, 3, 37, 7), (25, 2, 45, 5), (32, 3, 47, 7), (8, 4, 33, 6), (26, 1, 44, 9),
+                 (21, 6, 49, 8)]
+        records = [
+            dict(name=f"U{k}", id=k + 1, rect=list(r), depth=2 + k * 0.5, op="Union",
+                 scope=["B"], suppressed=False, pieces=[], sides={})
+            for k, r in enumerate(rects)
+        ]
+        records.append(dict(name="M", id=len(rects) + 1, mirror=True, source="B", x=35,
+                            op="Add", scope=["B"], suppressed=False))
+        natives = [f"N{k}" for k in range(NATIVES)]
+        want = Part.makeBox(10, 10, 10, App.Vector(20, 0, 0))
+        for r in records[:-1]:
+            length, width, height, corner = toolBox(r["rect"], r["depth"], "Union")
+            want = plain(want.fuse(Part.makeBox(length, width, height, corner)).removeSplitter())
+        want = want.fuse(want.mirror(App.Vector(35, 0, 0), App.Vector(1, 0, 0))).removeSplitter()
+        start = time.time()
+        got = oracle(natives, records, len(natives) + len(records))
+        elapsed = time.time() - start
+        self.assertEqual(got["B"], (round(want.Volume, 4), 1))
+        self.assertEqual(got["A"], (1000.0, 1))
+        self.assertLess(elapsed, 10, f"the oracle took {elapsed:.1f} s over {len(records)} records")
 
     def testRandomEdits(self):
         seeds = [int(s) for s in os.environ.get("STUDIO_PROP_SEEDS", "1,2,3").split(",") if s]
