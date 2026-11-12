@@ -3276,6 +3276,11 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                 && Mode != STATUS_SELECT_Constraint && Mode != STATUS_SELECT_Cross
                 && Mode != STATUS_SELECT_Wire) {
                 resetPreselectPoint();
+                // FreeCAD-CH (ops#640 polish P1b): this removal comes before the move's own
+                // detection, which then finds no preselection to change and skips the glyph
+                // hover: the hovered curve's glyphs would stay. Start their timer here (with
+                // nothing preselected it never asks for a redraw)
+                updateGlyphHover();
                 // FreeCAD-CH (ops#640 polish P7): the 3D view's pick that ends the region's
                 // preselection (the pointer left the region) takes the move: the hover ends here
                 if (hoveredRegion > 0 && !updatingRegionPreselection) {
