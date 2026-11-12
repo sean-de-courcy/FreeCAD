@@ -129,31 +129,71 @@ class TestSketchConflicts(unittest.TestCase):
                                self.sk.Geometry[ids[0]].EndPoint.y, places=6)
         self.assertAlmostEqual(pad.Shape.Volume, 2000.0, places=4)
 
-    # planegcs gives no diagnosis for this pair: solve() returns -1 with empty conflict and
-    # redundancy lists, so the sketch is Invalid (also when the Angle is added to a line already
-    # solved horizontal). Next step of sketch conflicts (work/sketch-conflicts-2/handoff.md).
-    @unittest.expectedFailure
     def testHorizontalAndAngleLeaveTheLineAsDrawn(self):
-        # oracle 10b q-a (SK7b's rule): a Horizontal and an Angle 30 on a line drawn at 10 degrees;
-        # neither holds as drawn, so both are left out and the line stays as drawn, while a
-        # length on another line (the rest) is applied
+        # oracle 10b q-a (SK7b's rule): a Horizontal and an Angle 30 on a line drawn at 10 degrees,
+        # added at once; neither holds as drawn, so both are left out and the line stays as drawn,
+        # while a length on another line (the rest) is applied. planegcs gives no diagnosis for
+        # this pair (the solve does not converge, both lists empty).
         import math
 
         a = math.radians(10.0)
         end = V(10.0 * math.cos(a), 10.0 * math.sin(a), 0)
         line = self.sk.addGeometry(Part.LineSegment(V(0, 0, 0), end), False)
         other = self.sk.addGeometry(Part.LineSegment(V(0, 20, 0), V(8, 20, 0)), False)
-        self.sk.addConstraint(Sketcher.Constraint("Horizontal", line))
-        self.sk.addConstraint(Sketcher.Constraint("Angle", line, math.radians(30.0)))
-        self.sk.addConstraint(Sketcher.Constraint("Distance", other, 12.0))
+        self.sk.addConstraint([
+            Sketcher.Constraint("Horizontal", line),
+            Sketcher.Constraint("Angle", line, math.radians(30.0)),
+            Sketcher.Constraint("Distance", other, 12.0),
+        ])
         self.doc.recompute()
-        self.assertTrue(self.sk.ConflictingConstraints)
+        self.assertEqual(sorted(self.sk.ConflictingConstraints), [1, 2])
         self.assertIn("Warning", self.sk.State)
         self.assertTrue(self.sk.isValid(), self.sk.State)
         g = self.sk.Geometry[line]
         self.assertAlmostEqual((g.StartPoint - V(0, 0, 0)).Length, 0.0, places=6)
         self.assertAlmostEqual((g.EndPoint - end).Length, 0.0, places=6)
         self.assertAlmostEqual(_length(self.sk, other), 12.0, places=6)
+
+    def testAngleOnAHorizontalLineIsLeftOut(self):
+        # the same pair, the Angle added to a line already solved horizontal: the Horizontal holds
+        # as drawn and stays, the Angle is left out and the line stays horizontal. planegcs names
+        # only the Horizontal as conflicting here; the failed solve's geometry (the line at 30
+        # degrees) must not be written.
+        import math
+
+        a = math.radians(10.0)
+        line = self.sk.addGeometry(
+            Part.LineSegment(V(0, 0, 0), V(10.0 * math.cos(a), 10.0 * math.sin(a), 0)), False)
+        other = self.sk.addGeometry(Part.LineSegment(V(0, 20, 0), V(8, 20, 0)), False)
+        self.sk.addConstraint(Sketcher.Constraint("Horizontal", line))
+        self.sk.addConstraint(Sketcher.Constraint("DistanceX", line, 1, 0.0))
+        self.sk.addConstraint(Sketcher.Constraint("DistanceY", line, 1, 0.0))
+        drawn = self.sk.Geometry[line].EndPoint
+        self.assertAlmostEqual(drawn.y, 0.0, places=9)
+        angle = self.sk.addConstraint(Sketcher.Constraint("Angle", line, math.radians(30.0)))
+        self.sk.addConstraint(Sketcher.Constraint("Distance", other, 12.0))
+        self.doc.recompute()
+        self.assertIn(angle + 1, self.sk.ConflictingConstraints)
+        self.assertIn("Warning", self.sk.State)
+        self.assertTrue(self.sk.isValid(), self.sk.State)
+        self.assertAlmostEqual((self.sk.Geometry[line].EndPoint - drawn).Length, 0.0, places=6)
+        self.assertAlmostEqual(_length(self.sk, other), 12.0, places=6)
+
+    def testPerpendicularBetweenHorizontalLinesKeepsTheLines(self):
+        # PL1d's kind: two horizontal lines 10 long and a Perpendicular between them, which holds
+        # only when one line has no length. The rank test sees no conflict and the solver met it
+        # by shrinking a line to a point; Onshape keeps the lines and names the Perpendicular.
+        a = self.sk.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)), False)
+        b = self.sk.addGeometry(Part.LineSegment(V(0, 5, 0), V(10, 5, 0)), False)
+        self.sk.addConstraint(Sketcher.Constraint("Horizontal", a))
+        self.sk.addConstraint(Sketcher.Constraint("Horizontal", b))
+        perpendicular = self.sk.addConstraint(Sketcher.Constraint("Perpendicular", a, b))
+        self.doc.recompute()
+        self.assertIn(perpendicular + 1, self.sk.ConflictingConstraints)
+        self.assertIn("Warning", self.sk.State)
+        self.assertTrue(self.sk.isValid(), self.sk.State)
+        self.assertAlmostEqual(_length(self.sk, a), 10.0, places=6)
+        self.assertAlmostEqual(_length(self.sk, b), 10.0, places=6)
 
     def testConsistentRepeatIsAcceptedWithoutWarning(self):
         # SK8 (consistent): accepted silently, as ops#656 made it

@@ -650,9 +650,12 @@ int System::addConstraintP2PAngle(Point& p1, Point& p2, double* angle, double in
     return addConstraint(constr);
 }
 
-int System::addConstraintP2PAngle(Point& p1, Point& p2, double* angle, int /*tagId*/, bool driving)
+int System::addConstraintP2PAngle(Point& p1, Point& p2, double* angle, int tagId, bool driving)
 {
-    return addConstraintP2PAngle(p1, p2, angle, 0., 0, driving);
+    // FreeCAD-CH (ops#640): the tag is passed on. It was dropped (0), so a line's Angle was never
+    // named in a conflict or redundancy and its error could not be read by tag (a conflict
+    // solved around then left out the other constraints of the conflict instead)
+    return addConstraintP2PAngle(p1, p2, angle, 0., tagId, driving);
 }
 
 int System::addConstraintP2LDistance(Point& p, Line& l, double* distance, bool ccw, int tagId, bool driving)
