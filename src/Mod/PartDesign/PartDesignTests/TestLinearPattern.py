@@ -279,6 +279,31 @@ class TestLinearPattern(unittest.TestCase):
         finally:
             shutil.rmtree(tempDir, ignore_errors=True)
 
+    def testSecondDirectionWithoutReferenceFails(self):
+        """A second direction in use (count 2) with no reference is refused, as Onshape's "Select a
+        pattern direction." (oracle 9j); before, its rows fell on the first row, silently
+        (ops#655). Count 1 is the box unticked: then no reference is needed."""
+        pattern = self.blockGrid()
+        pattern.Direction2 = None
+        self.Doc.recompute()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(self.blockCorners(pattern.Shape), self.gridCorners((0.0,)))
+        pattern.Mode2 = "Spacing"
+        pattern.Offset2 = 25
+        pattern.Occurrences2 = 2
+        self.Doc.recompute()
+        self.assertFalse(pattern.isValid(), "no refusal")
+        self.assertIn("Select a pattern direction", pattern.getStatusString())
+
+    def testFirstDirectionWithoutReferenceFails(self):
+        """Likewise direction 1: count 3 with no reference is refused, not three copies on the
+        seed (ops#655)."""
+        pattern = self.blockGrid()
+        pattern.Direction = None
+        self.Doc.recompute()
+        self.assertFalse(pattern.isValid(), "no refusal")
+        self.assertIn("Select a pattern direction", pattern.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument(self.Doc.Name)  # testSavedSpacings2Kept reopens it

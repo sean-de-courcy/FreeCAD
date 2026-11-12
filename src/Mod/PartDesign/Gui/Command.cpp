@@ -4000,10 +4000,6 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
                         Feat,
                         "Direction = (" << Gui::Command::getObjectCmd(sketch) << ", ['H_Axis'])"
                     );
-                    FCMD_OBJ_CMD(
-                        Feat,
-                        "Direction2 = (" << Gui::Command::getObjectCmd(sketch) << ", ['V_Axis'])"
-                    );
                     direction = true;
                 }
             }
@@ -4013,18 +4009,17 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
                     "Direction = (" << Gui::Command::getObjectCmd(pcActiveBody->getOrigin()->getX())
                                     << ",[''])"
                 );
-                FCMD_OBJ_CMD(
-                    Feat,
-                    "Direction2 = ("
-                        << Gui::Command::getObjectCmd(pcActiveBody->getOrigin()->getY()) << ",[''])"
-                );
             }
             // Onshape's defaults (ops#640 rank 8, B3-6): Distance is the spacing between
             // neighbouring instances, so a count change keeps it; count 2; Centered and Skip off
-            // (the properties' defaults)
+            // (the properties' defaults). The second direction has Onshape's own: an empty
+            // Direction (Onshape doesn't fill it), a spacing of 25, count 1 (its box unticked),
+            // so a count of 2 puts the row 25 away once a direction is picked (ops#655)
             FCMD_OBJ_CMD(Feat, "Mode = 'Spacing'");
             FCMD_OBJ_CMD(Feat, "Offset = 25");
             FCMD_OBJ_CMD(Feat, "Occurrences = 2");
+            FCMD_OBJ_CMD(Feat, "Mode2 = 'Spacing'");
+            FCMD_OBJ_CMD(Feat, "Offset2 = 25");
 
             finishTransformed(cmd, Feat);
         };

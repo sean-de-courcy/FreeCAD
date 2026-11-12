@@ -46,10 +46,10 @@ public:
      * Off and empty by default, so a file saved before them computes as it did.
      */
     //@{
-    /// Centered: the instances run both ways from the original along Direction, the original the
-    /// middle one (with an even count, one more on the positive side)
+    /// Centered: the instances run both ways from the original along Direction, Occurrences on
+    /// each side, the original included (Onshape's, oracle 9j: count n makes 2n - 1)
     App::PropertyBool Centered;
-    /// Centered along Direction2
+    /// Centered along Direction2, likewise (Onshape's own box for it, oracle 9j)
     App::PropertyBool Centered2;
     /// Skip instances: (i, j) pairs, flattened (i1, j1, i2, j2, ...): i counts the instances along
     /// Direction, j along Direction2, both from 0 at the negative end (the original is (0, 0)

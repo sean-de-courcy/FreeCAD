@@ -43,8 +43,8 @@ public:
      * Off and empty by default, so a file saved before them computes as it did.
      */
     //@{
-    /// Centered: the instances run both ways from the original, the original the middle one
-    /// (with an even count, one more in the positive direction)
+    /// Centered: the instances run both ways from the original, Occurrences on each side, the
+    /// original included (Onshape's, oracle 9j: count n makes 2n - 1)
     App::PropertyBool Centered;
     /// Skip instances: indexes from 0 at the first instance (the original is 0 unless centered),
     /// as Onshape lists them. The original is never skipped; an index out of range is ignored
