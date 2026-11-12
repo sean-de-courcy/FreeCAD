@@ -715,7 +715,7 @@ class TestStudioPatternsGui(unittest.TestCase):
                 body = self.doc.getObject(part)
                 self.assertFalse(body.isRolledBack(), f"{part} holds its step")
                 self.assertTrue(step.isValid(), step.getStatusString())
-                self.assertFalse(step.isTouched(), f"{part}'s step isn't computed")
+                self.assertNotIn("Touched", step.State, f"{part}'s step isn't computed")
         # the copy 25 along x (at (35, 50), partly in Across's cut) takes more of Q
         self.assertLess(self.step(pattern, "Q").Shape.Volume, PLATE - HOLE - ACROSS - 10)
         self.accept()
