@@ -268,6 +268,15 @@ public:
             }
             else if (BaseGeoId != curveId) {
                 seekAndRenderAutoConstraint(SugConstr, onSketchPos, Base::Vector2d(0.f, 0.f));
+                // FreeCAD-CH (Onshape GA3-25): the extended curve can't hold its own end (on
+                // its preview, a PointOnObject on itself); in open space Onshape stores nothing
+                const auto own = std::ranges::remove_if(SugConstr, [this](const AutoConstraint& c) {
+                    return c.GeoId == BaseGeoId;
+                });
+                if (!own.empty()) {
+                    SugConstr.erase(own.begin(), own.end());
+                    renderSuggestConstraintsCursor(SugConstr);
+                }
             }
         }
     }
