@@ -280,17 +280,35 @@ def _thicken_per_face(group, infos, t1, t2):
         if not piece.Solids:
             raise SolidOpsError("Thicken failed: the result has no solid")
         pieces.append(piece)
-    return _fused(pieces, probes)
+    pinched = all(abs(_bend_radii(i, t1, t2)[1] - i["d"]) <= TOL for i in infos if i is not None and _reaches_axis(i, t1, t2))
+    return _fused(pieces, probes, pinched)
 
 
-def _fused(pieces, probes):
+def _self_intersects(shape, pinched):
+    """BOPAlgo's self-intersection check. A fuse of tangent pieces can self-intersect yet pass isValid
+    (a U-turn bend whose legs' rings collide: 179 degrees, 457.6406 for 457.6189, review r2). Where
+    each ring only touches its bend's axis, the pieces meet at a pinch point, which BOPAlgo reports
+    as a vertex or edge self-intersection on a right result (Onshape TK2): those count only when no
+    ring merely touches. Tolerance reports (InvalidCurveOnSurface, TooSmallEdge) are left to the
+    volume and probe checks."""
+    try:
+        shape.check(True)
+        return False
+    except Exception as e:
+        lines = [l for l in str(e).splitlines() if "SelfIntersect" in l]
+    if pinched:
+        lines = [l for l in lines if not ("Vertex" in l or "Edge" in l)]
+    return bool(lines)
+
+
+def _fused(pieces, probes, pinched=False):
     """The pieces' union as one checked solid. The pieces meet along tangent faces, where OCC's fuse
     depends on the order (the horn bore's three pieces fused one by one gave two solids; a 150 degree
     bend's list fuse collapsed into a smaller valid solid). So try a list fuse, then one piece at a time
     in each order, and take the first result that is one valid solid, no smaller than its largest piece
     and no larger than their sum, with every probe point (inside each piece) inside it; else fail
-    loudly. A ring crossing its axis with no neighbour beside it (a lone bend) gives two solids that
-    meet along the axis: that fails too."""
+    loudly. The result must also pass BOPAlgo's self-intersection check. A ring crossing its axis with
+    no neighbour beside it (a lone bend) gives two solids that meet along the axis: that fails too."""
     if len(pieces) == 1:
         return pieces[0]
 
@@ -309,8 +327,11 @@ def _fused(pieces, probes):
                 continue
             if not max(p.Volume for p in pieces) - tol <= res.Volume <= total + tol:
                 continue
-            if all(res.isInside(q, 1e-6, True) for q in probes):
-                return res
+            if not all(res.isInside(q, 1e-6, True) for q in probes):
+                continue
+            if _self_intersects(res, pinched):
+                continue
+            return res
         except Exception:
             continue  # past the geometry time limit, the next try stops at once
     raise SolidOpsError("Thicken failed: the thickened bend is not one valid solid")
