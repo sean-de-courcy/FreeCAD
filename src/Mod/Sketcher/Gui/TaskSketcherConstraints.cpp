@@ -689,9 +689,19 @@ void ConstraintView::contextMenuEvent(QContextMenuEvent* event)
         const std::string docName = sketch->getDocument()->getName();
         const std::string objName = sketch->getNameInDocument();
         const std::string pathText = path.toString();
-        for (const auto& configItem : App::callConfigMenuQuery(sketch, path)) {
-            QAction* action = menu.addAction(
-                QString::fromStdString(configItem.label), [docName, objName, pathText, configItem]() {
+        // Onshape (CP2-9): a "Configure dimension" submenu, one item per input ("Size",
+        // "Set to #w"); a configured dimension's "Unconfigure from <input>" sits in it too
+        const auto configItems = App::callConfigMenuQuery(sketch, path);
+        QMenu* configMenu = configItems.empty() ? nullptr : menu.addMenu(tr("Configure dimension"));
+        if (configMenu) {
+            configMenu->setObjectName(QStringLiteral("constraintConfigMenu"));
+        }
+        for (const auto& configItem : configItems) {
+            const QString label = configItem.action == "configure"
+                ? QString::fromStdString(configItem.inputName)
+                : QString::fromStdString(configItem.label);
+            QAction* action = configMenu->addAction(
+                label, [docName, objName, pathText, configItem]() {
                     auto doc = App::GetApplication().getDocument(docName.c_str());
                     if (auto target = doc ? doc->getObject(objName.c_str()) : nullptr) {
                         App::runConfigMenuItem(target, pathText, configItem);

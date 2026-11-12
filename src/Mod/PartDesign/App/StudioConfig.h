@@ -135,11 +135,14 @@ PartDesignExport bool configMoveRow(App::Part* studio,
                                     const std::string& row,
                                     int index,
                                     std::string* why);
-/// Renames a List or Checkbox input (its id stays); a Variable's name is its #name and stays
+/// Renames an input (its id stays). A Variable's property is renamed too (its #name), and the
+/// expressions that read it follow
 PartDesignExport bool configRenameInput(App::Part* studio,
                                         const std::string& input,
                                         const std::string& name,
                                         std::string* why);
+/// Moves an input to position index (0 is the first): the panel's tabs and the bar follow
+PartDesignExport bool configMoveInput(App::Part* studio, const std::string& input, int index, std::string* why);
 /// Sets a Checkbox input's default and rebinds
 PartDesignExport bool configSetCheckboxDefault(App::Part* studio,
                                                const std::string& input,

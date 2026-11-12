@@ -94,6 +94,19 @@ private:
 
 // FreeCAD-CH (ops#671 C2): Onshape's configuration items in a bound field's context menu
 // ("Configure with <input>", "Set to #<variable>", "Unconfigure from <input>"), from the App hook
+// A field that is no longer configured loses the outline and gets its own tooltip back
+void clearConfiguredMarker(QAbstractSpinBox* spinbox)
+{
+    if (spinbox->property("configured").isValid()) {
+        spinbox->setProperty("configured", QVariant());
+        spinbox->setStyleSheet(QString());
+    }
+    if (spinbox->property("plainToolTip").isValid()) {
+        spinbox->setToolTip(spinbox->property("plainToolTip").toString());
+        spinbox->setProperty("plainToolTip", QVariant());
+    }
+}
+
 class ConfigurationMenuFilter: public QObject
 {
 public:
@@ -111,6 +124,13 @@ public:
         }
         auto [obj, path] = m_target();
         if (!obj || !obj->isAttachedToDocument()) {
+            return false;
+        }
+        // Onshape (CP2-9): a sketch dimension's value box has no configure items; they are in the
+        // dimension's own menu ("Configure dimension")
+        static const Base::Type sketchType = Base::Type::fromName("Sketcher::SketchObject");
+        if (!sketchType.isBad() && obj->getTypeId().isDerivedFrom(sketchType)
+            && path.getPropertyName() == "Constraints") {
             return false;
         }
         const auto items = App::callConfigMenuQuery(obj, path);
@@ -396,10 +416,17 @@ void ExpressionSpinBox::showExpression(Number number)
             QObject::tr("Configured by %1").arg(QString::fromStdString(input)) + QStringLiteral("\n")
             + expressionToolTipText(getExpression().get())
         );
+        // Onshape's tooltip: "Depth: #len * 0.25 (Configured by Size)"
+        if (!spinbox->property("plainToolTip").isValid()) {
+            spinbox->setProperty("plainToolTip", spinbox->toolTip());
+        }
+        spinbox->setToolTip(QObject::tr("%1: %2 (Configured by %3)")
+                                .arg(QString::fromStdString(getPath().getPropertyName()),
+                                     QString::fromStdString(getExpression()->toString()),
+                                     QString::fromStdString(input)));
     }
-    else if (spinbox->property("configured").isValid()) {
-        spinbox->setProperty("configured", QVariant());
-        spinbox->setStyleSheet(QString());
+    else {
+        SpinBoxPrivate::clearConfiguredMarker(spinbox);
     }
 }
 
@@ -413,10 +440,7 @@ void ExpressionSpinBox::clearExpression()
     p.setColor(QPalette::Active, QPalette::Text, defaultPalette.color(QPalette::Text));
     lineedit->setPalette(p);
     iconLabel->setExpressionText(QString());
-    if (spinbox->property("configured").isValid()) {
-        spinbox->setProperty("configured", QVariant());
-        spinbox->setStyleSheet(QString());
-    }
+    SpinBoxPrivate::clearConfiguredMarker(spinbox);
 }
 
 void ExpressionSpinBox::updateExpression()

@@ -426,7 +426,12 @@ public:
         add_varargs_method(
             "configRenameInput",
             &Module::guarded<&Module::configRenameInput>,
-            "configRenameInput(studio, input, name) -- Renames a List or Checkbox input (its id stays)."
+            "configRenameInput(studio, input, name) -- Renames an input (its id stays; a Variable's #name too)."
+        );
+        add_varargs_method(
+            "configMoveInput",
+            &Module::guarded<&Module::configMoveInput>,
+            "configMoveInput(studio, input, index) -- Moves an input to position index (0 first)."
         );
         add_varargs_method(
             "configSetCheckboxDefault",
@@ -1853,6 +1858,21 @@ private:
         configStudioArg(pStudio, doc, studio);
         std::string why;
         return done(PartDesign::configRenameInput(studio, input, name, &why), why);
+    }
+
+    Py::Object configMoveInput(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        int index;
+        if (!PyArg_ParseTuple(args.ptr(), "Osi", &pStudio, &input, &index)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configMoveInput(studio, input, index, &why), why);
     }
 
     Py::Object configSetCheckboxDefault(const Py::Tuple& args)

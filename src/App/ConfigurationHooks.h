@@ -55,8 +55,9 @@ AppExport std::string callConfiguredQuery(const DocumentObject* obj, const Objec
 struct ConfigMenuItem
 {
     std::string label;
-    std::string action;  ///< "configure", "new", "variable" or "unconfigure"
-    std::string input;   ///< the input's id (empty for "new")
+    std::string action;     ///< "configure", "variable" or "unconfigure"
+    std::string input;      ///< the input's id
+    std::string inputName;  ///< the input's name (a sketch dimension's submenu shows it)
 };
 using ConfigMenuQuery = std::function<std::vector<ConfigMenuItem>(const DocumentObject* obj,
                                                                   const ObjectIdentifier& path)>;

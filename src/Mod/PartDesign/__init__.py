@@ -61,6 +61,7 @@ configSetDefaultRow = _PartDesign.configSetDefaultRow
 configRemoveInput = _PartDesign.configRemoveInput
 configMoveRow = _PartDesign.configMoveRow
 configRenameInput = _PartDesign.configRenameInput
+configMoveInput = _PartDesign.configMoveInput
 configSetCheckboxDefault = _PartDesign.configSetCheckboxDefault
 configEditVariable = _PartDesign.configEditVariable
 configConfigure = _PartDesign.configConfigure

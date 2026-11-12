@@ -2,13 +2,17 @@
 
 """The Configuration panel, Onshape's (FreeCAD-CH ops#671, slice C2; notes/configurations-design.md
 3.8). A dock with one tab per configuration input of a part studio: a List's table (its rows by the
-parameters and suppressions it configures) with Add, rename, reorder, default and remove; a
-Checkbox's two rows and its default; a Variable's default and bounds. Every edit is one undo step
-through the PartDesign.config* calls (the App side, slice C1).
+parameters and suppressions it configures, in feature order); a Checkbox's two rows; a Variable's
+default and bounds. As in Onshape (CP2, oracle 9f): the active row carries the bar and the default
+is named above the table; a click selects a cell and a double-click edits it, and rows switch,
+become the default, are duplicated, moved and deleted from the row's menu. Inputs are renamed,
+moved and deleted from the head. Every edit is one undo step through the PartDesign.config*
+calls (the App side, slice C1).
 
 The configuration items of a field's context menu (Gui core's spin boxes, the sketch's constraint
-list, the Features list rows) come from PartDesign.configMenuItems (Onshape's "Configure with <input>",
-"Set to #<variable>", "Unconfigure from <input>") and run `fieldAction`; Gui core reaches it through
+list, the Features list rows) come from PartDesign.configMenuItems (Onshape's "Configure", "Configure
+with <input>", "Set to #<variable>", "Unconfigure from <input>"; none while the studio has no input)
+and run `fieldAction`; Gui core reaches it through
 the App hook, as it can't import PartDesign. The Features list's Configurations button runs
 `openFor`, and calls `follow` when its studio changes."""
 
@@ -84,8 +88,8 @@ def entryTitle(entry):
     return "{} / {}".format(obj.Label, entry["path"])
 
 
-def defaultMarker():
-    """The bar that marks the default row in the Name column (CP2-5)"""
+def activeMarker():
+    """The bar that marks the active row in the Name column (CP2-4)"""
     pix = QtGui.QPixmap(4, 16)
     pix.fill(QtGui.QColor(52, 120, 220))
     return QtGui.QIcon(pix)
@@ -150,13 +154,27 @@ class ConfigurationsPanel(QtWidgets.QWidget):
         self.removeButton.setText(_tr("Remove"))
         self.removeButton.clicked.connect(lambda: self.removeInput(self.currentInput()))
         head.addWidget(self.removeButton)
+        self.moveInputButtons = []
+        for name, text, step in (("configMoveInputUp", _tr("Move up"), -1), ("configMoveInputDown", _tr("Move down"), 1)):
+            b = QtWidgets.QToolButton()
+            b.setObjectName(name)
+            b.setText(text)
+            b.clicked.connect(lambda checked=False, st=step: self.moveInput(self.currentInput(), st))
+            head.addWidget(b)
+            self.moveInputButtons.append(b)
         layout.addLayout(head)
+        # Onshape's "Configure Part Studio": the first input, a List "Configuration" with one row
+        # "Default" (CP2-1); fields offer no configure item before it
+        self.createButton = QtWidgets.QPushButton(_tr("Configure studio"))
+        self.createButton.setObjectName("configCreate")
+        self.createButton.clicked.connect(self.createFirstInput)
+        layout.addWidget(self.createButton)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setObjectName("configTabs")
         layout.addWidget(self.tabs, 1)
         self.empty = QtWidgets.QLabel(
-            _tr("No configuration inputs. Add a List, a Checkbox or a Variable, or choose Configure... on a field.")
+            _tr("Right click sketch dimensions, features, or feature parameters to configure them.")
         )
         self.empty.setObjectName("configEmpty")
         self.empty.setWordWrap(True)
@@ -235,6 +253,9 @@ class ConfigurationsPanel(QtWidgets.QWidget):
             self.empty.setVisible(not inputs)
             self.renameButton.setEnabled(bool(inputs))
             self.removeButton.setEnabled(bool(inputs))
+            for b in self.moveInputButtons:
+                b.setEnabled(len(inputs) > 1)
+            self.createButton.setVisible(self.studio is not None and not inputs)
         finally:
             self._building = False
 
@@ -244,8 +265,10 @@ class ConfigurationsPanel(QtWidgets.QWidget):
         table.setObjectName("configTable_" + inp["id"])
         table.setHorizontalHeaderLabels([_tr("Name")] + [entryTitle(e) for e in entries])
         table.verticalHeader().setVisible(False)
-        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        # A click selects a cell, a double-click edits it; it doesn't switch rows (CP2-4)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
         table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed)
         active = activeOf(self.studio, inp)
         for r, (key, name) in enumerate(rows):
             item = QtWidgets.QTableWidgetItem(name)
@@ -265,15 +288,20 @@ class ConfigurationsPanel(QtWidgets.QWidget):
                     cell.setText(text)
                 table.setItem(r, c, cell)
             if key == active:
+                # The active row: the bar and blue text (CP2-4)
+                item.setIcon(activeMarker())
+                item.setData(QtCore.Qt.UserRole + 1, "active")
+                item.setToolTip(_tr("The active configuration"))
                 for c in range(table.columnCount()):
-                    f = table.item(r, c).font()
-                    f.setBold(True)
-                    table.item(r, c).setFont(f)
-                    table.item(r, c).setBackground(QtGui.QBrush(QtGui.QColor(70, 130, 220, 50)))
+                    table.item(r, c).setForeground(QtGui.QBrush(QtGui.QColor(40, 100, 200)))
         header = table.horizontalHeader()
         header.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(
             lambda pos, t=table, es=entries: self._headerMenu(t, es, t.horizontalHeader().logicalIndexAt(pos))
+        )
+        table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos, t=table, i=inp: self._execRowMenu(t, i, t.itemAt(pos))
         )
         table.setProperty("entryCount", len(entries))
         table.itemChanged.connect(lambda item, i=inp, es=entries: self._cellChanged(i, es, item))
@@ -283,42 +311,31 @@ class ConfigurationsPanel(QtWidgets.QWidget):
     def _listTab(self, inp, entries):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
-        default = inp.get("default")
-        rows = []
-        for r in inp["rows"]:
-            rows.append((r["id"], r["name"]))
-        table = self._table(inp, rows, entries)
-        for r, row in enumerate(inp["rows"]):
-            if row["id"] == default:
-                table.item(r, 0).setIcon(defaultMarker())
-                table.item(r, 0).setData(QtCore.Qt.UserRole + 1, "default")
-                table.item(r, 0).setToolTip(_tr("The default configuration"))
-        layout.addWidget(table, 1)
-        buttons = QtWidgets.QHBoxLayout()
-        for name, text, slot in (
-            ("configAddRow", _tr("Add row"), lambda: self.addRow(inp["id"])),
-            ("configRemoveRow", _tr("Remove row"), lambda: self.removeRow(inp["id"], self._selectedRow(table))),
-            ("configMoveUp", _tr("Up"), lambda: self.moveRow(inp["id"], self._selectedRow(table), -1)),
-            ("configMoveDown", _tr("Down"), lambda: self.moveRow(inp["id"], self._selectedRow(table), 1)),
-            ("configSetDefault", _tr("Make default"), lambda: self.setDefaultRow(inp["id"], self._selectedRow(table))),
-        ):
-            b = QtWidgets.QPushButton(text)
-            b.setObjectName(name)
-            b.clicked.connect(slot)
-            buttons.addWidget(b)
-        layout.addLayout(buttons)
+        rows = [(r["id"], r["name"]) for r in inp["rows"]]
+        default = next((name for key, name in rows if key == inp.get("default")), "")
+        layout.addWidget(self._defaultLabel(default))
+        layout.addWidget(self._table(inp, rows, entries), 1)
+        add = QtWidgets.QPushButton(_tr("Add row"))
+        add.setObjectName("configAddRow")
+        add.clicked.connect(lambda: self.addRow(inp["id"]))
+        layout.addWidget(add, 0, QtCore.Qt.AlignLeft)
         return w
 
     def _checkboxTab(self, inp, entries):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
-        default = QtWidgets.QCheckBox(_tr("Checked by default"))
-        default.setObjectName("configCheckboxDefault")
-        default.setChecked(bool(inp.get("default", True)))
-        default.toggled.connect(lambda on: self.setCheckboxDefault(inp["id"], on))
-        layout.addWidget(default)
-        layout.addWidget(self._table(inp, [("true", _tr("Checked")), ("false", _tr("Unchecked"))], entries), 1)
+        # No Edit definition: the default changes through a row's "Set as default" (CP2-7)
+        rows = [("true", _tr("Checked")), ("false", _tr("Unchecked"))]
+        layout.addWidget(self._defaultLabel(rows[0][1] if inp.get("default", True) else rows[1][1]))
+        layout.addWidget(self._table(inp, rows, entries), 1)
         return w
+
+    @staticmethod
+    def _defaultLabel(name):
+        """The block header that names the default row (CP2-4: "Default: Small")"""
+        label = QtWidgets.QLabel(_tr("Default: {}").format(name))
+        label.setObjectName("configDefaultLabel")
+        return label
 
     def _variableTab(self, inp):
         w = QtWidgets.QWidget()
@@ -337,6 +354,18 @@ class ConfigurationsPanel(QtWidgets.QWidget):
             fields[key] = line
         apply = QtWidgets.QPushButton(_tr("Apply"))
         apply.setObjectName("configVariableApply")
+
+        def check():
+            # Onshape (CP2-7): a maximum below the default (or a minimum above it) turns the boxes
+            # red and greys out OK
+            bad = variableProblem(inp, {k: f.text() for k, f in fields.items()})
+            for k, f in fields.items():
+                f.setStyleSheet("QLineEdit { color: #c0392b; }" if k in bad else "")
+            apply.setEnabled(not bad)
+
+        for f in fields.values():
+            f.textChanged.connect(lambda text: check())
+        check()
         apply.clicked.connect(
             lambda: self.editVariable(
                 inp["id"],
@@ -348,18 +377,52 @@ class ConfigurationsPanel(QtWidgets.QWidget):
         form.addRow(apply)
         return w
 
-    @staticmethod
-    def _selectedRow(table):
-        row = table.currentRow()
-        return table.item(row, 0).data(ROW_ID) if row >= 0 else None
 
     def _headerMenu(self, table, entries, column):
         if column < 1 or column > len(entries):
             return
         entry = entries[column - 1]
         menu = QtWidgets.QMenu(table)
-        menu.addAction(_tr("Remove configuration"), lambda: self.unconfigure(entry["object"], entry["path"]))
+        menu.addAction(_tr("Delete column"), lambda: self.unconfigure(entry["object"], entry["path"])).setObjectName(
+            "configDeleteColumn"
+        )
         menu.exec_(QtGui.QCursor.pos())
+
+    def rowMenu(self, inputId, key, parent=None):
+        """A row's menu (CP2-4): Switch to "<row>", Set as default (not on the default row), and for a
+        List row Duplicate row, Move up, Move down, Delete row"""
+        inp = next(i for i in inputsOf(self.studio) if i["id"] == inputId)
+        menu = QtWidgets.QMenu(parent or self)
+        if inp["kind"] == "list":
+            ids = [r["id"] for r in inp["rows"]]
+            name = next(r["name"] for r in inp["rows"] if r["id"] == key)
+            isDefault = key == inp.get("default")
+        else:
+            ids = ["true", "false"]
+            name = _tr("Checked") if key == "true" else _tr("Unchecked")
+            isDefault = (key == "true") == bool(inp.get("default", True))
+
+        def add(objectName, text, fn, enabled=True):
+            action = menu.addAction(text, fn)
+            action.setObjectName(objectName)
+            action.setEnabled(enabled)
+
+        add("configRowSwitch", _tr('Switch to "{}"').format(name), lambda: self.switchTo(inputId, key),
+            key != activeOf(self.studio, inp))
+        if not isDefault:
+            add("configRowSetDefault", _tr("Set as default"), lambda: self.setDefaultRow(inputId, key))
+        if inp["kind"] == "list":
+            add("configRowDuplicate", _tr("Duplicate row"), lambda: self.duplicateRow(inputId, key))
+            add("configRowMoveUp", _tr("Move up"), lambda: self.moveRow(inputId, key, -1), ids.index(key) > 0)
+            add("configRowMoveDown", _tr("Move down"), lambda: self.moveRow(inputId, key, 1), ids.index(key) < len(ids) - 1)
+            add("configRowDelete", _tr("Delete row"), lambda: self.removeRow(inputId, key), len(ids) > 1)
+        return menu
+
+    def _execRowMenu(self, table, inp, item):
+        if item is None:
+            return
+        key = table.item(item.row(), 0).data(ROW_ID)
+        self.rowMenu(inp["id"], key, table).exec_(QtGui.QCursor.pos())
 
     # ------------------------------------------------------------------------------ edits
     def run(self, title, fn):
@@ -409,8 +472,53 @@ class ConfigurationsPanel(QtWidgets.QWidget):
         return self.run(_tr("Rename configuration input"), lambda: PartDesign.configRenameInput(self.studio, inputId, name))
 
     def removeInput(self, inputId):
+        """No confirmation; what it configured keeps the active row's values (CP2-6)"""
         if inputId:
             return self.run(_tr("Remove configuration input"), lambda: PartDesign.configRemoveInput(self.studio, inputId))
+
+    def moveInput(self, inputId, step):
+        ids = [i["id"] for i in inputsOf(self.studio)]
+        if inputId not in ids or not 0 <= ids.index(inputId) + step < len(ids):
+            return None
+        return self.run(
+            _tr("Reorder configuration inputs"),
+            lambda: PartDesign.configMoveInput(self.studio, inputId, ids.index(inputId) + step),
+        )
+
+    def createFirstInput(self):
+        """Onshape's "Configure Part Studio": a List "Configuration" with one row "Default" """
+        return self.addList(_newListName(self.studio), ["Default"])
+
+    def switchTo(self, inputId, key):
+        inp = next(i for i in inputsOf(self.studio) if i["id"] == inputId)
+        value = (key == "true") if inp["kind"] == "checkbox" else key
+        return self.run(_tr("Switch configuration"), lambda: PartDesign.configSetActive(self.studio, {inputId: value}))
+
+    def duplicateRow(self, inputId, rowId):
+        """A copy of the row's cells, right below it"""
+        inp = next(i for i in inputsOf(self.studio) if i["id"] == inputId)
+        ids = [r["id"] for r in inp["rows"]]
+        source = next(r["name"] for r in inp["rows"] if r["id"] == rowId)
+        taken = {r["name"] for r in inp["rows"]} | set(ids)
+        name, n = _tr("{} copy").format(source), 2
+        while name in taken:
+            name = _tr("{} copy {}").format(source, n)
+            n += 1
+        entries = [e for e in PartDesign.configEntries(self.studio) if e["input"] == inputId]
+
+        def apply():
+            new = PartDesign.configAddRow(self.studio, inputId, name)
+            for e in entries:
+                if rowId not in e["cells"]:
+                    continue
+                if e["path"] is None:
+                    PartDesign.configSetSuppressionCell(e["object"], new, e["cells"][rowId] == "true")
+                else:
+                    PartDesign.configSetCell(e["object"], e["path"], new, e["cells"][rowId])
+            PartDesign.configMoveRow(self.studio, inputId, new, ids.index(rowId) + 1)
+            return new
+
+        return self.run(_tr("Duplicate configuration"), apply)
 
     def addRow(self, inputId, name=None):
         inp = next(i for i in inputsOf(self.studio) if i["id"] == inputId)
@@ -450,8 +558,13 @@ class ConfigurationsPanel(QtWidgets.QWidget):
                 table.setCurrentCell(r, 0)
 
     def setDefaultRow(self, inputId, rowId):
-        if rowId:
-            return self.run(_tr("Set default configuration"), lambda: PartDesign.configSetDefaultRow(self.studio, inputId, rowId))
+        """A List's default row, or a Checkbox's default (its row "true" or "false")"""
+        if not rowId:
+            return None
+        inp = next(i for i in inputsOf(self.studio) if i["id"] == inputId)
+        if inp["kind"] == "checkbox":
+            return self.setCheckboxDefault(inputId, rowId == "true")
+        return self.run(_tr("Set default configuration"), lambda: PartDesign.configSetDefaultRow(self.studio, inputId, rowId))
 
     def setCheckboxDefault(self, inputId, on):
         if not self._building:
@@ -616,20 +729,20 @@ def _fieldPath(obj, path):
     return path
 
 
-def configureField(obj, path, inputId=None):
-    """Configures obj's path (None or '': its suppression) with the List or Checkbox inputId, or,
-    with None, a new List "Configuration" with one row "Default" (Onshape's first input, CP2-1).
-    Returns the input id, or None when nothing was configured"""
+def configureField(obj, path, inputId):
+    """Configures obj's path (None or '': its suppression) with the List or Checkbox inputId; nothing
+    makes an input implicitly (CP2-1). Shows Onshape's toast ("Extrude 2 Depth added to
+    Configuration") and the panel. Returns the input id, or None when nothing was configured"""
     studio = PartDesign.studioOf(obj)
+    inp = next((i for i in inputsOf(studio) if i["id"] == inputId), None) if inputId else None
+    if inp is None:
+        return None
     path = _fieldPath(obj, path)
     if path is None:
         return None
     what = obj.Label if not path else "{} / {}".format(obj.Label, path)
 
     def apply():
-        nonlocal inputId
-        if inputId is None:
-            inputId = PartDesign.configAddList(studio, _newListName(studio), ["Default"])
         if not path:
             PartDesign.configConfigureSuppression(obj, inputId)
         else:
@@ -637,8 +750,16 @@ def configureField(obj, path, inputId=None):
 
     if not _try(studio, _tr("Configure {}").format(what), apply):
         return None
+    toast(_tr("{} {} added to {}").format(obj.Label, path or _tr("suppression"), inp["name"]))
     showPanel(studio, inputId)
     return inputId
+
+
+def toast(text):
+    """Onshape's toast, as a status bar message"""
+    mw = FreeCADGui.getMainWindow()
+    if mw is not None:
+        mw.statusBar().showMessage(text, 5000)
 
 
 def unconfigureField(obj, path):
@@ -666,8 +787,6 @@ def fieldAction(obj, path, action, inputId=""):
     boxes, the sketch's constraint list and the Features list"""
     if action == "configure":
         return configureField(obj, path, inputId)
-    if action == "new":
-        return configureField(obj, path, None)
     if action == "unconfigure":
         return unconfigureField(obj, path)
     if action == "variable":
@@ -706,6 +825,42 @@ def _namedConstraintPath(sketch, path):
         FreeCAD.Console.PrintWarning("Configurations: {}\n".format(exc))
         return None
     return "Constraints." + name
+
+
+def variableProblem(inp, texts):
+    """The fields of a Variable's definition that make it invalid ({'default', 'min', 'max'}):
+    a value that doesn't read, a minimum above the maximum, or a default outside them"""
+    kind = inp.get("type")
+    if kind == "Text":
+        return set()
+
+    def read(text):
+        if not text.strip():
+            return None
+        if kind in ("Length", "Angle"):
+            q = FreeCAD.Units.Quantity(text)
+            unit = FreeCAD.Units.Length if kind == "Length" else FreeCAD.Units.Angle
+            if q.Unit != unit and q.Unit != FreeCAD.Units.Unit():
+                raise ValueError(text)
+            return q.Value
+        return float(text)
+
+    values, bad = {}, set()
+    for key, text in texts.items():
+        try:
+            values[key] = read(text)
+        except Exception:
+            bad.add(key)
+    if values.get("default") is None and "default" not in bad:
+        bad.add("default")
+    lo, hi, d = values.get("min"), values.get("max"), values.get("default")
+    if lo is not None and hi is not None and lo > hi:
+        bad |= {"min", "max"}
+    if d is not None and hi is not None and d > hi:
+        bad |= {"default", "max"}
+    if d is not None and lo is not None and d < lo:
+        bad |= {"default", "min"}
+    return bad
 
 
 def openFor(docName, studioName):

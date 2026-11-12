@@ -2793,8 +2793,16 @@ void FeaturesView::setActiveConfiguration(const std::string& input, const std::s
     catch (const std::exception& e) {
         why = e.what();
     }
+    auto line = configBar->findChild<QLineEdit*>(QStringLiteral("configInput_") + QString::fromStdString(input));
+    if (!ok && line) {
+        // Onshape (CP2-8): a Variable value out of range is refused, not clamped; the box keeps the
+        // typed text in red, with no message, and the value stays the model's
+        line->setStyleSheet(QStringLiteral("QLineEdit { color: #c0392b; }"));
+        line->setProperty("refused", QString::fromStdString(why));
+        return;
+    }
     if (!ok) {
-        // Refused (a value out of range: CP2-8 open; the box shows the model's value again)
+        // Refused: the bar shows the model's value again
         Base::Console().warning("Configurations: %s\n", why.c_str());
         Gui::getMainWindow()->showMessage(QString::fromStdString(why), 5000);
         configBar->setToolTip(QString::fromStdString(why));

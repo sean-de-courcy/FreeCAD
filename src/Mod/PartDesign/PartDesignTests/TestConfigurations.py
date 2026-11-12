@@ -209,8 +209,8 @@ class TestConfigurations(unittest.TestCase):
             PartDesign.configMoveRow(self.studio, self.size, "Huge", 0)
 
     def testRenameInputKeepsItsId(self):
-        """A List or Checkbox input's name is only shown: the id, the key and the cells stay; a
-        Variable's name is its #name and stays"""
+        """An input's name is only shown: the id, the key and the cells stay. A Variable's name is
+        its #name (Onshape renames every input, CP2-7): the expressions that read it follow"""
         self.configureSizes()
         tall = self.edit(lambda: PartDesign.configAddCheckbox(self.studio, "Tall"))
         self.edit(lambda: PartDesign.configRenameInput(self.studio, self.size, "Width"))
@@ -224,28 +224,49 @@ class TestConfigurations(unittest.TestCase):
         with self.assertRaises(ValueError):
             PartDesign.configRenameInput(self.studio, self.size, "")
         self.edit(lambda: PartDesign.configAddVariable(self.studio, "len", "Length", "80 mm"))
+        bpad = self.doc.getObject("BPad")
+        self.edit(lambda: bpad.setExpression("Length", "#len / 4"))
+        self.assertAlmostEqual(height(self.B), 20, delta=TOL)
+        self.edit(lambda: PartDesign.configRenameInput(self.studio, "len", "length"))
+        self.assertIsNotNone(self.cfg.getPropertyByName("length"))
+        self.assertIn("length", dict(bpad.ExpressionEngine)["Length"])
+        self.edit(lambda: PartDesign.configEditVariable(self.studio, "len", "120 mm"))
+        PartDesign.configSetActive(self.studio, {"len": "120 mm"})
+        self.assertAlmostEqual(height(self.B), 30, delta=TOL)
         with self.assertRaises(ValueError):
-            PartDesign.configRenameInput(self.studio, "len", "length")
+            PartDesign.configRenameInput(self.studio, "len", "2wide")
+
+    def testMoveInput(self):
+        """Inputs reorder (CP2-7): the panel's tabs and the bar follow Inputs' order"""
+        tall = self.edit(lambda: PartDesign.configAddCheckbox(self.studio, "Tall"))
+        self.edit(lambda: PartDesign.configMoveInput(self.studio, tall, 0))
+        self.assertEqual([i["id"] for i in json.loads(self.cfg.Inputs)["inputs"]], [tall, self.size])
+        with self.assertRaises(ValueError):
+            PartDesign.configMoveInput(self.studio, tall, 2)
 
     def testCheckboxDefault(self):
-        """A Checkbox's default can change; with no active value set, the model follows it"""
+        """A Checkbox's default can change; the active value doesn't (Onshape, CP2-7)"""
         tall = self.edit(lambda: PartDesign.configAddCheckbox(self.studio, "Tall"))
         cpad = self.doc.getObject("CPad")
         self.edit(lambda: PartDesign.configConfigure(cpad, "Length", tall))
         self.edit(lambda: PartDesign.configSetCell(cpad, "Length", "true", "15 mm"))
         self.assertAlmostEqual(height(self.C), 15, delta=TOL)
         self.edit(lambda: PartDesign.configSetCheckboxDefault(self.studio, tall, False))
-        self.assertAlmostEqual(height(self.C), 10, delta=TOL)
+        self.assertAlmostEqual(height(self.C), 15, delta=TOL)
         self.assertEqual(PartDesign.configDefaultKey(self.studio), self.size + "=Default;Tall=false")
+        PartDesign.configSetActive(self.studio, {tall: False})
+        self.assertAlmostEqual(height(self.C), 10, delta=TOL)
         with self.assertRaises(ValueError):
             PartDesign.configSetCheckboxDefault(self.studio, self.size, False)
 
     def testEditVariable(self):
-        """A Variable's default and bounds can change, its type can't; a default outside the new
-        bounds is refused and changes nothing"""
+        """A Variable's default and bounds can change, its type can't; the active value stays (CP2-7)
+        unless the new bounds leave it out; a default outside the new bounds is refused"""
         self.edit(lambda: PartDesign.configAddVariable(self.studio, "len", "Length", "80 mm", "10 mm", "200 mm"))
         bpad = self.doc.getObject("BPad")
         self.edit(lambda: bpad.setExpression("Length", "#len / 8"))
+        self.assertAlmostEqual(height(self.B), 10, delta=TOL)
+        self.edit(lambda: PartDesign.configEditVariable(self.studio, "len", "160 mm", "50 mm", None))
         self.assertAlmostEqual(height(self.B), 10, delta=TOL)
         self.edit(lambda: PartDesign.configEditVariable(self.studio, "len", "160 mm", "100 mm", None))
         self.assertAlmostEqual(height(self.B), 20, delta=TOL)

@@ -102,34 +102,68 @@ class TestConfigurationsGui(unittest.TestCase):
     def names(table):
         return [table.item(r, 0).text() for r in range(table.rowCount())]
 
+    @staticmethod
+    def marked(table):
+        """The rows that carry the active bar"""
+        return [table.item(r, 0).text() for r in range(table.rowCount())
+                if table.item(r, 0).data(QtCore.Qt.UserRole + 1) == "active"]
+
+    @staticmethod
+    def defaultLabel(panel, inputId):
+        pump()
+        tab = panel.findChild(QtWidgets.QWidget, "configTab_" + inputId)
+        return tab.findChild(QtWidgets.QLabel, "configDefaultLabel").text()
+
+    @staticmethod
+    def trigger(menu, name):
+        action = next(a for a in menu.actions() if a.objectName() == name)
+        assert action.isEnabled(), name
+        action.trigger()
+        pump()
+
     # ---------------------------------------------------------------------------- the panel
     def testPanelShowsTheTableAndHidesStaleEntries(self):
         """Onshape's table (CP2-4): a Name column, then "<feature> / <parameter>" and
-        "<feature> / Unsuppressed" (a tick: unsuppressed); the default row has its bar (CP2-5), the
-        active row is highlighted; a deleted owner's column goes, and comes back with the undo"""
-        self.configureSizes()
+        "<feature> / Unsuppressed" (a tick: unsuppressed), in feature order; the active row has the
+        bar and the default is named above the table; a deleted owner's column goes, and comes back
+        with the undo"""
+        self.edit(lambda: PartDesign.configConfigureSuppression(self.E, self.size))
+        self.edit(lambda: PartDesign.configSetSuppressionCell(self.E, "Small", True))
+        self.edit(lambda: PartDesign.configConfigure(self.APad, "Length", self.size))
+        self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", "Large", "20 mm"))
         panel = ConfigurationsGui.showPanel(self.studio)
         tabs = panel.findChild(QtWidgets.QTabWidget, "configTabs")
         self.assertEqual([tabs.tabText(i) for i in range(tabs.count())], ["Size"])
         table = self.table(panel, self.size)
         self.assertEqual(self.headers(table), ["Name", "APad / Length", "E / Unsuppressed"])
         self.assertEqual(self.names(table), ["Small", "Large"])
-        self.assertEqual(table.item(0, 0).data(QtCore.Qt.UserRole + 1), "default")
-        self.assertIsNone(table.item(1, 0).data(QtCore.Qt.UserRole + 1))
+        self.assertEqual(self.marked(table), ["Small"])
+        self.assertEqual(self.defaultLabel(panel, self.size), "Default: Small")
         self.assertEqual(table.item(1, 1).text(), "20 mm")
         self.assertEqual(table.item(0, 2).checkState(), QtCore.Qt.Unchecked)
         self.assertEqual(table.item(1, 2).checkState(), QtCore.Qt.Checked)
-        self.assertTrue(table.item(0, 0).font().bold())
-        self.assertFalse(table.item(1, 0).font().bold())
+        # A click selects a cell, it doesn't switch (CP2-4); the bar follows the active row
+        rect = table.visualItemRect(table.item(1, 1))
+        QTest.mouseClick(table.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center())
+        pump()
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Default")
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.assertTrue(waitFor(lambda: self.marked(self.table(panel, self.size)) == ["Large"]))
+        self.assertEqual(self.defaultLabel(panel, self.size), "Default: Small")
+        table = self.table(panel, self.size)
         self.edit(lambda: (PartDesign.studioRemove(self.E), self.doc.removeObject("E")))
         self.assertTrue(waitFor(lambda: self.headers(self.table(panel, self.size)) == ["Name", "APad / Length"]))
         self.doc.undo()
         self.assertTrue(waitFor(lambda: len(self.headers(self.table(panel, self.size))) == 3))
 
     def testPanelEditsRowsCellsAndSuppression(self):
-        """Add, rename, reorder, default; a cell and a suppression tick edit the model, each one undo step"""
+        """Add and rename rows; the row menu (CP2-4) switches, sets the default, duplicates, moves and
+        deletes; a cell and a suppression tick edit the model, each one undo step"""
         self.configureSizes()
         panel = ConfigurationsGui.showPanel(self.studio)
+        names = [a.objectName() for a in panel.rowMenu(self.size, "Default").actions()]
+        self.assertEqual(names, ["configRowSwitch", "configRowDuplicate", "configRowMoveUp", "configRowMoveDown",
+                                 "configRowDelete"])
         medium = panel.addRow(self.size, "Medium")
         table = self.table(panel, self.size)
         self.assertEqual(self.names(table), ["Small", "Large", "Medium"])
@@ -139,14 +173,23 @@ class TestConfigurationsGui(unittest.TestCase):
         self.assertEqual(self.inputs()[0]["rows"][2]["id"], medium)
         table.item(2, 1).setText("15 mm")
         self.assertEqual(self.cells(self.APad, "Length")[medium], "15 mm")
-        PartDesign.configSetActive(self.studio, {"Size": "Mid"})
+        self.trigger(panel.rowMenu(self.size, medium), "configRowSwitch")
         self.assertAlmostEqual(height(self.A), 15, delta=TOL)
-        panel.moveRow(self.size, medium, -1)
+        self.trigger(panel.rowMenu(self.size, medium), "configRowMoveUp")
         self.assertEqual(self.names(self.table(panel, self.size)), ["Small", "Mid", "Large"])
-        panel.setDefaultRow(self.size, "Large")
-        table = self.table(panel, self.size)
+        self.trigger(panel.rowMenu(self.size, medium), "configRowDuplicate")
+        self.assertEqual(self.names(self.table(panel, self.size)), ["Small", "Mid", "Mid copy", "Large"])
+        copy = self.inputs()[0]["rows"][2]["id"]
+        self.assertEqual(self.cells(self.APad, "Length")[copy], "15 mm")
+        self.trigger(panel.rowMenu(self.size, copy), "configRowDelete")
+        self.assertEqual(self.names(self.table(panel, self.size)), ["Small", "Mid", "Large"])
+        self.trigger(panel.rowMenu(self.size, "Large"), "configRowSetDefault")
         self.assertEqual(self.inputs()[0]["default"], "Large")
-        self.assertEqual(table.item(2, 0).data(QtCore.Qt.UserRole + 1), "default")
+        self.assertEqual(self.defaultLabel(panel, self.size), "Default: Large")
+        self.assertNotIn("configRowSetDefault", [a.objectName() for a in panel.rowMenu(self.size, "Large").actions()])
+        # Setting the default doesn't switch (CP2-7)
+        self.assertAlmostEqual(height(self.A), 15, delta=TOL)
+        table = self.table(panel, self.size)
         # Small's E column: a tick unsuppresses E in Small
         table.item(0, 2).setCheckState(QtCore.Qt.Checked)
         self.assertEqual(self.cells(self.E, None)["Default"], "false")
@@ -161,7 +204,9 @@ class TestConfigurationsGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: self.names(self.table(panel, self.size)) == ["Small", "Large"]))
 
     def testCheckboxAndVariableTabs(self):
-        """A Checkbox's tab: its default and its two rows; a Variable's: default and bounds; an input renamed"""
+        """A Checkbox's tab: its two rows, its default set from a row's menu; a Variable's: default and
+        bounds, with OK greyed out while the maximum is below the default (CP2-7); inputs renamed
+        (a Variable's #name too) and moved"""
         panel = ConfigurationsGui.showPanel(self.studio)
         tall = panel.addCheckbox("Tall")
         cpad = self.doc.getObject("CPad")
@@ -170,34 +215,62 @@ class TestConfigurationsGui(unittest.TestCase):
         self.assertEqual(self.names(table), ["Checked", "Unchecked"])
         table.item(0, 1).setText("15 mm")
         self.assertAlmostEqual(height(self.C), 15, delta=TOL)
-        panel.findChild(QtWidgets.QWidget, "configTab_" + tall).findChild(
-            QtWidgets.QCheckBox, "configCheckboxDefault"
-        ).setChecked(False)
+        self.assertEqual(self.defaultLabel(panel, tall), "Default: Checked")
+        self.trigger(panel.rowMenu(tall, "false"), "configRowSetDefault")
+        self.assertEqual(self.defaultLabel(panel, tall), "Default: Unchecked")
+        self.assertAlmostEqual(height(self.C), 15, delta=TOL)
+        self.trigger(panel.rowMenu(tall, "false"), "configRowSwitch")
         self.assertAlmostEqual(height(self.C), 10, delta=TOL)
         panel.addVariable("len", "Length", "80 mm", "10 mm", "200 mm")
         pump()
         tab = panel.findChild(QtWidgets.QWidget, "configTab_len")
+        apply = tab.findChild(QtWidgets.QPushButton, "configVariableApply")
+        tab.findChild(QtWidgets.QLineEdit, "configVariable_max").setText("50 mm")
+        self.assertFalse(apply.isEnabled())
+        self.assertIn("c0392b", tab.findChild(QtWidgets.QLineEdit, "configVariable_max").styleSheet())
+        tab.findChild(QtWidgets.QLineEdit, "configVariable_max").setText("200 mm")
         tab.findChild(QtWidgets.QLineEdit, "configVariable_default").setText("120 mm")
-        tab.findChild(QtWidgets.QPushButton, "configVariableApply").click()
+        self.assertTrue(apply.isEnabled())
+        apply.click()
         self.assertAlmostEqual(self.inputs()[2]["default"], 120, delta=TOL)
         panel.renameInput(self.size, "Width")
+        panel.renameInput("len", "width")
+        pump()
+        self.assertIsNotNone(self.cfg.getPropertyByName("width"))
+        tabs = panel.findChild(QtWidgets.QTabWidget, "configTabs")
+        self.assertEqual([tabs.tabText(i) for i in range(tabs.count())], ["Width", "Tall", "width"])
+        tabs.setCurrentWidget(panel.findChild(QtWidgets.QWidget, "configTab_len"))
+        panel.findChild(QtWidgets.QToolButton, "configMoveInputUp").click()
         pump()
         tabs = panel.findChild(QtWidgets.QTabWidget, "configTabs")
-        self.assertEqual(tabs.tabText(0), "Width")
+        self.assertEqual([tabs.tabText(i) for i in range(tabs.count())], ["Width", "width", "Tall"])
+        # Deleting the inputs: no confirmation; the last one gone, the panel offers the first again
+        for inp in self.inputs():
+            panel.removeInput(inp["id"])
+        pump()
+        self.assertTrue(panel.findChild(QtWidgets.QPushButton, "configCreate").isVisible())
+        panel.findChild(QtWidgets.QPushButton, "configCreate").click()
+        pump()
+        self.assertEqual([(i["name"], [r["name"] for r in i["rows"]]) for i in self.inputs()],
+                         [("Configuration", ["Default"])])
 
     # ------------------------------------------------------------------------ field menus
     def testFieldMenuItemsAndTheirActions(self):
-        """Onshape's field menu (CP2-1): "Configure with <input>" per List or Checkbox, "Set to #len"
-        per Variable; a configured field offers only "Unconfigure from <input>", which keeps the
-        active value; with no List or Checkbox, "Configure..." makes the List "Configuration"."""
-        self.assertEqual(PartDesign.configMenuItems(self.APad, "Length"), [("Configure with Size", "configure", self.size)])
+        """Onshape's field menu (CP2-1): with one input a plain "Configure"; with several, "Configure
+        with <input>" per List or Checkbox and "Set to #len" per Variable; a configured field offers
+        only "Unconfigure from <input>", which keeps the active value; with no input, nothing.
+        Configuring shows a toast ("APad Length added to Size")."""
+        self.assertEqual(PartDesign.configMenuItems(self.APad, "Length"), [("Configure", "configure", self.size)])
+        self.assertEqual(PartDesign.configMenuItems(self.E), [("Configure suppression", "configure", self.size)])
         self.edit(lambda: PartDesign.configAddVariable(self.studio, "len", "Length", "80 mm"))
-        self.assertIn(("Set to #len", "variable", "len"), PartDesign.configMenuItems(self.APad, "Length"))
+        self.assertEqual(PartDesign.configMenuItems(self.APad, "Length"),
+                         [("Configure with Size", "configure", self.size), ("Set to #len", "variable", "len")])
         self.assertEqual(
             PartDesign.configMenuItems(self.E), [("Configure suppression with Size", "configure", self.size)]
         )
         ConfigurationsGui.fieldAction(self.APad, "Length", "configure", self.size)
         self.assertTrue(PartDesign.configIsConfigured(self.APad, "Length"))
+        self.assertEqual(Gui.getMainWindow().statusBar().currentMessage(), "APad Length added to Size")
         panel = ConfigurationsGui.panel()
         self.assertTrue(panel is not None and panel.isVisible())
         self.assertEqual(panel.currentInput(), self.size)
@@ -211,13 +284,16 @@ class TestConfigurationsGui(unittest.TestCase):
         ConfigurationsGui.fieldAction(bpad, "Length", "variable", "len")
         self.assertAlmostEqual(height(self.B), 80, delta=TOL)
         self.edit(lambda: PartDesign.configRemoveInput(self.studio, self.size))
-        self.assertIn(("Configure...", "new", ""), PartDesign.configMenuItems(self.APad, "Length"))
-        made = ConfigurationsGui.fieldAction(self.APad, "Length", "new", "")
-        new = next(i for i in self.inputs() if i["id"] == made)
-        self.assertEqual((new["name"], [r["name"] for r in new["rows"]]), ("Configuration", ["Default"]))
+        self.edit(lambda: bpad.setExpression("Length", None))
+        self.edit(lambda: PartDesign.configRemoveInput(self.studio, "len"))
+        self.assertEqual(PartDesign.configMenuItems(self.APad, "Length"), [])
+        self.assertEqual(PartDesign.configMenuItems(self.E), [])
+        self.assertIsNone(ConfigurationsGui.fieldAction(self.APad, "Length", "configure", ""))
+        self.assertEqual(self.inputs(), [])
 
     def testSketchDimensionIsConfiguredByName(self):
-        """A sketch dimension is configured as Constraints.<name>; an unnamed one is named first"""
+        """A sketch dimension is configured as Constraints.<name>; an unnamed one is named first. Its
+        items are in the dimension's "Configure dimension" submenu (CP2-9), not in its value box"""
         import Part
         import Sketcher
 
@@ -234,10 +310,24 @@ class TestConfigurationsGui(unittest.TestCase):
         self.assertEqual(sk.Constraints[0].Name, "w")
         self.assertTrue(PartDesign.configIsConfigured(sk, "Constraints.w"))
         self.assertEqual(PartDesign.configMenuItems(sk, ".Constraints.w"), [("Unconfigure from Size", "unconfigure", self.size)])
+        # The value box of a sketch dimension has no configure items; a feature's field has them
+        def boxMenu(obj, path):
+            box = Gui.UiLoader().createWidget("Gui::QuantitySpinBox")
+            Gui.ExpressionBinding(box).bind(obj, path)
+            box.show()
+            pump()
+            names = menuActions(box.findChild(QtWidgets.QLineEdit))
+            box.deleteLater()
+            return [n for n in names if n.startswith("fieldConfig_")]
+
+        self.assertEqual(boxMenu(self.APad, "Length"), ["fieldConfig_configure"])
+        self.assertEqual(boxMenu(sk, "Constraints.w"), [])
+        self.assertFalse([n for n in menuActions(line) if n.startswith("fieldConfig_")])
 
     def testConfiguredFieldInTheDialog(self):
-        """Onshape's configured field (CP2-2): a dotted orange outline, and typing writes the active
-        row's cell only; the field's menu offers the configuration items"""
+        """Onshape's configured field (CP2-2): a dotted orange outline, the tooltip "Length: <expr>
+        (Configured by Size)", and typing writes the active row's cell only; the field's menu offers
+        the configuration items"""
         self.APad.ViewObject.doubleClicked()
         pump()
         field = Gui.getMainWindow().findChild(QtWidgets.QWidget, "lengthEdit")
@@ -255,6 +345,7 @@ class TestConfigurationsGui(unittest.TestCase):
         line = field.findChild(QtWidgets.QLineEdit)
         self.assertEqual(field.property("configured"), "Size")
         self.assertIn("dotted", field.styleSheet())
+        self.assertRegex(field.toolTip(), r"^Length: .* \(Configured by Size\)$")
         self.assertFalse(field.property("readOnly"))
         self.assertIn("fieldConfig_unconfigure", menuActions(line))
         line.setFocus()
@@ -284,11 +375,16 @@ class TestConfigurationsGui(unittest.TestCase):
         return view()
 
     def testActiveBarSwitchesTheConfiguration(self):
-        """Onshape's bar above the Feature list (CP2-8): one control per input; a value out of a
-        Variable's range is refused and the box shows the model's value again"""
-        self.configureSizes()
+        """Onshape's bar above the Feature list (CP2-8): shown while the studio has an input, one
+        control per input; a value out of a Variable's range is refused: the box keeps the typed
+        text, in red, with no message"""
+        self.edit(lambda: PartDesign.configRemoveInput(self.studio, self.size))
         view = self.featuresView()
         bar = view.findChild(QtWidgets.QWidget, "configBar")
+        pump()
+        self.assertFalse(bar.isVisible())
+        self.size = self.edit(lambda: PartDesign.configAddList(self.studio, "Size", ["Small", "Large"]))
+        self.configureSizes()
         self.assertTrue(waitFor(lambda: bar.isVisible()))
         combo = view.findChild(QtWidgets.QComboBox, "configInput_" + self.size)
         self.assertEqual([combo.itemText(i) for i in range(combo.count())], ["Small", "Large"])
@@ -307,8 +403,10 @@ class TestConfigurationsGui(unittest.TestCase):
         box.editingFinished.emit()
         pump()
         self.assertNotAlmostEqual(float(dict(self.cfg.Active).get("len", "80")), 300)
-        self.assertTrue(waitFor(lambda: abs(App.Units.Quantity(view.findChild(QtWidgets.QLineEdit, "configInput_len").text()).Value - 80) < TOL))
-        box = view.findChild(QtWidgets.QLineEdit, "configInput_len")
+        pump()
+        self.assertIs(view.findChild(QtWidgets.QLineEdit, "configInput_len"), box)
+        self.assertEqual(box.text(), "300 mm")
+        self.assertIn("c0392b", box.styleSheet())
         box.setText("120 mm")
         box.editingFinished.emit()
         self.assertTrue(waitFor(lambda: abs(float(dict(self.cfg.Active).get("len", "0")) - 120) < TOL))

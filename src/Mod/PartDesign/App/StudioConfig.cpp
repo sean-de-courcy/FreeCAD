@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <numbers>
 #include <set>
 
@@ -32,6 +33,7 @@
 #include "FeatureTransformed.h"
 #include "Pieces.h"
 #include "ShapeBinder.h"
+#include "Studio.h"
 #include "StudioConfig.h"
 #include "StudioList.h"
 
@@ -251,6 +253,22 @@ std::map<std::string, std::string> activeValues(const StudioConfig* cfg)
         values[id] = v;
     }
     return values;
+}
+
+/// Onshape (CP2-7): changing a default doesn't change the active value. An input with no active
+/// value of its own (it follows its default) gets its current value as one first
+void pinActive(StudioConfig* cfg, const std::string& id)
+{
+    auto active = cfg->Active.getValues();
+    if (active.contains(id)) {
+        return;
+    }
+    const auto values = activeValues(cfg);
+    auto it = values.find(id);
+    if (it != values.end()) {
+        active[id] = it->second;
+        cfg->Active.setValues(active);
+    }
 }
 
 App::Part* studioOfObject(const App::DocumentObject* obj)
@@ -1147,6 +1165,7 @@ bool configSetDefaultRow(App::Part* studio, const std::string& input, const std:
     if (!r) {
         return refuse(why, "No row '" + row + "'");
     }
+    pinActive(cfg, str(*in, "id"));
     (*in)["default"] = str(*r, "id");
     store(cfg->Inputs, inputs);
     return rebind(cfg, why);
@@ -1193,9 +1212,6 @@ bool configRenameInput(App::Part* studio, const std::string& input, const std::s
     if (!in) {
         return refuse(why, "No input '" + input + "'");
     }
-    if (str(*in, "kind") == "variable") {
-        return refuse(why, "A configuration Variable's name is its #name: it can't be renamed");
-    }
     for (const auto& other : inputs["inputs"]) {
         if (&other != in && (str(other, "id") == name || str(other, "name") == name)) {
             return refuse(why, "An input needs a name of its own ('" + name + "')");
@@ -1204,9 +1220,59 @@ bool configRenameInput(App::Part* studio, const std::string& input, const std::s
     if (name.empty()) {
         return refuse(why, "An input needs a name");
     }
+    const std::string old = str(*in, "name");
+    if (old == name) {
+        return true;
+    }
+    if (str(*in, "kind") == "variable") {
+        // Onshape (CP2-7) renames every input. A Variable's name is its property's (#name): the
+        // property is renamed, and the expressions that read it follow
+        if (!isIdentifier(name)) {
+            return refuse(why, "A configuration Variable's name is used as #" + name
+                                   + ": letters, digits and _, not starting with a digit");
+        }
+        App::Property* prop = cfg->getPropertyByName(old.c_str());
+        if (!prop || cfg->getPropertyByName(name.c_str())) {
+            return refuse(why, "The name " + name + " is taken");
+        }
+        if (!cfg->renameDynamicProperty(prop, name.c_str())) {
+            return refuse(why, "The configuration Variable " + old + " can't be renamed to " + name);
+        }
+    }
     (*in)["name"] = name;
     store(cfg->Inputs, inputs);
     return true;
+}
+
+bool configMoveInput(App::Part* studio, const std::string& input, int index, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in) {
+        return refuse(why, "No input '" + input + "'");
+    }
+    json& all = inputs["inputs"];
+    const int count = static_cast<int>(all.size());
+    if (index < 0 || index >= count) {
+        return refuse(why, "No position " + std::to_string(index) + " among " + std::to_string(count) + " inputs");
+    }
+    const std::string id = str(*in, "id");
+    for (int i = 0; i < count; ++i) {
+        if (str(all[i], "id") == id) {
+            if (i != index) {
+                json moved = all[i];
+                all.erase(all.begin() + i);
+                all.insert(all.begin() + index, moved);
+                store(cfg->Inputs, inputs);
+            }
+            return true;
+        }
+    }
+    return refuse(why, "No input '" + input + "'");
 }
 
 bool configSetCheckboxDefault(App::Part* studio, const std::string& input, bool value, std::string* why)
@@ -1220,6 +1286,7 @@ bool configSetCheckboxDefault(App::Part* studio, const std::string& input, bool 
     if (!in || str(*in, "kind") != "checkbox") {
         return refuse(why, "No Checkbox input '" + input + "'");
     }
+    pinActive(cfg, str(*in, "id"));
     (*in)["default"] = value;
     store(cfg->Inputs, inputs);
     return rebind(cfg, why);
@@ -1242,10 +1309,7 @@ bool configEditVariable(App::Part* studio,
         return refuse(why, "No configuration Variable '" + input + "'");
     }
     const std::string type = str(*in, "type");
-    if (type == "Text") {
-        (*in)["default"] = defaultText;
-    }
-    else {
+    if (type != "Text") {
         double def = 0;
         double lo = -HUGE_VAL;
         double hi = HUGE_VAL;
@@ -1257,6 +1321,7 @@ bool configEditVariable(App::Part* studio,
         if (lo > hi || def < lo || def > hi) {
             return refuse(why, "The default " + defaultText + " is not between the minimum and the maximum");
         }
+        pinActive(cfg, str(*in, "id"));
         (*in)["default"] = def;
         in->erase("min");
         in->erase("max");
@@ -1266,6 +1331,21 @@ bool configEditVariable(App::Part* studio,
         if (!maximum.empty()) {
             (*in)["max"] = hi;
         }
+        // An active value outside the new bounds goes: the input takes its new default
+        auto active = cfg->Active.getValues();
+        auto it = active.find(str(*in, "id"));
+        if (it != active.end()) {
+            char* end = nullptr;
+            const double v = std::strtod(it->second.c_str(), &end);
+            if (end == it->second.c_str() || v < lo || v > hi) {
+                active.erase(it);
+                cfg->Active.setValues(active);
+            }
+        }
+    }
+    else {
+        pinActive(cfg, str(*in, "id"));
+        (*in)["default"] = defaultText;
     }
     store(cfg->Inputs, inputs);
     return rebind(cfg, why);
@@ -1390,28 +1470,29 @@ std::vector<App::ConfigMenuItem> configMenuItems(const App::DocumentObject* obj,
         json table = tableOf(cfg);
         const json* e = suppression ? findSuppress(table, obj) : findParam(table, obj, canonical(obj, path));
         items.push_back({suppression ? std::string("Unconfigure suppression") : "Unconfigure from " + configuredBy,
-                         "unconfigure", e ? str(*e, "input") : std::string()});
+                         "unconfigure", e ? str(*e, "input") : std::string(), configuredBy});
         return items;
     }
-    bool anyInput = false;
-    if (cfg) {
-        for (const auto& in : inputsOf(cfg)["inputs"]) {
-            const std::string kind = str(in, "kind");
-            const std::string name = str(in, "name");
-            if (kind == "list" || kind == "checkbox") {
-                anyInput = true;
-                items.push_back({(suppression ? "Configure suppression with " : "Configure with ") + name,
-                                 "configure", str(in, "id")});
-            }
-            else if (kind == "variable" && !suppression) {
-                items.push_back({"Set to #" + name, "variable", str(in, "id")});
-            }
-        }
+    // With no input there is no item: the panel makes the first one ("Configure Part Studio").
+    // With one, a plain "Configure"; with several, one item per List and Checkbox (CP2-1)
+    if (!cfg) {
+        return items;
     }
-    if (!anyInput) {
-        // Open in Onshape (CP2-1): with no List or Checkbox, a new List "Configuration" with one
-        // row "Default", like the panel's "Configure Part Studio"
-        items.push_back({suppression ? "Configure suppression..." : "Configure...", "new", std::string()});
+    const json inputs = inputsOf(cfg);
+    const bool single = inputs.contains("inputs") && inputs["inputs"].size() == 1;
+    for (const auto& in : inputs.value("inputs", json::array())) {
+        const std::string kind = str(in, "kind");
+        const std::string name = str(in, "name");
+        if (kind == "list" || kind == "checkbox") {
+            std::string label = suppression ? "Configure suppression" : "Configure";
+            if (!single) {
+                label += " with " + name;
+            }
+            items.push_back({label, "configure", str(in, "id"), name});
+        }
+        else if (kind == "variable" && !suppression) {
+            items.push_back({"Set to #" + name, "variable", str(in, "id"), name});
+        }
     }
     return items;
 }
@@ -1450,6 +1531,21 @@ std::vector<ConfigEntry> configEntries(const StudioConfig* config)
     };
     collect("params", false);
     collect("suppress", true);
+    // Onshape (CP2-4): the columns follow the feature order, not the order they were configured
+    // in; a feature's parameters come before its suppression. Objects outside the studio's
+    // sequence come last, in the table's order
+    std::map<const App::DocumentObject*, std::size_t> rank;
+    if (auto doc = config->getDocument()) {
+        const auto sequence = studioSequence(doc, config->studio());
+        for (std::size_t i = 0; i < sequence.size(); ++i) {
+            rank.emplace(sequence[i], i);
+        }
+    }
+    auto rankOf = [&](const ConfigEntry& e) {
+        auto it = rank.find(e.object);
+        return it != rank.end() ? it->second : rank.size();
+    };
+    std::ranges::stable_sort(out, {}, rankOf);
     return out;
 }
 
