@@ -368,6 +368,33 @@ class TestSketchConflictKeptGui(Round3GuiCase):
         self.assertNotIn("Invalid", self.sketch.State, self.describe())
         self.assertIn("Warning", self.sketch.State, self.describe())
 
+    def test_a_conflicting_value_typed_into_a_dimension(self):
+        """Oracle 10b q-b (PL1d): line 0 has a length 10 and a horizontal distance 10 between its
+        ends (they agree); 12 typed into the length conflicts. As in Onshape the value is kept,
+        the line stays as drawn, its entity is red and the messages line reads "Sketch could not
+        be solved." (the way EditDatumDialog sets it: setDatum in a transaction, then a solve)."""
+        from PySide import QtWidgets
+
+        length = self.sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        self.sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 10.0))
+        self.doc.recompute()
+        self.start_edit()
+        self.doc.openTransaction("Change value")
+        self.sketch.setDatum(length, FreeCAD.Units.Quantity("12 mm"))
+        self.doc.commitTransaction()
+        self.sketch.solve()
+        self.flush_gui(300)
+        self.assertAlmostEqual(self.sketch.Constraints[length].Value, 12.0, places=6)
+        self.assertIn(length + 1, self.sketch.ConflictingConstraints, self.describe())
+        for size in self.lengths():
+            self.assertAlmostEqual(size, 10.0, places=6)
+        texts = [label.text() for label in FreeCADGui.getMainWindow().findChildren(QtWidgets.QLabel)]
+        self.assertTrue(any("Sketch could not be solved." in text for text in texts), texts)
+        colours = TestSketchOverdefinedRedGui.curve_colours(self)
+        red = TestSketchOverdefinedRedGui.RED
+        self.assertTrue(TestSketchOverdefinedRedGui.near(colours[0], red), colours)
+        self.assertFalse(TestSketchOverdefinedRedGui.near(colours[1], red), colours)
+
     def test_a_constraint_that_fits_is_kept(self):
         """Control: an Equal between the two lines holds without collapsing anything."""
         self.constrain("Sketcher_ConstrainEqual", "Edge1", "Edge2")
