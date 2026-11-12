@@ -50,6 +50,16 @@
 # part it touches, and does nothing when it touches none or two (refused loudly). Onshape oracle 9
 # (R4): an Add's source outside the scope that touches the copy or that part is merged too, and
 # consumed from the mirror's place on. A New mirror's part is compared by its maker's name.
+#
+# T1a (notes/parts-design.md 10.16) adds feature patterns as studio features: a Linear pattern
+# along the studio's y or a Mirror about the studio's plane y = 5 (My5, outside the list), made
+# outside every Body as the command makes it, of one or two box owners (Remove or Add, any parts),
+# Reapply off, count and spacing random; edits toggle an original and change the count. The oracle
+# models each part as an in-Body pattern of that part's own originals (instance by instance, each
+# original in order); a part where an original's step changed nothing gets nothing (its step
+# fails); and the owner's refusals: nothing picked, an Add original over two or more parts (Onshape
+# Q2), an original that split its part (O7) and one whose part was absorbed before the pattern
+# (Q8): then nothing anywhere. G1 deletes and remakes the pattern steps with the rest.
 
 import os
 import random
@@ -147,6 +157,7 @@ def isOwner(obj):
         obj.TypeId in ("Part::Box", "PartDesign::Boolean", "PartDesign::Pocket")
         or isPartMirror(obj)
         or isFillet(obj)
+        or isFeatureOwner(obj)
     )
 
 
@@ -208,7 +219,53 @@ PATTERN_TYPES = {"Linear": "PartDesign::LinearPattern", "Mirror": "PartDesign::M
 
 
 def isPattern(obj):
-    return obj.TypeId in PATTERN_TYPES.values() and not isPartMirror(obj)
+    """An in-Body pattern (slice 8; a T1a owner is no pattern here, isFeatureOwner)."""
+    return obj.TypeId in PATTERN_TYPES.values() and not isPartMirror(obj) and not isFeatureOwner(obj)
+
+
+def isFeatureOwner(obj):
+    """A feature pattern studio feature (T1a): outside every Body, no step."""
+    if obj.TypeId not in PATTERN_TYPES.values() or isPartMirror(obj):
+        return False
+    parent = obj.getParentGeoFeatureGroup()
+    return getattr(obj, "StudioOwner", None) is None and not (
+        parent is not None and parent.TypeId == "PartDesign::Body"
+    )
+
+
+def makeFeatureOwner(doc, studio, name, kind, originals, length=0, count=2, suppressed=False):
+    """A T1a feature pattern made as the command makes it: outside every Body, in the studio,
+    Reapply off, a Linear along the studio's y or a Mirror about My5 (not yet listed)."""
+    pat = doc.addObject(PATTERN_TYPES[kind], name)
+    studio.addObject(pat)
+    pat.Reapply = False
+    pat.Originals = [doc.getObject(o) for o in originals if doc.getObject(o)]
+    if kind == "Linear":
+        pat.Direction = (studio.Origin.OriginFeatures[1], [""])
+        pat.Mode = "Extent"
+        pat.Length = length
+        pat.Occurrences = count
+    else:
+        pat.MirrorPlane = (doc.getObject("My5"), ["Face1"])
+    pat.Refine = False
+    if suppressed:
+        pat.Suppressed = True
+    return pat
+
+
+def featureRecord(pat):
+    kind = "Mirror" if pat.TypeId == PATTERN_TYPES["Mirror"] else "Linear"
+    record = dict(
+        name=pat.Name,
+        id=pat.ID,
+        fpattern=kind,
+        originals=[o.Name for o in pat.Originals],
+        suppressed=bool(pat.Suppressed),
+    )
+    if kind == "Linear":
+        record["length"] = round(pat.Length.Value, 6)
+        record["count"] = int(pat.Occurrences)
+    return record
 
 
 def makeMirror(doc, studio, name, source, x, op, scope=(), suppressed=False):
@@ -304,6 +361,8 @@ def patternRecord(pat):
 
 
 def ownerRecord(box):
+    if isFeatureOwner(box):
+        return featureRecord(box)
     if isPartMirror(box):
         return mirrorRecord(box)
     if isFillet(box):
@@ -642,11 +701,63 @@ def oracle(natives, records, bar, live=None):
                 ):
                     out.append(key)
         return out
+    consumedAt = {}  # T1a: each consumed part -> the index of the record that consumed it
+    places = {r["name"]: i for i, r in enumerate(records)}
     for i, record in enumerate(records):
+        for p in consumed:
+            consumedAt.setdefault(p, i - 1)
         if len(natives) + i >= bar:
             break
         if record["suppressed"] or record.get("fillet"):
             continue  # P8a: a fillet isn't modelled (activeFillet)
+        if record.get("fpattern"):
+            # T1a: a feature pattern over parts. Refused (nothing anywhere): nothing picked; an
+            # original whose part was absorbed between it and the pattern (Q8); one that split its
+            # part (O7); an Add over two or more parts (Q2), Reapply being off. A suppressed
+            # original contributes nothing
+            names = [o for o in record["originals"] if places.get(o, i) < i]
+            acting = [o for o in names if o in resolved]
+            refused = not names
+            for o in acting:
+                orec = records[places[o]]
+                if any(consumedAt.get(p, -1) > places[o] for p in resolved[o]):
+                    refused = True
+                if any(parent in orec["scope"] for _, parent, _ in orec.get("pieces", ())):
+                    refused = True
+                if orec["op"] == "Union" and len(resolved[o]) > 1:
+                    refused = True
+            if refused:
+                continue
+            targets = []
+            for o in acting:
+                targets += [p for p in resolved[o] if p not in targets]
+            for p in targets:
+                if p not in shapes or p in consumed or p in dead:
+                    continue
+                mapped = [o for o in acting if p in resolved[o]]
+                if any((o, p) not in applied for o in mapped):
+                    continue  # an original's step there changed nothing: the step fails
+                tools = []
+                for o in mapped:
+                    orec = records[places[o]]
+                    length, width, height, corner = toolBox(orec["rect"], orec["depth"], orec["op"])
+                    tools.append((Part.makeBox(length, width, height, corner), orec["op"]))
+                if record["fpattern"] == "Linear":
+                    count = record["count"]
+                    moves = [V(0, k * record["length"] / (count - 1), 0) for k in range(1, count)]
+                    copy = lambda tool, move: tool.translated(move)
+                else:
+                    moves = [None]
+                    copy = lambda tool, move: tool.mirror(V(0, 5, 0), V(0, 1, 0))
+                result = shapes[p]
+                for move in moves:  # instance-major (R1), each original in order
+                    for tool, op in tools:
+                        moved = copy(tool, move)
+                        result = result.cut(moved) if op == "Subtraction" else result.fuse(moved)
+                result = result.removeSplitter()
+                if len(result.Solids) == 1:
+                    shapes[p] = result
+            continue
         if record.get("mirror"):
             sources = resolve([record["source"]])
             if len(sources) != 1 or sources[0] not in shapes:
@@ -1198,7 +1309,13 @@ def fromScratch(natives, records, bar, maker=None):
         lst = studioList(doc)
         assert [e.Name for e in lst.Entries] == natives, ([e.Name for e in lst.Entries], natives)
         for r in sorted(records, key=lambda r: r["id"]):
-            if "pattern" in r:
+            if "fpattern" in r:
+                # T1a: its originals set when every object is made (one may be younger)
+                box = makeFeatureOwner(
+                    doc, studio, r["name"], r["fpattern"], [], r.get("length", 0),
+                    r.get("count", 2), r["suppressed"],
+                )
+            elif "pattern" in r:
                 box = makePattern(
                     doc, r["name"], r["pattern"], r["part"], r["originals"], r.get("length", 0),
                     r.get("count", 2), r["suppressed"], r.get("reapply", False),
@@ -1228,6 +1345,8 @@ def fromScratch(natives, records, bar, maker=None):
                 )
             assert box.Name == r["name"], (box.Name, r["name"])
         for r in records:
+            if "fpattern" in r:
+                doc.getObject(r["name"]).Originals = [doc.getObject(o) for o in r["originals"]]
             if "pattern" in r:
                 insertPattern(doc.getObject(r["name"]), r["part"], -1)
             else:
@@ -1798,6 +1917,11 @@ def propStudio(name):
         studio.addObject(plane)
         plane.Length, plane.Width = 40, 40
         plane.Placement = App.Placement(V(x, -15, 25), App.Rotation(V(0, 1, 0), 90))
+    # T1a: the feature pattern owners' mirror plane y = 5 (outside the list)
+    plane = doc.addObject("Part::Plane", "My5")
+    studio.addObject(plane)
+    plane.Length, plane.Width = 80, 40
+    plane.Placement = App.Placement(V(-15, 5, 25), App.Rotation(V(1, 0, 0), -90))
     doc.recompute()
     return doc, studio
 
@@ -1816,6 +1940,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.mergesSeen = 0  # states with a part an Add merged into another at the bar (10.13)
         self.lateSeen = 0  # edits committed, then recomputed outside the transaction (10.15)
         self.filletsSeen = 0  # states with a part a Fillet owner rounds at the bar (P8a)
+        self.ownersSeen = 0  # valid feature pattern owners with a step, summed over the states (T1a)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -1832,10 +1957,29 @@ class TestStudioListProperty(unittest.TestCase):
         free = len(lst.Entries) - NATIVES  # places after the natives
         kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern", "mirror", "mirror"]
         kinds += ["delete", "move", "scope", "depth", "suppress", "bar", "split", "split"]
-        kinds += ["merge", "merge", "fillet", "fillet"]
+        kinds += ["merge", "merge", "fillet", "fillet"] + ["fpattern"] * 3
         kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
-        if kind == "pattern" and not shapeOwners:
+        listedBoxes = [b for b in boxes if b.TypeId == "Part::Box"]
+        if kind == "pattern" and not shapeOwners or kind == "fpattern" and not listedBoxes:
             kind = "insert"
+        if kind == "fpattern":
+            # T1a: a feature pattern over parts, made as the command makes it (outside every
+            # Body, in the studio, listed), of one or two box owners of any parts, after them
+            originals = rng.sample(listedBoxes, min(rng.randint(1, 2), len(listedBoxes)))
+            which = rng.choice(["Linear", "Linear", "Mirror"])
+            count = rng.choice([2, 3])
+            length = rng.choice([1, 2]) * (count - 1)
+            after = max(list(lst.Entries).index(o) for o in originals) + 1 - NATIVES
+            at = rng.randint(after, free)
+            pat = makeFeatureOwner(
+                doc, doc.getObject("S"), f"F{counter}", which, [o.Name for o in originals],
+                length, count,
+            )
+            PartDesign.studioInsert(pat, NATIVES + at)
+            return (
+                f"feature pattern {pat.Name} {which} of {[o.Name for o in originals]} L{length} "
+                f"n{count} at {at}"
+            )
         if kind == "fillet":
             # P8a: a Fillet owner r 0.5 or 1 on a random edge of one or two random parts (their
             # shapes at the bar, as a pick is made), anywhere in the list
@@ -1957,6 +2101,26 @@ class TestStudioListProperty(unittest.TestCase):
                 box.Length = rng.choice([1, 2]) * (count - 1)
                 PartDesign.studioReconcile(lst)
                 return f"count {name} n{count} L{box.Length.Value}"
+        if isFeatureOwner(box) and kind in ("scope", "depth"):
+            if kind == "depth" and box.TypeId == PATTERN_TYPES["Linear"]:
+                count = rng.choice([2, 3])
+                box.Occurrences = count
+                box.Length = rng.choice([1, 2]) * (count - 1)
+                PartDesign.studioReconcile(lst)
+                return f"count {name} n{count} L{box.Length.Value}"
+            # T1a: an original toggled (a box owner before it; one is always kept)
+            place = list(lst.Entries).index(box)
+            before = [b for b in listedBoxes if list(lst.Entries).index(b) < place]
+            originals = list(box.Originals)
+            if before:
+                o = rng.choice(before)
+                if o in originals and len(originals) > 1:
+                    originals.remove(o)
+                elif o not in originals:
+                    originals.append(o)
+            box.Originals = originals
+            PartDesign.studioReconcile(lst)
+            return f"originals {name} {[o.Name for o in originals]}"
         if isFillet(box) and kind in ("scope", "depth"):
             # P8a: its radius, read by its steps when they run
             box.Radius = 1.5 - box.Radius.Value  # 0.5 <-> 1
@@ -2183,6 +2347,11 @@ class TestStudioListProperty(unittest.TestCase):
                 1 for e in studioList(doc).Entries
                 if isPartMirror(e) and e.isValid() and not e.Suppressed
             )
+            self.ownersSeen += sum(
+                1 for e in studioList(doc).Entries
+                if isFeatureOwner(e) and e.isValid() and not e.Suppressed
+                and any(PartDesign.studioStepOf(e, doc.getObject(p)) for p, _ in PARTS)
+            )
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -2205,6 +2374,7 @@ class TestStudioListProperty(unittest.TestCase):
         self.assertGreater(self.mergesSeen, 0)
         self.assertGreater(self.lateSeen, 0)
         self.assertGreater(self.filletsSeen, 0)
+        self.assertGreater(self.ownersSeen, 0)
         unlisted = os.environ.get("STUDIO_PROP_UNLISTED", "2,4,6").split(",")
         if any(str(s) in unlisted for s in seeds):
             self.assertGreater(self.unlistedSeen, 0)  # ops#654: an unlisted start was checked
@@ -2212,7 +2382,8 @@ class TestStudioListProperty(unittest.TestCase):
               f"with a consumed part, {self.patternsSeen} valid patterns, {self.mirrorsSeen} valid "
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
               f"states without a list, {self.mergesSeen} states with a merge, {self.lateSeen} "
-              f"edits committed before their recompute, {self.filletsSeen} states with a fillet")
+              f"edits committed before their recompute, {self.filletsSeen} states with a fillet, "
+              f"{self.ownersSeen} valid feature pattern owners")
 
 
 if __name__ == "__main__":
