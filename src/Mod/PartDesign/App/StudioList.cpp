@@ -786,6 +786,36 @@ Consumed consumedBy(const std::vector<App::DocumentObject*>& entries,
     Consumed out;
     const auto split = splitParents(bodies);
     for (std::size_t i = 0; i < entries.size(); ++i) {
+        // 10.12 amendment point 7 (Onshape U3, U4): a part (or a piece) a Remove takes all of is
+        // no part after it, by its last compute's record (StudioTakenParts), where the part still
+        // resolves in its scope at its place; so are its pieces of that part (a split taking all)
+        if (const auto taken = stringsOf(entries[i], "StudioTakenParts");
+            !taken.empty() && static_cast<int>(i) < barAt && !suppressedOf(entries[i])
+            && !Body::findBodyOf(entries[i])) {
+            auto at = positions.find(entries[i]);
+            if (at != positions.end() && at->second == static_cast<int>(i)) {
+                const auto scope = resolveScope(
+                    scopeIdsAt(entries[i], bodies, static_cast<int>(i), positions, out),
+                    bodies,
+                    static_cast<int>(i),
+                    positions,
+                    out
+                );
+                for (auto body : scope) {
+                    const std::string id = studioPartId(body);
+                    if (std::ranges::find(taken, id) == taken.end()) {
+                        continue;
+                    }
+                    out.emplace(body, static_cast<int>(i));
+                    for (auto piece : bodies) {
+                        if (isPieceBody(piece) && piece->StudioMadeBy.getValue() == entries[i]
+                            && id == piece->StudioParentId.getValue()) {
+                            out.emplace(piece, static_cast<int>(i));
+                        }
+                    }
+                }
+            }
+        }
         if (auto it = split.find(entries[i]); it != split.end() && !suppressedOf(entries[i])) {
             auto at = positions.find(entries[i]);
             if (at != positions.end() && at->second == static_cast<int>(i)) {
@@ -1810,6 +1840,24 @@ bool StudioList::reconcile(std::string* why)
             }
             seen->setValues(lost);
         }
+        // The parts a Remove takes all of (10.12 amendment point 7), as the lost splits above
+        if (const auto taken = entry ? stringsOf(entry, "StudioTakenParts")
+                                     : std::vector<std::string>();
+            entry && taken != stringsOf(entry, "StudioTakenPartsSeen")) {
+            auto seen = freecad_cast<App::PropertyStringList*>(
+                entry->getPropertyByName("StudioTakenPartsSeen")
+            );
+            if (!seen) {
+                seen = static_cast<App::PropertyStringList*>(entry->addDynamicProperty(
+                    "App::PropertyStringList",
+                    "StudioTakenPartsSeen",
+                    "Studio",
+                    "The parts taken whole the projection last took (ops#654 10.12 amendment 7)",
+                    App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+                ));
+            }
+            seen->setValues(taken);
+        }
         if (Body::findBodyOf(entry)) {
             continue;
         }
@@ -2438,6 +2486,13 @@ void resyncPartMirrors(const App::Document& constDoc)
                 if (entry
                     && stringsOf(entry, "StudioSplitLost")
                         != stringsOf(entry, "StudioSplitLostSeen")) {
+                    stale.push_back(list);
+                    break;
+                }
+                // 10.12 amendment point 7: a Remove's parts taken whole
+                if (entry
+                    && stringsOf(entry, "StudioTakenParts")
+                        != stringsOf(entry, "StudioTakenPartsSeen")) {
                     stale.push_back(list);
                     break;
                 }

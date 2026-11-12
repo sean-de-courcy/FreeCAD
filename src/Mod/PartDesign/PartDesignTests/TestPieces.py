@@ -912,6 +912,135 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(left, 7000)
         self.assertVolume(right, 2900)
 
+    # ------------------------------------------- a Remove that takes all (10.12 amendment, 7)
+    def assertTaken(self, e, body, *live):
+        """body is gone after e (Onshape U3, U4): e and its step there OK, no part live but live,
+        body's Body valid and empty, hidden, nothing failing or touched."""
+        self.assertEqual(self.live(), list(live))
+        self.assertNotIn(body, PartDesign.studioLiveParts(self.list))
+        self.assertValid(e, self.step(e, body), body)
+        self.assertTrue(body.Shape.isNull() or body.Shape.Volume < 1e-9, body.Name)
+        self.assertFalse(body.Visibility)
+        self.assertEqual(list(getattr(e, "StudioTakenParts", [])), [body.StudioPartId])
+        self.assertNothingFails()
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+
+    def takenStudio(self):
+        """U3: P a 10 x 10 x 10 box; E a rectangle x -5..15, y -5..15, a Remove through all."""
+        self.studio((("P", (0, 0, 10, 10), 10),))
+        return self.pocket("E", ((-5, -5, 15, 15),), ("P",)), self.doc.getObject("P")
+
+    def testU3ARemoveThatTakesAllOfItsPartLeavesNoPart(self):
+        """U3: E is OK with no message and P is gone after it (Parts (0)); a later Pocket scoped
+        only to P resolves to nothing and fails loudly; E suppressed, P is back."""
+        e, p = self.takenStudio()
+        self.assertTaken(e, p)
+        f = self.pocket("F", ((2, 2, 4, 4),), ("P",), length=2)
+        self.assertFalse(f.isValid())
+        self.assertIn("No merge scope selected", f.getStatusString())
+        self.assertIsNone(self.step(f, p))
+        self.doc.removeObject(f.Name)
+        self.doc.recompute()
+        PartDesign.studioSuppress(e, True)
+        self.doc.recompute()
+        self.assertEqual(self.live(), [p])
+        self.assertVolume(p, 1000)
+
+    def testU3TheTakenPartsBodyIsValidUnderASuppressedFeature(self):
+        """A suppressed Pad of P listed after E, P's Tip, passes E's empty result through: the Body
+        stays valid and empty (seed 5's 'Tip shape is empty', Body touched and invalid)."""
+        e, p = self.takenStudio()
+        boss = pad(p, "B1", sketch(p, "B1Sk", xyPlane(p), (2, 2, 8, 8), z=10), 5)
+        PartDesign.studioInsert(boss.Profile[0], -1)
+        boss.Suppressed = True
+        self.doc.recompute()
+        self.assertIs(p.Tip, boss)
+        self.assertTrue(p.isValid(), p.getStatusString())
+        self.assertNotIn("Touched", p.State)
+        self.assertTrue(p.Shape.isNull() or p.Shape.Volume < 1e-9)
+        self.assertNotIn(p, PartDesign.studioLiveParts(self.list))
+
+    def testU3MaterialLeftBringsThePartBackWithItsId(self):
+        """E's rectangle moved to x 5..25: half of P is left, P is a part again with its id; moved
+        back, gone again."""
+        e, p = self.takenStudio()
+        self.moveSketch(e, 10)
+        self.assertEqual(self.live(), [p])
+        self.assertEqual(p.StudioPartId, "P")
+        self.assertVolume(p, 500)
+        self.assertValid(e, self.step(e, p), p)
+        self.assertEqual(list(getattr(e, "StudioTakenParts", [])), [])
+        self.moveSketch(e, -10)
+        self.assertTaken(e, p)
+
+    def testU3UndoRedo(self):
+        """E made deeper in one edit (5 -> through): undo, P is the part cut 5 deep; redo, gone."""
+        self.studio((("P", (0, 0, 10, 10), 10),))
+        e = self.pocket("E", ((-5, -5, 15, 15),), ("P",), length=5)
+        p = self.doc.getObject("P")
+        self.assertVolume(p, 500)
+        self.doc.openTransaction("through")
+        e.Length = 11
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertTaken(e, p)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), [p])
+        self.assertVolume(p, 500)
+        self.assertNothingFails()
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertTaken(e, p)
+
+    def testU3SaveAndReopen(self):
+        """Saved with P gone: reopened, P is still gone and nothing fails."""
+        e, p = self.takenStudio()
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "taken.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = studioList(self.doc)
+        self.doc.recompute()
+        self.assertTaken(self.doc.getObject("E"), self.doc.getObject("P"))
+
+    def testU4ARemoveThatTakesAllOfOnePieceLeavesItsSibling(self):
+        """U4: the slot's left piece (x 0..30) taken whole by E2 scoped to it: E2 OK, the piece is
+        gone, the right piece stays (6900); E2 moved to leave x 25..30, the piece is back, its id."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        e2 = self.pocket("E2", ((-5, -5, 30.5, 15),), (left.StudioPartId,))
+        self.assertTaken(e2, left, right)
+        self.assertVolume(right, 6900)
+        self.moveSketch(e2, -5.5)
+        self.assertEqual(self.live(), [left, right])
+        self.assertVolume(left, 500)
+        self.assertValid(e2, self.step(e2, left))
+
+    def testASplitWhoseCutTakesAllOfItsPartLeavesNothing(self):
+        """Seed 5's case: the slot's split made, then F before E leaves only the strip x 30..31,
+        which E's slot takes whole: P is gone after E and so are E's pieces (no part, no step of
+        E); E OK, nothing fails. F deleted: the split is back, its pieces with their ids."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        ids = (left.StudioPartId, right.StudioPartId)
+        p = self.doc.getObject("P")
+        f = self.pocket("F", ((-5, -5, 30, 15), (31, -5, 105, 15)), ("P",))
+        PartDesign.studioMove(f, list(self.list.Entries).index(e))
+        self.doc.recompute()
+        self.assertTaken(e, p)
+        for piece in (left, right):
+            self.assertIsNone(self.step(e, piece), piece.Name)
+        PartDesign.studioRemove(f)
+        self.doc.removeObject(f.Name)
+        self.doc.recompute()
+        self.assertEqual(self.live(), [left, right])
+        self.assertEqual((left.StudioPartId, right.StudioPartId), ids)
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+        self.assertNothingFails()
+
     # ------------------------------------------------------------------------------- Union, patterns
     def testUnionKeepsAToolApartAPart(self):
         """A Union of A with B (touching) and C (apart): B merges into A (2000), C stays a part,

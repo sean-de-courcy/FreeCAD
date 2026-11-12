@@ -40,6 +40,8 @@ from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
 from PartDesignTests.TestStudioPatterns import box, linear, newStudio
 
 V = App.Vector
+# Onshape's words for PATTERN_SWITCH_TO_PER_INSTANCE (onshape-facts U6)
+SWITCH_WORDS = ("Could not create all instances as entered.", 'Try selecting "Reapply features" option.')
 X_AXIS, Y_AXIS, Z_AXIS, XY_PLANE, XZ_PLANE, YZ_PLANE = range(6)
 HOLE_R = 3.0
 HOLE = math.pi * HOLE_R**2
@@ -227,10 +229,10 @@ class TestStudioFeaturePattern(unittest.TestCase):
 
     def testSplittingSeedWithReapplyOffIsRefusedInOnshapesWords(self):
         """Acceptance 5's refusal (O7, settled 7): a seed that split its parts, Reapply off:
-        refused, Onshape's PATTERN_SWITCH_TO_PER_INSTANCE ("Reapply features")."""
+        refused in Onshape's words for PATTERN_SWITCH_TO_PER_INSTANCE (fact U6)."""
         g = self.splitPlates()
         lp = linearOwner(self.doc, self.S, "LP", [g], 40, 3)
-        self.assertRefused(lp, "Reapply features", "PATTERN_SWITCH_TO_PER_INSTANCE")
+        self.assertRefused(lp, *SWITCH_WORDS)
 
     def liveParts(self):
         """Each live part's id -> its volume."""
@@ -537,7 +539,7 @@ class TestStudioFeaturePattern(unittest.TestCase):
         b = self.boss("A", (12, 5, 18, 15), "Boss", scope=("A", "B"))
         self.doc.recompute()
         lp = linearOwner(self.doc, self.S, "LP", [b], 4, 2)
-        self.assertRefused(lp, "Reapply features", "PATTERN_SWITCH_TO_PER_INSTANCE")
+        self.assertRefused(lp, *SWITCH_WORDS)
 
     # ------------------------------------------------------------------------------- T1b: merges
     def gapPlates(self):
@@ -591,7 +593,7 @@ class TestStudioFeaturePattern(unittest.TestCase):
         lp.Length = 5
         lp.Reapply = False
         self.doc.recompute()
-        self.assertRefused(lp, "Reapply features", "PATTERN_SWITCH_TO_PER_INSTANCE")
+        self.assertRefused(lp, *SWITCH_WORDS)
         self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
 
     def testAddInstanceJoiningNoPartIsANewPart(self):

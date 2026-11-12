@@ -204,7 +204,7 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.assertFalse(pattern.isValid())
         self.assertIn("Bosses", statusOf(field))
         self.assertIn("2 parts", statusOf(field))
-        self.assertIn("PATTERN_SWITCH_TO_PER_INSTANCE", statusOf(field))
+        self.assertIn('Try selecting "Reapply features" option.', statusOf(field))
         self.accept()
         self.assertFalse(pattern.isValid())
         Gui.getDocument(self.doc.Name).setEdit(pattern.Name)

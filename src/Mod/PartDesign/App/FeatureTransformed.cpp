@@ -1899,12 +1899,11 @@ void notePatternMerges(Transformed& pattern, const std::vector<std::string>& rec
 }
 
 /// Onshape's refusal of a pattern that needs Reapply features (PATTERN_SWITCH_TO_PER_INSTANCE,
-/// O7, Q2); the words are the fork's (Onshape's own text unverified)
+/// O7, Q2), in Onshape's words (fact U6), what needs it after them
 std::string switchToPerInstance(const std::string& what)
 {
-    return "Pattern failed: " + what
-        + ": select Reapply features to pattern each instance (Onshape: "
-          "PATTERN_SWITCH_TO_PER_INSTANCE)";
+    return "Could not create all instances as entered. Try selecting \"Reapply features\" option. ("
+        + what + ")";
 }
 
 /** A feature pattern as a studio feature (FreeCAD-CH ops#654 T1a, parts-design.md 10.16): outside
