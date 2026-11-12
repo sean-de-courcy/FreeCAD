@@ -333,7 +333,7 @@ class TestStudioPatternsGui(unittest.TestCase):
 
     def testEditAgainAfterAnOriginalIsDeleted(self):
         """Hole and Across patterned; Across deleted: the owner keeps the Hole, and an edit again
-        lists only the Hole, the pattern valid."""
+        lists the Hole after a "Missing feature" row (T1b, fact U5), the pattern valid."""
         self.runTool("PartDesign_LinearPattern", self.hole, self.across)
         pattern = self.pattern()
         self.assertEqual(sorted(o.Name for o in pattern.Originals), ["Across", "Hole"])
@@ -350,7 +350,8 @@ class TestStudioPatternsGui(unittest.TestCase):
         settle()
         field = self.field()
         self.assertEqual(
-            [entries(field).item(i).text() for i in range(entries(field).count())], ["Hole"]
+            [entries(field).item(i).text() for i in range(entries(field).count())],
+            ["Missing feature", "Hole"],
         )
         self.cancel()
         self.assertTip("P", PLATE - 2 * HOLE)
@@ -719,6 +720,76 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.assertLess(self.step(pattern, "Q").Shape.Volume, PLATE - HOLE - ACROSS - 10)
         self.accept()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
+
+    def deleteOwner(self, owner):
+        self.doc.openTransaction("delete " + owner.Name)
+        PartDesign.studioRemove(owner)
+        self.doc.removeObject(owner.Name)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+
+    def testDeletedSeedIsAMissingFeatureRowUntilRemoved(self):
+        """Fact U5: Hole and Across patterned, Across deleted: the pattern stays valid on the
+        Hole; its Features list shows a red "Missing feature" row and the Hole; the row taken
+        out (Delete), it is gone, also after OK and an edit again."""
+        from PartDesignTests.TestReferenceFieldGui import clickRow, key, texts
+
+        self.runTool("PartDesign_LinearPattern", self.hole, self.across)
+        pattern = self.pattern()
+        self.accept()
+        self.deleteOwner(self.across)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.editAgain(pattern)
+        field = self.field()
+        self.assertEqual(texts(field), ["Missing feature", "Hole"])
+        row = entries(field).item(0)
+        self.assertGreater(row.background().color().red(), 200)
+        self.assertEqual(row.background().color().green(), 0)
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: texts(field) == ["Hole"]), texts(field))
+        self.assertEqual(pattern.Originals, [self.hole])
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.editAgain(pattern)
+        self.assertEqual(texts(self.field()), ["Hole"])
+        self.cancel()
+
+    def testEverySeedDeletedIsTwoMissingRowsAndTheError(self):
+        """Fact U5: both originals deleted: Onshape's error ("Select features to pattern.") and
+        two "Missing feature" rows."""
+        from PartDesignTests.TestReferenceFieldGui import texts
+
+        self.runTool("PartDesign_LinearPattern", self.hole, self.across)
+        pattern = self.pattern()
+        self.accept()
+        self.deleteOwner(self.across)
+        self.deleteOwner(self.hole)
+        self.assertFalse(pattern.isValid())
+        self.assertIn("Select features to pattern", pattern.getStatusString())
+        self.editAgain(pattern)
+        field = self.field()
+        self.assertEqual(texts(field), ["Missing feature", "Missing feature"])
+        self.assertIn("Select features to pattern", statusOf(field))
+        self.cancel()
+
+    def testSuppressedSeedRowIsGreyedAndStruckThrough(self):
+        """Fact U7: the only original suppressed: the App's error in the field, and its row
+        greyed and struck through."""
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        pattern = self.pattern()
+        self.accept()
+        self.hole.Suppressed = True
+        self.doc.recompute()
+        self.assertFalse(pattern.isValid())
+        self.editAgain(pattern)
+        field = self.field()
+        row = entries(field).item(0)
+        self.assertEqual(row.text(), "Hole")
+        self.assertTrue(row.font().strikeOut())
+        self.assertEqual(row.foreground().color().name(), "#808080")
+        self.assertIn("Selected features do not create any geometry", statusOf(field))
+        self.cancel()
 
 
 if __name__ == "__main__":

@@ -1195,6 +1195,34 @@ void StudioList::removeEntry(App::DocumentObject* entry)
     if (pos < 0) {
         throw Base::ValueError(quoted(entry) + " is not in this history");
     }
+    // A feature pattern that patterned the entry keeps a "Missing feature" row for it (T1b,
+    // Onshape fact U5), its Label, until the row is taken out (StudioMissingOriginals, hidden;
+    // in the delete's transaction, so undo takes it back with the entry)
+    for (App::DocumentObject* other : entries) {
+        auto pattern = freecad_cast<Transformed*>(other);
+        if (!pattern || !isFeaturePatternOwner(pattern)) {
+            continue;
+        }
+        const auto& originals = pattern->Originals.getValues();
+        if (std::ranges::find(originals, entry) == originals.end()) {
+            continue;
+        }
+        auto missing = freecad_cast<App::PropertyStringList*>(
+            pattern->getPropertyByName("StudioMissingOriginals")
+        );
+        if (!missing) {
+            missing = static_cast<App::PropertyStringList*>(pattern->addDynamicProperty(
+                "App::PropertyStringList",
+                "StudioMissingOriginals",
+                "Studio",
+                "Originals deleted from the pattern: its Missing feature rows (ops#654 T1b)",
+                App::Prop_Hidden
+            ));
+        }
+        std::vector<std::string> labels = missing->getValues();
+        labels.emplace_back(entry->Label.getValue());
+        missing->setValues(labels);
+    }
     entries.erase(entries.begin() + pos);
     int bar = Bar.getValue();
     if (bar >= 0 && pos < bar) {

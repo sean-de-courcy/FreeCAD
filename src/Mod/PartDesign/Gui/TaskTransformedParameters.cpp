@@ -35,6 +35,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/DocumentObserver.h>
+#include <App/PropertyStandard.h>
 #include <App/Transactions.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/Origin.h>
@@ -220,6 +221,28 @@ void TaskTransformedParameters::setupUI()
             PartDesign::Body* body = PartDesign::Body::findBodyOf(obj);
             App::Part* studio = nullptr;
             return body && Part::BodyBase::studioOf(body, studio) && studio == list->studio();
+        };
+        // Its deleted originals (fact U5): a "Missing feature" row each until taken out
+        auto missingOf = [patternT]() -> App::PropertyStringList* {
+            auto pattern = patternT.getObject();
+            return pattern ? freecad_cast<App::PropertyStringList*>(
+                                 pattern->getPropertyByName("StudioMissingOriginals")
+                             )
+                           : nullptr;
+        };
+        options.missingRows = [missingOf]() {
+            auto missing = missingOf();
+            return missing ? missing->getValues() : std::vector<std::string>();
+        };
+        options.removeMissing = [this, missingOf](int k) {
+            auto missing = missingOf();
+            if (!missing || k < 0 || k >= missing->getSize()) {
+                return;
+            }
+            setupTransaction();
+            std::vector<std::string> labels = missing->getValues();
+            labels.erase(labels.begin() + k);
+            missing->setValues(labels);
         };
     }
     // Not the pattern, nor a feature after it
