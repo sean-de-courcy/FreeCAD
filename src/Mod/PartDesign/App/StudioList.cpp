@@ -491,6 +491,33 @@ std::vector<Body*> scopePartsAt(const App::DocumentObject* owner,
                                 const std::map<const App::DocumentObject*, int>& positions,
                                 const Consumed& consumed);
 
+/// A New studio feature (T1b, settled 3): an owner whose scope is only parts it made itself
+/// (studioNewPart), none a piece
+bool isNewFeature(const App::DocumentObject* entry)
+{
+    if (!entry || !entry->getDocument() || Body::findBodyOf(entry) || booleanOwner(entry)
+        || isFeaturePatternOwner(entry) || isStudioPartPattern(entry) || isDressUpOwner(entry)
+        || std::string(operationOf(entry)) != "Union") {
+        return false;
+    }
+    const auto ids = studioScopeIds(entry);
+    if (ids.empty()) {
+        return false;
+    }
+    for (const auto& id : ids) {
+        const Body* found = nullptr;
+        for (auto obj : entry->getDocument()->getObjectsOfType(Body::getClassTypeId())) {
+            if (studioPartId(static_cast<const Body*>(obj)) == id) {
+                found = static_cast<const Body*>(obj);
+            }
+        }
+        if (!found || found->StudioMadeBy.getValue() != entry || isPieceBody(found)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// A feature pattern's scope ids (10.16 T1.3, settled 5): the parts its originals act on, each at
 /// its own place: a Body member's part, an owner's resolved scope, a pattern owner's own (derived,
 /// recursively). Resolved at the pattern's place, a part absorbed before it resolves to nothing
@@ -525,6 +552,9 @@ std::vector<std::string> patternScopeIds(const App::DocumentObject* owner,
         auto at = positions.find(original);
         if (at == positions.end() || at->second >= index) {
             continue;  // not listed, or after the pattern: its execute says so
+        }
+        if (isNewFeature(original)) {
+            continue;  // T1b settled 3: its instances are parts of their own, its part untouched
         }
         if (isFeaturePatternOwner(original)) {
             for (const auto& id :
@@ -611,6 +641,11 @@ std::string absorbedPickPart(std::string id,
 /// a dress-up (P8a)
 bool isMergingAdd(const App::DocumentObject* entry)
 {
+    // T1b (10.16 settled 2 and 8): a feature pattern with Reapply on merges what the instances of
+    // an Add over parts join; its compute writes the record (none when nothing merges)
+    if (auto pattern = freecad_cast<const Transformed*>(entry); pattern && isFeaturePatternOwner(entry)) {
+        return pattern->Reapply.getValue();
+    }
     return entry && !Body::findBodyOf(entry) && !booleanOwner(entry) && !isDressUpOwner(entry)
         && !freecad_cast<const Transformed*>(entry) && !entry->isDerivedFrom<Part::BodyBase>()
         && !entry->isDerivedFrom<App::Part>() && std::string(operationOf(entry)) == "Union"
@@ -1534,7 +1569,11 @@ bool StudioList::reconcile(std::string* why)
             }
             Feature* step = stepOf(slot.entry, body);
             if (!step) {
-                const std::string type = studioStepType(slot.entry);
+                // A part a feature pattern made from a leftover (T1b): a piece step, an applier
+                const std::string type = isFeaturePatternOwner(slot.entry) && isPieceBody(body)
+                        && body->StudioMadeBy.getValue() == slot.entry
+                    ? std::string("PartDesign::FeatureApply")
+                    : studioStepType(slot.entry);
                 const std::string name = stepName(slot.entry, body);
                 auto obj = doc->addObject(type.c_str(), name.c_str());
                 step = freecad_cast<Feature*>(obj);
@@ -2516,6 +2555,17 @@ PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
 bool PartDesign::isStudioFeaturePattern(const App::DocumentObject* obj)
 {
     return isFeaturePatternOwner(obj) && StudioList::holding(obj);
+}
+
+namespace PartDesign
+{
+PartDesignExport bool studioIsNewFeature(const App::DocumentObject* obj);
+}  // namespace PartDesign
+
+/// Whether obj is a New studio feature: its scope only parts it made (T1b, settled 3)
+bool PartDesign::studioIsNewFeature(const App::DocumentObject* obj)
+{
+    return isNewFeature(obj);
 }
 
 /// The Originals of owner's step in body (settled 1): each original of the owner mapped to body:

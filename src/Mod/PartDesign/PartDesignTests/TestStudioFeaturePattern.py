@@ -11,7 +11,13 @@
 # once and conjugated into each step's Body (settled 4). The owner computes no shape (settled 6).
 # Refused in Onshape's words: an Add seed whose scope has two or more parts with Reapply off
 # (settled 2, oracle Q2), a seed that split its part with Reapply off (O7, settled 7), an original
-# whose part was absorbed before the pattern (T1.9, Q8). Not yet (T1b): the same with Reapply on.
+# whose part was absorbed before the pattern (T1.9, Q8).
+#
+# T1b: with Reapply on, an Add seed over two or more parts merges instance by instance what its
+# instances join (settled 2, Onshape Q2: one part with the first part's id; the pattern's own merge
+# record, read by the list: settled 8); an instance joining no part is a new part (Q7). A New seed's
+# instances are new parts, never in the seed's part (settled 3, Q1), made by the command (P6p, ids
+# "<pattern>:k"). Not yet: a seed that split its part, with Reapply on (refused loudly).
 #
 # Designed geometry only: plates and bosses whose volumes come from their dimensions.
 
@@ -349,15 +355,220 @@ class TestStudioFeaturePattern(unittest.TestCase):
     # ------------------------------------------------------------------------------- refusals
     def testAddSeedOverTwoPartsWithReapplyOffIsRefused(self):
         """Settled 2 (Onshape Q2): an Add seed scoped {A, B}, Reapply off, refused in Onshape's
-        words even though no instance bridges; with Reapply on: not yet (T1b)."""
+        words even though no instance bridges (Reapply on: the tests below)."""
         self.studio((("A", (0, 0, 20, 20), 10), ("B", (30, 0, 50, 20), 10)))
         b = self.boss("A", (12, 5, 18, 15), "Boss", scope=("A", "B"))
         self.doc.recompute()
         lp = linearOwner(self.doc, self.S, "LP", [b], 4, 2)
         self.assertRefused(lp, "Reapply features", "PATTERN_SWITCH_TO_PER_INSTANCE")
-        lp.Reapply = True
+
+    # ------------------------------------------------------------------------------- T1b: merges
+    def gapPlates(self):
+        """A x 0..20 and B x 30..50, y 0..20, z 0..10 (4000 each)."""
+        return self.studio((("A", (0, 0, 20, 20), 10), ("B", (30, 0, 50, 20), 10)))
+
+    def bridgeSeed(self):
+        """An Add scoped {A, B}: a block x 20..25 against A's side, z 0..10 (1000)."""
+        b = self.boss("A", (20, 0, 25, 20), "Boss", length=10, z=0, scope=("A", "B"))
         self.doc.recompute()
-        self.assertRefused(lp, "not yet")
+        self.assertVolume("A", 5000)
+        return b
+
+    def testAddSeedOverTwoPartsWithNothingBridgingMergesNothing(self):
+        """Settled 2 with Reapply on (moved from T1a's "not yet"): the boss's instance joins A
+        only: A 4000 + 10 x 10 x 5, B untouched, no merge record, both parts live."""
+        self.gapPlates()
+        b = self.boss("A", (12, 5, 18, 15), "Boss", scope=("A", "B"))
+        self.doc.recompute()
+        lp = linearOwner(self.doc, self.S, "LP", [b], 4, 2, reapply=True)
+        self.assertValid(lp, self.step(lp, "A"))
+        self.assertVolume("A", 4500)
+        self.assertVolume("B", 4000)
+        self.assertEqual(list(getattr(lp, "StudioMergedParts", [])), [])
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
+
+    def testAcceptance7InstanceBridgingMergesBIntoA(self):
+        """Acceptance 7 (settled 2, Q2): instance 2 (x 25..30) bridges A grown by the seed and
+        B: one part with A's id, 4000 + 1000 + 1000 + 4000; the pattern's record names it, the
+        list reads it (settled 8: B consumed by the pattern, no step of it in B); re-spaced
+        (instance 2 inside B) B comes back; with Reapply off: refused in Onshape's words."""
+        self.gapPlates()
+        b = self.bridgeSeed()
+        lp = linearOwner(self.doc, self.S, "LP", [b], 5, 2, reapply=True)
+        self.assertValid(lp, self.step(lp, "A"))
+        self.assertEqual(list(lp.StudioMergedParts), ["B -> A"])
+        live = PartDesign.studioLiveParts(self.list)
+        self.assertEqual([p.StudioPartId for p in live], ["A"])
+        self.assertIs(PartDesign.studioConsumerOf(self.part("B")), lp)
+        self.assertIsNone(self.step(lp, "B"))
+        self.assertVolume("A", 10000)
+        self.assertEqual(len(self.part("A").Tip.Shape.Solids), 1)
+        lp.Length = 10
+        self.doc.recompute()
+        self.assertValid(lp)
+        self.assertEqual(list(lp.StudioMergedParts), [])
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
+        self.assertIsNotNone(self.step(lp, "B"))
+        self.assertVolume("A", 5000)
+        self.assertVolume("B", 4000)
+        lp.Length = 5
+        lp.Reapply = False
+        self.doc.recompute()
+        self.assertRefused(lp, "Reapply features", "PATTERN_SWITCH_TO_PER_INSTANCE")
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
+
+    def testAddInstanceJoiningNoPartIsANewPart(self):
+        """Q7: the boss's instance over the gap (x 22..28, z 10..15) joins no part: loud until
+        the command makes it a part 'LP:1' of 300; A 4300, B untouched."""
+        self.gapPlates()
+        b = self.boss("A", (12, 5, 18, 15), "Boss", scope=("A", "B"))
+        self.doc.recompute()
+        lp = linearOwner(self.doc, self.S, "LP", [b], 10, 2, reapply=True)
+        self.assertRefused(lp, "press OK")
+        made = self.makePieces(lp)
+        self.assertEqual([m.StudioPartId for m in made], ["LP:1"])
+        self.assertValid(lp)
+        self.assertAlmostEqual(made[0].Shape.Volume, 300, places=3)
+        self.assertVolume("A", 4300)
+        self.assertVolume("B", 4000)
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 3)
+
+    def testMergeUndoRedoAndSaveReopen(self):
+        """Acceptance 11 for a merge: undo brings B back, redo merges it again; saved and
+        opened again, the same part, volume and element names."""
+        self.gapPlates()
+        b = self.bridgeSeed()
+        self.doc.openTransaction("pattern")
+        linearOwner(self.doc, self.S, "LP", [b], 5, 2, reapply=True)
+        self.doc.commitTransaction()
+        self.assertVolume("A", 10000)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("LP"))
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 2)
+        self.assertVolume("A", 5000)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertValid(self.doc.getObject("LP"))
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 1)
+        self.assertVolume("A", 10000)
+        before = elementNames(self.part("A").Tip.Shape)
+        self.reopen()
+        self.assertValid(self.doc.getObject("LP"))
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 1)
+        self.assertVolume("A", 10000)
+        self.assertEqual(elementNames(self.part("A").Tip.Shape), before)
+
+    def reopen(self):
+        self.dir = self.dir or tempfile.mkdtemp()
+        path = os.path.join(self.dir, "pattern.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.docs.append(self.doc.Name)
+        self.list = studioList(self.doc)
+        self.doc.recompute()
+
+    # ------------------------------------------------------------------------------- T1b: New
+    def newSeed(self, rect=(0, 30, 10, 40)):
+        """Plate A, and N: a New Pad 10 x 10 x 5 (500) on rect, its own part 'N:1'."""
+        self.studio((("A", (0, 0, 60, 20), 10),))
+        sk = studioSketch(self.doc, self.S, "NSk", rects=(rect,), z=0)
+        n = makeOwner(self.doc, self.S, "Pad", "N", sk, (), Length=5)
+        self.doc.openTransaction("new part")
+        PartDesign.studioNewPart(n)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertValid(n)
+        return n
+
+    def madeBy(self, owner):
+        bodies = [b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"]
+        return sorted((b for b in bodies if b.StudioMadeBy == owner), key=lambda b: b.StudioPartId)
+
+    def makePieces(self, owner):
+        self.doc.openTransaction("pieces")
+        made = PartDesign.studioMakePieces(owner)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        return made
+
+    def testAcceptance6NewSeedMakesAPartPerInstance(self):
+        """Acceptance 6 (O6, settled 3): the New seed patterned +x 20 x 3: loud until the
+        command, then two new parts 'LP:1', 'LP:2' of 500 at x 20..30 and 40..50; N's part and A
+        untouched, no step of the pattern in them; the same with Reapply on. Count 3 -> 4 adds a
+        part, 4 -> 2 deletes the Bodies left empty."""
+        n = self.newSeed()
+        lp = linearOwner(self.doc, self.S, "LP", [n], 40, 3)
+        self.assertRefused(lp, "press OK")
+        made = self.makePieces(lp)
+        self.assertEqual(sorted(m.StudioPartId for m in made), ["LP:1", "LP:2"])
+        self.assertValid(lp)
+        nPart = self.madeBy(n)[0]
+        for reapply in (False, True):
+            with self.subTest(reapply=reapply):
+                lp.Reapply = reapply
+                self.doc.recompute()
+                self.assertValid(lp)
+                parts = self.madeBy(lp)
+                self.assertEqual(len(parts), 2)
+                centres = sorted(b.Shape.BoundBox.Center.x for b in parts)
+                for body in parts:
+                    self.assertAlmostEqual(body.Shape.Volume, 500, places=3)
+                self.assertAlmostEqual(centres[0], 25, places=6)
+                self.assertAlmostEqual(centres[1], 45, places=6)
+                self.assertAlmostEqual(nPart.Shape.Volume, 500, places=3)
+                self.assertVolume("A", PLATE)
+                self.assertIsNone(self.step(lp, "A"))
+                self.assertIsNone(PartDesign.studioStepOf(lp, nPart))
+        lp.Occurrences = 4
+        lp.Length = 60
+        self.doc.recompute()
+        self.assertRefused(lp, "press OK")
+        self.assertEqual(len(self.makePieces(lp)), 1)
+        self.assertEqual(len(self.madeBy(lp)), 3)
+        lp.Occurrences = 2
+        lp.Length = 20
+        self.doc.recompute()
+        self.makePieces(lp)
+        self.assertValid(lp)
+        self.assertEqual(len(self.madeBy(lp)), 1)
+        self.assertAlmostEqual(self.madeBy(lp)[0].Shape.BoundBox.Center.x, 25, places=6)
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 3)
+
+    def testNewInstanceOverlappingTheSeedStaysAPartOfItsOwn(self):
+        """Settled 3 (Onshape Q1): an instance overlapping the seed's part (+x 5) is a part of
+        its own; N's part stays 500."""
+        n = self.newSeed()
+        lp = linearOwner(self.doc, self.S, "LP", [n], 5, 2)
+        self.makePieces(lp)
+        self.assertValid(lp)
+        parts = self.madeBy(lp)
+        self.assertEqual(len(parts), 1)
+        self.assertAlmostEqual(parts[0].Shape.Volume, 500, places=3)
+        self.assertAlmostEqual(self.madeBy(n)[0].Shape.Volume, 500, places=3)
+
+    def testNewUndoRedoAndSaveReopen(self):
+        """Acceptance 11 for a New seed: the command's parts go with undo and come back with
+        redo; saved and opened again, the same parts and element names."""
+        n = self.newSeed()
+        lp = linearOwner(self.doc, self.S, "LP", [n], 40, 3)
+        self.makePieces(lp)
+        self.assertEqual(len(self.madeBy(lp)), 2)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.madeBy(lp)), 0)
+        self.assertRefused(lp, "press OK")
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertValid(lp)
+        before = {b.StudioPartId: elementNames(b.Shape) for b in self.madeBy(lp)}
+        self.assertEqual(sorted(before), ["LP:1", "LP:2"])
+        self.reopen()
+        lp = self.doc.getObject("LP")
+        self.assertValid(lp)
+        after = {b.StudioPartId: elementNames(b.Shape) for b in self.madeBy(lp)}
+        self.assertEqual(after, before)
 
     def testOriginalWhosePartWasAbsorbedIsRefused(self):
         """T1.9 (Onshape Q8): a hole on B, then B fused into A by a Union, then the pattern of

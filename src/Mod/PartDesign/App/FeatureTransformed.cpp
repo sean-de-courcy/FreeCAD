@@ -42,6 +42,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <unordered_map>
 #include <algorithm>
@@ -58,6 +59,7 @@
 #include "FeatureTransformed.h"
 #include "Body.h"
 #include "FeatureAddSub.h"
+#include "FeatureApply.h"
 #include "FeatureBoolean.h"
 #include "FeatureChamfer.h"
 #include "FeatureExtrude.h"
@@ -93,6 +95,12 @@ PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
 );
 PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
 PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
+// T1b (10.16 settled 2, 3, 8): StudioList.cpp, Pieces.cpp; and below, for Pieces.cpp
+PartDesignExport bool studioIsNewFeature(const App::DocumentObject* obj);
+PartDesignExport std::vector<std::string> studioMembersAfter(const App::DocumentObject* owner,
+                                                             const Body* part);
+PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b);
+PartDesignExport Part::TopoShape studioPatternLeftovers(const App::DocumentObject* obj);
 }  // namespace PartDesign
 
 namespace
@@ -1682,6 +1690,200 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
     return App::DocumentObject::StdReturn;
 }
 
+/// T1b: whether original's tool depends on the part it acts on (an Up to extent): a pattern over
+/// parts doesn't re-run such a tool against parts that merge or a part made new (loud, settled 9)
+bool dependsOnBase(const App::DocumentObject* original)
+{
+    auto type = freecad_cast<const App::PropertyEnumeration*>(original->getPropertyByName("Type"));
+    const char* value = type ? type->getValueAsString() : nullptr;
+    return value && std::string(value).starts_with("UpTo");
+}
+
+/// T1b (settled 2): whether original is an Add studio feature acting on two or more parts
+bool addsOverParts(const App::DocumentObject* original)
+{
+    if (!original || Body::findBodyOf(original) || isStudioFeaturePattern(original)) {
+        return false;
+    }
+    const std::vector<Body*> parts = studioScopeOf(original);
+    if (parts.size() < 2 || std::string(studioOperationOf(original)) != "Union") {
+        return false;
+    }
+    for (auto part : parts) {
+        if (auto step = freecad_cast<FeatureAddSub*>(StudioList::stepOf(original, part))) {
+            return step->getAddSubType() == FeatureAddSub::Type::Additive;
+        }
+    }
+    return false;
+}
+
+/// T1b (settled 2): the Add original over two or more parts that a pattern with Reapply on merges
+/// with, instance by instance; null when there is none or Reapply is off
+const App::DocumentObject* mergingSeedOf(const Transformed& pattern)
+{
+    if (!pattern.Reapply.getValue()) {
+        return nullptr;
+    }
+    for (auto original : pattern.Originals.getValues()) {
+        if (addsOverParts(original)) {
+            return original;
+        }
+    }
+    return nullptr;
+}
+
+/** T1b: original's whole tool (in the document's frame) at each instance of pattern but the first
+ * and the skipped ones, each named as a copy is: the pattern's tag and the instance's number in a
+ * section of every name. Empty with why */
+std::vector<Part::TopoShape>
+instanceTools(const Transformed& pattern, const App::DocumentObject* original, std::string& why)
+{
+    std::vector<Part::TopoShape> out;
+    const Part::TopoShape tool = FeatureApply::toolOf(original, &why);
+    if (tool.isNull()) {
+        return out;
+    }
+    const std::vector<gp_Trsf> transforms = ownerTransforms(pattern, why);
+    if (!why.empty()) {
+        return out;
+    }
+    const auto skipped = pattern.getSkippedPositions();
+    const long tag = pattern.getID();
+    for (std::size_t position = 1; position < transforms.size(); ++position) {
+        if (std::ranges::find(skipped, position) != skipped.end()) {
+            continue;
+        }
+        Part::TopoShape copy(tag, pattern.getDocument()->getStringHasher());
+        copy.makeElementTransform(tool, transforms[position]);
+        copy.appendElementSection(tag, Part::OpCodes::Transformed, std::to_string(position + 1));
+        out.push_back(copy);
+    }
+    return out;
+}
+
+/** T1b (settled 2, Onshape Q2 and Q7): what a pattern with Reapply on of an Add over parts joins,
+ * instance by instance: the contact graph of its scope parts (their shapes at its place, in scope
+ * order) and the seed's instance solids, contact by studioSolidsJoin, an instance joining a part
+ * through another instance that joins it too (the part as grown: instance-major). Each component
+ * holding a part is one part, its first listed part surviving; an instance solid in no component
+ * is a leftover: a new part (P6p, "<pattern>:k") */
+struct PatternMerge
+{
+    std::vector<Body*> parts;
+    std::vector<Part::TopoShape> shapes;  ///< each part at the pattern's place (document frame)
+    std::vector<int> partComponent;
+    std::vector<Part::TopoShape> solids;  ///< the instance solids (document frame)
+    std::vector<int> solidComponent;      ///< each solid's component, -1: a leftover
+    std::vector<std::string> records;     ///< "<merged id> -> <survivor id>", in scope order
+
+    int indexOf(const Body* body) const
+    {
+        auto it = std::ranges::find(parts, body);
+        return it == parts.end() ? -1 : static_cast<int>(it - parts.begin());
+    }
+    int survivorOf(int component) const
+    {
+        for (std::size_t k = 0; k < parts.size(); ++k) {
+            if (partComponent[k] == component) {
+                return static_cast<int>(k);
+            }
+        }
+        return -1;
+    }
+};
+
+PatternMerge
+patternMergeOf(const Transformed& pattern, const App::DocumentObject* seed, std::string& why)
+{
+    PatternMerge out;
+    for (auto part : studioScopeOf(&pattern)) {
+        if (isPieceBody(part) && part->StudioMadeBy.getValue() == &pattern) {
+            continue;  // a part it made from a leftover: nothing of it comes before the pattern
+        }
+        Part::TopoShape shape = studioBaseAt(&pattern, part);
+        if (!shape.isNull()) {
+            out.parts.push_back(part);
+            out.shapes.push_back(shape);
+        }
+    }
+    for (const auto& copy : instanceTools(pattern, seed, why)) {
+        for (const auto& solid : copy.getSubTopoShapes(TopAbs_SOLID)) {
+            out.solids.push_back(solid);
+        }
+    }
+    if (!why.empty()) {
+        return out;
+    }
+    const int parts = static_cast<int>(out.parts.size());
+    const int solids = static_cast<int>(out.solids.size());
+    std::vector<int> root(parts + solids);
+    std::iota(root.begin(), root.end(), 0);
+    auto find = [&root](int k) {
+        while (root[k] != k) {
+            root[k] = root[root[k]];
+            k = root[k];
+        }
+        return k;
+    };
+    auto join = [&root, &find](int a, int b) {
+        a = find(a);
+        b = find(b);
+        root[std::max(a, b)] = std::min(a, b);
+    };
+    for (int j = 0; j < solids; ++j) {
+        const TopoDS_Shape& solid = out.solids[j].getShape();
+        for (int k = 0; k < parts; ++k) {
+            if (studioSolidsJoin(solid, out.shapes[k].getShape())) {
+                join(parts + j, k);
+            }
+        }
+        for (int i = 0; i < j; ++i) {
+            if (studioSolidsJoin(solid, out.solids[i].getShape())) {
+                join(parts + j, parts + i);
+            }
+        }
+    }
+    for (int k = 0; k < parts; ++k) {
+        out.partComponent.push_back(find(k));
+    }
+    for (int j = 0; j < solids; ++j) {
+        const int r = find(parts + j);
+        out.solidComponent.push_back(r < parts ? r : -1);
+    }
+    for (int k = 0; k < parts; ++k) {
+        const int survivor = out.survivorOf(out.partComponent[k]);
+        if (survivor != k) {
+            out.records.push_back(studioPartId(out.parts[k]) + " -> "
+                                  + studioPartId(out.parts[survivor]));
+        }
+    }
+    return out;
+}
+
+/// Writes the pattern's merge record (StudioMergedParts, as an Add owner's, 10.13) when it
+/// changed; the projection takes it after the recompute (settled 8)
+void notePatternMerges(Transformed& pattern, const std::vector<std::string>& records)
+{
+    auto prop =
+        freecad_cast<App::PropertyStringList*>(pattern.getPropertyByName("StudioMergedParts"));
+    if (!prop) {
+        if (records.empty()) {
+            return;
+        }
+        prop = static_cast<App::PropertyStringList*>(pattern.addDynamicProperty(
+            "App::PropertyStringList",
+            "StudioMergedParts",
+            "Studio",
+            "The parts this pattern merges into another part of its scope, each '<id> -> "
+            "<survivor id>' (ops#654 10.16 T1b)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (prop->getValues() != records) {
+        prop->setValues(records);
+    }
+}
+
 /// Onshape's refusal of a pattern that needs Reapply features (PATTERN_SWITCH_TO_PER_INSTANCE,
 /// O7, Q2); the words are the fork's (Onshape's own text unverified)
 std::string switchToPerInstance(const std::string& what)
@@ -1697,11 +1899,15 @@ std::string switchToPerInstance(const std::string& what)
  * original listed after it; an original whose part was absorbed before it (T1.9, Onshape Q8: it
  * fails both ways, never follows the part); an Add original over two or more parts (settled 2,
  * Q2) and an original that split its part (O7, settled 7), refused with Reapply off in Onshape's
- * words and, with Reapply on, not yet (T1b: the merge through 10.13, the pieces per instance) */
+ * words. T1b: with Reapply on, the Add over parts merges what its instances join (settled 2: the
+ * pattern's own merge record, StudioMergedParts, read by the projection, settled 8); a New original
+ * makes a part per instance (settled 3); both leave instances that are no part's (P6p leftovers,
+ * studioPatternLeftovers), loud until the command makes them parts */
 App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
 {
     pattern.Shape.setValue(Part::TopoShape());
     auto fail = [&pattern](const std::string& why) {
+        notePatternMerges(pattern, {});  // a failed pattern merges nothing
         return new App::DocumentObjectExecReturn(why, &pattern);
     };
     if (static_cast<Transformed::Mode>(pattern.TransformMode.getValue())
@@ -1730,6 +1936,16 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
     const bool reapply = pattern.Reapply.getValue();
     const std::string notYet =
         ", with Reapply features on, is not yet done (T1b): pattern it per part, or turn Reapply off";
+    // T1b: a New original's instances and an Add over parts are copies of its whole tool, never
+    // re-run against a part (a tool that depends on one, an Up to extent: loud, settled 9)
+    const auto copiedWhole = [](const App::DocumentObject* original) -> std::string {
+        if (!dependsOnBase(original)) {
+            return {};
+        }
+        return "A pattern of " + quoted(original) + ", whose extent depends on the part"
+            + (studioIsNewFeature(original) ? " (a New feature)" : " (an Add over parts)")
+            + ", is not done: give it a length";
+    };
     for (auto original : originals) {
         const std::string name = quoted(original);
         const int at = placeOf(original);
@@ -1752,7 +1968,7 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
         // followed: refused (a split part goes on as its pieces)
         for (auto part : parts) {
             const App::DocumentObject* by = studioConsumerOf(part, here);
-            if (!by || by == original || placeOf(by) <= at
+            if (!by || by == original || by == &pattern || placeOf(by) <= at
                 || !pieceRecords(by, studioPartId(part)).empty()) {
                 continue;
             }
@@ -1763,6 +1979,13 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
             );
         }
         if (member || isStudioFeaturePattern(original)) {
+            continue;
+        }
+        if (studioIsNewFeature(original)) {
+            // Settled 3: its instances are new parts (the leftovers below), never in its part
+            if (std::string refused = copiedWhole(original); !refused.empty()) {
+                return fail(refused);
+            }
             continue;
         }
         // Settled 7: a seed that split its part (P6p records of it)
@@ -1784,8 +2007,10 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
                         name + " adds to " + std::to_string(parts.size()) + " parts"
                     ));
                 }
-                return fail("A pattern of " + name + ", an Add over "
-                            + std::to_string(parts.size()) + " parts" + notYet);
+                // Settled 2 with Reapply on: merged instance by instance (below)
+                if (std::string refused = copiedWhole(original); !refused.empty()) {
+                    return fail(refused);
+                }
             }
         }
     }
@@ -1802,10 +2027,93 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
     if (!why.empty()) {
         return fail(why);
     }
+    // T1b settled 2: with Reapply on, an Add over parts merges the parts its instances join; the
+    // merge is the pattern's alone (other originals with it: loud, unverified on Onshape)
+    std::vector<std::string> records;
+    if (const App::DocumentObject* seed = mergingSeedOf(pattern)) {
+        for (auto original : originals) {
+            if (original != seed && !studioIsNewFeature(original)) {
+                return fail("A pattern of " + quoted(seed) + ", an Add over parts, with "
+                            + quoted(original)
+                            + " is not done: pattern the Add over parts on its own");
+            }
+        }
+        try {
+            records = patternMergeOf(pattern, seed, why).records;
+        }
+        catch (const Base::Exception& e) {
+            why = e.what();
+        }
+        catch (const Standard_Failure& e) {
+            why = e.GetMessageString();
+        }
+        if (!why.empty()) {
+            return fail(why);
+        }
+    }
+    // Instances that are no part's (a New original's, an Add's touching no part): parts made by
+    // the command (P6p), loud until then
+    if (std::string left = unclaimedLeftovers(&pattern); !left.empty()) {
+        return fail(left);
+    }
+    notePatternMerges(pattern, records);
     return App::DocumentObject::StdReturn;
 }
 
 }  // namespace
+
+/// T1b (settled 3 and 2): the solids of a feature pattern's instances that are no part's, in the
+/// document's frame: each instance of a New original (never fused, never merged into its part:
+/// Onshape Q1), and each instance of an Add over parts that joins none of them (Q7); a compound,
+/// null when there are none. Pieces.cpp's leftoverSolids for a pattern (its pieces' source)
+Part::TopoShape PartDesign::studioPatternLeftovers(const App::DocumentObject* obj)
+{
+    auto pattern = freecad_cast<const Transformed*>(obj);
+    if (!pattern || !isStudioFeaturePattern(obj)
+        || static_cast<Transformed::Mode>(pattern->TransformMode.getValue())
+            != Transformed::Mode::Features) {
+        return {};
+    }
+    std::vector<Part::TopoShape> kept;
+    try {
+        std::string why;
+        for (auto original : pattern->Originals.getValues()) {
+            if (!original || !studioIsNewFeature(original) || dependsOnBase(original)) {
+                continue;
+            }
+            for (const auto& copy : instanceTools(*pattern, original, why)) {
+                for (const auto& solid : copy.getSubTopoShapes(TopAbs_SOLID)) {
+                    kept.push_back(solid);
+                }
+            }
+            why.clear();
+        }
+        if (const App::DocumentObject* seed = mergingSeedOf(*pattern)) {
+            const PatternMerge merge = patternMergeOf(*pattern, seed, why);
+            for (std::size_t j = 0; j < merge.solids.size(); ++j) {
+                if (merge.solidComponent[j] < 0) {
+                    kept.push_back(merge.solids[j]);
+                }
+            }
+        }
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    if (kept.empty()) {
+        return {};
+    }
+    Part::TopoShape out(pattern->getID(), pattern->getDocument()->getStringHasher());
+    out.makeElementCompound(
+        kept,
+        nullptr,
+        Part::TopoShape::SingleShapeCompoundCreationPolicy::forceCompound
+    );
+    return out;
+}
 
 App::DocumentObjectExecReturn* Transformed::execute()
 {
@@ -1829,6 +2137,103 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     + ": a step of a studio feature takes its owner's (reconcile the studio's list)",
                 this
             );
+        }
+        // T1b settled 2: with Reapply on, an Add over parts: this part's component of the merge
+        // (instance-major, Onshape Q2), the parts merged into it first, then its instances
+        if (const App::DocumentObject* seed = mergingSeedOf(*owner)) {
+            if (owner->isError()) {
+                return new App::DocumentObjectExecReturn(quoted(owner) + " failed", this);
+            }
+            try {
+                std::string why;
+                const PatternMerge merge = patternMergeOf(*owner, seed, why);
+                if (!why.empty()) {
+                    return new App::DocumentObjectExecReturn(why, this);
+                }
+                Body* body = getFeatureBody();
+                if (!BaseFeature.getValue() && body) {
+                    body->setBaseProperty(this);
+                }
+                Part::TopoShape base = getBaseTopoShape(/*silent=*/true);
+                if (base.isNull() || !body) {
+                    return new App::DocumentObjectExecReturn(
+                        "Nothing comes before " + quoted(this) + ": it has no solid to add to",
+                        this
+                    );
+                }
+                positionBySupport();
+                base.move(getInverseLocation(base));
+                const Base::Placement toStep =
+                    (App::GeoFeature::getGlobalPlacement(body) * Placement.getValue()).inverse();
+                auto inStep = [&toStep](Part::TopoShape shape) {
+                    shape.transformShape(toStep.toMatrix(), false, true);
+                    return shape;
+                };
+                std::vector<Part::TopoShape> operands {base};
+                const int k = merge.indexOf(body);
+                if (k >= 0 && merge.survivorOf(merge.partComponent[k]) == k) {
+                    const int component = merge.partComponent[k];
+                    for (std::size_t m = 0; m < merge.parts.size(); ++m) {
+                        if (static_cast<int>(m) == k || merge.partComponent[m] != component) {
+                            continue;
+                        }
+                        // A feature of the merged part after the pattern would have no part:
+                        // loud, never a silent follow (as an Add's merge, 10.13)
+                        const auto later = studioMembersAfter(owner, merge.parts[m]);
+                        if (!later.empty()) {
+                            std::string names;
+                            for (const auto& name : later) {
+                                names += (names.empty() ? "'" : ", '") + name + "'";
+                            }
+                            return new App::DocumentObjectExecReturn(
+                                quoted(owner) + " merges " + quoted(merge.parts[m]) + " into "
+                                    + quoted(body) + ", but " + names + " after it in "
+                                    + quoted(merge.parts[m]) + " would have no part: move it "
+                                    + "above, or into " + quoted(body),
+                                this
+                            );
+                        }
+                        operands.push_back(inStep(merge.shapes[m]));
+                    }
+                    for (std::size_t j = 0; j < merge.solids.size(); ++j) {
+                        if (merge.solidComponent[j] == component) {
+                            operands.push_back(inStep(merge.solids[j]));
+                        }
+                    }
+                }
+                if (operands.size() == 1) {
+                    // No instance joins this part, or it is merged into another (its chain ends
+                    // before the pattern once the list takes the record): as it was
+                    rawShape = base;
+                    Shape.setValue(getSolid(base));
+                    return App::DocumentObject::StdReturn;
+                }
+                Part::TopoShape result(
+                    namingTag(),
+                    getDocument()->getStringHasher(),
+                    getSelectedHistoryAlgorithm()
+                );
+                result.makeElementBoolean(Part::OpCodes::Fuse, operands);
+                rawShape = result;
+                result = refineShapeIfActive(result);
+                if (const int solids = result.isNull() ? 0 : countSolids(result.getShape());
+                    solids != 1) {
+                    return new App::DocumentObjectExecReturn(
+                        quoted(owner) + " leaves " + quoted(body) + " in "
+                            + std::to_string(solids) + " solids",
+                        this
+                    );
+                }
+                Shape.setValue(getSolid(result));
+                rejected.Nullify();
+                return App::DocumentObject::StdReturn;
+            }
+            catch (const Standard_Failure& e) {
+                return new App::DocumentObjectExecReturn(e.GetMessageString(), this);
+            }
+            catch (const Base::Exception& e) {
+                return new App::DocumentObjectExecReturn(e.what(), this);
+            }
         }
     }
     if (isOutOfChain()) {
