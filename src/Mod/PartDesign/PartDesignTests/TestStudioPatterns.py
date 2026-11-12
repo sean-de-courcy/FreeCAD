@@ -244,10 +244,11 @@ class TestStudioPatterns(unittest.TestCase):
                 App.closeDocument(self.doc.Name)
 
     def testSecondDirectionCenteredAndSkipped(self):
-        """Centered along Y with 3 rows puts them at y 5, 20, 35 around the seed's y 20; skipping
-        (1, 2) leaves out x 30 on the last row (counted from the negative end): eight holes."""
+        """Centered along Y with count 2 puts rows at y 5, 20, 35 around the seed's y 20 (Onshape's
+        count is per side, the seed included: oracle 9j); skipping (1, 2) leaves out x 30 on the
+        last row (counted from the negative end): eight holes."""
         lp = self.gridPattern(
-            hy=20.0, Offset2=15, Occurrences2=3, Centered2=True, SkippedInstances=[1, 2]
+            hy=20.0, Offset2=15, Occurrences2=2, Centered2=True, SkippedInstances=[1, 2]
         )
         self.assertTipVolume(60 * 40 * 10 - 8 * self.hole(5))
         expected = [(x, y) for x in (10, 30, 50) for y in (5, 20, 35) if (x, y) != (30, 35)]

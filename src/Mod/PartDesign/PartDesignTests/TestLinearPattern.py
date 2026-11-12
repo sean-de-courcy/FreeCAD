@@ -280,9 +280,9 @@ class TestLinearPattern(unittest.TestCase):
             shutil.rmtree(tempDir, ignore_errors=True)
 
     def testSecondDirectionWithoutReferenceFails(self):
-        """A second direction in use (count 2) with no reference is refused, as Onshape shows a
-        required selection left empty; before, its rows fell on the first row, silently (ops#655).
-        Count 1 is the box unticked: then no reference is needed."""
+        """A second direction in use (count 2) with no reference is refused, as Onshape's "Select a
+        pattern direction." (oracle 9j); before, its rows fell on the first row, silently
+        (ops#655). Count 1 is the box unticked: then no reference is needed."""
         pattern = self.blockGrid()
         pattern.Direction2 = None
         self.Doc.recompute()
@@ -293,7 +293,7 @@ class TestLinearPattern(unittest.TestCase):
         pattern.Occurrences2 = 2
         self.Doc.recompute()
         self.assertFalse(pattern.isValid(), "no refusal")
-        self.assertIn("Select a second direction", pattern.getStatusString())
+        self.assertIn("Select a pattern direction", pattern.getStatusString())
 
     def testFirstDirectionWithoutReferenceFails(self):
         """Likewise direction 1: count 3 with no reference is refused, not three copies on the
@@ -302,7 +302,7 @@ class TestLinearPattern(unittest.TestCase):
         pattern.Direction = None
         self.Doc.recompute()
         self.assertFalse(pattern.isValid(), "no refusal")
-        self.assertIn("Select a direction", pattern.getStatusString())
+        self.assertIn("Select a pattern direction", pattern.getStatusString())
 
     def tearDown(self):
         # closing doc
