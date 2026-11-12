@@ -110,6 +110,7 @@ from PartDesignTests.TestFilletPropagation import TestFilletPropagation  # FreeC
 from PartDesignTests.TestFilletFailureText import (  # FreeCAD-CH, ops#640 F2, ops#701
     TestFilletFailureText,
     TestMultiPartWarning,
+    TestMultiPartLink,  # ops#701 F2c
 )
 from PartDesignTests.TestChamfer import TestChamfer
 from PartDesignTests.TestDraft import (

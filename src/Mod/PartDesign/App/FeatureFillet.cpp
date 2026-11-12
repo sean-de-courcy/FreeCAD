@@ -110,7 +110,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
 {
     // FreeCAD-CH ops#701 (F2b): over several parts, this part failing while the first part's
     // builds is a warning, as Onshape's FILLET_PARTIAL_FAIL
-    return partialFailure(build(), "fillet");
+    return partialFailure(build(), "fillet", "Radius");
 }
 
 App::DocumentObjectExecReturn* Fillet::build()

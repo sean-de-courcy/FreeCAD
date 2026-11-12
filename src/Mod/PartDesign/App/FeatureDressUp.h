@@ -61,11 +61,17 @@ public:
     short mustExecute() const override;
 
     /** FreeCAD-CH ops#701 (F2b): ret, the dress-up's result, as Onshape's partial failure: when
-     * it failed and MultiPartPrimary built, the base passes through, the failure becomes the
-     * warning "Failed to <verb> selections on <part>: <why>" and the result is a success, so the
-     * part's later features recompute on its base. Otherwise ret unchanged.
+     * it failed and MultiPartPrimary built (itself: not suppressed or passed through), the base
+     * passes through, the failure becomes the warning "Failed to <verb> selections on <part>:
+     * <why>" and the result is a success, so the part's later features recompute on its base.
+     * Only while the expression of sizeProperty still refers to the primary (F2c). Otherwise ret
+     * unchanged.
      */
-    App::DocumentObjectExecReturn* partialFailure(App::DocumentObjectExecReturn* ret, const char* verb);
+    App::DocumentObjectExecReturn* partialFailure(
+        App::DocumentObjectExecReturn* ret,
+        const char* verb,
+        const char* sizeProperty
+    );
     /// updates the Placement property from the Placement of the BaseFeature
     void positionByBaseFeature();
     /**

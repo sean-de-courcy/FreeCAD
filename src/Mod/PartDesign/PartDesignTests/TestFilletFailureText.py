@@ -278,5 +278,149 @@ class TestMultiPartWarning(FailureCase):
         self.assertBoxB(bodyB)
 
 
+class TestMultiPartLink(FailureCase):
+    """F2c (ops#701): the link counts only while it holds. The follower's size expression must
+    still refer to the first dress-up (it alone orders the two), and the first must have built
+    its own result."""
+
+    assertPartialFailure = TestMultiPartWarning.assertPartialFailure
+    assertBoxB = TestMultiPartWarning.assertBoxB
+
+    def assertFollowerError(self, feature, body):
+        """B's failure is its own error: no warning, B passed through as its box."""
+        self.assertFalse(feature.isValid())
+        self.assertNotIn("Warning", feature.State)
+        self.assertBoxB(body)
+
+    def testPassThroughLeavesNoAddSubShape(self):
+        """B's warned fillet adds and removes nothing, as a suppressed feature: its AddSubShape
+        is empty."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+        shape = filletB.AddSubShape
+        self.assertTrue(shape.isNull() or abs(shape.Volume) < 1e-9)
+
+    def testPrimaryDeletedWithTheExpressionLeft(self):
+        """The first dress-up deleted while B's radius still refers to it: the link is cleared,
+        B is an error (its expression no longer resolves), not a warning; B stays its box."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        name = filletA.Name
+        bodyA.removeObject(filletA)
+        self.doc.removeObject(name)
+        self.doc.recompute()
+        self.assertIsNone(filletB.MultiPartPrimary)
+        self.assertFollowerError(filletB, bodyB)
+        self.assertFalse(filletB.getStatusString().startswith("Warning"))
+
+    def testPrimaryEditedToFail(self):
+        """The pair worked; A's radius is then set to 150, past A's 100 faces: A fails, and B,
+        failing too, is an error, not a warning (FILLET_FAILED)."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+        filletA.Radius = 150
+        self.doc.recompute()
+        self.assertOnshapeFailure(filletA, "fillet")
+        self.assertEqual(filletB.Radius.Value, 150)
+        self.assertOnshapeFailure(filletB, "fillet")
+        self.assertFollowerError(filletB, bodyB)
+        self.assertAlmostEqual(bodyA.Shape.Volume, 100**3, delta=1e-6)
+
+    def testSuppressedPrimary(self):
+        """A's fillet suppressed: it built nothing of its own, so B's failure is an error."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        filletA.Suppressed = True
+        self.doc.recompute()
+        self.assertAlmostEqual(bodyA.Shape.Volume, 100**3, delta=1e-6)
+        self.assertEqual(filletB.MultiPartPrimary, filletA)
+        self.assertFollowerError(filletB, bodyB)
+        filletA.Suppressed = False
+        self.doc.recompute()
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+
+    def testUndoOfTheSuppressionWarnsAgain(self):
+        """A suppressed and recomputed in one transaction, then undone: undo puts back B's
+        properties but not its error, so B must run again and warn."""
+        self.doc.UndoMode = 1
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        self.doc.openTransaction("Suppress the first fillet")
+        filletA.Suppressed = True
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertFollowerError(filletB, bodyB)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse(filletA.Suppressed)
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+        self.assertBoxB(bodyB)
+
+    def testUndoOfThePrimaryDeletionRestoresTheLink(self):
+        """Undo of the first dress-up's deletion brings the link back, and B warns again."""
+        self.doc.UndoMode = 1
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        name, nameB = filletA.Name, filletB.Name
+        self.doc.openTransaction("Delete the first fillet")
+        bodyA.removeObject(filletA)
+        self.doc.removeObject(name)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        filletB = self.doc.getObject(nameB)
+        self.assertIsNone(filletB.MultiPartPrimary)
+        self.doc.undo()
+        self.doc.recompute()
+        filletA = self.doc.getObject(name)
+        self.assertIsNotNone(filletA)
+        self.assertEqual(filletB.MultiPartPrimary, filletA)
+        self.assertTrue(filletA.isValid(), filletA.getStatusString())
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+        self.assertBoxB(bodyB)
+
+    def testOwnSizeEndsTheLink(self):
+        """B given a size of its own, its expression cleared or replaced: nothing orders the two
+        and B no longer follows A, so B's failure is an error, the link left as it is. A hidden
+        reference (href) orders nothing either."""
+        for case in ("cleared", "constant", "hidden", "chamfer"):
+            with self.subTest(case=case):
+                if case == "chamfer":
+                    first, second, bodyA, bodyB = self.twoParts("Chamfer", 40, 30, link=True)
+                    second.setExpression("Size", None)
+                    second.Size = 30
+                else:
+                    first, second, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+                    if case == "cleared":
+                        second.setExpression("Radius", None)
+                        second.Radius = 50
+                    elif case == "hidden":
+                        second.setExpression("Radius", "href(%s.Radius)" % first.Name)
+                    else:
+                        second.setExpression("Radius", "50 mm")
+                self.doc.recompute()
+                self.assertTrue(first.isValid(), first.getStatusString())
+                self.assertEqual(second.MultiPartPrimary, first)
+                self.assertFollowerError(second, bodyB)
+                App.closeDocument(self.doc.Name)
+                self.doc = models.newDocument("PartDesignTestFilletFailureText")
+
+    def testWarningRightAfterReopen(self):
+        """Saved with B warned and reopened, before any recompute: B shows the warning, valid,
+        and B's shape is its box."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        status = filletB.getStatusString()
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "warned.FCStd")
+            nameA, nameB = filletA.Name, filletB.Name
+            self.doc.saveAs(path)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            filletA, filletB = self.doc.getObject(nameA), self.doc.getObject(nameB)
+            bodyB = self.doc.getObject("PartB")
+            self.assertTrue(filletA.isValid(), filletA.getStatusString())
+            self.assertPartialFailure(filletB, "fillet", bodyB)
+            self.assertEqual(filletB.getStatusString(), status)
+            self.assertBoxB(bodyB)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

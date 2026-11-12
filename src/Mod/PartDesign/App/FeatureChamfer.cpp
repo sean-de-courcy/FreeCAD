@@ -156,7 +156,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
 {
     // FreeCAD-CH ops#701 (F2b): over several parts, this part failing while the first part's
     // builds is a warning, as Onshape's CHAMFER_PARTIAL_FAIL
-    return partialFailure(build(), "chamfer");
+    return partialFailure(build(), "chamfer", "Size");
 }
 
 App::DocumentObjectExecReturn* Chamfer::build()

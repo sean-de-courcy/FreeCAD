@@ -66,6 +66,8 @@
 #include "PartDesignParameter.h"
 #include <Base/Console.h>
 #include <App/Document.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
@@ -412,6 +414,20 @@ void DressUp::onChanged(const App::Property* prop)
             // AddSubShape acts as a shape cache; invalidate so Transformed
             // can rebuild it lazily via getAddSubShape().
             AddSubShape.setValue(Part::TopoShape());
+        }
+    }
+    else if (prop == &_PassedThrough) {
+        // FreeCAD-CH ops#701 (F2c): a follower's state reads whether this one built
+        // (partialFailure()). Its only dependency is its size expression, which a suppression
+        // doesn't touch, and the recompute enforces only the readers of a changed property.
+        // Undo too: it puts back the follower's properties, not its Error state
+        if (!getDocument()->testStatus(App::Document::Restoring)) {
+            for (auto in : getInList()) {
+                auto follower = freecad_cast<DressUp*>(in);
+                if (follower && follower != this && follower->MultiPartPrimary.getValue() == this) {
+                    follower->enforceRecompute();
+                }
+            }
         }
     }
 
@@ -954,15 +970,57 @@ PartDesignExport bool isDressUpFailure(const std::string& what)
 namespace PartDesign
 {
 
+namespace
+{
+
+/// Whether `follower` still follows `primary`: the expression of its size refers to it. That
+/// expression alone orders the two (MultiPartPrimary is hidden), so without it the primary's
+/// state may be stale; and the user has given this part a size of its own (ops#701 F2c)
+bool followsBySize(
+    const App::DocumentObject* follower,
+    App::DocumentObject* primary,
+    const char* sizeProperty
+)
+{
+    const App::Property* size = follower->getPropertyByName(sizeProperty);
+    if (!size) {
+        return false;
+    }
+    const auto info = follower->getExpression(App::ObjectIdentifier(*size));
+    if (!info.expression) {
+        return false;
+    }
+    // A hidden reference (href()) adds no dependency edge: it orders nothing
+    const auto deps = info.expression->getDepObjects();
+    const auto dep = deps.find(primary);
+    return dep != deps.end() && !dep->second;
+}
+
+/// Whether the primary built its own result: not an error, not suppressed, not passed through
+/// (a suppressed feature's or its own partial failure's), not held by its Body's roll-back bar
+bool builtItself(const DressUp* primary)
+{
+    if (primary->isError() || primary->Shape.getShape().isNull() || primary->Suppressed.getValue()
+        || primary->passesBaseThrough()) {
+        return false;
+    }
+    const Body* body = primary->getFeatureBody();
+    return !(body && body->holds(primary));
+}
+
+}  // namespace
+
 App::DocumentObjectExecReturn* DressUp::partialFailure(
     App::DocumentObjectExecReturn* ret,
-    const char* verb
+    const char* verb,
+    const char* sizeProperty
 )
 {
     auto primary = freecad_cast<DressUp*>(MultiPartPrimary.getValue());
-    // Not inside a pattern's re-run (dressUpRun), whose caller takes the failure
+    // Not inside a pattern's re-run (dressUpRun), whose caller takes the failure. A link whose
+    // size expression is gone (cleared, replaced) is no link: nothing orders the two (F2c)
     if (!ret || ret == App::DocumentObject::StdReturn || dressUpRun || !primary || primary == this
-        || primary->isError() || primary->Shape.getShape().isNull()) {
+        || !followsBySize(this, primary, sizeProperty) || !builtItself(primary)) {
         return ret;
     }
     Part::TopoShape base;
@@ -990,6 +1048,9 @@ App::DocumentObjectExecReturn* DressUp::partialFailure(
     }
     setFailurePassedThrough(false);
     Shape.setValue(base);
+    // Nothing of its own for a pattern to apply, as a suppressed feature's. onChanged(Shape)
+    // has cleared it already (this runs only in execute()); said here, where it matters
+    AddSubShape.setValue(Part::TopoShape());
     if (auto doc = getDocument()) {
         const char* previous = doc->getWarningDescription(this);
         doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + why : why);
