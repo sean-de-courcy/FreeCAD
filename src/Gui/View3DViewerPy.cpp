@@ -171,7 +171,9 @@ void View3DInventorViewerPy::init_type()
         "setOverrideMode(mode): sets the display override mode."
     );
 
-    add_noargs_method(
+    // varargs, not noargs: getattr() below routes every non-keyword method through one varargs
+    // handler, which a METH_NOARGS method reaches with NULL arguments
+    add_varargs_method(
         "getOverrideMode",
         &View3DInventorViewerPy::getOverrideMode,
         "getOverrideMode() -> str: the display override mode."
@@ -804,8 +806,11 @@ Py::Object View3DInventorViewerPy::setOverrideMode(const Py::Tuple& args)
     return Py::None();
 }
 
-Py::Object View3DInventorViewerPy::getOverrideMode()
+Py::Object View3DInventorViewerPy::getOverrideMode(const Py::Tuple& args)
 {
+    if (!PyArg_ParseTuple(args.ptr(), "")) {
+        throw Py::Exception();
+    }
     return Py::String(_viewer->getOverrideMode());
 }
 

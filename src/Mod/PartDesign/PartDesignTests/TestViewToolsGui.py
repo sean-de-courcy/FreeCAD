@@ -58,12 +58,30 @@ def waitFor(condition, timeout=5.0):
     return bool(condition())
 
 
+def menuBarMenu(menuTitle):
+    """The menu bar's current menu with this title. Not findChildren: the menus of an earlier
+    workbench stay children of the menu bar after it is cleared, and may come first."""
+    for action in Gui.getMainWindow().menuBar().actions():
+        menu = action.menu()
+        if menu is not None and menu.title().replace("&", "") == menuTitle:
+            return menu
+    return None
+
+
+def subMenu(menu, title):
+    """The submenu of `menu` with this title, at any depth, or None."""
+    if menu is None:
+        return None
+    for sub in menu.findChildren(QtWidgets.QMenu):
+        if sub.title().replace("&", "") == title:
+            return sub
+    return None
+
+
 def menuActions(menuTitle):
     """The objectNames of the actions of the menu-bar menu with this title, in order."""
-    for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
-        if menu.title().replace("&", "") == menuTitle:
-            return [a.objectName() for a in menu.actions()]
-    return None
+    menu = menuBarMenu(menuTitle)
+    return None if menu is None else [a.objectName() for a in menu.actions()]
 
 
 class ViewToolsCase(unittest.TestCase):
@@ -79,6 +97,7 @@ class ViewToolsCase(unittest.TestCase):
         pump()
 
     def setUp(self):
+        self.documentsBefore = set(App.listDocuments())
         self.doc = App.newDocument(self.docName)
         box = self.doc.addObject("Part::Box", "Box")
         box.Length = box.Width = box.Height = 20
@@ -97,7 +116,11 @@ class ViewToolsCase(unittest.TestCase):
         pump()
 
     def tearDown(self):
-        App.closeDocument(self.doc.Name)
+        # every document the test opened, even one a failed test left behind: a leaked 3D view
+        # breaks the later units that count the views
+        for name in list(App.listDocuments()):
+            if name not in self.documentsBefore:
+                App.closeDocument(name)
         pump(0.1)
 
 
@@ -198,9 +221,19 @@ class TestNamedViewsGui(ViewToolsCase):
         self.tmp = tempfile.mkdtemp()
 
     def tearDown(self):
-        self.view.setAnimationEnabled(True)
+        try:
+            self.view.setAnimationEnabled(True)
+        except RuntimeError:
+            pass  # the view went with its document (a reopen that failed half way)
         super().tearDown()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def assertCamera(self, view, want):
+        """The view's camera is the camera string `want`. Both are compared as setCamera leaves
+        them: getCamera writes only the fields that are set, and a restore sets them all."""
+        got = view.getCamera()
+        view.setCamera(want)
+        self.assertEqual(got, view.getCamera())
 
     def twoViews(self):
         """Saves "Top" and "Front"; returns the camera strings of the two."""
@@ -220,9 +253,9 @@ class TestNamedViewsGui(ViewToolsCase):
         top, front = self.twoViews()
         self.assertEqual(self.guiDoc.namedViews(), ["Top", "Front"])
         self.guiDoc.restoreNamedView("Top")
-        self.assertEqual(self.view.getCamera(), top)
+        self.assertCamera(self.view, top)
         self.guiDoc.restoreNamedView("Front")
-        self.assertEqual(self.view.getCamera(), front)
+        self.assertCamera(self.view, front)
 
     def testSameNameReplaces(self):
         self.twoViews()
@@ -232,14 +265,14 @@ class TestNamedViewsGui(ViewToolsCase):
         self.assertEqual(self.guiDoc.namedViews(), ["Top", "Front"])  # same place, no new entry
         self.view.viewFront()
         self.guiDoc.restoreNamedView("Top")
-        self.assertEqual(self.view.getCamera(), rear)
+        self.assertCamera(self.view, rear)
 
     def testRename(self):
         top, front = self.twoViews()
         self.guiDoc.renameNamedView("Top", "Roof")
         self.assertEqual(self.guiDoc.namedViews(), ["Roof", "Front"])
         self.guiDoc.restoreNamedView("Roof")
-        self.assertEqual(self.view.getCamera(), top)
+        self.assertCamera(self.view, top)
         with self.assertRaises(ValueError):
             self.guiDoc.restoreNamedView("Top")
         with self.assertRaises(ValueError):
@@ -285,16 +318,16 @@ class TestNamedViewsGui(ViewToolsCase):
         self.doc = App.openDocument(path)
         pump()
         guiDoc = Gui.getDocument(self.doc.Name)
-        self.assertEqual(guiDoc.namedViews(), ["Top", "Front"])
         Gui.ActiveDocument = guiDoc
         view = guiDoc.ActiveView
+        self.view, self.guiDoc = view, guiDoc  # for tearDown, before anything can fail
+        self.assertEqual(guiDoc.namedViews(), ["Top", "Front"])
         view.setAnimationEnabled(False)
-        guiDoc.restoreNamedView("Front")
-        self.assertEqual(view.getCamera(), front)
+        # Top first: the reopened view stands where it was saved, at Front
         guiDoc.restoreNamedView("Top")
-        self.assertEqual(view.getCamera(), top)
-        self.view = view
-        self.guiDoc = guiDoc
+        self.assertCamera(view, top)
+        guiDoc.restoreNamedView("Front")
+        self.assertCamera(view, front)
 
     def testDocumentWithoutViewsWritesNoElement(self):
         path = os.path.join(self.tmp, "no_views.FCStd")
@@ -331,19 +364,13 @@ class TestNamedViewsGui(ViewToolsCase):
         self.assertEqual(self.guiDoc.namedViews(), ["Asked"])
         self.view.viewFront()
         self.guiDoc.restoreNamedView("Asked")
-        self.assertEqual(self.view.getCamera(), top)
-
-    def viewMenu(self):
-        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
-            if menu.title().replace("&", "") == "View":
-                return menu
-        self.fail("the View menu")
+        self.assertCamera(self.view, top)
 
     def namedViewsMenu(self):
-        for menu in self.viewMenu().findChildren(QtWidgets.QMenu):
-            if menu.title().replace("&", "") == "Named views":
-                return menu
-        self.fail("the Named views menu in the View menu")
+        menu = subMenu(menuBarMenu("View"), "Named views")
+        if menu is None:
+            self.fail("the Named views menu in the View menu")
+        return menu
 
     def testMenusAreInTheViewMenu(self):
         entries = menuActions("View")
@@ -378,7 +405,7 @@ class TestNamedViewsGui(ViewToolsCase):
         self.assertEqual(len(entry), 1)
         entry[0].trigger()
         pump()
-        self.assertEqual(self.view.getCamera(), top)
+        self.assertCamera(self.view, top)
 
 
 PART_VIEW = "User parameter:BaseApp/Preferences/Mod/Part/View"
@@ -416,12 +443,10 @@ class TestDisplayStylesGui(ViewToolsCase):
         super().tearDown()
 
     def displayMenu(self):
-        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
-            if menu.title().replace("&", "") == "View":
-                for sub in menu.findChildren(QtWidgets.QMenu):
-                    if sub.title().replace("&", "") == "Display":
-                        return sub
-        self.fail("the Display menu in the View menu")
+        menu = subMenu(menuBarMenu("View"), "Display")
+        if menu is None:
+            self.fail("the Display menu in the View menu")
+        return menu
 
     def testDisplayMenuListsTheFourStyles(self):
         entries = [a.text().replace("&", "") for a in self.displayMenu().actions()]
@@ -443,11 +468,7 @@ class TestDisplayStylesGui(ViewToolsCase):
         entries = menuActions("View")
         self.assertIn("Std_TangentEdges", entries)
         # the draw styles stay: a drop-down submenu without an object name, found by its title
-        titles = []
-        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
-            if menu.title().replace("&", "") == "View":
-                titles = [m.title().replace("&", "") for m in menu.findChildren(QtWidgets.QMenu)]
-        self.assertIn("Draw Style", titles)
+        self.assertIsNotNone(subMenu(menuBarMenu("View"), "Draw Style"))
 
     def testShadedWithEdgesIsTheDefault(self):
         actions = Gui.Command.get("Std_DisplayStyle").getAction()
@@ -563,24 +584,28 @@ GUI_VIEW = "User parameter:BaseApp/Preferences/View"
 
 
 class TestCameraMenuGui(ViewToolsCase):
-    """Perspective is the default camera of a new view, and the camera entries and the zoom to a
-    window make a Camera group of the View menu (ops#640, view tools 4)."""
+    """A new view is orthographic, as Onshape's (its "Perspective view" is a toggle that starts off),
+    through FreeCAD's own preference View/Orthographic; the camera entries and the zoom to a window
+    make a Camera group of the View menu (ops#640, view tools 4)."""
 
     docName = "CameraMenuGui"
 
     def setUp(self):
         super().setUp()
-        self.saved = App.ParamGet(GUI_VIEW).GetString("DefaultCameraType", "")
+        params = App.ParamGet(GUI_VIEW)
+        self.hadPreference = "Orthographic" in params.GetBools()
+        self.saved = params.GetBool("Orthographic", True)
         self.extra = []
 
     def tearDown(self):
         for name in self.extra:
             App.closeDocument(name)
         params = App.ParamGet(GUI_VIEW)
-        if self.saved:
-            params.SetString("DefaultCameraType", self.saved)
+        if self.hadPreference:
+            params.SetBool("Orthographic", self.saved)
         else:
-            params.RemString("DefaultCameraType")
+            params.RemBool("Orthographic")
+        self.view.setCameraType("Orthographic")
         pump(0.1)
         super().tearDown()
 
@@ -595,30 +620,21 @@ class TestCameraMenuGui(ViewToolsCase):
         return guiDoc.ActiveView.getCameraType()
 
     def cameraMenu(self):
-        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
-            if menu.title().replace("&", "") == "View":
-                for sub in menu.findChildren(QtWidgets.QMenu):
-                    if sub.title().replace("&", "") == "Camera":
-                        return sub
-        self.fail("the Camera menu in the View menu")
+        menu = subMenu(menuBarMenu("View"), "Camera")
+        if menu is None:
+            self.fail("the Camera menu in the View menu")
+        return menu
 
-    def testNewViewIsPerspectiveWithoutAPreference(self):
-        App.ParamGet(GUI_VIEW).RemString("DefaultCameraType")
-        self.assertEqual(self.newViewCameraType("CameraDefault"), "Perspective")
+    def testNewViewIsOrthographicWithoutAPreference(self):
+        App.ParamGet(GUI_VIEW).RemBool("Orthographic")
+        self.assertEqual(self.newViewCameraType("CameraDefault"), "Orthographic")
 
     def testNewViewTakesThePreference(self):
         params = App.ParamGet(GUI_VIEW)
-        params.SetString("DefaultCameraType", "Orthographic")
-        self.assertEqual(self.newViewCameraType("CameraOrtho"), "Orthographic")
-        params.SetString("DefaultCameraType", "Perspective")
+        params.SetBool("Orthographic", False)
         self.assertEqual(self.newViewCameraType("CameraPersp"), "Perspective")
-
-    def testChangingThePreferenceLeavesTheOpenViewAlone(self):
-        before = self.view.getCameraType()
-        other = "Orthographic" if before == "Perspective" else "Perspective"
-        App.ParamGet(GUI_VIEW).SetString("DefaultCameraType", other)
-        pump(0.1)
-        self.assertEqual(self.view.getCameraType(), before)
+        params.SetBool("Orthographic", True)
+        self.assertEqual(self.newViewCameraType("CameraOrtho"), "Orthographic")
 
     def testCameraMenuHasTheCameraEntriesAndTheZoomToWindow(self):
         names = [a.objectName() for a in self.cameraMenu().actions() if not a.isSeparator()]
