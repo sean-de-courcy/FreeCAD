@@ -615,6 +615,28 @@ public:
     int trim(int geoId, const Base::Vector3d& point, bool includeSketchAxes = false);
     /// extend a curve
     int extend(int geoId, double increment, PointPos endPoint);
+    /** FreeCAD-CH (Onshape's Extend, ops#640): extends a line's end by increment, but the end
+     *  stops at the first boundary in its way (seekExtendBoundary), where a constraint holds it:
+     *  PointOnObject on a curve, Coincident on a point. Other curves, and a shrink, as extend.
+     */
+    int extendToBoundary(int geoId, double increment, PointPos endPoint);
+    /** FreeCAD-CH (Onshape's Extend, ops#640): the increment that takes line geoId's end
+     *  endPoint, moving away from the line's other end by increment, to the first boundary in its
+     *  way: a curve of the sketch (construction ones too) or a Use'd (external) one crossing the
+     *  path, or a point on it (a sketch point, a curve's end point; at the same place a point wins
+     *  over a crossing). Not boundaries: the origin axes, a constraint's helper link (a model pick,
+     *  ops#634), internal geometry (an ellipse's axes, a B-spline's poles), anything at the old end,
+     *  another curve's extension. boundaryGeoId is GeoUndef (and increment is returned) when
+     *  nothing is in the way, the increment isn't positive or geoId isn't a line; boundaryPos is
+     *  the boundary's point, or none for a crossing.
+     */
+    double seekExtendBoundary(
+        int geoId,
+        PointPos endPoint,
+        double increment,
+        int& boundaryGeoId,
+        PointPos& boundaryPos
+    ) const;
     /// Once smaller pieces have been created from a larger curve (by split or trim, say), derive
     /// the constraint that will replace the given one (which is to be deleted). NOTE: Currently
     /// assuming all constraints on the end points of the old curve have been transferred or

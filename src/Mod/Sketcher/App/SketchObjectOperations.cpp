@@ -25,7 +25,19 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <set>
 #include <tuple>
+
+#include <Geom2dAPI_InterCurveCurve.hxx>
+#include <Geom2dInt_GInter.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <GeomAPI.hxx>
+#include <Geom_Curve.hxx>
+#include <IntRes2d_IntersectionSegment.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
+#include <gp_Pln.hxx>
 
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
@@ -521,6 +533,171 @@ int SketchObject::extend(int GeoId, double increment, PointPos endpoint)
         solve();
     }
     return retcode;
+}
+
+// FreeCAD-CH (Onshape's Extend, ops#640; see the header)
+double SketchObject::seekExtendBoundary(
+    int GeoId,
+    PointPos endpoint,
+    double increment,
+    int& boundaryGeoId,
+    PointPos& boundaryPos
+) const
+{
+    boundaryGeoId = GeoEnum::GeoUndef;
+    boundaryPos = PointPos::none;
+    if (GeoId < 0 || GeoId > getHighestCurveIndex() || !(increment > 0)
+        || (endpoint != PointPos::start && endpoint != PointPos::end)) {
+        return increment;
+    }
+    const auto* seg = dynamic_cast<const Part::GeomLineSegment*>(getGeometry(GeoId));
+    if (!seg) {
+        return increment;
+    }
+    const Base::Vector3d end = endpoint == PointPos::start ? seg->getStartPoint() : seg->getEndPoint();
+    Base::Vector3d dir = end - (endpoint == PointPos::start ? seg->getEndPoint() : seg->getStartPoint());
+    if (dir.Length() < Precision::Confusion()) {
+        return increment;
+    }
+    dir.Normalize();
+
+    // as Trim's (arePointsWithinPrecision): a point within this of the path is on it
+    const double tol = 500 * Precision::Confusion();
+    double best = increment + tol;  // a boundary at the click (within tol) is reached
+    // a candidate at distance t along the path from the old end: the nearest wins, and at the
+    // same distance a point (an end point, a sketch point) wins over a curve's crossing
+    auto consider = [&](const Base::Vector3d& p, int geoId, PointPos pos) {
+        const Base::Vector3d v = p - end;
+        const double t = v * dir;
+        if (t <= tol || (v - dir * t).Length() > tol) {
+            return;  // behind or at the old end (a curve through it doesn't stop it), or off the path
+        }
+        const bool point = pos != PointPos::none;
+        const bool first = boundaryGeoId == GeoEnum::GeoUndef;
+        const bool samePlace = std::abs(t - best) <= tol;
+        if ((first && t <= best) || (!first && t < best - tol)
+            || (!first && samePlace && point && boundaryPos == PointPos::none)) {
+            best = t;
+            boundaryGeoId = geoId;
+            boundaryPos = pos;
+        }
+    };
+
+    // a constraint's helper link (a model pick, ops#634) is not Use'd: Onshape's model edges in
+    // the sketch plane don't stop it (GA3-25)
+    std::set<int> helpers;
+    for (int entry = 0; entry < ExternalGeometry.getSize(); ++entry) {
+        if (!isImplicitExternal(entry)) {
+            continue;
+        }
+        for (long id : externalGeometryIds(entry)) {
+            auto it = externalGeoMap.find(id);
+            if (it != externalGeoMap.end()) {
+                helpers.insert(-it->second - 1);  // ExternalGeo[k] has GeoId -1 - k
+            }
+        }
+    }
+
+    gp_Pln plane(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+    Handle(Geom2d_Curve) path = new Geom2d_TrimmedCurve(
+        new Geom2d_Line(gp_Pnt2d(end.x, end.y), gp_Dir2d(dir.x, dir.y)),
+        0.0,
+        increment + tol
+    );
+    std::vector<int> ids;
+    for (int id = 0; id <= getHighestCurveIndex(); ++id) {
+        ids.push_back(id);
+    }
+    // not the origin axes (GeoIds -1 and -2): Onshape's don't stop it
+    for (int id = GeoEnum::RefExt; id >= -getExternalGeometryCount(); --id) {
+        ids.push_back(id);
+    }
+    for (int id : ids) {
+        const Part::Geometry* geo = getGeometry(id);
+        if (id == GeoId || !geo || helpers.count(id) != 0
+            || GeometryFacade::isInternalAligned(geo)) {
+            continue;  // an ellipse's axes, a B-spline's poles and knots are the curve's own
+        }
+        if (geo->is<Part::GeomPoint>()) {
+            consider(static_cast<const Part::GeomPoint*>(geo)->getPoint(), id, PointPos::start);
+            continue;
+        }
+        if (geo->isDerivedFrom<Part::GeomBoundedCurve>()) {
+            const auto* bounded = static_cast<const Part::GeomBoundedCurve*>(geo);
+            consider(bounded->getStartPoint(), id, PointPos::start);
+            consider(bounded->getEndPoint(), id, PointPos::end);
+        }
+        Handle(Geom_Curve) curve3d = Handle(Geom_Curve)::DownCast(geo->handle());
+        if (curve3d.IsNull()) {
+            continue;
+        }
+        try {
+            Geom2dAPI_InterCurveCurve intersector(path, GeomAPI::To2d(curve3d, plane), 1.0e-12);
+            for (int i = 1; i <= intersector.NbPoints(); ++i) {
+                const gp_Pnt2d p = intersector.Point(i);
+                consider(Base::Vector3d(p.X(), p.Y(), 0), id, PointPos::none);
+            }
+            // a collinear overlap: its first point (an end point, considered above, or the path's)
+            const Geom2dInt_GInter& inter = intersector.Intersector();
+            for (int i = 1; i <= inter.NbSegments(); ++i) {
+                const IntRes2d_IntersectionSegment& overlap = inter.Segment(i);
+                if (overlap.HasFirstPoint()) {
+                    const gp_Pnt2d p = overlap.FirstPoint().Value();
+                    consider(Base::Vector3d(p.X(), p.Y(), 0), id, PointPos::none);
+                }
+            }
+        }
+        catch (const Standard_Failure&) {
+            continue;  // a curve OCCT can't intersect doesn't stop it
+        }
+    }
+    if (boundaryGeoId == GeoEnum::GeoUndef) {
+        return increment;
+    }
+    // a crossing at one of the boundary's end points is that point (a corner, a curve's end)
+    if (boundaryPos == PointPos::none) {
+        const Base::Vector3d at = end + dir * best;
+        for (PointPos pos : {PointPos::start, PointPos::end}) {
+            const Part::Geometry* geo = getGeometry(boundaryGeoId);
+            if (geo->isDerivedFrom<Part::GeomBoundedCurve>()
+                && (getPoint(boundaryGeoId, pos) - at).Length() < tol) {
+                boundaryPos = pos;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+int SketchObject::extendToBoundary(int GeoId, double increment, PointPos endpoint)
+{
+    int boundaryGeoId;
+    PointPos boundaryPos;
+    const double bounded = seekExtendBoundary(GeoId, endpoint, increment, boundaryGeoId, boundaryPos);
+    if (boundaryGeoId == GeoEnum::GeoUndef) {
+        return extend(GeoId, increment, endpoint);
+    }
+    // the end goes onto the boundary, and the constraint holds it there
+    int retcode = extend(GeoId, bounded, endpoint);
+    if (retcode != 0) {
+        return retcode;
+    }
+    auto constraint = std::make_unique<Constraint>();
+    constraint->First = GeoId;
+    constraint->FirstPos = endpoint;
+    constraint->Second = boundaryGeoId;
+    if (boundaryPos == PointPos::none) {
+        constraint->Type = Sketcher::PointOnObject;
+    }
+    else {
+        constraint->Type = Sketcher::Coincident;
+        constraint->SecondPos = boundaryPos;
+    }
+    addConstraint(std::move(constraint));
+    if (noRecomputes) {
+        solve();
+    }
+    return 0;
 }
 
 // clang-format on

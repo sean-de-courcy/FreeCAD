@@ -1662,10 +1662,13 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     double increment;
     int endPoint;
     int GeoId;
+    PyObject* toBoundary = Py_False;  // FreeCAD-CH (Onshape's Extend, ops#640)
 
-    if (PyArg_ParseTuple(args, "idi", &GeoId, &increment, &endPoint)) {
-        if (this->getSketchObjectPtr()
-                ->extend(GeoId, increment, static_cast<Sketcher::PointPos>(endPoint))) {
+    if (PyArg_ParseTuple(args, "idi|O!", &GeoId, &increment, &endPoint, &PyBool_Type, &toBoundary)) {
+        auto* sketch = this->getSketchObjectPtr();
+        const auto pos = static_cast<Sketcher::PointPos>(endPoint);
+        if (Base::asBoolean(toBoundary) ? sketch->extendToBoundary(GeoId, increment, pos)
+                                        : sketch->extend(GeoId, increment, pos)) {
             std::stringstream str;
             str << "Not able to extend geometry with id : (" << GeoId << ") for increment ("
                 << increment << ") and point position (" << endPoint << ")";
@@ -1678,7 +1681,7 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     PyErr_SetString(
         PyExc_TypeError,
         "extend() method accepts:\n"
-        "-- int,float,int\n"
+        "-- int,float,int[,bool]\n"
     );
     return nullptr;
 }

@@ -753,6 +753,11 @@ class SketchObject(Part2DObject):
     def extend(self) -> None:
         """
         Extend a curve to new start and end positions
+
+        extend(geoId:int, increment:float, pointPos:int, toBoundary:bool=False)
+            A line's or an arc's end grows by increment (an arc's in radians). With toBoundary
+            (FreeCAD-CH, Onshape's Extend), a line's end stops at the first curve or point in its
+            way, where a PointOnObject or Coincident constraint holds it.
         """
         ...
 

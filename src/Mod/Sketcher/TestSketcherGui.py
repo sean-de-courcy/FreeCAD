@@ -40,6 +40,8 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
     TestSketchSplitIntersectionGui,  # FreeCAD-CH, sketcher 3 (hand-check 6)
     TestSketchTrimCrossingGui,  # FreeCAD-CH, sketcher 4 (Onshape SK19-SK22, SK24)
     TestSketchTrimPointsGui,  # FreeCAD-CH, sketcher 4 (Onshape SK23-SK25)
+    TestSketchExtendGui,  # FreeCAD-CH, sketch tools 2 (Onshape GA3-25)
+    TestSketchTrimDragGui,  # FreeCAD-CH, sketch tools 2 (Onshape GA3-25)
 )
 from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch round 3)
     TestSketchModelInferenceGui,
