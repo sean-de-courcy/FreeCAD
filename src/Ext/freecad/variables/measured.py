@@ -73,6 +73,10 @@ class MeasuredVariable:
             App.Console.PrintWarning(
                 "{}: made by a newer build (measured variable format {}); it may not measure as "
                 "intended\n".format(obj.Label, obj.Format))
+        try:  # the saved value was measured with the saved placements
+            self.frames = _frames([(o, s) for o, subs in obj.References for s in (subs or ("",))])
+        except Exception:
+            self.frames = None
 
     def execute(self, obj):
         refs = _references(obj)
@@ -82,6 +86,21 @@ class MeasuredVariable:
             raise MeasureError("Measured variable '{}': {}".format(variable_name(obj), e)) from None
         obj.ReferenceNames = [_show(o, sub) for o, sub in refs]
         obj.Value = value
+        self.frames = _frames(refs)
+
+    def mustExecute(self, obj):
+        # A body's placement change touches neither the measurement nor the features it links
+        # (and a link to the body would be a cycle when one of its features uses the variable):
+        # compare the placements read at the last measurement (kept in memory only; a reopened
+        # file starts from its saved placements, onDocumentRestored).
+        frames = getattr(self, "frames", None)
+        if frames is None:
+            return False
+        try:
+            pairs = [(o, s) for o, subs in obj.References for s in (subs or ("",))]
+            return _frames(pairs) != frames
+        except Exception:
+            return False
 
     def dumps(self):
         return None
@@ -127,21 +146,58 @@ def _show(obj, sub):
     return "{}.{}".format(name, sub) if sub else name
 
 
+def _frame_path(obj):
+    """(root, path objects, transform) placing `obj` in its studio's frame: `root` is the studio
+    (its own placement left out, transform False) or, for the implicit studio, `obj`'s top parent
+    (placed, transform True); `path` the objects from below `root` down to `obj`, each placing the
+    next (a body, then its feature)."""
+    studio = studio_of(obj)
+    try:
+        parents = list(obj.Parents)
+    except Exception:
+        parents = []
+    best = None
+    for parent, sub in parents:
+        try:
+            chain = parent.getSubObjectList(sub)
+        except Exception:
+            continue
+        if not chain or chain[-1] != obj:
+            continue
+        if studio is not None and studio in chain:
+            i = chain.index(studio)
+            return studio, chain[i + 1:], False
+        if best is None:
+            best = (parent, chain[1:], True)
+    if best is not None:
+        return best
+    if studio is obj:
+        return obj, [], False
+    return obj, [], True
+
+
+def _frames(pairs):
+    """The placements that put each reference in the studio's frame, apart from the referenced
+    object's own (a change of which touches it): a body's, a nested part's. A change of one of
+    these doesn't touch the measurement, so mustExecute compares them."""
+    out = []
+    for linked, _sub in pairs:
+        root, path, transform = _frame_path(linked)
+        placed = ([root] if transform else []) + path[:-1]
+        out.append(tuple((o.Name, tuple(round(x, 12) for x in o.Placement.toMatrix().A))
+                         for o in placed if hasattr(o, "Placement")))
+    return out
+
+
 def _resolve(obj, sub):
-    """The shape of one reference in the coordinates of its top parent (the studio's frame, so two
-    references in differently placed bodies compare right), or raise MeasureError."""
+    """The shape of one reference in its studio's frame (so two references in differently placed
+    bodies compare right, and a body's placement counts), or raise MeasureError."""
     import Part
 
-    root, path = obj, sub
+    root, path, transform = _frame_path(obj)
     try:
-        parents = obj.getParents()
-        if parents:
-            root, prefix = parents[0]
-            path = prefix + sub
-    except Exception:
-        pass
-    try:
-        shape = Part.getShape(root, path, needSubElement=True)
+        shape = Part.getShape(root, "".join(o.Name + "." for o in path) + sub,
+                              needSubElement=True, transform=transform)
     except Exception:
         shape = None
     if shape is None or shape.isNull():
@@ -573,7 +629,7 @@ def studio_of(obj):
     return None
 
 
-# --- picks: a 3D selection resolved to the feature that made the element (design section 2)
+# --- picks: a 3D selection resolved to the feature it was picked on (design section 3)
 
 _TOL = 1e-6
 
@@ -642,22 +698,19 @@ def _element_like(obj, picked):
     return None
 
 
-def _same_body(a, b):
-    return a.getParentGeoFeatureGroup() == b.getParentGeoFeatureGroup()
-
-
 def resolve_pick(root, subname, wire_body=False):
     """The reference a 3D pick stands for: (feature, element name), the element named in the
-    feature that made it (the design note's section 2). With `wire_body` (Length), a whole object
-    whose shape is edges only (a sketch, a wire) is taken as (object, ""), Onshape's wire body.
+    feature whose shape was picked (the design note's section 3). With `wire_body` (Length), a
+    whole object whose shape is edges only (a sketch, a wire) is taken as (object, ""), Onshape's
+    wire body.
 
     `root` and `subname` are a selection's object and subname (a part studio and
-    "Body.Pad2.Edge3", or a body and "Edge3"). A PartDesign body's shape is its tip's. From the
-    feature whose shape was picked, the pick walks back along the body's BaseFeature chain while
-    the earlier feature still has an element of the same geometry, and names the element in the
-    earliest one. An edge that later features left alone is read from the feature that made it,
-    so a feature in between can use the variable without a cycle; an edge a later feature changed
-    (trimmed, split) stays on the feature that changed it, so the value is the one picked.
+    "Body.Pad2.Edge3", or a body and "Edge3"). A PartDesign body's shape is its tip's, so a pick on
+    a body names the tip's element. Onshape's variable reads the geometry at its own place in the
+    feature list, after every feature that existed when it was made: the picked feature is that
+    place. So a later edit of that feature (a pocket moved to trim the edge) changes the value, and
+    a feature after it can use the variable; the picked feature itself using it is a cycle,
+    refused at once (in Onshape a feature before the variable can't read it).
     Raises MeasureError for a pick that is not a vertex, an edge or a face."""
     owner, _parent, _child, element = root.resolve(subname)
     element = element or ""
@@ -701,19 +754,7 @@ def resolve_pick(root, subname, wire_body=False):
         if name is None:
             raise MeasureError("{}.{} is not in the body's tip".format(owner.Label, element))
         owner, element = tip, name
-    feature = owner
-    seen = {feature.Name}
-    while feature.isDerivedFrom("PartDesign::Feature"):
-        base = getattr(feature, "BaseFeature", None)
-        if (base is None or base.Name in seen or not base.isDerivedFrom("PartDesign::Feature")
-                or not _same_body(base, feature)):
-            break
-        seen.add(base.Name)
-        name = _element_like(base, picked)
-        if name is None:
-            break
-        feature, element = base, name
-    return feature, element
+    return owner, element
 
 
 def set_references(m, references):

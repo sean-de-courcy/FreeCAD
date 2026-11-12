@@ -265,15 +265,17 @@ class TestMeasuredVariablesGui(unittest.TestCase):
         self.doc.recompute()
         self.assertFalse(self.doc.getObjectsByLabel("w (measured)"))
 
-    def test_pick_resolves_to_the_feature_that_made_it(self):
+    def test_pick_reads_the_feature_it_was_picked_on(self):
+        """Onshape's variable reads the geometry at its own place: an edge picked on the tip is
+        the tip's, even where an earlier pad has the same edge (ops#640, integrator 12's review)."""
         pad2 = self.top_pad()
         panel = self.addMeasured("w", "Measured length")
         tip_edge = edge_named(pad2.Shape, bottom_long)
         self.pick("{}.{}.{}".format(self.bodyA.Name, pad2.Name, tip_edge))
         (feature, element), = panel.references()
-        self.assertIs(feature, self.padA)
-        self.assertEqual(element, edge_named(self.padA.Shape, bottom_long))
-        self.assertEqual(panel.list.item(0).text(), "PadA." + element)
+        self.assertIs(feature, pad2)
+        self.assertEqual(element, tip_edge)
+        self.assertEqual(panel.list.item(0).text(), pad2.Label + "." + element)
 
     def face(self, test):
         return ["Face%d" % i for i, f in enumerate(self.padA.Shape.Faces, 1) if test(f)][0]

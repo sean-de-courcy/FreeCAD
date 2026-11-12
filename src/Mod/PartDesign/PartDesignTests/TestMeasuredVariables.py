@@ -403,24 +403,27 @@ class TestMeasuredVariables(unittest.TestCase):
         self.assertValid(pad)
         return pad
 
-    def testPickResolvesToTheFeatureThatMadeIt(self):
-        """An edge a later pad left alone, picked on the tip, names the first pad's edge."""
+    def testPickReadsTheFeatureItWasPickedOn(self):
+        """Onshape's variable reads the geometry at its own place, after every feature that existed
+        when it was made: a pick on the tip names the tip's element, even for an edge a later pad
+        left alone (an earlier feature with the same edge is not where the variable sits)."""
         pad2 = self.side_pad(x=5, y=2, z=5, length=3)  # on top, away from the bottom edges
         tip_edge = edge_named(pad2.Shape, bottom_long)
         feature, element = self.measured.resolve_pick(
             self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, tip_edge))
-        self.assertIs(feature, self.padA)
-        self.assertEqual(element, edge_named(self.padA.Shape, bottom_long))
+        self.assertIs(feature, pad2)
+        self.assertEqual(element, tip_edge)
         # through the body (its shape is the tip's)
         feature, element = self.measured.resolve_pick(
             self.studio, "{}.{}".format(self.bodyA.Name, tip_edge))
-        self.assertIs(feature, self.padA)
-        # a face
-        bottom = face_named(pad2.Shape, lambda f: f.BoundBox.ZMax < 1e-6)
+        self.assertIs(feature, pad2)
+        self.assertEqual(element, tip_edge)
+        # a feature picked in the tree is read as that feature left it
+        first = edge_named(self.padA.Shape, bottom_long)
         feature, element = self.measured.resolve_pick(
-            self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, bottom))
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, self.padA.Name, first))
         self.assertIs(feature, self.padA)
-        self.assertEqual(element, face_named(self.padA.Shape, lambda f: f.BoundBox.ZMax < 1e-6))
+        self.assertEqual(element, first)
 
     def testPickOfAChangedEdgeStaysOnTheFeatureThatChangedIt(self):
         """A pad across the bottom front edge splits it: the piece picked is not in the first pad,
@@ -438,16 +441,102 @@ class TestMeasuredVariables(unittest.TestCase):
         self.assertAlmostEqual(holder.w.Value, 5, places=6)
 
     def testPickedEdgeLetsALaterFeatureUseTheVariable(self):
-        """Resolved to the first pad, the pick can drive the later pad that showed it."""
+        """Picked on the first pad (the variable's place is after it), the variable can drive a
+        later pad; picked on the later pad, that pad using it is a cycle, refused at once (in
+        Onshape a feature before the variable can't read it)."""
         pad2 = self.side_pad(x=5, y=2, z=5, length=3)
-        tip_edge = edge_named(pad2.Shape, bottom_long)
+        first = edge_named(self.padA.Shape, bottom_long)
         ref = self.measured.resolve_pick(
-            self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, tip_edge))
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, self.padA.Name, first))
         holder, m = self.measured.add(self.studio, "w", "Length", [ref])
         pad2.setExpression("Length", "#w / 4")
         self.doc.recompute()
         self.assertValid(m, holder, pad2)
         self.assertAlmostEqual(pad2.Length.Value, 5, places=6)
+        pad3 = self.side_pad(x=12, y=2, z=5, length=2, name="Pad3")
+        tip_edge = edge_named(pad3.Shape, top_long)
+        ref = self.measured.resolve_pick(self.studio, "{}.{}".format(self.bodyA.Name, tip_edge))
+        self.assertIs(ref[0], pad3)
+        holder3, m3 = self.measured.add(self.studio, "t", "Length", [ref])
+        self.doc.recompute()
+        with self.assertRaisesRegex(Exception, "(?i)cycl"):
+            pad3.setExpression("Length", "#t / 10")
+
+    # --- integrator 12's review cases (ops#673 comment 6816773029): the variable reads the
+    # studio's geometry at its own place, and a body's placement counts
+
+    def pocket_rect(self, x, y, w, h):
+        """A through-all midplane pocket in body A of a w x h rectangle at (x, y), its corner
+        held by the constraints PX and PY."""
+        sk = self.sketch(self.bodyA, "CutSketch")
+        rectangle(sk, x, y, w, h)
+        for kind, a, b, value, name in (("DistanceX", (-1, 1), (0, 1), x, "PX"),
+                                        ("DistanceY", (-1, 1), (0, 1), y, "PY"),
+                                        ("DistanceX", (0, 1), (0, 2), w, None),
+                                        ("DistanceY", (1, 1), (1, 2), h, None)):
+            c = sk.addConstraint(Sketcher.Constraint(kind, a[0], a[1], b[0], b[1], value))
+            if name:
+                sk.renameConstraint(c, name)
+        pocket = self.bodyA.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = sk
+        pocket.Type = "ThroughAll"
+        pocket.Midplane = True
+        self.doc.recompute()
+        self.assertValid(pocket)
+        return sk, pocket
+
+    def testMeasuredEdgeTrimmedBetween(self):
+        """A pocket clear of A's top front edge (y = 0, z = 5) at the pick, then moved to notch it:
+        the edge is 0..15 in the studio's result, so w reads 15 (it read 20, from PadA's untrimmed
+        edge, with no warning, on e8fdaa630e)."""
+        sk, pocket = self.pocket_rect(15, 6, 6, 5)
+        top_front = lambda e: (isinstance(e.Curve, Part.Line)
+                               and Part.Vertex(V(5, 0, 5)).distToShape(e)[0] < 1e-6)
+        edge = edge_named(self.bodyA.Shape, top_front)
+        ref = self.measured.resolve_pick(self.studio, "{}.{}".format(self.bodyA.Name, edge))
+        holder, m = self.measured.add(self.studio, "w", "Length", [ref])
+        pad = self.make_user("#w")
+        self.doc.recompute()
+        self.assertValid(m, holder, pad)
+        self.assertAlmostEqual(holder.w.Value, 20, places=6)
+        sk.setDatum("PY", App.Units.Quantity("-1 mm"))
+        self.doc.recompute()
+        trimmed = self.bodyA.Shape.getElement(edge_named(self.bodyA.Shape, top_front))
+        self.assertAlmostEqual(trimmed.Length, 15, places=6)  # the model is what the case says
+        self.assertValid(m, holder, pad)
+        self.assertAlmostEqual(holder.w.Value, 15, places=6)
+        self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testMeasuredDistanceBodyMoved(self):
+        """d is the distance between A's face x = 20 and a second body's face x = 30 (10); moving
+        that body by its Placement (x + 5) makes it 15 (it stayed 10 on e8fdaa630e: the body's
+        placement was ignored, and nothing recomputed the measurement)."""
+        body2 = self.doc.addObject("PartDesign::Body", "Body2")
+        self.studio.addObject(body2)
+        sk = self.sketch(body2, "Sketch2")
+        rectangle(sk, 30, 0, 10, 10)
+        pad2 = body2.newObject("PartDesign::Pad", "Pad2")
+        pad2.Profile = sk
+        pad2.Length = 5
+        self.doc.recompute()
+        f1 = face_named(self.bodyA.Shape, lambda f: abs(f.CenterOfMass.x - 20) < 1e-6)
+        f2 = face_named(body2.Shape, lambda f: abs(f.CenterOfMass.x - 30) < 1e-6)
+        refs = [self.measured.resolve_pick(self.studio, "{}.{}".format(self.bodyA.Name, f1)),
+                self.measured.resolve_pick(self.studio, "{}.{}".format(body2.Name, f2))]
+        holder, m = self.measured.add(self.studio, "d", "Distance", refs)
+        pad = self.make_user("#d")
+        self.doc.recompute()
+        self.assertValid(m, holder, pad)
+        self.assertAlmostEqual(holder.d.Value, 10, places=6)
+        body2.Placement = App.Placement(V(5, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertValid(m, holder, pad)
+        self.assertAlmostEqual(holder.d.Value, 15, places=6)
+        self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, 15, places=6)
+        # read in the studio's frame: moving the studio itself changes nothing
+        self.studio.Placement = App.Placement(V(0, 7, 3), App.Rotation(V(0, 0, 1), 30))
+        self.doc.recompute()
+        self.assertAlmostEqual(holder.d.Value, 15, places=6)
 
     def testPickOfASketchEdge(self):
         line = "Edge1"
