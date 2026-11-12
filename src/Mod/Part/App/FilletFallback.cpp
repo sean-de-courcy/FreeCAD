@@ -2832,7 +2832,19 @@ TopoDS_Shape applyTools(
         inputs.push_back(tool->solid);
     }
     double raised = raisedTolerance(result, inputs);
-    if (std::abs(change - expected) > volumeTolerance * scale + raised * size + expectedAllowance) {
+    double bound = volumeTolerance * scale + raised * size + expectedAllowance;
+    if (std::abs(change - expected) > bound) {
+        // OCCT's default integration is not exact on free-form faces, and its error there moves
+        // with the shape it integrates (about a point it takes from the shape): the faces the stage
+        // left alone then don't cancel. On the replica's Case Base (#108) the body measures 0.43
+        // over, and a cut that rebuilt only analytic faces 2.45e-4 short of its closed form, eight
+        // times the bound. Measured adaptively, the change is right to 7e-7
+        change = MassProperties::volume(result, true) - MassProperties::volume(shape, true);
+        if (cut) {
+            change = -change;
+        }
+    }
+    if (std::abs(change - expected) > bound) {
         refuse(std::string(cut ? "the cut removed " : "the fuse added ") + describe(change)
                + " instead of " + describe(expected));
     }
@@ -3620,6 +3632,12 @@ TopoDS_Shape constructShape(
         size = std::max(size, squareSize(tool.solid));
     }
     double allowance = raisedTolerance(shape, inputs) * size + (trimmed ? trimmedAllowance : 0.0);
+    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
+        // As in applyTools: OCCT's default integration of free-form faces doesn't cancel between
+        // the base and the result; both again, adaptively
+        measured = MassProperties::volume(shape, true);
+        expected = MassProperties::volume(base.getShape(), true) - cutVolume + fusedVolume;
+    }
     if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
         refuse("the result's volume " + describe(measured) + " differs from its closed form "
                + describe(expected));
