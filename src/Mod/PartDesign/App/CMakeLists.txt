@@ -42,6 +42,8 @@ SET(Features_SRCS
     StudioPattern.h
     FeatureApply.cpp
     FeatureApply.h
+    StudioTransform.cpp
+    StudioTransform.h
     Pieces.cpp
     Pieces.h
     Derived.cpp

@@ -87,4 +87,12 @@ try:
 except Exception as exc:
     FreeCAD.Console.PrintWarning(f"PartDesign: the Thicken, Scale and Offset commands are not available: {exc}\n")
 
+# FreeCAD-CH ops#655: Transform (move, rotate, copy part), a studio feature
+try:
+    from PartDesign import TransformGui
+
+    TransformGui.register()
+except Exception as exc:
+    FreeCAD.Console.PrintWarning(f"PartDesign: the Transform command is not available: {exc}\n")
+
 FreeCAD.__unit_test__ += ["TestPartDesignGui"]

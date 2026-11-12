@@ -12,6 +12,7 @@ set(PartDesign_Scripts
     Init.py
     TestPartDesignApp.py
     SolidOpsFeatures.py
+    TransformFeature.py
 )
 
 if(BUILD_GUI)
@@ -19,6 +20,7 @@ if(BUILD_GUI)
           InitGui.py
           TestPartDesignGui.py
           SolidOpsGui.py
+          TransformGui.py
           InvoluteGearFeature.py
           InvoluteGearFeature.ui
           SprocketFeature.py
@@ -121,6 +123,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestPartStudioVariables.py
     PartDesignTests/TestResultCheck.py
     PartDesignTests/TestStudioPartMirror.py
+    PartDesignTests/TestStudioTransform.py
     PartDesignTests/TestStudioMerge.py
     PartDesignTests/TestStudioDressUp.py
     PartDesignTests/TestConfigurations.py
@@ -176,6 +179,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPartsListGui.py
         PartDesignTests/TestStudioPatternsGui.py
         PartDesignTests/TestStudioPartMirrorGui.py
+        PartDesignTests/TestStudioTransformGui.py
     )
 endif(BUILD_GUI)
 

@@ -26,6 +26,7 @@
 #include "StudioList.h"
 #include "StudioOwner.h"
 #include "StudioPattern.h"
+#include "StudioTransform.h"
 
 using namespace PartDesign;
 
@@ -268,6 +269,23 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         App::DocumentObject* owner = StudioOwner.getValue();
         std::string why;
         Body* body = getFeatureBody();
+        // ops#655: a Transform studio feature's step moves its part or makes a copy
+        // (StudioTransform.cpp); its location is the step's Placement
+        if (owner && isStudioTransform(owner)) {
+            Part::TopoShape moved =
+                studioTransformStep(owner, body, getBaseTopoShape(/*silent=*/true), namingTag(), &why);
+            if (moved.isNull()) {
+                return new App::DocumentObjectExecReturn(why, this);
+            }
+            AddSubShape.setValue(Part::TopoShape());
+            const Base::Placement place = moved.getPlacement();
+            if (!Placement.getValue().isSame(place, Precision::Confusion())) {
+                Placement.setValue(place);
+            }
+            rawShape = moved;
+            Shape.setValue(moved);
+            return App::DocumentObject::StdReturn;
+        }
         // A piece step (P6p): the first step of a part its owner made from a piece or a leftover
         // takes the one solid of the source its witness selects, as is
         const bool piece = body && owner && isPieceBody(body) && body->StudioMadeBy.getValue() == owner;
