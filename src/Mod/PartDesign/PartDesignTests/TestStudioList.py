@@ -508,7 +508,10 @@ def labelPieces(made, box):
         if not body.StudioParentId:
             side = "N"
         else:
-            shape = body.Tip.Shape if body.Tip else Part.Shape()
+            # Its piece step's solid, not its Tip's: a later feature in the piece can reach across
+            # the slot (a pattern's merging instance that bridges the two pieces, T1b)
+            step = PartDesign.studioStepOf(box, body) or body.Tip
+            shape = step.Shape if step else Part.Shape()
             side = "?" if shape.isNull() else ("L" if shape.BoundBox.Center.x < middle else "R")
         if not hasattr(body, "OracleSide"):
             body.addProperty("App::PropertyString", "OracleSide", "Test")

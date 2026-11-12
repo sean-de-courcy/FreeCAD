@@ -638,15 +638,14 @@ class TestStudioFeaturePattern(unittest.TestCase):
         self.assertVolume("A", 10000)
         self.assertEqual(elementNames(self.part("A").Tip.Shape), before)
 
-    @unittest.expectedFailure
     def testMergeInstanceBridgingTwoPiecesOfASplitMergesThem(self):
-        """The gate's seed 1 op 8 (T1b gate half, open): the seed Add x 15..35, y 0..4 merges B
-        into A; a through slot x 40..41 then splits A in two (pieces made); the pattern of the
-        seed +x 10, Reapply on: its instance x 25..45 bridges the slot, so the right piece merges
-        into the left one (the pattern's record says so) and one part is live, its pattern step
-        valid. Today the step in the left piece fails "Nothing comes before ...: it has no solid
-        to add to" (its base not computed yet when it runs) while the record consumes the right
-        piece: one part live, holding only the left piece."""
+        """The gate's seed 1 op 8 (T1b gate half): the seed Add x 15..35, y 0..4 merges B into A;
+        a through slot x 40..41 then splits A in two (pieces made); the pattern of the seed +x 10,
+        Reapply on: its instance x 25..45 bridges the slot, so the right piece merges into the left
+        one (the pattern's record says so) and one part is live, 8240, its pattern step valid. The
+        left piece holds no step of the seed: its pattern step has no Originals there and still
+        takes its place in the chain (it was left out, "it has no solid to add to"). Undo brings
+        both pieces back, redo merges them again; saved and opened again, the same."""
         self.gapPlates()
         seed = self.boss("A", (15, 0, 35, 4), "Seed", length=10, z=0, scope=("A", "B"))
         self.doc.recompute()
@@ -654,13 +653,35 @@ class TestStudioFeaturePattern(unittest.TestCase):
         sk = studioSketch(self.doc, self.S, "SlotSk", rects=((40, -1, 41, 21),), z=10)
         slot = makeOwner(self.doc, self.S, "Pocket", "Slot", sk, ("A",), Length=11)
         self.doc.recompute()
-        self.assertEqual(len(self.makePieces(slot)), 2)
-        lp = linearOwner(self.doc, self.S, "LP", [seed], 10, 2, reapply=True)
+        pieces = self.makePieces(slot)
+        self.assertEqual(len(pieces), 2)
+        self.assertEqual(sorted(round(p.Shape.Volume, 3) for p in pieces), [1800, 6400])
+
+        def merged():
+            lp = self.doc.getObject("LP")
+            live = PartDesign.studioLiveParts(self.list)
+            self.assertEqual(len(live), 1)
+            self.assertValid(lp, PartDesign.studioStepOf(lp, live[0]))
+            self.assertEqual(live[0].Tip, PartDesign.studioStepOf(lp, live[0]))
+            self.assertAlmostEqual(live[0].Shape.Volume, 8240, places=2)
+            self.assertEqual(len(lp.StudioMergedParts), 1)
+            return live[0]
+
+        self.doc.openTransaction("pattern")
+        linearOwner(self.doc, self.S, "LP", [seed], 10, 2, reapply=True)
+        self.doc.commitTransaction()
         self.doc.recompute()
+        merged()
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("LP"))
         live = PartDesign.studioLiveParts(self.list)
-        self.assertEqual(len(live), 1)
-        self.assertValid(lp, PartDesign.studioStepOf(lp, live[0]))
-        self.assertAlmostEqual(live[0].Shape.Volume, 8240, places=2)
+        self.assertEqual(sorted(round(p.Shape.Volume, 3) for p in live), [1800, 6400])
+        self.doc.redo()
+        self.doc.recompute()
+        before = elementNames(merged().Tip.Shape)
+        self.reopen()
+        self.assertEqual(elementNames(merged().Tip.Shape), before)
 
     def reopen(self):
         self.dir = self.dir or tempfile.mkdtemp()

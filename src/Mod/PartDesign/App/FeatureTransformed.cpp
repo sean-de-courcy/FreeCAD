@@ -1385,10 +1385,20 @@ bool Transformed::isMultiTransformChild() const
     return false;
 }
 
+namespace
+{
+const App::DocumentObject* mergingSeedOf(const Transformed& pattern);  // T1b, below
+}
+
 bool Transformed::isOutOfChain() const
 {
     if (!isMultiTransformChild()) {
         // Originals listed, or a whole-shape transform
+        return false;
+    }
+    // T1b settled 2: a merging pattern's step in a part that holds none of its originals (a piece
+    // of a split after the seed) still merges the parts and instances that join it: in the chain
+    if (const Transformed* owner = studioPatternOwnerOf(*this); owner && mergingSeedOf(*owner)) {
         return false;
     }
     if (!BaseFeature.getValue()) {
