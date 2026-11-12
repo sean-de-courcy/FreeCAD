@@ -32,6 +32,8 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDockWidget>
+#include <QFile>
+#include <QFileInfo>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -57,6 +59,7 @@
 #include <App/DocumentPy.h>
 #include <App/DocumentTabs.h>
 #include <App/GeoFeature.h>
+#include <App/PropertyLinks.h>
 #include <App/Link.h>
 #include <App/VarSet.h>
 #include <Base/Console.h>
@@ -227,6 +230,14 @@ public:
         App::Document* doc,
         const std::string& name,
         const std::string& path,
+        std::string& error
+    );
+    void exportAllInteractive(int index);
+    bool exportAllDrawings(App::Document* doc, const std::string& path, std::string& error);
+    bool writeDrawings(
+        const std::vector<App::DocumentObject*>& pages,
+        const std::string& path,
+        const char* function,
         std::string& error
     );
     bool openManager();
@@ -1501,13 +1512,28 @@ void Controller::onTabMenu(const QPoint& pos)
     );
     QAction* exportAction = menu.addAction(QApplication::translate("DocumentTabs", "Export..."));
     exportAction->setObjectName(QStringLiteral("FreeCADCH_ExportTab"));
-    const bool exportable = found && is3DKind(tab.kind);
+    const bool isDrawing = found && tab.kind == AppTabs::Kind::Drawing;
+    const bool exportable = found && (is3DKind(tab.kind) || isDrawing);
     exportAction->setEnabled(exportable);
     exportAction->setToolTip(
-        exportable
+        isDrawing ? QApplication::translate("DocumentTabs", "Export the drawing to PDF or SVG")
+        : exportable
             ? QApplication::translate("DocumentTabs", "Export the tab to STEP")
-            : QApplication::translate("DocumentTabs", "Only a Part Studio or an Assembly exports")
+            : QApplication::translate(
+                "DocumentTabs",
+                "Only a Part Studio, an Assembly or a Drawing exports"
+            )
     );
+    QAction* exportAllAction = nullptr;
+    if (isDrawing) {
+        exportAllAction = menu.addAction(
+            QApplication::translate("DocumentTabs", "Export all drawings to PDF...")
+        );
+        exportAllAction->setObjectName(QStringLiteral("FreeCADCH_ExportAllDrawings"));
+        exportAllAction->setToolTip(
+            QApplication::translate("DocumentTabs", "Every drawing of the document, one PDF")
+        );
+    }
     QAction* deleteAction = menu.addAction(QApplication::translate("DocumentTabs", "Delete"));
     QAction* chosen = menu.exec(typed->mapToGlobal(pos));
     if (chosen == renameAction) {
@@ -1518,6 +1544,9 @@ void Controller::onTabMenu(const QPoint& pos)
     }
     else if (chosen == exportAction) {
         exportInteractive(index);
+    }
+    else if (exportAllAction && chosen == exportAllAction) {
+        exportAllInteractive(index);
     }
     else if (chosen == deleteAction) {
         deleteInteractive(index);
@@ -1552,21 +1581,62 @@ void Controller::exportInteractive(int index)
     for (QChar bad : QStringLiteral("\\/:*?\"<>|")) {
         base.replace(bad, QLatin1Char('_'));
     }
-    const QString file = FileDialog::getSaveFileName(
-        mw,
-        QApplication::translate("DocumentTabs", "Export"),
-        FileDialog::getWorkingDirectory() + QLatin1Char('/') + base + QStringLiteral(".step"),
-        {FileDialog::Filter(
-            QStringLiteral("STEP"),
-            {QStringLiteral("*.step"), QStringLiteral("*.stp")}
-        )}
-    );
+    AppTabs::Tab exported {};
+    const bool drawing = AppTabs::findTab(doc, name, exported)
+        && exported.kind == AppTabs::Kind::Drawing;
+    // A drawing: PDF first, so it is the default; the format follows the file's extension
+    const QString file = drawing
+        ? FileDialog::getSaveFileName(
+            mw,
+            QApplication::translate("DocumentTabs", "Export"),
+            FileDialog::getWorkingDirectory() + QLatin1Char('/') + base + QStringLiteral(".pdf"),
+            {FileDialog::Filter(QStringLiteral("PDF"), {QStringLiteral("*.pdf")}),
+             FileDialog::Filter(QStringLiteral("SVG"), {QStringLiteral("*.svg")})}
+        )
+        : FileDialog::getSaveFileName(
+            mw,
+            QApplication::translate("DocumentTabs", "Export"),
+            FileDialog::getWorkingDirectory() + QLatin1Char('/') + base + QStringLiteral(".step"),
+            {FileDialog::Filter(
+                QStringLiteral("STEP"),
+                {QStringLiteral("*.step"), QStringLiteral("*.stp")}
+            )}
+        );
     if (file.isEmpty()) {
         return;
     }
     FileDialog::setWorkingDirectory(file);
     std::string error;
     if (!exportTab(doc, name, file.toUtf8().toStdString(), error)) {
+        QMessageBox::warning(
+            mw,
+            QApplication::translate("DocumentTabs", "Export"),
+            QString::fromStdString(error)
+        );
+        return;
+    }
+    message(QApplication::translate("DocumentTabs", "Exported %1").arg(file).toStdString());
+}
+
+void Controller::exportAllInteractive(int index)
+{
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (!doc || index < 0) {
+        return;
+    }
+    const QString file = FileDialog::getSaveFileName(
+        mw,
+        QApplication::translate("DocumentTabs", "Export all drawings"),
+        FileDialog::getWorkingDirectory() + QLatin1Char('/')
+            + QString::fromUtf8(doc->getName()) + QStringLiteral(".pdf"),
+        {FileDialog::Filter(QStringLiteral("PDF"), {QStringLiteral("*.pdf")})}
+    );
+    if (file.isEmpty()) {
+        return;
+    }
+    FileDialog::setWorkingDirectory(file);
+    std::string error;
+    if (!exportAllDrawings(doc, file.toUtf8().toStdString(), error)) {
         QMessageBox::warning(
             mw,
             QApplication::translate("DocumentTabs", "Export"),
@@ -1681,12 +1751,104 @@ bool Controller::exportTab(
         error = "No such tab";
         return false;
     }
+    if (tab.kind == AppTabs::Kind::Drawing) {
+        // E1 (ops#640): the drawing's page, as PDF or SVG by the file's extension
+        const QString suffix = QFileInfo(QString::fromUtf8(path.c_str())).suffix().toLower();
+        if (suffix != QStringLiteral("pdf") && suffix != QStringLiteral("svg")) {
+            error = "A Drawing exports to PDF or SVG";
+            return false;
+        }
+        return writeDrawings(
+            {tab.object},
+            path,
+            suffix == QStringLiteral("svg") ? "exportPageAsSvg" : "exportPageAsPdf",
+            error
+        );
+    }
     try {
         // ImportGui's writer: the parts' colours too
         AppTabs::exportTab(doc, tab, path, "ImportGui");
     }
     catch (const Base::Exception& e) {
         error = e.what();
+        return false;
+    }
+    return true;
+}
+
+bool Controller::exportAllDrawings(App::Document* doc, const std::string& path, std::string& error)
+{
+    // E1 (ops#640): every Drawing tab of the document, in the bar's order, as one PDF
+    std::vector<App::DocumentObject*> pages;
+    if (doc) {
+        for (const auto& tab : AppTabs::tabs(doc)) {
+            if (tab.kind == AppTabs::Kind::Drawing && tab.object) {
+                pages.push_back(tab.object);
+            }
+        }
+    }
+    if (pages.empty()) {
+        error = "The document has no Drawing to export";
+        return false;
+    }
+    return writeDrawings(pages, path, "exportPagesAsPdf", error);
+}
+
+bool Controller::writeDrawings(
+    const std::vector<App::DocumentObject*>& pages,
+    const std::string& path,
+    const char* function,
+    std::string& error
+)
+{
+    // TechDrawGui writes the page without its window being open (PagePrinter::ensureScene)
+    const QString file = QString::fromUtf8(path.c_str());
+    for (auto obj : pages) {
+        // a page without its template can't render
+        auto link = dynamic_cast<App::PropertyLink*>(obj->getPropertyByName("Template"));
+        if (!link || !link->getValue()) {
+            error = std::string(obj->Label.getValue()) + " has no template to export";
+            return false;
+        }
+    }
+    // a stale file must not pass for the export: replace it, or say it can't be (a viewer holds it)
+    if (QFile::exists(file) && !QFile::remove(file)) {
+        error = "Can't replace " + path + ": is it open in another program?";
+        return false;
+    }
+    try {
+        Base::PyGILStateLocker lock;
+        PyObject* imported = PyImport_ImportModule("TechDrawGui");
+        if (!imported) {
+            throw Py::Exception();
+        }
+        Py::Module writer(imported, true);
+        Py::Callable exporter(writer.getAttr(function));
+        Py::Tuple args(2);
+        if (std::strcmp(function, "exportPagesAsPdf") == 0) {
+            Py::List list;
+            for (auto obj : pages) {
+                list.append(Py::asObject(obj->getPyObject()));
+            }
+            args.setItem(0, list);
+        }
+        else {
+            args.setItem(0, Py::asObject(pages.front()->getPyObject()));
+        }
+        args.setItem(1, Py::String(path));
+        exporter.apply(args);
+    }
+    catch (Py::Exception&) {
+        Base::PyException exception;
+        error = exception.what();
+        return false;
+    }
+    catch (const Base::Exception& e) {
+        error = e.what();
+        return false;
+    }
+    if (!QFileInfo::exists(file) || QFileInfo(file).size() == 0) {
+        error = "The file was not written: " + path;
         return false;
     }
     return true;
@@ -2103,6 +2265,12 @@ public:
             "the file is chosen"
         );
         add_varargs_method(
+            "exportAllDrawings",
+            &Module::pyExportAllDrawings,
+            "exportAllDrawings(doc, path) -> (written, error), as the tab menu's Export all\n"
+            "drawings once the file is chosen: every Drawing tab, in the bar's order, one PDF"
+        );
+        add_varargs_method(
             "openManager",
             &Module::pyOpenManager,
             "openManager() -> whether the Tab manager opened, as Alt+T"
@@ -2272,6 +2440,22 @@ private:
         PyMem_Free(path);
         std::string error;
         const bool done = controller().exportTab(documentArg(pyDoc), name, file, error);
+        Py::Tuple result(2);
+        result.setItem(0, Py::Boolean(done));
+        result.setItem(1, Py::String(error));
+        return result;
+    }
+    Py::Object pyExportAllDrawings(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        char* path = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Oet", &pyDoc, "utf-8", &path)) {
+            throw Py::Exception();
+        }
+        const std::string file(path);
+        PyMem_Free(path);
+        std::string error;
+        const bool done = controller().exportAllDrawings(documentArg(pyDoc), file, error);
         Py::Tuple result(2);
         result.setItem(0, Py::Boolean(done));
         result.setItem(1, Py::String(error));
