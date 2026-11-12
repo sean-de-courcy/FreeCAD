@@ -33,6 +33,7 @@
 #include <QPointF>
 #include <QRectF>
 #include <QString>
+#include <cmath>
 
 # include <BRepAdaptor_Surface.hxx>
 # include <BRepLProp_SLProps.hxx>
@@ -509,6 +510,17 @@ bool DrawGuiUtil::isArchSection(App::DocumentObject* obj)
         }
     }
     return result;
+}
+
+QString DrawGuiUtil::scaleText(double scale)
+{
+    if (scale <= 0.0) {
+        return QStringLiteral("?");
+    }
+    if (scale < 1.0) {
+        return QStringLiteral("1:%1").arg(std::round(1.0 / scale * 10000.0) / 10000.0);
+    }
+    return QStringLiteral("%1:1").arg(std::round(scale * 10000.0) / 10000.0);
 }
 
 bool DrawGuiUtil::needPage(Gui::Command* cmd, bool findAny)

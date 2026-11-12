@@ -31,4 +31,5 @@ from TDTest.DrawViewScaleTypeTest import DrawViewScaleTypeTest  # noqa: F401
 from TDTest.TestOnshapeDrawings import TestTemplateProjection  # noqa: F401  FreeCAD-CH, ops#640
 from TDTest.TestOnshapeDrawings import TestDimensionAfterEdit  # noqa: F401  FreeCAD-CH, ops#640
 from TDTest.TestOnshapeDrawings import TestCreateDrawing  # noqa: F401  FreeCAD-CH, ops#640
+from TDTest.TestOnshapeDrawings import TestScaleRefit  # noqa: F401  FreeCAD-CH, ops#640 V1
 

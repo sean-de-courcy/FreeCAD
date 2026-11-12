@@ -213,6 +213,7 @@ Gui::MenuItem* Workbench::setupMenuBar() const
     Gui::MenuItem* views = new Gui::MenuItem;
     views->setCommand("TechDraw Views");
     *views << "TechDraw_View";
+    *views << "TechDraw_ProjectView";  // FreeCAD-CH (design D, V1)
     *views << "TechDraw_BrokenView";
     *views << "TechDraw_SectionView";
     *views << "TechDraw_ComplexSection";
@@ -301,6 +302,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
     Gui::ToolBarItem* views = new Gui::ToolBarItem(root);
     views->setCommand("TechDraw Views");
     *views << "TechDraw_View";
+    *views << "TechDraw_ProjectView";  // FreeCAD-CH (design D, V1)
     *views << "TechDraw_BrokenView";
     *views << "TechDraw_ActiveView";
     *views << "TechDraw_SectionGroup";
@@ -418,6 +420,7 @@ Gui::ToolBarItem* Workbench::setupCommandBars() const
     Gui::ToolBarItem* views = new Gui::ToolBarItem(root);
     views->setCommand("Views");
     *views << "TechDraw_View";
+    *views << "TechDraw_ProjectView";  // FreeCAD-CH (design D, V1)
     *views << "TechDraw_ActiveView";
     *views << "TechDraw_SectionGroup";
     *views << "TechDraw_DetailView";

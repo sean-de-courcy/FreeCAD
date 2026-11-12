@@ -25,6 +25,8 @@
 #include <QAction>
 #include <QApplication>
 #include <QContextMenuEvent>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QMdiSubWindow>
 #include <QMenu>
 #include <QMessageBox>
@@ -44,6 +46,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentObserver.h>
 #include <Base/Console.h>
 #include <Base/Stream.h>
 #include <Gui/Application.h>
@@ -69,6 +72,7 @@
 #include <Mod/TechDraw/App/Geometry.h>
 #include <Mod/TechDraw/App/Preferences.h>
 
+#include "DrawGuiUtil.h"
 #include "MDIViewPage.h"
 #include "QGIDatumLabel.h"
 #include "QGIEdge.h"
@@ -624,8 +628,77 @@ bool MDIViewPage::addSelectionGroups(QMenu& menu)
     return added;
 }
 
+namespace
+{
+/// FreeCAD-CH (design D, V1, ops#640): the sheet's scale, as one command (undoable)
+void setSheetScale(const App::DocumentObjectT& pageT, double scale)
+{
+    auto* page = dynamic_cast<TechDraw::DrawPage*>(pageT.getObject());
+    if (!page || scale <= 0.0) {
+        return;
+    }
+    Gui::Document* gdoc = Gui::Application::Instance->getDocument(page->getDocument());
+    if (!gdoc) {
+        return;
+    }
+    gdoc->openCommand(QT_TRANSLATE_NOOP("Command", "Sheet scale"));
+    Gui::Command::doCommand(Gui::Command::Doc, "%s.Scale = %.12g", pageT.getObjectPython().c_str(), scale);
+    Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", pageT.getDocumentPython().c_str());
+    gdoc->commitCommand();
+}
+
+/// A typed scale: "3:1", "1:2.5" or a plain number; 0 if it isn't one
+double parseScale(const QString& text)
+{
+    const QStringList parts = text.trimmed().split(QLatin1Char(':'));
+    bool ok1 = false;
+    bool ok2 = true;
+    const double a = parts.value(0).trimmed().toDouble(&ok1);
+    const double b = parts.size() == 2 ? parts.value(1).trimmed().toDouble(&ok2) : 1.0;
+    if (!ok1 || !ok2 || parts.size() > 2 || a <= 0.0 || b <= 0.0) {
+        return 0.0;
+    }
+    return a / b;
+}
+
+/// Onshape's sheet scale (its drawing properties), as a submenu of the page's context menu
+void addSheetScaleMenu(QMenu& menu, TechDraw::DrawPage* page)
+{
+    QMenu* sub = menu.addMenu(QObject::tr("Sheet scale"));
+    sub->setObjectName(QStringLiteral("FreeCADCH_SheetScale"));
+    const App::DocumentObjectT pageT(page);
+    const double current = page->Scale.getValue();
+    for (double scale : {0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 10.0}) {
+        QAction* action = sub->addAction(DrawGuiUtil::scaleText(scale));
+        action->setCheckable(true);
+        action->setChecked(std::abs(current - scale) < 1e-9);
+        QObject::connect(action, &QAction::triggered, [pageT, scale]() { setSheetScale(pageT, scale); });
+    }
+    sub->addSeparator();
+    QAction* other = sub->addAction(QObject::tr("Other..."));
+    QObject::connect(other, &QAction::triggered, [pageT, current]() {
+        bool ok = false;
+        const QString text = QInputDialog::getText(Gui::getMainWindow(), QObject::tr("Sheet scale"),
+                                                   QObject::tr("Scale (for example 3:1)"),
+                                                   QLineEdit::Normal, DrawGuiUtil::scaleText(current), &ok);
+        if (!ok) {
+            return;
+        }
+        const double scale = parseScale(text);
+        if (scale <= 0.0) {
+            QMessageBox::warning(Gui::getMainWindow(), QObject::tr("Sheet scale"),
+                                 QObject::tr("'%1' is not a scale").arg(text));
+            return;
+        }
+        setSheetScale(pageT, scale);
+    });
+    menu.addSeparator();
+}
+}  // namespace
+
 void MDIViewPage::addPageGroup(QMenu& menu)
 {
+    addSheetScaleMenu(menu, m_vpPage->getDrawPage());
     menu.addAction(m_toggleGridAction);
     menu.addAction(m_toggleFrameAction);
     menu.addAction(m_toggleKeepUpdatedAction);

@@ -70,6 +70,8 @@ class TechDrawGuiExport DrawGuiUtil {
     static bool isArchSection(App::DocumentObject* obj);
 
     static bool needPage(Gui::Command* cmd, bool findAny = false);
+    /// FreeCAD-CH (design D, V1): a scale as a drawing shows it, 1:3, 1:1, 2:1
+    static QString scaleText(double scale);
     static bool needView(Gui::Command* cmd, bool partOnly = true);
     static void dumpRectF(const char* text, const QRectF& r);
     static void dumpPointF(const char* text, const QPointF& p);

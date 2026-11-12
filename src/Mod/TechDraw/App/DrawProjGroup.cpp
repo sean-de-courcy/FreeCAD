@@ -117,9 +117,25 @@ void DrawProjGroup::onChanged(const App::Property* prop)
     TechDraw::DrawPage* page = getPage();
 
     if (prop == &Scale) {
+        // FreeCAD-CH (design D, V1, ops#640): the views' middle at the old scale, which the
+        // layout at the new scale keeps (refitAfterScale); not on undo or redo, which restore
+        // the position too. Onshape's rule is unverified.
+        Base::BoundBox3d box;
+        if (!m_refitPending && !ScaleType.isValue("Automatic")
+            && !getDocument()->isPerformingTransaction() && contentBox(box)) {
+            m_refitMiddle = Base::Vector3d(X.getValue() + (box.MinX + box.MaxX) / 2.0,
+                                           Y.getValue() + (box.MinY + box.MaxY) / 2.0,
+                                           0.0);
+            m_refitPending = true;
+        }
         updateChildrenScale();
         recomputeChildren();
         return;
+    }
+
+    if ((prop == &X || prop == &Y) && !m_refitting) {
+        // a position set after the scale is the user's: it wins over the refit
+        m_refitPending = false;
     }
 
     if (prop == &ProjectionType) {
@@ -192,8 +208,68 @@ App::DocumentObjectExecReturn* DrawProjGroup::execute()
     if (AutoDistribute.getValue()) {
         autoPositionChildren();
     }
+    if (m_refitPending) {
+        refitAfterScale();
+    }
     overrideKeepUpdated(false);
     return DrawViewCollection::execute();
+}
+
+bool DrawProjGroup::contentBox(Base::BoundBox3d& box) const
+{
+    box = Base::BoundBox3d();
+    bool any = false;
+    for (auto* obj : Views.getValues()) {
+        auto* item = freecad_cast<DrawProjGroupItem*>(obj);
+        if (!item) {
+            continue;
+        }
+        // scaled, about the view's origin, +Y down as the view's geometry is stored
+        Base::BoundBox3d bb = item->getBoundingBox();
+        if (!bb.IsValid() || (bb.LengthX() <= 0.0 && bb.LengthY() <= 0.0)) {
+            return false;
+        }
+        const double x = item->X.getValue();
+        const double y = item->Y.getValue();
+        box.Add(Base::Vector3d(x + bb.MinX, y - bb.MaxY, 0.0));
+        box.Add(Base::Vector3d(x + bb.MaxX, y - bb.MinY, 0.0));
+        any = true;
+    }
+    return any;
+}
+
+void DrawProjGroup::refitAfterScale()
+{
+    m_refitPending = false;
+    Base::BoundBox3d box;
+    DrawPage* page = getPage();
+    if (!page || !contentBox(box)) {
+        return;
+    }
+    // the middle where it was
+    double x = m_refitMiddle.x - (box.MinX + box.MaxX) / 2.0;
+    double y = m_refitMiddle.y - (box.MinY + box.MaxY) / 2.0;
+    // then on the sheet, if the views fit it
+    auto onSheet = [](double at, double low, double high, double size) {
+        if (high - low > size) {
+            return at;
+        }
+        if (at + low < 0.0) {
+            return -low;
+        }
+        if (at + high > size) {
+            return size - high;
+        }
+        return at;
+    };
+    x = onSheet(x, box.MinX, box.MaxX, page->getPageWidth());
+    y = onSheet(y, box.MinY, box.MaxY, page->getPageHeight());
+    m_refitting = true;
+    X.setValue(x);
+    Y.setValue(y);
+    m_refitting = false;
+    requestPaint();
+    purgeTouched();
 }
 
 short DrawProjGroup::mustExecute() const

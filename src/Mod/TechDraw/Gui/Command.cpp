@@ -23,12 +23,38 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
+#include <QGraphicsSimpleTextItem>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QListWidget>
+#include <QMouseEvent>
+#include <QPen>
 #include <QPushButton>
+#include <QVBoxLayout>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <numbers>
+#include <optional>
+#include <set>
 #include <vector>
+
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <TopExp_Explorer.hxx>
 
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentObserver.h>
+#include <App/DocumentTabs.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/Link.h>
 
 #include <Base/Console.h>
@@ -47,11 +73,14 @@
 #include <Gui/ViewProvider.h>
 #include <Gui/WaitCursor.h>
 
+#include <Mod/Part/App/PartFeature.h>
 #include <Mod/Spreadsheet/App/Sheet.h>
 
 #include <Mod/TechDraw/App/DrawComplexSection.h>
 #include <Mod/TechDraw/App/DrawPage.h>
 #include <Mod/TechDraw/App/DrawProjGroup.h>
+#include <Mod/TechDraw/App/DrawProjGroupItem.h>
+#include <Mod/TechDraw/App/ShapeExtractor.h>
 #include <Mod/TechDraw/App/DrawUtil.h>
 #include <Mod/TechDraw/App/DrawSVGTemplate.h>
 #include <Mod/TechDraw/App/DrawViewArch.h>
@@ -65,6 +94,7 @@
 
 #include "DrawGuiUtil.h"
 #include "MDIViewPage.h"
+#include "QGIView.h"
 #include "QGIViewPart.h"
 #include "QGSPage.h"
 #include "QGVPage.h"
@@ -75,6 +105,7 @@
 #include "TaskProjGroup.h"
 #include "TaskProjection.h"
 #include "TaskSectionView.h"
+#include "TechDrawHandler.h"
 #include "ViewProviderPage.h"
 #include "ViewProviderDrawingView.h"
 #include "CommandHelpers.h"
@@ -287,6 +318,798 @@ void CmdTechDrawPrintAll::activated(int iMsg)
 bool CmdTechDrawPrintAll::isActive() { return DrawGuiUtil::needPage(this); }
 
 //===========================================================================
+// FreeCAD-CH (design D, slice V1, ops#640): Insert View and Project View, as Onshape's
+// (oracle 11, GD-B2): Insert view asks what to draw (the document's parts, studios and
+// assemblies, never a file browser), the orientation and the scale; one click places the view;
+// a projection then follows the cursor (right of it a right view, a diagonal an isometric) and a
+// click places it, until Esc. From a group's front view the projection joins the group, aligned;
+// from any other view it is a free view in the projected direction.
+//===========================================================================
+
+namespace
+{
+
+/// What Insert View can draw: a part, a studio (its parts) or an assembly
+struct ViewSource
+{
+    QString text;
+    std::vector<App::DocumentObject*> objects;
+    std::vector<App::DocumentObject*> xObjects;
+};
+
+/// Onshape's view orientations: the direction the view looks from, and its page right
+struct ViewOrientation
+{
+    const char* name;
+    Base::Vector3d direction;
+    Base::Vector3d xDirection;
+};
+
+const std::array<ViewOrientation, 7>& viewOrientations()
+{
+    static const double r3 = 1.0 / std::sqrt(3.0);
+    static const double r2 = 1.0 / std::sqrt(2.0);
+    static const std::array<ViewOrientation, 7> list {{
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Front"), Base::Vector3d(0, -1, 0), Base::Vector3d(1, 0, 0)},
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Back"), Base::Vector3d(0, 1, 0), Base::Vector3d(-1, 0, 0)},
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Top"), Base::Vector3d(0, 0, 1), Base::Vector3d(1, 0, 0)},
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Bottom"), Base::Vector3d(0, 0, -1), Base::Vector3d(1, 0, 0)},
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Left"), Base::Vector3d(-1, 0, 0), Base::Vector3d(0, -1, 0)},
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Right"), Base::Vector3d(1, 0, 0), Base::Vector3d(0, 1, 0)},
+        {QT_TRANSLATE_NOOP("TechDraw_InsertView", "Isometric"), Base::Vector3d(r3, -r3, r3), Base::Vector3d(r2, r2, 0)},
+    }};
+    return list;
+}
+
+const std::array<double, 9>& standardScales()
+{
+    static const std::array<double, 9> list {0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 10.0};
+    return list;
+}
+
+Gui::Document* guiDocument(App::Document* doc)
+{
+    return Gui::Application::Instance->getDocument(doc);
+}
+
+bool hasSolid(const App::DocumentObject* obj)
+{
+    try {
+        const TopoDS_Shape shape = Part::Feature::getShape(
+            obj, Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform);
+        return !shape.IsNull() && TopExp_Explorer(shape, TopAbs_SOLID).More();
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+/// A studio's parts, as its Parts list shows them: its Bodies with a solid, and the other solids
+/// that no shape of the studio reads (a Part workbench feature, an import)
+std::vector<App::DocumentObject*> partsOf(const std::vector<App::DocumentObject*>& members)
+{
+    static const Base::Type bodyType = Base::Type::fromName("PartDesign::Body");
+    const std::set<App::DocumentObject*> inStudio(members.begin(), members.end());
+    std::vector<App::DocumentObject*> parts;
+    for (auto* obj : members) {
+        if (!obj || obj->isDerivedFrom<TechDraw::DrawView>() || !hasSolid(obj)) {
+            continue;
+        }
+        if (!bodyType.isBad() && obj->isDerivedFrom(bodyType)) {
+            parts.push_back(obj);
+            continue;
+        }
+        if (!obj->isDerivedFrom<Part::Feature>()) {
+            continue;
+        }
+        auto* group = App::GeoFeatureGroupExtension::getGroupOfObject(obj);
+        if (group && !bodyType.isBad() && group->isDerivedFrom(bodyType)) {
+            continue;  // a Body's feature: the Body is the part
+        }
+        bool read = false;
+        for (auto* user : obj->getInList()) {
+            if (inStudio.count(user) && user->isDerivedFrom<Part::Feature>()
+                && !user->isDerivedFrom<TechDraw::DrawView>()) {
+                read = true;
+                break;
+            }
+        }
+        if (!read) {
+            parts.push_back(obj);
+        }
+    }
+    return parts;
+}
+
+QString labelOf(const App::DocumentObject* obj)
+{
+    return QString::fromUtf8(obj->Label.getValue());
+}
+
+/// The document's parts, then each studio (all its parts) and each assembly, by its tabs
+std::vector<ViewSource> drawableSources(App::Document* doc)
+{
+    namespace Tabs = App::DocumentTabs;
+    std::vector<ViewSource> parts;
+    std::vector<ViewSource> wholes;
+    std::vector<Tabs::Tab> tabs = Tabs::tabs(doc);
+    if (tabs.empty()) {
+        for (auto* part : partsOf(doc->getObjects())) {
+            parts.push_back({labelOf(part), {part}, {}});
+        }
+        return parts;
+    }
+    for (const auto& tab : tabs) {
+        const QString tabLabel = QString::fromUtf8(Tabs::label(doc, tab).c_str());
+        if (tab.kind == Tabs::Kind::PartStudio) {
+            std::vector<App::DocumentObject*> studioParts = partsOf(Tabs::members(doc, tab));
+            for (auto* part : studioParts) {
+                parts.push_back({labelOf(part), {part}, {}});
+            }
+            if (studioParts.size() > 1) {
+                wholes.push_back({QCoreApplication::translate("TechDraw_InsertView", "%1 (Part Studio)")
+                                      .arg(tabLabel),
+                                  studioParts,
+                                  {}});
+            }
+        }
+        else if (tab.kind == Tabs::Kind::Assembly && tab.object) {
+            wholes.push_back(
+                {QCoreApplication::translate("TechDraw_InsertView", "%1 (Assembly)").arg(tabLabel),
+                 {tab.object},
+                 {}});
+        }
+    }
+    parts.insert(parts.end(), wholes.begin(), wholes.end());
+    return parts;
+}
+
+std::string pyObject(const App::DocumentObject* obj)
+{
+    return std::string("App.getDocument('") + obj->getDocument()->getName() + "').getObject('"
+        + obj->getNameInDocument() + "')";
+}
+
+/// Python's text for a list of objects
+std::string pyList(const std::vector<App::DocumentObject*>& objects)
+{
+    std::string text = "[";
+    for (auto* obj : objects) {
+        text += pyObject(obj) + ", ";
+    }
+    return text + "]";
+}
+
+std::string pyVector(const Base::Vector3d& v)
+{
+    char text[128];
+    snprintf(text, sizeof(text), "FreeCAD.Vector(%.12f, %.12f, %.12f)", v.x, v.y, v.z);
+    return text;
+}
+
+/// The page point (mm, +Y up) under a mouse event on the page's view
+Base::Vector3d pagePoint(QGVPage* viewPage, QMouseEvent* event)
+{
+    const QPointF scene = viewPage->mapToScene(event->pos());
+    return Base::Vector3d(Rez::appX(scene.x()), -Rez::appX(scene.y()), 0.0);
+}
+
+/// The size on the page (mm) of `sources` seen from `direction` with page right `xDirection`
+QSizeF projectedSize(const std::vector<App::DocumentObject*>& sources,
+                     const Base::Vector3d& direction,
+                     const Base::Vector3d& xDirection,
+                     double scale)
+{
+    Bnd_Box box;
+    try {
+        TopoDS_Shape shape = TechDraw::ShapeExtractor::getShapes(sources, false);
+        if (!shape.IsNull()) {
+            BRepBndLib::Add(shape, box);
+        }
+    }
+    catch (...) {
+    }
+    if (box.IsVoid()) {
+        return {20.0, 20.0};
+    }
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    const Base::Vector3d up = direction.Cross(xDirection);
+    const double big = std::numeric_limits<double>::max();
+    double minX = big, maxX = -big, minY = big, maxY = -big;
+    for (int i = 0; i < 8; ++i) {
+        const Base::Vector3d corner(i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? z1 : z0);
+        minX = std::min(minX, corner * xDirection);
+        maxX = std::max(maxX, corner * xDirection);
+        minY = std::min(minY, corner * up);
+        maxY = std::max(maxY, corner * up);
+    }
+    return {(maxX - minX) * scale, (maxY - minY) * scale};
+}
+
+/// A dashed frame with a name that follows the cursor: where the next view lands
+class ViewPreview
+{
+public:
+    void show(QGVPage* viewPage, const Base::Vector3d& at, const QSizeF& size, const QString& name)
+    {
+        if (!viewPage || !viewPage->scene()) {
+            return;
+        }
+        if (!frame) {
+            frame = new QGraphicsRectItem();
+            QPen pen(QColor(0x30, 0x70, 0xd0));
+            pen.setStyle(Qt::DashLine);
+            pen.setCosmetic(true);
+            frame->setPen(pen);
+            frame->setZValue(1000.0);
+            viewPage->scene()->addItem(frame);
+            label = new QGraphicsSimpleTextItem();
+            label->setBrush(QColor(0x30, 0x70, 0xd0));
+            label->setZValue(1000.0);
+            viewPage->scene()->addItem(label);
+        }
+        const double w = Rez::guiX(size.width());
+        const double h = Rez::guiX(size.height());
+        const QPointF centre(Rez::guiX(at.x), -Rez::guiX(at.y));
+        frame->setRect(QRectF(centre.x() - w / 2.0, centre.y() - h / 2.0, w, h));
+        label->setText(name);
+        label->setPos(centre.x() - w / 2.0, centre.y() + h / 2.0);
+        frame->show();
+        label->show();
+    }
+
+    void hide()
+    {
+        if (frame) {
+            frame->hide();
+            label->hide();
+        }
+    }
+
+    void remove()
+    {
+        delete frame;
+        delete label;
+        frame = nullptr;
+        label = nullptr;
+    }
+
+private:
+    QGraphicsRectItem* frame {nullptr};
+    QGraphicsSimpleTextItem* label {nullptr};
+};
+
+bool activatePageHandler(TechDrawHandler* handler)
+{
+    std::unique_ptr<TechDrawHandler> owned(handler);
+    auto* mdi = qobject_cast<MDIViewPage*>(Gui::getMainWindow()->activeWindow());
+    ViewProviderPage* vp = mdi ? mdi->getViewProviderPage() : nullptr;
+    QGVPage* viewPage = vp ? vp->getQGVPage() : nullptr;
+    if (!viewPage) {
+        return false;
+    }
+    viewPage->activateHandler(owned.release());
+    return true;
+}
+
+/// The page position of a view's middle: a group's item is placed relative to its group
+Base::Vector3d viewMiddle(const TechDraw::DrawViewPart* view)
+{
+    Base::Vector3d at(view->X.getValue(), view->Y.getValue(), 0.0);
+    auto* item = dynamic_cast<const TechDraw::DrawProjGroupItem*>(view);
+    if (auto* group = item ? item->getPGroup() : nullptr) {
+        at += Base::Vector3d(group->X.getValue(), group->Y.getValue(), 0.0);
+    }
+    return at;
+}
+
+/// The projection a move from a view's middle asks for, by TechDraw's names in third angle
+/// (Right is to the right): within 22.5 degrees of an axis an orthographic view, between them
+/// an isometric. Nothing until the cursor is 5 mm away.
+const char* projectionOfMove(double dx, double dy, bool firstAngle)
+{
+    if (std::hypot(dx, dy) < 5.0) {
+        return nullptr;
+    }
+    static const std::array<const char*, 8> third {"Right", "FrontTopRight", "Top", "FrontTopLeft",
+                                                  "Left", "FrontBottomLeft", "Bottom",
+                                                  "FrontBottomRight"};
+    const int sector = static_cast<int>(std::lround(std::atan2(dy, dx) / (std::numbers::pi / 4.0)));
+    int index = (sector + 8) % 8;
+    if (firstAngle) {
+        // first angle puts each projection on the far side: the view of the left on the right
+        index = (index + 4) % 8;
+    }
+    return third[index];
+}
+
+/// The direction and page right of the projection `type` (TechDraw's names) of a view looking
+/// from `d` with page right `x`
+std::pair<Base::Vector3d, Base::Vector3d>
+projectedFrame(const std::string& type, const Base::Vector3d& d, const Base::Vector3d& x)
+{
+    const Base::Vector3d up = d.Cross(x);
+    auto iso = [&](double sx, double sy) {
+        Base::Vector3d dir = d + x * sx + up * sy;
+        dir.Normalize();
+        Base::Vector3d right = up.Cross(dir);
+        right.Normalize();
+        return std::make_pair(dir, right);
+    };
+    if (type == "Right") {
+        return std::make_pair(x, -d);
+    }
+    if (type == "Left") {
+        return std::make_pair(-x, d);
+    }
+    if (type == "Top") {
+        return std::make_pair(up, x);
+    }
+    if (type == "Bottom") {
+        return std::make_pair(-up, x);
+    }
+    if (type == "FrontTopRight") {
+        return iso(1, 1);
+    }
+    if (type == "FrontTopLeft") {
+        return iso(-1, 1);
+    }
+    if (type == "FrontBottomRight") {
+        return iso(1, -1);
+    }
+    return iso(-1, -1);  // FrontBottomLeft
+}
+
+QString projectionName(const std::string& type)
+{
+    if (type.rfind("Front", 0) == 0 && type != "Front") {
+        return QCoreApplication::translate("TechDraw_InsertView", "Isometric");
+    }
+    return QCoreApplication::translate("TechDraw_InsertView", type.c_str());
+}
+
+/// Project View's tool: click a view (or start on one), move, click; Esc ends
+class ProjectViewHandler: public TechDrawHandler
+{
+public:
+    explicit ProjectViewHandler(TechDraw::DrawViewPart* parent)
+    {
+        if (parent) {
+            parentT = App::DocumentObjectT(parent);
+        }
+    }
+
+    void deactivated() override
+    {
+        preview.remove();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        auto* parent = parentView();
+        if (!parent) {
+            preview.hide();
+            return;
+        }
+        const Base::Vector3d at = pagePoint(viewPage, event);
+        Projection next = projectionAt(parent, at);
+        if (next.type.empty()) {
+            preview.hide();
+            return;
+        }
+        if (next.type != sizeType || parent != sizeParent) {
+            // the shape is read once a projection, not at every move
+            size = projectedSize(parent->getAllSources(), next.direction, next.xDirection,
+                                 parent->getScale());
+            sizeType = next.type;
+            sizeParent = parent;
+        }
+        preview.show(viewPage, next.at, size, projectionName(next.type));
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            return;
+        }
+        const Base::Vector3d at = pagePoint(viewPage, event);
+        auto* parent = parentView();
+        if (!parent) {
+            // the view clicked is the parent; the next click places its projection
+            if (auto* picked = viewUnder(at)) {
+                parentT = App::DocumentObjectT(picked);
+            }
+            return;
+        }
+        Projection next = projectionAt(parent, at);
+        if (next.type.empty()) {
+            return;
+        }
+        place(parent, next);
+        preview.hide();
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_Escape) {
+            event->accept();  // the release ends the tool
+        }
+    }
+
+private:
+    struct Projection
+    {
+        std::string type;  // TechDraw's name; empty for none
+        Base::Vector3d at;
+        Base::Vector3d direction;
+        Base::Vector3d xDirection;
+        bool joinsGroup {false};
+    };
+
+    TechDraw::DrawViewPart* parentView() const
+    {
+        return dynamic_cast<TechDraw::DrawViewPart*>(parentT.getObject());
+    }
+
+    /// The view whose box holds the point (the smallest, when boxes overlap): a click inside a
+    /// view picks it, edge or not. The boxes are the views' own (page position and geometry),
+    /// as the sheet draws them
+    TechDraw::DrawViewPart* viewUnder(const Base::Vector3d& at)
+    {
+        auto* page = getPage();
+        if (!page) {
+            return nullptr;
+        }
+        TechDraw::DrawViewPart* best = nullptr;
+        double bestArea = std::numeric_limits<double>::max();
+        for (auto* obj : page->getAllViews()) {
+            auto* view = dynamic_cast<TechDraw::DrawViewPart*>(obj);
+            if (!view || !view->Visibility.getValue()) {
+                continue;
+            }
+            const Base::BoundBox3d bb = view->getBoundingBox();  // scaled, about the middle, +Y down
+            const Base::Vector3d middle = viewMiddle(view);
+            const double margin = 2.0;  // mm: a click on the outline counts
+            const bool inside = at.x >= middle.x + bb.MinX - margin && at.x <= middle.x + bb.MaxX + margin
+                && at.y >= middle.y - bb.MaxY - margin && at.y <= middle.y - bb.MinY + margin;
+            const double area = bb.LengthX() * bb.LengthY();
+            if (inside && area < bestArea) {
+                best = view;
+                bestArea = area;
+            }
+        }
+        return best;
+    }
+
+    static TechDraw::DrawProjGroup* anchorGroup(TechDraw::DrawViewPart* view)
+    {
+        auto* item = dynamic_cast<TechDraw::DrawProjGroupItem*>(view);
+        auto* group = item ? item->getPGroup() : nullptr;
+        return group && group->getAnchor() == item ? group : nullptr;
+    }
+
+    static bool firstAngle(TechDraw::DrawViewPart* view)
+    {
+        auto* item = dynamic_cast<TechDraw::DrawProjGroupItem*>(view);
+        if (auto* group = item ? item->getPGroup() : nullptr) {
+            return group->usedProjectionType().isValue("First angle");
+        }
+        auto* page = view->findParentPage();
+        return page && page->ProjectionType.isValue("First angle");
+    }
+
+    Projection projectionAt(TechDraw::DrawViewPart* parent, const Base::Vector3d& at) const
+    {
+        Projection next;
+        const Base::Vector3d middle = viewMiddle(parent);
+        const char* type = projectionOfMove(at.x - middle.x, at.y - middle.y, firstAngle(parent));
+        if (!type) {
+            return next;
+        }
+        next.type = type;
+        next.at = at;
+        // an orthographic projection stays aligned with its parent
+        if (next.type == "Right" || next.type == "Left") {
+            next.at.y = middle.y;
+        }
+        else if (next.type == "Top" || next.type == "Bottom") {
+            next.at.x = middle.x;
+        }
+        Base::Vector3d d = parent->Direction.getValue();
+        d.Normalize();
+        Base::Vector3d x = parent->getXDirection();
+        x.Normalize();
+        std::tie(next.direction, next.xDirection) = projectedFrame(next.type, d, x);
+        next.joinsGroup = anchorGroup(parent) != nullptr;
+        return next;
+    }
+
+    void place(TechDraw::DrawViewPart* parent, const Projection& next)
+    {
+        App::Document* doc = parent->getDocument();
+        if (auto* group = anchorGroup(parent)) {
+            if (group->hasProjection(next.type.c_str())) {
+                Gui::getMainWindow()->showMessage(
+                    QCoreApplication::translate("TechDraw_ProjectView", "The group has that view already"),
+                    3000);
+                return;
+            }
+            guiDocument(doc)->openCommand(QT_TRANSLATE_NOOP("Command", "Projected view"));
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.addProjection('%s')",
+                                    pyObject(group).c_str(), next.type.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()",
+                                    pyObject(group).c_str());
+            guiDocument(doc)->commitCommand();
+            return;
+        }
+        // a free view: from a view that is not a group's front view
+        auto* page = parent->findParentPage();
+        if (!page) {
+            return;
+        }
+        std::string scaleType = parent->ScaleType.getValueAsString();
+        double scale = parent->getScale();
+        auto* item = dynamic_cast<TechDraw::DrawProjGroupItem*>(parent);
+        if (auto* group = item ? item->getPGroup() : nullptr) {
+            scaleType = group->ScaleType.getValueAsString();
+        }
+        if (scaleType == "Automatic") {
+            scaleType = "Custom";
+        }
+        const std::string name = doc->getUniqueObjectName("View");
+        const std::string view = std::string("App.getDocument('") + doc->getName()
+            + "').getObject('" + name + "')";
+        guiDocument(doc)->openCommand(QT_TRANSLATE_NOOP("Command", "Projected view"));
+        Gui::Command::doCommand(Gui::Command::Doc,
+                                "App.getDocument('%s').addObject('TechDraw::DrawProjGroupItem', '%s')",
+                                doc->getName(), name.c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.translateLabel('DrawProjGroupItem', 'View', '%s')",
+                                view.c_str(), name.c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.addView(%s)", pyObject(page).c_str(), view.c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.Source = %s.Source", view.c_str(),
+                                pyObject(parent).c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.XSource = %s.XSource", view.c_str(),
+                                pyObject(parent).c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.Direction = %s", view.c_str(),
+                                pyVector(next.direction).c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.XDirection = %s", view.c_str(),
+                                pyVector(next.xDirection).c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.ScaleType = '%s'", view.c_str(), scaleType.c_str());
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.Scale = %.12g", view.c_str(), scale);
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.X = %.6f", view.c_str(), next.at.x);
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.Y = %.6f", view.c_str(), next.at.y);
+        Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", view.c_str());
+        guiDocument(doc)->commitCommand();
+    }
+
+    App::DocumentObjectT parentT;
+    ViewPreview preview;
+    std::string sizeType;
+    const TechDraw::DrawViewPart* sizeParent {nullptr};
+    QSizeF size;
+};
+
+/// Insert View's choice: what, which way, what scale (0: the sheet's)
+struct InsertChoice
+{
+    ViewSource source;
+    int orientation {0};
+    double scale {0.0};
+};
+
+/// Insert View's tool after the dialog: the view's frame follows the cursor, a click places it
+/// and the projection tool takes over on it
+class PlaceViewHandler: public TechDrawHandler
+{
+public:
+    explicit PlaceViewHandler(InsertChoice choice)
+        : choice(std::move(choice))
+    {}
+
+    void deactivated() override
+    {
+        preview.remove();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        const ViewOrientation& orient = viewOrientations()[choice.orientation];
+        if (!size) {
+            auto* page = getPage();
+            const double scale =
+                choice.scale > 0.0 ? choice.scale : (page ? page->Scale.getValue() : 1.0);
+            std::vector<App::DocumentObject*> all = choice.source.objects;
+            all.insert(all.end(), choice.source.xObjects.begin(), choice.source.xObjects.end());
+            size = projectedSize(all, orient.direction, orient.xDirection, scale);
+        }
+        preview.show(viewPage, pagePoint(viewPage, event), *size,
+                     QCoreApplication::translate("TechDraw_InsertView", orient.name));
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            return;
+        }
+        auto* anchor = place(pagePoint(viewPage, event));
+        QGVPage* page = viewPage;
+        if (!anchor) {
+            quit();
+            return;  // no code after: quit() deleted this handler
+        }
+        // the projection follows the cursor from the new view (GD-B2)
+        page->activateHandler(new ProjectViewHandler(anchor));
+        // no code after: activateHandler() deleted this handler
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_Escape) {
+            event->accept();
+        }
+    }
+
+private:
+    TechDraw::DrawProjGroupItem* place(const Base::Vector3d& at)
+    {
+        auto* page = getPage();
+        if (!page || (choice.source.objects.empty() && choice.source.xObjects.empty())) {
+            return nullptr;
+        }
+        App::Document* doc = page->getDocument();
+        const ViewOrientation& orient = viewOrientations()[choice.orientation];
+        const std::string name = doc->getUniqueObjectName("ProjGroup");
+        const std::string group = std::string("App.getDocument('") + doc->getName()
+            + "').getObject('" + name + "')";
+        guiDocument(doc)->openCommand(QT_TRANSLATE_NOOP("Command", "Insert view"));
+        try {
+            Gui::Command::doCommand(Gui::Command::Doc,
+                                    "App.getDocument('%s').addObject('TechDraw::DrawProjGroup', '%s')",
+                                    doc->getName(), name.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.addView(%s)", pyObject(page).c_str(),
+                                    group.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Source = %s", group.c_str(),
+                                    pyList(choice.source.objects).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.XSource = %s", group.c_str(),
+                                    pyList(choice.source.xObjects).c_str());
+            if (choice.scale > 0.0) {
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.ScaleType = 'Custom'", group.c_str());
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.Scale = %.12g", group.c_str(),
+                                        choice.scale);
+            }
+            else {
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.ScaleType = 'Page'", group.c_str());
+            }
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.addProjection('Front')", group.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Anchor.Direction = %s", group.c_str(),
+                                    pyVector(orient.direction).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Anchor.XDirection = %s", group.c_str(),
+                                    pyVector(orient.xDirection).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Anchor.RotationVector = %s", group.c_str(),
+                                    pyVector(orient.xDirection).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.X = %.6f", group.c_str(), at.x);
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Y = %.6f", group.c_str(), at.y);
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Anchor.recompute()", group.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", group.c_str());
+            guiDocument(doc)->commitCommand();
+        }
+        catch (const Base::Exception& e) {
+            guiDocument(doc)->abortCommand();
+            Base::Console().error("Insert view: %s\n", e.what());
+            return nullptr;
+        }
+        auto* made = dynamic_cast<TechDraw::DrawProjGroup*>(doc->getObject(name.c_str()));
+        return made ? made->getAnchor() : nullptr;
+    }
+
+    InsertChoice choice;
+    ViewPreview preview;
+    std::optional<QSizeF> size;
+};
+
+/// Onshape's Insert view dialog (GD-B2): what to draw, the orientation, the scale
+class InsertViewDialog: public QDialog
+{
+public:
+    InsertViewDialog(std::vector<ViewSource> list, int current, double sheetScale, QWidget* parent)
+        : QDialog(parent)
+        , sources(std::move(list))
+    {
+        setObjectName(QStringLiteral("FreeCADCH_InsertView"));
+        setWindowTitle(tr("Insert view"));
+        auto* layout = new QVBoxLayout(this);
+        layout->addWidget(new QLabel(tr("Insert"), this));
+        sourceList = new QListWidget(this);
+        sourceList->setObjectName(QStringLiteral("sources"));
+        for (const auto& source : sources) {
+            sourceList->addItem(source.text);
+        }
+        if (!sources.empty()) {
+            sourceList->setCurrentRow(std::clamp(current, 0, int(sources.size()) - 1));
+        }
+        layout->addWidget(sourceList);
+        if (sources.empty()) {
+            layout->addWidget(new QLabel(tr("The document has no part to draw"), this));
+        }
+        layout->addWidget(new QLabel(tr("View orientation"), this));
+        orientation = new QComboBox(this);
+        orientation->setObjectName(QStringLiteral("orientation"));
+        for (const auto& orient : viewOrientations()) {
+            orientation->addItem(QCoreApplication::translate("TechDraw_InsertView", orient.name));
+        }
+        layout->addWidget(orientation);
+        layout->addWidget(new QLabel(tr("View scale"), this));
+        scale = new QComboBox(this);
+        scale->setObjectName(QStringLiteral("scale"));
+        scale->addItem(tr("%1 (Sheet)").arg(DrawGuiUtil::scaleText(sheetScale)), 0.0);
+        for (double value : standardScales()) {
+            scale->addItem(DrawGuiUtil::scaleText(value), value);
+        }
+        layout->addWidget(scale);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(!sources.empty());
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(buttons);
+    }
+
+    InsertChoice choice() const
+    {
+        InsertChoice result;
+        const int row = sourceList->currentRow();
+        if (row >= 0 && row < int(sources.size())) {
+            result.source = sources[row];
+        }
+        result.orientation = std::max(0, orientation->currentIndex());
+        result.scale = scale->currentData().toDouble();
+        return result;
+    }
+
+private:
+    std::vector<ViewSource> sources;
+    QListWidget* sourceList;
+    QComboBox* orientation;
+    QComboBox* scale;
+};
+
+/// Insert View with what is selected (none, or parts): the dialog, then the placing tool
+void insertViewInteractively(TechDraw::DrawPage* page,
+                             const std::vector<App::DocumentObject*>& shapes,
+                             const std::vector<App::DocumentObject*>& xShapes)
+{
+    std::vector<ViewSource> sources = drawableSources(page->getDocument());
+    int current = 0;
+    if (!shapes.empty() || !xShapes.empty()) {
+        auto same = std::ranges::find_if(sources, [&](const ViewSource& source) {
+            return xShapes.empty() && source.objects == shapes;
+        });
+        if (same != sources.end()) {
+            current = int(same - sources.begin());
+        }
+        else {
+            // the selection as it is: what the view draws
+            QStringList labels;
+            for (auto* obj : shapes) {
+                labels << labelOf(obj);
+            }
+            for (auto* obj : xShapes) {
+                labels << labelOf(obj);
+            }
+            ViewSource selected {labels.join(QStringLiteral(", ")), shapes, xShapes};
+            sources.insert(sources.begin(), selected);
+        }
+    }
+    InsertViewDialog dialog(sources, current, page->Scale.getValue(), Gui::getMainWindow());
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    activatePageHandler(new PlaceViewHandler(dialog.choice()));
+}
+
+}  // namespace
+
+//===========================================================================
 // TechDraw_View
 //===========================================================================
 
@@ -296,11 +1119,12 @@ CmdTechDrawView::CmdTechDrawView() : Command("TechDraw_View")
 {
     sAppModule = "TechDraw";
     sGroup = QT_TR_NOOP("TechDraw");
-    sMenuText = QT_TR_NOOP("New View");
+    // FreeCAD-CH (design D, V1, ops#640): Onshape's Insert view
+    sMenuText = QT_TR_NOOP("Insert View");
     sToolTipText = QT_TR_NOOP(
-        "Inserts a new view into the current page based on the selected object in the tree view "
-        "or 3D view.\n"
-        "If no object is selected, a file browser opens to select an SVG or image file.");
+        "Inserts a view of a part, a Part Studio or an assembly of the document: choose it, the "
+        "orientation and the scale, then click to place it. Its projections then follow the "
+        "cursor, a click places each, until Esc.");
     sWhatsThis = "TechDraw_View";
     sStatusTip = sToolTipText;
     sPixmap = "actions/TechDraw_View";
@@ -323,12 +1147,8 @@ void CmdTechDrawView::activated(int iMsg)
         vpp->show();
     }
 
-
-    //set projection direction from selected Face
-    //use first object with a face selected
+    // the selection: a spreadsheet or a BIM section makes its view at once; parts go to the dialog
     std::vector<App::DocumentObject*> shapes, xShapes;
-    App::DocumentObject* partObj = nullptr;
-    std::string faceName;
     auto selection = getSelection().getSelectionEx(nullptr, App::DocumentObject::getClassTypeId());
     for (auto& sel : selection) {
         bool is_linked = false;
@@ -407,138 +1227,61 @@ void CmdTechDrawView::activated(int iMsg)
         //not a Link and not null.  assume to be drawable.  Undrawables will be
         // skipped later.
         shapes.push_back(obj);
-        if (partObj) {
-            continue;
-        }
-        //don't know if this works for an XLink
-        for (auto& sub : sel.getSubNames()) {
-            if (TechDraw::DrawUtil::getGeomTypeFromName(sub) == "Face") {
-                faceName = sub;
-                //
-                partObj = obj;
-                break;
-            }
-        }
     }
 
-    ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/TechDraw");
-    if (shapes.empty() && xShapes.empty()) {
-        if (!viewCreated) {
-            // If nothing was selected, then we offer to insert SVG or Images files.
-            bool dontShowAgain = hGrp->GetBool("DontShowInsertFileMessage", false);
-            if (!dontShowAgain) {
-                auto msgText = QObject::tr("To insert a view from existing objects, "
-                        "select them before invoking this tool. Without a selection, a "
-                        "file browser will open to insert an SVG or image file.");
-                QMessageBox msgBox(Gui::getMainWindow());
-                msgBox.setText(msgText);
-                auto dontShowMsg = QObject::tr("Do not show this message again");
-                QCheckBox dontShowCheckBox(dontShowMsg, &msgBox);
-                msgBox.setCheckBox(&dontShowCheckBox);
-                QPushButton* okButton = msgBox.addButton(QMessageBox::Ok);
-
-                msgBox.exec();
-
-                if (msgBox.clickedButton() == okButton && dontShowCheckBox.isChecked()) {
-                    // Save the preference to not show the message again
-                    hGrp->SetBool("DontShowInsertFileMessage", true);
-                }
-            }
-
-            const Gui::FileDialog::FilterList filterList {
-                {QObject::tr("SVG or Image files"), {"*.svg", "*.svgz", "*.jpg", "*.jpeg", "*.png", "*.bmp"}},
-                Gui::FileDialog::Filter::AllFiles(),
-            };
-            QString filename = Gui::FileDialog::getOpenFileName(Gui::getMainWindow(),
-                QObject::tr("Select a SVG or Image file to open"),
-                Preferences::defaultSymbolDir(),
-                filterList);
-
-            if (!filename.isEmpty()) {
-                if (filename.endsWith(QStringLiteral(".svg"), Qt::CaseInsensitive)
-                    || filename.endsWith(QStringLiteral(".svgz"), Qt::CaseInsensitive)) {
-                    std::string FeatName = getUniqueObjectName("Symbol");
-                    auto filespec = DU::cleanFilespecBackslash(
-                        Base::Tools::escapeEncodeFilename(filename.toStdString()));
-                    openCommand(QT_TRANSLATE_NOOP("Command", "Create Symbol"));
-                    doCommand(Doc, "f = open(\"%s\", 'r', encoding=\"utf-8\")", filespec.c_str());
-                    doCommand(Doc, "svg = f.read()");
-                    doCommand(Doc, "f.close()");
-                    doCommand(Doc,
-                              "App.activeDocument().addObject('TechDraw::DrawViewSymbol', '%s')",
-                              FeatName.c_str());
-                    doCommand(
-                        Doc,
-                        "App.activeDocument().%s.translateLabel('DrawViewSymbol', 'Symbol', '%s')",
-                        FeatName.c_str(),
-                        FeatName.c_str());
-                    doCommand(Doc, "App.activeDocument().%s.Symbol = svg", FeatName.c_str());
-                    doCommand(Doc,
-                              "App.activeDocument().%s.addView(App.activeDocument().%s)",
-                              PageName.c_str(),
-                              FeatName.c_str());
-                }
-                else {
-                    std::string FeatName = getUniqueObjectName("Image");
-                    auto filespec = DU::cleanFilespecBackslash(
-                        Base::Tools::escapeEncodeFilename(filename.toStdString()));
-                    openCommand(QT_TRANSLATE_NOOP("Command", "Create image"));
-                    doCommand(Doc, "App.activeDocument().addObject('TechDraw::DrawViewImage', '%s')", FeatName.c_str());
-                    doCommand(Doc, "App.activeDocument().%s.translateLabel('DrawViewImage', 'Image', '%s')",
-                        FeatName.c_str(), FeatName.c_str());
-                    doCommand(Doc, "App.activeDocument().%s.ImageFile = '%s'", FeatName.c_str(), filespec.c_str());
-                    doCommand(Doc, "App.activeDocument().%s.addView(App.activeDocument().%s)", PageName.c_str(), FeatName.c_str());
-                    updateActive();
-                    commitCommand();
-                }
-
-                updateActive();
-                commitCommand();
-            }
-        }
-        return;
+    if (shapes.empty() && xShapes.empty() && viewCreated) {
+        return;  // a spreadsheet or BIM view, made above
     }
-
-    Gui::WaitCursor wc;
-    openCommand(QT_TRANSLATE_NOOP("Command", "Create view"));
-    std::string FeatName = getUniqueObjectName("View");
-    doCommand(Doc, "App.activeDocument().addObject('TechDraw::DrawProjGroupItem', '%s')",
-        FeatName.c_str());
-    doCommand(Doc, "App.activeDocument().%s.translateLabel('DrawProjGroupItem', 'View', '%s')",
-        FeatName.c_str(), FeatName.c_str());
-    doCommand(Doc, "App.activeDocument().%s.addView(App.activeDocument().%s)", PageName.c_str(),
-        FeatName.c_str());
-
-    App::DocumentObject* docObj = getDocument()->getObject(FeatName.c_str());
-    auto* dvp = dynamic_cast<TechDraw::DrawViewPart*>(docObj);
-    if (!dvp) {
-        throw Base::TypeError("CmdTechDrawView DVP not found\n");
-    }
-    dvp->Source.setValues(shapes);
-    dvp->XSource.setValues(xShapes);
-
-    getDocument()->setStatus(App::Document::Status::SkipRecompute, true);
-    std::pair<Base::Vector3d, Base::Vector3d> dirs = viewDirection();
-    Base::Vector3d checkedDir = checkDirectionVsBasis(dirs.first);
-    doCommand(Doc,
-              "App.activeDocument().%s.Direction = FreeCAD.Vector(%.12f, %.12f, %.12f)",
-              FeatName.c_str(), checkedDir.x, checkedDir.y, checkedDir.z);
-    doCommand(Doc,
-              "App.activeDocument().%s.RotationVector = FreeCAD.Vector(%.12f, %.12f, %.12f)",
-              FeatName.c_str(), dirs.second.x, dirs.second.y, dirs.second.z);
-    doCommand(Doc,
-              "App.activeDocument().%s.XDirection = FreeCAD.Vector(%.12f, %.12f, %.12f)",
-              FeatName.c_str(), dirs.second.x, dirs.second.y, dirs.second.z);
-
-    getDocument()->setStatus(App::Document::Status::SkipRecompute, false);
-    doCommand(Doc, "App.activeDocument().%s.recompute()", FeatName.c_str());
-    commitCommand();
-
-    // create the rest of the desired views
-    Gui::Control().showDialog(new TaskDlgProjGroup(dvp, true));
+    // FreeCAD-CH (design D, V1, ops#640): Onshape's Insert view. A dialog lists the document's
+    // parts, studios and assemblies (the selection first, if it is none of them), never a file
+    // browser; then one click places the view and its projections follow the cursor. No task
+    // panel stays open and no lone second front view is made (H1's stumble 3). An image or SVG
+    // goes on the sheet with TechDraw_Image and TechDraw_Symbol.
+    insertViewInteractively(page, shapes, xShapes);
 }
 
 bool CmdTechDrawView::isActive() { return DrawGuiUtil::needPage(this); }
+
+//===========================================================================
+// TechDraw_ProjectView (FreeCAD-CH, design D, V1, ops#640): Onshape's Projected view
+//===========================================================================
+
+DEF_STD_CMD_A(CmdTechDrawProjectView)
+
+CmdTechDrawProjectView::CmdTechDrawProjectView() : Command("TechDraw_ProjectView")
+{
+    sAppModule = "TechDraw";
+    sGroup = QT_TR_NOOP("TechDraw");
+    sMenuText = QT_TR_NOOP("Projected View");
+    sToolTipText = QT_TR_NOOP(
+        "Click a view, move, click: a projection of it where the cursor went (a diagonal gives an "
+        "isometric). From a projection group's front view it joins the group, aligned; from any "
+        "other view it is a view of its own. Esc ends.");
+    sWhatsThis = "TechDraw_ProjectView";
+    sStatusTip = sToolTipText;
+    sPixmap = "actions/TechDraw_ProjectionGroup";
+}
+
+void CmdTechDrawProjectView::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    TechDraw::DrawPage* page = DrawGuiUtil::findPage(this);
+    if (!page) {
+        return;
+    }
+    if (auto* vpp = freecad_cast<ViewProviderPage*>(Gui::Application::Instance->getViewProvider(page))) {
+        vpp->show();
+    }
+    // a view selected is the parent; otherwise the first click picks it
+    TechDraw::DrawViewPart* parent = nullptr;
+    auto views = getSelection().getObjectsOfType(TechDraw::DrawViewPart::getClassTypeId());
+    if (views.size() == 1) {
+        parent = static_cast<TechDraw::DrawViewPart*>(views.front());
+    }
+    activatePageHandler(new ProjectViewHandler(parent));
+}
+
+bool CmdTechDrawProjectView::isActive() { return DrawGuiUtil::needPage(this); }
 
 //===========================================================================
 // TechDraw_BrokenView
@@ -2013,6 +2756,7 @@ void CreateTechDrawCommands()
     rcCmdMgr.addCommand(new CmdTechDrawRedrawPage());
     rcCmdMgr.addCommand(new CmdTechDrawPrintAll());
     rcCmdMgr.addCommand(new CmdTechDrawView());
+    rcCmdMgr.addCommand(new CmdTechDrawProjectView());
     rcCmdMgr.addCommand(new CmdTechDrawActiveView());
     rcCmdMgr.addCommand(new CmdTechDrawSectionGroup());
     rcCmdMgr.addCommand(new CmdTechDrawSectionView());

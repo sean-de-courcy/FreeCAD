@@ -205,6 +205,15 @@ protected:
                            std::array<Base::BoundBox3d, MAXPROJECTIONCOUNT> bboxes);
     double getMaxColWidth(std::array<int, 3> list,
                           std::array<Base::BoundBox3d, MAXPROJECTIONCOUNT> bboxes);
+
+    /// FreeCAD-CH (design D, V1, ops#640): a scale change keeps the group's middle where it
+    /// was, and the group on the sheet when it fits. The page box of the views, relative to
+    /// the group's X, Y; false while a view has no geometry yet
+    bool contentBox(Base::BoundBox3d& box) const;
+    void refitAfterScale();
+    bool m_refitPending {false};
+    Base::Vector3d m_refitMiddle;
+    bool m_refitting {false};
 };
 
 } //namespace TechDraw

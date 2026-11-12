@@ -40,6 +40,7 @@
 
 #include "MDIViewPage.h"
 #include "QGVPage.h"
+#include "ViewProviderPage.h"
 #include "TechDrawHandler.h"
 
 
@@ -78,6 +79,11 @@ void TechDrawHandler::deactivate()
     QTimer::singleShot(100, []() { // 100 milliseconds delay
         auto* mdi = qobject_cast<MDIViewPage*>(Gui::getMainWindow()->activeWindow());
         if (!mdi) {
+            return;
+        }
+        // FreeCAD-CH (design D, V1): not while a handler that followed this one is active
+        auto* vp = mdi->getViewProviderPage();
+        if (vp && vp->getQGVPage() && vp->getQGVPage()->isHandlerActive()) {
             return;
         }
         mdi->enableContextualMenu(true);
