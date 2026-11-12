@@ -39,6 +39,7 @@
 #include "ExportInfo.h"
 #include "TransactionDefs.h"
 
+#include <functional>
 #include <map>
 #include <vector>
 #include <utility>
@@ -1001,6 +1002,39 @@ public:
 
     /// Check whether a transaction is open.
     bool hasPendingTransaction() const;
+
+    /**
+     * FreeCAD-CH (ops#671 C3i): whether the open transaction is the last undo step, reopened at
+     * the end of a recompute that ran outside any transaction for the observers of
+     * signalBecameStable (ops#654 10.15): no user transaction is open then.
+     */
+    bool isStepReopened() const;
+
+    /**
+     * FreeCAD-CH (ops#671 C3i): writes of derived data that no undo step records. While a scope
+     * lives, the document's open transaction (a user's, or the step reopened at the end of a
+     * recompute) is set aside, a booked or global transaction is not opened by a change, no
+     * recompute reopens a step, and the end of a recompute neither records these writes nor
+     * clears Redo for them. Scopes nest. Only for data rebuilt from the document itself (the
+     * configuration cache): never for data a user edits. isDerived names the writes allowed;
+     * any other change of a property outside a recompute is warned about (still unrecorded).
+     */
+    class AppExport UnrecordedWrites
+    {
+    public:
+        using Derived = std::function<bool(const DocumentObject&, const Property&)>;
+        UnrecordedWrites(Document& doc, Derived isDerived);
+        ~UnrecordedWrites();
+        UnrecordedWrites(const UnrecordedWrites&) = delete;
+        UnrecordedWrites& operator=(const UnrecordedWrites&) = delete;
+
+    private:
+        Document& doc;
+        Derived isDerived;
+        fastsignals::scoped_connection watch;
+    };
+    /// Whether an UnrecordedWrites scope is alive on this document
+    bool isWritingUnrecorded() const;
 
     /**
      * @brief Get the undo or redo transaction ID.

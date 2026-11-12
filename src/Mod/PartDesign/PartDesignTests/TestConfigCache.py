@@ -176,6 +176,29 @@ class TestConfigCache(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(linkHeight(link), 30, delta=TOL)
 
+    def testTheCacheRecordsNoStepAndKeepsRedo(self):
+        """Filling an instance is derived data (ruling A, C3i): after an edit and the recompute
+        that follows its commit (the step reopened for the regeneration, ops#654 10.15) the undo
+        stack holds the edit's step only, an undo of it keeps Redo (the refill clears nothing) and
+        the redo shows the edit again"""
+        self.configureSizes()
+        link = self.instance({"Size": "Large"})
+        self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
+        undos = self.doc.UndoCount
+        self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", "Large", "30 mm"))
+        self.doc.recompute()
+        self.assertAlmostEqual(linkHeight(link), 30, delta=TOL)
+        self.assertEqual(self.doc.UndoCount, undos + 1, self.doc.UndoNames)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
+        self.assertEqual(self.doc.RedoCount, 1, "the refill after the undo cleared Redo")
+        self.assertEqual(self.doc.UndoCount, undos)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertAlmostEqual(linkHeight(link), 30, delta=TOL)
+        self.assertEqual(self.doc.UndoCount, undos + 1, self.doc.UndoNames)
+
     def testUndoMarksStaleAndTheSaveKeepsIt(self):
         """Undo of a studio edit marks the entries stale (review 6); a save before the next
         recompute writes the stale state (ConfigStale), so the reopened entry is rebuilt"""

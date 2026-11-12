@@ -763,6 +763,80 @@ TEST_F(StableStepTest, anObserverWriteAfterACommitJoinsTheLastStep)
     EXPECT_NE(doc()->getObject("A"), nullptr);
 }
 
+// FreeCAD-CH (ops#671 C3i): derived data written in a Document::UnrecordedWrites scope joins
+// no step and clears no Redo; scopes nest and give the open transaction back
+TEST_F(StableStepTest, anUnrecordedWriteAtTheReopenedStepJoinsNoStep)
+{
+    auto a = addInStep("add", "A");
+    bool reopened = false;
+    const fastsignals::scoped_connection observer = doc()->signalBecameStable.connect(
+        [this, &reopened](const App::Document&) {
+            if (doc()->getObject("W")) {
+                return;
+            }
+            reopened = doc()->isStepReopened();
+            App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+            EXPECT_FALSE(doc()->hasPendingTransaction());
+            doc()->addObject("App::DocumentObjectGroup", "W");
+        }
+    );
+    a->touch();
+    doc()->recompute();
+    EXPECT_TRUE(reopened);
+    ASSERT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_FALSE(doc()->isStepReopened());
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"add"}));
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("A"), nullptr);
+    EXPECT_NE(doc()->getObject("W"), nullptr);  // unrecorded: the undo leaves it
+    EXPECT_TRUE(doc()->redo());
+    EXPECT_NE(doc()->getObject("A"), nullptr);
+}
+
+TEST_F(StableStepTest, anUnrecordedWriteAfterAnUndoKeepsRedo)
+{
+    auto a = addInStep("first", "A");
+    addInStep("second", "B");
+    ASSERT_TRUE(doc()->undo());
+    ASSERT_EQ(doc()->getAvailableRedos(), 1);
+    const fastsignals::scoped_connection observer = doc()->signalBecameStable.connect(
+        [this](const App::Document&) {
+            if (!doc()->getObject("W")) {
+                App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+                doc()->addObject("App::DocumentObjectGroup", "W");
+            }
+        }
+    );
+    a->touch();
+    doc()->recompute();
+    ASSERT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_EQ(doc()->getAvailableRedos(), 1);
+    EXPECT_TRUE(doc()->redo());
+    EXPECT_NE(doc()->getObject("B"), nullptr);
+}
+
+TEST_F(StableStepTest, unrecordedScopesNestAndGiveTheOpenTransactionBack)
+{
+    doc()->openTransaction("t");
+    doc()->addObject("App::DocumentObjectGroup", "X");
+    {
+        App::Document::UnrecordedWrites outer(*doc(), nullptr);
+        {
+            App::Document::UnrecordedWrites inner(*doc(), nullptr);
+            EXPECT_TRUE(doc()->isWritingUnrecorded());
+        }
+        EXPECT_TRUE(doc()->isWritingUnrecorded());
+        EXPECT_FALSE(doc()->hasPendingTransaction());
+        doc()->addObject("App::DocumentObjectGroup", "Y");
+    }
+    EXPECT_FALSE(doc()->isWritingUnrecorded());
+    EXPECT_TRUE(doc()->hasPendingTransaction());
+    doc()->commitTransaction();
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("X"), nullptr);
+    EXPECT_NE(doc()->getObject("Y"), nullptr);
+}
+
 TEST_F(StableStepTest, aRecomputeWithNoWriteLeavesTheStepsAsTheyWere)
 {
     addInStep("first", "A");

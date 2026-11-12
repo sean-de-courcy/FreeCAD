@@ -1188,7 +1188,7 @@ void Document::changePropertyOfObject(TransactionalObject* obj,
     if (!prop || !obj || !obj->isAttachedToDocument()) {
         return;
     }
-    if (!isPerformingTransaction() && !d->activeUndoTransaction) {
+    if (!isPerformingTransaction() && !d->activeUndoTransaction && d->unrecordedDepth == 0) {
         if (!testStatus(Restoring) || testStatus(Importing)) {
             // FreeCAD-CH (ops#163; upstream issue 32285, from upstream f4665aa7b5): open the
             // global transaction once booked, as _checkTransaction does. It was only booked, so
@@ -1531,7 +1531,9 @@ void Document::_checkTransaction(DocumentObject* pcDelObj, const Property* What,
         return;
     }
 
-    if (!testStatus(Restoring) || testStatus(Importing)) {
+    // ops#671 C3i: an UnrecordedWrites scope opens no booked or global transaction; only the
+    // removal of an object an older step holds still opens "Delete" (the step must keep it)
+    if (d->unrecordedDepth == 0 && (!testStatus(Restoring) || testStatus(Importing))) {
 
         // Priority to a transaction that has been booked
         // explicitly for this document, it there are none
@@ -1741,6 +1743,51 @@ void Document::_abortTransaction()
 bool Document::hasPendingTransaction() const
 {
     return d->activeUndoTransaction != nullptr;
+}
+
+bool Document::isStepReopened() const
+{
+    return d->stepReopened && d->activeUndoTransaction != nullptr;
+}
+
+bool Document::isWritingUnrecorded() const
+{
+    return d->unrecordedDepth > 0;
+}
+
+Document::UnrecordedWrites::UnrecordedWrites(Document& doc, Derived isDerived)
+    : doc(doc)
+    , isDerived(std::move(isDerived))
+    // A change the caller doesn't call derived, outside a recompute's outputs, is warned about:
+    // the scope must never hide a user's edit from Undo
+    , watch(doc.signalChangedObject.connect([this](const DocumentObject& obj, const Property& prop) {
+        if (this->doc.testStatus(Document::Recomputing) || !this->isDerived || this->isDerived(obj, prop)) {
+            return;
+        }
+        FC_WARN(this->doc.getName() << ": " << obj.getFullName() << "." << prop.getName()
+                                    << " changed in an unrecorded scope: no undo step holds it");
+    }))
+{
+    if (doc.d->unrecordedDepth++ == 0) {
+        doc.d->unrecordedSetAside = doc.d->activeUndoTransaction;
+        doc.d->activeUndoTransaction = nullptr;
+    }
+}
+
+Document::UnrecordedWrites::~UnrecordedWrites()
+{
+    watch.disconnect();
+    if (--doc.d->unrecordedDepth > 0) {
+        return;
+    }
+    Transaction* setAside = doc.d->unrecordedSetAside;
+    doc.d->unrecordedSetAside = nullptr;
+    if (doc.d->activeUndoTransaction) {
+        // Only _checkTransaction's "Delete" (an object older steps hold, removed) opens one here
+        FC_WARN(doc.getName() << ": a transaction opened in an unrecorded scope; committed");
+        doc._commitTransaction(true);
+    }
+    doc.d->activeUndoTransaction = setAside;
 }
 
 int Document::getTransactionID(const bool undo, unsigned pos) const
@@ -4777,7 +4824,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
             && mRedoTransactions.empty() && d->undoRedoDepth == 0 && !isPerformingTransaction()
             && !d->committing && !testStatus(Restoring) && !isStepLocked()
             && GetApplication().getGlobalTransaction() == NullTransaction
-            && !GetApplication().isClosingAll();
+            && !GetApplication().isClosingAll()
+            // ops#671 C3i: not inside an UnrecordedWrites scope (its recompute writes derived data)
+            && d->unrecordedDepth == 0;
         Transaction* reopened = nullptr;
         Transaction* setAside = nullptr;
         if (join) {
@@ -4785,20 +4834,27 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
             reopened = mUndoTransactions.back();
             mUndoTransactions.pop_back();
             d->activeUndoTransaction = reopened;
+            d->stepReopened = true;
         }
+        // A write in an UnrecordedWrites scope is derived data: no reason to clear Redo (C3i)
         bool wrote = false;
-        const auto mark = [&wrote](const DocumentObject&) {
-            wrote = true;
+        const auto mark = [this, &wrote](const DocumentObject&) {
+            if (d->unrecordedDepth == 0) {
+                wrote = true;
+            }
         };
         const fastsignals::scoped_connection created = signalNewObject.connect(mark);
         const fastsignals::scoped_connection deleted = signalDeletedObject.connect(mark);
         const fastsignals::scoped_connection changed = signalChangedObject.connect(
-            [&wrote](const DocumentObject&, const Property&) {
-                wrote = true;
+            [this, &wrote](const DocumentObject&, const Property&) {
+                if (d->unrecordedDepth == 0) {
+                    wrote = true;
+                }
             }
         );
         const Base::ScopeGuard after([&]() {
             if (reopened) {
+                d->stepReopened = false;
                 if (d->activeUndoTransaction == reopened
                     && (mUndoTransactions.empty() || mUndoTransactions.back() != reopened)) {
                     mUndoTransactions.push_back(reopened);

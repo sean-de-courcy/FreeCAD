@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string_view>
@@ -85,6 +86,23 @@ App::Link* instanceLink(const App::DocumentObject* obj)
 App::PropertyXLink* linkedProperty(App::Link* link)
 {
     return freecad_cast<App::PropertyXLink*>(link->getLinkedObjectProperty());
+}
+
+/// What the cache writes (C3i): its entries and their group, and an instance's target and the
+/// text that names its part. Written in a Document::UnrecordedWrites scope: derived data, which no
+/// undo step records and which never clears Redo (coordinator c752's ruling A, 11-12)
+bool derivedWrite(const App::DocumentObject& obj, const App::Property& prop)
+{
+    if (obj.isDerivedFrom<ConfigShape>()) {
+        return true;
+    }
+    const char* objName = obj.getNameInDocument();
+    if (objName && std::string_view(objName).starts_with("ConfigCache")) {
+        return true;
+    }
+    const std::string_view name = prop.getName() ? prop.getName() : "";
+    return obj.isDerivedFrom<App::Link>()
+        && (name == "LinkedObject" || name == "ConfigDoc" || name == "ConfigStudio" || name == "ConfigPartId");
 }
 
 /// The instance's own property: never getPropertyByName, which an App::Link answers with its
@@ -279,8 +297,12 @@ void mirror(const App::Document& doc)
     if (isTemp(&doc) || doc.testStatus(App::Document::Restoring) || liveEntries.load() == 0) {
         return;
     }
+    std::optional<App::Document::UnrecordedWrites> unrecorded;
     for (auto e : configCacheEntries(&doc)) {
         if (e->ConfigStale.getValue() != e->isStale()) {
+            if (!unrecorded) {
+                unrecorded.emplace(const_cast<App::Document&>(doc), derivedWrite);
+            }
             e->ConfigStale.setValue(e->isStale());
         }
     }
@@ -331,7 +353,9 @@ void request(const App::DocumentObject* reader)
 
 bool busy(const App::Document* doc)
 {
-    return doc->hasPendingTransaction() || doc->isPerformingTransaction()
+    // The step reopened at the end of a recompute (ops#654 10.15) is no user's transaction: the
+    // pass runs then, unrecorded (C3i)
+    return (doc->hasPendingTransaction() && !doc->isStepReopened()) || doc->isPerformingTransaction()
         || doc->testStatus(App::Document::Recomputing);
 }
 
@@ -634,6 +658,11 @@ bool runPass(const std::vector<App::Document*>& docs, std::string* why)
         return true;
     }
     PassGuard guard;
+    // Every write of the pass, its recomputes included, is derived data (C3i)
+    std::vector<std::unique_ptr<App::Document::UnrecordedWrites>> unrecorded;
+    for (auto doc : involved) {
+        unrecorded.push_back(std::make_unique<App::Document::UnrecordedWrites>(*doc, derivedWrite));
+    }
     ++stats.passes;
     std::vector<Served> served;
     std::map<std::pair<App::Document*, std::string>, std::map<std::string, std::vector<ConfigShape*>>> fills;

@@ -105,6 +105,12 @@ struct DocumentP
     // FreeCAD-CH (ops#640): the depth of undo()/redo() calls, so that undo(id), which undoes the
     // steps above id one by one, regenerates once, at its end
     int undoRedoDepth {0};
+    // FreeCAD-CH (ops#671 C3i): Document::UnrecordedWrites: the depth of its scopes and the
+    // transaction set aside by the outermost one; and whether the last undo step is reopened
+    // for signalBecameStable (Document::isStepReopened)
+    int unrecordedDepth {0};
+    Transaction* unrecordedSetAside {nullptr};
+    bool stepReopened {false};
     // Id and name that the next transaction will take
     // as soon as there is a change to the document
     int bookedTransaction {0};
