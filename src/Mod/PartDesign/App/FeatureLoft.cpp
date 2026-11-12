@@ -749,8 +749,10 @@ std::vector<TopoDS_Edge> chainWithVertices(
 
 /// Pairs a chain of fewer vertices with one of more (both from one connection to the next): the
 /// fewer side's inner vertices match the nearest of the other's in order (least total difference of
-/// arc-length fractions), and each unmatched vertex gets a partner on the fewer side at the same
-/// proportion between the matched pairs around it. Returns the fewer side's new vertex fractions.
+/// arc-length fractions), and the unmatched vertices between two matched pairs get partners that
+/// divide the fewer side's span between those pairs into equal parts by count (Onshape, oracle 14
+/// LC1-LC2: thirds, midpoints). Returns the fewer side's new vertex fractions. A span of several
+/// edges is divided by arc length (an assumption: LC1 left it untested).
 std::vector<double> partnerFractions(const std::vector<double>& fewer, const std::vector<double>& more)
 {
     const size_t m = fewer.size();
@@ -777,27 +779,24 @@ std::vector<double> partnerFractions(const std::vector<double>& fewer, const std
         }
     }
     std::vector<double> added;
+    double g0 = 0;  // the fewer side's fraction at the last matched pair (the chain's start first)
+    std::vector<size_t> gap;  // the unmatched vertices since then
+    auto divide = [&](double g1) {
+        for (size_t i = 0; i < gap.size(); ++i) {
+            added.push_back(g0 + (g1 - g0) * static_cast<double>(i + 1) / static_cast<double>(gap.size() + 1));
+        }
+        gap.clear();
+        g0 = g1;
+    };
     for (size_t j = 0; j < n; ++j) {
         if (partner[j] >= 0) {
-            continue;
+            divide(fewer[partner[j]]);
         }
-        double f0 = 0, g0 = 0, f1 = 1, g1 = 1;
-        for (size_t k = j; k-- > 0;) {
-            if (partner[k] >= 0) {
-                f0 = more[k];
-                g0 = fewer[partner[k]];
-                break;
-            }
+        else {
+            gap.push_back(j);
         }
-        for (size_t k = j + 1; k < n; ++k) {
-            if (partner[k] >= 0) {
-                f1 = more[k];
-                g1 = fewer[partner[k]];
-                break;
-            }
-        }
-        added.push_back(g0 + (more[j] - f0) / (f1 - f0) * (g1 - g0));
     }
+    divide(1.0);
     return added;
 }
 
@@ -903,6 +902,44 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
         }
         edgesA.insert(edgesA.end(), chainA.begin(), chainA.end());
         edgesB.insert(edgesB.end(), chainB.begin(), chainB.end());
+    }
+
+    // Onshape's LOFT_INVALID (oracle 14 LC1, LC4): pairs that turn the loft through itself, a half
+    // turn or crossed connections. The ruled section between paired points must keep the profiles'
+    // sense: its area along the profile's normal stays above 1 % of the smaller profile's.
+    {
+        auto sampled = [](const std::vector<TopoDS_Edge>& edges) {
+            std::vector<gp_Pnt> points;
+            constexpr int perEdge = 8;
+            for (const auto& edge : edges) {
+                BRepAdaptor_Curve curve(edge);
+                const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+                const double length = GCPnts_AbscissaPoint::Length(curve);
+                const double from = reversed ? curve.LastParameter() : curve.FirstParameter();
+                for (int k = 0; k < perEdge; ++k) {
+                    const double s = length * k / perEdge;
+                    GCPnts_AbscissaPoint at(curve, reversed ? -s : s, from);
+                    points.push_back(curve.Value(at.IsDone() ? at.Parameter() : from));
+                }
+            }
+            return points;
+        };
+        const auto pa = sampled(edgesA);
+        const auto pb = sampled(edgesB);
+        const gp_Vec normal = na.Normalized();
+        const double smaller = std::min(na.Magnitude(), std::abs(nb.Dot(normal)));
+        for (double t : {0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875}) {
+            std::vector<gp_Pnt> section;
+            for (size_t i = 0; i < pa.size() && i < pb.size(); ++i) {
+                section.emplace_back(pa[i].XYZ() * (1 - t) + pb[i].XYZ() * t);
+            }
+            if (areaVector(section).Dot(normal) < 0.01 * smaller) {
+                throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
+                ));
+            }
+        }
     }
 
     auto wireOf = [](const std::vector<TopoDS_Edge>& edges,
