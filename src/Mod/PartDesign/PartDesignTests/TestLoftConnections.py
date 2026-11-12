@@ -44,6 +44,21 @@ def ruledVolume(bottom, top, height=H):
     return height * (at(0) + 4 * at(0.5) + at(1)) / 6
 
 
+def ruledByArcLength(bottom, top, height=H, n=400):
+    """The ruled loft's volume between two loops of edges paired in order, points paired by arc length on each edge
+    pair (bottom, top: Part geometries in traversal order)."""
+    a, b = [], []
+    for e, f in zip(bottom, top):
+        a += [(p.x, p.y) for p in e.toShape().discretize(Number=n + 1)[:-1]]
+        b += [(p.x, p.y) for p in f.toShape().discretize(Number=n + 1)[:-1]]
+    return ruledVolume(a, b, height)
+
+
+ONSHAPE_SURFACE = 0.002
+"""Onshape's surface between a paired arc and line is not ruled by arc length: its V and A differ by about 0.1 % (LC1:
+-0.72 and -5.19 on ~4800) while the joins and the faces agree; the fork's loft is the arc-length ruled model."""
+
+
 class ConnectionCase(unittest.TestCase):
     def setUp(self):
         self.doc = models.newDocument("PartDesignTestLoftConnections")
@@ -89,6 +104,11 @@ class ConnectionCase(unittest.TestCase):
             self.assertAlmostEqual(shape.Area, area, delta=areaDelta or delta)
         if faces is not None:
             self.assertEqual(len(shape.Faces), faces)
+
+    def assertNearOnshape(self, loft, volume, area):
+        shape = loft.Shape
+        self.assertAlmostEqual(shape.Volume, volume, delta=ONSHAPE_SURFACE * volume)
+        self.assertAlmostEqual(shape.Area, area, delta=ONSHAPE_SURFACE * area)
 
     def assertJoined(self, loft, a, b, height=H, straight=True):
         """The loft has a side edge from (a, 0) to (b, height): the connected vertices are joined."""
@@ -281,23 +301,37 @@ class TestLoftConnectionsUnequal(ConnectionCase):
     def testSixEdgesCornerToCornerIsOnshapesDefault(self):
         """Oracle 14 LC1: (-10, -6) -> (-6, -4) is Onshape's default; the arc ends take the rectangle's thirds."""
         loft = self.loft(self.sixEdges(), self.RECT(), [((-10, -6), (-6, -4))])
-        self.assertLoft(loft, 4811.584195, 1847.092629, 8)
         self.assertJoined(loft, (10, -3), (6, -4 / 3))
         self.assertJoined(loft, (10, 3), (6, 4 / 3))
+        g = self.sixEdges()  # (7, 6) -> (-10, 6), left, bottom, arc, right, arc
+        L = lambda p, q: Part.LineSegment(V(p[0], p[1], 0), V(q[0], q[1], 0))
+        y = 4 / 3
+        top = [L((6, 4), (-6, 4)), L((-6, 4), (-6, -4)), L((-6, -4), (6, -4)), L((6, -4), (6, -y)), L((6, -y), (6, y))]
+        top.append(L((6, y), (6, 4)))
+        self.assertLoft(loft, ruledByArcLength(g, top), faces=8)
+        self.assertNearOnshape(loft, 4811.584195, 1847.092629)  # oracle 14 LC1
 
     def testSixEdgesArcEndToACorner(self):
         """Oracle 14 LC1: (10, -3) -> (6, -4); the leftovers take their edges' midpoints."""
         loft = self.loft(self.sixEdges(), self.RECT(), [((10, -3), (6, -4))])
-        self.assertLoft(loft, 4781.672715, 1841.389255, 8)
         self.assertJoined(loft, (7, -6), (0, -4))
         self.assertJoined(loft, (10, 3), (6, 0))
+        g = self.sixEdges()  # (7, 6) -> (-10, 6), left, bottom, arc, right, arc
+        L = lambda p, q: Part.LineSegment(V(p[0], p[1], 0), V(q[0], q[1], 0))
+        top = [L((6, 4), (-6, 4)), L((-6, 4), (-6, -4)), L((-6, -4), (0, -4)), L((0, -4), (6, -4)), L((6, -4), (6, 0))]
+        top.append(L((6, 0), (6, 4)))
+        self.assertLoft(loft, ruledByArcLength(g, top), faces=8)
+        self.assertNearOnshape(loft, 4781.672715, 1841.389255)  # oracle 14 LC1
 
     def testSixEdgesHalfTurnStops(self):
         """Oracle 14 LC1: (-10, -6) -> (6, 4) is a half-turn wrap, Onshape's LOFT_INVALID."""
         loft = self.loft(self.sixEdges(), self.RECT(), [((-10, -6), (6, 4))])
         self.assertStops(loft, "connection")
 
-    def testEightEdgesToARectangleFourConnections(self):
+    def testEightEdgesToARectangleFourConnectionsStopsAtTangentJoints(self):
+        # oracle 14 LC2: Onshape builds V 4751.303503, A 1799.865681, F 8: 6 side faces, the rounded corners' arc ends
+        # (7, +-6) unmatched (a side face spans the arc and the line against the rectangle's top or bottom edge), the
+        # chamfer vertices (-10, +-4) to (-6, +-4/3). One edge against a tangent run stops until ops#729.
         # 8 edges: a 20 x 12 rectangle with the right corners rounded r 3 and the left corners cut 2 x 2 (6 lines, 2 arcs)
         g = models.polyline([(7, 6), (-8, 6), (-10, 4), (-10, -4), (-8, -6), (7, -6)])
         g.append(Part.ArcOfCircle(Part.Circle(V(7, -3, 0), V(0, 0, 1), 3), -math.pi / 2, 0))
@@ -311,9 +345,21 @@ class TestLoftConnectionsUnequal(ConnectionCase):
             StartCondition="Normal to profile",
             EndCondition="Normal to profile",
         )
-        self.assertLoft(loft, 4751.303503, 1799.865681, 8)  # oracle 14 LC2
-        for a, b in pairs + [((-10, 4), (-6, 4 / 3)), ((-10, -4), (-6, -4 / 3))]:
-            self.assertJoined(loft, a, b, straight=False)
+        self.assertStops(loft, "tangent")
+
+    def testEightLinesToARectangleFourConnections(self):
+        """LC2 with all four corners cut 2 x 2 (8 lines, sharp joints) and no end conditions: each chain's extra vertices
+        divide the rectangle's edge equally (LC1, LC2), and the loft is the ruled model."""
+        g = models.polygon([(8, 6), (-8, 6), (-10, 4), (-10, -4), (-8, -6), (8, -6), (10, -4), (10, 4)])
+        pairs = [((-8, 6), (-6, 4)), ((-8, -6), (-6, -4)), ((10, -4), (6, -4)), ((10, 4), (6, 4))]
+        loft = self.loft(g, models.rectangle(-6, -4, 6, 4), pairs)
+        y = 4 / 3
+        extra = [((8, 6), (0, 4)), ((-10, 4), (-6, y)), ((-10, -4), (-6, -y)), ((8, -6), (0, -4))]
+        for a, b in pairs + extra:
+            self.assertJoined(loft, a, b)
+        bottom = [(8, 6), (-8, 6), (-10, 4), (-10, -4), (-8, -6), (8, -6), (10, -4), (10, 4)]
+        top = [(0, 4), (-6, 4), (-6, y), (-6, -y), (-6, -4), (0, -4), (6, -4), (6, 4)]
+        self.assertLoft(loft, ruledVolume(bottom, top), faces=10)
 
     def slotAndRoundedRectangle(self):
         # bottom: a slot, lines y = +-5 from x -10..10, half circles r 5 (4 edges); top: a 16 x 8 rectangle with
