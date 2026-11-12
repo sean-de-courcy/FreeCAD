@@ -214,6 +214,15 @@ PartDesignExport bool configSetActive(App::Part* studio,
                                       const std::map<std::string, std::string>& values,
                                       std::string* why);
 
+/// configSetActive in doc (a studio-less call: doc's top-level studio, not the active document's)
+PartDesignExport bool configSetActiveIn(App::Document* doc,
+                                        App::Part* studio,
+                                        const std::map<std::string, std::string>& values,
+                                        std::string* why);
+/// The StudioConfig of obj's studio (null: none; never for the cache's entries)
+PartDesignExport StudioConfig* configObjectConfig(const App::DocumentObject* obj);
+/// The configured studio source belongs to (an entry of the cache: its studio's), or null
+PartDesignExport StudioConfig* configSourceConfig(const App::DocumentObject* source);
 /// The key of the user's values (input id or name -> row id or name, a bool, a value; missing
 /// inputs: the defaults), or empty with why
 PartDesignExport std::string configKeyOf(const StudioConfig* config,

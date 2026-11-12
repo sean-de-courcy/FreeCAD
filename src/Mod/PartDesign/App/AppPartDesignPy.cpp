@@ -43,6 +43,7 @@
 #include <App/NameTable.h>
 
 #include "Body.h"
+#include "ConfigCache.h"
 #include "Derived.h"
 #include "FeatureDressUp.h"
 #include "FeatureBase.h"
@@ -542,6 +543,31 @@ public:
             "configSetReaderKey",
             &Module::guarded<&Module::configSetReaderKey>,
             "configSetReaderKey(reader, source, values) -- The configuration a Link or binder outside the studio shows."
+        );
+        add_varargs_method(
+            "configRefresh",
+            &Module::guarded<&Module::configRefresh>,
+            "configRefresh(doc=None) -- Builds now the configurations doc's instances (None: every open document's) need; refuses while a transaction is open."
+        );
+        add_varargs_method(
+            "configSetInstanceKey",
+            &Module::guarded<&Module::configSetInstanceKey>,
+            "configSetInstanceKey(instance, values) -- The configuration an instance (a Link of a configured studio's part) shows; the next recompute shows it."
+        );
+        add_varargs_method(
+            "configInstancePart",
+            &Module::guarded<&Module::configInstancePart>,
+            "configInstancePart(instance) -- The Body an instance stands for, or None."
+        );
+        add_varargs_method(
+            "configCacheEntries",
+            &Module::guarded<&Module::configCacheEntries>,
+            "configCacheEntries(doc) -- doc's cache entries: dicts of object, studio, key, partId, stale, error."
+        );
+        add_varargs_method(
+            "configCacheStats",
+            &Module::guarded<&Module::configCacheStats>,
+            "configCacheStats() -- Counters: passes, copies, keys, fills, deferred, copySeconds."
         );
         add_varargs_method(
             "configReaderError",
@@ -2174,6 +2200,87 @@ private:
             PartDesign::configSetReaderKey(entryArg(pReader), entryArg(pSource), configValues(pValues), &why),
             why
         );
+    }
+
+    static App::Document* docArgOrNone(PyObject* p)
+    {
+        if (p == Py_None) {
+            return nullptr;
+        }
+        if (!PyObject_TypeCheck(p, &(App::DocumentPy::Type))) {
+            throw Py::TypeError("expected a document or None");
+        }
+        return static_cast<App::DocumentPy*>(p)->getDocumentPtr();
+    }
+
+    Py::Object configRefresh(const Py::Tuple& args)
+    {
+        PyObject* pDoc = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "|O", &pDoc)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(PartDesign::configRefresh(docArgOrNone(pDoc), &why), why);
+    }
+
+    Py::Object configSetInstanceKey(const Py::Tuple& args)
+    {
+        PyObject* pInstance;
+        PyObject* pValues = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pInstance, &pValues)) {
+            throw Py::Exception();
+        }
+        std::string why;
+        return done(
+            PartDesign::configSetInstanceKey(entryArg(pInstance), configValues(pValues), &why),
+            why
+        );
+    }
+
+    Py::Object configInstancePart(const Py::Tuple& args)
+    {
+        PyObject* pInstance;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pInstance)) {
+            throw Py::Exception();
+        }
+        auto part = PartDesign::configInstancePart(entryArg(pInstance));
+        return part ? Py::asObject(part->getPyObject()) : Py::None();
+    }
+
+    Py::Object configCacheEntries(const Py::Tuple& args)
+    {
+        PyObject* pDoc;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pDoc)) {
+            throw Py::Exception();
+        }
+        Py::List out;
+        for (auto e : PartDesign::configCacheEntries(docArgOrNone(pDoc))) {
+            Py::Dict d;
+            d.setItem("object", Py::asObject(e->getPyObject()));
+            d.setItem("studio", Py::String(e->ConfigStudio.getValue()));
+            d.setItem("key", Py::String(e->ConfigKey.getValue()));
+            d.setItem("partId", Py::String(e->ConfigPartId.getValue()));
+            d.setItem("stale", Py::Boolean(e->isStale()));
+            d.setItem("error", Py::String(e->ConfigError.getValue()));
+            out.append(d);
+        }
+        return out;
+    }
+
+    Py::Object configCacheStats(const Py::Tuple& args)
+    {
+        if (!PyArg_ParseTuple(args.ptr(), "")) {
+            throw Py::Exception();
+        }
+        const auto st = PartDesign::configCacheStats();
+        Py::Dict d;
+        d.setItem("passes", Py::Long(st.passes));
+        d.setItem("copies", Py::Long(st.copies));
+        d.setItem("keys", Py::Long(st.keys));
+        d.setItem("fills", Py::Long(st.fills));
+        d.setItem("deferred", Py::Long(st.deferred));
+        d.setItem("copySeconds", Py::Float(st.copySeconds));
+        return d;
     }
 
     Py::Object configReaderError(const Py::Tuple& args)

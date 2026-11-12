@@ -67,6 +67,7 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "ConfigCache.h"
 #include "StudioConfig.h"
 #include "StudioList.h"
 #include "FeatureApply.h"
@@ -111,6 +112,7 @@ PyMOD_INIT_FUNC(_PartDesign)
     // (ops#654 slice 9)
     PartDesign::registerPartMirrorResync();
     PartDesign::registerConfigurationHooks();  // ops#671
+    PartDesign::registerConfigCacheHooks();    // ops#671 C3
     Base::Console().log("Loading Part Design module… done\n");
 
 
@@ -203,6 +205,7 @@ PyMOD_INIT_FUNC(_PartDesign)
     // FreeCAD-CH ops#654: studio features
     PartDesign::StudioList                  ::init();
     PartDesign::StudioConfig                ::init();  // ops#671
+    PartDesign::ConfigShape                 ::init();  // ops#671 C3
     PartDesign::FeatureApply                ::init();
 
     PartDesign::Measure ::initialize();

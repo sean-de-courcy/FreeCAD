@@ -30,6 +30,7 @@
 #include <Base/Unit.h>
 
 #include "Body.h"
+#include "ConfigCache.h"
 #include "FeatureTransformed.h"
 #include "Pieces.h"
 #include "ShapeBinder.h"
@@ -291,7 +292,8 @@ App::Part* studioOfObject(const App::DocumentObject* obj)
 
 StudioConfig* configOfObject(const App::DocumentObject* obj)
 {
-    if (!obj || !obj->getDocument()) {
+    // The cache's entries and their group sit at the top level, never a studio's (ops#671 C3)
+    if (!obj || !obj->getDocument() || isConfigCacheObject(obj)) {
         return nullptr;
     }
     return StudioConfig::of(obj->getDocument(), studioOfObject(obj));
@@ -302,6 +304,19 @@ StudioConfig* sourceConfig(const App::DocumentObject* source)
 {
     if (!source || !source->getDocument()) {
         return nullptr;
+    }
+    // An entry of the cache reads as its studio's (ops#671 C3)
+    if (auto entry = freecad_cast<const ConfigShape*>(source)) {
+        const std::string name = entry->ConfigStudio.getValue();
+        App::Part* studio = nullptr;
+        if (!name.empty()) {
+            studio = freecad_cast<App::Part*>(source->getDocument()->getObject(name.c_str()));
+            if (!studio) {
+                return nullptr;
+            }
+        }
+        auto cfg = StudioConfig::of(source->getDocument(), studio);
+        return cfg && cfg->hasInputs() ? cfg : nullptr;
     }
     if (auto part = freecad_cast<App::Part*>(const_cast<App::DocumentObject*>(source))) {
         if (auto cfg = StudioConfig::of(source->getDocument(), part)) {
@@ -1770,7 +1785,16 @@ bool configSetSuppressionCell(App::DocumentObject* owner, const std::string& row
 
 bool configSetActive(App::Part* studio, const std::map<std::string, std::string>& values, std::string* why)
 {
-    App::Document* doc = docOf(studio);
+    return configSetActiveIn(docOf(studio), studio, values, why);
+}
+
+bool configSetActiveIn(App::Document* doc,
+                       App::Part* studio,
+                       const std::map<std::string, std::string>& values,
+                       std::string* why)
+{
+    // A switch changes no configuration's intent: the cache's entries stay fresh (ops#671 C3)
+    ConfigSwitchGuard guard;
     auto cfg = configOrRefuse(studio, doc, why);
     if (!cfg) {
         return false;
@@ -1910,6 +1934,23 @@ bool configSetReaderKey(App::DocumentObject* reader,
 
 std::string configReaderError(const App::DocumentObject* reader, const App::DocumentObject* source)
 {
+    // An entry of the cache (ops#671 C3): fresh, stale or failed
+    if (freecad_cast<const ConfigShape*>(source)) {
+        return configCacheReaderError(reader, source, {});
+    }
+    const std::string key = configReaderKey(reader, source);
+    if (!key.empty()) {
+        auto cfg = sourceConfig(source);
+        const std::string active = cfg->activeKey();
+        if (key != active) {
+            App::Part* studio = cfg->studio();
+            // An instance gets the entry of its configuration from the pass (C3); binders and
+            // Derived stay loud until C4
+            return configCacheReaderError(reader, source,
+                "The studio " + (studio ? quoted(studio) : std::string("of the document"))
+                + " shows the configuration " + active + ", not this one's (" + key + ")");
+        }
+    }
     // A part made from a piece whose solid is gone (its split suppressed, or another row's) keeps
     // its Body while something outside the studio reads it: the reader is loud, never showing
     // the solid it had or nothing at all (review R2, round 2)
@@ -1920,19 +1961,17 @@ std::string configReaderError(const App::DocumentObject* reader, const App::Docu
                    "is suppressed, or this configuration doesn't make it)";
         }
     }
-    const std::string key = configReaderKey(reader, source);
-    if (key.empty()) {
-        return {};
-    }
-    auto cfg = sourceConfig(source);
-    const std::string active = cfg->activeKey();
-    if (key == active) {
-        return {};
-    }
-    App::Part* studio = cfg->studio();
-    return "The studio " + (studio ? quoted(studio) : std::string("of the document"))
-        + " shows the configuration " + active + ", not this one's (" + key
-        + "): until instances and Derived get their own configuration, switch the studio to it";
+    return {};
+}
+
+StudioConfig* configObjectConfig(const App::DocumentObject* obj)
+{
+    return configOfObject(obj);
+}
+
+StudioConfig* configSourceConfig(const App::DocumentObject* source)
+{
+    return sourceConfig(source);
 }
 
 void registerConfigurationHooks()
