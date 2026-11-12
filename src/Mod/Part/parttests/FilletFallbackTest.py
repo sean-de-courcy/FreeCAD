@@ -2558,3 +2558,79 @@ class CurvedWallEndTest(unittest.TestCase):
         edges = [edge_between(shape, (x, 0, 2), (x, 0, 6)) for x in (10, 11.5)]
         with self.assertRaises(Part.OCCError):
             shape.makeFillet(0.75, edges)
+
+
+def wall_on_a_chamfered_rim(inset=0.0, chamfer=1.5875):
+    """ops#640 (the replica's #150, a full round at half a wall on a chamfered rim): a plate z -t..0
+    (t 1.5875), a box (y >= 0) and a half disc (y < 0) of radius Ro whose rim is chamfered through
+    the whole thickness (a cone from Ro - chamfer at z -t to Ro at z 0), and a wall of thickness t,
+    -135..-45 deg, z 0..4, whose outer cylinder is `inset` inside the rim. At 0 it stands flush on
+    the rim, and each outer end edge's foot has four edges and four faces: the wall's end, its outer
+    cylinder, the plate's top and the cone. Returns the solid, the wall's four end edges, and the
+    wall's inner and outer radii."""
+    t = 1.5875
+    outer = 10.92836
+    h = 4.0
+    wo = outer - inset
+    wi = wo - t
+    box = Part.makeBox(2 * outer, 15.0, t, V(-outer, 0, -t))
+    cone = Part.makeCone(outer - chamfer, outer, t, V(0, 0, -t))
+    half = cone.common(Part.makeBox(2 * outer + 2, outer + 1, t + 2, V(-outer - 1, -outer - 1, -t - 1)))
+    plate = box.fuse(half).removeSplitter()
+    ring = Part.makeCylinder(wo, h, V(0, 0, 0), V(0, 0, 1), 360).cut(
+        Part.makeCylinder(wi, h, V(0, 0, 0))
+    )
+    sector = ring.common(
+        Part.makeCylinder(wo + 1, h, V(0, 0, 0), V(0, 0, 1), 90).rotated(V(0, 0, 0), V(0, 0, 1), -135)
+    )
+    shape = plate.fuse(sector).removeSplitter()
+    edges = []
+    for e in shape.Edges:
+        if e.Curve.TypeId != "Part::GeomLine" or len(e.Vertexes) != 2:
+            continue
+        a, b = e.Vertexes[0].Point, e.Vertexes[1].Point
+        if abs(a.x - b.x) > 1e-9 or abs(a.y - b.y) > 1e-9 or abs(abs(a.z - b.z) - h) > 1e-9:
+            continue
+        if min(abs(math.hypot(a.x, a.y) - r) for r in (wo, wi)) < 1e-6 and a.y < 0:
+            edges.append(e)
+    return shape, edges, wi, wo
+
+
+class WallOnAChamferedRimTest(unittest.TestCase):
+    """A full round at half a wall whose outer face stands flush on a chamfered rim (ops#640, the
+    replica's #150, refused by F1 as "a vertex where 4 edges meet"). The cone meets each outer
+    foot only through the rim, which lies in the plate's top, and lies wholly below it; the round
+    ends on the plate's top as it does on a plain plate (FR1 at each end), and the plate, its cone
+    included, is untouched."""
+
+    def check(self, inset, chamfer, feet):
+        shape, edges, wi, wo = wall_on_a_chamfered_rim(inset, chamfer)
+        self.assertEqual(len(edges), 4)
+        self.assertEqual(
+            sorted(edge_count_at(shape, min(e.Vertexes, key=lambda v: v.Point.z).Point) for e in edges),
+            feet,
+        )
+        section, removed, side = wall_end_round(wi, wo, 4.0)
+        result = shape.makeFillet((wo - wi) / 2, edges)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        expected = shape.Volume - 2 * removed
+        self.assertAlmostEqual(result.Volume, expected, delta=1e-6 * expected)
+        # The plate is untouched: below its top the result is the plate, the cone's area unchanged
+        below = Part.makeBox(40, 40, 1.5875, V(-20, -20, -1.5875))
+        self.assertAlmostEqual(
+            result.common(below).Volume, shape.common(below).Volume, delta=1e-6 * expected
+        )
+        def cones(s):
+            return sum(f.Area for f in s.Faces if f.Surface.TypeId == "Part::GeomCone")
+        self.assertGreater(cones(shape), 0)
+        self.assertAlmostEqual(cones(result), cones(shape), delta=1e-6)
+
+    def testFullRoundOfAWallFlushOnAChamferedRim(self):
+        for chamfer in (1.5875, 0.8):
+            with self.subTest(chamfer=chamfer):
+                self.check(0.0, chamfer, [3, 3, 4, 4])
+
+    def testFullRoundOfAWallInsideAChamferedRim(self):
+        # The control: the wall 0.2 inside the rim, three edges at every foot (F1 built it)
+        self.check(0.2, 1.5875, [3, 3, 3, 3])
