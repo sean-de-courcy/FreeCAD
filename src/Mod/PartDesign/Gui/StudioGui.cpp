@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <string_view>
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -430,7 +431,8 @@ private:
             return;
         }
         updating = true;
-        const bool isNew = isNewResult(owner);
+        // A part pattern switched to Add with no tick yet still stores New (Union, no scope)
+        const bool isNew = isNewResult(owner) && !pendingAdd;
         const std::string op = operationOf(owner);
         int index = 1;
         if (isNew) {
@@ -594,6 +596,19 @@ private:
             return;
         }
         live = false;  // the person chose: never picked for them again
+        if (newIsEmptyScope(owner)) {
+            // A part pattern's Add with no tick is its New until a part is ticked (T2)
+            const bool wasPending = pendingAdd;
+            pendingAdd = index == 1;
+            if (index == 1 && isNewResult(owner)) {
+                refresh();
+                return;
+            }
+            if (index == 0 && wasPending && isNewResult(owner)) {
+                refresh();
+                return;
+            }
+        }
         const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
         const bool wasNew = isNewResult(owner);
         const std::string op = operationOf(owner);
@@ -633,12 +648,7 @@ private:
             }
             const char* ops[] = {"Union", "Union", "Subtraction", "Common"};
             commands.push_back(ownerCmd + ".Operation = '" + ops[index] + "'");
-            if (wasNew && newIsEmptyScope(owner)) {
-                // A part pattern's copies are its records' parts: the App's resync and the OK's
-                // studioMakePieces settle them; the scope stays empty until a tick (Q1b, Q1d)
-                commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
-            }
-            else if (wasNew) {
+            if (wasNew) {
                 // Onshape (Q1b, Q1d): a hand switch from New fills no scope
                 leaveNew(owner, commands);
             }
@@ -680,8 +690,25 @@ private:
         else {
             return;
         }
-        run({"PartDesign.studioSetScopeIds(" + Gui::Command::getObjectCmd(owner) + ", "
-             + pyList(ids) + ")"});
+        std::vector<std::string> commands;
+        if (on && newIsEmptyScope(owner) && isNewResult(owner)) {
+            // A part pattern's Add chosen (pendingAdd): its first tick leaves New, whose copies'
+            // parts go as a switch from New takes them (T2), unless one holds later features
+            const auto made = partsMadeBy(owner);
+            const QStringList later = laterFeatures(owner, made);
+            if (!later.isEmpty()) {
+                refusal = trStudio("%1 has later features: %2. Leaving New would delete them; "
+                                   "delete or move them first.")
+                              .arg(made.empty() ? QString() : studioPartName(made.front()),
+                                   later.join(QStringLiteral(", ")));
+                QMetaObject::invokeMethod(this, [this]() { refresh(); }, Qt::QueuedConnection);
+                return;
+            }
+            leaveNew(owner, commands);
+        }
+        commands.push_back("PartDesign.studioSetScopeIds(" + Gui::Command::getObjectCmd(owner) + ", "
+                           + pyList(ids) + ")");
+        run(commands);
         recompute();
         // After the itemChanged signal: the list is rebuilt
         QPointer<QListWidget> list(ticks);
@@ -788,6 +815,8 @@ private:
     bool live = false;
     bool deciding = false;
     bool pending = false;
+    /// A part pattern's Add chosen while its scope is empty (stored as New until a tick, T2)
+    bool pendingAdd = false;
 };
 
 /** A Boolean studio feature's parts (ops#654 P5, Onshape O3): Targets and Tools, one tick per part
@@ -1107,7 +1136,7 @@ private:
         if (obj->isDerivedFrom<PartDesign::Mirrored>()) {
             return "PartDesign_Mirrored";
         }
-        return std::strcmp(obj->getTypeId().getName(), "PartDesign::PolarPattern") == 0
+        return std::string_view(obj->getTypeId().getName()) == "PartDesign::PolarPattern"
             ? "PartDesign_PolarPattern"
             : "PartDesign_LinearPattern";
     }

@@ -3748,8 +3748,9 @@ static bool prepareStudioPartPattern(Gui::Command* cmd, const std::string& which
             studio = own;
         }
     }
-    else if (PartDesignGui::getBody(/*messageIfNot = */ false)) {
-        return false;  // a Body is active: today's pattern of its features
+    else if (PartDesignGui::getBody(/*messageIfNot = */ false, /*autoActivate = */ false)) {
+        return false;  // a Body is active: today's pattern of its features (a lone Body isn't
+                       // made active for it: with nothing picked it is the part pattern's case)
     }
     else {
         studio = PartDesignGui::getActivePart();

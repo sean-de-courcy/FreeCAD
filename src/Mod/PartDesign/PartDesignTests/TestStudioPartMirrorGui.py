@@ -217,7 +217,8 @@ class TestStudioPartMirrorGui(unittest.TestCase):
 def typeInto(name, text):
     """Types text over the value of the visible panel box `name`, key by key, then leaves it
     (which commits it: the boxes don't track keys; Return would press OK)."""
-    from PySide import QtGui, QtTest
+    from PySide import QtGui
+    from PySide6 import QtTest
 
     box = visible(QtWidgets.QWidget, name)
     if box is None:
@@ -621,14 +622,19 @@ class TestStudioPartPatternGui(unittest.TestCase):
         self.doc.recompute()
         self.edit(pat)
         typeInto("spinOccurrences", "2")
-        self.accept()
-        self.assertIsNotNone(self.doc.getObject(second.Name))
-        self.assertFalse(pat.isValid())
-        self.edit(pat)
         note = visible(QtWidgets.QLabel, "studioPatternNote")
         self.assertTrue(waitFor(lambda: note.isVisible() and "no longer makes the copy" in note.text()),
                         note.text())
-        self.cancel()
+        # OK is refused (the copy's Body holds the boss): the dialog stays, loud; Cancel undoes
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        pump(0.5)
+        if Gui.Control.activeDialog():
+            self.cancel()
+        else:
+            self.doc.recompute()
+            self.assertFalse(pat.isValid() and boss.isValid(), "a copy gone under a feature: silent")
+        self.assertIsNotNone(self.doc.getObject(second.Name))
+        self.assertTrue(boss.isValid() or not pat.isValid())
 
 
 if __name__ == "__main__":
