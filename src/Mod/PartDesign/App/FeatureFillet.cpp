@@ -46,6 +46,9 @@ using namespace PartDesign;
 
 namespace PartDesign
 {
+// FeatureDressUp.cpp (ops#640 F2, Onshape's failure text; declared where used)
+PartDesignExport std::string dressUpFailure(const char* verb, const std::string& what);
+PartDesignExport bool isDressUpFailure(const std::string& what);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
 PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
@@ -251,19 +254,20 @@ App::DocumentObjectExecReturn* Fillet::execute()
         this->Shape.setValue(shape);
         return App::DocumentObject::StdReturn;
     }
+    // ops#640 F2: Onshape's "Failed to fillet selections" with the exact construction's reason,
+    // never OCCT's raw text (row 104's "TopOpeBRepDS_DataStructure::Point")
     catch (Base::Exception& e) {
-        return new App::DocumentObjectExecReturn(e.what());
+        const std::string what = e.what();
+        return new App::DocumentObjectExecReturn(
+            isDressUpFailure(what) ? dressUpFailure("fillet", what) : what
+        );
     }
     catch (Standard_Failure& e) {
-        return new App::DocumentObjectExecReturn(e.GetMessageString());
+        const char* what = e.GetMessageString();
+        return new App::DocumentObjectExecReturn(dressUpFailure("fillet", what ? what : ""));
     }
     catch (...) {
-        return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-            "Exception",
-            "Fillet operation failed. The selected edges may contain geometry that cannot be "
-            "filleted together. "
-            "Try filleting edges individually or with a smaller radius."
-        ));
+        return new App::DocumentObjectExecReturn(dressUpFailure("fillet", ""));
     }
 }
 

@@ -21,6 +21,7 @@ from . import TestCrossBody
 from . import TestDatum
 from . import TestDraft
 from . import TestFillet
+from . import TestFilletFailureText
 from . import TestFilletPropagation
 from . import TestHelix
 from . import TestHole

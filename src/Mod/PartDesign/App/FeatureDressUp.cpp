@@ -57,6 +57,8 @@
 #include <TopExp_Explorer.hxx>
 
 #include <cstring>
+#include <regex>
+#include <string>
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -868,4 +870,73 @@ PartDesignExport TopoDS_Shape runOutCut(
     }
     return count ? TopoDS_Shape(touching) : TopoDS_Shape();
 }
+}  // namespace PartDesign
+
+// FreeCAD-CH ops#640 F2: a fillet's or chamfer's failure in Onshape's words (design F, row 104)
+namespace
+{
+/// Whether text is OCCT's or C++'s own words rather than the fork's: an OCCT class or exception
+/// name ("TopOpeBRepDS_DataStructure::Point", "Standard_OutOfRange", "BRep_API: ..."), the
+/// exact construction's "OCCT: ..." relay, "command not done", or nothing at all
+bool isKernelText(const std::string& text)
+{
+    static const std::regex internal(
+        R"(\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b(?:TopoDS|Base|Part|std)::\w+|)"
+        R"(command not done|Unknown C\+\+ exception|^\s*OCCT:)"
+    );
+    return text.find_first_not_of(" \t\r\n") == std::string::npos
+        || std::regex_search(text, internal);
+}
+}  // namespace
+
+namespace PartDesign
+{
+
+/** The message of a fillet or chamfer that failed, as Onshape's: "Failed to fillet selections"
+ * with the exact construction's reason after it, and never OCCT's raw text.
+ *
+ * TopoShape::makeElementFillet() and makeElementChamfer() raise OCCT's error with the reason
+ * appended, "BRep_API: command not done (exact construction refused: <reason>)", or the fork's
+ * own thin-face error, which names the reason too; OCCT's other errors come as they are.
+ *
+ * @param verb "fillet" or "chamfer"
+ * @param what The error's text
+ * @return "Failed to <verb> selections: <reason>", with a hint where no reason is readable
+ */
+PartDesignExport std::string dressUpFailure(const char* verb, const std::string& what)
+{
+    static const std::string marker = "exact construction refused: ";
+    std::string reason;
+    const std::size_t at = what.find(marker);
+    if (at != std::string::npos && at > 0 && what[at - 1] == '(') {
+        // OCCT's error with the reason in parentheses: the reason alone
+        reason = what.substr(at + marker.size());
+        if (!reason.empty() && reason.back() == ')') {
+            reason.pop_back();
+        }
+        if (isKernelText(reason)) {
+            reason.clear();
+        }
+    }
+    else if (!isKernelText(what)) {
+        reason = what;
+    }
+    else if (at != std::string::npos && !isKernelText(what.substr(at + marker.size()))) {
+        reason = what.substr(at + marker.size());
+    }
+    const std::string verbText(verb);
+    if (reason.empty()) {
+        reason = "the geometry kernel could not build it; try a smaller "
+            + std::string(verbText == "fillet" ? "radius" : "size") + " or fewer edges";
+    }
+    return "Failed to " + verbText + " selections: " + reason;
+}
+
+/// Whether a dress-up's error is reworded by dressUpFailure(): OCCT's text, or one that carries
+/// the exact construction's reason. The fork's other errors (a time limit, Esc) stay as they are.
+PartDesignExport bool isDressUpFailure(const std::string& what)
+{
+    return isKernelText(what) || what.find("exact construction refused: ") != std::string::npos;
+}
+
 }  // namespace PartDesign
