@@ -2066,7 +2066,7 @@ App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
 /// document's frame: each instance of a New original (never fused, never merged into its part:
 /// Onshape Q1), and each instance of an Add over parts that joins none of them (Q7); a compound,
 /// null when there are none. Pieces.cpp's leftoverSolids for a pattern (its pieces' source)
-Part::TopoShape PartDesign::studioPatternLeftovers(const App::DocumentObject* obj)
+Part::TopoShape studioPatternLeftovers(const App::DocumentObject* obj)
 {
     auto pattern = freecad_cast<const Transformed*>(obj);
     if (!pattern || !isStudioFeaturePattern(obj)
