@@ -57,8 +57,12 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentTabs.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
+#include <App/GeoFeatureGroupExtension.h>
+#include <App/GroupExtension.h>
+#include <App/PropertyPythonObject.h>
 #include <App/PropertyStandard.h>
 #include <App/PropertyUnits.h>
 #include <App/Range.h>
@@ -230,6 +234,238 @@ bool isNumeric(const App::Property* prop)
 {
     return freecad_cast<const App::PropertyFloat*>(prop)
         || freecad_cast<const App::PropertyInteger*>(prop);
+}
+
+// FreeCAD-CH (ops#640, measured variables 2): a measured variable's row (design note section 6).
+// Not in the header's Role enum, so that only this file rebuilds.
+constexpr int MeasuredRole = Qt::UserRole + 50;
+// The Add dialog's Type data of a measured kind: this prefix, then the kind ("Length").
+constexpr const char* measuredTypePrefix = "Measured:";
+
+/// The measurement @a prop of @a holder reads: its expression is `<object>.Value` and that object
+/// has a MeasuredVariable proxy (freecad.variables.measured); else nullptr.
+App::DocumentObject* measurementOf(const App::DocumentObject* holder, const App::Property* prop)
+{
+    if (!holder || !prop) {
+        return nullptr;
+    }
+    auto info = holder->getExpression(App::ObjectIdentifier(*prop));
+    auto variable = dynamic_cast<const App::VariableExpression*>(info.expression.get());
+    if (!variable) {
+        return nullptr;
+    }
+    App::ObjectIdentifier path = variable->getPath();
+    App::DocumentObject* obj = path.getDocumentObject();
+    if (!obj || path.getPropertyName() != "Value" || !obj->getPropertyByName("ReferenceNames")) {
+        return nullptr;
+    }
+    auto proxy = freecad_cast<App::PropertyPythonObject*>(obj->getPropertyByName("Proxy"));
+    if (!proxy) {
+        return nullptr;
+    }
+    Base::PyGILStateLocker lock;
+    try {
+        Py::Object value = proxy->getValue();
+        if (value.isNone()) {
+            return nullptr;
+        }
+        Py::Object name = value.type().getAttr("__name__");
+        return Py::String(name).as_std_string("utf-8") == "MeasuredVariable" ? obj : nullptr;
+    }
+    catch (Py::Exception&) {
+        PyErr_Clear();
+    }
+    return nullptr;
+}
+
+/// Whether @a obj is a measured variable's own holder: a VarSet whose every variable is measured
+/// (freecad.variables.measured.is_measured_holder). Its rows show under its studio's own set, and
+/// it is never an Add target.
+bool isMeasuredHolder(const App::DocumentObject* obj)
+{
+    if (!obj || obj->getTypeId() != App::VarSet::getClassTypeId()) {
+        return false;
+    }
+    std::vector<std::string> names = obj->getDynamicPropertyNames();
+    if (names.empty()) {
+        return false;
+    }
+    for (const auto& name : names) {
+        if (!measurementOf(obj, obj->getPropertyByName(name.c_str()))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The studio's own set a measured variable's holder belongs with: the first VarSet of its
+/// App::Part that is no holder, or for the implicit studio (the top level) the one named, else
+/// labelled, "Variables" (freecad.variables.measured.studio_variables).
+App::DocumentObject* studioSetOf(const App::DocumentObject* holder)
+{
+    auto isOwnSet = [](const App::DocumentObject* obj) {
+        return obj && obj->getTypeId() == App::VarSet::getClassTypeId()
+            && !App::DocumentTabs::isVariableStudio(obj) && !isMeasuredHolder(obj);
+    };
+    if (App::DocumentObject* group = App::GeoFeatureGroupExtension::getGroupOfObject(holder)) {
+        if (auto ext = group->getExtensionByType<App::GroupExtension>(true)) {
+            for (auto obj : ext->Group.getValues()) {
+                if (isOwnSet(obj)) {
+                    return obj;
+                }
+            }
+        }
+        return nullptr;
+    }
+    App::Document* doc = holder->getDocument();
+    App::DocumentObject* named = doc->getObject("Variables");
+    if (isOwnSet(named) && !App::GeoFeatureGroupExtension::getGroupOfObject(named)) {
+        return named;
+    }
+    for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        if (isOwnSet(obj) && !App::GeoFeatureGroupExtension::getGroupOfObject(obj)
+            && std::string(obj->Label.getValue()) == "Variables") {
+            return obj;
+        }
+    }
+    return nullptr;
+}
+
+/// A measured variable's holder shows no header of its own: its row moves under its studio's
+/// set, where Onshape lists every variable of the studio. A holder whose set isn't listed keeps
+/// its header.
+void foldMeasuredHolders(QStandardItemModel* model, const App::Document* doc)
+{
+    using Model = Gui::DockWnd::VariablesModel;
+    auto headerOf = [model](const App::DocumentObject* holder) -> QStandardItem* {
+        const QString name = QString::fromLatin1(holder->getNameInDocument());
+        for (int row = 0; row < model->rowCount(); ++row) {
+            QStandardItem* header = model->item(row, 0);
+            if (header && header->data(Model::KindRole).toInt() == Model::HeaderKind
+                && header->data(Model::HolderRole).toString() == name) {
+                return header;
+            }
+        }
+        return nullptr;
+    };
+    for (int row = model->rowCount() - 1; row >= 0; --row) {
+        QStandardItem* header = model->item(row, 0);
+        if (!header || header->data(Model::KindRole).toInt() != Model::HeaderKind) {
+            continue;
+        }
+        App::DocumentObject* holder
+            = doc->getObject(header->data(Model::HolderRole).toString().toLatin1().constData());
+        if (!isMeasuredHolder(holder)) {
+            continue;
+        }
+        App::DocumentObject* set = studioSetOf(holder);
+        if (!set) {
+            continue;
+        }
+        QStandardItem* target = headerOf(set);
+        if (!target) {
+            // The studio's set has no variables of its own, so no header: this one becomes it
+            const QString label = QString::fromUtf8(set->Label.getValue());
+            header->setText(label);
+            header->setData(QString::fromLatin1(set->getNameInDocument()), Model::HolderRole);
+            header->setToolTip(QString::fromLatin1(set->getNameInDocument()));
+            continue;
+        }
+        if (target == header) {
+            continue;
+        }
+        while (header->rowCount() > 0) {
+            target->appendRow(header->takeRow(0));
+        }
+        model->removeRow(header->row());
+    }
+}
+
+/// What a measurement reads, for the Expression column: "Length of Pad.Edge3, Pad.Edge7",
+/// "Distance (minimum, use axis) of Pad.Face1, Sketch.Edge2", "Distance along X (maximum) of ...",
+/// "Radius of Pad.Edge4". The references as last measured.
+QString measurementText(const App::DocumentObject* measurement)
+{
+    auto kind = freecad_cast<const App::PropertyEnumeration*>(
+        measurement->getPropertyByName("Kind")
+    );
+    auto type = freecad_cast<const App::PropertyEnumeration*>(
+        measurement->getPropertyByName("DistanceType")
+    );
+    auto names = freecad_cast<const App::PropertyStringList*>(
+        measurement->getPropertyByName("ReferenceNames")
+    );
+    QString what = kind && kind->getValueAsString()
+        ? QString::fromUtf8(kind->getValueAsString())
+        : QStringLiteral("?");
+    QStringList refs;
+    if (names) {
+        for (const auto& name : names->getValues()) {
+            refs << QString::fromStdString(name);
+        }
+    }
+    auto flag = [measurement](const char* name) {
+        auto prop = freecad_cast<const App::PropertyBool*>(measurement->getPropertyByName(name));
+        return prop && prop->getValue();
+    };
+    if (what == QLatin1String("Distance")) {
+        auto record = freecad_cast<const App::PropertyEnumeration*>(
+            measurement->getPropertyByName("ValueToRecord")
+        );
+        bool maximum = type && type->getValueAsString()
+            && std::string(type->getValueAsString()) == "Maximum";
+        QString mode = maximum
+            ? QCoreApplication::translate("Gui::DockWnd::VariablesModel", "maximum")
+            : flag("UseAxis")
+            ? QCoreApplication::translate("Gui::DockWnd::VariablesModel", "minimum, use axis")
+            : QCoreApplication::translate("Gui::DockWnd::VariablesModel", "minimum");
+        std::string axis = record && record->getValueAsString() ? record->getValueAsString() : "";
+        if (axis == "X" || axis == "Y" || axis == "Z") {
+            // "Distance along X (minimum) of Pad.Edge1, Pad.Edge2"
+            return QCoreApplication::translate("Gui::DockWnd::VariablesModel",
+                                               "Distance along %1 (%2) of %3")
+                .arg(QString::fromStdString(axis), mode, refs.join(QStringLiteral(", ")));
+        }
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Distance (%1) of %2")
+            .arg(mode, refs.join(QStringLiteral(", ")));
+    }
+    if (what == QLatin1String("Diameter") && flag("Radius")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Radius of %1")
+            .arg(refs.join(QStringLiteral(", ")));
+    }
+    return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "%1 of %2")
+        .arg(QCoreApplication::translate("Gui::DockWnd::VariablesModel", what.toUtf8().constData()),
+             refs.join(QStringLiteral(", ")));
+}
+
+/// The measured kind's word for the Source column: "measured length".
+QString measuredWords(const App::DocumentObject* measurement)
+{
+    auto kind = freecad_cast<const App::PropertyEnumeration*>(
+        measurement->getPropertyByName("Kind")
+    );
+    QString what = kind && kind->getValueAsString()
+        ? QString::fromUtf8(kind->getValueAsString()).toLower()
+        : QString();
+    return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "measured %1").arg(what);
+}
+
+/// Runs freecad.variables.measuredgui.<function>(args...) and returns its text: "" when it
+/// opened, else why not (a Python error's message included).
+QString runMeasuredGui(const char* function, const Py::Tuple& args)
+{
+    Base::PyGILStateLocker lock;
+    try {
+        Py::Module module(PyImport_ImportModule("freecad.variables.measuredgui"), true);
+        Py::Callable call(module.getAttr(function));
+        Py::Object result = call.apply(args);
+        return result.isString() ? QString::fromStdString(Py::String(result).as_std_string("utf-8"))
+                                 : QString();
+    }
+    catch (Py::Exception&) {
+        Base::PyException e;
+        return QString::fromStdString(e.what());
+    }
 }
 
 /// Recomputes @a doc after an edit, inside the edit's transaction (one undo step), as the property
@@ -770,6 +1006,9 @@ void VariablesModel::rebuild(const App::Document* doc)
     if (newRow) {
         addNewRow(doc);
     }
+    if (scope.empty()) {
+        foldMeasuredHolders(this, doc);
+    }
 }
 
 void VariablesModel::addNewRow(const App::Document* doc)
@@ -911,7 +1150,44 @@ void VariablesModel::addHolderRows(
         if (!description.isEmpty()) {
             descriptionItem->setToolTip(description);
         }
-        if (holder->isError() && !expression.isEmpty()) {
+        // FreeCAD-CH (ops#640, measured variables 2): a measured variable shows what it reads and
+        // is marked in Source; its own measurement's error (a lost reference) marks it failed.
+        App::DocumentObject* measurement = sheet ? nullptr : measurementOf(holder, prop);
+        if (measurement) {
+            QString reads = measurementText(measurement);
+            exprItem->setText(reads);
+            exprItem->setData(reads, EditTextRole);
+            sourceItem->setText(measuredWords(measurement));
+            for (auto item : row) {
+                item->setData(true, MeasuredRole);
+                item->setToolTip(tr("%1: %2 (double-click to change what it measures)")
+                                     .arg(varName, measuredWords(measurement)));
+            }
+        }
+        if (measurement && measurement->isError()) {
+            QString why = QString::fromUtf8(measurement->getStatusString());
+            // Its users fail with it (FreeCAD marks them "'<measurement>' has an error")
+            QStringList users;
+            for (const auto& use : App::VariableLookup::uses(prop)) {
+                if (use.user && use.user != holder && use.user->isError()) {
+                    QString user = QString::fromUtf8(use.user->Label.getValue());
+                    if (!users.contains(user)) {
+                        users << user;
+                    }
+                }
+            }
+            QString tip = tr("%1 failed: %2").arg(varName, why);
+            if (!users.isEmpty()) {
+                tip += QLatin1Char('\n') + tr("Failed with it: %1").arg(users.join(QStringLiteral(", ")));
+            }
+            nameItem->setForeground(Qt::red);
+            valueItem->setForeground(Qt::red);
+            valueItem->setText(tr("failed"));
+            for (auto item : row) {
+                item->setToolTip(tip);
+            }
+        }
+        else if (holder->isError() && !expression.isEmpty()) {
             valueItem->setForeground(Qt::red);
             valueItem->setToolTip(QString::fromUtf8(holder->getStatusString()));
         }
@@ -937,8 +1213,11 @@ Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
     if (kind(index) == NewKind) {
         return index.column() == NameColumn ? result | Qt::ItemIsEditable : result;
     }
+    // A measured variable's expression is its measurement: changed in its dialog (double-click)
+    const bool measuredRow = index.data(MeasuredRole).toBool();
     if (kind(index) != HeaderKind
-        && (index.column() == NameColumn || index.column() == ExpressionColumn)) {
+        && (index.column() == NameColumn
+            || (index.column() == ExpressionColumn && !measuredRow))) {
         result |= Qt::ItemIsEditable;
     }
     if (kind(index) == VarSetKind && index.column() == DescriptionColumn) {
@@ -1904,16 +2183,17 @@ void VariablesView::rebuild()
         tree->setFirstColumnSpanned(row, QModelIndex(), true);
         QString holder = header.data(VariablesModel::HolderRole).toString();
         tree->setExpanded(header, !collapsed.contains(headerKey(header)));
-        if (holder != currentHolder) {
-            continue;
-        }
         if (currentVariable.isEmpty()) {
-            tree->setCurrentIndex(header);
+            if (holder == currentHolder) {
+                tree->setCurrentIndex(header);
+            }
             continue;
         }
+        // Each row's own holder: a measured variable's row sits under its studio's set (ops#640)
         for (int child = 0; child < model->rowCount(header); ++child) {
             QModelIndex index = model->index(child, currentColumn, header);
-            if (index.data(VariablesModel::VariableRole).toString() == currentVariable) {
+            if (index.data(VariablesModel::HolderRole).toString() == currentHolder
+                && index.data(VariablesModel::VariableRole).toString() == currentVariable) {
                 tree->setCurrentIndex(index);
             }
         }
@@ -1979,6 +2259,31 @@ void VariablesView::onCommitFailed(const QModelIndex& index, const QString& text
 
 void VariablesView::onDoubleClicked(const QModelIndex& index)
 {
+    // FreeCAD-CH (ops#640, measured variables 2): a measured variable reopens its dialog, as an
+    // Onshape Variable feature opens for editing (the name stays editable in place).
+    if (index.data(MeasuredRole).toBool() && index.column() != VariablesModel::NameColumn
+        && index.column() != VariablesModel::DescriptionColumn) {
+        App::DocumentObject* obj = VariablesModel::holder(index);
+        if (!obj) {
+            return;
+        }
+        QString error;
+        {
+            Base::PyGILStateLocker lock;
+            Py::Tuple holderName(2);
+            holderName.setItem(0, Py::String(obj->getDocument()->getName()));
+            holderName.setItem(1, Py::String(obj->getNameInDocument()));
+            Py::Tuple call(2);
+            call.setItem(0, holderName);
+            call.setItem(
+                1,
+                Py::String(index.data(VariablesModel::VariableRole).toString().toStdString())
+            );
+            error = runMeasuredGui("edit", call);
+        }
+        showMessage(error, !error.isEmpty());
+        return;
+    }
     if (index.column() != VariablesModel::SourceColumn
         && VariablesModel::kind(index) != VariablesModel::HeaderKind) {
         return;
@@ -2004,7 +2309,7 @@ App::DocumentObject* VariablesView::addTarget() const
     // The selected row's VarSet, else the document's "Variables" VarSet; never a copy that is
     // still attached to its source (ops#317: its variables are read-only).
     if (App::DocumentObject* obj = VariablesModel::holder(tree->currentIndex())) {
-        if (isEditableSet(obj)) {
+        if (isEditableSet(obj) && !isMeasuredHolder(obj)) {
             return obj;
         }
     }
@@ -2051,6 +2356,15 @@ void VariablesView::addVariable()
     typeBox->addItem(tr("Number"), QByteArray("App::PropertyFloat"));
     typeBox->addItem(tr("Yes/No"), QByteArray("App::PropertyBool"));
     typeBox->addItem(tr("Text"), QByteArray("App::PropertyString"));
+    // FreeCAD-CH (ops#640, measured variables 2): Onshape's Variable feature in the measured
+    // mode. OK opens the measured variable dialog, which takes picks in the 3D view; Distance's
+    // minimum or center to center is chosen there.
+    if (studioName.empty()) {  // a Variable Studio has no geometry to measure
+        typeBox->insertSeparator(typeBox->count());
+        typeBox->addItem(tr("Measured distance"), QByteArray(measuredTypePrefix) + "Distance");
+        typeBox->addItem(tr("Measured length"), QByteArray(measuredTypePrefix) + "Length");
+        typeBox->addItem(tr("Measured diameter"), QByteArray(measuredTypePrefix) + "Diameter");
+    }
     auto valueEdit = new ExpressionLineEdit(dialog);
     valueEdit->setObjectName(QStringLiteral("value"));
     valueEdit->setValidator(nullptr);  // as in the Expression column: '=' starts an expression
@@ -2064,6 +2378,9 @@ void VariablesView::addVariable()
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
         if (!isEditableSet(obj)) {
             continue;  // an attached copy (ops#317)
+        }
+        if (isMeasuredHolder(obj)) {
+            continue;  // a measured variable's own set (ops#640): it holds that variable only
         }
         if (!studioName.empty() && obj != target) {
             continue;  // a Variable Studio's Add: the studio only
@@ -2134,6 +2451,24 @@ void VariablesView::addVariable()
     layout->addWidget(errorLabel);
     layout->addWidget(buttons);
 
+    // A measured kind: the value comes from the picks, and the variable goes into the active Part
+    // Studio's own set.
+    auto onType = [=](int) {
+        const bool measuredKind
+            = typeBox->currentData().toByteArray().startsWith(measuredTypePrefix);
+        valueEdit->setEnabled(!measuredKind);
+        setBox->setEnabled(!measuredKind);
+        valueEdit->setPlaceholderText(
+            measuredKind ? tr("Picked in the 3D view after OK")
+                         : tr("A value, or an expression with #name")
+        );
+        setBox->setToolTip(
+            measuredKind ? tr("A measured variable goes into its Part Studio's variables")
+                         : QString()
+        );
+    };
+    connect(typeBox, qOverload<int>(&QComboBox::currentIndexChanged), dialog, onType);
+
     QPointer<VariablesView> view(this);
     connect(buttons, &QDialogButtonBox::accepted, dialog, [=] {
         if (!view) {
@@ -2142,6 +2477,30 @@ void VariablesView::addVariable()
         }
         QByteArray type = typeBox->currentData().toByteArray();
         QString error;
+        if (type.startsWith(measuredTypePrefix)) {
+            // The measured variable dialog checks the name against the studio's set and opens;
+            // nothing is made before its OK.
+            {
+                Base::PyGILStateLocker lock;
+                Py::Tuple args(4);
+                args.setItem(0, Py::String(docName));
+                args.setItem(1, Py::String(nameEdit->text().trimmed().toStdString()));
+                args.setItem(
+                    2,
+                    Py::String(type.mid(int(std::strlen(measuredTypePrefix))).toStdString())
+                );
+                args.setItem(3, Py::String(descriptionEdit->toPlainText().toStdString()));
+                error = runMeasuredGui("start", args);
+            }
+            if (error.isEmpty()) {
+                view->showMessage(QString(), false);
+                dialog->accept();
+                return;
+            }
+            errorLabel->setText(error);
+            errorLabel->show();
+            return;
+        }
         // FreeCAD-CH (ops#640, decision 317): a name an imported copy has: asked before anything
         // is made; Cancel keeps the dialog as it is.
         std::string clashChoice;
@@ -2568,18 +2927,37 @@ void VariablesView::deleteVariable()
     }
     else {
         uses = usesText(current, &count);
+        // FreeCAD-CH (ops#640, measured variables 2): a measured variable goes with its
+        // measurement, and with its own set when it was that set's only variable.
+        App::DocumentObject* measurement = measurementOf(obj, VariablesModel::property(current));
+        const bool lastOfHolder = measurement && isMeasuredHolder(obj)
+            && obj->getDynamicPropertyNames().size() == 1;
         commands.push_back(pyObject(obj) + ".removeProperty(" + pyString(name) + ")");
+        std::vector<std::string> removals;  // after the touches below
+        if (measurement) {
+            removals.push_back(
+                "App.getDocument(" + pyString(docName) + ").removeObject("
+                + pyString(measurement->getNameInDocument()) + ")"
+            );
+        }
+        if (lastOfHolder) {
+            removals.push_back(
+                "App.getDocument(" + pyString(docName) + ").removeObject(" + pyString(holderName)
+                + ")"
+            );
+        }
         // Its users, the VarSet itself included, fail at the edit's recompute (D4, ops#599): touch
         // them, as nothing else would.
         std::set<const App::DocumentObject*> users;
         if (App::Property* prop = VariablesModel::property(current)) {
             for (const auto& use : App::VariableLookup::uses(prop)) {
                 if (use.user && use.user->isAttachedToDocument()
-                    && users.insert(use.user).second) {
+                    && !(lastOfHolder && use.user == obj) && users.insert(use.user).second) {
                     commands.push_back(pyObject(use.user) + ".touch()");
                 }
             }
         }
+        commands.insert(commands.end(), removals.begin(), removals.end());
     }
     if (count > 0) {
         QMessageBox box(

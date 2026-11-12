@@ -122,6 +122,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDerivedFiles.py
     PartDesignTests/TestDerivedFollowUps.py
     PartDesignTests/TestPartStudioVariables.py
+    PartDesignTests/TestMeasuredVariables.py
     PartDesignTests/TestResultCheck.py
     PartDesignTests/TestStudioPartMirror.py
     PartDesignTests/TestStudioTransform.py
@@ -144,6 +145,7 @@ if(BUILD_GUI)
         PartDesignTests/TestExtrudeFieldsGui.py
         PartDesignTests/TestNewSketchDialogGui.py
         PartDesignTests/TestOnshapeStudioGui.py
+        PartDesignTests/TestMeasuredVariablesGui.py
         PartDesignTests/TestRollBackBarGui.py
     PartDesignTests/TestFeaturesViewGui.py
         PartDesignTests/TestParkedMarkingGui.py

@@ -338,6 +338,25 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertIn("w", self.doc.getObject(name).PropertiesList)
         self.assertNotIn("w", other.PropertiesList)
 
+    def testAddOffersNoMeasuredVariable(self):
+        """Onshape's MV5: a Variable Studio holds no measured variable (no geometry to measure):
+        its Add offers none, and the measured variable dialog won't start there."""
+        name, view = self.studio()
+        self.action(view, "addVariable").trigger()
+        found = waitFor(lambda: [w for w in QtWidgets.QApplication.topLevelWidgets()
+                                 if w.objectName() == "addVariableDialog" and w.isVisible()])
+        self.assertTrue(found, "no Add variable dialog")
+        typeBox = found[0].findChild(QtWidgets.QComboBox, "type")
+        texts = [typeBox.itemText(i) for i in range(typeBox.count())]
+        self.assertTrue(texts)
+        self.assertFalse([t for t in texts if t.startswith("Measured")], texts)
+        found[0].reject()
+        pump(0.1)
+        from freecad.variables import measuredgui
+
+        self.assertIn("Part Studio", measuredgui.start(self.doc, "w", "Length"))
+        self.assertIsNone(measuredgui.current)
+
     def testDeleteTabClosesItsView(self):
         """Deleting the studio closes its window; undo brings the tab back, and a click opens a
         window again."""
