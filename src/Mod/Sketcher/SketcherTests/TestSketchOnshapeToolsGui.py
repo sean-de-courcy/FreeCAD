@@ -1108,3 +1108,109 @@ class TestSketchTrimPointsGui(SketchSplitTestCase):
         self.assertTrue(self.has_line(V(2, 5, 0), V(5, 5, 0)), f"Expected M's left piece gone: {self.sketch.Geometry}")
         self.assertEqual(len(self.arcs()), 1, "Expected R whole")
         self.assertEqual(self.modals["seen"], [])
+
+
+class TestSketchExtendGui(SketchSplitTestCase):
+    """Onshape GA3-25 (ops#640): Extend's first click picks the line, the second sets its end, but
+    the end stops at the first curve in its way, where the end is put on that curve (PointOnObject);
+    nothing in the way, it ends at the click and nothing is stored. Line A (0,5)-(6,5); line B
+    (9,0)-(9,10) across A's path."""
+
+    def build(self):
+        self.sketch.addGeometry(Part.LineSegment(V(0, 5, 0), V(6, 5, 0)), False)
+        self.sketch.addGeometry(Part.LineSegment(V(9, 0, 0), V(9, 10, 0)), False)
+
+    def start_extend(self):
+        self.modals = self.answer_modals()
+        self.start_edit()
+        FreeCADGui.runCommand("Sketcher_Extend")
+        self.flush_gui(200)
+
+    def pick_a_near_its_end(self):
+        self.trace((4.5, 5), (5.2, 5), (5.5, 5))
+        self.require_preselection()
+        self.click_at(5.5, 5.0)
+
+    def test_a_click_past_a_line_stops_the_end_on_it(self):
+        self.start_extend()
+        self.pick_a_near_its_end()
+        self.trace((7, 5), (10, 5), (12, 5))
+        self.click_at(12.0, 5.0)
+        end = self.sketch.getPoint(0, 2)
+        self.assertLess((end - V(9, 5, 0)).Length, 1e-9, f"Expected A's end on B at (9, 5), got {end}")
+        self.assertLess((self.sketch.getPoint(0, 1) - V(0, 5, 0)).Length, 1e-9, "Expected A's start kept")
+        found = [(c.Type, c.First, c.FirstPos, c.Second) for c in self.sketch.Constraints]
+        self.assertIn(("PointOnObject", 0, 2, 1), found)
+        self.assertEqual(self.modals["seen"], [])
+
+    def test_a_click_short_of_the_line_ends_there_and_stores_nothing(self):
+        self.start_extend()
+        self.pick_a_near_its_end()
+        self.trace((7, 5), (7.5, 5))
+        self.click_at(8.0, 5.0)
+        self.assert_near(self.sketch.getPoint(0, 2), 8, 5, "A's end")
+        self.assertEqual(len(self.sketch.Constraints), 0, f"Expected nothing stored: {self.sketch.Constraints}")
+        self.assertEqual(self.modals["seen"], [])
+
+
+class TestSketchTrimDragGui(SketchSplitTestCase):
+    """Onshape GA3-25 and sketch tools 1 extra 3 (ops#640): Trim by dragging. One drag with the
+    button held across several curves trims each to its boundaries, and a curve with no boundary is
+    deleted whole. V (0,5)-(8,5) crosses G1-G3, x = 2, 4, 6 from y 0 to 10; F1 and F2, x = 12 and 14
+    from y 0 to 10, cross nothing."""
+
+    def build(self):
+        self.sketch.addGeometry(Part.LineSegment(V(0, 5, 0), V(8, 5, 0)), False)
+        for x in (2, 4, 6, 12, 14):
+            self.sketch.addGeometry(Part.LineSegment(V(x, 0, 0), V(x, 10, 0)), False)
+
+    def start_trim(self):
+        self.modals = self.answer_modals()
+        self.start_edit()
+        FreeCADGui.runCommand("Sketcher_Trimming")
+        self.flush_gui(200)
+
+    def drag(self, *points):
+        """Presses at the first sketch point, moves through the others with the button held,
+        releases at the last."""
+        first = self.screen_point(*points[0])
+        self.move(self.viewport, first)
+        self.send_mouse(self.viewport, QtCore.QEvent.MouseButtonPress, first, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+        self.pump(80)
+        for x, y in points[1:]:
+            self.send_mouse(
+                self.viewport,
+                QtCore.QEvent.MouseMove,
+                self.screen_point(x, y),
+                QtCore.Qt.NoButton,
+                QtCore.Qt.LeftButton,
+            )
+            self.pump(80)
+        last = self.screen_point(*points[-1])
+        self.send_mouse(self.viewport, QtCore.QEvent.MouseButtonRelease, last, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+        self.flush_gui(150)
+
+    def test_a_drag_across_three_lines_trims_each_back_to_the_crossing_line(self):
+        self.start_trim()
+        self.trace((1.0, 8), (1.5, 8))
+        self.drag((1.0, 8), (1.6, 8), (2.0, 8), (2.4, 8), (3.6, 8), (4.0, 8), (4.4, 8), (5.6, 8), (6.0, 8), (6.4, 8), (7.0, 8))
+        if self.has_line(V(2, 0, 0), V(2, 10, 0)) and self.has_line(V(4, 0, 0), V(4, 10, 0)):
+            self.require_preselection()
+        for x in (2, 4, 6):
+            self.assertTrue(
+                self.has_line(V(x, 0, 0), V(x, 5, 0)), f"Expected G at x={x} trimmed to (x,0)-(x,5): {self.sketch.Geometry}"
+            )
+        self.assertTrue(self.has_line(V(0, 5, 0), V(8, 5, 0)), "Expected V whole")
+        self.assertEqual(len(self.lines()), 6, f"Expected nothing else changed: {self.sketch.Geometry}")
+        self.assertEqual(self.modals["seen"], [])
+
+    def test_a_drag_across_free_lines_deletes_them(self):
+        self.start_trim()
+        self.trace((11.0, 8), (11.5, 8))
+        self.drag((11.0, 8), (11.6, 8), (12.0, 8), (12.4, 8), (13.6, 8), (14.0, 8), (14.4, 8), (15.0, 8))
+        if self.has_line(V(12, 0, 0), V(12, 10, 0)) and self.has_line(V(14, 0, 0), V(14, 10, 0)):
+            self.require_preselection()
+        self.assertFalse(self.has_line(V(12, 0, 0), V(12, 10, 0)), f"Expected F1 deleted: {self.sketch.Geometry}")
+        self.assertFalse(self.has_line(V(14, 0, 0), V(14, 10, 0)), f"Expected F2 deleted: {self.sketch.Geometry}")
+        self.assertEqual(len(self.lines()), 4, f"Expected V and G1-G3 kept: {self.sketch.Geometry}")
+        self.assertEqual(self.modals["seen"], [])

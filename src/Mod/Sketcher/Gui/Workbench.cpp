@@ -490,6 +490,7 @@ inline void SketcherAddWorkbenchConstraints<Gui::MenuItem>(Gui::MenuItem& cons)
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
          << "Sketcher_ConstrainMidpoint"
+         << "Sketcher_ConstrainPierce"  // FreeCAD-CH (Onshape's Pierce)
          << "Sketcher_ConstrainSymmetric"
          << "Sketcher_ConstrainBlock"
          << "Sketcher_ConstrainGroup"
@@ -559,6 +560,7 @@ inline void SketcherAddWorkbenchConstraints<Gui::ToolBarItem>(Gui::ToolBarItem& 
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
          << "Sketcher_ConstrainMidpoint"
+         << "Sketcher_ConstrainPierce"  // FreeCAD-CH (Onshape's Pierce)
          << "Sketcher_ConstrainSymmetric"
          << "Sketcher_ConstrainBlock"
          << "Sketcher_ConstrainGroup";
@@ -732,6 +734,7 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
            << "Sketcher_ConstrainTangent"
            << "Sketcher_ConstrainEqual"
            << "Sketcher_ConstrainMidpoint"
+           << "Sketcher_ConstrainPierce"  // FreeCAD-CH (Onshape's Pierce)
            << "Sketcher_ConstrainSymmetric"
            << "Sketcher_ConstrainBlock";
 

@@ -52,6 +52,7 @@ SKETCH = [
     "Sketcher_ConstrainTangent",
     "Sketcher_ConstrainEqual",
     "Sketcher_ConstrainMidpoint",
+    "Sketcher_ConstrainPierce",  # Onshape's Pierce
     "Sketcher_ConstrainSymmetric",
     "Sketcher_ConstrainBlock",
 ]

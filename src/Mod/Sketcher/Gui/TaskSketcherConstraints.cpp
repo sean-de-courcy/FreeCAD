@@ -138,6 +138,9 @@ public:
             case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "Midpoint");
                 break;
+            case Sketcher::Pierce:  // FreeCAD-CH (Onshape's Pierce)
+                type = QCoreApplication::translate("SketcherGui::ConstraintView", "Pierce");
+                break;
             case Sketcher::Parallel:
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "Parallel");
                 break;
@@ -235,6 +238,7 @@ public:
                 case Sketcher::Coincident:
                 case Sketcher::PointOnObject:
                 case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                case Sketcher::Pierce:    // FreeCAD-CH (Onshape's Pierce)
                 case Sketcher::Parallel:
                 case Sketcher::Perpendicular:
                 case Sketcher::Tangent:
@@ -392,6 +396,8 @@ public:
                     return selicon(constraint, pntoo, pntoo);
                 case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
                     return selicon(constraint, midpt, midpt);
+                case Sketcher::Pierce:  // FreeCAD-CH (Onshape's Pierce): a coincidence
+                    return selicon(constraint, coinc, coinc);
                 case Sketcher::Group:
                     return selicon(constraint, group, group);
                 case Sketcher::Text:
@@ -478,6 +484,7 @@ public:
                 case Sketcher::Block:
                 case Sketcher::PointOnObject:
                 case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                case Sketcher::Pierce:    // FreeCAD-CH (Onshape's Pierce)
                 case Sketcher::Parallel:
                 case Sketcher::Perpendicular:
                 case Sketcher::Tangent:
@@ -1874,6 +1881,7 @@ bool TaskSketcherConstraints::isConstraintFiltered(QListWidgetItem* item)
                 break;
             case Sketcher::PointOnObject:
             case Sketcher::Midpoint:  // FreeCAD-CH (ops#656): a point kept on an object
+            case Sketcher::Pierce:    // FreeCAD-CH (Onshape's Pierce): likewise
                 visible = checkFilterBitset(multiFilterStatus, FilterValue::PointOnObject);
                 break;
             case Sketcher::Group:

@@ -12443,6 +12443,112 @@ void CmdSketcherConstrainMidpoint::applyConstraint(std::vector<SelIdPair>& selSe
 
 // ======================================================================================
 
+// FreeCAD-CH (Onshape's Pierce): a point of the sketch where a model edge crosses the sketch
+// plane, in one constraint (SketchObject::addPierce, which adds the edge's intersection as the
+// constraint's helper). Selection first only: a point, a line, a circle or an arc of the sketch
+// and a model edge, either order (addPierce refuses another curve with its reason).
+// The model edge isn't a model pick for ModelPickBooking (that would project it): it goes to
+// addPierce as picked.
+DEF_STD_CMD_A(CmdSketcherConstrainPierce)
+
+CmdSketcherConstrainPierce::CmdSketcherConstrainPierce()
+    : Command("Sketcher_ConstrainPierce")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Pierce");
+    sToolTipText = QT_TR_NOOP("Constrain a point to where an edge crosses the sketch plane");
+    sWhatsThis = "Sketcher_ConstrainPierce";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_Intersection";
+    sAccel = "";
+    eType = ForEdit;
+}
+
+void CmdSketcherConstrainPierce::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    auto* guiDocument = getActiveGuiDocument();
+    auto* vp = guiDocument ? dynamic_cast<ViewProviderSketch*>(guiDocument->getInEdit()) : nullptr;
+    if (!vp) {
+        return;
+    }
+    Sketcher::SketchObject* Obj = vp->getSketchObject();
+
+    int pointGeoId = GeoEnum::GeoUndef;
+    Sketcher::PointPos pointPos = Sketcher::PointPos::none;
+    int points = 0;
+    int others = 0;  // anything else picked
+    App::DocumentObject* edgeObject = nullptr;
+    std::string edgeName;
+    int edges = 0;
+    for (const auto& sel : Gui::Selection().getSelection(Obj->getDocument()->getName())) {
+        if (!sel.pObject) {
+            continue;
+        }
+        const std::string_view element(sel.SubName ? sel.SubName : "");
+        if (sel.pObject == Obj) {
+            int geoId = GeoEnum::GeoUndef;
+            Sketcher::PointPos pos = Sketcher::PointPos::none;
+            getIdsFromName(std::string(element), Obj, geoId, pos);
+            // the sketch's own point or curve (not the origin, nor external geometry: they
+            // can't move)
+            if (geoId >= 0 && (isVertex(geoId, pos) || isEdge(geoId, pos))) {
+                pointGeoId = geoId;
+                pointPos = pos;
+                ++points;
+            }
+            else {
+                ++others;
+            }
+            continue;
+        }
+        if (element.starts_with("Edge") && element.size() > 4) {
+            edgeObject = sel.pObject;
+            edgeName = std::string(element);
+            ++edges;
+        }
+        else {
+            ++others;
+        }
+    }
+    if (points != 1 || edges != 1 || others != 0) {
+        Gui::TranslatedUserWarning(Obj,
+                                   QObject::tr("Wrong selection"),
+                                   QObject::tr("Select one point or line of the sketch and one "
+                                               "model edge that crosses the sketch plane."));
+        return;
+    }
+
+    openCommand(QT_TRANSLATE_NOOP("Command", "Add pierce constraint"));
+    try {
+        Gui::cmdAppObjectArgs(Obj,
+                              "addPierce(%d,%d,'%s','%s')",
+                              pointGeoId,
+                              static_cast<int>(pointPos),
+                              edgeObject->getNameInDocument(),
+                              edgeName.c_str());
+    }
+    catch (const Base::Exception& e) {
+        // refused (the edge lies in the plane or misses it): nothing stays, as in Onshape
+        abortCommand();
+        Gui::TranslatedUserWarning(Obj,
+                                   QObject::tr("Cannot add the pierce constraint"),
+                                   QString::fromUtf8(e.what()));
+        return;
+    }
+    commitCommand();
+    tryAutoRecompute(Obj);
+    getSelection().clearSelection();
+}
+
+bool CmdSketcherConstrainPierce::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
+// ======================================================================================
+
 DEF_STD_CMD_A(CmdSketcherConstrainSnellsLaw)
 
 CmdSketcherConstrainSnellsLaw::CmdSketcherConstrainSnellsLaw()
@@ -13206,6 +13312,7 @@ void CreateSketcherCommandsConstraints()
     rcCmdMgr.addCommand(new CmdSketcherConstrainPointOnObject());
     rcCmdMgr.addCommand(new CmdSketcherConstrainSymmetric());
     rcCmdMgr.addCommand(new CmdSketcherConstrainMidpoint());  // FreeCAD-CH (ops#645)
+    rcCmdMgr.addCommand(new CmdSketcherConstrainPierce());  // FreeCAD-CH (Onshape's Pierce)
     rcCmdMgr.addCommand(new CmdSketcherConstrainSnellsLaw());
     rcCmdMgr.addCommand(new CmdSketcherConstrainGroup());
     rcCmdMgr.addCommand(new CmdSketcherChangeDimensionConstraint());

@@ -137,8 +137,9 @@ class TestSketchToolbarFeaturesGui(Round3GuiCase):
         self.assertNotIn("PartDesign_Revolution", names)
 
 
-class TestSketchMirrorToolFirstGui(Round3GuiCase):
-    """Rank 48, gap S22: Mirror with nothing selected takes the mirror line, then the entities."""
+class ToolFirstCase(Round3GuiCase):
+    """Four entities on round 3's sketch, and clicks and keys in the view, for the tools that
+    start with nothing selected."""
 
     def setUp(self):
         super().setUp()
@@ -182,6 +183,10 @@ class TestSketchMirrorToolFirstGui(Round3GuiCase):
         expected = [self.mirrored(original.StartPoint), self.mirrored(original.EndPoint)]
         for end in (copy.StartPoint, copy.EndPoint):
             self.assertLess(min((end - e).Length for e in expected), TOL, (end, expected))
+
+
+class TestSketchMirrorToolFirstGui(ToolFirstCase):
+    """Rank 48, gap S22: Mirror with nothing selected takes the mirror line, then the entities."""
 
     def test_mirror_with_nothing_selected_takes_the_line_then_the_entities(self):
         self.start_edit()
@@ -248,6 +253,97 @@ class TestSketchMirrorToolFirstGui(Round3GuiCase):
         self.sketch.solve()
         self.assert_line_mirrored(self.sketch.Geometry[1], self.sketch.Geometry[4])
         self.assertEqual(self.symmetric().count((1, 4, 0)), 2, self.symmetric())
+
+
+class TestSketchTransformToolFirstGui(ToolFirstCase):
+    """Sketch tools item 6: under Onshape's keymap Move, Rotate and Scale start with nothing
+    selected, as Offset and Mirror do: each click picks (or unpicks) the sketch's geometry, shown as
+    the selection, and Enter hands the picks to the tool. The same four entities as the mirror's;
+    the mirror line is blocked and is not picked here."""
+
+    def picked(self):
+        names = []
+        for selection in FreeCADGui.Selection.getSelectionEx():
+            names += [name.split(".")[-1] for name in selection.SubElementNames]
+        return sorted(names)
+
+    def enter(self):
+        graphics_view = self.view.graphicsView()
+        graphics_view.setFocus(QtCore.Qt.OtherFocusReason)
+        self.pump(100)
+        self.key_click(graphics_view, QtCore.Qt.Key_Return)
+        self.flush_gui(300)
+
+    def test_the_tools_are_active_with_nothing_selected(self):
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.flush_gui(200)
+        for name in ("Sketcher_Translate", "Sketcher_Rotate", "Sketcher_Scale"):
+            self.assertTrue(FreeCADGui.isCommandActive(name), name)
+
+    def test_move_with_nothing_selected_picks_then_moves(self):
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("Sketcher_Translate")
+        self.flush_gui(200)
+        # the line, the circle's right edge, the other line, that line again (unpicked)
+        self.clicks([(4, 3), (5, 7), (2, 8.5)])
+        self.assertEqual(self.picked(), ["Edge2", "Edge3", "Edge4"])
+        self.clicks([(2, 8.5)])
+        self.assertEqual(self.picked(), ["Edge2", "Edge3"], "Expected a second click to unpick")
+        self.assertEqual(self.sketch.GeometryCount, 4, "Expected picking to change nothing")
+        self.enter()
+        self.assertEqual(self.picked(), [], "Expected Enter to hand the picks to Move")
+        line, circle, other = (self.sketch.Geometry[i] for i in (1, 2, 3))
+        # Move's two clicks: from, to (in open space, away from the geometry)
+        self.clicks([(13, 2), (15, 3)])
+
+        # (a move replaces the picks by moved geometry at new ids: found by type and place)
+        def circles():
+            return [g for g in self.sketch.Geometry if isinstance(g, Part.Circle)]
+
+        def moved():
+            self.sketch.solve()
+            return len(circles()) == 1 and (circles()[0].Center - circle.Center).Length > 0.5
+
+        self.assertTrue(self.wait_until(moved, 2000), "Expected the picks moved")
+        self.assertEqual(self.sketch.GeometryCount, 4, "Expected a move, not a copy")
+        shift = circles()[0].Center - circle.Center
+        lines = [g for g in self.sketch.Geometry if isinstance(g, Part.LineSegment)]
+
+        def has_line(start, end):
+            return any(
+                (g.StartPoint - start).Length < TOL and (g.EndPoint - end).Length < TOL
+                for g in lines
+            )
+
+        self.assertTrue(has_line(line.StartPoint + shift, line.EndPoint + shift), "moved line")
+        self.assertTrue(has_line(other.StartPoint, other.EndPoint), "the unpicked line stays")
+
+    def test_enter_with_nothing_picked_does_nothing_and_esc_ends(self):
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("Sketcher_Rotate")
+        self.flush_gui(200)
+        self.enter()
+        self.clicks([(13, 2), (15, 3)])
+        self.assertEqual(self.picked(), [])
+        self.assertEqual(self.sketch.GeometryCount, 4)
+        self.escape()
+        self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit(), "Expected the sketch open")
+        self.clicks([(4, 3)])
+        self.assertEqual(self.picked(), ["Edge2"], "Expected the tool ended: a plain selection")
+
+    def test_scale_takes_its_picks_on_enter(self):
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("Sketcher_Scale")
+        self.flush_gui(200)
+        self.clicks([(5, 7)])
+        self.assertEqual(self.picked(), ["Edge3"])
+        self.enter()
+        self.assertEqual(self.picked(), [], "Expected Enter to hand the pick to Scale")
+        self.escape()
 
 
 class TestSketchOtherPartSnapGui(Round3GuiCase):

@@ -265,19 +265,33 @@ public:
      *  ExternalTypes so that it goes with its last constraint (delUnusedImplicitExternals). An
      *  add that isn't implicit on a marked link of that kind keeps the link: the mark goes (the
      *  External geometry tool takes it), with the defining flag asked for
+     *  pierce: (FreeCAD-CH, Onshape's Pierce; an edge, with intersection) the link's intersection
+     *  is one point, where the edge's underlying curve crosses the sketch plane, the first along
+     *  the edge from its start (pierceExternalMark)
      */
     int addExternal(
         App::DocumentObject* Obj,
         const char* SubName,
         bool defining = false,
         bool intersection = false,
-        bool implicit = false
+        bool implicit = false,
+        bool pierce = false
     );
     /// FreeCAD-CH (ops#634): the links marked implicit that nothing uses (no constraint on any of
     /// their geometries, none of them defining), by index in ExternalGeometry
     std::vector<int> unusedImplicitExternals() const;
     /// FreeCAD-CH (ops#634): deletes the links unusedImplicitExternals() gives; returns how many
     int delUnusedImplicitExternals();
+    /** FreeCAD-CH (Onshape's Pierce): constrains the sketch point (pointGeoId, pos) to where the
+     *  model edge obj's edgeSub crosses the sketch plane, in one constraint. The crossing is a
+     *  point of the edge's Intersection external, added implicit (a constraint's helper, ops#634)
+     *  and pierce (the edge's underlying curve, the first crossing along the edge from its start,
+     *  as Onshape) unless a link of that edge already gives intersections. Raises
+     *  (Base::ValueError) when the point isn't the sketch's own, the edge isn't an edge, lies in
+     *  the sketch plane, or its curve doesn't reach the plane, as Onshape refuses such a Pierce.
+     *  Returns the new constraint's index.
+     */
+    int addPierce(int pointGeoId, PointPos pos, App::DocumentObject* obj, const char* edgeSub);
     /** delete external
      *  ExtGeoId >= 0 with 0 corresponding to the first user defined
      *  external geometry
@@ -299,10 +313,19 @@ public:
     /// FreeCAD-CH (ops#634): the bit of an ExternalTypes entry that marks an implicit link (a
     /// constraint's helper, addExternal). A build before reads such an entry as no known type
     static constexpr long implicitExternalMark = 0x100;
-    /// an ExternalTypes entry without the implicit mark (the repair mark, negative, as it is)
+    /// FreeCAD-CH (Onshape's Pierce): the bit of an ExternalTypes entry that marks a Pierce's
+    /// link: its intersection is where the edge's underlying curve (not the bounded edge) crosses
+    /// the sketch plane, one point, the first along the edge from its start (SketchObject::addPierce)
+    static constexpr long pierceExternalMark = 0x200;
+    /// an ExternalTypes entry without the implicit and pierce marks (the repair mark, negative, as
+    /// it is)
     static constexpr long externalKind(long type)
     {
-        return type < 0 ? type : type & ~implicitExternalMark;
+        return type < 0 ? type : type & ~(implicitExternalMark | pierceExternalMark);
+    }
+    static constexpr bool isPierceType(long type)
+    {
+        return type >= 0 && (type & pierceExternalMark) != 0;
     }
     static constexpr bool isImplicitType(long type)
     {
@@ -595,6 +618,28 @@ public:
     int trim(int geoId, const Base::Vector3d& point, bool includeSketchAxes = false);
     /// extend a curve
     int extend(int geoId, double increment, PointPos endPoint);
+    /** FreeCAD-CH (Onshape's Extend, ops#640): extends a line's end by increment, but the end
+     *  stops at the first boundary in its way (seekExtendBoundary), where a constraint holds it:
+     *  PointOnObject on a curve, Coincident on a point. Other curves, and a shrink, as extend.
+     */
+    int extendToBoundary(int geoId, double increment, PointPos endPoint);
+    /** FreeCAD-CH (Onshape's Extend, ops#640): the increment that takes line geoId's end
+     *  endPoint, moving away from the line's other end by increment, to the first boundary in its
+     *  way: a curve of the sketch (construction ones too) or a Use'd (external) one crossing the
+     *  path, or a point on it (a sketch point, a curve's end point; at the same place a point wins
+     *  over a crossing). Not boundaries: the origin axes, a constraint's helper link (a model pick,
+     *  ops#634), internal geometry (an ellipse's axes, a B-spline's poles), anything at the old end,
+     *  another curve's extension. boundaryGeoId is GeoUndef (and increment is returned) when
+     *  nothing is in the way, the increment isn't positive or geoId isn't a line; boundaryPos is
+     *  the boundary's point, or none for a crossing.
+     */
+    double seekExtendBoundary(
+        int geoId,
+        PointPos endPoint,
+        double increment,
+        int& boundaryGeoId,
+        PointPos& boundaryPos
+    ) const;
     /// Once smaller pieces have been created from a larger curve (by split or trim, say), derive
     /// the constraint that will replace the given one (which is to be deleted). NOTE: Currently
     /// assuming all constraints on the end points of the old curve have been transferred or
