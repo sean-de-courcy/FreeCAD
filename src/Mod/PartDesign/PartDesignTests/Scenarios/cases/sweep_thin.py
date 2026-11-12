@@ -23,11 +23,32 @@ of its drawn direction, `left2`/`right2` the second's (+x and -x), placed from t
 import FreeCAD as App
 import Part
 
-from PartDesignTests.Scenarios.harness import Bound, Scenario, face
+from PartDesignTests.Scenarios.harness import Bound, Outcome, Scenario, edge, expectedNames, face, tolerance
 from PartDesignTests.Scenarios import models as m
 
 V = App.Vector
 XZ = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+
+
+class BoundEdges(Outcome):
+    """A SubShapeBinder of edges: its shape has exactly the expected edges (each point of one on the
+    other, the same length), as `Bound` is for faces."""
+
+    def compare(self, scenario, consumer, target, expectation):
+        expected = [target.Shape.getElement(n) for n in expectedNames(expectation, target.Shape)]
+        edges = consumer.Shape.Edges
+        tol = tolerance(target.Shape)
+        if len(edges) != len(expected):
+            return False, f"{len(edges)} edges bound for {len(expected)}"
+
+        def same(a, b):
+            return abs(a.Length - b.Length) <= tol and all(
+                Part.Vertex(p).distToShape(b)[0] < tol for p in a.discretize(9))
+
+        for e in expected:
+            if not any(same(g, e) for g in edges):
+                return False, f"no bound edge at {e.CenterOfMass} with length {e.Length:.4f}"
+        return True, ""
 
 
 class _ThinPipe(Scenario):
@@ -64,6 +85,21 @@ class _ThinPipe(Scenario):
     def right2(self):
         return face(surface="plane", contains=(10 - self._out()[1], -4, 10))
 
+    def leftCorner(self):
+        """The wall's edge along the path where the two segments' left sides meet (the outside of
+        the profile's corner: the corner's own vertex in the base state)."""
+        out = self._out()[0]
+        return edge(curve="line", direction=(0, 0, 1), contains=(10 + out, out, 10))
+
+    def rightCorner(self):
+        """Where the right sides meet, the inside of the corner."""
+        out = self._out()[1]
+        return edge(curve="line", direction=(0, 0, 1), contains=(10 - out, -out, 10))
+
+    def leftStart(self):
+        """The edge along the path at the profile's start, on the left side."""
+        return edge(curve="line", direction=(0, 0, 1), contains=(0, self._out()[0], 10))
+
     # In the base state the left sides lie on the curves and the first's right side is its offset
     curve1 = left1
     offset1 = right1
@@ -88,7 +124,7 @@ class _ThinPipe(Scenario):
             expect = getattr(self, ref)
             binder = doc.addObject("PartDesign::SubShapeBinder", "Bind" + ref)
             binder.Support = [(pipe, tuple(self.names(pipe, expect())))]
-            self.ref(ref, binder, "Support", expect, Bound())
+            self.ref(ref, binder, "Support", expect, BoundEdges() if expect().kind == "Edge" else Bound())
         doc.recompute()
 
 
@@ -134,7 +170,7 @@ class ThinPipeWallFlipped(_ThinPipe):
     sides, a different reference's."""
 
     abstract = False
-    REFS = ("curve1", "curve2")
+    REFS = ("curve1", "curve2", "leftCorner", "rightCorner", "leftStart")
 
     def edit(self, doc):
         self.flip = True
@@ -147,7 +183,7 @@ class ThinPipeToMidplane(_ThinPipe):
     stays its side, the left (on the curve) to y = 0.5, the right (the offset) to y = -0.5."""
 
     abstract = False
-    REFS = ("left1", "right1", "left2", "right2")
+    REFS = ("left1", "right1", "left2", "right2", "leftCorner", "rightCorner", "leftStart")
 
     def edit(self, doc):
         self.midplane = True
@@ -168,7 +204,7 @@ class ThinPipeFromMidplane(_ThinPipe):
 
     abstract = False
     midplane = True
-    REFS = ("left1", "right1", "left2", "right2")
+    REFS = ("left1", "right1", "left2", "right2", "leftCorner", "rightCorner", "leftStart")
 
     def edit(self, doc):
         self.midplane = False
@@ -189,7 +225,7 @@ class ThinPipeWallUnflipped(_ThinPipe):
 
     abstract = False
     flip = True
-    REFS = ("left1", "right1", "left2", "right2")
+    REFS = ("left1", "right1", "left2", "right2", "leftCorner", "rightCorner", "leftStart")
 
     def edit(self, doc):
         self.flip = False
