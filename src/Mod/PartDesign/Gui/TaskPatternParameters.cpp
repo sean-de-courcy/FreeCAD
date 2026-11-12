@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include <QCheckBox>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QRegularExpression>
@@ -36,7 +37,17 @@
 #include <gp_Pnt.hxx>
 
 #include <BRep_Builder.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
 #include <TopoDS_Compound.hxx>
+
+#include <Inventor/events/SoMouseButtonEvent.h>
+#include <Inventor/nodes/SoAnnotation.h>
+#include <Inventor/nodes/SoBaseColor.h>
+#include <Inventor/nodes/SoCoordinate3.h>
+#include <Inventor/nodes/SoEventCallback.h>
+#include <Inventor/nodes/SoMarkerSet.h>
+#include <Inventor/nodes/SoSeparator.h>
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
@@ -50,6 +61,7 @@
 #include <Gui/View3DInventor.h>
 #include <Gui/View3DInventorViewer.h>
 #include <Gui/ViewProviderCoordinateSystem.h>
+#include <Gui/Inventor/MarkerBitmaps.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/DatumLine.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
@@ -148,6 +160,7 @@ void TaskPatternParameters::setupParameterUI(QWidget* widget)
 
     // Set first direction widget
     auto* viewer = getTopTransformedView()->getViewer();
+    dotViewer = viewer;
     parametersWidget = new PartGui::PatternParametersWidget(type, viewer, widget);
 
     auto* placeholderLayout = new QVBoxLayout(ui->parametersWidgetPlaceholder);
@@ -191,7 +204,9 @@ void TaskPatternParameters::setupParameterUI(QWidget* widget)
             this,
             &TaskPatternParameters::onParameterWidgetParametersChanged
         );
-        parametersWidget2->setTitle(tr("Direction 2"));
+        // Onshape's Second direction box: ticked, it shows the second direction's fields; the
+        // fork's "off" is count 1 (FreeCAD-CH ops#655)
+        parametersWidget2->setTitle(tr("Second direction"));
         parametersWidget2->setCheckable(true);
     }
 
@@ -236,6 +251,37 @@ void TaskPatternParameters::addOnshapeOptions(QWidget* widget)
         FCMD_OBJ_CMD(getObject(), "Centered = " << (on ? "True" : "False"));
         kickUpdateViewTimer();
     });
+
+    // The second direction's own Centered, in its group (Onshape's isCenteredTwo; ops#655), and
+    // the banner for parallel directions
+    auto centered2Prop = freecad_cast<App::PropertyBool*>(pattern->getPropertyByName("Centered2"));
+    if (parametersWidget2 && centered2Prop) {
+        auto* centered2 = new QCheckBox(tr("Centered"), parametersWidget2);
+        centered2->setObjectName(QStringLiteral("checkCentered2"));
+        centered2->setChecked(centered2Prop->getValue());
+        parametersWidget2->addRow(centered2);
+        connect(centered2, &QCheckBox::toggled, this, [this](bool on) {
+            if (blockUpdate || !getObject()) {
+                return;
+            }
+            setupTransaction();
+            FCMD_OBJ_CMD(getObject(), "Centered2 = " << (on ? "True" : "False"));
+            kickUpdateViewTimer();
+        });
+
+        parallelBanner = new QLabel(
+            tr("Parallel directions selected for first and second direction."),
+            widget
+        );
+        parallelBanner->setObjectName(QStringLiteral("parallelBanner"));
+        parallelBanner->setWordWrap(true);
+        parallelBanner->setStyleSheet(
+            QStringLiteral("color: white; background-color: #2f6fd1; padding: 4px;")
+        );
+        parallelBanner->setVisible(false);
+        ui->verticalLayout->insertWidget(0, parallelBanner);
+        updateParallelBanner();
+    }
     // A MultiTransform's step: the MultiTransform makes the instances and skips none of a step's,
     // so a step offers no Skip
     if (getTopTransformedObject() != pattern) {
@@ -259,6 +305,7 @@ void TaskPatternParameters::addOnshapeOptions(QWidget* widget)
         skipped->setVisible(on);
         if (on) {
             skipped->setFocus();
+            updateSkipDots();
             return;
         }
         // Off, nothing is skipped
@@ -269,6 +316,7 @@ void TaskPatternParameters::addOnshapeOptions(QWidget* widget)
         setupTransaction();
         FCMD_OBJ_CMD(getObject(), "SkippedInstances = []");
         kickUpdateViewTimer();
+        updateSkipDots();
     });
     connect(skipped, &QLineEdit::editingFinished, this, [this, skipped, pairs]() {
         if (blockUpdate || !getObject()) {
@@ -277,7 +325,9 @@ void TaskPatternParameters::addOnshapeOptions(QWidget* widget)
         setupTransaction();
         FCMD_OBJ_CMD(getObject(), "SkippedInstances = " << skippedPython(skipped->text(), pairs));
         kickUpdateViewTimer();
+        updateSkipDots();
     });
+    updateSkipDots();
 }
 
 void TaskPatternParameters::bindProperties()
@@ -346,6 +396,8 @@ void TaskPatternParameters::updateUI()
     if (parametersWidget2) {
         parametersWidget2->updateUI();
     }
+    updateParallelBanner();
+    updateSkipDots();
 }
 
 // --- Task-Specific Logic ---
@@ -537,6 +589,7 @@ void TaskPatternParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 
 TaskPatternParameters::~TaskPatternParameters()
 {
+    clearSkipDots();
     showOriginAxes(false);         // Clean up temporary visibility
     exitReferenceSelectionMode();  // Ensure gates are removed etc.
     // ui unique_ptr handles deletion
@@ -726,6 +779,238 @@ Base::Vector3d TaskPatternParameters::getStartPoint() const
         }
     }
     return startPoint;
+}
+
+void TaskPatternParameters::updateParallelBanner()
+{
+    auto* linear = getObject<PartDesign::LinearPattern>();
+    if (!linear || !parallelBanner) {
+        return;
+    }
+    // Both directions in use with a reference each: the offsets are zero otherwise
+    bool parallel = false;
+    try {
+        const gp_Vec first = linear->calculateOffsetVector(Part::LinearPatternDirection::First);
+        const gp_Vec second = linear->calculateOffsetVector(Part::LinearPatternDirection::Second);
+        parallel = first.Magnitude() > Precision::Confusion()
+            && second.Magnitude() > Precision::Confusion()
+            && first.IsParallel(second, Precision::Angular());
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    parallelBanner->setVisible(parallel);
+}
+
+void TaskPatternParameters::clearSkipDots()
+{
+    if (skipDots) {
+        if (dotViewer) {
+            auto* root = static_cast<SoSeparator*>(dotViewer->getSceneGraph());
+            const int index = root->findChild(skipDots);
+            if (index >= 0) {
+                root->removeChild(index);
+            }
+        }
+        skipDots->unref();
+        skipDots = nullptr;
+    }
+    if (dotCallback && dotViewer) {
+        dotViewer->removeEventCallback(SoMouseButtonEvent::getClassTypeId(), skipDotCallback, this);
+    }
+    dotCallback = false;
+    dots.clear();
+}
+
+void TaskPatternParameters::updateSkipDots()
+{
+    clearSkipDots();
+    auto* linear = getObject<PartDesign::LinearPattern>();
+    auto* skip = findChild<QCheckBox*>(QStringLiteral("checkSkip"));
+    if (skip) {
+        skip->setProperty("dots", QString());
+    }
+    if (!linear || !skip || !skip->isChecked() || !dotViewer) {
+        return;
+    }
+
+    // The grid as getTransformations() makes it: the steps from the seed's uncentered grid
+    // (Direction2 fastest), mirrored through the seed along a centered direction, whose count is
+    // per side, the seed included (oracle 9j)
+    const int first = std::max(static_cast<int>(linear->Occurrences.getValue()), 1);
+    const int second = std::max(static_cast<int>(linear->Occurrences2.getValue()), 1);
+    std::vector<gp_Trsf> grid;
+    try {
+        const std::list<gp_Trsf> list = linear->calculateTransformations();
+        grid.assign(list.begin(), list.end());
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    if (grid.size() != static_cast<std::size_t>(first) * second) {
+        return;  // no grid to show (a direction without its reference)
+    }
+    const auto step = [&](int k, bool alongSecond) {
+        const auto index = static_cast<std::size_t>(std::abs(k));
+        const gp_Trsf& t = grid[alongSecond ? index : index * static_cast<std::size_t>(second)];
+        gp_Vec v(t.TranslationPart());
+        return k < 0 ? v.Reversed() : v;
+    };
+    const bool centered = linear->Centered.getValue();
+    const bool centered2 = linear->Centered2.getValue();
+    const int rows = centered ? 2 * first - 1 : first;
+    const int columns = centered2 ? 2 * second - 1 : second;
+    const int middle = centered ? first - 1 : 0;
+    const int middle2 = centered2 ? second - 1 : 0;
+
+    const auto& values = linear->SkippedInstances.getValues();
+    const auto isSkipped = [&values](long i, long j) {
+        for (std::size_t k = 0; k + 1 < values.size(); k += 2) {
+            if (values[k] == i && values[k + 1] == j) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const gp_Trsf location = linear->getLocation().Transformation();
+    const Base::Vector3d seed = getStartPoint();
+    QStringList listed;
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            if (row == middle && column == middle2) {
+                continue;  // the seed has no dot
+            }
+            gp_Vec offset = step(row - middle, false) + step(column - middle2, true);
+            offset.Transform(location);
+            const Base::Vector3d at = seed + Base::Vector3d(offset.X(), offset.Y(), offset.Z());
+            const bool skipped = isSkipped(row, column);
+            dots.push_back({row, column, at, skipped});
+            listed << QStringLiteral("(%1, %2)%3").arg(row).arg(column).arg(skipped ? "*" : "");
+        }
+    }
+    // For the GUI tests: the dots in order, a skipped one starred
+    skip->setProperty("dots", listed.join(QStringLiteral(", ")));
+    if (dots.empty()) {
+        return;
+    }
+
+    skipDots = new SoAnnotation();
+    skipDots->ref();
+    for (bool hollow : {false, true}) {
+        auto* group = new SoSeparator();
+        auto* color = new SoBaseColor();
+        color->rgb.setValue(0.18F, 0.44F, 0.82F);
+        auto* coords = new SoCoordinate3();
+        int count = 0;
+        for (const auto& dot : dots) {
+            if (dot.skipped == hollow) {
+                coords->point.set1Value(count++, SbVec3f(dot.at.x, dot.at.y, dot.at.z));
+            }
+        }
+        auto* markers = new SoMarkerSet();
+        markers->markerIndex = Gui::Inventor::MarkerBitmaps::getMarkerIndex(
+            hollow ? "CIRCLE_LINE" : "CIRCLE_FILLED",
+            9
+        );
+        markers->numPoints = count;
+        group->addChild(color);
+        group->addChild(coords);
+        group->addChild(markers);
+        skipDots->addChild(group);
+    }
+    static_cast<SoSeparator*>(dotViewer->getSceneGraph())->addChild(skipDots);
+    dotViewer->addEventCallback(SoMouseButtonEvent::getClassTypeId(), skipDotCallback, this);
+    dotCallback = true;
+}
+
+int TaskPatternParameters::skipDotAt(const SbVec2s& point) const
+{
+    if (!dotViewer) {
+        return -1;
+    }
+    // Within a dot's radius and a little more, the nearest
+    const double reach = 8.0 * dotViewer->devicePixelRatio();
+    int found = -1;
+    double best = reach * reach;
+    for (std::size_t k = 0; k < dots.size(); ++k) {
+        const auto& at = dots[k].at;
+        const SbVec2s p = dotViewer->getPointOnViewport(SbVec3f(at.x, at.y, at.z));
+        const double dx = p[0] - point[0];
+        const double dy = p[1] - point[1];
+        const double distance = dx * dx + dy * dy;
+        if (distance <= best) {
+            best = distance;
+            found = static_cast<int>(k);
+        }
+    }
+    return found;
+}
+
+void TaskPatternParameters::toggleSkipped(long i, long j)
+{
+    auto* pattern = getObject();
+    auto skippedProp = pattern
+        ? freecad_cast<App::PropertyIntegerList*>(pattern->getPropertyByName("SkippedInstances"))
+        : nullptr;
+    if (!skippedProp) {
+        return;
+    }
+    std::vector<long> values;
+    bool found = false;
+    const auto& old = skippedProp->getValues();
+    for (std::size_t k = 0; k + 1 < old.size(); k += 2) {
+        if (old[k] == i && old[k + 1] == j) {
+            found = true;
+            continue;
+        }
+        values.push_back(old[k]);
+        values.push_back(old[k + 1]);
+    }
+    if (!found) {
+        values.push_back(i);
+        values.push_back(j);
+    }
+    const QString text = skippedText(values, true);
+    setupTransaction();
+    FCMD_OBJ_CMD(pattern, "SkippedInstances = " << skippedPython(text, true));
+    if (auto* field = findChild<QLineEdit*>(QStringLiteral("editSkipped"))) {
+        field->setText(text);
+    }
+    updateSkipDots();
+    kickUpdateViewTimer();
+}
+
+void TaskPatternParameters::skipDotCallback(void* data, SoEventCallback* node)
+{
+    auto* self = static_cast<TaskPatternParameters*>(data);
+    const auto* event = static_cast<const SoMouseButtonEvent*>(node->getEvent());
+    if (event->getButton() != SoMouseButtonEvent::BUTTON1) {
+        return;
+    }
+    if (event->getState() == SoButtonEvent::UP) {
+        // The press was a dot's: its release selects nothing either
+        if (self->dotPressed) {
+            self->dotPressed = false;
+            node->setHandled();
+        }
+        return;
+    }
+    self->dotPressed = false;
+    if (self->selectionMode != SelectionMode::None) {
+        return;  // picking a direction
+    }
+    const int hit = self->skipDotAt(event->getPosition());
+    if (hit < 0) {
+        return;
+    }
+    self->dotPressed = true;
+    node->setHandled();
+    // The scene graph changes after this traversal
+    const long i = self->dots[hit].i;
+    const long j = self->dots[hit].j;
+    QTimer::singleShot(0, self, [self, i, j]() { self->toggleSkipped(i, j); });
 }
 
 //**************************************************************************
