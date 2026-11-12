@@ -5,6 +5,10 @@
 #include <FCGlobal.h>
 #include <Base/Parameter.h>
 
+#include <QtCore/qnamespace.h>
+
+class QKeyEvent;
+
 namespace Gui
 {
 
@@ -46,8 +50,26 @@ void applyTo(Command* cmd);
  */
 void actionCreated(Command* cmd);
 
-/// Re-reads the preference, and re-applies the defaults if the keymap changed.
+/// Re-reads the preferences, and re-applies the defaults if the keymap or isMac() changed.
 void reload();
+
+/** Whether the Mac's keys apply: on macOS, and elsewhere where the hidden preference
+ * `KeymapMacKeys` (General) is set, so the GUI tests can check them on Windows (ops#640 polish,
+ * the Mac keys). They differ in three ways: Backspace deletes too (isDeleteKey()), the Part
+ * selection filters take Control+Shift (Qt's Meta) for Shift+Option, which types a character on
+ * the Mac, and the sketch tools' M takes Control for Cmd, whose Cmd+M minimizes the window.
+ */
+GuiExport bool isMac();
+
+/** Whether  event is the Delete key alone: Delete, and with isMac() also Backspace, the Mac
+ * keyboard's Delete key (Fn+Delete gives Delete). For the places that test the key themselves.
+ */
+GuiExport bool isDeleteKey(const QKeyEvent* event);
+
+/** The modifier of a sketch tool's own key  letter ('M', 'U', ...) under the fork's keymap
+ * (Sketcher's DrawSketchHandler::isToolKey()): Ctrl (Cmd on macOS), but Meta for M with isMac().
+ */
+GuiExport Qt::KeyboardModifier toolKeyModifier(char letter);
 
 }  // namespace ForkKeymap
 

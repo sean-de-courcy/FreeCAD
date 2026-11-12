@@ -184,6 +184,35 @@ class TestStudioHistoryGui(unittest.TestCase):
         self.assertIsNotNone(self.doc.getObject("F1_at_A"))
         self.assertVolume("A", partBox("A").cut(tool(*F1[:3])).Volume)
 
+    def testBackspaceOnTheMacDeletesARow(self):
+        """On the Mac (simulated through the hidden General/KeymapMacKeys, ops#640 polish)
+        Backspace on F1's selected row deletes F1 and its steps as Delete does; without the Mac's
+        keys Backspace deletes nothing."""
+        from PySide6 import QtTest
+
+        general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+        self.addCleanup(general.RemBool, "KeymapMacKeys")
+        viewport = self.list.viewport()
+
+        def backspaceOnF1():
+            QtTest.QTest.mouseClick(
+                viewport, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, self.rowRect("F1").center()
+            )
+            self.list.setFocus()
+            fv.pump()
+            QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Backspace)
+            fv.pump()
+
+        backspaceOnF1()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("F1"))
+        general.SetBool("KeymapMacKeys", True)
+        backspaceOnF1()
+        self.doc.recompute()
+        for name in ("F1", "F1_at_A", "F1_at_B"):
+            self.assertIsNone(self.doc.getObject(name), name)
+        self.assertTrue(fv.waitFor(lambda: self.rows() == NATIVE_ROWS + ["F2", "|"]), self.rows())
+
     def testSuppressARowSuppressesItsSteps(self):
         """Suppress on F1's row: both its steps pass their part through, in one undo step."""
         undo = self.doc.UndoCount

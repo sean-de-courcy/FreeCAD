@@ -99,7 +99,8 @@ void ShortcutManager::OnChange(Base::Subject<const char*>& src, const char* reas
 
     if (ForkKeymap::preferenceGroup() == &src) {
         // "" when the group is cleared (a reset of the General preferences)
-        if (Base::Tools::isNullOrEmpty(reason) || boost::equals(reason, "Keymap")) {
+        if (Base::Tools::isNullOrEmpty(reason) || boost::equals(reason, "Keymap")
+            || boost::equals(reason, "KeymapMacKeys")) {
             ForkKeymap::reload();
         }
         return;
