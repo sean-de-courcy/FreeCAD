@@ -786,28 +786,49 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
             }
         }
         else {
-            try {
-                // The model edges in the sketch's plane bound regions too (Onshape's imprint);
-                // they stay out of the open wires below and out of the sketch's Shape
-                auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
-                const auto imprint = imprintEdges(*this);
-                if (!imprint.isNull()) {
-                    for (auto& edge : imprint.getSubTopoShapes(TopAbs_EDGE)) {
-                        shapes.push_back(std::move(edge));
+            // The model edges in the sketch's plane bound regions too (Onshape's imprint);
+            // they stay out of the open wires below and out of the sketch's Shape
+            const auto imprint = imprintEdges(*this);
+            // near: only the model edges that can reach the sketch's regions (perf profile 2b)
+            auto regions = [&](bool near) {
+                Part::TopoShape made = makeTopoShape(getID());
+                try {
+                    auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
+                    bool leftOutLoop = false;
+                    if (!imprint.isNull()) {
+                        auto model = near ? nearImprintEdges(imprint, edges, leftOutLoop)
+                                          : imprint.getSubTopoShapes(TopAbs_EDGE);
+                        for (auto& edge : model) {
+                            shapes.push_back(std::move(edge));
+                        }
+                    }
+                    made = made.makeElementFace(shapes,
+                            /*op*/"",
+                            /*maker*/"Part::FaceMakerBuildFace",
+                            /*pln*/nullptr
+                    );
+                    if (!imprint.isNull()) {
+                        // the model edges split the sketch's regions, and make none of their own
+                        made = withinSketchRegions(made, edges, leftOutLoop);
                     }
                 }
-                result = result.makeElementFace(shapes,
-                        /*op*/"",
-                        /*maker*/"Part::FaceMakerBuildFace",
-                        /*pln*/nullptr
-                );
-                if (!imprint.isNull()) {
-                    // the model edges split the sketch's regions, and make none of their own
-                    result = withinSketchRegions(result, edges);
+                catch (const Part::NullShapeException&) {
+                    // An open-only sketch has no bounded regions, so a null face result is
+                    // expected.
                 }
+                return made;
+            };
+            if (imprint.isNull() || imprintNearMode() != "verify") {
+                result = regions(!imprint.isNull());
             }
-            catch (const Part::NullShapeException&) {
-                // An open-only sketch has no bounded regions, so a null face result is expected.
+            else {
+                const auto near = regions(true);
+                result = regions(false);
+                if (const std::string difference = regionsDifference(near, result);
+                    !difference.empty()) {
+                    FC_ERR(getFullName() << ": imprint near edges: the regions differ: "
+                                         << difference);
+                }
             }
         }
 

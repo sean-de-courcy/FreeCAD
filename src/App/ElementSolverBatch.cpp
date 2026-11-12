@@ -122,22 +122,116 @@ DigestCache& digestCache()
 // The cache's depth, read without its mutex by forgetPlacementDigestOf()
 std::atomic<int> digestDepth {0};
 
-// FREECAD_CH_DIGEST_CACHE, or empty
-std::string digestCacheMode()
+// An environment variable, or empty
+std::string environmentValue(const char* name)
 {
 #ifdef _MSC_VER
     char* value = nullptr;
     std::size_t size = 0;
-    if (_dupenv_s(&value, &size, "FREECAD_CH_DIGEST_CACHE") != 0 || !value) {
+    if (_dupenv_s(&value, &size, name) != 0 || !value) {
         return {};
     }
     std::string text(value);
     std::free(value);
     return text;
 #else
-    const char* value = std::getenv("FREECAD_CH_DIGEST_CACHE");
+    const char* value = std::getenv(name);
     return value ? std::string(value) : std::string();
 #endif
+}
+
+// FREECAD_CH_DIGEST_CACHE, or empty
+std::string digestCacheMode()
+{
+    return environmentValue("FREECAD_CH_DIGEST_CACHE");
+}
+
+// The solver profile (SolverSiteTimer, ElementSolverEdits.h): on for the outermost scope's thread
+// while FREECAD_CH_SOLVER_PROFILE was set at its open
+struct SolverProfile
+{
+    std::atomic<bool> on {false};
+    std::thread::id thread;
+    double seconds[static_cast<int>(SolverSite::Count)] = {};
+    std::uint64_t calls[static_cast<int>(SolverSite::Count)] = {};
+};
+
+SolverProfile& solverProfile()
+{
+    static SolverProfile profile;
+    return profile;
+}
+
+// The running solveElementReferences()' measured fingerprints (batchElementFingerprint(),
+// ElementSolverEdits.h), innermost first
+struct BatchFingerprints
+{
+    const PropertyContainer* target = nullptr;
+    std::map<std::string, Data::ElementFingerprint>* measured = nullptr;
+    // A property of the target changed since they were measured
+    bool stale = false;
+    // FREECAD_CH_FINGERPRINT_SHORTCUTS=verify: each one used is measured again and compared
+    bool verify = false;
+    BatchFingerprints* previous = nullptr;
+};
+thread_local BatchFingerprints* runningBatch = nullptr;
+
+struct BatchFingerprintsScope
+{
+    BatchFingerprints batch;
+    BatchFingerprintsScope(const PropertyContainer* target,
+                           std::map<std::string, Data::ElementFingerprint>* measured)
+    {
+        batch.target = target;
+        batch.measured = measured;
+        // FREECAD_CH_FINGERPRINT_SHORTCUTS=off: none kept
+        const std::string mode = environmentValue("FREECAD_CH_FINGERPRINT_SHORTCUTS");
+        batch.stale = mode == "off";
+        batch.verify = mode == "verify";
+        batch.previous = runningBatch;
+        runningBatch = &batch;
+    }
+    ~BatchFingerprintsScope()
+    {
+        runningBatch = batch.previous;
+    }
+    BatchFingerprintsScope(const BatchFingerprintsScope&) = delete;
+    BatchFingerprintsScope& operator=(const BatchFingerprintsScope&) = delete;
+};
+
+BatchFingerprints* batchOf(const PropertyContainer* target)
+{
+    for (auto batch = runningBatch; batch; batch = batch->previous) {
+        if (batch->target == target) {
+            return batch->stale ? nullptr : batch;
+        }
+    }
+    return nullptr;
+}
+
+const char* solverSiteName(int site)
+{
+    static const char* names[] = {"updateRefs",
+                                  "solve",
+                                  "pass1",
+                                  "pass2Frames",
+                                  "pool",
+                                  "measure",
+                                  "solveOwner",
+                                  "writeBack",
+                                  "update",
+                                  "updateCompare",
+                                  "fingerprint",
+                                  "fpResolve",
+                                  "fpGet",
+                                  "fpTwin",
+                                  "fpUpTo",
+                                  "fpClosure",
+                                  "fpSources",
+                                  "fpString",
+                                  "held"};
+    static_assert(sizeof(names) / sizeof(names[0]) == static_cast<int>(SolverSite::Count));
+    return names[site];
 }
 
 // Whether this thread's recompute keeps digests now (the cache's mutex held)
@@ -161,6 +255,14 @@ PlacementDigestScope::PlacementDigestScope()
         cache.digests.clear();
         cache.calls = cache.made = cache.reused = cache.differed = 0;
         cache.seconds = 0.0;
+        auto& profile = solverProfile();
+        profile.on = false;
+        if (!environmentValue("FREECAD_CH_SOLVER_PROFILE").empty()) {
+            profile.thread = cache.owner;
+            std::fill(std::begin(profile.seconds), std::end(profile.seconds), 0.0);
+            std::fill(std::begin(profile.calls), std::end(profile.calls), 0);
+            profile.on = true;
+        }
     }
     else if (cache.owner != std::this_thread::get_id()) {
         return;
@@ -199,13 +301,91 @@ PlacementDigestScope::~PlacementDigestScope()
         FC_LOG("placement sources: " << calls << " calls, " << seconds << " s; digests made " << made
                                      << ", reused " << reused);
     }
+    auto& profile = solverProfile();
+    if (profile.on.exchange(false)) {
+        std::ostringstream text;
+        for (int site = 0; site < static_cast<int>(SolverSite::Count); ++site) {
+            if (profile.calls[site] > 0) {
+                text << " " << solverSiteName(site) << " " << profile.calls[site] << "x "
+                     << std::fixed << std::setprecision(4) << profile.seconds[site] << ";";
+            }
+        }
+        FC_LOG("solver profile:" << text.str());
+    }
     if (differed > 0) {
         FC_ERR("placement digests: " << differed << " kept digests differ from a fresh one");
     }
 }
 
+SolverSiteTimer::SolverSiteTimer(SolverSite which)
+{
+    auto& profile = solverProfile();
+    if (profile.on.load(std::memory_order_relaxed) && profile.thread == std::this_thread::get_id()) {
+        site = static_cast<int>(which);
+        start = std::chrono::steady_clock::now().time_since_epoch().count();
+    }
+}
+
+SolverSiteTimer::~SolverSiteTimer()
+{
+    auto& profile = solverProfile();
+    if (site < 0 || !profile.on.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count() - start;
+    profile.seconds[site] += std::chrono::duration<double>(std::chrono::steady_clock::duration(ticks)).count();
+    ++profile.calls[site];
+}
+
+bool batchElementFingerprint(const GeoFeature* geo,
+                             const std::string& element,
+                             bool& measured,
+                             Data::ElementFingerprint& fingerprint)
+{
+    auto batch = batchOf(geo);
+    if (!batch) {
+        return false;
+    }
+    auto it = batch->measured->find(element);
+    if (it == batch->measured->end()) {
+        return false;
+    }
+    // An element getElementFingerprint() gave nothing for is kept as an invalid fingerprint
+    measured = it->second.isValid();
+    fingerprint = it->second;
+    if (batch->verify) {
+        Data::ElementFingerprint fresh;
+        const bool freshMeasured = geo->getElementFingerprint(element.c_str(), fresh);
+        if (freshMeasured != measured
+            || (measured && fresh.toString() != fingerprint.toString())) {
+            FC_ERR("fingerprint shortcuts: a kept measurement of " << geo->getFullName() << "."
+                                                                   << element << " differs");
+        }
+        measured = freshMeasured;
+        fingerprint = fresh;
+    }
+    return true;
+}
+
+void keepBatchElementFingerprint(const GeoFeature* geo,
+                                 const std::string& element,
+                                 bool measured,
+                                 const Data::ElementFingerprint& fingerprint)
+{
+    if (auto batch = batchOf(geo)) {
+        batch->measured->emplace(element,
+                                 measured ? fingerprint : Data::ElementFingerprint());
+    }
+}
+
 void forgetPlacementDigestOf(const PropertyContainer* container)
 {
+    // The running batches' measurements of the container's shape (batchElementFingerprint())
+    for (auto batch = runningBatch; batch; batch = batch->previous) {
+        if (container && batch->target == container) {
+            batch->stale = true;
+        }
+    }
     if (container && digestDepth.load(std::memory_order_relaxed) > 0) {
         forgetPlacementDigest(dynamic_cast<const DocumentObject*>(container));
     }
@@ -1482,12 +1662,14 @@ bool solveElementReferences(DocumentObject* feature,
             --solving;
         }
     } solvingGuard;
+    SolverSiteTimer solveTimer(SolverSite::Solve);
 
     // Pass 1: the exact lookup, per property.
     SolverBatch batch;
     batch.feature = feature;
     batch.reverse = reverse;
     batch.notify = notify;
+    std::optional<SolverSiteTimer> pass1Timer(std::in_place, SolverSite::Pass1);
     for (auto prop : props) {
         try {
             prop->collectElementReferences(feature, batch);
@@ -1502,7 +1684,10 @@ bool solveElementReferences(DocumentObject* feature,
         }
     }
 
+    pass1Timer.reset();
+
     // Pass 2. Keep the references to feature's elements, by owner.
+    std::optional<SolverSiteTimer> framesTimer(std::in_place, SolverSite::Pass2Frames);
     std::map<std::string, std::vector<const SolverEntry*>> owners;  // by full name
     // The target's frame now and the solver's tolerances, for the entries' frames (ops#557): read
     // at the first record that has a frame
@@ -1616,6 +1801,7 @@ bool solveElementReferences(DocumentObject* feature,
         }
         owners[entry.owner->getFullName()].push_back(&entry);
     }
+    framesTimer.reset();
 
     std::map<const PropertyLinkBase*, std::vector<SolverResolution>> resolutions;
     std::map<const PropertyLinkBase*, std::vector<ReferenceReport::Entry>> reports;
@@ -1624,6 +1810,7 @@ bool solveElementReferences(DocumentObject* feature,
     auto pool = [&](const std::string& type) -> const std::vector<Data::SolveInput::Element>& {
         auto it = pools.find(type);
         if (it == pools.end()) {
+            SolverSiteTimer poolTimer(SolverSite::Pool);
             it = pools.emplace(type, poolOf(geo, type, mapForms)).first;
         }
         return it->second;
@@ -1691,9 +1878,12 @@ bool solveElementReferences(DocumentObject* feature,
     // The target's elements' current fingerprints, measured once per batch: the shape is the
     // same for every owner (ops#105).
     auto measured = std::make_shared<std::map<std::string, Data::ElementFingerprint>>();
+    // And the write-back's records' (batchElementFingerprint())
+    BatchFingerprintsScope batchFingerprints(geo, measured.get());
     auto fingerprintOf = [geo, measured](const std::string& index) {
         auto it = measured->find(index);
         if (it == measured->end()) {
+            SolverSiteTimer measureTimer(SolverSite::Measure);
             Data::ElementFingerprint fingerprint;
             if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {
                 fingerprint = Data::ElementFingerprint();
@@ -2772,7 +2962,9 @@ bool solveElementReferences(DocumentObject* feature,
             input.entries.push_back(std::move(item));
         }
 
+        std::optional<SolverSiteTimer> ownerTimer(std::in_place, SolverSite::SolveOwner);
         auto outcomes = Data::solveOwner(input);
+        ownerTimer.reset();
         for (std::size_t i = 0; i < entries.size(); ++i) {
             const auto& entry = *entries[i];
             const auto& outcome = outcomes[i];
@@ -3086,6 +3278,7 @@ bool solveElementReferences(DocumentObject* feature,
     }
 
     // Write back, once per property visited, and rebuild its report for this target.
+    SolverSiteTimer writeTimer(SolverSite::WriteBack);
     bool changed = false;
     for (const auto& [prop, touched] : batch.properties) {
         auto& list = resolutions[prop];
