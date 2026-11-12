@@ -82,6 +82,11 @@ from PartDesignTests.TestPipeOnshape import (  # FreeCAD-CH, sweeps as Onshape's
     TestPipeThin,
 )
 from PartDesignTests.TestLoft import TestLoft
+from PartDesignTests.TestLoftOnshape import (  # FreeCAD-CH, ops#655
+    TestLoftOnshapePlain,
+    TestLoftOnshapeConditions,
+    TestLoftOnshapeThreeSections,
+)
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
 from PartDesignTests.TestLostTool import TestLostTool  # FreeCAD-CH, ops#472
@@ -104,6 +109,7 @@ from PartDesignTests.TestAttachAcrossContainers import TestAttachAcrossContainer
 
 # dressup features
 from PartDesignTests.TestFillet import TestFillet
+from PartDesignTests.TestFilletPropagation import TestFilletPropagation  # FreeCAD-CH, ops#655
 from PartDesignTests.TestChamfer import TestChamfer
 from PartDesignTests.TestDraft import (
     TestDraft,

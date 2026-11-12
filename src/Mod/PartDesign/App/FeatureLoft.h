@@ -40,6 +40,12 @@ public:
     App::PropertyLinkSubList Sections;
     App::PropertyBool Ruled;
     App::PropertyBool Closed;
+    /// Onshape's start and end profile conditions with their magnitudes (ops#655,
+    /// notes/loft-options.md): "None" or "Normal to profile"
+    App::PropertyEnumeration StartCondition;
+    App::PropertyFloat StartMagnitude;
+    App::PropertyEnumeration EndCondition;
+    App::PropertyFloat EndMagnitude;
 
     /** @name methods override feature */
     //@{
@@ -68,6 +74,7 @@ protected:
     ) override;
 
 private:
+    static const char* ConditionEnums[];
     // static const char* TypeEnums[];
     // static const char* SideEnums[];
 };

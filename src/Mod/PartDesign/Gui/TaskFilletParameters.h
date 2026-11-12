@@ -55,6 +55,7 @@ private Q_SLOTS:
     void onLengthChanged(double);
     void onBaseChanged() override;
     void onCheckBoxUseAllEdgesToggled(bool checked);
+    void onTangentPropagationToggled(bool checked);
 
 protected:
     double getLength() const;

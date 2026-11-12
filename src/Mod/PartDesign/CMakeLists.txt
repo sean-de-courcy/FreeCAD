@@ -54,6 +54,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestHole.py
     PartDesignTests/TestRevolve.py
     PartDesignTests/TestLoft.py
+    PartDesignTests/TestLoftOnshape.py
     PartDesignTests/TestPipe.py
     PartDesignTests/TestPipeOnshape.py
     PartDesignTests/TestPrimitive.py
@@ -70,6 +71,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestBoolean.py
     PartDesignTests/TestBaseFeature.py
     PartDesignTests/TestFillet.py
+    PartDesignTests/TestFilletPropagation.py
     PartDesignTests/TestChamfer.py
     PartDesignTests/TestDraft.py
     PartDesignTests/TestThickness.py
@@ -173,6 +175,7 @@ if(BUILD_GUI)
         PartDesignTests/TestDialogFlowGui.py
         PartDesignTests/TestRevolveFieldsGui.py
         PartDesignTests/TestPolishGui.py
+        PartDesignTests/TestLoftFilletOptionsGui.py
         PartDesignTests/TestPatternDefaultsGui.py
         PartDesignTests/TestRegenerateGui.py
         PartDesignTests/TestDressUpAnyPartGui.py

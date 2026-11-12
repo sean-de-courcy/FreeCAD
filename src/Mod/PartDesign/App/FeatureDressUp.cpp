@@ -22,6 +22,31 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <cmath>
+
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <Bnd_Box.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <Precision.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <TopExp.hxx>
@@ -769,9 +794,10 @@ bool holdsLookup(const App::PropertyLinkSub& link, const std::vector<std::string
 std::vector<const char*> ownerParameters(const DressUp* step)
 {
     if (step->isDerivedFrom<Chamfer>()) {
-        return {"ChamferType", "Size", "Size2", "Angle", "FlipDirection", "UseAllEdges", "Refine"};
+        return {"ChamferType", "Size", "Size2", "Angle", "FlipDirection", "UseAllEdges",
+                "TangentPropagation", "Refine"};
     }
-    return {"Radius", "UseAllEdges", "Refine"};
+    return {"Radius", "UseAllEdges", "TangentPropagation", "Refine"};
 }
 
 }  // namespace
@@ -1036,4 +1062,234 @@ PartDesignExport std::string studioDressUpPickOf(const DressUp* owner,
     return studioPartId(body) + "|" + Data::NameTable::instance().toPlain(mapped.front().first.toString());
 }
 
+}  // namespace PartDesign
+
+// ops#655: tangent propagation off, as Onshape's (notes/loft-options.md, oracle fact GB13), for a
+// fillet and a chamfer; declared where used
+namespace
+{
+
+/// Takes out of `edges` the picked edges whose OCCT contour reaches an edge that isn't picked:
+/// OCCT would fillet the whole tangent chain there. Returns them.
+}  // namespace
+
+namespace PartDesign
+{
+PartDesignExport std::vector<Part::TopoShape> takeChainedEdges(
+    const Part::TopoShape& base,
+    std::vector<Part::TopoShape>& edges,
+    double radius
+)
+{
+    TopTools_IndexedMapOfShape picked;
+    for (const auto& edge : edges) {
+        picked.Add(edge.getShape());
+    }
+    std::vector<Part::TopoShape> chained;
+    std::vector<Part::TopoShape> kept;
+    for (const auto& edge : edges) {
+        BRepFilletAPI_MakeFillet maker(base.getShape());
+        maker.Add(radius, TopoDS::Edge(edge.getShape()));
+        bool reaches = false;
+        for (int contour = 1; contour <= maker.NbContours() && !reaches; ++contour) {
+            for (int i = 1; i <= maker.NbEdges(contour); ++i) {
+                if (!picked.Contains(maker.Edge(contour, i))) {
+                    reaches = true;
+                    break;
+                }
+            }
+        }
+        (reaches ? chained : kept).push_back(edge);
+    }
+    edges = std::move(kept);
+    return chained;
+}
+}  // namespace PartDesign
+
+namespace
+{
+[[noreturn]] void notStraightRunOut()
+{
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Tangent propagation off: a picked edge continues tangentially into an edge that isn't "
+        "picked, and only a straight edge between two flat faces with a convex corner can stop "
+        "there. Pick the whole tangent chain, or turn tangent propagation on."
+    ));
+}
+
+/// The corner region a fillet of `radius` (`arc`) or an equal-distance chamfer of size `radius`
+/// removes along a straight convex edge between two planar faces of `base`, extended along the
+/// edge past the body both ways, as a prism: Onshape's fillet and chamfer run straight on past a
+/// tangent vertex (GB13).
+TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, double radius, bool arc)
+{
+    BRepAdaptor_Curve curve(edge);
+    if (curve.GetType() != GeomAbs_Line) {
+        notStraightRunOut();
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    if (!edgeFaces.Contains(edge)) {
+        notStraightRunOut();
+    }
+    TopTools_IndexedMapOfShape faces;
+    for (const auto& face : edgeFaces.FindFromKey(edge)) {
+        faces.Add(face);
+    }
+    if (faces.Extent() != 2) {
+        notStraightRunOut();
+    }
+    const gp_Pnt start = BRep_Tool::Pnt(TopExp::FirstVertex(edge));
+    const gp_Pnt end = BRep_Tool::Pnt(TopExp::LastVertex(edge));
+    const gp_Dir along(gp_Vec(start, end));
+    const gp_Pnt middle((start.XYZ() + end.XYZ()) / 2);
+    gp_Dir normal[2];
+    gp_Dir into[2];
+    for (int k = 0; k < 2; ++k) {
+        const TopoDS_Face& face = TopoDS::Face(faces(k + 1));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            notStraightRunOut();
+        }
+        normal[k] = surface.Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            normal[k].Reverse();
+        }
+        // across the edge, into the face
+        into[k] = along.Crossed(normal[k]);
+        const double probe = std::min(1e-3 * radius, 1e-3 * start.Distance(end));
+        BRepClass_FaceClassifier inside(face, middle.Translated(gp_Vec(into[k]) * probe), 1e-9);
+        if (inside.State() != TopAbs_IN) {
+            into[k].Reverse();
+        }
+    }
+    // convex: each face runs away below the other's plane
+    if (into[0].Dot(normal[1]) > -1e-9 || into[1].Dot(normal[0]) > -1e-9) {
+        notStraightRunOut();
+    }
+    // the ball's centre is r inside both planes
+    const double c = normal[0].Dot(normal[1]);
+    const gp_Vec toCentre = (gp_Vec(normal[0]) + gp_Vec(normal[1])) * (-radius / (1.0 + c));
+
+    Bnd_Box box;
+    BRepBndLib::Add(base, box);
+    const double past = std::sqrt(box.SquareExtent()) + radius;
+    const gp_Pnt corner = start.Translated(gp_Vec(along) * -past);
+    const gp_Pnt centre = corner.Translated(toCentre);
+    // a fillet's arc touches each face where the ball does; a chamfer's line meets each face
+    // `radius` from the edge
+    const gp_Pnt tangent0 = arc ? centre.Translated(gp_Vec(normal[0]) * radius)
+                                : corner.Translated(gp_Vec(into[0]) * radius);
+    const gp_Pnt tangent1 = arc ? centre.Translated(gp_Vec(normal[1]) * radius)
+                                : corner.Translated(gp_Vec(into[1]) * radius);
+    TopoDS_Edge across;
+    if (arc) {
+        const gp_Pnt arcMiddle = centre.Translated(gp_Vec(centre, corner).Normalized() * radius);
+        across = BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(tangent0, arcMiddle, tangent1).Value())
+                     .Edge();
+    }
+    else {
+        across = BRepBuilderAPI_MakeEdge(tangent0, tangent1).Edge();
+    }
+    BRepBuilderAPI_MakeWire wire(
+        BRepBuilderAPI_MakeEdge(corner, tangent0).Edge(),
+        across,
+        BRepBuilderAPI_MakeEdge(tangent1, corner).Edge()
+    );
+    BRepBuilderAPI_MakeFace section(wire.Wire(), true);
+    TopoDS_Shape tool
+        = BRepPrimAPI_MakePrism(section.Face(), gp_Vec(along) * (start.Distance(end) + 2 * past))
+              .Shape();
+
+    // At an end where the edge meets a wall (a face there whose outside looks back along the edge:
+    // a concave corner), the run-out stops at the wall as Onshape's does: the tool keeps only the
+    // edge's side of the wall's plane (integrator 13, FilletRunOutPastWall). The face the body ends
+    // at, or a face going on tangentially, looks away from or across the edge: the tool runs on.
+    TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+    const double size = 2 * (start.Distance(end) + 2 * past + radius);
+    const TopoDS_Vertex ends[2] = {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)};
+    for (int e = 0; e < 2; ++e) {
+        if (!vertexFaces.Contains(ends[e])) {
+            continue;
+        }
+        const gp_Pnt at = BRep_Tool::Pnt(ends[e]);
+        const gp_Dir intoEdge = e == 0 ? along : along.Reversed();
+        TopTools_IndexedMapOfShape seen;
+        for (const auto& shape : vertexFaces.FindFromKey(ends[e])) {
+            const TopoDS_Face& face = TopoDS::Face(shape);
+            if (faces.Contains(face) || seen.Contains(face)) {
+                continue;
+            }
+            seen.Add(face);
+            BRepAdaptor_Surface surface(face);
+            gp_Dir outward;
+            if (surface.GetType() == GeomAbs_Plane) {
+                outward = surface.Plane().Axis().Direction();
+            }
+            else {
+                const gp_Pnt2d uv = BRep_Tool::Parameters(ends[e], face);
+                BRepLProp_SLProps props(surface, uv.X(), uv.Y(), 1, Precision::Confusion());
+                if (!props.IsNormalDefined()) {
+                    continue;
+                }
+                outward = props.Normal();
+            }
+            if (face.Orientation() == TopAbs_REVERSED) {
+                outward.Reverse();
+            }
+            if (outward.Dot(intoEdge) < 1e-6) {
+                continue;
+            }
+            // a box on the edge's side of the wall's tangent plane, larger than the tool
+            const gp_Ax2 frame(at, outward);
+            const gp_Pnt origin = at.Translated(
+                (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-size / 2)
+            );
+            const TopoDS_Shape keep
+                = BRepPrimAPI_MakeBox(gp_Ax2(origin, outward, frame.XDirection()), size, size, size)
+                      .Shape();
+            BRepAlgoAPI_Common trimmed(tool, keep);
+            if (!trimmed.IsDone()) {
+                notStraightRunOut();
+            }
+            tool = trimmed.Shape();
+        }
+    }
+    return tool;
+}
+
+}  // namespace
+
+namespace PartDesign
+{
+/// The overlap of `shape` and the run-out tool of `edge` that touches `edge`: the fillet (`arc`)
+/// or chamfer runs on until it leaves the body, and doesn't reach a part of the body the tool's
+/// line enters again.
+PartDesignExport TopoDS_Shape runOutCut(
+    const TopoDS_Shape& shape,
+    const TopoDS_Shape& base,
+    const TopoDS_Edge& edge,
+    double radius,
+    bool arc
+)
+{
+    BRepAlgoAPI_Common common(shape, runOutTool(base, edge, radius, arc));
+    if (!common.IsDone()) {
+        notStraightRunOut();
+    }
+    BRep_Builder builder;
+    TopoDS_Compound touching;
+    builder.MakeCompound(touching);
+    int count = 0;
+    for (TopExp_Explorer solid(common.Shape(), TopAbs_SOLID); solid.More(); solid.Next()) {
+        BRepExtrema_DistShapeShape distance(solid.Current(), edge);
+        if (distance.IsDone() && distance.Value() < 1e-6) {
+            builder.Add(touching, solid.Current());
+            ++count;
+        }
+    }
+    return count ? TopoDS_Shape(touching) : TopoDS_Shape();
+}
 }  // namespace PartDesign

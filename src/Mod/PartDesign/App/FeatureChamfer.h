@@ -45,6 +45,8 @@ public:
     App::PropertyAngle Angle;
     App::PropertyBool FlipDirection;
     App::PropertyBool UseAllEdges;
+    /// Onshape's "Tangent propagation": off chamfers only the picked edges (ops#655)
+    App::PropertyBool TangentPropagation;
 
     /** @name methods override feature */
     //@{

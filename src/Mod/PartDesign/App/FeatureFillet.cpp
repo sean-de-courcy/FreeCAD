@@ -53,6 +53,19 @@ PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
 PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
 PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
 PartDesignExport bool runsAsStudioOwner(const Feature* feature);
+// FeatureDressUp.cpp (ops#655, tangent propagation off)
+PartDesignExport std::vector<Part::TopoShape> takeChainedEdges(
+    const Part::TopoShape& base,
+    std::vector<Part::TopoShape>& edges,
+    double radius
+);
+PartDesignExport TopoDS_Shape runOutCut(
+    const TopoDS_Shape& shape,
+    const TopoDS_Shape& base,
+    const TopoDS_Edge& edge,
+    double radius,
+    bool arc
+);
 }  // namespace PartDesign
 
 
@@ -75,11 +88,20 @@ Fillet::Fillet()
         "If true, then this overrides any edge changes made to the Base property or in the "
         "dialog.\n"
     );
+    ADD_PROPERTY_TYPE(
+        TangentPropagation,
+        (true),
+        "Fillet",
+        App::Prop_None,
+        "Fillet the whole tangent chain of each picked edge (Onshape's 'Tangent propagation').\n"
+        "Off: only the picked edges; where a picked straight edge continues tangentially, the\n"
+        "fillet runs straight on until it leaves the body, as Onshape's does."
+    );
 }
 
 short Fillet::mustExecute() const
 {
-    if (Placement.isTouched() || Radius.isTouched()) {
+    if (Placement.isTouched() || Radius.isTouched() || TangentPropagation.isTouched()) {
         return 1;
     }
     return DressUp::mustExecute();
@@ -144,7 +166,17 @@ App::DocumentObjectExecReturn* Fillet::execute()
 #endif
 
         Part::FilletFallback::Recorder recorder;
-        shape.makeElementFillet(baseShape, edges, Radius.getValue(), Radius.getValue());
+        // ops#655: with tangent propagation off, an edge whose tangent chain goes on is cut
+        // Onshape's way after the others are filleted
+        const std::vector<Part::TopoShape> runOut = TangentPropagation.getValue()
+            ? std::vector<Part::TopoShape>()
+            : takeChainedEdges(baseShape, edges, radius);
+        if (edges.empty()) {
+            shape = baseShape;
+        }
+        else {
+            shape.makeElementFillet(baseShape, edges, Radius.getValue(), Radius.getValue());
+        }
         if (shape.isNull()) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is null")
@@ -168,7 +200,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         }
         // OCCT fills a recess its band crosses, in a valid solid (ops#393)
         const std::string filled
-            = ResultCheck::skippedForTheLimit(this, "The fillet's check for a filled recess")
+            = edges.empty() || ResultCheck::skippedForTheLimit(this, "The fillet's check for a filled recess")
             ? std::string()
             : Part::filledPocket(shape, baseShape, edges);
         if (!filled.empty()) {
@@ -177,7 +209,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
         // (ops#603)
         const std::string lost
-            = ResultCheck::skippedForTheLimit(this, "The fillet's check for lost material")
+            = edges.empty() || ResultCheck::skippedForTheLimit(this, "The fillet's check for lost material")
             ? std::string()
             : Part::lostMaterial(shape, baseShape, edges, radius);
         if (!lost.empty()) {
@@ -185,11 +217,32 @@ App::DocumentObjectExecReturn* Fillet::execute()
         }
         // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
         const std::string bridged
-            = ResultCheck::skippedForTheLimit(this, "The fillet's check for a bridged recess")
+            = edges.empty() || ResultCheck::skippedForTheLimit(this, "The fillet's check for a bridged recess")
             ? std::string()
             : Part::bridgedRecess(shape, baseShape, edges, radius);
         if (!bridged.empty()) {
             return new App::DocumentObjectExecReturn("The fillet" + bridged);
+        }
+        // ops#655: each chained edge's fillet runs straight on until it leaves the body (GB13)
+        for (const auto& edge : runOut) {
+            const TopoDS_Shape tool = runOutCut(
+                shape.getShape(),
+                baseShape.getShape(),
+                TopoDS::Edge(edge.getShape()),
+                radius,
+                true
+            );
+            if (tool.IsNull()) {
+                continue;
+            }
+            TopoShape cut = makeTopoShape();
+            cut.makeElementCut({shape, makeTopoShape(tool)});
+            shape = cut;
+        }
+        if (!runOut.empty() && !Part::checkDressUp(shape, baseShape, Part::LooseParts::drop)) {
+            return new App::DocumentObjectExecReturn(
+                QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
+            );
         }
         // store shape before refinement
         if (reapplying) {

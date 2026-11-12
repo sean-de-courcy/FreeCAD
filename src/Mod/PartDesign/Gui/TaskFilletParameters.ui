@@ -18,6 +18,19 @@
     <widget class="QWidget" name="baseFieldPlaceholder"/>
    </item>
    <item>
+    <widget class="QCheckBox" name="checkBoxTangentPropagation">
+     <property name="toolTip">
+      <string>Fillet the edges tangent to the picked ones too; off, the fillet runs straight on</string>
+     </property>
+     <property name="text">
+      <string>Tangent propagation</string>
+     </property>
+     <property name="checked">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="horizontalLayout_2">
      <item>
       <widget class="QLabel" name="label">
@@ -52,6 +65,7 @@
   </customwidget>
  </customwidgets>
  <tabstops>
+  <tabstop>checkBoxTangentPropagation</tabstop>
   <tabstop>filletRadius</tabstop>
   <tabstop>checkBoxUseAllEdges</tabstop>
  </tabstops>

@@ -64,6 +64,7 @@ private Q_SLOTS:
     void onFlipDirection(bool);
     void onBaseChanged() override;
     void onCheckBoxUseAllEdgesToggled(bool checked);
+    void onTangentPropagationToggled(bool checked);
 
 protected:
     void changeEvent(QEvent* e) override;

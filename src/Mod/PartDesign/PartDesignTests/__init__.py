@@ -21,11 +21,13 @@ from . import TestCrossBody
 from . import TestDatum
 from . import TestDraft
 from . import TestFillet
+from . import TestFilletPropagation
 from . import TestHelix
 from . import TestHole
 from . import TestInvoluteGear
 from . import TestLinearPattern
 from . import TestLoft
+from . import TestLoftOnshape
 from . import TestMirrored
 from . import TestMultiTransform
 from . import TestPad

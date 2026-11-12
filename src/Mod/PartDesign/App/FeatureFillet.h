@@ -41,6 +41,8 @@ public:
 
     App::PropertyQuantityConstraint Radius;
     App::PropertyBool UseAllEdges;
+    /// Onshape's "Tangent propagation": off fillets only the picked edges (ops#655)
+    App::PropertyBool TangentPropagation;
 
     /** @name methods override feature */
     //@{
