@@ -164,6 +164,16 @@ bool App::saveReplacedFile()
     return fileReplaced;
 }
 
+bool App::keepFileAs(const std::string& from, const std::string& to)
+{
+    return keepFileNoErase(Base::FileInfo(from), to);
+}
+
+void App::replaceFileWith(const std::string& source, const std::string& target)
+{
+    replaceFile(source, target);
+}
+
 bool App::saveFaultPoint(const char* step)
 {
     static const std::string fault = qgetenv("FREECAD_CH_SAVE_FAULT").toStdString();
