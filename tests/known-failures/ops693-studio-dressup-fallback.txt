@@ -1,0 +1,8 @@
+# Batch 11 lane interaction: kernel safety 18-19's fillet fallback now rounds r 4 on a 3-high edge, where hub 11's
+# P8a tests expect Onshape's refusal (FILLET_FAILED). Remove this file with the fix.
+
+issue: ops#693
+
+reason: the fillet fallback rounds a radius past the adjacent face instead of failing; the studio dress-up tests expect the refusal
+cli  PartDesignTests.TestStudioDressUp.TestStudioDressUp.testNoPartRoundedFails
+cli  PartDesignTests.TestStudioDressUp.TestStudioDressUp.testAFailingPartIsLeftUnchanged
