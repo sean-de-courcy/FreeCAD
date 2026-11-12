@@ -18,6 +18,11 @@ from SketcherTests.TestSketchCommandsGui import TestSketchCommandsGui
 from SketcherTests.TestSketchToolbarGui import TestSketchToolbarGui  # FreeCAD-CH, ops#605
 from SketcherTests.TestSketchDxfGui import TestSketchDxfGui  # FreeCAD-CH, the DXF lane
 from SketcherTests.TestSketchModelPicksGui import TestSketchModelPicksGui  # FreeCAD-CH, ops#634
+from SketcherTests.TestSketchMidpointPicksGui import (  # FreeCAD-CH, selection parity 10 (b)
+    TestModelEdgeMidpointMarkerGui,
+    TestSketchModelMidpointPickGui,
+    TestSketchModelArcMidpointPickGui,
+)
 from SketcherTests.TestSketchModelFacesGui import TestSketchModelFacesGui  # FreeCAD-CH, ops#640
 from SketcherTests.TestSketchConstraintToolsGui import TestSketchConstraintToolsGui  # FreeCAD-CH, ops#640
 from SketcherTests.TestSketchOnshapeGui import (  # FreeCAD-CH, ops#640
@@ -76,6 +81,9 @@ from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH,
     and TestSketchCommandsGui
     and TestSketchToolbarGui
     and TestSketchModelPicksGui
+    and TestModelEdgeMidpointMarkerGui
+    and TestSketchModelMidpointPickGui
+    and TestSketchModelArcMidpointPickGui
     and TestSketchEscapeGui
     and TestSketchMidpointGui
     and TestSketchOverdefiningDimensionGui

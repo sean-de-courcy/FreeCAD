@@ -171,6 +171,8 @@ SET(PartGui_SRCS
     ViewProviderDatum.h
     ViewProviderExt.cpp
     ViewProviderExt.h
+    EdgeMidpointMarker.cpp
+    EdgeMidpointMarker.h
     ViewProviderReference.cpp
     ViewProviderReference.h
     ViewProviderBox.cpp
