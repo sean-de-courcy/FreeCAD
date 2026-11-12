@@ -77,6 +77,18 @@ class TestLoftOnshapePlain(LoftCase):
         self.assertLoft(loft, 6586.04, 2157.64, 6)
         self.assertEqual(len(loft.Shape.Edges), 12)
 
+    def testCircleToSquareMatchesOnshape(self):
+        """The circle first: its cap takes the moved seam too (no vertex left at the sketch's 0 degrees)."""
+        loft = self.loft([models.circle(0, 0, 5)], square(20))
+        self.assertLoft(loft, 6586.04, 2157.64, 6)
+        self.assertEqual(len(loft.Shape.Edges), 12)
+        self.assertEqual(len(loft.Shape.Vertexes), 8)
+
+    def testRuledSquareToCircleHasFourSides(self):
+        loft = self.loft(square(20), [models.circle(0, 0, 5)], Ruled=True)
+        self.assertLoft(loft, 6586.04, 2157.64, 6)
+        self.assertEqual(len(loft.Shape.Edges), 12)
+
     def testSquareToPointIsThePyramid(self):
         loft = self.loft(square(20), [Part.Point(V(0, 0, 0))])
         self.assertLoft(loft, 400 * H / 3, 1664.91, 5)
@@ -142,16 +154,38 @@ class TestLoftOnshapeConditions(LoftCase):
         self.assertGreater(loft.Shape.Volume, one + 1)
         self.assertAlmostEqual(loft.Shape.BoundBox.XMax, 10, delta=1e-4)
 
-    def testNamesMatchThePlainLoft(self):
-        """The condition keeps the side faces' names (a later feature's reference survives switching it on)."""
-        loft = self.loft(square(20), [models.circle(0, 0, 5)])
-        plain = sorted(name for name in loft.Shape.ElementReverseMap if name.startswith("Face"))
-        mapped = {name: loft.Shape.getElementMappedName(name) for name in plain}
-        loft.StartCondition = "Normal to profile"
+    @staticmethod
+    def places(shape):
+        """Each face's and edge's mapped name -> where it is: cap or side, and its centre's angle."""
+        out = {}
+        for kind, elements in (("Face", shape.Faces), ("Edge", shape.Edges)):
+            for i, element in enumerate(elements, 1):
+                centre = element.CenterOfMass
+                flat = element.BoundBox.ZLength < 1e-6
+                place = ("bottom" if centre.z < H / 2 else "top") if flat else "side"
+                if math.hypot(centre.x, centre.y) > 1e-6:
+                    place += " %d" % (round(math.degrees(math.atan2(centre.y, centre.x))) % 360)
+                out[shape.getElementMappedName("%s%d" % (kind, i))] = (kind, place)
+        return out
+
+    def assertNamesKept(self, loft, condition):
+        """Switching the condition on keeps every face's and edge's mapped name on the same face or edge,
+        so a later feature's reference (stored as the mapped name) still lands where it pointed."""
+        plain = self.places(loft.Shape)
+        self.assertEqual(len(plain), 6 + 12)  # every element named, no two alike
+        self.assertNotIn("", plain)
+        setattr(loft, condition, "Normal to profile")
         self.doc.recompute()
         self.assertTrue(loft.isValid(), loft.getStatusString())
-        after = {name: loft.Shape.getElementMappedName(name) for name in plain}
-        self.assertEqual(set(m[0] for m in mapped.values() if m), set(m[0] for m in after.values() if m))
+        after = self.places(loft.Shape)
+        for mapped, place in plain.items():
+            self.assertEqual(after.get(mapped), place, mapped)
+
+    def testNamesMatchThePlainLoft(self):
+        self.assertNamesKept(self.loft(square(20), [models.circle(0, 0, 5)]), "StartCondition")
+
+    def testNamesMatchThePlainLoftCircleFirst(self):
+        self.assertNamesKept(self.loft([models.circle(0, 0, 5)], square(20)), "EndCondition")
 
     def testPointProfileStops(self):
         loft = self.loft(square(20), [Part.Point(V(0, 0, 0))], EndCondition="Normal to profile")

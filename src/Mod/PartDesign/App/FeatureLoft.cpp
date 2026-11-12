@@ -25,7 +25,9 @@
 #include <array>
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
@@ -38,6 +40,7 @@
 #include <GeomFill_Profiler.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
@@ -49,6 +52,8 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <gp_Pln.hxx>
 #include <Precision.hxx>
 
@@ -60,6 +65,7 @@
 #include <Base/Reader.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 
+#include "Mod/Part/App/TopoShapeMapper.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
 #include "FeatureLoft.h"
@@ -374,6 +380,161 @@ Part::TopoShape withProfileConditions(
     result.makeShapeWithElementMap(sewn, Part::MapperHistory(history), {ruled});
     return result;
 }
+
+/// ops#655: a profile that is one closed periodic edge (a circle, an ellipse) keeps its seam vertex
+/// where the sketch put it, and ThruSections splits the other profile there too: an extra side face
+/// (7 faces where Onshape has 6 for a square to a circle, GB12 (c)). Move the seam to where
+/// ThruSections maps the neighbouring profile's first vertex onto it (the ray from this profile's
+/// centre along that vertex's direction from its own centre), so the vertices pair up one to one.
+/// The surface is the same; the old edge's and vertex's names carry over as modified.
+Part::TopoShape reseamed(const Part::TopoShape& wire, const Part::TopoShape& neighbour)
+{
+    if (wire.isNull() || neighbour.isNull() || wire.getShape().ShapeType() != TopAbs_WIRE
+        || neighbour.getShape().ShapeType() != TopAbs_WIRE) {
+        return wire;
+    }
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(wire.getShape(), TopAbs_EDGE, edges);
+    TopTools_IndexedMapOfShape neighbourVertices;
+    TopExp::MapShapes(neighbour.getShape(), TopAbs_VERTEX, neighbourVertices);
+    if (edges.Extent() != 1 || neighbourVertices.Extent() < 2) {
+        return wire;
+    }
+    TopoDS_Edge edge;
+    for (TopExp_Explorer xp(wire.getShape(), TopAbs_EDGE); xp.More(); xp.Next()) {
+        edge = TopoDS::Edge(xp.Current());  // with its orientation in the wire
+        break;
+    }
+    const TopoDS_Vertex seam = TopExp::FirstVertex(edge);
+    if (seam.IsNull() || !seam.IsSame(TopExp::LastVertex(edge))) {
+        return wire;
+    }
+    double first = 0;
+    double last = 0;
+    TopLoc_Location location;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+    if (curve.IsNull() || !curve->IsPeriodic()) {
+        return wire;
+    }
+    if (!location.IsIdentity()) {
+        curve = Handle(Geom_Curve)::DownCast(curve->Transformed(location.Transformation()));
+    }
+    const double period = curve->Period();
+    if (std::abs(last - first - period) > Precision::PConfusion()) {
+        return wire;
+    }
+
+    // the profile's plane normal (Newell) and centre
+    constexpr int samples = 360;
+    std::vector<gp_Pnt> points;
+    points.reserve(samples);
+    for (int i = 0; i < samples; ++i) {
+        points.push_back(curve->Value(first + period * i / samples));
+    }
+    gp_XYZ newell(0, 0, 0);
+    for (int i = 0; i < samples; ++i) {
+        newell += points[i].XYZ().Crossed(points[(i + 1) % samples].XYZ());
+    }
+    if (newell.Modulus() < Precision::Confusion()) {
+        return wire;
+    }
+    const gp_Vec normal(newell.Normalized());
+    const gp_Pnt centre = wireCentre(wire.getShape());
+
+    gp_Vec direction(
+        wireCentre(neighbour.getShape()),
+        BRep_Tool::Pnt(TopoDS::Vertex(neighbourVertices(1)))
+    );
+    direction -= normal * direction.Dot(normal);
+    if (direction.Magnitude() < Precision::Confusion()) {
+        return wire;
+    }
+    direction.Normalize();
+
+    // the crossing: the sample nearest the ray's direction, then bisect the side the ray is on
+    auto side = [&](double u) {
+        return normal.Dot(gp_Vec(centre, curve->Value(u)).Crossed(direction));
+    };
+    int best = 0;
+    double bestCos = -2;
+    for (int i = 0; i < samples; ++i) {
+        gp_Vec radius(centre, points[i]);
+        if (radius.Magnitude() < Precision::Confusion()) {
+            continue;
+        }
+        const double c = radius.Normalized().Dot(direction);
+        if (c > bestCos) {
+            bestCos = c;
+            best = i;
+        }
+    }
+    if (bestCos < 0.5) {
+        return wire;  // no crossing nearby: leave it
+    }
+    const double step = period / samples;
+    double a = first + step * (best - 1);
+    double b = first + step * (best + 1);
+    double fa = side(a);
+    if (fa * side(b) > 0) {
+        return wire;
+    }
+    for (int i = 0; i < 100 && b - a > Precision::PConfusion() * 1e-3; ++i) {
+        const double m = (a + b) / 2;
+        const double fm = side(m);
+        if ((fm < 0) == (fa < 0)) {
+            a = m;
+            fa = fm;
+        }
+        else {
+            b = m;
+        }
+    }
+    const double u = (a + b) / 2;
+    if (curve->Value(u).Distance(BRep_Tool::Pnt(seam)) < Precision::Confusion()) {
+        return wire;  // already there
+    }
+
+    TopoDS_Edge newEdge = BRepBuilderAPI_MakeEdge(curve, u, u + period).Edge();
+    newEdge.Orientation(edge.Orientation());
+    const TopoDS_Wire newWire = BRepBuilderAPI_MakeWire(newEdge).Wire();
+
+    Part::ShapeMapper mapper;
+    mapper.insert(Part::MappingStatus::Modified, edge, newEdge);
+    mapper.insert(Part::MappingStatus::Modified, seam, TopExp::FirstVertex(newEdge));
+    Part::TopoShape result(wire.Tag, wire.Hasher);
+    result.makeShapeWithElementMap(newWire, mapper, {wire});
+    return result;
+}
+
+/// Each one-edge closed profile in a loft's sections gets its seam at the nearest polygon-like
+/// section's first vertex (previous one first); point sections and all-circle lofts are left as they are.
+void reseamSections(std::vector<Part::TopoShape>& sections)
+{
+    auto isPolygonal = [](const Part::TopoShape& s) {
+        if (s.isNull() || s.getShape().ShapeType() != TopAbs_WIRE) {
+            return false;
+        }
+        TopTools_IndexedMapOfShape vertices;
+        TopExp::MapShapes(s.getShape(), TopAbs_VERTEX, vertices);
+        return vertices.Extent() >= 2;
+    };
+    const int count = static_cast<int>(sections.size());
+    for (int i = 0; i < count; ++i) {
+        if (isPolygonal(sections[i])) {
+            continue;
+        }
+        for (int d = 1; d < count; ++d) {
+            const int j = i - d >= 0 && isPolygonal(sections[i - d]) ? i - d
+                : i + d < count && isPolygonal(sections[i + d])      ? i + d
+                                                                      : -1;
+            if (j >= 0) {
+                sections[i] = reseamed(sections[i], sections[j]);
+                break;
+            }
+        }
+    }
+}
+
 }  // namespace
 
 PROPERTY_SOURCE(PartDesign::Loft, PartDesign::ProfileBased)
@@ -659,10 +820,14 @@ App::DocumentObjectExecReturn* Loft::execute()
 
         // build all shells
         std::vector<TopoShape> shells;
+        bool frontReseamed = false;
         for (auto& sectionWires : wiresections) {
             for (auto& wire : sectionWires) {
                 wire.move(invObjLoc);
             }
+            const TopoDS_Shape unseamed = sectionWires.front().getShape();
+            reseamSections(sectionWires);  // ops#655: vertices pair up as Onshape's
+            frontReseamed = frontReseamed || !unseamed.IsSame(sectionWires.front().getShape());
             // ops#655: a profile condition rebuilds the ruled loft's side faces
             const bool conditioned = StartCondition.getValue() != 0 || EndCondition.getValue() != 0;
             if (conditioned) {
@@ -701,32 +866,17 @@ App::DocumentObjectExecReturn* Loft::execute()
         }
 
         // build the top and bottom face, sew the shell and build the final solid
-        TopoShape front;
-        if (wiresections[0].front().shapeType() != TopAbs_VERTEX) {
-            front = getTopoShapeVerifiedFace();
-            if (front.isNull()) {
-                return new App::DocumentObjectExecReturn(
-                    QT_TRANSLATE_NOOP("Exception", "Loft: Creating a face from sketch failed")
-                );
-            }
-            front.move(invObjLoc);
-        }
-
-        TopoShape back;
-        if (wiresections[0].back().shapeType() != TopAbs_VERTEX) {
-            std::vector<TopoShape> backwires;
-            for (auto& sectionWires : wiresections) {
-                backwires.push_back(sectionWires.back());
-            }
+        auto capFace = [&](const std::vector<TopoShape>& capWires) {
             const char* faceMaker[] = {
                 "Part::FaceMakerBullseye",
                 "Part::FaceMakerCheese",
                 "Part::FaceMakerSimple",
                 "Part::FaceMakerUnified",
             };
+            TopoShape face;
             for (size_t i = 0; i < std::size(faceMaker); i++) {
                 try {
-                    back = makeTopoShape(false).makeElementFace(backwires, nullptr, faceMaker[i]);
+                    face = makeTopoShape(false).makeElementFace(capWires, nullptr, faceMaker[i]);
                     break;
                 }
                 catch (...) {
@@ -736,6 +886,37 @@ App::DocumentObjectExecReturn* Loft::execute()
                     continue;
                 }
             }
+            return face;
+        };
+
+        TopoShape front;
+        if (wiresections[0].front().shapeType() != TopAbs_VERTEX) {
+            if (frontReseamed) {
+                // ops#655: the cap takes the moved seam too, or the sketch's seam vertex comes back
+                std::vector<TopoShape> frontwires;
+                for (auto& sectionWires : wiresections) {
+                    frontwires.push_back(sectionWires.front());
+                }
+                front = capFace(frontwires);
+            }
+            else {
+                front = getTopoShapeVerifiedFace();
+                if (front.isNull()) {
+                    return new App::DocumentObjectExecReturn(
+                        QT_TRANSLATE_NOOP("Exception", "Loft: Creating a face from sketch failed")
+                    );
+                }
+                front.move(invObjLoc);
+            }
+        }
+
+        TopoShape back;
+        if (wiresections[0].back().shapeType() != TopAbs_VERTEX) {
+            std::vector<TopoShape> backwires;
+            for (auto& sectionWires : wiresections) {
+                backwires.push_back(sectionWires.back());
+            }
+            back = capFace(backwires);
         }
 
         if (!front.isNull() || !back.isNull()) {
