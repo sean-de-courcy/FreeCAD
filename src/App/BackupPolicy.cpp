@@ -38,6 +38,9 @@
 #include <filesystem>
 #include <system_error>
 #include <thread>
+
+#include <QByteArray>
+#include <QtGlobal>
 #ifdef _WIN32
 # include <windows.h>
 #else
@@ -141,10 +144,7 @@ bool keepFileNoErase(const Base::FileInfo& file, const std::string& name)
 
 void App::saveFaultPoint(const char* step)
 {
-    static const std::string fault = [] {
-        const char* value = std::getenv("FREECAD_CH_SAVE_FAULT");
-        return std::string(value ? value : "");
-    }();
+    static const std::string fault = qgetenv("FREECAD_CH_SAVE_FAULT").toStdString();
     if (fault.empty()) {
         return;
     }
