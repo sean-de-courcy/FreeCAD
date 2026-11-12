@@ -696,6 +696,8 @@ private:
 namespace
 {
 // FreeCAD-CH (ops#640, slice A2): the save guard's question and notices
+bool askOnFileChange(Gui::Document* gui, const App::Document::FileChange& change);
+
 QString fileChangeText(const char* text)
 {
     return QCoreApplication::translate("Gui::FileChange", text);
@@ -859,6 +861,11 @@ private:
                 FileChangeMonitor::instance().checkSoon();
             };
         };
+        if (change.changed && !change.known) {
+            label->setText(fileChangeText("This document was not read from the file under its "
+                                          "name as it is now. Saving asks which version to keep."));
+            return;
+        }
         if (change.changed) {
             const QString when = whenText(change.when);
             QString text = when.isEmpty()
@@ -874,7 +881,13 @@ private:
                 reload->setObjectName(QStringLiteral("FileChangeReload"));
                 QObject::connect(reload,
                                  &QAction::triggered,
-                                 withDocument([](App::Document* doc, Gui::Document*) {
+                                 withDocument([](App::Document* doc, Gui::Document* gui) {
+                                     // Edited since the bar was shown: the three-way question
+                                     // instead (A2 review R6)
+                                     if (gui->isModified()) {
+                                         askOnFileChange(gui, doc->fileChangeOnDisk());
+                                         return;
+                                     }
                                      doc->restore();
                                  }));
             }
@@ -953,10 +966,18 @@ bool askOnFileChange(Gui::Document* gui, const App::Document::FileChange& change
     box.setObjectName(QStringLiteral("FileChangeQuestion"));
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(fileChangeText("Document changed on disk"));
-    box.setText(when.isEmpty()
-                    ? fileChangeText("%1 saved this document after you opened it.").arg(who)
-                    : fileChangeText("%1 saved this document at %2, after you opened it.")
-                          .arg(who, when));
+    if (!change.known) {
+        box.setText(
+            fileChangeText("This document was not read from the file under its name as it is now "
+                           "(last saved by %1%2).")
+                .arg(who, when.isEmpty() ? QString() : QStringLiteral(", ") + when));
+    }
+    else {
+        box.setText(when.isEmpty()
+                        ? fileChangeText("%1 saved this document after you opened it.").arg(who)
+                        : fileChangeText("%1 saved this document at %2, after you opened it.")
+                              .arg(who, when));
+    }
     box.setInformativeText(fileChangeText("Neither version is lost, whichever you choose."));
     QPushButton* keepCopy =
         box.addButton(fileChangeText("Keep mine as a copy"), QMessageBox::AcceptRole);
@@ -2692,6 +2713,13 @@ void Document::saveAll()
             if (!gdoc->saveAs()) {
                 break;
             }
+        }
+        // FreeCAD-CH (ops#640, A2): a file changed on disk: the three ways out, as for one save
+        if (const App::Document::FileChange change = doc->fileChangeOnDisk(); change.changed) {
+            if (!askOnFileChange(gdoc, change)) {
+                break;
+            }
+            continue;
         }
         Gui::WaitCursor wc;
 

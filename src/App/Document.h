@@ -348,6 +348,9 @@ public:
         /// Who saved the file on disk, and when (its LastModifiedBy, its LastModifiedDate, UTC)
         std::string by;
         std::string when;
+        /// False when this document has no sure record of its file: its read failed, the file
+        /// changed during the read, or it was read from a recovery copy. The save asks all the same
+        bool known = true;
     };
     /// Compares the document's file with the one it read or last saved (size and time)
     FileChange fileChangeOnDisk() const;
@@ -368,8 +371,8 @@ public:
      *
      * @param[in] path: one of conflictCopies().
      * @param[in] choice: "KeepThis" gives the other its author's name and time; "KeepOther" keeps
-     * this version under its author's name and time, puts the other under the document's name
-     * and reads it.
+     * this version as the document holds it (a copy with a new id, `<name> (<who> <date> <time>)`),
+     * puts the other under the document's name and reads it.
      * @return the renamed or kept file's name.
      */
     std::string resolveConflictCopy(const std::string& path, const std::string& choice);

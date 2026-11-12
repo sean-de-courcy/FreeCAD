@@ -4050,13 +4050,77 @@ class DocumentSaveGuardCases(unittest.TestCase):
         self.assertEqual(self._marker(first), 9)
         self.assertEqual(self._marker(second), 8)
 
+    def testFailedReadKeepsTheGuard(self):
+        # A2 persistence review P1: theirs can't be read, so TakeTheirs fails; the emptied
+        # document's save then asks instead of overwriting their file
+        doc = self._opened()
+        garbage = b"not a zip archive, though longer than an empty one"
+        with open(self.path, "wb") as fh:
+            fh.write(garbage)
+        with self.assertRaises(Exception):
+            doc.resolveFileChange("TakeTheirs")
+        kept = [n for n in self._documents() if n.startswith("Plate (Ward ")]
+        self.assertEqual(len(kept), 1, "mine is kept before theirs is read")
+        change = doc.fileChangeOnDisk()
+        self.assertTrue(change["changed"])
+        self.assertFalse(change["known"])
+        with self.assertRaises(Exception):
+            doc.save()
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), garbage)
+
+    def testArrivalDuringSaveRefuses(self):
+        # A2 review R1: their save arrives while this one is being written: not overwritten
+        doc = self._opened()
+        test = self
+
+        class Arrival:
+            done = False
+
+            def slotStartSaveDocument(self, document, filename):
+                if not self.done and document.Name == doc.Name:
+                    self.done = True
+                    test._theirSave()
+
+        arrival = Arrival()
+        FreeCAD.addDocumentObserver(arrival)
+        try:
+            with self.assertRaises(Exception) as caught:
+                doc.save()
+        finally:
+            FreeCAD.removeDocumentObserver(arrival)
+        self.assertTrue(arrival.done)
+        self.assertIn("while it was being saved here", str(caught.exception))
+        self.assertEqual(self._marker(self.path), 9)
+        self.assertEqual(self._documents(), [self.NAME])
+
+    def testKeepOtherKeepsUnsavedEdits(self):
+        # A2 review R2: this version is kept as the document holds it, its unsaved edit too
+        doc = self._opened()
+        doc.save()
+        doc.getObject("Marker").Integer = 3
+        other = os.path.join(self.folder, self.CONFLICTS[0])
+        self._theirSave(other)
+        kept = doc.resolveConflictCopy(other, "KeepOther")
+        self.assertEqual(self._marker(kept), 3)
+        self.assertEqual(self._marker(self.path), 9)
+
+    @unittest.skipUnless(sys.platform == "win32", "case-insensitive names")
+    def testSaveCopyOntoOwnFileIsRefused(self):
+        # A2 review R3: the document's own file under another spelling is no copy's target
+        doc = self._opened()
+        self._theirSave()
+        doc.saveCopy(self.path.upper())
+        self.assertEqual(self._marker(self.path), 9)
+
     # Conflict copies
 
     CONFLICTS = ("Plate.sync-conflict-20261112-140200-ABCDEF7.FCStd",
                  "Plate (Sean's conflicted copy 2026-11-12).FCStd",
                  "Plate (conflicted copy 2026-11-12 140200).FCStd")
     NOT_CONFLICTS = ("Plate 2.FCStd", "Plates.sync-conflict-20261112-140200-ABCDEF7.FCStd",
-                     "Other.sync-conflict-20261112-140200-ABCDEF7.FCStd", "Plate (Sean 2026-11-12 14-02).FCStd")
+                     "Other.sync-conflict-20261112-140200-ABCDEF7.FCStd", "Plate (Sean 2026-11-12 14-02).FCStd",
+                     "Plate (conflicted copy notes).FCStd")
 
     def testConflictCopiesAreFound(self):
         doc = self._opened()

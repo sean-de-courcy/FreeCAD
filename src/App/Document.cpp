@@ -371,14 +371,35 @@ std::optional<FileStamp> stampOf(const std::string& path)
     return stamp;
 }
 
+// No sure record of the document's file (A2 review P1-P3): the stamp matches no file, so the next
+// save over an existing file asks
+constexpr std::uintmax_t unknownSize = static_cast<std::uintmax_t>(-1);
+void markUnknown(const Document& doc)
+{
+    const std::string file = doc.FileName.getStrValue();
+    if (file.empty()) {
+        fileStamps.erase(&doc);
+        return;
+    }
+    FileStamp stamp;
+    stamp.path = file;
+    stamp.size = unknownSize;
+    fileStamps[&doc] = stamp;
+}
+
 void recordFile(const Document& doc)
 {
     if (auto stamp = stampOf(doc.FileName.getStrValue())) {
         fileStamps[&doc] = *stamp;
     }
     else {
-        fileStamps.erase(&doc);
+        markUnknown(doc);
     }
+}
+
+bool sameStamp(const FileStamp& first, const FileStamp& second)
+{
+    return first.size == second.size && first.time == second.time;
 }
 
 bool samePath(const std::string& first, const std::string& second)
@@ -435,22 +456,43 @@ std::string namedCopy(const std::string& file, const std::string& who, const std
 
 // The sync tools' names for the losing side of a conflict (design section 3, item 3): Syncthing's
 // `<stem>.sync-conflict-<date>-<time>-<device>.<ext>`; Dropbox's `<stem> (<who>'s conflicted copy
-// <date>).<ext>` and Nextcloud's `<stem> (conflicted copy <date> <time>).<ext>`. OneDrive's
-// `<stem>-<computer>.<ext>` is not matched: it can't be told from a document's own name.
-bool isConflictCopy(const std::string& name, const std::string& stem, const std::string& ext)
+// <date>).<ext>` and Nextcloud's `<stem> (conflicted copy <date> <time>).<ext>` (a date: a digit
+// inside). OneDrive's `<stem>-<computer>.<ext>` is not matched: it can't be told from a document's
+// own name. Compiled once per folder scan, with a cheap prefix test first (A2 review)
+class ConflictMatcher
 {
-    const std::string quotedStem = boost::regex_replace(
-        stem, boost::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\\$&)", boost::match_default | boost::format_perl);
-    const std::string quotedExt = boost::regex_replace(
-        ext, boost::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\\$&)", boost::match_default | boost::format_perl);
-    const boost::regex syncthing("^" + quotedStem + R"(\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}\.)"
-                                     + quotedExt + "$",
-                                 boost::regex::icase);
-    const boost::regex conflictedCopy("^" + quotedStem + R"( \([^)]*conflicted copy[^)]*\)\.)"
-                                          + quotedExt + "$",
-                                      boost::regex::icase);
-    return boost::regex_match(name, syncthing) || boost::regex_match(name, conflictedCopy);
-}
+public:
+    ConflictMatcher(const std::string& stem, const std::string& ext)
+        : stem(stem)
+        , syncthing("^" + quoted(stem) + R"(\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}\.)" + quoted(ext) + "$",
+                    boost::regex::icase)
+        , conflictedCopy("^" + quoted(stem) + R"( \([^)]*conflicted copy[^)]*\d[^)]*\)\.)" + quoted(ext)
+                             + "$",
+                         boost::regex::icase)
+    {}
+
+    bool operator()(const std::string& name) const
+    {
+        if (name.size() <= stem.size()
+            || !boost::iequals(std::string_view(name).substr(0, stem.size()), stem)) {
+            return false;
+        }
+        return boost::regex_match(name, syncthing) || boost::regex_match(name, conflictedCopy);
+    }
+
+private:
+    static std::string quoted(const std::string& text)
+    {
+        return boost::regex_replace(text,
+                                    boost::regex(R"([.^$|()\[\]{}*+?\\])"),
+                                    R"(\\$&)",
+                                    boost::match_default | boost::format_perl);
+    }
+
+    std::string stem;
+    boost::regex syncthing;
+    boost::regex conflictedCopy;
+};
 // The UUIDs of the documents each running import's objects were copied from, by document name
 // (exportObjects writes them, ops#171); under "" the one UUID of a copy of one document's objects
 // (SourceDocument). None for a saved project or a copy made by a build before ops#171
@@ -3580,7 +3622,8 @@ bool Document::saveAs(const char* _file)
 bool Document::saveCopy(const char* file) const
 {
     const std::string checked = checkFileName(file);
-    if (this->FileName.getStrValue() == checked) {
+    // The document's own file under any spelling: no copy over it, past the guard (A2 review R3)
+    if (samePath(this->FileName.getStrValue(), checked)) {
         return false;
     }
     // FreeCAD-CH (ops#640, A1): the copy gets an id of its own; the open document keeps its id
@@ -3610,10 +3653,11 @@ Document::FileChange Document::fileChangeOnDisk() const
     if (!now) {
         return change;  // gone: a save overwrites nothing
     }
-    if (now->size == known->second.size && now->time == known->second.time) {
+    if (sameStamp(*now, known->second)) {
         return change;
     }
     change.changed = true;
+    change.known = known->second.size != unknownSize;
     try {
         const ProjectFile project(file);
         const ProjectFile::Metadata meta = project.getMetadata();
@@ -3653,8 +3697,15 @@ std::string Document::resolveFileChange(const std::string& choice)
     if (choice == "SaveMineOver") {
         // Theirs is kept under its author's name and time, then mine is saved over it
         const std::string kept = namedCopy(file, change.by, change.when);
+        const auto theirs = stampOf(file);
         if (!keepFileAs(file, kept)) {
             throw Base::FileException("Cannot keep the other version: not saved", kept);
+        }
+        // A third version arriving meanwhile is not overwritten (review P4); the kept copy stays
+        const auto still = stampOf(file);
+        if (!theirs || !still || !sameStamp(*theirs, *still)) {
+            throw Base::FileException(
+                "The file changed again while the other version was kept: not saved", file);
         }
         guardSkipped.insert(this);
         struct Restore
@@ -3682,14 +3733,13 @@ std::vector<std::string> Document::conflictCopies() const
         return copies;
     }
     const Base::FileInfo fi(file);
-    const std::string stem = fi.fileNamePure();
-    const std::string ext = fi.extension();
+    const ConflictMatcher isConflictCopy(fi.fileNamePure(), fi.extension());
     std::error_code error;
     const auto dir = Base::FileInfo::stringToPath(fi.dirPath());
     for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end;
          it.increment(error)) {
         const std::string name = Base::FileInfo::pathToString(it->path().filename());
-        if (isConflictCopy(name, stem, ext) && it->is_regular_file(error)) {
+        if (isConflictCopy(name) && it->is_regular_file(error)) {
             copies.push_back(Base::FileInfo::pathToString(it->path()));
         }
     }
@@ -3731,9 +3781,10 @@ std::string Document::resolveConflictCopy(const std::string& path, const std::st
     if (choice == "KeepOther") {
         // This one is kept under its author's name and time, the other takes the document's
         // name, and the document reads it
-        const ProjectFile::Metadata meta = metadataOf(file);
-        const std::string kept = namedCopy(file, meta.lastModifiedBy, meta.lastModifiedDate);
-        if (!keepFileAs(file, kept)) {
+        // This version is kept as the document holds it, its unsaved edits too, as a document of
+        // its own (a new id; A2 review R2)
+        const std::string kept = namedCopy(file, saveAuthor(), std::string());
+        if (!saveCopy(kept.c_str())) {
             throw Base::FileException("Cannot keep this version: nothing changed", kept);
         }
         replaceFileWith(*other, file);
@@ -3786,11 +3837,14 @@ bool Document::save()
                         + localTime(change.when)
                               .toString(QStringLiteral("yyyy-MM-dd HH:mm"))
                               .toStdString();
+                const std::string what = change.known
+                    ? who + " saved this document" + when + ", after it was opened here"
+                    : "This document was not read from the file under its name as it is now (last "
+                        "saved by " + who + when + ")";
                 throw Base::FileException(
-                    (who + " saved this document" + when
-                     + ", after it was opened here: not saved, so as not to overwrite it. Keep "
-                       "this version as a copy, take the other (this one is kept), or save this "
-                       "one over it (the other is kept)")
+                    (what
+                     + ": not saved, so as not to overwrite it. Keep this version as a copy, take "
+                       "the other (this one is kept), or save this one over it (the other is kept)")
                         .c_str(),
                     Base::FileInfo(FileName.getValue()));
             }
@@ -3986,6 +4040,19 @@ bool Document::saveToFile(const char* filename) const
             backupPolicy.setPolicy(BackupPolicy::Standard);
         }
         backupPolicy.setNumberOfFiles(count_bak);
+        // FreeCAD-CH (ops#640, A2 review R1): a file that arrived while this one was written is
+        // not overwritten either (the window left is the flush and the rename)
+        if (samePath(filename, FileName.getStrValue()) && !guardSkipped.contains(this)) {
+            const FileChange change = fileChangeOnDisk();
+            if (change.changed) {
+                throw Base::FileException(
+                    ((change.by.empty() ? std::string("Someone") : change.by)
+                     + " saved this document while it was being saved here: not saved, so as not "
+                       "to overwrite it")
+                        .c_str(),
+                    Base::FileInfo(filename));
+            }
+        }
         applying = true;
         backupPolicy.apply(fn, nativePath);
     }
@@ -4128,14 +4195,12 @@ void Document::restore(const char* filename,
     }
     Base::FileInfo fi(filename);
     Base::ifstream file(fi, std::ios::in | std::ios::binary);
-    // The file this document knows (A2): its own file as it is read now; another file (a recovery
-    // copy) leaves the guard nothing to compare with
-    if (samePath(filename, FileName.getStrValue())) {
-        recordFile(*this);
-    }
-    else {
-        fileStamps.erase(this);
-    }
+    // The file this document knows (A2): its own file as it is before the read, kept only once the
+    // read succeeded and if the file did not change meanwhile; until then, and for a document read
+    // from another file (a recovery copy), no sure record (review P1-P3)
+    const std::optional<FileStamp> stampBefore =
+        samePath(filename, FileName.getStrValue()) ? stampOf(filename) : std::nullopt;
+    markUnknown(*this);
     std::streambuf* buf = file.rdbuf();
     std::streamoff size = buf->pubseekoff(0, std::ios::end, std::ios::in);
     buf->pubseekoff(0, std::ios::beg, std::ios::in);
@@ -4179,6 +4244,28 @@ void Document::restore(const char* filename,
     // without GUI. But if available then follow after all data files of the App document.
     signalRestoreDocument(reader);
     reader.readFiles(zipstream);
+    if (stampBefore && !testStatus(Document::RestoreError)) {
+        const auto stampAfter = stampOf(filename);
+        if (stampAfter && sameStamp(*stampAfter, *stampBefore)) {
+            fileStamps[this] = *stampBefore;
+        }
+    }
+    else if (!stampBefore && !testStatus(Document::RestoreError) && !FileName.getStrValue().empty()
+             && !samePath(filename, FileName.getStrValue())) {
+        // Read from another file (a recovery copy): the document's own file is the version it was
+        // made from when that file was saved by the same person at the same time (A2 review R4);
+        // else no sure record, and the first save asks
+        try {
+            const ProjectFile::Metadata meta = ProjectFile(FileName.getStrValue()).getMetadata();
+            if (!meta.lastModifiedDate.empty()
+                && meta.lastModifiedDate == LastModifiedDate.getStrValue()
+                && meta.lastModifiedBy == LastModifiedBy.getStrValue()) {
+                recordFile(*this);
+            }
+        }
+        catch (...) {
+        }
+    }
     reportNameRemap(*remap, getName());
     remap.reset();
     reportNewerFormat(this);

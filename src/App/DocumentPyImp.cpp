@@ -196,6 +196,7 @@ PyObject* DocumentPy::fileChangeOnDisk(PyObject* args)
         dict.setItem("changed", Py::Boolean(change.changed));
         dict.setItem("by", Py::String(change.by));
         dict.setItem("when", Py::String(change.when));
+        dict.setItem("known", Py::Boolean(change.known));
         return Py::new_reference_to(dict);
     }
     PY_CATCH
