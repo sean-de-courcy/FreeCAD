@@ -80,8 +80,9 @@ bool saveFaultPoint(const char* step);
 /// new file under the document's name (reset when apply starts). Not exported.
 bool saveReplacedFile();
 
-/// FreeCAD-CH (ops#640, slice A2): keeps `from` also under `to` (a hard link, else a copy), never
-/// over an existing file. Not exported.
+/// FreeCAD-CH (ops#640, slice A2): keeps `from` also under `to` as a copy (no hard link: an
+/// in-place write to `from` must not change it), flushed, never over an existing file. Not
+/// exported.
 bool keepFileAs(const std::string& from, const std::string& to);
 
 /// FreeCAD-CH (ops#640, slice A2): puts `source` under `target` with one replacing rename. Throws
