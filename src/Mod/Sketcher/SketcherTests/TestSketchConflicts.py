@@ -55,11 +55,15 @@ class TestSketchConflicts(unittest.TestCase):
     def _sk7b(self):
         """Onshape SK7b: two lengths on the bottom line off the drawing (25 and 30) and a 15 on
         the right side. Returns (line ids, index of the right side's length)."""
+        # added at once, as Onshape's API case: one addConstraint per constraint solves after
+        # each, so the 25 alone would first redraw the line at 25 (and the 25 then holds as drawn)
         ids = _rectangle(self.sk)
-        self.sk.addConstraint(Sketcher.Constraint("Distance", ids[0], 25.0))
-        self.sk.addConstraint(Sketcher.Constraint("Distance", ids[0], 30.0))
-        side = self.sk.addConstraint(Sketcher.Constraint("Distance", ids[1], 15.0))
-        return ids, side
+        self.sk.addConstraint([
+            Sketcher.Constraint("Distance", ids[0], 25.0),
+            Sketcher.Constraint("Distance", ids[0], 30.0),
+            Sketcher.Constraint("Distance", ids[1], 15.0),
+        ])
+        return ids, len(self.sk.Constraints) - 1
 
     def testConflictSolvesTheRest(self):
         # SK7b: the conflicting pair is left out (the bottom stays at its drawn 20), the side's 15
@@ -106,11 +110,12 @@ class TestSketchConflicts(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(self.sk.isValid(), self.sk.State)
         self.assertTrue(pad.isValid(), pad.State)
-        self.assertAlmostEqual(pad.Shape.Volume, 2000.0, places=4)  # both side lengths left out
+        # the 12 does not hold as drawn and is left out; the 10 holds and is kept
+        self.assertAlmostEqual(pad.Shape.Volume, 2000.0, places=4)
 
     def testGeometricConflictIsKeptAndTheNewestLeftOut(self):
         # PL1d: a Vertical on the bottom line of a framed rectangle; the constraint stays, the
-        # rectangle keeps its shape (the newest constraint of the conflict is left out)
+        # rectangle keeps its shape (the Vertical does not hold as drawn and is left out)
         ids = _rectangle(self.sk)
         self.sk.addConstraint(Sketcher.Constraint("Distance", ids[0], 20.0))
         self.sk.addConstraint(Sketcher.Constraint("Distance", ids[1], 10.0))
@@ -123,6 +128,32 @@ class TestSketchConflicts(unittest.TestCase):
         self.assertAlmostEqual(self.sk.Geometry[ids[0]].StartPoint.y,
                                self.sk.Geometry[ids[0]].EndPoint.y, places=6)
         self.assertAlmostEqual(pad.Shape.Volume, 2000.0, places=4)
+
+    # planegcs gives no diagnosis for this pair: solve() returns -1 with empty conflict and
+    # redundancy lists, so the sketch is Invalid (also when the Angle is added to a line already
+    # solved horizontal). Next step of sketch conflicts (work/sketch-conflicts-2/handoff.md).
+    @unittest.expectedFailure
+    def testHorizontalAndAngleLeaveTheLineAsDrawn(self):
+        # oracle 10b q-a (SK7b's rule): a Horizontal and an Angle 30 on a line drawn at 10 degrees;
+        # neither holds as drawn, so both are left out and the line stays as drawn, while a
+        # length on another line (the rest) is applied
+        import math
+
+        a = math.radians(10.0)
+        end = V(10.0 * math.cos(a), 10.0 * math.sin(a), 0)
+        line = self.sk.addGeometry(Part.LineSegment(V(0, 0, 0), end), False)
+        other = self.sk.addGeometry(Part.LineSegment(V(0, 20, 0), V(8, 20, 0)), False)
+        self.sk.addConstraint(Sketcher.Constraint("Horizontal", line))
+        self.sk.addConstraint(Sketcher.Constraint("Angle", line, math.radians(30.0)))
+        self.sk.addConstraint(Sketcher.Constraint("Distance", other, 12.0))
+        self.doc.recompute()
+        self.assertTrue(self.sk.ConflictingConstraints)
+        self.assertIn("Warning", self.sk.State)
+        self.assertTrue(self.sk.isValid(), self.sk.State)
+        g = self.sk.Geometry[line]
+        self.assertAlmostEqual((g.StartPoint - V(0, 0, 0)).Length, 0.0, places=6)
+        self.assertAlmostEqual((g.EndPoint - end).Length, 0.0, places=6)
+        self.assertAlmostEqual(_length(self.sk, other), 12.0, places=6)
 
     def testConsistentRepeatIsAcceptedWithoutWarning(self):
         # SK8 (consistent): accepted silently, as ops#656 made it
@@ -140,9 +171,13 @@ class TestSketchConflicts(unittest.TestCase):
         # SK8b: bottom 25 and top 20 on a rectangle drawn 20 x 10: a warning, the width stays as
         # drawn (both lengths left out), the side's 12 is applied
         ids = _rectangle(self.sk)
-        self.sk.addConstraint(Sketcher.Constraint("Distance", ids[0], 25.0))
-        self.sk.addConstraint(Sketcher.Constraint("Distance", ids[2], 20.0))
-        self.sk.addConstraint(Sketcher.Constraint("Distance", ids[1], 12.0))
+        # added at once, as Onshape's API case: one addConstraint per constraint solves after
+        # each, so the 25 alone would first redraw the line at 25
+        self.sk.addConstraint([
+            Sketcher.Constraint("Distance", ids[0], 25.0),
+            Sketcher.Constraint("Distance", ids[2], 20.0),
+            Sketcher.Constraint("Distance", ids[1], 12.0),
+        ])
         pad = self._pad()
         self.assertIn("Warning", self.sk.State)
         self.assertTrue(self.sk.isValid(), self.sk.State)

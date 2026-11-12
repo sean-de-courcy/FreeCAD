@@ -111,8 +111,10 @@ static bool midpointsOffTheirArcs(const SketchObject& sketch)
 // FreeCAD-CH (ops#640): leaves the constraints of a conflict out of the solve and solves the rest.
 // The solver's conflicting set is a superset of the conflict (it can hold the corners'
 // coincidences and dimensions the conflict does not involve), so:
-// 1. every driving dimension of the set is left out at once (Onshape SK7b, SK8b: both lengths of
-//    the line are left out), kept only when that alone resolves the conflict;
+// 1. every constraint of the set (conflicting, redundant, partially redundant) that the drawn
+//    geometry does not satisfy is left out at once and the satisfied ones are kept: the conflict's
+//    entities stay as drawn (Onshape SK7b, SK8b, PL1d; oracle 10b q-a: Horizontal + Angle 30 leaves
+//    the line as drawn), kept only when that alone resolves the conflict;
 // 2. otherwise the newest constraint still in conflict is left out, one per diagnosis (at most 10
 //    such steps, then all that is still in conflict).
 // A redundant constraint that does not hold is left out the same way. Returns false, with nothing
@@ -161,13 +163,25 @@ bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
         return false;
     };
 
-    std::set<int> dimensions;
-    for (int index : indicesOf(tags, {})) {
-        if (constraints[index]->isDimensional() && constraints[index]->isDriving) {
-            dimensions.insert(index);
+    // 1. As drawn: every driving constraint of the failing group that the drawn geometry does not
+    //    satisfy is left out, the ones it satisfies are kept, so the conflict's entities stay as drawn.
+    std::set<int> unsatisfied;
+    solvedSketch.setSkippedConstraints({});
+    solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+    std::vector<int> group = tags;
+    for (const std::vector<int>* list : {&solvedSketch.getConflicting(),
+                                         &solvedSketch.getRedundant(),
+                                         &solvedSketch.getPartiallyRedundant()}) {
+        group.insert(group.end(), list->begin(), list->end());
+    }
+    for (int index : indicesOf(group, {})) {
+        // parameters are still the drawn ones (set up, not solved); NaN counts as not satisfied
+        const double error = solvedSketch.calculateConstraintError(index + 1);
+        if (constraints[index]->isDriving && !(std::abs(error) < 1e-7)) {
+            unsatisfied.insert(index);
         }
     }
-    if (!dimensions.empty() && attempt(dimensions)) {
+    if (!unsatisfied.empty() && attempt(unsatisfied)) {
         return true;
     }
 
