@@ -4285,15 +4285,23 @@ bool startsWithNumberAndUnit(const std::string& s)
     return unitEnd(s, i) != std::string::npos;
 }
 
+// FreeCAD-CH (ops#684): a unit after a parenthesised operand is that much of the unit, as Onshape
+// reads the team's `(1/32) in` anywhere in an expression (`#w + (1/32) in`, `2 * (3/8) in`). The
+// grammar takes a unit only after a number, so `(e) unit` was an error. It is rewritten here to
+// `((e) * 1 unit)`: the outer parentheses bind the unit to the group as tightly as `3 mm` binds
+// to its number (`x / (1/2) in` is x / ((1/2) in)). Only a group opened where an operand starts,
+// never a function's `(` (`sqrt(2) mm` stays an error); the unit as unitEnd() reads one.
 std::string rewriteLiteralFractions(const std::string& s)
 {
-    if (s.find('/') == std::string::npos) {
+    if (s.find('/') == std::string::npos && s.find(')') == std::string::npos) {
         return s;
     }
     std::string out;
     out.reserve(s.size() + 8);
     // Whether an operand may start here: a numerator is taken only then.
     bool operandStart = true;
+    // The open parentheses: where each is in out, and whether it opened a bare group (ops#684)
+    std::vector<std::pair<std::size_t, bool>> groups;
     std::size_t i = 0;
     while (i < s.size()) {
         char c = s[i];
@@ -4359,6 +4367,25 @@ std::string rewriteLiteralFractions(const std::string& s)
             operandStart = false;
             i = j;
             continue;
+        }
+        if (c == '(') {
+            groups.emplace_back(out.size(), operandStart);
+        }
+        else if (c == ')' && !groups.empty()) {
+            const auto [open, bare] = groups.back();
+            groups.pop_back();
+            const std::size_t unit = skipBlanks(s, i + 1);
+            const std::size_t end = bare ? unitEnd(s, unit) : std::string::npos;
+            if (end != std::string::npos) {
+                // (e) unit -> ((e) * 1 unit)
+                out.insert(open, 1, '(');
+                out += ") * 1 ";
+                out.append(s, unit, end - unit);
+                out += ')';
+                operandStart = false;
+                i = end;
+                continue;
+            }
         }
         out.append(s, i, len);
         operandStart = len == 1 && std::strchr("([,;+-*%?:=<>!", c) != nullptr;
