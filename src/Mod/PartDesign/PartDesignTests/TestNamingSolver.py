@@ -3709,3 +3709,107 @@ class TestNamingSolver(unittest.TestCase):
             self.assertTrue(feature.isValid(), (kind, feature.getStatusString()))
             self.assertEqual(feature.EdgeLinks[1], ["Edge%d" % i for i in top[:3]])
             self.assertAlmostEqual(feature.Shape.BoundBox.ZMax, 12, places=6)
+
+    # The digests of one recompute (ops#640, notes/recompute-cost.md): kept per object while
+    # nothing of it changes, so a record holds the digest a fresh one would.
+
+    def _digestCacheModel(self):
+        """A block, a pad on its top face (First) and a pad on First's top face (Second). The
+        base sketch has a property Note."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        baseSketch = models.sketch(doc, "BaseSketch", models.rectangle(0, 0, 20, 20), body)
+        baseSketch.addProperty("App::PropertyString", "Note").Note = "before"
+        block = models.pad(body, baseSketch, 10, "Block")
+        doc.recompute()
+
+        def padOnTop(name, under, z, radius, length):
+            sketch = models.sketch(doc, name + "Sketch", [], body)
+            top = face("plane", normal=Z, through=(10, 10, z)).one(under.Shape)[0]
+            sketch.AttachmentSupport = [(under, top)]
+            sketch.MapMode = "FlatFace"
+            doc.recompute()
+            centre = sketch.getGlobalPlacement().inverse().multVec(App.Vector(10, 10, z))
+            sketch.addGeometry(models.circle(centre.x, centre.y, radius), False)
+            pad = models.pad(body, sketch, length, name)
+            doc.recompute()
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            return sketch, pad
+
+        firstSketch, first = padOnTop("First", block, 10, 4, 5)
+        secondSketch, _ = padOnTop("Second", first, 15, 2, 3)
+        return doc, body, baseSketch, block, firstSketch, first, secondSketch
+
+    def _digestIn(self, doc, holder, obj):
+        """The digest of `obj` in the record of `holder`'s support, from the saved file."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "DigestCache.FCStd")
+        doc.saveAs(path)
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("Document.xml"))
+        for node in root.iter("Object"):
+            if node.get("name") == holder.Name and node.find("Properties") is not None:
+                support = [p for p in node.iter("Property") if p.get("name") == "AttachmentSupport"]
+                records = [e.get("fp") for p in support for e in p.iter() if e.get("fp")]
+                self.assertEqual(len(records), 1)  # the setup: one reference with a record
+                found = re.findall(r"(?:^|[|/])D%d:([0-9a-f]{16})" % obj.ID, records[0])
+                self.assertEqual(len(found), 1, records[0])
+                return found[0]
+        self.fail("no object data for " + holder.Name)
+
+    def _checkDigestCacheSees(self, change):
+        """`change(base sketch)` runs while the block made taller recomputes, when the first
+        pad's sketch is done: the block's records took the base sketch's digest by then, Second's
+        reference into First takes it after. Its record holds the new digest, the one a later
+        recompute (a new cache) makes again."""
+        doc, body, baseSketch, block, firstSketch, first, secondSketch = self._digestCacheModel()
+        before = self._digestIn(doc, secondSketch, baseSketch)
+
+        class Observer:
+            done = False
+
+            def slotRecomputedObject(self, obj):
+                if obj.Name == firstSketch.Name and not self.done:
+                    self.done = True
+                    change(baseSketch)
+
+        observer = Observer()
+        App.addDocumentObserver(observer)
+        try:
+            block.Length = 12
+            doc.recompute()
+        finally:
+            App.removeDocumentObserver(observer)
+        self.assertTrue(observer.done)  # the setup: the change ran inside the recompute
+        for obj in body.Group:
+            self.assertTrue(obj.isValid(), (obj.Name, obj.getStatusString()))
+        inside = self._digestIn(doc, secondSketch, baseSketch)
+        self.assertNotEqual(inside, before)
+
+        first.touch()
+        doc.recompute()
+        self.assertEqual(self._digestIn(doc, secondSketch, baseSketch), inside)
+
+    def testDigestCacheSeesValueChangeInsideRecompute(self):
+        """An upstream sketch's property set while the recompute runs (its touch cleared)."""
+
+        def change(sketch):
+            sketch.Note = "after"
+            sketch.purgeTouched()
+
+        self._checkDigestCacheSees(change)
+
+    def testDigestCacheSeesStatusChangeInsideRecompute(self):
+        """An upstream sketch's property made an output (which a digest leaves out) while the
+        recompute runs: a status change, which touches nothing."""
+        self._checkDigestCacheSees(lambda sketch: sketch.setPropertyStatus("Note", "Output"))
+
+    def testDigestCacheSeesAddedPropertyInsideRecompute(self):
+        """A property added to an upstream sketch while the recompute runs: its list changed."""
+
+        def change(sketch):
+            sketch.addProperty("App::PropertyString", "Added")
+            sketch.purgeTouched()
+
+        self._checkDigestCacheSees(change)

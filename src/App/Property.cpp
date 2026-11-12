@@ -32,6 +32,8 @@
 #include <CXX/Objects.hxx>
 
 #include "Property.h"
+#include "DocumentObject.h"
+#include "ElementSolverEdits.h"
 #include "ObjectIdentifier.h"
 #include "PropertyContainer.h"
 
@@ -360,6 +362,11 @@ void Property::setStatusValue(unsigned long status)
         static unsigned long _signalMask = (1 << ReadOnly) | (1 << Hidden);
         if ((status & _signalMask) != (oldStatus & _signalMask)) {
             father->onPropertyStatusChanged(*this, oldStatus);
+        }
+        // A placement digest leaves out outputs and transients by their status, a change of which
+        // signals nothing (ops#640)
+        if (status != oldStatus) {
+            forgetPlacementDigest(dynamic_cast<DocumentObject*>(father));
         }
     }
 }

@@ -25,6 +25,31 @@ void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop);
 /// depends on another document's object (whose edits no record here shows).
 bool editedSinceOpen(const DocumentObject* feature);
 
+/** The digests of one recompute (perf profile 1, `notes\recompute-cost.md`, ops#640).
+ *
+ * placementSources() folds every object of a target's chain into a digest, and runs about three
+ * times per re-executed feature: without a cache, an edit of an early feature costs O(N^2) in the
+ * feature count. While a scope is open on this thread (a document's recompute; nested scopes
+ * share the outermost one), each object's digest is made once and kept until a property of the
+ * object changes (forgetPlacementDigest()), so the values are the ones a fresh digest gives.
+ * A scope opened on another thread meanwhile keeps nothing. `FREECAD_CH_DIGEST_CACHE=off` turns
+ * the cache off, `=verify` makes each digest again and reports a kept one that differs.
+ */
+class PlacementDigestScope
+{
+public:
+    PlacementDigestScope();
+    ~PlacementDigestScope();
+    PlacementDigestScope(const PlacementDigestScope&) = delete;
+    PlacementDigestScope& operator=(const PlacementDigestScope&) = delete;
+
+private:
+    bool active = false;
+};
+/// \a obj's properties changed (a value, a status, the list) or \a obj is going: its kept
+/// digests are dropped.
+void forgetPlacementDigest(const void* obj);
+
 }  // namespace App
 
 #endif  // APP_ELEMENTSOLVEREDITS_H

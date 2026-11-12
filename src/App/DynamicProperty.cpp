@@ -41,6 +41,7 @@
 #include "Application.h"
 #include "Document.h"
 #include "DocumentObject.h"
+#include "ElementSolverEdits.h"
 #include "Property.h"
 #include "PropertyContainer.h"
 #include "Transactions.h"
@@ -292,6 +293,8 @@ Property* DynamicProperty::addDynamicProperty(
 
     pcProperty->syncType(attr);
     pcProperty->StatusBits.set((size_t)Property::PropDynamic);
+    // A digest folds every property (ops#640)
+    forgetPlacementDigest(dynamic_cast<DocumentObject*>(&pc));
 
     GetApplication().signalAppendDynamicProperty(*pcProperty);
 
@@ -347,6 +350,7 @@ bool DynamicProperty::removeDynamicProperty(const char* name)
             throw Base::RuntimeError("property is not dynamic");
         }
         Property* prop = it->property;
+        forgetPlacementDigest(dynamic_cast<DocumentObject*>(prop->getContainer()));
         GetApplication().signalRemoveDynamicProperty(*prop);
 
         // Handle possible recursive calls of removeDynamicProperty

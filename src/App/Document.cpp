@@ -4382,6 +4382,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     // signalBeforeRecompute() temporarily release it when they need to run
     // Python on the GUI thread to avoid deadlocks.
     Base::PyGILStateLocker locker;
+    // Each object's placement digest made once for the whole recompute, its end included (ops#640,
+    // notes\recompute-cost.md: an edit of an early feature was O(N^2) in the feature count)
+    PlacementDigestScope digestScope;
 
     if (d->undoing || d->rollback) {
         if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
@@ -5209,6 +5212,8 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
         recompute({feature}, true, &hasError);
         return !hasError;
     }
+    // Each object's placement digest made once (ops#640, notes\recompute-cost.md)
+    PlacementDigestScope digestScope;
     // delete recompute log
     d->clearRecomputeLog(feature);
     auto continuation = recomputeContinuation();
