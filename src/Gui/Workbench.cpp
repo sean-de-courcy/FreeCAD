@@ -851,7 +851,7 @@ MenuItem* StdWorkbench::setupMenuBar() const
           << "Separator" << zoom << "Std_ViewDockUndockFullscreen"
           << "Std_ViewIvIssueCamPos"
           << "Std_AxisCross"
-          << "Std_ToggleClipPlane"
+          << "Std_ToggleClipPlane" << "Std_SectionView"
           << "Std_TextureMapping"
           << "Separator" << visu << "Std_ToggleNavigation"
           << "Std_RandomColor"

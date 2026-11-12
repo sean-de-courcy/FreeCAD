@@ -155,6 +155,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPickFirstGui.py
         PartDesignTests/TestEscCancelsGui.py
         PartDesignTests/TestSelectionParityGui.py
+        PartDesignTests/TestViewToolsGui.py
         PartDesignTests/TestSketchPlaneGui.py
         PartDesignTests/TestBooleanDialogGui.py
         PartDesignTests/TestDialogFlowGui.py

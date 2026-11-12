@@ -4783,6 +4783,9 @@ bool StdCmdSelectOther::isActive()
 namespace Gui
 {
 
+// FreeCAD-CH: the view tools, in CommandViewTools.cpp
+void CreateViewToolCommands();
+
 void CreateViewStdCommands()
 {
     // NOLINTBEGIN
@@ -4838,6 +4841,7 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdOrthographicCamera());
     rcCmdMgr.addCommand(new StdPerspectiveCamera());
     rcCmdMgr.addCommand(new StdCmdToggleClipPlane());
+    CreateViewToolCommands();
     rcCmdMgr.addCommand(new StdCmdDrawStyle());
     rcCmdMgr.addCommand(new StdCmdViewSaveCamera());
     rcCmdMgr.addCommand(new StdCmdViewRestoreCamera());

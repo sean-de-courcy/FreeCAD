@@ -2789,6 +2789,8 @@ void Application::runApplication()
         defaultFormat.setRenderableType(QSurfaceFormat::OpenGL);
         defaultFormat.setProfile(QSurfaceFormat::CompatibilityProfile);
         defaultFormat.setOption(QSurfaceFormat::DeprecatedFunctions, true);
+        // FreeCAD-CH: the stencil cap of the section view needs stencil bits on every platform
+        defaultFormat.setStencilBufferSize(8);
 #if defined(FC_OS_LINUX) || defined(FC_OS_BSD)
         // QGuiApplication::platformName() doesn't yet work at this point, so we use the env var
         if (getenv("WAYLAND_DISPLAY")) {

@@ -114,6 +114,7 @@ from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection pa
     TestBoxSelectionGui,
     TestProfileFieldStaysArmedGui,
 )
+from PartDesignTests.TestViewToolsGui import TestSectionViewGui  # FreeCAD-CH, ops#640 view tools
 
 
 # timer runs this class in order to access modal dialog
