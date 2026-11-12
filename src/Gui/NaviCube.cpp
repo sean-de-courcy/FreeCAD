@@ -1438,6 +1438,8 @@ QMenu* NaviCubeImplementation::createNaviCubeMenu()
     if (menuCommands.empty()) {
         menuCommands.emplace_back("Std_OrthographicCamera");
         menuCommands.emplace_back("Std_PerspectiveCamera");
+        menuCommands.emplace_back("Std_ViewBoxZoom");
+        menuCommands.emplace_back("Separator");
         menuCommands.emplace_back("Std_ViewIsometric");
         menuCommands.emplace_back("Separator");
         menuCommands.emplace_back("Std_ViewFitAll");

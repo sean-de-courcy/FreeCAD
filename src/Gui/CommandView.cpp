@@ -2963,8 +2963,8 @@ StdViewBoxZoom::StdViewBoxZoom()
     : Command("Std_ViewBoxZoom")
 {
     sGroup = "Standard-View";
-    sMenuText = QT_TR_NOOP("&Box Zoom");
-    sToolTipText = QT_TR_NOOP("Activates the box zoom tool");
+    sMenuText = QT_TR_NOOP("&Zoom to window");
+    sToolTipText = QT_TR_NOOP("Zooms to a window that you drag in the view");
     sWhatsThis = "Std_ViewBoxZoom";
     sStatusTip = sToolTipText;
     sPixmap = "zoom-border";

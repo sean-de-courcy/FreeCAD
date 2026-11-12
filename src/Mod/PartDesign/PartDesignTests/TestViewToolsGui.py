@@ -554,5 +554,88 @@ class TestDisplayStylesGui(ViewToolsCase):
         self.assertEqual(len(Gui.Command.get("Std_DrawStyle").getAction()), 7)
 
 
+GUI_VIEW = "User parameter:BaseApp/Preferences/View"
+
+
+class TestCameraMenuGui(ViewToolsCase):
+    """Perspective is the default camera of a new view, and the camera entries and the zoom to a
+    window make a Camera group of the View menu (ops#640, view tools 4)."""
+
+    docName = "CameraMenuGui"
+
+    def setUp(self):
+        super().setUp()
+        self.saved = App.ParamGet(GUI_VIEW).GetString("DefaultCameraType", "")
+        self.extra = []
+
+    def tearDown(self):
+        for name in self.extra:
+            App.closeDocument(name)
+        params = App.ParamGet(GUI_VIEW)
+        if self.saved:
+            params.SetString("DefaultCameraType", self.saved)
+        else:
+            params.RemString("DefaultCameraType")
+        pump(0.1)
+        super().tearDown()
+
+    def newViewCameraType(self, name):
+        """The camera type of the 3D view a new document gets."""
+        doc = App.newDocument(name)
+        self.extra.append(doc.Name)
+        pump()
+        guiDoc = Gui.getDocument(doc.Name)
+        Gui.ActiveDocument = guiDoc
+        pump()
+        return guiDoc.ActiveView.getCameraType()
+
+    def cameraMenu(self):
+        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
+            if menu.title().replace("&", "") == "View":
+                for sub in menu.findChildren(QtWidgets.QMenu):
+                    if sub.title().replace("&", "") == "Camera":
+                        return sub
+        self.fail("the Camera menu in the View menu")
+
+    def testNewViewIsPerspectiveWithoutAPreference(self):
+        App.ParamGet(GUI_VIEW).RemString("DefaultCameraType")
+        self.assertEqual(self.newViewCameraType("CameraDefault"), "Perspective")
+
+    def testNewViewTakesThePreference(self):
+        params = App.ParamGet(GUI_VIEW)
+        params.SetString("DefaultCameraType", "Orthographic")
+        self.assertEqual(self.newViewCameraType("CameraOrtho"), "Orthographic")
+        params.SetString("DefaultCameraType", "Perspective")
+        self.assertEqual(self.newViewCameraType("CameraPersp"), "Perspective")
+
+    def testChangingThePreferenceLeavesTheOpenViewAlone(self):
+        before = self.view.getCameraType()
+        other = "Orthographic" if before == "Perspective" else "Perspective"
+        App.ParamGet(GUI_VIEW).SetString("DefaultCameraType", other)
+        pump(0.1)
+        self.assertEqual(self.view.getCameraType(), before)
+
+    def testCameraMenuHasTheCameraEntriesAndTheZoomToWindow(self):
+        names = [a.objectName() for a in self.cameraMenu().actions() if not a.isSeparator()]
+        self.assertEqual(names, ["Std_OrthographicCamera", "Std_PerspectiveCamera", "Std_ViewBoxZoom"])
+
+    def testCameraEntriesLeaveTheViewMenuTopLevel(self):
+        entries = menuActions("View")
+        self.assertNotIn("Std_OrthographicCamera", entries)
+        self.assertNotIn("Std_PerspectiveCamera", entries)
+
+    def testZoomToWindowIsNamedAsOnshapeNamesIt(self):
+        action = Gui.Command.get("Std_ViewBoxZoom").getAction()[0]
+        self.assertEqual(action.text().replace("&", ""), "Zoom to window")
+
+    def testCameraEntriesSwitchTheType(self):
+        Gui.runCommand("Std_OrthographicCamera", 1)
+        pump(0.1)
+        self.assertEqual(self.view.getCameraType(), "Orthographic")
+        Gui.runCommand("Std_PerspectiveCamera", 1)
+        pump(0.1)
+        self.assertEqual(self.view.getCameraType(), "Perspective")
+
+
 if __name__ == "__main__":
     unittest.main()

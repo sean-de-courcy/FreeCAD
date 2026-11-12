@@ -141,6 +141,19 @@ View3DInventor::View3DInventor(
 
     // create the inventor widget and set the defaults
     _viewer->setDocument(this->_pcDocument);
+
+    // FreeCAD-CH (ops#640): the camera of a new view is the preferred type, perspective as in
+    // Onshape (a document that is opened brings its own camera afterwards)
+    {
+        auto hView = App::GetApplication().GetParameterGroupByPath(
+            "User parameter:BaseApp/Preferences/View"
+        );
+        const std::string cameraType = hView->GetASCII("DefaultCameraType", "Perspective");
+        _viewer->setCameraType(
+            cameraType == "Orthographic" ? SoOrthographicCamera::getClassTypeId()
+                                         : SoPerspectiveCamera::getClassTypeId()
+        );
+    }
     stack->addWidget(_viewer->getWidget());
     // https://forum.freecad.org/viewtopic.php?f=3&t=6055&sid=150ed90cbefba50f1e2ad4b4e6684eba
     // describes a minor error but trying to fix it leads to a major issue

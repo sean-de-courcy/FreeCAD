@@ -834,6 +834,12 @@ MenuItem* StdWorkbench::setupMenuBar() const
     zoom->setCommand("&Zoom");
     *zoom << "Std_ViewZoomIn" << "Std_ViewZoomOut" << "Separator" << "Std_ViewBoxZoom";
 
+    // Camera (Onshape): the camera type and the zoom to a window
+    auto camera = new MenuItem;
+    camera->setCommand("&Camera");
+    *camera << "Std_OrthographicCamera" << "Std_PerspectiveCamera" << "Separator"
+            << "Std_ViewBoxZoom";
+
     // Visibility
     auto visu = new MenuItem;
     visu->setCommand("V&isibility");
@@ -845,7 +851,7 @@ MenuItem* StdWorkbench::setupMenuBar() const
     // View
     auto view = new MenuItem(menuBar);
     view->setCommand("&View");
-    *view << "Std_ViewCreate" << "Std_OrthographicCamera" << "Std_PerspectiveCamera"
+    *view << "Std_ViewCreate" << camera
           << "Std_MainFullscreen" << "Separator" << stdviews << "Std_FreezeViews" << "Std_SaveNamedView" << "Std_NamedViews"
           << "Std_DrawStyle" << "Std_DisplayStyle" << "Std_TangentEdges"
           << "Std_SelBoundingBox"
