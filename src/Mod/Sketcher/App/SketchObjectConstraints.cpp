@@ -2184,6 +2184,11 @@ int SketchObject::transferConstraints(
             // For example a B-spline pole being a point instead of a circle.
             continue;
         }
+        if (vals[i]->Type == Sketcher::Pattern) {
+            // FreeCAD-CH (sketch patterns): the record names whole geometries, never a coincident
+            // point's stand-in (a deleted pivot removes the pattern)
+            continue;
+        }
         else if (
             vals[i]->involvesGeoIdAndPosId(fromGeoId, fromPosId)
             && !vals[i]->involvesGeoIdAndPosId(toGeoId, toPosId)
@@ -2446,6 +2451,38 @@ void SketchObject::changeConstraintAfterDeletingGeo(Constraint* constr,
                                                     const int deletedGeoId) const
 {
     if (!constr) {
+        return;
+    }
+
+    // FreeCAD-CH (Onshape's sketch patterns, GA3-28b): a deleted copy empties its slot, which
+    // stays empty; a deleted seed, pivot or direction line removes the pattern (the copies stay,
+    // free, as the mirror's). A malformed record goes as any constraint on the geometry.
+    if (auto record = PatternRecord::read(*constr)) {
+        if (deletedGeoId < 0) {
+            return;  // an external: the record names the sketch's own geometry only
+        }
+        if (std::ranges::find(record->seeds, deletedGeoId) != record->seeds.end()
+            || record->pivot == deletedGeoId || record->direction1 == deletedGeoId
+            || record->direction2 == deletedGeoId) {
+            constr->Type = ConstraintType::None;
+            return;
+        }
+        auto renumbered = [deletedGeoId](int geoId) {
+            if (geoId == deletedGeoId) {
+                return int(GeoEnum::GeoUndef);
+            }
+            return geoId > deletedGeoId ? geoId - 1 : geoId;
+        };
+        for (int& seed : record->seeds) {
+            seed = renumbered(seed);
+        }
+        for (int* owned : {&record->pivot, &record->direction1, &record->direction2}) {
+            *owned = renumbered(*owned);
+        }
+        for (auto& [slot, copy] : record->instances) {
+            copy = renumbered(copy);
+        }
+        record->write(*constr);
         return;
     }
 
@@ -3328,6 +3365,25 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
 
     int intGeoCount = getHighestCurveIndex() + 1;
     int extGeoCount = getExternalGeometryCount();
+
+    // FreeCAD-CH (sketch patterns): a pattern's record names the sketch's own geometry only; its
+    // empty slots and a missing second direction are GeoUndef
+    if (constraint->Type == Pattern) {
+        auto record = PatternRecord::read(*constraint);
+        if (!record) {
+            return false;
+        }
+        auto own = [intGeoCount](int geoId) { return geoId >= 0 && geoId < intGeoCount; };
+        auto ownOrUndef = [&own](int geoId) { return geoId == GeoEnum::GeoUndef || own(geoId); };
+        bool valid = std::ranges::all_of(record->seeds, own)
+            && (record->kind == PatternRecord::Kind::Circular ? own(record->pivot)
+                                                               : own(record->direction1)
+                     && ownOrUndef(record->direction2));
+        for (const auto& [slot, copy] : record->instances) {
+            valid = valid && ownOrUndef(copy);
+        }
+        return valid;
+    }
 
     // the actual checks
     bool ret = true;

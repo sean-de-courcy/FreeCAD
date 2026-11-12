@@ -80,6 +80,11 @@ enum ConstraintType : int
     // sketch plane: Second is a point of the edge's implicit Intersection external (SecondPos
     // start), and the solver keeps the two coincident (SketchObject::addPierce)
     Pierce = 23,
+    // FreeCAD-CH (Onshape's sketch patterns): one circular or linear pattern. Its elements are the
+    // seeds, then the pattern-owned pivot point or direction lines, then the instance table (a
+    // copy's GeoId per slot, GeoUndef for an empty slot); its kind and counts are in MetaData and
+    // a circular pattern's total angle is its Value (SketchPattern.h)
+    Pattern = 24,
     NumConstraintTypes  // must be the last item!
 };
 
@@ -218,7 +223,8 @@ private:
          "Group",
          "Text",
          "Midpoint",
-         "Pierce"}};
+         "Pierce",
+         "Pattern"}};
     // clang-format on
 
     constexpr static std::array<const char*, InternalAlignmentType::NumInternalAlignmentType>

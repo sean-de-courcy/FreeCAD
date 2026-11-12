@@ -22,7 +22,9 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <iostream>
 
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -54,6 +56,7 @@
 #include "Constraint.h"
 #include "GeometryFacade.h"
 #include "Sketch.h"
+#include "SketchPattern.h"
 #include "SolverGeometryExtension.h"
 
 
@@ -2679,6 +2682,9 @@ int Sketch::addConstraint(const Constraint* constraint)
             rtn = ConstraintsCounter;
             break;
         }
+        case Pattern:  // FreeCAD-CH (Onshape's sketch patterns)
+            rtn = addPatternConstraint(constraint, c);
+            break;
         case Sketcher::None:   // ambiguous enum value
         case Sketcher::Block:  // handled separately while adding geometry
         case NumConstraintTypes:
@@ -2687,6 +2693,138 @@ int Sketch::addConstraint(const Constraint* constraint)
 
     Constrs.push_back(c);
     return rtn;
+}
+
+// FreeCAD-CH (Onshape's sketch patterns): see Sketch.h and SketchPattern.h. Per live slot, the
+// copy's points are its seed's, rotated about the pivot by k step angles (circular) or moved by
+// a and b times the direction lines (linear): a point's point, a line's ends, a circle's centre, an
+// arc's centre. A circle's or arc's radius is its seed's, and an arc's end angles are its seed's
+// (plus k steps, circular). The step angle is the pattern's value, a fixed parameter. Equations
+// per copy: as many as the copy's own unknowns, so a pattern adds no redundancy.
+int Sketch::addPatternConstraint(const Constraint* constraint, ConstrDef& c)
+{
+    const auto record = PatternRecord::read(*constraint);
+    if (!record) {
+        return -1;
+    }
+    const int internalCount = std::ranges::count_if(Geoms, [](const GeoDef& g) { return !g.external; });
+    auto internal = [&](int geoId) {
+        return geoId >= 0 && geoId < internalCount && !Geoms[geoId].external;
+    };
+    auto patterned = [](GeoType type) {
+        return type == Point || type == Line || type == Circle || type == Arc;
+    };
+    for (int seed : record->seeds) {
+        if (!internal(seed) || !patterned(Geoms[seed].type)) {
+            return -1;
+        }
+    }
+    const bool circular = record->kind == PatternRecord::Kind::Circular;
+    if (circular && (!internal(record->pivot) || Geoms[record->pivot].type != Point)) {
+        return -1;
+    }
+    if (!circular) {
+        auto line = [&](int geoId) { return internal(geoId) && Geoms[geoId].type == Line; };
+        if (!line(record->direction1)
+            || (record->direction2 != GeoEnum::GeoUndef && !line(record->direction2))
+            || (record->count2 > 1 && record->direction2 == GeoEnum::GeoUndef)) {
+            return -1;
+        }
+    }
+    for (const auto& [slot, copy] : record->instances) {
+        if (copy == GeoEnum::GeoUndef) {
+            continue;
+        }
+        const int seed = record->seeds[slot[0]];
+        if (!internal(copy) || copy == seed || Geoms[copy].type != Geoms[seed].type) {
+            return -1;
+        }
+    }
+    if (!c.driving) {
+        return ++ConstraintsCounter;  // a reference pattern holds nothing
+    }
+
+    const int tag = ++ConstraintsCounter;
+    if (circular) {
+        c.value = new double(record->stepAngle());
+        FixParameters.push_back(c.value);
+    }
+    constexpr double turn = 2.0 * std::numbers::pi;
+    for (const auto& [slot, copy] : record->instances) {
+        if (copy == GeoEnum::GeoUndef) {
+            continue;
+        }
+        const GeoDef& seedDef = Geoms[record->seeds[slot[0]]];
+        const GeoDef& copyDef = Geoms[copy];
+        std::vector<std::pair<int, int>> points;  // (copy point, seed point) in Points
+        switch (seedDef.type) {
+            case Point:
+                points.emplace_back(copyDef.startPointId, seedDef.startPointId);
+                break;
+            case Line:
+                points.emplace_back(copyDef.startPointId, seedDef.startPointId);
+                points.emplace_back(copyDef.endPointId, seedDef.endPointId);
+                break;
+            default:  // Circle, Arc: the centre
+                points.emplace_back(copyDef.midPointId, seedDef.midPointId);
+                break;
+        }
+        const double k = slot[1];
+        for (const auto& [to, from] : points) {
+            if (circular) {
+                GCSsys.addConstraintPatternRotation(
+                    Points[to],
+                    Points[from],
+                    Points[Geoms[record->pivot].startPointId],
+                    c.value,
+                    k,
+                    tag
+                );
+                continue;
+            }
+            const GCS::Point& s1 = Points[Geoms[record->direction1].startPointId];
+            const GCS::Point& e1 = Points[Geoms[record->direction1].endPointId];
+            for (bool x : {true, false}) {
+                std::vector<double*> params {x ? Points[from].x : Points[from].y,
+                                             x ? e1.x : e1.y,
+                                             x ? s1.x : s1.y};
+                std::vector<double> weights {1.0, double(slot[1]), -double(slot[1])};
+                if (slot[2] != 0) {
+                    const GCS::Point& s2 = Points[Geoms[record->direction2].startPointId];
+                    const GCS::Point& e2 = Points[Geoms[record->direction2].endPointId];
+                    params.push_back(x ? e2.x : e2.y);
+                    params.push_back(x ? s2.x : s2.y);
+                    weights.push_back(double(slot[2]));
+                    weights.push_back(-double(slot[2]));
+                }
+                GCSsys.addConstraintLinearSum(x ? Points[to].x : Points[to].y, params, weights, 0.0, tag);
+            }
+        }
+        if (seedDef.type == Circle) {
+            GCSsys.addConstraintEqual(Circles[copyDef.index].rad, Circles[seedDef.index].rad, tag);
+        }
+        else if (seedDef.type == Arc) {
+            GCS::Arc& seedArc = Arcs[seedDef.index];
+            GCS::Arc& copyArc = Arcs[copyDef.index];
+            GCSsys.addConstraintEqual(copyArc.rad, seedArc.rad, tag);
+            // the copy's end angles, k steps on (circular), up to whole turns: the angles as they
+            // are now give the turns, so the solve never spins an arc by a turn
+            for (auto [to, from] : {std::pair {copyArc.startAngle, seedArc.startAngle},
+                                    std::pair {copyArc.endAngle, seedArc.endAngle}}) {
+                std::vector<double*> params {from};
+                std::vector<double> weights {1.0};
+                double offset = 0.0;
+                if (circular) {
+                    params.push_back(c.value);
+                    weights.push_back(k);
+                    offset = k * *c.value;
+                }
+                const double turns = std::round((*to - *from - offset) / turn);
+                GCSsys.addConstraintLinearSum(to, params, weights, turns * turn, tag);
+            }
+        }
+    }
+    return tag;
 }
 
 int Sketch::addConstraints(const std::vector<Constraint*>& ConstraintList)

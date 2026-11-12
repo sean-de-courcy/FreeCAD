@@ -42,6 +42,7 @@
 
 #include "SketchGeometryExtension.h"
 #include "ExternalGeometryExtension.h"
+#include "SketchPattern.h"
 
 namespace Sketcher
 {
@@ -679,6 +680,30 @@ public:
         Sketcher::PointPos posId2,
         int continuity = 0
     );
+
+    /** FreeCAD-CH (Onshape's sketch patterns, SketchPattern.h, SketchObjectPattern.cpp).
+     *  addCircularPattern: count instances of the seeds (points, lines, circles, arcs) about a
+     *  new pattern-owned construction point at pivot, over angle (radians; 2 pi spreads them over
+     *  the full turn). addLinearPattern: count1 instances along direction1 (its vector is the
+     *  spacing: a new pattern-owned construction line from the first seed's centre) and count2
+     *  along direction2 (a zero vector: direction1 turned a quarter counterclockwise). Both make
+     *  the copies and one Pattern constraint, and return its index; Base::ValueError on refused
+     *  input (nothing changed). */
+    int addCircularPattern(const std::vector<int>& seeds, int count, const Base::Vector3d& pivot, double angle);
+    int addLinearPattern(
+        const std::vector<int>& seeds,
+        int count1,
+        const Base::Vector3d& direction1,
+        int count2,
+        const Base::Vector3d& direction2
+    );
+    /// a pattern's new counts (count2 0: kept): the copies keep their ids and slots, empty slots
+    /// stay empty, new slots get new copies, copies past the counts are deleted
+    void setPatternCount(int constrId, int count1, int count2 = 0);
+    /// a circular pattern's new total angle (radians)
+    void setPatternAngle(int constrId, double angle);
+    /// the record of the Pattern constraint constrId; nullopt for any other constraint
+    std::optional<PatternRecord> getPattern(int constrId) const;
 
     /// adds symmetric geometric elements with respect to the refGeoId (line or point)
     int addSymmetric(

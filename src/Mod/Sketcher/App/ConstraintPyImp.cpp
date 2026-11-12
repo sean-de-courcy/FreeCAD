@@ -1043,6 +1043,9 @@ std::string ConstraintPy::representation() const
         case Text:
             result << "'Text'>";
             break;
+        case Pattern:  // FreeCAD-CH (Onshape's sketch patterns)
+            result << "'Pattern'>";
+            break;
         default:
             result << "'?'>";
             break;
@@ -1124,6 +1127,9 @@ Py::String ConstraintPy::getType() const
             break;
         case Text:
             return Py::String("Text");
+            break;
+        case Pattern:  // FreeCAD-CH (Onshape's sketch patterns)
+            return Py::String("Pattern");
             break;
         default:
             return Py::String("Undefined");
