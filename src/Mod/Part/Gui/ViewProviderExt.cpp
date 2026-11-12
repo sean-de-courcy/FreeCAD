@@ -648,7 +648,8 @@ void ViewProviderPartExt::attach(App::DocumentObject* pcFeat)
     hiddenEdgesGroup->addChild(hiddenColor);
     hiddenEdgesGroup->addChild(hiddenStyle);
     hiddenEdgesGroup->addChild(hiddenLines);
-    pcHiddenEdges = new SoSwitch(SO_SWITCH_NONE);
+    pcHiddenEdges = new SoSwitch;
+    pcHiddenEdges->whichChild = SO_SWITCH_NONE;
     pcHiddenEdges->ref();
     pcHiddenEdges->setName("HiddenEdges");
     pcHiddenEdges->addChild(hiddenEdgesGroup);
