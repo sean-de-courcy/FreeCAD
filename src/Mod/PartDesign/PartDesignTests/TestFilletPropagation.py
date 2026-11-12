@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-# FreeCAD-CH: fillet tangent propagation off, as Onshape's (ops#655, notes/loft-options.md, oracle fact GB13).
+# FreeCAD-CH: fillet and chamfer tangent propagation off, as Onshape's (ops#655, notes/loft-options.md, oracle
+# fact GB13).
 #
 # Designed geometry: a slot (lines y = +-5 from x -10..10, half-circle ends r5) padded 10. Onshape's results are
 # closed forms: propagation off runs the fillet straight on past the tangent vertices and cuts both round ends
 # until it leaves the body: removed = 20 (4 - pi) + 2 * integral of sqrt(25 - y^2) over the corner region
-# (y 3..5, z 8..10 outside the r2 circle about (3, 8)) = 20.338.
+# (y 3..5, z 8..10 outside the r2 circle about (3, 8)) = 20.338. A chamfer 2 the same way removes the triangle
+# (y 3..5, z 8..10, (5 - y) + (10 - z) <= 2): 2 * integral of (2 - s) (10 + sqrt(25 - (5 - s)^2)), s 0..2 = 49.120.
 
 import math
 import unittest
@@ -76,6 +78,15 @@ class TestFilletPropagation(unittest.TestCase):
         self.doc.recompute()
         return fillet
 
+    def chamfer(self, base, edges, size=2.0, **properties):
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (base, edges)
+        chamfer.Size = size
+        for name, value in properties.items():
+            setattr(chamfer, name, value)
+        self.doc.recompute()
+        return chamfer
+
     def assertResult(self, feature, volume, faces, delta=0.002):
         self.assertTrue(feature.isValid(), feature.getStatusString())
         shape = feature.Shape
@@ -146,6 +157,38 @@ class TestFilletPropagation(unittest.TestCase):
         fillet = self.fillet(pad, [self.edgeName(pad.Shape, test)], TangentPropagation=False)
         self.assertFalse(fillet.isValid(), "expected a stop")
         self.assertIn("tangent", fillet.getStatusString().lower())
+
+    def testChamferPropagationIsOnByDefault(self):
+        pad = self.slotPad()
+        chamfer = self.chamfer(pad, [self.topLine(pad.Shape)])
+        self.assertTrue(chamfer.TangentPropagation)
+        # GB13: the whole tangent top loop, 4 chamfer faces, V 2650.944
+        self.assertResult(chamfer, 2650.944, 10)
+
+    def testChamferOffRunsStraightOnThroughTheRoundEnds(self):
+        pad = self.slotPad()
+        chamfer = self.chamfer(pad, [self.topLine(pad.Shape)], TangentPropagation=False)
+        # GB13: 1 planar chamfer face, x -14..14, V 2736.279
+        self.assertResult(chamfer, 2736.279, 7)
+        normal = V(0, 1, 1).normalize()
+        slopes = [
+            f
+            for f in chamfer.Shape.Faces
+            if isinstance(f.Surface, Part.Plane) and abs(abs(f.normalAt(0, 0).dot(normal)) - 1) < 1e-9
+        ]
+        self.assertEqual(len(slopes), 1)
+        box = slopes[0].BoundBox
+        self.assertAlmostEqual(box.XMin, -14, delta=1e-3)
+        self.assertAlmostEqual(box.XMax, 14, delta=1e-3)
+
+    def testChamferOffByTwoDistancesStops(self):
+        """Which face takes which distance is OCCT's choice: only an equal distance chamfer runs on."""
+        pad = self.slotPad()
+        chamfer = self.chamfer(
+            pad, [self.topLine(pad.Shape)], TangentPropagation=False, ChamferType="Two distances", Size2=1.0
+        )
+        self.assertFalse(chamfer.isValid(), "expected a stop")
+        self.assertIn("tangent", chamfer.getStatusString().lower())
 
 
 if __name__ == "__main__":
