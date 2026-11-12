@@ -1025,6 +1025,248 @@ class TestDocumentTabsGui(unittest.TestCase):
         done, error = GuiTabs.exportTab(self.doc, "VarSetMissing", path)
         self.assertFalse(done)
 
+    # -- E1: a drawing's tab exports (ops#640, notes/drawings-design.md section 5) ------------------
+
+    def drawingTab(self, title, source=None):
+        """A drawing on the ANSI A (landscape) template whose first title line is `title`, its
+        tab's name."""
+        import TechDrawCreateDrawing as Create
+
+        page = Create.createDrawing(self.doc, source, views=source is not None)
+        svg = page.Template
+        texts = dict(svg.EditableTexts)
+        texts["DrawingTitle1"] = title
+        svg.EditableTexts = texts
+        self.doc.recompute()
+        GuiTabs.reconcile(self.doc)
+        pump(0.3)
+        names = [n for n, kind, _label in Tabs.tabs(self.doc) if kind == "Drawing"]
+        return [n for n in names if self.doc.getObject(n) == page][0]
+
+    def tabMenu(self, tabName):
+        """The tab menu of a tab, opened on its bar and read: {action's object name or text:
+        (text, enabled)}, then closed."""
+        from PySide import QtCore
+
+        bar = Gui.getMainWindow().findChild(QtWidgets.QTabBar, "FreeCADCH_TypedTabBar")
+        self.assertIsNotNone(bar)
+        index = [bar.tabData(i) for i in range(bar.count())].index(tabName)
+        found = {}
+
+        def read():
+            menu = QtWidgets.QApplication.activePopupWidget()
+            if menu is None:
+                return
+            for action in menu.actions():
+                found[action.objectName() or action.text()] = (action.text(), action.isEnabled())
+            menu.close()
+
+        QtCore.QTimer.singleShot(400, read)
+        bar.customContextMenuRequested.emit(bar.tabRect(index).center())
+        pump(0.2)
+        return found
+
+    def testDrawingTabExports(self):
+        """A drawing's tab menu offers Export; it writes the page as a PDF of one ANSI A page
+        (11 x 8.5 in = 792 x 612 pt) holding the title's text, or as an SVG, with the page's
+        window closed; other file types are refused."""
+        import shutil
+        import tempfile
+
+        if not techDrawTemplateReadable():
+            self.skipTest("no readable TechDraw template")
+        objects = self.model(assembly=False)
+        name = self.drawingTab("BLOCKTITLE", objects["body1"])
+        folder = tempfile.mkdtemp(prefix="TestDocumentTabsGui")
+        self.addCleanup(shutil.rmtree, folder, True)
+
+        menu = self.tabMenu(name)
+        self.assertTrue(menu["FreeCADCH_ExportTab"][1], menu)
+        self.assertTrue(menu["FreeCADCH_ExportAllDrawings"][1], menu)
+        partMenu = self.tabMenu("Part")
+        self.assertTrue(partMenu["FreeCADCH_ExportTab"][1], partMenu)
+        self.assertNotIn("FreeCADCH_ExportAllDrawings", partMenu)
+
+        # the page's window closed first: the export does not need it
+        page = self.doc.getObject(name)
+        page.ViewObject.hide()
+        pump(0.3)
+        pdf = os.path.join(folder, "one.pdf")
+        done, error = GuiTabs.exportTab(self.doc, name, pdf)
+        self.assertTrue(done, error)
+        data = open(pdf, "rb").read()
+        self.assertTrue(data.startswith(b"%PDF"))
+        self.assertEqual(self.pdfPageSizes(data), [(792, 612)])
+        self.assertIn("BLOCKTITLE", self.pdfText(data))
+
+        svg = os.path.join(folder, "one.svg")
+        done, error = GuiTabs.exportTab(self.doc, name, svg)
+        self.assertTrue(done, error)
+        self.assertIn("BLOCKTITLE", open(svg, encoding="utf-8").read())
+
+        done, error = GuiTabs.exportTab(self.doc, name, os.path.join(folder, "one.dxf"))
+        self.assertFalse(done)
+        self.assertIn("PDF or SVG", error)
+
+    def testReopenedDrawingExportsUnopened(self):
+        """A drawing of a saved and reopened document, its page never shown, exports to PDF and
+        SVG with its title (the scene is filled for the export)."""
+        import shutil
+        import tempfile
+
+        if not techDrawTemplateReadable():
+            self.skipTest("no readable TechDraw template")
+        objects = self.model(assembly=False)
+        name = self.drawingTab("REOPENEDTITLE", objects["body1"])
+        folder = tempfile.mkdtemp(prefix="TestDocumentTabsGui")
+        self.addCleanup(shutil.rmtree, folder, True)
+        saved = os.path.join(folder, "drawing.FCStd")
+        self.switch("Part")
+        self.doc.getObject(name).ViewObject.hide()  # saved hidden: reopened without its window
+        self.doc.saveAs(saved)
+        oldName = self.doc.Name
+        App.closeDocument(oldName)
+        self.docs.remove(oldName)
+        pump(0.3)
+        self.doc = App.openDocument(saved)
+        self.docs.append(self.doc.Name)
+        pump(0.5)
+        page = self.doc.getObject(name)
+        self.assertIsNotNone(page)
+        self.assertIsNone(GuiTabs.viewOf(self.doc, name), "the page's window is not open")
+
+        pdf = os.path.join(folder, "reopened.pdf")
+        done, error = GuiTabs.exportTab(self.doc, name, pdf)
+        self.assertTrue(done, error)
+        data = open(pdf, "rb").read()
+        self.assertEqual(self.pdfPageSizes(data), [(792, 612)])
+        self.assertIn("REOPENEDTITLE", self.pdfText(data))
+        svg = os.path.join(folder, "reopened.svg")
+        done, error = GuiTabs.exportTab(self.doc, name, svg)
+        self.assertTrue(done, error)
+        self.assertIn("REOPENEDTITLE", open(svg, encoding="utf-8").read())
+
+    def testAllDrawingsExportAsOnePdf(self):
+        """Two drawings give one PDF of two pages, in the bar's order, each with its own title;
+        a document without a drawing refuses and writes nothing."""
+        import shutil
+        import tempfile
+
+        if not techDrawTemplateReadable():
+            self.skipTest("no readable TechDraw template")
+        objects = self.model(assembly=False)
+        self.drawingTab("FIRSTSHEET", objects["body1"])
+        self.drawingTab("SECONDSHEET")
+        folder = tempfile.mkdtemp(prefix="TestDocumentTabsGui")
+        self.addCleanup(shutil.rmtree, folder, True)
+
+        path = os.path.join(folder, "all.pdf")
+        done, error = GuiTabs.exportAllDrawings(self.doc, path)
+        self.assertTrue(done, error)
+        data = open(path, "rb").read()
+        self.assertEqual(self.pdfPageSizes(data), [(792, 612), (792, 612)])
+        text = self.pdfText(data)
+        self.assertIn("FIRSTSHEET", text)
+        self.assertIn("SECONDSHEET", text)
+        self.assertLess(text.index("FIRSTSHEET"), text.index("SECONDSHEET"))
+
+        other = self.newDocument("TestDocumentTabsGuiNoDrawing")
+        none = os.path.join(folder, "none.pdf")
+        done, error = GuiTabs.exportAllDrawings(other, none)
+        self.assertFalse(done)
+        self.assertFalse(os.path.exists(none))
+
+    def pdfObjects(self, data):
+        """The objects of a Qt-written PDF: (dictionary text, decoded stream or None) each."""
+        import re
+        import zlib
+
+        text = data.decode("latin-1")
+        objects = []
+        for match in re.finditer(r"\d+ 0 obj(.*?)endobj", text, re.S):
+            body = match.group(1)
+            stream = None
+            start = body.find("stream")
+            if start >= 0:
+                raw = body[start + 6 :].lstrip("\r\n")
+                raw = raw[: raw.rfind("endstream")].rstrip("\r\n").encode("latin-1")
+                try:
+                    stream = zlib.decompress(raw) if "FlateDecode" in body[:start] else raw
+                except zlib.error:
+                    stream = None
+            objects.append((body[: start if start >= 0 else len(body)], stream))
+        return objects
+
+    def pdfPageSizes(self, data):
+        """The pages' (width, height) in points, rounded, in file order."""
+        import re
+
+        sizes = []
+        for info, _stream in self.pdfObjects(data):
+            if re.search(r"/Type\s*/Page\b(?!s)", info):
+                box = re.search(r"/MediaBox\s*\[([^\]]*)\]", info)
+                x0, y0, x1, y1 = (float(v) for v in box.group(1).split())
+                sizes.append((round(x1 - x0), round(y1 - y0)))
+        return sizes
+
+    def pdfText(self, data):
+        """The text a Qt-written PDF shows, page by page ("\n" between pages): each glyph of a
+        content stream mapped back through its font's ToUnicode table (Qt writes one `<glyph> Tj`
+        per glyph, the fonts as /F<n> in the page's resources)."""
+        import re
+
+        objects = {}
+        text = data.decode("latin-1")
+        decoded = self.pdfObjects(data)
+        for match, (info, stream) in zip(re.finditer(r"(\d+) 0 obj", text), decoded):
+            objects[int(match.group(1))] = (info, stream)
+
+        def cmap(number):
+            table = {}
+            stream = (objects.get(number) or ("", None))[1]
+            if not stream:
+                return table
+            body = stream.decode("latin-1")
+            for block in re.findall(r"beginbfchar(.*?)endbfchar", body, re.S):
+                for src, dst in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", block):
+                    table[int(src, 16)] = chr(int(dst[:4], 16))
+            for block in re.findall(r"beginbfrange(.*?)endbfrange", body, re.S):
+                for lo, hi, dst in re.findall(
+                    r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])", block
+                ):
+                    values = re.findall(r"<([0-9A-Fa-f]+)>", dst)
+                    for k in range(int(lo, 16), int(hi, 16) + 1):
+                        index = k - int(lo, 16)
+                        if dst.startswith("["):
+                            table[k] = chr(int(values[index][:4], 16))
+                        else:
+                            table[k] = chr(int(values[0][:4], 16) + index)
+            return table
+
+        pages = []
+        for info, _stream in decoded:
+            if not re.search(r"/Type\s*/Page\b(?!s)", info):
+                continue
+            contents = int(re.search(r"/Contents\s+(\d+) 0 R", info).group(1))
+            resources = objects[int(re.search(r"/Resources\s+(\d+) 0 R", info).group(1))][0]
+            fonts = {}
+            for name, number in re.findall(r"/(F\d+)\s+(\d+) 0 R", resources):
+                font = objects[int(number)][0]
+                unicode_table = re.search(r"/ToUnicode\s+(\d+) 0 R", font)
+                fonts[name] = cmap(int(unicode_table.group(1))) if unicode_table else {}
+            words = []
+            table = {}
+            for token in re.finditer(rb"/(F\d+)\s+[\d.]+\s+Tf|<([0-9A-Fa-f]+)>\s*Tj", objects[contents][1]):
+                if token.group(1):
+                    table = fonts.get(token.group(1).decode(), {})
+                else:
+                    run = token.group(2)
+                    words.append(
+                        "".join(table.get(int(run[i : i + 4], 16), "?") for i in range(0, len(run), 4))
+                    )
+            pages.append("".join(words))
+        return "\n".join(pages)
+
     def testDragOnTheBarSavesTheOrder(self):
         """A tab dragged along the bar: the order is the document's (saved, the document marked
         modified), not an undo step."""

@@ -413,6 +413,68 @@ void PagePrinter::printPdf(ViewProviderPage* vpPage, const std::string& file)
     ourDoc->setModified(docModifiedState);
 }
 
+/// the given pages as the pages of one pdf file, each at its own template's size
+void PagePrinter::printPagesPdf(const std::vector<TechDraw::DrawPage*>& pages,
+                                const std::string& file)
+{
+    if (file.empty() || pages.empty()) {
+        return;
+    }
+    Base::FileInfo fi{file};
+    if (fi.exists() && !fi.isWritable()) {
+        Base::Console().error("File %s is not available for writing.\n", file.c_str());
+        return;
+    }
+
+    auto filespec = Base::Tools::escapeEncodeFilename(file);
+    filespec = DU::cleanFilespecBackslash(filespec);
+    QPdfWriter pdfWriter(QString::fromStdString(filespec));
+    pdfWriter.setPdfVersion(Gui::Dialog::DlgSettingsPDF::evaluatePDFVersion());
+    pdfWriter.setTitle(QString::fromUtf8(pages.front()->getDocument()->getName()));
+    pdfWriter.setCreator(QString::fromStdString(App::Application::getNameWithVersion())
+                       + QLatin1String(" TechDraw"));
+
+    // the first page's layout is set before the painter is made, or it is not respected
+    QPageLayout pageLayout = pdfWriter.pageLayout();
+    double width = pages.front()->getPageWidth();
+    double height = pages.front()->getPageHeight();
+    makePageLayout(pages.front(), pageLayout, width, height);
+    pdfWriter.setPageLayout(pageLayout);
+    QPainter painter(&pdfWriter);
+
+    auto ourDoc = Gui::Application::Instance->getDocument(pages.front()->getDocument());
+    auto docModifiedState = ourDoc->isModified();
+    double dpmm = pdfWriter.resolution() / mmPerInch;
+
+    bool firstTime = true;
+    for (auto* dPage : pages) {
+        auto* vpp = dynamic_cast<TechDrawGui::ViewProviderPage*>(
+            Gui::Application::Instance->getViewProvider(dPage));
+        if (!vpp) {
+            continue;  // no window of the page's document: nothing to render
+        }
+        width = dPage->getPageWidth();
+        height = dPage->getPageHeight();
+        makePageLayout(dPage, pageLayout, width, height);
+        pdfWriter.setPageLayout(pageLayout);
+        if (!firstTime) {
+            pdfWriter.newPage();
+        }
+        firstTime = false;
+
+        QGISVGTemplate* ourTemplate{nullptr};
+        QGSPage* ourScene{nullptr};
+        preRenderSetUp(vpp, ourScene, ourTemplate);
+
+        QRectF sourceRect(0.0, Rez::guiX(-height), Rez::guiX(width), Rez::guiX(height));
+        QRect targetRect(0, 0, int(std::round(width * dpmm)), int(std::round(height * dpmm)));
+        renderPage(vpp, painter, sourceRect, targetRect);
+
+        postRenderCleanUp(ourScene, dPage, ourTemplate);
+    }
+    ourDoc->setModified(docModifiedState);
+}
+
 void PagePrinter::preRenderSetUp(TechDrawGui::ViewProviderPage* vpp,
                                  QGSPage*& ourScene,
                                  QGISVGTemplate*& ourTemplate)
@@ -420,12 +482,30 @@ void PagePrinter::preRenderSetUp(TechDrawGui::ViewProviderPage* vpp,
     if (!vpp) {
         return;
     }
+    ensureScene(vpp);
     ourScene = vpp->getQGSPage();
     // setExportingPdf does not hurt anything here and protects against Windows
     // Pdf writer not asking for file name until after rendering.
     ourScene->setExportingPdf(true);
     ourTemplate = static_cast<QGISVGTemplate*>(vpp->getQTemplate());
-    ourTemplate->updateView(true);
+    if (ourTemplate) {
+        ourTemplate->updateView(true);
+    }
+}
+
+void PagePrinter::ensureScene(ViewProviderPage* vpPage)
+{
+    // A page's scene is filled when its view opens (ViewProviderPage::showMDIViewPage). A page
+    // that was never opened, or one whose view was closed before the first fill, has no
+    // template and no views in its scene: fill it the same way, without showing anything.
+    auto scene = vpPage ? vpPage->getQGSPage() : nullptr;
+    if (!scene || scene->getTemplate()) {
+        return;
+    }
+    scene->addChildrenToPage();
+    scene->updateTemplate(true);
+    scene->redrawAllViews();
+    scene->fixOrphans(true);
 }
 
 void PagePrinter::postRenderCleanUp(QGSPage* ourScene,
@@ -437,7 +517,9 @@ void PagePrinter::postRenderCleanUp(QGSPage* ourScene,
     }
     ourScene->setExportingPdf(false);
     dPage->redrawCommand();
-    ourTemplate->updateView(true);
+    if (ourTemplate) {
+        ourTemplate->updateView(true);
+    }
 }
 
 
@@ -452,6 +534,7 @@ void PagePrinter::saveSVG(ViewProviderPage* vpPage, const std::string& file)
     filespec = DU::cleanFilespecBackslash(file);
     QString filename = QString::fromStdString(filespec);
 
+    ensureScene(vpPage);
     auto ourScene = vpPage->getQGSPage();
     ourScene->setExportingSvg(true);
     auto ourDoc = vpPage->getDocument();
