@@ -871,11 +871,16 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
                                                        : studioBaseAt(entry, body);
         sources.push_back({inDocument(shape, body), base, body});
     }
-    // A leftover record that finds nothing stays (merged back, 10.12 amendment point 5, Onshape
-    // Q2c): dormant until the tool leaves its part again, with the same id
+    // An Add's leftover record that finds nothing stays (merged back, 10.12 amendment point 5,
+    // Onshape Q2c): dormant until the tool leaves its part again, with the same id. A feature
+    // pattern's whose instance is gone goes (fewer occurrences: its Body left empty)
+    const bool keepLeftovers = !isStudioFeaturePattern(entry);
     std::vector<Body*> emptied;
     if (Part::TopoShape left = leftoverSolids(entry); !left.isNull()) {
         sources.push_back({left, Part::TopoShape(), nullptr});
+    }
+    else if (!keepLeftovers) {
+        emptied = pieceRecords(entry, std::string());
     }
 
     // Every new piece and its witness first: a piece that can't become a part refuses the
@@ -894,7 +899,8 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         for (std::size_t r = 0; r < records.size(); ++r) {
             // A gone split's records stay, and an absorbed piece's (a partial unsplit), so its
             // pieces come back with their ids when an edit cuts again (10.12 amendment, point 4)
-            if (match.solids[r] < 0 && match.heldBy[r] < 0 && source.parent && solids != 1) {
+            if (match.solids[r] < 0 && match.heldBy[r] < 0
+                && (source.parent ? solids != 1 : !keepLeftovers)) {
                 emptied.push_back(records[r]);
             }
         }
