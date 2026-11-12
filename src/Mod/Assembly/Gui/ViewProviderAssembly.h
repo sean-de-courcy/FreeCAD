@@ -226,6 +226,17 @@ public:
     /// The drag ends: commits its undo step, aligns the triad with the assembly's axes again and,
     /// for an arrow or a ring, opens the value box
     void endTriadDrag();
+    /// FreeCAD-CH (ops#640, C10): moves the triad alone to @a point (global), on the assembly's
+    /// axes; the parts stay where they are, and a ring then turns them about @a point
+    void moveTriadOriginTo(const Base::Vector3d& point);
+    /// Where a pick of @a subName (under @a root, the element included) at @a cursor (global) puts
+    /// the triad's origin: an open edge's end close to the cursor (the Transform dialog's snap), else
+    /// the cursor
+    Base::Vector3d triadOriginPick(
+        App::DocumentObject* root,
+        const std::string& subName,
+        const Base::Vector3d& cursor
+    ) const;
     TriadHandle getTriadHandle() const
     {
         return triadHandle;
@@ -272,6 +283,14 @@ public:
     bool forceSolveOnMoveForRigid;
 
     long lastClickTime;  // Store last click time as milliseconds
+    // C10: Alt (Option on a Mac) held, as the viewer's key events tell it; a press it took moved
+    // the triad alone, and its release is taken too
+    bool triadAltHeld = false;
+    bool triadOriginPress = false;
+    // C10: the viewer whose selection is off from that press to its release (its selection
+    // root selects on the release, before this view provider sees it)
+    QPointer<Gui::View3DInventorViewer> triadOriginViewer;
+    void endTriadOriginPress();
 
     int numberOfSel;
     Base::Vector3d prevPosition;
