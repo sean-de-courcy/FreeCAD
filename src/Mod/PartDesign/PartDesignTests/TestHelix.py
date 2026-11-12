@@ -427,5 +427,59 @@ class TestHelix(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(helix.Shape.Volume / 1e5, 6.0643, places=4)
 
+    def testRefineAfterThreadMergesCoplanarFaces(self):
+        """A refined feature after a thread merges coplanar neighbours, as Onshape does.
+
+        A tube (r 10..20, height 8) carries an outer thread on r 20; a ring (r 20..23) padded down
+        1 mm from the tube's top plane puts its top face beside the tube's. The two make one face
+        r 10..23 at z = 8, area pi (23^2 - 10^2). The helix widens its edges' tolerance, and the
+        refine kept the two faces apart, with no warning (rehearsal 5, rb43)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+
+        def annulus(name, r0, r1, z):
+            sketch = body.newObject("Sketcher::SketchObject", name)
+            sketch.AttachmentSupport = [(planes["XY_Plane"], "")]
+            sketch.MapMode = "FlatFace"
+            sketch.AttachmentOffset = FreeCAD.Placement(Base.Vector(0, 0, z), FreeCAD.Rotation())
+            sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), r1))
+            sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), r0))
+            return sketch
+
+        tube = body.newObject("PartDesign::Pad", "Tube")
+        tube.Profile = annulus("TubeSketch", 10, 20, 0)
+        tube.Length = 8
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = [Base.Vector(20, 1.0, 0), Base.Vector(20, 2.0, 0), Base.Vector(20.8, 1.5, 0)]
+        for i in range(3):
+            profile.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 3]))
+        thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-height-angle"
+        thread.Pitch = 2.5
+        thread.Height = 4.0
+        thread.Refine = True
+        ring = body.newObject("PartDesign::Pad", "Ring")
+        ring.Profile = annulus("RingSketch", 20, 23, 8)
+        ring.Length = 1
+        ring.Reversed = True
+        ring.Refine = True
+        self.Doc.recompute()
+
+        self.assertTrue(ring.isValid(), ring.getStatusString())
+        self.assertTrue(ring.Shape.isValid())
+        top = [
+            f
+            for f in ring.Shape.Faces
+            if f.Surface.__class__.__name__ == "Plane"
+            and abs(f.BoundBox.ZMin - 8) < 1e-7
+            and abs(f.BoundBox.ZMax - 8) < 1e-7
+        ]
+        self.assertEqual(len(top), 1, [f.Area for f in top])
+        self.assertAlmostEqual(top[0].Area, pi * (23**2 - 10**2), places=6)
+
     def tearDown(self):
         FreeCAD.closeDocument("PartDesignTestHelix")
