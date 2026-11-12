@@ -57,6 +57,8 @@
 #include <TopExp_Explorer.hxx>
 
 #include <cstring>
+#include <regex>
+#include <string>
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -64,9 +66,12 @@
 #include "PartDesignParameter.h"
 #include <Base/Console.h>
 #include <App/Document.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
+#include "Body.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
@@ -113,6 +118,15 @@ DressUp::DressUp()
         "Studio",
         App::Prop_Hidden,
         "A studio dress-up's picks: '<part id>|<element name>', the name expanded (ops#654 P8a)"
+    );
+    // FreeCAD-CH ops#701 (F2b): the dress-up of the first part, for one over several parts
+    ADD_PROPERTY_TYPE(
+        MultiPartPrimary,
+        (nullptr),
+        "Studio",
+        App::Prop_Hidden,
+        "The dress-up this one was made with in another part: when it builds and this one fails, "
+        "this one passes its part through with a warning"
     );
 
     AddSubShape.setStatus(App::Property::Output, true);
@@ -402,6 +416,20 @@ void DressUp::onChanged(const App::Property* prop)
             // AddSubShape acts as a shape cache; invalidate so Transformed
             // can rebuild it lazily via getAddSubShape().
             AddSubShape.setValue(Part::TopoShape());
+        }
+    }
+    else if (prop == &_PassedThrough) {
+        // FreeCAD-CH ops#701 (F2c): a follower's state reads whether this one built
+        // (partialFailure()). Its only dependency is its size expression, which a suppression
+        // doesn't touch, and the recompute enforces only the readers of a changed property.
+        // Undo too: it puts back the follower's properties, not its Error state
+        if (!getDocument()->testStatus(App::Document::Restoring)) {
+            for (auto in : getInList()) {
+                auto follower = freecad_cast<DressUp*>(in);
+                if (follower && follower != this && follower->MultiPartPrimary.getValue() == this) {
+                    follower->enforceRecompute();
+                }
+            }
         }
     }
 
@@ -1292,4 +1320,166 @@ PartDesignExport TopoDS_Shape runOutCut(
     }
     return count ? TopoDS_Shape(touching) : TopoDS_Shape();
 }
+}  // namespace PartDesign
+
+// FreeCAD-CH ops#640 F2: a fillet's or chamfer's failure in Onshape's words (design F, row 104)
+namespace
+{
+/// Whether text is OCCT's or C++'s own words rather than the fork's: an OCCT class or exception
+/// name ("TopOpeBRepDS_DataStructure::Point", "Standard_OutOfRange", "BRep_API: ..."), the
+/// exact construction's "OCCT: ..." relay, "command not done", or nothing at all
+bool isKernelText(const std::string& text)
+{
+    static const std::regex internal(
+        R"(\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b(?:TopoDS|Base|Part|std)::\w+|)"
+        R"(command not done|Unknown C\+\+ exception|^\s*OCCT:)"
+    );
+    return text.find_first_not_of(" \t\r\n") == std::string::npos
+        || std::regex_search(text, internal);
+}
+}  // namespace
+
+namespace PartDesign
+{
+
+/** The message of a fillet or chamfer that failed, as Onshape's: "Failed to fillet selections"
+ * with the exact construction's reason after it, and never OCCT's raw text.
+ *
+ * TopoShape::makeElementFillet() and makeElementChamfer() raise OCCT's error with the reason
+ * appended, "BRep_API: command not done (exact construction refused: <reason>)", or the fork's
+ * own thin-face error, which names the reason too; OCCT's other errors come as they are.
+ *
+ * @param verb "fillet" or "chamfer"
+ * @param what The error's text
+ * @return "Failed to <verb> selections: <reason>", with a hint where no reason is readable
+ */
+PartDesignExport std::string dressUpFailure(const char* verb, const std::string& what)
+{
+    static const std::string marker = "exact construction refused: ";
+    std::string reason;
+    const std::size_t at = what.find(marker);
+    if (at != std::string::npos && at > 0 && what[at - 1] == '(') {
+        // OCCT's error with the reason in parentheses: the reason alone
+        reason = what.substr(at + marker.size());
+        if (!reason.empty() && reason.back() == ')') {
+            reason.pop_back();
+        }
+        if (isKernelText(reason)) {
+            reason.clear();
+        }
+    }
+    else if (!isKernelText(what)) {
+        reason = what;
+    }
+    else if (at != std::string::npos && !isKernelText(what.substr(at + marker.size()))) {
+        reason = what.substr(at + marker.size());
+    }
+    const std::string verbText(verb);
+    if (reason.empty()) {
+        reason = "the geometry kernel could not build it; try a smaller "
+            + std::string(verbText == "fillet" ? "radius" : "size") + " or fewer edges";
+    }
+    return "Failed to " + verbText + " selections: " + reason;
+}
+
+/// Whether a dress-up's error is reworded by dressUpFailure(): OCCT's text, or one that carries
+/// the exact construction's reason. The fork's other errors (a time limit, Esc) stay as they are.
+PartDesignExport bool isDressUpFailure(const std::string& what)
+{
+    return isKernelText(what) || what.find("exact construction refused: ") != std::string::npos;
+}
+
+}  // namespace PartDesign
+
+namespace PartDesign
+{
+
+namespace
+{
+
+/// Whether `follower` still follows `primary`: the expression of its size refers to it. That
+/// expression alone orders the two (MultiPartPrimary is hidden), so without it the primary's
+/// state may be stale; and the user has given this part a size of its own (ops#701 F2c)
+bool followsBySize(
+    const App::DocumentObject* follower,
+    App::DocumentObject* primary,
+    const char* sizeProperty
+)
+{
+    const App::Property* size = follower->getPropertyByName(sizeProperty);
+    if (!size) {
+        return false;
+    }
+    const auto info = follower->getExpression(App::ObjectIdentifier(*size));
+    if (!info.expression) {
+        return false;
+    }
+    // A hidden reference (href()) adds no dependency edge: it orders nothing
+    const auto deps = info.expression->getDepObjects();
+    const auto dep = deps.find(primary);
+    return dep != deps.end() && !dep->second;
+}
+
+/// Whether the primary built its own result: not an error, not suppressed, not passed through
+/// (a suppressed feature's or its own partial failure's), not held by its Body's roll-back bar
+bool builtItself(const DressUp* primary)
+{
+    if (primary->isError() || primary->Shape.getShape().isNull() || primary->Suppressed.getValue()
+        || primary->passesBaseThrough()) {
+        return false;
+    }
+    const Body* body = primary->getFeatureBody();
+    return !(body && body->holds(primary));
+}
+
+}  // namespace
+
+App::DocumentObjectExecReturn* DressUp::partialFailure(
+    App::DocumentObjectExecReturn* ret,
+    const char* verb,
+    const char* sizeProperty
+)
+{
+    auto primary = freecad_cast<DressUp*>(MultiPartPrimary.getValue());
+    // Not inside a pattern's re-run (dressUpRun), whose caller takes the failure. A link whose
+    // size expression is gone (cleared, replaced) is no link: nothing orders the two (F2c)
+    if (!ret || ret == App::DocumentObject::StdReturn || dressUpRun || !primary || primary == this
+        || !followsBySize(this, primary, sizeProperty) || !builtItself(primary)) {
+        return ret;
+    }
+    Part::TopoShape base;
+    try {
+        base = getBaseTopoShape(true);
+    }
+    catch (const Base::Exception&) {
+    }
+    if (base.isNull()) {
+        return ret;
+    }
+    std::string why = ret->Why;
+    delete ret;
+    // "Failed to fillet selections: <reason>" (dressUpFailure()) names the part; another
+    // failure (an invalid result, a recess filled) goes after it
+    const std::string failed = "Failed to " + std::string(verb) + " selections";
+    const Body* body = getFeatureBody();
+    const std::string on = failed + " on " + (body ? body->Label.getValue() : Label.getValue());
+    why = why.rfind(failed + ": ", 0) == 0 ? on + why.substr(failed.size()) : on + ": " + why;
+
+    // As a suppressed feature's: the output is the base, the feature's own state is a success
+    this->positionByBaseFeature();
+    if (!_PassedThrough.getValue()) {
+        _PassedThrough.setValue(true);
+    }
+    setFailurePassedThrough(false);
+    Shape.setValue(base);
+    // Nothing of its own for a pattern to apply, as a suppressed feature's. onChanged(Shape)
+    // has cleared it already (this runs only in execute()); said here, where it matters
+    AddSubShape.setValue(Part::TopoShape());
+    if (auto doc = getDocument()) {
+        const char* previous = doc->getWarningDescription(this);
+        doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + why : why);
+    }
+    return App::DocumentObject::StdReturn;
+}
+
 }  // namespace PartDesign

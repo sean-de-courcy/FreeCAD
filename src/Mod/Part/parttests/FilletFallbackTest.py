@@ -1520,7 +1520,8 @@ class LostStepTest(unittest.TestCase):
 
     def testErrorSaysWhyTheConstructionRefused(self):
         # r = 5.01 at the exact step: OCCT fails, and the exact construction refuses because the
-        # round would climb the step's wall (ops#601)
+        # round would climb the step's wall (ops#601). PartDesign words it as Onshape does, the
+        # reason after it (ops#640 F2)
         for kind in ("Fillet", "Chamfer"):
             for which in ("four", "one"):
                 with self.subTest(kind=kind, which=which):
@@ -1528,12 +1529,9 @@ class LostStepTest(unittest.TestCase):
                     self.assertFalse(feature.isValid())
                     status = feature.getStatusString()
                     self.assertTrue(
-                        status.startswith(
-                            "BRep_API: command not done (exact construction refused: "
-                        ),
-                        status,
+                        status.startswith("Failed to %s selections: " % kind.lower()), status
                     )
-                    self.assertTrue(status.endswith(")"), status)
+                    self.assertNotIn("command not done", status)
                     self.assertIn("runs off its face", status)
 
 

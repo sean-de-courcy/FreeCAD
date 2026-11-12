@@ -52,6 +52,9 @@ using namespace PartDesign;
 
 namespace PartDesign
 {
+// FeatureDressUp.cpp (ops#640 F2, Onshape's failure text; declared where used)
+PartDesignExport std::string dressUpFailure(const char* verb, const std::string& what);
+PartDesignExport bool isDressUpFailure(const std::string& what);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
 PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
@@ -154,6 +157,13 @@ short Chamfer::mustExecute() const
 }
 
 App::DocumentObjectExecReturn* Chamfer::execute()
+{
+    // FreeCAD-CH ops#701 (F2b): over several parts, this part failing while the first part's
+    // builds is a warning, as Onshape's CHAMFER_PARTIAL_FAIL
+    return partialFailure(build(), "chamfer", "Size");
+}
+
+App::DocumentObjectExecReturn* Chamfer::build()
 {
     // FreeCAD-CH ops#654 T3: re-run at a pattern's instance, on its base and edges
     Part::TopoShape reapplyBase;
@@ -320,13 +330,20 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         this->Shape.setValue(shape);
         return App::DocumentObject::StdReturn;
     }
+    // ops#640 F2: Onshape's "Failed to chamfer selections" with the exact construction's reason,
+    // never OCCT's raw text; the fork's other errors (a time limit, Esc) go on as before
+    catch (Base::Exception& e) {
+        if (!isDressUpFailure(e.what())) {
+            throw;
+        }
+        return new App::DocumentObjectExecReturn(dressUpFailure("chamfer", e.what()));
+    }
     catch (Standard_Failure& e) {
-        return new App::DocumentObjectExecReturn(e.GetMessageString());
+        const char* what = e.GetMessageString();
+        return new App::DocumentObjectExecReturn(dressUpFailure("chamfer", what ? what : ""));
     }
     catch (...) {
-        return new App::DocumentObjectExecReturn(
-            QT_TRANSLATE_NOOP("Exception", "Chamfer failed: OCC kernel error in chamfer computation")
-        );
+        return new App::DocumentObjectExecReturn(dressUpFailure("chamfer", ""));
     }
 }
 

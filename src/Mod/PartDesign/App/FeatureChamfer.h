@@ -66,6 +66,8 @@ public:
 
 protected:
     void Restore(Base::XMLReader& reader) override;
+    /// The dress-up itself; execute() adds the partial failure over several parts (ops#701)
+    App::DocumentObjectExecReturn* build();
     void handleChangedPropertyType(
         Base::XMLReader& reader,
         const char* TypeName,
