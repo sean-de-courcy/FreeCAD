@@ -222,7 +222,19 @@ App::DocumentObjectExecReturn* Chamfer::build()
     // edge's opening near 180 degrees: unknown, so that check doesn't run (PR review r1, T2)
     double reach = std::max(size, size2);
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        // A chain of edges at different angles gets Onshape's setbacks, which can exceed the
+        // size (0.714 of it beside a 110-degree first edge): the largest, as makeElementChamfer's
         reach = size;
+        try {
+            std::vector<TopoShape> copies = edges;
+            const TopoShape input = Part::FilletFallback::makerInput(TopShape, copies);
+            for (double setback : Part::FilletFallback::chainSetbacks(input, copies, size)) {
+                reach = std::max(reach, setback);
+            }
+        }
+        catch (const Base::Exception&) {
+            // makeElementChamfer reports it
+        }
     }
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::distanceAngle) {
         reach = 0.0;

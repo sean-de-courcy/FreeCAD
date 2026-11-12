@@ -73,6 +73,9 @@ struct Request
     /// round ends against a wall), and the check for merged faces compares with these. Empty:
     /// read from the base when the construction runs
     TopTools_DataMapOfShapeReal faceTolerances;
+    /// ChamferType::equalDistance: each edge's setback on both faces, in the order of the edges
+    /// passed in (chainSetbacks()). Empty: size1 on every edge
+    std::vector<double> setbacks;
 };
 
 /// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
@@ -90,6 +93,28 @@ PartExport TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
  * @return The copy, for the maker and the exact construction
  */
 PartExport TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& edges);
+
+/** The setbacks of a chamfer by equal distances, as Onshape's (notes/chamfer-chain-setbacks.md,
+ * oracle 14 CT1-CT3): the chamfer's edges that meet at vertices form a chain; the chain's first
+ * edge in the list gets the width, and every other edge of it gets
+ * s = width tan(a1 / 2) / tan(a / 2), a the edge's wedge angle between its faces, a1 the first
+ * edge's: the chords of one rolling ball. Exactly the width where the angles are equal (to 1e-9).
+ *
+ * The edges are OCCT's contours after Add() (tangent propagation included), read from a maker
+ * that is never built; contours that share a vertex form a chain. A chain keeps the width on every
+ * edge where an angle varies along a contour, a contour's edges have different angles, convex and
+ * concave edges mix, or a setback isn't finite. A concave chain takes the air-side angle.
+ *
+ * @param input The shape the chamfer is made on (the makerInput() copy)
+ * @param edges The listed edges of input, in the dress-up's order
+ * @param width The chamfer's distance
+ * @return One setback per listed edge, in order
+ */
+PartExport std::vector<double> chainSetbacks(
+    const TopoShape& input,
+    const std::vector<TopoShape>& edges,
+    double width
+);
 
 /** Copies of the shapes handed to one OCCT maker that raises its inputs' tolerances in place, as
  * makerInput() makes the base's: BRepFeat up to a face raises the face's edges and vertices and
