@@ -33,6 +33,7 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_FindSurface.hxx>
 #include <Geom2dAPI_InterCurveCurve.hxx>
@@ -44,6 +45,8 @@
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopoDS_Wire.hxx>
 
 #include <algorithm>
 #include <cmath>
@@ -177,6 +180,57 @@ TopTools_ListOfShape Part::FaceMakerBuildFace::splitSelfIntersecting(
         }
     }
     return result;
+}
+
+bool Part::FaceMakerBuildFace::planeOf(const std::vector<TopoShape>& shapes, gp_Pln& plane)
+{
+    // The edges in the order and form makeElementFace() gives them to Build_Essence() (addTopoShape(),
+    // useTopoCompound(), collectEdgesFromWires()), without the names: a wire's edges, an edge in a
+    // wire of its own; a compound's children so; faces, vertices and nested compounds add none
+    TopTools_ListOfShape edges;
+    bool other = false;
+    auto add = [&edges, &other](const TopoDS_Shape& shape) {
+        switch (shape.ShapeType()) {
+            case TopAbs_WIRE:
+                for (TopExp_Explorer exp(shape, TopAbs_EDGE); exp.More(); exp.Next()) {
+                    edges.Append(exp.Current());
+                }
+                break;
+            case TopAbs_EDGE: {
+                const TopoDS_Wire wire = BRepBuilderAPI_MakeWire(TopoDS::Edge(shape)).Wire();
+                for (TopExp_Explorer exp(wire, TopAbs_EDGE); exp.More(); exp.Next()) {
+                    edges.Append(exp.Current());
+                }
+                break;
+            }
+            case TopAbs_COMPOUND:
+            case TopAbs_FACE:
+            case TopAbs_VERTEX:
+                break;
+            default:
+                other = true;  // the face maker throws: so does the run with every edge
+                break;
+        }
+    };
+    for (const auto& topo : shapes) {
+        const TopoDS_Shape& shape = topo.getShape();
+        if (shape.IsNull()) {
+            return false;
+        }
+        if (shape.ShapeType() == TopAbs_COMPOUND) {
+            for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+                add(it.Value());
+            }
+        }
+        else {
+            add(shape);
+        }
+    }
+    if (other || edges.IsEmpty()) {
+        return false;
+    }
+    FaceMakerBuildFace maker;
+    return maker.findPlane(edges, plane);
 }
 
 bool Part::FaceMakerBuildFace::findPlane(const TopTools_ListOfShape& edges, gp_Pln& plane) const

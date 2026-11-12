@@ -54,16 +54,21 @@
 #include <Geom_Surface.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_MapOfOrientedShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Shell.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Message_ProgressScope.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include <App/Application.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Parameter.h>
 
@@ -711,12 +716,232 @@ bool checkValid(const TopoDS_Shape& shape)
         for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
             Handle(BRepCheck_Shell) shell = new BRepCheck_Shell(TopoDS::Shell(it.Current()));
             if (!statusOk(shell) || shell->Closed() != BRepCheck_NoError
-                || shell->Orientation() != BRepCheck_NoError) {
+                || !orientedConsistently(*shell, TopoDS::Shell(it.Current()))) {
                 return false;
             }
         }
     }
     return true;
+}
+
+namespace
+{
+std::string fastOrientationMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_FAST_ORIENTATION") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_FAST_ORIENTATION");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+// True only where BRepCheck_Shell::Orientation() finds no error: it takes the faces as the shell's
+// explorer gives them (keyed without orientation: a face twice is RedundantFace), and for each edge
+// that isn't degenerated the faces that use it; with two faces, the edge's first use in each, an
+// error where they agree; with one face (once, or twice as a seam) nothing; three or more uses are
+// left to OCCT, as are unoriented faces and uses (which its edge map leaves out)
+bool fastOriented(const TopoDS_Shell& shell)
+{
+    struct Use
+    {
+        int face {0};
+        TopAbs_Orientation orientation {TopAbs_FORWARD};
+    };
+    struct Uses
+    {
+        int count {0};
+        Use use[2];
+    };
+    TopTools_IndexedMapOfShape faces;
+    TopTools_IndexedMapOfShape edges;
+    std::vector<Uses> uses;
+    for (TopExp_Explorer f(shell, TopAbs_FACE); f.More(); f.Next()) {
+        const TopoDS_Shape& face = f.Current();
+        if (face.Orientation() != TopAbs_FORWARD && face.Orientation() != TopAbs_REVERSED) {
+            return false;
+        }
+        if (faces.Contains(face)) {
+            return false;
+        }
+        const int faceIndex = faces.Add(face);
+        for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+            const TopoDS_Shape& edge = e.Current();
+            if (edge.Orientation() != TopAbs_FORWARD && edge.Orientation() != TopAbs_REVERSED) {
+                return false;
+            }
+            const int k = edges.Add(edge);
+            if (static_cast<std::size_t>(k) > uses.size()) {
+                uses.resize(k);
+            }
+            Uses& u = uses[k - 1];
+            if (u.count == 2) {
+                return false;
+            }
+            u.use[u.count++] = {faceIndex, edge.Orientation()};
+        }
+    }
+    for (int k = 1; k <= edges.Extent(); ++k) {
+        const Uses& u = uses[k - 1];
+        if (u.count < 2 || u.use[0].face == u.use[1].face) {
+            continue;
+        }
+        if (BRep_Tool::Degenerated(TopoDS::Edge(edges(k)))) {
+            continue;
+        }
+        if (u.use[0].orientation == u.use[1].orientation) {
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
+
+bool orientedConsistently(BRepCheck_Shell& check, const TopoDS_Shell& shell)
+{
+    const std::string mode = fastOrientationMode();
+    if (mode == "off") {
+        return check.Orientation() == BRepCheck_NoError;
+    }
+    const bool fast = fastOriented(shell);
+    if (mode != "verify") {
+        return fast || check.Orientation() == BRepCheck_NoError;
+    }
+    const bool occt = check.Orientation() == BRepCheck_NoError;
+    if (fast && !occt) {
+        Base::Console().error("fast orientation: true where BRepCheck_Shell finds an error\n");
+    }
+    return occt;
+}
+
+
+namespace
+{
+std::string narrowCheckMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_NARROW_CHECK") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_NARROW_CHECK");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+bool solidsOnly(const TopoDS_Shape& shape)
+{
+    return TopExp_Explorer(shape, TopAbs_SHELL, TopAbs_SOLID).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_FACE, TopAbs_SHELL).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_EDGE, TopAbs_FACE).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_VERTEX, TopAbs_EDGE).More() == Standard_False
+        && TopExp_Explorer(shape, TopAbs_SOLID).More() == Standard_True;
+}
+
+bool narrowValid(const TopoDS_Shape& shape, const TopoDS_Shape& base)
+{
+    if (base.IsNull() || !solidsOnly(shape)) {
+        return checkValid(shape);
+    }
+    // The base's faces as its explorer gives them: with their orientation and transform
+    TopTools_MapOfOrientedShape kept;
+    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+        kept.Add(it.Current());
+    }
+    // Each face once (shared faces too), as the analyzer checks each sub-shape once
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    std::vector<char> check(faces.Extent() + 1, 0);
+    std::vector<int> changed;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        if (!kept.Contains(it.Current())) {
+            const int k = faces.FindIndex(it.Current());
+            if (!check[k]) {
+                check[k] = 1;
+                changed.push_back(k);
+            }
+        }
+    }
+    // Their neighbours: every face with a vertex of a changed face (those with an edge of it too)
+    if (!changed.empty()) {
+        TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+        for (const int k : changed) {
+            TopTools_IndexedMapOfShape vertices;
+            TopExp::MapShapes(faces(k), TopAbs_VERTEX, vertices);
+            for (int v = 1; v <= vertices.Extent(); ++v) {
+                const int index = vertexFaces.FindIndex(vertices(v));
+                if (index == 0) {
+                    continue;
+                }
+                for (const auto& face : vertexFaces(index)) {
+                    check[faces.FindIndex(face)] = 1;
+                }
+            }
+        }
+    }
+    for (int k = 1; k <= faces.Extent(); ++k) {
+        if (!check[k]) {
+            continue;
+        }
+        const TopoDS_Face& face = TopoDS::Face(faces(k));
+        const bool valid = byParts(face) ? faceValidByParts(face)
+                                         : BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        if (!valid) {
+            return false;
+        }
+    }
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        Handle(BRepCheck_Solid) solidCheck = new BRepCheck_Solid(TopoDS::Solid(solid.Current()));
+        if (!statusOk(solidCheck)) {
+            return false;
+        }
+        for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
+            Handle(BRepCheck_Shell) shell = new BRepCheck_Shell(TopoDS::Shell(it.Current()));
+            if (!statusOk(shell) || shell->Closed() != BRepCheck_NoError
+                || !orientedConsistently(*shell, TopoDS::Shell(it.Current()))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+}  // namespace
+
+bool checkValidChanged(const TopoDS_Shape& shape, const TopoDS_Shape& base)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    const std::string mode = narrowCheckMode();
+    if (mode == "off") {
+        return BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+    }
+    if (mode != "verify") {
+        return narrowValid(shape, base);
+    }
+    const bool narrow = narrowValid(shape, base);
+    const bool whole = BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+    if (narrow != whole) {
+        Base::Console().error(
+            "narrow check: %s where BRepCheck_Analyzer finds the shape %s\n",
+            narrow ? "valid" : "invalid",
+            whole ? "valid" : "invalid"
+        );
+    }
+    return whole;
 }
 
 }  // namespace Part::KernelBudget

@@ -187,13 +187,12 @@ std::string Sketcher::imprintNearMode()
 }
 
 std::vector<Part::TopoShape> Sketcher::nearImprintEdges(
-    const Part::TopoShape& imprint,
+    const std::vector<Part::TopoShape>& all,
     const Part::TopoShape& sketchEdges,
     bool& leftOutLoop
 )
 {
     leftOutLoop = false;
-    std::vector<Part::TopoShape> all = imprint.getSubTopoShapes(TopAbs_EDGE);
     Bnd_Box own;
     for (TopExp_Explorer x(sketchEdges.getShape(), TopAbs_EDGE); x.More(); x.Next()) {
         BRepBndLib::Add(x.Current(), own);
