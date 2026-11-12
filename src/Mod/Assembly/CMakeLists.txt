@@ -64,6 +64,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestFloatingSolve.py
     AssemblyTests/TestJointRecords.py
     AssemblyTests/TestOnshapeJointsGui.py
+    AssemblyTests/TestMateOffsetsGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
     AssemblyTests/TestOnshapeAssemblies.py

@@ -857,7 +857,10 @@ class Joint:
             self.ensureUnconnectedIsSecondRef(joint)
 
             if joint.JointType in JointUsingPreSolve:
-                self.preSolve(joint)
+                # FreeCAD-CH (ops#640, design C1): a new Fastened mate is unflipped whatever the
+                # parts' positions, as Onshape's (GC-B1); Flip primary axis flips it. Before, the
+                # closer of the two directions was taken, so parts already facing came out flipped.
+                self.preSolve(joint, unflipped=joint.JointType == "Fixed")
             elif joint.JointType in JointParallelForbidden:
                 self.preventParallel(joint)
 
@@ -913,16 +916,16 @@ class Joint:
     def flipOnePart(self, joint):
         self.matchJCS(joint, False, True)
 
-    def preSolve(self, joint, savePlc=True):
+    def preSolve(self, joint, savePlc=True, unflipped=False):
         # The goal of this is to put the part in the correct position to avoid wrong placement by the solve.
 
         # we actually don't want to match perfectly the JCS, it is best to match them
         # in the current closest direction, ie either matched or flipped.
-        self.matchJCS(joint, savePlc)
+        self.matchJCS(joint, savePlc, unflipped=unflipped)
 
-    def matchJCS(self, joint, savePlc=True, reverse=False):
+    def matchJCS(self, joint, savePlc=True, reverse=False, unflipped=False):
         assembly = self.getAssembly(joint)
-        sameDir = self.areJcsSameDir(joint)
+        sameDir = True if unflipped else self.areJcsSameDir(joint)
         if reverse:
             sameDir = not sameDir
 
@@ -1835,6 +1838,9 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.distanceSpinbox.valueChanged.connect(self.onDistanceChanged)
         self.jForm.distanceSpinbox2.valueChanged.connect(self.onDistance2Changed)
         self.jForm.offsetSpinbox.valueChanged.connect(self.onOffsetChanged)
+        self.jForm.offsetXSpinbox.valueChanged.connect(self.onOffsetXChanged)
+        self.jForm.offsetYSpinbox.valueChanged.connect(self.onOffsetYChanged)
+        self.jForm.offsetCheckbox.toggled.connect(self.offsetToggled)
         self.jForm.rotationSpinbox.valueChanged.connect(self.onRotationChanged)
         self.bindFields()
 
@@ -1888,6 +1894,10 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         bind = Gui.ExpressionBinding(self.jForm.angleSpinbox).bind(self.joint, "Angle")
         bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox).bind(self.joint, "Distance")
         bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox2).bind(self.joint, "Distance2")
+        # FreeCAD-CH (ops#640, design C1): Onshape's mate offset is X, Y and Z, each taking an
+        # expression (#name included); before, only Z was reachable without the placement editor
+        bind = Gui.ExpressionBinding(self.jForm.offsetXSpinbox).bind(self.joint, "Offset2.Base.x")
+        bind = Gui.ExpressionBinding(self.jForm.offsetYSpinbox).bind(self.joint, "Offset2.Base.y")
         bind = Gui.ExpressionBinding(self.jForm.offsetSpinbox).bind(self.joint, "Offset2.Base.z")
         bind = Gui.ExpressionBinding(self.jForm.rotationSpinbox).bind(
             self.joint, "Offset2.Rotation.Yaw"
@@ -2092,11 +2102,47 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
     def onDistance2Changed(self, quantity):
         self.joint.Distance2 = self.jForm.distanceSpinbox2.property("rawValue")
 
-    def onOffsetChanged(self, quantity):
+    def setOffsetComponent(self, axis, spinbox):
         if self.blockOffsetRotation:
             return
+        base = App.Vector(self.joint.Offset2.Base)
+        setattr(base, axis, spinbox.property("rawValue"))
+        self.joint.Offset2.Base = base
 
-        self.joint.Offset2.Base = App.Vector(0, 0, self.jForm.offsetSpinbox.property("rawValue"))
+    def onOffsetChanged(self, quantity):
+        # Z alone: X and Y are kept (they were zeroed before C1)
+        self.setOffsetComponent("z", self.jForm.offsetSpinbox)
+
+    def onOffsetXChanged(self, quantity):
+        self.setOffsetComponent("x", self.jForm.offsetXSpinbox)
+
+    def onOffsetYChanged(self, quantity):
+        self.setOffsetComponent("y", self.jForm.offsetYSpinbox)
+
+    OFFSET_PATHS = ("Offset2.Base.x", "Offset2.Base.y", "Offset2.Base.z")
+
+    def offsetExpressions(self):
+        return [
+            path
+            for path, _expr in self.joint.ExpressionEngine
+            if path.lstrip(".") in self.OFFSET_PATHS
+        ]
+
+    def hasOffset(self):
+        """The Offset box is ticked for a joint with a translation offset or an expression on one."""
+        base = self.joint.Offset2.Base
+        return base.Length > 1e-9 or bool(self.offsetExpressions())
+
+    def offsetToggled(self, on):
+        """Onshape's Offset checkbox: ticked shows X, Y and Z; unticked drops the translation
+        offset with its expressions (the rotation and the two buttons' turns stay)."""
+        if not on and self.hasOffset():
+            for path in self.offsetExpressions():
+                self.joint.setExpression(path, None)
+            plc = self.joint.Offset2
+            self.joint.Offset2 = App.Placement(App.Vector(), plc.Rotation)
+            self.updateOffsetWidgets()
+        self.adaptUi()
 
     def onRotationChanged(self, quantity):
         if self.blockOffsetRotation:
@@ -2191,8 +2237,12 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.offset2Label.setVisible(advancedOffset)
         self.jForm.offset1Button.setVisible(advancedOffset)
         self.jForm.offset2Button.setVisible(advancedOffset)
-        self.jForm.offsetLabel.setVisible(not advancedOffset and needOffset)
-        self.jForm.offsetSpinbox.setVisible(not advancedOffset and needOffset)
+        showOffset = not advancedOffset and needOffset
+        self.jForm.offsetCheckbox.setVisible(showOffset)
+        showFields = showOffset and self.jForm.offsetCheckbox.isChecked()
+        for name in ("offsetX", "offsetY", "offset"):
+            getattr(self.jForm, name + "Label").setVisible(showFields)
+            getattr(self.jForm, name + "Spinbox").setVisible(showFields)
         self.jForm.rotationLabel.setVisible(not advancedOffset and needRotation)
         self.jForm.rotationSpinbox.setVisible(not advancedOffset and needRotation)
 
@@ -2243,6 +2293,8 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.offset2Button.setText(f"({pos.x}, {pos.y}, {pos.z})")
 
         self.blockOffsetRotation = True
+        self.jForm.offsetXSpinbox.setProperty("rawValue", pos.x)
+        self.jForm.offsetYSpinbox.setProperty("rawValue", pos.y)
         self.jForm.offsetSpinbox.setProperty("rawValue", pos.z)
         self.jForm.rotationSpinbox.setProperty(
             "rawValue", self.joint.Offset2.Rotation.getYawPitchRoll()[0]
@@ -2310,10 +2362,18 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.angleSpinbox.setProperty("rawValue", self.joint.Angle.Value)
         self.jForm.distanceSpinbox.setProperty("rawValue", self.joint.Distance.Value)
         self.jForm.distanceSpinbox2.setProperty("rawValue", self.joint.Distance2.Value)
+        self.blockOffsetRotation = True
+        self.jForm.offsetXSpinbox.setProperty("rawValue", self.joint.Offset2.Base.x)
+        self.jForm.offsetYSpinbox.setProperty("rawValue", self.joint.Offset2.Base.y)
         self.jForm.offsetSpinbox.setProperty("rawValue", self.joint.Offset2.Base.z)
+        self.blockOffsetRotation = False
         self.jForm.rotationSpinbox.setProperty(
             "rawValue", self.joint.Offset2.Rotation.getYawPitchRoll()[0]
         )
+        # A new joint starts with Offset off (Onshape's); an edited one shows its offset
+        self.jForm.offsetCheckbox.blockSignals(True)
+        self.jForm.offsetCheckbox.setChecked(self.hasOffset())
+        self.jForm.offsetCheckbox.blockSignals(False)
 
         self.jForm.limitCheckbox1.setChecked(self.joint.EnableLengthMin)
         self.jForm.limitCheckbox2.setChecked(self.joint.EnableLengthMax)

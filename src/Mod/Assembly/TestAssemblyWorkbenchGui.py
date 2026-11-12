@@ -8,6 +8,10 @@ from AssemblyTests.TestOnshapeJointsGui import TestOnshapeJointsGui  # ops#640, 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestOnshapeJointsGui else False
 
+from AssemblyTests.TestMateOffsetsGui import TestMateOffsetsGui  # ops#640, design C1
+
+True if TestMateOffsetsGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,
