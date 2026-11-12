@@ -31,6 +31,11 @@ def invalid(obj):
     return "Invalid" in obj.State or "Error" in obj.State
 
 
+def linkHeight(link):
+    box = Part.getShape(link).BoundBox
+    return box.ZMax - box.ZMin
+
+
 class TestConfigurations(unittest.TestCase):
     def setUp(self):
         self.doc, self.studio = newStudio("TestConfigurations")
@@ -618,25 +623,36 @@ class TestConfigurations(unittest.TestCase):
                 pass
 
     # --------------------------------------------------------------------------- outside readers
-    def testInstanceOnAnotherRowErrors(self):
-        """A Link outside the studio shows the default row (Onshape's Insert, CF8); while the
-        studio shows another, it errors loudly, and heals when the studio is switched back"""
+    def testInstanceOnAnotherRowShowsItsRow(self):
+        """A Link outside the studio shows the default row (Onshape's Insert, CF8). While the
+        studio shows another row, the Link shows its own row through a cache entry (C3), and
+        goes back to the Body when the studio shows its row again"""
         self.configureSizes()
         link = self.doc.addObject("App::Link", "Instance")
         link.LinkedObject = self.A
         self.doc.recompute()
         self.assertFalse(invalid(link))
         PartDesign.configSetActive(self.studio, {"Size": "Large"})
-        self.assertTrue(invalid(link))
-        self.assertIn("configuration", PartDesign.configReaderError(link, self.A))
-        PartDesign.configSetActive(self.studio, {"Size": "Small"})
-        self.assertFalse(invalid(link))
-        # An instance made on Large is right in Large and loud in Small
-        PartDesign.configSetReaderKey(link, self.A, {"Size": "Large"})
         self.doc.recompute()
-        self.assertTrue(invalid(link))
-        PartDesign.configSetActive(self.studio, {"Size": "Large"})
         self.assertFalse(invalid(link))
+        self.assertEqual(link.LinkedObject.TypeId, "PartDesign::ConfigShape")
+        self.assertAlmostEqual(linkHeight(link), 10, delta=TOL)
+        self.assertEqual(PartDesign.configInstancePart(link), self.A)
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.doc.recompute()
+        self.assertFalse(invalid(link))
+        self.assertEqual(link.LinkedObject, self.A)
+        # An instance set to Large shows Large in either row of the studio
+        PartDesign.configSetInstanceKey(link, {"Size": "Large"})
+        self.doc.recompute()
+        self.assertFalse(invalid(link))
+        self.assertEqual(link.LinkedObject.TypeId, "PartDesign::ConfigShape")
+        self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.doc.recompute()
+        self.assertFalse(invalid(link))
+        self.assertEqual(link.LinkedObject, self.A)
+        self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
 
     def testDerivedBinderOnAnotherRowErrors(self):
         """A binder of a configured studio's part in another body (Derived's reader) is loud too;

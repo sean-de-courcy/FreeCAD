@@ -722,7 +722,10 @@ void connectDocument(const App::Document& cdoc)
 }
 
 /// An undo or redo marks every entry of its document stale: nothing then depends on the order of
-/// the change signals during the rollback (review 6)
+/// the change signals during the rollback (review 6). Undo has already regenerated the model
+/// (`Document::undo`, regenerateAfterTransaction), so the instances on those entries are touched
+/// now and the next recompute refills them; an undo is no studio edit, whose recompute only
+/// touches (that took two recomputes to show the undone shape)
 void onUndoRedo(const App::Document& cdoc)
 {
     lastEvent[&cdoc] = Event::Other;
@@ -735,7 +738,7 @@ void onUndoRedo(const App::Document& cdoc)
         e->setStale(true);
     }
     if (!entries.empty()) {
-        studioEditDocs.insert(doc.getName());
+        touchWaitingInstances();
     }
 }
 

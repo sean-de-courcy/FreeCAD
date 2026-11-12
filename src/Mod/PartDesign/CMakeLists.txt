@@ -130,6 +130,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestStudioDressUp.py
     PartDesignTests/TestConfigurations.py
     PartDesignTests/TestStudioFeaturePattern.py
+    PartDesignTests/TestConfigCache.py
 )
 
 if(BUILD_GUI)
