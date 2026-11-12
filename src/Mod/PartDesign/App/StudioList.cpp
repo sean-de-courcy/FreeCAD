@@ -61,6 +61,8 @@ PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
 PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
 PartDesignExport Feature* studioPatternSourceStep(const App::DocumentObject* original,
                                                   const Body* body);
+// Pieces.cpp (declared where used: 10.12 amendment, the resync's new parts)
+PartDesignExport std::vector<App::DocumentObject*> takePiecesDue(App::Document* doc);
 }  // namespace PartDesign
 
 namespace
@@ -938,6 +940,12 @@ std::vector<Body*> scopePartsAt(const App::DocumentObject* owner,
     return out;
 }
 
+bool patternOriginalsGoneFrom(const App::DocumentObject* owner,
+                              const Body* part,
+                              const std::vector<Body*>& bodies,
+                              const std::map<const App::DocumentObject*, int>& positions,
+                              const Consumed& consumed);
+
 /// The parts owner (at index) has a step in: the parts it acts on, without those an Add merges
 /// into another part (10.13: their chains end before it; the survivor's step reads them)
 std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
@@ -952,7 +960,65 @@ std::vector<Body*> stepPartsAt(const App::DocumentObject* owner,
             out.erase(it);
         }
     }
+    if (isFeaturePatternOwner(owner)) {
+        std::erase_if(out, [&](const Body* part) {
+            return patternOriginalsGoneFrom(owner, part, bodies, positions, consumed);
+        });
+    }
     return out;
+}
+
+/// Whether every original of the feature pattern owner went from part (the property gate's seed 1
+/// op 57): part is a piece made by an original that no longer acts on the part it was cut from (a
+/// split inserted before it), and no other original acts there. Its step would pattern nothing
+/// ("Select features to mirror."), where a from-scratch build makes none: no step. A merging
+/// pattern keeps its steps (its instances merge in a part that holds none of its originals,
+/// T1b settled 2), and one with a pattern original too (its scope is its own)
+bool patternOriginalsGoneFrom(const App::DocumentObject* owner,
+                              const Body* part,
+                              const std::vector<Body*>& bodies,
+                              const std::map<const App::DocumentObject*, int>& positions,
+                              const Consumed& consumed)
+{
+    auto pattern = freecad_cast<const Transformed*>(owner);
+    const std::string parentId = part->StudioParentId.getValue();
+    if (!pattern || !isPieceBody(part) || parentId.empty()) {
+        return false;
+    }
+    bool gone = false;
+    for (auto original : pattern->Originals.getValues()) {
+        if (!original) {
+            continue;
+        }
+        if (Body::findBodyOf(original)) {
+            if (Body::findBodyOf(original) == part) {
+                return false;
+            }
+            continue;
+        }
+        if (isFeaturePatternOwner(original) || isMergingAdd(original)) {
+            return false;
+        }
+        auto at = positions.find(original);
+        if (at == positions.end()) {
+            continue;
+        }
+        const auto parts = scopePartsAt(original, bodies, at->second, positions, consumed);
+        if (std::ranges::find(parts, part) == parts.end()) {
+            continue;
+        }
+        if (part->StudioMadeBy.getValue() != original) {
+            return false;  // it acts on the piece itself
+        }
+        const bool parentThere = std::ranges::any_of(parts, [&parentId](const Body* body) {
+            return studioPartId(body) == parentId;
+        });
+        if (parentThere) {
+            return false;
+        }
+        gone = true;
+    }
+    return gone;
 }
 
 /// A part pattern's source parts (StudioEntities) resolved at its place (index), without the
@@ -2490,9 +2556,25 @@ void resyncPartMirrors(const App::Document& constDoc)
 {
     static bool busy = false;
     auto& doc = const_cast<App::Document&>(constDoc);
-    if (busy || doc.isPerformingTransaction() || doc.testStatus(App::Document::Restoring)
+    if (busy) {
+        return;  // the loop below takes its own recomputes' decisions
+    }
+    // The entries whose solids are no part (10.12 amendment, points 2-4), taken at every signal
+    // so a decision never outlives its recompute
+    std::vector<App::DocumentObject*> due = takePiecesDue(&doc);
+    if (doc.isPerformingTransaction() || doc.testStatus(App::Document::Restoring)
         || App::GetApplication().isClosingAll() || needsRecompute(doc)) {
         return;
+    }
+    // Where the new parts can go (amendment point 3): the active step (a command's, or the last
+    // one 10.15 reopened for this signal), or nowhere to keep together (no step recorded or
+    // undone: a script). Otherwise (Redo not empty, the stack untouched by 10.15's guard) the
+    // entry stays loud with its message; an open dialog's step makes nothing (its OK does)
+    const bool canMake = !doc.isStepLocked()
+        && (doc.hasPendingTransaction()
+            || (doc.getAvailableUndos() == 0 && doc.getAvailableRedos() == 0));
+    if (!canMake) {
+        due.clear();
     }
     auto staleLists = [&doc]() {
         std::vector<StudioList*> stale;
@@ -2536,9 +2618,41 @@ void resyncPartMirrors(const App::Document& constDoc)
         return stale;
     };
     std::vector<StudioList*> stale = staleLists();
-    if (stale.empty()) {
+    if (stale.empty() && due.empty()) {
         return;
     }
+    // An entry the piece command refused (no face tells a piece apart) isn't asked again here: it
+    // stays loud with the command's reason
+    std::set<std::string> refusedPieces;
+    auto makeDue = [&]() {
+        bool madeAny = false;
+        for (auto entry : due) {
+            if (!entry->isAttachedToDocument() || refusedPieces.count(entry->getNameInDocument())
+                || !StudioList::holding(entry)) {
+                continue;
+            }
+            std::string why;
+            const auto made = makePieces(entry, &why);
+            if (made.empty()) {
+                refusedPieces.insert(entry->getNameInDocument());
+                if (!why.empty()) {
+                    Base::Console().warning("%s\n", why.c_str());
+                }
+                continue;
+            }
+            madeAny = true;
+            // Onshape's INFO (U2, BOOLEAN_UNION_NO_OP): there is no info state on a feature, so a
+            // log line; a split's new pieces have none (U1)
+            if (std::ranges::any_of(made, [](const Body* body) {
+                    return std::string(body->StudioParentId.getValue()).empty();
+                })) {
+                Base::Console().log("%s: adds to no part of its merge scope: a new part\n",
+                                    entry->Label.getValue());
+            }
+        }
+        due = takePiecesDue(&doc);
+        return madeAny;
+    };
     // Until nothing is stale: the recompute after a reconcile can decide anew for an entry later
     // in the list (a second Union sees its tool, which the first one's resync gave back, and
     // decides it apart: ops#654 P6p, gate seed 3). Its own signal comes while busy, so this
@@ -2549,7 +2663,10 @@ void resyncPartMirrors(const App::Document& constDoc)
     for (auto obj : doc.getObjectsOfType(StudioList::getClassTypeId())) {
         bound += static_cast<StudioList*>(obj)->Entries.getSize();
     }
-    for (std::size_t round = 0; !stale.empty(); ++round) {
+    bound *= 2;  // the new parts' rounds too: each makes an entry's parts or refuses it
+    // Until nothing is stale and no entry's solids wait to be parts: a new part can feed a later
+    // entry (its scope, a merge), whose compute then decides anew (amendment point 1's fixed point)
+    for (std::size_t round = 0; !stale.empty() || !due.empty(); ++round) {
         if (round == bound) {
             Base::Console().warning(
                 "%s: the studio's history doesn't settle after a recompute (a Union's tools apart, "
@@ -2557,6 +2674,14 @@ void resyncPartMirrors(const App::Document& constDoc)
                 doc.Label.getValue()
             );
             return;
+        }
+        if (stale.empty()) {
+            makeDue();
+            if (!canMake) {
+                due.clear();
+            }
+            stale = staleLists();
+            continue;
         }
         bool refused = false;
         for (auto list : stale) {
@@ -2571,6 +2696,11 @@ void resyncPartMirrors(const App::Document& constDoc)
             return;  // a refused reconcile writes nothing: going on would only refuse again
         }
         stale = staleLists();
+        for (auto entry : takePiecesDue(&doc)) {
+            if (canMake && std::ranges::find(due, entry) == due.end()) {
+                due.push_back(entry);
+            }
+        }
     }
 }
 }  // namespace

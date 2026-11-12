@@ -880,6 +880,33 @@ class TestStudioFeaturePattern(unittest.TestCase):
         top = [e for e in solid.Edges if all(abs(v.Point.z - 10) < 1e-6 for v in e.Vertexes)]
         self.assertVolume("P", 60 * 20 * 5 + 3 * solid.makeChamfer(1, top).Volume)
 
+    # ------------------------------------------------------------------------------- the gate
+    def testAPatternStepWhoseOriginalsAllWentFromItsPartGoes(self):
+        """The property gate's seed 1 op 57: a through slot S9 (x 40..41) splits A (pieces made),
+        M mirrors S9 (Reapply on) and has a step in each piece. A split S5 (x 10..11, pieces
+        made) inserted before S9: S9 no longer acts on A, its pieces fail. M's originals all went
+        from them: M has no step there (a from-scratch build makes none), so no piece's Tip is a
+        mirror failing "Select features to mirror." (the list is the only truth)."""
+        self.studio((("A", (0, 0, 60, 20), 10),))
+        sk9 = studioSketch(self.doc, self.S, "S9Sk", rects=((40, -1, 41, 21),), z=10)
+        s9 = makeOwner(self.doc, self.S, "Pocket", "S9", sk9, ("A",), Length=11)
+        self.doc.recompute()
+        pieces = self.makePieces(s9)
+        self.assertEqual(len(pieces), 2)
+        m = ownerPattern(self.doc, self.S, "Mirrored", "M", [s9], reapply=True,
+                         MirrorPlane=origin(self.S, YZ_PLANE))
+        for piece in pieces:
+            self.assertIsNotNone(PartDesign.studioStepOf(m, piece))
+        sk5 = studioSketch(self.doc, self.S, "S5Sk", rects=((10, -1, 11, 21),), z=10)
+        s5 = makeOwner(self.doc, self.S, "Pocket", "S5", sk5, ("A",), Length=11)
+        PartDesign.studioMove(s5, list(self.list.Entries).index(s9))
+        self.doc.recompute()
+        self.assertEqual(len(self.makePieces(s5)), 2)
+        for piece in pieces:
+            step = PartDesign.studioStepOf(m, piece)
+            self.assertIsNone(step, f"{piece.StudioPartId}: {step and step.getStatusString()}")
+            self.assertFalse(piece.Tip and piece.Tip.Name.startswith("M_"), piece.Tip.Name)
+
 
 if __name__ == "__main__":
     unittest.main()

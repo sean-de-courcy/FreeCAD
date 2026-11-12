@@ -85,6 +85,27 @@ namespace
 
 const App::DocumentObject* commandEntry = nullptr;
 
+/// The entries whose last compute found solids that are no part (10.12 amendment, "leftovers and
+/// splits that appear without a command"): (document, entry) names, so a deleted entry is never
+/// read. Due: the resync can make them (a first split, a further piece, a leftover); loud: a
+/// source of the entry it must not touch (a record that finds nothing, no unique witness, the
+/// nested debt), so the whole entry stays loud
+using EntryKey = std::pair<std::string, std::string>;
+std::set<EntryKey> duePieces;
+std::set<EntryKey> loudPieces;
+
+EntryKey entryKey(const App::DocumentObject* entry)
+{
+    return {entry->getDocument()->getName(), entry->getNameInDocument()};
+}
+
+void markPieces(const App::DocumentObject* entry, bool due)
+{
+    if (entry && entry->isAttachedToDocument() && entry->getDocument()) {
+        (due ? duePieces : loudPieces).insert(entryKey(entry));
+    }
+}
+
 std::string quoted(const App::DocumentObject* obj)
 {
     return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
@@ -591,16 +612,49 @@ std::string unclaimedSplit(const App::DocumentObject* maker,
     }
     const std::string head = quoted(maker) + " splits " + quoted(part) + " into "
         + std::to_string(solids) + " pieces";
-    const auto records = pieceRecords(maker, studioPartId(part));
+    const std::string partId = studioPartId(part);
+    const auto records = pieceRecords(maker, partId);
     if (records.empty()) {
+        // A first split: the resync makes both pieces (Onshape U1). Loud while the maker holds
+        // records of a piece of this part whose own split is gone (the split amendment's skeptic
+        // point 1, a nested split under a vanished outer one: debt)
+        const App::Document* doc = maker->getDocument();
+        const bool nested = std::ranges::any_of(
+            doc->getObjectsOfType(Body::getClassTypeId()),
+            [&](const App::DocumentObject* obj) {
+                auto body = static_cast<const Body*>(obj);
+                if (!isPieceBody(body) || body->StudioMadeBy.getValue() != maker) {
+                    return false;
+                }
+                std::set<std::string> seen;
+                std::string id = body->StudioParentId.getValue();
+                while (!id.empty() && seen.insert(id).second) {
+                    const Body* up = bodyWithId(const_cast<App::Document*>(doc), id);
+                    id = up ? std::string(up->StudioParentId.getValue()) : std::string();
+                    if (id == partId) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        );
+        markPieces(maker, !nested);
         return head + ": open " + quoted(maker) + " and press OK to make them parts";
     }
     const PieceMatch match = matchPieces(result, records);
     std::set<int> claimed(match.solids.begin(), match.solids.end());
     claimed.erase(-1);
     if (static_cast<int>(claimed.size()) < solids) {
+        // A further piece beside records that all hold theirs: a new ordinal (amendment point
+        // 4); a record that finds nothing (no unique witness, a different cut) stays loud
+        markPieces(maker, std::ranges::none_of(match.solids, [](int j) { return j < 0; }));
         return head + ", " + std::to_string(claimed.size()) + " are parts: open " + quoted(maker)
             + " and press OK";
+    }
+    for (std::size_t r = 0; r < records.size(); ++r) {
+        if (match.solids[r] < 0 && match.heldBy[r] < 0) {
+            markPieces(maker, false);  // its piece step fails: a command would delete the record
+        }
     }
     return {};
 }
@@ -675,12 +729,35 @@ std::string unclaimedLeftovers(const App::DocumentObject* owner)
     const PieceMatch match = matchPieces(left, pieceRecords(owner, std::string()));
     for (int j = 0; j < solids; ++j) {
         if (std::ranges::find(match.solids, j) == match.solids.end()) {
+            markPieces(owner, true);  // the resync makes it a part (Onshape U2, H1a, R4)
             return "Solid " + std::to_string(j + 1)
                 + " of the tool touches no part of the merge scope and is no part: open "
                 + quoted(owner) + " and press OK to make it a new part";
         }
     }
     return {};
+}
+
+std::vector<App::DocumentObject*> takePiecesDue(App::Document* doc)
+{
+    std::vector<App::DocumentObject*> out;
+    if (!doc) {
+        return out;
+    }
+    const std::string name = doc->getName();
+    for (auto it = duePieces.begin(); it != duePieces.end();) {
+        if (it->first != name) {
+            ++it;
+            continue;
+        }
+        auto entry = doc->getObject(it->second.c_str());
+        if (entry && !loudPieces.count(*it)) {
+            out.push_back(entry);
+        }
+        it = duePieces.erase(it);
+    }
+    std::erase_if(loudPieces, [&name](const EntryKey& key) { return key.first == name; });
+    return out;
 }
 
 const App::DocumentObject* piecesCommandEntry()

@@ -1148,6 +1148,209 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(p, 60 * 20 * 10 - 4 * 16 * 10)
 
 
+    # ------------------------------------------------------------------------------- U1, U2
+    # 10.12's amendment "leftovers and splits that appear without a command" (Onshape U1, U2): an
+    # upstream edit that moves an Add's tool off its part, or makes a Remove split its part, makes
+    # the new parts in the edit's own undo step (the resync, 10.15); loud only where that step
+    # can't hold them. A 10 x 10 x 10 (1000) and a boss E 6 x 6 x 3 (108) on its top; for U1 the
+    # bar P 100 x 10 x 10 and the slot 1 wide
+    def bodies(self):
+        return sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body")
+
+    def names(self):
+        return sorted(o.Name for o in self.doc.Objects)
+
+    def bossOnA(self, undo=True):
+        self.studio((("A", (0, 0, 10, 10), 10),))
+        # Undo off: a script that records no step (UndoMode is fixed on in this build)
+        if undo:
+            self.doc.openTransaction("boss")
+        sk = studioSketch(self.doc, self.S, "ESk", ((2, 2, 8, 8),), z=10)
+        e = makeOwner(self.doc, self.S, "Pad", "E", sk, ("A",), Length=3)
+        self.doc.recompute()
+        if undo:
+            self.doc.commitTransaction()
+        self.assertValid(e)
+        self.assertVolume(self.doc.getObject("A"), 1108)
+        return e
+
+    def assertLeftover(self, e, partId="E:1"):
+        """E OK, its tool a new part partId (108) made by E, A without it (1000)."""
+        self.assertValid(e)
+        new = self.byId(partId)
+        self.assertIsNotNone(new, f"no part {partId}: {e.getStatusString()}")
+        self.assertIs(new.StudioMadeBy, e)
+        self.assertEqual(new.StudioParentId, "")
+        self.assertValid(self.step(e, new))
+        self.assertVolume(new, 108)
+        self.assertVolume(self.doc.getObject("A"), 1000)
+        self.assertEqual(sorted(b.Name for b in PartDesign.studioLiveParts(self.list)),
+                         sorted(["A", new.Name]))
+        return new
+
+    def testU2AnUpstreamEditMovingAnAddOffItsPartMakesANewPart(self):
+        """U2: E's circle moved off A (no dialog, no command): E OK, its tool a new part; undo
+        takes the Body and its steps away with the move, redo brings them back under the same
+        names; saved and opened again, the same."""
+        e = self.bossOnA()
+        before = self.bodies()
+        self.moveSketch(e, 60)
+        new = self.assertLeftover(e)
+        after = self.names()
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.bodies(), before)
+        self.assertValid(e)
+        self.assertVolume(self.doc.getObject("A"), 1108)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(self.names(), after)
+        self.assertLeftover(e)
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "u2.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = PartDesign.studioList(self.doc.getObject("S"))
+        self.doc.recompute()
+        self.assertLeftover(self.doc.getObject("E"))
+        self.assertEqual(self.byId("E:1").Name, new.Name)
+
+    def testU2BackOntoThePartMergesAndOffAgainGivesTheSameId(self):
+        """U2 (Q2c): the circle back onto A: one part, A 1108, E OK, nothing failing; off again:
+        the same id E:1 comes back."""
+        e = self.bossOnA()
+        self.moveSketch(e, 60)
+        self.assertLeftover(e)
+        self.moveSketch(e, -60)
+        self.assertValid(e)
+        self.assertVolume(self.doc.getObject("A"), 1108)
+        self.assertEqual([b.Name for b in PartDesign.studioLiveParts(self.list)], ["A"])
+        failed = [o.Name for o in self.doc.Objects if hasattr(o, "Shape") and not o.isValid()]
+        self.assertEqual(failed, [])
+        self.moveSketch(e, 60)
+        self.assertLeftover(e, "E:1")
+        self.assertIsNone(self.byId("E:2"))
+
+    def testU2APartMirrorCopyLeftByItsScopeMakesANewPart(self):
+        """U2 through a Transform owner (R4): Mir, Y's copy (x -12..-2) joins X (x -22..-12);
+        X's sketch moved to x -42..-32: the copy touches no scope part, a new part (1000), Mir
+        OK; undo: the copy is X's again."""
+        from PartDesignTests.TestStudioPartMirror import boxPart
+
+        self.doc = App.newDocument("TestPieces")
+        self.doc.UndoMode = 1
+        self.S = self.doc.addObject("App::Part", "S")
+        y = boxPart(self.doc, self.S, "Y", 2, 0, 12, 10, 0, 10)
+        x = boxPart(self.doc, self.S, "X", -22, 0, -12, 10, 0, 10)
+        self.doc.recompute()
+        self.list = PartDesign.studioList(self.S, True)
+        self.doc.openTransaction("mirror")
+        m = partMirror(self.doc, self.S, "Mir", "Y", (originPlane(y, "YZ_Plane"), [""]), "Add", ("X",))
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertValid(m)
+        self.assertVolume(x, 2000)
+        before = self.bodies()
+        self.doc.openTransaction("move X")
+        self.doc.getObject("XSk").AttachmentOffset = App.Placement(V(-20, 0, 0), App.Rotation())
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertValid(m)
+        new = self.byId("Mir:1")
+        self.assertIsNotNone(new, m.getStatusString())
+        self.assertVolume(new, 1000)
+        self.assertVolume(x, 1000)
+        self.assertVolume(y, 1000)
+        self.assertEqual(len(PartDesign.studioLiveParts(self.list)), 3)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.bodies(), before)
+        self.assertVolume(x, 2000)
+
+    def testU2UndoOffMakesTheNewPart(self):
+        """Undo off (a script): nothing to keep together, the resync makes the part."""
+        e = self.bossOnA(undo=False)
+        sk = e.Profile[0]
+        sk.Placement = App.Placement(sk.Placement.Base + V(60, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertLeftover(e)
+
+    def testU2RedoNotEmptyStaysLoud(self):
+        """10.15's guard false (Redo not empty): no step can hold the part, so E stays loud with
+        today's message; the unrecorded change clears Redo (10.15 point 1)."""
+        e = self.bossOnA()
+        self.doc.openTransaction("other")
+        self.doc.getObject("A").Label = "A2"
+        self.doc.commitTransaction()
+        self.doc.undo()
+        self.assertEqual(len(self.doc.RedoNames), 1)
+        sk = e.Profile[0]
+        sk.Placement = App.Placement(sk.Placement.Base + V(60, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertFalse(e.isValid())
+        self.assertIn("touches no part of the merge scope", e.getStatusString())
+        self.assertIsNone(self.byId("E:1"))
+
+    def testU2AnOpenDialogMakesNothing(self):
+        """A step-locked document (an open dialog) makes nothing: its OK is the command."""
+        e = self.bossOnA()
+        self.doc.openTransaction("dialog")
+        self.doc.lockStep()
+        try:
+            sk = e.Profile[0]
+            sk.Placement = App.Placement(sk.Placement.Base + V(60, 0, 0), App.Rotation())
+            self.doc.recompute()
+            self.assertFalse(e.isValid())
+            self.assertIn("press OK", e.getStatusString())
+            self.assertIsNone(self.byId("E:1"))
+        finally:
+            self.doc.unlockStep()
+            self.doc.abortTransaction()
+
+    def testU1ARemoveThatStartsToSplitAfterASketchEditMakesTwoParts(self):
+        """U1: a slot x 30..31 that stops short of the bar's far side (y -1..5) cuts no piece off;
+        its sketch edited to y -1..11: two parts, both new ids (E:1 3000, E:2 6900), E OK; undo:
+        P one part again; redo: the same pieces. The sketch back: P with its own id."""
+        self.studio()
+        self.doc.openTransaction("slot")
+        e = self.pocket("E", ((30, -1, 31, 5),), ("P",))
+        self.doc.commitTransaction()
+        p = self.doc.getObject("P")
+        self.assertValid(e)
+        before = self.bodies()
+
+        def edit(y1):
+            self.doc.openTransaction("edit")
+            sk = e.Profile[0]
+            sk.delGeometries(list(range(sk.GeometryCount)))
+            from PartDesignTests.TestStudio import rect
+
+            rect(sk, 30, -1, 31, y1)
+            self.doc.commitTransaction()
+            self.doc.recompute()
+
+        edit(11)
+        self.assertValid(e)
+        left, right = self.live()
+        self.assertEqual(sorted([left.StudioPartId, right.StudioPartId]), ["E:1", "E:2"])
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+        after = self.names()
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.bodies(), before)
+        self.assertEqual(self.live(), [p])
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(self.names(), after)
+        self.assertEqual(len(self.live()), 2)
+        edit(5)
+        self.assertValid(e)
+        self.assertEqual(self.live(), [p])
+        self.assertVolume(p, 10000 - 6 * 10)
+
+
 class TestStudioUndo(unittest.TestCase):
     """ops#654 10.15: the resync after a recompute outside any transaction records into the undo
     step it follows (the last one), so undoing the edit undoes the steps the resync made or
