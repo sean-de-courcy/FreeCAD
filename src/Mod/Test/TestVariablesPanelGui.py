@@ -32,6 +32,10 @@ EditTextRole = QtCore.Qt.UserRole + 6
 NAME, TYPE, EXPRESSION, VALUE, DESCRIPTION, SOURCE = range(6)
 
 
+# Clicks that may open a modal dialog are made directly (button.click()), never through
+# QTimer.singleShot(0, button.click) and then pump() or waitFor(): on macOS (Qt 6.11, Cocoa
+# event dispatcher) no timer fires inside a modal exec() entered from an event that a manual
+# processEvents() delivered, so the timer that answers the dialog never runs and the test hangs.
 def pump(seconds=0.3):
     app = QtWidgets.QApplication.instance()
     end = time.time() + seconds
@@ -386,7 +390,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         panelDialog = self.openPanelAddDialog()
         other = panelDialog.findChild(QtWidgets.QPushButton, "other")
         self.assertIsNotNone(other, "no Other... button")
-        QtCore.QTimer.singleShot(0, other.click)
+        other.click()
         dialog = waitFor(
             lambda: [
                 w
@@ -713,7 +717,7 @@ class TestVariablesPanelGui(unittest.TestCase):
             other.click()
             doc.removeObject("VarSet")
 
-        QtCore.QTimer.singleShot(0, clickThenDelete)
+        clickThenDelete()
         pump(0.5)
         self.assertEqual(doc.findObjects("App::VarSet"), [])
         self.assertFalse(
@@ -1373,7 +1377,7 @@ class TestVariablesImportGui(unittest.TestCase):
         button = self.find(QtWidgets.QPushButton, "import")
         self.assertTrue(button.isEnabled(), self.find(QtWidgets.QPlainTextEdit, "report")
                         .toPlainText())
-        QtCore.QTimer.singleShot(0, button.click)
+        button.click()
         self.assertTrue(waitFor(lambda: self.dialog.result is not None))
         pump(0.1)
         return self.dialog.result
@@ -1505,7 +1509,7 @@ class TestVariablesImportGui(unittest.TestCase):
     # PR 317 round 1
 
     def clickImport(self):
-        QtCore.QTimer.singleShot(0, self.find(QtWidgets.QPushButton, "import").click)
+        self.find(QtWidgets.QPushButton, "import").click()
 
     def test_failure_shown(self):
         """A failed check (the test hook moves Width's value), then any other error during the
@@ -1771,7 +1775,7 @@ class TestVariablesRefreshGui(unittest.TestCase):
         button = dialog.findChild(QtWidgets.QPushButton, "apply")
         self.assertTrue(button.isEnabled(),
                         dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
-        QtCore.QTimer.singleShot(0, button.click)
+        button.click()
         self.assertTrue(waitFor(lambda: dialog.result is not None))
         pump(0.3)
         return dialog.result
@@ -2018,7 +2022,7 @@ class TestVariablesClashGui(unittest.TestCase):
         if answer is not None:
             QtCore.QTimer.singleShot(50, answerBox)
         ok = dialog.findChild(QtWidgets.QDialogButtonBox).button(QtWidgets.QDialogButtonBox.Ok)
-        QtCore.QTimer.singleShot(0, ok.click)
+        ok.click()  # direct: the name-clash box's exec() runs here, where answerBox's timer fires (see pump)
         if answer is not None:
             self.assertTrue(waitFor(lambda: texts), "no question about the name")
         pump(0.4)
@@ -2116,7 +2120,7 @@ class TestVariablesClashGui(unittest.TestCase):
         button = dialog.findChild(QtWidgets.QPushButton, "import")
         self.assertTrue(button.isEnabled(),
                         dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
-        QtCore.QTimer.singleShot(0, button.click)
+        button.click()
         self.assertTrue(waitFor(lambda: dialog.result is not None))
         pump(0.2)
         return dialog.result.copies[0]
@@ -2177,7 +2181,7 @@ class TestVariablesClashGui(unittest.TestCase):
         pump(0.1)
         self.assertTrue(apply.isEnabled(),
                         dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
-        QtCore.QTimer.singleShot(0, apply.click)
+        apply.click()
         self.assertTrue(waitFor(lambda: dialog.result is not None))
         pump(0.2)
         self.assertEqual(copy.Bindings, {"#Rail": "Studio_B.Rail"})
