@@ -435,6 +435,32 @@ public:
             "configSetDefaultRow(studio, input, row) -- Makes row the List's default."
         );
         add_varargs_method(
+            "configMoveRow",
+            &Module::guarded<&Module::configMoveRow>,
+            "configMoveRow(studio, input, row, index) -- Moves a List row to position index (0 first)."
+        );
+        add_varargs_method(
+            "configRenameInput",
+            &Module::guarded<&Module::configRenameInput>,
+            "configRenameInput(studio, input, name) -- Renames an input (its id stays; a Variable's #name too)."
+        );
+        add_varargs_method(
+            "configMoveInput",
+            &Module::guarded<&Module::configMoveInput>,
+            "configMoveInput(studio, input, index) -- Moves an input to position index (0 first)."
+        );
+        add_varargs_method(
+            "configSetCheckboxDefault",
+            &Module::guarded<&Module::configSetCheckboxDefault>,
+            "configSetCheckboxDefault(studio, input, value) -- Sets a Checkbox input's default."
+        );
+        add_varargs_method(
+            "configEditVariable",
+            &Module::guarded<&Module::configEditVariable>,
+            "configEditVariable(studio, name, default, min=None, max=None) -- Sets a configuration "
+            "Variable's default and bounds (None: no bound); its type stays."
+        );
+        add_varargs_method(
             "configRemoveInput",
             &Module::guarded<&Module::configRemoveInput>,
             "configRemoveInput(studio, input) -- Removes an input; what it configured keeps its active value."
@@ -473,6 +499,24 @@ public:
             "configIsConfigured",
             &Module::guarded<&Module::configIsConfigured>,
             "configIsConfigured(obj, path=None) -- Whether obj's path (None: its suppression) is configured."
+        );
+        add_varargs_method(
+            "configInputOf",
+            &Module::guarded<&Module::configInputOf>,
+            "configInputOf(obj, path=None) -- The name of the input that configures obj's path (None: "
+            "its suppression), or ''."
+        );
+        add_varargs_method(
+            "configMenuItems",
+            &Module::guarded<&Module::configMenuItems>,
+            "configMenuItems(obj, path=None) -- The configuration items of the field's context menu "
+            "(None: the suppression's), as (label, action, input id) tuples."
+        );
+        add_varargs_method(
+            "configEntries",
+            &Module::guarded<&Module::configEntries>,
+            "configEntries(studio=None) -- The live table entries: dicts with object, path (None: a "
+            "suppression), input (its id) and cells (row id or 'true'/'false' -> text); stale ones are left out."
         );
         add_varargs_method(
             "configSetActive",
@@ -1823,6 +1867,93 @@ private:
         return done(PartDesign::configSetDefaultRow(studio, input, row, &why), why);
     }
 
+    Py::Object configMoveRow(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        const char* row;
+        int index;
+        if (!PyArg_ParseTuple(args.ptr(), "Ossi", &pStudio, &input, &row, &index)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configMoveRow(studio, input, row, index, &why), why);
+    }
+
+    Py::Object configRenameInput(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        const char* name;
+        if (!PyArg_ParseTuple(args.ptr(), "Oss", &pStudio, &input, &name)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configRenameInput(studio, input, name, &why), why);
+    }
+
+    Py::Object configMoveInput(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        int index;
+        if (!PyArg_ParseTuple(args.ptr(), "Osi", &pStudio, &input, &index)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(PartDesign::configMoveInput(studio, input, index, &why), why);
+    }
+
+    Py::Object configSetCheckboxDefault(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* input;
+        PyObject* pValue;
+        if (!PyArg_ParseTuple(args.ptr(), "OsO", &pStudio, &input, &pValue)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::string why;
+        return done(
+            PartDesign::configSetCheckboxDefault(studio, input, PyObject_IsTrue(pValue) == 1, &why),
+            why
+        );
+    }
+
+    Py::Object configEditVariable(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        const char* name;
+        PyObject* pDefault;
+        PyObject* pMin = Py_None;
+        PyObject* pMax = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "OsO|OO", &pStudio, &name, &pDefault, &pMin, &pMax)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        auto text = [](PyObject* v) {
+            return v == Py_None ? std::string() : configValueText(v);
+        };
+        std::string why;
+        return done(
+            PartDesign::configEditVariable(studio, name, text(pDefault), text(pMin), text(pMax), &why),
+            why
+        );
+    }
+
     Py::Object configRemoveInput(const Py::Tuple& args)
     {
         PyObject* pStudio;
@@ -1924,6 +2055,59 @@ private:
             return Py::Boolean(PartDesign::configSuppressionIsConfigured(obj));
         }
         return Py::Boolean(PartDesign::configIsConfigured(obj, configValueText(pPath)));
+    }
+
+    Py::Object configInputOf(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pPath = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pObj, &pPath)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* obj = entryArg(pObj);
+        const std::string path = pPath == Py_None ? std::string() : configValueText(pPath);
+        return Py::String(PartDesign::configInputOf(obj, path));
+    }
+
+    Py::Object configMenuItems(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pPath = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pObj, &pPath)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* obj = entryArg(pObj);
+        const std::string path = pPath == Py_None ? std::string() : configValueText(pPath);
+        Py::List out;
+        for (const auto& item : PartDesign::configMenuItems(obj, path)) {
+            out.append(Py::TupleN(Py::String(item.label), Py::String(item.action), Py::String(item.input)));
+        }
+        return out;
+    }
+
+    Py::Object configEntries(const Py::Tuple& args)
+    {
+        PyObject* pStudio = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "|O", &pStudio)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        Py::List out;
+        for (const auto& e : PartDesign::configEntries(PartDesign::StudioConfig::of(doc, studio))) {
+            Py::Dict d;
+            d.setItem("object", Py::asObject(e.object->getPyObject()));
+            d.setItem("path", e.path.empty() ? Py::None() : Py::Object(Py::String(e.path)));
+            d.setItem("input", Py::String(e.input));
+            Py::Dict cells;
+            for (const auto& [key, text] : e.cells) {
+                cells.setItem(key, Py::String(text));
+            }
+            d.setItem("cells", cells);
+            out.append(d);
+        }
+        return out;
     }
 
     Py::Object configSetActive(const Py::Tuple& args)

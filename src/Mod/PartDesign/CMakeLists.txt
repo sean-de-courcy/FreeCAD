@@ -26,6 +26,7 @@ if(BUILD_GUI)
           SprocketFeature.py
           SprocketFeature.ui
           DerivedFromFileGui.py
+          ConfigurationsGui.py
     )
 endif(BUILD_GUI)
 
@@ -181,6 +182,7 @@ if(BUILD_GUI)
         PartDesignTests/TestStudioPartMirrorGui.py
         PartDesignTests/TestStudioTransformGui.py
         PartDesignTests/TestFacePatternGui.py
+        PartDesignTests/TestConfigurationsGui.py
     )
 endif(BUILD_GUI)
 

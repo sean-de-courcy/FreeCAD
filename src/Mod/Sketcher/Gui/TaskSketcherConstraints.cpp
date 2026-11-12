@@ -40,6 +40,7 @@
 #include <limits>
 
 #include <App/Application.h>
+#include <App/ConfigurationHooks.h>
 #include <App/Document.h>
 #include <App/Expression.h>
 #include <Gui/Application.h>
@@ -678,6 +679,38 @@ void ConstraintView::contextMenuEvent(QContextMenuEvent* event)
     QAction* change = menu.addAction(tr("Edit Value"), this, &ConstraintView::modifyCurrentItem);
     change->setEnabled(isQuantity);
     menu.setDefaultAction(change);
+
+    // FreeCAD-CH (ops#671 C2): Onshape's configuration items on a dimension ("Configure with
+    // <input>", "Set to #<variable>", "Unconfigure from <input>"), from the App hook
+    if (it && isQuantity && items.size() <= 1) {
+        auto sketch = it->sketchView->getSketchObject();
+        App::ObjectIdentifier path = sketch->ExpressionEngine.canonicalPath(
+            sketch->Constraints.createPath(it->ConstraintNbr));
+        const std::string docName = sketch->getDocument()->getName();
+        const std::string objName = sketch->getNameInDocument();
+        const std::string pathText = path.toString();
+        // Onshape (CP2-9): a "Configure dimension" submenu, one item per input ("Size",
+        // "Set to #w"); a configured dimension's "Unconfigure from <input>" sits in it too
+        const auto configItems = App::callConfigMenuQuery(sketch, path);
+        QMenu* configMenu = configItems.empty() ? nullptr : menu.addMenu(tr("Configure dimension"));
+        if (configMenu) {
+            configMenu->setObjectName(QStringLiteral("constraintConfigMenu"));
+        }
+        for (const auto& configItem : configItems) {
+            const QString label = configItem.action == "configure"
+                ? QString::fromStdString(configItem.inputName)
+                : QString::fromStdString(configItem.label);
+            QAction* action = configMenu->addAction(
+                label, [docName, objName, pathText, configItem]() {
+                    auto doc = App::GetApplication().getDocument(docName.c_str());
+                    if (auto target = doc ? doc->getObject(objName.c_str()) : nullptr) {
+                        App::runConfigMenuItem(target, pathText, configItem);
+                    }
+                });
+            action->setObjectName(QStringLiteral("constraintConfig_")
+                                  + QString::fromStdString(configItem.action));
+        }
+    }
 
     QAction* driven =
         menu.addAction(tr("Toggle Driving/Reference"), this, &ConstraintView::updateDrivingStatus);

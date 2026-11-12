@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <numbers>
 #include <set>
 
@@ -32,6 +33,7 @@
 #include "FeatureTransformed.h"
 #include "Pieces.h"
 #include "ShapeBinder.h"
+#include "Studio.h"
 #include "StudioConfig.h"
 #include "StudioList.h"
 
@@ -253,6 +255,22 @@ std::map<std::string, std::string> activeValues(const StudioConfig* cfg)
     return values;
 }
 
+/// Onshape (CP2-7): changing a default doesn't change the active value. An input with no active
+/// value of its own (it follows its default) gets its current value as one first
+void pinActive(StudioConfig* cfg, const std::string& id)
+{
+    auto active = cfg->Active.getValues();
+    if (active.contains(id)) {
+        return;
+    }
+    const auto values = activeValues(cfg);
+    auto it = values.find(id);
+    if (it != values.end()) {
+        active[id] = it->second;
+        cfg->Active.setValues(active);
+    }
+}
+
 App::Part* studioOfObject(const App::DocumentObject* obj)
 {
     if (!obj) {
@@ -382,7 +400,9 @@ std::string currentText(App::DocumentObject* obj, const std::string& path)
     if (info.expression) {
         return info.expression->toString();
     }
-    const App::any value = id.getValue();
+    // The property's own path value: a sketch's Constraints.<name> is its dimension (the Python
+    // attribute path knows no constraint names)
+    const App::any value = id.getValue(true);
     if (value.type() == typeid(Base::Quantity)) {
         const auto& q = App::any_cast<Base::Quantity>(value);
         const std::string unit = q.getUnit().getString();
@@ -1147,7 +1167,188 @@ bool configSetDefaultRow(App::Part* studio, const std::string& input, const std:
     if (!r) {
         return refuse(why, "No row '" + row + "'");
     }
+    pinActive(cfg, str(*in, "id"));
     (*in)["default"] = str(*r, "id");
+    store(cfg->Inputs, inputs);
+    return rebind(cfg, why);
+}
+
+bool configMoveRow(App::Part* studio, const std::string& input, const std::string& row, int index, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in || str(*in, "kind") != "list") {
+        return refuse(why, "No List input '" + input + "'");
+    }
+    json& rows = (*in)["rows"];
+    const int count = static_cast<int>(rows.size());
+    if (index < 0 || index >= count) {
+        return refuse(why, "No position " + std::to_string(index) + " among " + std::to_string(count) + " rows");
+    }
+    for (int i = 0; i < count; ++i) {
+        if (str(rows[i], "id") == row) {
+            if (i != index) {
+                json moved = rows[i];
+                rows.erase(rows.begin() + i);
+                rows.insert(rows.begin() + index, moved);
+                store(cfg->Inputs, inputs);
+            }
+            return true;
+        }
+    }
+    return refuse(why, "No row '" + row + "'");
+}
+
+bool configRenameInput(App::Part* studio, const std::string& input, const std::string& name, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in) {
+        return refuse(why, "No input '" + input + "'");
+    }
+    for (const auto& other : inputs["inputs"]) {
+        if (&other != in && (str(other, "id") == name || str(other, "name") == name)) {
+            return refuse(why, "An input needs a name of its own ('" + name + "')");
+        }
+    }
+    if (name.empty()) {
+        return refuse(why, "An input needs a name");
+    }
+    const std::string old = str(*in, "name");
+    if (old == name) {
+        return true;
+    }
+    if (str(*in, "kind") == "variable") {
+        // Onshape (CP2-7) renames every input. A Variable's name is its property's (#name): the
+        // property is renamed, and the expressions that read it follow
+        if (!isIdentifier(name)) {
+            return refuse(why, "A configuration Variable's name is used as #" + name
+                                   + ": letters, digits and _, not starting with a digit");
+        }
+        App::Property* prop = cfg->getPropertyByName(old.c_str());
+        if (!prop || cfg->getPropertyByName(name.c_str())) {
+            return refuse(why, "The name " + name + " is taken");
+        }
+        if (!cfg->renameDynamicProperty(prop, name.c_str())) {
+            return refuse(why, "The configuration Variable " + old + " can't be renamed to " + name);
+        }
+    }
+    (*in)["name"] = name;
+    store(cfg->Inputs, inputs);
+    return true;
+}
+
+bool configMoveInput(App::Part* studio, const std::string& input, int index, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in) {
+        return refuse(why, "No input '" + input + "'");
+    }
+    json& all = inputs["inputs"];
+    const int count = static_cast<int>(all.size());
+    if (index < 0 || index >= count) {
+        return refuse(why, "No position " + std::to_string(index) + " among " + std::to_string(count) + " inputs");
+    }
+    const std::string id = str(*in, "id");
+    for (int i = 0; i < count; ++i) {
+        if (str(all[i], "id") == id) {
+            if (i != index) {
+                json moved = all[i];
+                all.erase(all.begin() + i);
+                all.insert(all.begin() + index, moved);
+                store(cfg->Inputs, inputs);
+            }
+            return true;
+        }
+    }
+    return refuse(why, "No input '" + input + "'");
+}
+
+bool configSetCheckboxDefault(App::Part* studio, const std::string& input, bool value, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in || str(*in, "kind") != "checkbox") {
+        return refuse(why, "No Checkbox input '" + input + "'");
+    }
+    pinActive(cfg, str(*in, "id"));
+    (*in)["default"] = value;
+    store(cfg->Inputs, inputs);
+    return rebind(cfg, why);
+}
+
+bool configEditVariable(App::Part* studio,
+                        const std::string& input,
+                        const std::string& defaultText,
+                        const std::string& minimum,
+                        const std::string& maximum,
+                        std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in || str(*in, "kind") != "variable") {
+        return refuse(why, "No configuration Variable '" + input + "'");
+    }
+    const std::string type = str(*in, "type");
+    if (type != "Text") {
+        double def = 0;
+        double lo = -HUGE_VAL;
+        double hi = HUGE_VAL;
+        if (!variableValue(type, defaultText, def, why)
+            || (!minimum.empty() && !variableValue(type, minimum, lo, why))
+            || (!maximum.empty() && !variableValue(type, maximum, hi, why))) {
+            return false;
+        }
+        if (lo > hi || def < lo || def > hi) {
+            return refuse(why, "The default " + defaultText + " is not between the minimum and the maximum");
+        }
+        pinActive(cfg, str(*in, "id"));
+        (*in)["default"] = def;
+        in->erase("min");
+        in->erase("max");
+        if (!minimum.empty()) {
+            (*in)["min"] = lo;
+        }
+        if (!maximum.empty()) {
+            (*in)["max"] = hi;
+        }
+        // An active value outside the new bounds goes: the input takes its new default
+        auto active = cfg->Active.getValues();
+        auto it = active.find(str(*in, "id"));
+        if (it != active.end()) {
+            char* end = nullptr;
+            const double v = std::strtod(it->second.c_str(), &end);
+            if (end == it->second.c_str() || v < lo || v > hi) {
+                active.erase(it);
+                cfg->Active.setValues(active);
+            }
+        }
+    }
+    else {
+        pinActive(cfg, str(*in, "id"));
+        (*in)["default"] = defaultText;
+    }
     store(cfg->Inputs, inputs);
     return rebind(cfg, why);
 }
@@ -1222,6 +1423,132 @@ bool configSuppressionIsConfigured(const App::DocumentObject* owner)
     }
     json table = tableOf(cfg);
     return findSuppress(table, owner) != nullptr;
+}
+
+std::string configInputOf(const App::DocumentObject* obj, const std::string& path)
+{
+    auto cfg = configOfObject(obj);
+    if (!cfg || cfg == obj || !obj->isAttachedToDocument()) {
+        return {};
+    }
+    try {
+        json table = tableOf(cfg);
+        const json* e = path.empty() ? findSuppress(table, obj) : findParam(table, obj, canonical(obj, path));
+        if (!e) {
+            return {};
+        }
+        const json inputs = inputsOf(cfg);
+        const json* in = findInput(inputs, str(*e, "input"));
+        return in ? str(*in, "name") : std::string();
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+    catch (const std::exception&) {
+        return {};
+    }
+}
+
+std::vector<App::ConfigMenuItem> configMenuItems(const App::DocumentObject* obj, const std::string& path)
+{
+    std::vector<App::ConfigMenuItem> items;
+    if (!obj || !obj->isAttachedToDocument() || obj->isDerivedFrom<StudioConfig>()) {
+        return items;
+    }
+    const bool suppression = path.empty();
+    if (!suppression) {
+        try {
+            canonical(obj, path);
+        }
+        catch (const Base::Exception&) {
+            return items;
+        }
+    }
+    // Onshape (CP2-1, CP2-3): a configured field offers only its unconfigure; an unconfigured one
+    // offers each List and Checkbox, and each configuration Variable ("Set to #len")
+    const std::string configuredBy = configInputOf(obj, path);
+    auto cfg = configOfObject(obj);
+    if (!configuredBy.empty() && cfg) {
+        json table = tableOf(cfg);
+        const json* e = suppression ? findSuppress(table, obj) : findParam(table, obj, canonical(obj, path));
+        items.push_back({suppression ? std::string("Unconfigure suppression") : "Unconfigure from " + configuredBy,
+                         "unconfigure", e ? str(*e, "input") : std::string(), configuredBy});
+        return items;
+    }
+    // With no input there is no item: the panel makes the first one ("Configure Part Studio").
+    // With one, a plain "Configure"; with several, one item per List and Checkbox (CP2-1)
+    if (!cfg) {
+        return items;
+    }
+    const json inputs = inputsOf(cfg);
+    const bool single = inputs.contains("inputs") && inputs["inputs"].size() == 1;
+    for (const auto& in : inputs.value("inputs", json::array())) {
+        const std::string kind = str(in, "kind");
+        const std::string name = str(in, "name");
+        if (kind == "list" || kind == "checkbox") {
+            std::string label = suppression ? "Configure suppression" : "Configure";
+            if (!single) {
+                label += " with " + name;
+            }
+            items.push_back({label, "configure", str(in, "id"), name});
+        }
+        else if (kind == "variable" && !suppression) {
+            items.push_back({"Set to #" + name, "variable", str(in, "id"), name});
+        }
+    }
+    return items;
+}
+
+std::vector<ConfigEntry> configEntries(const StudioConfig* config)
+{
+    std::vector<ConfigEntry> out;
+    if (!config) {
+        return out;
+    }
+    const json table = tableOf(config);
+    auto collect = [&](const char* list, bool suppression) {
+        if (!table.contains(list) || !table[list].is_array()) {
+            return;
+        }
+        for (const auto& e : table[list]) {
+            // A stale entry (its object deleted, or its name now another object's) configures
+            // nothing and is not shown; it stays for the undo that brings its object back
+            App::DocumentObject* obj = entryObject(config, e);
+            if (!obj) {
+                continue;
+            }
+            ConfigEntry entry;
+            entry.object = obj;
+            entry.path = suppression ? std::string() : str(e, "path");
+            entry.input = str(e, "input");
+            if (e.contains("cells") && e["cells"].is_object()) {
+                for (const auto& [key, cell] : e["cells"].items()) {
+                    entry.cells[key] = cell.is_string() ? cell.get<std::string>()
+                        : cell.is_boolean()             ? std::string(cell.get<bool>() ? "true" : "false")
+                                                        : cell.dump();
+                }
+            }
+            out.push_back(std::move(entry));
+        }
+    };
+    collect("params", false);
+    collect("suppress", true);
+    // Onshape (CP2-4): the columns follow the feature order, not the order they were configured
+    // in; a feature's parameters come before its suppression. Objects outside the studio's
+    // sequence come last, in the table's order
+    std::map<const App::DocumentObject*, std::size_t> rank;
+    if (auto doc = config->getDocument()) {
+        const auto sequence = studioSequence(doc, config->studio());
+        for (std::size_t i = 0; i < sequence.size(); ++i) {
+            rank.emplace(sequence[i], i);
+        }
+    }
+    auto rankOf = [&](const ConfigEntry& e) {
+        auto it = rank.find(e.object);
+        return it != rank.end() ? it->second : rank.size();
+    };
+    std::ranges::stable_sort(out, {}, rankOf);
+    return out;
 }
 
 bool configConfigure(App::DocumentObject* obj,
@@ -1612,6 +1939,12 @@ void registerConfigurationHooks()
 {
     App::setExpressionWriteHook(hookWrite);
     App::setConfigReaderCheck(configReaderError);
+    App::setConfiguredQuery([](const App::DocumentObject* obj, const App::ObjectIdentifier& path) {
+        return configInputOf(obj, path.toString());
+    });
+    App::setConfigMenuQuery([](const App::DocumentObject* obj, const App::ObjectIdentifier& path) {
+        return configMenuItems(obj, path.toString());
+    });
     // An undo or redo can bring back expressions a StudioConfig's cells disagree with (a file
     // that failed the load check, then a configReconcile write undone) without restoring any of
     // its properties: touched, its execute() checks again (review R3, round 2)

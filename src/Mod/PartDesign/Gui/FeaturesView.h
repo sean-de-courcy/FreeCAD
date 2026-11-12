@@ -189,6 +189,10 @@ private:
     void forceRebuild();
     void rebuildFeatures();
     void rebuildParts();
+    /// The active-configuration bar of the studio (hidden with no inputs; ops#671 C2)
+    void rebuildConfigBar();
+    /// The switch from the bar: input -> row id, true/false or a value
+    void setActiveConfiguration(const std::string& input, const std::string& value);
     /// The Assembly tab's list: "Instances" and "Mates" (ops#640 round 10)
     void rebuildAssembly();
     void onAssemblyDoubleClicked(QTreeWidgetItem* item, int column);
@@ -244,6 +248,15 @@ private:
     QToolButton* errorsButton = nullptr;
     /// Onshape's "Filter by name or type" box; ":errors" and ":warnings" filter by status
     QLineEdit* filterBox = nullptr;
+    /// Onshape's Configurations button (ops#671 C2): the studio's Configuration panel
+    QToolButton* configButton = nullptr;
+    /// The active-configuration bar above the list: one control per input (ops#671 C2)
+    QWidget* configBar = nullptr;
+    /// What the bar shows (the studio, its inputs, the active values): a rebuild that changes
+    /// none of them keeps the bar's widgets
+    std::string configBarKey;
+    /// The studio the open Configuration panel was last told about
+    std::string configStudioKey;
     /// The object in edit (its row highlighted, ops#640 rank 40), by name, or empty
     std::string editedName;
     /// The object the lists' hover pre-highlights, by name, or empty

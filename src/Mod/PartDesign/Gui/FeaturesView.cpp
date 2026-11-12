@@ -8,8 +8,17 @@
 
 #include <TopoDS_Iterator.hxx>
 
+#include <cmath>
+
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPointer>
+#include <QTimer>
 #include <QCoreApplication>
 #include <QEvent>
 #include <QHBoxLayout>
@@ -47,7 +56,12 @@
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
 #include <App/SuppressibleExtension.h>
+#include <App/ConfigurationHooks.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/Interpreter.h>
+#include <Base/Quantity.h>
+#include <Base/Unit.h>
 #include <Gui/ActiveObjectList.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -76,6 +90,7 @@
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/PartDesign/App/Studio.h>
+#include <Mod/PartDesign/App/StudioConfig.h>
 #include <Mod/PartDesign/App/StudioList.h>
 
 #include "ViewProviderBody.h"
@@ -1219,7 +1234,36 @@ FeaturesView::FeaturesView(QWidget* parent)
     title = new QLabel(tr("Features"), featuresBox);
     title->setObjectName(QStringLiteral("featuresTitle"));
     header->addWidget(title, 1);
+    // Onshape's Configurations button beside the list (ops#671 C2): the studio's panel
+    configButton = new QToolButton(featuresBox);
+    configButton->setObjectName(QStringLiteral("featuresConfigurations"));
+    configButton->setText(tr("Configurations"));
+    configButton->setToolTip(tr("The part studio's configurations: its inputs and the values they configure"));
+    configButton->setAutoRaise(true);
+    header->addWidget(configButton);
+    connect(configButton, &QToolButton::clicked, this, [this]() {
+        auto doc = document();
+        if (!doc) {
+            return;
+        }
+        const std::string code = "from PartDesign import ConfigurationsGui\nConfigurationsGui.openFor('"
+            + std::string(doc->getName()) + "', '" + studioName + "')\n";
+        try {
+            Base::Interpreter().runString(code.c_str());
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+        }
+    });
     featuresLayout->addLayout(header);
+    // The active-configuration bar (Onshape's, above the Feature list; CP2-8): one control per input
+    configBar = new QWidget(featuresBox);
+    configBar->setObjectName(QStringLiteral("configBar"));
+    auto barLayout = new QHBoxLayout(configBar);
+    barLayout->setContentsMargins(4, 0, 4, 0);
+    barLayout->setSpacing(6);
+    configBar->hide();
+    featuresLayout->addWidget(configBar);
     // Onshape's filter box (ops#640 rank 33): rows by name or type, ":errors", ":warnings"
     filterBox = new QLineEdit(featuresBox);
     filterBox->setObjectName(QStringLiteral("featuresFilter"));
@@ -1614,7 +1658,10 @@ void FeaturesView::onChangedObject(const App::DocumentObject& obj, const App::Pr
     bool shown = name
         && (strcmp(name, "Group") == 0 || strcmp(name, "Tip") == 0 || strcmp(name, "Label") == 0
             || strcmp(name, "Suppressed") == 0 || strcmp(name, "Visibility") == 0
-            || strcmp(name, "HistoryRank") == 0 || strcmp(name, "Bar") == 0);
+            || strcmp(name, "HistoryRank") == 0 || strcmp(name, "Bar") == 0
+            // The active-configuration bar (ops#671 C2)
+            || (obj.isDerivedFrom<PartDesign::StudioConfig>()
+                && (strcmp(name, "Inputs") == 0 || strcmp(name, "Active") == 0)));
     if (shown || prop.isDerivedFrom<App::PropertyLinkBase>()) {
         scheduleRebuild();
     }
@@ -1709,6 +1756,7 @@ void FeaturesView::rebuild()
         rebuildFeatures();
         rebuildParts();
     }
+    rebuildConfigBar();
     // A selected bar stays selected through a rebuild (its row is new after a move)
     if (auto bar = !assembly && barSelected ? features->barItem() : nullptr) {
         features->setCurrentItem(bar);
@@ -2603,6 +2651,180 @@ void FeaturesView::onFeatureDoubleClicked(QListWidgetItem* item)
     }
 }
 
+void FeaturesView::rebuildConfigBar()
+{
+    auto doc = document();
+    const bool assembly = !assemblyName.empty();
+    auto cfg = doc && !assembly ? PartDesign::StudioConfig::of(doc, studio()) : nullptr;
+    // An open Configuration panel follows the list's studio
+    const std::string studioKey = doc ? std::string(doc->getName()) + "#" + studioName : std::string();
+    if (studioKey != configStudioKey) {
+        configStudioKey = studioKey;
+        if (doc && !assembly && Gui::getMainWindow()->findChild<QWidget*>(QStringLiteral("Configurations"))) {
+            const std::string code = "from PartDesign import ConfigurationsGui\nConfigurationsGui.follow('"
+                + std::string(doc->getName()) + "', '" + studioName + "')\n";
+            try {
+                Base::Interpreter().runString(code.c_str());
+            }
+            catch (const Base::Exception& e) {
+                e.reportException();
+            }
+        }
+    }
+    configButton->setVisible(!assembly);
+    std::string key = studioKey;
+    if (cfg && cfg->hasInputs()) {
+        key += "\n" + std::string(cfg->Inputs.getValue()) + "\n";
+        for (const auto& [input, value] : cfg->Active.getValues()) {
+            key += input + "=" + value + ";";
+        }
+    }
+    if (key == configBarKey) {
+        return;
+    }
+    configBarKey = key;
+    auto layout = configBar->layout();
+    while (auto item = layout->takeAt(0)) {
+        if (auto widget = item->widget()) {
+            // Out of the bar now (a lookup by name finds the new control), deleted later
+            widget->hide();
+            widget->setObjectName(QString());
+            widget->deleteLater();
+        }
+        delete item;
+    }
+    if (!cfg || !cfg->hasInputs()) {
+        configBar->hide();
+        return;
+    }
+    const auto active = cfg->Active.getValues();
+    const QJsonArray inputs =
+        QJsonDocument::fromJson(QByteArray(cfg->Inputs.getValue())).object().value(QLatin1String("inputs")).toArray();
+    QPointer<FeaturesView> self(this);
+    for (const auto& value : inputs) {
+        const QJsonObject in = value.toObject();
+        const std::string id = in.value(QLatin1String("id")).toString().toStdString();
+        const QString name = in.value(QLatin1String("name")).toString();
+        const QString kind = in.value(QLatin1String("kind")).toString();
+        const QString objectName = QStringLiteral("configInput_") + QString::fromStdString(id);
+        auto it = active.find(id);
+        const std::string current = it != active.end() ? it->second : std::string();
+        if (kind == QLatin1String("list")) {
+            layout->addWidget(new QLabel(name, configBar));
+            auto combo = new QComboBox(configBar);
+            combo->setObjectName(objectName);
+            std::string shown = current;
+            bool found = false;
+            for (const auto& row : in.value(QLatin1String("rows")).toArray()) {
+                const QJsonObject r = row.toObject();
+                combo->addItem(r.value(QLatin1String("name")).toString(), r.value(QLatin1String("id")).toString());
+                found = found || r.value(QLatin1String("id")).toString().toStdString() == current;
+            }
+            if (!found) {
+                shown = in.value(QLatin1String("default")).toString().toStdString();
+            }
+            combo->setCurrentIndex(std::max(0, combo->findData(QString::fromStdString(shown))));
+            connect(combo, qOverload<int>(&QComboBox::activated), this, [self, combo, id](int index) {
+                if (self) {
+                    self->setActiveConfiguration(id, combo->itemData(index).toString().toStdString());
+                }
+            });
+            layout->addWidget(combo);
+        }
+        else if (kind == QLatin1String("checkbox")) {
+            auto box = new QCheckBox(name, configBar);
+            box->setObjectName(objectName);
+            const bool on = current == "true" || (current != "false" && in.value(QLatin1String("default")).toBool(true));
+            box->setChecked(on);
+            connect(box, &QCheckBox::clicked, this, [self, id](bool checked) {
+                if (self) {
+                    self->setActiveConfiguration(id, checked ? "true" : "false");
+                }
+            });
+            layout->addWidget(box);
+        }
+        else {
+            // A configuration Variable: its value box, in the user's units
+            layout->addWidget(new QLabel(QStringLiteral("#") + name, configBar));
+            auto line = new QLineEdit(configBar);
+            line->setObjectName(objectName);
+            const QString type = in.value(QLatin1String("type")).toString();
+            QString text;
+            if (type == QLatin1String("Text")) {
+                text = QString::fromStdString(current.empty() ? in.value(QLatin1String("default")).toString().toStdString() : current);
+            }
+            else {
+                const double v = current.empty() ? in.value(QLatin1String("default")).toDouble()
+                                                 : QString::fromStdString(current).toDouble();
+                if (type == QLatin1String("Length")) {
+                    text = QString::fromStdString(Base::Quantity(v, Base::Unit::Length).getUserString());
+                }
+                else if (type == QLatin1String("Angle")) {
+                    text = QString::fromStdString(Base::Quantity(v, Base::Unit::Angle).getUserString());
+                }
+                else if (type == QLatin1String("Integer")) {
+                    text = QString::number(static_cast<long long>(std::llround(v)));
+                }
+                else {
+                    text = QString::number(v, 'g', 12);
+                }
+            }
+            line->setText(text);
+            line->setMaximumWidth(110);
+            connect(line, &QLineEdit::editingFinished, this, [self, line, id, text]() {
+                if (self && line->text() != text) {
+                    self->setActiveConfiguration(id, line->text().toStdString());
+                }
+            });
+            layout->addWidget(line);
+        }
+    }
+    static_cast<QHBoxLayout*>(layout)->addStretch(1);
+    configBar->show();
+}
+
+void FeaturesView::setActiveConfiguration(const std::string& input, const std::string& value)
+{
+    if (!document()) {
+        return;
+    }
+    std::string why;
+    bool ok = false;
+    try {
+        ok = PartDesign::configSetActive(studio(), {{input, value}}, &why);
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const std::exception& e) {
+        why = e.what();
+    }
+    auto line = configBar->findChild<QLineEdit*>(QStringLiteral("configInput_") + QString::fromStdString(input));
+    if (!ok && line) {
+        // Onshape (CP2-8): a Variable value out of range is refused, not clamped; the box keeps the
+        // typed text in red, with no message, and the value stays the model's
+        line->setStyleSheet(QStringLiteral("QLineEdit { color: #c0392b; }"));
+        line->setProperty("refused", QString::fromStdString(why));
+        return;
+    }
+    if (!ok) {
+        // Refused: the bar shows the model's value again
+        Base::Console().warning("Configurations: %s\n", why.c_str());
+        Gui::getMainWindow()->showMessage(QString::fromStdString(why), 5000);
+        configBar->setToolTip(QString::fromStdString(why));
+        configBarKey.clear();
+        QPointer<FeaturesView> self(this);
+        QTimer::singleShot(0, this, [self]() {
+            if (self) {
+                self->rebuildConfigBar();
+            }
+        });
+    }
+    else {
+        configBar->setToolTip(QString());
+    }
+}
+
 void FeaturesView::onFeatureMenu(const QPoint& pos)
 {
     auto item = features->itemAt(pos);
@@ -2714,6 +2936,20 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
         }
     );
     suppress->setObjectName(QStringLiteral("featureToggleSuppress"));
+    // Onshape's configured suppression (ops#671 C2, CP2-3): "Configure suppression with <input>",
+    // or "Unconfigure suppression" on a configured one; the row looks like any suppressed one
+    if (PartDesign::isStudioOwner(obj) && selected.size() <= 1) {
+        for (const auto& configItem : PartDesign::configMenuItems(obj, std::string())) {
+            auto action = menu.addAction(QString::fromStdString(configItem.label), [self, name, configItem]() {
+                auto doc = self ? self->document() : nullptr;
+                if (auto target = doc ? doc->getObject(name.c_str()) : nullptr) {
+                    App::runConfigMenuItem(target, std::string(), configItem);
+                }
+            });
+            action->setObjectName(QStringLiteral("featureConfig_") + QString::fromStdString(configItem.action));
+            action->setEnabled(!locked);
+        }
+    }
     auto dependencies = menu.addAction(tr("Show dependencies"), [self, name]() {
         auto doc = self ? self->document() : nullptr;
         if (auto target = doc ? doc->getObject(name.c_str()) : nullptr) {

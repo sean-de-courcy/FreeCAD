@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <FCGlobal.h>
 
@@ -40,5 +41,32 @@ AppExport void setConfigReaderCheck(ConfigReaderCheck check);
 /// Why reader may not show source as it is now (empty: it may)
 AppExport std::string callConfigReaderCheck(const DocumentObject* reader,
                                             const DocumentObject* source);
+
+/// The configured-field query (C2): the name of the input that configures obj's path, or empty.
+/// The GUI asks it to mark configured fields (installed by the module, like the hooks above)
+using ConfiguredQuery = std::function<std::string(const DocumentObject* obj, const ObjectIdentifier& path)>;
+AppExport void setConfiguredQuery(ConfiguredQuery query);
+/// The query's answer (empty when none is set or the path is not configured)
+AppExport std::string callConfiguredQuery(const DocumentObject* obj, const ObjectIdentifier& path);
+
+/// One configuration item of a field's context menu (C2, Onshape's: "Configure with <input>",
+/// "Set to #<variable>", "Unconfigure from <input>"); the GUI runs
+/// PartDesign.ConfigurationsGui.fieldAction(obj, path, action, input) for it
+struct ConfigMenuItem
+{
+    std::string label;
+    std::string action;     ///< "configure", "variable" or "unconfigure"
+    std::string input;      ///< the input's id
+    std::string inputName;  ///< the input's name (a sketch dimension's submenu shows it)
+};
+using ConfigMenuQuery = std::function<std::vector<ConfigMenuItem>(const DocumentObject* obj,
+                                                                  const ObjectIdentifier& path)>;
+AppExport void setConfigMenuQuery(ConfigMenuQuery query);
+/// The items for obj's path (none when no query is set or the field can't be configured)
+AppExport std::vector<ConfigMenuItem> callConfigMenuQuery(const DocumentObject* obj,
+                                                          const ObjectIdentifier& path);
+/// Runs a menu item (path empty: obj's suppression) through Python's
+/// PartDesign.ConfigurationsGui.fieldAction; an error goes to the report view
+AppExport void runConfigMenuItem(const DocumentObject* obj, const std::string& path, const ConfigMenuItem& item);
 
 }  // namespace App
