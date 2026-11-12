@@ -88,8 +88,8 @@ PartExport bool hasFreeForm(const TopoDS_Shape& shape);
 /// The readouts (Shape.Area and Volume, a solid's mass; a shell's or face's mass, centre of mass
 /// and inertia): adaptive where needsAdaptive() or hasFreeForm(), OCCT's default elsewhere, where
 /// it is exact (planes, quadrics, tori and their extrusions). A solid's centre of mass and inertia,
-/// and the centre of gravity, are adaptive only where needsAdaptive(): forced on a rational sphere
-/// they took 74 s
+/// and the centre of gravity, likewise, integrated about a point off the centre: about the centre
+/// a scaled sphere's took 92 s (ops#680)
 PartExport void readoutVolumeProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 PartExport void readoutSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 PartExport double readoutVolume(const TopoDS_Shape& shape);

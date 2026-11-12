@@ -378,6 +378,31 @@ double clearance(const std::vector<std::vector<SurfaceSample>>& faces, const gp_
     return least;
 }
 
+// Fixed general directions for moving OCCT's reference point
+const std::array<gp_XYZ, 6> referenceDirections {
+    gp_XYZ(0.31, 0.27, 0.16),
+    gp_XYZ(-0.23, 0.41, -0.12),
+    gp_XYZ(0.17, -0.29, 0.37),
+    gp_XYZ(-0.37, -0.11, 0.25),
+    gp_XYZ(0.13, 0.33, -0.39),
+    gp_XYZ(-0.19, -0.36, -0.28)
+};
+
+// The shape and one isolated vertex that bring the mean of its count vertices (mean) plus that
+// one to target: OCCT's reference point for the volume integrals. A vertex holds no volume
+TopoDS_Shape withVertexMeanAt(const TopoDS_Shape& shape, const gp_XYZ& target, const gp_XYZ& mean, int count)
+{
+    const gp_XYZ position = target * (count + 1) - mean * count;
+    BRep_Builder builder;
+    TopoDS_Vertex vertex;
+    builder.MakeVertex(vertex, gp_Pnt(position), Precision::Confusion());
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    builder.Add(compound, shape);
+    builder.Add(compound, vertex);
+    return compound;
+}
+
 // The shape whose volume to integrate adaptively: the shape itself, or, when a face lies on a
 // plane (or a cone) through OCCT's reference point, the shape and one isolated vertex that move
 // that point clear of every face (a vertex holds no volume, and a closed shell's integral is the
@@ -402,14 +427,7 @@ TopoDS_Shape withClearReference(const TopoDS_Shape& shape)
     }
     // The box's centre, else points around it in fixed general directions
     const gp_XYZ centre = (low + high) / 2.0;
-    const std::array<gp_XYZ, 6> directions {
-        gp_XYZ(0.31, 0.27, 0.16),
-        gp_XYZ(-0.23, 0.41, -0.12),
-        gp_XYZ(0.17, -0.29, 0.37),
-        gp_XYZ(-0.37, -0.11, 0.25),
-        gp_XYZ(0.13, 0.33, -0.39),
-        gp_XYZ(-0.19, -0.36, -0.28)
-    };
+    const auto& directions = referenceDirections;
     gp_XYZ best = centre;
     double bestClearance = clearance(faces, centre);
     for (const double fraction : {0.05, 0.13}) {
@@ -425,16 +443,48 @@ TopoDS_Shape withClearReference(const TopoDS_Shape& shape)
             }
         }
     }
-    // The vertex that brings the mean of count + 1 vertices to best
-    const gp_XYZ position = best * (count + 1) - mean * count;
-    BRep_Builder builder;
-    TopoDS_Vertex vertex;
-    builder.MakeVertex(vertex, gp_Pnt(position), Precision::Confusion());
-    TopoDS_Compound compound;
-    builder.MakeCompound(compound);
-    builder.Add(compound, shape);
-    builder.Add(compound, vertex);
-    return compound;
+    return withVertexMeanAt(shape, best, mean, count);
+}
+
+// The shape and one isolated vertex that put OCCT's reference point 0.02 box diagonals off the
+// box centre, clear of every face where it can: the centre and inertia readouts' integration
+// (ops#680). About a point at the centre a face's first moments can be 0 (the one face of SC7's
+// scaled sphere), their relative error never converges, and the adaptive centre took 92 s; 0.02
+// off, 0.03 s within 5e-10 mm. The centre's error grows with the distance, about the tolerance
+// times it (a cylinder drilled by 60 holes: 5.7e-5 mm at 0.02, 8.7e-5 at 0.1, 1e-3 at 2 diagonals
+// with momentsTolerance), hence a small one. OCCT has no absolute error bound: this is one
+TopoDS_Shape offCentreReference(const TopoDS_Shape& shape)
+{
+    int count = 0;
+    const gp_XYZ mean = vertexMean(shape, count);
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (count == 0 || box.IsVoid()) {
+        return shape;
+    }
+    const gp_XYZ low = box.CornerMin().XYZ();
+    const gp_XYZ high = box.CornerMax().XYZ();
+    const double size = (high - low).Modulus();
+    if (!(size > 0.0)) {
+        return shape;
+    }
+    const double needed = 1e-3 * size;
+    const auto faces = faceSamples(shape);
+    const gp_XYZ centre = (low + high) / 2.0;
+    gp_XYZ best = centre;
+    double bestClearance = -1.0;
+    for (const auto& direction : referenceDirections) {
+        const gp_XYZ candidate = centre + direction * (0.02 * size / direction.Modulus());
+        const double candidateClearance = faces.empty() ? needed : clearance(faces, candidate);
+        if (candidateClearance > bestClearance) {
+            best = candidate;
+            bestClearance = candidateClearance;
+        }
+        if (bestClearance >= needed) {
+            break;
+        }
+    }
+    return withVertexMeanAt(shape, best, mean, count);
 }
 
 // The adaptive volume properties into props, with the centre of mass and inertia when everything
@@ -443,7 +493,8 @@ bool adaptiveVolume(
     const TopoDS_Shape& shape,
     GProp_GProps& props,
     bool everything,
-    double tolerance = adaptiveTolerance
+    double tolerance = adaptiveTolerance,
+    bool offCentre = false
 )
 {
     GProp_GProps adaptive = props;
@@ -456,7 +507,7 @@ bool adaptiveVolume(
     // area right): the integration over the whole face is within 1e-8 there (SC7, ops#640)
     const bool useSpans = !anyOutsideItsSurface(shape);
     if (BRepGProp::VolumePropertiesGK(
-            withClearReference(shape),
+            offCentre ? offCentreReference(shape) : withClearReference(shape),
             adaptive,
             tolerance,
             onlyClosed,
@@ -1286,15 +1337,18 @@ public:
 
 void readoutVolumeProperties(const TopoDS_Shape& shape, GProp_GProps& props)
 {
-    // Not forced on free-form faces (debt, ops#640): the adaptive centre of SC7's scaled sphere
-    // took 92 s even at 1e-4 (75 s at 1e-5), its moments about the centre being near zero, while
-    // the default integration put a drilled cylinder's centre 7.7e-4 mm off its axis
-    if (!needsAdaptive(shape)) {
+    // Adaptive on free-form faces too, about a point off the centre (offCentreReference, ops#680):
+    // the default integration put a symmetric drilled cylinder's centre 6.8e-4 mm off its axis
+    // (4.6e-5 mm adaptive, 2.6 s), and SC7's scaled sphere's 2.2e-3 mm (5e-10, 0.03 s)
+    if (!needsAdaptive(shape) && !hasFreeForm(shape)) {
         integrateVolume(shape, props, true, false);
         return;
     }
     GProp_GProps moments = props;
-    integrateVolume(shape, moments, true, true, momentsTolerance);
+    if (!adaptiveVolume(shape, moments, true, momentsTolerance, true)) {
+        BRepGProp::VolumeProperties(shape, props);
+        return;
+    }
     props = WithMass(moments, volume(shape, true));
 }
 
