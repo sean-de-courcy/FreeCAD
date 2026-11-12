@@ -1780,9 +1780,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         ++it;
                     }
                     // Of each original re-run at this pattern's instances, the instances that
-                    // failed; of the copies that add, those tried and made
+                    // failed; whether any original was made at any instance; of the copies that
+                    // add, those tried and made
                     std::vector<std::size_t> failed(items.size(), 0);
                     std::vector<std::string> firstWhy(items.size());
+                    bool madeSome = false;
                     std::size_t instancesRun = 0;
                     std::size_t addsTried = 0;
                     std::size_t addsMade = 0;
@@ -1857,6 +1859,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     }
                                     supportShape = made;
                                     inputCheck = ownResultCheck();
+                                    madeSome = true;
                                     continue;
                                 }
                                 Part::TopoShape shape = item.tool;
@@ -1964,6 +1967,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                 }
                                 supportShape = result;
                                 inputCheck = ownResultCheck();
+                                madeSome = true;
                             }
                         }
                     }
@@ -1973,9 +1977,12 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     catch (const Base::Exception& e) {
                         return new App::DocumentObjectExecReturn(e.what(), this);
                     }
-                    // An original re-run at every instance and made at none: loud (unverified on
-                    // Onshape, which drops a failing instance silently, R2)
-                    for (std::size_t index = 0; index < items.size(); ++index) {
+                    // An original re-run at every instance and made at none contributes nothing,
+                    // with no message, while the pattern makes another original somewhere: Onshape
+                    // builds such a pattern (ops#640, a replica's circular pattern), as it drops
+                    // any failing instance (R2). Loud only when the pattern makes nothing at all
+                    // (unverified on Onshape)
+                    for (std::size_t index = 0; index < items.size() && !madeSome; ++index) {
                         if (instancesRun > 0 && failed[index] == instancesRun) {
                             return new App::DocumentObjectExecReturn(
                                 quoted(items[index].named) + " can't be made at any instance ("
