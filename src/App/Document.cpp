@@ -1763,7 +1763,9 @@ Document::UnrecordedWrites::UnrecordedWrites(Document& doc, Derived isDerived)
     // A change the caller doesn't call derived, outside a recompute's outputs, is warned about:
     // the scope must never hide a user's edit from Undo
     , watch(doc.signalChangedObject.connect([this](const DocumentObject& obj, const Property& prop) {
-        if (this->doc.testStatus(Document::Recomputing) || !this->isDerived || this->isDerived(obj, prop)) {
+        // Suspended (a nested signalBecameStable, review F3) its writes are recorded: not asked
+        if (this->doc.d->unrecordedDepth == 0 || this->doc.testStatus(Document::Recomputing)
+            || !this->isDerived || this->isDerived(obj, prop)) {
             return;
         }
         FC_WARN(this->doc.getName() << ": " << obj.getFullName() << "." << prop.getName()
@@ -1788,7 +1790,11 @@ Document::UnrecordedWrites::~UnrecordedWrites()
         // Nothing should open one here (_checkTransaction opens none in a scope)
         FC_WARN(doc.getName() << ": a transaction opened in an unrecorded scope; committed");
         if (!doc._commitTransaction(true) && doc.d->activeUndoTransaction) {
-            FC_ERR(doc.getName() << ": it could not be committed; the set-aside one stays closed");
+            doc._abortTransaction();
+        }
+        if (doc.d->activeUndoTransaction) {
+            FC_ERR(doc.getName() << ": it could be neither committed nor aborted; the transaction set "
+                                    "aside by the scope is lost");
             return;
         }
     }
@@ -5584,7 +5590,9 @@ void Document::_removeObject(DocumentObject* pcObject, RemoveObjectOptions optio
         }
     }
     const Base::ScopeGuard swapOut([this, swappedIn]() {
-        if (swappedIn && d->activeUndoTransaction == swappedIn) {
+        // Whatever is active now goes back to the scope (as becameStable's resume does)
+        if (swappedIn) {
+            d->unrecordedSetAside = d->activeUndoTransaction;
             d->activeUndoTransaction = nullptr;
         }
     });

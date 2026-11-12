@@ -840,7 +840,7 @@ TEST_F(StableStepTest, unrecordedScopesNestAndGiveTheOpenTransactionBack)
 TEST_F(StableStepTest, anUnrecordedScopeOpensNoGlobalTransaction)
 {
     auto a = addInStep("add", "A");
-    App::GetApplication().setActiveTransaction("global");
+    App::GetApplication().setActiveTransaction(App::TransactionName {.name = "global"});
     {
         App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
         a->addDynamicProperty("App::PropertyString", "Derived");
@@ -885,7 +885,15 @@ TEST_F(StableStepTest, aRemovalInsideAScopeNeverLeavesAStepDangling)
         doc()->removeObject("A");
     }
     ASSERT_NE(doc()->getObject("A"), nullptr);
+    // A step only booked (openTransaction opens it at the first write) is not set aside either
     doc()->openTransaction("t");
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+        doc()->removeObject("A");
+    }
+    ASSERT_NE(doc()->getObject("A"), nullptr);
+    doc()->addObject("App::DocumentObjectGroup", "Z");
+    ASSERT_TRUE(doc()->hasPendingTransaction());
     {
         App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
         doc()->removeObject("A");
@@ -893,8 +901,33 @@ TEST_F(StableStepTest, aRemovalInsideAScopeNeverLeavesAStepDangling)
     }
     EXPECT_EQ(doc()->getObject("A"), nullptr);
     doc()->commitTransaction();
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"t", "add"}));
     EXPECT_TRUE(doc()->undo());
     EXPECT_NE(doc()->getObject("A"), nullptr);
+    EXPECT_EQ(doc()->getObject("Z"), nullptr);
+}
+
+TEST_F(StableStepTest, aRemovalInsideAScopeKeepsWhatTheSetAsideStepHolds)
+{
+    // review T2: an object held only by the transaction the scope set aside (made in it) is
+    // recorded into it, not destroyed: the commit, undo and redo work on it
+    doc()->openTransaction("t");
+    doc()->addObject("App::DocumentObjectGroup", "C");
+    doc()->addObject("App::DocumentObjectGroup", "B");
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+        doc()->removeObject("B");
+    }
+    EXPECT_EQ(doc()->getObject("B"), nullptr);
+    EXPECT_TRUE(doc()->hasPendingTransaction());
+    doc()->commitTransaction();
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"t"}));
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("C"), nullptr);
+    EXPECT_EQ(doc()->getObject("B"), nullptr);
+    EXPECT_TRUE(doc()->redo());
+    EXPECT_NE(doc()->getObject("C"), nullptr);
+    EXPECT_EQ(doc()->getObject("B"), nullptr);
 }
 
 TEST_F(StableStepTest, anUnrecordedScopeAsksAboutEveryWriteOutsideARecompute)

@@ -108,9 +108,12 @@ bool derivedWrite(const App::DocumentObject& obj, const App::Property& prop)
     if (objName && std::string_view(objName).starts_with("ConfigCache")) {
         return true;
     }
+    // _LinkTouched: the link's recompute marker for its view provider, touched only by its own
+    // execute, which in the GUI runs inside the pass's scope outside a document's Recomputing status
     const std::string_view name = prop.getName() ? prop.getName() : "";
     return obj.isDerivedFrom<App::Link>()
-        && (name == "LinkedObject" || name == "ConfigDoc" || name == "ConfigStudio" || name == "ConfigPartId");
+        && (name == "LinkedObject" || name == "ConfigDoc" || name == "ConfigStudio" || name == "ConfigPartId"
+            || name == "_LinkTouched");
 }
 
 /// derivedWrite, counting what it refuses: each is a write the scope warns about (stats)
