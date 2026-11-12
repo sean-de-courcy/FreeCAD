@@ -35,3 +35,8 @@ from AssemblyTests.TestAssemblyPatternsGui import TestAssemblyPatternsGui  # Fre
 
 True if TestAssemblyListGui else False
 True if TestAssemblyPatternsGui else False
+
+from AssemblyTests.TestTriadGui import TestTriadGui, TestTriadMouseGui  # ops#640, C8
+
+True if TestTriadGui else False
+True if TestTriadMouseGui else False
