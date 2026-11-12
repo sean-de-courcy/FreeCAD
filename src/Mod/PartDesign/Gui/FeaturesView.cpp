@@ -92,6 +92,7 @@
 #include <Mod/PartDesign/App/Studio.h>
 #include <Mod/PartDesign/App/StudioConfig.h>
 #include <Mod/PartDesign/App/StudioList.h>
+#include <Mod/Sketcher/App/SketchObject.h>
 
 #include "ViewProviderBody.h"
 
@@ -477,6 +478,15 @@ bool showMovedTips(const std::vector<PartDesign::Body*>& bodies, const std::vect
     return changed;
 }
 
+/// FreeCAD-CH (ops#640): a sketch whose conflict was solved around (its constraints left out, the
+/// rest solved) is a warning to the document, but Onshape's list reads it red, as a failed feature
+/// (PL1d: "Sketch could not be solved.")
+bool sketchCouldNotSolve(const App::DocumentObject* obj)
+{
+    const auto* sketch = dynamic_cast<const Sketcher::SketchObject*>(obj);
+    return sketch && sketch->getLastSolvedAroundConflict();
+}
+
 /// What a row shows of obj: its name, label and status (statusIcon(), statusFont(), and the
 /// message of an error or a warning, rowToolTip())
 std::string rowKey(const App::DocumentObject* obj, bool held, const std::string& extra = {})
@@ -486,6 +496,7 @@ std::string rowKey(const App::DocumentObject* obj, bool held, const std::string&
     key += obj->Label.getValue();
     key += '\x1f';
     key += obj->isError() ? 'e' : obj->isWarning() ? 'w' : '-';
+    key += sketchCouldNotSolve(obj) ? 'c' : '-';
     key += held ? 'h' : '-';
     key += obj->isTouched() || obj->mustExecute() == 1 ? 't' : '-';
     key += isSuppressed(obj) ? 's' : '-';
@@ -550,11 +561,11 @@ QString rowToolTip(const App::DocumentObject* obj, const App::DocumentObject* bo
     return tip;
 }
 
-/// An error row's text is red, a warning's orange, as Onshape's (blind test F38); other rows keep
-/// the palette's
+/// An error row's text is red, a warning's orange, as Onshape's (blind test F38), and a sketch
+/// that could not be solved red (sketchCouldNotSolve()); other rows keep the palette's
 QVariant statusForeground(const App::DocumentObject* obj)
 {
-    if (obj->isError()) {
+    if (obj->isError() || sketchCouldNotSolve(obj)) {
         return QBrush(QColor(0xd0, 0x30, 0x30));
     }
     if (obj->isWarning()) {

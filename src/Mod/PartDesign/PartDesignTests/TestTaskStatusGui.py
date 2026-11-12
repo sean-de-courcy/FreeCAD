@@ -208,12 +208,13 @@ class TestTaskStatusGui(unittest.TestCase):
         taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
         pump()
-        # A hole whose sketch fails by itself: two radii in conflict
+        # A hole whose sketch fails by itself: a malformed constraint (a conflict no longer fails
+        # a sketch, ops#640)
         round_ = models.sketch(self.doc, "Round", [models.circle(7, 7, 1)], self.body, z=10)
         hole = models.pocket(self.body, round_, 3)
         self.doc.recompute()
         round_.addConstraint(Sketcher.Constraint("Radius", 0, 1))
-        round_.addConstraint(Sketcher.Constraint("Radius", 0, 2))
+        round_.addConstraint(Sketcher.Constraint("Midpoint", 0, 3, 0))
         self.doc.recompute()
         self.assertFalse(round_.isValid())
         self.assertIn("links to 'Round', which has an error", hole.getStatusString())
@@ -236,9 +237,9 @@ class TestTaskStatusGui(unittest.TestCase):
     def testSketchEditorShowsNothing(self):
         """The sketch editor has no status label, even for a sketch in error."""
         self.body = models.body(self.doc)
-        sketch = models.sketch(self.doc, "Conflict", models.polyline([(0, 0), (10, 0)]), self.body)
+        sketch = models.sketch(self.doc, "Broken", models.polyline([(0, 0), (10, 0)]), self.body)
         sketch.addConstraint(Sketcher.Constraint("Distance", 0, 5.0))
-        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 7.0))
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 1, 0))  # malformed (ops#640)
         self.doc.recompute()
         self.assertIn("Invalid", sketch.State)
         self.edit(sketch)

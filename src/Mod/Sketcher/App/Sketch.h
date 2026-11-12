@@ -116,6 +116,17 @@ public:
     /// retrieves a point
     Base::Vector3d getPoint(int geoId, PointPos pos) const;
 
+    /// FreeCAD-CH (ops#640, sketch conflicts): constraint indices (0-based) the next setUpSketch
+    /// leaves out of the solve, as it does unenforceable ones (a conflict solved around)
+    void setSkippedConstraints(std::set<int> skipped)
+    {
+        skippedConstraints = std::move(skipped);
+    }
+    const std::set<int>& getSkippedConstraints() const
+    {
+        return skippedConstraints;
+    }
+
     // Inline methods
     inline bool hasConflicts() const
     {
@@ -609,6 +620,7 @@ private:
     GCS::System GCSsys;
     int ConstraintsCounter;
     std::vector<int> Conflicting;
+    std::set<int> skippedConstraints;
     std::vector<int> Redundant;
     std::vector<int> PartiallyRedundant;
     std::vector<int> MalformedConstraints;
