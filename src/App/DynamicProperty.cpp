@@ -526,8 +526,12 @@ bool DynamicProperty::renameDynamicProperty(Property* prop,
         // manages the memory.
         d.property->myName = d.name.c_str();
     });
+    // A placement digest folds each property's name (ops#640, review prmemo-r2 R2-2): before the
+    // signal, whose handlers may digest, and again after it, as a remove does
+    forgetPlacementDigestOf(container);
 
     GetApplication().signalRenameDynamicProperty(*prop, oldName.c_str());
+    forgetPlacementDigestOf(container);
 
     return true;
 }

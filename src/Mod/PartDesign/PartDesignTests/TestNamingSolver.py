@@ -3780,7 +3780,10 @@ class TestNamingSolver(unittest.TestCase):
                 archive.writestr(item, data)
         doc = App.openDocument(path)
         self.documents.append(doc.Name)
-        self.assertIn("Freeze", doc.getObject(name).State)  # the setup: frozen
+        # The setup: frozen, so a change doesn't touch it (State doesn't show a freeze)
+        frozen = doc.getObject(name)
+        frozen.Label2 = "frozen"
+        self.assertNotIn("Touched", frozen.State)
         return doc
 
     def _checkDigestCacheSees(self, change, frozen=False):
@@ -3791,11 +3794,9 @@ class TestNamingSolver(unittest.TestCase):
         onChanged() then returns at once)."""
         doc, body, baseSketch, block, firstSketch, first, secondSketch = self._digestCacheModel()
         if frozen:
+            names = [o.Name for o in (body, baseSketch, block, firstSketch, first, secondSketch)]
             doc = self._frozenCopy(doc, baseSketch.Name)
-            get = doc.getObject
-            body, baseSketch, block = get(body.Name), get(baseSketch.Name), get(block.Name)
-            firstSketch, first = get(firstSketch.Name), get(first.Name)
-            secondSketch = get(secondSketch.Name)
+            body, baseSketch, block, firstSketch, first, secondSketch = map(doc.getObject, names)
         before = self._digestIn(doc, secondSketch, baseSketch)
 
         class Observer:
@@ -3850,6 +3851,11 @@ class TestNamingSolver(unittest.TestCase):
         """An upstream sketch's property made an output (which a digest leaves out) while the
         recompute runs: a status change, which touches nothing."""
         self._checkDigestCacheSees(lambda sketch: sketch.setPropertyStatus("Note", "Output"))
+
+    def testDigestCacheSeesRenamedPropertyInsideRecompute(self):
+        """An upstream sketch's property renamed while the recompute runs: a digest folds the
+        names (review prmemo-r2 R2-2)."""
+        self._checkDigestCacheSees(lambda sketch: sketch.renameProperty("Note", "Remark"))
 
     def testDigestCacheSeesAddedPropertyInsideRecompute(self):
         """A property added to an upstream sketch while the recompute runs: its list changed."""

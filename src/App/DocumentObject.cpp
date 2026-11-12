@@ -96,7 +96,7 @@ DocumentObject::~DocumentObject()
     // under it until here (ops#119)
     forgetElementReferencesTo(this);
     // Its address may be reused within the recompute (ops#640)
-    forgetPlacementDigest(this);
+    forgetPlacementDigestOf(this);
     if (!PythonObject.is(Py::_None())) {
         Base::PyGILStateLocker lock;
         // Remark: The API of Py::Object has been changed to set whether the wrapper owns the passed
