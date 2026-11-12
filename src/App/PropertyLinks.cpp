@@ -5725,6 +5725,47 @@ bool PropertyLinkSubList::adjustLink(const std::set<App::DocumentObject*>& inLis
     return touched;
 }
 
+namespace
+{
+// FreeCAD-CH (ops#671 C3g): closing a document never runs breakLink, and DocInfo's unlink and
+// detach remove only the whole-object back links. The property-level ones updateDepsProp adds
+// across documents stayed: on the open document's object, pointing at the closed owner (the
+// next recompute of it wrote into freed memory), or in the open owner's _PropDeps, pointing
+// at the closed document's objects. Drop the entries that cross into or out of the closing
+// document while both ends are alive; reopening it adds them again (restoreLink, updateDeps).
+struct PropDepsAccess: PropertyXLinkContainer
+{
+    static std::map<std::pair<std::string, DocumentObject*>, bool>&
+    of(PropertyXLinkContainer& container)
+    {
+        return container.*(&PropDepsAccess::_PropDeps);
+    }
+};
+
+void dropPropDepsAcross(PropertyLinkBase* prop, const Document& closing)
+{
+    auto container = dynamic_cast<PropertyXLinkContainer*>(prop);
+    auto owner = container ? freecad_cast<DocumentObject*>(container->getContainer()) : nullptr;
+    if (!owner) {
+        return;
+    }
+    auto& propDeps = PropDepsAccess::of(*container);
+    for (auto it = propDeps.begin(); it != propDeps.end();) {
+        DocumentObject* key = it->first.second;
+        bool across = key && key->getDocument() != owner->getDocument()
+            && (owner->getDocument() == &closing || key->getDocument() == &closing);
+        if (!across) {
+            ++it;
+            continue;
+        }
+        if (!it->second && key->isAttachedToDocument()) {
+            key->_removeBackLinkProp(container->getName(), owner, it->first.first.c_str());
+        }
+        it = propDeps.erase(it);
+    }
+}
+}  // namespace
+
 //**************************************************************************
 // DocInfo
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -6223,6 +6264,7 @@ public:
                 // must call unlink here, so that PropertyLink::resetLink can
                 // remove back link before the owner object is marked as being
                 // destroyed
+                dropPropDepsAcross(link->parentProp, doc);  // FreeCAD-CH (ops#671 C3g)
                 link->unlink();
             }
         }
@@ -6245,6 +6287,7 @@ public:
         }
         for (auto& v : parentLinks) {
             if (v.first) {
+                dropPropDepsAcross(v.first, doc);  // FreeCAD-CH (ops#671 C3g)
                 v.first->setFlag(PropertyLinkBase::LinkDetached);
                 v.first->aboutToSetValue();
             }
@@ -9112,7 +9155,8 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
                 ++entry;
                 continue;
             }
-            if (!entry->second && obj->getDocument() == owner->getDocument()) {
+            // FreeCAD-CH (ops#671 C3g): in any document, as updateDepsProp adds them in any
+            if (!entry->second) {
                 obj->_removeBackLinkProp(getName(), owner, entry->first.first.c_str());
             }
             entry = _PropDeps.erase(entry);
@@ -9141,8 +9185,10 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
     // cut's sibling made and dropped in one dialog)
     for (const auto& [entry, hidden] : _PropDeps) {
         DocumentObject* key = entry.second;
-        if (!hidden && key && key->isAttachedToDocument()
-            && key->getDocument() == owner->getDocument()) {
+        // FreeCAD-CH (ops#671 C3g): in the key's document too when it is another one:
+        // updateDepsProp adds them across documents, so a closed document left an edge on
+        // the open one's object it reached by expression, and its next recompute crashed
+        if (!hidden && key && key->isAttachedToDocument()) {
             key->_removeBackLinkProp(getName(), owner, entry.first.c_str());
         }
     }

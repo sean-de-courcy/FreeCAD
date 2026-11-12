@@ -225,7 +225,7 @@ class TestConfigCache(unittest.TestCase):
     # C3f found: with the syntax fixed, the fill's temporary copy re-opens the VarSet's document by a path
     # under the temporary folder and FreeCAD crashes (Illegal storage access). Skipped so the suite runs;
     # fixed in C3g (work\configs-c3\handoff6.md).
-    @unittest.skip("C3f: the temporary copy crashes on a cross-document expression (C3g fixes it)")
+    @unittest.skip("C3g: the crash is fixed (PropertyLinks.cpp); the entry stays stale after the refresh (C3h)")
     def testCrossDocumentVarSetMarksEntriesStale(self):
         """Review 2: a VarSet in another document drives BPad by expression; its edit marks the
         studio's entries stale, and the next recompute refreshes them"""
