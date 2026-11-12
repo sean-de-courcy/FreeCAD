@@ -2089,6 +2089,9 @@ class TestStudioListProperty(unittest.TestCase):
         self.lateSeen = 0  # edits committed, then recomputed outside the transaction (10.15)
         self.filletsSeen = 0  # states with a part a Fillet owner rounds at the bar (P8a)
         self.ownersSeen = 0  # valid feature pattern owners with a step, summed over the states (T1a)
+        self.patternPartsSeen = 0  # states with a live part a feature pattern made (T1b)
+        self.patternMergesSeen = 0  # states with a feature pattern's merge record (T1b)
+        self.newSeen = 0  # states with a New box owner's part live (T1b)
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -2530,6 +2533,13 @@ class TestStudioListProperty(unittest.TestCase):
                 if isFeatureOwner(e) and e.isValid() and not e.Suppressed
                 and any(PartDesign.studioStepOf(e, doc.getObject(p)) for p, _ in PARTS)
             )
+            liveNow = PartDesign.studioLiveParts(studioList(doc))
+            if any(b.StudioMadeBy is not None and isFeatureOwner(b.StudioMadeBy) for b in liveNow):
+                self.patternPartsSeen += 1
+            if any(isFeatureOwner(e) and merges(e) for e in studioList(doc).Entries):
+                self.patternMergesSeen += 1
+            if any(b.StudioMadeBy is not None and isNewBox(b.StudioMadeBy) for b in liveNow):
+                self.newSeen += 1
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -2589,7 +2599,9 @@ class TestStudioListProperty(unittest.TestCase):
               f"part mirrors seen, {self.piecesSeen} states with a live piece, {self.unlistedSeen} "
               f"states without a list, {self.mergesSeen} states with a merge, {self.lateSeen} "
               f"edits committed before their recompute, {self.filletsSeen} states with a fillet, "
-              f"{self.ownersSeen} valid feature pattern owners")
+              f"{self.ownersSeen} valid feature pattern owners, {self.patternPartsSeen} states with a "
+              f"pattern's part, {self.patternMergesSeen} with a pattern's merge, {self.newSeen} with "
+              f"a New box's part")
 
 
 if __name__ == "__main__":
