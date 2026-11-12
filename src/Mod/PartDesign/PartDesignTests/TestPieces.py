@@ -214,6 +214,36 @@ class TestPieces(unittest.TestCase):
         self.assertIsNone(self.byId("E:3"))
         self.assertEqual(self.live(), [left, right])
 
+    def testASplitBeforeAMergingAddMakesNoPiecesOfTheSurvivor(self):
+        """The property gate's seed 6 op 16 (ops#654, the no-op Add gate half): an Add bar
+        (x 25..45, y 2..5, z 10..13) merges B (x 20..30) and C (x 40..50). A through slot in C
+        (x 46..47) inserted before it, its pieces made in the insert's step: the bar now merges B
+        with C's left piece; B stays one solid, so nothing makes pieces of B (they were made
+        once, from a compute before the merge was decided, and were never parts)."""
+        self.studio((("B", (20, 0, 30, 10), 10), ("C", (40, 0, 50, 10), 10)))
+        sk = studioSketch(self.doc, self.S, "BarSk", ((25, 2, 45, 5),), z=10)
+        bar = makeOwner(self.doc, self.S, "Pad", "Bar", sk, ("B", "C"), Length=3)
+        self.doc.recompute()
+        self.doc.recompute()
+        b = self.doc.getObject("B")
+        self.assertAlmostEqual(b.Shape.Volume, 2000 + 20 * 3 * 3, places=3)
+        self.doc.openTransaction("split")
+        sk = studioSketch(self.doc, self.S, "ESk", ((46, -1, 47, 11),), z=10)
+        e = makeOwner(self.doc, self.S, "Pocket", "E", sk, ("C",), Length=11)
+        PartDesign.studioMove(e, list(self.list.Entries).index(bar))
+        PartDesign.studioMakePieces(e)  # as the gate's split: its command, then the recompute
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(
+            len([p for p in self.doc.Objects
+                 if p.TypeId == "PartDesign::Body" and p.StudioMadeBy == e]), 2)
+        self.assertEqual(
+            [p.StudioPartId for p in self.doc.Objects
+             if p.TypeId == "PartDesign::Body" and p.StudioMadeBy == bar], [])
+        self.assertIn(b, PartDesign.studioLiveParts(self.list))
+        self.assertEqual(len(b.Shape.Solids), 1)
+
     # ------------------------------------------------------------------------------- H1, H2
     def testH1MovedCutKeepsTheSideAndAPieceScopedPocketCutsNothing(self):
         """H1: the x 31..100 piece keeps its id when the slot moves to x 70..71; a Pocket scoped

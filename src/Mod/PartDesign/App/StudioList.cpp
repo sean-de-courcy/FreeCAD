@@ -2603,6 +2603,12 @@ void resyncPartMirrors(const App::Document& constDoc)
     // The entries whose solids are no part (10.12 amendment, points 2-4), taken at every signal
     // so a decision never outlives its recompute
     std::vector<App::DocumentObject*> due = takePiecesDue(&doc);
+    // Inside a piece command's own recompute the states are partial (its pieces not made yet: an
+    // Add merging the part it splits reads it whole, two solids, the gate's seed 6 op 16): the
+    // command decides, and the recompute after it resyncs
+    if (piecesCommandEntry()) {
+        return;
+    }
     if (doc.isPerformingTransaction() || doc.testStatus(App::Document::Restoring)
         || App::GetApplication().isClosingAll() || needsRecompute(doc)) {
         return;
