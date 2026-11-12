@@ -139,6 +139,62 @@
     </layout>
    </item>
    <item>
+    <widget class="QGroupBox" name="groupConnections">
+     <property name="title">
+      <string>Connections</string>
+     </property>
+     <property name="toolTip">
+      <string>Vertex pairs the loft joins: one vertex on the profile, one on the section</string>
+     </property>
+     <layout class="QVBoxLayout" name="connectionsLayout">
+      <item>
+       <widget class="QListWidget" name="listConnections">
+        <property name="selectionMode">
+         <enum>QAbstractItemView::ExtendedSelection</enum>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>16777215</width>
+          <height>100</height>
+         </size>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="connectionButtonsLayout">
+        <item>
+         <widget class="QPushButton" name="buttonAddConnection">
+          <property name="text">
+           <string>Add connection</string>
+          </property>
+          <property name="toolTip">
+           <string>Pick a vertex on the profile, then one on the section</string>
+          </property>
+          <property name="checkable">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="buttonRemoveConnection">
+          <property name="text">
+           <string>Remove</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="labelConnectionHint">
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="Line" name="line">
      <property name="orientation">
       <enum>Qt::Horizontal</enum>
@@ -164,6 +220,9 @@
   <tabstop>spinStartMagnitude</tabstop>
   <tabstop>comboEndCondition</tabstop>
   <tabstop>spinEndMagnitude</tabstop>
+  <tabstop>listConnections</tabstop>
+  <tabstop>buttonAddConnection</tabstop>
+  <tabstop>buttonRemoveConnection</tabstop>
   <tabstop>checkBoxUpdateView</tabstop>
  </tabstops>
  <resources/>

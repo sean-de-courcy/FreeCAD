@@ -24,13 +24,17 @@
 
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 
+#include <QKeyEvent>
+#include <QListWidget>
 #include <QPointer>
 
 #include <boost/algorithm/string/predicate.hpp>
 
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
@@ -104,7 +108,14 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
             this, &TaskLoftParameters::onEndMagnitude);
     connect(ui->checkBoxUpdateView, &QCheckBox::toggled,
             this, &TaskLoftParameters::onUpdateView);
+    connect(ui->buttonAddConnection, &QPushButton::toggled,
+            this, &TaskLoftParameters::onAddConnection);
+    connect(ui->buttonRemoveConnection, &QPushButton::clicked,
+            this, &TaskLoftParameters::onRemoveConnection);
+    connect(ui->listConnections, &QListWidget::itemSelectionChanged,
+            this, &TaskLoftParameters::onConnectionRow);
     // clang-format on
+    ui->listConnections->installEventFilter(this);
 
     this->groupLayout()->addWidget(proxy);
 
@@ -137,6 +148,18 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
     }
 
     createFields();
+    // ops#640: a field armed for a pick ends the connection pick
+    for (ReferenceField* field : {profileField, sectionsField}) {
+        if (field) {
+            connect(field, &ReferenceField::armedChanged, this, [this](bool armed) {
+                if (armed) {
+                    ui->buttonAddConnection->setChecked(false);
+                }
+            });
+        }
+    }
+    fillConnections();
+    connectionHint(QString());
     updateUI();
 }
 
@@ -269,9 +292,165 @@ void TaskLoftParameters::updateUI()
     ui->spinEndMagnitude->setVisible(end);
 }
 
-void TaskLoftParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
+void TaskLoftParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 {
-    // The fields take the picks
+    // The fields take the picks; the Add connection button takes vertex pairs (ops#640)
+    if (picking || !ui->buttonAddConnection->isChecked()
+        || msg.Type != Gui::SelectionChanges::AddSelection) {
+        return;
+    }
+    auto loft = getObject<PartDesign::Loft>();
+    if (!loft || !msg.pDocName
+        || std::strcmp(msg.pDocName, loft->getDocument()->getName()) != 0) {
+        return;
+    }
+    App::DocumentObject* obj = loft->getDocument()->getObject(msg.pObjectName);
+    const std::string sub =
+        Base::Tools::isNullOrEmpty(msg.pSubName) ? std::string() : Data::oldElementName(msg.pSubName);
+    {
+        Base::StateLocker lock(picking, true);
+        Gui::Selection().clearSelection();
+    }
+    App::DocumentObject* profile = loft->Profile.getValue();
+    const auto& sections = loft->Sections.getValues();
+    App::DocumentObject* section = sections.size() == 1 ? sections.front() : nullptr;
+    if (!section) {
+        connectionHint(tr("Connections need exactly two profiles: the profile and one section"));
+        return;
+    }
+    if (!obj || (obj != profile && obj != section) || !boost::starts_with(sub, "Vertex")) {
+        connectionHint(tr("Pick a vertex of the profile or of the section"));
+        return;
+    }
+    if (!pendingObject || obj == pendingObject) {
+        pendingObject = obj;
+        pendingVertex = sub;
+        connectionHint(
+            obj == profile ? tr("Now pick its vertex on the section")
+                           : tr("Now pick its vertex on the profile")
+        );
+        return;
+    }
+    auto objects = loft->Connections.getValues();
+    auto subs = loft->Connections.getSubValues(false);
+    if (pendingObject == profile) {
+        objects.insert(objects.end(), {pendingObject, obj});
+        subs.insert(subs.end(), {pendingVertex, sub});
+    }
+    else {
+        objects.insert(objects.end(), {obj, pendingObject});
+        subs.insert(subs.end(), {sub, pendingVertex});
+    }
+    loft->Connections.setValues(objects, subs);
+    ui->buttonAddConnection->setChecked(false);
+    fillConnections();
+    recomputeFeature();
+}
+
+void TaskLoftParameters::connectionHint(const QString& text)
+{
+    ui->labelConnectionHint->setText(text);
+    ui->labelConnectionHint->setVisible(!text.isEmpty());
+}
+
+void TaskLoftParameters::fillConnections()
+{
+    QSignalBlocker block(ui->listConnections);
+    ui->listConnections->clear();
+    auto loft = getObject<PartDesign::Loft>();
+    if (!loft) {
+        return;
+    }
+    const auto& objects = loft->Connections.getValues();
+    const auto subs = loft->Connections.getSubValues(false);
+    auto end = [&](size_t i) {
+        const char* label = objects[i] ? objects[i]->Label.getValue() : "?";
+        return QStringLiteral("%1: %2").arg(
+            QString::fromUtf8(label),
+            QString::fromStdString(i < subs.size() ? subs[i] : std::string())
+        );
+    };
+    for (size_t k = 0; k + 1 < objects.size(); k += 2) {
+        ui->listConnections->addItem(QStringLiteral("%1 \u2192 %2").arg(end(k), end(k + 1)));
+    }
+}
+
+void TaskLoftParameters::onAddConnection(bool on)
+{
+    pendingObject = nullptr;
+    pendingVertex.clear();
+    // The panel's own observer is blocked (TaskSketchBasedParameters); it listens while the button is down
+    blockSelection(!on);
+    if (on) {
+        if (ReferenceField* field = ReferenceField::armedField()) {
+            field->setArmed(false);
+        }
+        connectionHint(tr("Pick a vertex on the profile, then its partner on the section"));
+    }
+    else {
+        connectionHint(QString());
+    }
+}
+
+void TaskLoftParameters::onRemoveConnection()
+{
+    auto loft = getObject<PartDesign::Loft>();
+    if (!loft) {
+        return;
+    }
+    std::vector<int> rows;
+    for (const QModelIndex& index : ui->listConnections->selectionModel()->selectedRows()) {
+        rows.push_back(index.row());
+    }
+    if (rows.empty()) {
+        return;
+    }
+    std::sort(rows.rbegin(), rows.rend());
+    auto objects = loft->Connections.getValues();
+    auto subs = loft->Connections.getSubValues(false);
+    for (int row : rows) {
+        const auto at = static_cast<size_t>(2 * row);
+        if (at + 1 < objects.size() && at + 1 < subs.size()) {
+            objects.erase(objects.begin() + at, objects.begin() + at + 2);
+            subs.erase(subs.begin() + at, subs.begin() + at + 2);
+        }
+    }
+    loft->Connections.setValues(objects, subs);
+    fillConnections();
+    recomputeFeature();
+}
+
+void TaskLoftParameters::onConnectionRow()
+{
+    // The selected rows' vertices show selected in the 3D view, unless a field waits for a pick
+    auto loft = getObject<PartDesign::Loft>();
+    if (!loft || ReferenceField::armedField() || ui->buttonAddConnection->isChecked()) {
+        return;
+    }
+    Base::StateLocker lock(picking, true);
+    Gui::Selection().clearSelection();
+    const auto& objects = loft->Connections.getValues();
+    const auto subs = loft->Connections.getSubValues(false);
+    const char* doc = loft->getDocument()->getName();
+    for (const QModelIndex& index : ui->listConnections->selectionModel()->selectedRows()) {
+        for (size_t i : {static_cast<size_t>(2 * index.row()), static_cast<size_t>(2 * index.row() + 1)}) {
+            if (i < objects.size() && i < subs.size() && objects[i]) {
+                Gui::Selection().addSelection(doc, objects[i]->getNameInDocument(), subs[i].c_str());
+            }
+        }
+    }
+}
+
+bool TaskLoftParameters::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == ui->listConnections && event->type() == QEvent::KeyPress) {
+        const auto key = static_cast<QKeyEvent*>(event)->key();
+        if (key == Qt::Key_Delete || key == Qt::Key_Backspace) {
+            onRemoveConnection();
+            return true;
+        }
+    }
+    return TaskSketchBasedParameters::eventFilter(watched, event);
 }
 
 void TaskLoftParameters::changeEvent(QEvent* /*e*/)

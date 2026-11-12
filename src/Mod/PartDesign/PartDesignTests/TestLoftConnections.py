@@ -79,14 +79,14 @@ class ConnectionCase(unittest.TestCase):
             links.append((self.section, self.vertexName(self.section, b)))
         loft.Connections = links
 
-    def assertLoft(self, loft, volume, area=None, faces=None, delta=0.02):
+    def assertLoft(self, loft, volume, area=None, faces=None, delta=0.02, areaDelta=None):
         self.assertTrue(loft.isValid(), loft.getStatusString())
         shape = loft.Shape
         self.assertTrue(shape.isValid())
         self.assertEqual(len(shape.Solids), 1)
         self.assertAlmostEqual(shape.Volume, volume, delta=delta)
         if area is not None:
-            self.assertAlmostEqual(shape.Area, area, delta=delta)
+            self.assertAlmostEqual(shape.Area, area, delta=areaDelta or delta)
         if faces is not None:
             self.assertEqual(len(shape.Faces), faces)
 
@@ -105,6 +105,16 @@ class ConnectionCase(unittest.TestCase):
                     self.assertAlmostEqual(edge.Length, (q - p).Length, delta=1e-6)
                 return
         self.fail("no side edge joins %s to %s" % (a, b))
+
+    def assertBilinearSides(self, loft, sides=4):
+        """The side faces are the ruled surface itself: bilinear patches (degree 1 by 1, 2 x 2 poles). With the
+        volume this pins the geometry; OCCT's default area integration reads a patch twisted by 135 degrees about
+        0.02 high (324.302 where a fine integration gives 324.281), so the twisted areas carry a wider delta."""
+        patches = [f for f in loft.Shape.Faces if f.Surface.TypeId != "Part::GeomPlane"]
+        self.assertEqual(len(patches), sides)
+        for face in patches:
+            surface = face.Surface
+            self.assertEqual((surface.UDegree, surface.VDegree, surface.NbUPoles, surface.NbVPoles), (1, 1, 2, 2))
 
     def assertStops(self, loft, *words):
         self.assertFalse(loft.isValid(), "expected a stop")
@@ -144,28 +154,34 @@ class TestLoftConnectionsTwist(ConnectionCase):
 
     def testOppositeCornerTwistsAHundredThirtyFive(self):
         loft = self.twisted(180)
-        self.assertLoft(loft, 3585.7864, 1797.1225, 6)
+        self.assertLoft(loft, 3585.7864, 1797.1225, 6, areaDelta=0.1)
+        self.assertBilinearSides(loft)
         self.assertJoined(loft, (10, 10), (-S, 0))
         self.assertAlmostEqual(ruledVolume(self.BOTTOM, self.top(180)), 3585.7864, delta=1e-4)
 
     def testTheOtherOppositeCornerMirrors(self):
         loft = self.twisted(270)
-        self.assertLoft(loft, 3585.7864, 1797.1225, 6)
+        self.assertLoft(loft, 3585.7864, 1797.1225, 6, areaDelta=0.1)
+        self.assertBilinearSides(loft)
         self.assertJoined(loft, (10, 10), (0, -S))
 
     def testTwoConnectionsThatAgree(self):
         top = self.top(180)
         loft = self.loft(square(20), turnedSquare(10), [((10, 10), top[0]), ((-10, -10), top[2])])
-        self.assertLoft(loft, 3585.7864, 1797.1225, 6)
+        self.assertLoft(loft, 3585.7864, 1797.1225, 6, areaDelta=0.1)
+        self.assertBilinearSides(loft)
 
     def testFourConnectionsThatAgree(self):
         top = self.top(180)
         loft = self.loft(square(20), turnedSquare(10), list(zip(self.BOTTOM, top)))
-        self.assertLoft(loft, 3585.7864, 1797.1225, 6)
+        self.assertLoft(loft, 3585.7864, 1797.1225, 6, areaDelta=0.1)
+        self.assertBilinearSides(loft)
 
     def testCrossedConnectionsStop(self):
+        # two connections always keep one cyclic order; three can cross: bottom corners 0, 1, 2 to top 0, 2, 1
         top = self.top(180)
-        loft = self.loft(square(20), turnedSquare(10), [((10, 10), top[0]), ((-10, 10), top[2])])
+        pairs = [((10, 10), top[0]), ((-10, 10), top[2]), ((-10, -10), top[1])]
+        loft = self.loft(square(20), turnedSquare(10), pairs)
         self.assertStops(loft, "connection")
 
     def testAVertexConnectedTwiceStops(self):

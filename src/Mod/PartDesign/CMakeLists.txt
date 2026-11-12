@@ -163,6 +163,7 @@ if(BUILD_GUI)
         PartDesignTests/TestDialogFlowGui.py
         PartDesignTests/TestRevolveFieldsGui.py
         PartDesignTests/TestLoftFilletOptionsGui.py
+        PartDesignTests/TestLoftConnectionsGui.py
         PartDesignTests/TestPatternDefaultsGui.py
         PartDesignTests/TestRegenerateGui.py
         PartDesignTests/TestDressUpAnyPartGui.py
