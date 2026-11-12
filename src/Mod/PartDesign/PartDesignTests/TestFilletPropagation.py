@@ -181,6 +181,55 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertAlmostEqual(box.XMin, -14, delta=1e-3)
         self.assertAlmostEqual(box.XMax, 14, delta=1e-3)
 
+    def dPad(self, wall):
+        """The slot's right half: the y = 5 line from x -10 to 10 runs into the round end at x = 10 and ends
+        sharp at x = -10, on a flat end (no wall) or on a wall x -14..-10, y -8..8, z 0..20 (a concave corner)."""
+        dee = [
+            Part.LineSegment(V(-10, 5, 0), V(10, 5, 0)),
+            Part.ArcOfCircle(Part.Circle(V(10, 0, 0), V(0, 0, 1), 5), -math.pi / 2, math.pi / 2),
+            Part.LineSegment(V(10, -5, 0), V(-10, -5, 0)),
+            Part.LineSegment(V(-10, -5, 0), V(-10, 5, 0)),
+        ]
+        pad = models.pad(self.body, models.sketch(self.doc, "Dee", dee, self.body), 10)
+        volume = 10 * (200 + math.pi * 25 / 2)
+        if wall:
+            sketch = models.sketch(self.doc, "Wall", models.rectangle(-14, -8, -10, 8), self.body)
+            pad = models.pad(self.body, sketch, 20)
+            volume += 4 * 16 * 20
+        self.doc.recompute()
+        self.assertAlmostEqual(pad.Shape.Volume, volume, delta=1e-3)
+        return pad, volume
+
+    # One round end's share of what the run-out removes past the straight span (GB13's closed forms above)
+    FILLET_SPAN = 20 * (4 - math.pi)
+    FILLET_END = (20.338046 - FILLET_SPAN) / 2
+    CHAMFER_SPAN = 20 * 2
+    CHAMFER_END = (49.120 - CHAMFER_SPAN) / 2
+
+    def testOffStopsAtAWall(self):
+        """The run-out goes on through the round end, and stops where the line meets the wall: the wall
+        keeps its volume (no groove 4 (4 - pi) through it)."""
+        pad, volume = self.dPad(wall=True)
+        fillet = self.fillet(pad, [self.topLine(pad.Shape)], TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume, volume - self.FILLET_SPAN - self.FILLET_END, delta=0.002)
+        wall = fillet.Shape.common(Part.makeBox(4, 16, 20, V(-14, -8, 0)))
+        self.assertAlmostEqual(wall.Volume, 4 * 16 * 20, delta=1e-6)
+
+    def testOffRunsOffAFlatEnd(self):
+        """A sharp end with no wall: the body ends there, so nothing is left past it either."""
+        pad, volume = self.dPad(wall=False)
+        fillet = self.fillet(pad, [self.topLine(pad.Shape)], TangentPropagation=False)
+        self.assertResult(fillet, volume - self.FILLET_SPAN - self.FILLET_END, 7)
+
+    def testChamferOffStopsAtAWall(self):
+        pad, volume = self.dPad(wall=True)
+        chamfer = self.chamfer(pad, [self.topLine(pad.Shape)], TangentPropagation=False)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume, volume - self.CHAMFER_SPAN - self.CHAMFER_END, delta=0.002)
+        wall = chamfer.Shape.common(Part.makeBox(4, 16, 20, V(-14, -8, 0)))
+        self.assertAlmostEqual(wall.Volume, 4 * 16 * 20, delta=1e-6)
+
     def testChamferOffByTwoDistancesStops(self):
         """Which face takes which distance is OCCT's choice: only an equal distance chamfer runs on."""
         pad = self.slotPad()

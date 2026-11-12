@@ -35,12 +35,18 @@
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <Bnd_Box.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <Precision.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <TopExp.hxx>
@@ -768,8 +774,66 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
         BRepBuilderAPI_MakeEdge(tangent1, corner).Edge()
     );
     BRepBuilderAPI_MakeFace section(wire.Wire(), true);
-    return BRepPrimAPI_MakePrism(section.Face(), gp_Vec(along) * (start.Distance(end) + 2 * past))
-        .Shape();
+    TopoDS_Shape tool
+        = BRepPrimAPI_MakePrism(section.Face(), gp_Vec(along) * (start.Distance(end) + 2 * past))
+              .Shape();
+
+    // At an end where the edge meets a wall (a face there whose outside looks back along the edge:
+    // a concave corner), the run-out stops at the wall as Onshape's does: the tool keeps only the
+    // edge's side of the wall's plane (integrator 13, FilletRunOutPastWall). The face the body ends
+    // at, or a face going on tangentially, looks away from or across the edge: the tool runs on.
+    TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+    const double size = 2 * (start.Distance(end) + 2 * past + radius);
+    const TopoDS_Vertex ends[2] = {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)};
+    for (int e = 0; e < 2; ++e) {
+        if (!vertexFaces.Contains(ends[e])) {
+            continue;
+        }
+        const gp_Pnt at = BRep_Tool::Pnt(ends[e]);
+        const gp_Dir intoEdge = e == 0 ? along : along.Reversed();
+        TopTools_IndexedMapOfShape seen;
+        for (const auto& shape : vertexFaces.FindFromKey(ends[e])) {
+            const TopoDS_Face& face = TopoDS::Face(shape);
+            if (faces.Contains(face) || seen.Contains(face)) {
+                continue;
+            }
+            seen.Add(face);
+            BRepAdaptor_Surface surface(face);
+            gp_Dir outward;
+            if (surface.GetType() == GeomAbs_Plane) {
+                outward = surface.Plane().Axis().Direction();
+            }
+            else {
+                const gp_Pnt2d uv = BRep_Tool::Parameters(ends[e], face);
+                BRepLProp_SLProps props(surface, uv.X(), uv.Y(), 1, Precision::Confusion());
+                if (!props.IsNormalDefined()) {
+                    continue;
+                }
+                outward = props.Normal();
+            }
+            if (face.Orientation() == TopAbs_REVERSED) {
+                outward.Reverse();
+            }
+            if (outward.Dot(intoEdge) < 1e-6) {
+                continue;
+            }
+            // a box on the edge's side of the wall's tangent plane, larger than the tool
+            const gp_Ax2 frame(at, outward);
+            const gp_Pnt origin = at.Translated(
+                (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-size / 2)
+            );
+            const TopoDS_Shape keep
+                = BRepPrimAPI_MakeBox(gp_Ax2(origin, outward, frame.XDirection()), size, size, size)
+                      .Shape();
+            BRepAlgoAPI_Common trimmed(tool, keep);
+            if (!trimmed.IsDone()) {
+                notStraightRunOut();
+            }
+            tool = trimmed.Shape();
+        }
+    }
+    return tool;
 }
 
 }  // namespace
