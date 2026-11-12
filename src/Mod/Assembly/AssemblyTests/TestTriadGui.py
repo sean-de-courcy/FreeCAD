@@ -281,6 +281,97 @@ class TestTriadGui(TriadGuiCase):
         )
 
 
+class TestTriadOriginGui(TriadGuiCase):
+    """C10 (ops#640): the triad alone onto a point, then a ring turns the parts about it."""
+
+    docName = "TriadOriginGui"
+
+    def edge_name(self, obj, p, q):
+        """The name of @obj's straight edge from @p to @q (designed geometry, found by its ends)."""
+        for i, edge in enumerate(obj.Shape.Edges, 1):
+            ends = [v.Point for v in edge.Vertexes]
+            if len(ends) == 2 and (
+                ((ends[0] - p).Length < TOL and (ends[1] - q).Length < TOL)
+                or ((ends[0] - q).Length < TOL and (ends[1] - p).Length < TOL)
+            ):
+                return f"Edge{i}"
+        self.fail(f"no edge {p} to {q} on {obj.Name}")
+
+    def assertTriadAt(self, point):
+        shown = self.vp.getTriadPlacement()
+        self.assertLess((shown.Base - point).Length, 1e-9, shown.Base)
+        self.assertTrue(shown.Rotation.isSame(App.Rotation(), 1e-12), shown.Rotation)
+
+    def test_triad_moves_alone_onto_a_point_and_a_ring_turns_about_it(self):
+        self.pick(self.a, "Face6", V(5, 5, 10))
+        start = self.a.Placement
+        undo0 = self.doc.UndoCount
+        corner = V(10, 10, 10)
+        self.vp.moveTriadOriginTo(corner)
+        # only the triad moved: the part, the selection's triad and the undo stack are as before
+        self.assertPlacement(self.a, start)
+        self.assertEqual(self.doc.UndoCount, undo0)
+        self.assertTriadAt(corner)
+        self.assertTrue(self.vp.DraggerVisibility)
+
+        self.vp.dragTriad("RotateZ", App.Placement(corner, App.Rotation(V(0, 0, 1), 90)))
+        self.assertPlacement(self.a, turnedAbout(corner, App.Rotation(V(0, 0, 1), 90)))
+        self.assertTriadAt(corner)
+        self.assertTrue(self.vp.applyTriadValue("45 deg"))
+        self.assertPlacement(self.a, turnedAbout(corner, App.Rotation(V(0, 0, 1), 45)))
+        self.assertEqual(self.doc.UndoCount, undo0 + 2)
+        self.doc.undo()
+        pump()
+        self.assertPlacement(self.a, turnedAbout(corner, App.Rotation(V(0, 0, 1), 90)))
+
+    def test_a_moved_part_turns_about_the_new_origin_from_where_it_is(self):
+        self.pick(self.a, "Face6", V(5, 5, 10))
+        self.vp.dragTriad("TranslateX", App.Placement(V(17, 5, 10), App.Rotation()))
+        shifted = App.Placement(V(12, 0, 0), App.Rotation())
+        self.assertPlacement(self.a, shifted)
+        self.assertTrue(self.vp.isTriadBoxOpen())
+
+        corner = V(22, 0, 0)  # the moved box's corner
+        self.vp.moveTriadOriginTo(corner)
+        self.assertFalse(self.vp.isTriadBoxOpen(), "the box of the earlier drag stays open")
+        self.assertPlacement(self.a, shifted)
+        self.vp.dragTriad("RotateZ", App.Placement(corner, App.Rotation(V(0, 0, 1), 90)))
+        self.assertPlacement(self.a, turnedAbout(corner, App.Rotation(V(0, 0, 1), 90)) * shifted)
+        # typed values are measured from the ring drag's start, about the new origin
+        self.assertTrue(self.vp.applyTriadValue("-30 deg"))
+        self.assertPlacement(self.a, turnedAbout(corner, App.Rotation(V(0, 0, 1), -30)) * shifted)
+
+    def test_two_instances_turn_about_the_new_origin(self):
+        self.pick(self.a, "Face6", V(5, 5, 10))
+        self.pick(self.b, "Face6", V(45, 5, 10))
+        pivot = V(40, 0, 0)  # B's corner
+        self.vp.moveTriadOriginTo(pivot)
+        turn = turnedAbout(pivot, App.Rotation(V(0, 0, 1), 90))
+        self.vp.dragTriad("RotateZ", App.Placement(pivot, App.Rotation(V(0, 0, 1), 90)))
+        self.assertPlacement(self.a, turn)
+        self.assertPlacement(self.b, turn * App.Placement(V(40, 0, 0), App.Rotation()))
+
+    def test_the_origin_snaps_to_an_edge_end_near_the_cursor(self):
+        self.pick(self.a, "Face6", V(5, 5, 10))
+        edge = "A." + self.edge_name(self.a, V(10, 0, 10), V(10, 10, 10))
+        # within 0.15 of the edge's length (10) of its end: the end (the Transform dialog's snap)
+        self.vp.moveTriadOriginTo(V(10, 1, 10), edge)
+        self.assertTriadAt(V(10, 0, 10))
+        self.vp.moveTriadOriginTo(V(10, 9.2, 10), edge)
+        self.assertTriadAt(V(10, 10, 10))
+        # mid-edge, or a face: the point itself
+        self.vp.moveTriadOriginTo(V(10, 5, 10), edge)
+        self.assertTriadAt(V(10, 5, 10))
+        self.vp.moveTriadOriginTo(V(9, 1, 10), "A.Face6")
+        self.assertTriadAt(V(9, 1, 10))
+        self.assertPlacement(self.a, App.Placement())
+
+    def test_moving_the_origin_needs_the_triad(self):
+        self.assertFalse(self.vp.DraggerVisibility)
+        with self.assertRaises(RuntimeError):
+            self.vp.moveTriadOriginTo(V(0, 0, 0))
+
+
 class TestTriadMouseGui(TriadGuiCase):
     """The triad driven by mouse events in the 3D view (a real window)."""
 
@@ -295,10 +386,8 @@ class TestTriadMouseGui(TriadGuiCase):
         pump(0.3)
         self.viewport = self.view.graphicsView().viewport()
 
-    def send_mouse(self, kind, pos, button, buttons):
-        event = QtGui.QMouseEvent(
-            kind, pos, self.viewport.mapToGlobal(pos), button, buttons, QtCore.Qt.NoModifier
-        )
+    def send_mouse(self, kind, pos, button, buttons, modifiers=QtCore.Qt.NoModifier):
+        event = QtGui.QMouseEvent(kind, pos, self.viewport.mapToGlobal(pos), button, buttons, modifiers)
         QtWidgets.QApplication.sendEvent(self.viewport, event)
 
     def to_widget(self, vp_point):
@@ -419,3 +508,40 @@ class TestTriadMouseGui(TriadGuiCase):
         self.assertTrue(waitFor(lambda: self.vp.DraggerVisibility), "the triad did not come back")
         triad = self.vp.getTriadPlacement().Base
         self.assertLess((triad - (triad0 + moved)).Length, 1e-6, "the triad did not follow the part")
+
+    def test_alt_click_moves_the_triad_alone(self):
+        # C10 (ops#640): Alt (Option) + click on a point of another part, the triad showing
+        self.click(self.screen(V(3, 4, 10)))
+        self.assertTrue(waitFor(lambda: self.vp.DraggerVisibility))
+        selected = [(s.ObjectName, s.SubElementNames) for s in Gui.Selection.getSelectionEx()]
+        undo0 = self.doc.UndoCount
+        target = V(45, 4, 10)  # B's top face
+        pos = self.screen(target)
+        pump(QtWidgets.QApplication.doubleClickInterval() / 1000.0 + 0.15)
+        self.send_mouse(QtCore.QEvent.MouseMove, pos, QtCore.Qt.NoButton, QtCore.Qt.NoButton)
+        pump(0.2)
+        alt = QtCore.Qt.AltModifier
+        QtWidgets.QApplication.sendEvent(
+            self.viewport, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Alt, alt)
+        )
+        self.send_mouse(
+            QtCore.QEvent.MouseButtonPress, pos, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, alt
+        )
+        self.send_mouse(
+            QtCore.QEvent.MouseButtonRelease, pos, QtCore.Qt.LeftButton, QtCore.Qt.NoButton, alt
+        )
+        QtWidgets.QApplication.sendEvent(
+            self.viewport,
+            QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, QtCore.Qt.Key_Alt, QtCore.Qt.NoModifier),
+        )
+        pump(0.3)
+        triad = self.vp.getTriadPlacement()
+        self.assertLess((triad.Base - target).Length, 0.5, triad.Base)
+        self.assertAlmostEqual(triad.Base.z, 10, places=4)
+        # the parts and the selection stay
+        self.assertPlacement(self.a, App.Placement())
+        self.assertPlacement(self.b, App.Placement(V(40, 0, 0), App.Rotation()))
+        self.assertEqual(
+            [(s.ObjectName, s.SubElementNames) for s in Gui.Selection.getSelectionEx()], selected
+        )
+        self.assertEqual(self.doc.UndoCount, undo0)

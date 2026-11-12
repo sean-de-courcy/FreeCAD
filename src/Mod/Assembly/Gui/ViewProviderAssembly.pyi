@@ -89,6 +89,15 @@ class ViewProviderAssembly(ViewProvider):
         @placement (global): the dragger's start, motion and finish steps, without the mouse.
         """
         ...
+
+    def moveTriadOriginTo(self, point: Any, subName: str = "", /) -> None:
+        """
+        Moves the triad alone to @point (global), on the assembly's axes, as Alt+click on a point
+        does: the parts stay, and a ring then turns them about the point. With @subName (under the
+        assembly, the element included, e.g. "Box.Edge3") the point snaps to that edge's end when
+        close to one, as the Transform dialog's pick does.
+        """
+        ...
     EnableMovement: bool
     """Enable moving the parts by clicking and dragging."""
 

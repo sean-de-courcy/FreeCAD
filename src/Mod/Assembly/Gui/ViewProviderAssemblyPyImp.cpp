@@ -23,6 +23,7 @@
 
 #include <Base/Interpreter.h>
 #include <Base/PlacementPy.h>
+#include <Base/VectorPy.h>
 #include <Base/GeometryPyCXX.h>
 #include <App/DocumentObjectPy.h>
 
@@ -228,6 +229,26 @@ PyObject* ViewProviderAssemblyPy::dragTriad(PyObject* args)
     vp->beginTriadDrag(*handle);
     vp->moveTriadTo(*static_cast<Base::PlacementPy*>(plc)->getPlacementPtr());
     vp->endTriadDrag();
+    Py_Return;
+}
+
+PyObject* ViewProviderAssemblyPy::moveTriadOriginTo(PyObject* args)
+{
+    PyObject* pnt = nullptr;
+    const char* subName = nullptr;
+    if (!PyArg_ParseTuple(args, "O!|s", &(Base::VectorPy::Type), &pnt, &subName)) {
+        return nullptr;
+    }
+    auto* vp = getViewProviderAssemblyPtr();
+    if (!vp->getDraggerVisibility()) {
+        PyErr_SetString(PyExc_RuntimeError, "the triad is not shown");
+        return nullptr;
+    }
+    Base::Vector3d point = *static_cast<Base::VectorPy*>(pnt)->getVectorPtr();
+    if (subName && *subName) {
+        point = vp->triadOriginPick(vp->getObject(), subName, point);
+    }
+    vp->moveTriadOriginTo(point);
     Py_Return;
 }
 

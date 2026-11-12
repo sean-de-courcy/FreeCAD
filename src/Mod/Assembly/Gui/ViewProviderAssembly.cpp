@@ -23,6 +23,7 @@
 
 
 #include <boost/core/ignore_unused.hpp>
+#include <QApplication>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -46,6 +47,7 @@
 #include <memory>
 #include <numbers>
 #include <set>
+#include <utility>
 #include <algorithm>
 #include <iterator>
 #include <Inventor/SoPath.h>
@@ -57,6 +59,9 @@
 #include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
 #include <App/Part.h>
+#include <App/GeoFeature.h>
+#include <App/Services.h>
+#include <Base/ServiceProvider.h>
 
 #include <Base/Quantity.h>
 #include <Base/Tools.h>
@@ -450,6 +455,7 @@ bool ViewProviderAssembly::setEdit(int mode)
 
 void ViewProviderAssembly::unsetEdit(int mode)
 {
+    endTriadOriginPress();
     if (mode == ViewProvider::Default) {
         canStartDragging = false;
         partMoving = false;
@@ -566,6 +572,10 @@ App::DocumentObject* ViewProviderAssembly::getActivePart() const
 
 bool ViewProviderAssembly::keyPressed(bool pressed, int key)
 {
+    if (key == SoKeyboardEvent::LEFT_ALT || key == SoKeyboardEvent::RIGHT_ALT) {
+        triadAltHeld = pressed;  // C10's Alt+click; the key stays the viewer's
+        return false;
+    }
     if (key == SoKeyboardEvent::ESCAPE) {
         if (isInEditMode()) {
             if (Gui::Control().activeDialog(nullptr)) {
@@ -787,6 +797,32 @@ bool ViewProviderAssembly::mouseButtonPressed(
 
     // Left Mouse button ****************************************************
     if (Button == 1) {
+        // FreeCAD-CH (ops#640, C10): Alt (Option) + click on a point of any part, while the triad
+        // shows, moves the triad alone there (snapped to an edge's end as the Transform dialog's
+        // pick does); the selection stays, and a ring then turns the parts about that point
+        if (!pressed && triadOriginPress) {
+            endTriadOriginPress();
+            return true;
+        }
+        const bool alt = triadAltHeld
+            || QApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+        if (pressed && alt && getDraggerVisibility() && !pressIsOnTriad(cursorPos, viewer)) {
+            const auto& pre = Gui::Selection().getPreselection();
+            auto* root = pre.Object.getObject();
+            if (root && pre.pSubName && *pre.pSubName) {
+                Base::Vector3d cursor(pre.x, pre.y, pre.z);
+                moveTriadOriginTo(triadOriginPick(root, pre.pSubName, cursor));
+                triadOriginPress = true;
+                // the selection root would add the clicked element on the release, before this
+                // view provider sees it: no selection until that release
+                auto* view = const_cast<Gui::View3DInventorViewer*>(viewer);
+                if (view && view->isSelectionEnabled()) {
+                    view->setSelectionEnabled(false);
+                    triadOriginViewer = view;
+                }
+                return true;
+            }
+        }
         // FreeCAD-CH (ops#640, C8): the triad shows whenever a free instance is selected, so a press
         // beside the triad still drags the part; a press on the triad is the dragger's.
         if (pressed && (!getDraggerVisibility() || !pressIsOnTriad(cursorPos, viewer))) {
@@ -1386,8 +1422,18 @@ void ViewProviderAssembly::showTriadAt(const Base::Placement& plc)
     setTriadCallbacks(true);
 }
 
+void ViewProviderAssembly::endTriadOriginPress()
+{
+    triadOriginPress = false;
+    if (triadOriginViewer) {
+        triadOriginViewer->setSelectionEnabled(true);
+    }
+    triadOriginViewer = nullptr;
+}
+
 void ViewProviderAssembly::endMoveDragger()
 {
+    endTriadOriginPress();
     closeTriadBox();
     if (triadDragging) {
         // the selection changed in the middle of a drag: keep what was moved
@@ -1565,6 +1611,51 @@ void ViewProviderAssembly::moveTriadTo(const Base::Placement& triad)
             pPlc->setValue(movePlc * movingObj.plc);
         }
     }
+}
+
+void ViewProviderAssembly::moveTriadOriginTo(const Base::Vector3d& point)
+{
+    if (!getDraggerVisibility()) {
+        return;
+    }
+    endTriadDrag();
+    // The parts' move starts again here: what they are at now (earlier drags and typed values
+    // of this selection included) is the new start, and the triad's move is the identity
+    for (auto& movingObj : docsToMove) {
+        if (auto* pPlc = movingObj.obj->getPlacementProperty()) {
+            movingObj.plc = pPlc->getValue();
+        }
+    }
+    Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+    showTriadAt(Base::Placement(point, asmPlc.getRotation()));
+}
+
+Base::Vector3d ViewProviderAssembly::triadOriginPick(
+    App::DocumentObject* root,
+    const std::string& subName,
+    const Base::Vector3d& cursor
+) const
+{
+    auto* provider = Base::provideService<App::SubObjectPlacementProvider>();
+    if (!provider || !root) {
+        return cursor;
+    }
+    App::SubObjectT pick(root, subName.c_str());
+    auto* leaf = pick.getSubObject();
+    if (!leaf) {
+        return cursor;
+    }
+    try {
+        // as TaskTransform::referencePlacementFromSelection: the element's owner to the world
+        Base::Placement global = App::GeoFeature::getGlobalPlacement(leaf, root, subName);
+        if (auto snapped = provider->snapPosition(pick, cursor, global.toMatrix())) {
+            return *snapped;
+        }
+    }
+    catch (const Base::Exception&) {
+        // no shape to snap to: the cursor
+    }
+    return cursor;
 }
 
 void ViewProviderAssembly::endTriadDrag()
