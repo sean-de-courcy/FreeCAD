@@ -2385,7 +2385,9 @@ class TestPipeCorners(unittest.TestCase):
         profile = self.profile(models.rectangle(-1, -1, 1, 1))
         pipe, seconds = self.timedPipe(spine, profile, Transition="Transformed", Refine=False)
         self.assertValidSolid(pipe)
-        self.assertAlmostEqual(pipe.Shape.Volume, 218.489, 3)
+        # SC7's readout (ops#640): C++ meshes at deflection 0.01 and 0.005 read 217.185 and 217.181;
+        # OCCT's default integration read 218.489 (0.6 % over)
+        self.assertAlmostEqual(pipe.Shape.Volume, 217.213, 3)
         self.assertLess(seconds, 10)
 
     def arcAfterACorner(self, degrees, tilt, radius, arc):

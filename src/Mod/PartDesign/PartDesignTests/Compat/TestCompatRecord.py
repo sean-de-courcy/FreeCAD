@@ -24,6 +24,7 @@
 and names that no corpus model holds yet, so that the reopen gate can't miss a change there.
 Designed shapes only."""
 
+import json
 import os
 import shutil
 import tempfile
@@ -180,3 +181,151 @@ class TestCompatRecord(unittest.TestCase):
             self.assertEqual(masker.tag(str(box.ID)), "{PartFile#Box}")
             self.assertEqual(masker.tag("-" + str(box.ID)), "{-PartFile#Box}")
         self.assertEqual(masker.tag(str(link.ID)), "{Link}")
+
+
+class TestCompatDeltas(unittest.TestCase):
+    """A generation's delta file (beta-compatibility 3.5, ops#640 SC7): an intended change of a
+    float, the record's old value and the build's new one, each within the entry's tolerance;
+    anything else still a difference. Records of a designed box, scaled by hand."""
+
+    def setUp(self):
+        doc = App.newDocument("CompatDeltaBox")
+        try:
+            doc.addObject("Part::Feature", "Shape").Shape = Part.makeBox(2, 3, 4)
+            doc.recompute()
+            self.old = CompatRecord.record(doc)
+        finally:
+            App.closeDocument(doc.Name)
+        self.new = json.loads(
+            json.dumps(self.old)
+        )
+        self.volume = self.old["objects"]["Shape"]["shape"]["volume"]  # 24 within 1e-15
+        self.new["objects"]["Shape"]["shape"]["volume"] = self.volume * (1 + 1e-6)
+
+    def lines(self, deltas, actual=None, allDeltas=True):
+        lines, _ = CompatRecord.compare(
+            self.old, actual or self.new, "recompute", deltas=deltas, allDeltas=allDeltas
+        )
+        return lines
+
+    def testWithoutADeltaTheChangeIsRed(self):
+        self.assertEqual(
+            [line.split(":")[0] for line in self.lines(None)], ["Shape.shape.volume"]
+        )
+
+    def testTheDeltaMadeOfTheChangeHoldsIt(self):
+        entries, others = CompatRecord.deltaEntries(self.old, self.new, "recompute")
+        self.assertEqual(others, [])
+        self.assertEqual(list(entries), ["Shape.shape.volume"])
+        self.assertEqual(entries["Shape.shape.volume"]["old"], self.volume)
+        self.assertEqual(self.lines(entries), [])
+
+    def testANewValueOffTheDeltaIsRed(self):
+        entries, _ = CompatRecord.deltaEntries(self.old, self.new, "recompute")
+        wrong = json.loads(
+            json.dumps(self.new)
+        )
+        wrong["objects"]["Shape"]["shape"]["volume"] = self.volume * (1 + 2e-6)
+        self.assertEqual(len(self.lines(entries, wrong)), 1)
+        self.assertIn("the delta's new value", self.lines(entries, wrong)[0])
+        # within the entry's own tolerance it holds (another platform's spread)
+        wrong["objects"]["Shape"]["shape"]["volume"] = self.volume * (1 + 1e-6) * (1 + 1e-11)
+        self.assertEqual(self.lines(entries, wrong), [])
+
+    def testADeltaOnAnotherOldValueIsRed(self):
+        entries = {"Shape.shape.volume": {"old": 25.0, "new": self.volume * (1 + 1e-6), "rel": 1e-9}}
+        self.assertIn("the delta's old value", self.lines(entries)[0])
+
+    def testAStaleDeltaIsRedUnlessNotAllAreCompared(self):
+        entries, _ = CompatRecord.deltaEntries(self.old, self.new, "recompute")
+        entries["Gone.shape.area"] = {"old": 1.0, "new": 2.0, "rel": 1e-9}
+        self.assertEqual(self.lines(entries), ["Gone.shape.area: a delta entry that nothing compared"])
+        self.assertEqual(self.lines(entries, allDeltas=False), [])
+
+    def testADeltaFileReads(self):
+        folder = tempfile.mkdtemp(prefix="compat-delta-")
+        try:
+            path = os.path.join(folder, "Model.delta.json")
+            body = {
+                "format": 1,
+                "issue": "ops#640",
+                "label": "compat-change",
+                "approved": "test",
+                "why": "test",
+                "changes": {"Model": {"Shape.shape.volume": {"old": 24.0, "new": 24.1}}},
+            }
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(body))
+            self.assertEqual(
+                CompatRecord.loadDeltas(folder, "Model"), body["changes"]
+            )
+            self.assertEqual(CompatRecord.loadDeltas(folder, "Other"), {})
+            body["label"] = "accepted"
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(body))
+            with self.assertRaises(ValueError):
+                CompatRecord.loadDeltas(folder, "Model")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+class TestCompatNamesMeasure(unittest.TestCase):
+    """A names line's `m=` (an area or length printed beside the name) compares within
+    CompatRecord.NAMES_MEASURE_REL, the rest of the line exactly; and a difference a delta can't
+    hold stops make_delta (the coordinator's ruling c742, ops#640)."""
+
+    LINE = "Face c=(1.0000,2.0000,3.0000) m={} : _;_;{{Box}};MLN;26;F;0;_;_"
+
+    def records(self, newMeasure, newName=None):
+        old = {"objects": {"Body": {"type": "PartDesign::Body", "names": [
+            self.LINE.format("10.0000"), "Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : -"]}}}
+        new = json.loads(json.dumps(old))
+        line = self.LINE.format(newMeasure)
+        new["objects"]["Body"]["names"][0] = newName and line.replace("{Box}", newName) or line
+        return old, new
+
+    def lines(self, old, new):
+        return CompatRecord.compare(old, new, "recompute")[0]
+
+    def testAMeasureWithinTheToleranceMatches(self):
+        self.assertEqual(self.lines(*self.records("10.0020")), [])  # 2e-4 relative
+
+    def testAMeasureBeyondTheToleranceIsRed(self):
+        lines = self.lines(*self.records("10.0200"))  # 2e-3 relative
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("Body.names: 1 lines gone, 1 new"), lines[0])
+
+    def testTheRestOfTheLineIsExact(self):
+        self.assertEqual(len(self.lines(*self.records("10.0000", "Cylinder"))), 1)
+
+    def testEqualLinesCountedDifferentlyAreRed(self):
+        old, new = self.records("10.0000")
+        new["objects"]["Body"]["names"].append(new["objects"]["Body"]["names"][0])
+        self.assertEqual(CompatRecord.unmatchedNameLines(
+            old["objects"]["Body"]["names"], new["objects"]["Body"]["names"]),
+            ([], [self.LINE.format("10.0000")]))
+
+    def testMakeDeltaStopsOnANamesChange(self):
+        from PartDesignTests.Compat import make_delta
+        import contextlib
+        import io
+
+        old, new = self.records("10.0200")
+        folder = tempfile.mkdtemp(prefix="compat_make_delta_")
+        try:
+            report, corpus = os.path.join(folder, "report"), os.path.join(folder, "corpus")
+            os.makedirs(report)
+            os.makedirs(os.path.join(corpus, "gen1"))
+            stem = "gen1-Model-alone.recompute.Doc"
+            for rec, kind in ((old, "expected"), (new, "actual")):
+                with open(os.path.join(report, f"{stem}.{kind}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = make_delta.main([report, corpus, "--issue", "ops#640", "--label",
+                                        "compat-neutral", "--approved", "test", "--why", "test"])
+            self.assertEqual(code, 1)
+            self.assertIn(f"not a delta: {stem}.expected.json: Body.names", out.getvalue())
+            self.assertEqual(os.listdir(os.path.join(corpus, "gen1")), [])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)

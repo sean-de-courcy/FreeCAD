@@ -196,6 +196,8 @@ class _Step:
             oracle = json.load(fh)
         # as saved (a recompute must give it) and as the saving build reopened it (an open must)
         self.saved = oracle["records"]
+        # the generation's intended changes (a compat-change or compat-neutral PR's delta file)
+        self.intended = CompatRecord.loadDeltas(genFolder, model)
         deltas = oracle.get("openedDelta", {})
         self.opened = {
             stem: CompatRecord.applyDelta(record, deltas.get(stem))
@@ -232,7 +234,12 @@ class _Step:
             if self.older:
                 compared = olderForm(*compared, atOpen=passName == "open")
             found, drift = CompatRecord.compare(
-                compared[0], compared[1], stage, names=names, touched=touched
+                compared[0],
+                compared[1],
+                stage,
+                names=names,
+                touched=touched,
+                deltas=self.intended.get(stem),
             )
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
@@ -310,7 +317,14 @@ class _Step:
             compared = (only(self.saved[stem], touched=False), actual)
             if self.older:
                 compared = olderForm(*compared)
-            found, drift = CompatRecord.compare(compared[0], compared[1], "recompute", names=names)
+            found, drift = CompatRecord.compare(
+                compared[0],
+                compared[1],
+                "recompute",
+                names=names,
+                deltas=self.intended.get(stem),
+                allDeltas=False,
+            )
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
         self.result["rollforward"] = {
@@ -722,6 +736,11 @@ def subsetCorpus(work, models, tamper=None, files=None):
             indent=1,
             sort_keys=True,
         )
+    # the models' delta files, beside the MANIFEST as in the generation
+    for model in kept:
+        delta = os.path.join(source, model + ".delta.json")
+        if os.path.isfile(delta):
+            shutil.copy2(delta, target)
     return os.path.join(work, "corpus")
 
 
@@ -795,8 +814,18 @@ class TestCompatCorpus(unittest.TestCase):
             info = manifest(folder)
             self.assertTrue(info["models"], f"{gen}: no model in its MANIFEST")
             listed = set(info["files"]) | {"MANIFEST"}
-            present = {f for f in os.listdir(folder) if not f.startswith(".")}
+            # a delta file sits beside the generation, outside its MANIFEST (3.5: the generation
+            # itself is never edited); it belongs to one of its models and reads
+            deltas = {f for f in os.listdir(folder) if f.endswith(".delta.json")}
+            present = {f for f in os.listdir(folder) if not f.startswith(".")} - deltas
             self.assertEqual(present, listed, f"{gen}: files not in its MANIFEST, or missing")
+            for fileName in sorted(deltas):
+                model = fileName[: -len(".delta.json")]
+                self.assertIn(model, info["models"], f"{gen}: {fileName} has no model")
+                changes = CompatRecord.loadDeltas(folder, model)
+                self.assertTrue(
+                    set(changes) <= set(info["models"][model]), f"{gen}: {fileName}'s files"
+                )
             for fileName, digest in info["files"].items():
                 with open(os.path.join(folder, fileName), "rb") as fh:
                     actual = hashlib.sha256(fh.read()).hexdigest()

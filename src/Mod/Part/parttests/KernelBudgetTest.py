@@ -135,7 +135,9 @@ class KernelBudgetTest(unittest.TestCase):
         cut = doc.addObject("Part::Cut", "Cut")
         cut.Base = box
         cut.Tool = ext
-        self.setLimit(0.3)
+        # A limit no machine meets, so the Pocket's stop doesn't depend on its speed: at 0.3 s a
+        # macOS runner finished the Pocket in time (ops#681). The Cut runs to its end under it
+        self.setLimit(1e-6)
         doc.recompute()
         self.assertTrue(cut.isValid(), cut.getStatusString())
         self.assertLess(cut.Shape.Volume, 60 * 60 * 5 - 100)
