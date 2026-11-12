@@ -2118,6 +2118,51 @@ class OverflowTest(unittest.TestCase):
         with self.assertRaises(Part.OCCError):
             base.makeFillet(8, edge)
 
+    def channel(self, wall):
+        # A U channel 20 long in z: left wall x -5..0, slot floor x 0..2 at y 0, right wall x 2..2+wall, up to y 10
+        base = (
+            Part.makeBox(5, 15, 20, V(-5, -5, 0))
+            .fuse([Part.makeBox(2, 5, 20, V(0, -5, 0)), Part.makeBox(wall, 15, 20, V(2, -5, 0))])
+            .removeSplitter()
+        )
+        return base, [edge_between(base, (0, 0, 0), (0, 0, 20))]
+
+    @staticmethod
+    def slotSection(kind, size):
+        # The dress-up's section (legs `size` on the floor and the left wall) inside the slot x 0..2
+        if kind == "Chamfer":
+            return 2 * size - 2
+        # a fillet's: under y = size - sqrt(size^2 - (size - x)^2), x 0..2; u = size - x
+        r = size
+        prim = lambda u: u / 2 * math.sqrt(r * r - u * u) + r * r / 2 * math.asin(u / r)
+        return 2 * r - (prim(r) - prim(r - 2))
+
+    def testConcaveThroughAThinWallIsClippedOrRefused(self):
+        # Integrator 11 T2: the slot's floor edge dressed up at 6, wider than the slot (2): the floor strip runs
+        # off the floor into the right wall. A wall 3 thick ends at x 5, so the strip goes on into the air
+        # (x 5..6). checkFusedRunOff's one sample per off face (in the wall) lets it pass, but the piece past
+        # the wall keeps part of the strip's contact face, so "a tool's face on a face next to its edge is
+        # left in the result" refuses it (loud). Onshape clips the dress-up by the wall's back face (oracle
+        # 9d): one solid with nothing past x 5, the base plus the section inside the slot.
+        for kind in ("Chamfer", "Fillet"):
+            with self.subTest(kind=kind):
+                base, edges = self.channel(3)
+                try:
+                    shape = self.dressUp(kind, base, 6, edges)
+                except Part.OCCError:
+                    continue
+                self.assertLessEqual(shape.BoundBox.XMax, 5 + 1e-6)
+                self.assertBuilt(shape, base.Volume + 20 * self.slotSection(kind, 6))
+
+    def testConcaveIntoAThickWallBuilds(self):
+        # The control: a wall 10 thick (x 2..12) holds the strip's end (x 6): it builds, the base plus the slot's section
+        for kind in ("Chamfer", "Fillet"):
+            with self.subTest(kind=kind):
+                base, edges = self.channel(10)
+                shape = self.dressUp(kind, base, 6, edges)
+                self.assertLessEqual(shape.BoundBox.XMax, 12 + 1e-6)
+                self.assertBuilt(shape, base.Volume + 20 * self.slotSection(kind, 6))
+
 
 def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
     """A keyhole-shaped wall (the native replica's #15, designed): the opening is a disc r 6.35
