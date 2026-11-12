@@ -2698,6 +2698,10 @@ struct ResyncSteps
     bool ownStep = false;
     bool recomputed = false;
     bool awaitingRecompute = false;
+    /// An open dialog's step held parts its lock kept the resync from making (the OK makes
+    /// them): its commit leaves the step awaiting them, so the first recompute after it (the
+    /// OK's) is still that edit's and makes them there (10.15, c750)
+    bool lockedDue = false;
 };
 
 ResyncSteps& resyncSteps(const App::Document& doc)
@@ -2753,6 +2757,9 @@ void resyncPartMirrors(const App::Document& constDoc)
         steps.awaitingRecompute = false;
     }
     const bool canMake = !doc.isStepLocked() && doc.hasPendingTransaction() && edits;
+    if (!due.empty() && doc.hasPendingTransaction()) {
+        steps.lockedDue = !canMake && doc.isStepLocked();  // made in the step itself, or awaited
+    }
     if (!canMake) {
         due.clear();
     }
@@ -2918,7 +2925,8 @@ void PartDesign::registerPartMirrorResync()
             }
         );
         d.signalCommitTransaction.connect([](const App::Document& doc) {
-            resyncSteps(doc).awaitingRecompute = needsRecompute(doc);
+            ResyncSteps& steps = resyncSteps(doc);
+            steps.awaitingRecompute = needsRecompute(doc) || std::exchange(steps.lockedDue, false);
         });
         // An input changed outside any step (a script's edit, not an undo, a rollback or a
         // compute): the next recompute is that edit's, in the last step (10.12 amendment point 2)
@@ -2936,6 +2944,7 @@ void PartDesign::registerPartMirrorResync()
         );
         d.signalAbortTransaction.connect([](const App::Document& doc) {
             resyncSteps(doc).awaitingRecompute = false;
+            resyncSteps(doc).lockedDue = false;
         });
         d.signalBecameStable.connect(&resyncPartMirrors);
     };
