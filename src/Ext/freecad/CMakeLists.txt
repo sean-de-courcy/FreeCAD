@@ -43,6 +43,7 @@ set(EXT_VARIABLES_FILES
     variables/copies.py
     variables/importer.py
     variables/importgui.py
+    variables/order.py
 )
 
 foreach (it ${EXT_VARIABLES_FILES})

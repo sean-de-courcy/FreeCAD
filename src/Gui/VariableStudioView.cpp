@@ -21,6 +21,7 @@
 
 #include <cstring>
 
+#include <QCheckBox>
 #include <QIcon>
 #include <QPointer>
 #include <QTimer>
@@ -29,6 +30,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentTabs.h>
 
 #include "BitmapFactory.h"
 #include "Document.h"
@@ -56,6 +58,24 @@ VariableStudioView::VariableStudioView(Gui::Document* doc, App::DocumentObject* 
     table = new DockWnd::VariablesView(nullptr, central, obj);
     table->setObjectName(QStringLiteral("VariableStudioTable"));
     layout->addWidget(table);
+    // Onshape's "Insert into all Part Studios and Assemblies" (VS8, Q9; polish 13 P18), on by
+    // default: off, the Part Studios and Assemblies see the studio only once they insert it
+    auto everywhere = new QCheckBox(tr("Insert into all Part Studios and Assemblies"), central);
+    everywhere->setObjectName(QStringLiteral("insertEverywhere"));
+    everywhere->setToolTip(
+        tr("On: every Part Studio and Assembly of the document uses these variables by #name. Off: "
+           "only those that insert this Variable Studio (Insert Variable Studio in the Variables "
+           "panel), and the other Variable Studios")
+    );
+    everywhere->setChecked(App::DocumentTabs::insertsEverywhere(obj));
+    connect(everywhere, &QCheckBox::toggled, this, [this](bool on) {
+        App::Document* document = getAppDocument();
+        App::DocumentObject* own = document ? document->getObject(studio.c_str()) : nullptr;
+        if (own && App::DocumentTabs::isVariableStudio(own)) {
+            App::DocumentTabs::setInsertsEverywhere(own, on);
+        }
+    });
+    layout->addWidget(everywhere);
     setCentralWidget(central);
     setWindowIcon(QIcon(BitmapFactory().pixmap("VarSet")));
     updateTitle();

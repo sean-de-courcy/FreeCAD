@@ -24,8 +24,13 @@
 
 #include <iostream>
 
+#include <algorithm>
+
 #include "VarSet.h"
 #include "DocumentObject.h"
+#include "DocumentTabs.h"
+#include "Expression.h"
+#include "ObjectIdentifier.h"
 
 using namespace App;
 
@@ -34,4 +39,45 @@ PROPERTY_SOURCE(App::VarSet, App::DocumentObject)
 const char* VarSet::getViewProviderName() const
 {
     return "Gui::ViewProviderVarSet";
+}
+
+std::string VarSet::orderError() const
+{
+    if (!DocumentTabs::isVariableStudio(this)) {
+        return {};
+    }
+    const std::vector<std::string> names = getDynamicPropertyNames();
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const Property* prop = getPropertyByName(names[i].c_str());
+        if (!prop) {
+            continue;
+        }
+        auto info = getExpression(ObjectIdentifier(*prop));
+        if (!info.expression) {
+            continue;
+        }
+        ExpressionDeps deps = info.expression->getDeps();
+        auto own = deps.find(const_cast<VarSet*>(this));
+        if (own == deps.end()) {
+            continue;
+        }
+        for (const auto& [used, paths] : own->second) {
+            auto at = std::find(names.begin(), names.end(), used);
+            if (at != names.end() && std::size_t(at - names.begin()) >= i) {
+                return "#" + names[i] + " uses #" + used + ", which is below it in "
+                    + Label.getValue() + ": a variable uses only those above it (move #" + used
+                    + " up)";
+            }
+        }
+    }
+    return {};
+}
+
+DocumentObjectExecReturn* VarSet::execute()
+{
+    std::string why = orderError();
+    if (!why.empty()) {
+        return new DocumentObjectExecReturn(why, this);
+    }
+    return DocumentObject::execute();
 }

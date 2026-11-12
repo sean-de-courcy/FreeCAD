@@ -551,3 +551,119 @@ class TestDocumentTabs(unittest.TestCase):
         top = [f for f in studio.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
         body.Placement.Base = App.Vector(0, 0, 5)
         self.assertIsNone(PartDesign.studioOriginFeature(sketch, top))
+
+
+class TestVariableStudioInsert(unittest.TestCase):
+    """Onshape's "Insert into all Part Studios and Assemblies" (VS8, Q9; polish 13 P18).
+
+    Designed model: Part Studio 1 (the top level) a Body with a 10 x 10 x 10 mm box; Part Studio 2
+    (an App::Part) a Body with a cylinder r 5, h 20; Variable Studio 1 (switch on) holds w = 10 mm;
+    Variable Studio 2 (switch off) holds z = 4 mm. Onshape: VS2 is absent from a Part Studio until
+    that Part Studio inserts it by hand; a Variable Studio sees the other studios.
+    """
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestDocumentTabsInsert")
+        self.doc = App.newDocument("TestDocumentTabsInsert")
+        doc = self.doc
+        body1 = doc.addObject("PartDesign::Body", "Body")
+        self.box = box(doc, body1)
+        studio2 = doc.addObject("App::Part", "Part")
+        studio2.Label = "Part Studio 2"
+        body2 = doc.addObject("PartDesign::Body", "Body001")
+        studio2.addObject(body2)
+        self.cylinder = cylinder(doc, body2)
+        self.vs1 = doc.addObject("App::VarSet", "VarSet")
+        self.vs1.Label = "Variable Studio 1"
+        Tabs.setVariableStudio(self.vs1)
+        self.vs1.addProperty("App::PropertyDistance", "w")
+        self.vs1.w = 10
+        self.vs2 = doc.addObject("App::VarSet", "VarSet001")
+        self.vs2.Label = "Variable Studio 2"
+        Tabs.setVariableStudio(self.vs2)
+        self.vs2.addProperty("App::PropertyDistance", "z")
+        self.vs2.z = 4
+        doc.recompute()
+
+    def tearDown(self):
+        for name in list(App.listDocuments()):
+            if name.startswith("TestDocumentTabsInsert"):
+                App.closeDocument(name)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def refused(self, obj, prop, text):
+        with self.assertRaises(Exception) as caught:
+            obj.setExpression(prop, text)
+        self.assertIsNone(dict(obj.ExpressionEngine).get(prop))
+        return str(caught.exception)
+
+    def testOnByDefault(self):
+        """A new Variable Studio inserts itself everywhere: both Part Studios use #w and #z."""
+        self.assertTrue(Tabs.insertsEverywhere(self.vs1))
+        self.assertTrue(Tabs.insertsEverywhere(self.vs2))
+        self.cylinder.setExpression("Radius", "#z")
+        self.box.setExpression("Length", "#w")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.cylinder.Shape.Volume, math.pi * 16 * 20, 6)
+        self.assertAlmostEqual(self.box.Shape.Volume, 1000, 6)
+
+    def testOffKeepsItOutOfThePartStudios(self):
+        """Off: #z is refused in both Part Studios, naming the studio; #w (on) still works; another
+        Variable Studio still uses #z."""
+        Tabs.setInsertsEverywhere(self.vs2, False)
+        self.assertFalse(Tabs.insertsEverywhere(self.vs2))
+        self.assertTrue(Tabs.insertsEverywhere(self.vs1))
+        message = self.refused(self.cylinder, "Radius", "#z")
+        self.assertIn("Variable Studio 2", message)
+        self.assertIn("not inserted", message)
+        self.refused(self.box, "Length", "#z * 2")
+        self.assertFalse(Tabs.sees(self.cylinder, self.vs2))
+        self.assertTrue(Tabs.sees(self.cylinder, self.vs1))
+        self.box.setExpression("Length", "#w")
+        self.vs1.addProperty("App::PropertyDistance", "q")
+        self.vs1.setExpression("q", "#z * 2")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.box.Shape.Volume, 1000, 6)
+        self.assertAlmostEqual(self.vs1.q.Value, 8, 9)
+
+    def testInsertedByHand(self):
+        """Inserted into Part Studio 2 by hand: #z works there (r 4: 320 pi), not in Part Studio
+        1; the insert taken back refuses it again; the switch on again: both see it."""
+        Tabs.setInsertsEverywhere(self.vs2, False)
+        Tabs.setInserted(self.doc, "Part", self.vs2.Name)
+        self.assertEqual(Tabs.insertedStudios(self.doc, "Part"), [self.vs2.Name])
+        self.assertEqual(Tabs.insertedStudios(self.doc, "*"), [])
+        self.cylinder.setExpression("Radius", "#z")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.cylinder.Shape.Volume, math.pi * 16 * 20, 6)
+        self.refused(self.box, "Length", "#z")
+        Tabs.setInserted(self.doc, "Part", self.vs2.Name, False)
+        self.assertEqual(Tabs.insertedStudios(self.doc, "Part"), [])
+        self.refused(self.cylinder, "Height", "#z")
+        Tabs.setInsertsEverywhere(self.vs2, True)
+        self.box.setExpression("Length", "#z")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.box.Shape.Volume, 400, 6)
+
+    def testSavedWithTheDocument(self):
+        """The switch and the insert are saved and read back."""
+        Tabs.setInsertsEverywhere(self.vs2, False)
+        Tabs.setInserted(self.doc, "Part", self.vs2.Name)
+        path = os.path.join(self.folder, "insert.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        vs2 = self.doc.getObject("VarSet001")
+        self.assertFalse(Tabs.insertsEverywhere(vs2))
+        self.assertTrue(Tabs.insertsEverywhere(self.doc.getObject("VarSet")))
+        self.assertEqual(Tabs.insertedStudios(self.doc, "Part"), ["VarSet001"])
+        self.refused(self.doc.getObject("Box"), "Length", "#z")
+
+    def testOnlyVariableStudiosHaveTheSwitch(self):
+        """A plain VarSet is seen everywhere and has no switch to turn off."""
+        plain = self.doc.addObject("App::VarSet", "Variables")
+        self.assertTrue(Tabs.insertsEverywhere(plain))
+        with self.assertRaises(TypeError):
+            Tabs.setInsertsEverywhere(plain, False)
+        with self.assertRaises(ValueError):
+            Tabs.setInserted(self.doc, "Part", "a,b")

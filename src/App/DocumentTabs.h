@@ -116,6 +116,27 @@ AppExport bool isVariableStudio(const DocumentObject* obj);
 /// Marks or unmarks an App::VarSet (of exactly that type) as a Variable Studio
 AppExport void setVariableStudio(DocumentObject* varSet, bool marked);
 
+/** Onshape's "Insert into all Part Studios and Assemblies" of a Variable Studio (VS8, Q9; polish
+ * 13, ops#640 P18): on by default. Off, the studio's variables are seen by #name only from the
+ * Variable Studios and from the tabs that inserted it by hand (setInserted()). Kept in the registry,
+ * so, as the marks, outside the undo history.
+ */
+AppExport bool insertsEverywhere(const DocumentObject* studio);
+AppExport void setInsertsEverywhere(DocumentObject* studio, bool on);
+/// The Variable Studios (internal names) the tab @p tab ("*": the implicit studio) inserted by hand
+AppExport std::vector<std::string> insertedStudios(const Document* doc, const std::string& tab);
+AppExport void setInserted(
+    Document* doc,
+    const std::string& tab,
+    const std::string& studio,
+    bool inserted
+);
+/// Whether the tab @p tab sees @p studio's variables: always for anything but a Variable Studio
+AppExport bool seesStudio(const std::string& tab, const DocumentObject* studio);
+/// Whether an expression of @p owner sees @p holder's variables by #name: seesStudio() of
+/// @p owner's tab
+AppExport bool sees(const DocumentObject* owner, const DocumentObject* holder);
+
 /// The lowest free "<base> N" (N from 1) among the labels of the document's tabs
 AppExport std::string nextLabel(const Document* doc, const std::string& base);
 

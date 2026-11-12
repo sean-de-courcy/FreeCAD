@@ -40,6 +40,7 @@ import FreeCADGui as Gui
 import Part
 
 from PySide import QtCore, QtGui, QtWidgets
+from PySide6.QtTest import QTest
 
 Tabs = App.DocumentTabs
 GuiTabs = Gui.DocumentTabs
@@ -382,6 +383,288 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertTrue(model.setData(self.index(view, "w", EXPRESSION), "20 mm"))
         self.doc.recompute()
         self.assertAlmostEqual(self.doc.getObject("Pad").Shape.Volume, 2000, 6)
+
+    # -- polish 13 (ops#640, decision 361): Onshape's Variable Studio rows P14-P19 ---------------
+
+    def dockPanel(self):
+        """The Variables dock, shown; returns its tree."""
+        panel = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Variables")
+        self.assertIsNotNone(panel, "no Variables panel")
+        dock = panel
+        while dock is not None and not isinstance(dock, QtWidgets.QDockWidget):
+            dock = dock.parentWidget()
+        self.assertIsNotNone(dock)
+        dock.show()
+        self.addCleanup(dock.hide)
+        pump(0.4)
+        return panel, panel.findChild(QtWidgets.QTreeView, "variablesTree")
+
+    def headerTexts(self, tree):
+        pump(0.4)
+        model = tree.model()
+        return [model.data(model.index(row, NAME)) for row in range(model.rowCount())]
+
+    def headerTip(self, tree, label):
+        model = tree.model()
+        for row in range(model.rowCount()):
+            index = model.index(row, NAME)
+            if model.data(index) == label:
+                return model.data(index, QtCore.Qt.ToolTipRole)
+        self.fail("no header " + label)
+
+    def testOneValueCell(self):
+        """P15, Onshape's VS1 and Q7: one Value cell. The Expression column is hidden; h = #w * 2
+        with w = 10 mm shows its value, 20 mm; the cell's editor holds the expression; typing
+        #w * 3 there makes h 30 mm (one undo step)."""
+        name, view = self.studio()
+        self.add(view, "w", "10 mm")
+        self.add(view, "h", "#w * 2")
+        varset = self.doc.getObject(name)
+        self.assertAlmostEqual(varset.h.Value, 20, 9)
+        tree = self.tree(view)
+        self.assertTrue(tree.isColumnHidden(EXPRESSION), "the Expression column shows")
+        self.assertFalse(tree.isColumnHidden(VALUE))
+        index = self.index(view, "h", VALUE)
+        self.assertAlmostEqual(App.Units.Quantity(index.data()).Value, 20, 6)
+        self.assertTrue(index.flags() & QtCore.Qt.ItemIsEditable, "the Value cell can't be edited")
+        tree.setCurrentIndex(index)
+        tree.edit(index)
+        editor = waitFor(lambda: tree.indexWidget(index))
+        self.assertIsNotNone(editor, "no editor on the Value cell")
+        self.assertEqual(editor.objectName(), "expressionEditor")
+        self.assertIn("#w", editor.text())
+        self.assertIn("2", editor.text())
+        editor.setText("#w * 3")
+        QTest.keyClick(editor, QtCore.Qt.Key_Return)
+        pump(0.4)
+        self.assertAlmostEqual(varset.h.Value, 30, 9)
+        self.assertAlmostEqual(App.Units.Quantity(self.index(view, "h", VALUE).data()).Value, 30, 6)
+        # A plain value in w's Value cell
+        index = self.index(view, "w", VALUE)
+        tree.setCurrentIndex(index)
+        tree.edit(index)
+        editor = waitFor(lambda: tree.indexWidget(index))
+        self.assertIsNotNone(editor)
+        editor.setText("15 mm")
+        QTest.keyClick(editor, QtCore.Qt.Key_Return)
+        pump(0.4)
+        self.doc.recompute()
+        self.assertAlmostEqual(varset.w.Value, 15, 9)
+        self.assertAlmostEqual(varset.h.Value, 45, 9)
+        self.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(varset.w.Value, 10, 9)
+        self.assertAlmostEqual(varset.h.Value, 30, 9)
+
+    def testPartStudioPanelStacksTheStudiosFirst(self):
+        """P19, Onshape's Q10: in a Part Studio the Variables panel shows one table per Variable
+        Studio first, in the tabs' order, headed by the studio's name ("Automatically referenced
+        Variable Studio"), then the other holders, here the Variables set made before them."""
+        plain = self.doc.addObject("App::VarSet", "Variables")
+        plain.addProperty("App::PropertyDistance", "q")
+        self.padStudioless()
+        first, view1 = self.studio()
+        self.add(view1, "a", "1 mm")
+        second, view2 = self.studio()
+        self.add(view2, "b", "2 mm")
+        self.doc.getObject(first).Label = "Dims"
+        self.doc.getObject(second).Label = "Holes"
+        self.assertTrue(GuiTabs.switchTo(self.doc, "*")[0])
+        pump(0.3)
+        _panel, tree = self.dockPanel()
+        self.assertEqual(self.headerTexts(tree), ["Dims", "Holes", "Variables"])
+        self.assertTrue(self.headerTip(tree, "Dims").startswith("Automatically referenced Variable Studio"))
+        # The tabs' order decides: Holes moved before Dims
+        order = Tabs.order(self.doc)
+        order.remove(second)
+        order.insert(order.index(first), second)
+        Tabs.setOrder(self.doc, order)
+        self.doc.recompute()
+        self.assertTrue(GuiTabs.switchTo(self.doc, second)[0])
+        pump(0.2)
+        self.assertTrue(GuiTabs.switchTo(self.doc, "*")[0])
+        self.assertEqual(self.headerTexts(tree), ["Holes", "Dims", "Variables"])
+
+    def testDeleteWithoutWarning(self):
+        """P14, Onshape's VS Q5: Delete in a Variable Studio removes a used variable at once, with
+        no warning; the Pad of #w goes in error; undo brings both back."""
+        name, view = self.studio()
+        self.add(view, "w", "10 mm")
+        _body, pad = self.padStudio()
+        self.assertTrue(GuiTabs.switchTo(self.doc, name)[0])
+        pump(0.3)
+        boxes = []
+
+        def closeBoxes():
+            for widget in QtWidgets.QApplication.topLevelWidgets():
+                if isinstance(widget, QtWidgets.QMessageBox) and widget.isVisible():
+                    boxes.append(widget.objectName())
+                    widget.reject()
+
+        timer = QtCore.QTimer()
+        timer.timeout.connect(closeBoxes)
+        timer.start(200)
+        try:
+            tree = self.tree(view)
+            tree.setCurrentIndex(self.index(view, "w", NAME))
+            self.action(view, "deleteVariable").trigger()
+            pump(0.5)
+        finally:
+            timer.stop()
+        self.assertEqual(boxes, [], "Delete asked first")
+        self.assertNotIn("w", self.doc.getObject(name).PropertiesList)
+        self.doc.recompute()
+        self.assertFalse(pad.isValid(), "the Pad of #w stayed valid")
+        self.undo()
+        self.doc.recompute()
+        self.assertIn("w", self.doc.getObject(name).PropertiesList)
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, 6)
+
+    def testInsertEverywhereSwitch(self):
+        """P18, Onshape's VS8 and Q9: the switch shows on, by default. Off, the studio is absent
+        from Part Studio 1's panel and #z is refused there; Insert Variable Studio in the panel
+        brings it in (header "Variable Studio"), and #z works."""
+        self.padStudioless()
+        name, view = self.studio()
+        self.add(view, "z", "4 mm")
+        switch = view.findChild(QtWidgets.QCheckBox, "insertEverywhere")
+        self.assertIsNotNone(switch, "no Insert into all Part Studios and Assemblies switch")
+        self.assertEqual(switch.text(), "Insert into all Part Studios and Assemblies")
+        self.assertTrue(switch.isChecked())
+        switch.click()
+        pump(0.2)
+        self.assertFalse(Tabs.insertsEverywhere(self.doc.getObject(name)))
+        label = self.doc.getObject(name).Label
+        self.assertTrue(GuiTabs.switchTo(self.doc, "*")[0])
+        pump(0.3)
+        panel, tree = self.dockPanel()
+        self.assertNotIn(label, self.headerTexts(tree))
+        body = self.doc.getObject("Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        with self.assertRaises(Exception):
+            box.setExpression("Length", "#z")
+        menu = panel.findChild(QtWidgets.QMenu, "insertStudioMenu")
+        self.assertIsNotNone(menu, "no Insert Variable Studio menu")
+        menu.aboutToShow.emit()
+        entries = [a for a in menu.actions() if a.objectName() == name]
+        self.assertEqual(len(entries), 1, [a.text() for a in menu.actions()])
+        self.assertFalse(entries[0].isChecked())
+        entries[0].trigger()
+        pump(0.4)
+        self.assertEqual(Tabs.insertedStudios(self.doc, "*"), [name])
+        self.assertIn(label, self.headerTexts(tree))
+        self.assertTrue(self.headerTip(tree, label).startswith("Variable Studio"))
+        box.setExpression("Length", "#z")
+        box.Width = box.Height = 10
+        self.doc.recompute()
+        self.assertAlmostEqual(box.Shape.Volume, 400, 6)
+        # Back on: the switch shows it
+        self.assertTrue(GuiTabs.switchTo(self.doc, name)[0])
+        pump(0.3)
+        switch.click()
+        pump(0.2)
+        self.assertTrue(Tabs.insertsEverywhere(self.doc.getObject(name)))
+
+    def order(self, view):
+        """The table's own rows, top to bottom."""
+        pump(0.3)
+        model = self.tree(view).model()
+        names = []
+        for row in range(model.rowCount()):
+            index = model.index(row, NAME)
+            if model.data(index, KIND_ROLE) == VARSET_KIND:
+                names.append(model.data(index))
+        return names
+
+    def testTypeDropdownPerRow(self):
+        """P16, Onshape's VS1: the type is a dropdown in the row. n (a Number, 3) set to Length
+        becomes 3 mm in its place, its user follows (a Pad of #w + #n: 1300 mm^3); one undo
+        step takes it back."""
+        name, view = self.studio()
+        self.add(view, "w", "10 mm")
+        self.add(view, "n", "3", "Number")
+        self.add(view, "k", "2", "Number")
+        _body, pad = self.padStudio()
+        pad.setExpression("Length", "#w + #n")
+        self.doc.recompute()
+        self.assertAlmostEqual(pad.Shape.Volume, 1300, 6)
+        self.assertTrue(GuiTabs.switchTo(self.doc, name)[0])
+        pump(0.3)
+        varset = self.doc.getObject(name)
+        tree = self.tree(view)
+        index = self.index(view, "n", TYPE)
+        self.assertTrue(index.flags() & QtCore.Qt.ItemIsEditable, "the Type cell can't be edited")
+        tree.setCurrentIndex(index)
+        tree.edit(index)
+        box = waitFor(lambda: tree.indexWidget(index))
+        self.assertIsInstance(box, QtWidgets.QComboBox)
+        items = [box.itemText(i) for i in range(box.count())]
+        for label in ("Length", "Angle", "Number"):
+            self.assertIn(label, items)
+        self.assertEqual(box.currentText(), "Number")
+        box.setCurrentIndex(box.findText("Length"))
+        box.activated.emit(box.currentIndex())
+        pump(0.5)
+        self.assertEqual(varset.getTypeIdOfProperty("n"), "App::PropertyDistance")
+        self.assertAlmostEqual(varset.n.Value, 3, 9)
+        self.assertEqual(self.order(view), ["w", "n", "k"])
+        self.assertEqual(self.rows(view)["n"][0], "Length")
+        self.doc.recompute()
+        self.assertTrue(pad.isValid())
+        self.assertAlmostEqual(pad.Shape.Volume, 1300, 6)
+        self.undo()
+        self.assertEqual(varset.getTypeIdOfProperty("n"), "App::PropertyFloat")
+        self.assertEqual(self.order(view), ["w", "n", "k"])
+
+    def testMoveUpDownAndTheOrderRule(self):
+        """P17, Onshape's VS Q5: Move up / Move down in the row menu, and the order matters: h =
+        #w * 2 moved above w fails the studio and the Pad of #h / 2 (ERROR); w moved up again
+        heals both (1000 mm^3). Each move is one undo step."""
+        name, view = self.studio()
+        self.add(view, "w", "10 mm")
+        self.add(view, "h", "#w * 2")
+        _body, pad = self.padStudio()
+        pad.setExpression("Length", "#h / 2")
+        self.doc.recompute()
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, 6)
+        self.assertTrue(GuiTabs.switchTo(self.doc, name)[0])
+        pump(0.3)
+        varset = self.doc.getObject(name)
+        tree = self.tree(view)
+        up = self.action(view, "moveUp")
+        down = self.action(view, "moveDown")
+        self.assertIn(up, tree.actions(), "Move up is not in the row menu")
+        self.assertIn(down, tree.actions())
+        tree.setCurrentIndex(self.index(view, "w", NAME))
+        pump(0.1)
+        self.assertFalse(up.isEnabled(), "Move up on the first row")
+        self.assertTrue(down.isEnabled())
+        tree.setCurrentIndex(self.index(view, "h", NAME))
+        pump(0.1)
+        self.assertTrue(up.isEnabled())
+        self.assertFalse(down.isEnabled(), "Move down on the last row")
+        up.trigger()
+        pump(0.5)
+        self.assertEqual(self.order(view), ["h", "w"])
+        self.doc.recompute()
+        self.assertIn("Invalid", varset.State)
+        self.assertFalse(pad.isValid(), "the Pad of #h stayed valid with h above w")
+        # The current row followed h: w is below it, Move down on w heals it
+        tree.setCurrentIndex(self.index(view, "w", NAME))
+        pump(0.1)
+        up.trigger()
+        pump(0.5)
+        self.assertEqual(self.order(view), ["w", "h"])
+        self.doc.recompute()
+        self.assertNotIn("Invalid", varset.State)
+        self.assertTrue(pad.isValid())
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, 6)
+        self.undo()
+        self.assertEqual(self.order(view), ["h", "w"])
+        self.undo()
+        self.assertEqual(self.order(view), ["w", "h"])
+        self.doc.recompute()
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, 6)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "DocumentObject.h"
 
 namespace App
@@ -40,6 +42,16 @@ public:
     ~VarSet() override = default;
 
     const char* getViewProviderName() const override;
+
+    /** FreeCAD-CH (ops#640, polish 13 P17): Onshape's order rule in a Variable Studio (VS Q5): a
+     * variable may use only those above it, so one that uses a variable below it fails the
+     * studio, naming both, and the features using the studio fail with it (Onshape: the variable
+     * is invalid and an extrude using it fails). Move up / Move down heals it.
+     */
+    DocumentObjectExecReturn* execute() override;
+
+    /// The order rule's breach in a Variable Studio: "#h uses #w, which is below it ...", or ""
+    std::string orderError() const;
 };
 
 }  // namespace App

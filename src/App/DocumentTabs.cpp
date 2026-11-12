@@ -90,13 +90,18 @@ Base::Type datumType()
     return typeNamed(type, "Part::Datum");
 }
 
-/// The registry, parsed: "order=a,b\nvariables=c,d\nimplicit=<label>"
+/** The registry, parsed: "order=a,b\nvariables=c,d\nimplicit=<label>", and since polish 13
+ * (ops#640, P18) "local=c" (the Variable Studios whose "Insert into all Part Studios and
+ * Assemblies" is off) and "inserted=*:c,Part:c" (the tabs that inserted one by hand, tab:studio)
+ */
 struct Registry
 {
     std::vector<std::string> order;
     std::vector<std::string> variables;
     std::string implicit;
     bool hasImplicit = false;
+    std::vector<std::string> local;
+    std::vector<std::string> inserted;
 };
 
 std::vector<std::string> splitNames(const std::string& text)
@@ -150,6 +155,12 @@ Registry readRegistry(const Document* doc)
         else if (key == "variables") {
             registry.variables = splitNames(value);
         }
+        else if (key == "local") {
+            registry.local = splitNames(value);
+        }
+        else if (key == "inserted") {
+            registry.inserted = splitNames(value);
+        }
         else if (key == "implicit") {
             registry.implicit = value;
             registry.hasImplicit = true;
@@ -170,6 +181,12 @@ void writeRegistry(Document* doc, const Registry& registry)
     }
     std::string text = "order=" + joinNames(order) + "\nvariables="
         + joinNames(registry.variables);
+    if (!registry.local.empty()) {
+        text += "\nlocal=" + joinNames(registry.local);
+    }
+    if (!registry.inserted.empty()) {
+        text += "\ninserted=" + joinNames(registry.inserted);
+    }
     if (registry.hasImplicit) {
         std::string label = registry.implicit;
         std::replace(label.begin(), label.end(), '\n', ' ');
@@ -512,6 +529,104 @@ void DocumentTabs::setVariableStudio(DocumentObject* varSet, bool marked)
     writeRegistry(varSet->getDocument(), registry);
 }
 
+bool DocumentTabs::insertsEverywhere(const DocumentObject* studio)
+{
+    if (!isVariableStudio(studio)) {
+        return true;
+    }
+    const Registry registry = readRegistry(studio->getDocument());
+    return std::find(registry.local.begin(), registry.local.end(), studio->getNameInDocument())
+        == registry.local.end();
+}
+
+void DocumentTabs::setInsertsEverywhere(DocumentObject* studio, bool on)
+{
+    if (!isVariableStudio(studio)) {
+        throw Base::TypeError("Not a Variable Studio");
+    }
+    Registry registry = readRegistry(studio->getDocument());
+    const std::string name = studio->getNameInDocument();
+    auto it = std::find(registry.local.begin(), registry.local.end(), name);
+    if (!on && it == registry.local.end()) {
+        registry.local.push_back(name);
+    }
+    else if (on && it != registry.local.end()) {
+        registry.local.erase(it);
+    }
+    else {
+        return;
+    }
+    writeRegistry(studio->getDocument(), registry);
+}
+
+std::vector<std::string> DocumentTabs::insertedStudios(const Document* doc, const std::string& tab)
+{
+    std::vector<std::string> names;
+    const std::string prefix = tab + ':';
+    for (const auto& entry : readRegistry(doc).inserted) {
+        if (entry.starts_with(prefix) && entry.size() > prefix.size()) {
+            names.push_back(entry.substr(prefix.size()));
+        }
+    }
+    return names;
+}
+
+void DocumentTabs::setInserted(
+    Document* doc,
+    const std::string& tab,
+    const std::string& studio,
+    bool inserted
+)
+{
+    const char* separators = ":,\n";
+    if (!doc || tab.empty() || studio.empty() || tab.find_first_of(separators) != std::string::npos
+        || studio.find_first_of(separators) != std::string::npos) {
+        throw Base::ValueError("A tab's name and a Variable Studio's name");
+    }
+    Registry registry = readRegistry(doc);
+    const std::string entry = tab + ':' + studio;
+    auto it = std::find(registry.inserted.begin(), registry.inserted.end(), entry);
+    if (inserted && it == registry.inserted.end()) {
+        registry.inserted.push_back(entry);
+    }
+    else if (!inserted && it != registry.inserted.end()) {
+        registry.inserted.erase(it);
+    }
+    else {
+        return;
+    }
+    writeRegistry(doc, registry);
+}
+
+bool DocumentTabs::seesStudio(const std::string& tab, const DocumentObject* studio)
+{
+    if (!isVariableStudio(studio)) {
+        return true;
+    }
+    const Document* doc = studio->getDocument();
+    const Registry registry = readRegistry(doc);
+    const std::string name = studio->getNameInDocument();
+    if (std::find(registry.local.begin(), registry.local.end(), name) == registry.local.end()) {
+        return true;  // inserted into all Part Studios and Assemblies
+    }
+    // Onshape (Q8, Q9): a Variable Studio sees the others; a Part Studio or an Assembly sees one
+    // whose switch is off only once it inserted it
+    Tab found;
+    if (tab == name || (findTab(doc, tab, found) && found.kind == Kind::VariableStudio)) {
+        return true;
+    }
+    return std::find(registry.inserted.begin(), registry.inserted.end(), tab + ':' + name)
+        != registry.inserted.end();
+}
+
+bool DocumentTabs::sees(const DocumentObject* owner, const DocumentObject* holder)
+{
+    if (!owner || !owner->isAttachedToDocument() || owner == holder) {
+        return true;
+    }
+    return seesStudio(tabNameOf(owner), holder);
+}
+
 std::string DocumentTabs::nextLabel(const Document* doc, const std::string& base)
 {
     std::set<std::string> labels;
@@ -837,6 +952,31 @@ public:
             &Module::pySetVariableStudio,
             "setVariableStudio(varset, marked=True)"
         );
+        add_varargs_method(
+            "insertsEverywhere",
+            &Module::pyInsertsEverywhere,
+            "insertsEverywhere(studio): its Insert into all Part Studios and Assemblies switch"
+        );
+        add_varargs_method(
+            "setInsertsEverywhere",
+            &Module::pySetInsertsEverywhere,
+            "setInsertsEverywhere(studio, on)"
+        );
+        add_varargs_method(
+            "insertedStudios",
+            &Module::pyInsertedStudios,
+            "insertedStudios(doc, tab) -> the studios the tab inserted by hand"
+        );
+        add_varargs_method(
+            "setInserted",
+            &Module::pySetInserted,
+            "setInserted(doc, tab, studio, inserted=True)"
+        );
+        add_varargs_method(
+            "sees",
+            &Module::pySees,
+            "sees(owner, holder): whether owner's expressions see holder's variables by #name"
+        );
         add_varargs_method("nextLabel", &Module::pyNextLabel, "nextLabel(doc, base) -> '<base> N'");
         add_varargs_method(
             "members",
@@ -999,6 +1139,76 @@ private:
             throw Py::TypeError(e.what());
         }
         return Py::None();
+    }
+    Py::Object pyInsertsEverywhere(const Py::Tuple& args)
+    {
+        PyObject* pyObj = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pyObj)) {
+            throw Py::Exception();
+        }
+        return Py::Boolean(insertsEverywhere(objectArg(pyObj)));
+    }
+    Py::Object pySetInsertsEverywhere(const Py::Tuple& args)
+    {
+        PyObject* pyObj = nullptr;
+        PyObject* on = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "OO!", &pyObj, &PyBool_Type, &on)) {
+            throw Py::Exception();
+        }
+        try {
+            setInsertsEverywhere(objectArg(pyObj), on == Py_True);
+        }
+        catch (const Base::Exception& e) {
+            throw Py::TypeError(e.what());
+        }
+        return Py::None();
+    }
+    Py::Object pyInsertedStudios(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* tab = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "Os", &pyDoc, &tab)) {
+            throw Py::Exception();
+        }
+        Py::List list;
+        for (const auto& name : insertedStudios(documentArg(pyDoc), tab)) {
+            list.append(Py::String(name));
+        }
+        return list;
+    }
+    Py::Object pySetInserted(const Py::Tuple& args)
+    {
+        PyObject* pyDoc = nullptr;
+        const char* tab = nullptr;
+        const char* studio = nullptr;
+        PyObject* inserted = Py_True;
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "Oss|O!",
+                &pyDoc,
+                &tab,
+                &studio,
+                &PyBool_Type,
+                &inserted
+            )) {
+            throw Py::Exception();
+        }
+        try {
+            setInserted(documentArg(pyDoc), tab, studio, inserted == Py_True);
+        }
+        catch (const Base::Exception& e) {
+            throw Py::ValueError(e.what());
+        }
+        return Py::None();
+    }
+    Py::Object pySees(const Py::Tuple& args)
+    {
+        PyObject* pyOwner = nullptr;
+        PyObject* pyHolder = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pyOwner, &pyHolder)) {
+            throw Py::Exception();
+        }
+        return Py::Boolean(sees(objectArg(pyOwner), objectArg(pyHolder)));
     }
     Py::Object pyNextLabel(const Py::Tuple& args)
     {

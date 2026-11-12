@@ -39,6 +39,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentTabs.h>  // FreeCAD-CH (ops#640, polish 13)
 #include <App/ExpressionParser.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Property.h>
@@ -1136,7 +1137,12 @@ private:
         if (!doc) {
             return;
         }
-        const auto variables = App::VariableLookup::listVariables(doc);
+        // FreeCAD-CH (ops#640, polish 13 P18): not a Variable Studio this object's tab doesn't see
+        const App::DocumentObject* owner = doc->getObject(currentObj.c_str());
+        auto variables = App::VariableLookup::listVariables(doc);
+        std::erase_if(variables, [owner](const App::VariableRef& variable) {
+            return owner && !App::DocumentTabs::sees(owner, variable.holder);
+        });
         std::map<std::string, int> holdersPerName;
         for (const auto& variable : variables) {
             ++holdersPerName[variable.name];

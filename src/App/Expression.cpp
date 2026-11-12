@@ -50,6 +50,7 @@
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/ObjectIdentifier.h>
+#include <App/DocumentTabs.h>
 #include <App/Part.h>
 #include <App/PropertyUnits.h>
 #include <App/VariableChoice.h>
@@ -4039,6 +4040,32 @@ std::string resolveVariable(const App::DocumentObject* owner, const std::string&
         throw ParserError(
             fmt::format("no variable named {} in this document (in expression '{}')", name, buffer)
         );
+    }
+    // FreeCAD-CH (ops#640, polish 13 P18): a Variable Studio whose "Insert into all Part Studios
+    // and Assemblies" is off is seen only from the Variable Studios and the tabs that inserted it
+    // (Onshape's Q9: absent from a Part Studio until inserted by hand)
+    {
+        std::vector<App::VariableRef> seen;
+        const App::DocumentObject* hidden = nullptr;
+        for (const auto& ref : refs) {
+            if (App::DocumentTabs::sees(owner, ref.holder)) {
+                seen.push_back(ref);
+            }
+            else if (!hidden) {
+                hidden = ref.holder;
+            }
+        }
+        if (seen.empty()) {
+            throw ParserError(fmt::format(
+                "#{} is in the Variable Studio {}, which is not inserted here: insert it from the "
+                "Variables panel, or turn on its \"Insert into all Part Studios and Assemblies\" "
+                "(in expression '{}')",
+                name,
+                hidden->Label.getValue(),
+                buffer
+            ));
+        }
+        refs = std::move(seen);
     }
     // FreeCAD-CH (notes/derived-design.md, slice 2): Part Studio variables, Onshape's Variable
     // feature. A holder inside a part studio (an App::Part) is seen only from that studio, and

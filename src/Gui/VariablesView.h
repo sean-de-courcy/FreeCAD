@@ -112,6 +112,20 @@ public:
     {
         return scope;
     }
+    /** FreeCAD-CH (ops#640, polish 13 P19): the dock's rows as the tab @a name sees them: its
+     * Variable Studios first, one table each in the tabs' order, and none it doesn't see (P18);
+     * empty: every holder in the document's order.
+     */
+    void setTab(const std::string& name)
+    {
+        tab = name;
+    }
+    /// Onshape's one Value cell (P15): a Variable Studio's table edits the expression in the Value
+    /// column, which shows the value (the Expression column is hidden there)
+    bool oneValueCell() const
+    {
+        return !scope.empty();
+    }
     /// What adds the variable a name typed in the new row names; false and the error if none
     std::function<bool(const QString& name, QString& error)> addNamed;
 
@@ -164,15 +178,24 @@ public:
     /// Number no unit), or empty.
     static QString unitMismatch(App::DocumentObject* obj, App::Property* prop);
 
+    /// A Variable Studio row's types (Onshape's dropdown, polish 13 P16): {label, property type}
+    static const std::vector<std::pair<QString, const char*>>& rowTypes();
+    /** Moves the row's variable up (@a offset -1) or down (+1), Onshape's Move up / Move down
+     * (polish 13 P17), as one transaction; false and lastError() when it can't.
+     */
+    bool moveRow(const QModelIndex& index, int offset);
+
 private:
     void addHolderRows(const App::DocumentObject* holder, const std::vector<std::string>& names);
     void addNewRow(const App::Document* doc);
     bool rename(const QModelIndex& index, const QString& newName);
     bool setExpression(const QModelIndex& index, const QString& text);
+    bool retype(const QModelIndex& index, const QString& type);
 
     QString error;
     QString warning;
     std::string scope;
+    std::string tab;
 };
 
 /// The Expression column's editor: an expression line edit with `#` completion.
@@ -273,7 +296,13 @@ private:
     /// The import dialog for Onshape exports, several files at once (ops#317 PR G1).
     void importVariables();
     void deleteVariable();
+    void moveVariable(int offset);
     void showUses();
+    /// The dock's "Insert Variable Studio" menu: the studios whose switch is off, checked where the
+    /// active tab inserted them (polish 13 P18)
+    void fillInsertMenu();
+    /// The tab the dock's rows follow: the active one under the typed tabs, else none
+    std::string activeTab() const;
     QString usesText(const QModelIndex& index, int* count) const;
 
     App::Document* currentDocument() const;
@@ -294,6 +323,9 @@ private:
     QAction* usesAction;
     QAction* describeAction;
     QAction* importAction;
+    QAction* insertStudioAction = nullptr;
+    QAction* moveUpAction = nullptr;
+    QAction* moveDownAction = nullptr;
     std::string documentName;
     /// The Variable Studio the panel is scoped to (its internal name), or empty: the dock
     std::string studioName;

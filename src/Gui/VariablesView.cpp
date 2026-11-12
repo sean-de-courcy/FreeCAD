@@ -35,6 +35,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFileInfo>
@@ -45,6 +46,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -57,6 +59,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentTabs.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
 #include <App/PropertyStandard.h>
@@ -75,6 +78,7 @@
 #include "BitmapFactory.h"
 #include "Command.h"
 #include "DockWindowManager.h"
+#include "DocumentTabBar.h"
 #include "ForkKeymap.h"
 #include "Document.h"
 #include "ExpressionCompleter.h"
@@ -759,6 +763,27 @@ void VariablesModel::rebuild(const App::Document* doc)
             return group.first->getNameInDocument() == scope;
         });
     }
+    else if (!tab.empty()) {
+        // FreeCAD-CH (ops#640, polish 13 P19, P18): as Onshape's Variable table (Q10), the
+        // Variable Studios the tab sees come first, one table each in the tabs' order; one the tab
+        // doesn't see (its "Insert into all Part Studios and Assemblies" off) is absent (Q9)
+        std::erase_if(groups, [this](const auto& group) {
+            return !App::DocumentTabs::seesStudio(tab, group.first);
+        });
+        std::vector<std::string> studios;
+        for (const auto& each : App::DocumentTabs::tabs(doc)) {
+            if (each.kind == App::DocumentTabs::Kind::VariableStudio) {
+                studios.push_back(each.name());
+            }
+        }
+        auto rank = [&studios](const App::DocumentObject* holder) {
+            auto it = std::find(studios.begin(), studios.end(), holder->getNameInDocument());
+            return it == studios.end() ? studios.size() : std::size_t(it - studios.begin());
+        };
+        std::stable_sort(groups.begin(), groups.end(), [&rank](const auto& a, const auto& b) {
+            return rank(a.first) < rank(b.first);
+        });
+    }
     bool newRow = !scope.empty();
     for (const auto& [holder, names] : groups) {
         if (newRow && holder->getNameInDocument() != scope) {
@@ -810,6 +835,14 @@ void VariablesModel::addHolderRows(
     header->setData(docName, DocumentRole);
     header->setData(holderName, HolderRole);
     header->setToolTip(QString::fromLatin1(holder->getNameInDocument()));
+    if (App::DocumentTabs::isVariableStudio(holder)) {
+        // Onshape's header icon tooltip (Q10): how the studio came into the tab
+        header->setToolTip(
+            (App::DocumentTabs::insertsEverywhere(holder) ? tr("Automatically referenced Variable Studio")
+                                                          : tr("Variable Studio"))
+            + QLatin1Char('\n') + QString::fromLatin1(holder->getNameInDocument())
+        );
+    }
     // FreeCAD-CH (ops#317 PR G2, ops#640 round 5): an attached copy's header says whether its
     // source changed since the last Refresh (design section 3.2); its orphans are flagged.
     CopyState state;
@@ -887,6 +920,9 @@ void VariablesModel::addHolderRows(
         auto exprItem = new QStandardItem(expression);
         exprItem->setData(expression, EditTextRole);
         auto valueItem = new QStandardItem(valueText(prop));
+        if (oneValueCell()) {
+            valueItem->setData(expression, EditTextRole);  // P15: edited as the expression
+        }
         auto descriptionItem = new QStandardItem(descriptionLine(description));
         descriptionItem->setData(description, EditTextRole);
         auto sourceItem = new QStandardItem(
@@ -943,6 +979,12 @@ Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
     }
     if (kind(index) == VarSetKind && index.column() == DescriptionColumn) {
         result |= Qt::ItemIsEditable;  // an alias has no description
+    }
+    if (oneValueCell() && kind(index) != HeaderKind && index.column() == ValueColumn) {
+        result |= Qt::ItemIsEditable;  // P15: the Value cell edits the expression
+    }
+    if (oneValueCell() && kind(index) == VarSetKind && index.column() == TypeColumn) {
+        result |= Qt::ItemIsEditable;  // P16: a dropdown per row
     }
     return result;
 }
@@ -1005,8 +1047,11 @@ bool VariablesModel::setData(const QModelIndex& index, const QVariant& value, in
     if (index.column() == NameColumn) {
         return rename(index, value.toString().trimmed());
     }
-    if (index.column() == ExpressionColumn) {
+    if (index.column() == ExpressionColumn || (oneValueCell() && index.column() == ValueColumn)) {
         return setExpression(index, value.toString().trimmed());
+    }
+    if (oneValueCell() && index.column() == TypeColumn && kind(index) == VarSetKind) {
+        return retype(index, value.toString());
     }
     if (index.column() == DescriptionColumn && kind(index) == VarSetKind) {
         if (value.toString() == index.data(EditTextRole).toString()) {
@@ -1127,6 +1172,99 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
         return false;
     }
     return runEdit(obj->getDocument(), "Set " + name, commands, error);
+}
+
+const std::vector<std::pair<QString, const char*>>& VariablesModel::rowTypes()
+{
+    // The Add dialog's types: Onshape's Length, Angle and Number, and its Any as Yes/No and Text
+    static const std::vector<std::pair<QString, const char*>> types {
+        {tr("Length"), "App::PropertyDistance"},
+        {tr("Angle"), "App::PropertyAngle"},
+        {tr("Number"), "App::PropertyFloat"},
+        {tr("Yes/No"), "App::PropertyBool"},
+        {tr("Text"), "App::PropertyString"},
+    };
+    return types;
+}
+
+namespace
+{
+/// `[u'a', u'b']`: @a obj's variables in their order, for freecad.variables.order
+std::string orderList(const App::DocumentObject* obj)
+{
+    std::string list = "[";
+    for (const auto& name : obj->getDynamicPropertyNames()) {
+        list += (list.size() > 1 ? ", " : "") + pyString(name);
+    }
+    return list + "]";
+}
+}  // namespace
+
+bool VariablesModel::retype(const QModelIndex& index, const QString& type)
+{
+    App::DocumentObject* obj = holder(index);
+    App::Property* prop = property(index);
+    if (!obj || !prop) {
+        error = tr("The variable is gone.");
+        return false;
+    }
+    const auto& types = rowTypes();
+    auto it = std::find_if(types.begin(), types.end(), [&type](const auto& entry) {
+        return type == QLatin1String(entry.second) || type == entry.first;
+    });
+    if (it == types.end()) {
+        error = tr("No type %1").arg(type);
+        return false;
+    }
+    if (variableType(prop) == it->first) {
+        return true;  // a Length (a Distance or a Length) stays as it is
+    }
+    const std::string name = index.data(VariableRole).toString().toStdString();
+    std::vector<std::string> commands {
+        "from freecad.variables import order as _order",
+        "_order.retype(" + pyObject(obj) + ", " + orderList(obj) + ", " + pyString(name) + ", '"
+            + it->second + "')",
+    };
+    // Its users read it again at the edit's recompute
+    for (const auto& use : App::VariableLookup::uses(prop)) {
+        if (use.user && use.user->isAttachedToDocument() && use.user != obj) {
+            commands.push_back(pyObject(use.user) + ".touch()");
+        }
+    }
+    return runEdit(obj->getDocument(), "Type of " + name, commands, error);
+}
+
+bool VariablesModel::moveRow(const QModelIndex& index, int offset)
+{
+    error.clear();
+    App::DocumentObject* obj = holder(index);
+    if (!obj || kind(index) != VarSetKind || isReadOnly(index)) {
+        error = tr("Only a Variable Studio's own variables move.");
+        return false;
+    }
+    const std::string name = index.data(VariableRole).toString().toStdString();
+    const std::vector<std::string> names = obj->getDynamicPropertyNames();
+    auto it = std::find(names.begin(), names.end(), name);
+    if (it == names.end()) {
+        error = tr("The variable is gone.");
+        return false;
+    }
+    const auto position = it - names.begin() + offset;
+    if (position < 0 || position >= static_cast<std::ptrdiff_t>(names.size())) {
+        return false;
+    }
+    std::vector<std::string> commands {
+        "from freecad.variables import order as _order",
+        "_order.move(" + pyObject(obj) + ", " + orderList(obj) + ", " + pyString(name) + ", "
+            + std::to_string(offset) + ")",
+        pyObject(obj) + ".touch()",
+    };
+    return runEdit(
+        obj->getDocument(),
+        (offset < 0 ? "Move up " : "Move down ") + name,
+        commands,
+        error
+    );
 }
 
 bool VariablesModel::editCommands(
@@ -1330,7 +1468,23 @@ QWidget* VariablesDelegate::createEditor(
         });
         return nullptr;
     }
-    if (index.column() != VariablesModel::ExpressionColumn) {
+    auto variables = qobject_cast<const VariablesModel*>(index.model());
+    if (variables && variables->oneValueCell() && index.column() == VariablesModel::TypeColumn) {
+        // Onshape's type dropdown per row (polish 13 P16): a choice commits at once
+        auto box = new QComboBox(parent);
+        box->setObjectName(QStringLiteral("typeEditor"));
+        for (const auto& [label, type] : VariablesModel::rowTypes()) {
+            box->addItem(label, QString::fromLatin1(type));
+        }
+        connect(box, &QComboBox::activated, this, [this, box] {
+            Q_EMIT const_cast<VariablesDelegate*>(this)->commitData(box);
+            Q_EMIT const_cast<VariablesDelegate*>(this)->closeEditor(box);
+        });
+        return box;
+    }
+    const bool valueCell = variables && variables->oneValueCell()
+        && index.column() == VariablesModel::ValueColumn;
+    if (index.column() != VariablesModel::ExpressionColumn && !valueCell) {
         return QStyledItemDelegate::createEditor(parent, option, index);
     }
     auto editor = new ExpressionLineEdit(parent);
@@ -1358,6 +1512,11 @@ bool VariablesDelegate::eventFilter(QObject* object, QEvent* event)
 
 void VariablesDelegate::setEditorData(QWidget* editor, const QModelIndex& index) const
 {
+    if (auto box = qobject_cast<QComboBox*>(editor)) {
+        int found = box->findText(index.data(Qt::DisplayRole).toString());
+        box->setCurrentIndex(found);  // -1 for a type the list hasn't (an Integer, an Area)
+        return;
+    }
     auto lineEdit = qobject_cast<QLineEdit*>(editor);
     if (!lineEdit) {
         QStyledItemDelegate::setEditorData(editor, index);
@@ -1378,6 +1537,18 @@ void VariablesDelegate::setModelData(
     const QModelIndex& index
 ) const
 {
+    if (auto box = qobject_cast<QComboBox*>(editor)) {
+        if (box->currentIndex() < 0) {
+            return;
+        }
+        if (model->setData(index, box->currentData(), Qt::EditRole)) {
+            Q_EMIT committed();
+        }
+        else {
+            Q_EMIT commitFailed(index, QString());
+        }
+        return;
+    }
     auto lineEdit = qobject_cast<QLineEdit*>(editor);
     if (!lineEdit) {
         QStyledItemDelegate::setModelData(editor, model, index);
@@ -1484,6 +1655,24 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
             runGui(copyCall("locate", copy));
         }
     });
+    // FreeCAD-CH (ops#640, polish 13 P18): Onshape's "Insert Variable Studio" in a Part Studio's
+    // Variable table (Q9): a Variable Studio whose "Insert into all Part Studios and Assemblies" is
+    // off comes into the active tab only once inserted here
+    if (studioName.empty()) {  // a Variable Studio sees every other: nothing to insert
+        auto insertMenu = new QMenu(this);
+        insertMenu->setObjectName(QStringLiteral("insertStudioMenu"));
+        connect(insertMenu, &QMenu::aboutToShow, this, &VariablesView::fillInsertMenu);
+        insertStudioAction = toolBar->addAction(tr("Insert Variable Studio"));
+        insertStudioAction->setObjectName(QStringLiteral("insertStudio"));
+        insertStudioAction->setToolTip(
+            tr("Insert into this tab a Variable Studio whose \"Insert into all Part Studios and "
+               "Assemblies\" is off")
+        );
+        insertStudioAction->setMenu(insertMenu);
+        connect(insertStudioAction, &QAction::triggered, this, [this, insertMenu] {
+            insertMenu->popup(QCursor::pos());
+        });
+    }
     // FreeCAD-CH (ops#640): the toolbar's text actions don't set the panel's width (a dock 441 px
     // wide took 185 px from the 3D view in round 5): what doesn't fit goes to its overflow button,
     // and every action is in the list's context menu too
@@ -1522,6 +1711,8 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
         // The studio itself is every own row's source; the Onshape import makes copies, which
         // the dock lists
         tree->setColumnHidden(VariablesModel::SourceColumn, true);
+        // Onshape's one Value cell (polish 13 P15): the expression while edited, the value shown
+        tree->setColumnHidden(VariablesModel::ExpressionColumn, true);
         importAction->setVisible(false);
         tree->setRootIsDecorated(false);
         // Onshape's "Insert Variable Studio" (VS8): here another file's VarSet, as a copy that
@@ -1548,6 +1739,20 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
     tree->addAction(copyAction);
     tree->addAction(refreshAction);
     tree->addAction(locateAction);
+    if (!studioName.empty()) {
+        // Onshape's row menu (VS Q5, polish 13 P17): Move up / Move down; the order matters
+        moveUpAction = new QAction(tr("Move up"), this);
+        moveUpAction->setObjectName(QStringLiteral("moveUp"));
+        connect(moveUpAction, &QAction::triggered, this, [this] { moveVariable(-1); });
+        moveDownAction = new QAction(tr("Move down"), this);
+        moveDownAction->setObjectName(QStringLiteral("moveDown"));
+        connect(moveDownAction, &QAction::triggered, this, [this] { moveVariable(1); });
+        tree->addAction(moveUpAction);
+        tree->addAction(moveDownAction);
+    }
+    if (insertStudioAction) {
+        tree->addAction(insertStudioAction);
+    }
     layout->addWidget(tree);
 
     hint = new QLabel(
@@ -1719,6 +1924,12 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
     connections.emplace_back(Application::Instance->signalDeleteDocument.connect(
         std::bind(&VariablesView::onDeleteDocument, this, sp::_1)
     ));
+    if (studioName.empty()) {
+        // polish 13 P19: the rows follow the active tab
+        connections.emplace_back(Application::Instance->signalActivateView.connect(
+            [this](const Gui::MDIView*) { scheduleRebuild(); }
+        ));
+    }
 
     if (Gui::Document* active = Application::Instance->activeDocument();
         active && studioName.empty()) {
@@ -1888,6 +2099,7 @@ void VariablesView::rebuild()
         }
     }
 
+    model->setTab(activeTab());
     model->rebuild(currentDocument());
 
     for (int row = 0; row < model->rowCount(); ++row) {
@@ -1940,6 +2152,21 @@ void VariablesView::updateActions()
     }
     if (auto action = findChild<QAction*>(QStringLiteral("copyFromFreeCAD"))) {
         action->setEnabled(currentDocument() != nullptr);
+    }
+    if (moveUpAction && moveDownAction) {
+        App::DocumentObject* obj = variable ? VariablesModel::holder(current) : nullptr;
+        std::vector<std::string> names;
+        if (obj && obj == studio() && !VariablesModel::isReadOnly(current)) {
+            names = obj->getDynamicPropertyNames();
+        }
+        const std::string name = current.data(VariablesModel::VariableRole).toString().toStdString();
+        auto it = std::find(names.begin(), names.end(), name);
+        moveUpAction->setEnabled(it != names.end() && it != names.begin());
+        moveDownAction->setEnabled(it != names.end() && it + 1 != names.end());
+    }
+    if (insertStudioAction) {
+        insertStudioAction->setVisible(Gui::DocumentTabs::isOn());
+        insertStudioAction->setEnabled(!activeTab().empty());
     }
     // A copy's variable can't be deleted or described while the copy is attached (ops#317).
     bool readOnly = VariablesModel::isReadOnly(current);
@@ -2581,7 +2808,9 @@ void VariablesView::deleteVariable()
             }
         }
     }
-    if (count > 0) {
+    // Onshape's Delete in a Variable Studio doesn't warn (VS Q5; polish 13 P14): its uses fail at
+    // the recompute, as there. The dock still lists them first.
+    if (count > 0 && studioName.empty()) {
         QMessageBox box(
             QMessageBox::Warning,
             tr("Delete variable"),
@@ -2610,6 +2839,79 @@ void VariablesView::deleteVariable()
         return;
     }
     showMessage(QString(), false);
+}
+
+void VariablesView::moveVariable(int offset)
+{
+    QModelIndex current = tree->currentIndex();
+    const QString name = current.data(VariablesModel::VariableRole).toString();
+    const QString holder = current.sibling(current.row(), 0).data(VariablesModel::HolderRole).toString();
+    const int column = current.column();
+    if (!model->moveRow(current, offset)) {
+        showMessage(model->lastError(), !model->lastError().isEmpty());
+        return;
+    }
+    showMessage(QString(), false);
+    // The row follows the variable to its new place
+    rebuild();
+    for (int row = 0; row < model->rowCount(); ++row) {
+        QModelIndex index = model->index(row, column);
+        if (index.data(VariablesModel::VariableRole).toString() == name
+            && index.sibling(row, 0).data(VariablesModel::HolderRole).toString() == holder) {
+            tree->setCurrentIndex(index);
+        }
+    }
+    updateActions();
+}
+
+std::string VariablesView::activeTab() const
+{
+    if (!studioName.empty() || !Gui::DocumentTabs::isOn()) {
+        return {};
+    }
+    App::Document* doc = currentDocument();
+    return doc ? Gui::DocumentTabs::activeTab(doc) : std::string();
+}
+
+void VariablesView::fillInsertMenu()
+{
+    auto menu = findChild<QMenu*>(QStringLiteral("insertStudioMenu"));
+    if (!menu) {
+        return;
+    }
+    menu->clear();
+    App::Document* doc = currentDocument();
+    const std::string tab = activeTab();
+    if (!doc || tab.empty()) {
+        return;
+    }
+    std::string docName = doc->getName();
+    for (const auto& each : App::DocumentTabs::tabs(doc)) {
+        if (each.kind != App::DocumentTabs::Kind::VariableStudio || !each.object
+            || App::DocumentTabs::insertsEverywhere(each.object) || each.name() == tab) {
+            continue;
+        }
+        const std::vector<std::string> inserted = App::DocumentTabs::insertedStudios(doc, tab);
+        const std::string name = each.name();
+        QAction* action = menu->addAction(QString::fromUtf8(each.object->Label.getValue()));
+        action->setObjectName(QString::fromLatin1(name.c_str()));
+        action->setCheckable(true);
+        action->setChecked(std::find(inserted.begin(), inserted.end(), name) != inserted.end());
+        connect(action, &QAction::toggled, this, [this, docName, tab, name](bool on) {
+            App::Document* document = App::GetApplication().getDocument(docName.c_str());
+            if (!document || !document->getObject(name.c_str())) {
+                return;
+            }
+            App::DocumentTabs::setInserted(document, tab, name, on);
+            scheduleRebuild();
+        });
+    }
+    if (menu->isEmpty()) {
+        QAction* none = menu->addAction(
+            tr("No Variable Studio to insert: every one is inserted into all Part Studios")
+        );
+        none->setEnabled(false);
+    }
 }
 
 void VariablesView::importVariables()
