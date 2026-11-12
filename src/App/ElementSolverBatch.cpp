@@ -118,6 +118,24 @@ DigestCache& digestCache()
     return cache;
 }
 
+// FREECAD_CH_DIGEST_CACHE, or empty
+std::string digestCacheMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_DIGEST_CACHE") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_DIGEST_CACHE");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
 // Whether this thread's recompute keeps digests now (the cache's mutex held)
 bool digestCacheActive(const DigestCache& cache)
 {
@@ -132,8 +150,7 @@ PlacementDigestScope::PlacementDigestScope()
     std::lock_guard<std::mutex> lock(cache.mutex);
     if (cache.depth == 0) {
         cache.owner = std::this_thread::get_id();
-        const char* mode = std::getenv("FREECAD_CH_DIGEST_CACHE");
-        const std::string_view text(mode ? mode : "");
+        const std::string text = digestCacheMode();
         cache.mode = text == "off" ? DigestCache::Off
             : text == "verify"     ? DigestCache::Verify
                                    : DigestCache::On;
