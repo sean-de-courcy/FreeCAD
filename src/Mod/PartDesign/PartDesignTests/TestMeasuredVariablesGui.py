@@ -189,7 +189,11 @@ class TestMeasuredVariablesGui(unittest.TestCase):
         self.chooseType(dialog, kind_text)
         dialog.findChild(QtWidgets.QDialogButtonBox).button(QtWidgets.QDialogButtonBox.Ok).click()
         pump(0.3)
-        error = dialog.findChild(QtWidgets.QLabel, "error") if dialog.isVisible() else None
+        import shiboken6
+
+        # The Add dialog deletes itself on OK (macOS real-window run, measured variables 3)
+        open_ = shiboken6.isValid(dialog) and dialog.isVisible()
+        error = dialog.findChild(QtWidgets.QLabel, "error") if open_ else None
         self.assertIsNone(error and error.text() or None, error and error.text())
         panel = waitFor(lambda: self.gui.current)
         self.assertIsNotNone(panel, "no measured variable dialog")
@@ -404,7 +408,7 @@ class TestMeasuredVariablesGui(unittest.TestCase):
                            and e.BoundBox.XMax < 1e-6 and e.BoundBox.ZMax < 1e-6)
         panel.refs = []
         self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, short))
-        self.assertTrue(panel.accept())
+        self.assertTrue(panel.accept(), panel.errorLabel.text())
         pump(0.2)
         self.assertAlmostEqual(holder.w.Value, 10, places=6)
 
