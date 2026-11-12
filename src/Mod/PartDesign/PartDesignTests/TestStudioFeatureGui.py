@@ -1137,8 +1137,8 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
         """P without later features: New -> Add deletes P (scope empty, "No merge scope selected");
         back to New makes it again with the same id; OK. Then Add with A ticked (the tool apart
         from A): Onshape H1a makes the region a new part, and the OK is the command that makes it
-        (P6p): a leftover part, its own undo step after the edit's; undo leaves the edit's loud
-        failure, a second undo brings P back whole, redo takes it again."""
+        (P6p): a leftover part, in the edit's own undo step (10.12, c750); one undo brings P back
+        whole, redo brings the leftover back with its id."""
         owner, made = self.makeE()
         pid = made.StudioPartId
         undo = self.doc.UndoCount
@@ -1160,19 +1160,17 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
         self.choose("Add")
         self.tick("A", True)
         self.close(ok=True)
-        self.assertEqual(self.doc.UndoCount, undo + 2)
+        # The leftover is made in the edit's own step (c750: the edit's transaction holds the
+        # change), never a step of its own after it
+        self.assertEqual(self.doc.UndoCount, undo + 1)
         [left] = self.madeParts(owner)
+        leftId = left.StudioPartId
         self.assertEqual(left.StudioParentId, "")
         self.assertAlmostEqual(left.Shape.Volume, self.PV, places=4)
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertVolumes(A=4000)
 
-        self.doc.undo()
-        self.doc.recompute()
-        self.assertEqual(self.madeParts(owner), [])
-        self.assertFalse(owner.isValid())
-        self.assertIn("touches no part", owner.getStatusString())
-        self.assertVolumes(A=4000)
+        # One undo takes the edit and its leftover together: P is back whole, nothing loud
         self.doc.undo()
         self.doc.recompute()
         [back] = self.madeParts(owner)
@@ -1180,10 +1178,15 @@ class TestLeavingNewGui(StudioDialog, unittest.TestCase):
         self.assertAlmostEqual(back.Shape.Volume, self.PV, places=4)
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertEqual(PartDesign.studioScopeIds(owner), [pid])
+        self.assertVolumes(A=4000)
+        # Redo brings the edit and its leftover back, the same part
         self.doc.redo()
         self.doc.recompute()
-        self.assertEqual(self.madeParts(owner), [])
-        self.assertFalse(owner.isValid())
+        [again] = self.madeParts(owner)
+        self.assertEqual(again.StudioPartId, leftId)
+        self.assertEqual(again.StudioParentId, "")
+        self.assertAlmostEqual(again.Shape.Volume, self.PV, places=4)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertVolumes(A=4000)
 
 

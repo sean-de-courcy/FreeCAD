@@ -3162,6 +3162,16 @@ bool TaskDlgFeatureParameters::accept()
             App::Document* document = feature->getDocument();
             const bool own = !document->hasPendingTransaction();
             if (own) {
+                // resetEdit() committed the edit's step under the open dialog's lock, where the
+                // resync makes nothing (10.12, c750). A recompute now, outside any transaction,
+                // records what the resync makes into that step (10.15): the edit and its
+                // leftovers and pieces are one undo step. What it can't make (Redo not empty)
+                // the step below makes, as before
+                feature->touch();
+                for (auto step : PartDesign::StudioList::stepsOf(feature)) {
+                    step->touch();
+                }
+                Gui::cmdAppDocument(document, "recompute()");
                 document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
             }
             // Not its own, the edit's step: then a refusal fails the OK as a whole
