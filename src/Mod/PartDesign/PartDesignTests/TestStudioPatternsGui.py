@@ -7,6 +7,12 @@
 # that can't copy an original (one acting on two parts, an Up to last one...) says why in its
 # Features field (TestStudioPatterns has the rules).
 #
+# T1a (notes/parts-design.md 10.16): the pattern a command makes in a listed studio is a studio
+# feature (an owner) outside every Body, in one step with its list entry and its steps (Cancel
+# leaves nothing); its native panel edits the owner: Features takes studio features and members of
+# any part of the studio, the direction or plane offers the studio's own origin, and there is no
+# merge-scope field. A step that can't pattern its part says why in the Features field.
+#
 # Designed geometry only: two plates in the studio S, P (x 0..60, y 0..20) and Q (x 0..60,
 # y 40..60), 10 high; Hole, an r3 cut 5 deep at (10, 10) on P; Across, a 4 x 50 cut 3 deep over
 # both plates.
@@ -27,6 +33,13 @@ from PartDesignTests.TestStudioPatterns import newStudio
 
 PLATE = 60 * 20 * 10
 HOLE = math.pi * 9 * 5
+ACROSS = 4 * 15 * 3  # Across's cut in each plate
+
+
+def isOwnerPattern(obj, typeId="PartDesign::LinearPattern"):
+    """A pattern of typeId that is no step (a T1a owner, or an in-Body pattern of an unlisted
+    document)."""
+    return obj.TypeId == typeId and getattr(obj, "StudioOwner", None) is None
 
 
 def flushDeletes():
@@ -99,10 +112,25 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
         settle()
 
-    def pattern(self):
-        found = [o for o in self.doc.Objects if o.TypeId == "PartDesign::LinearPattern"]
+    def pattern(self, typeId="PartDesign::LinearPattern"):
+        found = [o for o in self.doc.Objects if isOwnerPattern(o, typeId)]
         self.assertEqual(len(found), 1, [o.Name for o in found])
         return found[0]
+
+    def cancel(self):
+        cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
+        self.assertIsNotNone(cancel, "no Cancel button")
+        cancel.click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays open")
+        self.doc.recompute()
+
+    def step(self, owner, part):
+        return PartDesign.studioStepOf(owner, self.doc.getObject(part))
+
+    def assertTip(self, part, volume):
+        body = self.doc.getObject(part)
+        self.assertTrue(body.Tip.isValid(), f"{body.Tip.Name}: {body.Tip.getStatusString()}")
+        self.assertAlmostEqual(body.Tip.Shape.Volume, volume, places=3, msg=part)
 
     def accept(self):
         ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
@@ -140,8 +168,9 @@ class TestStudioPatternsGui(unittest.TestCase):
         pattern.Offset = 10
         self.doc.recompute()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
-        self.assertEqual(self.P.Tip, pattern)
-        self.assertAlmostEqual(pattern.Shape.Volume, PLATE - 2 * HOLE - 4 * 15 * 3, places=3)
+        # T1a: a studio feature; its step in P is P's Tip
+        self.assertEqual(self.P.Tip, self.step(pattern, "P"))
+        self.assertTip("P", PLATE - 2 * HOLE - ACROSS)
 
     def testFacePickStandsForTheStudioFeature(self):
         """With nothing selected the Features field opens armed; a pick of the hole's wall in the
@@ -158,17 +187,24 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.assertEqual(pattern.Originals, [])
 
     def testRefusalShowsInTheField(self):
-        """Across (on P and Q) picked: the pattern takes it, fails, and its Features field says why;
+        """T1a: Bosses (an Add on P and on Q) picked: the pattern takes it and fails in Onshape's
+        words (Q2: an Add over two parts with Reapply off), and its Features field says why;
         accepted red, an edit again says it too."""
+        sk = studioSketch(
+            self.doc, self.S, "BossesSk", rects=((40, 5, 44, 9), (40, 45, 44, 49)), z=10
+        )
+        bosses = makeOwner(self.doc, self.S, "Pad", "Bosses", sk, ("P", "Q"), Length=2)
+        self.doc.recompute()
         self.runTool("PartDesign_LinearPattern")
         pattern = self.pattern()
         field = self.field()
         self.assertTrue(waitFor(lambda: armed(field)))
-        self.pick(self.across)
-        self.assertEqual(pattern.Originals, [self.across])
+        self.pick(bosses)
+        self.assertEqual(pattern.Originals, [bosses])
         self.assertFalse(pattern.isValid())
-        self.assertIn("Across", statusOf(field))
+        self.assertIn("Bosses", statusOf(field))
         self.assertIn("2 parts", statusOf(field))
+        self.assertIn("PATTERN_SWITCH_TO_PER_INSTANCE", statusOf(field))
         self.accept()
         self.assertFalse(pattern.isValid())
         Gui.getDocument(self.doc.Name).setEdit(pattern.Name)
@@ -182,7 +218,7 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.runTool("PartDesign_LinearPattern", self.hole)
         pattern = self.pattern()
         self.accept()
-        volume = pattern.Shape.Volume
+        volume = self.P.Shape.Volume
         Gui.getDocument(self.doc.Name).setEdit(pattern.Name)
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()))
         settle()
@@ -194,7 +230,130 @@ class TestStudioPatternsGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
         self.doc.recompute()
         self.assertEqual(pattern.Originals, [self.hole])
-        self.assertAlmostEqual(pattern.Shape.Volume, volume, places=4)
+        self.assertAlmostEqual(self.P.Shape.Volume, volume, places=4)
+
+    # ------------------------------------------------------------------------------ T1a
+    def testCommandMakesAnOwnerOverParts(self):
+        """Across (on P and Q) selected, Linear pattern: a studio feature outside every Body, last
+        in the list, its direction the studio's X axis; OK: a step in each part, each plate cut
+        twice (O7); one undo step, whose undo leaves the document as it was."""
+        undo = self.doc.UndoCount
+        names = sorted(o.Name for o in self.doc.Objects)
+        before = {p: self.doc.getObject(p).Shape.Volume for p in "PQ"}
+        self.runTool("PartDesign_LinearPattern", self.across)
+        pattern = self.pattern()
+        self.assertEqual(pattern.getParentGeoFeatureGroup(), self.S)
+        self.assertIsNone(pattern.getParentGeoFeatureGroup().getParentGeoFeatureGroup())
+        self.assertEqual(list(studioList(self.doc).Entries)[-1], pattern)
+        self.assertEqual(pattern.Originals, [self.across])
+        self.assertEqual(pattern.Direction[0], self.S.Origin.OriginFeatures[0])
+        self.accept()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        for part in "PQ":
+            step = self.step(pattern, part)
+            self.assertIsNotNone(step, part)
+            self.assertEqual(step.TypeId, "PartDesign::LinearPattern")
+            self.assertEqual(self.doc.getObject(part).Tip, step)
+        # Onshape's defaults: two instances 25 apart along x
+        self.assertTip("P", PLATE - HOLE - 2 * ACROSS)
+        self.assertTip("Q", PLATE - 2 * ACROSS)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        for p in "PQ":
+            self.assertAlmostEqual(self.doc.getObject(p).Shape.Volume, before[p], places=4)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertTip("Q", PLATE - 2 * ACROSS)
+
+    def testCancelLeavesNothing(self):
+        """Hole selected, Linear pattern, Cancel: no object, no list entry, no undo step."""
+        undo = self.doc.UndoCount
+        names = sorted(o.Name for o in self.doc.Objects)
+        entries = [e.Name for e in studioList(self.doc).Entries]
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        self.pattern()
+        self.cancel()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertEqual([e.Name for e in studioList(self.doc).Entries], entries)
+        self.assertEqual(self.doc.UndoCount, undo)
+        self.assertTip("P", PLATE - HOLE - ACROSS)
+
+    def testFeaturesTakesAFeatureOfAnotherPart(self):
+        """Made on the Hole (P), the Features field takes the Hole on Q (a Features-list row);
+        OK: a step in each part, each patterning only its own original."""
+        sk = studioSketch(self.doc, self.S, "HoleQSk", z=10, circles=((10, 50, 3),))
+        holeQ = makeOwner(self.doc, self.S, "Pocket", "HoleQ", sk, ("Q",), Length=5)
+        self.doc.recompute()
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        pattern = self.pattern()
+        field = self.field()
+        field.setProperty("armed", True)
+        pump(0.1)
+        self.assertTrue(waitFor(lambda: armed(field)), "the field isn't armed")
+        self.pick(holeQ)
+        self.assertEqual(pattern.Originals, [self.hole, holeQ])
+        self.assertEqual(
+            [entries(field).item(i).text() for i in range(entries(field).count())],
+            ["Hole", "HoleQ"],
+        )
+        self.accept()
+        pattern.Offset = 15  # the copies clear of Across (x 30..34)
+        self.doc.recompute()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(list(self.step(pattern, "P").Originals), [self.step(self.hole, "P")])
+        self.assertEqual(list(self.step(pattern, "Q").Originals), [self.step(holeQ, "Q")])
+        self.assertTip("P", PLATE - 2 * HOLE - ACROSS)
+        self.assertTip("Q", PLATE - 2 * HOLE - ACROSS)
+
+    def testPanelOnTheOwner(self):
+        """The Linear panel on the owner: its direction box offers the studio's axes, and there
+        is no merge-scope field (no Result box); the Mirror panel offers the studio's planes."""
+        self.runTool("PartDesign_LinearPattern", self.hole)
+        self.pattern()
+        main = Gui.getMainWindow()
+        combo = main.findChild(QtWidgets.QComboBox, "comboDirection")
+        self.assertIsNotNone(combo, "no direction box")
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        self.assertTrue(any("X" in t for t in texts), texts)
+        self.assertTrue(any("Y" in t for t in texts), texts)
+        for name in ("studioScopeList", "resultCombo", "studioMergeAll"):
+            widget = main.findChild(QtWidgets.QWidget, name)
+            self.assertTrue(widget is None or not widget.isVisible(), name)
+        self.cancel()
+        self.runTool("PartDesign_Mirrored", self.hole)
+        mirror = self.pattern("PartDesign::Mirrored")
+        self.assertEqual(mirror.getParentGeoFeatureGroup(), self.S)
+        combo = main.findChild(QtWidgets.QComboBox, "comboPlane")
+        self.assertIsNotNone(combo, "no plane box")
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        self.assertGreaterEqual(sum(1 for t in texts if "plane" in t.lower()), 3, texts)
+        self.cancel()
+
+    def testEditAgainAfterAnOriginalIsDeleted(self):
+        """Hole and Across patterned; Across deleted: the owner keeps the Hole, and an edit again
+        lists only the Hole, the pattern valid."""
+        self.runTool("PartDesign_LinearPattern", self.hole, self.across)
+        pattern = self.pattern()
+        self.assertEqual(sorted(o.Name for o in pattern.Originals), ["Across", "Hole"])
+        self.accept()
+        self.doc.openTransaction("delete Across")
+        PartDesign.studioRemove(self.across)
+        self.doc.removeObject("Across")
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(pattern.Originals, [self.hole])
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        Gui.getDocument(self.doc.Name).setEdit(pattern.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()))
+        settle()
+        field = self.field()
+        self.assertEqual(
+            [entries(field).item(i).text() for i in range(entries(field).count())], ["Hole"]
+        )
+        self.cancel()
+        self.assertTip("P", PLATE - 2 * HOLE)
 
     # ------------------------------------------------------------------------------ Reapply (T3)
     def editAgain(self, pattern):
@@ -215,9 +374,8 @@ class TestStudioPatternsGui(unittest.TestCase):
         for command, typeId in kinds:
             with self.subTest(command):
                 self.runTool(command, self.hole)
-                found = [o for o in self.doc.Objects if o.TypeId == typeId]
-                self.assertEqual(len(found), 1)
-                pattern = found[0]
+                pattern = self.pattern(typeId)
+                self.assertEqual(pattern.getParentGeoFeatureGroup(), self.S)  # T1a: an owner
                 self.assertTrue(waitFor(lambda: reapplyBox() is not None), "no Reapply box")
                 box = reapplyBox()
                 self.assertFalse(box.isChecked())
@@ -243,21 +401,24 @@ class TestStudioPatternsGui(unittest.TestCase):
         pattern = self.pattern()
         field = self.field()
         # two instances on the plate: the seed's and one 30 along x
-        pattern.Direction = (self.P.Origin.OriginFeatures[0], [""])
+        pattern.Direction = (self.S.Origin.OriginFeatures[0], [""])
         pattern.Mode = "Extent"
         pattern.Length = 30
         pattern.Occurrences = 2
         self.doc.recompute()
-        self.assertFalse(pattern.isValid())
-        self.assertIn("Up to last", pattern.getStatusString())
+        # T1a: the owner computes; its step in P refuses the copy, and the field says why
+        step = self.step(pattern, "P")
+        self.assertFalse(step.isValid())
+        self.assertIn("Up to last", step.getStatusString())
         self.assertTrue(waitFor(lambda: reapplyBox() is not None))
         reapplyBox().click()
         pump(0.2)
         self.assertTrue(pattern.Reapply)
-        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertTrue(step.isValid(), step.getStatusString())
         self.assertNotIn("Up to last", statusOf(field))
         self.accept()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertTrue(step.isValid(), step.getStatusString())
 
     def testFirstPatternInAFreshStudioMakesTheList(self):
         """ops#654 list on first use: in a fresh document (a Body at the top level, its plate and

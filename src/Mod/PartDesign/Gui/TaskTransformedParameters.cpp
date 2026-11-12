@@ -35,7 +35,9 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/Transactions.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/Origin.h>
+#include <App/Part.h>
 #include <Base/Console.h>
 #include <Gui/Document.h>
 #include <Gui/BitmapFactory.h>
@@ -54,6 +56,7 @@
 #include "TaskMultiTransformParameters.h"
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
+#include "Utils.h"
 
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
@@ -84,10 +87,36 @@ App::DocumentObject* studioOwnerOfPick(App::DocumentObject* obj)
 }
 
 /// A pattern of studio features that can't copy one (ops#654 slice 8: an original acting on
-/// other parts, an Up to next one...) says why in its Features field, in red until the next pick
+/// other parts, an Up to next one...) says why in its Features field, in red until the next pick.
+/// A pattern over parts (T1a, a studio feature): its own refusal, or else its first step's that
+/// fails (the part it can't pattern)
 void showStudioRefusal(ReferenceField* field, PartDesign::Transformed* pattern)
 {
-    if (!field || !pattern || !pattern->isError()) {
+    if (!field || !pattern) {
+        return;
+    }
+    if (PartDesign::isStudioOwner(pattern)) {
+        const char* why = nullptr;
+        if (pattern->isError()) {
+            why = pattern->getStatusString();
+        }
+        else {
+            for (auto obj : pattern->getDocument()->getObjectsOfType(
+                     PartDesign::Body::getClassTypeId()
+                 )) {
+                auto step = PartDesign::StudioList::stepOf(pattern, static_cast<PartDesign::Body*>(obj));
+                if (step && step->isError()) {
+                    why = step->getStatusString();
+                    break;
+                }
+            }
+        }
+        if (why) {
+            field->setNote(QString::fromUtf8(why));
+        }
+        return;
+    }
+    if (!pattern->isError()) {
         return;
     }
     const auto& originals = pattern->Originals.getValues();
@@ -96,6 +125,27 @@ void showStudioRefusal(ReferenceField* field, PartDesign::Transformed* pattern)
     }
 }
 }  // namespace
+
+namespace PartDesignGui
+{
+/// The origin a pattern's panel offers its references from: its Body's, or a studio feature's
+/// (ops#654 T1a, outside every Body) its studio's own: Top, Front, Right (declared where used,
+/// TaskMirroredParameters.cpp, TaskPatternParameters.cpp). Null when it has neither; throws as
+/// getOrigin() does
+App::Origin* transformedOrigin(App::DocumentObject* pattern)
+{
+    if (!pattern) {
+        return nullptr;
+    }
+    if (PartDesign::Body* body = PartDesign::Body::findBodyOf(pattern)) {
+        return body->getOrigin();
+    }
+    if (auto studio = freecad_cast<App::Part*>(App::GeoFeatureGroupExtension::getGroupOfObject(pattern))) {
+        return studio->getOrigin();
+    }
+    return nullptr;
+}
+}  // namespace PartDesignGui
 
 TaskTransformedParameters::TaskTransformedParameters(
     ViewProviderTransformed* TransformedView,
@@ -259,6 +309,23 @@ bool TaskTransformedParameters::acceptOriginal(App::DocumentObject* obj, std::st
 {
     PartDesign::Transformed* pcTransformed = getObject();
     PartDesign::Body* body = pcTransformed ? pcTransformed->getFeatureBody() : nullptr;
+    // A pattern over parts (ops#654 T1a, a studio feature): a studio feature or a member of any
+    // part of its own studio (one it can't pattern, it takes and says why)
+    if (pcTransformed && PartDesign::isStudioOwner(pcTransformed)) {
+        const PartDesign::StudioList* list = PartDesign::StudioList::holding(pcTransformed);
+        App::DocumentObject* owner = studioOwnerOfPick(obj);
+        App::DocumentObject* entry = owner ? owner : obj;
+        if (!owner && !entry->isDerivedFrom<PartDesign::FeatureAddSub>()
+            && !entry->isDerivedFrom<PartDesign::Transformed>()) {
+            why = QT_TR_NOOP("Pick a feature that adds or removes material.");
+            return false;
+        }
+        if (PartDesign::StudioList::holding(entry) != list) {
+            why = QT_TR_NOOP("Pick a feature of the studio's parts.");
+            return false;
+        }
+        return true;
+    }
     // A studio feature whose step is in the pattern's part (ops#654 slice 8): its step is copied.
     // One acting on other parts too is taken, and the pattern says why it can't copy it
     if (App::DocumentObject* owner = studioOwnerOfPick(obj)) {
@@ -300,8 +367,15 @@ void TaskTransformedParameters::writeOriginals(const std::vector<App::DocumentOb
             originals.push_back(entry);
         }
     }
+    // A pattern over parts (T1a): in the studio's list's order
+    if (PartDesign::isStudioOwner(pcTransformed)) {
+        const auto& entries = PartDesign::StudioList::holding(pcTransformed)->Entries.getValues();
+        std::ranges::stable_sort(originals, {}, [&entries](App::DocumentObject* obj) {
+            return std::ranges::find(entries, obj) - entries.begin();
+        });
+    }
     // In the body's order, as getSortedOriginals() gives them (a studio feature at its step)
-    if (PartDesign::Body* body = pcTransformed->getFeatureBody()) {
+    else if (PartDesign::Body* body = pcTransformed->getFeatureBody()) {
         const std::vector<App::DocumentObject*>& group = body->Group.getValues();
         std::ranges::stable_sort(originals, {}, [&group, body](App::DocumentObject* obj) {
             App::DocumentObject* inBody = obj;
@@ -398,20 +472,16 @@ void TaskTransformedParameters::fillAxisCombo(Gui::ComboLinks& combolinks, Part:
         }
     }
 
-    // add part axes
-    App::DocumentObject* obj = getObject();
-    PartDesign::Body* body = PartDesign::Body::findBodyOf(obj);
-
-    if (body) {
-        try {
-            App::Origin* orig = body->getOrigin();
+    // add part axes (a studio feature's: its studio's, ops#654 T1a)
+    try {
+        if (App::Origin* orig = transformedOrigin(getObject())) {
             combolinks.addLink(orig->getX(), "", tr("Base X-axis"));
             combolinks.addLink(orig->getY(), "", tr("Base Y-axis"));
             combolinks.addLink(orig->getZ(), "", tr("Base Z-axis"));
         }
-        catch (const Base::Exception& ex) {
-            Base::Console().error("%s\n", ex.what());
-        }
+    }
+    catch (const Base::Exception& ex) {
+        Base::Console().error("%s\n", ex.what());
     }
 
     // add "Select reference"
@@ -434,20 +504,16 @@ void TaskTransformedParameters::fillPlanesCombo(Gui::ComboLinks& combolinks, Par
         }
     }
 
-    // add part baseplanes
-    App::DocumentObject* obj = getObject();
-    PartDesign::Body* body = PartDesign::Body::findBodyOf(obj);
-
-    if (body) {
-        try {
-            App::Origin* orig = body->getOrigin();
+    // add part baseplanes (a studio feature's: its studio's, ops#654 T1a)
+    try {
+        if (App::Origin* orig = transformedOrigin(getObject())) {
             combolinks.addLink(orig->getXY(), "", tr("Base XY-plane"));
             combolinks.addLink(orig->getYZ(), "", tr("Base YZ-plane"));
             combolinks.addLink(orig->getXZ(), "", tr("Base XZ-plane"));
         }
-        catch (const Base::Exception& ex) {
-            Base::Console().error("%s\n", ex.what());
-        }
+    }
+    catch (const Base::Exception& ex) {
+        Base::Console().error("%s\n", ex.what());
     }
 
     // add "Select reference"
@@ -457,6 +523,29 @@ void TaskTransformedParameters::fillPlanesCombo(Gui::ComboLinks& combolinks, Par
 void TaskTransformedParameters::recomputeFeature()
 {
     getTopTransformedView()->recomputeFeature();
+    // FreeCAD-CH ops#654 T1a: a pattern over parts (a studio feature) computes no shape; its
+    // steps show the edit: reconcile in the dialog's transaction (an original added on another
+    // part grows the scope, one taken out shrinks it; each step takes the owner's originals),
+    // then the document recomputes (as the dress-up owner's picks do). A refusal is reported, not thrown into the dialog
+    PartDesign::Transformed* pattern = getTopTransformedObject();
+    if (!pattern || !PartDesign::isStudioOwner(pattern)) {
+        return;
+    }
+    App::Document* doc = pattern->getDocument();
+    if (!doc || doc->testStatus(App::Document::Recomputing)) {
+        return;
+    }
+    try {
+        std::string why;
+        PartDesign::StudioList* list = PartDesign::StudioList::holding(pattern);
+        if (list && !list->reconcile(&why)) {
+            Base::Console().warning("%s\n", why.c_str());
+        }
+        doc->recompute();
+    }
+    catch (const Base::Exception& e) {
+        Base::Console().error("%s\n", e.what());
+    }
 }
 
 PartDesignGui::ViewProviderTransformed* TaskTransformedParameters::getTopTransformedView() const
@@ -492,6 +581,19 @@ App::DocumentObject* TaskTransformedParameters::getBaseObject() const
     PartDesign::Feature* feature = getTopTransformedObject();
     if (!feature) {
         return nullptr;
+    }
+
+    // A pattern over parts (ops#654 T1a) has no base: its field's element picks are made in the
+    // active part, in the solid before its step there (the Tip while it has none)
+    if (PartDesign::isStudioOwner(feature)) {
+        PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+        if (!active) {
+            return nullptr;
+        }
+        if (PartDesign::Feature* step = PartDesign::StudioList::stepOf(feature, active)) {
+            return step->getBaseObject(true);
+        }
+        return active->Tip.getValue();
     }
 
     // NOTE: getBaseObject() throws if there is no base; shouldn't happen here.

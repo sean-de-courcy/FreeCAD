@@ -81,6 +81,12 @@
 using namespace PartDesignGui;
 namespace sp = std::placeholders;
 
+namespace PartDesign
+{
+// App/StudioList.cpp (ops#654 T1a; declared where used)
+PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
+}  // namespace PartDesign
+
 const char* PartDesignGui::ViewProviderBody::BodyModeEnum[] = {"Through", "Tip", nullptr};
 
 namespace
@@ -136,7 +142,8 @@ constexpr const char* dragAloneMessage =
  * the member just before its first solid feature. Unlike a member's edit the point is kept when it
  * holds nothing yet: a part ticked in the dialog gets its step after it, held too. Null when
  * other isn't in the owner's studio, its first member is a solid feature, or its saved bar holds
- * as much already
+ * as much already. A pattern over parts (ops#654 T1a) shows what it makes: its steps are
+ * above the point (an in-Body pattern's edit point is the pattern itself)
  */
 App::DocumentObject* studioOwnerEditPointFor(const PartDesign::Body* other, const App::DocumentObject* owner)
 {
@@ -151,6 +158,11 @@ App::DocumentObject* studioOwnerEditPointFor(const PartDesign::Body* other, cons
     for (auto entry : list->Entries.getValues()) {
         if (entry == owner) {
             found = true;
+            if (PartDesign::isStudioFeaturePattern(owner)) {
+                for (auto step : PartDesign::StudioList::stepsOf(owner)) {
+                    above.insert(step);
+                }
+            }
             break;
         }
         if (!entry) {
