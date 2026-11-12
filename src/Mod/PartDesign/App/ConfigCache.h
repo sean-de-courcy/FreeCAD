@@ -110,6 +110,7 @@ struct ConfigCacheStats
     long keys = 0;      ///< switches made in copies
     long fills = 0;     ///< entries filled (a shape or an error)
     long deferred = 0;  ///< passes put off (a transaction open)
+    long foreignWrites = 0;  ///< writes in the cache's unrecorded scope it doesn't call derived (warned)
     double copySeconds = 0;  ///< time spent saving and opening copies
 };
 PartDesignExport ConfigCacheStats configCacheStats();

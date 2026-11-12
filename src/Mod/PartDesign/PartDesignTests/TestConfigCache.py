@@ -185,6 +185,7 @@ class TestConfigCache(unittest.TestCase):
         link = self.instance({"Size": "Large"})
         self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
         undos = self.doc.UndoCount
+        foreign = stats()["foreignWrites"]
         self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", "Large", "30 mm"))
         self.doc.recompute()
         self.assertAlmostEqual(linkHeight(link), 30, delta=TOL)
@@ -198,6 +199,7 @@ class TestConfigCache(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(linkHeight(link), 30, delta=TOL)
         self.assertEqual(self.doc.UndoCount, undos + 1, self.doc.UndoNames)
+        self.assertEqual(stats()["foreignWrites"], foreign, "the fill wrote what it doesn't call derived")
 
     def testUndoMarksStaleAndTheSaveKeepsIt(self):
         """Undo of a studio edit marks the entries stale (review 6); a save before the next
@@ -399,6 +401,48 @@ class TestConfigCache(unittest.TestCase):
         PartDesign.configSetInstanceKey(inst, {"Size": "Large"})
         self.doc.recompute()
         self.assertAlmostEqual(linkHeight(inst), 20, delta=TOL)
+        self.assertEqual(asm.solve(), 0)
+        self.assertAlmostEqual(lid.Placement.Base.z - small, 10, delta=1e-6)
+
+    def testJointReferenceRetargetsUnrecorded(self):
+        """The key change of an instance a joint references, in a user's step: the retarget
+        rewrites the joint's reference as derived data (ruling A, coordinator c752): no warned
+        write, no undo step beside the user's, and the lid follows (Small 10 -> Large 20)"""
+        try:
+            import JointObject
+        except ImportError as e:
+            self.skipTest("Assembly not importable: %s" % e)
+        self.configureSizes()
+        asm = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
+        asm.Type = "Assembly"
+        joints = asm.newObject("Assembly::JointGroup", "Joints")
+        inst = asm.newObject("App::Link", "Instance")
+        inst.LinkedObject = self.A
+        lid = asm.newObject("Part::Box", "Lid")
+        lid.Length = lid.Width = 10
+        lid.Height = 1
+        self.doc.recompute()
+        ground = joints.newObject("App::FeaturePython", "GroundedJoint")
+        JointObject.GroundedJoint(ground, inst)
+        shape = Part.getShape(inst)
+        top = topFace(shape)
+        face = shape.getElement(top)
+        corner = min(range(len(shape.Vertexes)), key=lambda i: (
+            not face.isInside(shape.Vertexes[i].Point, TOL, True), shape.Vertexes[i].Point.x
+            + shape.Vertexes[i].Point.y))
+        joint = joints.newObject("App::FeaturePython", "Fixed")
+        JointObject.Joint(joint, 0)
+        joint.Proxy.setJointConnectors(
+            joint, [[lid, ["Face5", "Vertex1"]], [inst, [top, "Vertex%d" % (corner + 1)]]])
+        self.assertEqual(asm.solve(), 0)
+        small = lid.Placement.Base.z
+        undos = self.doc.UndoCount
+        foreign = stats()["foreignWrites"]
+        self.edit(lambda: PartDesign.configSetInstanceKey(inst, {"Size": "Large"}))
+        self.doc.recompute()
+        self.assertEqual(inst.LinkedObject.TypeId, "PartDesign::ConfigShape")
+        self.assertEqual(stats()["foreignWrites"], foreign, "the retarget warned")
+        self.assertEqual(self.doc.UndoCount, undos + 1, self.doc.UndoNames)
         self.assertEqual(asm.solve(), 0)
         self.assertAlmostEqual(lid.Placement.Base.z - small, 10, delta=1e-6)
 

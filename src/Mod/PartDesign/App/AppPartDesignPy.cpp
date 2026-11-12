@@ -2279,6 +2279,7 @@ private:
         d.setItem("keys", Py::Long(st.keys));
         d.setItem("fills", Py::Long(st.fills));
         d.setItem("deferred", Py::Long(st.deferred));
+        d.setItem("foreignWrites", Py::Long(st.foreignWrites));
         d.setItem("copySeconds", Py::Float(st.copySeconds));
         return d;
     }

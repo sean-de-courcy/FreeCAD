@@ -1527,7 +1527,9 @@ void Transaction::openPendingTransaction(Document& doc)
 void Document::_checkTransaction(DocumentObject* pcDelObj, const Property* What, int line)
 {
     // if no transaction open, open one!
-    if (isPerformingTransaction() || d->activeUndoTransaction) {
+    // ops#671 C3i: nothing opens in an UnrecordedWrites scope; a removal there is recorded into the
+    // transaction the scope set aside when a step holds the object (_removeObject)
+    if (isPerformingTransaction() || d->activeUndoTransaction || d->unrecordedDepth > 0) {
         return;
     }
 
@@ -1783,9 +1785,12 @@ Document::UnrecordedWrites::~UnrecordedWrites()
     Transaction* setAside = doc.d->unrecordedSetAside;
     doc.d->unrecordedSetAside = nullptr;
     if (doc.d->activeUndoTransaction) {
-        // Only _checkTransaction's "Delete" (an object older steps hold, removed) opens one here
+        // Nothing should open one here (_checkTransaction opens none in a scope)
         FC_WARN(doc.getName() << ": a transaction opened in an unrecorded scope; committed");
-        doc._commitTransaction(true);
+        if (!doc._commitTransaction(true) && doc.d->activeUndoTransaction) {
+            FC_ERR(doc.getName() << ": it could not be committed; the set-aside one stays closed");
+            return;
+        }
     }
     doc.d->activeUndoTransaction = setAside;
 }
@@ -4817,6 +4822,22 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     // there for the signal, and the move and the put-back go inside the hop (the Gui's undo list
     // reads the stack there)
     const auto becameStable = [this]() {
+        // ops#671 C3i (review F3): a recompute inside an UnrecordedWrites scope (the configuration
+        // cache's pass) signals with the scope suspended: the other observers (a studio's resync)
+        // record as after any recompute, into the set-aside transaction or the reopened step
+        const int suspendedDepth = d->activeUndoTransaction ? 0 : d->unrecordedDepth;
+        if (suspendedDepth > 0) {
+            d->activeUndoTransaction = d->unrecordedSetAside;
+            d->unrecordedSetAside = nullptr;
+            d->unrecordedDepth = 0;
+        }
+        const Base::ScopeGuard resume([this, suspendedDepth]() {
+            if (suspendedDepth > 0) {
+                d->unrecordedSetAside = d->activeUndoTransaction;
+                d->activeUndoTransaction = nullptr;
+                d->unrecordedDepth = suspendedDepth;
+            }
+        });
         Transaction* const active = d->activeUndoTransaction;
         const bool bookedOutputsOnly = active && active->getID() == d->bookedTransaction
             && !active->changesInputs();
@@ -5540,6 +5561,33 @@ void Document::_removeObject(DocumentObject* pcObject, RemoveObjectOptions optio
     }
 
     TransactionLocker tlock(this);
+
+    // ops#671 C3i (review F1): inside an UnrecordedWrites scope an object that an undo or redo step
+    // holds, or the transaction the scope set aside, is never destroyed unrecorded (the step would
+    // keep a dangling record): its removal is recorded into the set-aside transaction, or refused
+    // when there is none
+    Transaction* swappedIn = nullptr;
+    if (d->unrecordedDepth > 0 && !d->rollback && !d->activeUndoTransaction) {
+        const auto holds = [pcObject](const Transaction* step) {
+            return step && step->hasObject(pcObject);
+        };
+        const bool held = holds(d->unrecordedSetAside) || std::ranges::any_of(mUndoTransactions, holds)
+            || std::ranges::any_of(mRedoTransactions, holds);
+        if (held) {
+            if (!d->unrecordedSetAside) {
+                FC_ERR("Cannot delete " << pcObject->getFullName()
+                                        << " unrecorded: an undo step holds it");
+                return;
+            }
+            swappedIn = d->unrecordedSetAside;
+            d->activeUndoTransaction = swappedIn;
+        }
+    }
+    const Base::ScopeGuard swapOut([this, swappedIn]() {
+        if (swappedIn && d->activeUndoTransaction == swappedIn) {
+            d->activeUndoTransaction = nullptr;
+        }
+    });
 
     _checkTransaction(pcObject, nullptr, __LINE__);
 

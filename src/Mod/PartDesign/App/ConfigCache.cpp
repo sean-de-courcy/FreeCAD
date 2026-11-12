@@ -20,6 +20,7 @@
 #include <App/PropertyLinks.h>
 #include <Base/Console.h>
 #include <Base/FileInfo.h>
+#include <Base/Tools.h>
 #include <Base/Sequencer.h>
 
 #include "Body.h"
@@ -91,8 +92,15 @@ App::PropertyXLink* linkedProperty(App::Link* link)
 /// What the cache writes (C3i): its entries and their group, and an instance's target and the
 /// text that names its part. Written in a Document::UnrecordedWrites scope: derived data, which no
 /// undo step records and which never clears Redo (coordinator c752's ruling A, 11-12)
+bool inRetarget = false;  ///< an instance's LinkedObject is being set to its entry or Body
+
 bool derivedWrite(const App::DocumentObject& obj, const App::Property& prop)
 {
+    // The retarget rewrites the references that follow the instance (App::followLinkRetarget:
+    // a joint's, an attachment's): derived from the row too (coordinator c752, 11-12)
+    if (inRetarget && prop.isDerivedFrom<App::PropertyLinkBase>()) {
+        return true;
+    }
     if (obj.isDerivedFrom<ConfigShape>()) {
         return true;
     }
@@ -103,6 +111,16 @@ bool derivedWrite(const App::DocumentObject& obj, const App::Property& prop)
     const std::string_view name = prop.getName() ? prop.getName() : "";
     return obj.isDerivedFrom<App::Link>()
         && (name == "LinkedObject" || name == "ConfigDoc" || name == "ConfigStudio" || name == "ConfigPartId");
+}
+
+/// derivedWrite, counting what it refuses: each is a write the scope warns about (stats)
+bool derivedWriteCounted(const App::DocumentObject& obj, const App::Property& prop)
+{
+    const bool derived = derivedWrite(obj, prop);
+    if (!derived) {
+        ++stats.foreignWrites;
+    }
+    return derived;
 }
 
 /// The instance's own property: never getPropertyByName, which an App::Link answers with its
@@ -301,7 +319,7 @@ void mirror(const App::Document& doc)
     for (auto e : configCacheEntries(&doc)) {
         if (e->ConfigStale.getValue() != e->isStale()) {
             if (!unrecorded) {
-                unrecorded.emplace(const_cast<App::Document&>(doc), derivedWrite);
+                unrecorded.emplace(const_cast<App::Document&>(doc), derivedWriteCounted);
             }
             e->ConfigStale.setValue(e->isStale());
         }
@@ -661,7 +679,7 @@ bool runPass(const std::vector<App::Document*>& docs, std::string* why)
     // Every write of the pass, its recomputes included, is derived data (C3i)
     std::vector<std::unique_ptr<App::Document::UnrecordedWrites>> unrecorded;
     for (auto doc : involved) {
-        unrecorded.push_back(std::make_unique<App::Document::UnrecordedWrites>(*doc, derivedWrite));
+        unrecorded.push_back(std::make_unique<App::Document::UnrecordedWrites>(*doc, derivedWriteCounted));
     }
     ++stats.passes;
     std::vector<Served> served;
@@ -697,6 +715,8 @@ bool runPass(const std::vector<App::Document*>& docs, std::string* why)
     for (const auto& s : served) {
         auto prop = linkedProperty(s.link);
         if (prop && prop->getValue() != s.target) {
+            inRetarget = true;
+            const Base::ScopeGuard retargeted([] { inRetarget = false; });
             prop->setValue(s.target);
         }
         // An errored object can end a recompute untouched (Document.cpp's stopped and

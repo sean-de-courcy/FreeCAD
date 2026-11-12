@@ -837,6 +837,80 @@ TEST_F(StableStepTest, unrecordedScopesNestAndGiveTheOpenTransactionBack)
     EXPECT_NE(doc()->getObject("Y"), nullptr);
 }
 
+TEST_F(StableStepTest, anUnrecordedScopeOpensNoGlobalTransaction)
+{
+    auto a = addInStep("add", "A");
+    App::GetApplication().setActiveTransaction("global");
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+        a->addDynamicProperty("App::PropertyString", "Derived");
+        a->Label.setValue("Written");
+        EXPECT_FALSE(doc()->hasPendingTransaction());
+    }
+    App::GetApplication().closeActiveTransaction();
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"add"}));
+    EXPECT_STREQ(a->Label.getValue(), "Written");
+    EXPECT_NE(a->getPropertyByName("Derived"), nullptr);
+}
+
+TEST_F(StableStepTest, aRecomputeInsideAScopeSignalsWithTheScopeSuspended)
+{
+    // review F3: an observer's write at the nested signal joins the last step as after any
+    // recompute; the scope's own write stays unrecorded
+    auto a = addInStep("add", "A");
+    addOnStable("W");
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+        doc()->addObject("App::DocumentObjectGroup", "U");
+        a->touch();
+        doc()->recompute();
+        EXPECT_TRUE(doc()->isWritingUnrecorded());
+        EXPECT_FALSE(doc()->hasPendingTransaction());
+    }
+    ASSERT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"add"}));
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("A"), nullptr);
+    EXPECT_EQ(doc()->getObject("W"), nullptr);
+    EXPECT_NE(doc()->getObject("U"), nullptr);
+}
+
+TEST_F(StableStepTest, aRemovalInsideAScopeNeverLeavesAStepDangling)
+{
+    // review F1: an object a step holds is not destroyed unrecorded: refused with nothing set
+    // aside, recorded into the set-aside transaction otherwise
+    addInStep("add", "A");
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+        doc()->removeObject("A");
+    }
+    ASSERT_NE(doc()->getObject("A"), nullptr);
+    doc()->openTransaction("t");
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), nullptr);
+        doc()->removeObject("A");
+        EXPECT_FALSE(doc()->hasPendingTransaction());
+    }
+    EXPECT_EQ(doc()->getObject("A"), nullptr);
+    doc()->commitTransaction();
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_NE(doc()->getObject("A"), nullptr);
+}
+
+TEST_F(StableStepTest, anUnrecordedScopeAsksAboutEveryWriteOutsideARecompute)
+{
+    auto a = addInStep("add", "A");
+    int asked = 0;
+    {
+        App::Document::UnrecordedWrites unrecorded(*doc(), [&asked](const App::DocumentObject&, const App::Property&) {
+            ++asked;
+            return false;
+        });
+        a->Label.setValue("Written");
+    }
+    EXPECT_EQ(asked, 1);
+}
+
 TEST_F(StableStepTest, aRecomputeWithNoWriteLeavesTheStepsAsTheyWere)
 {
     addInStep("first", "A");
