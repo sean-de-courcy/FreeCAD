@@ -69,6 +69,7 @@ FEATURES = [
     "PartDesign_Mirrored",
     "PartDesign_LinearPattern",
     "PartDesign_PolarPattern",
+    "PartDesign_CurvePattern",
     "PartDesign_MultiTransform",
     SEP,
     "PartDesign_Boolean",
@@ -126,6 +127,7 @@ STOCK = {
         "PartDesign_Mirrored",
         "PartDesign_LinearPattern",
         "PartDesign_PolarPattern",
+        "PartDesign_CurvePattern",
         "PartDesign_MultiTransform",
     ],
 }
@@ -138,6 +140,7 @@ TEXTS = {
     "PartDesign_Mirrored": "Mirror",
     "PartDesign_LinearPattern": "Linear pattern",
     "PartDesign_PolarPattern": "Circular pattern",
+    "PartDesign_CurvePattern": "Curve pattern",
 }
 
 
