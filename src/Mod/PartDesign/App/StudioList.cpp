@@ -1014,7 +1014,7 @@ bool patternOriginalsGoneFrom(const App::DocumentObject* owner,
             }
             continue;
         }
-        if (isFeaturePatternOwner(original) || isMergingAdd(original)) {
+        if (isFeaturePatternOwner(original)) {
             return false;
         }
         auto at = positions.find(original);
@@ -1022,6 +1022,11 @@ bool patternOriginalsGoneFrom(const App::DocumentObject* owner,
             continue;
         }
         const auto parts = scopePartsAt(original, bodies, at->second, positions, consumed);
+        // An Add over two or more parts merges what its instances join, wherever (T1b settled
+        // 2); an Add over one part acts on that part only (the gate's seed 1 op 57, again)
+        if (isMergingAdd(original) && parts.size() > 1) {
+            return false;
+        }
         if (std::ranges::find(parts, part) == parts.end()) {
             continue;
         }

@@ -910,6 +910,33 @@ class TestStudioFeaturePattern(unittest.TestCase):
             self.assertIsNone(step, f"{piece.StudioPartId}: {step and step.getStatusString()}")
             self.assertFalse(piece.Tip and piece.Tip.Name.startswith("M_"), piece.Tip.Name)
 
+    def testAPatternStepGoesWhenItsOtherOriginalIsAnAddOnAnotherPart(self):
+        """The property gate's seed 1 op 57 again (ops#654, the no-op Add gate half): as above,
+        with M's other original an Add on B alone (Reapply on). That Add over one part merges
+        nothing, so it acts on B only: M's originals all went from S9's pieces and M has no step
+        there, as a from-scratch build reaches it."""
+        self.studio((("A", (0, 0, 60, 20), 10), ("B", (80, 0, 100, 20), 10)))
+        sk9 = studioSketch(self.doc, self.S, "S9Sk", rects=((40, -1, 41, 21),), z=10)
+        s9 = makeOwner(self.doc, self.S, "Pocket", "S9", sk9, ("A",), Length=11)
+        self.doc.recompute()
+        pieces = self.makePieces(s9)
+        self.assertEqual(len(pieces), 2)
+        add = self.boss("B", (85, 2, 90, 6), "AddB")
+        self.doc.recompute()
+        m = ownerPattern(self.doc, self.S, "Mirrored", "M", [s9, add], reapply=True,
+                         MirrorPlane=origin(self.S, YZ_PLANE))
+        for piece in pieces:
+            self.assertIsNotNone(PartDesign.studioStepOf(m, piece))
+        sk5 = studioSketch(self.doc, self.S, "S5Sk", rects=((10, -1, 11, 21),), z=10)
+        s5 = makeOwner(self.doc, self.S, "Pocket", "S5", sk5, ("A",), Length=11)
+        PartDesign.studioMove(s5, list(self.list.Entries).index(s9))
+        self.doc.recompute()
+        self.doc.recompute()
+        self.assertEqual(len(self.madeBy(s5)), 2)
+        for piece in pieces:
+            step = PartDesign.studioStepOf(m, piece)
+            self.assertIsNone(step, f"{piece.StudioPartId}: {step and step.getStatusString()}")
+
 
 if __name__ == "__main__":
     unittest.main()
