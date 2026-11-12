@@ -53,6 +53,8 @@ if doc:
         entry["uuid"] = mat.UUID
         entry["name"] = mat.Name
         entry["density"] = density(mat, "kg/m^3")
+        raw = mat.getPhysicalValue("Density") if mat.hasPhysicalProperty("Density") else None
+        entry["densityText"] = None if raw is None else str(raw)
         perMm3 = density(mat, "kg/mm^3")
         entry["mass"] = None if perMm3 is None or entry["volume"] is None else entry["volume"] * perMm3
         out["objects"][obj.Name] = entry
@@ -375,9 +377,29 @@ class MaterialInFileTestCases(unittest.TestCase):
         self.assertEqual(entry["uuid"], made)
         self.assertEqual(entry["name"], PLASTER)
         self.assertIsNone(entry["density"])
+        text = entry["densityText"] or ""
+        self.assertNotIn("mm", text, "the density kept the unit that does not fit")
+        self.assertNotIn("1.99", text)
         self.assertCube(entry, "Box")
         self.assertCube(result["objects"]["Box2"], "Box2")
         warning = [line for line in log.splitlines() if "not restored" in line and "Box" in line]
         self.assertTrue(warning, log[-2000:])
         self.assertIn("Density", warning[0])
         self.assertIn(unknownModel, warning[0])
+
+    def testQuantityTextIsKeptAsText(self):
+        """A density whose text is not a quantity is saved as that text, not as 0"""
+        doc = self.newDoc("E1Text")
+        box = self.cube(doc, "Box")
+        mat = self.plaster()
+        mat.setPhysicalValue("Density", "about two")
+        box.ShapeMaterial = mat
+        doc.recompute()
+        path = os.path.join(self.work, "text.FCStd")
+        doc.saveAs(path)
+        self.assertIn('<Value name="Density" value="about two"/>', self.documentXml(path))
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertEqual(entry["name"], PLASTER, log[-2000:])
+        self.assertEqual(entry["densityText"], "about two")
+        self.assertIsNone(entry["density"])

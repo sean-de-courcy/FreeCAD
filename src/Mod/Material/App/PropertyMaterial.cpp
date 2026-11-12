@@ -45,6 +45,8 @@
 #include "Exceptions.h"
 #include "MaterialLibrary.h"
 #include "MaterialManager.h"
+#include "Model.h"
+#include "ModelManager.h"
 #include "MaterialPy.h"
 #include "PropertyMaterial.h"
 
@@ -353,7 +355,7 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
         return;
     }
 
-    auto name = QString::fromUtf8(reader.getAttribute<const char*>("name"));
+    auto name = QString::fromUtf8(reader.getAttribute<const char*>("name", ""));
     auto modelCount = reader.getAttribute<long>("models");
     auto valueCount = reader.getAttribute<long>("values");
     bool hasChildren = modelCount > 0 || valueCount > 0;
@@ -365,12 +367,16 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
     std::vector<std::string> lost;
     for (long i = 0; i < modelCount; ++i) {
         reader.readElement("Model");
-        auto model = QString::fromLatin1(reader.getAttribute<const char*>("uuid"));
+        auto model = QString::fromLatin1(reader.getAttribute<const char*>("uuid", ""));
         if (material.hasPhysicalModel(model)) {
             continue;
         }
         try {
-            material.addPhysical(model);  // ignores a model unknown here
+            // addPhysical neither reports a model unknown here nor checks its kind
+            auto known = ModelManager::getManager().getModel(model);
+            if (known->getType() == Model::ModelType_Physical) {
+                material.addPhysical(model);
+            }
         }
         catch (const Base::Exception&) {
         }
@@ -380,9 +386,10 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
     }
     for (long i = 0; i < valueCount; ++i) {
         reader.readElement("Value");
-        auto valueName = QString::fromUtf8(reader.getAttribute<const char*>("name"));
-        if (!material.hasPhysicalProperty(valueName)) {
-            lost.push_back(valueName.toStdString());
+        auto valueName = QString::fromUtf8(reader.getAttribute<const char*>("name", ""));
+        if (valueName.isEmpty() || !material.hasPhysicalProperty(valueName)) {
+            lost.push_back(valueName.isEmpty() ? std::string("a value without a name")
+                                               : valueName.toStdString());
             continue;
         }
         try {
