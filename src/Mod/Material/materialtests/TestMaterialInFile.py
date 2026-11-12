@@ -28,6 +28,7 @@ STEEL_UUID = "90bbd8ef-8623-4d78-b3bf-e0bdb9b74dd3"  # Standard/Metal/Steel/Stee
 PLASTER = "E1 test plaster"
 PLASTER_DENSITY = 1990.0  # kg/m^3
 CUBE_VOLUME = 1000.0  # mm^3
+TEST_MODEL = "34d0583d-f999-49ba-99e6-aa40bd5c3a6b"  # Resources/Models/Test: every value type
 
 CHILD = r'''
 import json, os
@@ -45,6 +46,8 @@ def density(mat, unit):
         return None
 
 out = {"userAppData": FreeCAD.getUserAppDataDir(), "objects": {}}
+if os.environ.get("E1_EXEC"):
+    exec(os.environ["E1_EXEC"])
 doc = FreeCAD.openDocument(os.environ["E1_DOC"]) if os.environ.get("E1_DOC") else None
 if doc:
     for obj in doc.Objects:
@@ -58,6 +61,10 @@ if doc:
         perMm3 = density(mat, "kg/mm^3")
         entry["mass"] = None if perMm3 is None or entry["volume"] is None else entry["volume"] * perMm3
         out["objects"][obj.Name] = entry
+    if os.environ.get("E1_RESAVE"):
+        doc.saveAs(os.environ["E1_RESAVE"])
+library = os.path.join(FreeCAD.getUserAppDataDir(), "Material")
+out["learned"] = sorted(os.listdir(library)) if os.path.isdir(library) else []
 if os.environ.get("E1_UUID"):
     try:
         card = Materials.MaterialManager().getMaterial(os.environ["E1_UUID"])
@@ -127,8 +134,13 @@ class MaterialInFileTestCases(unittest.TestCase):
         os.makedirs(folder)
         return folder
 
-    def child(self, home, doc=None, uuidToResolve=None):
-        """Opens doc (and resolves a UUID) in a FreeCADCmd whose settings folder is home"""
+    def child(self, home, doc=None, uuidToResolve=None, resave=None, code=None):
+        """Opens doc (and resolves a UUID) in a FreeCADCmd whose settings folder is home; resave
+        saves the opened document there; code runs first"""
+        try:
+            freecadCmd = _freecadCmd()
+        except FileNotFoundError as e:
+            self.skipTest(str(e))
         script = os.path.join(self.work, "child.py")
         with open(script, "w", encoding="utf-8") as f:
             f.write(CHILD)
@@ -138,14 +150,18 @@ class MaterialInFileTestCases(unittest.TestCase):
         for inherited in ("FREECAD_USER_DATA", "FREECAD_USER_TEMP"):
             env.pop(inherited, None)  # they override FREECAD_USER_HOME's folders
         env["E1_OUT"] = out
-        env.pop("E1_DOC", None)
-        env.pop("E1_UUID", None)
+        for own in ("E1_DOC", "E1_UUID", "E1_RESAVE", "E1_EXEC"):
+            env.pop(own, None)
+        if resave:
+            env["E1_RESAVE"] = resave
+        if code:
+            env["E1_EXEC"] = code
         if doc:
             env["E1_DOC"] = doc
         if uuidToResolve:
             env["E1_UUID"] = uuidToResolve
         proc = subprocess.run(
-            [_freecadCmd(), script],
+            [freecadCmd, script],
             env=env,
             cwd=self.work,
             stdout=subprocess.PIPE,
@@ -386,6 +402,7 @@ class MaterialInFileTestCases(unittest.TestCase):
         self.assertTrue(warning, log[-2000:])
         self.assertIn("Density", warning[0])
         self.assertIn(unknownModel, warning[0])
+        self.assertEqual(result["learned"], [], "a partly restored material became a card")
 
     def testQuantityTextIsKeptAsText(self):
         """A density whose text is not a quantity is saved as that text, not as 0"""
@@ -403,3 +420,209 @@ class MaterialInFileTestCases(unittest.TestCase):
         self.assertEqual(entry["name"], PLASTER, log[-2000:])
         self.assertEqual(entry["densityText"], "about two")
         self.assertIsNone(entry["density"])
+
+    # -- the desktop's persistence review (ops#675 comment 6821046237) --------------------------
+
+    def elementOf(self, xml, materialUuid):
+        start = xml.index('<PropertyMaterial uuid="{}"'.format(materialUuid))
+        end = xml.index("</PropertyMaterial>", start) + len("</PropertyMaterial>")
+        return start, end
+
+    def editElement(self, path, materialUuid, edit):
+        def change(xml):
+            start, end = self.elementOf(xml, materialUuid)
+            element = xml[start:end]
+            changed = edit(element)
+            self.assertNotEqual(changed, element)
+            return xml[:start] + changed + xml[end:]
+
+        self.rewriteDocumentXml(path, change)
+
+    def testControlCharactersStaySafe(self):
+        """A material name and a string value with control characters: the file is valid XML and
+        the whole document reopens"""
+        import xml.dom.minidom
+
+        doc = self.newDoc("E1Control")
+        box = self.cube(doc, "Box")
+        mat = self.plaster()
+        mat.Name = "E1\x01plaster\x1b"
+        mat.addPhysicalModel(TEST_MODEL)
+        mat.setPhysicalValue("TestString", "a\x0bb")
+        box.ShapeMaterial = mat
+        self.cube(doc, "Box2", 20)
+        doc.recompute()
+        path = os.path.join(self.work, "control.FCStd")
+        doc.saveAs(path)
+        xml.dom.minidom.parseString(self.documentXml(path).encode("utf-8"))  # raises if invalid
+
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertCube(entry, "Box")
+        self.assertCube(result["objects"]["Box2"], "Box2")
+        self.assertEqual(entry["name"], "E1_plaster_", log[-2000:])
+        self.assertAlmostEqual(entry["density"], PLASTER_DENSITY, places=9)
+
+    def testCountsAboveTheChildren(self):
+        """Counts above the real children (a hand-edited file): the children there are restored, a
+        warning says what is missing, the rest of the document is read, nothing is learned"""
+        doc = self.newDoc("E1Counts")
+        box = self.cube(doc, "Box")
+        box.ShapeMaterial = self.plaster()
+        made = box.ShapeMaterial.UUID
+        later = self.cube(doc, "Box2", 20)
+        later.ShapeMaterial = Materials.MaterialManager().getMaterial(STEEL_UUID)
+        doc.recompute()
+        path = os.path.join(self.work, "counts.FCStd")
+        doc.saveAs(path)
+        self.editElement(
+            path,
+            made,
+            lambda e: e.replace('models="1"', 'models="5"').replace('values="1"', 'values="9"'),
+        )
+
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertEqual(entry["name"], PLASTER, log[-2000:])
+        self.assertAlmostEqual(entry["density"], PLASTER_DENSITY, places=9)
+        self.assertCube(result["objects"]["Box2"], "Box2")
+        self.assertEqual(result["objects"]["Box2"]["uuid"], STEEL_UUID)
+        self.assertIn("1 of 5 models and 1 of 9 values found", log)
+        self.assertNotIn("Invalid Document.xml", log)
+        self.assertEqual(result["learned"], [])
+
+    def testInvalidUuidIsNotLearned(self):
+        """A stored uuid that is no UUID: the material is restored, not learned, and a warning says
+        why"""
+        doc = self.newDoc("E1BadUuid")
+        box = self.cube(doc, "Box")
+        box.ShapeMaterial = self.plaster()
+        made = box.ShapeMaterial.UUID
+        doc.recompute()
+        path = os.path.join(self.work, "baduuid.FCStd")
+        doc.saveAs(path)
+        self.editElement(path, made, lambda e: e.replace(made, "not-a-uuid", 1))
+
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertEqual(entry["uuid"], "not-a-uuid", log[-2000:])
+        self.assertAlmostEqual(entry["density"], PLASTER_DENSITY, places=9)
+        self.assertEqual(result["learned"], [])
+        self.assertIn("has no valid UUID ('not-a-uuid')", log)
+
+    def testLearnedNamesThatCannotBeFiles(self):
+        """Names Windows reserves, names over 200 characters and names that differ from a card's
+        file only in case are not learned; an ordinary name is"""
+        doc = self.newDoc("E1Names")
+        names = ["Aux", "com3.ini", "x" * 210, "E1 TEST PLASTER", "E1 fine"]
+        uuids = {}
+        for i, name in enumerate(names):
+            box = self.cube(doc, "Box{}".format(i), 20 * i)
+            mat = self.plaster()
+            mat.Name = name
+            box.ShapeMaterial = mat
+            uuids[name] = box.ShapeMaterial.UUID
+        doc.recompute()
+        path = os.path.join(self.work, "names.FCStd")
+        doc.saveAs(path)
+
+        home = self.settingsFolder("names-settings")
+        probe, _ = self.child(home)
+        library = os.path.join(probe["userAppData"], "Material")
+        os.makedirs(library, exist_ok=True)
+        with open(os.path.join(library, "e1 test plaster.FCMat"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nGeneral:\n"
+                '  UUID: "{}"\n'
+                '  Name: "e1 test plaster"\n'
+                "Models:\n  Density:\n    UUID: '{}'\n"
+                '    Density: "2500 kg/m^3"\n'.format(uuid.uuid4(), DENSITY_MODEL)
+            )
+
+        result, log = self.child(home, path)
+        self.assertEqual(
+            result["learned"], ["E1 fine.FCMat", "e1 test plaster.FCMat"], log[-3000:]
+        )
+        for i, name in enumerate(names):
+            entry = result["objects"]["Box{}".format(i)]
+            self.assertEqual(entry["uuid"], uuids[name])
+            self.assertAlmostEqual(entry["density"], PLASTER_DENSITY, places=9)
+
+    @unittest.skipIf(
+        sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        "needs a folder the user can't write",
+    )
+    def testUnwritableLibraryRegistersNothing(self):
+        """A user library that can't be written: the material isn't learned, and the session
+        doesn't pretend it is in the library"""
+        doc = self.newDoc("E1ReadOnly")
+        box = self.cube(doc, "Box")
+        box.ShapeMaterial = self.plaster()
+        made = box.ShapeMaterial.UUID
+        doc.recompute()
+        path = os.path.join(self.work, "readonly.FCStd")
+        doc.saveAs(path)
+
+        home = self.settingsFolder("readonly-settings")
+        probe, _ = self.child(home)
+        library = os.path.join(probe["userAppData"], "Material")
+        os.makedirs(library, exist_ok=True)
+        os.chmod(library, 0o555)
+        try:
+            result, log = self.child(home, path, made)
+        finally:
+            os.chmod(library, 0o755)
+        self.assertAlmostEqual(result["objects"]["Box"]["density"], PLASTER_DENSITY, places=9)
+        self.assertEqual(result["learned"], [])
+        self.assertIn("error", result["library"], log[-2000:])
+
+    def testIntegersKeep64Bits(self):
+        """An integer value above 2^31 survives a reopen and a save"""
+        doc = self.newDoc("E1Integer")
+        box = self.cube(doc, "Box")
+        mat = self.plaster()
+        mat.addPhysicalModel(TEST_MODEL)
+        mat.setPhysicalValue("TestInteger", "42")
+        box.ShapeMaterial = mat
+        made = box.ShapeMaterial.UUID
+        doc.recompute()
+        path = os.path.join(self.work, "integer.FCStd")
+        doc.saveAs(path)
+        self.assertIn('<Value name="TestInteger" value="42"/>', self.documentXml(path))
+        self.editElement(
+            path,
+            made,
+            lambda e: e.replace(
+                '<Value name="TestInteger" value="42"/>',
+                '<Value name="TestInteger" value="3000000000"/>',
+            ),
+        )
+
+        resaved = os.path.join(self.work, "integer-resaved.FCStd")
+        result, log = self.child(self.settingsFolder("empty-settings"), path, resave=resaved)
+        self.assertTrue(os.path.isfile(resaved), log[-2000:])
+        xml = self.documentXml(resaved)
+        start, end = self.elementOf(xml, made)
+        self.assertIn('<Value name="TestInteger" value="3000000000"/>', xml[start:end])
+
+    def testValuesNotCarriedAreNamed(self):
+        """A session material holding a list value: saving warns that the list is not in the file"""
+        save = os.path.join(self.work, "list.FCStd")
+        code = (
+            "import FreeCAD, Materials\n"
+            "d = FreeCAD.newDocument('E1List')\n"
+            "b = d.addObject('Part::Box', 'Box')\n"
+            "m = Materials.Material()\n"
+            "m.Name = 'E1 list'\n"
+            "m.addPhysicalModel('{}')\n"
+            "m.setValue('TestList', ['one', 'two'])\n"
+            "b.ShapeMaterial = m\n"
+            "d.recompute()\n"
+            "d.saveAs({!r})\n".format(TEST_MODEL, save)
+        )
+        result, log = self.child(self.settingsFolder("empty-settings"), code=code)
+        self.assertTrue(os.path.isfile(save), log[-2000:])
+        warning = [l for l in log.splitlines() if "not saved with the document" in l]
+        self.assertTrue(warning, log[-2000:])
+        self.assertIn("TestList", warning[0])
+        self.assertNotIn('name="TestList"', self.documentXml(save))

@@ -27,7 +27,9 @@
 #include <locale>
 #include <sstream>
 
+#include <QDir>
 #include <QFileInfo>
+#include <QStringList>
 #include <QMetaType>
 #include <QUuid>
 
@@ -134,9 +136,16 @@ std::string exactDouble(double value)
     return stream.str();
 }
 
+// An attribute's text: a control character, which XML 1.0 refuses, would make the whole document
+// unreadable, so it goes through validateXMLString as PropertyString's does.
+std::string encode(const std::string& text)
+{
+    return Base::Persistence::encodeAttribute(Base::Persistence::validateXMLString(text));
+}
+
 std::string encode(const QString& text)
 {
-    return Base::Persistence::encodeAttribute(text.toStdString());
+    return encode(text.toStdString());
 }
 
 // The attributes of one value, or empty when the value is not carried.
@@ -157,7 +166,7 @@ std::string valueAttributes(const MaterialProperty& prop)
             }
             auto quantity = value.value<Base::Quantity>();
             stream << " value=\"" << exactDouble(quantity.getValue()) << "\" unit=\""
-                   << Base::Persistence::encodeAttribute(quantity.getUnit().getString()) << "\"";
+                   << encode(quantity.getUnit().getString()) << "\"";
             break;
         }
         case MaterialValue::Float:
@@ -196,6 +205,18 @@ void restoreValue(Material& material,
         case MaterialValue::Float:
             material.setPhysicalValue(name, reader.getAttribute<double>("value"));
             break;
+        case MaterialValue::Integer: {
+            // written as 64 bits (toLongLong), so read as 64 bits: setInt(QString) has 32
+            long long number = std::stoll(text);
+            if (number >= std::numeric_limits<int>::min()
+                && number <= std::numeric_limits<int>::max()) {
+                material.setPhysicalValue(name, static_cast<int>(number));
+            }
+            else {
+                material.setPhysicalValue(name, QVariant(static_cast<qlonglong>(number)));
+            }
+            break;
+        }
         default:
             material.setPhysicalValue(name, QString::fromUtf8(text));
             break;
@@ -220,6 +241,38 @@ std::string ownerName(const App::Property& prop)
     return prop.getFullName();
 }
 
+// Whether a file name is one Windows reserves for a device (CON, NUL, COM1...), whatever its case
+// and extension
+bool reservedOnWindows(const QString& file)
+{
+    QString base = file.section(QLatin1Char('.'), 0, 0).trimmed().toUpper();
+    static const QStringList devices = {QStringLiteral("CON"),
+                                        QStringLiteral("PRN"),
+                                        QStringLiteral("AUX"),
+                                        QStringLiteral("NUL")};
+    if (devices.contains(base)) {
+        return true;
+    }
+    if (base.size() == 4 && (base.startsWith(QStringLiteral("COM")) || base.startsWith(QStringLiteral("LPT")))) {
+        return base.at(3) >= QLatin1Char('1') && base.at(3) <= QLatin1Char('9');
+    }
+    return false;
+}
+
+// Whether the folder holds a file of this name, compared without case (Windows and macOS do)
+bool existsIgnoringCase(const QString& folder, const QString& file)
+{
+    QDir dir(folder);
+    for (auto& entry : dir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)) {
+        if (entry.compare(file, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr int maxLearnedName = 200;
+
 // A file name for a material learned on open: its name, without characters a file system refuses.
 QString learnedFileName(const QString& name)
 {
@@ -242,6 +295,14 @@ void learnMaterial(const Material& material, const std::string& owner)
 {
     try {
         auto& manager = MaterialManager::getManager();
+        if (QUuid::fromString(material.getUUID()).isNull()) {
+            Base::Console().warning("Material '%s' of %s has no valid UUID ('%s'): "
+                                    "not added to the user material library\n",
+                                    material.getName().toStdString().c_str(),
+                                    owner.c_str(),
+                                    material.getUUID().toStdString().c_str());
+            return;
+        }
         if (manager.exists(material.getUUID())) {
             return;
         }
@@ -260,7 +321,16 @@ void learnMaterial(const Material& material, const std::string& owner)
             return;
         }
         QString path = learnedFileName(material.getName());
-        if (QFileInfo::exists(local->getLocalPath(path))) {
+        if (path.size() > maxLearnedName || reservedOnWindows(path)) {
+            Base::Console().log("Material '%s' of %s not added: '%s' can't be a file name on "
+                                "every computer\n",
+                                material.getName().toStdString().c_str(),
+                                owner.c_str(),
+                                path.toStdString().c_str());
+            return;
+        }
+        QString filePath = local->getLocalPath(path);
+        if (existsIgnoringCase(QFileInfo(filePath).path(), QFileInfo(filePath).fileName())) {
             Base::Console().log("Material '%s' of %s not added: '%s' exists in the user library\n",
                                 material.getName().toStdString().c_str(),
                                 owner.c_str(),
@@ -270,6 +340,15 @@ void learnMaterial(const Material& material, const std::string& owner)
         auto card = std::make_shared<Material>(material);
         // saveAsCopy keeps the UUID, so the card resolves this document's reference
         manager.saveMaterial(library, card, path, false, true, false);
+        if (!QFileInfo::exists(filePath)) {
+            // saveMaterial registers the material even when its file couldn't be written
+            manager.remove(material.getUUID());
+            Base::Console().log("Material '%s' of %s not added: '%s' could not be written\n",
+                                material.getName().toStdString().c_str(),
+                                owner.c_str(),
+                                filePath.toStdString().c_str());
+            return;
+        }
         Base::Console().log("Material '%s' added to the user library from %s\n",
                             material.getName().toStdString().c_str(),
                             owner.c_str());
@@ -288,6 +367,47 @@ void learnMaterial(const Material& material, const std::string& owner)
     }
 }
 
+// One stored <Model>: added when it is a physical model known here, else reported
+void restoreModel(Material& material, Base::XMLReader& reader, std::vector<std::string>& lost)
+{
+    auto model = QString::fromLatin1(reader.getAttribute<const char*>("uuid", ""));
+    if (material.hasPhysicalModel(model)) {
+        return;
+    }
+    try {
+        // addPhysical neither reports a model unknown here nor checks its kind
+        auto known = ModelManager::getManager().getModel(model);
+        if (known->getType() == Model::ModelType_Physical) {
+            material.addPhysical(model);
+        }
+    }
+    catch (const Base::Exception&) {
+    }
+    if (!material.hasPhysicalModel(model)) {
+        lost.push_back("model " + model.toStdString());
+    }
+}
+
+// One stored <Value>: set when its property is there and takes it, else reported
+void restoreNamedValue(Material& material, Base::XMLReader& reader, std::vector<std::string>& lost)
+{
+    auto valueName = QString::fromUtf8(reader.getAttribute<const char*>("name", ""));
+    if (valueName.isEmpty() || !material.hasPhysicalProperty(valueName)) {
+        lost.push_back(valueName.isEmpty() ? std::string("a value without a name")
+                                           : valueName.toStdString());
+        return;
+    }
+    try {
+        restoreValue(material, valueName, reader);
+    }
+    catch (const Base::Exception&) {
+        lost.push_back(valueName.toStdString());
+    }
+    catch (const std::exception&) {
+        lost.push_back(valueName.toStdString());
+    }
+}
+
 }  // namespace
 
 void PropertyMaterial::Save(Base::Writer& writer) const
@@ -298,15 +418,27 @@ void PropertyMaterial::Save(Base::Writer& writer) const
     }
     std::sort(models.begin(), models.end());
     std::vector<std::pair<QString, std::string>> values;
+    std::string dropped;
     for (auto& [name, prop] : _material.getPhysicalProperties()) {
         auto attributes = valueAttributes(*prop);
         if (!attributes.empty()) {
             values.emplace_back(name, attributes);
         }
+        else if (!prop->isNull()) {
+            dropped += (dropped.empty() ? "" : ", ") + name.toStdString();
+        }
+    }
+    if (!dropped.empty() && !MaterialManager::getManager().exists(_material.getUUID())) {
+        // lists, arrays, colours, images and long texts are not carried: only a card holds them
+        Base::Console().warning("Material '%s' of %s is in no material library here: "
+                                "these values are not saved with the document: %s\n",
+                                _material.getName().toStdString().c_str(),
+                                ownerName(*this).c_str(),
+                                dropped.c_str());
     }
 
-    writer.Stream() << writer.ind() << "<PropertyMaterial uuid=\""
-                    << _material.getUUID().toStdString() << "\" name=\""
+    writer.Stream() << writer.ind() << "<PropertyMaterial uuid=\"" << encode(_material.getUUID())
+                    << "\" name=\""
                     << encode(_material.getName()) << "\" models=\"" << models.size()
                     << "\" values=\"" << values.size() << "\"";
     if (models.empty() && values.empty()) {
@@ -316,8 +448,7 @@ void PropertyMaterial::Save(Base::Writer& writer) const
     writer.Stream() << ">" << std::endl;
     writer.incInd();
     for (auto& uuid : models) {
-        writer.Stream() << writer.ind() << "<Model uuid=\"" << uuid.toStdString() << "\"/>"
-                        << std::endl;
+        writer.Stream() << writer.ind() << "<Model uuid=\"" << encode(uuid) << "\"/>" << std::endl;
     }
     for (auto& [name, attributes] : values) {
         writer.Stream() << writer.ind() << "<Value name=\"" << encode(name) << "\"" << attributes
@@ -356,54 +487,41 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
     }
 
     auto name = QString::fromUtf8(reader.getAttribute<const char*>("name", ""));
-    auto modelCount = reader.getAttribute<long>("models");
-    auto valueCount = reader.getAttribute<long>("values");
-    bool hasChildren = modelCount > 0 || valueCount > 0;
+    auto modelCount = reader.getAttribute<long>("models", 0);
+    auto valueCount = reader.getAttribute<long>("values", 0);
 
     // The file wins: the library card, when there is one, gives only what the file does not carry.
     Material material = card ? Material(*card) : Material();
     material.setUUID(uuid);
     material.setName(name);
     std::vector<std::string> lost;
-    for (long i = 0; i < modelCount; ++i) {
-        reader.readElement("Model");
-        auto model = QString::fromLatin1(reader.getAttribute<const char*>("uuid", ""));
-        if (material.hasPhysicalModel(model)) {
-            continue;
+
+    // The children are read one by one up to the element's end, whatever the counts say: a count
+    // above the real children must not read on into the document (readElement would).
+    long models = 0;
+    long values = 0;
+    while (reader.readNextElement()) {
+        std::string tag = reader.localName();
+        if (tag == "Model") {
+            ++models;
+            restoreModel(material, reader, lost);
         }
-        try {
-            // addPhysical neither reports a model unknown here nor checks its kind
-            auto known = ModelManager::getManager().getModel(model);
-            if (known->getType() == Model::ModelType_Physical) {
-                material.addPhysical(model);
-            }
+        else if (tag == "Value") {
+            ++values;
+            restoreNamedValue(material, reader, lost);
         }
-        catch (const Base::Exception&) {
-        }
-        if (!material.hasPhysicalModel(model)) {
-            lost.push_back("model " + model.toStdString());
-        }
-    }
-    for (long i = 0; i < valueCount; ++i) {
-        reader.readElement("Value");
-        auto valueName = QString::fromUtf8(reader.getAttribute<const char*>("name", ""));
-        if (valueName.isEmpty() || !material.hasPhysicalProperty(valueName)) {
-            lost.push_back(valueName.isEmpty() ? std::string("a value without a name")
-                                               : valueName.toStdString());
-            continue;
-        }
-        try {
-            restoreValue(material, valueName, reader);
-        }
-        catch (const Base::Exception&) {
-            lost.push_back(valueName.toStdString());
-        }
-        catch (const std::exception&) {
-            lost.push_back(valueName.toStdString());
+        else {
+            lost.push_back("element <" + tag + ">");
         }
     }
-    if (hasChildren) {
-        reader.readEndElement("PropertyMaterial");
+    // at the end of this element, or at its parent's end when it was self-closing
+    if (std::string(reader.localName()) == "PropertyMaterial") {
+        reader.readEndElement("PropertyMaterial");  // returns at once: it is the current element
+    }
+    if (models != modelCount || values != valueCount) {
+        lost.push_back(std::to_string(models) + " of " + std::to_string(modelCount) + " models and "
+                       + std::to_string(values) + " of " + std::to_string(valueCount)
+                       + " values found");
     }
     if (!lost.empty()) {
         std::string list;
@@ -416,7 +534,9 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
                                 list.c_str());
     }
     setValue(material);
-    if (!card && !material.getPhysicalModels()->isEmpty() && openingDocument(*this)) {
+    // only a material restored whole becomes a card
+    if (!card && lost.empty() && !material.getPhysicalModels()->isEmpty()
+        && openingDocument(*this)) {
         learnMaterial(material, ownerName(*this));
     }
 }
