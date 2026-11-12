@@ -1106,7 +1106,7 @@ class TestPipeSelfOverlapUnion(PipeCase):
         x = 0, into leg 1's (r 1). The sweep came out a self-overlapping solid (BOP SelfIntersect on
         faces, V 869.6967, the overlap counted twice), Up-to-date. Now the sections' reach arms the
         check, and the tubes' union is one solid holding the point (1, 0.8, 0), inside both tubes
-        (V 869.2494, 7 faces, BOP finds only the C0 edges it finds at r 4). The overlap lies in leg 1's
+        (V 869.3323, 869.2494 before SC7's readouts; 7 faces, BOP finds only the C0 edges it finds at r 4). The overlap lies in leg 1's
         tube (r 1) where leg 3 reaches below y 1, which needs its radius over 5: x < 3.4 for a radius
         growing evenly from 1 at x 30. So the union is under the double-counted volume and over it
         less a 6 long piece of leg 1's tube (twice that reach)."""
@@ -1117,13 +1117,13 @@ class TestPipeSelfOverlapUnion(PipeCase):
         volume = pipe.Shape.Volume
         self.assertLess(volume, doubled - 0.1)
         self.assertGreater(volume, doubled - 6 * math.pi)
-        self.assertAlmostEqual(volume, 869.2494, places=2)
+        self.assertAlmostEqual(volume, 869.3323, places=2)
 
     def testASectionClearOfTheOtherLegSweepsAsBefore(self):
         """The end section r 4 reaches y 2 at x = 0, clear of leg 1's tube (y 1): the check runs (the
         sections' reach, 4, against legs 6 apart) and finds nothing, and the sweep is as before
         (V 569.609 on the build without the sections' reach)."""
-        self.assertOneSolid(self.multisection(4), 569.609, places=2)
+        self.assertOneSolid(self.multisection(4), 569.7189, places=2)
 
 
 class TestPipeSelfOverlapUntouched(PipeCase):
