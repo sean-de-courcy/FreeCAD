@@ -31,6 +31,7 @@
 #include <boost_graph_adjacency_list.hpp>
 
 #include <App/Application.h>
+#include <App/ConfigurationHooks.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/DocumentObserver.h>
@@ -677,6 +678,15 @@ void PropertyExpressionEngine::setValue(const ObjectIdentifier& path,
         && (expr == it->second.expression
             || (expr && it->second.expression && expr->isSame(*it->second.expression)))) {
         return;
+    }
+
+    // FreeCAD-CH ops#671: a configured path's write becomes its active row's cell (or is refused)
+    if (!restoring) {
+        if (auto owner = freecad_cast<DocumentObject*>(getContainer())) {
+            if (callExpressionWriteHook(owner, usePath, expr)) {
+                return;
+            }
+        }
     }
 
     if (expr) {

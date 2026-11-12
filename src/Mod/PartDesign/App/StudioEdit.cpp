@@ -12,6 +12,7 @@
 
 #include "Body.h"
 #include "Pieces.h"
+#include "StudioConfig.h"
 #include "StudioEdit.h"
 #include "StudioList.h"
 
@@ -215,6 +216,10 @@ bool studioSetScopeIds(
 
 bool studioSuppress(App::DocumentObject* entry, bool on, std::string* why)
 {
+    // FreeCAD-CH ops#671: a configured suppression's Suppress writes the active cell (CF4)
+    if (configSuppressionIsConfigured(entry)) {
+        return configSetSuppressionCell(entry, std::string(), on, why);
+    }
     StudioList* list = holdingOrRefuse(entry, why);
     if (!list) {
         return false;
