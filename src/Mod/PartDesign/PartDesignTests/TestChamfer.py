@@ -21,6 +21,7 @@
 # *                                                                         *
 # ***************************************************************************
 
+import math
 from math import pi
 import os
 import shutil
@@ -470,6 +471,90 @@ class TestChamfer(unittest.TestCase):
             self.assertTrue(
                 chamfer.getStatusString().startswith(message), chamfer.getStatusString()
             )
+
+    # Chamfers by equal distances over a chain of edges at different angles, as Onshape's
+    # (notes/chamfer-chain-setbacks.md in the ops repository, oracle 14 CT1-CT3): the chain's first
+    # edge in Base gets the size, every other edge size tan(a1 / 2) / tan(a / 2), a its wedge
+    # angle. Q-TAPER: a block 20 x 20 x 5 with a pocket open at z = 0, its end walls x = 5 and
+    # x = 15 square, its side walls leaning in by 6 degrees (bottom edges at 96 degrees).
+
+    def _taper_body(self, t=6):
+        k = math.tan(math.radians(t))
+        V = FreeCAD.Vector
+        block = Part.makeBox(20, 20, 5, V(0, -10, 0))
+        section = Part.makePolygon(
+            [
+                V(5, -3 - k, -1),
+                V(5, 3 + k, -1),
+                V(5, 3 - 3 * k, 3),
+                V(5, -3 + 3 * k, 3),
+                V(5, -3 - k, -1),
+            ]
+        )
+        pocket = Part.Face(section).extrude(V(10, 0, 0))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        feature = self.Doc.addObject("Part::Feature", "Taper")
+        feature.Shape = block.cut(pocket).Solids[0]
+        body.BaseFeature = feature
+        self.Doc.recompute()
+        base = body.BaseFeature
+        shape = base.Shape
+        edges = {
+            "end5": self._edge_between(shape, (5, -3, 0), (5, 3, 0)),
+            "end15": self._edge_between(shape, (15, -3, 0), (15, 3, 0)),
+            "side+": self._edge_between(shape, (5, 3, 0), (15, 3, 0)),
+            "side-": self._edge_between(shape, (5, -3, 0), (15, -3, 0)),
+        }
+        return body, base, edges
+
+    def _assertHole(self, chamfer, x_min, x_max, y_max):
+        # The bottom face's hole: its corners at x_min and x_max, |y| = y_max
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        shape = chamfer.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        bottoms = [
+            face
+            for face in shape.Faces
+            if face.Area > 100 and all(abs(v.Point.z) < 1e-7 for v in face.Vertexes)
+        ]
+        self.assertEqual(len(bottoms), 1)
+        hole = [v.Point for v in bottoms[0].Vertexes if 1 < v.Point.x < 19 and abs(v.Point.y) < 9]
+        self.assertEqual(len(hole), 4)
+        self.assertAlmostEqual(min(p.x for p in hole), x_min, places=7)
+        self.assertAlmostEqual(max(p.x for p in hole), x_max, places=7)
+        for p in hole:
+            self.assertAlmostEqual(abs(p.y), y_max, places=7)
+
+    def testChamferChainSquareEdgeFirst(self):
+        # A square end edge first: the 96-degree sides get 0.5 / tan 48 = 0.450202
+        body, base, e = self._taper_body()
+        edges = [e["end5"], e["side+"], e["end15"], e["side-"]]
+        chamfer = self._add_chamfer(body, base, edges, 0.5)
+        side = 0.5 / math.tan(math.radians(48))
+        self.assertAlmostEqual(side, 0.450202, places=6)
+        self._assertHole(chamfer, 4.5, 15.5, 3 + side)
+
+    def testChamferChainReorderedBase(self):
+        # Base reordered so a tapered side comes first: the square ends get 0.5 tan 48 = 0.555306
+        body, base, e = self._taper_body()
+        edges = [e["end5"], e["side+"], e["end15"], e["side-"]]
+        chamfer = self._add_chamfer(body, base, edges, 0.5)
+        chamfer.Base = (base, [e["side+"], e["end5"], e["side-"], e["end15"]])
+        self.Doc.recompute()
+        end = 0.5 * math.tan(math.radians(48))
+        self.assertAlmostEqual(end, 0.555306, places=6)
+        self._assertHole(chamfer, 5 - end, 15 + end, 3.5)
+
+    def testChamferChainRemovingTheFirstPickPromotesTheNext(self):
+        # Without the end edge at x = 5 the chain is side, end, side, led by the tapered side: the
+        # end at x = 15 gets 0.555306, the sides 0.5, and the end at x = 5 isn't chamfered
+        body, base, e = self._taper_body()
+        edges = [e["end5"], e["side+"], e["end15"], e["side-"]]
+        chamfer = self._add_chamfer(body, base, edges, 0.5)
+        chamfer.Base = (base, [e["side+"], e["end15"], e["side-"]])
+        self.Doc.recompute()
+        self._assertHole(chamfer, 5, 15 + 0.5 * math.tan(math.radians(48)), 3.5)
 
     def tearDown(self):
         # closing doc
