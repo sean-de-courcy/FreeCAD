@@ -184,6 +184,11 @@ class TestLoftConnectionsTwist(ConnectionCase):
         loft = self.loft(square(20), turnedSquare(10), pairs)
         self.assertStops(loft, "connection")
 
+    def testTwoCrossedConnectionsStop(self):
+        """Oracle 14 LC4: (10, 10) -> (-7.07, 0) and (-10, 10) -> (7.07, 0), Onshape's LOFT_INVALID."""
+        loft = self.loft(square(20), turnedSquare(10), [((10, 10), (-S, 0)), ((-10, 10), (S, 0))])
+        self.assertStops(loft, "connection")
+
     def testAVertexConnectedTwiceStops(self):
         top = self.top(180)
         loft = self.loft(square(20), turnedSquare(10), [((10, 10), top[0]), ((10, 10), top[1])])
@@ -207,7 +212,7 @@ class TestLoftConnectionsTwist(ConnectionCase):
         top = self.BOTTOM[1:] + self.BOTTOM[:1]
         loft = self.loft(square(20), square(20), [((10, 10), (-10, 10))])
         self.assertAlmostEqual(ruledVolume(self.BOTTOM, top), 8000.0, delta=1e-9)
-        self.assertLoft(loft, 8000.0, 2848.1431, 6)
+        self.assertLoft(loft, 8000.0, 2848.143703, 6)  # oracle 14 LC5
         self.assertJoined(loft, (10, 10), (-10, 10))
 
     def testSubtractiveLoftCutsTheTwist(self):
@@ -271,11 +276,26 @@ class TestLoftConnectionsUnequal(ConnectionCase):
         g.append(Part.ArcOfCircle(Part.Circle(V(7, 3, 0), V(0, 0, 1), 3), 0, math.pi / 2))
         return g
 
-    def testSixEdgesToARectangleOneConnection(self):
-        loft = self.loft(self.sixEdges(), models.rectangle(-6, -4, 6, 4), [((-10, -6), (6, 4))])
-        self.assertTrue(loft.isValid(), loft.getStatusString())
-        self.assertEqual(len(loft.Shape.Solids), 1)
-        self.assertJoined(loft, (-10, -6), (6, 4))
+    RECT = staticmethod(lambda: models.rectangle(-6, -4, 6, 4))
+
+    def testSixEdgesCornerToCornerIsOnshapesDefault(self):
+        """Oracle 14 LC1: (-10, -6) -> (-6, -4) is Onshape's default; the arc ends take the rectangle's thirds."""
+        loft = self.loft(self.sixEdges(), self.RECT(), [((-10, -6), (-6, -4))])
+        self.assertLoft(loft, 4811.584195, 1847.092629, 8)
+        self.assertJoined(loft, (10, -3), (6, -4 / 3))
+        self.assertJoined(loft, (10, 3), (6, 4 / 3))
+
+    def testSixEdgesArcEndToACorner(self):
+        """Oracle 14 LC1: (10, -3) -> (6, -4); the leftovers take their edges' midpoints."""
+        loft = self.loft(self.sixEdges(), self.RECT(), [((10, -3), (6, -4))])
+        self.assertLoft(loft, 4781.672715, 1841.389255, 8)
+        self.assertJoined(loft, (7, -6), (0, -4))
+        self.assertJoined(loft, (10, 3), (6, 0))
+
+    def testSixEdgesHalfTurnStops(self):
+        """Oracle 14 LC1: (-10, -6) -> (6, 4) is a half-turn wrap, Onshape's LOFT_INVALID."""
+        loft = self.loft(self.sixEdges(), self.RECT(), [((-10, -6), (6, 4))])
+        self.assertStops(loft, "connection")
 
     def testEightEdgesToARectangleFourConnections(self):
         # 8 edges: a 20 x 12 rectangle with the right corners rounded r 3 and the left corners cut 2 x 2 (6 lines, 2 arcs)
@@ -291,11 +311,11 @@ class TestLoftConnectionsUnequal(ConnectionCase):
             StartCondition="Normal to profile",
             EndCondition="Normal to profile",
         )
-        self.assertTrue(loft.isValid(), loft.getStatusString())
-        self.assertEqual(len(loft.Shape.Solids), 1)
-        for a, b in pairs:
+        self.assertLoft(loft, 4751.303503, 1799.865681, 8)  # oracle 14 LC2
+        for a, b in pairs + [((-10, 4), (-6, 4 / 3)), ((-10, -4), (-6, -4 / 3))]:
             self.assertJoined(loft, a, b, straight=False)
 
+    @unittest.expectedFailure  # oracle 14 LC3: Onshape leaves tangent (G1) joints unmatched; the rule is open
     def testSlotToARoundedRectangleTwoConnections(self):
         # bottom: a slot, lines y = +-5 from x -10..10, half circles r 5 (4 edges); top: a 16 x 8 rectangle with
         # corners rounded r 2 (8 edges)
@@ -313,9 +333,8 @@ class TestLoftConnectionsUnequal(ConnectionCase):
             )
         pairs = [((10, 5), (6, 4)), ((-10, -5), (-6, -4))]
         loft = self.loft(slot, rounded, pairs)
-        self.assertTrue(loft.isValid(), loft.getStatusString())
-        self.assertEqual(len(loft.Shape.Solids), 1)
-        for a, b in pairs:
+        self.assertLoft(loft, 5831.449304, 2131.481057, 6)  # oracle 14 LC3
+        for a, b in pairs + [((10, -5), (6, -4)), ((0, 5), (-6, 4))]:
             self.assertJoined(loft, a, b)
 
 
