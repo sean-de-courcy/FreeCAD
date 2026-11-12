@@ -37,6 +37,25 @@
 
 using namespace App;
 
+void App::saveFaultPoint(const char* step)
+{
+    static const std::string fault = [] {
+        const char* value = std::getenv("FREECAD_CH_SAVE_FAULT");
+        return std::string(value ? value : "");
+    }();
+    if (fault.empty()) {
+        return;
+    }
+    const auto colon = fault.find(':');
+    if (fault.compare(0, colon, step) != 0) {
+        return;
+    }
+    if (colon != std::string::npos && fault.compare(colon + 1, std::string::npos, "throw") == 0) {
+        throw Base::FileException((std::string("Save fault injected at ") + step).c_str());
+    }
+    std::_Exit(86);
+}
+
 void BackupPolicy::setPolicy(const Policy p)
 {
     policy = p;
@@ -63,6 +82,7 @@ void BackupPolicy::apply(const std::string& sourcename, const std::string& targe
             applyTimeStamp(sourcename, targetname);
             break;
     }
+    saveFaultPoint("pruned");
 }
 
 void BackupPolicy::applyStandard(const std::string& sourcename, const std::string& targetname) const
@@ -119,10 +139,12 @@ void BackupPolicy::applyStandard(const std::string& sourcename, const std::strin
         }
     }
 
+    saveFaultPoint("kept");
     if (Base::FileInfo tmp(sourcename); !tmp.renameFile(targetname.c_str())) {
         throw Base::FileException("Cannot rename tmp save file to project file",
                                   Base::FileInfo(targetname));
     }
+    saveFaultPoint("replaced");
 }
 
 void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::string& targetname)
@@ -317,12 +339,14 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
         }
     }
 
+    saveFaultPoint("kept");
     Base::FileInfo tmp(sourcename);
     if (!tmp.renameFile(targetname.c_str())) {
         throw Base::FileException(
             "Save interrupted: Cannot rename temporary file to project file",
             tmp);
     }
+    saveFaultPoint("replaced");
 
     if (backupManagementError) {
         throw Base::FileException(

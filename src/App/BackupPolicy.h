@@ -64,4 +64,11 @@ private:
     bool useFCBakExtension {true};
     std::string saveBackupDateFormat {"%Y%m%d-%H%M%S"};
 };
+
+/// FreeCAD-CH (ops#640, slice A1): a test's way to stop a save at one of its steps. With the
+/// environment variable FREECAD_CH_SAVE_FAULT set to `<step>` the process ends there at once, as
+/// if it were killed; with `<step>:throw` the save throws a Base::FileException there. The steps
+/// in their order: write (the temporary file half written), written, flushed, kept (the old file
+/// kept as a backup), replaced (the new file under the document's name), pruned. Not exported.
+void saveFaultPoint(const char* step);
 }  // namespace App

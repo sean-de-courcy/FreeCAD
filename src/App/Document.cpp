@@ -3473,6 +3473,7 @@ bool Document::saveToFile(const char* filename) const
         // to them by index (ops#6 T2)
         Data::NameRefCollector collector;
         Document::Save(writer);
+        saveFaultPoint("write");
 
         // Special handling for Gui document.
         signalSaveDocument(writer);
@@ -3489,6 +3490,8 @@ bool Document::saveToFile(const char* filename) const
 
         GetApplication().signalSaveDocument(*this);
     }
+    saveFaultPoint("written");
+    saveFaultPoint("flushed");
 
     if (policy) {
         // if saving the project data succeeded rename to the actual file name
