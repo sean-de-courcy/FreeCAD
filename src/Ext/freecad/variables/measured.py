@@ -9,14 +9,13 @@ with a `MeasuredVariable` proxy, in the same studio. It re-reads the geometry on
 and a lost reference raises an error naming it; FreeCAD then marks the VarSet and every feature
 using the variable as failed ("'<measurement>' has an error").
 
-Kinds:
-- Distance: two references (vertex, edge or face); Minimum by default (BRepExtrema), or Center
-  (Quick Measure's center: a circle's or sphere's center, else the center of mass).
-- Length: one or more edges, summed.
-- Diameter: one circle or arc edge, or one cylindrical face.
-
-Readings marked [R] are the most Onshape-like reading, kept until the Onshape oracle answers
-(the design note's section 6).
+Kinds, as Onshape's (notes/onshape-facts.md MV0-MV3 in the ops repo):
+- Distance: two references (vertex, edge or face). Minimum (the default) is the gap between them
+  (BRepExtrema); Maximum the farthest points. With Minimum, Use axis measures a circle, an arc or
+  a sphere from its center and a cylinder or a cone from its axis. Value to record: the distance,
+  or its X, Y or Z component (unsigned, in the studio's frame).
+- Length: edges and wire bodies, summed; a face beside them is ignored, a face alone refused.
+- Diameter: one circle or arc edge, or one cylinder or sphere face; Radius records the radius.
 """
 
 import FreeCAD as App
@@ -24,7 +23,8 @@ import FreeCAD as App
 FORMAT = 1
 # Saved by index: append only.
 KINDS = ["Distance", "Length", "Diameter"]
-DISTANCE_TYPES = ["Minimum", "Center"]
+DISTANCE_TYPES = ["Minimum", "Maximum"]
+RECORDS = ["Distance", "X", "Y", "Z"]
 
 _READ_ONLY_OUTPUT = 1 | 8  # Prop_ReadOnly | Prop_Output
 
@@ -47,7 +47,13 @@ class MeasuredVariable:
 
         add("App::PropertyInteger", "Format", "Version of this object's property table", _READ_ONLY_OUTPUT)
         add("App::PropertyEnumeration", "Kind", "What is measured")
-        add("App::PropertyEnumeration", "DistanceType", "Distance only: Minimum, or between centers")
+        add("App::PropertyEnumeration", "DistanceType", "Distance only: Minimum or Maximum")
+        add("App::PropertyBool", "UseAxis",
+            "Distance with Minimum only: circles, arcs and spheres from their centers, cylinders "
+            "and cones from their axes")
+        add("App::PropertyEnumeration", "ValueToRecord",
+            "Distance only: the distance, or its X, Y or Z component (unsigned)")
+        add("App::PropertyBool", "Radius", "Diameter only: record the radius")
         add("App::PropertyLinkSubList", "References", "The measured vertices, edges or faces")
         add("App::PropertyLength", "Value", "The measured value", _READ_ONLY_OUTPUT)
         add("App::PropertyStringList", "ReferenceNames",
@@ -56,6 +62,8 @@ class MeasuredVariable:
             obj.Kind = KINDS
         if not obj.DistanceType or obj.DistanceType not in DISTANCE_TYPES:
             obj.DistanceType = DISTANCE_TYPES
+        if not obj.ValueToRecord or obj.ValueToRecord not in RECORDS:
+            obj.ValueToRecord = RECORDS
         if obj.Format == 0:
             obj.Format = FORMAT
 
@@ -69,7 +77,7 @@ class MeasuredVariable:
     def execute(self, obj):
         refs = _references(obj)
         try:
-            value = measure(obj.Kind, refs, obj.DistanceType)
+            value = measure(obj.Kind, refs, **options_of(obj))
         except MeasureError as e:
             raise MeasureError("Measured variable '{}': {}".format(variable_name(obj), e)) from None
         obj.ReferenceNames = [_show(o, sub) for o, sub in refs]
@@ -141,15 +149,49 @@ def _resolve(obj, sub):
     return shape
 
 
-def measure(kind, refs, distance_type="Minimum"):
-    """The measured value in mm of `refs`, a list of (object, subelement) pairs."""
+def options_of(m):
+    """The measurement `m`'s options, as `measure` and `add` take them."""
+    return {"distance_type": m.DistanceType, "use_axis": bool(m.UseAxis),
+            "record": m.ValueToRecord, "radius": bool(m.Radius)}
+
+
+def check_options(distance_type="Minimum", use_axis=False, record="Distance", radius=False):
+    """Raise ValueError for an option value that doesn't exist."""
+    if distance_type not in DISTANCE_TYPES:
+        raise ValueError("distance type must be one of {}".format(", ".join(DISTANCE_TYPES)))
+    if record not in RECORDS:
+        raise ValueError("value to record must be one of {}".format(", ".join(RECORDS)))
+
+
+def set_options(m, distance_type="Minimum", use_axis=False, record="Distance", radius=False):
+    """Set the measurement `m`'s options (each kind reads its own; the others are kept)."""
+    check_options(distance_type, use_axis, record, radius)
+    m.DistanceType = distance_type
+    m.UseAxis = bool(use_axis)
+    m.ValueToRecord = record
+    m.Radius = bool(radius)
+
+
+def measure(kind, refs, distance_type="Minimum", use_axis=False, record="Distance", radius=False):
+    """The measured value in mm of `refs`, a list of (object, subelement) pairs. Each kind reads
+    its own options and ignores the others, as Onshape ignores Radius for a Length (MV2)."""
     if kind == "Length":
         return _length(refs)
     if kind == "Diameter":
-        return _diameter(refs)
+        d = _diameter(refs)
+        return d / 2.0 if radius else d
     if kind == "Distance":
-        return _distance(refs, distance_type)
+        d, vector = _distance(refs, distance_type, use_axis)
+        if record == "Distance":
+            return d
+        return abs({"X": vector.x, "Y": vector.y, "Z": vector.z}[record])
     raise MeasureError("unknown kind {!r}".format(kind))
+
+
+def distance_components(refs, distance_type="Minimum", use_axis=False):
+    """(distance, |X|, |Y|, |Z|) of a Distance (Onshape's Axis measurements group)."""
+    d, v = _distance(refs, distance_type, use_axis)
+    return d, abs(v.x), abs(v.y), abs(v.z)
 
 
 def _shape(obj, sub):
@@ -158,59 +200,254 @@ def _shape(obj, sub):
     return _resolve(obj, sub)
 
 
+def is_wire_body(shape):
+    """Whether `shape`, a whole object's, is a wire body (edges and no faces: a sketch, a wire)."""
+    return bool(shape.Edges) and not shape.Faces
+
+
 def _length(refs):
+    """Onshape's Length (MV2): the edges and wire bodies summed. Anything else picked (a face, a
+    vertex) is ignored, as Onshape ignores a face beside an edge; with no edge at all it fails, as
+    Onshape's does: a face's perimeter is not measured."""
     if not refs:
         raise MeasureError("Length needs one or more edges")
     total = 0.0
+    counted = 0
     for obj, sub in refs:
         shape = _shape(obj, sub)
-        if shape.ShapeType != "Edge":
-            raise MeasureError("Length takes edges; {} is a {}".format(
-                _show(obj, sub), shape.ShapeType.lower()))
-        total += shape.Length
+        if shape.ShapeType == "Edge":
+            total += shape.Length
+            counted += 1
+        elif not sub and is_wire_body(shape):
+            total += sum(e.Length for e in shape.Edges)
+            counted += 1
+    if not counted:
+        raise MeasureError("Length takes edges and wire bodies: select edges to measure ({} has "
+                           "none; a face's perimeter is not measured)".format(
+                               ", ".join(_show(o, s) for o, s in refs)))
     return total
 
 
-def _diameter(refs):
+def _analytic(shape):
+    """What `shape` is for Diameter and Use axis: ("Circle", radius, center, axis) for a circle or
+    arc edge, ("Cylinder", radius, point on the axis, axis), ("Sphere", radius, center, None) or
+    ("Cone", None, point on the axis, axis) for such a face; else None."""
     import Part
 
+    if shape.ShapeType == "Edge":
+        curve = shape.Curve
+        if isinstance(curve, Part.Circle):
+            return "Circle", curve.Radius, curve.Center, curve.Axis
+        return None
+    if shape.ShapeType != "Face":
+        return None
+    surface = shape.Surface
+    if isinstance(surface, Part.Cylinder):
+        return "Cylinder", surface.Radius, surface.Center, surface.Axis
+    if isinstance(surface, Part.Sphere):
+        return "Sphere", surface.Radius, surface.Center, None
+    if isinstance(surface, Part.Cone):
+        return "Cone", None, surface.Apex, surface.Axis
+    return None
+
+
+def _describe(shape):
+    """A few words on what `shape` is, for an error."""
+    kind = _analytic(shape)
+    if kind is not None:
+        return {"Circle": "a circle", "Cylinder": "a cylinder face", "Sphere": "a sphere face",
+                "Cone": "a cone face"}[kind[0]]
+    if shape.ShapeType == "Face":
+        return "a {} face".format(type(shape.Surface).__name__.lower())
+    if shape.ShapeType == "Edge":
+        return "a {} edge".format(type(shape.Curve).__name__.lower())
+    return "a " + shape.ShapeType.lower()
+
+
+def _diameter(refs):
+    """Onshape's Diameter (MV3): one circle or arc edge, or one cylinder or sphere face. A cone
+    face or a plane fails (a cone's circular edge is a circle)."""
     if len(refs) != 1:
-        raise MeasureError("Diameter takes one circle, arc or cylindrical face, not {}".format(len(refs)))
+        raise MeasureError("Diameter takes one circle, arc, cylinder or sphere, not {} "
+                           "references".format(len(refs)))
     obj, sub = refs[0]
     shape = _shape(obj, sub)
-    if shape.ShapeType == "Edge" and isinstance(shape.Curve, Part.Circle):
-        return 2.0 * shape.Curve.Radius
-    if shape.ShapeType == "Face" and isinstance(shape.Surface, Part.Cylinder):
-        return 2.0 * shape.Surface.Radius
-    raise MeasureError("Diameter takes a circle, arc or cylindrical face; {} is not one".format(
-        _show(obj, sub)))
+    kind = _analytic(shape)
+    if kind is not None and kind[0] in ("Circle", "Cylinder", "Sphere"):
+        return 2.0 * kind[1]
+    raise MeasureError("Diameter takes a circle or arc edge, or a cylinder or sphere face: "
+                       "select an entity to measure ({} is {})".format(
+                           _show(obj, sub), _describe(shape)))
 
 
-def _distance(refs, distance_type):
+def _distance(refs, distance_type="Minimum", use_axis=False):
+    """(distance, vector from the first reference's point to the second's) of a Distance (MV1).
+    Use axis applies to Minimum only: Onshape hides it with Maximum."""
     if len(refs) != 2:
         raise MeasureError("Distance takes two references, not {}".format(len(refs)))
     first, second = (_shape(obj, sub) for obj, sub in refs)
-    if distance_type == "Center":
-        return (_center(first) - _center(second)).Length
     try:
-        return first.distToShape(second)[0]
+        if distance_type == "Maximum":
+            return _farthest(first, second)
+        if use_axis:
+            first, second = _axis_form(first), _axis_form(second)
+        d, pairs, _info = first.distToShape(second)
+        return d, pairs[0][1] - pairs[0][0]
+    except MeasureError:
+        raise
     except Exception as e:
         raise MeasureError("no distance between {} and {} ({})".format(
             _show(*refs[0]), _show(*refs[1]), e))
 
 
-def _center(shape):
-    """Quick Measure's center (notes/measure-design.md): a vertex's point, a circle's or a sphere's
-    center, else the center of mass."""
+# Half the length of the line standing for a cylinder's or a cone's axis (Use axis): the axis is
+# infinite in Onshape [R]; a kilometre each way is beyond any part studio here.
+_AXIS_HALF = 1.0e6
+
+
+def _axis_form(shape):
+    """Use axis (MV1): a circle, an arc or a sphere becomes its center, a cylinder or a cone its
+    axis; anything else stays as it is."""
     import Part
 
-    if shape.ShapeType == "Vertex":
-        return shape.Point
-    if shape.ShapeType == "Edge" and isinstance(shape.Curve, Part.Circle):
-        return shape.Curve.Center
-    if shape.ShapeType == "Face" and isinstance(shape.Surface, Part.Sphere):
-        return shape.Surface.Center
-    return shape.CenterOfMass
+    kind = _analytic(shape)
+    if kind is None:
+        return shape
+    name, _radius, point, axis = kind
+    if name in ("Circle", "Sphere"):
+        return Part.Vertex(point)
+    axis = App.Vector(axis).normalize()
+    com = shape.CenterOfMass
+    middle = point + axis * (com - point).dot(axis)
+    return Part.Edge(Part.LineSegment(middle - axis * _AXIS_HALF, middle + axis * _AXIS_HALF))
+
+
+# --- Maximum: the farthest points of two vertices, edges or faces. OCC has no maximum distance
+# (BRepExtrema is the minimum), and Quick Measure's is approximate. Each shape is split into
+# parametrized pieces (a point; an edge's curve on its range; a face's surface on its domain, and
+# its boundary edges, since a maximum on a face may lie inside it or on its boundary), sampled, and
+# the best sampled pairs are refined by a pattern search on both pieces' parameters until the step
+# is below 1e-12 of the range. At a maximum the distance is flat, so the value is exact to far
+# below 1e-9 mm wherever the samples land in the maximum's neighbourhood.
+
+_EDGE_SAMPLES = 32
+_FACE_SAMPLES = 12  # per parameter direction
+_STARTS = 6
+
+
+def _edge_piece(edge):
+    lo, hi = edge.FirstParameter, edge.LastParameter
+
+    def at(x, e=edge):
+        try:
+            return e.valueAt(x[0])
+        except Exception:
+            return None
+    return (lo,), (hi,), at
+
+
+def _pieces(shape):
+    """[(lows, highs, at)]: `at(params)` is a point of the piece, or None outside its domain."""
+    t = shape.ShapeType
+    if t == "Vertex":
+        point = shape.Point
+        return [((), (), lambda x, p=point: p)]
+    if t == "Edge":
+        return [_edge_piece(shape)]
+    if t == "Face":
+        pieces = [_edge_piece(e) for e in shape.Edges]
+        u0, u1, v0, v1 = shape.ParameterRange
+
+        def at(x, f=shape):
+            try:
+                if not f.isPartOfDomain(x[0], x[1]):
+                    return None
+                return f.valueAt(x[0], x[1])
+            except Exception:
+                return None
+        pieces.append(((u0, v0), (u1, v1), at))
+        return pieces
+    raise MeasureError("Maximum measures vertices, edges and faces, not a {}".format(t.lower()))
+
+
+def _grid(lows, highs):
+    if not lows:
+        return [()]
+    if len(lows) == 1:
+        n = _EDGE_SAMPLES
+        return [(lows[0] + (highs[0] - lows[0]) * i / n,) for i in range(n + 1)]
+    n = _FACE_SAMPLES
+    return [(lows[0] + (highs[0] - lows[0]) * i / n, lows[1] + (highs[1] - lows[1]) * j / n)
+            for i in range(n + 1) for j in range(n + 1)]
+
+
+def _samples(pieces):
+    found = []
+    for k, (lows, highs, at) in enumerate(pieces):
+        for x in _grid(lows, highs):
+            p = at(x)
+            if p is not None:
+                found.append((k, x, p))
+    return found
+
+
+def _refine(piece_a, xa, piece_b, xb):
+    """Pattern search on (xa, xb) for the farthest points of the two pieces; returns
+    (distance, point a, point b)."""
+    lows = list(piece_a[0]) + list(piece_b[0])
+    highs = list(piece_a[1]) + list(piece_b[1])
+    na = len(piece_a[0])
+    x = list(xa) + list(xb)
+
+    def value(params):
+        pa = piece_a[2](params[:na])
+        pb = piece_b[2](params[na:])
+        if pa is None or pb is None:
+            return -1.0, pa, pb
+        return (pa - pb).Length, pa, pb
+
+    best, pa, pb = value(x)
+    steps = [(h - lo) / _EDGE_SAMPLES for lo, h in zip(lows, highs)]
+    ends = [(h - lo) * 1e-12 for lo, h in zip(lows, highs)]
+    for _ in range(20000):
+        if all(s <= e for s, e in zip(steps, ends)):
+            break
+        moved = False
+        for i in range(len(x)):
+            for sign in (1.0, -1.0):
+                trial = list(x)
+                trial[i] = min(highs[i], max(lows[i], x[i] + sign * steps[i]))
+                if trial[i] == x[i]:
+                    continue
+                v, qa, qb = value(trial)
+                if v > best:
+                    best, pa, pb, x, moved = v, qa, qb, trial, True
+                    break
+        if not moved:
+            steps = [s / 2.0 for s in steps]
+    return best, pa, pb
+
+
+def _farthest(a, b):
+    """(maximum distance, vector from a's point to b's) of the shapes `a` and `b`."""
+    pieces_a, pieces_b = _pieces(a), _pieces(b)
+    samples_a, samples_b = _samples(pieces_a), _samples(pieces_b)
+    if not samples_a or not samples_b:
+        raise MeasureError("no point to measure from")
+    best_of = {}  # (piece of a, piece of b) -> its best sampled pair
+    for ka, xa, pa in samples_a:
+        for kb, xb, pb in samples_b:
+            d = (pa - pb).Length
+            key = (ka, kb)
+            if key not in best_of or d > best_of[key][0]:
+                best_of[key] = (d, xa, xb)
+    starts = sorted(best_of.items(), key=lambda item: -item[1][0])[:_STARTS]
+    result = None
+    for (ka, kb), (_d, xa, xb) in starts:
+        d, pa, pb = _refine(pieces_a[ka], xa, pieces_b[kb], xb)
+        if result is None or d > result[0]:
+            result = (d, pa, pb)
+    return result[0], result[2] - result[1]
 
 
 def variable_name(obj):
@@ -409,9 +646,10 @@ def _same_body(a, b):
     return a.getParentGeoFeatureGroup() == b.getParentGeoFeatureGroup()
 
 
-def resolve_pick(root, subname):
+def resolve_pick(root, subname, wire_body=False):
     """The reference a 3D pick stands for: (feature, element name), the element named in the
-    feature that made it (the design note's section 2).
+    feature that made it (the design note's section 2). With `wire_body` (Length), a whole object
+    whose shape is edges only (a sketch, a wire) is taken as (object, ""), Onshape's wire body.
 
     `root` and `subname` are a selection's object and subname (a part studio and
     "Body.Pad2.Edge3", or a body and "Edge3"). A PartDesign body's shape is its tip's. From the
@@ -443,6 +681,13 @@ def resolve_pick(root, subname):
             element = Part.getShape(owner).getElementName(element, 1) or element
         except Exception:
             pass
+    if wire_body and not element:
+        try:
+            whole = _resolve(owner, "")
+        except MeasureError:
+            whole = None
+        if whole is not None and is_wire_body(whole):
+            return owner, ""
     kind = element.rstrip("0123456789")
     if kind not in ("Vertex", "Edge", "Face") or kind == element:
         raise MeasureError("pick a vertex, an edge or a face, not {}".format(
@@ -523,21 +768,27 @@ def check_references(kind, references):
     return ""
 
 
-def add(studio, name, kind, references, distance_type="Minimum", description=""):
+def add(studio, name, kind, references, distance_type="Minimum", description="", use_axis=False,
+        record="Distance", radius=False):
     """Add the measured variable `name` to the part studio `studio`: an App::Part, or the document
-    for the implicit studio (the top level).
+    for the implicit studio (the top level). Never a Variable Studio: it holds no geometry to
+    measure (Onshape's MV5).
 
     `references`: a list of (object, subelement name) pairs, e.g. [(pad, "Edge5")].
+    Options (each kind reads its own): `distance_type` "Minimum" or "Maximum", `use_axis` (with
+    Minimum), `record` "Distance", "X", "Y" or "Z" (Distance); `radius` (Diameter).
     Returns (holder, measurement): the holder is the variable's own VarSet, in the studio.
     The caller recomputes (and opens the undo transaction).
     """
     implicit = _is_document(studio)
+    if studio is not None and not implicit and _is_variable_studio(studio):
+        raise ValueError("a Variable Studio holds no geometry to measure: add a measured variable "
+                         "in a Part Studio")
     if studio is None or not (implicit or studio.isDerivedFrom("App::Part")):
         raise ValueError("a measured variable belongs to a part studio (an App::Part)")
     if kind not in KINDS:
         raise ValueError("kind must be one of {}".format(", ".join(KINDS)))
-    if distance_type not in DISTANCE_TYPES:
-        raise ValueError("distance type must be one of {}".format(", ".join(DISTANCE_TYPES)))
+    check_options(distance_type, use_axis, record, radius)
     reason = check_references(kind, references)
     if reason:
         raise ValueError(reason)
@@ -563,7 +814,7 @@ def add(studio, name, kind, references, distance_type="Minimum", description="")
         studio.addObject(m)
         studio.addObject(holder)
     m.Kind = kind
-    m.DistanceType = distance_type
+    set_options(m, distance_type, use_axis, record, radius)
     set_references(m, references)
     holder.addProperty("App::PropertyLength", name, "",
                        description or "Measured {}".format(kind.lower()))

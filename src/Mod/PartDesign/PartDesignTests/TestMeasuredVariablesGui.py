@@ -271,24 +271,73 @@ class TestMeasuredVariablesGui(unittest.TestCase):
         self.assertEqual(element, edge_named(self.padA.Shape, bottom_long))
         self.assertEqual(panel.list.item(0).text(), "PadA." + element)
 
-    def test_distance_center_option(self):
+    def face(self, test):
+        return ["Face%d" % i for i, f in enumerate(self.padA.Shape.Faces, 1) if test(f)][0]
+
+    def test_distance_options(self):
+        """Onshape's MV0: Minimum or Maximum, Use axis with Minimum only, Value to record; the row
+        says what it records."""
         panel = self.addMeasured("d", "Measured distance")
         self.assertTrue(panel.distanceBox.isVisibleTo(panel.form))
-        x0 = ["Face%d" % i for i, f in enumerate(self.padA.Shape.Faces, 1) if f.BoundBox.XMax < 1e-6][0]
-        x1 = ["Face%d" % i for i, f in enumerate(self.padA.Shape.Faces, 1)
-              if f.BoundBox.XMin > 20 - 1e-6][0]
+        self.assertTrue(panel.useAxisBox.isVisibleTo(panel.form))
+        self.assertTrue(panel.recordBox.isVisibleTo(panel.form))
+        self.assertFalse(panel.radiusBox.isVisibleTo(panel.form))
+        x0 = self.face(lambda f: f.BoundBox.XMax < 1e-6)
+        x1 = self.face(lambda f: f.BoundBox.XMin > 20 - 1e-6)
         self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, x0))
         self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, x1))
         self.assertAlmostEqual(panel.value, 20, places=6)
+        self.assertIn("20", panel.axisLabel.text())
         # a third pick is refused, loudly
-        top = ["Face%d" % i for i, f in enumerate(self.padA.Shape.Faces, 1)
-               if f.BoundBox.ZMin > 5 - 1e-6][0]
+        top = self.face(lambda f: f.BoundBox.ZMin > 5 - 1e-6)
         self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, top))
         self.assertEqual(len(panel.references()), 2)
         self.assertTrue(panel.errorLabel.text())
-        panel.distanceBox.setCurrentIndex(panel.distanceBox.findData("Center"))
+        panel.useAxisBox.setChecked(True)  # two planes have no axis: unchanged
         pump(0.05)
-        self.assertAlmostEqual(panel.value, 20, places=6)  # face centers, 20 apart in x
+        self.assertAlmostEqual(panel.value, 20, places=6)
+        panel.distanceBox.setCurrentIndex(panel.distanceBox.findData("Maximum"))
+        pump(0.05)
+        self.assertFalse(panel.useAxisBox.isVisibleTo(panel.form))
+        self.assertAlmostEqual(panel.value, (20 ** 2 + 10 ** 2 + 5 ** 2) ** 0.5, places=6)
+        panel.recordBox.setCurrentIndex(panel.recordBox.findData("Y"))
+        pump(0.05)
+        self.assertAlmostEqual(panel.value, 10, places=6)
+        self.assertTrue(panel.accept())
+        pump(0.3)
+        holder = self.doc.getObjectsByLabel("d (measured)")[0]
+        self.assertAlmostEqual(holder.d.Value, 10, places=6)
+        m = self.measured.measurement_of(holder, "d")
+        self.assertEqual((m.DistanceType, m.ValueToRecord), ("Maximum", "Y"))
+        self.assertEqual(self.text("d", EXPRESSION),
+                         "Distance along Y (maximum) of PadA.{}, PadA.{}".format(x0, x1))
+
+    def test_diameter_radius_option(self):
+        """Onshape's MV3: Radius records the radius; the row says so."""
+        self.sketchA.addGeometry(Part.Circle(V(5, 5, 0), V(0, 0, 1), 2))
+        self.doc.recompute()
+        edge = ["Edge%d" % i for i, e in enumerate(self.padA.Shape.Edges, 1)
+                if isinstance(e.Curve, Part.Circle) and e.BoundBox.ZMax < 1e-6][0]
+        panel = self.addMeasured("r", "Measured diameter")
+        self.assertTrue(panel.radiusBox.isVisibleTo(panel.form))
+        self.assertFalse(panel.distanceBox.isVisibleTo(panel.form))
+        self.pick("{}.{}.{}".format(self.bodyA.Name, self.padA.Name, edge))
+        self.assertAlmostEqual(panel.value, 4, places=6)
+        panel.radiusBox.setChecked(True)
+        pump(0.05)
+        self.assertAlmostEqual(panel.value, 2, places=6)
+        self.assertTrue(panel.accept())
+        pump(0.3)
+        holder = self.doc.getObjectsByLabel("r (measured)")[0]
+        self.assertAlmostEqual(holder.r.Value, 2, places=6)
+        self.assertEqual(self.text("r", EXPRESSION), "Radius of PadA." + edge)
+
+    def test_length_of_a_sketch_picked_whole(self):
+        """Onshape's MV2: Length takes a wire body (a sketch picked in the tree): A's rectangle, 60."""
+        panel = self.addMeasured("p", "Measured length")
+        self.pick("{}.{}.".format(self.bodyA.Name, self.sketchA.Name))
+        self.assertEqual([(o.Name, s) for o, s in panel.references()], [(self.sketchA.Name, "")])
+        self.assertAlmostEqual(panel.value, 60, places=6)
 
     def test_pick_in_another_studio_refused(self):
         other = self.doc.addObject("App::Part", "Q")

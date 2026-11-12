@@ -12,6 +12,7 @@ Designed geometry, in part studio P:
 - Sometimes a hole of radius 2 at (5, 5) in A's sketch, or two such holes 10 mm apart.
 Every expected value is geometric: a length, a diameter, a distance, or a volume."""
 
+import math
 import os
 import shutil
 import tempfile
@@ -169,6 +170,9 @@ class TestMeasuredVariables(unittest.TestCase):
             self.assertIn("Invalid", o.State, o.Label)
         self.assertIn(edge, m.getStatusString())
         self.assertIn("has an error", pad.getStatusString())
+        # Onshape's MV4: the variable is unset and its user fails with no last value kept; here
+        # its body's result is gone (the pad's own shape is not shown when its body has one).
+        self.assertTrue(self.bodyB.Shape.isNull(), "the user's body kept a result")
 
     def testDeletedObjectFailsLoudly(self):
         box = self.doc.addObject("Part::Box", "Src")
@@ -189,23 +193,28 @@ class TestMeasuredVariables(unittest.TestCase):
 
     # --- the kinds
 
-    def testDistanceMinimumAndCenter(self):
+    def testDistanceMinimumUseAxisAndMaximum(self):
+        """Two holes r2, centres 10 apart: gap 6, centre to centre 10, farthest points 14."""
         self.sketchA.addGeometry(Part.Circle(V(5, 5, 0), V(0, 0, 1), 2))
         self.sketchA.addGeometry(Part.Circle(V(15, 5, 0), V(0, 0, 1), 2))
         self.doc.recompute()
         a = edge_named(self.padA.Shape, bottom_circle(5))
         b = edge_named(self.padA.Shape, bottom_circle(15))
-        vs, low = self.measured.add(self.studio, "gap", "Distance", [(self.padA, a), (self.padA, b)])
-        hp, mid = self.measured.add(self.studio, "pitch", "Distance", [(self.padA, a), (self.padA, b)],
-                                   distance_type="Center")
+        refs = [(self.padA, a), (self.padA, b)]
+        vs, low = self.measured.add(self.studio, "gap", "Distance", refs)
+        hp, mid = self.measured.add(self.studio, "pitch", "Distance", refs, use_axis=True)
+        hf, far = self.measured.add(self.studio, "far", "Distance", refs, distance_type="Maximum")
         x0 = face_named(self.padA.Shape, lambda f: f.BoundBox.XMax < 1e-6)
         x1 = face_named(self.padA.Shape, lambda f: f.BoundBox.XMin > 20 - 1e-6)
         hs, faces = self.measured.add(self.studio, "span", "Distance", [(self.padA, x0), (self.padA, x1)])
         self.doc.recompute()
-        self.assertValid(low, mid, faces, vs, hp, hs)
+        self.assertValid(low, mid, far, faces, vs, hp, hf, hs)
         self.assertAlmostEqual(vs.gap.Value, 10 - 2 * 2, places=6)
         self.assertAlmostEqual(hp.pitch.Value, 10, places=6)
+        self.assertAlmostEqual(hf.far.Value, 10 + 2 * 2, places=9)
         self.assertAlmostEqual(hs.span.Value, 20, places=6)
+        self.assertTrue(mid.UseAxis)
+        self.assertEqual(far.DistanceType, "Maximum")
 
     def testDistanceAcrossPlacedObjects(self):
         """A's face x = 20 (inside BodyA) and the near face of a box placed at x = 45 in the studio:
@@ -249,9 +258,9 @@ class TestMeasuredVariables(unittest.TestCase):
         _, d = self.measured.add(self.studio, "b", "Diameter", [(self.padA, line)])
         self.doc.recompute()
         self.assertIn("Invalid", m.State)
-        self.assertIn("takes edges", m.getStatusString())
+        self.assertIn("select edges to measure", m.getStatusString())
         self.assertIn("Invalid", d.State)
-        self.assertIn("is not one", d.getStatusString())
+        self.assertIn("select an entity to measure", d.getStatusString())
 
     def testAddChecks(self):
         edge = edge_named(self.padA.Shape, bottom_long)
@@ -263,6 +272,11 @@ class TestMeasuredVariables(unittest.TestCase):
             self.measured.add(self.studio, "w", "Diameter", [(self.padA, edge)] * 2)
         with self.assertRaises(ValueError):
             self.measured.add(self.studio, "w", "Volume", [(self.padA, edge)])
+        two = [(self.padA, edge), (self.padA, edge_named(self.padA.Shape, top_long))]
+        with self.assertRaises(ValueError):  # lane 1's "Center" is Use axis now
+            self.measured.add(self.studio, "w", "Distance", two, distance_type="Center")
+        with self.assertRaises(ValueError):
+            self.measured.add(self.studio, "w", "Distance", two, record="W")
         self.measured.add(self.studio, "w", "Length", [(self.padA, edge)])
         with self.assertRaises(ValueError):
             self.measured.add(self.studio, "w", "Length", [(self.padA, edge)])  # name taken
@@ -270,9 +284,12 @@ class TestMeasuredVariables(unittest.TestCase):
     def testSaveAndRestore(self):
         edge = edge_named(self.padA.Shape, bottom_long)
         vs, m = self.measured.add(self.studio, "w", "Length", [(self.padA, edge)])
+        top = edge_named(self.padA.Shape, top_long)
+        _hx, mx = self.measured.add(self.studio, "x", "Distance", [(self.padA, edge), (self.padA, top)],
+                                    distance_type="Maximum", record="Y", use_axis=True)
         self.make_user("#w")
         self.doc.recompute()
-        names = m.Name, vs.Name
+        names = m.Name, vs.Name, mx.Name
         folder = tempfile.mkdtemp()
         try:
             path = os.path.join(folder, "measured.FCStd")
@@ -282,11 +299,16 @@ class TestMeasuredVariables(unittest.TestCase):
             m = self.doc.getObject(names[0])
             self.assertEqual(m.Format, 1)
             self.assertEqual(m.Kind, "Length")
+            mx = self.doc.getObject(names[2])
+            self.assertEqual((mx.DistanceType, mx.ValueToRecord, mx.UseAxis, mx.Radius),
+                             ("Maximum", "Y", True, False))
             self.doc.getObject("SketchA").setDatum("W", App.Units.Quantity("25 mm"))
             self.doc.recompute()
             pad = self.doc.getObject("PadB")
             self.assertAlmostEqual(self.doc.getObject(names[1]).w.Value, 25, places=6)
             self.assertAlmostEqual(pad.Shape.Volume, 16 * 25, places=4)
+            # the bottom and top long edges, farthest apart corner to corner: Y is the 10 between them
+            self.assertAlmostEqual(mx.Value.Value, 10, places=9)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
@@ -453,6 +475,175 @@ class TestMeasuredVariables(unittest.TestCase):
         self.assertIs(feature, box)
         with self.assertRaisesRegex(self.measured.MeasureError, "link"):
             self.measured.resolve_pick(self.studio, "BlockLink.Edge1")
+
+    # --- measured variables 3: Onshape's answers (notes/onshape-facts.md MV1-MV5 in the ops repo),
+    # on the oracle's own geometry: two cylinders r5 h10 with centres 20 apart, a cone, a sphere
+
+    def cylinders(self):
+        """Two cylinders r5 h10 standing on XY, centres (100, 0) and (120, 0)."""
+        made = []
+        for i, x in enumerate((100, 120)):
+            c = self.doc.addObject("Part::Cylinder", "Cyl%d" % i)
+            c.Radius = 5
+            c.Height = 10
+            c.Placement = App.Placement(V(x, 0, 0), App.Rotation())
+            self.studio.addObject(c)
+            made.append(c)
+        self.doc.recompute()
+        return made
+
+    @staticmethod
+    def circle_at(z, r=5):
+        return lambda e: (isinstance(e.Curve, Part.Circle) and abs(e.Curve.Radius - r) < 1e-6
+                          and abs(e.BoundBox.ZMin - z) < 1e-6 and abs(e.BoundBox.ZMax - z) < 1e-6)
+
+    @staticmethod
+    def surface_of(kind):
+        return lambda f: isinstance(f.Surface, kind)
+
+    def tops(self):
+        a, b = self.cylinders()
+        return (a, edge_named(a.Shape, self.circle_at(10))), (b, edge_named(b.Shape, self.circle_at(10)))
+
+    def testDistanceOfTwoCirclesAsOnshape(self):
+        """MV1: two top circle edges, centres 20 apart: Minimum 10 (the gap), Maximum 30, Minimum
+        with Use axis 20, Maximum with Use axis 30 (Onshape hides the option then)."""
+        ta, tb = self.tops()
+        for options, want in (({}, 10), ({"distance_type": "Maximum"}, 30), ({"use_axis": True}, 20),
+                              ({"distance_type": "Maximum", "use_axis": True}, 30)):
+            self.assertAlmostEqual(self.measured.measure("Distance", [ta, tb], **options), want,
+                                   places=9, msg=str(options))
+        holder, m = self.measured.add(self.studio, "far", "Distance", [ta, tb], distance_type="Maximum")
+        self.doc.recompute()
+        self.assertValid(m, holder)
+        self.assertAlmostEqual(holder.far.Value, 30, places=9)
+
+    def testDistanceValueToRecord(self):
+        """MV1: Value to record X is 10 from either pick order (unsigned), Y 0; Use axis with X 20."""
+        ta, tb = self.tops()
+        measure = self.measured.measure
+        self.assertAlmostEqual(measure("Distance", [ta, tb], record="X"), 10, places=9)
+        self.assertAlmostEqual(measure("Distance", [tb, ta], record="X"), 10, places=9)
+        self.assertAlmostEqual(measure("Distance", [ta, tb], record="Y"), 0, places=9)
+        self.assertAlmostEqual(measure("Distance", [ta, tb], record="Z"), 0, places=9)
+        self.assertAlmostEqual(measure("Distance", [tb, ta], record="X", use_axis=True), 20, places=9)
+        self.assertAlmostEqual(measure("Distance", [ta, tb], record="X", distance_type="Maximum"),
+                               30, places=9)
+        d, x, y, z = self.measured.distance_components([tb, ta])
+        self.assertAlmostEqual(d, 10, places=9)
+        self.assertAlmostEqual(x, 10, places=9)
+        holder, m = self.measured.add(self.studio, "dx", "Distance", [tb, ta], record="X", use_axis=True)
+        self.doc.recompute()
+        self.assertValid(m, holder)
+        self.assertAlmostEqual(holder.dx.Value, 20, places=9)
+
+    def testDistanceOfCylinderFacesAndOneCylinder(self):
+        """MV1: two cylinder faces 10, with Use axis 20 (axis to axis); a top and the bottom edge of
+        one cylinder 10 (its height)."""
+        a, b = self.cylinders()
+        fa = (a, face_named(a.Shape, self.surface_of(Part.Cylinder)))
+        fb = (b, face_named(b.Shape, self.surface_of(Part.Cylinder)))
+        measure = self.measured.measure
+        self.assertAlmostEqual(measure("Distance", [fa, fb]), 10, places=9)
+        self.assertAlmostEqual(measure("Distance", [fa, fb], use_axis=True), 20, places=9)
+        top, bottom = (a, edge_named(a.Shape, self.circle_at(10))), (a, edge_named(a.Shape, self.circle_at(0)))
+        self.assertAlmostEqual(measure("Distance", [top, bottom]), 10, places=9)
+
+    def testMaximumOfTwoFaces(self):
+        """PadA's faces x = 0 and x = 20 (each 10 x 5): farthest corner to corner, sqrt(20^2 + 10^2 + 5^2)."""
+        x0 = (self.padA, face_named(self.padA.Shape, lambda f: f.BoundBox.XMax < 1e-6))
+        x1 = (self.padA, face_named(self.padA.Shape, lambda f: f.BoundBox.XMin > 20 - 1e-6))
+        d, x, y, z = self.measured.distance_components([x0, x1], distance_type="Maximum")
+        self.assertAlmostEqual(d, (20 ** 2 + 10 ** 2 + 5 ** 2) ** 0.5, places=9)
+        self.assertEqual((round(x, 9), round(y, 9), round(z, 9)), (20, 10, 5))
+
+    def testLengthAsOnshape(self):
+        """MV2: edges summed (one circle 2 pi 5, two, three); a face beside an edge ignored; a face
+        alone refused; Radius ignored."""
+        ta, tb = self.tops()
+        a = ta[0]
+        bottom = (a, edge_named(a.Shape, self.circle_at(0)))
+        side = (a, face_named(a.Shape, self.surface_of(Part.Cylinder)))
+        measure = self.measured.measure
+        circle = 2 * math.pi * 5
+        self.assertAlmostEqual(measure("Length", [ta]), circle, places=9)
+        self.assertAlmostEqual(measure("Length", [ta, tb]), 2 * circle, places=9)
+        self.assertAlmostEqual(measure("Length", [ta, tb, bottom]), 3 * circle, places=9)
+        self.assertAlmostEqual(measure("Length", [side, ta]), circle, places=9)
+        self.assertAlmostEqual(measure("Length", [ta], radius=True), circle, places=9)
+        with self.assertRaisesRegex(self.measured.MeasureError, "select edges to measure"):
+            measure("Length", [side])
+        holder, m = self.measured.add(self.studio, "w", "Length", [ta, side])
+        self.doc.recompute()
+        self.assertValid(m, holder)
+        self.assertAlmostEqual(holder.w.Value, circle, places=9)
+
+    def testLengthOfAWireBody(self):
+        """MV2: a wire body (here a sketch, picked whole) sums its edges: A's rectangle, 60."""
+        sub = "{}.{}.".format(self.bodyA.Name, self.sketchA.Name)
+        ref = self.measured.resolve_pick(self.studio, sub, wire_body=True)
+        self.assertEqual((ref[0].Name, ref[1]), (self.sketchA.Name, ""))
+        with self.assertRaises(self.measured.MeasureError):  # not for Distance or Diameter
+            self.measured.resolve_pick(self.studio, sub)
+        with self.assertRaises(self.measured.MeasureError):  # a solid is no wire body
+            self.measured.resolve_pick(self.studio, "{}.{}.".format(self.bodyA.Name, self.padA.Name),
+                                       wire_body=True)
+        holder, m = self.measured.add(self.studio, "p", "Length", [ref])
+        self.doc.recompute()
+        self.assertValid(m, holder)
+        self.assertAlmostEqual(holder.p.Value, 60, places=9)
+        self.sketchA.setDatum("W", App.Units.Quantity("30 mm"))
+        self.doc.recompute()
+        self.assertAlmostEqual(holder.p.Value, 80, places=9)
+
+    def testDiameterAsOnshape(self):
+        """MV3: a circle edge 10, with Radius 5; a cylinder face 10; a sphere face 10; a sketch arc
+        (half a circle r5) 10; a cone's circular edge 10. A cone face and a plane are refused."""
+        ta, _tb = self.tops()
+        a = ta[0]
+        sphere = self.doc.addObject("Part::Sphere", "Ball")
+        sphere.Radius = 5
+        sphere.Placement = App.Placement(V(140, 0, 0), App.Rotation())
+        cone = self.doc.addObject("Part::Cone", "Cone")
+        cone.Radius1, cone.Radius2, cone.Height = 5, 3, 10
+        cone.Placement = App.Placement(V(160, 0, 0), App.Rotation())
+        arc = self.doc.addObject("Sketcher::SketchObject", "ArcSketch")
+        arc.addGeometry(Part.ArcOfCircle(Part.Circle(V(180, 0, 0), V(0, 0, 1), 5), 0, math.pi))
+        for o in (sphere, cone, arc):
+            self.studio.addObject(o)
+        self.doc.recompute()
+        measure = self.measured.measure
+        self.assertAlmostEqual(measure("Diameter", [ta]), 10, places=9)
+        self.assertAlmostEqual(measure("Diameter", [ta], radius=True), 5, places=9)
+        side = (a, face_named(a.Shape, self.surface_of(Part.Cylinder)))
+        self.assertAlmostEqual(measure("Diameter", [side]), 10, places=9)
+        ball = (sphere, face_named(sphere.Shape, self.surface_of(Part.Sphere)))
+        self.assertAlmostEqual(measure("Diameter", [ball]), 10, places=9)
+        self.assertAlmostEqual(measure("Diameter", [(arc, "Edge1")]), 10, places=9)
+        self.assertAlmostEqual(measure("Diameter", [(cone, edge_named(cone.Shape, self.circle_at(0)))]),
+                               10, places=9)
+        conical = (cone, face_named(cone.Shape, self.surface_of(Part.Cone)))
+        with self.assertRaisesRegex(self.measured.MeasureError, "is a cone face"):
+            measure("Diameter", [conical])
+        plane = (cone, face_named(cone.Shape, lambda f: isinstance(f.Surface, Part.Plane)
+                                  and f.BoundBox.ZMin > 10 - 1e-6))
+        with self.assertRaisesRegex(self.measured.MeasureError, "select an entity to measure"):
+            measure("Diameter", [plane])
+        holder, m = self.measured.add(self.studio, "r", "Diameter", [ball], radius=True)
+        self.doc.recompute()
+        self.assertValid(m, holder)
+        self.assertAlmostEqual(holder.r.Value, 5, places=9)
+
+    def testVariableStudioRefused(self):
+        """MV5: a Variable Studio holds no measured variable (it has no geometry to measure)."""
+        studio = self.doc.addObject("App::VarSet", "VarSet")
+        studio.Label = "Variable Studio 1"
+        App.DocumentTabs.setVariableStudio(studio)
+        edge = edge_named(self.padA.Shape, bottom_long)
+        with self.assertRaisesRegex(ValueError, "Variable Studio"):
+            self.measured.add(studio, "w", "Length", [(self.padA, edge)])
+        self.assertEqual([p for p in studio.PropertiesList if p == "w"], [])
+
 
 
 if __name__ == "__main__":

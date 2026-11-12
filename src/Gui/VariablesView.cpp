@@ -382,7 +382,8 @@ void foldMeasuredHolders(QStandardItemModel* model, const App::Document* doc)
 }
 
 /// What a measurement reads, for the Expression column: "Length of Pad.Edge3, Pad.Edge7",
-/// "Distance (center to center) of Pad.Face1, Sketch.Edge2". The references as last measured.
+/// "Distance (minimum, use axis) of Pad.Face1, Sketch.Edge2", "Distance along X (maximum) of ...",
+/// "Radius of Pad.Edge4". The references as last measured.
 QString measurementText(const App::DocumentObject* measurement)
 {
     auto kind = freecad_cast<const App::PropertyEnumeration*>(
@@ -403,15 +404,33 @@ QString measurementText(const App::DocumentObject* measurement)
             refs << QString::fromStdString(name);
         }
     }
-    if (what == QLatin1String("Distance") && type && type->getValueAsString()
-        && std::string(type->getValueAsString()) == "Center") {
-        return QCoreApplication::translate("Gui::DockWnd::VariablesModel",
-                                           "Distance (center to center) of %1")
-            .arg(refs.join(QStringLiteral(", ")));
-    }
+    auto flag = [measurement](const char* name) {
+        auto prop = freecad_cast<const App::PropertyBool*>(measurement->getPropertyByName(name));
+        return prop && prop->getValue();
+    };
     if (what == QLatin1String("Distance")) {
-        return QCoreApplication::translate("Gui::DockWnd::VariablesModel",
-                                           "Distance (minimum) of %1")
+        auto record = freecad_cast<const App::PropertyEnumeration*>(
+            measurement->getPropertyByName("ValueToRecord")
+        );
+        bool maximum = type && type->getValueAsString()
+            && std::string(type->getValueAsString()) == "Maximum";
+        QString mode = maximum
+            ? QCoreApplication::translate("Gui::DockWnd::VariablesModel", "maximum")
+            : flag("UseAxis")
+            ? QCoreApplication::translate("Gui::DockWnd::VariablesModel", "minimum, use axis")
+            : QCoreApplication::translate("Gui::DockWnd::VariablesModel", "minimum");
+        std::string axis = record && record->getValueAsString() ? record->getValueAsString() : "";
+        if (axis == "X" || axis == "Y" || axis == "Z") {
+            // "Distance along X (minimum) of Pad.Edge1, Pad.Edge2"
+            return QCoreApplication::translate("Gui::DockWnd::VariablesModel",
+                                               "Distance along %1 (%2) of %3")
+                .arg(QString::fromStdString(axis), mode, refs.join(QStringLiteral(", ")));
+        }
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Distance (%1) of %2")
+            .arg(mode, refs.join(QStringLiteral(", ")));
+    }
+    if (what == QLatin1String("Diameter") && flag("Radius")) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Radius of %1")
             .arg(refs.join(QStringLiteral(", ")));
     }
     return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "%1 of %2")

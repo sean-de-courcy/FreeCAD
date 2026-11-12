@@ -18,7 +18,8 @@ from freecad.variables import measured
 current = None
 
 KIND_TEXT = {"Distance": "Distance", "Length": "Length", "Diameter": "Diameter"}
-DISTANCE_TEXT = {"Minimum": "Minimum", "Center": "Center to center"}
+DISTANCE_TEXT = {"Minimum": "Minimum", "Maximum": "Maximum"}
+RECORD_TEXT = {"Distance": "Distance", "X": "X", "Y": "Y", "Z": "Z"}
 
 
 def _tr(text):
@@ -109,6 +110,30 @@ class MeasuredPanel:
         self.distanceLabel = QtWidgets.QLabel(_tr("Distance:"))
         layout.addRow(self.distanceLabel, self.distanceBox)
 
+        # Onshape's Use axis: shown with Minimum only (Maximum hides it, MV0)
+        self.useAxisBox = QtWidgets.QCheckBox(_tr("Use axis"))
+        self.useAxisBox.setObjectName("useAxis")
+        self.useAxisBox.setToolTip(_tr("Measure circles, arcs and spheres from their centers, "
+                                       "cylinders and cones from their axes"))
+        layout.addRow("", self.useAxisBox)
+
+        self.recordBox = QtWidgets.QComboBox()
+        self.recordBox.setObjectName("valueToRecord")
+        for r in measured.RECORDS:
+            self.recordBox.addItem(_tr(RECORD_TEXT[r]), r)
+        self.recordLabel = QtWidgets.QLabel(_tr("Value to record:"))
+        layout.addRow(self.recordLabel, self.recordBox)
+
+        # Onshape's Axis measurements: the distance and its components, read only
+        self.axisLabel = QtWidgets.QLabel()
+        self.axisLabel.setObjectName("axisMeasurements")
+        self.axisLabel.setWordWrap(True)
+        layout.addRow(self.axisLabel)
+
+        self.radiusBox = QtWidgets.QCheckBox(_tr("Radius"))
+        self.radiusBox.setObjectName("radius")
+        layout.addRow("", self.radiusBox)
+
         self.hint = QtWidgets.QLabel()
         self.hint.setObjectName("hint")
         self.hint.setWordWrap(True)
@@ -135,8 +160,12 @@ class MeasuredPanel:
 
         if measurement is not None:
             kind = measurement.Kind
+            options = measured.options_of(measurement)
             self.distanceBox.setCurrentIndex(
-                max(0, self.distanceBox.findData(measurement.DistanceType)))
+                max(0, self.distanceBox.findData(options["distance_type"])))
+            self.useAxisBox.setChecked(options["use_axis"])
+            self.recordBox.setCurrentIndex(max(0, self.recordBox.findData(options["record"])))
+            self.radiusBox.setChecked(options["radius"])
             try:
                 self.refs = measured._references(measurement)
             except measured.MeasureError as e:
@@ -148,6 +177,9 @@ class MeasuredPanel:
 
         self.kindBox.currentIndexChanged.connect(self.changed)
         self.distanceBox.currentIndexChanged.connect(self.changed)
+        self.useAxisBox.toggled.connect(self.changed)
+        self.recordBox.currentIndexChanged.connect(self.changed)
+        self.radiusBox.toggled.connect(self.changed)
         self.removeButton.clicked.connect(self.removeSelected)
 
         if measurement is None:
@@ -171,6 +203,11 @@ class MeasuredPanel:
     def distanceType(self):
         return self.distanceBox.currentData()
 
+    def options(self):
+        """The options as `measured.measure` and `measured.add` take them."""
+        return {"distance_type": self.distanceType(), "use_axis": self.useAxisBox.isChecked(),
+                "record": self.recordBox.currentData(), "radius": self.radiusBox.isChecked()}
+
     def references(self):
         return list(self.refs)
 
@@ -178,12 +215,18 @@ class MeasuredPanel:
         """Refresh the list, the hint and the live value."""
         kind = self.kind()
         distance = kind == "Distance"
-        self.distanceBox.setVisible(distance)
-        self.distanceLabel.setVisible(distance)
+        for widget in (self.distanceBox, self.distanceLabel, self.recordBox, self.recordLabel,
+                       self.axisLabel):
+            widget.setVisible(distance)
+        self.useAxisBox.setVisible(distance and self.distanceType() == "Minimum")
+        self.radiusBox.setVisible(kind == "Diameter")
+        self.axisLabel.setText("")
         self.hint.setText({
             "Distance": _tr("Pick two vertices, edges or faces in the 3D view."),
-            "Length": _tr("Pick one or more edges in the 3D view; their lengths are summed."),
-            "Diameter": _tr("Pick a circle, an arc or a cylindrical face in the 3D view."),
+            "Length": _tr("Pick one or more edges in the 3D view, or a sketch in the tree; their "
+                          "lengths are summed. A face is not measured."),
+            "Diameter": _tr("Pick a circle or an arc, or a cylinder or a sphere face, in the 3D "
+                            "view."),
         }[kind])
         self.list.clear()
         for obj, sub in self.refs:
@@ -195,8 +238,14 @@ class MeasuredPanel:
             self.valueError = reason
             return
         try:
-            self.value = measured.measure(kind, self.refs, self.distanceType())
+            options = self.options()
+            self.value = measured.measure(kind, self.refs, **options)
             self.valueLabel.setText(_length_text(self.value))
+            if distance:
+                d, x, y, z = measured.distance_components(
+                    self.refs, options["distance_type"], options["use_axis"])
+                self.axisLabel.setText(_tr("Distance {}, along X {}, Y {}, Z {}").format(
+                    *(_length_text(v) for v in (d, x, y, z))))
             self.valueError = ""
             if not self.errorLabel.text().startswith(_tr("Pick")):
                 self.errorLabel.setText("")
@@ -215,7 +264,8 @@ class MeasuredPanel:
         """Add the pick (root object, subname) as a reference; returns the reference, or None with
         the reason shown. A pick already listed is not added twice."""
         try:
-            feature, element = measured.resolve_pick(root, subname)
+            feature, element = measured.resolve_pick(root, subname,
+                                                     wire_body=self.kind() == "Length")
         except measured.MeasureError as e:
             self.message(str(e))
             return None
@@ -248,7 +298,8 @@ class MeasuredPanel:
 
     def removePick(self, root, subname):
         try:
-            feature, element = measured.resolve_pick(root, subname)
+            feature, element = measured.resolve_pick(root, subname,
+                                                     wire_body=self.kind() == "Length")
         except measured.MeasureError:
             return
         before = len(self.refs)
@@ -334,12 +385,14 @@ class MeasuredPanel:
         doc.openTransaction(title)
         try:
             if new:
-                _vs, self.measurement = measured.add(self.studio, self.name, kind, self.refs,
-                                                     self.distanceType(), self.description)
+                options = self.options()
+                _vs, self.measurement = measured.add(
+                    self.studio, self.name, kind, self.refs, options["distance_type"],
+                    self.description, options["use_axis"], options["record"], options["radius"])
             else:
                 m = self.measurement
                 m.Kind = kind
-                m.DistanceType = self.distanceType()
+                measured.set_options(m, **self.options())
                 measured.set_references(m, self.refs)
             doc.recompute()
         except Exception as e:
