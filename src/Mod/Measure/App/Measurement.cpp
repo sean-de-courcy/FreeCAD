@@ -95,6 +95,7 @@ void Measurement::clear()
     std::vector<App::DocumentObject*> Objects;
     std::vector<std::string> SubElements;
     References3D.setValues(Objects, SubElements);
+    pointReferences.clear();
     measureType = MeasureType::Invalid;
 }
 
@@ -118,6 +119,7 @@ int Measurement::addReference3D(App::DocumentObject* obj, const char* subName)
     objects.push_back(obj);
     subElements.emplace_back(subName);
 
+    pointReferences.clear();
     References3D.setValues(objects, subElements);
 
     measureType = findType();
@@ -153,12 +155,7 @@ MeasureType Measurement::findType()
     for (; obj != objects.end(); ++obj, ++subEl) {
         TopoDS_Shape refSubShape;
         try {
-            refSubShape = Part::Feature::getShape(
-                *obj,
-                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                    | Part::ShapeOption::Transform,
-                (*subEl).c_str()
-            );
+            refSubShape = getShape(*obj, (*subEl).c_str());
 
             if (refSubShape.IsNull()) {
                 return MeasureType::Invalid;
@@ -376,6 +373,14 @@ MeasureType Measurement::getType()
 TopoDS_Shape Measurement::getShape(App::DocumentObject* obj, const char* subName, TopAbs_ShapeEnum hint) const
 {
     (void)hint;
+    // FreeCAD-CH (ops#673): a point standing for the reference
+    if (!pointReferences.empty()) {
+        auto found = pointReferences.find({obj, subName ? std::string(subName) : std::string()});
+        if (found != pointReferences.end()) {
+            const Base::Vector3d& p = found->second;
+            return BRepBuilderAPI_MakeVertex(gp_Pnt(p.x, p.y, p.z)).Vertex();
+        }
+    }
     return Part::Feature::getShape(
         obj,
         Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
@@ -1075,12 +1080,7 @@ bool Measurement::planesAreParallel() const
     for (size_t i = 0; i < objects.size(); ++i) {
         TopoDS_Shape refSubShape;
         try {
-            refSubShape = Part::Feature::getShape(
-                objects[i],
-                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                    | Part::ShapeOption::Transform,
-                subElements[i].c_str()
-            );
+            refSubShape = getShape(objects[i], subElements[i].c_str());
 
             if (refSubShape.IsNull()) {
                 return false;
@@ -1566,7 +1566,29 @@ void Measurement::setReferences3D(
     const std::vector<std::string>& subNames
 )
 {
+    pointReferences.clear();
     References3D.setValues(objects, subNames);
+    measureType = findType();
+}
+
+// FreeCAD-CH (ops#673, selection parity 11)
+void Measurement::setReferences3D(
+    const std::vector<App::DocumentObject*>& objects,
+    const std::vector<std::string>& subNames,
+    const std::vector<std::optional<Base::Vector3d>>& points
+)
+{
+    pointReferences.clear();
+    References3D.setValues(objects, subNames);
+    // keyed by the names as the property gives them back (getShape's arguments)
+    const auto& storedObjects = References3D.getValues();
+    const auto& storedSubs = References3D.getSubValues();
+    for (std::size_t i = 0; i < points.size() && i < storedObjects.size() && i < storedSubs.size();
+         ++i) {
+        if (points[i]) {
+            pointReferences[{storedObjects[i], storedSubs[i]}] = *points[i];
+        }
+    }
     measureType = findType();
 }
 

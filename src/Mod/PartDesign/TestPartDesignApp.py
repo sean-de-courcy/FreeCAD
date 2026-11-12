@@ -168,6 +168,7 @@ from PartDesignTests.TestSplit import TestSplit  # FreeCAD-CH, ops#325
 from PartDesignTests.TestMergeScope import TestMergeScope  # FreeCAD-CH, ops#640
 from PartDesignTests.TestResultRules import TestResultRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDatumPlanePoint import TestDatumPlanePoint  # FreeCAD-CH, ops#640
+from PartDesignTests.TestPlaneEdgePoint import TestPlaneEdgePoint  # FreeCAD-CH, ops#673
 from PartDesignTests.TestFlipKeepsTheSketch import TestFlipKeepsTheSketch  # FreeCAD-CH, ops#640
 from PartDesignTests.TestFilletDeleteKeepsTheSketch import (  # FreeCAD-CH, ops#640
     TestFilletDeleteKeepsTheSketch,

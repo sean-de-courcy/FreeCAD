@@ -3,6 +3,7 @@
 set(MeasureGui_LIBS
     Measure
     #Part
+    PartGui
     FreeCADGui
 )
 
