@@ -170,6 +170,7 @@ from PartDesignTests.TestStudioPatterns import TestStudioPatterns
 from PartDesignTests.TestStudioPartMirror import TestStudioPartMirror
 from PartDesignTests.TestStudioMerge import TestStudioMerge
 from PartDesignTests.TestStudioDressUp import TestStudioDressUp
+from PartDesignTests.TestStudioFeaturePattern import TestStudioFeaturePattern
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

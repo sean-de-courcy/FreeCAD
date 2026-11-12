@@ -48,6 +48,7 @@
 
 #include <App/Document.h>
 #include <App/GeoFeature.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
@@ -81,6 +82,18 @@
 
 
 using namespace PartDesign;
+
+namespace PartDesign
+{
+// StudioList.cpp (FreeCAD-CH ops#654 T1a, P5, 10.13; declared where used)
+PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
+    const App::DocumentObject* owner,
+    const Body* body
+);
+PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
+PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
+}  // namespace PartDesign
 
 namespace
 {
@@ -219,6 +232,115 @@ std::string quoted(const App::DocumentObject* obj)
     return std::string("'") + obj->Label.getValue() + "'";
 }
 
+/// FreeCAD-CH ops#654 T1a: the feature pattern studio feature obj is a step of, or null
+const Transformed* studioPatternOwnerOf(const Transformed& obj)
+{
+    auto owner = freecad_cast<const Transformed*>(obj.StudioOwner.getValue());
+    return owner && obj.getFeatureBody() && isStudioFeaturePattern(owner) ? owner : nullptr;
+}
+
+gp_Trsf trsfOf(const Base::Placement& placement)
+{
+    return Part::TopoShape::convert(placement.toMatrix());
+}
+
+/// The frame a reference is given in (T1a settled 4): the placement in the document of the
+/// coordinate system holding it (its Body, its studio, any group), identity at the top level.
+/// A pattern's subclass reads a reference in that frame (an origin axis, a sketch, a face)
+Base::Placement referenceFrame(const App::DocumentObject* ref)
+{
+    auto group = App::GeoFeatureGroupExtension::getGroupOfObject(ref);
+    return group ? App::GeoFeature::getGlobalPlacement(group) : Base::Placement();
+}
+
+/** A feature pattern owner's transformations in the document's frame (T1a settled 4): its own
+ * subclass's, read in its references' frame, then carried into the document's once. References
+ * in two frames that differ (a direction in one Body, a second direction in another placed
+ * elsewhere) are refused loudly (not done yet) */
+std::vector<gp_Trsf> ownerTransforms(const Transformed& owner, std::string& why)
+{
+    std::optional<Base::Placement> frame;
+    std::vector<App::Property*> props;
+    owner.getPropertyList(props);
+    for (auto prop : props) {
+        auto link = freecad_cast<App::PropertyLinkSub*>(prop);
+        if (!link || !link->getValue()) {
+            continue;
+        }
+        const Base::Placement here = referenceFrame(link->getValue());
+        if (frame && !frame->isSame(here, 1e-9)) {
+            why = quoted(&owner)
+                + "'s references are in parts placed differently: pick them in one part or in "
+                  "the studio (references in two frames are not done yet)";
+            return {};
+        }
+        frame = here;
+    }
+    auto self = const_cast<Transformed*>(&owner);
+    const std::list<gp_Trsf> got = self->getTransformations(self->getOriginals());
+    const gp_Trsf to =
+        trsfOf(frame.value_or(Base::Placement())).Multiplied(owner.getLocation().Transformation());
+    const gp_Trsf from = to.Inverted();
+    std::vector<gp_Trsf> out;
+    for (const gp_Trsf& t : got) {
+        out.push_back(to.Multiplied(t).Multiplied(from));
+    }
+    return out;
+}
+
+/// The transformations obj makes, in its own frame: a feature pattern step's are its owner's,
+/// conjugated by the step's place in the document (T1a settled 4: the one hook on the step);
+/// any other's its own
+std::list<gp_Trsf> transformationsOf(
+    Transformed& obj,
+    const std::vector<App::DocumentObject*>& originals
+)
+{
+    const Transformed* owner = studioPatternOwnerOf(obj);
+    if (!owner) {
+        return obj.getTransformations(originals);
+    }
+    std::string why;
+    const std::vector<gp_Trsf> inDocument = ownerTransforms(*owner, why);
+    if (!why.empty()) {
+        throw Base::RuntimeError(why);
+    }
+    const gp_Trsf at = trsfOf(App::GeoFeature::getGlobalPlacement(&obj));
+    const gp_Trsf atInv = at.Inverted();
+    std::list<gp_Trsf> out;
+    for (const gp_Trsf& t : inDocument) {
+        out.push_back(atInv.Multiplied(t).Multiplied(at));
+    }
+    return out;
+}
+
+/// The values a feature pattern step takes from its owner when it runs (T1a): its subclass's own
+/// parameters (counts, lengths, modes, skipped instances), Refine and Reapply; never a link (its
+/// Originals are reconcile's, its references are read through the owner) nor the Base or Studio
+/// bookkeeping. Generic over the subclasses
+void takeOwnerValues(Transformed& step, const Transformed& owner)
+{
+    std::vector<App::Property*> props;
+    step.getPropertyList(props);
+    for (auto to : props) {
+        const char* name = to->getName();
+        if (!name || to->isDerivedFrom<App::PropertyLinkBase>() || to->testStatus(App::Property::ReadOnly)
+            || to->testStatus(App::Property::PropDynamic)) {
+            continue;
+        }
+        const char* group = step.getPropertyGroup(to);
+        const std::string inGroup = group ? group : "";
+        if ((inGroup.empty() || inGroup == "Base" || inGroup == "Studio")
+            && std::strcmp(name, "Reapply") != 0) {
+            continue;
+        }
+        auto from = owner.getPropertyByName(name);
+        if (from && from->getTypeId() == to->getTypeId() && !to->isSame(*from)) {
+            to->Paste(*from);
+        }
+    }
+}
+
 /// FreeCAD-CH ops#654 slice 8: the studio feature an original stands for: a studio feature (an
 /// owner, outside every Body) or one of its steps; null for any other original
 App::DocumentObject* studioOwnerOfOriginal(App::DocumentObject* obj)
@@ -265,21 +387,26 @@ std::string studioStepOf(
         return name + " merges parts into one (" + merges->getValues().front()
             + "): a pattern of an Add that merges parts comes later";
     }
-    const std::vector<Body*> parts = studioScopeOf(owner);
-    if (parts.size() > 1) {
+    // T1a (10.16 T1.4): a feature pattern studio feature's step patterns an original wherever
+    // it acts; the in-Body pattern (made by an old command) only in its own part
+    const bool overParts = studioPatternOwnerOf(pattern) != nullptr;
+    const std::vector<Body*> parts = overParts ? std::vector<Body*>() : studioScopeOf(owner);
+    const std::string again = ": make the pattern again (a pattern made now is a studio feature "
+                              "that patterns it in every part)";
+    if (!overParts && parts.size() > 1) {
         std::string names;
         for (auto part : parts) {
             names += (names.empty() ? "" : ", ") + quoted(part);
         }
-        return name + " acts on " + std::to_string(parts.size()) + " parts (" + names
-            + "): a pattern across parts comes later; pattern it in one part";
+        return name + " acts on " + std::to_string(parts.size()) + " parts (" + names + ")"
+            + again;
     }
-    if (parts.empty()) {
+    if (!overParts && parts.empty()) {
         return name + " acts on no part";
     }
-    if (parts.front() != body) {
+    if (!overParts && parts.front() != body) {
         return name + " acts on " + quoted(parts.front()) + ", not on " + quoted(body)
-            + ", the pattern's part";
+            + ", the pattern's part" + again;
     }
     step = freecad_cast<FeatureAddSub*>(StudioList::stepOf(owner, body));
     if (!step) {
@@ -346,6 +473,12 @@ struct ToolCollector
         int depth
     )
     {
+        // A pattern among the originals (a feature pattern studio feature's step too, T1a:
+        // flattened in this part, T7a) brings its own instances
+        if (auto inner = freecad_cast<Transformed*>(original);
+            inner && studioPatternOwnerOf(*inner)) {
+            return instances(*inner, checks, out, depth);
+        }
         if (auto owner = studioOwnerOfOriginal(original)) {
             FeatureAddSub* step = nullptr;
             if (std::string why = studioStepOf(owner, pattern, body, step); !why.empty()) {
@@ -439,7 +572,7 @@ struct ToolCollector
         }
         std::vector<gp_Trsf> list;
         try {
-            std::list<gp_Trsf> got = inner.getTransformations(originals);
+            std::list<gp_Trsf> got = transformationsOf(inner, originals);
             list.assign(got.begin(), got.end());
         }
         catch (const Base::Exception& e) {
@@ -660,6 +793,12 @@ struct ReapplyCollector
         int depth
     )
     {
+        // A pattern among the originals (a feature pattern studio feature's step too, T1a:
+        // flattened in this part, T7a) brings its own instances
+        if (auto inner = freecad_cast<Transformed*>(original);
+            inner && studioPatternOwnerOf(*inner)) {
+            return instances(*inner, levels, out, depth);
+        }
         if (auto owner = studioOwnerOfOriginal(original)) {
             FeatureAddSub* step = nullptr;
             if (std::string why = studioStepOf(owner, pattern, body, step); !why.empty()) {
@@ -958,7 +1097,7 @@ struct ReapplyCollector
         }
         std::vector<gp_Trsf> list;
         try {
-            std::list<gp_Trsf> got = inner.getTransformations(originals);
+            std::list<gp_Trsf> got = transformationsOf(inner, originals);
             list.assign(got.begin(), got.end());
         }
         catch (const Base::Exception& e) {
@@ -1295,6 +1434,12 @@ short Transformed::mustExecute() const
     if (Originals.isTouched() || TransformMode.isTouched()) {
         return 1;
     }
+    // FreeCAD-CH ops#654 T1a settled 1: a feature pattern step whose Originals aren't its owner's
+    // mapped to its part runs, and fails loudly
+    if (const Transformed* owner = studioPatternOwnerOf(*this);
+        owner && Originals.getValues() != studioPatternStepOriginals(owner, getFeatureBody())) {
+        return 1;
+    }
     return PartDesign::Feature::mustExecute();
 }
 
@@ -1537,6 +1682,129 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
     return App::DocumentObject::StdReturn;
 }
 
+/// Onshape's refusal of a pattern that needs Reapply features (PATTERN_SWITCH_TO_PER_INSTANCE,
+/// O7, Q2); the words are the fork's (Onshape's own text unverified)
+std::string switchToPerInstance(const std::string& what)
+{
+    return "Pattern failed: " + what
+        + ": select Reapply features to pattern each instance (Onshape: "
+          "PATTERN_SWITCH_TO_PER_INSTANCE)";
+}
+
+/** A feature pattern as a studio feature (FreeCAD-CH ops#654 T1a, parts-design.md 10.16): outside
+ * every Body, a step of its own type in each part an original acts on. Its own compute (settled 6)
+ * checks what its steps pattern and keeps an empty shape: nothing picked (Onshape's words); an
+ * original listed after it; an original whose part was absorbed before it (T1.9, Onshape Q8: it
+ * fails both ways, never follows the part); an Add original over two or more parts (settled 2,
+ * Q2) and an original that split its part (O7, settled 7), refused with Reapply off in Onshape's
+ * words and, with Reapply on, not yet (T1b: the merge through 10.13, the pieces per instance) */
+App::DocumentObjectExecReturn* executeStudioFeaturePattern(Transformed& pattern)
+{
+    pattern.Shape.setValue(Part::TopoShape());
+    auto fail = [&pattern](const std::string& why) {
+        return new App::DocumentObjectExecReturn(why, &pattern);
+    };
+    if (static_cast<Transformed::Mode>(pattern.TransformMode.getValue())
+        != Transformed::Mode::Features) {
+        return fail(
+            "A pattern of the whole shape is not a studio feature: pattern the part's features, or "
+            "the part with the Part type"
+        );
+    }
+    std::vector<App::DocumentObject*> originals;
+    for (auto obj : pattern.Originals.getValues()) {
+        if (obj) {
+            originals.push_back(obj);
+        }
+    }
+    if (originals.empty()) {
+        return nothingToTransform(pattern);
+    }
+    const StudioList* list = StudioList::holding(&pattern);
+    const auto& entries = list->Entries.getValues();
+    auto placeOf = [&entries](const App::DocumentObject* obj) {
+        auto it = std::ranges::find(entries, obj);
+        return it == entries.end() ? -1 : static_cast<int>(it - entries.begin());
+    };
+    const int here = placeOf(&pattern);
+    const bool reapply = pattern.Reapply.getValue();
+    const std::string notYet =
+        ", with Reapply features on, is not yet done (T1b): pattern it per part, or turn Reapply off";
+    for (auto original : originals) {
+        const std::string name = quoted(original);
+        const int at = placeOf(original);
+        const Body* member = Body::findBodyOf(original);
+        if (!member && at < 0) {
+            return fail(name + " is not in the studio's history: it can't be patterned");
+        }
+        if (at >= 0 && at > here) {
+            return fail(name + " comes after the pattern");
+        }
+        // The parts it acts on at its own place
+        std::vector<Body*> parts;
+        if (member) {
+            parts.push_back(const_cast<Body*>(member));
+        }
+        else if (!isStudioFeaturePattern(original)) {
+            parts = studioScopeOf(original);
+        }
+        // T1.9: a part absorbed between the original and the pattern (a merge, a Union) is not
+        // followed: refused (a split part goes on as its pieces)
+        for (auto part : parts) {
+            const App::DocumentObject* by = studioConsumerOf(part, here);
+            if (!by || by == original || placeOf(by) <= at
+                || !pieceRecords(by, studioPartId(part)).empty()) {
+                continue;
+            }
+            return fail(
+                name + " acts on " + quoted(part) + ", which " + quoted(by)
+                + " absorbed before the pattern: a pattern doesn't follow a part into another (Onshape "
+                  "fails it); pattern it before " + quoted(by)
+            );
+        }
+        if (member || isStudioFeaturePattern(original)) {
+            continue;
+        }
+        // Settled 7: a seed that split its part (P6p records of it)
+        for (const auto& id : studioScopeIds(original)) {
+            if (pieceRecords(original, id).empty()) {
+                continue;
+            }
+            if (!reapply) {
+                return fail(switchToPerInstance(name + " splits its part"));
+            }
+            return fail("A pattern of " + name + ", which splits its part" + notYet);
+        }
+        // Settled 2: an Add seed over two or more parts
+        if (parts.size() > 1 && std::string(studioOperationOf(original)) == "Union") {
+            auto step = freecad_cast<FeatureAddSub*>(StudioList::stepOf(original, parts.front()));
+            if (step && step->getAddSubType() == FeatureAddSub::Type::Additive) {
+                if (!reapply) {
+                    return fail(switchToPerInstance(
+                        name + " adds to " + std::to_string(parts.size()) + " parts"
+                    ));
+                }
+                return fail("A pattern of " + name + ", an Add over "
+                            + std::to_string(parts.size()) + " parts" + notYet);
+            }
+        }
+    }
+    std::string why;
+    try {
+        ownerTransforms(pattern, why);
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const Standard_Failure& e) {
+        why = e.GetMessageString();
+    }
+    if (!why.empty()) {
+        return fail(why);
+    }
+    return App::DocumentObject::StdReturn;
+}
+
 }  // namespace
 
 App::DocumentObjectExecReturn* Transformed::execute()
@@ -1545,6 +1813,23 @@ App::DocumentObjectExecReturn* Transformed::execute()
     // apply (the part mirror's tool); here it checks it
     if (runsAsStudioOwner(this) && PatternType.getValue() == 1) {
         return executeStudioPartPattern(*this);
+    }
+    // T1a (10.16 settled 6): a feature pattern over parts computes no shape; it checks what its
+    // steps will pattern
+    if (runsAsStudioOwner(this) && isStudioFeaturePattern(this)) {
+        return executeStudioFeaturePattern(*this);
+    }
+    // Its step: the owner's values, and its Originals the owner's mapped to its part (settled 1)
+    if (const Transformed* owner = studioPatternOwnerOf(*this)) {
+        takeOwnerValues(*this, *owner);
+        if (Originals.getValues() != studioPatternStepOriginals(owner, getFeatureBody())) {
+            return new App::DocumentObjectExecReturn(
+                quoted(this) + "'s originals differ from " + quoted(owner) + "'s in "
+                    + quoted(getFeatureBody())
+                    + ": a step of a studio feature takes its owner's (reconcile the studio's list)",
+                this
+            );
+        }
     }
     if (isOutOfChain()) {
         // FreeCAD-CH (ops#640): a MultiTransform's step computes nothing of its own (its
@@ -1591,7 +1876,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
     // get transformations from subclass by calling virtual method
     std::vector<gp_Trsf> transformations;
     try {
-        std::list<gp_Trsf> t_list = getTransformations(originals);
+        std::list<gp_Trsf> t_list = transformationsOf(*this, originals);
         transformations.insert(transformations.end(), t_list.begin(), t_list.end());
     }
     catch (Base::Exception& e) {

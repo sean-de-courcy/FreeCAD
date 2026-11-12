@@ -29,7 +29,10 @@
 #include "FeatureBoolean.h"
 #include "FeatureChamfer.h"
 #include "FeatureFillet.h"
+#include "FeatureLinearPattern.h"
+#include "FeatureMirrored.h"
 #include "FeatureMultiTransform.h"
+#include "FeaturePolarPattern.h"
 #include "Pieces.h"
 #include "Retarget.h"
 #include "Studio.h"
@@ -51,6 +54,10 @@ namespace PartDesign
 {
 // Below (slice 9)
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
+    const App::DocumentObject* owner,
+    const Body* body
+);
 PartDesignExport bool studioPartMirrorConsumes(const App::DocumentObject* owner);
 }  // namespace PartDesign
 
@@ -459,6 +466,80 @@ bool isDressUpOwner(const App::DocumentObject* entry)
 
 /// The part ids of a dress-up owner's picks (StudioPickIds, "<part id>|<element name>"), in
 /// order, without repeats
+/// The Transformed types a feature pattern in a studio can be (T1a, parts-design.md 10.16): one
+/// line per type (a new pattern type, CurvePattern, is one more here)
+bool isFeaturePatternType(const App::DocumentObject* obj)
+{
+    return obj
+        && (obj->isDerivedFrom<LinearPattern>() || obj->isDerivedFrom<PolarPattern>()
+            || obj->isDerivedFrom<Mirrored>());
+}
+
+/// A feature pattern studio feature (FreeCAD-CH ops#654 T1a, 10.16): a Linear pattern, Polar
+/// pattern or Mirror of features (PatternType Feature) outside every Body; its scope is derived
+/// from its originals, its steps are of its own type
+bool isFeaturePatternOwner(const App::DocumentObject* entry)
+{
+    auto pattern = freecad_cast<const Transformed*>(entry);
+    return pattern && isFeaturePatternType(entry) && pattern->PatternType.getValue() == 0
+        && !Body::findBodyOf(entry);
+}
+
+std::vector<Body*> scopePartsAt(const App::DocumentObject* owner,
+                                const std::vector<Body*>& bodies,
+                                int index,
+                                const std::map<const App::DocumentObject*, int>& positions,
+                                const Consumed& consumed);
+
+/// A feature pattern's scope ids (10.16 T1.3, settled 5): the parts its originals act on, each at
+/// its own place: a Body member's part, an owner's resolved scope, a pattern owner's own (derived,
+/// recursively). Resolved at the pattern's place, a part absorbed before it resolves to nothing
+/// (never followed into its survivor: T1.9's refusal names it), a split part to its pieces
+std::vector<std::string> patternScopeIds(const App::DocumentObject* owner,
+                                         const std::vector<Body*>& bodies,
+                                         int index,
+                                         const std::map<const App::DocumentObject*, int>& positions,
+                                         const Consumed& consumed,
+                                         int depth = 0)
+{
+    std::vector<std::string> ids;
+    auto pattern = freecad_cast<const Transformed*>(owner);
+    if (!pattern || depth > 8) {
+        return ids;
+    }
+    auto add = [&ids](const std::string& id) {
+        if (!id.empty() && std::ranges::find(ids, id) == ids.end()) {
+            ids.push_back(id);
+        }
+    };
+    for (auto original : pattern->Originals.getValues()) {
+        if (!original) {
+            continue;
+        }
+        if (const Body* body = Body::findBodyOf(original)) {
+            if (std::ranges::find(bodies, body) != bodies.end()) {
+                add(studioPartId(body));
+            }
+            continue;
+        }
+        auto at = positions.find(original);
+        if (at == positions.end() || at->second >= index) {
+            continue;  // not listed, or after the pattern: its execute says so
+        }
+        if (isFeaturePatternOwner(original)) {
+            for (const auto& id :
+                 patternScopeIds(original, bodies, at->second, positions, consumed, depth + 1)) {
+                add(id);
+            }
+            continue;
+        }
+        for (auto body : scopePartsAt(original, bodies, at->second, positions, consumed)) {
+            add(studioPartId(body));
+        }
+    }
+    return ids;
+}
+
 std::vector<std::string> pickPartIds(const App::DocumentObject* owner)
 {
     std::vector<std::string> ids;
@@ -545,6 +626,9 @@ std::vector<std::string> scopeIdsAt(const App::DocumentObject* owner,
                                     const std::map<const App::DocumentObject*, int>& positions,
                                     const Consumed& consumed)
 {
+    if (isFeaturePatternOwner(owner)) {
+        return patternScopeIds(owner, bodies, index, positions, consumed);
+    }
     if (isDressUpOwner(owner)) {
         // P8a: the parts its picks name, each followed into the part that absorbed it
         std::vector<std::string> ids;
@@ -882,6 +966,10 @@ std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, con
             // P8a: a studio dress-up step's Base is its chain's previous feature, written by its
             // owner as BaseFeature is by reconcile
             if (member && propName == "Base" && isDressUpOwner(ownerOfStep(in))) {
+                continue;
+            }
+            // T1a: a feature pattern step's Originals are written by reconcile from its owner's
+            if (member && propName == "Originals" && isFeaturePatternOwner(ownerOfStep(in))) {
                 continue;
             }
             std::vector<App::DocumentObject*> linked;
@@ -1544,7 +1632,18 @@ bool StudioList::reconcile(std::string* why)
 
     // 5. The steps' values from their owners; the owners' bases at their place, in scope order
     std::map<const App::DocumentObject*, std::vector<App::DocumentObject*>> basesByOwner;
-    for (auto& [owner, steps] : stepsByOwner) {
+    // In the list's order: a feature pattern step that enters its chain here (its Originals
+    // written) finds the steps before it in the chain already (T1a: a mirror of a mirror)
+    std::vector<const App::DocumentObject*> ownerOrder;
+    for (const auto& [owner, steps] : stepsByOwner) {
+        ownerOrder.push_back(owner);
+    }
+    std::ranges::stable_sort(ownerOrder, {}, [&positions, size](const App::DocumentObject* owner) {
+        const auto at = positions.find(owner);
+        return at == positions.end() ? size : at->second;
+    });
+    for (const App::DocumentObject* owner : ownerOrder) {
+        auto& steps = stepsByOwner[owner];
         const auto at = positions.find(owner);
         const auto scope = stepPartsAt(owner,
                                        bodies,
@@ -1569,6 +1668,17 @@ bool StudioList::reconcile(std::string* why)
                     // The owner writes the picks: it runs again (a step made again by G1 or a
                     // merge, a base reordered)
                     const_cast<App::DocumentObject*>(owner)->touch();
+                }
+            }
+            else if (auto pattern = freecad_cast<Transformed*>(step);
+                     pattern && isFeaturePatternOwner(owner)) {
+                // T1a settled 1: the owner's Originals, each mapped to this part (a step whose
+                // Originals differ fails loudly, Transformed::mustExecute)
+                const auto originals = studioPatternStepOriginals(owner, body);
+                if (pattern->Originals.getValues() != originals) {
+                    pattern->Originals.setValues(originals);
+                    // Into its chain, between the solids before and after it
+                    body->setBaseProperty(pattern);
                 }
             }
             else if (auto addSub = freecad_cast<FeatureAddSub*>(step)) {
@@ -2161,6 +2271,10 @@ void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Bo
 namespace PartDesign
 {
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+PartDesignExport std::vector<App::DocumentObject*> studioPatternStepOriginals(
+    const App::DocumentObject* owner,
+    const Body* body
+);
 PartDesignExport std::vector<Body*> studioPartPatternSources(const App::DocumentObject* owner);
 }  // namespace PartDesign
 
@@ -2325,7 +2439,7 @@ std::string PartDesign::studioStepType(const App::DocumentObject* owner)
 {
     // A Fillet or a Chamfer: its own type (P8a); every tool-making owner, and S1's shape owners:
     // an applier
-    if (isDressUpOwner(owner)) {
+    if (isDressUpOwner(owner) || isFeaturePatternOwner(owner)) {
         return std::string(owner->getTypeId().getName());
     }
     return "PartDesign::FeatureApply";
@@ -2362,3 +2476,49 @@ PartDesignExport std::vector<Body*> studioPickPartsAt(const App::DocumentObject*
                         consumed);
 }
 }  // namespace PartDesign
+
+// ------------------------------------------------------------------------------------------------
+// The feature pattern as an owner over parts (FreeCAD-CH ops#654 T1a, parts-design.md 10.16).
+// Declared where used (FeatureTransformed.cpp): no header change
+namespace PartDesign
+{
+PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
+}  // namespace PartDesign
+
+/// Whether obj is a feature pattern studio feature: a Linear pattern, Polar pattern or Mirror of
+/// features outside every Body, held by a studio's list
+bool PartDesign::isStudioFeaturePattern(const App::DocumentObject* obj)
+{
+    return isFeaturePatternOwner(obj) && StudioList::holding(obj);
+}
+
+/// The Originals of owner's step in body (settled 1): each original of the owner mapped to body:
+/// a member of body itself, an owner's (a pattern owner's too) step in body; a member of another
+/// Body, or an owner with no step in body, contributes nothing there (T1.4)
+std::vector<App::DocumentObject*> PartDesign::studioPatternStepOriginals(
+    const App::DocumentObject* owner,
+    const Body* body
+)
+{
+    std::vector<App::DocumentObject*> out;
+    auto pattern = freecad_cast<const Transformed*>(owner);
+    if (!pattern || !body) {
+        return out;
+    }
+    for (auto original : pattern->Originals.getValues()) {
+        if (!original) {
+            continue;
+        }
+        App::DocumentObject* mapped = nullptr;
+        if (Body::findBodyOf(original)) {
+            mapped = body->hasObject(original) ? original : nullptr;
+        }
+        else {
+            mapped = StudioList::stepOf(original, body);
+        }
+        if (mapped && std::ranges::find(out, mapped) == out.end()) {
+            out.push_back(mapped);
+        }
+    }
+    return out;
+}
