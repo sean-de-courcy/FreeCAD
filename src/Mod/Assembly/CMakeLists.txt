@@ -32,6 +32,7 @@ set(Assembly_Scripts
     CommandCreateSimulation.py
     CommandCreateSnapshot.py
     CommandExportASMT.py
+    CommandSnapMode.py
     TestAssemblyWorkbench.py
     JointObject.py
     Preferences.py
@@ -64,6 +65,9 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestFloatingSolve.py
     AssemblyTests/TestJointRecords.py
     AssemblyTests/TestOnshapeJointsGui.py
+    AssemblyTests/TestMateOffsetsGui.py
+    AssemblyTests/TestConnectorPointsGui.py
+    AssemblyTests/TestSnapModeGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
     AssemblyTests/TestOnshapeAssemblies.py

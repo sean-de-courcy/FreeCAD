@@ -857,7 +857,10 @@ class Joint:
             self.ensureUnconnectedIsSecondRef(joint)
 
             if joint.JointType in JointUsingPreSolve:
-                self.preSolve(joint)
+                # FreeCAD-CH (ops#640, design C1): a new Fastened mate is unflipped whatever the
+                # parts' positions, as Onshape's (GC-B1); Flip primary axis flips it. Before, the
+                # closer of the two directions was taken, so parts already facing came out flipped.
+                self.preSolve(joint, unflipped=joint.JointType == "Fixed")
             elif joint.JointType in JointParallelForbidden:
                 self.preventParallel(joint)
 
@@ -913,16 +916,16 @@ class Joint:
     def flipOnePart(self, joint):
         self.matchJCS(joint, False, True)
 
-    def preSolve(self, joint, savePlc=True):
+    def preSolve(self, joint, savePlc=True, unflipped=False):
         # The goal of this is to put the part in the correct position to avoid wrong placement by the solve.
 
         # we actually don't want to match perfectly the JCS, it is best to match them
         # in the current closest direction, ie either matched or flipped.
-        self.matchJCS(joint, savePlc)
+        self.matchJCS(joint, savePlc, unflipped=unflipped)
 
-    def matchJCS(self, joint, savePlc=True, reverse=False):
+    def matchJCS(self, joint, savePlc=True, reverse=False, unflipped=False):
         assembly = self.getAssembly(joint)
-        sameDir = self.areJcsSameDir(joint)
+        sameDir = True if unflipped else self.areJcsSameDir(joint)
         if reverse:
             sameDir = not sameDir
 
@@ -1144,7 +1147,60 @@ class ViewProviderJoint:
         self.display_mode.addChild(self.switch_JCS1)
         self.display_mode.addChild(self.switch_JCS2)
         self.display_mode.addChild(self.switch_JCS_preview)
+        self.display_mode.addChild(self.makeConnectorPoints())
         vobj.addDisplayMode(self.display_mode, "Wireframe")
+
+    def makeConnectorPoints(self):
+        """FreeCAD-CH (ops#640, design C3): every connector point of the hovered face or edge,
+        drawn on top; the one that a click there takes is drawn larger."""
+        self.switch_points = coin.SoSwitch()
+        self.switch_points.whichChild = coin.SO_SWITCH_NONE
+        root = coin.SoSeparator()
+        pick = coin.SoPickStyle()
+        pick.style.setValue(coin.SoPickStyle.UNPICKABLE)
+        root.addChild(pick)
+        color = coin.SoBaseColor()
+        color.rgb.setValue(1.0, 0.6, 0.0)
+        root.addChild(color)
+        self.points_coords = coin.SoCoordinate3()
+        root.addChild(self.points_coords)
+        self.points_set = coin.SoMarkerSet()
+        self.points_set.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_7_7
+        root.addChild(self.points_set)
+        chosen = coin.SoSeparator()
+        self.chosen_coords = coin.SoCoordinate3()
+        chosen.addChild(self.chosen_coords)
+        chosen_set = coin.SoMarkerSet()
+        chosen_set.markerIndex = coin.SoMarkerSet.CIRCLE_LINE_9_9
+        chosen.addChild(chosen_set)
+        root.addChild(chosen)
+        self.switch_points.addChild(root)
+        return self.switch_points
+
+    def showConnectorPoints(self, points=None, chosen=None):
+        """points: the document-coordinate points to draw (None hides them); chosen: an index."""
+        if not hasattr(self, "switch_points"):
+            return
+        if not points:
+            self.switch_points.whichChild = coin.SO_SWITCH_NONE
+            return
+        assembly = self.app_obj.Proxy.getAssembly(self.app_obj)
+        if assembly:
+            inv = assembly.getGlobalPlacement().inverse()
+            points = [inv.multVec(p) for p in points]
+        self.points_coords.point.setNum(0)
+        self.points_coords.point.setValues(0, len(points), [(p.x, p.y, p.z) for p in points])
+        self.chosen_coords.point.setNum(0)
+        if chosen is not None:
+            p = points[chosen]
+            self.chosen_coords.point.setValues(0, 1, [(p.x, p.y, p.z)])
+        self.switch_points.whichChild = coin.SO_SWITCH_ALL
+
+    def connectorPointsShown(self):
+        """The number of points drawn (0 when hidden), for the tests."""
+        if not hasattr(self, "switch_points") or self.switch_points.whichChild.getValue() == coin.SO_SWITCH_NONE:
+            return 0
+        return self.points_coords.point.getNum()
 
     def updateData(self, joint, prop):
         """If a property of the handled feature has changed we have the chance to handle this here"""
@@ -1835,6 +1891,9 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.distanceSpinbox.valueChanged.connect(self.onDistanceChanged)
         self.jForm.distanceSpinbox2.valueChanged.connect(self.onDistance2Changed)
         self.jForm.offsetSpinbox.valueChanged.connect(self.onOffsetChanged)
+        self.jForm.offsetXSpinbox.valueChanged.connect(self.onOffsetXChanged)
+        self.jForm.offsetYSpinbox.valueChanged.connect(self.onOffsetYChanged)
+        self.jForm.offsetCheckbox.toggled.connect(self.offsetToggled)
         self.jForm.rotationSpinbox.valueChanged.connect(self.onRotationChanged)
         self.bindFields()
 
@@ -1888,6 +1947,10 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         bind = Gui.ExpressionBinding(self.jForm.angleSpinbox).bind(self.joint, "Angle")
         bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox).bind(self.joint, "Distance")
         bind = Gui.ExpressionBinding(self.jForm.distanceSpinbox2).bind(self.joint, "Distance2")
+        # FreeCAD-CH (ops#640, design C1): Onshape's mate offset is X, Y and Z, each taking an
+        # expression (#name included); before, only Z was reachable without the placement editor
+        bind = Gui.ExpressionBinding(self.jForm.offsetXSpinbox).bind(self.joint, "Offset2.Base.x")
+        bind = Gui.ExpressionBinding(self.jForm.offsetYSpinbox).bind(self.joint, "Offset2.Base.y")
         bind = Gui.ExpressionBinding(self.jForm.offsetSpinbox).bind(self.joint, "Offset2.Base.z")
         bind = Gui.ExpressionBinding(self.jForm.rotationSpinbox).bind(
             self.joint, "Offset2.Rotation.Yaw"
@@ -2092,11 +2155,47 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
     def onDistance2Changed(self, quantity):
         self.joint.Distance2 = self.jForm.distanceSpinbox2.property("rawValue")
 
-    def onOffsetChanged(self, quantity):
+    def setOffsetComponent(self, axis, spinbox):
         if self.blockOffsetRotation:
             return
+        base = App.Vector(self.joint.Offset2.Base)
+        setattr(base, axis, spinbox.property("rawValue"))
+        self.joint.Offset2.Base = base
 
-        self.joint.Offset2.Base = App.Vector(0, 0, self.jForm.offsetSpinbox.property("rawValue"))
+    def onOffsetChanged(self, quantity):
+        # Z alone: X and Y are kept (they were zeroed before C1)
+        self.setOffsetComponent("z", self.jForm.offsetSpinbox)
+
+    def onOffsetXChanged(self, quantity):
+        self.setOffsetComponent("x", self.jForm.offsetXSpinbox)
+
+    def onOffsetYChanged(self, quantity):
+        self.setOffsetComponent("y", self.jForm.offsetYSpinbox)
+
+    OFFSET_PATHS = ("Offset2.Base.x", "Offset2.Base.y", "Offset2.Base.z")
+
+    def offsetExpressions(self):
+        return [
+            path
+            for path, _expr in self.joint.ExpressionEngine
+            if path.lstrip(".") in self.OFFSET_PATHS
+        ]
+
+    def hasOffset(self):
+        """The Offset box is ticked for a joint with a translation offset or an expression on one."""
+        base = self.joint.Offset2.Base
+        return base.Length > 1e-9 or bool(self.offsetExpressions())
+
+    def offsetToggled(self, on):
+        """Onshape's Offset checkbox: ticked shows X, Y and Z; unticked drops the translation
+        offset with its expressions (the rotation and the two buttons' turns stay)."""
+        if not on and self.hasOffset():
+            for path in self.offsetExpressions():
+                self.joint.setExpression(path, None)
+            plc = self.joint.Offset2
+            self.joint.Offset2 = App.Placement(App.Vector(), plc.Rotation)
+            self.updateOffsetWidgets()
+        self.adaptUi()
 
     def onRotationChanged(self, quantity):
         if self.blockOffsetRotation:
@@ -2191,8 +2290,12 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.offset2Label.setVisible(advancedOffset)
         self.jForm.offset1Button.setVisible(advancedOffset)
         self.jForm.offset2Button.setVisible(advancedOffset)
-        self.jForm.offsetLabel.setVisible(not advancedOffset and needOffset)
-        self.jForm.offsetSpinbox.setVisible(not advancedOffset and needOffset)
+        showOffset = not advancedOffset and needOffset
+        self.jForm.offsetCheckbox.setVisible(showOffset)
+        showFields = showOffset and self.jForm.offsetCheckbox.isChecked()
+        for name in ("offsetX", "offsetY", "offset"):
+            getattr(self.jForm, name + "Label").setVisible(showFields)
+            getattr(self.jForm, name + "Spinbox").setVisible(showFields)
         self.jForm.rotationLabel.setVisible(not advancedOffset and needRotation)
         self.jForm.rotationSpinbox.setVisible(not advancedOffset and needRotation)
 
@@ -2243,6 +2346,8 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.offset2Button.setText(f"({pos.x}, {pos.y}, {pos.z})")
 
         self.blockOffsetRotation = True
+        self.jForm.offsetXSpinbox.setProperty("rawValue", pos.x)
+        self.jForm.offsetYSpinbox.setProperty("rawValue", pos.y)
         self.jForm.offsetSpinbox.setProperty("rawValue", pos.z)
         self.jForm.rotationSpinbox.setProperty(
             "rawValue", self.joint.Offset2.Rotation.getYawPitchRoll()[0]
@@ -2310,10 +2415,18 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.jForm.angleSpinbox.setProperty("rawValue", self.joint.Angle.Value)
         self.jForm.distanceSpinbox.setProperty("rawValue", self.joint.Distance.Value)
         self.jForm.distanceSpinbox2.setProperty("rawValue", self.joint.Distance2.Value)
+        self.blockOffsetRotation = True
+        self.jForm.offsetXSpinbox.setProperty("rawValue", self.joint.Offset2.Base.x)
+        self.jForm.offsetYSpinbox.setProperty("rawValue", self.joint.Offset2.Base.y)
         self.jForm.offsetSpinbox.setProperty("rawValue", self.joint.Offset2.Base.z)
+        self.blockOffsetRotation = False
         self.jForm.rotationSpinbox.setProperty(
             "rawValue", self.joint.Offset2.Rotation.getYawPitchRoll()[0]
         )
+        # A new joint starts with Offset off (Onshape's); an edited one shows its offset
+        self.jForm.offsetCheckbox.blockSignals(True)
+        self.jForm.offsetCheckbox.setChecked(self.hasOffset())
+        self.jForm.offsetCheckbox.blockSignals(False)
 
         self.jForm.limitCheckbox1.setChecked(self.joint.EnableLengthMin)
         self.jForm.limitCheckbox2.setChecked(self.joint.EnableLengthMax)
@@ -2389,6 +2502,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
             )
         ):
             self.joint.ViewObject.Proxy.showPreviewJCS(False)
+            self.joint.ViewObject.Proxy.showConnectorPoints(None)
             if len(self.refs) >= 2:
                 self.updateLimits()
             return
@@ -2405,19 +2519,32 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
             # But we don't actually need to test because if there's no preselection then not cursor is None
         ):
             self.joint.ViewObject.Proxy.showPreviewJCS(False)
+            self.joint.ViewObject.Proxy.showConnectorPoints(None)
             return
 
         ref = self.presel_ref
 
         # newPos = self.view.getPoint(*info["Position"]) is not OK: it's not pos on the object but on the focal plane
         newPos = App.Vector(cursor_info["x"], cursor_info["y"], cursor_info["z"])
-        vertex_name = UtilsAssembly.findElementClosestVertex(ref, newPos)
+        self.showConnectorPoints(ref, newPos)
+        vertex_name = UtilsAssembly.findElementClosestVertex(ref, newPos, self.view)
 
         ref = UtilsAssembly.addVertexToReference(ref, vertex_name)
 
         placement = self.joint.Proxy.findPlacement(self.joint, ref, 0)
         self.joint.ViewObject.Proxy.showPreviewJCS(True, placement, ref)
         self.previewJCSVisible = True
+
+    def showConnectorPoints(self, ref, mousePos):
+        """Draws the hovered element's connector points (design C3) and marks the one a click at
+        mousePos takes."""
+        candidates = UtilsAssembly.connectorCandidates(ref)
+        if not candidates:
+            self.joint.ViewObject.Proxy.showConnectorPoints(None)
+            return
+        points = [UtilsAssembly.shapeToGlobal(ref, p) for p, _n, _k in candidates]
+        chosen = UtilsAssembly.chooseConnector(ref, candidates, mousePos, self.view)
+        self.joint.ViewObject.Proxy.showConnectorPoints(points, chosen)
 
     # 3D view keyboard handler
     def KeyboardEvent(self, info):
@@ -2534,7 +2661,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         # Selection is acceptable so add it
 
         mousePos = App.Vector(mousePos[0], mousePos[1], mousePos[2])
-        vertex_name = UtilsAssembly.findElementClosestVertex(ref, mousePos)
+        vertex_name = UtilsAssembly.findElementClosestVertex(ref, mousePos, self.view)
 
         # add the vertex name to the reference
         ref = UtilsAssembly.addVertexToReference(ref, vertex_name)
@@ -2544,6 +2671,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         # We hide the preview JCS if we just added to the selection
         self.joint.ViewObject.Proxy.showPreviewJCS(False)
+        self.joint.ViewObject.Proxy.showConnectorPoints(None)
 
     def removeSelection(self, doc_name, obj_name, sub_name, mousePos=None):
         if self.addition_rejected:
