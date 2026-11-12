@@ -3259,6 +3259,7 @@ void ViewProviderLink::_setupContextMenu(
     // Gui does not know Assembly or PartDesign, so it is looked up by name.
     if (auto configCmd
         = Application::Instance->commandManager().getCommandByName("Assembly_InstanceConfiguration")) {
+        configCmd->initAction();  // in no menu or toolbar, it has no action until asked (C3i)
         configCmd->testActive();
         if (configCmd->getAction() && configCmd->getAction()->action()->isEnabled()) {
             menu->addAction(configCmd->getAction()->action());

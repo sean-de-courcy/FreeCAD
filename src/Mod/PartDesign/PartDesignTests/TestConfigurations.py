@@ -671,6 +671,30 @@ class TestConfigurations(unittest.TestCase):
         inner.Support = [(self.A, ("",))]
         self.assertEqual(PartDesign.configReaderError(inner, self.A), "")
 
+    def testImplicitStudioOfAnotherDocument(self):
+        """A document's implicit studio named while another document is active (C3i): the switch
+        acts on that document's studio, and an edit, which can reach the implicit studio only
+        through the active document, is refused instead of editing the active one's."""
+        other = App.newDocument("TestConfigurationsImplicit")
+        body = other.addObject("PartDesign::Body", "P")
+        bodyPad = pad(body, "PPad", sketch(body, "PSk", xyPlane(body), (0, 0, 10, 10)), 10)
+        other.recompute()
+        size = PartDesign.configAddList(other, "Size", ["Small", "Large"])
+        PartDesign.configConfigure(bodyPad, "Length", size)
+        PartDesign.configSetCell(bodyPad, "Length", "Large", "20 mm")
+        other.recompute()
+        self.assertAlmostEqual(height(body), 10, delta=TOL)
+
+        App.setActiveDocument(self.doc.Name)
+        PartDesign.configSetActive(other, {"Size": "Large"})
+        other.recompute()
+        self.assertAlmostEqual(height(body), 20, delta=TOL)
+        self.assertIsNone(PartDesign.configStudio(self.doc), "the active document got a studio")
+        with self.assertRaises(ValueError):
+            PartDesign.configAddRow(other, size, "Medium")
+        rows = json.loads(PartDesign.configStudio(other).Inputs)["inputs"][0]["rows"]
+        self.assertEqual([r["name"] for r in rows], ["Small", "Large"])
+
 
 if __name__ == "__main__":
     unittest.main()

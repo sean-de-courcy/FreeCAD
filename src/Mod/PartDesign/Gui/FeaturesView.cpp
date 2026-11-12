@@ -62,6 +62,7 @@
 #include <Base/Interpreter.h>
 #include <Base/Quantity.h>
 #include <Base/Unit.h>
+#include <Gui/Action.h>
 #include <Gui/ActiveObjectList.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -3637,6 +3638,21 @@ void FeaturesView::onAssemblyMenu(const QPoint& pos)
             show->setEnabled(false);
             isolate->setEnabled(false);
             fix->setEnabled(false);
+        }
+        // FreeCAD-CH (ops#671, configurations C3): Onshape's "Change configuration..." on an
+        // instance of a configured studio's part (CF8); the Assembly command says by its IsActive
+        // whether the selection is one
+        if (auto configCmd = Gui::Application::Instance->commandManager().getCommandByName(
+                "Assembly_InstanceConfiguration"
+            )) {
+            configCmd->initAction();  // in no menu or toolbar, it has no action until asked
+            configCmd->testActive();
+            if (configCmd->getAction() && configCmd->getAction()->action()->isEnabled()) {
+                auto change = menu.addAction(configCmd->getAction()->action()->text(), [runByName]() {
+                    runByName("Assembly_InstanceConfiguration");
+                });
+                change->setObjectName(QStringLiteral("instanceChangeConfiguration"));
+            }
         }
     }
     auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });

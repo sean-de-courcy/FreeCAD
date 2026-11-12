@@ -1697,6 +1697,20 @@ private:
         studioArg(obj, doc, studio);
     }
 
+    /// The studio an edit acts on. The edits (configAddList ... configRemoveInput) find an
+    /// implicit studio through the active document, so another document's is refused rather
+    /// than the active one's edited in its place (ops#671 C3i)
+    static void editedStudioArg(PyObject* obj, App::Document*& doc, App::Part*& studio)
+    {
+        configStudioArg(obj, doc, studio);
+        if (!studio && doc != App::GetApplication().getActiveDocument()) {
+            throw Py::ValueError(
+                "The implicit studio of a document that is not the active one can't be edited here: "
+                "make the document active first"
+            );
+        }
+    }
+
     static std::string configValueText(PyObject* v)
     {
         if (PyBool_Check(v)) {
@@ -1778,7 +1792,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::vector<std::string> rows;
         if (pRows != Py_None) {
             Py::Sequence seq(pRows);
@@ -1800,7 +1814,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::string why;
         return configId(
             PartDesign::configAddCheckbox(studio, name, PyObject_IsTrue(pDefault) == 1, &why),
@@ -1821,7 +1835,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         auto text = [](PyObject* v) {
             return v == Py_None ? std::string() : configValueText(v);
         };
@@ -1842,7 +1856,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::string why;
         return configId(PartDesign::configAddRow(studio, input, name, &why), why);
     }
@@ -1858,7 +1872,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::string why;
         return done(PartDesign::configRenameRow(studio, input, row, name, &why), why);
     }
@@ -1873,7 +1887,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::string why;
         return done(PartDesign::configRemoveRow(studio, input, row, &why), why);
     }
@@ -1888,7 +1902,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::string why;
         return done(PartDesign::configSetDefaultRow(studio, input, row, &why), why);
     }
@@ -1989,7 +2003,7 @@ private:
         }
         App::Document* doc;
         App::Part* studio;
-        configStudioArg(pStudio, doc, studio);
+        editedStudioArg(pStudio, doc, studio);
         std::string why;
         return done(PartDesign::configRemoveInput(studio, input, &why), why);
     }
@@ -2147,7 +2161,7 @@ private:
         App::Part* studio;
         configStudioArg(pStudio, doc, studio);
         std::string why;
-        return done(PartDesign::configSetActive(studio, configValues(pValues), &why), why);
+        return done(PartDesign::configSetActiveIn(doc, studio, configValues(pValues), &why), why);
     }
 
     Py::Object configKey(const Py::Tuple& args)

@@ -92,17 +92,27 @@ def instanceLabel(assembly, source):
 def configInputsOfBody(body):
     """FreeCAD-CH (ops#671, configurations C3): the inputs of the configured studio that holds
     body, as the studio's JSON lists them (id, name, kind, rows, default), or None when body is no
-    Body or its studio has no inputs. A body in the implicit studio reads the active document's."""
+    Body or its studio has no inputs. A body in the implicit studio reads its own document's (an
+    other document's studio too, as Onshape's Insert offers: CF8)."""
+    try:
+        if not body.isDerivedFrom("PartDesign::Body"):
+            return None
+        tab = App.DocumentTabs.tabOf(body) if hasattr(App, "DocumentTabs") else None
+        if tab and tab != IMPLICIT_STUDIO:
+            return configInputsOfStudio(body.Document.getObject(tab))
+        return configInputsOfStudio(body.Document)
+    except Exception:
+        return None
+
+
+def configInputsOfStudio(studio):
+    """The inputs of studio (an App::Part studio, or a document for its implicit studio), or None
+    when it has none. A partially loaded document gives none: its studio may be missing objects."""
     try:
         import PartDesign
 
-        if not body.isDerivedFrom("PartDesign::Body"):
-            return None
-        studio = None
-        tab = App.DocumentTabs.tabOf(body) if hasattr(App, "DocumentTabs") else None
-        if tab and tab != IMPLICIT_STUDIO:
-            studio = body.Document.getObject(tab)
-        elif body.Document != App.ActiveDocument:
+        doc = studio if isinstance(studio, App.Document) else studio.Document
+        if doc.Partial:
             return None
         cfg = PartDesign.configStudio(studio)
         if cfg is None:
@@ -110,6 +120,12 @@ def configInputsOfBody(body):
         return json.loads(cfg.Inputs).get("inputs") or None
     except Exception:
         return None
+
+
+def studioBodies(studio):
+    """The Bodies of an App::Part studio, in its order: the parts a whole-studio insert of a
+    configured studio makes one instance each of (Onshape's default insert, GB10)."""
+    return [obj for obj in studio.Group if obj.isDerivedFrom("PartDesign::Body")]
 
 
 def parseConfigKey(key):
@@ -168,7 +184,8 @@ class CommandInstanceConfiguration:
     def GetResources(self):
         return {
             "Pixmap": "Assembly_InsertLink",
-            "MenuText": QT_TRANSLATE_NOOP("Assembly_InstanceConfiguration", "Configuration..."),
+            # Onshape's instance menu entry (CF8)
+            "MenuText": QT_TRANSLATE_NOOP("Assembly_InstanceConfiguration", "Change configuration..."),
             "ToolTip": QT_TRANSLATE_NOOP(
                 "Assembly_InstanceConfiguration",
                 "Changes the configuration of the part this instance shows",
@@ -513,20 +530,23 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         return (body.Document.Name, tab if tab and tab != IMPLICIT_STUDIO else "")
 
     def buildConfigPanel(self):
-        """A Configuration box under the part list, a section per configured studio of this
-        document: what an inserted part of it shows."""
+        """A Configuration box under the part list, a section per configured studio of the
+        listed documents (this one first): what an inserted part of it shows. Onshape's Insert
+        offers a studio's inputs in any document (CF8)."""
         if self.configBox:
             self.form.layout().removeWidget(self.configBox)
             self.configBox.deleteLater()
             self.configBox = None
         self.configValues = {}
         sections = {}
-        for obj in self.doc.Objects:
-            if not obj.isDerivedFrom("PartDesign::Body"):
-                continue
-            key = self.configStudioKey(obj)
-            if key not in sections:
-                sections[key] = configInputsOfBody(obj)
+        docs = [self.doc] + [d for d in App.listDocuments().values() if d != self.doc]
+        for doc in docs:
+            for obj in doc.Objects:
+                if not obj.isDerivedFrom("PartDesign::Body"):
+                    continue
+                key = self.configStudioKey(obj)
+                if key not in sections:
+                    sections[key] = configInputsOfBody(obj)
         sections = {k: v for k, v in sections.items() if v}
         if not sections:
             return
@@ -535,9 +555,16 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         boxLayout = QtWidgets.QVBoxLayout(box)
         for key, inputs in sections.items():
             form, values = buildConfigForm(inputs)
-            if len(sections) > 1:
-                studio = self.doc.getObject(key[1]) if key[1] else None
-                boxLayout.addWidget(QtWidgets.QLabel(studio.Label if studio else "Part Studio"))
+            doc = App.getDocument(key[0])
+            if len(sections) > 1 or doc != self.doc:
+                studio = doc.getObject(key[1]) if key[1] else None
+                label = studio.Label if studio else "Part Studio"
+                if doc != self.doc:
+                    label = doc.Label + ": " + label
+                caption = QtWidgets.QLabel(label)
+                caption.setObjectName("ConfigStudio_" + key[0] + "_" + key[1])
+                boxLayout.addWidget(caption)
+            form.setObjectName("ConfigForm_" + key[0] + "_" + key[1])
             boxLayout.addWidget(form)
             self.configValues[key] = values
         layout = self.form.layout()
@@ -550,6 +577,16 @@ class TaskAssemblyInsertLink(QtCore.QObject):
             return None
         get = self.configValues.get(self.configStudioKey(selectedPart))
         return get() if get else None
+
+    def isConfiguredStudio(self, selectedPart):
+        """Whether selectedPart is an App::Part studio with configuration inputs: inserted whole,
+        it makes one instance per part, each showing the chosen configuration (Onshape's whole
+        studio insert, CF8 and GB10; C3 keys instances of parts only)."""
+        return (
+            selectedPart.isDerivedFrom("App::Part")
+            and (selectedPart.Document.Name, selectedPart.Name) in self.configValues
+            and bool(studioBodies(selectedPart))
+        )
 
     def addStudioItems(self, doc, docItem, rootObjects, process_objects):
         """FreeCAD-CH (ops#640 round 7, gap A16): this document's Part Studios first, by tab name
@@ -703,10 +740,31 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 print(selectedPart.Document.Name)
                 documentItem.setText(0, f"{newDocName}.FCStd")"""
 
-        self.insertLink(selectedPart, item)
+        if self.isConfiguredStudio(selectedPart):
+            self.insertConfiguredStudio(selectedPart, item)
+        else:
+            self.insertLink(selectedPart, item)
 
-    def insertLink(self, selectedPart, item):
-        """Inserts a link to selectedPart for the list's row item and returns it."""
+    def insertConfiguredStudio(self, studio, item):
+        """FreeCAD-CH (ops#671): a configured studio inserted whole, one instance per Body, each
+        keyed with the panel's configuration, all at the studio's own positions relative to each
+        other (one placement, the first instance's). Returns the instances."""
+        bodies = studioBodies(studio)
+        first = self.insertLink(bodies[0], item)
+        added = [first]
+        for body in bodies[1:]:
+            added.append(self.insertLink(body, item, placement=first.Placement))
+        group = first.Name
+        for stackItem in self.insertionStack[-len(added) :]:
+            stackItem["group"] = group  # a right-click on the row takes the whole insert back
+        Gui.Selection.clearSelection()
+        for obj in added:
+            Gui.Selection.addSelection(self.doc.Name, obj.Name, "")
+        return added
+
+    def insertLink(self, selectedPart, item, placement=None):
+        """Inserts a link to selectedPart for the list's row item and returns it. placement, when
+        given, is the link's placement (a whole studio's later parts take the first one's)."""
         if selectedPart.isDerivedFrom("Assembly::AssemblyObject"):
             objType = "Assembly::AssemblyLink"
         else:
@@ -743,27 +801,31 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 
         translation = App.Vector()
         resetThreshold = (screenCorner - screenCenter).Length * 0.1
-        if len(self.insertionStack) == 1:
-            translation = App.Vector()  # No translation for first object.
-        elif (self.prevScreenCenter - screenCenter).Length > resetThreshold:
-            self.totalTranslation = App.Vector()
+        if placement is not None:
+            insertionDict["translation"] = translation
+            addedObject.Placement = placement
+        else:
+            if len(self.insertionStack) == 1:
+                translation = App.Vector()  # No translation for first object.
+            elif (self.prevScreenCenter - screenCenter).Length > resetThreshold:
+                self.totalTranslation = App.Vector()
+                self.prevScreenCenter = screenCenter
+            else:
+                translation = self.getTranslationVec(addedObject)
+
+            insertionDict["translation"] = translation
+            self.totalTranslation += translation
+
+            originX, originY = view.getPointOnViewport(App.Vector() + translation)
+            if originX > 0 and originX < x and originY > 0 and originY < y:
+                # If the origin is within view then we insert at the origin.
+                addedObject.Placement.Base = self.totalTranslation
+            else:
+                #
+                bboxCenter = addedObject.ViewObject.getBoundingBox().Center
+                addedObject.Placement.Base = screenCenter - bboxCenter + self.totalTranslation
+
             self.prevScreenCenter = screenCenter
-        else:
-            translation = self.getTranslationVec(addedObject)
-
-        insertionDict["translation"] = translation
-        self.totalTranslation += translation
-
-        originX, originY = view.getPointOnViewport(App.Vector() + translation)
-        if originX > 0 and originX < x and originY > 0 and originY < y:
-            # If the origin is within view then we insert at the origin.
-            addedObject.Placement.Base = self.totalTranslation
-        else:
-            #
-            bboxCenter = addedObject.ViewObject.getBoundingBox().Center
-            addedObject.Placement.Base = screenCenter - bboxCenter + self.totalTranslation
-
-        self.prevScreenCenter = screenCenter
 
         # We turn it flexible after changing the position so that it uses the logic in
         # AssemblyLink::onChanged to handle positioning correctly.
@@ -914,12 +976,19 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                     stack_item = self.insertionStack[i]
 
                     if stack_item["item"] == item:
-                        obj = stack_item["addedObject"]
+                        # A configured studio's whole insert goes as one (its "group", C3i)
+                        group = stack_item.get("group")
+                        objs = [
+                            s["addedObject"]
+                            for s in self.insertionStack
+                            if group is not None and s.get("group") == group
+                        ] or [stack_item["addedObject"]]
 
-                        # ONLY remove the object from the document.
+                        # ONLY remove the objects from the document.
                         # The Observer (onObjectDeleted) will handle the rest.
-                        if obj and obj.Document:
-                            UtilsAssembly.removeObjAndChilds(obj)
+                        for obj in objs:
+                            if obj and obj.Document:
+                                UtilsAssembly.removeObjAndChilds(obj)
 
                         return True
             else:
