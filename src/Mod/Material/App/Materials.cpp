@@ -21,6 +21,8 @@
  *                                                                         *
  **************************************************************************/
 
+#include <limits>
+
 #include <QDir>
 #include <QMetaType>
 #include <QUuid>
@@ -384,6 +386,13 @@ void MaterialProperty::setInt(int value)
 
 void MaterialProperty::setInt(const QString& value)
 {
+    // FreeCAD-CH: 64 bits, as a document carries them (ops#696); an int where it fits
+    bool ok = false;
+    qlonglong number = value.toLongLong(&ok);
+    if (ok && (number < std::numeric_limits<int>::min() || number > std::numeric_limits<int>::max())) {
+        _valuePtr->setValue(QVariant(number));
+        return;
+    }
     _valuePtr->setValue(value.toInt());
 }
 
