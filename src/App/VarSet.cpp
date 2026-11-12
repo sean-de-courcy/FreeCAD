@@ -27,6 +27,7 @@
 #include <algorithm>
 
 #include "VarSet.h"
+#include "Document.h"
 #include "DocumentObject.h"
 #include "DocumentTabs.h"
 #include "Expression.h"
@@ -35,6 +36,83 @@
 using namespace App;
 
 PROPERTY_SOURCE(App::VarSet, App::DocumentObject)
+
+VarSet::VarSet()
+{
+    ADD_PROPERTY_TYPE(
+        VariableOrder,
+        (),
+        "",
+        PropertyType(Prop_Hidden | Prop_NoRecompute),
+        "The order of the variables (FreeCAD-CH)"
+    );
+}
+
+std::vector<std::string> VarSet::getDynamicPropertyNames() const
+{
+    std::vector<std::string> names = DocumentObject::getDynamicPropertyNames();
+    std::vector<std::string> ordered;
+    ordered.reserve(names.size());
+    for (const auto& name : VariableOrder.getValues()) {
+        if (std::find(names.begin(), names.end(), name) != names.end()
+            && std::find(ordered.begin(), ordered.end(), name) == ordered.end()) {
+            ordered.push_back(name);
+        }
+    }
+    for (const auto& name : names) {
+        if (std::find(ordered.begin(), ordered.end(), name) == ordered.end()) {
+            ordered.push_back(name);
+        }
+    }
+    return ordered;
+}
+
+namespace
+{
+/// Whether a change of the variables is the user's, not a file being read or an undo replayed
+bool isUserChange(const VarSet* obj)
+{
+    const Document* doc = obj->getDocument();
+    return !obj->isRestoring() && !obj->testStatus(ObjectStatus::Remove)
+        && !(doc && (doc->isPerformingTransaction() || doc->testStatus(Document::Restoring)));
+}
+}  // namespace
+
+Property* VarSet::addDynamicProperty(
+    std::string_view type,
+    const char* name,
+    const char* group,
+    const char* doc,
+    short attr,
+    bool ro,
+    bool hidden
+)
+{
+    Property* prop = DocumentObject::addDynamicProperty(type, name, group, doc, attr, ro, hidden);
+    if (prop && prop->getName() && isUserChange(this)) {
+        std::vector<std::string> order = VariableOrder.getValues();
+        if (std::find(order.begin(), order.end(), prop->getName()) == order.end()) {
+            order.emplace_back(prop->getName());
+            VariableOrder.setValues(order);
+        }
+    }
+    return prop;
+}
+
+bool VarSet::renameDynamicProperty(Property* prop, const char* name)
+{
+    const std::string old = prop && prop->getName() ? prop->getName() : "";
+    if (!DocumentObject::renameDynamicProperty(prop, name)) {
+        return false;
+    }
+    std::vector<std::string> order = VariableOrder.getValues();
+    auto it = std::find(order.begin(), order.end(), old);
+    if (!old.empty() && name && it != order.end() && isUserChange(this)) {
+        *it = name;
+        VariableOrder.setValues(order);
+    }
+    return true;
+}
 
 const char* VarSet::getViewProviderName() const
 {

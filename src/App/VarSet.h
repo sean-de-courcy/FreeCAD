@@ -27,6 +27,7 @@
 #include <string>
 
 #include "DocumentObject.h"
+#include "PropertyStandard.h"
 
 namespace App
 {
@@ -38,10 +39,29 @@ class AppExport VarSet: public App::DocumentObject
     PROPERTY_HEADER_WITH_OVERRIDE(App::VarSet);
 
 public:
-    VarSet() = default;
+    VarSet();
     ~VarSet() override = default;
 
     const char* getViewProviderName() const override;
+
+    /** FreeCAD-CH (ops#640, polish 13 P17): the variables' order, Onshape's rows (hidden). A
+     * VarSet's dynamic properties have no order of their own (hashed): getDynamicPropertyNames()
+     * lists those named here first, in this order, then the others. A variable added is appended,
+     * a renamed one keeps its place; Move up / Move down rewrite it (freecad.variables.order).
+     */
+    PropertyStringList VariableOrder;
+
+    std::vector<std::string> getDynamicPropertyNames() const override;
+    Property* addDynamicProperty(
+        std::string_view type,
+        const char* name = nullptr,
+        const char* group = nullptr,
+        const char* doc = nullptr,
+        short attr = 0,
+        bool ro = false,
+        bool hidden = false
+    ) override;
+    bool renameDynamicProperty(Property* prop, const char* name) override;
 
     /** FreeCAD-CH (ops#640, polish 13 P17): Onshape's order rule in a Variable Studio (VS Q5): a
      * variable may use only those above it, so one that uses a variable below it fails the

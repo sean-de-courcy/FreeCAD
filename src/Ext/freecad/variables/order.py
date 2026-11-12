@@ -24,12 +24,11 @@ polish 13 P16 and P17).
 
 Onshape's Variable Studio orders its variables, and the order matters: a variable may use only
 those above it (VS Q5; App::VarSet::execute() fails a studio that breaks the rule). A VarSet's
-variables are its dynamic properties, in the order they were added; FreeCAD can't reorder them, so
-a move takes the rows from the moved one down off and adds them again in the new order, each with
-its type, group, description, status and value or expression. The type of a row changes the same
-way, with the rows below it re-added after it, so it keeps its place. The users' expressions name
-the variables, not their places, and stay. Run inside one transaction (the Variables panel's edit),
-so one undo step takes it back.
+dynamic properties have no order of their own: App::VarSet::VariableOrder holds it, and a move
+rewrites it. The type of a row changes by taking the variable off and adding it again with the new
+type, its group, description, status and value or expression carried over; VariableOrder keeps its
+place. The users' expressions name the variables, not their places, and stay. Run inside one
+transaction (the Variables panel's edit), so one undo step takes it back.
 """
 
 
@@ -75,13 +74,6 @@ def _restore(obj, row, type_=None):
             obj.setExpression(name, text)
 
 
-def _readd(obj, rows, retype=None):
-    for row in rows:
-        obj.removeProperty(row["name"])
-    for row in rows:
-        _restore(obj, row, retype.get(row["name"]) if retype else None)
-
-
 def move(obj, order, name, offset):
     """Moves the variable @a name of @a obj up (@a offset -1) or down (+1) by one row; @a order:
     its variables in their order (the panel's rows, VarSet::getDynamicPropertyNames())."""
@@ -92,10 +84,8 @@ def move(obj, order, name, offset):
     j = i + offset
     if offset not in (-1, 1) or j < 0 or j >= len(order):
         raise ValueError("{} can't move there".format(name))
-    first = min(i, j)
-    # [.., a, b, rest]: a and the rest added again after b: [.., b, a, rest]
-    rows = [_snapshot(obj, n) for n in [order[first]] + order[first + 2 :]]
-    _readd(obj, rows)
+    order[i], order[j] = order[j], order[i]
+    obj.VariableOrder = order
 
 
 def retype(obj, order, name, type_):
@@ -106,6 +96,7 @@ def retype(obj, order, name, type_):
         raise ValueError("{} has no variable {}".format(obj.Label, name))
     if obj.getTypeIdOfProperty(name) == type_:
         return
-    i = order.index(name)
-    rows = [_snapshot(obj, n) for n in order[i:]]
-    _readd(obj, rows, {name: type_})
+    row = _snapshot(obj, name)
+    obj.VariableOrder = order  # its place, also where the order wasn't written yet
+    obj.removeProperty(name)
+    _restore(obj, row, type_)

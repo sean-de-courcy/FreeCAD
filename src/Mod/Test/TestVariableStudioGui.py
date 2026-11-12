@@ -578,16 +578,16 @@ class TestVariableStudioGui(unittest.TestCase):
 
     def testTypeDropdownPerRow(self):
         """P16, Onshape's VS1: the type is a dropdown in the row. n (a Number, 3) set to Length
-        becomes 3 mm in its place, its user follows (a Pad of #w + #n: 1300 mm^3); one undo
-        step takes it back."""
+        becomes 3 mm in its place; the Pad of #w + #k (1500 mm^3) is unchanged; one undo step
+        takes it back."""
         name, view = self.studio()
         self.add(view, "w", "10 mm")
         self.add(view, "n", "3", "Number")
-        self.add(view, "k", "2", "Number")
+        self.add(view, "k", "5 mm")
         _body, pad = self.padStudio()
-        pad.setExpression("Length", "#w + #n")
+        pad.setExpression("Length", "#w + #k")
         self.doc.recompute()
-        self.assertAlmostEqual(pad.Shape.Volume, 1300, 6)
+        self.assertAlmostEqual(pad.Shape.Volume, 1500, 6)
         self.assertTrue(GuiTabs.switchTo(self.doc, name)[0])
         pump(0.3)
         varset = self.doc.getObject(name)
@@ -611,7 +611,7 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertEqual(self.rows(view)["n"][0], "Length")
         self.doc.recompute()
         self.assertTrue(pad.isValid())
-        self.assertAlmostEqual(pad.Shape.Volume, 1300, 6)
+        self.assertAlmostEqual(pad.Shape.Volume, 1500, 6)
         self.undo()
         self.assertEqual(varset.getTypeIdOfProperty("n"), "App::PropertyFloat")
         self.assertEqual(self.order(view), ["w", "n", "k"])
