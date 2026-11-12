@@ -123,6 +123,23 @@ class TestPatternDefaultsGui(unittest.TestCase):
         self.accept()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
 
+    def testNewLinearPatternSecondDirectionDefaults(self):
+        """The second direction starts as the first: Distance is a spacing of 25 (Onshape's one
+        distance default), its count 1 (off); count 2 puts the row 25 away along Y, not 100
+        (ops#655)."""
+        self.runTool("PartDesign_LinearPattern", self.box)
+        pattern = self.only("PartDesign::LinearPattern")
+        self.assertEqual(pattern.Mode2, "Spacing")
+        self.assertAlmostEqual(pattern.Offset2.Value, 25)
+        self.assertEqual(pattern.Occurrences2, 1)
+        pattern.Occurrences2 = 2
+        self.doc.recompute()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        box = pattern.Shape.BoundBox
+        self.assertAlmostEqual(box.YMax, 35)
+        self.assertAlmostEqual(box.XMax, 35)
+        self.accept()
+
     def testLinearCountChangeKeepsTheSpacing(self):
         """Count 2 -> 3 on a new linear pattern: Offset (the spacing) stays as it was."""
         self.runTool("PartDesign_LinearPattern", self.box)

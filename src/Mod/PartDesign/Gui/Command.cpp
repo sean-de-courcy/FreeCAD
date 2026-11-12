@@ -3748,10 +3748,13 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
             }
             // Onshape's defaults (ops#640 rank 8, B3-6): Distance is the spacing between
             // neighbouring instances, so a count change keeps it; count 2; Centered and Skip off
-            // (the properties' defaults)
+            // (the properties' defaults). The second direction starts as the first, its count 1
+            // (Onshape's box unticked), so a count of 2 puts the row 25 away (ops#655)
             FCMD_OBJ_CMD(Feat, "Mode = 'Spacing'");
             FCMD_OBJ_CMD(Feat, "Offset = 25");
             FCMD_OBJ_CMD(Feat, "Occurrences = 2");
+            FCMD_OBJ_CMD(Feat, "Mode2 = 'Spacing'");
+            FCMD_OBJ_CMD(Feat, "Offset2 = 25");
 
             finishTransformed(cmd, Feat);
         };

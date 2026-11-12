@@ -127,6 +127,15 @@ const std::list<gp_Trsf> LinearPattern::getTransformations(const std::vector<App
 {
     const int first = std::max(static_cast<int>(Occurrences.getValue()), 1);
     const int second = std::max(static_cast<int>(Occurrences2.getValue()), 1);
+    // FreeCAD-CH (ops#655): a direction in use needs its reference, as Onshape shows a required
+    // selection left empty. Without one its step is 0 and every copy falls on the seed, silently;
+    // count 1 is Onshape's unticked second direction and needs none
+    if (first > 1 && !Direction.getValue()) {
+        throw Base::ValueError("Select a direction.");
+    }
+    if (second > 1 && !Direction2.getValue()) {
+        throw Base::ValueError("Select a second direction.");
+    }
     return centerInstances(
         calculateTransformations(),
         first,
