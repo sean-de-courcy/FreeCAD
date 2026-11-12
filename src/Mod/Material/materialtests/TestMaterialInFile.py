@@ -58,6 +58,8 @@ if doc:
         entry["density"] = density(mat, "kg/m^3")
         raw = mat.getPhysicalValue("Density") if mat.hasPhysicalProperty("Density") else None
         entry["densityText"] = None if raw is None else str(raw)
+        if mat.hasPhysicalProperty("TestInteger"):
+            entry["integer"] = mat.getPhysicalValue("TestInteger")
         perMm3 = density(mat, "kg/mm^3")
         entry["mass"] = None if perMm3 is None or entry["volume"] is None else entry["volume"] * perMm3
         out["objects"][obj.Name] = entry
@@ -69,6 +71,8 @@ if os.environ.get("E1_UUID"):
     try:
         card = Materials.MaterialManager().getMaterial(os.environ["E1_UUID"])
         out["library"] = {"name": card.Name, "density": density(card, "kg/m^3")}
+        if card.hasPhysicalProperty("TestInteger"):
+            out["library"]["integer"] = card.getPhysicalValue("TestInteger")
     except Exception as e:
         out["library"] = {"error": str(e)}
 with open(os.environ["E1_OUT"], "w", encoding="utf-8") as f:
@@ -599,11 +603,16 @@ class MaterialInFileTestCases(unittest.TestCase):
         )
 
         resaved = os.path.join(self.work, "integer-resaved.FCStd")
-        result, log = self.child(self.settingsFolder("empty-settings"), path, resave=resaved)
+        home = self.settingsFolder("empty-settings")
+        result, log = self.child(home, path, resave=resaved)
         self.assertTrue(os.path.isfile(resaved), log[-2000:])
+        self.assertEqual(result["objects"]["Box"]["integer"], 3000000000)
         xml = self.documentXml(resaved)
         start, end = self.elementOf(xml, made)
         self.assertIn('<Value name="TestInteger" value="3000000000"/>', xml[start:end])
+        # the card learned on open keeps it too
+        again, log = self.child(home, None, made)
+        self.assertEqual(again["library"].get("integer"), 3000000000, log[-2000:])
 
     def testValuesNotCarriedAreNamed(self):
         """A session material holding a list value: saving warns that the list is not in the file"""

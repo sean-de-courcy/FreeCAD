@@ -28,6 +28,7 @@
 #include <sstream>
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QStringList>
 #include <QMetaType>
@@ -207,7 +208,11 @@ void restoreValue(Material& material,
             break;
         case MaterialValue::Integer: {
             // written as 64 bits (toLongLong), so read as 64 bits: setInt(QString) has 32
-            long long number = std::stoll(text);
+            std::size_t used = 0;
+            long long number = std::stoll(text, &used);
+            if (text[used] != '\0') {
+                throw Base::ValueError("not an integer");
+            }
             if (number >= std::numeric_limits<int>::min()
                 && number <= std::numeric_limits<int>::max()) {
                 material.setPhysicalValue(name, static_cast<int>(number));
@@ -249,12 +254,17 @@ bool reservedOnWindows(const QString& file)
     static const QStringList devices = {QStringLiteral("CON"),
                                         QStringLiteral("PRN"),
                                         QStringLiteral("AUX"),
-                                        QStringLiteral("NUL")};
+                                        QStringLiteral("NUL"),
+                                        QStringLiteral("CONIN$"),
+                                        QStringLiteral("CONOUT$")};
     if (devices.contains(base)) {
         return true;
     }
     if (base.size() == 4 && (base.startsWith(QStringLiteral("COM")) || base.startsWith(QStringLiteral("LPT")))) {
-        return base.at(3) >= QLatin1Char('1') && base.at(3) <= QLatin1Char('9');
+        // COM0-9, LPT0-9 and the superscript digits Windows also reserves
+        QChar digit = base.at(3);
+        return (digit >= QLatin1Char('0') && digit <= QLatin1Char('9')) || digit == QChar(0x00B9)
+            || digit == QChar(0x00B2) || digit == QChar(0x00B3);
     }
     return false;
 }
@@ -337,11 +347,26 @@ void learnMaterial(const Material& material, const std::string& owner)
                                 path.toStdString().c_str());
             return;
         }
+        {
+            // saveMaterial registers the material even when its file can't be written, in two maps
+            // (the manager's and the library's paths): try the file first
+            QDir().mkpath(QFileInfo(filePath).path());
+            QFile probe(filePath);
+            if (!probe.open(QIODevice::WriteOnly)) {
+                Base::Console().log("Material '%s' of %s not added: '%s' can't be written\n",
+                                    material.getName().toStdString().c_str(),
+                                    owner.c_str(),
+                                    filePath.toStdString().c_str());
+                return;
+            }
+            probe.close();
+            probe.remove();
+        }
         auto card = std::make_shared<Material>(material);
         // saveAsCopy keeps the UUID, so the card resolves this document's reference
         manager.saveMaterial(library, card, path, false, true, false);
         if (!QFileInfo::exists(filePath)) {
-            // saveMaterial registers the material even when its file couldn't be written
+            // written a moment ago, so this is rare: undo the manager's registration at least
             manager.remove(material.getUUID());
             Base::Console().log("Material '%s' of %s not added: '%s' could not be written\n",
                                 material.getName().toStdString().c_str(),
