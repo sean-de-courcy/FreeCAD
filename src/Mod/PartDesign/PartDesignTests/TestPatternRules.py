@@ -366,18 +366,33 @@ class TestPatternRules(unittest.TestCase):
         self.assertFalse(self.inside(-14, 0, 12.5))
 
     def testCenteredCircularPatternRunsBothWays(self):
-        """The square's boss, 90 deg over 3 occurrences, Centered: at -45, 0 and 45 deg, not 90."""
+        """The square's boss, 90 deg over 3 occurrences, Centered: Onshape's count is per side,
+        the seed included, the angle the extent each way (oracle 9j): 0, +-45 and +-90 deg, five
+        bosses, none at 180."""
         boss = self.squareWithBoss()
         pattern = self.polar(boss, 90, 3)
         pattern.Centered = True
         self.recompute()
         self.assertValid(pattern)
-        self.assertBody(SQUARE + 3 * STUB)
+        self.assertBody(SQUARE + 5 * STUB)
         r = 14 / math.sqrt(2)
-        self.assertTrue(self.inside(r, r, 12.5))
-        self.assertTrue(self.inside(r, -r, 12.5))
-        self.assertFalse(self.inside(0, 14, 12.5))
+        for x, y in ((r, r), (r, -r), (0, 14), (0, -14)):
+            self.assertTrue(self.inside(x, y, 12.5), (x, y))
+        self.assertFalse(self.inside(-14, 0, 12.5))
 
+    def testCenteredCircularPatternWithAnEvenCount(self):
+        """The square's boss, 120 deg over 4 occurrences, Centered: +-40, +-80, +-120 deg around
+        the seed (oracle 9j's case), seven bosses, none at 180."""
+        boss = self.squareWithBoss()
+        pattern = self.polar(boss, 120, 4)
+        pattern.Centered = True
+        self.recompute()
+        self.assertValid(pattern)
+        self.assertBody(SQUARE + 7 * STUB)
+        for degrees in (-120, -80, -40, 40, 80, 120):
+            a = math.radians(degrees)
+            self.assertTrue(self.inside(14 * math.cos(a), 14 * math.sin(a), 12.5), degrees)
+        self.assertFalse(self.inside(-14, 0, 12.5))
 
 if __name__ == "__main__":
     unittest.main()
