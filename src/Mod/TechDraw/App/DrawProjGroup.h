@@ -23,6 +23,7 @@
 #pragma once
 
 #include <QRectF>
+#include <vector>
 
 #include <App/DocumentObject.h>
 #include <App/PropertyLinks.h>
@@ -105,7 +106,8 @@ public:
     int removeProjection(const char *viewProjType);
 
     int purgeProjections();
-    Base::Vector3d getXYPosition(const char *viewTypeCStr);
+    /// `factor` (FreeCAD-CH, V1): the layout with every view's box that many times larger
+    Base::Vector3d getXYPosition(const char *viewTypeCStr, double factor = 1.0);
 
     short mustExecute() const override;
     /** @name methods override Feature */
@@ -207,13 +209,11 @@ protected:
                           std::array<Base::BoundBox3d, MAXPROJECTIONCOUNT> bboxes);
 
     /// FreeCAD-CH (design D, V1, ops#640): a scale change keeps the group's middle where it
-    /// was, and the group on the sheet when it fits. The page box of the views, relative to
-    /// the group's X, Y; false while a view has no geometry yet
-    bool contentBox(Base::BoundBox3d& box) const;
-    void refitAfterScale();
-    bool m_refitPending {false};
-    Base::Vector3d m_refitMiddle;
-    bool m_refitting {false};
+    /// was, and the group on the sheet when it fits. The page box of the views at `factor`
+    /// times their scale, relative to the group's X, Y, and the views' positions at that scale;
+    /// false while a view has no geometry yet
+    bool contentBox(Base::BoundBox3d& box, double factor, std::vector<Base::Vector3d>* where = nullptr);
+    void refitForScale(double newScale);
 };
 
 } //namespace TechDraw

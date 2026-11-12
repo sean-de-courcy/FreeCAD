@@ -339,16 +339,16 @@ class TestScaleRefit(unittest.TestCase):
         self.assertLessEqual(box[3], num(page.PageHeight) + TOL)
 
     def testMiddleKept(self):
-        """1:1 to 2:1 with room around: the group's middle stays, its views twice as large."""
+        """1:1 to 1.5:1 with room around: the group's middle stays, its views larger."""
         page, group = self.group(130, 100)
         before = groupBox(group)
-        page.Scale = 2
+        page.Scale = 1.5
         self.recompute()
-        self.assertAlmostEqual(group.Scale, 2.0, places=9)
+        self.assertAlmostEqual(group.Scale, 1.5, places=9)
         after = groupBox(group)
         for a, b in zip(centre(before), centre(after)):
             self.assertAlmostEqual(a, b, delta=0.01)
-        self.assertGreater(after[2] - after[0], 1.5 * (before[2] - before[0]))
+        self.assertGreater(after[2] - after[0], 1.25 * (before[2] - before[0]))
         self.assertOnSheet(page, after)
 
     def testKeptOnTheSheet(self):
@@ -377,6 +377,58 @@ class TestScaleRefit(unittest.TestCase):
         self.recompute()
         self.assertAlmostEqual(group.Scale, 2.0, places=9)
         self.assertOnSheet(page, groupBox(group))
+        # inside the sheet's 20 mm border, so inside ANSI A's frame (review V1R-3)
+        box = groupBox(group)
+        self.assertGreaterEqual(box[0], 20.0 - TOL)
+        self.assertGreaterEqual(box[1], 20.0 - TOL)
+        self.assertLessEqual(box[2], num(page.PageWidth) - 20.0 + TOL)
+        self.assertLessEqual(box[3], num(page.PageHeight) - 20.0 + TOL)
+
+    def testUndoPutsTheGroupBack(self):
+        """Review V1R-1: the move is part of the scale's own step, so undo restores both, also
+        when the recompute comes after the step (the GUI's order)."""
+        self.doc.UndoMode = 1
+        page, group = self.group(40, 40)
+        self.doc.openTransaction("Sheet scale")
+        page.Scale = 2
+        self.doc.commitTransaction()
+        self.recompute()
+        moved = abs(num(group.X) - 40.0) + abs(num(group.Y) - 40.0)
+        self.assertGreater(moved, 1e-3)   # moved into the sheet's border
+        self.doc.undo()
+        self.recompute()
+        self.assertAlmostEqual(page.Scale, 1.0, places=9)
+        self.assertAlmostEqual(num(group.X), 40.0, places=6)
+        self.assertAlmostEqual(num(group.Y), 40.0, places=6)
+
+    def testLockedGroupStays(self):
+        """Review V1R-2: a locked group keeps its place."""
+        page, group = self.group(40, 40)
+        group.LockPosition = True
+        page.Scale = 2
+        self.recompute()
+        self.assertAlmostEqual(num(group.X), 40.0, places=6)
+        self.assertAlmostEqual(num(group.Y), 40.0, places=6)
+
+    def testFreeViewKeepsItsRow(self):
+        """Review V1R-4: a free view on the Right view's row (as Project View places it) stays on
+        that row, clear of it, when the sheet's scale changes."""
+        page, group = self.group(90, 100)
+        right = [v for v in group.Views if v.Type == "Right"][0]
+        rx, ry = num(group.X) + num(right.X), num(group.Y) + num(right.Y)
+        free = self.doc.addObject("TechDraw::DrawProjGroupItem", "View")
+        page.addView(free)
+        free.Source = [self.part]
+        free.Direction = V(0, 1, 0)
+        free.XDirection = V(-1, 0, 0)
+        free.ScaleType = "Page"
+        free.X, free.Y = rx + 70, ry
+        self.recompute()
+        page.Scale = 2
+        self.recompute()
+        rx2, ry2 = num(group.X) + num(right.X), num(group.Y) + num(right.Y)
+        self.assertAlmostEqual(num(free.Y), ry2, places=6)
+        self.assertGreater(viewBox(free)[0], viewBox(right, num(group.X), num(group.Y))[2])
 
 
 # ---- V1's GUI: Insert View, Project View, the sheet's scale (design D, ops#640) -------------------

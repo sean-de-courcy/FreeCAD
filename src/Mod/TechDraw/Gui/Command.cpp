@@ -587,6 +587,8 @@ bool activatePageHandler(TechDrawHandler* handler)
     ViewProviderPage* vp = mdi ? mdi->getViewProviderPage() : nullptr;
     QGVPage* viewPage = vp ? vp->getQGVPage() : nullptr;
     if (!viewPage) {
+        Gui::getMainWindow()->showMessage(
+            QCoreApplication::translate("TechDraw_InsertView", "Open the drawing's sheet first"), 5000);
         return false;
     }
     viewPage->activateHandler(owned.release());
@@ -836,11 +838,17 @@ private:
                 return;
             }
             guiDocument(doc)->openCommand(QT_TRANSLATE_NOOP("Command", "Projected view"));
-            Gui::Command::doCommand(Gui::Command::Doc, "%s.addProjection('%s')",
-                                    pyObject(group).c_str(), next.type.c_str());
-            Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()",
-                                    pyObject(group).c_str());
-            guiDocument(doc)->commitCommand();
+            try {
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.addProjection('%s')",
+                                        pyObject(group).c_str(), next.type.c_str());
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()",
+                                        pyObject(group).c_str());
+                guiDocument(doc)->commitCommand();
+            }
+            catch (const Base::Exception& e) {
+                guiDocument(doc)->abortCommand();
+                Base::Console().error("Projected view: %s\n", e.what());
+            }
             return;
         }
         // a free view: from a view that is not a group's front view
@@ -861,26 +869,32 @@ private:
         const std::string view = std::string("App.getDocument('") + doc->getName()
             + "').getObject('" + name + "')";
         guiDocument(doc)->openCommand(QT_TRANSLATE_NOOP("Command", "Projected view"));
-        Gui::Command::doCommand(Gui::Command::Doc,
-                                "App.getDocument('%s').addObject('TechDraw::DrawProjGroupItem', '%s')",
-                                doc->getName(), name.c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.translateLabel('DrawProjGroupItem', 'View', '%s')",
-                                view.c_str(), name.c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.addView(%s)", pyObject(page).c_str(), view.c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.Source = %s.Source", view.c_str(),
-                                pyObject(parent).c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.XSource = %s.XSource", view.c_str(),
-                                pyObject(parent).c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.Direction = %s", view.c_str(),
-                                pyVector(next.direction).c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.XDirection = %s", view.c_str(),
-                                pyVector(next.xDirection).c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.ScaleType = '%s'", view.c_str(), scaleType.c_str());
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.Scale = %.12g", view.c_str(), scale);
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.X = %.6f", view.c_str(), next.at.x);
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.Y = %.6f", view.c_str(), next.at.y);
-        Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", view.c_str());
-        guiDocument(doc)->commitCommand();
+        try {
+            Gui::Command::doCommand(Gui::Command::Doc,
+                                    "App.getDocument('%s').addObject('TechDraw::DrawProjGroupItem', '%s')",
+                                    doc->getName(), name.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.translateLabel('DrawProjGroupItem', 'View', '%s')",
+                                    view.c_str(), name.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.addView(%s)", pyObject(page).c_str(), view.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Source = %s.Source", view.c_str(),
+                                    pyObject(parent).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.XSource = %s.XSource", view.c_str(),
+                                    pyObject(parent).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Direction = %s", view.c_str(),
+                                    pyVector(next.direction).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.XDirection = %s", view.c_str(),
+                                    pyVector(next.xDirection).c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.ScaleType = '%s'", view.c_str(), scaleType.c_str());
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Scale = %.12g", view.c_str(), scale);
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.X = %.6f", view.c_str(), next.at.x);
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.Y = %.6f", view.c_str(), next.at.y);
+            Gui::Command::doCommand(Gui::Command::Doc, "%s.recompute()", view.c_str());
+            guiDocument(doc)->commitCommand();
+        }
+        catch (const Base::Exception& e) {
+            guiDocument(doc)->abortCommand();
+            Base::Console().error("Projected view: %s\n", e.what());
+        }
     }
 
     App::DocumentObjectT parentT;

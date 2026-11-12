@@ -117,25 +117,16 @@ void DrawProjGroup::onChanged(const App::Property* prop)
     TechDraw::DrawPage* page = getPage();
 
     if (prop == &Scale) {
-        // FreeCAD-CH (design D, V1, ops#640): the views' middle at the old scale, which the
-        // layout at the new scale keeps (refitAfterScale); not on undo or redo, which restore
-        // the position too. Onshape's rule is unverified.
-        Base::BoundBox3d box;
-        if (!m_refitPending && !ScaleType.isValue("Automatic")
-            && !getDocument()->isPerformingTransaction() && contentBox(box)) {
-            m_refitMiddle = Base::Vector3d(X.getValue() + (box.MinX + box.MaxX) / 2.0,
-                                           Y.getValue() + (box.MinY + box.MaxY) / 2.0,
-                                           0.0);
-            m_refitPending = true;
+        // FreeCAD-CH (design D, V1, ops#640): the views keep their middle at the new scale, in
+        // the same transaction as the scale (so undo puts them back); not on undo or redo, which
+        // restore the position themselves. Onshape's rule is unverified.
+        if (!ScaleType.isValue("Automatic") && !LockPosition.getValue()
+            && !getDocument()->isPerformingTransaction()) {
+            refitForScale(Scale.getValue());
         }
         updateChildrenScale();
         recomputeChildren();
         return;
-    }
-
-    if ((prop == &X || prop == &Y) && !m_refitting) {
-        // a position set after the scale is the user's: it wins over the refit
-        m_refitPending = false;
     }
 
     if (prop == &ProjectionType) {
@@ -208,14 +199,11 @@ App::DocumentObjectExecReturn* DrawProjGroup::execute()
     if (AutoDistribute.getValue()) {
         autoPositionChildren();
     }
-    if (m_refitPending) {
-        refitAfterScale();
-    }
     overrideKeepUpdated(false);
     return DrawViewCollection::execute();
 }
 
-bool DrawProjGroup::contentBox(Base::BoundBox3d& box) const
+bool DrawProjGroup::contentBox(Base::BoundBox3d& box, double factor, std::vector<Base::Vector3d>* where)
 {
     box = Base::BoundBox3d();
     bool any = false;
@@ -224,52 +212,107 @@ bool DrawProjGroup::contentBox(Base::BoundBox3d& box) const
         if (!item) {
             continue;
         }
-        // scaled, about the view's origin, +Y down as the view's geometry is stored
+        // scaled, about the view's origin, +Y down as the view's geometry is stored; the
+        // geometry at another scale is this box times the scales' ratio
         Base::BoundBox3d bb = item->getBoundingBox();
         if (!bb.IsValid() || (bb.LengthX() <= 0.0 && bb.LengthY() <= 0.0)) {
             return false;
         }
-        const double x = item->X.getValue();
-        const double y = item->Y.getValue();
-        box.Add(Base::Vector3d(x + bb.MinX, y - bb.MaxY, 0.0));
-        box.Add(Base::Vector3d(x + bb.MaxX, y - bb.MinY, 0.0));
+        bb.ScaleX(factor);
+        bb.ScaleY(factor);
+        // where the layout puts the view at that scale (its own place when it is locked or the
+        // group doesn't distribute)
+        const Base::Vector3d at = factor == 1.0
+            ? Base::Vector3d(item->X.getValue(), item->Y.getValue(), 0.0)
+            : getXYPosition(item->Type.getValueAsString(), factor);
+        if (where) {
+            where->push_back(at);
+        }
+        box.Add(Base::Vector3d(at.x + bb.MinX, at.y - bb.MaxY, 0.0));
+        box.Add(Base::Vector3d(at.x + bb.MaxX, at.y - bb.MinY, 0.0));
         any = true;
     }
     return any;
 }
 
-void DrawProjGroup::refitAfterScale()
+void DrawProjGroup::refitForScale(double newScale)
 {
-    m_refitPending = false;
-    Base::BoundBox3d box;
     DrawPage* page = getPage();
-    if (!page || !contentBox(box)) {
+    auto* anchor = getAnchor();
+    // the anchor's own Scale is still the old one (updateChildrenScale comes after); its
+    // getScale() is already the group's new one
+    const double oldScale = anchor ? anchor->Scale.getValue() : 0.0;
+    if (!page || !anchor || oldScale <= 0.0 || newScale <= 0.0) {
         return;
     }
+    const double factor = newScale / oldScale;
+    if (DrawUtil::fpCompare(factor, 1.0)) {
+        return;
+    }
+    Base::BoundBox3d before;
+    Base::BoundBox3d after;
+    std::vector<Base::Vector3d> oldAt;
+    std::vector<Base::Vector3d> newAt;
+    if (!contentBox(before, 1.0, &oldAt) || !contentBox(after, factor, &newAt)) {
+        return;  // a view without geometry yet: nothing to keep
+    }
+    const double oldX = X.getValue();
+    const double oldY = Y.getValue();
     // the middle where it was
-    double x = m_refitMiddle.x - (box.MinX + box.MaxX) / 2.0;
-    double y = m_refitMiddle.y - (box.MinY + box.MaxY) / 2.0;
-    // then on the sheet, if the views fit it
-    auto onSheet = [](double at, double low, double high, double size) {
-        if (high - low > size) {
+    double x = oldX + (before.MinX + before.MaxX) / 2.0 - (after.MinX + after.MaxX) / 2.0;
+    double y = oldY + (before.MinY + before.MaxY) / 2.0 - (after.MinY + after.MaxY) / 2.0;
+    // then inside the sheet's border (20 mm, about a template's frame), or at least on the
+    // sheet, when the views fit
+    auto inside = [](double at, double low, double high, double size) {
+        for (double margin : {20.0, 0.0}) {
+            if (high - low > size - 2.0 * margin) {
+                continue;
+            }
+            if (at + low < margin) {
+                return margin - low;
+            }
+            if (at + high > size - margin) {
+                return size - margin - high;
+            }
             return at;
-        }
-        if (at + low < 0.0) {
-            return -low;
-        }
-        if (at + high > size) {
-            return size - high;
         }
         return at;
     };
-    x = onSheet(x, box.MinX, box.MaxX, page->getPageWidth());
-    y = onSheet(y, box.MinY, box.MaxY, page->getPageHeight());
-    m_refitting = true;
+    x = inside(x, after.MinX, after.MaxX, page->getPageWidth());
+    y = inside(y, after.MinY, after.MaxY, page->getPageHeight());
     X.setValue(x);
     Y.setValue(y);
-    m_refitting = false;
-    requestPaint();
-    purgeTouched();
+
+    // A free view on one of the group's rows or columns (Project View places them so) stays on
+    // it: the pair scales about the group's view, so the gap between them scales too
+    if (!ScaleType.isValue("Page")) {
+        return;
+    }
+    const double tolerance = 1e-4;  // mm: Project View writes positions to 1e-6
+    for (auto* obj : page->getViews()) {
+        auto* view = freecad_cast<DrawViewPart*>(obj);
+        auto* item = freecad_cast<DrawProjGroupItem*>(obj);
+        if (!view || (item && item->getPGroup()) || !view->ScaleType.isValue("Page")
+            || view->LockPosition.getValue()) {
+            continue;
+        }
+        const double vx = view->X.getValue();
+        const double vy = view->Y.getValue();
+        for (size_t i = 0; i < oldAt.size() && i < newAt.size(); ++i) {
+            const Base::Vector3d was(oldX + oldAt[i].x, oldY + oldAt[i].y, 0.0);
+            const Base::Vector3d now(x + newAt[i].x, y + newAt[i].y, 0.0);
+            if (std::abs(vy - was.y) < tolerance) {
+                view->Y.setValue(now.y);
+                view->X.setValue(now.x + (vx - was.x) * factor);
+                break;
+            }
+            if (std::abs(vx - was.x) < tolerance) {
+                view->X.setValue(now.x);
+                view->Y.setValue(now.y + (vy - was.y) * factor);
+                break;
+            }
+        }
+    }
 }
 
 short DrawProjGroup::mustExecute() const
@@ -659,7 +702,7 @@ gp_Dir DrawProjGroup::vec2dir(Base::Vector3d v)
 }
 
 //this can be improved.  this implementation positions views too far apart.
-Base::Vector3d DrawProjGroup::getXYPosition(const char* viewTypeCStr)
+Base::Vector3d DrawProjGroup::getXYPosition(const char* viewTypeCStr, double factor)
 {
     //    Base::Console().message("DPG::getXYPosition(%s)\n", Label.getValue());
     //   Third angle:  FTL  T  FTRight          0  1  2
@@ -695,6 +738,15 @@ Base::Vector3d DrawProjGroup::getXYPosition(const char* viewTypeCStr)
     // Calculate bounding boxes for each displayed view
     std::array<Base::BoundBox3d, MAXPROJECTIONCOUNT> bboxes;
     makeViewBbs(viewPtrs, bboxes);//scaled
+    if (factor != 1.0) {
+        // FreeCAD-CH (V1): the layout at another scale, the views' boxes times its ratio
+        for (auto& bb : bboxes) {
+            if (bb.IsValid()) {
+                bb.ScaleX(factor);
+                bb.ScaleY(factor);
+            }
+        }
+    }
 
     double xSpacing = spacingX.getValue();//in mm, no scale
     double ySpacing = spacingY.getValue();//in mm, no scale
