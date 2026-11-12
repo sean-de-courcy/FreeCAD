@@ -87,6 +87,8 @@
 #include "WorkflowManager.h"
 #include "ViewProvider.h"
 #include "ViewProviderBody.h"
+#include <Mod/Part/Gui/EdgeMidpointMarker.h>
+#include <Mod/Part/Gui/TaskAttacher.h>
 
 
 // TODO Remove this header after fixing code so it won;t be needed here (2015-10-20, Fat-Zer)
@@ -165,6 +167,25 @@ void UnifiedDatumCommand(Gui::Command& cmd, Base::Type type, std::string name)
 
         App::PropertyLinkSubList support;
         cmd.getSelection().getAsPropertyLinkSubList(support);
+        // FreeCAD-CH (ops#673): one edge picked in 3D at its middle; the dialog makes it the
+        // edge's middle (the selection is cleared before the dialog opens)
+        bool midpointPick = false;
+        {
+            const auto sel = Gui::Selection().getSelectionEx(
+                nullptr,
+                App::DocumentObject::getClassTypeId(),
+                Gui::ResolveMode::NoResolve
+            );
+            if (sel.size() == 1 && sel[0].getSubNames().size() == 1 && sel[0].hasPickedPoint(0)) {
+                midpointPick = PartGui::EdgeMidpointMarker::pickedMiddle(
+                                   sel[0].getDocName(),
+                                   sel[0].getFeatName(),
+                                   sel[0].getSubNames()[0].c_str(),
+                                   sel[0].getPickedPoints()[0]
+                )
+                                   .has_value();
+            }
+        }
 
         bool bEditSelected = false;
         if (support.getSize() == 1 && support.getValue()) {
@@ -214,6 +235,9 @@ void UnifiedDatumCommand(Gui::Command& cmd, Base::Type type, std::string name)
                         Feat,
                         "MapMode = '" << AttachEngine::getModeName(sugr.bestFitMode) << "'"
                     );
+                    if (midpointPick && support.getSize() == 1) {
+                        PartGui::TaskAttacher::markMidpointPick(Feat);
+                    }
                 }
                 else {
                     QMessageBox::information(

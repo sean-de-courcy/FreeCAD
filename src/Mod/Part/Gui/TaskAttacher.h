@@ -75,6 +75,10 @@ class PartGuiExport TaskAttacher: public Gui::TaskView::TaskBox, public Gui::Sel
     Q_OBJECT
 
 public:
+    /// FreeCAD-CH (ops#673): the datum command attached obj to an edge preselected at its middle;
+    /// the next dialog opened on obj treats it as a midpoint pick (the selection is gone by then)
+    static void markMidpointPick(const App::DocumentObject* obj);
+
     using VisibilityFunction = std::function<
         void(bool, const std::string&, Gui::ViewProviderDocumentObject*, App::DocumentObject*, const std::string&)>;
 

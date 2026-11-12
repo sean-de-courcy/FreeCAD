@@ -590,14 +590,38 @@ void TaskAttacher::findCorrectObjAndSubInThisContext(App::DocumentObject*& rootO
     // In this case the selection cannot guarantee the global placement that attacher will find.
 }
 
+namespace
+{
+std::string midpointPickMark;  // FreeCAD-CH (ops#673): see markMidpointPick
+std::string markOf(const App::DocumentObject* obj)
+{
+    return obj && obj->isAttachedToDocument()
+        ? std::string(obj->getDocument()->getName()) + "#" + obj->getNameInDocument()
+        : std::string();
+}
+}  // namespace
+
+void TaskAttacher::markMidpointPick(const App::DocumentObject* obj)
+{
+    midpointPickMark = markOf(obj);
+}
+
 void TaskAttacher::handleInitialSelection()
 {
     // We handle initial selection only if it is not attached yet.
     App::DocumentObject* obj = ViewProvider->getObject();
     Part::AttachExtension* pcAttach = obj->getExtensionByType<Part::AttachExtension>();
     std::vector<App::DocumentObject*> refs = pcAttach->AttachmentSupport.getValues();
+    // FreeCAD-CH (ops#673): attached by the datum command to an edge preselected at its middle
+    const bool markedMidpoint = !midpointPickMark.empty() && midpointPickMark == markOf(obj);
+    midpointPickMark.clear();
 
     if (!refs.empty()) {
+        if (markedMidpoint && refs.size() == 1) {
+            midpointPicks[0] = true;
+            applyMidpointPick();
+            updatePreview();
+        }
         return;
     }
     std::vector<SubAndObjName> subAndObjNamePairs;
@@ -614,7 +638,7 @@ void TaskAttacher::handleInitialSelection()
         const std::vector<Base::Vector3d> picked = selObj.getPickedPoints();
         for (std::size_t i = 0; i < subs.size(); ++i) {
             SubAndObjName objSubName = {objName, subs[i]};
-            objSubName.midpoint = i < picked.size()
+            objSubName.midpoint = i < picked.size() && selObj.hasPickedPoint(i)
                 && EdgeMidpointMarker::pickedMiddle(
                        selObj.getDocName(), objName.c_str(), subs[i].c_str(), picked[i]
                 )
@@ -633,9 +657,11 @@ void TaskAttacher::onSelectionChanged(const Gui::SelectionChanges& msg)
 
     if (msg.Type == Gui::SelectionChanges::AddSelection) {
         SubAndObjName pair = {msg.pObjectName, msg.pSubName};
-        // FreeCAD-CH (ops#673): an edge picked at its middle (the midpoint marker showing); a
-        // selection without a 3D pick has (0,0,0) there, which pickedMiddle refuses (off the edge)
-        pair.midpoint = EdgeMidpointMarker::pickedMiddle(
+        // FreeCAD-CH (ops#673): an edge picked at its middle (the midpoint marker showing). Only a
+        // picked point counts: a tree or Python selection has (0,0,0), which lies on any edge
+        // through the origin (selection parity 11 (3)).
+        pair.midpoint = msg.hasPickedPoint
+            && EdgeMidpointMarker::pickedMiddle(
                    msg.pDocName, msg.pObjectName, msg.pSubName, Base::Vector3d(msg.x, msg.y, msg.z)
             )
                    .has_value();

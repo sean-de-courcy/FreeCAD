@@ -439,6 +439,7 @@ std::vector<Gui::SelectionObject> SelectionSingleton::getSelectionIn(
                     if (newSub != "") {
                         ret[it->second].SubNames.emplace_back(newSub);
                         ret[it->second].SelPoses.emplace_back(sel.SelPoses[i]);
+                        ret[it->second].SelPicked.push_back(sel.hasPickedPoint(i));
                     }
                 }
                 else {
@@ -451,6 +452,7 @@ std::vector<Gui::SelectionObject> SelectionSingleton::getSelectionIn(
                     if (newSub != "") {
                         ret.back().SubNames.emplace_back(newSub);
                         ret.back().SelPoses.emplace_back(sel.SelPoses[i]);
+                        ret.back().SelPicked.push_back(sel.hasPickedPoint(i));
                     }
                     SortMap.insert(std::make_pair(newRootObj, ret.size() - 1));
                 }
@@ -525,6 +527,7 @@ std::vector<SelectionObject> SelectionSingleton::getObjectList(
                 }
                 temp[it->second].SubNames.emplace_back(subelement);
                 temp[it->second].SelPoses.emplace_back(sel.x, sel.y, sel.z);
+                temp[it->second].SelPicked.push_back(sel.hasPickedPoint);
             }
         }
         else {
@@ -537,6 +540,7 @@ std::vector<SelectionObject> SelectionSingleton::getObjectList(
             if (subelement && *subelement) {
                 temp.back().SubNames.emplace_back(subelement);
                 temp.back().SelPoses.emplace_back(sel.x, sel.y, sel.z);
+                temp.back().SelPicked.push_back(sel.hasPickedPoint);
                 if (resolve != ResolveMode::NoResolve) {
                     temp.back()._SubNameSet.insert(subelement);
                 }
@@ -1504,6 +1508,7 @@ bool SelectionSingleton::addSelection(
     temp.x = x;
     temp.y = y;
     temp.z = z;
+    temp.hasPickedPoint = pickedPoint == SelectionChanges::PickedPoint::Valid;
 
 
     // check for a Selection Gate
@@ -1860,7 +1865,9 @@ bool SelectionSingleton::addSelection(const SelectionObject& obj, bool clearPres
                 static_cast<float>(pnt.y),
                 static_cast<float>(pnt.z),
                 nullptr,
-                clearPreselect
+                clearPreselect,
+                obj.hasPickedPoint(i) ? SelectionChanges::PickedPoint::Valid
+                                      : SelectionChanges::PickedPoint::Invalid
             );
         }
         return ok;
@@ -2493,8 +2500,20 @@ PyObject* SelectionSingleton::sAddSelection(PyObject* /*self*/, PyObject* args)
     if (
         PyArg_ParseTuple(args, "ss|sfffO!", &docname, &objname, &subname, &x, &y, &z, &PyBool_Type, &clearPreselect)
     ) {
-        Selection()
-            .addSelection(docname, objname, subname, x, y, z, nullptr, Base::asBoolean(clearPreselect));
+        // FreeCAD-CH (ops#673): a point given is a picked point; without one the selection has none
+        const auto picked = PyTuple_Size(args) >= 6 ? SelectionChanges::PickedPoint::Valid
+                                                    : SelectionChanges::PickedPoint::Invalid;
+        Selection().addSelection(
+            docname,
+            objname,
+            subname,
+            x,
+            y,
+            z,
+            nullptr,
+            Base::asBoolean(clearPreselect),
+            picked
+        );
         Py_Return;
     }
 
@@ -2529,7 +2548,9 @@ PyObject* SelectionSingleton::sAddSelection(PyObject* /*self*/, PyObject* args)
             y,
             z,
             nullptr,
-            Base::asBoolean(clearPreselect)
+            Base::asBoolean(clearPreselect),
+            PyTuple_Size(args) >= 5 ? SelectionChanges::PickedPoint::Valid
+                                    : SelectionChanges::PickedPoint::Invalid
         );
         Py_Return;
     }
@@ -2941,6 +2962,7 @@ PyObject* SelectionSingleton::sGetSelectionObject(PyObject* /*self*/, PyObject* 
                 double y = (double)Py::Float(t.getItem(1));
                 double z = (double)Py::Float(t.getItem(2));
                 selObj.SelPoses.emplace_back(x, y, z);
+                selObj.SelPicked.push_back(true);  // a point given from Python counts as a pick
             }
         }
 

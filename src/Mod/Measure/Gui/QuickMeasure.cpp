@@ -197,7 +197,9 @@ void QuickMeasure::addSelectionToMeasurement()
         }
 
         // FreeCAD-CH (ops#673, selection parity 11): an edge picked at its middle (the midpoint
-        // marker showing) measures as that point, as in Onshape (SP10-Q9: "Point", "Min dist")
+        // marker showing) measures as that point, as in Onshape (SP10-Q9: "Point", "Min dist").
+        // Only a picked point counts: a tree or Python selection has (0,0,0), which lies on any
+        // edge through the origin (selection parity 11 (2)).
         const std::vector<Base::Vector3d> picked = selObj.getPickedPoints();
         for (std::size_t i = 0; i < subNames.size(); ++i) {
             const std::string& subName = subNames[i];
@@ -209,7 +211,8 @@ void QuickMeasure::addSelectionToMeasurement()
             objects.push_back(rootObj);
             subs.push_back(subName);
             points.push_back(
-                i < picked.size() ? PartGui::EdgeMidpointMarker::pickedMiddle(
+                i < picked.size() && selObj.hasPickedPoint(i)
+                    ? PartGui::EdgeMidpointMarker::pickedMiddle(
                                         selObj.getDocName(),
                                         selObj.getFeatName(),
                                         subName.c_str(),
