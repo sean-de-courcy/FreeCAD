@@ -310,13 +310,13 @@ void TaskPatternParameters::addOnshapeOptions(QWidget* widget)
         }
         // Off, nothing is skipped
         skipped->clear();
+        updateSkipDots();
         if (blockUpdate || !getObject()) {
             return;
         }
         setupTransaction();
         FCMD_OBJ_CMD(getObject(), "SkippedInstances = []");
         kickUpdateViewTimer();
-        updateSkipDots();
     });
     connect(skipped, &QLineEdit::editingFinished, this, [this, skipped, pairs]() {
         if (blockUpdate || !getObject()) {
@@ -832,6 +832,12 @@ void TaskPatternParameters::updateSkipDots()
         skip->setProperty("dots", QString());
     }
     if (!linear || !skip || !skip->isChecked() || !dotViewer) {
+        return;
+    }
+    // A direction in use without its reference: the pattern fails ("Select a pattern
+    // direction."), and its steps are zero, so no dots
+    if ((parametersWidget && parametersWidget->isDirectionMissing())
+        || (parametersWidget2 && parametersWidget2->isDirectionMissing())) {
         return;
     }
 
