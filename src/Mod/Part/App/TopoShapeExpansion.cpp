@@ -8537,7 +8537,8 @@ TopoShape& TopoShape::makeElementLoft(
     IsRuled isRuled,
     IsClosed isClosed,
     Standard_Integer maxDegree,
-    const char* op
+    const char* op,
+    bool checkCompatibility
 )
 {
     auto checkProfiles = [](const TopoShape& sh1, const TopoShape& sh2) {
@@ -8640,7 +8641,8 @@ TopoShape& TopoShape::makeElementLoft(
         }
     }
 
-    Standard_Boolean anIsCheck = Standard_True;
+    // FreeCAD-CH (loft connections, ops#640): off when the caller matched the wires itself
+    Standard_Boolean anIsCheck = checkCompatibility ? Standard_True : Standard_False;
     aGenerator.CheckCompatibility(anIsCheck);  // use BRepFill_CompatibleWires on profiles. force
                                                // #edges, orientation, "origin" to match.
 

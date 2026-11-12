@@ -46,6 +46,9 @@ public:
     App::PropertyFloat StartMagnitude;
     App::PropertyEnumeration EndCondition;
     App::PropertyFloat EndMagnitude;
+    /// Onshape's connections (ops#640, notes/loft-connections.md): entries 2k and 2k+1 are one
+    /// vertex of the Profile and one of the Section that the loft joins
+    App::PropertyLinkSubList Connections;
 
     /** @name methods override feature */
     //@{

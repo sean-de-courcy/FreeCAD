@@ -22,17 +22,23 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <array>
+#include <limits>
+#include <set>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_History.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GProp_GProps.hxx>
@@ -535,6 +541,442 @@ void reseamSections(std::vector<Part::TopoShape>& sections)
     }
 }
 
+// ops#640: Onshape's loft connections (notes/loft-connections.md). A connection joins one vertex of
+// the profile to one vertex of the section. ThruSections' compatibility step picks the wires'
+// origins itself, so a connected loft matches the two loops here and builds with the step off.
+
+constexpr double connectionTolerance = 1e-6;
+
+/// A loop's edges in traversal order, each oriented as traversed.
+std::vector<TopoDS_Edge> loopEdges(const TopoDS_Shape& wire)
+{
+    std::vector<TopoDS_Edge> edges;
+    for (BRepTools_WireExplorer x(TopoDS::Wire(wire)); x.More(); x.Next()) {
+        edges.push_back(x.Current());
+    }
+    return edges;
+}
+
+gp_Pnt startPoint(const TopoDS_Edge& edge)
+{
+    return BRep_Tool::Pnt(TopExp::FirstVertex(edge, Standard_True));
+}
+
+double edgeLength(const TopoDS_Edge& edge)
+{
+    BRepAdaptor_Curve curve(edge);
+    return GCPnts_AbscissaPoint::Length(curve);
+}
+
+/// Points along the loop in traversal order, 16 per edge.
+std::vector<gp_Pnt> loopSamples(const std::vector<TopoDS_Edge>& edges)
+{
+    std::vector<gp_Pnt> points;
+    constexpr int perEdge = 16;
+    for (const auto& edge : edges) {
+        BRepAdaptor_Curve curve(edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        for (int k = 0; k < perEdge; ++k) {
+            const double t = static_cast<double>(k) / perEdge;
+            points.push_back(curve.Value(reversed ? last - t * (last - first) : first + t * (last - first)));
+        }
+    }
+    return points;
+}
+
+/// Newell's area vector: its direction is the loop's normal by the right-hand rule.
+gp_Vec areaVector(const std::vector<gp_Pnt>& points)
+{
+    gp_XYZ sum(0, 0, 0);
+    for (size_t i = 0; i < points.size(); ++i) {
+        sum += points[i].XYZ().Crossed(points[(i + 1) % points.size()].XYZ());
+    }
+    return gp_Vec(sum / 2);
+}
+
+gp_Pnt meanPoint(const std::vector<gp_Pnt>& points)
+{
+    gp_XYZ sum(0, 0, 0);
+    for (const auto& p : points) {
+        sum += p.XYZ();
+    }
+    return gp_Pnt(sum / std::max<size_t>(points.size(), 1));
+}
+
+std::vector<TopoDS_Edge> reversedLoop(const std::vector<TopoDS_Edge>& edges)
+{
+    std::vector<TopoDS_Edge> result;
+    for (auto it = edges.rbegin(); it != edges.rend(); ++it) {
+        result.push_back(TopoDS::Edge(it->Reversed()));
+    }
+    return result;
+}
+
+int vertexIndex(const std::vector<TopoDS_Edge>& edges, const gp_Pnt& point)
+{
+    for (size_t i = 0; i < edges.size(); ++i) {
+        if (startPoint(edges[i]).Distance(point) < connectionTolerance) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool hasVertexAt(const Part::TopoShape& wire, const gp_Pnt& point)
+{
+    for (TopExp_Explorer x(wire.getShape(), TopAbs_VERTEX); x.More(); x.Next()) {
+        if (BRep_Tool::Pnt(TopoDS::Vertex(x.Current())).Distance(point) < connectionTolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The edge cut at the given fractions of its length from where its traversal starts (sorted,
+/// strictly inside 0..1). The pieces come in traversal order, oriented as traversed; each piece is
+/// recorded as modified from the edge and each new vertex as generated from it.
+std::vector<TopoDS_Edge> splitEdge(
+    const TopoDS_Edge& edge,
+    const std::vector<double>& fractions,
+    Part::ShapeMapper& mapper
+)
+{
+    if (fractions.empty()) {
+        return {edge};
+    }
+    BRepAdaptor_Curve adaptor(edge);
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    const double length = GCPnts_AbscissaPoint::Length(adaptor);
+    std::vector<double> params;
+    for (double t : fractions) {
+        GCPnts_AbscissaPoint at(
+            adaptor,
+            reversed ? -t * length : t * length,
+            reversed ? adaptor.LastParameter() : adaptor.FirstParameter()
+        );
+        if (!at.IsDone()) {
+            throw Base::CADKernelError(
+                QT_TRANSLATE_NOOP("Exception", "Loft: a profile edge could not be split for the connections")
+            );
+        }
+        params.push_back(at.Parameter());
+    }
+    std::sort(params.begin(), params.end());
+
+    double first = 0;
+    double last = 0;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);  // located copy
+    const auto forward = TopoDS::Edge(edge.Oriented(TopAbs_FORWARD));
+    std::vector<TopoDS_Vertex> vertices {TopExp::FirstVertex(forward)};
+    std::vector<double> us {first};
+    for (double u : params) {
+        TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(curve->Value(u)).Vertex();
+        mapper.insert(Part::MappingStatus::Generated, edge, vertex);
+        vertices.push_back(vertex);
+        us.push_back(u);
+    }
+    vertices.push_back(TopExp::LastVertex(forward));
+    us.push_back(last);
+
+    std::vector<TopoDS_Edge> pieces;
+    for (size_t k = 0; k + 1 < vertices.size(); ++k) {
+        BRepBuilderAPI_MakeEdge make(curve, vertices[k], vertices[k + 1], us[k], us[k + 1]);
+        if (!make.IsDone()) {
+            throw Base::CADKernelError(
+                QT_TRANSLATE_NOOP("Exception", "Loft: a profile edge could not be split for the connections")
+            );
+        }
+        mapper.insert(Part::MappingStatus::Modified, edge, make.Edge());
+        pieces.push_back(make.Edge());
+    }
+    if (reversed) {
+        pieces = reversedLoop(pieces);
+    }
+    return pieces;
+}
+
+/// Each inner vertex's arc length from the chain's start, over the chain's length.
+std::vector<double> innerFractions(const std::vector<TopoDS_Edge>& chain, double& total)
+{
+    std::vector<double> lengths;
+    total = 0;
+    for (const auto& edge : chain) {
+        lengths.push_back(edgeLength(edge));
+        total += lengths.back();
+    }
+    std::vector<double> fractions;
+    double sum = 0;
+    for (size_t k = 0; k + 1 < chain.size(); ++k) {
+        sum += lengths[k];
+        fractions.push_back(sum / total);
+    }
+    return fractions;
+}
+
+/// The chain with new vertices at the given fractions of its arc length (sorted, each strictly
+/// between two of its vertices).
+std::vector<TopoDS_Edge> chainWithVertices(
+    const std::vector<TopoDS_Edge>& chain,
+    const std::vector<double>& at,
+    Part::ShapeMapper& mapper
+)
+{
+    std::vector<double> lengths;
+    double total = 0;
+    for (const auto& edge : chain) {
+        lengths.push_back(edgeLength(edge));
+        total += lengths.back();
+    }
+    std::vector<TopoDS_Edge> result;
+    double start = 0;
+    size_t next = 0;
+    for (size_t k = 0; k < chain.size(); ++k) {
+        const double end = start + lengths[k];
+        std::vector<double> local;
+        while (next < at.size() && (at[next] * total < end || k + 1 == chain.size())) {
+            local.push_back(std::clamp((at[next] * total - start) / lengths[k], 1e-9, 1 - 1e-9));
+            ++next;
+        }
+        for (const auto& piece : splitEdge(chain[k], local, mapper)) {
+            result.push_back(piece);
+        }
+        start = end;
+    }
+    return result;
+}
+
+/// Pairs a chain of fewer vertices with one of more (both from one connection to the next): the
+/// fewer side's inner vertices match the nearest of the other's in order (least total difference of
+/// arc-length fractions), and each unmatched vertex gets a partner on the fewer side at the same
+/// proportion between the matched pairs around it. Returns the fewer side's new vertex fractions.
+std::vector<double> partnerFractions(const std::vector<double>& fewer, const std::vector<double>& more)
+{
+    const size_t m = fewer.size();
+    const size_t n = more.size();
+    const double inf = std::numeric_limits<double>::infinity();
+    std::vector<std::vector<double>> cost(m + 1, std::vector<double>(n + 1, inf));
+    for (size_t j = 0; j <= n; ++j) {
+        cost[0][j] = 0;
+    }
+    for (size_t i = 1; i <= m; ++i) {
+        for (size_t j = i; j <= n; ++j) {
+            cost[i][j] = std::min(cost[i][j - 1], cost[i - 1][j - 1] + std::abs(fewer[i - 1] - more[j - 1]));
+        }
+    }
+    std::vector<int> partner(n, -1);  // more's vertex -> fewer's, or -1
+    for (size_t i = m, j = n; i > 0 && j > 0;) {
+        if (cost[i][j] == cost[i][j - 1] && j > i) {
+            --j;
+        }
+        else {
+            partner[j - 1] = static_cast<int>(i - 1);
+            --i;
+            --j;
+        }
+    }
+    std::vector<double> added;
+    for (size_t j = 0; j < n; ++j) {
+        if (partner[j] >= 0) {
+            continue;
+        }
+        double f0 = 0, g0 = 0, f1 = 1, g1 = 1;
+        for (size_t k = j; k-- > 0;) {
+            if (partner[k] >= 0) {
+                f0 = more[k];
+                g0 = fewer[partner[k]];
+                break;
+            }
+        }
+        for (size_t k = j + 1; k < n; ++k) {
+            if (partner[k] >= 0) {
+                f1 = more[k];
+                g1 = fewer[partner[k]];
+                break;
+            }
+        }
+        added.push_back(g0 + (more[j] - f0) / (f1 - f0) * (g1 - g0));
+    }
+    return added;
+}
+
+[[noreturn]] void connectionsCantMatch()
+{
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Loft: the connections can't be matched (a vertex has two connections, or they cross)"
+    ));
+}
+
+/// The two loops matched for the connections (points in the loops' frame, profile first): the
+/// section runs the profile's way round, both start at a connection, and between consecutive
+/// connections both have the same number of edges. Edge i of one pairs with edge i of the other.
+std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
+    const Part::TopoShape& profile,
+    const Part::TopoShape& section,
+    std::vector<std::pair<gp_Pnt, gp_Pnt>> connections
+)
+{
+    auto a = loopEdges(profile.getShape());
+    auto b = loopEdges(section.getShape());
+    if (a.empty() || b.empty() || !BRep_Tool::IsClosed(profile.getShape())
+        || !BRep_Tool::IsClosed(section.getShape())) {
+        throw Base::CADKernelError(
+            QT_TRANSLATE_NOOP("Exception", "Loft: connections need closed profiles")
+        );
+    }
+
+    // the section's loop runs the profile's way round
+    const auto samplesA = loopSamples(a);
+    const auto samplesB = loopSamples(b);
+    const gp_Vec na = areaVector(samplesA);
+    const gp_Vec nb = areaVector(samplesB);
+    if (na.Magnitude() < Precision::Confusion() || nb.Magnitude() < Precision::Confusion()) {
+        throw Base::CADKernelError(
+            QT_TRANSLATE_NOOP("Exception", "Loft: connections need profiles that enclose an area")
+        );
+    }
+    double sense = na.Dot(nb) / (na.Magnitude() * nb.Magnitude());
+    if (std::abs(sense) < 1e-3) {
+        const gp_Vec d(meanPoint(samplesA), meanPoint(samplesB));
+        sense = na.Dot(d) * nb.Dot(d);
+        if (std::abs(sense) < Precision::Confusion()) {
+            connectionsCantMatch();
+        }
+    }
+    if (sense < 0) {
+        b = reversedLoop(b);
+    }
+
+    // each connection's vertices, at most one connection per vertex, in the same order round both
+    std::vector<std::pair<int, int>> indices;
+    std::set<int> usedA, usedB;
+    for (const auto& [p, q] : connections) {
+        const int i = vertexIndex(a, p);
+        const int j = vertexIndex(b, q);
+        if (i < 0 || j < 0) {
+            throw Base::CADKernelError(
+                QT_TRANSLATE_NOOP("Exception", "Loft: a connection's vertex is not on its profile")
+            );
+        }
+        if (!usedA.insert(i).second || !usedB.insert(j).second) {
+            connectionsCantMatch();
+        }
+        indices.emplace_back(i, j);
+    }
+    std::sort(indices.begin(), indices.end());
+    const int na0 = static_cast<int>(a.size());
+    const int nb0 = static_cast<int>(b.size());
+    const auto [i0, j0] = indices.front();
+    std::rotate(a.begin(), a.begin() + i0, a.end());
+    std::rotate(b.begin(), b.begin() + j0, b.end());
+    std::vector<int> cutsA, cutsB;
+    for (const auto& [i, j] : indices) {
+        cutsA.push_back((i - i0 + na0) % na0);
+        cutsB.push_back((j - j0 + nb0) % nb0);
+    }
+    for (size_t k = 1; k < cutsB.size(); ++k) {
+        if (cutsB[k] <= cutsB[k - 1]) {
+            connectionsCantMatch();
+        }
+    }
+    cutsA.push_back(na0);
+    cutsB.push_back(nb0);
+
+    // chain by chain, the same number of edges
+    Part::ShapeMapper mapperA, mapperB;
+    std::vector<TopoDS_Edge> edgesA, edgesB;
+    for (size_t k = 0; k + 1 < cutsA.size(); ++k) {
+        std::vector<TopoDS_Edge> chainA(a.begin() + cutsA[k], a.begin() + cutsA[k + 1]);
+        std::vector<TopoDS_Edge> chainB(b.begin() + cutsB[k], b.begin() + cutsB[k + 1]);
+        if (chainA.size() != chainB.size()) {
+            double lengthA = 0, lengthB = 0;
+            const auto fa = innerFractions(chainA, lengthA);
+            const auto fb = innerFractions(chainB, lengthB);
+            if (chainA.size() < chainB.size()) {
+                chainA = chainWithVertices(chainA, partnerFractions(fa, fb), mapperA);
+            }
+            else {
+                chainB = chainWithVertices(chainB, partnerFractions(fb, fa), mapperB);
+            }
+        }
+        edgesA.insert(edgesA.end(), chainA.begin(), chainA.end());
+        edgesB.insert(edgesB.end(), chainB.begin(), chainB.end());
+    }
+
+    auto wireOf = [](const std::vector<TopoDS_Edge>& edges,
+                     const Part::ShapeMapper& mapper,
+                     const Part::TopoShape& source) {
+        BRep_Builder builder;
+        TopoDS_Wire wire;
+        builder.MakeWire(wire);
+        for (const auto& edge : edges) {
+            builder.Add(wire, edge);
+        }
+        wire.Closed(Standard_True);
+        Part::TopoShape result(source.Tag, source.Hasher);
+        result.makeShapeWithElementMap(wire, mapper, {source});
+        return result;
+    };
+    return {wireOf(edgesA, mapperA, profile), wireOf(edgesB, mapperB, section)};
+}
+
+/// The connections' vertex pairs (profile first, global coordinates). Entries 2k and 2k+1 of
+/// `Connections` form one pair, in either order.
+std::vector<std::pair<gp_Pnt, gp_Pnt>> connectionPoints(const PartDesign::Loft& loft)
+{
+    const auto& objects = loft.Connections.getValues();
+    const auto subs = loft.Connections.getSubValues();
+    if (objects.empty()) {
+        return {};
+    }
+    if (objects.size() % 2 != 0 || subs.size() != objects.size()) {
+        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Loft: each connection needs one vertex on each profile"
+        ));
+    }
+    const auto& sections = loft.Sections.getValues();
+    if (sections.size() != 1) {
+        throw Base::CADKernelError(
+            QT_TRANSLATE_NOOP("Exception", "Loft: connections need exactly two profiles")
+        );
+    }
+    const App::DocumentObject* profile = loft.Profile.getValue();
+    const App::DocumentObject* section = sections.front();
+    auto point = [](App::DocumentObject* object, const std::string& sub) {
+        const auto vertex = Part::Feature::getTopoShape(
+            object,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            sub.c_str()
+        );
+        if (vertex.isNull() || vertex.getShape().ShapeType() != TopAbs_VERTEX) {
+            throw Base::CADKernelError(
+                QT_TRANSLATE_NOOP("Exception", "Loft: a connection must join two vertices")
+            );
+        }
+        return BRep_Tool::Pnt(TopoDS::Vertex(vertex.getShape()));
+    };
+    std::vector<std::pair<gp_Pnt, gp_Pnt>> result;
+    for (size_t k = 0; k + 1 < objects.size(); k += 2) {
+        size_t p = k;
+        size_t s = k + 1;
+        if (objects[p] == section && objects[s] == profile) {
+            std::swap(p, s);
+        }
+        if (objects[p] != profile || objects[s] != section || profile == section) {
+            throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Loft: a connection needs one vertex on the profile and one on the section"
+            ));
+        }
+        result.emplace_back(point(objects[p], subs[p]), point(objects[s], subs[s]));
+    }
+    return result;
+}
+
 }  // namespace
 
 PROPERTY_SOURCE(PartDesign::Loft, PartDesign::ProfileBased)
@@ -569,6 +1011,14 @@ Loft::Loft()
     );
     EndCondition.setEnums(ConditionEnums);
     ADD_PROPERTY_TYPE(EndMagnitude, (1.0), "Loft", App::Prop_None, "Scale of the end condition's tangent");
+    ADD_PROPERTY_TYPE(
+        Connections,
+        (nullptr),
+        "Loft",
+        App::Prop_None,
+        "Vertex pairs the loft joins, one vertex on the profile and one on the section (two profiles)"
+    );
+    Connections.setValue(nullptr);
 }
 
 const char* Loft::ConditionEnums[] = {"None", "Normal to profile", nullptr};
@@ -582,7 +1032,7 @@ short Loft::mustExecute() const
         return 1;
     }
     if (Closed.isTouched() || StartCondition.isTouched() || StartMagnitude.isTouched()
-        || EndCondition.isTouched() || EndMagnitude.isTouched()) {
+        || EndCondition.isTouched() || EndMagnitude.isTouched() || Connections.isTouched()) {
         return 1;
     }
 
@@ -818,6 +1268,15 @@ App::DocumentObjectExecReturn* Loft::execute()
         TopoShape result = makeTopoShape();
         std::vector<TopoShape> shapes;
 
+        // ops#640: Onshape's connections, in the wires' frame; each goes to the loop pair that
+        // holds both its vertices
+        auto connections = connectionPoints(*this);
+        for (auto& [p, q] : connections) {
+            p.Transform(invObjLoc.Transformation());
+            q.Transform(invObjLoc.Transformation());
+        }
+        std::vector<bool> placed(connections.size(), false);
+
         // build all shells
         std::vector<TopoShape> shells;
         bool frontReseamed = false;
@@ -826,9 +1285,37 @@ App::DocumentObjectExecReturn* Loft::execute()
                 wire.move(invObjLoc);
             }
             const TopoDS_Shape unseamed = sectionWires.front().getShape();
+            std::vector<std::pair<gp_Pnt, gp_Pnt>> loopConnections;
+            if (!connections.empty()) {
+                if (sectionWires.size() != 2 || closed) {
+                    throw Base::CADKernelError(
+                        QT_TRANSLATE_NOOP("Exception", "Loft: connections need exactly two profiles")
+                    );
+                }
+                if (sectionWires.front().shapeType() == TopAbs_VERTEX
+                    || sectionWires.back().shapeType() == TopAbs_VERTEX) {
+                    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Loft: connections need two profiles with vertices, not a point profile"
+                    ));
+                }
+                for (size_t c = 0; c < connections.size(); ++c) {
+                    if (!placed[c] && hasVertexAt(sectionWires.front(), connections[c].first)
+                        && hasVertexAt(sectionWires.back(), connections[c].second)) {
+                        loopConnections.push_back(connections[c]);
+                        placed[c] = true;
+                    }
+                }
+            }
+            const bool connected = !loopConnections.empty();
+            if (connected) {
+                auto matched = connectedLoops(sectionWires.front(), sectionWires.back(), loopConnections);
+                sectionWires.front() = matched.first;
+                sectionWires.back() = matched.second;
+            }
             // ops#655: vertices pair up as Onshape's. Only where the surface stays the same: two
             // profiles, or ruled; a smooth loft through 3+ sections would move (deferred issue)
-            if (sectionWires.size() == 2 || Ruled.getValue()) {
+            else if (sectionWires.size() == 2 || Ruled.getValue()) {
                 reseamSections(sectionWires);
             }
             frontReseamed = frontReseamed || !unseamed.IsSame(sectionWires.front().getShape());
@@ -853,7 +1340,10 @@ App::DocumentObjectExecReturn* Loft::execute()
                 sectionWires,
                 Part::IsSolid::notSolid,
                 Ruled.getValue() || conditioned ? Part::IsRuled::ruled : Part::IsRuled::notRuled,
-                closed ? Part::IsClosed::closed : Part::IsClosed::notClosed
+                closed ? Part::IsClosed::closed : Part::IsClosed::notClosed,
+                5,
+                nullptr,
+                !connected  // ops#640: connected loops are matched already
             );
             if (conditioned) {
                 shell = withProfileConditions(
@@ -867,6 +1357,11 @@ App::DocumentObjectExecReturn* Loft::execute()
                 );
             }
             shells.push_back(shell);
+        }
+        if (std::find(placed.begin(), placed.end(), false) != placed.end()) {
+            throw Base::CADKernelError(
+                QT_TRANSLATE_NOOP("Exception", "Loft: a connection's vertex is not on its profile")
+            );
         }
 
         // build the top and bottom face, sew the shell and build the final solid
