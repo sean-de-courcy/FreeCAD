@@ -1909,6 +1909,9 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
         );
     }
     if (touched.size() == 1) {
+        // The copy merged onto its scope part: a leftover's record is dormant (10.12 amendment
+        // point 5, Onshape U2, Q2c; the gate's seed 2 op 60), as an Add owner's is
+        unclaimedLeftovers(&pattern);
         const std::vector<Body*> sources = studioPartPatternSources(&pattern);
         const Body* source = sources.empty() ? nullptr : sources.front();
         if (source && std::ranges::find(scope, source) == scope.end()) {

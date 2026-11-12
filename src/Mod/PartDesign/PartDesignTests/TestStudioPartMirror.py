@@ -338,6 +338,57 @@ class TestStudioPartMirror(unittest.TestCase):
         self.assertEqual(self.made(m), [])
         self.assertVolume("Src", 1000)
 
+    def testALeftoverMergedBackOntoItsScopePartIsDormant(self):
+        """10.12 amendment point 5 (Onshape U2, Q2c; the gate's seed 2 op 60): the copy (x 50..60)
+        is a leftover, a part; the plane moved to x = 10, the copy (x 10..20) touches Src and
+        merges onto it (2000): the leftover's record is dormant (no part, hidden, nothing
+        fails), the same after undo and redo and after save and reopen; the plane back at
+        x = 30 gives the same part again."""
+        s, d, plane = self.blockAndPlane()
+        m = self.mirror("Mir", "Src", (plane, [""]), "Add", ("Src",))
+        [new] = self.made(m)
+        self.assertEqual(self.live(), sorted(["D", "Src", new.Name]))
+
+        def moveTo(x):
+            self.doc.openTransaction("plane")
+            plane.AttachmentOffset = App.Placement(V(0, 0, x), App.Rotation())
+            self.doc.recompute()
+            self.doc.commitTransaction()
+            self.doc.recompute()
+
+        def merged():
+            self.assertValid(m)
+            self.assertVolume("Src", 2000)
+            self.assertEqual(self.live(), ["D", "Src"])
+            self.assertFalse(new.Visibility)
+
+        moveTo(10)
+        merged()
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.live(), sorted(["D", "Src", new.Name]))
+        self.assertVolume("Src", 1000)
+        self.doc.redo()
+        self.doc.recompute()
+        merged()
+        name = new.Name
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "dormant.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.doc.UndoMode = 1
+        self.doc.recompute()
+        self.studio = self.doc.getObject("S")
+        self.list = PartDesign.studioList(self.studio)
+        m, new, plane = (self.doc.getObject(n) for n in ("Mir", name, "X30"))
+        merged()
+        moveTo(30)
+        self.assertValid(m)
+        self.assertEqual(self.made(m), [new])
+        self.assertEqual(self.live(), sorted(["D", "Src", new.Name]))
+        self.assertAlmostEqual(new.Shape.Volume, 1000, places=3)
+
     def testAddTouchingTwoScopePartsIsRefused(self):
         """The copy bridges two scope parts (merging them is not done yet): loud, not two
         overlapping parts."""
