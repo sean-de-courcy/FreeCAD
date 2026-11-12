@@ -290,6 +290,26 @@ class TestFillet(unittest.TestCase):
         self.assertTrue(fillet.Refine)
         self.assertEqual(len(fillet.Shape.Faces), len(shape.removeSplitter().Faces) + 1)
 
+    def testFilletFullRoundOfAWallFlushOnAChamferedRim(self):
+        # ops#640 (the replica's #150): a wall's outer face flush with a plate's chamfered rim, so
+        # four edges and four faces meet at each outer foot, the rim's cone one of them. The
+        # feature builds FR1's round at each end of the wall and leaves the plate as it was
+        shape, edges, inner, outer = models.wall_on_a_chamfered_rim()
+        _, removed, _ = models.wall_end_round(inner, outer, 4.0)
+        fillet = self._fillet_on_base(shape, edges, (outer - inner) / 2)
+        self._assertValidFillet(fillet, shape.Volume - 2 * removed)
+        below = Part.makeBox(40, 40, 1.5875, FreeCAD.Vector(-20, -20, -1.5875))
+        self.assertAlmostEqual(
+            fillet.Shape.common(below).Volume, shape.common(below).Volume, places=6
+        )
+        # Onshape's numbers (oracle 14, notes/onshape-facts.md PB2): faces 13 -> 13,
+        # A 1276.733058 -> 1271.269152, the cone's area 71.480181 unchanged
+        result = fillet.Shape
+        self.assertEqual(len(result.Faces), 13)
+        self.assertAlmostEqual(result.Area, 1271.269152, delta=1e-6 * 1271.269152)
+        cone = sum(f.Area for f in result.Faces if f.Surface.TypeId == "Part::GeomCone")
+        self.assertAlmostEqual(cone, 71.480181, delta=1e-6 * 71.480181)
+
     # Results that the full check rejects too (ops#12): the base is a 10 mm cube with a fin, a
     # face hanging inward at 45 degrees from the front bottom edge, so that three faces meet at
     # the edge. The fillet on the back top edge keeps the fin, and its result is invalid. The
