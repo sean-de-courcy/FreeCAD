@@ -3822,6 +3822,106 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
         self.assertEqual(self._digestIn(doc, secondSketch, baseSketch), inside)
 
+    def _recordOfSupport(self, doc, holder):
+        """The record of `holder`'s support, from the saved file."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Shortcuts.FCStd")
+        doc.saveAs(path)
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("Document.xml"))
+        for node in root.iter("Object"):
+            if node.get("name") == holder.Name and node.find("Properties") is not None:
+                support = [p for p in node.iter("Property") if p.get("name") == "AttachmentSupport"]
+                records = [e.get("fp") for p in support for e in p.iter() if e.get("fp")]
+                self.assertEqual(len(records), 1)  # the setup: one reference with a record
+                return records[0]
+        self.fail("no object data for " + holder.Name)
+
+    def _checkShortcutsKeepTheRecord(self, geometry, through):
+        """A plate padded from `geometry` and a sketch on its top face, at `through`: its record,
+        taken again when the plate recomputes, is the same with FREECAD_CH_FINGERPRINT_SHORTCUTS
+        off, on and verify (perf profile 2: the write-back reuses the solve's measurement, and the
+        inside point is the first of the centres ranked by their distance from the boundary that
+        lies inside, which is the scan's). A face whose area falls short of its outline's, so it has
+        an inside point."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        plateSketch = models.sketch(doc, "PlateSketch", geometry, body)
+        plate = models.pad(body, plateSketch, 4, "Plate")
+        doc.recompute()
+        self.assertTrue(plate.isValid(), plate.getStatusString())
+        top = face("plane", normal=Z, through=(through[0], through[1], 4)).one(plate.Shape)[0]
+        onTop = models.sketch(doc, "OnTop", [], body)
+        onTop.AttachmentSupport = [(plate, top)]
+        onTop.MapMode = "FlatFace"
+        doc.recompute()
+        self.assertTrue(onTop.isValid(), onTop.getStatusString())
+        topFace = plate.Shape.getElement(top)
+        # the convex hull of the outer boundary's corners (the plates are polygons), by area
+        corners = sorted({(round(v.X, 6), round(v.Y, 6)) for v in topFace.OuterWire.Vertexes})
+
+        def chain(points):
+            kept = []
+            for p in points:
+                while len(kept) >= 2 and (
+                    (kept[-1][0] - kept[-2][0]) * (p[1] - kept[-2][1])
+                    - (kept[-1][1] - kept[-2][1]) * (p[0] - kept[-2][0])
+                ) <= 0:
+                    kept.pop()
+                kept.append(p)
+            return kept[:-1]
+
+        hull = chain(corners) + chain(corners[::-1])
+        hullArea = abs(
+            sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(hull, hull[1:] + hull[:1]))
+        ) / 2
+        self.assertLess(topFace.Area, 0.98 * hullArea)  # the setup: the face has an inside point
+
+        previous = os.environ.get("FREECAD_CH_FINGERPRINT_SHORTCUTS")
+
+        def restore():
+            if previous is None:
+                os.environ.pop("FREECAD_CH_FINGERPRINT_SHORTCUTS", None)
+            else:
+                os.environ["FREECAD_CH_FINGERPRINT_SHORTCUTS"] = previous
+
+        self.addCleanup(restore)
+        records = {}
+        for mode in ("off", "on", "verify", "off"):
+            os.environ["FREECAD_CH_FINGERPRINT_SHORTCUTS"] = mode
+            plateSketch.touch()
+            doc.recompute()
+            self.assertTrue(onTop.isValid(), onTop.getStatusString())
+            records.setdefault(mode, []).append(self._recordOfSupport(doc, onTop))
+        self.assertEqual(records["off"][0], records["off"][1])  # the setup: the record is stable
+        self.assertEqual(records["on"][0], records["off"][0])
+        self.assertEqual(records["verify"][0], records["off"][0])
+
+    def testShortcutsKeepTheRecordOfAFaceWithManyHoles(self):
+        """24 holes: every centre of the 9 x 9 grid is classified by the scan."""
+        holes = [models.circle(10 + 16 * i, 10 + 13 * j, 3) for i in range(6) for j in range(4)]
+        self._checkShortcutsKeepTheRecord(models.rectangle(0, 0, 100, 60) + holes, (2, 2))
+
+    def testShortcutsKeepTheRecordOfAnL(self):
+        """An L, whose outline's centre lies outside it."""
+        points = [(0, 0), (60, 0), (60, 20), (20, 20), (20, 60), (0, 60)]
+        self._checkShortcutsKeepTheRecord(models.polygon(points), (5, 5))
+
+    def testShortcutsKeepTheRecordOfASymmetricRing(self):
+        """A square ring: centres at equal distances from the boundary, the first in the grid's
+        order kept."""
+        self._checkShortcutsKeepTheRecord(
+            models.rectangle(0, 0, 60, 60) + models.rectangle(10, 10, 50, 50), (5, 5)
+        )
+
+    def testShortcutsKeepTheRecordOfAThinFrame(self):
+        """A frame narrower than an 18th of its span: no centre of the 9 x 9 grid lies inside, the
+        27 x 27 grid's are taken."""
+        self._checkShortcutsKeepTheRecord(
+            models.rectangle(0, 0, 90, 90) + models.rectangle(2, 2, 88, 88), (1, 45)
+        )
+
     def testDigestCacheSeesValueChangeInsideRecompute(self):
         """An upstream sketch's property set while the recompute runs. (Not purgeTouched(): it
         clears a status, which drops the digest by itself.)"""

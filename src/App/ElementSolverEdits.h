@@ -7,11 +7,19 @@
 // reference by its saved place only where nothing in its feature's chain changed before the
 // migration recompute. FreeCADApp's own: not exported.
 
+#include <string>
+
+namespace Data
+{
+struct ElementFingerprint;
+}
+
 namespace App
 {
 
 class Document;
 class DocumentObject;
+class GeoFeature;
 class Property;
 class PropertyContainer;
 
@@ -53,6 +61,66 @@ void forgetPlacementDigest(const void* obj);
 /// The same for a property's container (a document object's, else nothing), at the cost of an
 /// atomic read while no scope is open: Property's setters call it.
 void forgetPlacementDigestOf(const PropertyContainer* container);
+
+/** The fingerprints of its target's elements that the running solveElementReferences() measured
+ * (perf profile 2, `notes\recompute-cost.md`, ops#640): its write-back's records take the same
+ * measurement of the same shape, which on a face with many holes costs milliseconds. Kept for that
+ * call only, by element name, and not used once a property of the target has changed
+ * (forgetPlacementDigestOf()). Whether one is kept for \a element of \a geo; \a measured then says
+ * whether getElementFingerprint() gave one, and \a fingerprint holds it.
+ */
+bool batchElementFingerprint(const GeoFeature* geo,
+                             const std::string& element,
+                             bool& measured,
+                             Data::ElementFingerprint& fingerprint);
+/// Keeps getElementFingerprint()'s result for \a element of \a geo, if it is the running
+/// solveElementReferences()'s target.
+void keepBatchElementFingerprint(const GeoFeature* geo,
+                                 const std::string& element,
+                                 bool measured,
+                                 const Data::ElementFingerprint& fingerprint);
+
+/// The solver's sites timed by SolverSiteTimer (perf profile 2, ops#640).
+enum class SolverSite
+{
+    UpdateReferences,  // PropertyLinkBase::updateElementReferences(), whole
+    Solve,             // solveElementReferences(), whole
+    Pass1,             // its exact lookup, per property
+    Pass2Frames,       // its loop over the entries: frames and sources
+    Pool,              // poolOf()
+    Measure,           // the batch's getElementFingerprint() of the target's elements
+    SolveOwner,        // Data::solveOwner()
+    WriteBack,         // applyResolutions() and the reports
+    Update,            // _updateElementFingerprints(), whole
+    UpdateCompare,     // its fromString() and comparisons
+    Fingerprint,       // elementFingerprint(), whole
+    FpResolve,         // its resolveElement()
+    FpGet,             // its getElementFingerprint()
+    FpTwin,            // elementTwinCentroid()
+    FpUpTo,            // elementUpToFaces()
+    FpClosure,         // the closure and its marks
+    FpSources,         // placementSources()
+    FpString,          // toString()
+    Held,              // updateHeldElementFingerprints()
+    Count
+};
+/** Adds the seconds from its making to its end, and a call, to \a site, while
+ * `FREECAD_CH_SOLVER_PROFILE` was set when the outermost PlacementDigestScope on this thread
+ * opened; that scope's end logs every site (`solver profile:`, PropertyLinks log level). Times are
+ * inclusive (a site inside another counts in both).
+ */
+class SolverSiteTimer
+{
+public:
+    explicit SolverSiteTimer(SolverSite site);
+    ~SolverSiteTimer();
+    SolverSiteTimer(const SolverSiteTimer&) = delete;
+    SolverSiteTimer& operator=(const SolverSiteTimer&) = delete;
+
+private:
+    int site = -1;
+    long long start = 0;
+};
 
 }  // namespace App
 

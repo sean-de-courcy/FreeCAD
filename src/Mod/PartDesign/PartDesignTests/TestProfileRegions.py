@@ -9,6 +9,8 @@
 # length 1 on XY has the profile's area as its volume.
 
 import math
+import os
+import time
 import unittest
 
 import FreeCAD
@@ -696,6 +698,108 @@ class TestProfileRegions(unittest.TestCase):
         self.Doc.recompute()
         self.assertEqual([round(f.Area, 6) for f in sk.InternalShape.Faces], [600])
 
+
+    # -- imprint near edges (perf profile 2b, ops#640) ----------------------------------------
+
+    def holedPlateAndTopSketch(self, holes=12):
+        """A 240 x 240 x 5 plate with holes x holes square through-holes of side 5 at the
+        centres of a 20 mm grid's cells (Part::Feature as the body's base), and a sketch on its
+        top face: the face has 4 + 4 * holes * holes edges."""
+        pitch = 240 / holes
+        square = lambda cx, cy, h: Part.makePolygon(
+            [V(cx - h, cy - h, 0), V(cx + h, cy - h, 0), V(cx + h, cy + h, 0), V(cx - h, cy + h, 0),
+             V(cx - h, cy - h, 0)]
+        )
+        wires = [square(120, 120, 120)] + [
+            square((i + 0.5) * pitch, (j + 0.5) * pitch, 2.5) for i in range(holes) for j in range(holes)
+        ]
+        plate = self.Doc.addObject("Part::Feature", "Plate")
+        plate.Shape = Part.makeFace(wires, "Part::FaceMakerBullseye").extrude(V(0, 0, 5))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = plate
+        self.Doc.recompute()
+        top = [
+            i
+            for i, f in enumerate(body.BaseFeature.Shape.Faces)
+            if abs(f.BoundBox.ZMin - 5) < TOL and abs(f.BoundBox.ZMax - 5) < TOL and f.Area > 25000
+        ][0]
+        _, sk = self.sketch(body, support=[(body.BaseFeature, "Face%d" % (top + 1))])
+        return body, sk, pitch
+
+    def internalsWith(self, sk, mode):
+        """The sketch's regions with FREECAD_CH_IMPRINT_NEAR = mode: their BRep text, their element
+        names, and the faces' areas in order."""
+        previous = os.environ.get("FREECAD_CH_IMPRINT_NEAR")
+        os.environ["FREECAD_CH_IMPRINT_NEAR"] = mode
+        try:
+            sk.touch()
+            self.Doc.recompute()
+        finally:
+            if previous is None:
+                os.environ.pop("FREECAD_CH_IMPRINT_NEAR", None)
+            else:
+                os.environ["FREECAD_CH_IMPRINT_NEAR"] = previous
+        shape = sk.InternalShape
+        names = sorted(shape.ElementMap.items()) if hasattr(shape, "ElementMap") else []
+        return shape.exportBrepToString(), names, [round(f.Area, 9) for f in shape.Faces]
+
+    def checkNearEdgesKeepTheRegions(self, sk, regions):
+        """The regions with the imprint's near edges only are those with all of them, to the
+        BRep text and the element names; `regions`: their count."""
+        self.Doc.recompute()
+        allEdges = self.internalsWith(sk, "off")
+        near = self.internalsWith(sk, "on")
+        self.assertEqual(len(allEdges[2]), regions, allEdges[2])  # the setup
+        self.assertEqual(near[2], allEdges[2])
+        self.assertEqual(near[1], allEdges[1])
+        self.assertEqual(near[0], allEdges[0])
+
+    def testImprintNearEdgesInTheWeb(self):
+        """A circle in the web between four holes: the disk only."""
+        body, sk, pitch = self.holedPlateAndTopSketch()
+        sk.addGeometry(Part.Circle(V(2 * pitch, 2 * pitch, 0), V(0, 0, 1), 3), False)
+        self.checkNearEdgesKeepTheRegions(sk, 1)
+
+    def testImprintNearEdgesOverAHole(self):
+        """A circle around a hole: the ring and the square over the hole (R5)."""
+        body, sk, pitch = self.holedPlateAndTopSketch()
+        sk.addGeometry(Part.Circle(V(2.5 * pitch, 2.5 * pitch, 0), V(0, 0, 1), 6), False)
+        self.checkNearEdgesKeepTheRegions(sk, 2)
+
+    def testImprintNearEdgesAcrossAHole(self):
+        """A circle across a hole's corner: the disk split by the hole's two sides."""
+        body, sk, pitch = self.holedPlateAndTopSketch()
+        sk.addGeometry(Part.Circle(V(2.5 * pitch + 2.5, 2.5 * pitch + 2.5, 0), V(0, 0, 1), 2), False)
+        self.checkNearEdgesKeepTheRegions(sk, 2)
+
+    def testImprintNearEdgesOverTheOutline(self):
+        """A circle over the plate's corner: the quarter on the plate and the rest, the outline's
+        loop near (the sketch's box meets two of its sides)."""
+        body, sk, pitch = self.holedPlateAndTopSketch()
+        sk.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 4), False)
+        self.checkNearEdgesKeepTheRegions(sk, 2)
+
+    def testImprintNearEdgesOfSeveralLoops(self):
+        """A rectangle over four holes and a separate circle in the web: six regions (the frame,
+        the four squares over the holes, the disk), in the face maker's order with all the edges."""
+        body, sk, pitch = self.holedPlateAndTopSketch()
+        rect(sk, 3 * pitch + 5, 3 * pitch + 5, 5 * pitch - 5, 5 * pitch - 5)
+        sk.addGeometry(Part.Circle(V(8 * pitch, 8 * pitch, 0), V(0, 0, 1), 3), False)
+        self.checkNearEdgesKeepTheRegions(sk, 6)
+
+    def testImprintNearEdgesSpeedUpAManyHoledFace(self):
+        """A circle on a face with 1600 hole edges: with only the near edges the regions are
+        made several times faster than with all of them (perf profile 2b: every cell of the face
+        was made and checked, then dropped)."""
+        body, sk, pitch = self.holedPlateAndTopSketch(holes=20)
+        sk.addGeometry(Part.Circle(V(2 * pitch, 2 * pitch, 0), V(0, 0, 1), 3), False)
+        self.Doc.recompute()
+        spent = {}
+        for mode in ("off", "on"):
+            start = time.perf_counter()
+            self.internalsWith(sk, mode)
+            spent[mode] = time.perf_counter() - start
+        self.assertLess(spent["on"], spent["off"] / 4, spent)
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,10 +5,15 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <map>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepTools.hxx>
 #include <Geom_Curve.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <TopExp_Explorer.hxx>
@@ -164,9 +169,159 @@ bool Sketcher::hasImprint(const SketchObject& sketch)
     return !collectImprint(sketch, true).empty();
 }
 
+std::string Sketcher::imprintNearMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_IMPRINT_NEAR") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_IMPRINT_NEAR");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+std::vector<Part::TopoShape> Sketcher::nearImprintEdges(
+    const Part::TopoShape& imprint,
+    const Part::TopoShape& sketchEdges,
+    bool& leftOutLoop
+)
+{
+    leftOutLoop = false;
+    std::vector<Part::TopoShape> all = imprint.getSubTopoShapes(TopAbs_EDGE);
+    Bnd_Box own;
+    for (TopExp_Explorer x(sketchEdges.getShape(), TopAbs_EDGE); x.More(); x.Next()) {
+        BRepBndLib::Add(x.Current(), own);
+    }
+    if (own.IsVoid() || all.size() < 2 || imprintNearMode() == "off") {
+        return all;
+    }
+    // Generous: a box too big keeps more edges, never fewer
+    constexpr double margin = 1e-3;
+    own.Enlarge(margin);
+    const std::size_t n = all.size();
+    std::vector<Bnd_Box> boxes(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        BRepBndLib::Add(all[i].getShape(), boxes[i]);
+        if (boxes[i].IsVoid()) {
+            return all;  // an edge without a box: nothing is left out
+        }
+        boxes[i].Enlarge(margin);
+    }
+    // The groups: edges whose boxes overlap, by a sweep along x
+    std::vector<std::size_t> parent(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        parent[i] = i;
+    }
+    auto root = [&parent](std::size_t i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        return i;
+    };
+    std::vector<std::size_t> order(n);
+    std::vector<double> xmin(n), xmax(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        order[i] = i;
+        double y0 {}, z0 {}, y1 {}, z1 {};
+        boxes[i].Get(xmin[i], y0, z0, xmax[i], y1, z1);
+    }
+    std::sort(order.begin(), order.end(), [&xmin](std::size_t a, std::size_t b) {
+        return xmin[a] < xmin[b];
+    });
+    std::vector<std::size_t> active;
+    for (std::size_t i : order) {
+        std::erase_if(active, [&](std::size_t a) { return xmax[a] < xmin[i]; });
+        for (std::size_t a : active) {
+            if (!boxes[a].IsOut(boxes[i])) {
+                parent[root(a)] = root(i);
+            }
+        }
+        active.push_back(i);
+    }
+    std::vector<char> near(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!boxes[i].IsOut(own)) {
+            near[root(i)] = 1;
+        }
+    }
+    // A group left out with a closed loop (as many edges as distinct vertices, or more) would have
+    // made a cell of model edges alone
+    std::map<std::size_t, std::pair<std::size_t, TopTools_IndexedMapOfShape>> leftOut;
+    std::vector<Part::TopoShape> kept;
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t group = root(i);
+        if (near[group]) {
+            kept.push_back(all[i]);
+            continue;
+        }
+        auto& [edgeCount, vertices] = leftOut[group];
+        ++edgeCount;
+        TopExp::MapShapes(all[i].getShape(), TopAbs_VERTEX, vertices);
+    }
+    for (const auto& [group, counts] : leftOut) {
+        // Vertices of separately copied edges aren't shared: the same point counts once
+        std::vector<gp_Pnt> points;
+        for (int k = 1; k <= counts.second.Extent(); ++k) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(counts.second(k)));
+            const double tolerance =
+                std::max(margin, 2.0 * BRep_Tool::Tolerance(TopoDS::Vertex(counts.second(k))));
+            if (std::none_of(points.begin(), points.end(), [&](const gp_Pnt& other) {
+                    return other.Distance(point) <= tolerance;
+                })) {
+                points.push_back(point);
+            }
+        }
+        if (counts.first >= points.size()) {
+            leftOutLoop = true;
+            break;
+        }
+    }
+    return kept;
+}
+
+std::string Sketcher::regionsDifference(const Part::TopoShape& a, const Part::TopoShape& b)
+{
+    if (a.isNull() || b.isNull()) {
+        return a.isNull() == b.isNull() ? std::string() : std::string("one is null");
+    }
+    if (a.getShape().ShapeType() != b.getShape().ShapeType()) {
+        return "the shape types";
+    }
+    std::ostringstream ta;
+    std::ostringstream tb;
+    BRepTools::Write(a.getShape(), ta);
+    BRepTools::Write(b.getShape(), tb);
+    if (ta.str() != tb.str()) {
+        return "the BRep text";
+    }
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const int count = static_cast<int>(a.countSubShapes(type));
+        if (count != static_cast<int>(b.countSubShapes(type))) {
+            return std::string("the count of ") + type;
+        }
+        for (int i = 1; i <= count; ++i) {
+            const Data::IndexedName name(type, i);
+            const std::string na = a.getMappedName(name).toString();
+            const std::string nb = b.getMappedName(name).toString();
+            if (na != nb) {
+                return std::string(type) + std::to_string(i) + ": " + na + " / " + nb;
+            }
+        }
+    }
+    return {};
+}
+
 Part::TopoShape Sketcher::withinSketchRegions(
     const Part::TopoShape& arrangement,
-    const Part::TopoShape& sketchEdges
+    const Part::TopoShape& sketchEdges,
+    bool rebuild
 )
 {
     if (arrangement.isNull()) {
@@ -312,7 +467,7 @@ Part::TopoShape Sketcher::withinSketchRegions(
             kept.push_back(cells[i]);
         }
     }
-    if (kept.size() == n) {
+    if (kept.size() == n && !rebuild) {
         return arrangement;
     }
     if (kept.empty()) {

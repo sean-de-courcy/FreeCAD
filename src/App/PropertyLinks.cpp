@@ -42,6 +42,7 @@
 #include "ElementFingerprint.h"
 #include "ElementSolver.h"
 #include "ElementSolverBatch.h"
+#include "ElementSolverEdits.h"
 #include "ReferenceReport.h"
 #include "DocumentObject.h"
 #include "MergeDocuments.h"
@@ -850,6 +851,7 @@ void PropertyLinkBase::updateElementReferences(DocumentObject* feature, bool rev
     if (it == _ElementRefMap.end()) {
         return;
     }
+    App::SolverSiteTimer updateTimer(App::SolverSite::UpdateReferences);
     std::vector<PropertyLinkBase*> props;
     props.reserve(it->second.size());
     props.insert(props.end(), it->second.begin(), it->second.end());
@@ -1054,6 +1056,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
                                       std::vector<App::DocumentObject*>* closureOut)
 {
     using ShadowSub = PropertyLinkBase::ShadowSub;
+    App::SolverSiteTimer fingerprintTimer(App::SolverSite::Fingerprint);
     // A broken reference keeps its fingerprint, even when the name it holds is found again: an
     // exact reference the solver broke (Task 2 PR 7) still holds its element's name.
     if (!obj || !obj->isAttachedToDocument() || Data::hasMissingElement(shadow.oldName.c_str())) {
@@ -1065,6 +1068,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     ShadowSub elementName;
     GeoFeature* geo = nullptr;
     const char* element = nullptr;
+    std::optional<App::SolverSiteTimer> resolveTimer(std::in_place, App::SolverSite::FpResolve);
     if (!GeoFeature::resolveElement(obj,
                                     subname,
                                     elementName,
@@ -1077,6 +1081,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
         || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
         return {};
     }
+    resolveTimer.reset();
     // A PartDesign feature's old shape under the new frame its execute set before making the shape
     // again (ops#557; Part::Feature marks the Shape NoRecompute while it re-places it): a record
     // taken now would pair the old shape with the new frame and hide the move from the update
@@ -1085,8 +1090,15 @@ static std::string elementFingerprint(App::DocumentObject* feature,
         && geo->isRecomputing() && prop->testStatus(Property::NoRecompute)) {
         return {};
     }
+    // The running solve's measurement of its target's element, if it took one (perf profile 2)
     Data::ElementFingerprint fingerprint;
-    if (!geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint)) {
+    bool measured = false;
+    if (!App::batchElementFingerprint(geo, elementName.oldName, measured, fingerprint)) {
+        App::SolverSiteTimer getTimer(App::SolverSite::FpGet);
+        measured = geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint);
+        App::keepBatchElementFingerprint(geo, elementName.oldName, measured, fingerprint);
+    }
+    if (!measured) {
         return {};
     }
     // An element told apart from its twins only by its place among them: their centroid, for the
@@ -1094,23 +1106,28 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     // the twin-pick rule (ops#503 D1)
     Base::Vector3d centroid;
     int count = 0;
+    std::optional<App::SolverSiteTimer> twinTimer(std::in_place, App::SolverSite::FpTwin);
     if (elementTwinCentroid(geo, elementName.oldName.c_str(), centroid, count)) {
         if (count >= 2) {
             fingerprint.twinCentroid = centroid;
         }
         fingerprint.twinCount = count;
     }
+    twinTimer.reset();
     // A far piece of a Pad up to a face or a shape: the up-to faces under its point, for the
     // solver to tell whether the cap or edge made whole again lies on the same ones (ops#522)
     std::vector<Data::ElementFingerprint::UpToFace> upToFaces;
+    std::optional<App::SolverSiteTimer> upToTimer(std::in_place, App::SolverSite::FpUpTo);
     if (elementUpToFaces(geo, elementName.oldName.c_str(), fingerprint, upToFaces)) {
         fingerprint.upToFaces = std::move(upToFaces);
     }
+    upToTimer.reset();
     // The marks (ops#526 D2): every object the target is built from, the target and the element's
     // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
     // drawn later; an object listed was feeding the target. Each says whether it was suppressed:
     // the world the record is taken in (ops#549 PS).
     // A dependency cycle (getOutListRecursive() throws) has no closure: no marks, unjudged.
+    std::optional<App::SolverSiteTimer> closureTimer(std::in_place, App::SolverSite::FpClosure);
     std::vector<App::DocumentObject*> closure {obj, geo};
     try {
         for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
@@ -1144,6 +1161,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
             return {};
         }
     }
+    closureTimer.reset();
     // The frame (ops#557): for a target whose placement is its chain's frame (a PartDesign
     // feature), the placement the fingerprint was taken without. A turn of it under a tool
     // fixed in the body can leave the local shape and its names as they were.
@@ -1156,10 +1174,14 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     }
     // The chain's placement sources and loci (decision 218): the solver tells a part moved as
     // one piece from an edit that moved some of it by them
-    placementSources(geo, fingerprint.sources);
+    {
+        App::SolverSiteTimer sourcesTimer(App::SolverSite::FpSources);
+        placementSources(geo, fingerprint.sources);
+    }
     if (closureOut) {
         *closureOut = std::move(closure);
     }
+    App::SolverSiteTimer stringTimer(App::SolverSite::FpString);
     return fingerprint.toString();
 }
 
@@ -1222,6 +1244,7 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                                                   const std::vector<ShadowSub>& shadows,
                                                   std::vector<std::string>& fingerprints)
 {
+    App::SolverSiteTimer updateTimer(App::SolverSite::Update);
     bool holdsElements = false;
     for (const auto& sub : subs) {
         const char* element = Data::findElementName(sub.c_str());
@@ -1276,6 +1299,7 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // the target is made again, the element is the old one and the marks would already hold
         // the edit, so a sketch line redrawn in place would read as there before. The record is
         // held, and taken again at the end of the recompute (updateHeldElementFingerprints()).
+        std::optional<App::SolverSiteTimer> compareTimer(std::in_place, App::SolverSite::UpdateCompare);
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
         // The record's world (ops#549 PS) changes only where the solver judged the reference
         // against its target (feature given: the batch's veto ran). A setter's refresh keeps
@@ -1298,6 +1322,7 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
             // recomputed too: a digest already holds the edit
             now.frame = old.frame;
             now.sources = old.sources;
+            compareTimer.reset();
             if (now == old && recordPending(closure)) {
                 _HeldFingerprints.insert(this);
                 FC_LOG("record held while its target is to be recomputed: " << propertyName(this)
@@ -6675,6 +6700,7 @@ void App::updateHeldElementFingerprints(const Document* doc, const DocumentObjec
     // Every document's: a holder in another document than its target is solved in the target's
     // recompute (review pr564opus-r1 T1). Not one whose own document is in a recompute still
     // running (this one nested in it): its end takes it.
+    App::SolverSiteTimer heldTimer(App::SolverSite::Held);
     std::vector<PropertyLinkBase*> held;
     for (auto prop : _HeldFingerprints) {
         auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
