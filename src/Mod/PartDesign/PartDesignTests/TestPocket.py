@@ -21,9 +21,11 @@
 # *                                                                         *
 # ***************************************************************************
 
+import math
 import unittest
 
 import FreeCAD
+import Part
 import TestSketcherApp
 
 
@@ -574,3 +576,81 @@ class TestPocket(unittest.TestCase):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")
         # print ("omit closing document for debugging")
+
+
+class TestRefineKeepsAValidResult(unittest.TestCase):
+    """FreeCAD-CH, replica repro (ops#640): Refine must not make a valid result invalid.
+
+    Designed model: a sphere of radius R = 10, made by a Revolution of a semicircle and scaled
+    non-uniformly by Part::Scale (z by P / R, P = 16): a spheroid with one B-spline face, the base of a
+    second body. A Pocket, Refine on, cuts from the equator's plane (z = 0) the annulus R - W < r < Ro to
+    the depth D = 1, W = 1. With Ro = R the tool's outer wall is tangent to the spheroid along its whole
+    equator: Refine merges no face, but it rebuilds them all, and the upper spheroid face came out
+    invalid ("Unorientable shape") although the unrefined result is valid.
+
+    Expected, for Ro = R and for the non-tangent control Ro = R + 0.5 alike (the spheroid's radius is at
+    most R in -D <= z <= 0, so the outer wall cuts nothing): one valid solid, 5 faces (the upper and lower
+    spheroid pieces, the annuli at z = 0 and z = -D, the cylinder r = R - W), and
+    V = 4/3 pi R^2 P - pi ((R^2 - (R - W)^2) D - R^2 D^3 / (3 P^2))."""
+
+    R, P, W, D = 10.0, 16.0, 1.0, 1.0
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestRefineKeepsAValidResult")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def expectedVolume(self):
+        R, P, W, D = self.R, self.P, self.W, self.D
+        return 4.0 / 3.0 * math.pi * R * R * P - math.pi * (
+            (R * R - (R - W) ** 2) * D - R * R * D**3 / (3 * P * P)
+        )
+
+    def build(self, outer):
+        doc = self.Doc
+        V = FreeCAD.Vector
+        R = self.R
+        sphereBody = doc.addObject("PartDesign::Body", "SphereBody")
+        semi = sphereBody.newObject("Sketcher::SketchObject", "Semicircle")
+        semi.MapMode = "Deactivated"
+        semi.addGeometry(Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), R), 0, math.pi))
+        semi.addGeometry(Part.LineSegment(V(-R, 0, 0), V(R, 0, 0)))
+        revolution = sphereBody.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = semi
+        revolution.ReferenceAxis = (semi, ["Edge2"])
+        revolution.Angle = 360
+        doc.recompute()
+        scale = doc.addObject("Part::Scale", "Scale")
+        scale.Base = sphereBody
+        scale.Uniform = False
+        scale.XScale, scale.YScale, scale.ZScale = 1, 1, self.P / R
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = scale
+        doc.recompute()
+        ring = body.newObject("Sketcher::SketchObject", "Ring")
+        ring.MapMode = "Deactivated"
+        ring.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), outer))
+        ring.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), R - self.W))
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = ring
+        pocket.Length = self.D
+        pocket.Refine = True
+        doc.recompute()
+        return pocket
+
+    def checkResult(self, pocket):
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        shape = pocket.Shape
+        self.assertTrue(shape.isValid(), "Refine left an invalid result")
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), 5)
+        expected = self.expectedVolume()
+        self.assertLess(abs(shape.Volume - expected), 1e-6 * expected)
+
+    def testTangentPocketStaysValid(self):
+        self.checkResult(self.build(self.R))
+
+    def testNonTangentPocketStaysValid(self):
+        # The control: passes with or without the fix
+        self.checkResult(self.build(self.R + 0.5))

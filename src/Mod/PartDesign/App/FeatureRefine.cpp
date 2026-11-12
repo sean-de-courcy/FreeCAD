@@ -140,10 +140,16 @@ TopoShape FeatureRefine::refineShapeIfActive(
         if (!merged) {
             // A refine that merges no face still rebuilds its faces (nearly always all of them), and
             // a rebuilt free-form face can come out invalid (a degenerate ellipsoid's B-spline face,
-            // ops#474). Those faces are checked; if one is invalid, the next feature checks this
-            // result instead of vouching for it (ops#310). Elementary faces (planes, cylinders,
-            // ...) are not checked, so a refined Pocket chain costs nothing more
-            if (booleanInputsValid && !freeFormFacesValid(refinedShape)) {
+            // ops#474). Those faces are checked. Elementary faces (planes, cylinders, ...) are not,
+            // so a refined Pocket chain costs nothing more
+            if (!freeFormFacesValid(refinedShape)) {
+                // Nothing merged, so the unrefined result has the same faces: keep it when its own
+                // free-form faces are valid (a refine must not make a valid result invalid; a pocket
+                // tangent to a scaled sphere along its equator, ops#640). Otherwise the next feature
+                // checks this result instead of vouching for it (ops#310)
+                if (freeFormFacesValid(oldShape)) {
+                    return oldShape;
+                }
                 booleanInputsValid = false;
             }
             return refinedShape;

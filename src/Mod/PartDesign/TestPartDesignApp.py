@@ -49,6 +49,7 @@ from PartDesignTests.TestPad import (
     TestUpToPlanePlacementInAPlacedBody,
 )
 from PartDesignTests.TestPocket import TestPocket
+from PartDesignTests.TestPocket import TestRefineKeepsAValidResult  # FreeCAD-CH, ops#640
 from PartDesignTests.TestHelix import TestHelix
 from PartDesignTests.TestHole import TestHole
 from PartDesignTests.TestRevolve import TestRevolve
