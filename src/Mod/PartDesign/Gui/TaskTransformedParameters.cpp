@@ -131,8 +131,9 @@ void showStudioRefusal(ReferenceField* field, PartDesign::Transformed* pattern)
 
 namespace PartDesign
 {
-// App/StudioList.cpp (ops#654 T1a; declared where used)
+// App/StudioList.cpp (ops#654 T1a, T2; declared where used)
 PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
 }  // namespace PartDesign
 
 namespace PartDesignGui
@@ -283,9 +284,17 @@ void TaskTransformedParameters::setupUI()
 
     setupParameterUI(ui->featureUI);  // create parameter UI widgets
 
+    // FreeCAD-CH ops#654 T2: a part pattern's parts are its own panel's (StudioGui.cpp): the
+    // native panel is its placement only, no Features list, no mode, no Reapply
+    const bool partPattern = PartDesign::isStudioPartPattern(pcTransformed);
+    if (partPattern) {
+        ui->widget->hide();
+        ui->groupFeatureList->hide();
+    }
+
     // FreeCAD-CH ops#654 T3: Onshape's "Reapply features" (a feature pattern's, off by default):
     // each instance re-runs its features there, against the part as it grows
-    if (!insideMultiTransform) {
+    if (!insideMultiTransform && !partPattern) {
         auto reapply = new QCheckBox(tr("Reapply features"), proxy);
         reapply->setObjectName(QStringLiteral("checkBoxReapply"));
         reapply->setToolTip(
@@ -344,7 +353,8 @@ int TaskTransformedParameters::getUpdateViewTimeout() const
 
 std::vector<ReferenceField*> TaskTransformedParameters::referenceFields() const
 {
-    if (originalsField) {
+    // A part pattern's Features list is hidden (T2): never armed
+    if (originalsField && !PartDesign::isStudioPartPattern(getObject())) {
         return {originalsField};
     }
     return {};
@@ -718,10 +728,21 @@ void TaskTransformedParameters::exitSelectionMode()
     }
 }
 
+/// The object a reference pick is filtered against: the base, or for a studio feature with none
+/// (no Body active, a part pattern: ops#654 T2) the pattern itself, so its studio's origin, the
+/// datums and the elements of its parts are taken
+static App::DocumentObject* referenceSupport(App::DocumentObject* base, App::DocumentObject* pattern)
+{
+    if (!base && pattern && PartDesign::isStudioOwner(pattern)) {
+        return pattern;
+    }
+    return base;
+}
+
 void TaskTransformedParameters::addReferenceSelectionGate(AllowSelectionFlags allow)
 {
     std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(
-        new ReferenceSelection(getBaseObject(), allow)
+        new ReferenceSelection(referenceSupport(getBaseObject(), getTopTransformedObject()), allow)
     );
     std::unique_ptr<Gui::SelectionFilterGate> gateDepPtr(
         new NoDependentsSelection(getTopTransformedObject())
@@ -771,7 +792,9 @@ public:
 
 void TaskTransformedParameters::addDirectionSelectionGate(AllowSelectionFlags allow)
 {
-    std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(new DirectionSelection(getBaseObject(), allow));
+    std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(
+        new DirectionSelection(referenceSupport(getBaseObject(), getTopTransformedObject()), allow)
+    );
     std::unique_ptr<Gui::SelectionFilterGate> gateDepPtr(
         new NoDependentsSelection(getTopTransformedObject())
     );
@@ -799,9 +822,12 @@ bool TaskDlgTransformedParameters::accept()
     // Add over several parts, a New seed, a split seed): OK makes them in the dialog's own step,
     // so one undo takes the pattern and its parts back (the OK below, once the edit has closed
     // its step, makes what is left, nothing then, in a step of its own). A refusal is the OK
-    // below's to report
+    // below's to report. T2: a part pattern's too (its copies' parts; a count drop deletes the
+    // empty Bodies in this step)
     App::DocumentObject* obj = getObject();
-    if (obj && PartDesign::isStudioFeaturePattern(obj) && obj->getDocument()->hasPendingTransaction()) {
+    if (obj
+        && (PartDesign::isStudioFeaturePattern(obj) || PartDesign::isStudioPartPattern(obj))
+        && obj->getDocument()->hasPendingTransaction()) {
         try {
             std::string why;
             PartDesign::StudioList* list = PartDesign::StudioList::holding(obj);

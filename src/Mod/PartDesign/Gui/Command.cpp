@@ -3692,26 +3692,40 @@ void finishTransformed(Gui::Command* cmd, App::DocumentObject* Feat)
 // PartDesign_Mirrored
 //===========================================================================
 
-/** FreeCAD-CH (ops#654 slice 9): Mirror in a studio with a list makes a part mirror (Onshape's
- * Mirror, Part type) when no feature is picked and either no Body is active or a part is picked
- * (whole, or by a face of it: its part is the part to mirror). It is a studio feature, in one step
- * with its list entry, its New part and its first recompute (Cancel aborts all of it): the part's
- * id in StudioEntities, Operation Union (the Result row's words, New with the part it makes), the
- * plane picked in its dialog. False: today's path */
-static bool prepareStudioPartMirror(Gui::Command* cmd)
+/** FreeCAD-CH (ops#654 slice 9, T2): Mirror, Linear pattern and Circular pattern in a studio with
+ * a list make a part pattern (Onshape's Part type, notes/parts-design.md 10.16) when no feature is
+ * picked and either no Body is active or a part is picked (a Parts-list row, a Body; for Mirror a
+ * face of a part too, its part being the part to mirror; for the patterns a face stands for its
+ * feature, T1's). It is a studio feature, in one step with its list entry and its first recompute
+ * (Cancel aborts all of it): the parts' ids in StudioEntities, Operation Union (the Result row's
+ * words). A mirror's New is the part it makes (studioNewPart); a pattern's New is Union with an
+ * empty scope, each copy a part of its own. The mirror plane is picked in the dialog; a pattern
+ * starts on the studio's X (Linear) or Z (Circular) with the feature pattern's defaults. No type
+ * switch in the dialog: the command again. False: today's path (which: Mirrored, LinearPattern,
+ * PolarPattern) */
+static bool prepareStudioPartPattern(Gui::Command* cmd, const std::string& which)
 {
     App::Document* doc = cmd->getDocument();
     if (!doc) {
         return false;
     }
-    PartDesign::Body* source = nullptr;
+    const bool mirror = which == "Mirrored";
+    std::vector<PartDesign::Body*> sources;
+    auto take = [&sources, mirror](PartDesign::Body* body) {
+        if (mirror) {
+            sources = {body};  // one part: the last picked
+        }
+        else if (std::ranges::find(sources, body) == sources.end()) {
+            sources.push_back(body);
+        }
+    };
     for (const auto& sel : cmd->getSelection().getSelectionEx()) {
         auto obj = const_cast<App::DocumentObject*>(sel.getObject());
         if (!obj || obj->getDocument() != doc) {
             continue;
         }
         if (auto body = freecad_cast<PartDesign::Body*>(obj)) {
-            source = body;
+            take(body);
             continue;
         }
         auto body = PartDesign::Body::findBodyOf(obj);
@@ -3719,19 +3733,23 @@ static bool prepareStudioPartMirror(Gui::Command* cmd)
         const bool element = std::ranges::any_of(subs, [](const std::string& sub) {
             return !sub.empty();
         });
-        if (!body || !element || !obj->isDerivedFrom<PartDesign::Feature>()) {
-            return false;  // a feature (or anything else) picked: today's feature mirror
+        if (!mirror || !body || !element || !obj->isDerivedFrom<PartDesign::Feature>()) {
+            return false;  // a feature (or anything else) picked: today's feature pattern
         }
-        source = body;
+        take(body);
     }
     App::Part* studio = nullptr;
-    if (source) {
-        if (!Part::BodyBase::studioOf(source, studio)) {
-            return false;
+    if (!sources.empty()) {
+        for (PartDesign::Body* source : sources) {
+            App::Part* own = nullptr;
+            if (!Part::BodyBase::studioOf(source, own) || (source != sources.front() && own != studio)) {
+                return false;
+            }
+            studio = own;
         }
     }
     else if (PartDesignGui::getBody(/*messageIfNot = */ false)) {
-        return false;  // a Body is active: today's mirror of its features
+        return false;  // a Body is active: today's pattern of its features
     }
     else {
         studio = PartDesignGui::getActivePart();
@@ -3743,17 +3761,17 @@ static bool prepareStudioPartMirror(Gui::Command* cmd)
     if (refuseStudioList(doc, studio)) {
         return true;
     }
-    const std::string name = cmd->getUniqueObjectName("Mirrored");
-    cmd->openCommand("Make Mirrored");
+    const std::string name = cmd->getUniqueObjectName(which.c_str());
+    cmd->openCommand(("Make " + which).c_str());
     try {
         makeStudioList(doc, studio);
         Gui::cmdAppDocument(
             doc,
-            std::ostringstream() << "addObject('PartDesign::Mirrored','" << name << "')"
+            std::ostringstream() << "addObject('PartDesign::" << which << "','" << name << "')"
         );
         App::DocumentObject* owner = doc->getObject(name.c_str());
         if (!owner) {
-            throw Base::RuntimeError("The part mirror was not made");
+            throw Base::RuntimeError("The part pattern was not made");
         }
         const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
         if (studio) {
@@ -3767,14 +3785,42 @@ static bool prepareStudioPartMirror(Gui::Command* cmd)
         );
         FCMD_OBJ_CMD(owner, "Operation = ['Union', 'Subtraction', 'Common']");
         FCMD_OBJ_CMD(owner, "Operation = 'Union'");
-        if (source) {
-            FCMD_OBJ_CMD(owner, "StudioEntities = ['" << PartDesign::studioPartId(source) << "']");
+        if (!sources.empty()) {
+            std::ostringstream ids;
+            ids << "StudioEntities = [";
+            for (PartDesign::Body* source : sources) {
+                ids << "'" << PartDesign::studioPartId(source) << "',";
+            }
+            ids << "]";
+            FCMD_OBJ_CMD(owner, ids.str());
         }
+        // The placement: the studio's own axis (the dialog takes any other), the feature
+        // pattern's defaults (ops#640 rank 8, B3-6)
+        App::Origin* origin = studio ? studio->getOrigin() : nullptr;
+        if (which == "LinearPattern") {
+            if (origin) {
+                FCMD_OBJ_CMD(owner, "Direction = (" << Gui::Command::getObjectCmd(origin->getX()) << ",[''])");
+            }
+            FCMD_OBJ_CMD(owner, "Mode = 'Spacing'");
+            FCMD_OBJ_CMD(owner, "Offset = 25");
+            FCMD_OBJ_CMD(owner, "Occurrences = 2");
+        }
+        else if (which == "PolarPattern") {
+            if (origin) {
+                FCMD_OBJ_CMD(owner, "Axis = (" << Gui::Command::getObjectCmd(origin->getZ()) << ",[''])");
+            }
+            FCMD_OBJ_CMD(owner, "Mode = 'Extent'");
+            FCMD_OBJ_CMD(owner, "Angle = 360");
+            FCMD_OBJ_CMD(owner, "Occurrences = 4");
+        }
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
         Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
-        // Onshape's part mirror makes a new part by default
-        Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
+        if (mirror) {
+            // Onshape's part mirror makes a new part by default
+            Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
+        }
         {
-            // No plane yet: its error isn't printed while the dialog opens asking for it
+            // No plane or part yet: its error isn't printed while the dialog opens asking for it
             Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
                 App::Document::IgnoreErrorOnRecompute,
                 doc,
@@ -3785,7 +3831,7 @@ static bool prepareStudioPartMirror(Gui::Command* cmd)
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
         cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
         if (!PartDesignGui::setEdit(owner)) {
-            throw Base::RuntimeError("The part mirror's dialog didn't open");
+            throw Base::RuntimeError("The part pattern's dialog didn't open");
         }
     }
     catch (const Base::Exception& e) {
@@ -3815,7 +3861,7 @@ void CmdPartDesignMirrored::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    if (prepareStudioPartMirror(this)) {
+    if (prepareStudioPartPattern(this, "Mirrored")) {
         return;
     }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
@@ -3880,6 +3926,10 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    // FreeCAD-CH ops#654 T2: a part picked, or no Body active, in a listed studio: a part pattern
+    if (prepareStudioPartPattern(this, "LinearPattern")) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {
@@ -3959,6 +4009,10 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    // FreeCAD-CH ops#654 T2: a part picked, or no Body active, in a listed studio: a part pattern
+    if (prepareStudioPartPattern(this, "PolarPattern")) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {

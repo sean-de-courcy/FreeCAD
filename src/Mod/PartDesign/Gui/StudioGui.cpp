@@ -47,6 +47,7 @@
 #include <Mod/PartDesign/App/Pieces.h>
 #include <Mod/PartDesign/App/FeatureApply.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/FeatureMirrored.h>
 #include <Mod/PartDesign/App/FeaturePad.h>
 #include <Mod/PartDesign/App/FeaturePocket.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
@@ -56,7 +57,9 @@
 
 #include "StudioGui.h"
 #include "TaskFeatureParameters.h"
+#include "TaskPatternParameters.h"
 #include "ViewProvider.h"
+#include "ViewProviderTransformed.h"
 
 namespace PartDesign
 {
@@ -69,6 +72,8 @@ PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
 // App/Pieces.cpp (FreeCAD-CH ops#654 10.13): the contact test of an Add's merge, its leftovers
 // and this pre-fill
 PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b);
+// App/StudioList.cpp (FreeCAD-CH ops#654 T2): a part pattern or part mirror (PatternType Part)
+PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
 }  // namespace PartDesign
 
 namespace PartDesignGui
@@ -129,10 +134,24 @@ std::vector<PartDesign::Body*> partsMadeBy(const App::DocumentObject* owner)
     return out;
 }
 
-/// A New result: the scope is parts owner made, and nothing else
+/// A part pattern, Linear or Circular (T2): its New is Union with an empty scope, each copy a
+/// part of its own (the App's records), not a part made for it as a mirror's or an Extrude's
+bool newIsEmptyScope(const App::DocumentObject* owner)
+{
+    return PartDesign::isStudioPartPattern(owner) && !owner->isDerivedFrom<PartDesign::Mirrored>();
+}
+
+/// A New result: the scope is parts owner made, and nothing else (a part pattern's: Union, no
+/// scope, no Merge with all)
 bool isNewResult(const App::DocumentObject* owner)
 {
     const auto ids = PartDesign::studioScopeIds(owner);
+    if (newIsEmptyScope(owner)) {
+        auto op = dynamic_cast<App::PropertyEnumeration*>(owner->getPropertyByName("Operation"));
+        auto all = freecad_cast<App::PropertyBool*>(owner->getPropertyByName("StudioMergeAll"));
+        const char* value = op ? op->getValueAsString() : nullptr;
+        return ids.empty() && (!all || !all->getValue()) && (!value || std::strcmp(value, "Union") == 0);
+    }
     if (ids.empty()) {
         return false;
     }
@@ -588,8 +607,15 @@ private:
             if (mergesWithAll(owner)) {
                 commands.push_back("PartDesign.studioSetMergeAll(" + ownerCmd + ", False)");
             }
-            commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
-            commands.push_back("PartDesign.studioNewPart(" + ownerCmd + ")");
+            if (newIsEmptyScope(owner)) {
+                // A part pattern's New: Union with no scope, each copy a part (T2)
+                commands.push_back(ownerCmd + ".Operation = 'Union'");
+                commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
+            }
+            else {
+                commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
+                commands.push_back("PartDesign.studioNewPart(" + ownerCmd + ")");
+            }
         }
         else {
             if (wasNew) {
@@ -607,7 +633,12 @@ private:
             }
             const char* ops[] = {"Union", "Union", "Subtraction", "Common"};
             commands.push_back(ownerCmd + ".Operation = '" + ops[index] + "'");
-            if (wasNew) {
+            if (wasNew && newIsEmptyScope(owner)) {
+                // A part pattern's copies are its records' parts: the App's resync and the OK's
+                // studioMakePieces settle them; the scope stays empty until a tick (Q1b, Q1d)
+                commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", [])");
+            }
+            else if (wasNew) {
                 // Onshape (Q1b, Q1d): a hand switch from New fills no scope
                 leaveNew(owner, commands);
             }
@@ -967,45 +998,56 @@ private:
 };
 
 
-/** The part mirror's panel (ops#654 slice 9; Onshape's Mirror of the Part type,
- * notes/onshape-facts.md "Field filters" and "Focus"): the part to mirror (a tick per part live at
- * its place; in the view, a face click picks its part), then the mirror plane (an origin or datum
- * plane, or a planar face); after the plane nothing is armed (the Result box's ticks are the merge
- * scope). Each change is an edit in the dialog's transaction.
+/** The part mirror's and part pattern's panel (ops#654 slice 9, T2; Onshape's Mirror, Linear and
+ * Circular pattern of the Part type, notes/onshape-facts.md "Field filters" and "Focus"): the parts
+ * to transform (a tick per part live at its place; in the view, a face click picks its part); a
+ * mirror takes one part, then the mirror plane (an origin or datum plane, or a planar face); a
+ * pattern takes one or more, its placement in the native panel below. After the plane (a mirror)
+ * or a part picked (a pattern) nothing is armed (the Result box's ticks are the merge scope). Each
+ * change is an edit in the dialog's transaction.
  */
-class TaskStudioPartMirror: public Gui::TaskView::TaskBox, public Gui::SelectionObserver
+class TaskStudioPartPattern: public Gui::TaskView::TaskBox, public Gui::SelectionObserver
 {
 public:
-    explicit TaskStudioPartMirror(ViewProvider* vp)
-        : TaskBox(Gui::BitmapFactory().pixmap("PartDesign_Mirrored"), trStudio("Part mirror"), true, nullptr)
+    explicit TaskStudioPartPattern(ViewProvider* vp)
+        : TaskBox(Gui::BitmapFactory().pixmap(iconOf(vp->getObject())), titleOf(vp->getObject()), true, nullptr)
         , ownerT(vp->getObject())
+        , mirror(vp->getObject()->isDerivedFrom<PartDesign::Mirrored>())
     {
-        setObjectName(QStringLiteral("studioPartMirror"));
+        setObjectName(mirror ? QStringLiteral("studioPartMirror") : QStringLiteral("studioPartPattern"));
         auto* sourceRow = new QWidget(this);
         auto* sourceLayout = new QHBoxLayout(sourceRow);
         sourceLayout->setContentsMargins(0, 0, 0, 0);
-        sourceLayout->addWidget(new QLabel(trStudio("Part to mirror:"), sourceRow));
+        sourceLayout->addWidget(
+            new QLabel(mirror ? trStudio("Part to mirror:") : trStudio("Parts to pattern:"), sourceRow)
+        );
         sourceButton = new QPushButton(trStudio("Pick in the view"), sourceRow);
-        sourceButton->setObjectName(QStringLiteral("studioMirrorSourceButton"));
+        sourceButton->setObjectName(
+            mirror ? QStringLiteral("studioMirrorSourceButton") : QStringLiteral("studioPatternSourceButton")
+        );
         sourceButton->setCheckable(true);
         sourceLayout->addWidget(sourceButton, 1);
         groupLayout()->addWidget(sourceRow);
         sources = new QListWidget(this);
-        sources->setObjectName(QStringLiteral("studioMirrorSourceList"));
-        sources->setToolTip(trStudio("The part mirrored"));
+        sources->setObjectName(
+            mirror ? QStringLiteral("studioMirrorSourceList") : QStringLiteral("studioPatternSourceList")
+        );
+        sources->setToolTip(mirror ? trStudio("The part mirrored") : trStudio("The parts patterned"));
         groupLayout()->addWidget(sources);
-        auto* planeRow = new QWidget(this);
-        auto* planeLayout = new QHBoxLayout(planeRow);
-        planeLayout->setContentsMargins(0, 0, 0, 0);
-        planeLayout->addWidget(new QLabel(trStudio("Mirror plane:"), planeRow));
-        planeButton = new QPushButton(planeRow);
-        planeButton->setObjectName(QStringLiteral("studioMirrorPlaneButton"));
-        planeButton->setCheckable(true);
-        planeButton->setToolTip(trStudio("A plane, a datum plane or a planar face"));
-        planeLayout->addWidget(planeButton, 1);
-        groupLayout()->addWidget(planeRow);
+        if (mirror) {
+            auto* planeRow = new QWidget(this);
+            auto* planeLayout = new QHBoxLayout(planeRow);
+            planeLayout->setContentsMargins(0, 0, 0, 0);
+            planeLayout->addWidget(new QLabel(trStudio("Mirror plane:"), planeRow));
+            planeButton = new QPushButton(planeRow);
+            planeButton->setObjectName(QStringLiteral("studioMirrorPlaneButton"));
+            planeButton->setCheckable(true);
+            planeButton->setToolTip(trStudio("A plane, a datum plane or a planar face"));
+            planeLayout->addWidget(planeButton, 1);
+            groupLayout()->addWidget(planeRow);
+        }
         note = new QLabel(this);
-        note->setObjectName(QStringLiteral("studioMirrorNote"));
+        note->setObjectName(mirror ? QStringLiteral("studioMirrorNote") : QStringLiteral("studioPatternNote"));
         note->setWordWrap(true);
         groupLayout()->addWidget(note);
 
@@ -1013,7 +1055,7 @@ public:
         if (pattern && pattern->StudioEntities.getValues().empty()) {
             armed = Armed::Source;
         }
-        else if (pattern && !linkedPlane()) {
+        else if (pattern && mirror && !linkedPlane()) {
             armed = Armed::Plane;
         }
         refresh();
@@ -1022,14 +1064,34 @@ public:
                 arm(on ? Armed::Source : Armed::None);
             }
         });
-        QObject::connect(planeButton, &QPushButton::toggled, this, [this](bool on) {
-            if (!updating) {
-                arm(on ? Armed::Plane : Armed::None);
-            }
-        });
+        if (planeButton) {
+            QObject::connect(planeButton, &QPushButton::toggled, this, [this](bool on) {
+                if (!updating) {
+                    arm(on ? Armed::Plane : Armed::None);
+                }
+            });
+        }
         QObject::connect(sources, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
             onTicked(item);
         });
+        // A pattern's placement is edited in the native panel: after each recompute the parts
+        // and the note (the App's loud states) show the pattern as it is
+        if (!mirror && ownerT.getObject()) {
+            recomputed = ownerT.getObject()->getDocument()->signalRecomputed.connect(
+                [this](const App::Document&, const std::vector<App::DocumentObject*>&) {
+                    QPointer<TaskStudioPartPattern> self(this);
+                    QMetaObject::invokeMethod(
+                        this,
+                        [self]() {
+                            if (self && !self->updating) {
+                                self->refresh();
+                            }
+                        },
+                        Qt::QueuedConnection
+                    );
+                }
+            );
+        }
     }
 
 private:
@@ -1039,6 +1101,22 @@ private:
         Source,
         Plane
     };
+
+    static const char* iconOf(const App::DocumentObject* obj)
+    {
+        if (obj->isDerivedFrom<PartDesign::Mirrored>()) {
+            return "PartDesign_Mirrored";
+        }
+        return std::strcmp(obj->getTypeId().getName(), "PartDesign::PolarPattern") == 0
+            ? "PartDesign_PolarPattern"
+            : "PartDesign_LinearPattern";
+    }
+
+    static QString titleOf(const App::DocumentObject* obj)
+    {
+        return obj->isDerivedFrom<PartDesign::Mirrored>() ? trStudio("Part mirror")
+                                                          : trStudio("Part pattern");
+    }
 
     App::PropertyLinkSub* planeLink() const
     {
@@ -1057,9 +1135,11 @@ private:
     {
         armed = what;
         QSignalBlocker blockSource(sourceButton);
-        QSignalBlocker blockPlane(planeButton);
         sourceButton->setChecked(armed == Armed::Source);
-        planeButton->setChecked(armed == Armed::Plane);
+        if (planeButton) {
+            QSignalBlocker blockPlane(planeButton);
+            planeButton->setChecked(armed == Armed::Plane);
+        }
     }
 
     void refresh()
@@ -1086,15 +1166,17 @@ private:
                 );
             }
         }
-        QString plane = trStudio("Select...");
-        if (App::DocumentObject* obj = linkedPlane()) {
-            plane = QString::fromUtf8(obj->Label.getValue());
-            const auto& subs = planeLink()->getSubValues();
-            if (!subs.empty() && !subs.front().empty()) {
-                plane += QStringLiteral(":") + QString::fromStdString(subs.front());
+        if (planeButton) {
+            QString plane = trStudio("Select...");
+            if (App::DocumentObject* obj = linkedPlane()) {
+                plane = QString::fromUtf8(obj->Label.getValue());
+                const auto& subs = planeLink()->getSubValues();
+                if (!subs.empty() && !subs.front().empty()) {
+                    plane += QStringLiteral(":") + QString::fromStdString(subs.front());
+                }
             }
+            planeButton->setText(plane);
         }
-        planeButton->setText(plane);
         arm(armed);
         QString text = refusal;
         if (text.isEmpty() && pattern->isError()) {
@@ -1124,7 +1206,7 @@ private:
         catch (const Base::Exception& e) {
             refusal = QString::fromUtf8(e.what());
         }
-        QPointer<TaskStudioPartMirror> self(this);
+        QPointer<TaskStudioPartPattern> self(this);
         QMetaObject::invokeMethod(
             this,
             [self]() {
@@ -1153,9 +1235,29 @@ private:
             return;
         }
         const std::string id = item->data(Qt::UserRole).toString().toStdString();
-        // One part: a tick replaces the one before
-        setSource(item->checkState() == Qt::Checked ? std::vector<std::string> {id}
-                                                    : std::vector<std::string> {});
+        const bool on = item->checkState() == Qt::Checked;
+        if (mirror) {
+            // One part: a tick replaces the one before
+            setSource(on ? std::vector<std::string> {id} : std::vector<std::string> {});
+            return;
+        }
+        auto pattern = freecad_cast<PartDesign::Transformed*>(ownerT.getObject());
+        if (pattern) {
+            setSource(toggled(pattern->StudioEntities.getValues(), id, on));
+        }
+    }
+
+    /// ids with id in (on) or out, in their order
+    static std::vector<std::string> toggled(std::vector<std::string> ids, const std::string& id, bool on)
+    {
+        auto at = std::ranges::find(ids, id);
+        if (on && at == ids.end()) {
+            ids.push_back(id);
+        }
+        else if (!on && at != ids.end()) {
+            ids.erase(at);
+        }
+        return ids;
     }
 
     static bool isPlaneObject(const App::DocumentObject* obj)
@@ -1174,6 +1276,10 @@ private:
         App::DocumentObject* obj = owner->getDocument()->getObject(msg.pObjectName);
         const std::string sub = msg.pSubName ? msg.pSubName : "";
         if (!obj) {
+            return;
+        }
+        // A pattern's direction or axis pick (the native panel's gate) is the panel's own
+        if (!mirror && Gui::Selection().hasSelectionGate(owner->getDocument())) {
             return;
         }
         if (armed == Armed::Plane) {
@@ -1208,12 +1314,22 @@ private:
             const auto live = liveStudioParts(owner);
             if (body && body->StudioMadeBy.getValue() != owner
                 && std::ranges::find(live, body) != live.end()) {
-                arm(linkedPlane() ? Armed::None : Armed::Plane);
-                setSource({PartDesign::studioPartId(body)});
+                if (mirror) {
+                    arm(linkedPlane() ? Armed::None : Armed::Plane);
+                    setSource({PartDesign::studioPartId(body)});
+                }
+                else {
+                    // A pattern: the pick adds its part, or takes it out (picked again)
+                    const auto ids =
+                        static_cast<PartDesign::Transformed*>(owner)->StudioEntities.getValues();
+                    const std::string id = PartDesign::studioPartId(body);
+                    arm(Armed::None);
+                    setSource(toggled(ids, id, std::ranges::find(ids, id) == ids.end()));
+                }
             }
         }
         // The pick is taken: the selection clears after this message
-        QPointer<TaskStudioPartMirror> self(this);
+        QPointer<TaskStudioPartPattern> self(this);
         QMetaObject::invokeMethod(
             this,
             [self]() {
@@ -1227,6 +1343,8 @@ private:
     }
 
     App::DocumentObjectT ownerT;
+    const bool mirror;
+    fastsignals::scoped_connection recomputed;
     QPushButton* sourceButton = nullptr;
     QListWidget* sources = nullptr;
     QPushButton* planeButton = nullptr;
@@ -1245,7 +1363,22 @@ public:
     explicit TaskDlgStudioPartMirror(ViewProvider* vp)
         : TaskDlgFeatureParameters(vp)
     {
-        Content.push_back(new TaskStudioPartMirror(vp));
+        Content.push_back(new TaskStudioPartPattern(vp));
+        addResultBox();
+    }
+};
+
+/// The part pattern's dialog (T2): the Result box on top (New / Add / Remove / Intersect and the
+/// merge scope's ticks), the parts to pattern, then the native Linear or Circular panel, its
+/// Features list hidden (TaskTransformedParameters). Its OK makes the copies' parts in the
+/// dialog's step (TaskDlgTransformedParameters::accept, then the feature dialog's OK)
+class TaskDlgStudioPartPattern: public TaskDlgLinearPatternParameters
+{
+public:
+    explicit TaskDlgStudioPartPattern(ViewProviderTransformed* vp)
+        : TaskDlgLinearPatternParameters(vp)
+    {
+        Content.insert(Content.begin(), new TaskStudioPartPattern(vp));
         addResultBox();
     }
 };
@@ -1449,15 +1582,22 @@ QWidget* makeStudioResultBox(ViewProvider* vp)
     return new TaskStudioResult(vp);
 }
 
-/// The part mirror's dialog (ops#654 slice 9), or null when vp's object is no part mirror in a
-/// studio's list (declared where used, ViewProviderMirrored.cpp)
-TaskDlgFeatureParameters* makeStudioPartMirrorDialog(ViewProvider* vp)
+/// The part mirror's (ops#654 slice 9) or part pattern's (T2) dialog, or null when vp's object is
+/// no part mirror or part pattern in a studio's list (declared where used, ViewProviderMirrored.cpp,
+/// ViewProviderLinearPattern.cpp, ViewProviderPolarPattern.cpp)
+TaskDlgFeatureParameters* makeStudioPartPatternDialog(ViewProvider* vp)
 {
     auto pattern = vp ? freecad_cast<PartDesign::Transformed*>(vp->getObject()) : nullptr;
     if (!pattern || !PartDesign::isStudioOwner(pattern) || pattern->PatternType.getValue() != 1) {
         return nullptr;
     }
-    return new TaskDlgStudioPartMirror(vp);
+    if (pattern->isDerivedFrom<PartDesign::Mirrored>()) {
+        return new TaskDlgStudioPartMirror(vp);
+    }
+    if (auto transformed = dynamic_cast<ViewProviderTransformed*>(vp)) {
+        return new TaskDlgStudioPartPattern(transformed);
+    }
+    return nullptr;
 }
 
 }  // namespace PartDesignGui

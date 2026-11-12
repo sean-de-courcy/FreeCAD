@@ -30,8 +30,18 @@ using namespace PartDesignGui;
 
 PROPERTY_SOURCE(PartDesignGui::ViewProviderLinearPattern, PartDesignGui::ViewProviderTransformed)
 
+namespace PartDesignGui
+{
+// StudioGui.cpp (FreeCAD-CH ops#654 T2; declared where used)
+TaskDlgFeatureParameters* makeStudioPartPatternDialog(ViewProvider* vp);
+}  // namespace PartDesignGui
+
 TaskDlgFeatureParameters* ViewProviderLinearPattern::getEditDialog()
 {
+    // A part pattern in a studio's list has its own dialog (parts, Result, placement)
+    if (TaskDlgFeatureParameters* dialog = makeStudioPartPatternDialog(this)) {
+        return dialog;
+    }
     return new TaskDlgLinearPatternParameters(this);
 }
 

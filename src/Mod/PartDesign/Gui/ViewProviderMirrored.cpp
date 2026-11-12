@@ -32,14 +32,14 @@ PROPERTY_SOURCE(PartDesignGui::ViewProviderMirrored, PartDesignGui::ViewProvider
 
 namespace PartDesignGui
 {
-// StudioGui.cpp (FreeCAD-CH ops#654 slice 9; declared where used)
-TaskDlgFeatureParameters* makeStudioPartMirrorDialog(ViewProvider* vp);
+// StudioGui.cpp (FreeCAD-CH ops#654 slice 9, T2; declared where used)
+TaskDlgFeatureParameters* makeStudioPartPatternDialog(ViewProvider* vp);
 }  // namespace PartDesignGui
 
 TaskDlgFeatureParameters* ViewProviderMirrored::getEditDialog()
 {
     // A part mirror in a studio's list has its own dialog (part, plane, Result)
-    if (TaskDlgFeatureParameters* dialog = makeStudioPartMirrorDialog(this)) {
+    if (TaskDlgFeatureParameters* dialog = makeStudioPartPatternDialog(this)) {
         return dialog;
     }
     return new TaskDlgMirroredParameters(this);
