@@ -6,11 +6,11 @@
 "ThinPipeCurveAdded|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeCurveAdded|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeCurveAdded|offset1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
-"ThinPipeMidplaneCurveAddedFirst|inner2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeMidplaneCurveAddedFirst|inner2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeMidplaneCurveAddedFirst|lower1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
-"ThinPipeMidplaneCurveAddedFirst|outer2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeMidplaneCurveAddedFirst|outer2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeMidplaneCurveAddedFirst|upper1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
-"ThinPipeMidplaneCurveAdded|inner2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeMidplaneCurveAdded|inner2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeMidplaneCurveAdded|lower1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeMidplaneCurveAdded|outer2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeMidplaneCurveAdded|upper1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
@@ -34,7 +34,7 @@
 "ThinPipeTwoSidedCurveAdded|left1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeTwoSidedCurveAdded|left2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeTwoSidedCurveAdded|right1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
-"ThinPipeTwoSidedCurveAdded|right2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
+"ThinPipeTwoSidedCurveAdded|right2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeWallFlipped|curve1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"},
 "ThinPipeWallFlipped|curve2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b6-r1", "issue": "ops#640", "tier": "F"}
 }
