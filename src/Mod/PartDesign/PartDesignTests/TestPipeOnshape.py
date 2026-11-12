@@ -1533,3 +1533,29 @@ class TestPipeThin(PipeCase):
         path = self.line(0, 10)
         pipe = self.pipe(self.strip(), path, kind="SubtractivePipe", BodyType="Thin", Thickness1=1)
         self.assertSweeps(pipe, 1000 - 40)
+
+    def faceNameAt(self, pipe, point):
+        """The mapped name of the one face of `pipe` holding `point`."""
+        found = [i for i, f in enumerate(pipe.Shape.Faces, 1)
+                 if f.distToShape(Part.Vertex(V(*point)))[0] < 1e-6]
+        self.assertEqual(len(found), 1, (point, found))
+        return pipe.Shape.getElementMappedName("Face%d" % found[0])
+
+    def assertSidesKeepTheirNames(self, points, **properties):
+        """The wall's sides along the last curve of the polyline (0,0)-(10,0)-(10,-8) keep their names when
+        a segment (10,-8)-(0,-8) follows it (sweeps 19, ops#640): each side's face, at x = 10 +- `points`,
+        is named from the curve alone, never as a twin counted with a piece of the wall's end."""
+        profile = self.strip(((0, 0), (10, 0), (10, -8)))
+        pipe = self.pipe(profile, self.line(0, 20), BodyType="Thin", **properties)
+        before = [self.faceNameAt(pipe, (x, -4, 10)) for x in points]
+        profile.addGeometry(Part.LineSegment(V(10, -8, 0), V(0, -8, 0)), False)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        after = [self.faceNameAt(pipe, (x, -4, 10)) for x in points]
+        self.assertEqual(before, after)
+
+    def testMidplaneLastCurveSidesKeepTheirNames(self):
+        self.assertSidesKeepTheirNames((9.5, 10.5), Thickness1=1, Midplane=True)
+
+    def testTwoSidedLastCurveSidesKeepTheirNames(self):
+        self.assertSidesKeepTheirNames((9, 10.5), Thickness1=1, Thickness2=0.5)
