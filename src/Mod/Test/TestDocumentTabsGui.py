@@ -1532,3 +1532,104 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.selectAsTheFeaturesList(doc, top)
         self.assertOnPlane(sketch, top)
         self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 0, 9)
+
+
+# FreeCAD-CH, ops#640 P11: under the Onshape keymap the Start view is Onshape's Documents page:
+# New, Open and the recent documents, shown whenever no document is open, and gone once one is.
+START = "User parameter:BaseApp/Preferences/Mod/Start"
+
+
+
+def page():
+    """The Start view while it is shown, else None."""
+    view = Gui.getMainWindow().findChild(QtWidgets.QWidget, "StartView")
+    return view if view is not None and view.isVisible() else None
+
+
+class TestDocumentsPageGui(unittest.TestCase):
+    def setUp(self):
+        if not Gui.DocumentTabs.isOn():
+            self.skipTest("the Documents page is the Onshape keymap's")
+        if "Start_Start" not in Gui.listCommands():
+            import StartGui  # noqa: F401
+        self.docs = []
+        self.closeAll()
+        self.closePage()
+
+    def tearDown(self):
+        App.ParamGet(START).RemBool("DocumentsPageInScripts")
+        self.closeAll()
+        self.closePage()
+
+    def closeAll(self):
+        for name in list(App.listDocuments()):
+            App.closeDocument(name)
+        pump(0.2)
+
+    def closePage(self):
+        view = page()
+        if view is not None:
+            sub = view.parentWidget()
+            while sub is not None and not isinstance(sub, QtWidgets.QMdiSubWindow):
+                sub = sub.parentWidget()
+            (sub or view).close()
+            pump(0.2)
+
+    def showPage(self):
+        Gui.runCommand("Start_Start")
+        pump(0.5)
+        view = page()
+        self.assertIsNotNone(view, "Expected the Documents page")
+        return view
+
+    def testThePageShowsNewOpenAndTheRecentDocuments(self):
+        view = self.showPage()
+        self.assertEqual(view.windowTitle(), "Documents")
+        row = view.findChild(QtWidgets.QWidget, "CreateNewRow")
+        buttons = [b for b in row.findChildren(QtWidgets.QPushButton) if b.isVisibleTo(view)]
+        self.assertEqual(
+            sorted(b.objectName() for b in buttons), ["DocumentsPageNew", "DocumentsPageOpen"]
+        )
+        # No first-start page, examples or footer ("Do not show again", "First Start Setup")
+        self.assertEqual(
+            [c for c in view.findChildren(QtWidgets.QCheckBox) if c.isVisibleTo(view)], []
+        )
+        labels = [l.text() for l in view.findChildren(QtWidgets.QLabel) if l.isVisibleTo(view)]
+        self.assertFalse(any("Examples" in t for t in labels), labels)
+        self.assertTrue(any("Recent" in t for t in labels) or not labels, labels)
+
+    def testNewDocumentTakesThePagesPlace(self):
+        view = self.showPage()
+        view.findChild(QtWidgets.QPushButton, "DocumentsPageNew").click()
+        pump(0.5)
+        self.assertEqual(len(App.listDocuments()), 1)
+        self.assertIsNone(page(), "Expected the page gone once a document is open")
+
+    def testCtrlNTakesThePagesPlace(self):
+        self.showPage()
+        Gui.runCommand("Std_New")
+        pump(0.5)
+        self.assertEqual(len(App.listDocuments()), 1)
+        self.assertIsNone(page(), "Expected the page gone once a document is open")
+
+    def testClosingTheLastDocumentShowsThePage(self):
+        App.ParamGet(START).SetBool("DocumentsPageInScripts", True)
+        first = App.newDocument("DocumentsPageA")
+        second = App.newDocument("DocumentsPageB")
+        pump(0.3)
+        App.closeDocument(first.Name)
+        pump(0.5)
+        self.assertIsNone(page(), "Expected no page while a document is open")
+        App.closeDocument(second.Name)
+        pump(0.5)
+        view = page()
+        self.assertIsNotNone(view, "Expected the Documents page once the last document closed")
+        self.assertEqual(view.windowTitle(), "Documents")
+
+    def testNoPageInAScriptRun(self):
+        """The GUI test runs (a script on the command line) close documents all the time."""
+        App.newDocument("DocumentsPageC")
+        pump(0.3)
+        self.closeAll()
+        pump(0.3)
+        self.assertIsNone(page())
