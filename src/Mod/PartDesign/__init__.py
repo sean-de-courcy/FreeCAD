@@ -83,6 +83,7 @@ configReaderError = _PartDesign.configReaderError
 configRefresh = _PartDesign.configRefresh  # ops#671 C3, the cache of other configurations
 configSetInstanceKey = _PartDesign.configSetInstanceKey
 configInstancePart = _PartDesign.configInstancePart
+configStudioParts = _PartDesign.configStudioParts
 configCacheEntries = _PartDesign.configCacheEntries
 configCacheStats = _PartDesign.configCacheStats
 studioReconcile = _PartDesign.studioReconcile

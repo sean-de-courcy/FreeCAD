@@ -24,6 +24,8 @@
 #include <Base/Sequencer.h>
 
 #include "Body.h"
+#include "FeatureBoolean.h"
+#include "FeatureDeletePart.h"
 #include "ConfigCache.h"
 #include "StudioConfig.h"
 #include "StudioList.h"
@@ -499,6 +501,84 @@ std::string copyPath(const App::Document* doc)
     return App::Application::getTempPath() + name;
 }
 
+/// doc saved to path and opened as a hidden temporary document, or null (path deleted, failure
+/// says why)
+App::Document* openCopy(App::Document* doc, const std::string& path, std::string& failure)
+{
+    const auto start = std::chrono::steady_clock::now();
+    App::Document* copy = nullptr;
+    try {
+        if (doc->saveCopy(path.c_str())) {
+            App::DocumentInitFlags flags;
+            flags.createView = false;
+            flags.temporary = true;
+            copy = App::GetApplication().openDocument(path.c_str(), flags);
+        }
+    }
+    catch (const Base::Exception& e) {
+        failure = std::string(": ") + e.what();
+    }
+    stats.copySeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    if (!copy) {
+        Base::FileInfo(path).deleteFile();
+        return nullptr;
+    }
+    ++stats.copies;
+    return copy;
+}
+
+/// A hidden copy's life: doc copied and opened, then on every path closed and its file deleted.
+/// Opening the copy makes it the active document, and closing the active one leaves none (the
+/// GUI's next command had no active view, review r1 of the C3 debt): the active document is given
+/// back at once, so the copy is never the active one when it closes (review r2)
+class CopyScope
+{
+public:
+    explicit CopyScope(App::Document* doc)
+        : path(copyPath(doc))
+    {
+        if (auto active = App::GetApplication().getActiveDocument()) {
+            activeName = active->getName();
+        }
+        copy = openCopy(doc, path, failure);
+        giveBack(copy);
+    }
+    ~CopyScope()
+    {
+        // closeDocument runs observers (Python too): nothing may escape a destructor
+        try {
+            if (copy) {
+                App::GetApplication().closeDocument(copy->getName());
+                Base::FileInfo(path).deleteFile();
+            }
+            giveBack(nullptr);
+        }
+        catch (...) {
+            Base::Console().error("Configurations: closing a hidden copy failed\n");
+        }
+    }
+    CopyScope(const CopyScope&) = delete;
+    CopyScope& operator=(const CopyScope&) = delete;
+
+    App::Document* copy = nullptr;
+    std::string failure;
+
+private:
+    /// The active document back when the copy (or nothing) took its place
+    void giveBack(const App::Document* taken) const
+    {
+        auto& app = App::GetApplication();
+        auto active = activeName.empty() ? nullptr : app.getDocument(activeName.c_str());
+        auto now = app.getActiveDocument();
+        if (active && now != active && (now == nullptr || now == taken)) {
+            app.setActiveDocument(active);
+        }
+    }
+
+    std::string path;
+    std::string activeName;
+};
+
 /// Fills entries (key -> entries) of studio doc's studio from one hidden copy
 void fillFromCopy(App::Document* doc,
                   const std::string& studio,
@@ -520,28 +600,12 @@ void fillFromCopy(App::Document* doc,
                 "other configurations");
         return;
     }
-    const auto start = std::chrono::steady_clock::now();
-    const std::string path = copyPath(doc);
-    App::Document* copy = nullptr;
-    std::string failure;
-    try {
-        if (doc->saveCopy(path.c_str())) {
-            App::DocumentInitFlags flags;
-            flags.createView = false;
-            flags.temporary = true;
-            copy = App::GetApplication().openDocument(path.c_str(), flags);
-        }
-    }
-    catch (const Base::Exception& e) {
-        failure = std::string(": ") + e.what();
-    }
-    stats.copySeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const CopyScope scope(doc);
+    App::Document* copy = scope.copy;
     if (!copy) {
-        Base::FileInfo(path).deleteFile();
-        failAll("The studio " + label + " can't be copied to build its other configurations" + failure);
+        failAll("The studio " + label + " can't be copied to build its other configurations" + scope.failure);
         return;
     }
-    ++stats.copies;
     App::Part* copyStudio = studio.empty() ? nullptr : freecad_cast<App::Part*>(copy->getObject(studio.c_str()));
     StudioConfig* copyCfg = StudioConfig::of(copy, copyStudio);
     Base::SequencerLauncher seq("Building configurations", keys.size());
@@ -587,8 +651,6 @@ void fillFromCopy(App::Document* doc,
         }
         seq.next();
     }
-    App::GetApplication().closeDocument(copy->getName());
-    Base::FileInfo(path).deleteFile();
 }
 
 struct PassGuard
@@ -986,6 +1048,108 @@ bool configSetInstanceKey(App::DocumentObject* instance,
     noteInstance(instance, *part);
     setString(instance, "ConfigKey", key);
     instance->touch();
+    return true;
+}
+
+// StudioList.cpp: the Boolean studio feature that consumes body at index (-1: the bar), or null
+PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
+
+namespace
+{
+
+/// Whether body is a part (Onshape's Parts list): not merged into another, not consumed by a
+/// Boolean (a studio one, or one in a Body), not deleted by a Delete part (the Insert list's
+/// UtilsAssembly.isMergedPart and isConsumedPart, plus DeletePart::deleterOf)
+bool isPart(const Body* body)
+{
+    // A Body with no solid (a piece kept empty in a configuration that doesn't split it) is no
+    // part either, as an entry of it would fail ("gives no solid")
+    return !Boolean::mergeOf(body) && !Boolean::consumerOf(body) && !studioConsumerOf(body, -1)
+        && !DeletePart::deleterOf(body) && !body->Shape.getShape().isNull();
+}
+
+/// cfg's parts in doc (the live document or a copy), in the document's order: part id and
+/// global placement
+std::vector<std::pair<std::string, Base::Placement>> partsIn(App::Document* doc, const StudioConfig* cfg)
+{
+    std::vector<std::pair<std::string, Base::Placement>> parts;
+    for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
+        auto body = static_cast<Body*>(obj);
+        if (configObjectConfig(body) == cfg && isPart(body)) {
+            parts.emplace_back(studioPartId(body), body->globalPlacement());
+        }
+    }
+    return parts;
+}
+
+}  // namespace
+
+bool configStudioParts(App::Document* doc,
+                       App::Part* studio,
+                       const std::map<std::string, std::string>& values,
+                       std::vector<ConfigStudioPart>& parts,
+                       std::string* why)
+{
+    parts.clear();
+    StudioConfig* cfg = doc ? StudioConfig::of(doc, studio) : nullptr;
+    if (!cfg) {
+        if (why) {
+            *why = "The studio has no configuration inputs";
+        }
+        return false;
+    }
+    const std::string key = configKeyOf(cfg, values, why);
+    if (key.empty()) {
+        return false;
+    }
+    std::vector<std::pair<std::string, Base::Placement>> found;
+    if (key == cfg->activeKey()) {
+        found = partsIn(doc, cfg);
+    }
+    else {
+        if (doc->testStatus(App::Document::PartialDoc)) {
+            if (why) {
+                *why = "The studio's document is only partly loaded: open it to read its other configurations";
+            }
+            return false;
+        }
+        const PassGuard guard;  // the copy's objects and signals are no edits
+        const CopyScope scope(doc);
+        App::Document* copy = scope.copy;
+        if (!copy) {
+            if (why) {
+                *why = "The studio can't be copied to read its other configurations" + scope.failure;
+            }
+            return false;
+        }
+        const std::string name = studio ? studio->getNameInDocument() : "";
+        App::Part* copyStudio = studio ? freecad_cast<App::Part*>(copy->getObject(name.c_str())) : nullptr;
+        StudioConfig* copyCfg = StudioConfig::of(copy, copyStudio);
+        std::string failed;
+        bool ok = copyCfg && (!studio || copyStudio);
+        try {
+            ok = ok && configSetActiveIn(copy, copyStudio, keyValues(key), &failed);
+        }
+        catch (const Base::Exception& e) {
+            ok = false;
+            failed = e.what();
+        }
+        if (ok) {
+            found = partsIn(copy, copyCfg);
+        }
+        if (!ok) {
+            if (why) {
+                *why = "The configuration " + key + " fails: " + (failed.empty() ? "the studio is gone" : failed);
+            }
+            return false;
+        }
+    }
+    // A part only that configuration makes (a piece of a configured split) has no Body here
+    for (const auto& [id, placement] : found) {
+        if (auto body = liveBody(doc, cfg, id)) {
+            parts.push_back({body, placement});
+        }
+    }
     return true;
 }
 

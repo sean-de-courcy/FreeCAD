@@ -34,6 +34,7 @@
 #include <App/Part.h>
 #include <Base/GeometryPyCXX.h>
 #include <Base/Interpreter.h>
+#include <Base/PlacementPy.h>
 #include <Base/VectorPy.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/BodyBase.h>
@@ -548,6 +549,11 @@ public:
             "configRefresh",
             &Module::guarded<&Module::configRefresh>,
             "configRefresh(doc=None) -- Builds now the configurations doc's instances (None: every open document's) need; refuses while a transaction is open."
+        );
+        add_varargs_method(
+            "configStudioParts",
+            &Module::guarded<&Module::configStudioParts>,
+            "configStudioParts(studio, values=None) -- The parts the configuration values names (missing inputs: the defaults) of studio (an App::Part, or a document for its implicit studio) has, in order: a list of (Body, global Placement in that configuration)."
         );
         add_varargs_method(
             "configSetInstanceKey",
@@ -2249,6 +2255,28 @@ private:
             PartDesign::configSetInstanceKey(entryArg(pInstance), configValues(pValues), &why),
             why
         );
+    }
+
+    // ops#671 C3 debt: the parts a configuration of a studio has (a whole-studio insert's)
+    Py::Object configStudioParts(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pValues = Py_None;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pStudio, &pValues)) {
+            throw Py::Exception();
+        }
+        App::Document* doc;
+        App::Part* studio;
+        configStudioArg(pStudio, doc, studio);
+        std::vector<PartDesign::ConfigStudioPart> parts;
+        std::string why;
+        done(PartDesign::configStudioParts(doc, studio, configValues(pValues), parts, &why), why);
+        Py::List list;
+        for (const auto& part : parts) {
+            list.append(Py::TupleN(Py::asObject(part.body->getPyObject()),
+                                   Py::asObject(new Base::PlacementPy(new Base::Placement(part.placement)))));
+        }
+        return list;
     }
 
     Py::Object configInstancePart(const Py::Tuple& args)

@@ -521,6 +521,79 @@ class TestConfiguredInsertSourcesGui(ConfigInsertBase):
         self.assertShowsSmallAfterTheSwitch(doc, studio, links[0])
         self.assertAlmostEqual(linkHeight(links[1]), 10, delta=TOL)
 
+    def insertWhole(self, doc, asm, studio, row):
+        """Chooses row in the Configuration box, clicks the studio's row (a whole insert) and
+        leaves the panel open; returns (panel, the studio's list item)"""
+        panel = self.openInsert(doc, asm)
+        combo = panel.configBox.findChild(QtWidgets.QComboBox, "ConfigInput_" + self.size)
+        combo.setCurrentIndex(combo.findText(row))
+        item = self.findItem(panel, studio.Label)
+        self.assertIsNotNone(item, "the studio is not in the list")
+        panel.onItemClicked(item)
+        pump(0.2)
+        return panel, item
+
+    def closePanel(self, panel, accept):
+        if accept:
+            self.assertTrue(panel.accept())
+        else:
+            panel.reject()
+        Gui.Control.closeDialog()
+        pump(0.2)
+
+    def testWholeStudioTakesTheChosenRowsParts(self):
+        """A whole insert makes the parts the chosen row has, at that row's positions (Onshape's
+        configured whole-studio insert, GB10): Large keeps C, which the active Small consumes,
+        and moves B 30 along y"""
+        from AssemblyTests.TestOnshapeAssembliesGui import tabsOn
+        from PartDesignTests.TestStudioList import booleanOwner
+
+        if not tabsOn():
+            self.skipTest("a studio is inserted whole under the typed tabs only")
+        doc, studio, asm = self.model()
+        B, C = doc.getObject("B"), doc.getObject("C")
+        self.edit(doc, lambda: PartDesign.configConfigure(B, "Placement.Base.y", self.size))
+        self.edit(doc, lambda: PartDesign.configSetCell(B, "Placement.Base.y", "Large", "30 mm"))
+        cut = booleanOwner(doc, studio, "CutC", "Cut", targets=["A"], tools=["C"])
+        self.edit(doc, lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(doc, lambda: PartDesign.configConfigureSuppression(cut, self.size))
+        self.edit(doc, lambda: PartDesign.configSetSuppressionCell(cut, "Large", True))
+        self.assertIsNotNone(PartDesign.studioConsumerOf(C), "Small doesn't consume C")
+        panel, item = self.insertWhole(doc, asm, studio, "Large")
+        self.assertIsNotNone(Gui.activeView(), "reading Large left no active view")
+        self.closePanel(panel, accept=True)
+        links = self.links(asm)
+        parts = [PartDesign.configInstancePart(l) for l in links]
+        self.assertEqual(parts, [self.A, B, C], "Large's parts")
+        self.settle(doc)
+        self.assertTrue(waitFor(lambda: all(isEntry(l) for l in links)), "not Large's shapes")
+        a, b, c = (Part.getShape(l).BoundBox for l in links)
+        self.assertAlmostEqual(b.XMin - a.XMin, 20, delta=TOL)
+        self.assertAlmostEqual(b.YMin - a.YMin, 30, delta=TOL, msg="B is not at Large's position")
+        self.assertAlmostEqual(c.XMin - a.XMin, 40, delta=TOL)
+        self.assertAlmostEqual(linkHeight(links[0]), 20, delta=TOL)
+
+    def testWholeInsertCountsOnce(self):
+        """The studio's row counts a whole insert once, as Onshape's insert dialog does, until its
+        last instance goes"""
+        from AssemblyTests.TestOnshapeAssembliesGui import tabsOn
+
+        if not tabsOn():
+            self.skipTest("a studio is inserted whole under the typed tabs only")
+        doc, studio, asm = self.model()
+        panel, item = self.insertWhole(doc, asm, studio, "Small")
+        self.assertEqual(len(self.links(asm)), 3)
+        self.assertTrue(item.text(0).endswith(": 1 inserted"), item.text(0))
+        links = self.links(asm)
+        doc.removeObject(links[1].Name)
+        pump(0.1)
+        self.assertTrue(item.text(0).endswith(": 1 inserted"), item.text(0))
+        for link in (links[0], links[2]):
+            doc.removeObject(link.Name)
+        pump(0.1)
+        self.assertNotIn("inserted", item.text(0))
+        self.closePanel(panel, accept=False)
+
     def testRightClickTakesTheWholeInsertBack(self):
         """In the panel a right-click on the studio's row removes its last insert, all its parts"""
         from AssemblyTests.TestOnshapeAssembliesGui import tabsOn

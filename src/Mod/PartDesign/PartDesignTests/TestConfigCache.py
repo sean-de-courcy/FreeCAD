@@ -446,5 +446,64 @@ class TestConfigCache(unittest.TestCase):
         self.assertEqual(asm.solve(), 0)
         self.assertAlmostEqual(lid.Placement.Base.z - small, 10, delta=1e-6)
 
+    # ---------------------------------------------- C3 debt: the chosen row's parts, nested Parts
+    def studioPartsModel(self):
+        """configureSizes, plus: B's Body 30 along y in Large; C consumed by a Cut of A (Keep tools
+        off) in Small only, the Cut suppressed in Large. Small is active."""
+        from PartDesignTests.TestStudioList import booleanOwner
+
+        self.configureSizes()
+        self.edit(lambda: PartDesign.configConfigure(self.B, "Placement.Base.y", self.size))
+        self.edit(lambda: PartDesign.configSetCell(self.B, "Placement.Base.y", "Large", "30 mm"))
+        cut = booleanOwner(self.doc, self.studio, "CutC", "Cut", targets=["A"], tools=["C"])
+        self.edit(lambda: PartDesign.studioInsert(cut, -1))
+        self.edit(lambda: PartDesign.configConfigureSuppression(cut, self.size))
+        self.edit(lambda: PartDesign.configSetSuppressionCell(cut, "Large", True))
+        self.assertIsNotNone(PartDesign.studioConsumerOf(self.C), "Small doesn't consume C")
+        self.assertAlmostEqual(self.B.Placement.Base.y, 0, delta=TOL)
+
+    def testStudioPartsOfTheChosenRow(self):
+        """configStudioParts gives the parts the chosen row has, in order, at that row's placements:
+        Small (the active row, read live: no copy) has A and B, C being consumed; Large has A, B
+        moved 30 along y, and C. The studio is left as it was."""
+        self.studioPartsModel()
+        App.setActiveDocument(self.doc.Name)
+        copies = stats()["copies"]
+        small = PartDesign.configStudioParts(self.studio, {"Size": "Small"})
+        self.assertEqual([body.Name for body, placement in small], ["A", "B"])
+        self.assertAlmostEqual(small[1][1].Base.y, 0, delta=TOL)
+        self.assertEqual(stats()["copies"], copies, "the active row needs no copy")
+        large = PartDesign.configStudioParts(self.studio, {"Size": "Large"})
+        self.assertEqual([body.Name for body, placement in large], ["A", "B", "C"])
+        self.assertAlmostEqual(large[1][1].Base.y, 30, delta=TOL)
+        self.assertAlmostEqual(large[2][1].Base.y, 0, delta=TOL)
+        self.assertEqual(stats()["copies"], copies + 1)
+        self.assertEqual(App.ActiveDocument.Name, self.doc.Name, "the copy took the active document")
+        self.assertAlmostEqual(self.B.Placement.Base.y, 0, delta=TOL)
+        self.assertIsNotNone(PartDesign.studioConsumerOf(self.C))
+
+    def nestedBody(self):
+        """N, a Body in the App::Part Inner inside the studio S (its 10 x 10 pad at x 60..70), its
+        pad's length configured by S's Size: Small 10, Large 20"""
+        inner = self.studio.newObject("App::Part", "Inner")
+        n = inner.newObject("PartDesign::Body", "N")
+        npad = pad(n, "NPad", sketch(n, "NSk", xyPlane(n), (60, 0, 70, 10)), 10)
+        self.doc.recompute()
+        self.edit(lambda: PartDesign.configConfigure(npad, "Length", self.size))
+        self.edit(lambda: PartDesign.configSetCell(npad, "Length", "Large", "20 mm"))
+        return n
+
+    def testNestedPartsBodyInstanceShowsItsRow(self):
+        """A Body in an App::Part inside the studio is the studio's part (the tab's, as
+        App.DocumentTabs.tabOf answers): an instance on Large shows Large through an entry"""
+        n = self.nestedBody()
+        link = self.doc.addObject("App::Link", "Instance")
+        link.LinkedObject = n
+        self.doc.recompute()
+        PartDesign.configSetInstanceKey(link, {"Size": "Large"})
+        self.doc.recompute()
+        self.entry(link)
+        self.assertAlmostEqual(linkHeight(link), 20, delta=TOL)
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <App/PropertyStandard.h>
+#include <Base/Placement.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/PartDesignGlobal.h>
 
@@ -30,10 +31,13 @@ namespace App
 {
 class Document;
 class DocumentObject;
+class Part;
 }  // namespace App
 
 namespace PartDesign
 {
+
+class Body;
 
 class PartDesignExport ConfigShape: public Part::Feature
 {
@@ -97,6 +101,24 @@ PartDesignExport bool configSetInstanceKey(App::DocumentObject* instance,
                                            const std::map<std::string, std::string>& values,
                                            std::string* why);
 
+/// A part of a studio in one configuration: its Body in the studio's document, and its global
+/// placement in that configuration
+struct ConfigStudioPart
+{
+    Body* body = nullptr;
+    Base::Placement placement;
+};
+/// The parts doc's studio (null: the top level) has in the configuration values names (missing
+/// inputs: the defaults), in the document's order (Onshape's whole-studio insert of a configured
+/// studio): its Bodies less those merged, consumed or deleted. The active configuration is read
+/// live; another from a hidden copy, the document left as it was. A part with no Body in the live
+/// document (a piece only that configuration makes) is left out. False, why: no inputs, a bad
+/// value, a copy or a switch that failed
+PartDesignExport bool configStudioParts(App::Document* doc,
+                                        App::Part* studio,
+                                        const std::map<std::string, std::string>& values,
+                                        std::vector<ConfigStudioPart>& parts,
+                                        std::string* why);
 /// The Body an instance stands for (its ConfigPart, else its linked Body), or null
 PartDesignExport App::DocumentObject* configInstancePart(const App::DocumentObject* instance);
 

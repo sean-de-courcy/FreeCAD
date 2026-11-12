@@ -366,6 +366,25 @@ class TestConfigurations(unittest.TestCase):
         self.assertFalse(bool(getattr(again, "Suppressed", False)))
         self.assertEqual(PartDesign.configReconcile(self.studio), "")
 
+    def testNestedPartsBodyIsTheTabsStudios(self):
+        """A Body in an App::Part inside the studio S belongs to S's configurations, the tab's (as
+        App.DocumentTabs.tabOf answers; Onshape's Part Studio is flat, ops#671 C3 debt): S's List
+        configures its pad, and a switch of S's row changes it"""
+        inner = self.studio.newObject("App::Part", "Inner")
+        n = inner.newObject("PartDesign::Body", "N")
+        npad = pad(n, "NPad", sketch(n, "NSk", xyPlane(n), (60, 0, 70, 10)), 10)
+        self.doc.recompute()
+        self.assertEqual(App.DocumentTabs.tabOf(n), "S")
+        self.assertEqual(PartDesign.configStudio(inner).Name, self.cfg.Name, "one configuration")
+        self.edit(lambda: PartDesign.configConfigure(npad, "Length", self.size))
+        self.edit(lambda: PartDesign.configSetCell(npad, "Length", "Large", "20 mm"))
+        PartDesign.configSetActive(self.studio, {"Size": "Large"})
+        self.doc.recompute()
+        self.assertAlmostEqual(height(n), 20, delta=TOL)
+        PartDesign.configSetActive(self.studio, {"Size": "Small"})
+        self.doc.recompute()
+        self.assertAlmostEqual(height(n), 10, delta=TOL)
+
     def testBodyMemberSuppressionIsRefused(self):
         with self.assertRaises(ValueError):
             PartDesign.configConfigureSuppression(self.APad, self.size)

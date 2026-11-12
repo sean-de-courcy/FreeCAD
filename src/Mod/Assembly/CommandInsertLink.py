@@ -122,35 +122,6 @@ def configInputsOfStudio(studio):
         return None
 
 
-def isDeletedPart(body):
-    """Whether a Delete part feature (not suppressed, up to the Tip) deletes body, as
-    PartDesign::DeletePart::deleterOf: the part is gone, its Body empty."""
-    tip = body.Tip
-    if tip is None:
-        return False
-    for obj in body.Group:
-        if obj.TypeId == "PartDesign::DeletePart" and not getattr(obj, "Suppressed", False):
-            return True
-        if obj == tip:
-            break
-    return False
-
-
-def studioBodies(studio):
-    """The parts of an App::Part studio, in its order: the parts a whole-studio insert of a
-    configured studio makes one instance each of (Onshape's default insert, GB10). Bodies that
-    are no part any more are left out, as the Insert list leaves them out: merged into another,
-    consumed by a Boolean, deleted by a Delete part."""
-    return [
-        obj
-        for obj in studio.Group
-        if obj.isDerivedFrom("PartDesign::Body")
-        and not UtilsAssembly.isMergedPart(obj)
-        and not UtilsAssembly.isConsumedPart(obj)
-        and not isDeletedPart(obj)
-    ]
-
-
 def studioLabel(doc, name):
     """The tab label of doc's studio name ("" for the implicit one), "Part Studio" when the
     document has no such tab."""
@@ -618,10 +589,10 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         """Whether selectedPart is an App::Part studio with configuration inputs: inserted whole,
         it makes one instance per part, each showing the chosen configuration (Onshape's whole
         studio insert, CF8 and GB10; C3 keys instances of parts only)."""
+        # Its parts are the chosen configuration's (insertConfiguredStudio), not the active one's
         return (
             selectedPart.isDerivedFrom("App::Part")
             and (selectedPart.Document.Name, selectedPart.Name) in self.configValues
-            and bool(studioBodies(selectedPart))
         )
 
     def addStudioItems(self, doc, docItem, rootObjects, process_objects):
@@ -782,28 +753,45 @@ class TaskAssemblyInsertLink(QtCore.QObject):
             self.insertLink(selectedPart, item)
 
     def insertConfiguredStudio(self, studio, item):
-        """FreeCAD-CH (ops#671): a configured studio inserted whole, one instance per Body, each
-        keyed with the panel's configuration, all at the studio's own positions relative to each
-        other: the first is placed as any insert, the others moved with it (a link to a Body
-        replaces the Body's own placement, so each keeps its offset from the first). Returns the
-        instances."""
-        bodies = studioBodies(studio)
-        first = self.insertLink(bodies[0], item)
-        added = [first]
-        move = first.Placement.multiply(bodies[0].Placement.inverse())
-        for body in bodies[1:]:
-            added.append(self.insertLink(body, item, placement=move.multiply(body.Placement)))
+        """FreeCAD-CH (ops#671): a configured studio inserted whole, one instance per part the
+        chosen configuration has (PartDesign.configStudioParts: its parts and their placements in
+        that configuration, which may differ from the active one's), each keyed with it, all at
+        their studio positions relative to each other: the first is placed as any insert, the
+        others moved with it (a link replaces its part's own placement, so each keeps its offset
+        from the first). The row counts one insert. Returns the instances."""
+        import PartDesign
+
+        get = self.configValues.get((studio.Document.Name, studio.Name))
+        try:
+            parts = PartDesign.configStudioParts(studio, get() if get else None)
+        except Exception as e:
+            App.Console.PrintError(f"{studio.Label}: {e}\n")
+            return []
+        if not parts:
+            App.Console.PrintWarning(f"{studio.Label}: this configuration has no parts\n")
+            return []
+        (firstBody, firstPlacement), rest = parts[0], parts[1:]
+        first = self.insertLink(firstBody, item)
+        # A right-click on the row takes the whole insert back; set as each comes, so a part that
+        # fails halfway leaves a group the counter still counts once
         group = first.Name
-        for stackItem in self.insertionStack[-len(added) :]:
-            stackItem["group"] = group  # a right-click on the row takes the whole insert back
+        self.insertionStack[-1]["group"] = group
+        added = [first]
+        move = first.Placement.multiply(firstPlacement.inverse())
+        for body, placement in rest:
+            added.append(
+                self.insertLink(body, item, placement=move.multiply(placement), group=group)
+            )
         Gui.Selection.clearSelection()
         for obj in added:
             Gui.Selection.addSelection(self.doc.Name, obj.Name, "")
         return added
 
-    def insertLink(self, selectedPart, item, placement=None):
+    def insertLink(self, selectedPart, item, placement=None, group=None):
         """Inserts a link to selectedPart for the list's row item and returns it. placement, when
-        given, is the link's placement (a whole studio's later parts take the first one's)."""
+        given, is the link's placement (a whole studio's later parts take the first one's).
+        group: the whole studio insert it is a later part of, which the row's counter counted
+        already (set before anything can fail, so the counter stays right)."""
         if selectedPart.isDerivedFrom("Assembly::AssemblyObject"):
             objType = "Assembly::AssemblyLink"
         else:
@@ -835,8 +823,11 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         insertionDict["item"] = item
         insertionDict["addedObject"] = addedObject
         insertionDict["configValues"] = configValues
+        if group is not None:
+            insertionDict["group"] = group
         self.insertionStack.append(insertionDict)
-        self.increment_counter(item)
+        if group is None:
+            self.increment_counter(item)
 
         translation = App.Vector()
         resetThreshold = (screenCorner - screenCenter).Length * 0.1
@@ -1104,9 +1095,14 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 # 1. Revert translation
                 self.totalTranslation -= stack_item["translation"]
 
-                # 2. Update UI counter
+                # 2. Update UI counter: a whole studio's insert counts once, until its last
+                # instance goes (ops#671)
                 item = stack_item["item"]
-                self.decrement_counter(item)
+                group = stack_item.get("group")
+                if group is None or not any(
+                    s is not stack_item and s.get("group") == group for s in self.insertionStack
+                ):
+                    self.decrement_counter(item)
 
                 # 3. Handle Grounded Joint cleanup
                 if self.groundedObj == obj:

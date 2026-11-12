@@ -272,22 +272,44 @@ void pinActive(StudioConfig* cfg, const std::string& id)
     }
 }
 
+/// The App::Part's tab: the outermost App::Part holding part that is no Assembly (ops#671 C3
+/// debt). A Part Studio is flat, in Onshape and in App::DocumentTabs::tabOf: a Body in an
+/// App::Part inside a studio is the studio's part, configured by the studio's inputs. An Assembly,
+/// or a part inside one, is left as it is.
+App::Part* tabStudio(App::Part* part)
+{
+    // By name, each time (Part doesn't link the Assembly module, which can load later)
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    auto isAssembly = [assembly](const App::Part* p) {
+        return !assembly.isBad() && p->isDerivedFrom(assembly);
+    };
+    if (!part || isAssembly(part)) {
+        return part;
+    }
+    std::set<const App::Part*> seen {part};
+    for (auto outer = App::Part::getPartOfObject(part, /*recursive=*/true);
+         outer && !isAssembly(outer) && seen.insert(outer).second;
+         outer = App::Part::getPartOfObject(outer, /*recursive=*/true)) {
+        part = outer;
+    }
+    return part;
+}
+
 App::Part* studioOfObject(const App::DocumentObject* obj)
 {
     if (!obj) {
         return nullptr;
     }
-    if (auto body = freecad_cast<Body*>(const_cast<App::DocumentObject*>(obj))) {
+    auto body = freecad_cast<Body*>(const_cast<App::DocumentObject*>(obj));
+    if (!body) {
+        body = Body::findBodyOf(obj);
+    }
+    if (body) {
         App::Part* studio = nullptr;
         Part::BodyBase::studioOf(body, studio);
-        return studio;
+        return tabStudio(studio);
     }
-    if (auto body = Body::findBodyOf(obj)) {
-        App::Part* studio = nullptr;
-        Part::BodyBase::studioOf(body, studio);
-        return studio;
-    }
-    return App::Part::getPartOfObject(obj, /*recursive=*/true);
+    return tabStudio(App::Part::getPartOfObject(obj, /*recursive=*/true));
 }
 
 StudioConfig* configOfObject(const App::DocumentObject* obj)
@@ -877,6 +899,8 @@ StudioConfig* StudioConfig::of(App::Document* doc, App::Part* studio, bool creat
     if (!doc || (!create && liveConfigs.load() == 0)) {
         return nullptr;
     }
+    // An App::Part inside a studio has the studio's configuration (studioOfObject's rule)
+    studio = tabStudio(studio);
     for (auto obj : doc->getObjectsOfType(StudioConfig::getClassTypeId())) {
         auto cfg = static_cast<StudioConfig*>(obj);
         if (cfg->studio() == studio) {
