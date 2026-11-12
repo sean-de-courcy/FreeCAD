@@ -277,6 +277,19 @@ class TestFillet(unittest.TestCase):
         # One quarter cylinder per edge; refined, they merge into one half cylinder
         self.assertEqual(len(fillet.Shape.Faces), 6 if fillet.Refine else 7)
 
+    def testFilletFullRoundOfAWallFlushWithItsBase(self):
+        # ops#640 F1 (the replica's row 150): a curved wall's end flush with its base's end, the two
+        # left as faces in one plane, so four edges meet at the foot of each rounded edge. The
+        # feature builds the full round at half the wall: FR1's section over the wall's height
+        shape, edges = models.wall_on_base()
+        _, removed, side = models.wall_end_round(10, 11.5, 4)
+        fillet = self._fillet_on_base(shape, edges, 0.75)
+        self._assertValidFillet(fillet, shape.Volume - removed)
+        self.assertAlmostEqual(fillet.Shape.Area, shape.Area - side, places=5)
+        # Refined, as Onshape's: the base's faces without its splits, and one half cylinder
+        self.assertTrue(fillet.Refine)
+        self.assertEqual(len(fillet.Shape.Faces), len(shape.removeSplitter().Faces) + 1)
+
     # Results that the full check rejects too (ops#12): the base is a 10 mm cube with a fin, a
     # face hanging inward at 45 degrees from the front bottom edge, so that three faces meet at
     # the edge. The fillet on the back top edge keeps the fin, and its result is invalid. The
