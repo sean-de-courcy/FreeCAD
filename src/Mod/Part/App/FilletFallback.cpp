@@ -1922,16 +1922,47 @@ bool neighbours(const TopoDS_Shape& a, const TopoDS_Shape& b)
     return false;
 }
 
+/** How long a stretch of the edge the part of a strip off its face runs along: the edge's
+ * common part with it (a Boolean of mixed dimensions keeps the edge's pieces on it). A strip that
+ * only grazes the edge at a point (at a vertex where it runs off over another edge) has none
+ */
+double lengthAlong(const TopoDS_Edge& edge, const TopoDS_Shape& off)
+{
+    TopTools_ListOfShape arguments;
+    arguments.Append(edge);
+    TopTools_ListOfShape tools;
+    tools.Append(off);
+    BRepAlgoAPI_Common common;
+    common.SetArguments(arguments);
+    common.SetTools(tools);
+    common.SetNonDestructive(Standard_True);
+    common.SetRunParallel(Standard_False);
+    common.Build();
+    if (!common.IsDone() || common.HasErrors()) {
+        refuse("finding where a tangent strip runs off its face failed");
+    }
+    double length = 0.0;
+    for (TopExp_Explorer it(common.Shape(), TopAbs_EDGE); it.More(); it.Next()) {
+        length += perimeterOf(it.Current());
+    }
+    return length;
+}
+
 /** A cut tool's strip that runs off its face (ops#640, S3) may cross only convex edges, onto
  * faces that turn away from the face's outward side: the air beyond trims the tool (Onshape's
  * KP1-KP4). Across a concave edge, into a wall that rises from the face (a ledge rounded wider
- * than the ledge), the tool would cut the wall, and Onshape fails too (fillet-parity 3.5x)
+ * than the ledge), the tool would cut the wall, and Onshape fails too (fillet-parity 3.5x).
+ *
+ * Returns whether it runs off across an edge that is not selected, along a stretch of it: past
+ * the face's far side (a keyhole wall's top, its outer loop), not over a neighbouring selected
+ * edge (a lens's tips, where each arc's strip runs over the other arc)
  */
-void checkRunOff(
+bool checkRunOff(
     const TopoDS_Face& face,
     const TopoDS_Shape& contact,
     const TopoDS_Shape& source,
-    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces
+    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+    const TopTools_IndexedMapOfShape& selected
 )
 {
     BRepAlgoAPI_Cut outside(contact, face);
@@ -1939,6 +1970,7 @@ void checkRunOff(
         refuse("finding where a tangent strip runs off its face failed");
     }
     const TopoDS_Shape off = outside.Shape();
+    bool pastUnselected = false;
     for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
         const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
         // A seam (a cylinder's) stays on the face
@@ -1963,7 +1995,13 @@ void checkRunOff(
         if (away.Dot(outwardNormal(face, curve.Value(middle))) > -1e-6) {
             refuse("a tangent strip runs off its face into a wall");
         }
+        // Along more than the tolerance of a grazing contact, by a margin
+        if (!pastUnselected && !selected.Contains(edge)
+            && lengthAlong(edge, off) > 1000 * linearTolerance) {
+            pastUnselected = true;
+        }
     }
+    return pastUnselected;
 }
 
 /** A fused tool's strip that runs off its face (ops#640, #15 past the limit) must run into the
@@ -2120,15 +2158,18 @@ Tool miterTool(
  * whether that happened (the tools are then "trimmed": their volumes are no longer their closed
  * forms). A fused tool (a concave edge) that overlaps another is refused; one whose strip runs
  * off its face must run into the base's material (checkFusedRunOff), and is listed in fusedOff:
- * the air beyond the face would have nothing to trim it.
+ * the air beyond the face would have nothing to trim it. A cut tool's strip that runs off its face
+ * across an edge that is not selected (checkRunOff) is listed in pastLoop.
  */
 bool checkStrips(
     const std::vector<Tool>& tools,
     const std::vector<Overlap>& overlaps,
     bool limitOnly,
     const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+    const TopTools_IndexedMapOfShape& selected,
     const TopoDS_Shape& base,
-    std::vector<const Tool*>& fusedOff
+    std::vector<const Tool*>& fusedOff,
+    std::vector<const Strip*>& pastLoop
 )
 {
     bool trimmed = false;
@@ -2183,8 +2224,16 @@ bool checkStrips(
                         checkFusedRunOff(group.face, contact, base);
                         fusedOff.push_back(group.owners[k]);
                     }
-                    else {
-                        checkRunOff(group.face, contact, group.owners[k]->source, edgeFaces);
+                    else if (checkRunOff(
+                                 group.face,
+                                 contact,
+                                 group.owners[k]->source,
+                                 edgeFaces,
+                                 selected
+                             )
+                             && std::find(pastLoop.begin(), pastLoop.end(), strip)
+                                 == pastLoop.end()) {
+                        pastLoop.push_back(strip);
                     }
                     offTheFace.push_back(strip);
                     trimmed = true;
@@ -2560,6 +2609,10 @@ TopoDS_Shape constructShape(
     bool unionCorners = false;
     // The concave ones, each with its miter piece
     std::vector<TopoDS_Vertex> miterCorners;
+    // The two-edge corners of convex edges at a vertex convex in the material (Corner2,
+    // Corner2Union), and the selected edges that continue one another tangentially
+    std::vector<TopoDS_Vertex> convexCorners;
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> continuations;
     for (const auto& edgeData : data) {
         VertexEnd ends[2];
         if (!edgeData.closed) {
@@ -2590,6 +2643,24 @@ TopoDS_Shape constructShape(
                 auto known = [&](const TopoDS_Vertex& v) {
                     return v.IsSame(vertices[i]);
                 };
+                if (edgeData.convex
+                    && (kind == VertexClass::Corner2Union || kind == VertexClass::Corner2)
+                    && std::none_of(convexCorners.begin(), convexCorners.end(), known)) {
+                    // A Corner2Union of convex edges is convex (classifyUnionCorner); a Corner2
+                    // may be concave (a U's inner corners)
+                    bool convexVertex = kind == VertexClass::Corner2Union;
+                    if (!convexVertex) {
+                        std::string unused;
+                        auto corner = cornerAt(ctx, vertices[i], unused);
+                        convexVertex = corner && corner->convex;
+                    }
+                    if (convexVertex) {
+                        convexCorners.push_back(vertices[i]);
+                    }
+                }
+                if (kind == VertexClass::TangentContinuation) {
+                    continuations.emplace_back(edgeData.edge, ends[slot].continuation);
+                }
                 if (kind == VertexClass::Corner2Union && !edgeData.convex
                     && std::none_of(miterCorners.begin(), miterCorners.end(), known)) {
                     miterCorners.push_back(vertices[i]);
@@ -2712,9 +2783,83 @@ TopoDS_Shape constructShape(
     }
     // The tools at a corner with a circle overlap: their volumes are measured, as past the limit
     std::vector<const Tool*> fusedOff;
-    const bool trimmed
-        = checkStrips(tools, overlaps, request.limitOnly, ctx.edgeFaces, base.getShape(), fusedOff)
+    std::vector<const Strip*> pastLoop;
+    const bool trimmed = checkStrips(
+                             tools,
+                             overlaps,
+                             request.limitOnly,
+                             ctx.edgeFaces,
+                             ctx.selected,
+                             base.getShape(),
+                             fusedOff,
+                             pastLoop
+                         )
         || unionCorners;
+    // Onshape, oracle 9e (ops#640, K1): CHAMFER/FILLET_OVERLAPS_EDGE_LOOP. Where two selected
+    // edges meet at a corner convex in the material and the strips on both sides of it, on the
+    // face that holds both edges, run past that face's outer loop (a keyhole wall's top chamfered
+    // wider than the wall at the arc and along the slot), Onshape refuses. One side past it builds
+    // (the arc exactly as wide as the wall), and so do strips past it with no such corner between
+    // them (the arc alone, both legs) or at a concave one (a U). An edge's strip is past it where
+    // a strip of its tangent chain on that face is: the arc in pieces is Onshape's one edge
+    auto pastOuterLoop = [&](const TopoDS_Shape& edge, const TopoDS_Face& face) {
+        std::vector<TopoDS_Shape> chain {edge};
+        auto inChain = [&](const TopoDS_Shape& shape) {
+            return std::any_of(chain.begin(), chain.end(), [&](const TopoDS_Shape& c) {
+                return c.IsSame(shape);
+            });
+        };
+        for (size_t i = 0; i < chain.size(); ++i) {
+            for (const auto& link : continuations) {
+                const TopoDS_Shape current = chain[i];
+                if (link.first.IsSame(current) && !inChain(link.second)) {
+                    chain.push_back(link.second);
+                }
+                else if (link.second.IsSame(current) && !inChain(link.first)) {
+                    chain.push_back(link.first);
+                }
+            }
+        }
+        for (const auto& tool : tools) {
+            if (!tool.cut || !inChain(tool.source)) {
+                continue;
+            }
+            for (const auto& strip : tool.strips) {
+                if (strip.face.IsSame(face)
+                    && std::find(pastLoop.begin(), pastLoop.end(), &strip) != pastLoop.end()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    for (const auto& vertex : convexCorners) {
+        std::vector<const EdgeData*> pair;
+        for (const auto& shape : ctx.list(ctx.vertexEdges, vertex)) {
+            auto it = std::find_if(data.begin(), data.end(), [&](const EdgeData& d) {
+                return d.edge.IsSame(shape);
+            });
+            if (it != data.end()) {
+                pair.push_back(&*it);
+            }
+        }
+        if (pair.size() != 2) {
+            continue;
+        }
+        TopoDS_Face shared;
+        for (const auto& mine : pair[0]->faces) {
+            for (const auto& theirs : pair[1]->faces) {
+                if (mine.IsSame(theirs)) {
+                    shared = mine;
+                }
+            }
+        }
+        if (!shared.IsNull() && pastOuterLoop(pair[0]->edge, shared)
+            && pastOuterLoop(pair[1]->edge, shared)) {
+            refuse("two picked edges meet at a corner convex in the material, and both their strips "
+                   "run past the face's outer loop");
+        }
+    }
     // A fused tool in the base's material: only where its strip ran off its face into it, and a
     // miter piece only beside such tools (its own faces are the tools' run on)
     for (const auto& tool : tools) {

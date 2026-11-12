@@ -2222,22 +2222,104 @@ class CornerWithACircleTest(unittest.TestCase):
         wall, edges = keyhole_ridge()
         wide, wideEdges = keyhole_ridge(1.6, 1.6)
         self.assertEqual(len(edges), 5)  # the arc in three pieces, at the cylinders' seams
-        for kind, size in (("Chamfer", 1.0), ("Fillet", 1.0), ("Chamfer", 1.05), ("Fillet", 1.05)):
-            with self.subTest(kind=kind, size=size):
+        for kind in ("Chamfer", "Fillet"):
+            with self.subTest(kind=kind, size=1.0):
                 if kind == "Chamfer":
-                    shape, reference = wall.makeChamfer(size, edges), wide.makeChamfer(size, wideEdges)
+                    shape, reference = wall.makeChamfer(1.0, edges), wide.makeChamfer(1.0, wideEdges)
                 else:
-                    shape, reference = wall.makeFillet(size, edges), wide.makeFillet(size, wideEdges)
+                    shape, reference = wall.makeFillet(1.0, edges), wide.makeFillet(1.0, wideEdges)
                 # The wall's top is consumed: 10 faces, less the top, plus one per edge
                 self.assertSameAs(shape, wall, reference, 14)
+        # Past the arc's wall Onshape refuses (oracle 9e, CHAMFER/FILLET_OVERLAPS_EDGE_LOOP from
+        # 1.001 on): the arc's strip and a leg's meet at a corner convex in the material, both
+        # running past the top's outer loop. So does a wall 1.0 thick on the legs too
+        legs = keyhole_ridge(1.0, 1.0)
+        for name, solid, picked, size in (
+            ("Chamfer", wall, edges, 1.05),
+            ("Fillet", wall, edges, 1.05),
+            ("Chamfer", wall, edges, 1.001),
+            ("Chamfer", legs[0], legs[1], 1.001),
+            ("Fillet", legs[0], legs[1], 1.05),
+        ):
+            with self.subTest(kind=name, size=size, legWall=solid is legs[0]):
+                with self.assertRaises(Part.OCCError):
+                    if name == "Chamfer":
+                        solid.makeChamfer(size, picked)
+                    else:
+                        solid.makeFillet(size, picked)
         # Onshape (oracle 9, this wall): removed 25.0539 and 10.6857, area -30.2078 and -21.2981;
-        # 12 faces, its arc being one edge. At 1.05 it refuses (CHAMFER_OVERLAPS_EDGE_LOOP), where
-        # the construction builds the shape above
+        # 12 faces, its arc being one edge
         for kind, removed, area in (("Chamfer", 25.0539, -30.2078), ("Fillet", 10.6857, -21.2981)):
             with self.subTest(onshape=kind):
                 shape = wall.makeChamfer(1.0, edges) if kind == "Chamfer" else wall.makeFillet(1.0, edges)
                 self.assertAlmostEqual(wall.Volume - shape.Volume, removed, delta=2e-4)
                 self.assertAlmostEqual(shape.Area - wall.Area, area, delta=2e-4)
+
+    def testKeyholeWallPartlyPastItsWidth(self):
+        # Onshape (oracle 9e) builds a strip past the outer loop where no picked corner convex in
+        # the material has such strips on both sides: the arc alone, one leg, both legs, thick legs.
+        # Its volumes, to its 4 decimals; the faces differ, its arc being one edge
+        wall, edges = keyhole_ridge()
+        arc = [e for e in edges if e.Curve.TypeId == "Part::GeomCircle"]
+        left = [e for e in edges if e.Curve.TypeId == "Part::GeomLine" and e.CenterOfMass.y > 0]
+        right = [e for e in edges if e.Curve.TypeId == "Part::GeomLine" and e.CenterOfMass.y < 0]
+        self.assertEqual((len(arc), len(left), len(right)), (3, 1, 1))
+        self.assertAlmostEqual(wall.Volume, 149.6516, delta=1e-4)
+        thick, thickEdges = keyhole_ridge(1.0, 1.775)
+        # Debt (ops#676): the arc alone and the thick legs differ from Onshape, whose volumes are
+        # in the comments; the current results are pinned (5e-4) so a change shows
+        for name, solid, picked, kind, volume in (
+            ("arc", wall, arc, "Fillet", 142.75744),  # Onshape 142.7221
+            ("leg", wall, left, "Chamfer", 143.429),
+            ("leg", wall, right, "Fillet", 147.019),
+            ("legs", wall, left + right, "Chamfer", 137.2064),
+            ("thick legs", thick, thickEdges, "Chamfer", 176.32184),  # Onshape 176.3182
+        ):
+            with self.subTest(picked=name, kind=kind):
+                if kind == "Chamfer":
+                    shape = solid.makeChamfer(1.05, picked)
+                else:
+                    shape = solid.makeFillet(1.05, picked)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Volume, volume, delta=5e-4)
+        # The arc's chamfer alone is refused where Onshape builds it (V 133.1013, ops#676)
+        with self.assertRaises(Part.OCCError):
+            wall.makeChamfer(1.05, arc)
+        # The arc and one leg: Onshape fails (CHAMFER_FAILED)
+        with self.assertRaises(Part.OCCError):
+            wall.makeChamfer(1.05, arc + left)
+
+    def testRingAndUPastTheirWalls(self):
+        # Onshape (oracle 9e) builds these at 1.05 on walls 1.0 thick, the top consumed: a ring's
+        # inner top circle, and a U's three inner top edges, whose corners are concave
+        ring = Part.makeCylinder(7.35, 3).cut(Part.makeCylinder(6.35, 5, V(0, 0, -1)))
+        u = Part.makeBox(12, 12, 3).cut(Part.makeBox(10, 12, 5, V(1, 1, -1)))
+        uEdges = [
+            e
+            for e in u.Edges
+            if all(abs(v.Point.z - 3) < 1e-9 for v in e.Vertexes)
+            and 0.75 < e.CenterOfMass.x < 11.25
+            and 0.75 < e.CenterOfMass.y
+        ]
+        self.assertEqual(len(uEdges), 3)
+        for name, solid, picked, kind, volume in (
+            ("ring", ring, None, "Chamfer", 105.9712),
+            ("ring", ring, None, "Fillet", 119.3319),
+            ("U", u, uEdges, "Chamfer", 83.6333),
+            ("U", u, uEdges, "Fillet", 94.2077),
+        ):
+            with self.subTest(solid=name, kind=kind):
+                if name == "ring":
+                    picked = [e for e in edges_at(solid, 3.0) if abs(e.Curve.Radius - 6.35) < 1e-9]
+                    self.assertEqual(len(picked), 1)
+                if kind == "Chamfer":
+                    shape = solid.makeChamfer(1.05, picked)
+                else:
+                    shape = solid.makeFillet(1.05, picked)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Volume, volume, delta=1e-3)
 
     def testKeyholeWallAtItsWidth(self):
         wall, edges = keyhole_ridge(1.0, 1.0)
