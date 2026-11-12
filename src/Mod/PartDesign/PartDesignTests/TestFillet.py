@@ -281,7 +281,7 @@ class TestFillet(unittest.TestCase):
         # ops#640 F1 (the replica's row 150): a curved wall's end flush with its base's end, the two
         # left as faces in one plane, so four edges meet at the foot of each rounded edge. The
         # feature builds the full round at half the wall: FR1's section over the wall's height
-        shape, edges = models.wall_on_base()
+        shape, edges = models.curved_wall_on_base()
         _, removed, side = models.wall_end_round(10, 11.5, 4)
         fillet = self._fillet_on_base(shape, edges, 0.75)
         self._assertValidFillet(fillet, shape.Volume - removed)
