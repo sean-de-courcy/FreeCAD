@@ -2397,6 +2397,30 @@ TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
     }
 }
 
+TEST_F(FilletFallbackTest, refusesATrimByAFinInFrontOfTheWall)
+{
+    // Review r1's case: a step (top z 10 over y 4..10, wall y 4 down to the ledge z 9.037) with a
+    // fin 0.5 thick standing on the ledge 0.02 in front of the wall, its top 0.5 above the ledge.
+    // The top's edge dressed up 1.0 runs past the wall's foot: the fin's section, closer to the
+    // wall than both offsets, would have trimmed the dress-up at the fin's top. Refused
+    const double h = 0.963;
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 10 - h), 22, 5, h + 1).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(0, 3.48, 10 - h), 20, 0.5, 0.5).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    TopoShape top = edgeBetween(base, {0, 4, 10}, {20, 4, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {top}, request, &reason).isNull());
+        EXPECT_NE(reason.find("not the wall"), std::string::npos) << reason;
+    }
+}
+
 TEST_F(FilletFallbackTest, refusesADressUpPastAConcaveEdgeIntoASlopedWall)
 {
     // The same strip past the riser's foot, but the tread slopes: its plane isn't square to the
