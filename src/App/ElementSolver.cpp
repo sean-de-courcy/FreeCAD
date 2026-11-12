@@ -3319,6 +3319,38 @@ bool sameRankName(std::string_view name, std::string_view oldName)
 namespace
 {
 
+// True if \a name and \a oldName differ only in their last section's connected elements, which
+// one side has and the other hasn't, neither counted (`<k>of<n>`): a helix's turn 1, the member
+// its start cap's edge tells apart from the other turns, and the lone face of a helix of one turn,
+// which no twin needs telling apart from (sweeps 16, sweep-design 13 T1; Onshape follows them)
+bool toldApartName(std::string_view name, std::string_view oldName)
+{
+    const auto as = NameAncestry::splitSections(name);
+    const auto bs = NameAncestry::splitSections(oldName);
+    if (as.empty() || as.size() != bs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i + 1 < as.size(); ++i) {
+        if (as[i] != bs[i]) {
+            return false;
+        }
+    }
+    DecodedMappedSection x = decodeSection(as.back());
+    DecodedMappedSection y = decodeSection(bs.back());
+    if (x.connectedElements.empty() == y.connectedElements.empty()
+        || x.duplicateCount != y.duplicateCount || rankOf(x.duplicateCount)) {
+        return false;
+    }
+    x.connectedElements.clear();
+    y.connectedElements.clear();
+    return x == y;
+}
+
+}  // namespace
+
+namespace
+{
+
 // Two sides' sets agree (ops#526 D2): as many entries, each matched once, a direction within
 // \a angle of the other with its sense, a curved side by its sign. Exact, the design's literal
 // rule (decision 219): a neighbour turned or a side added counts as other sides, loud.
@@ -6240,6 +6272,16 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             if (count >= 1 && twinsNow != count
                 && std::any_of(names.begin(), names.end(), [&](const auto& n) {
                        return sameRankName(n, oldName);
+                   })
+                && atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance)) {
+                return TwinPick::SameRank;
+            }
+            // A lone member and the member its connected elements tell apart, the group grown
+            // from one or shrunk to one (no record counts a lone member as 0 or 1), at the
+            // identical place: the same element, warned as SameRank is (sweeps 16)
+            if (saved && twinsNow != std::max(count, 1) && (count <= 1 || twinsNow == 1)
+                && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return toldApartName(n, oldName);
                    })
                 && atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance)) {
                 return TwinPick::SameRank;
