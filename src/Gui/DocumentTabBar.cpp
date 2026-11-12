@@ -395,6 +395,12 @@ Controller::Controller(MainWindow* mw)
             && !doc->testStatus(App::Document::Importing) && AppTabs::isVariableStudio(&obj)) {
             AppTabs::setVariableStudio(const_cast<App::DocumentObject*>(&obj), false);
         }
+        // Nor does it inherit a deleted studio's switch or a deleted tab's inserts (polish 13)
+        if (doc && obj.isAttachedToDocument() && !doc->isPerformingTransaction()
+            && !doc->testStatus(App::Document::Restoring)
+            && !doc->testStatus(App::Document::Importing)) {
+            AppTabs::forgetName(doc, obj.getNameInDocument());
+        }
         schedule(doc);
     }));
     connections.emplace_back(

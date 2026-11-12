@@ -97,6 +97,6 @@ def retype(obj, order, name, type_):
     if obj.getTypeIdOfProperty(name) == type_:
         return
     row = _snapshot(obj, name)
-    obj.VariableOrder = order  # its place, also where the order wasn't written yet
     obj.removeProperty(name)
     _restore(obj, row, type_)
+    obj.VariableOrder = order  # its place (the add put it last)

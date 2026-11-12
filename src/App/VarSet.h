@@ -62,6 +62,8 @@ public:
         bool hidden = false
     ) override;
     bool renameDynamicProperty(Property* prop, const char* name) override;
+    bool removeDynamicProperty(const char* name) override;
+    Property* moveDynamicProperty(Property* prop, DocumentObject* targetObj) override;
 
     /** FreeCAD-CH (ops#640, polish 13 P17): Onshape's order rule in a Variable Studio (VS Q5): a
      * variable may use only those above it, so one that uses a variable below it fails the

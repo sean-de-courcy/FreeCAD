@@ -700,7 +700,7 @@ def studio(*changes, drop=(), add=()):
     return [entry(*(variables + list(add)))]
 
 
-STATIC = set(FORMAT) | {"ExpressionEngine", "Label", "Label2", "Visibility"}
+STATIC = set(FORMAT) | {"ExpressionEngine", "Label", "Label2", "Visibility", "VariableOrder"}
 
 
 def dump(copy):

@@ -131,6 +131,10 @@ AppExport void setInserted(
     const std::string& studio,
     bool inserted
 );
+/** A new object reuses @p name (not an undo): the switch and the inserts kept under that name for a
+ * deleted studio or tab go, so the new one starts as Onshape's new ones do (on; nothing inserted)
+ */
+AppExport void forgetName(Document* doc, const std::string& name);
 /// Whether the tab @p tab sees @p studio's variables: always for anything but a Variable Studio
 AppExport bool seesStudio(const std::string& tab, const DocumentObject* studio);
 /// Whether an expression of @p owner sees @p holder's variables by #name: seesStudio() of

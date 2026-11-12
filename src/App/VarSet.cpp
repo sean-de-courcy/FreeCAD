@@ -43,7 +43,9 @@ VarSet::VarSet()
         VariableOrder,
         (),
         "",
-        PropertyType(Prop_Hidden | Prop_NoRecompute),
+        // A change touches the studio, an undo's or redo's too: the order rule is checked again
+        // (review polish13-r1 T-B)
+        PropertyType(Prop_Hidden),
         "The order of the variables (FreeCAD-CH)"
     );
 }
@@ -90,9 +92,12 @@ Property* VarSet::addDynamicProperty(
 {
     Property* prop = DocumentObject::addDynamicProperty(type, name, group, doc, attr, ro, hidden);
     if (prop && prop->getName() && isUserChange(this)) {
+        // A new variable goes last, also under a name a removed one left in the order (review
+        // polish13-r1 T3); a type change puts it back in its place itself
         std::vector<std::string> order = VariableOrder.getValues();
-        if (std::find(order.begin(), order.end(), prop->getName()) == order.end()) {
-            order.emplace_back(prop->getName());
+        std::erase(order, std::string(prop->getName()));
+        order.emplace_back(prop->getName());
+        if (order != VariableOrder.getValues()) {
             VariableOrder.setValues(order);
         }
     }
@@ -108,10 +113,57 @@ bool VarSet::renameDynamicProperty(Property* prop, const char* name)
     std::vector<std::string> order = VariableOrder.getValues();
     auto it = std::find(order.begin(), order.end(), old);
     if (!old.empty() && name && it != order.end() && isUserChange(this)) {
-        *it = name;
+        // The new name keeps the old one's place, and only that one (review T-A)
+        const std::string renamed = name;
+        *it = renamed;
+        std::vector<std::string> kept;
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            if (order[i] != renamed || order.begin() + std::ptrdiff_t(i) == it) {
+                kept.push_back(order[i]);
+            }
+        }
+        VariableOrder.setValues(kept);
+    }
+    return true;
+}
+
+bool VarSet::removeDynamicProperty(const char* name)
+{
+    const std::string removed = name ? name : "";
+    if (!DocumentObject::removeDynamicProperty(name)) {
+        return false;
+    }
+    // Its place goes with it, in the same transaction (review T-A): a later variable of that
+    // name is a new one, last
+    std::vector<std::string> order = VariableOrder.getValues();
+    if (!removed.empty() && isUserChange(this)
+        && std::find(order.begin(), order.end(), removed) != order.end()) {
+        std::erase(order, removed);
         VariableOrder.setValues(order);
     }
     return true;
+}
+
+Property* VarSet::moveDynamicProperty(Property* prop, DocumentObject* targetObj)
+{
+    const std::string name = prop && prop->getName() ? prop->getName() : "";
+    Property* moved = DocumentObject::moveDynamicProperty(prop, targetObj);
+    if (!moved || name.empty() || !isUserChange(this)) {
+        return moved;
+    }
+    // Out of this order, last in the target's (review T-C)
+    std::vector<std::string> order = VariableOrder.getValues();
+    if (std::find(order.begin(), order.end(), name) != order.end()) {
+        std::erase(order, name);
+        VariableOrder.setValues(order);
+    }
+    if (auto target = freecad_cast<VarSet*>(targetObj)) {
+        std::vector<std::string> theirs = target->VariableOrder.getValues();
+        std::erase(theirs, name);
+        theirs.push_back(name);
+        target->VariableOrder.setValues(theirs);
+    }
+    return moved;
 }
 
 const char* VarSet::getViewProviderName() const
@@ -121,7 +173,8 @@ const char* VarSet::getViewProviderName() const
 
 std::string VarSet::orderError() const
 {
-    if (!DocumentTabs::isVariableStudio(this)) {
+    if (!DocumentTabs::isVariableStudio(this) || VariableOrder.getValues().empty()) {
+        // A studio with no order written (from before polish 13) has none to break (review T4)
         return {};
     }
     const std::vector<std::string> names = getDynamicPropertyNames();

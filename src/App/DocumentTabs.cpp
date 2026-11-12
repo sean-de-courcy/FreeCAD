@@ -517,13 +517,19 @@ void DocumentTabs::setVariableStudio(DocumentObject* varSet, bool marked)
     Registry registry = readRegistry(varSet->getDocument());
     const std::string name = varSet->getNameInDocument();
     auto it = std::find(registry.variables.begin(), registry.variables.end(), name);
+    // Marking makes a studio that inserts itself everywhere: a deleted one's switch kept under
+    // its name (with its mark, for the delete's undo) goes (review polish13-r1 T1a)
+    const std::size_t switches = registry.local.size();
+    if (marked) {
+        std::erase(registry.local, name);
+    }
     if (marked && it == registry.variables.end()) {
         registry.variables.push_back(name);
     }
     else if (!marked && it != registry.variables.end()) {
         registry.variables.erase(it);
     }
-    else {
+    else if (registry.local.size() == switches) {
         return;
     }
     writeRegistry(varSet->getDocument(), registry);
@@ -596,6 +602,24 @@ void DocumentTabs::setInserted(
         return;
     }
     writeRegistry(doc, registry);
+}
+
+void DocumentTabs::forgetName(Document* doc, const std::string& name)
+{
+    if (!doc || name.empty()) {
+        return;
+    }
+    Registry registry = readRegistry(doc);
+    const std::size_t before = registry.local.size() + registry.inserted.size();
+    std::erase(registry.local, name);
+    std::erase_if(registry.inserted, [&name](const std::string& entry) {
+        auto colon = entry.find(':');
+        return colon == std::string::npos || entry.compare(0, colon, name) == 0
+            || entry.compare(colon + 1, std::string::npos, name) == 0;
+    });
+    if (registry.local.size() + registry.inserted.size() != before) {
+        writeRegistry(doc, registry);
+    }
 }
 
 bool DocumentTabs::seesStudio(const std::string& tab, const DocumentObject* studio)
@@ -802,6 +826,10 @@ DocumentObject* DocumentTabs::duplicate(Document* doc, const Tab& tab)
     }
     copy->Label.setValue(copyLabel);
     placeAfter(doc, copy->getNameInDocument(), original);
+    // The copy inserts what the original inserted by hand (review polish13-r1 T2)
+    for (const auto& studio : insertedStudios(doc, original)) {
+        setInserted(doc, copy->getNameInDocument(), studio, true);
+    }
     return copy;
 }
 

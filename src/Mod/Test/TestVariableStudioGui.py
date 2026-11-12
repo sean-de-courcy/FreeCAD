@@ -666,6 +666,24 @@ class TestVariableStudioGui(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(pad.Shape.Volume, 1000, 6)
 
+    def testReusedNamesStartClean(self):
+        """A Part Studio made under a deleted one's internal name inserts nothing; a Variable
+        Studio under a deleted one's name starts on (review polish13-r1 T1)."""
+        name, view = self.studio()
+        studio = self.doc.getObject(name)
+        Tabs.setInsertsEverywhere(studio, False)
+        part = self.doc.addObject("App::Part", "Part")
+        self.doc.recompute()
+        Tabs.setInserted(self.doc, "Part", name)
+        self.assertEqual(Tabs.insertedStudios(self.doc, "Part"), [name])
+        self.doc.removeObject("Part")
+        pump(0.2)
+        again = self.doc.addObject("App::Part", "Part")
+        self.assertEqual(again.Name, "Part")
+        pump(0.2)
+        self.assertEqual(Tabs.insertedStudios(self.doc, "Part"), [])
+        self.assertFalse(Tabs.insertsEverywhere(studio))
+
 
 if __name__ == "__main__":
     unittest.main()

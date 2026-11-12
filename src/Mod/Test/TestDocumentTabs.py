@@ -667,3 +667,82 @@ class TestVariableStudioInsert(unittest.TestCase):
             Tabs.setInsertsEverywhere(plain, False)
         with self.assertRaises(ValueError):
             Tabs.setInserted(self.doc, "Part", "a,b")
+
+    def testDeletedStudioNameReusedStartsOn(self):
+        """A studio made under a deleted studio's internal name starts on, as every new studio
+        (review polish13-r1 T1a)."""
+        Tabs.setInsertsEverywhere(self.vs2, False)
+        self.doc.removeObject("VarSet001")
+        again = self.doc.addObject("App::VarSet", "VarSet001")
+        self.assertEqual(again.Name, "VarSet001")
+        Tabs.setVariableStudio(again)
+        self.assertTrue(Tabs.insertsEverywhere(again))
+
+    def testDuplicateKeepsTheInserts(self):
+        """A duplicated Part Studio inserts what the original inserted by hand (review T2)."""
+        Tabs.setInsertsEverywhere(self.vs2, False)
+        Tabs.setInserted(self.doc, "Part", self.vs2.Name)
+        copy = Tabs.duplicate(self.doc, "Part")
+        self.assertEqual(Tabs.insertedStudios(self.doc, copy), [self.vs2.Name])
+
+    def testVariableOrder(self):
+        """App::VarSet::VariableOrder (P17): variables listed in the order added, a re-added one
+        last (review T3); the order rule fails a studio whose variable uses one below it, and
+        none while no order is written (a file from before it, review T4)."""
+        vs = self.vs1
+        for name in ("a", "b", "c"):
+            vs.addProperty("App::PropertyDistance", name)
+        self.assertEqual(list(vs.VariableOrder), ["w", "a", "b", "c"])
+        vs.removeProperty("a")
+        vs.addProperty("App::PropertyDistance", "a")
+        self.assertEqual(list(vs.VariableOrder), ["w", "b", "c", "a"])
+        vs.setExpression("b", "c * 2")
+        vs.touch()
+        self.doc.recompute()
+        self.assertIn("Invalid", vs.State)
+        vs.VariableOrder = []
+        vs.touch()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", vs.State)
+        vs.VariableOrder = ["w", "c", "b", "a"]
+        vs.touch()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", vs.State)
+
+    def testRenameIntoADeletedNameKeepsItsPlace(self):
+        """wid, hgt, dep = hgt * 2: wid deleted, dep renamed wid keeps dep's place below hgt, and
+        the studio stays valid (review polish13-r1 T-A)."""
+        vs = self.vs1
+        vs.removeProperty("w")
+        for name in ("wid", "hgt", "dep"):
+            vs.addProperty("App::PropertyDistance", name)
+        vs.hgt = 300
+        vs.setExpression("dep", "hgt * 2")
+        self.doc.recompute()
+        vs.removeProperty("wid")
+        vs.renameProperty("dep", "wid")
+        self.assertEqual(list(vs.VariableOrder), ["hgt", "wid"])
+        vs.touch()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", vs.State)
+        self.assertAlmostEqual(vs.wid.Value, 600, 9)
+
+    def testUndoAndRedoCheckTheOrderAgain(self):
+        """A move into a breach, undone and redone: each recompute checks the order rule again
+        (review T-B)."""
+        self.doc.UndoMode = 1
+        vs = self.vs1
+        vs.addProperty("App::PropertyDistance", "h")
+        vs.setExpression("h", "w * 2")
+        self.doc.recompute()
+        self.doc.openTransaction("Move up h")
+        vs.VariableOrder = ["h", "w"]
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertIn("Invalid", vs.State)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", vs.State)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertIn("Invalid", vs.State)
