@@ -1052,6 +1052,29 @@ class TestPipeSelfOverlapUnion(PipeCase):
         for outside in ((10, 0.3, 0), (10, 2, 0), (5, 0, 0)):
             self.assertFalse(solid.isInside(V(*outside), 1e-6, False), outside)
 
+    def testRoundCornerCircleOverlapping(self):
+        """S2's tube with 'Round corner' (FreeCAD's option; Onshape mitres every sharp corner and
+        builds S2's union, oracle 9). Each 90 degree round corner holds the legs cut square at the
+        corner, less their overlap on the inside (a quarter of the bicylinder, 4/3 r^3), plus the
+        sphere's quarter wedge outside (pi/3 r^3): pi x 49.5 - 3 (4 - pi) / 3 for r 1, and the union
+        drops S2's overlap at leg 4's end, 1.117866, as with the mitre. Stopped with OCCT's
+        BOPAlgo_AlertUnableToOrientTheShape (sweeps 14)."""
+        pipe = self.tube((10, 0.5), Transition="Round corner")
+        self.assertOneSolid(pipe, math.pi * 49.5 - (4 - math.pi) - 1.117866, places=5)
+        self.assertTrue(pipe.Shape.Solids[0].isInside(V(10, 0.75, 0), 1e-6, False))
+
+    def testRoundCornerRingOverlapping(self):
+        """The ring r 1 / 0.4 with 'Round corner', its wall meeting itself: OCCT's maker leaves
+        faces unused and a Round corner's joint has no planar edges to cut the tubes at, so it stops,
+        naming Right corner (Onshape has no Round corner: it mitres, and builds the union, which
+        testRingProfileHoleStaysOpen checks for the mitre). Building it here is debt (sweeps 18)."""
+        pipe = self.tube((10, 1.5), [models.circle(0, 0, 1), models.circle(0, 0, 0.4)],
+                         Transition="Round corner")
+        self.assertOneSolid(pipe)
+        models.setLines(self.doc.getObject("Path"), {3: ((10, 10), (10, 0.5))})
+        self.doc.recompute()
+        self.assertStops(pipe, "overlaps itself", "Round corner", "Right corner")
+
     def testClosedSpinePassingNearItself(self):
         """A closed path with a notch, (0,0)-(20,0)-(20,10)-(12,10)-(12,1.5)-(8,1.5)-(8,10)-(0,10): the
         notch's bottom runs 1.5 above leg 1 for 4, so the tubes (r 1) overlap there (a lens of 0.4532
@@ -1510,3 +1533,132 @@ class TestPipeThin(PipeCase):
         path = self.line(0, 10)
         pipe = self.pipe(self.strip(), path, kind="SubtractivePipe", BodyType="Thin", Thickness1=1)
         self.assertSweeps(pipe, 1000 - 40)
+
+    def faceNameAt(self, pipe, point):
+        """The mapped name of the one face of `pipe` holding `point`."""
+        found = [i for i, f in enumerate(pipe.Shape.Faces, 1)
+                 if f.distToShape(Part.Vertex(V(*point)))[0] < 1e-6]
+        self.assertEqual(len(found), 1, (point, found))
+        return pipe.Shape.getElementMappedName("Face%d" % found[0])
+
+    def assertSidesKeepTheirNames(self, points, **properties):
+        """The wall's sides along the last curve of the polyline (0,0)-(10,0)-(10,-8) keep their names when
+        a segment (10,-8)-(0,-8) follows it (sweeps 19, ops#640): each side's face, at x = 10 +- `points`,
+        is named from the curve alone, never as a twin counted with a piece of the wall's end."""
+        profile = self.strip(((0, 0), (10, 0), (10, -8)))
+        pipe = self.pipe(profile, self.line(0, 20), BodyType="Thin", **properties)
+        before = [self.faceNameAt(pipe, (x, -4, 10)) for x in points]
+        profile.addGeometry(Part.LineSegment(V(10, -8, 0), V(0, -8, 0)), False)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        after = [self.faceNameAt(pipe, (x, -4, 10)) for x in points]
+        self.assertEqual(before, after)
+
+    def testMidplaneLastCurveSidesKeepTheirNames(self):
+        self.assertSidesKeepTheirNames((9.5, 10.5), Thickness1=1, Midplane=True)
+
+    def testTwoSidedLastCurveSidesKeepTheirNames(self):
+        self.assertSidesKeepTheirNames((9, 10.5), Thickness1=1, Thickness2=0.5)
+
+
+class TestPipeThinReferencesKeepTheirSide(PipeCase):
+    """Oracle 12, Q-THIN-MID (THM1-THM4, sweeps 20, ops#640): a thin sweep along a 90 degree left turn, path
+    (0,0)-(30,0)-(30,20) on Top, of an open profile on Right, the line y 0, z 0..10 (drawn up, so the wall goes
+    to +y, the inside of the bend), thickness 2. A sketch on the inside wall A (y 2 in the base) holds a circle
+    r 2 at x 10, z 5, padded 1 mm; a fillet r 0.5 rounds the top edge of the outside wall B (y 0) on the
+    first leg. Onshape keeps each reference on its side of the bend in every (Midplane, FlipWall) state, and
+    with Midplane on Flip changes nothing. The wall's corner is mitred, so the solid is the L of the wall's
+    two legs; its volume is 10 x that L's area, plus the boss's 4 pi, less the fillet's (1 - pi / 4) r^2 along
+    the outside edge of the first leg: 970.957, 1010.903, 1050.850 and 1010.903 (Onshape: 970.96, 1010.90,
+    1050.85, 1010.90)."""
+
+    # (Midplane, FlipWall) -> the wall on the first leg, y0..y1: A is the y1 side, B the y0 side
+    WALL = {(False, False): (0, 2), (True, False): (-1, 1), (False, True): (-2, 0), (True, True): (-1, 1)}
+
+    def expectedVolume(self, y0, y1):
+        # The L: the first leg x 0..30 + (the outside's reach past the corner), the second leg's 20 + the same
+        reach = -y0
+        legs = (30 + reach) * 2 + (20 + reach) * 2 - 4
+        fillet = (1 - math.pi / 4) * 0.25 * (30 + reach)
+        return 10 * legs + 4 * math.pi - fillet
+
+    def faceAt(self, shape, point, normal):
+        found = [i for i, f in enumerate(shape.Faces, 1)
+                 if f.Surface.TypeId == "Part::GeomPlane" and f.distToShape(Part.Vertex(V(*point)))[0] < 1e-6
+                 and abs(f.normalAt(0, 0).dot(V(*normal)) - 1) < 1e-6]
+        self.assertEqual(len(found), 1, (point, found))
+        return "Face%d" % found[0]
+
+    def edgeAt(self, shape, a, b):
+        found = [i for i, e in enumerate(shape.Edges, 1)
+                 if e.distToShape(Part.Vertex(V(*a)))[0] < 1e-6 and e.distToShape(Part.Vertex(V(*b)))[0] < 1e-6]
+        self.assertEqual(len(found), 1, (a, b, found))
+        return "Edge%d" % found[0]
+
+    def build(self):
+        path = self.sketch("Path", models.polyline([(0, 0), (30, 0), (30, 20)]))
+        right = App.Placement(V(0, 0, 0), App.Rotation(0.5, 0.5, 0.5, 0.5))  # sketch (x, y) -> (0, x, y)
+        profile = self.sketch("Profile", models.polyline([(0, 0), (0, 10)]), placement=right)
+        pipe = self.pipe(profile, path, BodyType="Thin", Thickness1=2)
+        self.assertSweeps(pipe, 960)
+        sketch = self.body.newObject("Sketcher::SketchObject", "SketchOnA")
+        sketch.AttachmentSupport = [(pipe, self.faceAt(pipe.Shape, (15, 2, 5), (0, 1, 0)))]
+        sketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        centre = sketch.Placement.inverse().multVec(V(10, 2, 5))
+        sketch.addGeometry(Part.Circle(V(centre.x, centre.y, 0), V(0, 0, 1), 2), False)
+        boss = models.pad(self.body, sketch, 1, name="BossOnA")
+        self.doc.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "FilletOnB")
+        fillet.Base = (boss, [self.edgeAt(boss.Shape, (5, 0, 10), (25, 0, 10))])
+        fillet.Radius = 0.5
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        return pipe, sketch, boss, fillet
+
+    def assertState(self, features, midplane, flip):
+        pipe, sketch, boss, fillet = features
+        pipe.Midplane = midplane
+        pipe.FlipWall = flip
+        self.doc.recompute()
+        state = (midplane, flip)
+        for feature in features:
+            self.assertTrue(feature.isValid(), (state, feature.Name, feature.getStatusString()))
+        y0, y1 = self.WALL[state]
+        # The sketch on A, facing +y, at x 10 z 5
+        self.assertAlmostEqual(sketch.Placement.Base.y, y1, 6, state)
+        normal = sketch.Placement.Rotation.multVec(V(0, 0, 1))
+        self.assertLess((normal - V(0, 1, 0)).Length, 1e-9, (state, normal))
+        circle = sketch.Shape.Edges[0]
+        self.assertLess((circle.Curve.Center - V(10, y1, 5)).Length, 1e-6, (state, circle.Curve.Center))
+        # The boss on A, y1..y1 + 1; the fillet on B's top edge, y0..y0 + 0.5
+        bossFaces = [f for f in fillet.Shape.Faces if f.Surface.TypeId == "Part::GeomCylinder"
+                     and abs(f.Surface.Radius - 2) < 1e-6]
+        self.assertEqual(len(bossFaces), 1, state)
+        self.assertAlmostEqual(bossFaces[0].BoundBox.YMin, y1, 5, state)
+        self.assertAlmostEqual(bossFaces[0].BoundBox.YMax, y1 + 1, 5, state)
+        rounds = [f for f in fillet.Shape.Faces if f.Surface.TypeId == "Part::GeomCylinder"
+                  and abs(f.Surface.Radius - 0.5) < 1e-6]
+        self.assertEqual(len(rounds), 1, state)
+        box = rounds[0].BoundBox
+        self.assertAlmostEqual(box.YMin, y0, 5, state)
+        self.assertAlmostEqual(box.YMax, y0 + 0.5, 5, state)
+        self.assertAlmostEqual(box.ZMax, 10, 5, state)
+        self.assertAlmostEqual(fillet.Shape.Volume, self.expectedVolume(y0, y1), 2, state)
+
+    def testEachStateFromTheBase(self):
+        """Oracle 12's steps 1, 2 and 3, each from the base."""
+        for state in ((True, False), (False, True), (True, True)):
+            features = self.build()
+            self.assertState(features, False, False)
+            self.assertState(features, *state)
+            App.closeDocument(self.doc.Name)
+            self.setUp()
+
+    def testInSequence(self):
+        """THM3's 16 updates in sequence: each state reads the same every time."""
+        features = self.build()
+        self.assertState(features, False, False)
+        for midplane, flip in ((1, 0), (0, 0), (0, 1), (0, 0), (0, 1), (1, 1), (1, 0), (1, 1), (1, 0), (0, 0),
+                               (0, 1), (1, 1), (1, 0), (1, 1), (1, 0), (0, 0)):
+            self.assertState(features, bool(midplane), bool(flip))
