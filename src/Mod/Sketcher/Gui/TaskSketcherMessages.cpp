@@ -29,10 +29,12 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/CommandT.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "Command.h"
 #include "TaskSketcherMessages.h"
+#include "Utils.h"
 #include "ViewProviderSketch.h"
 
 
@@ -46,6 +48,58 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
     , sketchView(sketchView)
 {
     createSettingsButtonActions();
+
+    // FreeCAD-CH (ops#640 polish P4): Onshape's sketch dialog checkboxes, under the solver's
+    // message and in Onshape's order. Disable imprinting is the sketch's own (a property, one undo
+    // step); Show constraints and Show expressions are the user's preferences, whose observer in
+    // edit mode (EditModeCoinManager) redraws the sketch.
+    auto* disableImprinting = new QCheckBox(tr("Disable imprinting"));
+    disableImprinting->setObjectName(QStringLiteral("disableImprinting"));
+    disableImprinting->setToolTip(tr("The edges of the face the sketch lies on don't split its "
+        "regions"));
+    disableImprinting->setChecked(sketchView->getSketchObject()->DisableImprinting.getValue());
+    groupLayout()->addWidget(disableImprinting);
+    connect(disableImprinting, &QCheckBox::toggled, this, [this](bool checked) {
+        auto* sketch = this->sketchView->getSketchObject();
+        if (sketch->DisableImprinting.getValue() == checked) {
+            return;
+        }
+        this->sketchView->getDocument()->openCommand(QT_TRANSLATE_NOOP("Command", "Disable imprinting"));
+        Gui::cmdAppObjectArgs(sketch, "DisableImprinting = %s", checked ? "True" : "False");
+        this->sketchView->getDocument()->commitCommand();
+        tryAutoRecomputeIfNotSolve(sketch);
+    });
+
+    // FreeCAD-CH (ops#640 polish P1): Onshape's "Show constraints"
+    auto* showConstraints = new QCheckBox(tr("Show constraints"));
+    showConstraints->setObjectName(QStringLiteral("showConstraints"));
+    showConstraints->setToolTip(tr("Draws every constraint. Off, only the dimensions and the "
+        "constraints of the curve or point under the cursor are drawn"));
+    showConstraints->setChecked(ViewProviderSketch::showConstraintsPreference());
+    groupLayout()->addWidget(showConstraints);
+    connect(showConstraints, &QCheckBox::toggled, this, [](bool checked) {
+        ViewProviderSketch::setShowConstraintsPreference(checked);
+    });
+
+    auto* showExpressions = new QCheckBox(tr("Show expressions"));
+    showExpressions->setObjectName(QStringLiteral("showExpressions"));
+    showExpressions->setToolTip(tr("A dimension set by an expression shows the expression "
+        "instead of its value"));
+    showExpressions->setChecked(ViewProviderSketch::showExpressionsPreference());
+    groupLayout()->addWidget(showExpressions);
+    connect(showExpressions, &QCheckBox::toggled, this, [](bool checked) {
+        ViewProviderSketch::setShowExpressionsPreference(checked);
+    });
+
+    // FreeCAD-CH (ops#640 polish P1b): Onshape's "Show errors", its fourth box
+    auto* showErrors = new QCheckBox(tr("Show errors"));
+    showErrors->setObjectName(QStringLiteral("showErrors"));
+    showErrors->setToolTip(tr("Draws the conflicting, redundant and malformed constraints"));
+    showErrors->setChecked(ViewProviderSketch::showErrorsPreference());
+    groupLayout()->addWidget(showErrors);
+    connect(showErrors, &QCheckBox::toggled, this, [](bool checked) {
+        ViewProviderSketch::setShowErrorsPreference(checked);
+    });
 
     //NOLINTBEGIN
     connectionSetUp = sketchView->signalSetUp.connect(std::bind(

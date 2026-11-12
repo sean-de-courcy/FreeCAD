@@ -125,6 +125,7 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.pump(200)
         self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit(), "Expected sketch edit mode")
         self.view = FreeCADGui.ActiveDocument.ActiveView
+        self.fix_view_height(self.view)
         self.view.setCamera(TOP_VIEW_CAMERA)
         self.flush_gui(100)
         self.viewport = self.view.graphicsView().viewport()

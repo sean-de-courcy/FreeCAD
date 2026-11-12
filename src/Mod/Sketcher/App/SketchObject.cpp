@@ -254,6 +254,12 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Internal Geometry",
                       App::Prop_None,
                       "Enables selection of closed profiles within a sketch as input for operations");
+    ADD_PROPERTY_TYPE(DisableImprinting,
+                      (false),
+                      "Internal Geometry",
+                      App::Prop_None,
+                      "The edges of the face the sketch lies on don't split its regions (Onshape's "
+                      "Disable imprinting)");
     ADD_PROPERTY_TYPE(_InternalFaceVersion,
                       (0),
                       "Base",

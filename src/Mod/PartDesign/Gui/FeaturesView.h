@@ -21,6 +21,7 @@
 
 #include <fastsignals/signal.h>
 
+#include <App/DocumentObserver.h>
 #include <Gui/Selection/Selection.h>
 
 class QSplitter;
@@ -125,6 +126,15 @@ public:
 
     /// The widget, once PartDesign put it in the Model panel, or null
     static FeaturesView* instance();
+
+    /// FreeCAD-CH (ops#640 polish P8): Onshape's double click on an element in the 3D view: the
+    /// feature that made it and that feature's sketch tinted in the list, and the faces the feature
+    /// made tinted in the view, until the selection changes. The element is the preselection's
+    /// (document, object, sub-path)
+    static void showCreatorOf(const std::string& doc, const std::string& obj, const std::string& sub);
+    /// The PartDesign feature that made the shape's element (such as "Face3"): a sketch's or a
+    /// binder's element is the feature's whose profile it is. Null when none
+    static App::DocumentObject* creatorOf(App::DocumentObject* shape, const char* element);
 
     /// PartDesign's activation: the lists in place of the Model panel's tree, unless the user chose
     /// the tree (toggleModelTree()). Without the Combo view (turned off in the preferences) it
@@ -238,6 +248,13 @@ private:
     std::string editedName;
     /// The object the lists' hover pre-highlights, by name, or empty
     std::string preselected;
+    /// The feature a double click showed (P8) and its sketch, by name, or empty
+    std::string creatorName;
+    std::string creatorSketchName;
+    /// The shown object whose faces that double click tinted
+    App::DocumentObjectT creatorShape;
+    /// Clears that double click's tint in the list and the view
+    void clearCreator();
     /// A row's name is being edited: rebuilds wait for its commit
     bool renaming = false;
     /// The bar row is selected (for the arrow keys)

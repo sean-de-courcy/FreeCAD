@@ -28,10 +28,13 @@
 #include <QRegularExpression>
 #include <Bnd_Box.hxx>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <ranges>
+#include <set>
 #include <stack>
+#include <utility>
 #include <cmath>
 
 #include <Inventor/SbImage.h>
@@ -60,11 +63,13 @@
 #include <Gui/SoDatumLabel.h>
 #include <Gui/Tools.h>
 #include <Gui/Utilities.h>
+#include <Gui/VariableDisplay.h>
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/Sketcher/App/Constraint.h>
 #include <Mod/Sketcher/App/GeoEnum.h>
 #include <Mod/Sketcher/App/GeoList.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
+#include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/Sketcher/App/SolverGeometryExtension.h>
 
 #include "EditModeConstraintCoinManager.h"
@@ -97,22 +102,98 @@ EditModeConstraintCoinManager::EditModeConstraintCoinManager(
 
 EditModeConstraintCoinManager::~EditModeConstraintCoinManager() = default;
 
+std::vector<bool> EditModeConstraintCoinManager::shownConstraints(
+    const std::vector<Sketcher::Constraint*>& constrlist
+) const
+{
+    const bool isshownvirtualspace = ViewProviderSketchCoinAttorney::isShownVirtualSpace(viewProvider);
+    const bool showAll = ViewProviderSketch::showConstraintsPreference();
+
+    std::vector<bool> shown(constrlist.size(), false);
+
+    // FreeCAD-CH (ops#640 polish P1, P1b): with ShowConstraints off, Onshape's rule (PL1b,
+    // PL1d): the dimensions, the selected or hovered constraints, the constraints of the hovered
+    // curve or point (not of the selected ones), and the over-defining ones with Show errors on.
+    // The solver's over-defining constraints are 1-based numbers, as EditModeGeometryCoinManager
+    // reads them
+    std::set<int> overdefined;
+    std::optional<int> hoverCurve;
+    std::optional<std::pair<int, Sketcher::PointPos>> hoverPoint;
+    if (!showAll) {
+        const Sketcher::SketchObject* sketch = viewProvider.getSketchObject();
+        if (ViewProviderSketch::showErrorsPreference()) {
+            for (const auto* numbers :
+                 {&sketch->getLastConflicting(),
+                  &sketch->getLastRedundant(),
+                  &sketch->getLastMalformedConstraints()}) {
+                for (int number : *numbers) {
+                    overdefined.insert(number - 1);
+                }
+            }
+        }
+        hoverCurve = ViewProviderSketchCoinAttorney::getGlyphHoverCurve(viewProvider);
+        if (auto vertexId = ViewProviderSketchCoinAttorney::getGlyphHoverPoint(viewProvider)) {
+            int geoId = Sketcher::GeoEnum::GeoUndef;
+            Sketcher::PointPos posId = Sketcher::PointPos::none;
+            sketch->getGeoVertexIndex(*vertexId, geoId, posId);
+            if (geoId != Sketcher::GeoEnum::GeoUndef) {
+                hoverPoint.emplace(geoId, posId);
+            }
+        }
+    }
+
+    auto onHover = [&](int constrId, const Sketcher::Constraint* constraint) {
+        if (ViewProviderSketchCoinAttorney::isConstraintSelected(viewProvider, constrId)
+            || ViewProviderSketchCoinAttorney::isConstraintPreselected(viewProvider, constrId)) {
+            return true;
+        }
+        const std::array<std::pair<int, Sketcher::PointPos>, 3> elements {{
+            {constraint->First, constraint->FirstPos},
+            {constraint->Second, constraint->SecondPos},
+            {constraint->Third, constraint->ThirdPos},
+        }};
+        for (const auto& element : elements) {
+            if (element.first == Sketcher::GeoEnum::GeoUndef) {
+                continue;
+            }
+            if (hoverCurve && element.first == *hoverCurve) {
+                return true;
+            }
+            if (hoverPoint && element.second != Sketcher::PointPos::none && element == *hoverPoint) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (size_t i = 0; i < constrlist.size(); i++) {
+        const Sketcher::Constraint* constraint = constrlist[i];
+        // XOR of constraint mode and VP mode
+        if (constraint->isInVirtualSpace != isshownvirtualspace || !constraint->isVisible) {
+            continue;
+        }
+        shown[i] = showAll || constraint->isDimensional()
+            || overdefined.contains(static_cast<int>(i))
+            || onHover(static_cast<int>(i), constraint);
+    }
+    return shown;
+}
+
 void EditModeConstraintCoinManager::updateVirtualSpace()
 {
     const std::vector<Sketcher::Constraint*>& constrlist
         = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
 
-    bool isshownvirtualspace = ViewProviderSketchCoinAttorney::isShownVirtualSpace(viewProvider);
-
     if (constrlist.size() == vConstrType.size()) {
+
+        const std::vector<bool> shown = shownConstraints(constrlist);
 
         editModeScenegraphNodes.constrGroup->enable.setNum(constrlist.size());
 
         SbBool* sws = editModeScenegraphNodes.constrGroup->enable.startEditing();
 
         for (size_t i = 0; i < constrlist.size(); i++) {
-            sws[i] = !(constrlist[i]->isInVirtualSpace != isshownvirtualspace)
-                && constrlist[i]->isVisible;  // XOR of constraint mode and VP mode
+            sws[i] = shown[i];
         }
 
 
@@ -2144,6 +2225,25 @@ QString EditModeConstraintCoinManager::getPresentationString(
     auto valueStr = QString::fromStdString(constrPresValue);
 
     auto fixedValueStr = fixValueStr(valueStr, unitStr).value_or(valueStr);
+    const auto& constrlist = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
+    const auto it = std::ranges::find(constrlist, constraint);
+    const int constraintIndex = it != constrlist.end()
+        ? static_cast<int>(std::distance(constrlist.begin(), it))
+        : -1;
+    const bool hasExpression = constraintIndex >= 0
+        && ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex);
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions" (PL5a): a dimension set by
+    // an expression keeps its value and (fx) marker and gets a tag above it with the expression
+    // (variables as #Name): "tag\nvalue", which SoDatumLabel draws as a light-blue tag
+    QString expressionTag;
+    if (hasExpression && ViewProviderSketch::showExpressionsPreference()) {
+        auto* sketch = viewProvider.getSketchObject();
+        const auto info = sketch->getExpression(sketch->Constraints.createPath(constraintIndex));
+        if (info.expression) {
+            expressionTag = Gui::expressionDisplayText(info.expression.get());
+        }
+    }
+
     if (!prefix.empty()) {
         fixedValueStr.prepend(QString::fromStdString(prefix));
     }
@@ -2169,20 +2269,17 @@ QString EditModeConstraintCoinManager::getPresentationString(
         }
     }
 
-    int constraintIndex = -1;
-    const auto& constrlist = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
-    auto it = std::ranges::find(constrlist, constraint);
-    if (it != constrlist.end()) {
-        constraintIndex = std::distance(constrlist.begin(), it);
-        if (ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex)) {
-            fixedValueStr += QStringLiteral(" (ƒ𝑥)");
-        }
+    if (hasExpression) {
+        fixedValueStr += QStringLiteral(" (ƒ𝑥)");
     }
 
     if (!constraint->isDriving) {
         fixedValueStr = QStringLiteral("(") + fixedValueStr + QStringLiteral(")");
     }
 
+    if (!expressionTag.isEmpty()) {
+        fixedValueStr = expressionTag + QLatin1Char('\n') + fixedValueStr;
+    }
     return fixedValueStr;
 }
 
@@ -2431,6 +2528,8 @@ void EditModeConstraintCoinManager::drawConstraintIcons(const GeoListFacade& geo
         static_cast<int>(constraints.size())
     );
 
+    const std::vector<bool> shown = shownConstraints(constraints);
+
     for (int constrId = 0; constrId < maxNumberOfConstraints; ++constrId) {
         Sketcher::Constraint* constraint = constraints[constrId];
 
@@ -2521,9 +2620,7 @@ void EditModeConstraintCoinManager::drawConstraintIcons(const GeoListFacade& geo
         thisIcon.position = absPos;
         thisIcon.destination = coinIconPtr;
         thisIcon.infoPtr = infoPtr;
-        thisIcon.visible = (constraint->isInVirtualSpace
-                            == ViewProviderSketchCoinAttorney::isShownVirtualSpace(viewProvider))
-            && constraint->isVisible;
+        thisIcon.visible = shown[constrId];  // as the switches (updateVirtualSpace())
 
         if (constraint->Type == Symmetric) {
             Base::Vector3d startingpoint

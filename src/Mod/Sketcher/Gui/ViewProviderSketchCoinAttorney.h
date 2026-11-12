@@ -25,6 +25,7 @@
 #pragma once
 
 #include <QFont>
+#include <optional>
 #include <vector>
 
 #include <Inventor/SbVec2f.h>
@@ -115,11 +116,15 @@ private:
 
     static inline int getPreselectPoint(const ViewProviderSketch& vp);
     static inline int getPreselectCurve(const ViewProviderSketch& vp);
+    // FreeCAD-CH (ops#640 polish P1b): the hovered curve/point whose glyphs show
+    static inline std::optional<int> getGlyphHoverCurve(const ViewProviderSketch& vp);
+    static inline std::optional<int> getGlyphHoverPoint(const ViewProviderSketch& vp);
     static inline int getPreselectCross(const ViewProviderSketch& vp);
 
     static inline bool isConstraintPreselected(const ViewProviderSketch& vp, int constraintId);
     static inline bool isPointSelected(const ViewProviderSketch& vp, int pointId);
     static inline bool isCurveSelected(const ViewProviderSketch& vp, int curveId);
+    static inline bool isCurveRegionHovered(const ViewProviderSketch& vp, int curveId);
     static inline bool isConstraintSelected(const ViewProviderSketch& vp, int constraintId);
 
     static inline void executeOnSelectionPointSet(
@@ -274,6 +279,20 @@ inline int ViewProviderSketchCoinAttorney::getPreselectCurve(const ViewProviderS
     return vp.getPreselectCurve();
 }
 
+inline std::optional<int> ViewProviderSketchCoinAttorney::getGlyphHoverCurve(
+    const ViewProviderSketch& vp
+)
+{
+    return vp.glyphHoverCurve();
+}
+
+inline std::optional<int> ViewProviderSketchCoinAttorney::getGlyphHoverPoint(
+    const ViewProviderSketch& vp
+)
+{
+    return vp.glyphHoverPoint();
+}
+
 inline int ViewProviderSketchCoinAttorney::getPreselectCross(const ViewProviderSketch& vp)
 {
     return vp.getPreselectCross();
@@ -295,6 +314,12 @@ inline bool ViewProviderSketchCoinAttorney::isPointSelected(const ViewProviderSk
 inline bool ViewProviderSketchCoinAttorney::isCurveSelected(const ViewProviderSketch& vp, int curveId)
 {
     return vp.isCurveSelected(curveId);
+}
+
+inline bool ViewProviderSketchCoinAttorney::isCurveRegionHovered(const ViewProviderSketch& vp,
+                                                                 int curveId)
+{
+    return vp.isCurveRegionHovered(curveId);
 }
 
 inline bool ViewProviderSketchCoinAttorney::isConstraintSelected(

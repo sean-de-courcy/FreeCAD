@@ -573,6 +573,7 @@ class TestForkKeymapGui(unittest.TestCase):
             pump(0.1)
         Gui.runCommand("Part_SelectFilter", 3)
         App.ParamGet(KEYMAP).RemString("Keymap")
+        App.ParamGet(KEYMAP).RemBool("KeymapMacKeys")
         App.ParamGet(SHORTCUTS).RemString("Std_ViewFitAll")
         pump(0.1)
         guiDoc = Gui.getDocument(self.doc.Name)
@@ -1039,6 +1040,95 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertTrue(
             waitFor(lambda: options() == (before[0], not before[1])), "U under FreeCAD's"
         )
+        self.escapeTool()
+
+    # --- the Mac's keys (ops#640 polish), checked here through the hidden KeymapMacKeys
+
+    def testMacKeysMoveTheSelectionFiltersOffOption(self):
+        """With the Mac's keys the Part selection filters take Control+Shift (Qt's Meta+Shift),
+        since Shift+Option+letter types a character on the Mac; without them, Shift+Alt as
+        before, on the commands and on the filter group's actions."""
+        filters = ("Part_VertexSelection", "Part_EdgeSelection", "Part_FaceSelection",
+                   "Part_RemoveSelectionGate")
+        letters = "VEFC"
+        group = list(Gui.Command.get("Part_SelectFilter").getAction())
+
+        # The filters are the group's tools: a filter command has an action of its own only once
+        # a toolbar or menu shows it (else getShortcut() is ""), so only those are compared
+        owned = [i for i, name in enumerate(filters) if hasAction(name)]
+
+        def keys():
+            return ([QtGui.QKeySequence(shortcut(filters[i])).toString() for i in owned],
+                    [action.shortcut().toString() for action in group[:4]])
+
+        App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
+        pump(0.1)
+        mac = [QtGui.QKeySequence(f"Meta+Shift+{c}").toString() for c in letters]
+        commands, actions = keys()
+        self.assertEqual(actions, mac)
+        self.assertEqual(commands, [mac[i] for i in owned])
+        App.ParamGet(KEYMAP).RemBool("KeymapMacKeys")
+        pump(0.1)
+        windows = [QtGui.QKeySequence(f"Shift+Alt+{c}").toString() for c in letters]
+        commands, actions = keys()
+        self.assertEqual(actions, windows)
+        self.assertEqual(commands, [windows[i] for i in owned])
+
+    def testAssemblyListsTakeBackspaceOnTheMac(self):
+        """The Assembly task panels' lists (BOM columns, motions, view steps) test the key
+        themselves through UtilsAssembly.isDeleteKey(): Delete always, Backspace only with the
+        Mac's keys, and a letter never."""
+        import UtilsAssembly
+
+        def event(key):
+            return QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
+
+        delete, backspace = event(QtCore.Qt.Key_Delete), event(QtCore.Qt.Key_Backspace)
+        self.assertTrue(UtilsAssembly.isDeleteKey(delete))
+        self.assertFalse(UtilsAssembly.isDeleteKey(backspace))
+        App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
+        self.assertTrue(UtilsAssembly.isDeleteKey(delete))
+        self.assertTrue(UtilsAssembly.isDeleteKey(backspace))
+        self.assertFalse(UtilsAssembly.isDeleteKey(event(QtCore.Qt.Key_D)))
+
+    def testMacModeKeyIsControlM(self):
+        """With the Mac's keys the sketch tools' M takes Control (Qt's Meta), since Cmd+M
+        minimizes the window there: the rectangle's mode label shows it, Ctrl+M (Cmd+M) leaves
+        the construction method alone and Meta+M switches it; Ctrl+U still toggles the rounded
+        corners."""
+        App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
+        pump(0.1)
+        self.editSketch()
+        self.press(QtCore.Qt.Key_G)
+        self.assertTrue(waitFor(lambda: self.toolOption("Rounded corners")), "no rectangle options")
+
+        def native(key):
+            return QtGui.QKeySequence(key).toString(QtGui.QKeySequence.NativeText)
+
+        def visible(cls, name):
+            return [
+                w
+                for w in Gui.getMainWindow().findChildren(cls)
+                if w.objectName() == name and w.isVisible()
+            ]
+
+        self.assertEqual([l.text() for l in visible(QtWidgets.QLabel, "comboLabel1")],
+                         [f"Mode ({native('Meta+M')})"])
+
+        def method():
+            boxes = visible(QtWidgets.QComboBox, "comboBox1")
+            return boxes[0].currentIndex() if boxes else None
+
+        before = method()
+        self.assertIsNotNone(before)
+        self.press(QtCore.Qt.Key_M, QtCore.Qt.ControlModifier)
+        pump(0.4)
+        self.assertEqual(method(), before, "Ctrl+M (Cmd+M on the Mac)")
+        self.press(QtCore.Qt.Key_M, QtCore.Qt.MetaModifier)
+        self.assertTrue(waitFor(lambda: method() not in (None, before)), "Meta+M (Control+M)")
+        rounded = self.checked("Rounded corners")
+        self.press(QtCore.Qt.Key_U, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: self.checked("Rounded corners") == (not rounded)), "Ctrl+U")
         self.escapeTool()
 
     def testCtrlFAndRAreThePolylinesOwn(self):
@@ -2153,9 +2243,13 @@ OrthographicCamera {{
     def testSelectOtherInSketchListsAConstraintIconAndTheLineUnderIt(self):
         """A constraint icon over a line: the icon of the first line's Horizontal constraint, and
         a second, vertical line drawn through it. The constraint comes first (a hover picks the
-        icon), the line under it is listed too and Enter on it selects it."""
+        icon), the line under it is listed too and Enter on it selects it. Show constraints is
+        on: the Onshape keymap draws no constraint glyph by default (ops#640 polish P1)."""
         import Sketcher
 
+        general = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Sketcher/General")
+        general.SetBool("ShowConstraints", True)
+        self.addCleanup(general.RemBool, "ShowConstraints")
         sketch = self.sketchInEdit(lines=[((0, 5), (20, 5))])
         sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
         self.doc.recompute()

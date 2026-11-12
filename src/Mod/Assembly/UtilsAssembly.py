@@ -33,6 +33,23 @@ if App.GuiUp:
 
 translate = App.Qt.translate
 
+
+def isMacKeys():
+    """FreeCAD-CH (ops#640 polish, the Mac keys): whether the Mac's keys apply, as
+    Gui::ForkKeymap::isMac(): on macOS, and where the hidden preference General/KeymapMacKeys is
+    set (the GUI tests on Windows)."""
+    import sys
+
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return sys.platform == "darwin" or general.GetBool("KeymapMacKeys", False)
+
+
+def isDeleteKey(event):
+    """FreeCAD-CH: whether the key event is the Delete key: Delete, and on the Mac also
+    Backspace, the Mac keyboard's Delete key (Gui::ForkKeymap::isDeleteKey())."""
+    key = event.key()
+    return key == QtCore.Qt.Key_Delete or (key == QtCore.Qt.Key_Backspace and isMacKeys())
+
 __title__ = "Assembly utilitary functions"
 __author__ = "Ondsel"
 __url__ = "https://www.freecad.org"

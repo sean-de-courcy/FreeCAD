@@ -1012,6 +1012,27 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     # -- T6: Delete -----------------------------------------------------------------------------
 
+    def testBackspaceRemovesOnTheMac(self):
+        """T6 on the Mac (ops#640 polish, simulated through the hidden General/KeymapMacKeys):
+        Backspace, the Mac keyboard's Delete key, removes the selected entry; without the Mac's
+        keys Backspace leaves the entries alone, as before on Windows."""
+        box = self.box()
+        names = TOP_FRONT.one(box.Shape) + BOTTOM_BACK.one(box.Shape) + VERTICAL.one(box.Shape)
+        fillet = self.addFillet(box, names)
+        general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+        self.addCleanup(general.RemBool, "KeymapMacKeys")
+        [field] = self.edit(fillet)
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Backspace)
+        pump(0.2)
+        self.assertEqual(texts(field), names)
+        general.SetBool("KeymapMacKeys", True)
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Backspace)
+        self.assertTrue(waitFor(lambda: texts(field) == names[1:]), texts(field))
+        self.assertEqual(fillet.Base[1], names[1:])
+
     def testDeleteRemovesSelectedEntries(self):
         """T6: two of three entries selected, Delete: both go; OK makes one undo step, and undo
         brings them back."""

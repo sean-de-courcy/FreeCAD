@@ -2469,7 +2469,16 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
             delete_sequence = QtGui.QKeySequence(QtCore.Qt.Key_Delete)
 
         self.deleteAction = QtGui.QAction("Remove", self.jForm)
-        self.deleteAction.setShortcut(delete_sequence)
+        # FreeCAD-CH (ops#640 polish): both of the Mac's keys there, Backspace and Fn+Delete
+        if UtilsAssembly.isMacKeys():
+            self.deleteAction.setShortcuts(
+                [
+                    QtGui.QKeySequence(QtCore.Qt.Key_Backspace),
+                    QtGui.QKeySequence(QtCore.Qt.Key_Delete),
+                ]
+            )
+        else:
+            self.deleteAction.setShortcut(delete_sequence)
 
         self.deleteAction.setIcon(
             QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_DialogCancelButton)

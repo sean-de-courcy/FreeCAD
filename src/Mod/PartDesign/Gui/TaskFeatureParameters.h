@@ -63,6 +63,9 @@ class TaskPreviewParameters: public Gui::TaskView::TaskBox
 public:
     explicit TaskPreviewParameters(ViewProvider* vp, QWidget* parent = nullptr);
     ~TaskPreviewParameters() override;
+    /// FreeCAD-CH (ops#640 polish P5): Onshape's preview row, the overlay always on with its
+    /// opacity as "Preview", and a Final box only when \a finalOffered (a later feature exists)
+    void setOnshapeLayout(bool finalOffered);
 
 public Q_SLOTS:
     void onShowPreviewChanged(bool show);
@@ -359,6 +362,12 @@ protected:
     /// feature's name, red while the feature is in error; renamed in the lists only. Called
     /// after the feature changes or recomputes.
     void updateTitle();
+    /// FreeCAD-CH (ops#640 polish P5): under the Onshape keymap the dialog is one flat form under
+    /// its title row: the other boxes lose their headers, the title row doesn't fold, and the
+    /// Preview row is Onshape's. Called from open(), after the title box is chosen.
+    void flattenForOnshape();
+    /// A member of the feature's Body comes after it (Onshape offers Final then)
+    bool hasLaterFeature() const;
 
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none

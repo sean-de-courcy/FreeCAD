@@ -112,6 +112,9 @@ public:
     Part::PropertyPartShape InternalShape;
     App::PropertyPrecision InternalTolerance;
     App::PropertyBool MakeInternals;
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Disable imprinting": the edges of the face the
+    // sketch lies on don't split its regions (SketchImprint.h)
+    App::PropertyBool DisableImprinting;
     // Internal-face pipeline: 1 = legacy FaceMakerRing (<= 1.1), 2 = FaceMakerBuildFace.
     // Kept so old documents' internal-face names stay stable and references resolve.
     App::PropertyInteger _InternalFaceVersion;
