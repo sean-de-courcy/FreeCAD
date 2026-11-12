@@ -2443,7 +2443,7 @@ def wall_end_round(inner, outer, height):
     return section, height * section, side
 
 
-def wall_on_base(start=0.0, refined=False):
+def curved_wall_on_base(start=0.0, refined=False):
     """ops#640 F1 (the replica's row 150): a curved wall R 10..11.5, 0..90 deg, z 2..6, joined to
     a base R 8..13.5, z 0..2, that starts at the angle `start`. At 0 the wall's end (y = 0) is
     flush with the base's; unrefined, they stay two faces in one plane, so four edges meet at the
@@ -2463,7 +2463,7 @@ def wall_on_base(start=0.0, refined=False):
     return shape, edges
 
 
-def edges_at(shape, point):
+def edge_count_at(shape, point):
     """The number of the shape's edges with a vertex at the point"""
     return sum(
         1 for e in shape.Edges if any((v.Point - V(*point)).Length < 1e-7 for v in e.Vertexes)
@@ -2522,9 +2522,9 @@ class CurvedWallEndTest(unittest.TestCase):
         self.assertAlmostEqual(removed, 101.3164 - 100.3470, delta=1e-4)  # Onshape's FR1
         for start, refined, meeting in ((0, False, 4), (0, True, 3), (-10, False, 3)):
             with self.subTest(start=start, refined=refined):
-                shape, edges = wall_on_base(start, refined)
-                self.assertEqual(edges_at(shape, (10, 0, 2)), meeting)
-                self.assertEqual(edges_at(shape, (11.5, 0, 2)), meeting)
+                shape, edges = curved_wall_on_base(start, refined)
+                self.assertEqual(edge_count_at(shape, (10, 0, 2)), meeting)
+                self.assertEqual(edge_count_at(shape, (11.5, 0, 2)), meeting)
                 result = shape.makeFillet(0.75, edges)
                 self.assertTrue(result.isValid())
                 self.assertEqual(len(result.Solids), 1)
