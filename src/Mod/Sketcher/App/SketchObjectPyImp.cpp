@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <memory>
+#include <numbers>
 #include <sstream>
 
 #include <Geom_TrimmedCurve.hxx>
@@ -721,6 +722,203 @@ PyObject* SketchObjectPy::addPierce(PyObject* args)
         sketch->Constraints.touch();
     }
     return Py::new_reference_to(Py::Long(index));
+}
+
+// FreeCAD-CH (Onshape's sketch patterns)
+namespace
+{
+bool seedList(PyObject* seq, std::vector<int>& seeds)
+{
+    if (!PySequence_Check(seq)) {
+        PyErr_SetString(PyExc_TypeError, "Pattern: the seeds must be a list of geometry indices");
+        return false;
+    }
+    const Py_ssize_t size = PySequence_Size(seq);
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        PyObject* item = PySequence_GetItem(seq, i);
+        const bool isLong = item && PyLong_Check(item);
+        const long value = isLong ? PyLong_AsLong(item) : 0;
+        Py_XDECREF(item);
+        if (!isLong) {
+            PyErr_SetString(PyExc_TypeError, "Pattern: the seeds must be a list of geometry indices");
+            return false;
+        }
+        seeds.push_back(int(value));
+    }
+    return true;
+}
+
+// the caller's command sees the copies placed and solved (as addSymmetric's)
+void solvePattern(Sketcher::SketchObject* sketch)
+{
+    sketch->solve();
+    if (sketch->noRecomputes) {
+        sketch->setUpSketch();
+        sketch->Constraints.touch();
+    }
+}
+}  // namespace
+
+PyObject* SketchObjectPy::addCircularPattern(PyObject* args)
+{
+    PyObject* seq = nullptr;
+    int count = 0;
+    PyObject* pivot = nullptr;
+    double angle = 2.0 * std::numbers::pi;
+    if (!PyArg_ParseTuple(args, "OiO!|d", &seq, &count, &(Base::VectorPy::Type), &pivot, &angle)) {
+        return nullptr;
+    }
+    std::vector<int> seeds;
+    if (!seedList(seq, seeds)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    int index = -1;
+    try {
+        index = sketch->addCircularPattern(
+            seeds,
+            count,
+            *static_cast<Base::VectorPy*>(pivot)->getVectorPtr(),
+            angle
+        );
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    return Py::new_reference_to(Py::Long(index));
+}
+
+PyObject* SketchObjectPy::addLinearPattern(PyObject* args)
+{
+    PyObject* seq = nullptr;
+    int count1 = 0;
+    PyObject* direction1 = nullptr;
+    int count2 = 1;
+    PyObject* direction2 = Py_None;
+    if (!PyArg_ParseTuple(args, "OiO!|iO", &seq, &count1, &(Base::VectorPy::Type), &direction1, &count2, &direction2)) {
+        return nullptr;
+    }
+    Base::Vector3d step2;
+    if (direction2 != Py_None) {
+        if (!PyObject_TypeCheck(direction2, &(Base::VectorPy::Type))) {
+            PyErr_SetString(PyExc_TypeError, "Pattern: direction2 must be a Vector or None");
+            return nullptr;
+        }
+        step2 = *static_cast<Base::VectorPy*>(direction2)->getVectorPtr();
+    }
+    std::vector<int> seeds;
+    if (!seedList(seq, seeds)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    int index = -1;
+    try {
+        index = sketch->addLinearPattern(
+            seeds,
+            count1,
+            *static_cast<Base::VectorPy*>(direction1)->getVectorPtr(),
+            count2,
+            step2
+        );
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    return Py::new_reference_to(Py::Long(index));
+}
+
+PyObject* SketchObjectPy::setPatternCount(PyObject* args)
+{
+    int index = 0;
+    int count1 = 0;
+    int count2 = 0;
+    if (!PyArg_ParseTuple(args, "ii|i", &index, &count1, &count2)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    try {
+        sketch->setPatternCount(index, count1, count2);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    Py_Return;
+}
+
+PyObject* SketchObjectPy::setPatternAngle(PyObject* args)
+{
+    int index = 0;
+    double angle = 0;
+    if (!PyArg_ParseTuple(args, "id", &index, &angle)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    try {
+        sketch->setPatternAngle(index, angle);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    Py_Return;
+}
+
+PyObject* SketchObjectPy::getPattern(PyObject* args) const
+{
+    int index = 0;
+    if (!PyArg_ParseTuple(args, "i", &index)) {
+        return nullptr;
+    }
+    auto record = getSketchObjectPtr()->getPattern(index);
+    if (!record) {
+        PyErr_SetString(PyExc_ValueError, "Pattern: the constraint is not a pattern");
+        return nullptr;
+    }
+    auto geoOrNone = [](int geoId) -> Py::Object {
+        if (geoId == Sketcher::GeoEnum::GeoUndef) {
+            return Py::None();
+        }
+        return Py::Long(geoId);
+    };
+    const bool circular = record->kind == Sketcher::PatternRecord::Kind::Circular;
+    Py::Dict result;
+    result.setItem("Kind", Py::String(circular ? "Circular" : "Linear"));
+    Py::List seeds;
+    for (int seed : record->seeds) {
+        seeds.append(Py::Long(seed));
+    }
+    result.setItem("Seeds", seeds);
+    Py::Tuple counts(2);
+    counts.setItem(0, Py::Long(record->count1));
+    counts.setItem(1, Py::Long(record->count2));
+    result.setItem("Counts", counts);
+    if (circular) {
+        result.setItem("Pivot", geoOrNone(record->pivot));
+        result.setItem("Angle", Py::Float(record->angle));
+    }
+    else {
+        Py::Tuple directions(2);
+        directions.setItem(0, geoOrNone(record->direction1));
+        directions.setItem(1, geoOrNone(record->direction2));
+        result.setItem("Directions", directions);
+    }
+    Py::Dict instances;
+    for (const auto& [slot, copy] : record->instances) {
+        Py::Tuple key(3);
+        for (int i = 0; i < 3; ++i) {
+            key.setItem(i, Py::Long(slot[i]));
+        }
+        instances.setItem(key, geoOrNone(copy));
+    }
+    result.setItem("Instances", instances);
+    return Py::new_reference_to(result);
 }
 
 PyObject* SketchObjectPy::delUnusedImplicitExternals(PyObject* args)
