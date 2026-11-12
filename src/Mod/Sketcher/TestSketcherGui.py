@@ -54,6 +54,7 @@ from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch r
 from SketcherTests.TestSketchRound4Gui import (  # FreeCAD-CH, ops#640 (sketch round 4)
     TestSketchToolbarFeaturesGui,
     TestSketchMirrorToolFirstGui,
+    TestSketchTransformToolFirstGui,
     TestSketchOtherPartSnapGui,
 )
 from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH, ops#640 (round 5)
@@ -100,6 +101,7 @@ from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH,
     and TestSketchOnshapeShapesGui
     and TestSketchToolbarFeaturesGui
     and TestSketchMirrorToolFirstGui
+    and TestSketchTransformToolFirstGui
     and TestSketchOtherPartSnapGui
     and TestSketchCancelGui
     else False

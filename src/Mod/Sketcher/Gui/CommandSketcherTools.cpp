@@ -2689,6 +2689,158 @@ bool CmdSketcherOffset::isActive()
     return isCommandNeedingGeometryActive(getActiveGuiDocument());
 }
 
+namespace
+{
+/* FreeCAD-CH (ops#640, sketch tools item 6): under Onshape's keymap Move, Rotate and Scale start
+ * with nothing selected, as Offset and Mirror do. Each click on the sketch's own geometry picks it
+ * (a second click unpicks it); the picks show as the selection. Enter hands them to the tool,
+ * which then works as with a selection. A point of a curve picks its curve; a sketch point picks
+ * itself. Esc or a right click ends the tool.
+ */
+class DrawSketchHandlerTransformPick: public DrawSketchHandler
+{
+public:
+    using Make = std::unique_ptr<DrawSketchHandler> (*)(std::vector<int>);
+
+    DrawSketchHandlerTransformPick(Make make, const char* name, QString pickHint, QString startHint)
+        : make(make)
+        , name(name)
+        , pickHint(std::move(pickHint))
+        , startHint(std::move(startHint))
+    {}
+
+    void mouseMove(SnapManager::SnapHandle /*snapHandle*/) override
+    {}
+
+    bool pressButton(Base::Vector2d /*pos*/) override
+    {
+        return true;
+    }
+
+    bool releaseButton(Base::Vector2d /*pos*/) override
+    {
+        const std::string sub = pickedName();
+        if (!sub.empty()) {
+            if (sketchgui->isSelected(sub)) {
+                sketchgui->rmvSelection(sub);
+            }
+            else {
+                sketchgui->addSelection2(sub);
+            }
+            updateHint();
+        }
+        return true;
+    }
+
+    void registerPressedKey(bool pressed, int key) override
+    {
+        if ((key == SoKeyboardEvent::RETURN || key == SoKeyboardEvent::PAD_ENTER) && !pressed) {
+            start();
+            return;
+        }
+        DrawSketchHandler::registerPressedKey(pressed, key);
+    }
+
+    std::list<Gui::InputHint> getToolHints() const override
+    {
+        using enum Gui::InputHint::UserInput;
+        std::list<Gui::InputHint> hints {{pickHint, {MouseLeft}}};
+        if (!Gui::Selection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId()).empty()) {
+            hints.push_back({startHint, {KeyReturn}});
+        }
+        hints.push_back({QObject::tr("%1 end", "Sketcher transform: hint"), {KeyEscape}});
+        return hints;
+    }
+
+private:
+    std::string getToolName() const override
+    {
+        return name;
+    }
+
+    /// the selection name of the sketch geometry under the cursor: a curve, a sketch point, or
+    /// the curve a curve's point is of; empty for nothing, a projected curve or an axis
+    std::string pickedName() const
+    {
+        const Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        int geoId = getPreselectCurve();
+        if (geoId < 0) {
+            const int vertex = getPreselectPoint();
+            if (vertex < 0) {
+                return {};
+            }
+            Sketcher::PointPos pos {};
+            obj->getGeoVertexIndex(vertex, geoId, pos);
+            if (geoId < 0) {
+                return {};
+            }
+            if (isPoint(*obj->getGeometry(geoId))) {
+                return "Vertex" + std::to_string(vertex + 1);
+            }
+        }
+        return "Edge" + std::to_string(geoId + 1);
+    }
+
+    void start()
+    {
+        Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        if (Gui::Selection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId()).empty()) {
+            return;
+        }
+        // The tool replaces this one once this key event is done with it
+        const std::string documentName = obj->getDocument()->getName();
+        QTimer::singleShot(0, [documentName, make = make]() {
+            auto* document = Gui::Application::Instance->getDocument(documentName.c_str());
+            if (!document) {
+                return;
+            }
+            std::vector<int> geoIds = getListOfSelectedGeoIds(true);
+            Gui::Selection().clearSelection();
+            if (!geoIds.empty()) {
+                ActivateHandler(document, make(std::move(geoIds)));
+            }
+        });
+    }
+
+    Make make;
+    std::string name;
+    QString pickHint;
+    QString startHint;
+};
+
+/// Under Onshape's keymap with nothing of the sketch selected: the picking tool (true)
+bool startsTransformPick(
+    Gui::Document* document,
+    DrawSketchHandlerTransformPick::Make make,
+    const char* name,
+    const QString& pickHint,
+    const QString& startHint
+)
+{
+    if (!Gui::ForkKeymap::isOnshape()) {
+        return false;
+    }
+    std::vector<Gui::SelectionObject> selection
+        = Gui::Selection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId());
+    if (!selection.empty() && !(selection.size() == 1 && selection[0].getSubNames().empty())) {
+        return false;
+    }
+    Gui::Selection().clearSelection();
+    ActivateHandler(
+        document,
+        std::make_unique<DrawSketchHandlerTransformPick>(make, name, pickHint, startHint)
+    );
+    return true;
+}
+
+/// Under Onshape's keymap the transform tools start without a selection
+bool transformIsActive(Gui::Document* document)
+{
+    return Gui::ForkKeymap::isOnshape() ? isCommandActive(document)
+                                        : isCommandNeedingGeometryActive(document);
+}
+}  // namespace
+
 // Rotate tool =====================================================================
 
 DEF_STD_CMD_A(CmdSketcherRotate)
@@ -2710,6 +2862,18 @@ CmdSketcherRotate::CmdSketcherRotate()
 void CmdSketcherRotate::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640): Onshape's keymap with nothing selected picks the geometry first
+    if (startsTransformPick(
+            getActiveGuiDocument(),
+            [](std::vector<int> geoIds) -> std::unique_ptr<DrawSketchHandler> {
+                return std::make_unique<DrawSketchHandlerRotate>(std::move(geoIds));
+            },
+            "DSH_RotatePick",
+            QObject::tr("%1 pick the geometry to rotate", "Sketcher transform: hint"),
+            QObject::tr("%1 rotate it", "Sketcher transform: hint")
+        )) {
+        return;
+    }
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -2720,7 +2884,7 @@ void CmdSketcherRotate::activated(int iMsg)
 
 bool CmdSketcherRotate::isActive()
 {
-    return isCommandNeedingGeometryActive(getActiveGuiDocument());
+    return transformIsActive(getActiveGuiDocument());
 }
 
 // Scale tool =====================================================================
@@ -2744,6 +2908,18 @@ CmdSketcherScale::CmdSketcherScale()
 void CmdSketcherScale::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640): Onshape's keymap with nothing selected picks the geometry first
+    if (startsTransformPick(
+            getActiveGuiDocument(),
+            [](std::vector<int> geoIds) -> std::unique_ptr<DrawSketchHandler> {
+                return std::make_unique<DrawSketchHandlerScale>(std::move(geoIds));
+            },
+            "DSH_ScalePick",
+            QObject::tr("%1 pick the geometry to scale", "Sketcher transform: hint"),
+            QObject::tr("%1 scale it", "Sketcher transform: hint")
+        )) {
+        return;
+    }
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -2754,7 +2930,7 @@ void CmdSketcherScale::activated(int iMsg)
 
 bool CmdSketcherScale::isActive()
 {
-    return isCommandNeedingGeometryActive(getActiveGuiDocument());
+    return transformIsActive(getActiveGuiDocument());
 }
 
 // Translate / rectangular pattern tool =======================================================
@@ -2778,6 +2954,18 @@ CmdSketcherTranslate::CmdSketcherTranslate()
 void CmdSketcherTranslate::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640): Onshape's keymap with nothing selected picks the geometry first
+    if (startsTransformPick(
+            getActiveGuiDocument(),
+            [](std::vector<int> geoIds) -> std::unique_ptr<DrawSketchHandler> {
+                return std::make_unique<DrawSketchHandlerTranslate>(std::move(geoIds));
+            },
+            "DSH_TranslatePick",
+            QObject::tr("%1 pick the geometry to move", "Sketcher transform: hint"),
+            QObject::tr("%1 move it", "Sketcher transform: hint")
+        )) {
+        return;
+    }
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -2788,7 +2976,7 @@ void CmdSketcherTranslate::activated(int iMsg)
 
 bool CmdSketcherTranslate::isActive()
 {
-    return isCommandNeedingGeometryActive(getActiveGuiDocument());
+    return transformIsActive(getActiveGuiDocument());
 }
 
 void CreateSketcherCommandsConstraintAccel()
