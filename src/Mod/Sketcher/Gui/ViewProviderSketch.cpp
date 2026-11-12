@@ -5024,6 +5024,10 @@ void ViewProviderSketch::UpdateSolverInformation()
     bool hasRedundancies = getSketchObject()->getLastHasRedundancies();
     bool hasPartiallyRedundant = getSketchObject()->getLastHasPartialRedundancies();
     bool hasMalformed = getSketchObject()->getLastHasMalformedConstraints();
+    // FreeCAD-CH (ops#640): the conflict was solved around (its constraints left out, the rest
+    // solved): Onshape's banner text (PL1d)
+    const bool solvedAround = getSketchObject()->getLastSolvedAroundConflict();
+    const QString couldNotSolve = tr("Sketch could not be solved.") + QLatin1String(" ");
 
     if (getSketchObject()->Geometry.getSize() == 0 &&
         getSketchObject()->ExternalGeo.getSize() <= 2) { // X- and Y-Axis
@@ -5041,7 +5045,7 @@ void ViewProviderSketch::UpdateSolverInformation()
     else if (dofs < 0 || hasConflicts) {// over-constrained sketch
         signalSetUp(
             QStringLiteral("conflicting_constraints"),
-            tr("Over-constrained:") + QLatin1String(" "),
+            solvedAround ? couldNotSolve : tr("Over-constrained:") + QLatin1String(" "),
             QStringLiteral("#conflicting"),
             QStringLiteral("(%1)").arg(intListHelper(getSketchObject()->getLastConflicting())));
     }
@@ -5055,7 +5059,7 @@ void ViewProviderSketch::UpdateSolverInformation()
     else if (hasRedundancies) {
         signalSetUp(
             QStringLiteral("redundant_constraints"),
-            tr("Redundant constraints:") + QLatin1String(" "),
+            solvedAround ? couldNotSolve : tr("Redundant constraints:") + QLatin1String(" "),
             QStringLiteral("#redundant"),
             QStringLiteral("(%1)").arg(intListHelper(getSketchObject()->getLastRedundant())));
     }

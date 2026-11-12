@@ -79,6 +79,8 @@ class SketchObject(Part2DObject):
               -5 if malformed constraints
               -1 if solver error,
               -2 if redundant constraints.
+          FreeCAD-CH: with -4, -3 or -2 from a conflict (or a contradicting repeat), the
+          rest of the sketch is still solved and written, its constraints left out.
         """
         ...
 

@@ -20,6 +20,7 @@ import unittest
 import FreeCAD as App
 import FreeCADGui as Gui
 import PartDesign
+import Sketcher
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6.QtTest import QTest
 
@@ -876,6 +877,30 @@ class TestFeaturesViewGui(unittest.TestCase):
         names = self.popupAction(self.list, self.barRect().center(), "featureRollToEnd")
         self.assertEqual(names, ["featureRollToEnd"])
         self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
+
+    def testSketchThatCouldNotSolveIsRed(self):
+        """Onshape's list reads a sketch with conflicting constraints red (PL1d), though the sketch
+        solves the rest and its pad builds (a warning, not an error, to the document): SkA's bottom
+        line held Horizontal and then Vertical. Removing the Vertical brings the palette's colour
+        back (ops#640)."""
+        normal = self.item("SkA").foreground().color()
+        self.skA.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        vertical = self.skA.addConstraint(Sketcher.Constraint("Vertical", 0))
+        self.doc.recompute()
+        self.assertIn(vertical + 1, self.skA.ConflictingConstraints)
+        self.assertNotIn("Invalid", self.skA.State)
+        self.assertTrue(self.padA.isValid(), "the pad builds on the rest of the sketch")
+        red = QtGui.QColor(0xD0, 0x30, 0x30)
+        self.assertTrue(
+            waitFor(lambda: self.item("SkA").foreground().color() == red),
+            self.item("SkA").foreground().color().name(),
+        )
+        self.skA.delConstraint(vertical)
+        self.doc.recompute()
+        self.assertTrue(
+            waitFor(lambda: self.item("SkA").foreground().color() == normal),
+            self.item("SkA").foreground().color().name(),
+        )
 
     def testSuppressedRowIsGreyAndNothingIsPending(self):
         """Round 8 (J13): PadA suppressed: its row's text is grey, as Onshape greys a suppressed

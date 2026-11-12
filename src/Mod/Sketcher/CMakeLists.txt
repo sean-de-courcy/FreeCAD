@@ -30,6 +30,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchCarbonCopyElements.py
     SketcherTests/TestSketchCornerSteps.py
     SketcherTests/TestSketchTrimSplit.py
+    SketcherTests/TestSketchConflicts.py
     SketcherTests/TestSketchTrimSplitAttacks.py
     SketcherTests/TestSketchPierce.py
     SketcherTests/TestSketchExtend.py

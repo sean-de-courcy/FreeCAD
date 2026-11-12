@@ -53,7 +53,7 @@ from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch r
     TestSketchModelInferenceOnFaceGui,
     TestSketchModelArcMidpointGui,  # FreeCAD-CH, selection parity 10 (c)
     TestSketchModelArcMidpointOnFaceGui,
-    TestSketchConflictRefusedGui,
+    TestSketchConflictKeptGui,
     TestSketchOverdefinedRedGui,
     TestSketchOnshapeConstraintsGui,
     TestSketchOnshapeShapesGui,
@@ -105,7 +105,7 @@ from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH,
     and TestSketchConstraintToolsGui
     and TestSketchModelInferenceGui
     and TestSketchModelInferenceOnFaceGui
-    and TestSketchConflictRefusedGui
+    and TestSketchConflictKeptGui
     and TestSketchOverdefinedRedGui
     and TestSketchOnshapeConstraintsGui
     and TestSketchOnshapeShapesGui

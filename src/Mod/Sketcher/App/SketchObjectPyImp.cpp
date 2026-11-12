@@ -62,7 +62,13 @@ PyObject* SketchObjectPy::solve(PyObject* args)
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
-    int ret = this->getSketchObjectPtr()->solve();
+    SketchObject* sketch = this->getSketchObjectPtr();
+    int ret = sketch->solve();
+    // FreeCAD-CH (ops#640): a conflict solved around still reports its code (the geometry of the
+    // rest is solved and written)
+    if (ret == 0 && sketch->getLastSolvedAroundConflict()) {
+        ret = sketch->getLastHasConflicts() ? (sketch->getLastDoF() < 0 ? -4 : -3) : -2;
+    }
     return Py_BuildValue("i", ret);
 }
 

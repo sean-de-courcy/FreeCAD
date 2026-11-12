@@ -1246,8 +1246,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual([(r["property"], r["index"]) for r in App.getReferenceReport(pipe)], report)
 
     def testPipeCopyThatFailsIsNamed(self):
-        """ops#234: the spine outside the body has conflicting constraints (its first line 10 and
-        20 long), so its copy doesn't recompute either. OK stops with a message naming the
+        """ops#234: the spine outside the body has a malformed constraint (a Midpoint of its first
+        line on itself; a conflict no longer fails a sketch, ops#640), so its copy doesn't
+        recompute either. OK stops with a message naming the
         original and why: the copy is gone, the spine is the original, the body as before. The
         copy's result was ignored (round 1 of PR 219: it named it only in the Report view, and OK
         went on)."""
@@ -1255,12 +1256,12 @@ class TestPanelFixesGui(unittest.TestCase):
 
         pipe = self.rod(spineInBody=False)
         self.spine.addConstraint(Sketcher.Constraint("DistanceY", 0, 1, 0, 2, 10))
-        self.spine.addConstraint(Sketcher.Constraint("DistanceY", 0, 1, 0, 2, 20))
+        self.spine.addConstraint(Sketcher.Constraint("Midpoint", 0, 1, 0))
         self.doc.recompute()
         self.assertFalse(self.spine.isValid())
         before = self.body.Group
         self.assertOkStops(
-            pipe, "Pipe: a copy of 'Spine' doesn't recompute: Sketch with conflicting"
+            pipe, "Pipe: a copy of 'Spine' doesn't recompute: Sketch with malformed"
         )
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.body.Group, before)

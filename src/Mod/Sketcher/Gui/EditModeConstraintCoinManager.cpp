@@ -2836,6 +2836,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
         iconRotation = i->iconRotation;
 
         maxColorPriority = constrColorPriority(i->constraintId);
+        // FreeCAD-CH (ops#640): one error among the merged constraints badges the glyph
+        bool badged = isErrorBadge(i->constraintId);
 
         if (idString.length()) {
             idString.append(QStringLiteral(","));
@@ -2852,6 +2854,7 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
             labels.append(i->label);
             ids.push_back(i->constraintId);
             labelColors.append(constrColor(i->constraintId));
+            badged = badged || isErrorBadge(i->constraintId);
 
             if (constrColorPriority(i->constraintId) > maxColorPriority) {
                 maxColorPriority = constrColorPriority(i->constraintId);
@@ -2867,6 +2870,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
         std::vector<QRect> boundingBoxesVec;
         int oldHeight = 0;
 
+        const QColor badge = badged ? badgeFill(iconColor, maxColorPriority) : QColor();
+
         // Render the icon here.
         if (compositeIcon.isNull()) {
             compositeIcon = renderConstrIcon(
@@ -2876,7 +2881,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
                 labelColors,
                 iconRotation,
                 &boundingBoxesVec,
-                &lastVPad
+                &lastVPad,
+                badge
             );
         }
         else {
@@ -2888,7 +2894,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
                 labelColors,
                 iconRotation,
                 &boundingBoxesVec,
-                &thisVPad
+                &thisVPad,
+                badge
             );
 
             // Stack vertically for now.  Down the road, it might make sense
@@ -2952,7 +2959,8 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
     const QList<QColor>& labelColors,
     double iconRotation,
     std::vector<QRect>* boundingBoxes,
-    int* vPad
+    int* vPad,
+    const QColor& badgeColor
 )
 {
     // Constants to help create constraint icons
@@ -3003,7 +3011,18 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
     // Render the Icons
     QPainter qp(&image);
     qp.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    qp.fillRect(roticon.rect(), iconColor);
+    qp.fillRect(roticon.rect(), badgeColor.isValid() ? QColor(Qt::white) : iconColor);
+
+    // FreeCAD-CH (ops#640): Onshape's Show errors draws a conflicting constraint's glyph white on
+    // a red-filled badge (PL1d): the badge goes behind the whitened icon
+    if (badgeColor.isValid()) {
+        qp.setCompositionMode(QPainter::CompositionMode_DestinationOver);
+        qp.setRenderHint(QPainter::Antialiasing);
+        qp.setPen(Qt::NoPen);
+        qp.setBrush(badgeColor);
+        const double radius = roticon.width() / 5.0;
+        qp.drawRoundedRect(QRectF(roticon.rect()), radius, radius);
+    }
 
     // Render constraint label if necessary
     if (!labels.join(QString()).isEmpty()) {
@@ -3052,9 +3071,20 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
 void EditModeConstraintCoinManager::drawTypicalConstraintIcon(const constrIconQueueItem& i)
 {
     QColor color = constrColor(i.constraintId);
+    const QColor badge = isErrorBadge(i.constraintId)
+        ? badgeFill(color, constrColorPriority(i.constraintId))
+        : QColor();
 
-    QImage image
-        = renderConstrIcon(i.type, color, QStringList(i.label), QList<QColor>() << color, i.iconRotation);
+    QImage image = renderConstrIcon(
+        i.type,
+        color,
+        QStringList(i.label),
+        QList<QColor>() << color,
+        i.iconRotation,
+        nullptr,
+        nullptr,
+        badge
+    );
 
     i.infoPtr->string.setValue(QString::number(i.constraintId).toLatin1().data());
     sendConstraintIconToCoin(image, i.destination);
@@ -3150,6 +3180,27 @@ int EditModeConstraintCoinManager::constrColorPriority(int constraintId)
     }
 
     return 1;
+}
+
+bool EditModeConstraintCoinManager::isErrorBadge(int constraintId) const
+{
+    if (!ViewProviderSketch::showErrorsPreference()) {
+        return false;
+    }
+    // The solver's lists hold 1-based numbers
+    const Sketcher::SketchObject* sketch = viewProvider.getSketchObject();
+    for (const auto* numbers : {&sketch->getLastConflicting(), &sketch->getLastMalformedConstraints()}) {
+        if (std::ranges::find(*numbers, constraintId + 1) != numbers->end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QColor EditModeConstraintCoinManager::badgeFill(const QColor& iconColor, int priority)
+{
+    // Onshape's badge red (PL1d, about #D66E74); a selected or preselected glyph keeps that colour
+    return priority > 1 ? iconColor : QColor(0xD6, 0x6E, 0x74);
 }
 
 SoSeparator* EditModeConstraintCoinManager::getConstraintIdSeparator(int i) const
