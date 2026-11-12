@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <map>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -8270,6 +8271,14 @@ public:
                      || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface)))) {
                 continue;
             }
+            // A degenerate edge (a loft to a point) has no 3D curve to project a new pcurve from
+            bool degenerate = false;
+            for (TopExp_Explorer e(face, TopAbs_EDGE); e.More() && !degenerate; e.Next()) {
+                degenerate = BRep_Tool::Degenerated(TopoDS::Edge(e.Current()));
+            }
+            if (degenerate) {
+                continue;
+            }
             GeomLib_IsPlanarSurface check(surface, Precision::Confusion());
             if (!check.IsPlanar()) {
                 continue;
@@ -8391,24 +8400,33 @@ public:
         if (plane == planes.end() && line == lines.end()) {
             return Standard_False;
         }
+        // The plane and the curve each in its own frame: the curve is brought into the plane's
+        TopLoc_Location surfaceLocation;
+        const Handle(Geom_Surface) oldSurface = BRep_Tool::Surface(face, surfaceLocation);
         Handle(Geom_Plane) surface;
         if (plane != planes.end()) {
             surface = plane->second;
         }
         else {
-            TopLoc_Location location;
-            surface = Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(face, location));
+            surface = Handle(Geom_Plane)::DownCast(oldSurface);
             if (surface.IsNull()) {
                 return Standard_False;
             }
         }
-        TopLoc_Location location;
+        TopLoc_Location curveLocation;
         double first {}, last {};
-        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, curveLocation, first, last);
+        if (curve.IsNull()) {
+            return Standard_False;
+        }
         if (line != lines.end()) {
             first = parameterOn(line->second, curve->Value(first));
             last = parameterOn(line->second, curve->Value(last));
             curve = line->second;
+        }
+        if (!curveLocation.IsEqual(surfaceLocation)) {
+            curve = Handle(Geom_Curve)::DownCast(
+                curve->Transformed((surfaceLocation.Inverted() * curveLocation).Transformation()));
         }
         curve2d = GeomProjLib::Curve2d(curve, first, last, surface);
         tolerance = BRep_Tool::Tolerance(edge);
@@ -8424,7 +8442,14 @@ public:
         if (line == lines.end()) {
             return Standard_False;
         }
-        parameter = parameterOn(line->second, BRep_Tool::Pnt(vertex));
+        // Through the old curve, so the point is in the line's frame
+        TopLoc_Location location;
+        double first {}, last {};
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        if (curve.IsNull()) {
+            return Standard_False;
+        }
+        parameter = parameterOn(line->second, curve->Value(BRep_Tool::Parameter(vertex, edge)));
         tolerance = BRep_Tool::Tolerance(vertex);
         return Standard_True;
     }

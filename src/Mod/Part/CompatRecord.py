@@ -938,6 +938,16 @@ def loadDeltas(folder, model):
     return data["changes"]
 
 
+def deltasFor(deltas, passName):
+    """The entries of `deltas` that hold in the gate's pass `passName`: an entry with "passes"
+    holds only in those (a change in what a recompute builds leaves the saved shape that the open
+    pass reads as it was: ops#640, a loft's planes); one without holds in every pass."""
+    if not deltas:
+        return deltas
+    return {where: entry for where, entry in deltas.items()
+            if passName in entry.get("passes", (passName,))}
+
+
 def delta(base, other, stage="open"):
     """What `other` holds that `base` doesn't, within the stage's tolerance: {object: {field:
     value}}, a property field as {"props": {name: value}}, a gone object as None. With
