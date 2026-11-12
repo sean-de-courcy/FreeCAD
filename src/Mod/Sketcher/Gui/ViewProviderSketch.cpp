@@ -39,6 +39,12 @@
 #include <Inventor/nodes/SoShapeHints.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoTransform.h>
+#include <Inventor/details/SoFaceDetail.h>
+#include <Inventor/nodes/SoAnnotation.h>
+#include <Inventor/nodes/SoBaseColor.h>
+#include <Inventor/nodes/SoCoordinate3.h>
+#include <Inventor/nodes/SoDrawStyle.h>
+#include <Inventor/nodes/SoLineSet.h>
 
 #include <QApplication>
 #include <QFontMetricsF>
@@ -118,6 +124,8 @@
 #include <Precision.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <GCPnts_TangentialDeflection.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -645,6 +653,25 @@ void SoSketchFaces::initClass()
     SO_NODE_INIT_CLASS(SoSketchFaces, SoFCShape, "FCShape");
 }
 
+void SoSketchFaces::doAction(SoAction* action)
+{
+    // FreeCAD-CH (ops#640 polish P7, SP10-Q1/Q5): Onshape leaves a hovered region's fill as it
+    // is and draws its boundary curves in the hover colour
+    if (onHoverHighlight && Gui::ForkKeymap::isOnshape()
+        && action->isOfType(Gui::SoHighlightElementAction::getClassTypeId())) {
+        auto* highlight = static_cast<Gui::SoHighlightElementAction*>(action);
+        const SoDetail* detail = highlight->getElement();
+        int face = 0;
+        if (highlight->isHighlighted() && detail
+            && detail->isOfType(SoFaceDetail::getClassTypeId())) {
+            face = static_cast<const SoFaceDetail*>(detail)->getPartIndex() + 1;
+        }
+        onHoverHighlight(face, highlight->getColor());
+        return;
+    }
+    inherited::doAction(action);
+}
+
 /*************************** ViewProviderSketch **************************/
 
 // Struct for holding previous click information
@@ -669,8 +696,6 @@ ViewProviderSketch::ViewProviderSketch()
     , pcSketchFacesToggle(new SoToggleSwitch)
     , pcSelectedRegionsRoot(new SoSwitch)
     , pcSelectedRegions(new SoSketchFaces)
-    , pcHoveredRegionRoot(new SoSwitch)
-    , pcHoveredRegion(new SoSketchFaces)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -794,19 +819,32 @@ ViewProviderSketch::ViewProviderSketch()
     pcSelectedRegionsRoot->addChild(selectedRegions);
     pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
 
-    // FreeCAD-CH (ops#640 polish P7): the hovered region, unpickable as well
-    auto hoveredRegionNode = new SoSeparator;
-    auto hoverUnpickable = new SoPickStyle;
-    hoverUnpickable->style = SoPickStyle::UNPICKABLE;
-    hoveredRegionNode->addChild(hoverUnpickable);
-    hoveredRegionNode->addChild(pcHoveredRegion);
-    pcHoveredRegionRoot->addChild(hoveredRegionNode);
-    pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
+    // FreeCAD-CH (ops#640 polish P7): the 3D view's hovered region's boundary curves
+    pcRegionHoverRoot = new SoSwitch;
+    pcRegionHoverRoot->setName("RegionHoverEdges");
+    auto regionHover = new SoAnnotation;
+    auto regionHoverPick = new SoPickStyle;
+    regionHoverPick->style = SoPickStyle::UNPICKABLE;
+    regionHoverColor = new SoBaseColor;
+    regionHoverStyle = new SoDrawStyle;
+    regionHoverCoords = new SoCoordinate3;
+    regionHoverLines = new SoLineSet;
+    regionHover->addChild(regionHoverPick);
+    regionHover->addChild(regionHoverColor);
+    regionHover->addChild(regionHoverStyle);
+    regionHover->addChild(regionHoverCoords);
+    regionHover->addChild(regionHoverLines);
+    pcRegionHoverRoot->addChild(regionHover);
+    pcRegionHoverRoot->whichChild = SO_SWITCH_NONE;
+    pcSketchFaces->onHoverHighlight = [this](int face, const SbColor& color) {
+        showRegionHover(face, color);
+    };
 }
 
 ViewProviderSketch::~ViewProviderSketch()
 {
     connectionToolWidget.disconnect();
+    pcSketchFaces->onHoverHighlight = nullptr;  // FreeCAD-CH (ops#640 polish P7)
 }
 
 void ViewProviderSketch::slotUndoDocument(const Gui::Document& /*doc*/)
@@ -863,6 +901,11 @@ void ViewProviderSketch::activateHandler(std::unique_ptr<DrawSketchHandler> newH
     assert(!sketchHandler);
 
     sketchHandler = std::move(newHandler);
+    // FreeCAD-CH (ops#640 polish P7, SP10-Q2): a tool shows no region hover; one begun before
+    // the tool ends with it
+    if (updateHoveredRegion(0, 0.0, 0.0)) {
+        updateColor();
+    }
     setSketchMode(STATUS_SKETCH_UseHandler);
     // FreeCAD-CH (ops#634): a handler takes the model picks it wants itself (a constraint tool
     // turns selection on with its own gate); a drawing tool must get every click
@@ -2128,8 +2171,15 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
             const bool element = preselection.isPreselectPointValid()
                 || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
                 || !preselection.PreselectConstraintSet.empty();
-            const int region = Gui::ForkKeymap::isOnshape() && !element ? internalFaceAt(x, y) : 0;
+            int region = Gui::ForkKeymap::isOnshape() && !element ? internalFaceAt(x, y) : 0;
+            // SP10-Q4: hovering a selected region changes nothing
+            if (region > 0 && isSelected("InternalFace" + std::to_string(region))) {
+                region = 0;
+            }
             const bool regionChanged = updateHoveredRegion(region, x, y);
+            if (regionChanged && !preselectChanged) {
+                updateColor();
+            }
             if (preselectChanged) {
                 if (updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
                     editCoinManager->updateVirtualSpace();
@@ -3226,6 +3276,13 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                 && Mode != STATUS_SELECT_Constraint && Mode != STATUS_SELECT_Cross
                 && Mode != STATUS_SELECT_Wire) {
                 resetPreselectPoint();
+                // FreeCAD-CH (ops#640 polish P7): the 3D view's pick that ends the region's
+                // preselection (the pointer left the region) takes the move: the hover ends here
+                if (hoveredRegion > 0 && !updatingRegionPreselection) {
+                    hoveredRegion = 0;
+                    hoveredRegionCurves.clear();
+                    updateColor();
+                }
             }
         }
     }
@@ -4338,7 +4395,7 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
         updateSelectedRegions();  // FreeCAD-CH (selection parity SQ11)
         // FreeCAD-CH (ops#640 polish P7): the regions are new: the next move finds the hovered one
         hoveredRegion = 0;
-        pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
+        hoveredRegionCurves.clear();
     }
 
     if (prop != &getSketchObject()->Constraints) {
@@ -4631,6 +4688,7 @@ void ViewProviderSketch::attach(App::DocumentObject* pcFeat)
     ViewProvider2DObject::attach(pcFeat);
 
     getOrCreateAnnotation()->addChild(pcSketchFacesToggle);
+    getOrCreateAnnotation()->addChild(pcRegionHoverRoot);  // FreeCAD-CH (ops#640 polish P7)
 }
 
 void ViewProviderSketch::setupContextMenu(QMenu* menu, QObject* receiver, const char* member)
@@ -4719,8 +4777,7 @@ bool ViewProviderSketch::setEdit(int ModNum)
     pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
     editCoinManager->getRootEditNode()->addChild(pcSelectedRegionsRoot);
     hoveredRegion = 0;
-    pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
-    editCoinManager->getRootEditNode()->addChild(pcHoveredRegionRoot);
+    hoveredRegionCurves.clear();
 
 
     App::DocumentObject* editObj = getSketchObject();
@@ -6001,6 +6058,11 @@ bool ViewProviderSketch::isCurveSelected(int curveId) const
     return selection.SelCurvSet.find(curveId) != selection.SelCurvSet.end();
 }
 
+bool ViewProviderSketch::isCurveRegionHovered(int curveId) const
+{
+    return hoveredRegionCurves.count(curveId) > 0;
+}
+
 bool ViewProviderSketch::isConstraintSelected(int constraintId) const
 {
     return selection.SelConstraintSet.find(constraintId) != selection.SelConstraintSet.end();
@@ -6355,6 +6417,78 @@ void ViewProviderSketch::updateSelectedRegions()
     pcSelectedRegionsRoot->whichChild = any ? 0 : SO_SWITCH_NONE;
 }
 
+std::set<int> ViewProviderSketch::regionBoundaryCurves(int face) const
+{
+    std::set<int> curves;
+    auto* sketch = getSketchObject();
+    const TopoDS_Shape& shape = sketch->InternalShape.getValue();
+    if (face <= 0 || shape.IsNull()) {
+        return curves;
+    }
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    if (face > faces.Extent()) {
+        return curves;
+    }
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    TopTools_IndexedMapOfShape faceEdges;
+    TopExp::MapShapes(faces(face), TopAbs_EDGE, faceEdges);
+    const auto elementMap = sketch->getInternalElementMap();
+    for (int i = 1; i <= faceEdges.Extent(); ++i) {
+        const int index = edges.FindIndex(faceEdges(i));
+        auto it = elementMap.find(SketchObject::internalPrefix() + "Edge" + std::to_string(index));
+        int geoId = 0;
+        if (index > 0 && it != elementMap.end()
+            && sketch->geoIdFromShapeType(it->second.c_str(), geoId)) {
+            curves.insert(geoId);
+        }
+    }
+    return curves;
+}
+
+void ViewProviderSketch::showRegionHover(int face, const SbColor& color)
+{
+    auto* sketch = getSketchObject();
+    std::vector<SbVec3f> points;
+    std::vector<int32_t> counts;
+    if (face > 0 && !isInEditMode() && sketch
+        && !Gui::Selection().isSelected(sketch, ("InternalFace" + std::to_string(face)).c_str())) {
+        for (int geoId : regionBoundaryCurves(face)) {
+            const Part::Geometry* geo = geoId >= 0 ? sketch->getGeometry(geoId) : nullptr;
+            if (!geo) {
+                continue;
+            }
+            const TopoDS_Shape edge = geo->toShape();
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(TopoDS::Edge(edge));
+            GCPnts_TangentialDeflection discretizer(curve, 0.05, 0.01);
+            const int count = discretizer.NbPoints();
+            if (count < 2) {
+                continue;
+            }
+            for (int i = 1; i <= count; ++i) {
+                const gp_Pnt p = discretizer.Value(i);
+                points.emplace_back(float(p.X()), float(p.Y()), float(p.Z()));
+            }
+            counts.push_back(count);
+        }
+    }
+    if (counts.empty()) {
+        pcRegionHoverRoot->whichChild = SO_SWITCH_NONE;
+        return;
+    }
+    regionHoverColor->rgb.setValue(color);
+    regionHoverStyle->lineWidth = std::max(static_cast<float>(LineWidth.getValue()), 2.0F);
+    regionHoverCoords->point.setNum(int(points.size()));
+    regionHoverCoords->point.setValues(0, int(points.size()), points.data());
+    regionHoverLines->numVertices.setNum(int(counts.size()));
+    regionHoverLines->numVertices.setValues(0, int(counts.size()), counts.data());
+    pcRegionHoverRoot->whichChild = 0;
+}
+
 bool ViewProviderSketch::updateHoveredRegion(int face, double x, double y)
 {
     if (face == hoveredRegion || !isInEditMode()) {
@@ -6362,6 +6496,7 @@ bool ViewProviderSketch::updateHoveredRegion(int face, double x, double y)
     }
     const bool hadRegion = hoveredRegion > 0;
     hoveredRegion = 0;
+    hoveredRegionCurves.clear();
     TopoDS_Shape region;
     const TopoDS_Shape& shape = getSketchObject()->InternalShape.getValue();
     if (face > 0 && !shape.IsNull()) {
@@ -6372,27 +6507,27 @@ bool ViewProviderSketch::updateHoveredRegion(int face, double x, double y)
         }
     }
     if (region.IsNull()) {
-        pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
         // The region's preselection goes with it; an element's (the pointer on a side) stays
         const bool element = preselection.isPreselectPointValid()
             || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
             || !preselection.PreselectConstraintSet.empty();
         if (hadRegion && !element) {
+            updatingRegionPreselection = true;
             Gui::Selection().rmvPreselect();
+            updatingRegionPreselection = false;
         }
         return hadRegion;
     }
     hoveredRegion = face;
-    pcHoveredRegion->color.setValue(DrawingParameters::PreselectColor);
-    pcHoveredRegion->transparency.setValue(0.6F);
-    setupCoinGeometry(region, pcHoveredRegion, Deviation.getValue(), AngularDeflection.getValue());
-    pcHoveredRegionRoot->whichChild = 0;
+    hoveredRegionCurves = regionBoundaryCurves(face);
     Base::Vector3d onPlane;
     getEditingPlacement().multVec(Base::Vector3d(x, y, 0.0), onPlane);
+    updatingRegionPreselection = true;  // its removal of the old preselection keeps this hover
     setPreselect("InternalFace" + std::to_string(face),
                  static_cast<float>(onPlane.x),
                  static_cast<float>(onPlane.y),
                  static_cast<float>(onPlane.z));
+    updatingRegionPreselection = false;
     return true;
 }
 

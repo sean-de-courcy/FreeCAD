@@ -520,7 +520,9 @@ void EditModeGeometryCoinManager::updateGeometryColor(
                 // edit->CurveSet->numVertices => [i] indicates number of vertex for line i.
                 int indexes = (editModeScenegraphNodes.CurveSet[l][t]->numVertices[i]);
 
-                bool preselected = (preselectcurve == GeoId);
+                // FreeCAD-CH (ops#640 polish P7): a hovered region's boundary curves too
+                bool preselected = (preselectcurve == GeoId)
+                    || ViewProviderSketchCoinAttorney::isCurveRegionHovered(viewProvider, GeoId);
 
                 auto* obj = viewProvider.getSketchObject();
                 bool isGroupMember = GeoId >= 0 && obj->isInGroup(GeoId, false);

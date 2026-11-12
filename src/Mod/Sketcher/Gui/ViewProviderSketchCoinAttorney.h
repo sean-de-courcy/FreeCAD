@@ -124,6 +124,7 @@ private:
     static inline bool isConstraintPreselected(const ViewProviderSketch& vp, int constraintId);
     static inline bool isPointSelected(const ViewProviderSketch& vp, int pointId);
     static inline bool isCurveSelected(const ViewProviderSketch& vp, int curveId);
+    static inline bool isCurveRegionHovered(const ViewProviderSketch& vp, int curveId);
     static inline bool isConstraintSelected(const ViewProviderSketch& vp, int constraintId);
 
     static inline void executeOnSelectionPointSet(
@@ -313,6 +314,12 @@ inline bool ViewProviderSketchCoinAttorney::isPointSelected(const ViewProviderSk
 inline bool ViewProviderSketchCoinAttorney::isCurveSelected(const ViewProviderSketch& vp, int curveId)
 {
     return vp.isCurveSelected(curveId);
+}
+
+inline bool ViewProviderSketchCoinAttorney::isCurveRegionHovered(const ViewProviderSketch& vp,
+                                                                 int curveId)
+{
+    return vp.isCurveRegionHovered(curveId);
 }
 
 inline bool ViewProviderSketchCoinAttorney::isConstraintSelected(
