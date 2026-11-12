@@ -367,9 +367,8 @@ class TestPickFirstGui(unittest.TestCase):
     def testMirrorWithNothingSelectedStaysInFeaturesMode(self):
         """Mirror with nothing selected: Features mode (it was Whole shape), no originals, the
         Features field armed, the cube still shown (1000). The cube picked: mirrored in XY, 2000.
-        T1a: the mirror is an owner outside every Body; what the user sees is the Body (its Tip).
-        Red at 5debeaab7d (ops#654): the step the pick makes stays held by the Body's edit roll
-        (Touched, no shape) while the panel is open, so no 2000 until OK."""
+        T1a: the mirror is an owner outside every Body; what the user sees is the Body (its Tip):
+        the step the pick makes while the panel is open is previewed (ops#654)."""
         self.cube()
         self.runTool("PartDesign_Mirrored")
         mirror = self.only("PartDesign::Mirrored")
@@ -403,6 +402,63 @@ class TestPickFirstGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
         self.assertAlmostEqual(pattern.Shape.Volume, 2000, places=4)
+
+    def steps(self, owner):
+        return [o for o in self.doc.Objects if getattr(o, "StudioOwner", None) == owner]
+
+    def testListedLinearPatternPickedWithItsPanelOpenIsPreviewed(self):
+        """A listed studio: Linear pattern with nothing selected, the Body still 3000 (the cube
+        made 30 long in X, so the copy at x 25 overlaps it and the part stays one piece). The
+        cube picked with the panel open: its step in the Body is previewed (x 0..55, 5500) before
+        OK (ops#654). Cancel: 3000, no pattern and no step left. Again with OK: 5500, and one
+        undo takes the pattern and its step back (3000)."""
+        self.cube()
+        self.box.Length = 30
+        self.doc.recompute()
+        for accept in (False, True):
+            self.runTool("PartDesign_LinearPattern")
+            pattern = self.only("PartDesign::LinearPattern")
+            self.assertFalse(self.body.hasObject(pattern))
+            self.assertEqual(pattern.TransformMode, "Features")
+            self.assertAlmostEqual(self.body.Tip.Shape.Volume, 3000, places=4)
+            self.assertTrue(
+                waitFor(lambda: armed(visibleField("fieldOriginals"))), "Features isn't armed"
+            )
+            Gui.Selection.addSelection(self.doc.Name, self.box.Name)
+            self.assertTrue(waitFor(lambda: pattern.Originals == [self.box]), pattern.Originals)
+            pump(0.2)
+            self.assertIsNotNone(Gui.Control.activeDialog(), "the panel closed")
+            step = self.steps(pattern)
+            self.assertEqual(len(step), 1, [o.Name for o in step])
+            self.assertTrue(self.body.hasObject(step[0]))
+            self.assertFalse(self.body.isRolledBack(), "the step is held")
+            self.assertTrue(self.body.Tip.isValid(), self.body.Tip.getStatusString())
+            self.assertAlmostEqual(self.body.Tip.Shape.Volume, 5500, places=4)
+            name = pattern.Name
+            button = taskButton(
+                QtWidgets.QDialogButtonBox.Ok if accept else QtWidgets.QDialogButtonBox.Cancel
+            )
+            self.assertIsNotNone(button)
+            self.watchModals()
+            button.click()
+            closed = waitFor(lambda: not Gui.Control.activeDialog())
+            self.answering = False
+            self.assertEqual(self.modals, [])
+            self.assertTrue(closed, "the panel is still open")
+            if accept:
+                self.doc.recompute()
+                self.assertAlmostEqual(self.body.Tip.Shape.Volume, 5500, places=4)
+                self.doc.undo()
+                pump(0.2)
+                self.doc.recompute()
+            self.assertIsNone(self.doc.getObject(name), "the pattern is left")
+            self.assertEqual(
+                [o.Name for o in self.doc.Objects if getattr(o, "StudioOwner", None) is not None],
+                [],
+            )
+            self.assertEqual(self.body.Group, [self.box])
+            self.assertTrue(self.body.Tip.isValid(), self.body.Tip.getStatusString())
+            self.assertAlmostEqual(self.body.Tip.Shape.Volume, 3000, places=4)
 
     def testPolarPatternWithNothingSelectedArmsItsFeatures(self):
         self.cube()

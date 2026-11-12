@@ -1271,8 +1271,10 @@ void ViewProviderBody::setEditFinal(App::DocumentObject* member, bool final)
 
 void ViewProviderBody::followStudioEdit(App::DocumentObject* edited)
 {
+    // A studio's list with no App::Part (null studio()) is the document's own studio, its Bodies
+    // at the top (studioBodies(doc, nullptr)): it follows the edit as a Part's does (ops#654)
     const PartDesign::StudioList* list = edited ? PartDesign::StudioList::holding(edited) : nullptr;
-    if (!list || !list->studio() || !PartDesign::isStudioOwner(edited)) {
+    if (!list || !PartDesign::isStudioOwner(edited)) {
         return;
     }
     // Only while its dialog's edit is open
