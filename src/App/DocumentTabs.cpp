@@ -43,12 +43,26 @@
 #include "OriginGroupExtension.h"
 #include "Part.h"
 #include "VarSet.h"
+#include "VarSetCopy.h"
 
 using namespace App;
 using namespace App::DocumentTabs;
 
 namespace
 {
+
+/// Whether @a obj is a set that can be a Variable Studio: a plain App::VarSet, or a copy with no
+/// source, as Detach leaves an imported studio (ops#726). An attached copy can't: its variables
+/// are read-only and follow the source. Undoing a Detach attaches the copy again, and it stops
+/// being a tab until the redo.
+bool canBeVariableStudio(const DocumentObject* obj)
+{
+    if (obj->getTypeId() == VarSet::getClassTypeId()) {
+        return true;
+    }
+    auto copy = dynamic_cast<const VarSetCopy*>(obj);
+    return copy && copy->getTypeId() == VarSetCopy::getClassTypeId() && !copy->isAttached();
+}
 
 // Assembly and TechDraw aren't linked by App: their types by name, not kept while bad (the modules
 // can load after the first call), as GeoFeatureGroupExtension.cpp does
@@ -483,7 +497,7 @@ void DocumentTabs::placeAfter(Document* doc, const std::string& name, const std:
 
 bool DocumentTabs::isVariableStudio(const DocumentObject* obj)
 {
-    if (!obj || !obj->isAttachedToDocument() || obj->getTypeId() != VarSet::getClassTypeId()) {
+    if (!obj || !obj->isAttachedToDocument() || !canBeVariableStudio(obj)) {
         return false;
     }
     const Registry registry = readRegistry(obj->getDocument());
@@ -493,9 +507,13 @@ bool DocumentTabs::isVariableStudio(const DocumentObject* obj)
 
 void DocumentTabs::setVariableStudio(DocumentObject* varSet, bool marked)
 {
+    // unmarking takes any set, so a stale mark on an attached copy can be cleared
     if (!varSet || !varSet->isAttachedToDocument()
-        || varSet->getTypeId() != VarSet::getClassTypeId()) {
-        throw Base::TypeError("A Variable Studio is an App::VarSet");
+        || (marked ? !canBeVariableStudio(varSet) : !varSet->isDerivedFrom<VarSet>())) {
+        throw Base::TypeError(
+            "A Variable Studio is an App::VarSet or a detached copy (an attached copy is read-only: "
+            "detach it first)"
+        );
     }
     Registry registry = readRegistry(varSet->getDocument());
     const std::string name = varSet->getNameInDocument();

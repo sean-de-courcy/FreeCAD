@@ -399,9 +399,9 @@ Controller::Controller(MainWindow* mw)
     auto& app = App::GetApplication();
     connections.emplace_back(app.signalNewObject.connect([this](const App::DocumentObject& obj) {
         // A Variable Studio's mark outlives its VarSet (for the delete's undo); a new VarSet that
-        // reuses the name isn't one (R6T-8)
+        // reuses the name isn't one (R6T-8), nor a new copy, which starts with no source (ops#726)
         App::Document* doc = obj.getDocument();
-        if (doc && obj.getTypeId() == App::VarSet::getClassTypeId()
+        if (doc && obj.isDerivedFrom<App::VarSet>()
             && !doc->isPerformingTransaction() && !doc->testStatus(App::Document::Restoring)
             && !doc->testStatus(App::Document::Importing) && AppTabs::isVariableStudio(&obj)) {
             AppTabs::setVariableStudio(const_cast<App::DocumentObject*>(&obj), false);
@@ -430,7 +430,9 @@ Controller::Controller(MainWindow* mw)
             const char* name = prop.getName();
             if (name
                 && (std::strcmp(name, "Group") == 0 || std::strcmp(name, "Label") == 0
-                    || std::strcmp(name, "Origin") == 0)) {
+                    || std::strcmp(name, "Origin") == 0
+                    // a copy's Detach, or its undo, makes it a tab or not (ops#726)
+                    || std::strcmp(name, "SourceKind") == 0)) {
                 schedule(obj.getDocument());
             }
         }

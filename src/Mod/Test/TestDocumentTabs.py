@@ -31,6 +31,7 @@ Studio 2 (an App::Part) a Body with a cylinder r 5, h 20 on the origin; an assem
 VarSet.
 """
 
+import json
 import math
 import os
 import shutil
@@ -143,19 +144,80 @@ class TestDocumentTabs(unittest.TestCase):
 
     def testUnmarkedVarSetAndCopyAreNoTabs(self):
         """A VarSet the Variable tool makes (unmarked) and a VarSetCopy are variable sets, not
-        tabs; a VarSetCopy can't be marked."""
+        tabs; an attached VarSetCopy can't be marked (a detached one can: ops#726, below)."""
         plain = self.doc.addObject("App::VarSet", "Variables")
         copy = self.doc.addObject("App::VarSetCopy", "Copy")
+        copy.SourceKind = "Onshape JSON"
         names = [name for name, _kind in self.kinds()]
         self.assertNotIn(plain.Name, names)
         self.assertNotIn(copy.Name, names)
         self.assertFalse(Tabs.isVariableStudio(plain))
         with self.assertRaises(TypeError):
             Tabs.setVariableStudio(copy)
+        Tabs.setVariableStudio(copy, False)  # unmarking takes any set
         Tabs.setVariableStudio(plain)
         self.assertIn(plain.Name, [name for name, _kind in self.kinds()])
         Tabs.setVariableStudio(plain, False)
         self.assertNotIn(plain.Name, [name for name, _kind in self.kinds()])
+
+    def testDetachedCopyIsAVariableStudio(self):
+        """ops#726 (replica stage 2, G8): an imported Onshape studio, once detached, can be a
+        Variable Studio tab. Designed model: a studio export with w = 10 mm; a 10 x 10 mm square
+        padded by #w is 1000 mm³. Attached, the copy is refused; undoing the Detach attaches it
+        again and takes the tab away, the redo brings it back; the tab survives save and reopen."""
+        import Part
+        from freecad.variables import copies
+
+        path = os.path.join(self.folder, "Studio.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"variableStudioReference": None, "variables": [
+                {"type": "LENGTH", "name": "w", "value": None, "description": "the width",
+                 "expression": "10 mm"}]}], f)
+        copy = copies.import_studios(self.doc, [path]).copies[0]
+        self.assertEqual(copy.TypeId, "App::VarSetCopy")
+        with self.assertRaises(TypeError):
+            Tabs.setVariableStudio(copy)  # attached: read-only, it follows its source
+        self.assertFalse(Tabs.isVariableStudio(copy))
+
+        copies.detach(copy)
+        Tabs.setVariableStudio(copy)
+        self.assertTrue(Tabs.isVariableStudio(copy))
+        self.assertIn((copy.Name, "VariableStudio"), self.kinds())
+        self.assertEqual(Tabs.tabOf(copy), copy.Name)
+
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        corners = [App.Vector(x, y, 0) for x, y in ((0, 0), (10, 0), (10, 10), (0, 10))]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.setExpression("Length", "#w")
+        self.doc.recompute()
+        self.assertAlmostEqual(copy.w.Value, 10, 9)
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, 6)
+
+        # the Detach's undo: attached again, no tab; the redo: the tab again
+        self.doc.undo()
+        self.assertEqual(copy.SourceKind, "Onshape JSON")
+        self.assertFalse(Tabs.isVariableStudio(copy))
+        self.assertNotIn(copy.Name, [name for name, _kind in self.kinds()])
+        self.doc.redo()
+        self.assertEqual(copy.SourceKind, "None")
+        self.assertTrue(Tabs.isVariableStudio(copy))
+
+        saved = os.path.join(self.folder, "TestDocumentTabsDetached.FCStd")  # tearDown closes it
+        self.doc.saveAs(saved)
+        name = copy.Name
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(saved)
+        copy = self.doc.getObject(name)
+        self.assertEqual(copy.TypeId, "App::VarSetCopy")
+        self.assertTrue(Tabs.isVariableStudio(copy))
+        self.assertIn((name, "VariableStudio"), self.kinds())
+        self.doc.getObject("Pad").touch()
+        self.doc.recompute()
+        self.assertAlmostEqual(self.doc.getObject("Pad").Shape.Volume, 1000, 6)
 
     def testImplicitStudio(self):
         """An empty document is one implicit studio; a document whose top level holds no solid but
