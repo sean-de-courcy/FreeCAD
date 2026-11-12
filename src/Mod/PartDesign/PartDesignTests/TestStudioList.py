@@ -60,6 +60,16 @@
 # fails); and the owner's refusals: nothing picked, an Add original over two or more parts (Onshape
 # Q2), an original that split its part (O7) and one whose part was absorbed before the pattern
 # (Q8): then nothing anywhere. G1 deletes and remakes the pattern steps with the rest.
+#
+# T2 (10.16 T2, settled 9) adds part patterns: a Linear (along the studio's x, 2 or 3 instances
+# 10 to 30 apart) or Polar (about the studio's z, 2 or 4 over 360) pattern of one part, New, Add
+# or Remove over one or two parts, made in the edit's transaction with its command's OK; edits of
+# its count and spacing, its source (New) or scope, suppress, delete, move, undo and redo. The
+# oracle (partPatternStep) copies the source at the pattern's place itself: New, a part per copy;
+# Add, 10.13's graph (merges, sources consumed by contact, copies touching nothing new parts);
+# Remove, every source outside the scope consumed. Each made part is labelled with its copies'
+# instances when made (labelPartPatternPieces). Intersect (Q6's pieces with new ids) is left out.
+# G1 covers the parts a part pattern made too.
 
 import os
 import random
@@ -157,6 +167,7 @@ def isOwner(obj):
     return (
         obj.TypeId in ("Part::Box", "PartDesign::Boolean", "PartDesign::Pocket")
         or isPartMirror(obj)
+        or isPartPattern(obj)
         or isFillet(obj)
         or isFeatureOwner(obj)
     )
@@ -221,12 +232,15 @@ PATTERN_TYPES = {"Linear": "PartDesign::LinearPattern", "Mirror": "PartDesign::M
 
 def isPattern(obj):
     """An in-Body pattern (slice 8; a T1a owner is no pattern here, isFeatureOwner)."""
-    return obj.TypeId in PATTERN_TYPES.values() and not isPartMirror(obj) and not isFeatureOwner(obj)
+    return (
+        obj.TypeId in PATTERN_TYPES.values() and not isPartMirror(obj) and not isPartPattern(obj)
+        and not isFeatureOwner(obj)
+    )
 
 
 def isFeatureOwner(obj):
     """A feature pattern studio feature (T1a): outside every Body, no step."""
-    if obj.TypeId not in PATTERN_TYPES.values() or isPartMirror(obj):
+    if obj.TypeId not in PATTERN_TYPES.values() or isPartMirror(obj) or isPartPattern(obj):
         return False
     parent = obj.getParentGeoFeatureGroup()
     return getattr(obj, "StudioOwner", None) is None and not (
@@ -389,6 +403,140 @@ def mirrorRecord(owner):
     )
 
 
+PART_PATTERN_TYPES = {"Linear": "PartDesign::LinearPattern", "Polar": "PartDesign::PolarPattern"}
+
+
+def isPartPattern(obj):
+    """A Linear or Polar part pattern (T2, 10.16): a studio feature over parts, outside every Body."""
+    return obj.TypeId in PART_PATTERN_TYPES.values() and getattr(obj, "PatternType", "") == "Part"
+
+
+def makePartPattern(
+    doc, studio, name, kind, sources, op, scope=(), length=0, count=2, suppressed=False
+):
+    """A T2 part pattern of the part ids sources: Linear along the studio's x (Extent length) or
+    Polar about the studio's z (360 degrees), op New (no scope), Add or Remove (not yet listed)."""
+    owner = doc.addObject(PART_PATTERN_TYPES[kind], name)
+    studio.addObject(owner)
+    owner.PatternType = "Part"
+    owner.StudioEntities = list(sources)
+    axes = studio.Origin.OriginFeatures
+    if kind == "Linear":
+        owner.Direction = (axes[0], [""])
+        owner.Mode = "Extent"
+        owner.Length = length
+    else:
+        owner.Axis = (axes[2], [""])
+        owner.Angle = 360
+    owner.Occurrences = count
+    owner.Refine = False
+    owner.addProperty("App::PropertyEnumeration", "Operation", "Studio")
+    owner.Operation = ["Union", "Subtraction", "Common"]
+    owner.Operation = "Subtraction" if op == "Remove" else "Union"
+    owner.StudioScope = [] if op == "New" else list(scope)
+    if suppressed:
+        owner.Suppressed = True
+    return owner
+
+
+def partMoves(kind, length=0, count=2):
+    """A part pattern's instances but the first: (instance number, how a shape is copied)."""
+    if kind == "Linear":
+        return [
+            (k + 1, lambda shape, d=V(k * length / (count - 1), 0, 0): shape.translated(d))
+            for k in range(1, count)
+        ]
+    return [
+        (k + 1, lambda shape, a=k * 360.0 / count: shape.rotated(V(0, 0, 0), V(0, 0, 1), a))
+        for k in range(1, count)
+    ]
+
+
+def drawPartPattern(rng, kind):
+    """A part pattern's count and length: Linear 2 or 3 instances 10, 15, 20 or 30 apart (a copy
+    on a face of the next part, across a gap, on it, beyond it); Polar 2 or 4 over 360."""
+    if kind == "Linear":
+        count = rng.choice([2, 3])
+        return count, rng.choice([10, 15, 20, 30]) * (count - 1)
+    return rng.choice([2, 4]), 0
+
+
+def partPatternRecord(pat):
+    kind = "Polar" if pat.TypeId == PART_PATTERN_TYPES["Polar"] else "Linear"
+    pieces, sides = madePieceRecords(pat)
+    scope = list(pat.StudioScope)
+    op = "Remove" if pat.Operation == "Subtraction" else ("Add" if scope else "New")
+    return dict(
+        name=pat.Name,
+        id=pat.ID,
+        ppattern=kind,
+        sources=list(pat.StudioEntities),
+        op=op,
+        scope=scope,
+        length=round(pat.Length.Value, 6) if kind == "Linear" else 0,
+        count=int(pat.Occurrences),
+        suppressed=bool(pat.Suppressed),
+        pieces=pieces,
+        sides=sides,
+    )
+
+
+def labelPartPatternPieces(made, pat, force=False):
+    """Notes on each part pat's command (or the resync) just made the copies it holds, for the
+    Part oracle, each as its source and instance number ("C#2"): New, its copy; Add, the copies
+    its leftover holds ("C#2,C#3"); "?" when none matches. The copies are the oracle's at pat's place."""
+    made = [b for b in made if force or not getattr(b, "OracleSide", "")]
+    if not made:
+        return
+    capture = {pat.Name: None}
+    oracle(*listOf(pat.Document), capture=capture)
+    copies = capture[pat.Name] or []
+    new = not list(pat.StudioScope)
+    for body in made:
+        shape = body.Tip.Shape if body.Tip else Part.Shape()
+        side = "?"
+        if not body.StudioParentId and not shape.isNull() and shape.Solids and copies:
+            if new:
+                centre = shape.Solids[0].CenterOfMass
+                number, copy = min(
+                    copies, key=lambda c: (c[1].Solids[0].CenterOfMass - centre).Length
+                )
+                if (copy.Solids[0].CenterOfMass - centre).Length < 1e-4:
+                    side = number
+            else:
+                numbers = sorted({n for n, c in copies if shape.common(c).Volume > 1e-6})
+                side = ",".join(numbers) or "?"
+        if not hasattr(body, "OracleSide"):
+            body.addProperty("App::PropertyString", "OracleSide", "Test")
+        body.OracleSide = side
+
+
+def relabelPartPatterns(doc):
+    """Labels again, as when made, each part a part pattern made whose label names a source the
+    pattern no longer has (a source split or merged at the pattern's place: the pieces have new
+    ids, and the App's witness decides which record holds which copy; the oracle checks that each
+    holds one)."""
+    lst = PartDesign.studioList(doc.getObject("S"))
+    pats = [e for e in lst.Entries if isPartPattern(e)] if lst is not None else []
+    bodies = [
+        b for b in doc.Objects
+        if b.TypeId == "PartDesign::Body" and b.StudioMadeBy in pats and not b.StudioParentId
+    ]
+    if not bodies:
+        return
+    capture = {p.Name: None for p in pats}
+    oracle(*listOf(doc), capture=capture)
+    for body in bodies:
+        copies = capture.get(body.StudioMadeBy.Name)
+        if not copies:
+            continue
+        sources = {key.split("#")[0] for key, _ in copies}
+        side = getattr(body, "OracleSide", "")
+        if side and side != "?" and {x.split("#")[0] for x in side.split(",")} <= sources:
+            continue
+        labelPartPatternPieces([body], body.StudioMadeBy, force=True)
+
+
 def makePattern(
     doc, name, kind, part, originals, length=0, count=2, suppressed=False, reapply=False
 ):
@@ -441,6 +589,8 @@ def patternRecord(pat):
 
 
 def ownerRecord(box):
+    if isPartPattern(box):
+        return partPatternRecord(box)
     if isFeatureOwner(box):
         return featureRecord(box)
     if isPartMirror(box):
@@ -541,6 +691,8 @@ def labelMade(doc):
         maker = body.StudioMadeBy
         if isFeatureOwner(maker):
             labelPatternPieces([body], maker)
+        elif isPartPattern(maker):
+            labelPartPatternPieces([body], maker)
         elif maker.TypeId == "Part::Box":
             labelPieces([body], maker)
         else:
@@ -704,7 +856,7 @@ def listOf(doc):
     return natives, records, bar
 
 
-def oracle(natives, records, bar, live=None):
+def oracle(natives, records, bar, live=None, capture=None):
     """Per part, (volume, solids) by Part booleans from the list as data, never by reconcile
     (the S1 skeptic, 2026-11-10: fromScratch() reconciles too, so it shows only that incremental
     and one-shot reconcile agree). Records apply in list order up to the bar, each to the parts
@@ -797,6 +949,132 @@ def oracle(natives, records, bar, live=None):
                 ):
                     out.append(key)
         return out
+    def partPatternStep(record, own):
+        """T2 (10.16 T2, settled 9): a Linear or Polar part pattern. Its copies are each source
+        part as it is at the pattern's place moved by every instance but the first. New: each copy
+        a part (its record, labelled with its instance). Add: a graph of the scope parts, the
+        sources outside the scope and the copies (face contact or overlap, 10.13; scope parts are
+        never joined directly): a source in a component holding a scope part is consumed (O5, Q3),
+        else kept (Q10); the tool (those sources and the copies) then merges each component of
+        scope parts and tool solids into its first scope part, the others consumed; a component of
+        tool solids alone is a leftover, its record labelled with its copies' instances. Remove:
+        every source outside the scope consumed (Q5), each scope part cut by them and the copies
+        (all of it taken: gone; two solids: unchanged, a split isn't modelled). Loud, nothing
+        anywhere and every record failing: no source, no scope part with a solid, a leftover no
+        record holds."""
+        ownIds = set(own)
+        sources = [p for p in resolve(record["sources"]) if p in shapes and shapes[p].Solids]
+        moves = partMoves(record["ppattern"], record.get("length", 0), record["count"])
+        # Each copy keyed by its source and instance ("C#2"; a split source's pieces each one)
+        copies = [
+            (f"{s}#{number}", plain(copy(shapes[s]))) for s in sources for number, copy in moves
+        ]
+        if capture is not None and record["name"] in capture:
+            capture[record["name"]] = copies
+        scope = [
+            p for p in resolve(record["scope"])
+            if p in shapes and shapes[p].Solids and p not in ownIds
+        ]
+        op = record["op"]
+        leftovers = None  # label -> solid; None: the pattern fails
+        apply = lambda: None  # noqa: E731
+        if sources and op == "New":
+            leftovers = dict(copies)
+        elif sources and scope and op == "Remove":
+            apart = [s for s in sources if s not in scope]
+            leftovers = {}
+
+            def apply():
+                consumed.update(apart)
+                tools = [shapes[s] for s in apart] + [c for _, c in copies]
+                tool = tools[0].fuse(tools[1:]) if len(tools) > 1 else tools[0]
+                for p in scope:
+                    result = shapes[p].cut(tool)
+                    if not result.Solids:
+                        shapes[p] = Part.makeCompound([])
+                        consumed.add(p)
+                        continue
+                    result = result.removeSplitter()
+                    if len(result.Solids) == 1:
+                        shapes[p] = result
+        elif sources and scope:
+            apart = [s for s in sources if s not in scope]
+            n = len(scope)
+
+            def components(nodes, links):
+                root = list(range(len(nodes)))
+
+                def find(k):
+                    while root[k] != k:
+                        k = root[k]
+                    return k
+
+                for j in range(n, len(nodes)):
+                    for k in range(j):
+                        if links(j, k) and find(k) != find(j) and joins(nodes[j], nodes[k]):
+                            a, b = find(j), find(k)
+                            root[max(a, b)] = min(a, b)
+                return [find(k) for k in range(len(nodes))]
+
+            nodes = [shapes[p] for p in scope] + [shapes[s] for s in apart] + [c for _, c in copies]
+            first = components(nodes, lambda j, k: True)
+            taken = [s for k, s in enumerate(apart) if first[n + k] < n]
+            # The tool's solids (the taken sources and the copies) against the scope parts
+            tools = [(None, shapes[s]) for s in taken] + list(copies)
+            nodes = [shapes[p] for p in scope] + [t for _, t in tools]
+            roots = components(nodes, lambda j, k: True)
+            leftovers = {}
+            groups = {}
+            for k in range(n, len(nodes)):
+                groups.setdefault(roots[k], []).append(k)
+            for root, members in groups.items():
+                if root >= n:
+                    numbers = sorted(tools[k - n][0] for k in members if tools[k - n][0])
+                    solids = [nodes[k] for k in members]
+                    shape = solids[0].fuse(solids[1:]) if len(solids) > 1 else solids[0]
+                    leftovers[",".join(numbers)] = plain(shape.removeSplitter())
+
+            def apply():
+                consumed.update(taken)
+                for root in sorted(r for r in groups if r < n):
+                    others = [scope[k] for k in range(1, n) if roots[k] == root and k != root]
+                    pieces = [nodes[k] for k in groups[root]] + [shapes[p] for p in others]
+                    result = shapes[scope[root]].fuse(pieces).removeSplitter()
+                    if len(result.Solids) == 1:
+                        shapes[scope[root]] = result
+                    consumed.update(others)
+
+        # Each record holds the leftover of its label; an Add's whose copies merged onto a scope
+        # part is dormant (10.12 amendment point 5)
+        claims = {}
+        dormant = set()
+        if leftovers is not None:
+            for pid, (parent, side) in sorted(own.items()):
+                if parent:
+                    continue
+                if side in leftovers and side not in claims.values():
+                    claims[pid] = side
+                elif op == "Add" and side and side != "?":
+                    mine = set(side.split(","))
+                    loose = {x for label in leftovers for x in label.split(",")}
+                    if not mine & loose:
+                        dormant.add(pid)
+            if set(leftovers) - set(claims.values()):
+                leftovers = None  # a leftover no record holds: loud
+        for pid, (parent, _) in sorted(own.items()):
+            madePieces.add(pid)
+            if parent:
+                parentOf[pid] = parent
+                failed.add(pid)  # a piece of a split: not modelled
+            elif leftovers is not None and pid in claims:
+                shapes[pid] = leftovers[claims[pid]]
+            elif leftovers is not None and pid in dormant:
+                vanished.add(pid)
+            else:
+                failed.add(pid)
+        if leftovers is not None:
+            apply()
+
     consumedAt = {}  # T1a: each consumed part -> the index of the record that consumed it
     places = {r["name"]: i for i, r in enumerate(records)}
     for i, record in enumerate(records):
@@ -928,6 +1206,9 @@ def oracle(natives, records, bar, live=None):
                     shapes[pid] = leftovers[side]
                 else:
                     failed.add(pid)
+            continue
+        if record.get("ppattern"):
+            partPatternStep(record, pieceRecs.get(record["name"], {}))
             continue
         if record.get("mirror"):
             # 10.12 amendment (Onshape U1, U2): an Add's copy touching no part of its scope is a
@@ -1391,10 +1672,19 @@ def oracleDifferences(doc):
     return found
 
 
+def g1Bodies(doc):
+    """The Bodies G1 covers: the parts, and the parts a T2 part pattern made (its leftovers)."""
+    out = [doc.getObject(p) for p, _ in PARTS]
+    return out + [
+        b for b in doc.Objects
+        if b.TypeId == "PartDesign::Body" and b.StudioMadeBy is not None
+        and isPartPattern(b.StudioMadeBy)
+    ]
+
+
 def deleteSteps(doc, active=False):
     """Deletes every step (with active, only those up to the Tip and not suppressed)."""
-    for p, _ in PARTS:
-        body = doc.getObject(p)
+    for body in g1Bodies(doc):
         for obj in activeSteps(body) if active else [o for o in body.Group if isStep(o)]:
             body.removeObject(obj)
             doc.removeObject(obj.Name)
@@ -1430,8 +1720,8 @@ def plainNames(shape):
 def g1Record(doc):
     """G1's record: every Tip's and every active step's names with their geometry."""
     out = {}
-    for p, _ in PARTS:
-        body = doc.getObject(p)
+    for body in g1Bodies(doc):
+        p = body.Name if body.Name in dict(PARTS) else "piece:" + body.StudioPartId
         out[p] = plainNames(body.Tip.Shape) if body.Tip else {}
         for step in activeSteps(body):
             out[f"{step.StudioOwner.Name}@{p}"] = plainNames(step.Shape)
@@ -1542,7 +1832,12 @@ def fromScratch(natives, records, bar, maker=None):
         lst = studioList(doc)
         assert [e.Name for e in lst.Entries] == natives, ([e.Name for e in lst.Entries], natives)
         for r in sorted(records, key=lambda r: r["id"]):
-            if "fpattern" in r:
+            if "ppattern" in r:
+                box = makePartPattern(
+                    doc, studio, r["name"], r["ppattern"], r["sources"], r["op"], r["scope"],
+                    r["length"], r["count"], r["suppressed"],
+                )
+            elif "fpattern" in r:
                 # T1a: its originals set when every object is made (one may be younger)
                 box = makeFeatureOwner(
                     doc, studio, r["name"], r["fpattern"], [], r.get("length", 0),
@@ -2241,6 +2536,9 @@ class TestStudioListProperty(unittest.TestCase):
         self.newSeen = 0  # states with a New box owner's part live (T1b)
         self.resyncMade = set()  # (seed, part id): leftovers the resync made in an edit's step
         self.leftoversSeen = 0  # states with a live leftover part the resync made (10.12 amendment)
+        self.copiesSeen = 0  # states with a live part a part pattern made (T2)
+        self.sourcesSeen = 0  # states with a source a part pattern consumed (T2)
+        self.kinds = {}  # the edit kinds drawn
 
     def tearDown(self):
         for doc in list(App.listDocuments().values()):
@@ -2260,10 +2558,12 @@ class TestStudioListProperty(unittest.TestCase):
         kinds = ["insert"] * 3 + ["boolean", "pattern", "pattern", "mirror", "mirror"]
         kinds += ["delete", "move", "scope", "depth", "suppress", "bar", "split", "split"]
         kinds += ["merge", "merge", "fillet", "fillet"] + ["fpattern"] * 3 + ["new"]
+        kinds += ["ppattern"] * 3  # T2: about a ninth of the draws
         kind = rng.choice(kinds) if boxes else rng.choice(["insert", "insert", "boolean"])
         listedBoxes = [b for b in boxes if b.TypeId == "Part::Box"]
         if kind == "pattern" and not shapeOwners or kind == "fpattern" and not listedBoxes:
             kind = "insert"
+        self.kinds[kind] = self.kinds.get(kind, 0) + 1
         if kind == "fpattern":
             # T1a: a feature pattern over parts, made as the command makes it (outside every
             # Body, in the studio, listed), of one or two box owners of any parts, after them
@@ -2285,6 +2585,27 @@ class TestStudioListProperty(unittest.TestCase):
             return (
                 f"feature pattern {pat.Name} {which} of {[o.Name for o in originals]} L{length} "
                 f"n{count} reapply {reapply} at {at}: {len(made)} parts"
+            )
+        if kind == "ppattern":
+            # T2: a part pattern of one part, Linear along x or Polar about z, New, Add or Remove
+            # over one or two parts (its source among them or not), made as the command makes it:
+            # in the edit's transaction, its OK making the leftovers' parts
+            names = [p for p, _ in PARTS]
+            source = rng.choice(names)
+            which = rng.choice(["Linear", "Linear", "Polar"])
+            op = rng.choice(["New", "Add", "Add", "Remove"])
+            scope = [] if op == "New" else rng.sample(names, rng.randint(1, 2))
+            count, length = drawPartPattern(rng, which)
+            at = rng.randint(0, free)
+            pat = makePartPattern(
+                doc, doc.getObject("S"), f"F{counter}", which, [source], op, scope, length, count
+            )
+            PartDesign.studioInsert(pat, NATIVES + at)
+            made = PartDesign.studioMakePieces(pat)
+            labelPartPatternPieces(made, pat)
+            return (
+                f"part pattern {pat.Name} {which} {op} of {source} scope {scope} n{count} "
+                f"L{length} at {at}: {len(made)} parts"
             )
         if kind == "new":
             # T1b: a New box owner beside the parts (x 12, 32 or 52), its own part; a feature
@@ -2419,6 +2740,37 @@ class TestStudioListProperty(unittest.TestCase):
                 box.Length = rng.choice([1, 2]) * (count - 1)
                 PartDesign.studioReconcile(lst)
                 return f"count {name} n{count} L{box.Length.Value}"
+        if isPartPattern(box) and kind in ("scope", "depth"):
+            # T2: its count and spacing, its source (New) or a scope part toggled; each edit's OK
+            # is the command (the parts of new leftovers made, the empty ones of gone copies
+            # deleted)
+            def done(what):
+                made = PartDesign.studioMakePieces(box)
+                labelPartPatternPieces(made, box)
+                return f"{what}: {len(made)} parts"
+
+            names = [p for p, _ in PARTS]
+            which = "Polar" if box.TypeId == PART_PATTERN_TYPES["Polar"] else "Linear"
+            if kind == "depth":
+                count, length = drawPartPattern(rng, which)
+                box.Occurrences = count
+                if which == "Linear":
+                    box.Length = length
+                PartDesign.studioReconcile(lst)
+                return done(f"count {name} n{count} L{length}")
+            scope = list(box.StudioScope)
+            if not scope:
+                source = rng.choice(names)
+                box.StudioEntities = [source]
+                PartDesign.studioReconcile(lst)
+                return done(f"source {name} {source}")
+            p = rng.choice(names)
+            if p in scope and len(scope) > 1:
+                scope.remove(p)
+            elif p not in scope:
+                scope = sorted(scope + [p])
+            PartDesign.studioSetScopeIds(box, scope)
+            return done(f"scope {name} {scope}")
         if isFeatureOwner(box) and kind in ("scope", "depth"):
             # T1b: each edit's OK is the command (the parts of new leftovers made)
             def ok(what):
@@ -2610,6 +2962,7 @@ class TestStudioListProperty(unittest.TestCase):
                         self.resyncMade.update(
                             (seed, b.StudioPartId) for b in labelMade(doc) if not b.StudioParentId
                         )
+                        relabelPartPatterns(doc)
                     else:
                         # The command's recompute is in its transaction, as every GUI command
                         # and dialog OK does it (recompute, then commit): what the recompute
@@ -2623,6 +2976,7 @@ class TestStudioListProperty(unittest.TestCase):
                         self.resyncMade.update(
                             (seed, b.StudioPartId) for b in labelMade(doc) if not b.StudioParentId
                         )
+                        relabelPartPatterns(doc)
                         doc.commitTransaction()
                 except Exception as e:
                     if committed:
@@ -2700,6 +3054,11 @@ class TestStudioListProperty(unittest.TestCase):
             if any((seed, b.StudioPartId) in self.resyncMade for b in liveNow
                    if b.StudioPieceWitness):
                 self.leftoversSeen += 1
+            if any(b.StudioMadeBy is not None and isPartPattern(b.StudioMadeBy) for b in liveNow):
+                self.copiesSeen += 1
+            if any(c is not None and isPartPattern(c) and p in list(c.StudioEntities)
+                   for (p, _), c in zip(PARTS, consumers)):
+                self.sourcesSeen += 1
             if found:
                 bad += 1
                 self.log.append(f"seed {seed} op {step} after {what}:")
@@ -2761,7 +3120,9 @@ class TestStudioListProperty(unittest.TestCase):
               f"edits committed before their recompute, {self.filletsSeen} states with a fillet, "
               f"{self.ownersSeen} valid feature pattern owners, {self.patternPartsSeen} states with a "
               f"pattern's part, {self.patternMergesSeen} with a pattern's merge, {self.newSeen} with "
-              f"a New box's part, {self.leftoversSeen} with a leftover the resync made")
+              f"a New box's part, {self.leftoversSeen} with a leftover the resync made, "
+              f"{self.copiesSeen} with a part pattern's part, {self.sourcesSeen} with a part "
+              f"pattern's consumed source; kinds {sorted(self.kinds.items())}")
 
 
 if __name__ == "__main__":

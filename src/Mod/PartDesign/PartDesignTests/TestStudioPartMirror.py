@@ -1025,6 +1025,39 @@ class TestStudioPartPattern(unittest.TestCase):
         self.assertEqual(self.names(*self.made(pat)), before)
         self.assertEqual(len(self.live()), 4)
 
+    def testASourceNoLongerSplitAtThePatternGivesItsCopyAPartInTheEdit(self):
+        """ops#654 T2 gate (seed 1, op 14, a move): P x 0..30, y 0..20, z 0..5; source S x
+        40..60, y 0..10, z 0..10 (2000) split by a slot at x 49..50 before the pattern (S:1, S:2);
+        +x 40 x 2, Add, scope P: the copies touch nothing, two parts (900, 1000). The slot moved
+        after the pattern in an edit: S is whole at the pattern's place, its one copy (2000) is
+        held in the move's step (10.12 amendment), and a later recompute outside any step makes no
+        part. (The gate's case, a Polar Add of a split source's pieces, stays loud there.)"""
+        from PartDesignTests.TestStudioList import makeOwner
+
+        self.box("P", 0, 0, 30, 20, 0, 5)
+        self.box("Src", 40, 0, 60, 10, 0, 10)
+        self.listed()
+
+        def slot():
+            owner = makeOwner(self.doc, self.studio, "Slot", [49, -1, 50, 11], 11,
+                              "Subtraction", ["Src"])
+            PartDesign.studioInsert(owner, -1)
+            PartDesign.studioMakePieces(owner)
+            return owner
+
+        owner = self.edit("slot", slot)
+        pat = self.linear("Pat", ["Src"], "Add", ("P",), length=40, count=2)
+        self.assertValid(pat)
+        self.assertEqual(sorted(round(self.shape(b).Volume) for b in self.made(pat)), [900, 1000])
+        self.edit("move", lambda: PartDesign.studioMove(owner, len(self.list.Entries) - 1))
+        held = [b for b in self.made(pat) if b.Tip and b.Tip.isValid()]
+        self.assertEqual([round(self.shape(b).Volume) for b in held], [2000])
+        bodies = len([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"])
+        self.doc.recompute()
+        self.assertEqual(
+            len([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"]), bodies
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
