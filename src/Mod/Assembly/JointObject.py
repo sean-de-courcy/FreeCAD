@@ -1147,7 +1147,60 @@ class ViewProviderJoint:
         self.display_mode.addChild(self.switch_JCS1)
         self.display_mode.addChild(self.switch_JCS2)
         self.display_mode.addChild(self.switch_JCS_preview)
+        self.display_mode.addChild(self.makeConnectorPoints())
         vobj.addDisplayMode(self.display_mode, "Wireframe")
+
+    def makeConnectorPoints(self):
+        """FreeCAD-CH (ops#640, design C3): every connector point of the hovered face or edge,
+        drawn on top; the one that a click there takes is drawn larger."""
+        self.switch_points = coin.SoSwitch()
+        self.switch_points.whichChild = coin.SO_SWITCH_NONE
+        root = coin.SoSeparator()
+        pick = coin.SoPickStyle()
+        pick.style.setValue(coin.SoPickStyle.UNPICKABLE)
+        root.addChild(pick)
+        color = coin.SoBaseColor()
+        color.rgb.setValue(1.0, 0.6, 0.0)
+        root.addChild(color)
+        self.points_coords = coin.SoCoordinate3()
+        root.addChild(self.points_coords)
+        self.points_set = coin.SoMarkerSet()
+        self.points_set.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_7_7
+        root.addChild(self.points_set)
+        chosen = coin.SoSeparator()
+        self.chosen_coords = coin.SoCoordinate3()
+        chosen.addChild(self.chosen_coords)
+        chosen_set = coin.SoMarkerSet()
+        chosen_set.markerIndex = coin.SoMarkerSet.CIRCLE_LINE_9_9
+        chosen.addChild(chosen_set)
+        root.addChild(chosen)
+        self.switch_points.addChild(root)
+        return self.switch_points
+
+    def showConnectorPoints(self, points=None, chosen=None):
+        """points: the document-coordinate points to draw (None hides them); chosen: an index."""
+        if not hasattr(self, "switch_points"):
+            return
+        if not points:
+            self.switch_points.whichChild = coin.SO_SWITCH_NONE
+            return
+        assembly = self.app_obj.Proxy.getAssembly(self.app_obj)
+        if assembly:
+            inv = assembly.getGlobalPlacement().inverse()
+            points = [inv.multVec(p) for p in points]
+        self.points_coords.point.setNum(0)
+        self.points_coords.point.setValues(0, len(points), [(p.x, p.y, p.z) for p in points])
+        self.chosen_coords.point.setNum(0)
+        if chosen is not None:
+            p = points[chosen]
+            self.chosen_coords.point.setValues(0, 1, [(p.x, p.y, p.z)])
+        self.switch_points.whichChild = coin.SO_SWITCH_ALL
+
+    def connectorPointsShown(self):
+        """The number of points drawn (0 when hidden), for the tests."""
+        if not hasattr(self, "switch_points") or self.switch_points.whichChild.getValue() == coin.SO_SWITCH_NONE:
+            return 0
+        return self.points_coords.point.getNum()
 
     def updateData(self, joint, prop):
         """If a property of the handled feature has changed we have the chance to handle this here"""
@@ -2449,6 +2502,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
             )
         ):
             self.joint.ViewObject.Proxy.showPreviewJCS(False)
+            self.joint.ViewObject.Proxy.showConnectorPoints(None)
             if len(self.refs) >= 2:
                 self.updateLimits()
             return
@@ -2465,19 +2519,32 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
             # But we don't actually need to test because if there's no preselection then not cursor is None
         ):
             self.joint.ViewObject.Proxy.showPreviewJCS(False)
+            self.joint.ViewObject.Proxy.showConnectorPoints(None)
             return
 
         ref = self.presel_ref
 
         # newPos = self.view.getPoint(*info["Position"]) is not OK: it's not pos on the object but on the focal plane
         newPos = App.Vector(cursor_info["x"], cursor_info["y"], cursor_info["z"])
-        vertex_name = UtilsAssembly.findElementClosestVertex(ref, newPos)
+        self.showConnectorPoints(ref, newPos)
+        vertex_name = UtilsAssembly.findElementClosestVertex(ref, newPos, self.view)
 
         ref = UtilsAssembly.addVertexToReference(ref, vertex_name)
 
         placement = self.joint.Proxy.findPlacement(self.joint, ref, 0)
         self.joint.ViewObject.Proxy.showPreviewJCS(True, placement, ref)
         self.previewJCSVisible = True
+
+    def showConnectorPoints(self, ref, mousePos):
+        """Draws the hovered element's connector points (design C3) and marks the one a click at
+        mousePos takes."""
+        candidates = UtilsAssembly.connectorCandidates(ref)
+        if not candidates:
+            self.joint.ViewObject.Proxy.showConnectorPoints(None)
+            return
+        points = [UtilsAssembly.shapeToGlobal(ref, p) for p, _n, _k in candidates]
+        chosen = UtilsAssembly.chooseConnector(ref, candidates, mousePos, self.view)
+        self.joint.ViewObject.Proxy.showConnectorPoints(points, chosen)
 
     # 3D view keyboard handler
     def KeyboardEvent(self, info):
@@ -2585,7 +2652,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         # Selection is acceptable so add it
 
         mousePos = App.Vector(mousePos[0], mousePos[1], mousePos[2])
-        vertex_name = UtilsAssembly.findElementClosestVertex(ref, mousePos)
+        vertex_name = UtilsAssembly.findElementClosestVertex(ref, mousePos, self.view)
 
         # add the vertex name to the reference
         ref = UtilsAssembly.addVertexToReference(ref, vertex_name)
@@ -2595,6 +2662,7 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         # We hide the preview JCS if we just added to the selection
         self.joint.ViewObject.Proxy.showPreviewJCS(False)
+        self.joint.ViewObject.Proxy.showConnectorPoints(None)
 
     def removeSelection(self, doc_name, obj_name, sub_name, mousePos=None):
         if self.addition_rejected:

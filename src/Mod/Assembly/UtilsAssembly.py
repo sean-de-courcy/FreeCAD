@@ -495,10 +495,16 @@ def extract_type_and_number(element_name):
         return None, None
 
 
-def findElementClosestVertex(ref, mousePos):
+def findElementClosestVertex(ref, mousePos, view=None):
     element_name = getElementName(ref[1][0])
     if element_name == "":
         return ""
+
+    if view is not None:
+        # FreeCAD-CH (ops#640, design C3): the point under the cursor, else the centre
+        candidates = connectorCandidates(ref)
+        index = chooseConnector(ref, candidates, mousePos, view)
+        return candidates[index][1] if index is not None else element_name
 
     obj = getObject(ref)
 
@@ -616,6 +622,149 @@ def findElementClosestVertex(ref, mousePos):
         return vertex_name
 
     return ""
+
+
+# FreeCAD-CH (ops#640, design C3; notes/assemblies-design.md section 3): Onshape's mate connector
+# points. While a face or an edge is hovered every point it offers is drawn; the one under the
+# cursor is taken, and a click anywhere else takes the element's centre (oracle 8, "Mates").
+# Before, the point nearest the cursor always won, so a click near a corner took the corner, and a
+# face's straight edges offered no midpoint.
+
+CONNECTOR_PICK_PIXELS = 12  # a point this close to the cursor on screen is "under" it
+
+
+def connectorCandidates(ref):
+    """The connector points of the reference's element, as a list of (point, name, kind):
+    point in the object's shape coordinates (as findElementClosestVertex's mousePos), name for the
+    reference's point slot, kind "centre", "corner", "midpoint" or "circle". The element's own
+    centre comes first when it has one (its name is the element's own: findPlacement reads it as
+    the centre). A face's edge midpoints and circle centres are named by the edge's index within
+    the face, as the circle centres were before (findPlacement's Face branch)."""
+    element_name = getElementName(ref[1][0])
+    if element_name == "":
+        return []
+    obj = getObject(ref)
+    if obj is None:
+        return []
+    elt_type, elt_index = extract_type_and_number(element_name)
+    shape = obj.Shape
+
+    if elt_type == "Vertex":
+        vertex = get_element(shape, element_name)
+        return [(vertex.Point, element_name, "corner")] if vertex is not None else []
+
+    if elt_type == "Edge":
+        edge = get_element(shape, element_name)
+        if edge is None:
+            return []
+        curve = edge.Curve
+        out = []
+        if curve.TypeId == "Part::GeomCircle":
+            out.append((curve.Location, element_name, "centre"))
+        elif curve.TypeId == "Part::GeomLine":
+            pts = getPointsFromVertexes(edge.Vertexes)
+            out.append(((pts[0] + pts[1]) * 0.5, element_name, "centre"))
+        if curve.TypeId != "Part::GeomCircle" or not edge.isClosed():
+            for vtx in edge.Vertexes:
+                name = findVertexNameInObject(vtx, obj)
+                if name and all(n != name for _p, n, _k in out):
+                    out.append((vtx.Point, name, "corner"))
+        return out
+
+    if elt_type != "Face":
+        return []
+    face = get_element(shape, element_name)
+    if face is None:
+        return []
+    surface = face.Surface
+    _type = surface.TypeId
+    if _type in ("Part::GeomSphere", "Part::GeomTorus"):
+        return [(surface.Center, element_name, "centre")]
+
+    out = []
+    if _type in ("Part::GeomCylinder", "Part::GeomCone"):
+        centerOfG = face.CenterOfGravity - surface.Center
+        centerPoint = surface.Center + centerOfG
+        centerPoint = centerPoint + App.Vector().projectToLine(centerOfG, surface.Axis)
+        out.append((centerPoint, element_name, "centre"))
+    else:
+        out.append((face.CenterOfGravity, element_name, "centre"))
+        for vtx in face.Vertexes:
+            # a full circle's seam vertex is no corner
+            touching = [e for e in face.Edges if any(v.isSame(vtx) for v in e.Vertexes)]
+            if touching and all(e.isClosed() for e in touching):
+                continue
+            name = findVertexNameInObject(vtx, obj)
+            if name:
+                out.append((vtx.Point, name, "corner"))
+
+    for i, edge in enumerate(face.Edges):
+        curve = edge.Curve
+        name = "Edge" + str(i + 1)  # the index within the face
+        if curve.TypeId in ("Part::GeomCircle", "Part::GeomEllipse"):
+            out.append((curve.Location, name, "circle"))
+        elif curve.TypeId == "Part::GeomLine" and _type not in (
+            "Part::GeomCylinder",
+            "Part::GeomCone",
+        ):
+            pts = getPointsFromVertexes(edge.Vertexes)
+            out.append(((pts[0] + pts[1]) * 0.5, name, "midpoint"))
+        elif _type == "Part::GeomCylinder" and curve.TypeId == "Part::GeomBSplineCurve":
+            # two cylinders intersecting (findCylindersIntersection)
+            for j, facej in enumerate(shape.Faces):
+                if (elt_index - 1) != j and facej.Surface.TypeId == "Part::GeomCylinder":
+                    for edgej in facej.Edges:
+                        if (
+                            edgej.Curve.TypeId == "Part::GeomBSplineCurve"
+                            and edgej.CenterOfGravity == edge.CenterOfGravity
+                            and edgej.Length == edge.Length
+                        ):
+                            out.append((edgej.CenterOfGravity, name, "circle"))
+    return out
+
+
+def shapeToGlobal(ref, point):
+    """A point in the reference object's shape coordinates, in the document's (the inverse of
+    findElementClosestVertex's change of mousePos)."""
+    obj = getObject(ref)
+    return getGlobalPlacement(ref).multVec(obj.Placement.inverse().multVec(point))
+
+
+def chooseConnector(ref, candidates, mousePos, view=None, pixels=CONNECTOR_PICK_PIXELS):
+    """The candidate under the cursor, else the element's centre (Onshape's plain click), as an
+    index into candidates. mousePos is in the document's coordinates. Without a view, the nearest
+    candidate (as before C3)."""
+    if not candidates:
+        return None
+    points = [shapeToGlobal(ref, p) for p, _n, _k in candidates]
+    nearest, _ = findClosestPointToMousePos(points, mousePos)
+    if view is None or not hasattr(view, "getPointOnViewport"):
+        return nearest
+    under = connectorUnderCursor(ref, candidates, mousePos, view, pixels)
+    if under is not None:
+        return under
+    if candidates[0][2] == "centre":
+        return 0
+    return nearest
+
+
+def connectorUnderCursor(ref, candidates, mousePos, view, pixels=CONNECTOR_PICK_PIXELS):
+    """The index of the candidate nearest the cursor on screen if it is within `pixels`, else None
+    (Snap mode, design C9, snaps only onto a point under the cursor). mousePos is in the
+    document's coordinates."""
+    if not candidates or view is None:
+        return None
+    try:
+        mx, my = view.getPointOnViewport(mousePos)
+        best, bestDist = None, None
+        for i, (p, _n, _k) in enumerate(candidates):
+            px, py = view.getPointOnViewport(shapeToGlobal(ref, p))
+            d = math.hypot(px - mx, py - my)
+            if bestDist is None or d < bestDist:
+                best, bestDist = i, d
+    except Exception:
+        return None
+    return best if bestDist <= pixels else None
 
 
 def getPointsFromVertexes(vertexes):
@@ -1141,6 +1290,12 @@ def findPlacement(ref, ignoreVertex=False):
             ):
                 # handle special case of 2 cylinder intersecting.
                 plc.Base = findCylindersIntersection(obj, surface, edge, elt_index)
+
+            elif curve.TypeId == "Part::GeomLine":
+                # FreeCAD-CH (ops#640, design C3): the midpoint of the face's straight edge,
+                # with the face's frame (Onshape's MID_POINT with a second entity, GC-A1)
+                edge_points = getPointsFromVertexes(edge.Vertexes)
+                plc.Base = (edge_points[0] + edge_points[1]) * 0.5
 
         else:
             vertex = get_element(obj.Shape, vtx)

@@ -12,6 +12,10 @@ from AssemblyTests.TestMateOffsetsGui import TestMateOffsetsGui  # ops#640, desi
 
 True if TestMateOffsetsGui else False
 
+from AssemblyTests.TestConnectorPointsGui import TestConnectorPointsGui  # ops#640, design C3
+
+True if TestConnectorPointsGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,

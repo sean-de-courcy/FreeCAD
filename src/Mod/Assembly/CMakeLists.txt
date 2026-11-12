@@ -65,6 +65,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestJointRecords.py
     AssemblyTests/TestOnshapeJointsGui.py
     AssemblyTests/TestMateOffsetsGui.py
+    AssemblyTests/TestConnectorPointsGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
     AssemblyTests/TestOnshapeAssemblies.py
