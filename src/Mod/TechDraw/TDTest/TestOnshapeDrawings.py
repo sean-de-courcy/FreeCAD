@@ -411,8 +411,9 @@ class TestScaleRefit(unittest.TestCase):
         self.assertAlmostEqual(num(group.Y), 40.0, places=6)
 
     def testFreeViewKeepsItsRow(self):
-        """Review V1R-4: a free view on the Right view's row (as Project View places it) stays on
-        that row, clear of it, when the sheet's scale changes."""
+        """Reviews V1R-4, V1R-6 and V1R-7: with a free view on the sheet (one on the Right view's
+        row, as Project View places it) the group is not refitted: it keeps its place, so the free
+        view stays on its row and no other view moves, as before V1."""
         page, group = self.group(90, 100)
         right = [v for v in group.Views if v.Type == "Right"][0]
         rx, ry = num(group.X) + num(right.X), num(group.Y) + num(right.Y)
@@ -426,10 +427,21 @@ class TestScaleRefit(unittest.TestCase):
         self.recompute()
         page.Scale = 2
         self.recompute()
-        rx2, ry2 = num(group.X) + num(right.X), num(group.Y) + num(right.Y)
-        self.assertAlmostEqual(num(free.Y), ry2, places=6)
-        self.assertGreater(viewBox(free)[0], viewBox(right, num(group.X), num(group.Y))[2])
+        self.assertAlmostEqual(num(group.X), 90.0, places=6)
+        self.assertAlmostEqual(num(group.Y), 100.0, places=6)
+        self.assertAlmostEqual(num(free.X), rx + 70, places=6)
+        self.assertAlmostEqual(num(free.Y), num(group.Y) + num(right.Y), places=6)
 
+    def testNoRefitWhileNotKeptUpdated(self):
+        """Review V1R-5: with the sheet's updates off the views' geometry is not at the old scale,
+        so no refit is guessed: the group keeps its place."""
+        page, group = self.group(90, 100)
+        page.KeepUpdated = False
+        page.Scale = 2
+        page.Scale = 4
+        self.recompute()
+        self.assertAlmostEqual(num(group.X), 90.0, places=6)
+        self.assertAlmostEqual(num(group.Y), 100.0, places=6)
 
 # ---- V1's GUI: Insert View, Project View, the sheet's scale (design D, ops#640) -------------------
 

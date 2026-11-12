@@ -249,18 +249,35 @@ void DrawProjGroup::refitForScale(double newScale)
     if (DrawUtil::fpCompare(factor, 1.0)) {
         return;
     }
+    // Where the result can't be exact or would move other views, no refit: the group keeps its
+    // place, as before V1 (review rounds 1-2, decision 150). The prediction needs each view's
+    // geometry current at the old scale (no update pending, no hidden-line run going); and a free
+    // view of the sheet may stand on one of the group's rows (Project View places it so, and so
+    // does view snapping), which a moved group would leave.
+    if (!page->KeepUpdated.getValue()) {
+        return;
+    }
+    for (auto* obj : Views.getValues()) {
+        auto* item = freecad_cast<DrawProjGroupItem*>(obj);
+        if (item && (item->isTouched() || item->waitingForHlr())) {
+            return;
+        }
+    }
+    for (auto* obj : page->getViews()) {
+        auto* view = freecad_cast<DrawViewPart*>(obj);
+        auto* item = freecad_cast<DrawProjGroupItem*>(obj);
+        if (view && !(item && item->getPGroup())) {
+            return;
+        }
+    }
     Base::BoundBox3d before;
     Base::BoundBox3d after;
-    std::vector<Base::Vector3d> oldAt;
-    std::vector<Base::Vector3d> newAt;
-    if (!contentBox(before, 1.0, &oldAt) || !contentBox(after, factor, &newAt)) {
+    if (!contentBox(before, 1.0) || !contentBox(after, factor)) {
         return;  // a view without geometry yet: nothing to keep
     }
-    const double oldX = X.getValue();
-    const double oldY = Y.getValue();
     // the middle where it was
-    double x = oldX + (before.MinX + before.MaxX) / 2.0 - (after.MinX + after.MaxX) / 2.0;
-    double y = oldY + (before.MinY + before.MaxY) / 2.0 - (after.MinY + after.MaxY) / 2.0;
+    double x = X.getValue() + (before.MinX + before.MaxX) / 2.0 - (after.MinX + after.MaxX) / 2.0;
+    double y = Y.getValue() + (before.MinY + before.MaxY) / 2.0 - (after.MinY + after.MaxY) / 2.0;
     // then inside the sheet's border (20 mm, about a template's frame), or at least on the
     // sheet, when the views fit
     auto inside = [](double at, double low, double high, double size) {
@@ -282,37 +299,6 @@ void DrawProjGroup::refitForScale(double newScale)
     y = inside(y, after.MinY, after.MaxY, page->getPageHeight());
     X.setValue(x);
     Y.setValue(y);
-
-    // A free view on one of the group's rows or columns (Project View places them so) stays on
-    // it: the pair scales about the group's view, so the gap between them scales too
-    if (!ScaleType.isValue("Page")) {
-        return;
-    }
-    const double tolerance = 1e-4;  // mm: Project View writes positions to 1e-6
-    for (auto* obj : page->getViews()) {
-        auto* view = freecad_cast<DrawViewPart*>(obj);
-        auto* item = freecad_cast<DrawProjGroupItem*>(obj);
-        if (!view || (item && item->getPGroup()) || !view->ScaleType.isValue("Page")
-            || view->LockPosition.getValue()) {
-            continue;
-        }
-        const double vx = view->X.getValue();
-        const double vy = view->Y.getValue();
-        for (size_t i = 0; i < oldAt.size() && i < newAt.size(); ++i) {
-            const Base::Vector3d was(oldX + oldAt[i].x, oldY + oldAt[i].y, 0.0);
-            const Base::Vector3d now(x + newAt[i].x, y + newAt[i].y, 0.0);
-            if (std::abs(vy - was.y) < tolerance) {
-                view->Y.setValue(now.y);
-                view->X.setValue(now.x + (vx - was.x) * factor);
-                break;
-            }
-            if (std::abs(vx - was.x) < tolerance) {
-                view->X.setValue(now.x);
-                view->Y.setValue(now.y + (vy - was.y) * factor);
-                break;
-            }
-        }
-    }
 }
 
 short DrawProjGroup::mustExecute() const
