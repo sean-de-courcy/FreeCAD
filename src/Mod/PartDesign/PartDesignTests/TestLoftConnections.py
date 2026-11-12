@@ -315,8 +315,7 @@ class TestLoftConnectionsUnequal(ConnectionCase):
         for a, b in pairs + [((-10, 4), (-6, 4 / 3)), ((-10, -4), (-6, -4 / 3))]:
             self.assertJoined(loft, a, b, straight=False)
 
-    @unittest.expectedFailure  # oracle 14 LC3: Onshape leaves tangent (G1) joints unmatched; the rule is open
-    def testSlotToARoundedRectangleTwoConnections(self):
+    def slotAndRoundedRectangle(self):
         # bottom: a slot, lines y = +-5 from x -10..10, half circles r 5 (4 edges); top: a 16 x 8 rectangle with
         # corners rounded r 2 (8 edges)
         slot = [
@@ -331,11 +330,21 @@ class TestLoftConnectionsUnequal(ConnectionCase):
             rounded.append(
                 Part.ArcOfCircle(Part.Circle(V(cx, cy, 0), V(0, 0, 1), 2), math.radians(a0), math.radians(a0 + 90))
             )
-        pairs = [((10, 5), (6, 4)), ((-10, -5), (-6, -4))]
-        loft = self.loft(slot, rounded, pairs)
-        self.assertLoft(loft, 5831.449304, 2131.481057, 6)  # oracle 14 LC3
-        for a, b in pairs + [((10, -5), (6, -4)), ((0, 5), (-6, 4))]:
-            self.assertJoined(loft, a, b)
+        return slot, rounded
+
+    def testSlotToARoundedRectangleStopsAtTangentJoints(self):
+        # oracle 14 LC3: Onshape builds this, leaving the tangent joints unmatched (V 5831.449304,
+        # A 2131.481057, F 6; side edges (10, 5) -> (6, 4), (-10, -5) -> (-6, -4), (10, -5) -> (6, -4),
+        # (0, 5) -> (-6, 4)). Edge-to-edge pairing can't, so it stops (decision 150) until G1 runs merge.
+        slot, rounded = self.slotAndRoundedRectangle()
+        loft = self.loft(slot, rounded, [((10, 5), (6, 4)), ((-10, -5), (-6, -4))])
+        self.assertStops(loft, "tangent")
+
+    def testSlotToARoundedRectangleOneConnectionStops(self):
+        # oracle 14 LC3, one connection (10, 5) -> (6, 4): V 5923.449580, A 2149.140963, F 6 in Onshape
+        slot, rounded = self.slotAndRoundedRectangle()
+        loft = self.loft(slot, rounded, [((10, 5), (6, 4))])
+        self.assertStops(loft, "tangent")
 
 
 if __name__ == "__main__":

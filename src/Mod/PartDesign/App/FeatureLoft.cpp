@@ -751,8 +751,8 @@ std::vector<TopoDS_Edge> chainWithVertices(
 /// fewer side's inner vertices match the nearest of the other's in order (least total difference of
 /// arc-length fractions), and the unmatched vertices between two matched pairs get partners that
 /// divide the fewer side's span between those pairs into equal parts by count (Onshape, oracle 14
-/// LC1-LC2: thirds, midpoints). Returns the fewer side's new vertex fractions. A span of several
-/// edges is divided by arc length (an assumption: LC1 left it untested).
+/// LC1-LC2: thirds, midpoints). Returns the fewer side's new vertex fractions. Every fewer-side
+/// vertex is matched, so each such span is one fewer-side edge.
 std::vector<double> partnerFractions(const std::vector<double>& fewer, const std::vector<double>& more)
 {
     const size_t m = fewer.size();
@@ -806,6 +806,43 @@ std::vector<double> partnerFractions(const std::vector<double>& fewer, const std
         "Exception",
         "Loft: the connections can't be matched (a vertex has two connections, or they cross)"
     ));
+}
+
+/// Whether the joint where `in` ends and `out` starts (both in traversal order) is tangent (G1).
+bool tangentJoint(const TopoDS_Edge& in, const TopoDS_Edge& out)
+{
+    auto direction = [](const TopoDS_Edge& edge, bool atEnd) {
+        BRepAdaptor_Curve curve(edge);
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        const double u = (atEnd != reversed) ? curve.LastParameter() : curve.FirstParameter();
+        gp_Pnt p;
+        gp_Vec d;
+        curve.D1(u, p, d);
+        return reversed ? -d : d;
+    };
+    const gp_Vec a = direction(in, true);
+    const gp_Vec b = direction(out, false);
+    if (a.Magnitude() < Precision::Confusion() || b.Magnitude() < Precision::Confusion()) {
+        return false;
+    }
+    return a.Angle(b) < 1e-4;
+}
+
+/// Onshape leaves tangent (G1) joints unmatched (oracle 14 LC3: a slot to a rounded rectangle builds
+/// 4 side faces, a side face spanning several edges). Edge i must pair with edge i here, so a chain
+/// pair that needs new vertices while the shorter chain has a tangent inner joint stops (decision
+/// 150; merging such runs into one edge is a later step).
+void tangentJointsStop(const std::vector<TopoDS_Edge>& shorter)
+{
+    for (size_t k = 1; k < shorter.size(); ++k) {
+        if (tangentJoint(shorter[k - 1], shorter[k])) {
+            throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Loft: between two connections the profiles have different edge counts and a tangent "
+                "joint; connections can't match tangent joints yet"
+            ));
+        }
+    }
 }
 
 /// The two loops matched for the connections (points in the loops' frame, profile first): the
@@ -893,6 +930,7 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
             double lengthA = 0, lengthB = 0;
             const auto fa = innerFractions(chainA, lengthA);
             const auto fb = innerFractions(chainB, lengthB);
+            tangentJointsStop(chainA.size() < chainB.size() ? chainA : chainB);
             if (chainA.size() < chainB.size()) {
                 chainA = chainWithVertices(chainA, partnerFractions(fa, fb), mapperA);
             }
@@ -928,17 +966,33 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
         const auto pb = sampled(edgesB);
         const gp_Vec normal = na.Normalized();
         const double smaller = std::min(na.Magnitude(), std::abs(nb.Dot(normal)));
-        for (double t : {0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875}) {
+        // Newell's area of the blended polygon is exactly quadratic in t (each p_i x p_i+1 is), so
+        // three samples give it everywhere and its minimum over [0, 1] is exact: a half turn between
+        // profiles of different size only touches zero, between any fixed samples.
+        auto areaAt = [&](double t) {
             std::vector<gp_Pnt> section;
             for (size_t i = 0; i < pa.size() && i < pb.size(); ++i) {
                 section.emplace_back(pa[i].XYZ() * (1 - t) + pb[i].XYZ() * t);
             }
-            if (areaVector(section).Dot(normal) < 0.01 * smaller) {
-                throw Base::CADKernelError(QT_TRANSLATE_NOOP(
-                    "Exception",
-                    "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
-                ));
+            return areaVector(section).Dot(normal);
+        };
+        const double a0 = areaAt(0.0);
+        const double a1 = areaAt(1.0);
+        const double mid = 2 * areaAt(0.5) - (a0 + a1) / 2;  // Bernstein middle coefficient
+        // The ends are the profiles; a dip below them has its vertex inside (0, 1).
+        double lowest = std::numeric_limits<double>::infinity();
+        const double curvature = a0 - 2 * mid + a1;
+        if (curvature > 0) {
+            const double t = (a0 - mid) / curvature;
+            if (t > 0 && t < 1) {
+                lowest = (1 - t) * (1 - t) * a0 + 2 * t * (1 - t) * mid + t * t * a1;
             }
+        }
+        if (lowest < 0.01 * smaller) {
+            throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
+            ));
         }
     }
 
