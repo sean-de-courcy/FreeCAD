@@ -643,6 +643,12 @@ def ring_moment(R, d):
     return d * area + 2.0 / 3.0 * s ** 3
 
 
+def ring_moment_past(R, d):
+    """The integral of (x - d) over the part of the same disc with x > d: the revolved volume per
+    radian of the disc's part past the line x = d."""
+    return max(0.0, ring_moment(R, d) - math.pi * R * R * d)
+
+
 def annular_tube(centre, axis, r_in, r_out, length):
     t = Part.makeCylinder(r_out, length, centre, axis)
     return t.cut(Part.makeCylinder(r_in, length, centre, axis))
@@ -802,3 +808,126 @@ class TestThickenBend(unittest.TestCase):
         t.touch()
         self.doc.recompute()
         self.assertOneSolid(t, 1405.2049)
+
+    def testHornBoreFacesPickedDirectly(self):
+        # review r1 T4: the bore's faces picked off the solid, no Offset surface between
+        self.bore(4.0)
+        a = self.doc.getObject("A")
+        names = tuple("Face%d" % (k + 1) for k, f in enumerate(a.Shape.Faces) if f.Surface.__class__.__name__ != "Plane")
+        t = S.make_thicken(self.doc.addObject("PartDesign::Body", "T"), [(a, names)], 0.75, 0.0, name="Thk")
+        t.Midplane, t.Thickness = True, 1.5
+        self.doc.recompute()
+        self.assertOneSolid(t, 1405.2049)  # Onshape TK1
+
+
+class TestThickenPipe(unittest.TestCase):
+    """The lateral faces of a solid pipe of radius 4 (normals away from the tube's axis): legs of
+    `leg` along z down to the bend and out of it, a bend through `angle` about the line x = 0, z = 0
+    (direction -y) at distance `major` from the tube's axis. Expected volumes as TestThickenBend: with
+    legs, the union of the two annular tubes and the ring's near side revolved (the ring's part past the
+    axis sweeps inside the first leg); a lone bend, both sides of the ring revolved apart."""
+
+    def setUp(self):
+        self.doc = App.newDocument("ThickenPipe")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def pipe(self, major, angle, leg):
+        V = App.Vector
+        ax = V(0, -1, 0)
+        self.geo = (major, angle, leg)
+        self.c0 = V(-major, 0, 0)
+        rot = App.Rotation(ax, angle)
+        self.c1, self.d1 = rot.multVec(self.c0), rot.multVec(V(0, 0, -1))
+        disc = lambda c, n: Part.Face(Part.Wire(Part.makeCircle(4.0, c, n)))
+        sol = disc(self.c0, V(0, 0, 1)).revolve(V(0, 0, 0), ax, angle)
+        if leg:
+            sol = sol.fuse([disc(self.c0 + V(0, 0, leg), V(0, 0, -1)).extrude(V(0, 0, -leg)),
+                            disc(self.c1, self.d1).extrude(self.d1 * leg)]).removeSplitter()
+        self.assertTrue(sol.isValid())
+        p = self.doc.addObject("Part::Feature", "P")
+        p.Shape = Part.Shell([f for f in sol.Faces if f.Surface.__class__.__name__ != "Plane"])
+        return p
+
+    def thicken(self, sheet, t1=0.0, t2=0.0, midplane=None):
+        t = S.make_thicken(self.doc.addObject("PartDesign::Body", "T"), [(sheet, "")], 0.75, 0.0, name="Thk")
+        if midplane is not None:
+            t.Midplane, t.Thickness = True, midplane
+        else:
+            t.Thickness1, t.Thickness2 = t1, t2
+        self.doc.recompute()
+        return t
+
+    def expected(self, r_in, r_out):
+        major, angle, leg = self.geo
+        near = ring_moment(r_out, major) - ring_moment(r_in, major)
+        if not leg:
+            far = ring_moment_past(r_out, major) - ring_moment_past(r_in, major)
+            return math.radians(angle) * (near + far)
+        a = annular_tube(self.c0, App.Vector(0, 0, 1), r_in, r_out, leg)
+        b = annular_tube(self.c1, self.d1, r_in, r_out, leg)
+        return a.Volume + b.Volume + math.radians(angle) * near - a.common(b).Volume
+
+    def assertOneSolid(self, t, volume):
+        self.assertEqual(t.State, ["Up-to-date"], t.getStatusString())
+        self.assertTrue(t.Shape.isValid())
+        self.assertEqual(len(t.Shape.Solids), 1)
+        self.assertAlmostEqual(t.Shape.Volume, volume, delta=2e-3)
+
+    def assertRightOrLoud(self, t, volume):
+        """Never a valid-looking wrong solid (decision 150: where a case can't be kept right, it stops)."""
+        if "Invalid" in t.State:
+            text = t.getStatusString()
+            self.assertTrue("Thicken failed" in text or "time limit" in text, text)
+            return
+        self.assertOneSolid(t, volume)
+
+    def testACollapsedFuseIsRefused(self):
+        # review r1 T1: at 150 degrees with 5 mm legs (whose rings collide), a list fuse collapsed into one
+        # valid solid of 66.64 for 349.71, and it passed. Now each try must hold points inside every piece.
+        # (That case now ends at the geometry time limit, leaving a fuse running: it is not run here.)
+        V = App.Vector
+        a, b = Part.makeBox(10, 10, 10), Part.makeBox(10, 10, 10, V(10, 0, 0))
+        res = S._fused([a, b], [V(5, 5, 5), V(15, 5, 5)])
+        self.assertAlmostEqual(res.Volume, 2000.0, 6)
+        with self.assertRaises(S.SolidOpsError):
+            S._fused([a, b], [V(5, 5, 5), V(25, 5, 5)])  # a point the union misses: refused
+
+    def testHornAtSeveralAngles(self):
+        for angle in (90.0, 120.0, 135.0, 170.0):
+            for t1, t2 in ((0.75, 0.75), (0.75, 0.0), (0.0, 0.75)):
+                with self.subTest(angle=angle, t1=t1, t2=t2):
+                    t = self.thicken(self.pipe(4.0, angle, 5.0), t1=t1, t2=t2)
+                    self.assertOneSolid(t, self.expected(4.0 - t2, 4.0 + t1))
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument("ThickenPipe")
+
+    def testLoneHornBendCrossingItsAxisIsNotCutShort(self):
+        # review r1 T2: with no leg beside it, the ring's part past the axis was dropped (238.1069 for
+        # 239.3432). At 90 degrees the two sides' sweeps meet only along the axis: two solids, so it fails.
+        t = self.thicken(self.pipe(4.0, 90.0, 0.0), midplane=1.5)
+        self.assertIn("Invalid", t.State)
+        self.assertIn("not one valid solid", t.getStatusString())
+        t = self.thicken(self.pipe(4.0, 180.0, 0.0), midplane=1.5)
+        self.assertRightOrLoud(t, self.expected(3.25, 4.75))
+
+    def testLoneHornBendTowardTheCentre(self):
+        # the ring touches the axis at a point only: one solid, the ring revolved
+        t = self.thicken(self.pipe(4.0, 90.0, 0.0), t2=0.75)
+        self.assertOneSolid(t, self.expected(3.25, 4.0))
+
+    def testHornTorusWithItsSeamAwayFromTheAxis(self):
+        # review r1 T3: the face's middle (in v) is the horn's apex, where it has no normal
+        V = App.Vector
+        c = Part.Circle(V(4, 0, 0), V(0, -1, 0), 4.0)
+        c.XAxis = V(1, 0, 0)  # the seam at the point farthest from the axis
+        surf = c.toShape().revolve(V(0, 0, 0), V(0, 0, 1), 360).Faces[0].Surface
+        f = self.doc.addObject("Part::Feature", "F")
+        f.Shape = surf.toShape(0, math.pi / 2, 0, 2 * math.pi)
+        self.geo = (4.0, 90.0, 0.0)
+        face = f.Shape.Faces[0]
+        p = face.valueAt(math.pi / 4, 0.0)  # the seam, farthest from the axis
+        outward = face.normalAt(math.pi / 4, 0.0).dot(p - V(4 * math.cos(math.pi / 4), 4 * math.sin(math.pi / 4), 0)) > 0
+        t = self.thicken(f, t1=0.0 if outward else 0.75, t2=0.75 if outward else 0.0)  # toward the ring's centre
+        self.assertOneSolid(t, self.expected(3.25, 4.0))
