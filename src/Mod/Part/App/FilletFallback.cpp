@@ -29,6 +29,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools_History.hxx>
 #include <BRep_Builder.hxx>
@@ -38,6 +39,7 @@
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <Geom2d_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
@@ -66,6 +68,7 @@
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -3323,6 +3326,19 @@ TopoDS_Shape constructShape(
         }
         ctx.selected.Add(edge);
     }
+    // Per-edge setbacks (chainSetbacks()): a chain's first edge keeps size1, and a setback changes
+    // only at a vertex where two of the chain's contours meet. The construction builds one size,
+    // so any setback other than size1 means such a corner: OCCT's own result or error stands
+    if (!request.setbacks.empty()) {
+        if (request.setbacks.size() != edges.size()) {
+            refuse("a setback per edge that doesn't match the edges");
+        }
+        for (double setback : request.setbacks) {
+            if (setback != request.size1) {
+                refuse("a corner between chamfer widths that differ");
+            }
+        }
+    }
     // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: where it would
     // have reached an unselected edge, the construction (which stops there) differs from it
     for (const auto& edge : request.contour) {
@@ -4133,6 +4149,260 @@ TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& edges)
         edge = input.getSubTopoShape(TopAbs_EDGE, index);
     }
     return input;
+}
+
+namespace
+{
+
+/** At the parameter of an edge of the face: the direction in the face square to the edge, away
+ * from it (inwardIn()'s), and the face's outward normal. Any surface, through the edge's curve on
+ * the face. False where either is degenerate or the edge has no curve on the face.
+ */
+bool inwardAt(
+    const TopoDS_Face& face,
+    const TopoDS_Edge& edge,
+    double parameter,
+    gp_Dir& inward,
+    gp_Dir& normal
+)
+{
+    double first = 0.0;
+    double last = 0.0;
+    Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+    if (pcurve.IsNull()) {
+        return false;
+    }
+    const gp_Pnt2d uv = pcurve->Value(parameter);
+    BRepAdaptor_Surface surface(face, Standard_False);
+    gp_Pnt onSurface;
+    gp_Vec du;
+    gp_Vec dv;
+    surface.D1(uv.X(), uv.Y(), onSurface, du, dv);
+    gp_Vec outward = du.Crossed(dv);
+    if (outward.Magnitude() < linearTolerance) {
+        return false;
+    }
+    if (face.Orientation() == TopAbs_REVERSED) {
+        outward.Reverse();
+    }
+    gp_Pnt point;
+    gp_Vec tangent;
+    BRepAdaptor_Curve(edge).D1(parameter, point, tangent);
+    if (orientationIn(face, edge) == TopAbs_REVERSED) {
+        tangent.Reverse();
+    }
+    gp_Vec left = outward.Crossed(tangent);
+    if (left.Magnitude() < linearTolerance) {
+        return false;
+    }
+    inward = gp_Dir(left);
+    normal = gp_Dir(outward);
+    return true;
+}
+
+/// A contour's wedge angle, constant along it, or why not
+struct Wedge
+{
+    double angle = 0.0;
+    bool convex = true;
+    std::string fault;
+};
+
+/** The wedge angle of OCCT's contour ic, the construction's Section::alpha (acos of the two
+ * inward directions: the material angle at a convex edge, the air-side one at a concave edge),
+ * sampled at 0.1 .. 0.9 of each of its edges (notes/chamfer-chain-setbacks.md section 3)
+ */
+Wedge wedgeOf(
+    const BRepFilletAPI_MakeChamfer& maker,
+    int ic,
+    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces
+)
+{
+    Wedge wedge;
+    double low = std::numeric_limits<double>::max();
+    double high = -low;
+    int convex = 0;
+    int concave = 0;
+    for (int j = 1; j <= maker.NbEdges(ic); ++j) {
+        const TopoDS_Edge& edge = maker.Edge(ic, j);
+        const int index = edgeFaces.FindIndex(edge);
+        if (index == 0 || edgeFaces.FindFromIndex(index).Extent() != 2) {
+            wedge.fault = "an edge without two faces";
+            return wedge;
+        }
+        const TopoDS_Face& face0 = TopoDS::Face(edgeFaces.FindFromIndex(index).First());
+        const TopoDS_Face& face1 = TopoDS::Face(edgeFaces.FindFromIndex(index).Last());
+        BRepAdaptor_Curve curve(edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        double edgeLow = std::numeric_limits<double>::max();
+        double edgeHigh = -edgeLow;
+        for (double fraction : {0.1, 0.3, 0.5, 0.7, 0.9}) {
+            const double parameter = first + fraction * (last - first);
+            gp_Dir inward0;
+            gp_Dir inward1;
+            gp_Dir normal0;
+            gp_Dir normal1;
+            if (!inwardAt(face0, edge, parameter, inward0, normal0)
+                || !inwardAt(face1, edge, parameter, inward1, normal1)) {
+                wedge.fault = "a degenerate face or edge";
+                return wedge;
+            }
+            const double angle = std::acos(std::clamp(inward0.Dot(inward1), -1.0, 1.0));
+            edgeLow = std::min(edgeLow, angle);
+            edgeHigh = std::max(edgeHigh, angle);
+            ++(inward1.Dot(normal0) < 0 ? convex : concave);
+        }
+        if (edgeHigh - edgeLow > 1e-7) {
+            wedge.fault = "the angle varies along an edge";
+            return wedge;
+        }
+        low = std::min(low, edgeLow);
+        high = std::max(high, edgeHigh);
+    }
+    if (high - low > 1e-7) {
+        wedge.fault = "the contour's edges have different angles";
+    }
+    else if (convex > 0 && concave > 0) {
+        wedge.fault = "the contour mixes convex and concave edges";
+    }
+    wedge.angle = (low + high) / 2;
+    wedge.convex = concave == 0;
+    return wedge;
+}
+
+/// chainSetbacks() inside one try: OCCT's or the construction's exceptions keep the width
+std::vector<double> setbacksOf(
+    const TopoDS_Shape& shape,
+    const std::vector<TopoShape>& edges,
+    double width
+)
+{
+    std::vector<double> setbacks(edges.size(), width);
+    // OCCT's own contours: the listed edges, and the edges its tangent propagation adds. A
+    // contour has one distance in OCCT. The maker is never built
+    BRepFilletAPI_MakeChamfer maker(shape);
+    for (const auto& edge : edges) {
+        const TopoDS_Shape& e = edge.getShape();
+        if (e.IsNull() || e.ShapeType() != TopAbs_EDGE || BRep_Tool::Degenerated(TopoDS::Edge(e))) {
+            return setbacks;
+        }
+        maker.Add(TopoDS::Edge(e));
+    }
+    std::vector<int> contourOf(edges.size(), 0);
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        contourOf[i] = maker.Contour(TopoDS::Edge(edges[i].getShape()));
+    }
+    const int contours = maker.NbContours();
+
+    // Contours that share a vertex are one chain: union-find over the contours
+    std::vector<int> parent(contours + 1);
+    for (int ic = 0; ic <= contours; ++ic) {
+        parent[ic] = ic;
+    }
+    auto find = [&parent](int ic) {
+        while (parent[ic] != ic) {
+            parent[ic] = parent[parent[ic]];
+            ic = parent[ic];
+        }
+        return ic;
+    };
+    TopTools_IndexedMapOfShape vertices;
+    std::vector<int> contourAt;  // per vertex, the first contour seen there
+    for (int ic = 1; ic <= contours; ++ic) {
+        for (int j = 1; j <= maker.NbEdges(ic); ++j) {
+            for (TopExp_Explorer it(maker.Edge(ic, j), TopAbs_VERTEX); it.More(); it.Next()) {
+                const int index = vertices.Add(it.Current());
+                if (index > static_cast<int>(contourAt.size())) {
+                    contourAt.push_back(ic);
+                }
+                else {
+                    parent[find(contourAt[index - 1])] = find(ic);
+                }
+            }
+        }
+    }
+
+    // Each chain's first edge: the lowest index among the listed edges in it (section 5)
+    std::vector<int> firstOf(contours + 1, -1);
+    std::vector<int> size(contours + 1, 0);
+    for (int ic = 1; ic <= contours; ++ic) {
+        ++size[find(ic)];
+    }
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (contourOf[i] > 0 && firstOf[find(contourOf[i])] < 0) {
+            firstOf[find(contourOf[i])] = static_cast<int>(i);
+        }
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<double> setbackOf(contours + 1, width);
+    for (int root = 1; root <= contours; ++root) {
+        // A lone contour keeps the width (CT1)
+        if (firstOf[root] < 0 || size[root] < 2) {
+            continue;
+        }
+        const Wedge head = wedgeOf(maker, contourOf[firstOf[root]], edgeFaces);
+        std::string fault = head.fault;
+        for (int ic = 1; ic <= contours && fault.empty(); ++ic) {
+            if (find(ic) != root) {
+                continue;
+            }
+            const Wedge wedge = wedgeOf(maker, ic, edgeFaces);
+            if (!wedge.fault.empty()) {
+                fault = wedge.fault;
+            }
+            else if (wedge.convex != head.convex) {
+                fault = "the chain mixes convex and concave edges";
+            }
+            else if (std::abs(wedge.angle - head.angle) > 1e-9) {
+                // A concave chain by the air-side angle (Q-CC1's likely answer: the same ball)
+                const double setback
+                    = width * std::tan(head.angle / 2) / std::tan(wedge.angle / 2);
+                if (!std::isfinite(setback) || setback <= linearTolerance) {
+                    fault = "a setback that isn't finite";
+                }
+                setbackOf[ic] = setback;
+            }
+        }
+        if (!fault.empty()) {
+            FC_LOG("chamfer chain from edge " << firstOf[root] + 1 << " keeps the width: " << fault);
+            for (int ic = 1; ic <= contours; ++ic) {
+                if (find(ic) == root) {
+                    setbackOf[ic] = width;
+                }
+            }
+        }
+    }
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (contourOf[i] > 0) {
+            setbacks[i] = setbackOf[contourOf[i]];
+        }
+    }
+    return setbacks;
+}
+
+}  // namespace
+
+std::vector<double> chainSetbacks(
+    const TopoShape& input,
+    const std::vector<TopoShape>& edges,
+    double width
+)
+{
+    if (edges.size() < 2 || !(width > linearTolerance) || input.isNull()) {
+        return std::vector<double>(edges.size(), width);
+    }
+    try {
+        return setbacksOf(input.getShape(), edges, width);
+    }
+    catch (const Refusal& refusal) {
+        FC_LOG("chamfer chains keep the width: " << refusal.reason);
+    }
+    catch (const Standard_Failure& e) {
+        FC_LOG("chamfer chains keep the width: " << e.GetMessageString());
+    }
+    return std::vector<double>(edges.size(), width);
 }
 
 std::vector<TopoShape> makerInputs(const std::vector<TopoShape>& shapes)

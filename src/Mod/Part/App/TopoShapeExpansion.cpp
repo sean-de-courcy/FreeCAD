@@ -7922,8 +7922,14 @@ TopoShape& TopoShape::makeElementChamfer(
     const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
     auto mkChamferPtr = std::make_shared<BRepFilletAPI_MakeChamfer>(input.getShape());
     BRepFilletAPI_MakeChamfer& mkChamfer = *mkChamferPtr;
-    for (auto& e : inputEdges) {
-        const auto& edge = e.getShape();
+    // By equal distances, a chain of edges at different angles gets Onshape's setbacks
+    // (FilletFallback::chainSetbacks(), notes/chamfer-chain-setbacks.md)
+    std::vector<double> setbacks;
+    if (chamferType == ChamferType::equalDistance) {
+        setbacks = FilletFallback::chainSetbacks(input, inputEdges, radius1);
+    }
+    for (std::size_t i = 0; i < inputEdges.size(); ++i) {
+        const auto& edge = inputEdges[i].getShape();
         if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
             FC_THROWM(Base::CADKernelError, "chamfer edge is degenerated");
         }
@@ -7943,8 +7949,8 @@ TopoShape& TopoShape::makeElementChamfer(
             FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
         }
         switch (chamferType) {
-            case ChamferType::equalDistance:  // Equal distance
-                mkChamfer.Add(radius1, radius1, TopoDS::Edge(edge), TopoDS::Face(face));
+            case ChamferType::equalDistance:  // Equal distance, the edge's setback on both faces
+                mkChamfer.Add(setbacks[i], setbacks[i], TopoDS::Edge(edge), TopoDS::Face(face));
                 break;
             case ChamferType::twoDistances:  // Two distances
                 mkChamfer.Add(radius1, radius2, TopoDS::Edge(edge), TopoDS::Face(face));
@@ -7964,6 +7970,7 @@ TopoShape& TopoShape::makeElementChamfer(
     request.size2 = radius2;
     request.chamferType = chamferType;
     request.flipDirection = flipDirection;
+    request.setbacks = setbacks;
     auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp) {
         if (finishConstruction(*this, *outcome, input, op)) {
