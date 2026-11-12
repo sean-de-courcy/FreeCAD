@@ -26,6 +26,7 @@
 #include <xercesc/util/XMLException.hpp>
 #include <xercesc/util/XMLString.hpp>
 #include <algorithm>
+#include <set>
 #include <sstream>
 #include <QApplication>
 #include <QByteArray>
@@ -650,6 +651,32 @@ void Command::_invoke(int id, bool disablelog)
 #endif
 }
 
+namespace
+{
+// FreeCAD-CH (ops#695): a command's isActive() runs from the main window's update timer; an
+// exception leaving it reaches the Qt event loop, which on macOS runs inside Cocoa and aborts
+// the process. A throwing command reads inactive, reported once per command.
+bool guardedIsActive(Command* cmd)
+{
+    try {
+        return cmd->isActive();
+    }
+    catch (const Base::Exception& e) {
+        static std::set<std::string> reported;
+        if (reported.insert(cmd->getName()).second) {
+            Base::Console().warning("%s: isActive() failed: %s\n", cmd->getName(), e.what());
+        }
+    }
+    catch (const std::exception& e) {
+        static std::set<std::string> reported;
+        if (reported.insert(cmd->getName()).second) {
+            Base::Console().warning("%s: isActive() failed: %s\n", cmd->getName(), e.what());
+        }
+    }
+    return false;
+}
+}  // namespace
+
 void Command::testActive()
 {
     if (!_pcAction) {
@@ -693,12 +720,12 @@ void Command::testActive()
             }
             Command* cmd = rcCmdMgr.getCommandByName(name);
             if (cmd) {
-                action->setEnabled(cmd->isActive());
+                action->setEnabled(guardedIsActive(cmd));
             }
         }
     }
 
-    bool bActive = isActive();
+    bool bActive = guardedIsActive(this);
     _pcAction->setEnabled(bActive);
 }
 

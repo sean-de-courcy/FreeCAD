@@ -755,3 +755,30 @@ class TestCompactDialogGui(PolishCase):
         pump()
         panel = self.openDialog(lambda: Gui.ActiveDocument.setEdit(self.pad.Name))
         self.assertGreater(self.bottom(panel), self.contentBottom() + 100)
+
+
+class TestCameraCommandsGui(PolishCase):
+    """ops#695: the camera commands' isActive() reads the view's camera, and View3DInventor's
+    getCamera() throws while the view has none (being built or torn down). An exception from
+    isActive() leaves the main window's update timer, which aborts FreeCAD on macOS. Designed
+    state: the pad model's 3D view with its render manager's camera taken away for the check."""
+
+    COMMANDS = ("Std_OrthographicCamera", "Std_PerspectiveCamera")
+
+    def testCameraCommandsReadInactiveWithoutACamera(self):
+        manager = self.view.getViewer().getSoRenderManager()
+        camera = manager.getCamera()
+        self.assertIsNotNone(camera)
+        camera.ref()
+        try:
+            manager.setCamera(None)
+            for name in self.COMMANDS:
+                # Before ops#695 this raised "Could not find reference to 3D View camera"
+                self.assertFalse(Gui.Command.get(name).isActive(), name)
+        finally:
+            manager.setCamera(camera)
+            camera.unref()
+        pump(0.1)
+        self.assertEqual(
+            [Gui.Command.get(name).isActive() for name in self.COMMANDS], [True, True]
+        )

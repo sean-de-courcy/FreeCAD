@@ -86,6 +86,7 @@ from PartDesignTests.TestPolishGui import TestWindowLeftoversGui  # FreeCAD-CH, 
 from PartDesignTests.TestPolishGui import TestFlatFeatureDialogGui  # FreeCAD-CH, ops#640 polish 4
 from PartDesignTests.TestPolishGui import TestDoubleClickCreatorGui  # FreeCAD-CH, ops#640 polish 5
 from PartDesignTests.TestPolishGui import TestCompactDialogGui  # FreeCAD-CH, ops#640 polish 6
+from PartDesignTests.TestPolishGui import TestCameraCommandsGui  # FreeCAD-CH, ops#695
 from PartDesignTests.TestEscCancelsGui import TestEscCancelsGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSketchPlaneGui import TestSketchPlaneGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBooleanDialogGui import TestBooleanDialogGui  # FreeCAD-CH, ops#640
