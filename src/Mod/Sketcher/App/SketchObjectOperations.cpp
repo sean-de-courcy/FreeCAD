@@ -535,6 +535,26 @@ int SketchObject::extend(int GeoId, double increment, PointPos endpoint)
     return retcode;
 }
 
+// FreeCAD-CH (ops#640): the GeoIds of the geometry of ExternalGeometry's entries marked implicit (a
+// constraint's helper link, a model pick, ops#634). Onshape's model edges in the sketch plane, not
+// Use'd, bound neither Trim nor Extend (GA3-25)
+static std::set<int> implicitHelperGeoIds(const SketchObject& obj, const std::map<long, int>& geoMap)
+{
+    std::set<int> helpers;
+    for (int entry = 0; entry < obj.ExternalGeometry.getSize(); ++entry) {
+        if (!obj.isImplicitExternal(entry)) {
+            continue;
+        }
+        for (long id : obj.externalGeometryIds(entry)) {
+            auto it = geoMap.find(id);
+            if (it != geoMap.end()) {
+                helpers.insert(-it->second - 1);  // ExternalGeo[k] has GeoId -1 - k
+            }
+        }
+    }
+    return helpers;
+}
+
 // FreeCAD-CH (Onshape's Extend, ops#640; see the header)
 double SketchObject::seekExtendBoundary(
     int GeoId,
@@ -583,20 +603,8 @@ double SketchObject::seekExtendBoundary(
         }
     };
 
-    // a constraint's helper link (a model pick, ops#634) is not Use'd: Onshape's model edges in
-    // the sketch plane don't stop it (GA3-25)
-    std::set<int> helpers;
-    for (int entry = 0; entry < ExternalGeometry.getSize(); ++entry) {
-        if (!isImplicitExternal(entry)) {
-            continue;
-        }
-        for (long id : externalGeometryIds(entry)) {
-            auto it = externalGeoMap.find(id);
-            if (it != externalGeoMap.end()) {
-                helpers.insert(-it->second - 1);  // ExternalGeo[k] has GeoId -1 - k
-            }
-        }
-    }
+    // a constraint's helper link (a model pick, ops#634) is not Use'd: it doesn't stop it
+    const std::set<int> helpers = implicitHelperGeoIds(*this, externalGeoMap);
 
     gp_Pln plane(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
     Handle(Geom2d_Curve) path = new Geom2d_TrimmedCurve(
@@ -735,6 +743,42 @@ bool SketchObject::seekTrimPoints(
         geos.push_back(&vAxis);
     }
 
+    // FreeCAD-CH (Onshape GA3-25, GA3-25b, ops#640): a constraint's helper link (a model pick) bounds
+    // no trim, and a point on the curve (a sketch point, a Use'd one) does. Part's search takes only
+    // curves: a helper's entry is replaced by a point (which it skips), and each point on the curve
+    // stands in as a short segment across the curve through it (the crossing is the point)
+    const std::set<int> helpers = implicitHelperGeoIds(*this, externalGeoMap);
+    Part::GeomPoint skipped;
+    std::vector<std::unique_ptr<Part::GeomLineSegment>> standIns;
+    std::map<int, int> standInGeoIds;  // index in geos -> the point's GeoId
+    const auto* trimmed = getGeometry<Part::GeomCurve>(GeoId);
+    const std::size_t ownCount = geos.size() - (includeSketchAxes ? 2 : 0);
+    for (std::size_t i = 0; i < ownCount; ++i) {
+        const int id = getGeoIdFromCompleteGeometryIndex(static_cast<int>(i));
+        if (helpers.count(id) != 0) {
+            geos[i] = &skipped;
+            continue;
+        }
+        if (!trimmed || id == GeoId || !geos[i]->is<Part::GeomPoint>()
+            || GeometryFacade::isInternalAligned(geos[i])) {
+            continue;
+        }
+        const Base::Vector3d p = static_cast<const Part::GeomPoint*>(geos[i])->getPoint();
+        double u;
+        Base::Vector3d tangent;
+        if (!trimmed->closestParameter(p, u) || (trimmed->pointAtParameter(u) - p).Length() > Precision::Confusion()
+            || !trimmed->tangent(u, tangent)) {
+            continue;
+        }
+        tangent.Normalize();
+        const Base::Vector3d across(-tangent.y * 1e-4, tangent.x * 1e-4, 0);
+        auto standIn = std::make_unique<Part::GeomLineSegment>();
+        standIn->setPoints(p - across, p + across);
+        standInGeoIds[static_cast<int>(geos.size())] = id;
+        geos.push_back(standIn.get());
+        standIns.push_back(std::move(standIn));
+    }
+
     int localindex1, localindex2;
 
     // Not found in will be returned as -1, not as GeoUndef, Part WB is agnostic to the concept
@@ -747,6 +791,9 @@ bool SketchObject::seekTrimPoints(
 
     // invalid complete geometry indices are mapped to GeoUndef
     auto getGeoIdForIndex = [&](int index) {
+        if (auto it = standInGeoIds.find(index); it != standInGeoIds.end()) {
+            return it->second;
+        }
         if (includeSketchAxes && index == hAxisIndex) {
             return Part::Part2DObject::H_Axis;
         }

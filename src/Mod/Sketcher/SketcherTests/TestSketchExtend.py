@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-# FreeCAD-CH: Onshape's Extend (ops#640, oracle 10b GA3-25/25b, sketch tools 1 extra 2). A line's end
+# FreeCAD-CH: Onshape's Extend and what bounds a Trim (ops#640, oracle 10b GA3-25/25b, sketch tools 1 extra 2). A line's end
 # grows towards the click but stops at the first curve in its way: a sketch curve (construction
 # lines included), a sketch point, the end point of a collinear line, or a Use'd (external) edge.
 # The origin axes, a constraint's implicit model pick, and another curve's extension are not in the
@@ -198,6 +198,110 @@ class TestSketchExtend(unittest.TestCase):
         self.doc.recompute()
         self.assertAt(self.a, END, 20, 0)
         self.assertEqual(len(self.sketch.Constraints), before)
+
+
+class TestSketchTrimBounds(unittest.TestCase):
+    """Onshape GA3-25/25b (ops#640): a point on the curve (a sketch point, a Use'd one) bounds a
+    trim, with COINCIDENT(point, the kept piece's end); a constraint's helper link (a model pick)
+    doesn't, a Use'd edge does. Line L (0,0)-(10,0), trimmed with a click at (2,0)."""
+
+    def setUp(self):
+        self.doc = App.newDocument("TestSketchTrimBounds")
+        self.sketch = self.doc.addObject("Sketcher::SketchObject", "Sketch")
+        self.line = self.sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))
+        self.doc.recompute()
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def addModel(self, name, shape):
+        obj = self.doc.addObject("Part::Feature", name)
+        obj.Shape = shape
+        self.doc.recompute()
+        return obj
+
+    def lines(self):
+        return [g for g in self.sketch.Geometry if isinstance(g, Part.LineSegment)]
+
+    def assertKept(self, x1, x2):
+        lines = self.lines()
+        self.assertEqual(len(lines), 1, f"one piece of L: {self.sketch.Geometry}")
+        ends = sorted([lines[0].StartPoint.x, lines[0].EndPoint.x])
+        self.assertAlmostEqual(ends[0], x1, delta=TOL)
+        self.assertAlmostEqual(ends[1], x2, delta=TOL)
+
+    def coincidentWith(self, geo):
+        return [c for c in self.sketch.Constraints if c.Type == "Coincident" and geo in (c.First, c.Second)]
+
+    def testASketchPointOnTheLineBoundsTheTrim(self):
+        p = self.sketch.addGeometry(Part.Point(V(4, 0, 0)))
+        self.sketch.addConstraint(Sketcher.Constraint("PointOnObject", p, START, self.line))
+        self.doc.recompute()
+        self.sketch.trim(self.line, V(2, 0, 0))
+        self.doc.recompute()
+        self.assertKept(4, 10)
+        self.assertEqual(len(self.coincidentWith(p)), 1, f"{[c.Type for c in self.sketch.Constraints]}")
+
+    def testAFreePointOnTheLineBoundsTheTrim(self):
+        p = self.sketch.addGeometry(Part.Point(V(4, 0, 0)))
+        self.sketch.trim(self.line, V(2, 0, 0))
+        self.doc.recompute()
+        self.assertKept(4, 10)
+        self.assertEqual(len(self.coincidentWith(p)), 1)
+
+    def testAPointOffTheLineDoesNotBoundIt(self):
+        self.sketch.addGeometry(Part.Point(V(4, 1, 0)))
+        self.sketch.addGeometry(Part.LineSegment(V(6, -5, 0), V(6, 5, 0)))
+        self.sketch.trim(self.line, V(2, 0, 0))
+        self.doc.recompute()
+        pieces = [g for g in self.lines() if abs(g.StartPoint.y) < TOL and abs(g.EndPoint.y) < TOL]
+        self.assertEqual(len(pieces), 1, f"L trimmed back to the line at x=6: {self.sketch.Geometry}")
+        self.assertAlmostEqual(min(pieces[0].StartPoint.x, pieces[0].EndPoint.x), 6, delta=TOL)
+
+    def testAUsedPointBoundsTheTrim(self):
+        self.addModel("Peg", Part.Vertex(V(4, 0, 0)))
+        self.sketch.addExternal("Peg", "Vertex1")
+        self.doc.recompute()
+        self.sketch.trim(self.line, V(2, 0, 0))
+        self.doc.recompute()
+        self.assertKept(4, 10)
+        self.assertEqual(len(self.coincidentWith(-3)), 1)
+
+    def testAUsedEdgeBoundsTheTrim(self):
+        self.addModel("Wall", Part.makeLine(V(4, -5, 0), V(4, 5, 0)))
+        self.sketch.addExternal("Wall", "Edge1")
+        self.doc.recompute()
+        self.sketch.trim(self.line, V(2, 0, 0))
+        self.doc.recompute()
+        self.assertKept(4, 10)
+
+    def testAModelPickDoesNotBoundTheTrim(self):
+        # a helper link (implicit, ops#634) kept by a constraint on it: not a boundary, so the
+        # line, with nothing else crossing it, goes whole
+        self.addModel("Wall", Part.makeLine(V(4, -5, 0), V(4, 50, 0)))
+        self.sketch.addExternal("Wall", "Edge1", False, False, True)
+        p = self.sketch.addGeometry(Part.Point(V(4, 30, 0)))
+        self.sketch.addConstraint(Sketcher.Constraint("PointOnObject", p, START, -3))
+        self.doc.recompute()
+        self.sketch.trim(self.line, V(2, 0, 0))
+        self.doc.recompute()
+        self.assertEqual(self.lines(), [], f"L deleted whole: {self.sketch.Geometry}")
+
+    def testPointsOnACircleBoundItsTrim(self):
+        self.sketch.delGeometry(self.line)
+        c = self.sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 5))
+        self.sketch.addGeometry(Part.Point(V(5, 0, 0)))
+        self.sketch.addGeometry(Part.Point(V(-5, 0, 0)))
+        self.doc.recompute()
+        self.sketch.trim(c, V(0, 5, 0))
+        self.doc.recompute()
+        arcs = [g for g in self.sketch.Geometry if isinstance(g, Part.ArcOfCircle)]
+        self.assertEqual(len(arcs), 1, f"the lower arc kept: {self.sketch.Geometry}")
+        mid = arcs[0].value((arcs[0].FirstParameter + arcs[0].LastParameter) / 2)
+        self.assertLess(mid.y, 0)
+        for q in (arcs[0].StartPoint, arcs[0].EndPoint):
+            self.assertAlmostEqual(abs(q.x), 5, delta=TOL)
+            self.assertAlmostEqual(q.y, 0, delta=TOL)
 
 
 if __name__ == "__main__":
