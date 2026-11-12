@@ -69,6 +69,7 @@
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
+#include "Body.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
@@ -114,6 +115,15 @@ DressUp::DressUp()
         "A studio dress-up's picks on any parts, resolved"
     );
     ADD_PROPERTY_TYPE(StudioPickIds, (), "Studio", App::Prop_Hidden, "The part id of each pick");
+    // FreeCAD-CH ops#701 (F2b): the dress-up of the first part, for one over several parts
+    ADD_PROPERTY_TYPE(
+        MultiPartPrimary,
+        (nullptr),
+        "Studio",
+        App::Prop_Hidden,
+        "The dress-up this one was made with in another part: when it builds and this one fails, "
+        "this one passes its part through with a warning"
+    );
 
     AddSubShape.setStatus(App::Property::Output, true);
     Operation.setStatus(App::Property::Hidden, true);
@@ -937,6 +947,54 @@ PartDesignExport std::string dressUpFailure(const char* verb, const std::string&
 PartDesignExport bool isDressUpFailure(const std::string& what)
 {
     return isKernelText(what) || what.find("exact construction refused: ") != std::string::npos;
+}
+
+}  // namespace PartDesign
+
+namespace PartDesign
+{
+
+App::DocumentObjectExecReturn* DressUp::partialFailure(
+    App::DocumentObjectExecReturn* ret,
+    const char* verb
+)
+{
+    auto primary = freecad_cast<DressUp*>(MultiPartPrimary.getValue());
+    // Not inside a pattern's re-run (dressUpRun), whose caller takes the failure
+    if (!ret || ret == App::DocumentObject::StdReturn || dressUpRun || !primary || primary == this
+        || primary->isError() || primary->Shape.getShape().isNull()) {
+        return ret;
+    }
+    Part::TopoShape base;
+    try {
+        base = getBaseTopoShape(true);
+    }
+    catch (const Base::Exception&) {
+    }
+    if (base.isNull()) {
+        return ret;
+    }
+    std::string why = ret->Why;
+    delete ret;
+    // "Failed to fillet selections: <reason>" (dressUpFailure()) names the part; another
+    // failure (an invalid result, a recess filled) goes after it
+    const std::string failed = "Failed to " + std::string(verb) + " selections";
+    const Body* body = getFeatureBody();
+    const std::string on = failed + " on " + (body ? body->Label.getValue() : Label.getValue());
+    why = why.rfind(failed + ": ", 0) == 0 ? on + why.substr(failed.size()) : on + ": " + why;
+
+    // As a suppressed feature's: the output is the base, the feature's own state is a success
+    this->positionByBaseFeature();
+    if (!_PassedThrough.getValue()) {
+        _PassedThrough.setValue(true);
+    }
+    setFailurePassedThrough(false);
+    Shape.setValue(base);
+    if (auto doc = getDocument()) {
+        const char* previous = doc->getWarningDescription(this);
+        doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + why : why);
+    }
+    return App::DocumentObject::StdReturn;
 }
 
 }  // namespace PartDesign

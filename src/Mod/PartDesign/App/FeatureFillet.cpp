@@ -108,6 +108,13 @@ short Fillet::mustExecute() const
 
 App::DocumentObjectExecReturn* Fillet::execute()
 {
+    // FreeCAD-CH ops#701 (F2b): over several parts, this part failing while the first part's
+    // builds is a warning, as Onshape's FILLET_PARTIAL_FAIL
+    return partialFailure(build(), "fillet");
+}
+
+App::DocumentObjectExecReturn* Fillet::build()
+{
     // FreeCAD-CH ops#654 T3: re-run at a pattern's instance, on its base and edges
     Part::TopoShape reapplyBase;
     std::vector<Part::TopoShape> reapplyEdges;

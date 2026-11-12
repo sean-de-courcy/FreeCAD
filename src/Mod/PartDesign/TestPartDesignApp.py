@@ -107,7 +107,10 @@ from PartDesignTests.TestAttachAcrossContainers import TestAttachAcrossContainer
 # dressup features
 from PartDesignTests.TestFillet import TestFillet
 from PartDesignTests.TestFilletPropagation import TestFilletPropagation  # FreeCAD-CH, ops#655
-from PartDesignTests.TestFilletFailureText import TestFilletFailureText  # FreeCAD-CH, ops#640 F2
+from PartDesignTests.TestFilletFailureText import (  # FreeCAD-CH, ops#640 F2, ops#701
+    TestFilletFailureText,
+    TestMultiPartWarning,
+)
 from PartDesignTests.TestChamfer import TestChamfer
 from PartDesignTests.TestDraft import (
     TestDraft,

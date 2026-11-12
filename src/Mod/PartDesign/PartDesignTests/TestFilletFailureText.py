@@ -14,7 +14,10 @@
 # the triangle 30 x 30 / 2 along 40 mm, 18000; B stays 4000.
 
 import math
+import os
 import re
+import shutil
+import tempfile
 import unittest
 
 import FreeCAD
@@ -31,7 +34,9 @@ KERNEL = re.compile(
 )
 
 
-class TestFilletFailureText(unittest.TestCase):
+class FailureCase(unittest.TestCase):
+    """The two-part model and its checks."""
+
     def setUp(self):
         self.doc = models.newDocument("PartDesignTestFilletFailureText")
 
@@ -62,13 +67,15 @@ class TestFilletFailureText(unittest.TestCase):
         self.assertEqual(len(names), 1, names)
         return names[0]
 
-    def twoParts(self, kind, sizeA, size):
-        """A (a cube of sizeA) and B (20 x 20 x 10) dressed up on their top front edges, B's size
-        following A's as the command makes it: the two features and the two Bodies."""
+    def twoParts(self, kind, sizeA, size, sizeB=20, heightB=10, link=False):
+        """A (a cube of sizeA) and B (sizeB x sizeB x heightB) dressed up on their top front edges,
+        B's size following A's as the command makes it, and with `link` B's MultiPartPrimary A, as
+        the command sets it since ops#701 (without it, a file from before): the two features and
+        the two Bodies."""
         bodyA, padA = self.part("PartA", 0, sizeA, sizeA)
-        bodyB, padB = self.part("PartB", 120, 20, 10)
+        bodyB, padB = self.part("PartB", 120, sizeB, heightB)
         made = []
-        for body, pad, height in ((bodyA, padA, sizeA), (bodyB, padB, 10)):
+        for body, pad, height in ((bodyA, padA, sizeA), (bodyB, padB, heightB)):
             feature = body.newObject("PartDesign::" + kind, kind + body.Name)
             feature.Base = (pad, [self.topFront(pad.Shape, height)])
             made.append(feature)
@@ -76,6 +83,8 @@ class TestFilletFailureText(unittest.TestCase):
         param = "Radius" if kind == "Fillet" else "Size"
         setattr(first, param, size)
         second.setExpression(param, first.Name + "." + param)
+        if link:
+            second.MultiPartPrimary = first
         self.doc.recompute()
         return first, second, bodyA, bodyB
 
@@ -84,6 +93,10 @@ class TestFilletFailureText(unittest.TestCase):
         status = feature.getStatusString()
         self.assertTrue(status.startswith("Failed to %s selections: " % verb), status)
         self.assertIsNone(KERNEL.search(status), status)
+
+class TestFilletFailureText(FailureCase):
+    """Onshape's message; without the link (a file from before ops#701) each part's
+    dress-up fails on its own."""
 
     def testFilletOverTwoPartsBuildsThePartThatWorks(self):
         """O2: r 50 rounds A's edge; on B it leaves nothing, so B's fails and B is unchanged."""
@@ -137,6 +150,132 @@ class TestFilletFailureText(unittest.TestCase):
                     self.assertIn("runs off its face", feature.getStatusString())
                 finally:
                     App.closeDocument(doc.Name)
+
+
+
+class TestMultiPartWarning(FailureCase):
+    """F2b (ops#701): over several parts, a part that fails while the first part's dress-up builds
+    is Onshape's FILLET_PARTIAL_FAIL: a warning, the part unchanged, its later features computed.
+    The first part failing stays an error (ops#706); every part failing is FILLET_FAILED."""
+
+    def assertPartialFailure(self, feature, verb, body):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertIn("Warning", feature.State)
+        status = feature.getStatusString()
+        prefix = "Warning: Failed to %s selections on %s: " % (verb, body.Label)
+        self.assertTrue(status.startswith(prefix), status)
+        self.assertIsNone(KERNEL.search(status), status)
+
+    def assertBoxB(self, body):
+        self.assertAlmostEqual(body.Shape.Volume, 4000, delta=1e-6)
+        self.assertEqual(len(body.Shape.Solids), 1)
+        self.assertEqual(len(body.Shape.Faces), 6)
+
+    def testFilletPartWarns(self):
+        """O2: r 50 rounds A; B fails, warns and stays its box."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        self.assertTrue(filletA.isValid(), filletA.getStatusString())
+        self.assertNotIn("Warning", filletA.State)
+        removed = (1 - math.pi / 4) * 50**2 * 100
+        self.assertAlmostEqual(bodyA.Shape.Volume, 100**3 - removed, delta=1e-3)
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+        self.assertBoxB(bodyB)
+
+    def testChamferPartWarns(self):
+        """O2's chamfer: 30 on a 40 cube removes 18000; B warns and stays its box."""
+        chamferA, chamferB, bodyA, bodyB = self.twoParts("Chamfer", 40, 30, link=True)
+        self.assertTrue(chamferA.isValid(), chamferA.getStatusString())
+        self.assertAlmostEqual(bodyA.Shape.Volume, 40**3 - 30 * 30 / 2 * 40, delta=1e-3)
+        self.assertPartialFailure(chamferB, "chamfer", bodyB)
+        self.assertBoxB(bodyB)
+
+    def testLaterFeatureOfTheWarnedPartComputes(self):
+        """A pocket after B's warned fillet computes on B's box: a 4 x 4 square 5 deep, 3920."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        sketch = models.sketch(
+            self.doc, "PocketSketch", models.rectangle(128, 8, 132, 12), bodyB, z=10
+        )
+        pocket = models.pocket(bodyB, sketch, 5)
+        self.doc.recompute()
+        self.assertPartialFailure(filletB, "fillet", bodyB)
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertEqual(bodyB.Tip, pocket)
+        self.assertAlmostEqual(bodyB.Shape.Volume, 4000 - 4 * 4 * 5, delta=1e-6)
+
+    def testEveryPartFailingIsAnError(self):
+        """FILLET_FAILED: r 50 on two 20 x 20 x 10 boxes fails both, each an error."""
+        bodyA, padA = self.part("PartA", 0, 20, 10)
+        bodyB, padB = self.part("PartB", 120, 20, 10)
+        fillets = []
+        for body, pad in ((bodyA, padA), (bodyB, padB)):
+            fillet = body.newObject("PartDesign::Fillet", "Fillet" + body.Name)
+            fillet.Base = (pad, [self.topFront(pad.Shape, 10)])
+            fillets.append(fillet)
+        first, second = fillets
+        first.Radius = 50
+        second.setExpression("Radius", first.Name + ".Radius")
+        second.MultiPartPrimary = first
+        self.doc.recompute()
+        for fillet in fillets:
+            self.assertOnshapeFailure(fillet, "fillet")
+            self.assertNotIn("Warning", fillet.State)
+        self.assertAlmostEqual(bodyB.Shape.Volume, 4000, delta=1e-6)
+
+    def testThePrimaryFailingStaysAnError(self):
+        """The first part's dress-up failing is an error (ops#706, as before); the follower
+        builds: B the first part (r 50 fails), A the 100 cube."""
+        bodyB, padB = self.part("PartB", 120, 20, 10)
+        bodyA, padA = self.part("PartA", 0, 100, 100)
+        first = bodyB.newObject("PartDesign::Fillet", "FilletB")
+        first.Base = (padB, [self.topFront(padB.Shape, 10)])
+        first.Radius = 50
+        second = bodyA.newObject("PartDesign::Fillet", "FilletA")
+        second.Base = (padA, [self.topFront(padA.Shape, 100)])
+        second.setExpression("Radius", first.Name + ".Radius")
+        second.MultiPartPrimary = first
+        self.doc.recompute()
+        self.assertOnshapeFailure(first, "fillet")
+        self.assertTrue(second.isValid(), second.getStatusString())
+        self.assertNotIn("Warning", second.State)
+        self.assertAlmostEqual(
+            bodyA.Shape.Volume, 100**3 - (1 - math.pi / 4) * 50**2 * 100, delta=1e-3
+        )
+
+    def testSavedAndReopened(self):
+        """The link is saved: reopened and recomputed, B still warns and A still builds."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "twoparts.FCStd")
+            names = filletA.Name, filletB.Name
+            self.doc.saveAs(path)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            filletA, filletB = (self.doc.getObject(name) for name in names)
+            bodyB = self.doc.getObject("PartB")
+            self.assertEqual(filletB.MultiPartPrimary, filletA)
+            for obj in self.doc.Objects:
+                obj.touch()
+            self.doc.recompute()
+            self.assertTrue(filletA.isValid(), filletA.getStatusString())
+            self.assertPartialFailure(filletB, "fillet", bodyB)
+            self.assertBoxB(bodyB)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def testFollowerOfADeletedPrimaryIsAnError(self):
+        """The first part's dress-up deleted: B's link is cleared and its failure is an error."""
+        filletA, filletB, bodyA, bodyB = self.twoParts("Fillet", 100, 50, link=True)
+        filletB.setExpression("Radius", None)
+        filletB.Radius = 50
+        name = filletA.Name
+        bodyA.removeObject(filletA)
+        self.doc.removeObject(name)
+        self.doc.recompute()
+        self.assertIsNone(filletB.MultiPartPrimary)
+        self.assertOnshapeFailure(filletB, "fillet")
+        self.assertNotIn("Warning", filletB.State)
+        self.assertBoxB(bodyB)
 
 
 if __name__ == "__main__":

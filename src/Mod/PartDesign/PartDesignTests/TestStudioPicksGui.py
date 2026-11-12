@@ -385,6 +385,9 @@ class TestStudioDressUpsGui(ResultBoxGuiCase):
         [second] = [f for f in fillets if b.hasObject(f)]
         expressions = dict(second.ExpressionEngine)
         self.assertEqual(expressions.get("Radius"), first.Name + ".Radius")
+        # ops#701 (F2b): the second warns where it fails while the first builds
+        self.assertEqual(second.MultiPartPrimary, first)
+        self.assertIsNone(first.MultiPartPrimary)
         self.setField("filletRadius", 2)
         self.close(ok=True)
         self.watching = False

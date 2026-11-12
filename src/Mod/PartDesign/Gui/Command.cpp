@@ -3018,6 +3018,8 @@ void finishDressupFeature(
                 "setExpression('" << parameter << "', '" << FeatName << "." << parameter << "')"
             );
         }
+        // ops#701 (F2b): its failure is a warning while the first part's builds
+        FCMD_OBJ_CMD(otherFeat, "MultiPartPrimary = " << Gui::Command::getObjectCmd(Feat));
         FCMD_OBJ_HIDE(other.base);
         cmd->copyVisual(otherFeat, "ShapeAppearance", other.base);
         cmd->copyVisual(otherFeat, "LineColor", other.base);
