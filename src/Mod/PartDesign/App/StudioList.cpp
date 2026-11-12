@@ -2920,6 +2920,20 @@ void PartDesign::registerPartMirrorResync()
         d.signalCommitTransaction.connect([](const App::Document& doc) {
             resyncSteps(doc).awaitingRecompute = needsRecompute(doc);
         });
+        // An input changed outside any step (a script's edit, not an undo, a rollback or a
+        // compute): the next recompute is that edit's, in the last step (10.12 amendment point 2)
+        d.signalChangedObject.connect(
+            [](const App::DocumentObject& obj, const App::Property& prop) {
+                const App::Document* doc = obj.getDocument();
+                if (doc && !doc->hasPendingTransaction() && !doc->isPerformingTransaction()
+                    && !doc->testStatus(App::Document::Recomputing)
+                    && !doc->testStatus(App::Document::Restoring)
+                    && !prop.testStatus(App::Property::Output)
+                    && !(prop.getType() & App::Prop_Output)) {
+                    resyncSteps(*doc).awaitingRecompute = true;
+                }
+            }
+        );
         d.signalAbortTransaction.connect([](const App::Document& doc) {
             resyncSteps(doc).awaitingRecompute = false;
         });
