@@ -42,6 +42,8 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
 from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch round 3)
     TestSketchModelInferenceGui,
     TestSketchModelInferenceOnFaceGui,
+    TestSketchModelArcMidpointGui,  # FreeCAD-CH, selection parity 10 (c)
+    TestSketchModelArcMidpointOnFaceGui,
     TestSketchConflictRefusedGui,
     TestSketchOverdefinedRedGui,
     TestSketchOnshapeConstraintsGui,

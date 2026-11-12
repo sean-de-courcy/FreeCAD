@@ -5,6 +5,8 @@
 Designed geometry only: a 20 x 10 x 5 box Pad from the origin, and sketches on its top (z 5).
 Expected values are geometric (the box's corners and edges)."""
 
+import math
+
 import FreeCAD
 import Part
 import Sketcher
@@ -36,6 +38,7 @@ class Round3GuiCase(SketcherGuiTestCase):
     """The box, a sketch on its top, and drawing by clicks in a top view."""
 
     on_face = False  # True: the sketch is attached to the box's top face, else to XY at z 5
+    rounded_corner = False  # True: the box's corner (20, 10) is rounded r5 (an arc edge on top)
 
     def setUp(self):
         super().setUp()
@@ -53,11 +56,23 @@ class Round3GuiCase(SketcherGuiTestCase):
         base = self.body.newObject("Sketcher::SketchObject", "Base")
         base.AttachmentSupport = [(xy, "")]
         base.MapMode = "FlatFace"
-        corners = [V(0, 0, 0), V(20, 0, 0), V(20, 10, 0), V(0, 10, 0)]
-        for i in range(4):
-            base.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
-        for i in range(4):
-            base.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        if self.rounded_corner:
+            # the corner (20, 10) rounded r5: an arc centre (15, 5) from (20, 5) to (15, 10)
+            base.addGeometry(Part.LineSegment(V(0, 0, 0), V(20, 0, 0)))
+            base.addGeometry(Part.LineSegment(V(20, 0, 0), V(20, 5, 0)))
+            base.addGeometry(
+                Part.ArcOfCircle(Part.Circle(V(15, 5, 0), V(0, 0, 1), 5), 0, math.pi / 2)
+            )
+            base.addGeometry(Part.LineSegment(V(15, 10, 0), V(0, 10, 0)))
+            base.addGeometry(Part.LineSegment(V(0, 10, 0), V(0, 0, 0)))
+            for i in range(5):
+                base.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 5, 1))
+        else:
+            corners = [V(0, 0, 0), V(20, 0, 0), V(20, 10, 0), V(0, 10, 0)]
+            for i in range(4):
+                base.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+            for i in range(4):
+                base.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
         self.doc.recompute()
         self.pad = self.body.newObject("PartDesign::Pad", "Pad")
         self.pad.Profile = base
@@ -292,6 +307,64 @@ class TestSketchModelInferenceGui(Round3GuiCase):
 class TestSketchModelInferenceOnFaceGui(TestSketchModelInferenceGui):
     """The same, with the sketch attached to the box's top face (the support is the snap
     source)."""
+
+    on_face = True
+
+
+class TestSketchModelArcMidpointGui(Round3GuiCase):
+    """SQ2 on an arc (selection parity 10, item c): the box's corner (20, 10) is rounded r5, so
+    its top has an arc edge, centre (15, 5), from (20, 5) to (15, 10); its middle is at 45 deg,
+    (15 + 5 cos 45, 5 + 5 sin 45). A line ended near that middle snaps to it and gets a Midpoint
+    to the linked arc (Onshape's MIDPOINT with an arc, facts SK9), not a Point on object."""
+
+    rounded_corner = True
+    external_constraint = TestSketchModelInferenceGui.external_constraint
+
+    CENTRE = V(15, 5, 5)
+    RADIUS = 5.0
+
+    def arc_point(self, along, out=0.0):
+        """The world (x, y) `along` mm along the arc from its middle (counter-clockwise), `out`
+        mm outside it."""
+        angle = math.pi / 4 + along / self.RADIUS
+        r = self.RADIUS + out
+        return (self.CENTRE.x + r * math.cos(angle), self.CENTRE.y + r * math.sin(angle))
+
+    def arc_edge(self):
+        return self.pad_edge_between(V(20, 5, 5), V(15, 10, 5))
+
+    def test_a_line_ended_near_a_model_arc_s_middle_snaps_to_it_and_is_midpoint(self):
+        """0.15 mm along the arc and 0.04 mm outside it, as the straight edge's test."""
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(5, 3), self.arc_point(0.15, 0.04)])
+        end = self.world(self.sketch.Geometry[0].EndPoint)
+        middle = V(*self.arc_point(0.0), 5)
+        self.assertLess((end - middle).Length, 1e-6, "The end snapped to the arc's middle")
+        self.assertIn(("Pad", self.arc_edge()), self.links(), self.describe())
+        self.assertIsNotNone(
+            self.external_constraint("Midpoint", 0, 2),
+            "Expected the end at the linked arc's midpoint: %s" % self.describe(),
+        )
+        self.assertIsNone(self.external_constraint("PointOnObject", 0, 2), self.describe())
+
+    def test_a_line_ended_on_a_model_arc_beyond_its_middle_s_radius_is_on_it(self):
+        """0.4 mm along the arc from its middle (about 12 px) is the arc, not its middle."""
+        self.start_edit()
+        self.draw("Sketcher_CreateLine", [(5, 3), self.arc_point(0.4, 0.04)])
+        end = self.world(self.sketch.Geometry[0].EndPoint)
+        self.assertLess(
+            abs((end - self.CENTRE).Length - self.RADIUS), 1e-6, "The end snapped onto the arc"
+        )
+        self.assertGreater(
+            (end - V(*self.arc_point(0.0), 5)).Length, 0.2, "The end did not go to the middle"
+        )
+        self.assertIn(("Pad", self.arc_edge()), self.links(), self.describe())
+        self.assertIsNotNone(self.external_constraint("PointOnObject", 0, 2), self.describe())
+        self.assertIsNone(self.external_constraint("Midpoint", 0, 2), self.describe())
+
+
+class TestSketchModelArcMidpointOnFaceGui(TestSketchModelArcMidpointGui):
+    """The same, with the sketch attached to the box's top face."""
 
     on_face = True
 
