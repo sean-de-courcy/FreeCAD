@@ -16,6 +16,10 @@ from AssemblyTests.TestConnectorPointsGui import TestConnectorPointsGui  # ops#6
 
 True if TestConnectorPointsGui else False
 
+from AssemblyTests.TestSnapModeGui import TestSnapModeGui  # ops#640, design C9
+
+True if TestSnapModeGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,

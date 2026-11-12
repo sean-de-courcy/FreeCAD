@@ -1100,6 +1100,18 @@ class TestForkKeymapGui(unittest.TestCase):
             if Gui.Control.activeDialog():
                 Gui.Control.closeDialog()
             pump()
+            # Onshape's Shift+S in an assembly is Snap mode (ops#640, design C9); in a Part Studio
+            # it is a new sketch. In assembly edit both are enabled, and the tie rule gives the key
+            # to Snap mode, the ForEdit one
+            import CommandSnapMode
+
+            with self.watching("Assembly_ToggleSnapMode", "PartDesign_NewSketch") as fired:
+                self.press(QtCore.Qt.Key_S, QtCore.Qt.ShiftModifier)
+                self.assertTrue(waitFor(lambda: fired), "Shift+S ran nothing")
+                pump(0.4)
+            self.assertEqual(fired, ["Assembly_ToggleSnapMode"])
+            self.assertTrue(CommandSnapMode.isSnapModeOn())
+            CommandSnapMode.setSnapMode(False)
             # the fork's general keys: the sketch's keys meet Assembly's letters only on actions
             # that aren't reachable there (D: the sketch's dimension group, its toolbar hidden),
             # and Assembly's letters meet upstream's own (S and Std_LinkSelectActions' S, G)
@@ -1108,7 +1120,11 @@ class TestForkKeymapGui(unittest.TestCase):
                 for n, k in ONSHAPE.items()
                 if k and not n.startswith("Sketcher_")
             }
-            self.assertNoClashes("assembly edit", only=general)
+            self.assertNoClashes(
+                "assembly edit",
+                allowed=UPSTREAM_CLASHES + [("Assembly_ToggleSnapMode", "PartDesign_NewSketch")],
+                only=general,
+            )
             setKeymap("FreeCAD")
             wrong = [f"{n}: {toolKey(n)!r}" for n, k in ASSEMBLY_KEYS.items() if toolKey(n) != k]
             self.assertEqual(wrong, [], "FreeCAD")
