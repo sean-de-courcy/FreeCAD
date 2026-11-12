@@ -920,6 +920,44 @@ int System::addConstraintArcLength(Arc& a, double* distance, int tagId, bool dri
     return addConstraint(constr);
 }
 
+// FreeCAD-CH (sketch patterns)
+int System::addConstraintLinearSum(
+    double* q,
+    const std::vector<double*>& params,
+    const std::vector<double>& weights,
+    double constant,
+    int tagId,
+    bool driving
+)
+{
+    std::vector<double*> pvec {q};
+    pvec.insert(pvec.end(), params.begin(), params.end());
+    Constraint* constr = new ConstraintLinearSum(pvec, weights, constant);
+    constr->setTag(tagId);
+    constr->setDriving(driving);
+    return addConstraint(constr);
+}
+
+// FreeCAD-CH (sketch patterns)
+int System::addConstraintPatternRotation(
+    Point& copy,
+    Point& seed,
+    Point& pivot,
+    double* theta,
+    double k,
+    int tagId,
+    bool driving
+)
+{
+    for (int component : {0, 1}) {
+        Constraint* constr = new ConstraintPatternRotation(copy, seed, pivot, theta, k, component);
+        constr->setTag(tagId);
+        constr->setDriving(driving);
+        addConstraint(constr);
+    }
+    return 0;
+}
+
 
 // derived constraints
 

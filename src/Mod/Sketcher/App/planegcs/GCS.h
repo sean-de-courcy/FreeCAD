@@ -513,6 +513,25 @@ public:
     );
     int addConstraintP2CDistance(Point& p, Circle& c, double* distance, int tagId = 0, bool driving = true);
     int addConstraintArcLength(Arc& a, double* dist, int tagId, bool driving = true);
+    // FreeCAD-CH (sketch patterns): q = sum(weights_i * params_i) + constant
+    int addConstraintLinearSum(
+        double* q,
+        const std::vector<double*>& params,
+        const std::vector<double>& weights,
+        double constant,
+        int tagId,
+        bool driving = true
+    );
+    // FreeCAD-CH (sketch patterns): copy = pivot + R(k theta) (seed - pivot), both coordinates
+    int addConstraintPatternRotation(
+        Point& copy,
+        Point& seed,
+        Point& pivot,
+        double* theta,
+        double k,
+        int tagId,
+        bool driving = true
+    );
 
     // internal alignment constraints
     int addConstraintInternalAlignmentPoint2Ellipse(
