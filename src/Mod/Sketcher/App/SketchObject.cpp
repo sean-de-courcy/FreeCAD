@@ -62,6 +62,7 @@
 #include <Mod/Part/App/GeometryMigrationExtension.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 #include <Mod/Part/App/WireJoiner.h>
+#include <Mod/Part/App/FaceMakerBuildFace.h>
 
 #include <memory>
 #include <unordered_map>
@@ -790,26 +791,43 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
             // they stay out of the open wires below and out of the sketch's Shape
             const auto imprint = imprintEdges(*this);
             // nearOnly: only the model edges that can reach the sketch's regions (perf profile 2b)
-            auto regions = [&](bool nearOnly) {
+            // own: the sketch's edges; model: the imprint's
+            auto regions = [&](bool nearOnly,
+                               const Part::TopoShape& own,
+                               const Part::TopoShape& model) {
                 Part::TopoShape made = makeTopoShape(getID());
                 try {
-                    auto shapes = edges.getSubTopoShapes(TopAbs_WIRE);
+                    auto shapes = own.getSubTopoShapes(TopAbs_WIRE);
                     bool leftOutLoop = false;
-                    if (!imprint.isNull()) {
-                        auto model = nearOnly ? nearImprintEdges(imprint, edges, leftOutLoop)
-                                          : imprint.getSubTopoShapes(TopAbs_EDGE);
-                        for (auto& edge : model) {
+                    gp_Pln plane;
+                    bool fullPlane = false;
+                    if (!model.isNull()) {
+                        auto all = model.getSubTopoShapes(TopAbs_EDGE);
+                        auto kept = nearOnly ? nearImprintEdges(all, own, leftOutLoop)
+                                              : all;
+                        if (kept.size() != all.size()) {
+                            // The face maker fits its plane over every edge it is given: the
+                            // whole list's plane keeps the faces (origin, pcurves) the same
+                            auto full = shapes;
+                            full.insert(full.end(), all.begin(), all.end());
+                            fullPlane = Part::FaceMakerBuildFace::planeOf(full, plane);
+                            if (!fullPlane) {
+                                kept = std::move(all);  // as without the filter
+                                leftOutLoop = false;
+                            }
+                        }
+                        for (auto& edge : kept) {
                             shapes.push_back(std::move(edge));
                         }
                     }
                     made = made.makeElementFace(shapes,
                             /*op*/"",
                             /*maker*/"Part::FaceMakerBuildFace",
-                            /*pln*/nullptr
+                            /*pln*/fullPlane ? &plane : nullptr
                     );
-                    if (!imprint.isNull()) {
+                    if (!model.isNull()) {
                         // the model edges split the sketch's regions, and make none of their own
-                        made = withinSketchRegions(made, edges, leftOutLoop);
+                        made = withinSketchRegions(made, own, leftOutLoop);
                     }
                 }
                 catch (const Part::NullShapeException&) {
@@ -819,11 +837,14 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
                 return made;
             };
             if (imprint.isNull() || imprintNearMode() != "verify") {
-                result = regions(!imprint.isNull());
+                result = regions(!imprint.isNull(), edges, imprint);
             }
             else {
-                const auto nearRegions = regions(true);
-                result = regions(false);
+                // The face maker adds a pcurve on its own plane to each edge it is given: the near
+                // run gets copies, so that the two runs leave each other's edges alone
+                const auto nearRegions =
+                    regions(true, edges.makeElementCopy(), imprint.makeElementCopy());
+                result = regions(false, edges, imprint);
                 if (const std::string difference = regionsDifference(nearRegions, result);
                     !difference.empty()) {
                     FC_ERR(getFullName() << ": imprint near edges: the regions differ: "

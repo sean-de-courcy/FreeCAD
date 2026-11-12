@@ -7706,11 +7706,13 @@ bool buildDressUpFailed(
 
 /** Whether OCCT built the dress-up invalid without an error (ops#297), which the exact construction
  * may build instead. If it doesn't, the invalid result is returned as before, and the feature's
- * check (Part::checkDressUp()) repairs it or fails.
+ * check (Part::checkDressUp()) repairs it or fails. Checked where the maker changed its input \a base
+ * (KernelBudget::checkValidChanged(): the faces it made or changed and their neighbours, its shells
+ * and solids whole; perf profile 3, ops#640).
  */
-bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
+bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
 {
-    return !BRepCheck_Analyzer(maker.Shape()).IsValid();
+    return !KernelBudget::checkValidChanged(maker.Shape(), base);
 }
 
 /** Raises OCCT's error for a maker that failed, as before the exact construction: what it threw,
@@ -7795,7 +7797,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
             // A face of zero width (ops#298): the exact construction builds it at the limit
             out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
-            out.invalid = !out.failed && !out.thin && builtInvalid(*maker);
+            out.invalid = !out.failed && !out.thin && builtInvalid(*maker, base);
             if (out.failed || out.thin || out.invalid) {
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);

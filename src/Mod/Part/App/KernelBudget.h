@@ -21,6 +21,8 @@
 
 class Message_ProgressRange;
 class TopoDS_Shape;
+class TopoDS_Shell;
+class BRepCheck_Shell;
 
 /** A time limit for the long geometry calls of a feature, with Esc (FreeCAD-CH, kernel safety S1).
  *
@@ -94,6 +96,28 @@ PartExport bool isValid(const TopoDS_Shape& shape, const char* what = "Shape che
  * BRepCheck_Shell and BRepCheck_Solid. Any other shape: BRepCheck_Analyzer itself. Runs here. */
 PartExport bool checkValid(const TopoDS_Shape& shape);
 
+/** check.Orientation() == BRepCheck_NoError, for the check of \a shell whose Closed() gave
+ * BRepCheck_NoError, in time linear in the shell's edges (perf profile 3, ops#640): OCCT finds each
+ * edge again in its other face by going through that face's edges, the square of a face's edges
+ * for a plate with thousands of holes. True here, without OCCT's check, only where OCCT finds no
+ * error: every face oriented (forward or reversed) and in the shell once, every use of an edge in
+ * a face oriented, and every edge that isn't degenerated used once, twice in one face (a seam), or
+ * once in each of two faces with opposite orientations. Anything else is OCCT's check.
+ * FREECAD_CH_FAST_ORIENTATION: "off" (OCCT's check always), "verify" (both, an error logged where
+ * the fast answer is true and OCCT's isn't; OCCT's answer returned). */
+PartExport bool orientedConsistently(BRepCheck_Shell& check, const TopoDS_Shell& shell);
+
+/** checkValid() of a result made from \a base by an operation that keeps what it doesn't touch
+ * (a fillet or chamfer from its maker's input), narrowed to what it touched (perf profile 3, ruling
+ * c753, ops#640): of the result's faces, those \a base doesn't have (the same TShape, orientation
+ * and transform) and every face that shares a vertex with one of them are checked, as checkValid()
+ * checks a face; the faces it shares with \a base, apart from those, are not checked again. Its
+ * shells and solids are checked whole (BRepCheck_Shell, BRepCheck_Solid). A shape that isn't solids
+ * only, or a null base: checkValid() of the whole. FREECAD_CH_NARROW_CHECK: "off" (the whole
+ * BRepCheck_Analyzer, as before), "verify" (both, an error logged where they differ; the whole
+ * check's answer returned). */
+PartExport bool checkValidChanged(const TopoDS_Shape& shape, const TopoDS_Shape& base);
+
 /** Whether this thread's feature (its outermost Scope) has a limit that has passed. A step on the
  * calling thread that can't be stopped, and that the result doesn't need (a refine, a check), is
  * skipped then, with a warning on the feature. */
@@ -104,7 +128,7 @@ PartExport bool inScope();
 
 /** For a step on the calling thread that can't be stopped and that the result needs (a repair):
  * throws Base::CADKernelError, noted as a stop for the feature (Scope::fired()), when the
- * feature's limit has passed.  what names the step ("The repair of the shape"). */
+ * feature's limit has passed. \a what names the step ("The repair of the shape"). */
 PartExport void stopIfPastDeadline(const char* what);
 
 /** One deadline for every run() inside it, the outermost one's.  timeLimited: whether the

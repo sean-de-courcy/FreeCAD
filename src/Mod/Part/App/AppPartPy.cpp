@@ -501,6 +501,12 @@ public:
             "safety): BRepCheck_Analyzer's verdict, faces with many holes checked by parts."
         );
         add_varargs_method(
+            "kernelCheckChanged",
+            &Module::kernelCheckChanged,
+            "kernelCheckChanged(shape, base) -- kernelCheck of a result made from base, narrowed to "
+            "the faces base doesn't have and their neighbours (a dress-up's check, FreeCAD-CH)."
+        );
+        add_varargs_method(
             "show",
             &Module::show,
             "show(shape,[string]) -- Add the shape to the active document or create one if no "
@@ -1009,6 +1015,17 @@ private:
         }
         const TopoDS_Shape& value = static_cast<TopoShapePy*>(shape)->getTopoShapePtr()->getShape();
         return Py::Boolean(KernelBudget::checkValid(value));
+    }
+    Py::Object kernelCheckChanged(const Py::Tuple& args)
+    {
+        PyObject* shape = nullptr;
+        PyObject* base = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O!", &TopoShapePy::Type, &shape, &TopoShapePy::Type, &base)) {
+            throw Py::Exception();
+        }
+        const TopoDS_Shape& value = static_cast<TopoShapePy*>(shape)->getTopoShapePtr()->getShape();
+        const TopoDS_Shape& from = static_cast<TopoShapePy*>(base)->getTopoShapePtr()->getShape();
+        return Py::Boolean(KernelBudget::checkValidChanged(value, from));
     }
     Py::Object read(const Py::Tuple& args)
     {

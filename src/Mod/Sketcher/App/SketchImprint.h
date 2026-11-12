@@ -34,9 +34,9 @@ SketcherExport Part::TopoShape imprintEdges(const SketchObject& sketch);
 /// Whether imprintEdges() has an edge, without copying any
 SketcherExport bool hasImprint(const SketchObject& sketch);
 
-/** The imprint's edges that can reach the sketch's regions (perf profile 2b, ops#640: a sketch on a
- * face with thousands of edges made and checked every cell of the face's arrangement, then dropped
- * all but its own): the edges, in the imprint's order, of every group whose box meets the box of
+/** Of \a all, the imprint's edges (imprintEdges()), those that can reach the sketch's
+ * regions (perf profile 2b, ops#640: a sketch on a face with thousands of edges made and checked
+ * every cell of the face's arrangement, then dropped all but its own): the edges, in the imprint's order, of every group whose box meets the box of
  * the sketch's edges. A group is the edges joined by overlapping boxes, a superset of those joined
  * at a vertex or a crossing, so a loop of model edges is kept or left out whole and the arrangement
  * keeps the cells of the sketch's regions as they were. \a leftOutLoop: a group left out holds a
@@ -45,7 +45,7 @@ SketcherExport bool hasImprint(const SketchObject& sketch);
  * `FREECAD_CH_IMPRINT_NEAR=off`.
  */
 SketcherExport std::vector<Part::TopoShape> nearImprintEdges(
-    const Part::TopoShape& imprint,
+    const std::vector<Part::TopoShape>& all,
     const Part::TopoShape& sketchEdges,
     bool& leftOutLoop
 );

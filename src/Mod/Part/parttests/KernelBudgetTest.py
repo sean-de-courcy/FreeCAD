@@ -401,5 +401,151 @@ class KernelCheckTest(unittest.TestCase):
         self.assertTrue(faces.isValid())
         self.assertLess(elapsed, 5.0)
 
+    @staticmethod
+    def squareHoledPlate(n):
+        """A plate with n x n square through-holes: 4 n n + 4 edges on its top and bottom faces"""
+        squares = [
+            Part.makePolygon(
+                [V(5 * i + 1, 5 * j + 1, 0), V(5 * i + 2, 5 * j + 1, 0), V(5 * i + 2, 5 * j + 2, 0),
+                 V(5 * i + 1, 5 * j + 2, 0), V(5 * i + 1, 5 * j + 1, 0)]
+            )
+            for i in range(n)
+            for j in range(n)
+        ]
+        side = 5.0 * n
+        outer = Part.makePolygon([V(0, 0, 0), V(side, 0, 0), V(side, side, 0), V(0, side, 0), V(0, 0, 0)])
+        return Part.makeFace([outer] + squares, "Part::FaceMakerBullseye").extrude(V(0, 0, 5))
+
+    def testShellOrientationOfThousandsOfHolesInSeconds(self):
+        """perf profile 3 (ops#640): OCCT's shell orientation check finds each edge again in its
+        other face by going through that face's edges, the square of the plate face's 14 400 edges
+        for 60 x 60 square holes. The fast check takes the same verdict in linear time"""
+        solid = self.squareHoledPlate(60)
+        start = time.time()
+        self.assertTrue(Part.kernelCheck(solid))
+        self.assertLess(time.time() - start, 20.0)
+
+    def testShellWithAHoleSideTurnedFails(self):
+        """A hole's side face turned the wrong way (18 x 18 holes, the faces checked by parts): the
+        fast orientation check leaves it to OCCT's, which fails it"""
+        faces = self.squareHoledPlate(18).Faces
+        side = [k for k, f in enumerate(faces) if len(f.Wires) == 1 and f.Area < 6][0]
+        faces[side] = faces[side].reversed()
+        broken = Part.Solid(Part.Shell(faces))
+        self.assertEqual(self.verdicts(broken), (False, False))
+
+
+def analyzer_valid(shape):
+    try:
+        shape.check()
+        return True
+    except ValueError:
+        return False
+
+
+def rebuilt(faces, index, shift=0.0):
+    """Face index of a box's faces (all of them, as the box has them) made again on its own edges, a face of its own: on its plane,
+    or on the plane moved by shift along its normal (every edge then lies off the surface, a face
+    BRepCheck_Analyzer fails with its shell still closed and oriented). Of the ways to make it, the
+    one that keeps the box valid on the plane itself"""
+    face = faces[index]
+    surface = face.Surface
+    makers = [
+        lambda p: Part.Face(p, [face.OuterWire.reversed()]).reversed(),
+        lambda p: Part.Face(p, [face.OuterWire]),
+    ]
+    for make in makers:
+        trial = list(faces)
+        trial[index] = make(Part.Plane(surface.Position, surface.Axis))
+        if analyzer_valid(Part.Solid(Part.Shell(trial))):
+            return make(Part.Plane(surface.Position + surface.Axis * shift, surface.Axis))
+    raise RuntimeError("no valid rebuild of face %d" % index)
+
+
+class NarrowCheckTest(unittest.TestCase):
+    """Part.kernelCheckChanged, a fillet's or chamfer's check of what its maker built (perf
+    profile 3, ruling c753, ops#640): the faces the result doesn't share with the maker's input and
+    every face with a vertex of one of them, as kernelCheck checks faces; its shells and solids
+    whole. A box whose bottom (Face5) is made again on the same edges stands for the result, the box
+    before for the input"""
+
+    def verdicts(self, shape, base):
+        """kernelCheckChanged's, and BRepCheck_Analyzer's of the whole"""
+        return Part.kernelCheckChanged(shape, base), analyzer_valid(shape)
+
+    def result(self, bad=None):
+        """The input box (face bad made invalid, off its plane) and the result, the same with its
+        bottom made again"""
+        box = list(Part.makeBox(10, 10, 10).Faces)
+        faces = list(box)
+        if bad is not None:
+            faces[bad] = rebuilt(box, bad, 0.5)
+        changed = list(faces)
+        changed[4] = rebuilt(box, 4)
+        base = Part.Solid(Part.Shell(faces))
+        result = Part.Solid(Part.Shell(changed))
+        self.assertEqual(sum(1 for f in result.Faces if any(f.isEqual(b) for b in base.Faces)), 5)
+        return result, base
+
+    def testValidResultPasses(self):
+        self.assertEqual(self.verdicts(*self.result()), (True, True))
+
+    def testInvalidNeighbourIsCaught(self):
+        """An invalid face next to the changed one (it shares an edge): checked, and failed"""
+        self.assertEqual(self.verdicts(*self.result(bad=0)), (False, False))
+
+    def testInvalidChangedFaceIsCaught(self):
+        faces = list(Part.makeBox(10, 10, 10).Faces)
+        changed = list(faces)
+        changed[4] = rebuilt(faces, 4, 0.5)
+        base = Part.Solid(Part.Shell(faces))
+        self.assertEqual(self.verdicts(Part.Solid(Part.Shell(changed)), base), (False, False))
+
+    def testShellsAndSolidsAreCheckedWhole(self):
+        """Nothing changed: no face is checked again, the shell and the solid are"""
+        result, base = self.result(bad=5)
+        self.assertTrue(Part.kernelCheckChanged(base, base))
+        faces = list(Part.makeBox(10, 10, 10).Faces)
+        faces[2] = faces[2].reversed()  # nothing changed, but the shell's orientation fails
+        turned = Part.Solid(Part.Shell(faces))
+        self.assertFalse(Part.kernelCheckChanged(turned, turned))
+
+    def testInvalidFaceApartIsNotCheckedAgain(self):
+        """The ruling's rule: the top, opposite the changed bottom and sharing no vertex with it, is
+        the input's own face, not checked again (the feature's whole check, checkDressUp, still
+        reads it)"""
+        self.assertEqual(self.verdicts(*self.result(bad=5)), (True, False))
+
+    def testWithoutBaseTheWholeIsChecked(self):
+        result, _ = self.result(bad=5)
+        self.assertEqual(self.verdicts(result, Part.Shape()), (False, False))
+
+    def testFilletOnAPlateWithThousandsOfHolesInSeconds(self):
+        """A fillet on a corner of a plate with 40 x 40 square holes (6400 edges on its top and
+        bottom faces), checked in seconds. Every face here: the fillet's maker runs on a copy of
+        the plate (ops#345), so the result shares no face with it"""
+        n = 40
+        squares = [
+            Part.makePolygon(
+                [V(5 * i + 1, 5 * j + 1, 0), V(5 * i + 2, 5 * j + 1, 0), V(5 * i + 2, 5 * j + 2, 0),
+                 V(5 * i + 1, 5 * j + 2, 0), V(5 * i + 1, 5 * j + 1, 0)]
+            )
+            for i in range(n)
+            for j in range(n)
+        ]
+        side = 5.0 * n
+        outer = Part.makePolygon([V(0, 0, 0), V(side, 0, 0), V(side, side, 0), V(0, side, 0), V(0, 0, 0)])
+        plate = Part.makeFace([outer] + squares, "Part::FaceMakerBullseye").extrude(V(0, 0, 5))
+        corner = [
+            e for e in plate.Edges
+            if e.BoundBox.XMax < 1e-9 and e.BoundBox.YMax < 1e-9 and e.BoundBox.ZLength > 4
+        ][0]
+        filleted = plate.makeFillet(1.0, [corner])
+        start = time.time()
+        self.assertTrue(Part.kernelCheckChanged(filleted, plate))
+        self.assertLess(time.time() - start, 10.0)
+        self.assertTrue(Part.kernelCheck(filleted))
+
+
 if __name__ == "__main__":
     unittest.main()

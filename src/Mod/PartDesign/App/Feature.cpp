@@ -680,7 +680,8 @@ std::string checkResult(
                 if (shell.Closed() != BRepCheck_NoError) {
                     shellProblem = "a shell is open";
                 }
-                else if (shell.Orientation() != BRepCheck_NoError) {
+                else if (!Part::KernelBudget::orientedConsistently(
+                             shell, TopoDS::Shell(it.Current()))) {
                     shellProblem = "a shell's faces are not oriented consistently";
                 }
             }
