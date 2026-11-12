@@ -36,6 +36,16 @@ from AssemblyTests.TestAssemblyPatternsGui import TestAssemblyPatternsGui  # Fre
 True if TestAssemblyListGui else False
 True if TestAssemblyPatternsGui else False
 
+from AssemblyTests.TestConfigInsertGui import (  # ops#671, configurations C3 GUI
+    TestConfigPassSchedulerGui,
+    TestConfigInsertDialogGui,
+    TestInstanceConfigurationGui,
+)
+
+True if TestConfigPassSchedulerGui else False
+True if TestConfigInsertDialogGui else False
+True if TestInstanceConfigurationGui else False
+
 from AssemblyTests.TestTriadGui import TestTriadGui, TestTriadMouseGui  # ops#640, C8
 
 True if TestTriadGui else False

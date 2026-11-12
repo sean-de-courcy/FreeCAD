@@ -23,6 +23,7 @@
 
 import re
 import os
+import json
 import FreeCAD as App
 
 from PySide.QtCore import QT_TRANSLATE_NOOP
@@ -86,6 +87,160 @@ def instanceLabel(assembly, source):
     while n in taken or (not duplicates and doc.getObjectsByLabel(f"{base} <{n}>")):
         n += 1
     return f"{base} <{n}>"
+
+
+def configInputsOfBody(body):
+    """FreeCAD-CH (ops#671, configurations C3): the inputs of the configured studio that holds
+    body, as the studio's JSON lists them (id, name, kind, rows, default), or None when body is no
+    Body or its studio has no inputs. A body in the implicit studio reads the active document's."""
+    try:
+        import PartDesign
+
+        if not body.isDerivedFrom("PartDesign::Body"):
+            return None
+        studio = None
+        tab = App.DocumentTabs.tabOf(body) if hasattr(App, "DocumentTabs") else None
+        if tab and tab != IMPLICIT_STUDIO:
+            studio = body.Document.getObject(tab)
+        elif body.Document != App.ActiveDocument:
+            return None
+        cfg = PartDesign.configStudio(studio)
+        if cfg is None:
+            return None
+        return json.loads(cfg.Inputs).get("inputs") or None
+    except Exception:
+        return None
+
+
+def parseConfigKey(key):
+    """A ConfigKey ("<input id>=<value>;...") as a dict of input id to its value text."""
+    values = {}
+    for part in (key or "").split(";"):
+        name, sep, value = part.partition("=")
+        if sep:
+            values[name] = value
+    return values
+
+
+def buildConfigForm(inputs, key=""):
+    """The widgets that choose a configuration: a combo box per list input (its default row
+    first, Onshape's Insert order), a check box per checkbox input and a line edit per variable.
+    key preselects what a ConfigKey names. Returns (widget, values), values() being the choice as
+    the dict PartDesign.configSetInstanceKey takes."""
+    widget = QtWidgets.QWidget()
+    layout = QtWidgets.QFormLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+    current = parseConfigKey(key)
+    getters = {}
+    for inp in inputs:
+        inputId = inp["id"]
+        label = inp.get("name", inputId)
+        kind = inp.get("kind")
+        default = inp.get("default")
+        if kind == "list":
+            field = QtWidgets.QComboBox()
+            for row in sorted(inp.get("rows", []), key=lambda r: r["id"] != default):
+                field.addItem(row.get("name", row["id"]), row["id"])  # stable: default first
+            field.setCurrentIndex(max(field.findData(current.get(inputId, default)), 0))
+            getters[inputId] = lambda w=field: w.currentData()
+        elif kind == "checkbox":
+            field = QtWidgets.QCheckBox()
+            field.setChecked(str(current.get(inputId, default)).lower() == "true")
+            getters[inputId] = lambda w=field: w.isChecked()
+        else:
+            field = QtWidgets.QLineEdit(
+                str(current.get(inputId, default if default is not None else ""))
+            )
+            getters[inputId] = lambda w=field: w.text()
+        field.setObjectName("ConfigInput_" + inputId)
+        layout.addRow(label, field)
+
+    def values():
+        return {inputId: get() for inputId, get in getters.items()}
+
+    return widget, values
+
+
+class CommandInstanceConfiguration:
+    """FreeCAD-CH (ops#671, configurations C3; design F6): the instance's context menu entry that
+    changes the configuration an assembly instance of a configured part shows."""
+
+    def GetResources(self):
+        return {
+            "Pixmap": "Assembly_InsertLink",
+            "MenuText": QT_TRANSLATE_NOOP("Assembly_InstanceConfiguration", "Configuration..."),
+            "ToolTip": QT_TRANSLATE_NOOP(
+                "Assembly_InstanceConfiguration",
+                "Changes the configuration of the part this instance shows",
+            ),
+        }
+
+    @staticmethod
+    def selectedInstance():
+        """The selected object if it is an instance of a configured studio's part, else None."""
+        try:
+            import PartDesign
+
+            selection = Gui.Selection.getSelection()
+            if len(selection) == 1 and PartDesign.configInstancePart(selection[0]) is not None:
+                return selection[0]
+        except Exception:
+            pass
+        return None
+
+    def IsActive(self):
+        return self.selectedInstance() is not None
+
+    def Activated(self):
+        instance = self.selectedInstance()
+        if instance:
+            changeInstanceConfiguration(instance)
+
+
+def changeInstanceConfiguration(instance, parent=None):
+    """Asks which configuration instance shows and sets it, in one undo step. Returns whether it
+    changed. The dialog is a QDialog named InstanceConfigurationDialog."""
+    import PartDesign
+
+    body = PartDesign.configInstancePart(instance)
+    inputs = configInputsOfBody(body) if body else None
+    if not inputs:
+        return False
+    dialog = QtWidgets.QDialog(parent or Gui.getMainWindow())
+    dialog.setObjectName("InstanceConfigurationDialog")
+    dialog.setWindowTitle(QT_TRANSLATE_NOOP("Assembly_InstanceConfiguration", "Configuration"))
+    layout = QtWidgets.QVBoxLayout(dialog)
+    form, values = buildConfigForm(inputs, getattr(instance, "ConfigKey", ""))
+    layout.addWidget(form)
+    buttons = QtWidgets.QDialogButtonBox(
+        QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+    )
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    if dialog.exec_() != QtWidgets.QDialog.Accepted:
+        return False
+    return setInstanceConfiguration(instance, values())
+
+
+def setInstanceConfiguration(instance, values):
+    """Sets instance's configuration to values in one undo step; False when the App refuses."""
+    import PartDesign
+
+    doc = instance.Document
+    doc.openTransaction("Change configuration")
+    try:
+        ok = PartDesign.configSetInstanceKey(instance, values)
+        doc.recompute()
+    except Exception as e:
+        doc.abortTransaction()
+        App.Console.PrintError("Configuration: " + str(e) + "\n")
+        return False
+    if ok is False:
+        doc.abortTransaction()
+        return False
+    doc.commitTransaction()
+    return True
 
 
 class CommandGroupInsert:
@@ -173,6 +328,11 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         self.insertionStack = []  # used to handle cancellation of insertions.
         self.doc_item_map = {}
 
+        # FreeCAD-CH (ops#671, configurations C3): the configuration an inserted part of a
+        # configured studio gets, chosen before it is clicked; default row first
+        self.configBox = None
+        self.configValues = {}  # studio key -> () -> values
+
         self.buildPartList()
 
         Gui.ActiveDocument.openCommand("Insert Component")
@@ -185,6 +345,7 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         self.deactivated()
 
         Gui.addModule("UtilsAssembly")
+        Gui.addModule("PartDesign")
         commands = "assembly = UtilsAssembly.activeAssembly()\n"
         for insertionItem in self.insertionStack:
             object = insertionItem["addedObject"]
@@ -203,6 +364,10 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 f'item.LinkedObject = App.ActiveDocument.getObject("{object.LinkedObject.Name}")\n'
                 f'item.Label = "{object.Label}"\n'
             )
+            if insertionItem.get("configValues") is not None:
+                commands = commands + (
+                    f"PartDesign.configSetInstanceKey(item, {insertionItem['configValues']!r})\n"
+                )
 
             if translation != App.Vector():
                 commands = commands + (
@@ -340,6 +505,51 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 self.form.partList.expandToDepth(0)
 
         self.adjustTreeWidgetSize()
+        self.buildConfigPanel()
+
+    def configStudioKey(self, body):
+        """What names body's studio for the configuration panel."""
+        tab = App.DocumentTabs.tabOf(body) if hasattr(App, "DocumentTabs") else None
+        return (body.Document.Name, tab if tab and tab != IMPLICIT_STUDIO else "")
+
+    def buildConfigPanel(self):
+        """A Configuration box under the part list, a section per configured studio of this
+        document: what an inserted part of it shows."""
+        if self.configBox:
+            self.form.layout().removeWidget(self.configBox)
+            self.configBox.deleteLater()
+            self.configBox = None
+        self.configValues = {}
+        sections = {}
+        for obj in self.doc.Objects:
+            if not obj.isDerivedFrom("PartDesign::Body"):
+                continue
+            key = self.configStudioKey(obj)
+            if key not in sections:
+                sections[key] = configInputsOfBody(obj)
+        sections = {k: v for k, v in sections.items() if v}
+        if not sections:
+            return
+        box = QtWidgets.QGroupBox(QT_TRANSLATE_NOOP("Assembly_InsertLink", "Configuration"))
+        box.setObjectName("InsertConfigurationBox")
+        boxLayout = QtWidgets.QVBoxLayout(box)
+        for key, inputs in sections.items():
+            form, values = buildConfigForm(inputs)
+            if len(sections) > 1:
+                studio = self.doc.getObject(key[1]) if key[1] else None
+                boxLayout.addWidget(QtWidgets.QLabel(studio.Label if studio else "Part Studio"))
+            boxLayout.addWidget(form)
+            self.configValues[key] = values
+        layout = self.form.layout()
+        layout.addWidget(box, layout.rowCount(), 0, 1, -1)
+        self.configBox = box
+
+    def configValuesFor(self, selectedPart):
+        """The chosen configuration for an inserted body of a configured studio, else None."""
+        if not selectedPart.isDerivedFrom("PartDesign::Body"):
+            return None
+        get = self.configValues.get(self.configStudioKey(selectedPart))
+        return get() if get else None
 
     def addStudioItems(self, doc, docItem, rootObjects, process_objects):
         """FreeCAD-CH (ops#640 round 7, gap A16): this document's Part Studios first, by tab name
@@ -511,6 +721,13 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         screenCorner = view.getPointOnFocalPlane(x, y)
 
         addedObject.LinkedObject = selectedPart
+        configValues = self.configValuesFor(selectedPart)
+        if configValues is not None:
+            # ops#671: the instance shows the configuration chosen in the panel (the default
+            # row unless changed), whatever the studio has active
+            import PartDesign
+
+            PartDesign.configSetInstanceKey(addedObject, configValues)
         addedObject.Label = selectedPart.Label  # non-ASCII characters fails with newObject. #12164
         if onshapeKeymap():
             # Onshape's instance name (ops#640 round 10)
@@ -520,6 +737,7 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         insertionDict = {}
         insertionDict["item"] = item
         insertionDict["addedObject"] = addedObject
+        insertionDict["configValues"] = configValues
         self.insertionStack.append(insertionDict)
         self.increment_counter(item)
 
@@ -805,3 +1023,4 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 if App.GuiUp:
     Gui.addCommand("Assembly_InsertLink", CommandInsertLink())
     Gui.addCommand("Assembly_Insert", CommandGroupInsert())
+    Gui.addCommand("Assembly_InstanceConfiguration", CommandInstanceConfiguration())

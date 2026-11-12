@@ -3253,6 +3253,17 @@ void ViewProviderLink::_setupContextMenu(
 
     auto cmd = Application::Instance->commandManager().getCommandByName("Std_LinkSelectLinked");
     menu->addAction(cmd->getAction()->action());
+
+    // FreeCAD-CH (ops#671, configurations C3): Assembly's "Configuration..." for an instance of a
+    // configured studio's part. The command says by its IsActive whether the selection is one;
+    // Gui does not know Assembly or PartDesign, so it is looked up by name.
+    if (auto configCmd
+        = Application::Instance->commandManager().getCommandByName("Assembly_InstanceConfiguration")) {
+        configCmd->testActive();
+        if (configCmd->getAction() && configCmd->getAction()->action()->isEnabled()) {
+            menu->addAction(configCmd->getAction()->action());
+        }
+    }
 }
 
 bool ViewProviderLink::initDraggingPlacement()

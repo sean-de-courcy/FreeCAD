@@ -34,10 +34,12 @@
 #include <Gui/Language/Translator.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/ConfigCache.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <functional>
 #include <string>
 #include <QString>
+#include <QTimer>
 
 #include "Workbench.h"
 #include "FeaturesView.h"
@@ -222,6 +224,14 @@ PyMOD_INIT_FUNC(PartDesignGui)
     // FreeCAD-CH (ops#640 polish P8): under the Onshape keymap a double click on an element
     // tints the feature that made it, and its sketch, in the list and the view
     Gui::setDoubleClickElement(&PartDesignGui::FeaturesView::showCreatorOf);
+    // FreeCAD-CH (ops#671, configurations C3): the pass that refills other configurations' cached shapes
+    // opens a hidden copy of the document and recomputes it. It runs from the event loop, after the
+    // GUI event that ended the recompute, never inside it (ruling 4).
+    PartDesign::setConfigPassScheduler([](std::function<void()> pass) {
+        QTimer::singleShot(0, [pass = std::move(pass)]() {
+            pass();
+        });
+    });
     // FreeCAD-CH (ops#640 round 10): an Assembly tab's list in the Model panel
     PartDesignGui::FeaturesView::followTabs();
 
