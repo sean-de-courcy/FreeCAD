@@ -777,6 +777,9 @@ class SketchObject(Part2DObject):
     def addSymmetric(self) -> None:
         """
         Add symmetric geometric objects to the sketch with respect to a reference point or line
+
+        addSymmetric(geoList, refGeoId, refPos=0, linked=False): with linked True, each copy is
+        tied to its source by Symmetric constraints, as the GUI's Mirror does (FreeCAD-CH)
         """
         ...
 

@@ -1746,8 +1746,11 @@ PyObject* SketchObjectPy::addSymmetric(PyObject* args)
     PyObject* pcObj;
     int refGeoId;
     int refPosId = static_cast<int>(Sketcher::PointPos::none);
+    // FreeCAD-CH (ops#640): True links each copy to its source with Symmetric constraints, as the
+    // GUI's Mirror does
+    PyObject* linked = Py_False;
 
-    if (!PyArg_ParseTuple(args, "Oi|i", &pcObj, &refGeoId, &refPosId)) {
+    if (!PyArg_ParseTuple(args, "Oi|iO!", &pcObj, &refGeoId, &refPosId, &PyBool_Type, &linked)) {
         return nullptr;
     }
 
@@ -1761,7 +1764,12 @@ PyObject* SketchObjectPy::addSymmetric(PyObject* args)
         }
 
         int ret = this->getSketchObjectPtr()
-                      ->addSymmetric(geoIdList, refGeoId, static_cast<Sketcher::PointPos>(refPosId))
+                      ->addSymmetric(
+                          geoIdList,
+                          refGeoId,
+                          static_cast<Sketcher::PointPos>(refPosId),
+                          PyObject_IsTrue(linked) != 0
+                      )
             + 1;
 
         if (ret == -1) {
