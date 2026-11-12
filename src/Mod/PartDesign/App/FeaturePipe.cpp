@@ -6808,7 +6808,10 @@ OffsetCurve offsetOpenWire(const TopoDS_Wire& wire, const gp_Pln& plane, double 
     const auto [end, endTangent] = wireEnd(wire, true);
     OffsetCurve result;
     if (std::abs(distance) < Precision::Confusion()) {
-        for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next()) {
+        // A copy, not the wire's own edges: the wall's names come from its history alone
+        // (`MapperThinWall`, sweeps 20), never from sharing the profile's shapes
+        const TopoDS_Shape copy = BRepBuilderAPI_Copy(wire).Shape();
+        for (TopExp_Explorer it(copy, TopAbs_EDGE); it.More(); it.Next()) {
             result.edges.push_back(TopoDS::Edge(it.Current()));
         }
         result.start = start;
@@ -6967,7 +6970,8 @@ TopoDS_Shape thinWall(
         const Part::JoinType joinType = join == GeomAbs_Arc ? Part::JoinType::arc : Part::JoinType::intersection;
         auto grown = [&](double distance) {
             if (std::abs(distance) < Precision::Confusion()) {
-                return regions;
+                // A copy, as an open wire's (`offsetOpenWire`)
+                return Part::TopoShape(BRepBuilderAPI_Copy(regions.getShape()).Shape());
             }
             return regions.makeElementOffset2D(
                 distance,
@@ -7008,15 +7012,17 @@ double areaOf(const TopoDS_Shape& faces)
 }
 
 /// The thin wall's history (sweeps 16): the wall is built from OCCT offsets, which keep none, so each
-/// of its edges is related to the profile's by geometry. An edge on a profile curve is modified from
-/// it; one through a profile vertex (an open curve's end) is generated from that vertex; one
-/// parallel to a profile curve at a wall's thickness (its midpoint that far from it, the nearest
-/// curve) is generated from it. Where the curve lies inside the wall (Midplane, or a second
-/// thickness), its two offsets would be twins told apart only by rank, which an added curve
-/// changes (sweeps 17): the one on the near side (where the curve is when that side's thickness
-/// is 0: on \a nearSides) is modified from the curve, the other generated from it. The wall's
-/// sides are then named from the profile's curves, as a solid profile's are, so adding a curve or
-/// flipping the wall leaves the others' names alone.
+/// of its edges is related to the profile's by geometry. Each side of the wall is named from the
+/// profile curve it runs along (its midpoint at that side's thickness from it, the nearest curve), by
+/// the side it lies on (sweeps 20, oracle 12's THM1): an edge on the left side (\a leftSides: an open
+/// curve's left, a region's inner boundary) is modified from the curve, one on the right side
+/// (\a rightSides: the right, the outer boundary) generated from it, whether that side lies on the
+/// curve or is its offset. So the two sides of one curve are never twins told apart by rank (which an
+/// added curve changes, sweeps 17), and Midplane and FlipWall, which only move the wall across the
+/// curve, leave every side's name alone, as Onshape keeps each reference on its own side in every
+/// (Midplane, Flip) state. An edge through a profile vertex (an open curve's end) is generated from
+/// that vertex. An edge on neither side (none is known) falls back to the geometry alone: on a curve,
+/// modified from it; at a thickness from the nearest, generated from it.
 class MapperThinWall: public Part::TopoShape::Mapper
 {
 public:
@@ -7025,7 +7031,8 @@ public:
         const TopoDS_Shape& profile,
         double right,
         double left,
-        const TopoDS_Shape& nearSides
+        const TopoDS_Shape& leftSides,
+        const TopoDS_Shape& rightSides
     )
     {
         TopTools_IndexedMapOfShape edges;
@@ -7041,14 +7048,30 @@ public:
         }
         modifiedOf.resize(sourceEdges.size());
         generatedOf.resize(sourceEdges.size());
+        modifiedOfVertex.resize(sourceVertices.size());
         generatedOfVertex.resize(sourceVertices.size());
         const double tolerance = 1e-7 + 1e-6 * std::max(1.0, right + left);
         auto distance = [](const TopoDS_Shape& a, const gp_Pnt& p) {
             BRepExtrema_DistShapeShape measure(a, BRepBuilderAPI_MakeVertex(p).Vertex());
             return measure.IsDone() ? measure.Value() : std::numeric_limits<double>::max();
         };
+        auto nearestCurve = [&](const gp_Pnt& p, double& best) {
+            std::size_t nearest = sourceEdges.size();
+            best = std::numeric_limits<double>::max();
+            for (std::size_t s = 0; s < sourceEdges.size(); ++s) {
+                const double d = distance(sourceEdges[s], p);
+                if (d < best) {
+                    best = d;
+                    nearest = s;
+                }
+            }
+            return nearest;
+        };
         TopTools_IndexedMapOfShape wallEdges;
         TopExp::MapShapes(wall, TopAbs_EDGE, wallEdges);
+        // Each wall edge's source: the curve it runs along, or the vertex an end goes through
+        std::vector<std::size_t> curveOf(wallEdges.Extent() + 1, sourceEdges.size());
+        std::vector<std::size_t> endOf(wallEdges.Extent() + 1, sourceVertices.size());
         for (int w = 1; w <= wallEdges.Extent(); ++w) {
             const TopoDS_Edge& edge = TopoDS::Edge(wallEdges(w));
             BRepAdaptor_Curve curve(edge);
@@ -7056,12 +7079,31 @@ public:
             const double u1 = curve.LastParameter();
             const gp_Pnt middle = curve.Value((u0 + u1) / 2);
             const std::array<gp_Pnt, 3> samples {curve.Value(u0 + (u1 - u0) / 4), middle, curve.Value(u1 - (u1 - u0) / 4)};
+            auto lies = [&](const TopoDS_Shape& on) {
+                return !on.IsNull() && std::all_of(samples.begin(), samples.end(), [&](const gp_Pnt& p) {
+                    return distance(on, p) < tolerance;
+                });
+            };
+            // A side of the wall: named from its curve by the side, wherever the curve is
             bool named = false;
+            for (int side = 0; side < 2 && !named; ++side) {
+                if (!lies(side == 0 ? leftSides : rightSides)) {
+                    continue;
+                }
+                double best = 0;
+                const std::size_t nearest = nearestCurve(middle, best);
+                if (nearest < sourceEdges.size() && std::abs(best - (side == 0 ? left : right)) < tolerance) {
+                    (side == 0 ? modifiedOf : generatedOf)[nearest].push_back(edge);
+                    curveOf[w] = nearest;
+                    named = true;
+                }
+            }
             for (std::size_t s = 0; s < sourceEdges.size() && !named; ++s) {
                 if (std::all_of(samples.begin(), samples.end(), [&](const gp_Pnt& p) {
                         return distance(sourceEdges[s], p) < tolerance;
                     })) {
                     modifiedOf[s].push_back(edge);
+                    curveOf[w] = s;
                     named = true;
                 }
             }
@@ -7069,30 +7111,65 @@ public:
                 BRepExtrema_DistShapeShape measure(edge, sourceVertices[v]);
                 if (measure.IsDone() && measure.Value() < tolerance) {
                     generatedOfVertex[v].push_back(edge);
+                    endOf[w] = v;
                     named = true;
                 }
             }
             if (named) {
                 continue;
             }
-            std::size_t nearest = sourceEdges.size();
-            double best = std::numeric_limits<double>::max();
-            for (std::size_t s = 0; s < sourceEdges.size(); ++s) {
-                const double d = distance(sourceEdges[s], middle);
-                if (d < best) {
-                    best = d;
-                    nearest = s;
-                }
-            }
+            double best = 0;
+            const std::size_t nearest = nearestCurve(middle, best);
             if (nearest < sourceEdges.size()
                 && ((right > tolerance && std::abs(best - right) < tolerance)
                     || (left > tolerance && std::abs(best - left) < tolerance))) {
-                const bool inside = right > tolerance && left > tolerance;
-                const bool onNearSide = inside && !nearSides.IsNull()
-                    && std::all_of(samples.begin(), samples.end(), [&](const gp_Pnt& p) {
-                           return distance(nearSides, p) < tolerance;
-                       });
-                (onNearSide ? modifiedOf : generatedOf)[nearest].push_back(edge);
+                generatedOf[nearest].push_back(edge);
+                curveOf[w] = nearest;
+            }
+        }
+        // The wall's corners (sweeps 20): named from the profile vertex they stand for, by the side
+        // they lie on, as the sides are, so the edges a sweep makes of them keep their names too. A
+        // corner where a side meets an end stands for the end's vertex; one where the sides of two
+        // curves meet, for the vertex the two curves share
+        TopTools_IndexedDataMapOfShapeListOfShape edgesOfVertex;
+        TopExp::MapShapesAndAncestors(wall, TopAbs_VERTEX, TopAbs_EDGE, edgesOfVertex);
+        for (int i = 1; i <= edgesOfVertex.Extent(); ++i) {
+            const TopoDS_Shape& corner = edgesOfVertex.FindKey(i);
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(corner));
+            const int side = !leftSides.IsNull() && distance(leftSides, point) < tolerance ? 0
+                : !rightSides.IsNull() && distance(rightSides, point) < tolerance       ? 1
+                                                                                        : -1;
+            if (side < 0) {
+                continue;
+            }
+            std::size_t from = sourceVertices.size();
+            std::vector<std::size_t> curves;
+            for (const TopoDS_Shape& e : edgesOfVertex(i)) {
+                const int w = wallEdges.FindIndex(e);
+                if (w > 0 && endOf[w] < sourceVertices.size()) {
+                    from = endOf[w];
+                    break;
+                }
+                if (w > 0 && curveOf[w] < sourceEdges.size()
+                    && std::find(curves.begin(), curves.end(), curveOf[w]) == curves.end()) {
+                    curves.push_back(curveOf[w]);
+                }
+            }
+            if (from == sourceVertices.size() && curves.size() == 2) {
+                for (std::size_t v = 0; v < sourceVertices.size(); ++v) {
+                    const gp_Pnt at = BRep_Tool::Pnt(TopoDS::Vertex(sourceVertices[v]));
+                    if (distance(sourceEdges[curves[0]], at) < tolerance
+                        && distance(sourceEdges[curves[1]], at) < tolerance) {
+                        if (from < sourceVertices.size()) {
+                            from = sourceVertices.size();  // two: the curves meet twice, say nothing
+                            break;
+                        }
+                        from = v;
+                    }
+                }
+            }
+            if (from < sourceVertices.size()) {
+                (side == 0 ? modifiedOfVertex : generatedOfVertex)[from].push_back(corner);
             }
         }
     }
@@ -7104,7 +7181,7 @@ public:
 
     const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
     {
-        return lookUp(s, modifiedOf, {});
+        return lookUp(s, modifiedOf, modifiedOfVertex);
     }
 
 private:
@@ -7138,6 +7215,7 @@ private:
     std::vector<TopoDS_Shape> sourceVertices;
     std::vector<std::vector<TopoDS_Shape>> modifiedOf;
     std::vector<std::vector<TopoDS_Shape>> generatedOf;
+    std::vector<std::vector<TopoDS_Shape>> modifiedOfVertex;
     std::vector<std::vector<TopoDS_Shape>> generatedOfVertex;
 };
 
@@ -7194,15 +7272,10 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
         throw Base::ValueError("Pipe: the thin profile has no curves to put a wall around");
     }
     const TopoDS_Shape placed = wall.Located(location);
-    // The near side, where the curve is when its thickness is 0: Thickness2's, the left (the right
-    // when flipped). With Midplane always the left: flipping leaves the wall and its names as
-    // they are
-    const bool nearIsRight = !pipe.Midplane.getValue() && pipe.FlipWall.getValue();
-    const TopoDS_Shape nearSides = sides[nearIsRight ? 1 : 0].Located(location);
     Part::TopoShape result(0, pipe.getDocument()->getStringHasher());
     result.makeShapeWithElementMap(
         placed,
-        MapperThinWall(placed, named.getShape(), right, left, nearSides),
+        MapperThinWall(placed, named.getShape(), right, left, sides[0].Located(location), sides[1].Located(location)),
         {named},
         Part::OpCodes::Offset2D
     );

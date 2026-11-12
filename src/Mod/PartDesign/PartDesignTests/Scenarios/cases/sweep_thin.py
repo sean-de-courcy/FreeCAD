@@ -12,7 +12,13 @@ plane at z 0: a polyline (0,0)-(10,0)-(10,-8) (it turns right, so the wall's def
 right seen from +Z, is the corner's inside), Thickness1 `thick`. The wall is y -thick..0 along
 the first segment and x 10-thick..10 along the second. The face on the first segment's curve is
 the plane y = 0 (it holds (5, 0, 10)); its offset the plane y = -thick ((5, -thick, 10)); the face
-on the second segment's curve the plane x = 10 ((10, -4, 10))."""
+on the second segment's curve the plane x = 10 ((10, -4, 10)).
+
+Midplane and FlipWall (sweeps 20, oracle 12's THM1-THM4, ops `notes/onshape-facts.md`): Onshape keeps
+each of the wall's sides on its own side of the curve in every (Midplane, Flip) state; nothing
+swaps, and with Midplane on Flip changes nothing. A reference follows its side, not "the face on the
+curve" or "the offset face": `left1`/`right1` are the first segment's sides left (+y) and right (-y)
+of its drawn direction, `left2`/`right2` the second's (+x and -x), placed from the state."""
 
 import FreeCAD as App
 import Part
@@ -37,16 +43,31 @@ class _ThinPipe(Scenario):
     points = ((0, 0), (10, 0), (10, -8))
     closed = False
     midplane = False
+    flip = False
     thick2 = 0.0
 
-    def curve1(self):
-        return face(surface="plane", contains=(5, 0, 10))
+    def _out(self):
+        """How far the wall's left and right sides lie from the curve (Thickness2 is 0 here)."""
+        if self.midplane:
+            return self.thick / 2, self.thick / 2
+        return (self.thick, 0.0) if self.flip else (0.0, self.thick)
 
-    def offset1(self):
-        return face(surface="plane", contains=(5, -self.thick, 10))
+    def left1(self):
+        return face(surface="plane", contains=(5, self._out()[0], 10))
 
-    def curve2(self):
-        return face(surface="plane", contains=(10, -4, 10))
+    def right1(self):
+        return face(surface="plane", contains=(5, -self._out()[1], 10))
+
+    def left2(self):
+        return face(surface="plane", contains=(10 + self._out()[0], -4, 10))
+
+    def right2(self):
+        return face(surface="plane", contains=(10 - self._out()[1], -4, 10))
+
+    # In the base state the left sides lie on the curves and the first's right side is its offset
+    curve1 = left1
+    offset1 = right1
+    curve2 = left2
 
     def build(self, doc):
         body = m.body(doc)
@@ -59,6 +80,7 @@ class _ThinPipe(Scenario):
         pipe.BodyType = "Thin"
         pipe.Thickness1 = self.thick
         pipe.Midplane = self.midplane
+        pipe.FlipWall = self.flip
         pipe.Thickness2 = self.thick2
         self.pipe = pipe
         doc.recompute()
@@ -107,13 +129,71 @@ class ThinPipeCurveAddedFirst(_ThinPipe):
 
 class ThinPipeWallFlipped(_ThinPipe):
     """FlipWall: the wall goes to the curve's left (y 0..1 along the first segment, x 10..11 along
-    the second); the curves' faces stay where they were."""
+    the second). The references to the faces on the curves follow their side (THM1): the first's
+    left side moves to y = 1, the second's to x = 11; the faces now on the curves are the right
+    sides, a different reference's."""
 
     abstract = False
     REFS = ("curve1", "curve2")
 
     def edit(self, doc):
+        self.flip = True
         self.pipe.FlipWall = True
+        doc.recompute()
+
+
+class ThinPipeToMidplane(_ThinPipe):
+    """Midplane off -> on (oracle 12's step 1): the wall moves from y -1..0 to y -0.5..0.5; each side
+    stays its side, the left (on the curve) to y = 0.5, the right (the offset) to y = -0.5."""
+
+    abstract = False
+    REFS = ("left1", "right1", "left2", "right2")
+
+    def edit(self, doc):
+        self.midplane = True
+        self.pipe.Midplane = True
+        doc.recompute()
+
+
+class ThinPipeFlippedToMidplane(ThinPipeToMidplane):
+    """FlipWall on, then Midplane off -> on (oracle 12's step 3, where sweeps 19 swapped the names):
+    the wall moves from y 0..1 to y -0.5..0.5; the left side (the offset) to y = 0.5, the right (on
+    the curve) to y = -0.5."""
+
+    flip = True
+
+
+class ThinPipeFromMidplane(_ThinPipe):
+    """Midplane on -> off (THM3, the reverse of step 1): each side stays its side."""
+
+    abstract = False
+    midplane = True
+    REFS = ("left1", "right1", "left2", "right2")
+
+    def edit(self, doc):
+        self.midplane = False
+        self.pipe.Midplane = False
+        doc.recompute()
+
+
+class ThinPipeFlippedFromMidplane(ThinPipeFromMidplane):
+    """FlipWall on and Midplane on -> off: the wall goes to y 0..1, the left side to y = 1, the
+    right to y = 0 (on the curve)."""
+
+    flip = True
+
+
+class ThinPipeWallUnflipped(_ThinPipe):
+    """FlipWall on -> off, Midplane off: the wall comes back to y -1..0; the left side from y = 1 to
+    y = 0, the right from y = 0 to y = -1."""
+
+    abstract = False
+    flip = True
+    REFS = ("left1", "right1", "left2", "right2")
+
+    def edit(self, doc):
+        self.flip = False
+        self.pipe.FlipWall = False
         doc.recompute()
 
 
@@ -192,10 +272,23 @@ class ThinPipeMidplaneCurveAddedFirst(ThinPipeMidplaneThicker):
 
 
 class ThinPipeMidplaneFlipped(ThinPipeMidplaneThicker):
-    """Midplane, and FlipWall set: the wall straddles the curve as before, so every side stays."""
+    """Midplane, and FlipWall set: the wall straddles the curve as before, so every side stays
+    (THM2: with Midplane on, Flip changes nothing)."""
 
     def edit(self, doc):
+        self.flip = True
         self.pipe.FlipWall = True
+        doc.recompute()
+
+
+class ThinPipeMidplaneUnflipped(ThinPipeMidplaneFlipped):
+    """Midplane and FlipWall on, then FlipWall off: nothing moves (THM2)."""
+
+    flip = True
+
+    def edit(self, doc):
+        self.flip = False
+        self.pipe.FlipWall = False
         doc.recompute()
 
 
