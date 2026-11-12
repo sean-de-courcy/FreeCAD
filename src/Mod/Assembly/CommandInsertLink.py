@@ -122,10 +122,47 @@ def configInputsOfStudio(studio):
         return None
 
 
+def isDeletedPart(body):
+    """Whether a Delete part feature (not suppressed, up to the Tip) deletes body, as
+    PartDesign::DeletePart::deleterOf: the part is gone, its Body empty."""
+    tip = body.Tip
+    if tip is None:
+        return False
+    for obj in body.Group:
+        if obj.TypeId == "PartDesign::DeletePart" and not getattr(obj, "Suppressed", False):
+            return True
+        if obj == tip:
+            break
+    return False
+
+
 def studioBodies(studio):
-    """The Bodies of an App::Part studio, in its order: the parts a whole-studio insert of a
-    configured studio makes one instance each of (Onshape's default insert, GB10)."""
-    return [obj for obj in studio.Group if obj.isDerivedFrom("PartDesign::Body")]
+    """The parts of an App::Part studio, in its order: the parts a whole-studio insert of a
+    configured studio makes one instance each of (Onshape's default insert, GB10). Bodies that
+    are no part any more are left out, as the Insert list leaves them out: merged into another,
+    consumed by a Boolean, deleted by a Delete part."""
+    return [
+        obj
+        for obj in studio.Group
+        if obj.isDerivedFrom("PartDesign::Body")
+        and not UtilsAssembly.isMergedPart(obj)
+        and not UtilsAssembly.isConsumedPart(obj)
+        and not isDeletedPart(obj)
+    ]
+
+
+def studioLabel(doc, name):
+    """The tab label of doc's studio name ("" for the implicit one), "Part Studio" when the
+    document has no such tab."""
+    tabName = name or IMPLICIT_STUDIO
+    try:
+        for tab, kind, label in App.DocumentTabs.tabs(doc):
+            if tab == tabName:
+                return label
+    except Exception:
+        pass
+    studio = doc.getObject(name) if name else None
+    return studio.Label if studio else "Part Studio"
 
 
 def parseConfigKey(key):
@@ -557,8 +594,7 @@ class TaskAssemblyInsertLink(QtCore.QObject):
             form, values = buildConfigForm(inputs)
             doc = App.getDocument(key[0])
             if len(sections) > 1 or doc != self.doc:
-                studio = doc.getObject(key[1]) if key[1] else None
-                label = studio.Label if studio else "Part Studio"
+                label = studioLabel(doc, key[1])
                 if doc != self.doc:
                     label = doc.Label + ": " + label
                 caption = QtWidgets.QLabel(label)
@@ -748,12 +784,15 @@ class TaskAssemblyInsertLink(QtCore.QObject):
     def insertConfiguredStudio(self, studio, item):
         """FreeCAD-CH (ops#671): a configured studio inserted whole, one instance per Body, each
         keyed with the panel's configuration, all at the studio's own positions relative to each
-        other (one placement, the first instance's). Returns the instances."""
+        other: the first is placed as any insert, the others moved with it (a link to a Body
+        replaces the Body's own placement, so each keeps its offset from the first). Returns the
+        instances."""
         bodies = studioBodies(studio)
         first = self.insertLink(bodies[0], item)
         added = [first]
+        move = first.Placement.multiply(bodies[0].Placement.inverse())
         for body in bodies[1:]:
-            added.append(self.insertLink(body, item, placement=first.Placement))
+            added.append(self.insertLink(body, item, placement=move.multiply(body.Placement)))
         group = first.Name
         for stackItem in self.insertionStack[-len(added) :]:
             stackItem["group"] = group  # a right-click on the row takes the whole insert back

@@ -429,7 +429,8 @@ class TestConfiguredInsertSourcesGui(ConfigInsertBase):
     """Onshape's Insert offers a configured studio's inputs wherever the studio is (CF8): a studio
     of another document, its implicit one or an App::Part, gets its own section; a configured
     App::Part studio inserted whole makes one instance per part (Onshape's whole-studio insert,
-    GB10), each showing the chosen configuration."""
+    GB10), each showing the chosen configuration at its studio position, none for a deleted
+    part."""
 
     def insertSmall(self, asmDoc, asm, rowText):
         """Chooses Small in the Configuration box (its only section), clicks the row rowText and
@@ -477,12 +478,18 @@ class TestConfiguredInsertSourcesGui(ConfigInsertBase):
         if not tabsOn():
             self.skipTest("a studio is inserted whole under the typed tabs only")
         doc, studio, asm = self.model()
+        # B's Body moved 30 along y (its box at x 20..30, y 30..40); C deleted by a Delete part
+        doc.getObject("B").Placement = App.Placement(App.Vector(0, 30, 0), App.Rotation())
+        doc.getObject("C").newObject("PartDesign::DeletePart", "DeleteC")
+        doc.recompute()
+        pump(0.2)
         links = self.insertSmall(doc, asm, studio.Label)
-        self.assertEqual([l.LinkedObject for l in links], [doc.getObject(n) for n in ("A", "B", "C")])
-        self.assertEqual(len({str(l.Placement) for l in links}), 1, "the parts moved apart")
-        xmin = [Part.getShape(l).BoundBox.XMin for l in links]
-        self.assertAlmostEqual(xmin[1] - xmin[0], 20, delta=TOL)
-        self.assertAlmostEqual(xmin[2] - xmin[0], 40, delta=TOL)
+        self.assertEqual(
+            [l.LinkedObject for l in links], [doc.getObject(n) for n in ("A", "B")], "C is deleted"
+        )
+        a, b = (Part.getShape(l).BoundBox for l in links)
+        self.assertAlmostEqual(b.XMin - a.XMin, 20, delta=TOL)
+        self.assertAlmostEqual(b.YMin - a.YMin, 30, delta=TOL, msg="B left its studio position")
         self.assertShowsSmallAfterTheSwitch(doc, studio, links[0])
         self.assertAlmostEqual(linkHeight(links[1]), 10, delta=TOL)
 
