@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <App/ConfigurationHooks.h>
 #include <App/PropertyStandard.h>
 #include <App/VarSet.h>
 #include <Mod/PartDesign/PartDesignGlobal.h>
@@ -128,6 +129,29 @@ PartDesignExport bool configSetDefaultRow(App::Part* studio,
                                           const std::string& input,
                                           const std::string& row,
                                           std::string* why);
+/// Moves a List row to position index (0 is the first); the default row stays the default
+PartDesignExport bool configMoveRow(App::Part* studio,
+                                    const std::string& input,
+                                    const std::string& row,
+                                    int index,
+                                    std::string* why);
+/// Renames a List or Checkbox input (its id stays); a Variable's name is its #name and stays
+PartDesignExport bool configRenameInput(App::Part* studio,
+                                        const std::string& input,
+                                        const std::string& name,
+                                        std::string* why);
+/// Sets a Checkbox input's default and rebinds
+PartDesignExport bool configSetCheckboxDefault(App::Part* studio,
+                                               const std::string& input,
+                                               bool value,
+                                               std::string* why);
+/// Sets a configuration Variable's default and bounds (empty: no bound; the type stays) and rebinds
+PartDesignExport bool configEditVariable(App::Part* studio,
+                                         const std::string& input,
+                                         const std::string& defaultValue,
+                                         const std::string& minimum,
+                                         const std::string& maximum,
+                                         std::string* why);
 /// Removes an input; what it configured keeps its active value, unconfigured
 PartDesignExport bool configRemoveInput(App::Part* studio, const std::string& input, std::string* why);
 
@@ -161,6 +185,25 @@ PartDesignExport bool configSetSuppressionCell(App::DocumentObject* owner,
 PartDesignExport bool configSuppressionIsConfigured(const App::DocumentObject* owner);
 /// Whether obj's path is configured
 PartDesignExport bool configIsConfigured(const App::DocumentObject* obj, const std::string& path);
+/// The name of the input that configures obj's path (empty path: its suppression), or empty
+PartDesignExport std::string configInputOf(const App::DocumentObject* obj, const std::string& path);
+
+/// The configuration items of obj's path's context menu (empty path: its suppression's), Onshape's
+PartDesignExport std::vector<App::ConfigMenuItem> configMenuItems(const App::DocumentObject* obj,
+                                                                  const std::string& path);
+
+/// A live table entry: a configured parameter (path) or suppression (empty path)
+struct ConfigEntry
+{
+    App::DocumentObject* object = nullptr;
+    std::string path;
+    std::string input;
+    /// Row id (or "true"/"false") -> the cell's text (a suppression's: "true"/"false")
+    std::map<std::string, std::string> cells;
+};
+/// The table's live entries, parameters first, in the table's order; stale ones (an object
+/// deleted, or its name now another object's) are left out (C2: the panel hides them)
+PartDesignExport std::vector<ConfigEntry> configEntries(const StudioConfig* config);
 
 /// The switch: sets the active values (input id or name -> row id or name, true/false, value),
 /// rebinds, reconciles, makes pieces and recomputes, in one transaction (the caller's if open)

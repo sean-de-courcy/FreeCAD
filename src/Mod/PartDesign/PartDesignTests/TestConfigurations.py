@@ -188,6 +188,119 @@ class TestConfigurations(unittest.TestCase):
         self.edit(lambda: bpad.setExpression("Length", "#len / 12"))
         self.assertAlmostEqual(height(self.B), 10, delta=TOL)
 
+    # ------------------------------------------------------- the panel's edits (slice C2)
+    def testMoveRowKeepsIdsCellsAndDefault(self):
+        """Reordering rows changes only their order: ids, cells, the default and the active row stay"""
+        self.configureSizes()
+        medium = self.edit(lambda: PartDesign.configAddRow(self.studio, self.size, "Medium"))
+        self.edit(lambda: PartDesign.configSetCell(self.APad, "Length", medium, "15 mm"))
+        self.edit(lambda: PartDesign.configSetActive(self.studio, {"Size": "Large"}))
+        self.edit(lambda: PartDesign.configMoveRow(self.studio, self.size, medium, 0))
+        rows = json.loads(self.cfg.Inputs)["inputs"][0]["rows"]
+        self.assertEqual([r["id"] for r in rows], [medium, "Default", "Large"])
+        self.assertEqual(json.loads(self.cfg.Inputs)["inputs"][0]["default"], "Default")
+        self.assertEqual(PartDesign.configKey(self.studio), self.size + "=Large")
+        self.assertLarge()
+        PartDesign.configSetActive(self.studio, {"Size": "Medium"})
+        self.assertAlmostEqual(height(self.A), 15, delta=TOL)
+        with self.assertRaises(ValueError):
+            PartDesign.configMoveRow(self.studio, self.size, medium, 3)
+        with self.assertRaises(ValueError):
+            PartDesign.configMoveRow(self.studio, self.size, "Huge", 0)
+
+    def testRenameInputKeepsItsId(self):
+        """A List or Checkbox input's name is only shown: the id, the key and the cells stay; a
+        Variable's name is its #name and stays"""
+        self.configureSizes()
+        tall = self.edit(lambda: PartDesign.configAddCheckbox(self.studio, "Tall"))
+        self.edit(lambda: PartDesign.configRenameInput(self.studio, self.size, "Width"))
+        self.edit(lambda: PartDesign.configRenameInput(self.studio, tall, "High"))
+        self.assertEqual(PartDesign.configKey(self.studio, {"Width": "Large", "High": False}),
+                         self.size + "=Large;Tall=false")
+        PartDesign.configSetActive(self.studio, {"Width": "Large"})
+        self.assertLarge()
+        with self.assertRaises(ValueError):
+            PartDesign.configRenameInput(self.studio, self.size, "High")
+        with self.assertRaises(ValueError):
+            PartDesign.configRenameInput(self.studio, self.size, "")
+        self.edit(lambda: PartDesign.configAddVariable(self.studio, "len", "Length", "80 mm"))
+        with self.assertRaises(ValueError):
+            PartDesign.configRenameInput(self.studio, "len", "length")
+
+    def testCheckboxDefault(self):
+        """A Checkbox's default can change; with no active value set, the model follows it"""
+        tall = self.edit(lambda: PartDesign.configAddCheckbox(self.studio, "Tall"))
+        cpad = self.doc.getObject("CPad")
+        self.edit(lambda: PartDesign.configConfigure(cpad, "Length", tall))
+        self.edit(lambda: PartDesign.configSetCell(cpad, "Length", "true", "15 mm"))
+        self.assertAlmostEqual(height(self.C), 15, delta=TOL)
+        self.edit(lambda: PartDesign.configSetCheckboxDefault(self.studio, tall, False))
+        self.assertAlmostEqual(height(self.C), 10, delta=TOL)
+        self.assertEqual(PartDesign.configDefaultKey(self.studio), self.size + "=Default;Tall=false")
+        with self.assertRaises(ValueError):
+            PartDesign.configSetCheckboxDefault(self.studio, self.size, False)
+
+    def testEditVariable(self):
+        """A Variable's default and bounds can change, its type can't; a default outside the new
+        bounds is refused and changes nothing"""
+        self.edit(lambda: PartDesign.configAddVariable(self.studio, "len", "Length", "80 mm", "10 mm", "200 mm"))
+        bpad = self.doc.getObject("BPad")
+        self.edit(lambda: bpad.setExpression("Length", "#len / 8"))
+        self.assertAlmostEqual(height(self.B), 10, delta=TOL)
+        self.edit(lambda: PartDesign.configEditVariable(self.studio, "len", "160 mm", "100 mm", None))
+        self.assertAlmostEqual(height(self.B), 20, delta=TOL)
+        var = json.loads(self.cfg.Inputs)["inputs"][1]
+        self.assertAlmostEqual(var["min"], 100, delta=TOL)
+        self.assertNotIn("max", var)
+        with self.assertRaises(ValueError):
+            PartDesign.configEditVariable(self.studio, "len", "50 mm", "100 mm")
+        self.assertAlmostEqual(json.loads(self.cfg.Inputs)["inputs"][1]["default"], 160, delta=TOL)
+        with self.assertRaises(ValueError):
+            PartDesign.configEditVariable(self.studio, "len", "20 deg")
+        with self.assertRaises(ValueError):
+            PartDesign.configEditVariable(self.studio, self.size, "1 mm")
+
+    def testEntriesLeaveOutStaleOnes(self):
+        """The panel lists live entries only: a deleted owner's entry stays in the table (its undo
+        brings it back) but is not listed, and comes back with the undo"""
+        self.configureSizes()
+        entries = PartDesign.configEntries(self.studio)
+        self.assertEqual([(e["object"].Name, e["path"]) for e in entries], [("APad", "Length"), ("E", None)])
+        self.assertEqual(entries[0]["input"], self.size)
+        self.assertEqual(entries[0]["cells"]["Large"], "20 mm")
+        self.assertEqual(entries[1]["cells"], {"Default": "true", "Large": "false"})
+        self.assertEqual(PartDesign.configInputOf(self.APad, "Length"), "Size")
+        self.assertEqual(PartDesign.configInputOf(self.E), "Size")
+        self.assertEqual(PartDesign.configInputOf(self.APad, "Offset"), "")
+        self.doc.UndoMode = 1
+        self.edit(lambda: (PartDesign.studioRemove(self.E), self.doc.removeObject("E")))
+        self.assertEqual([e["object"].Name for e in PartDesign.configEntries(self.studio)], ["APad"])
+        self.assertEqual(len(json.loads(self.cfg.Table)["suppress"]), 1)
+        self.doc.undo()
+        self.assertEqual([e["object"].Name for e in PartDesign.configEntries(self.studio)], ["APad", "E"])
+
+    def testSketchConstraintIsConfigured(self):
+        """A sketch dimension is configured by its named path Constraints.<name> (Onshape configures
+        sketch dimensions): each row drives the dimension, and an edit of it writes the active cell"""
+        import Sketcher
+
+        sk = self.A.newObject("Sketcher::SketchObject", "CfgSketch")
+        sk.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)))
+        sk.addConstraint(Sketcher.Constraint("Distance", 0, 10))
+        sk.renameConstraint(0, "w")
+        self.doc.recompute()
+        self.edit(lambda: PartDesign.configConfigure(sk, "Constraints.w", self.size))
+        self.assertTrue(PartDesign.configIsConfigured(sk, "Constraints.w"))
+        self.assertEqual(PartDesign.configInputOf(sk, ".Constraints.w"), "Size")
+        self.edit(lambda: PartDesign.configSetCell(sk, "Constraints.w", "Large", "25 mm"))
+        self.edit(lambda: PartDesign.configSetActive(self.studio, {"Size": "Large"}))
+        self.assertAlmostEqual(sk.getDatum("w").Value, 25, delta=TOL)
+        # An edit of the dimension's expression (the datum dialog's path) writes the active cell
+        self.edit(lambda: sk.setExpression("Constraints.w", "30 mm"))
+        self.assertEqual(PartDesign.configEntries(self.studio)[0]["cells"]["Large"], "30 mm")
+        self.edit(lambda: PartDesign.configSetActive(self.studio, {"Size": "Small"}))
+        self.assertAlmostEqual(sk.getDatum("w").Value, 10, delta=TOL)
+
     def testCellFailsOnlyInItsRow(self):
         """F7 / CF10: a cell that fails fails only while its row is active, and heals"""
         self.configureSizes()

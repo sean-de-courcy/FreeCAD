@@ -1152,6 +1152,125 @@ bool configSetDefaultRow(App::Part* studio, const std::string& input, const std:
     return rebind(cfg, why);
 }
 
+bool configMoveRow(App::Part* studio, const std::string& input, const std::string& row, int index, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in || str(*in, "kind") != "list") {
+        return refuse(why, "No List input '" + input + "'");
+    }
+    json& rows = (*in)["rows"];
+    const int count = static_cast<int>(rows.size());
+    if (index < 0 || index >= count) {
+        return refuse(why, "No position " + std::to_string(index) + " among " + std::to_string(count) + " rows");
+    }
+    for (int i = 0; i < count; ++i) {
+        if (str(rows[i], "id") == row) {
+            if (i != index) {
+                json moved = rows[i];
+                rows.erase(rows.begin() + i);
+                rows.insert(rows.begin() + index, moved);
+                store(cfg->Inputs, inputs);
+            }
+            return true;
+        }
+    }
+    return refuse(why, "No row '" + row + "'");
+}
+
+bool configRenameInput(App::Part* studio, const std::string& input, const std::string& name, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in) {
+        return refuse(why, "No input '" + input + "'");
+    }
+    if (str(*in, "kind") == "variable") {
+        return refuse(why, "A configuration Variable's name is its #name: it can't be renamed");
+    }
+    for (const auto& other : inputs["inputs"]) {
+        if (&other != in && (str(other, "id") == name || str(other, "name") == name)) {
+            return refuse(why, "An input needs a name of its own ('" + name + "')");
+        }
+    }
+    if (name.empty()) {
+        return refuse(why, "An input needs a name");
+    }
+    (*in)["name"] = name;
+    store(cfg->Inputs, inputs);
+    return true;
+}
+
+bool configSetCheckboxDefault(App::Part* studio, const std::string& input, bool value, std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in || str(*in, "kind") != "checkbox") {
+        return refuse(why, "No Checkbox input '" + input + "'");
+    }
+    (*in)["default"] = value;
+    store(cfg->Inputs, inputs);
+    return rebind(cfg, why);
+}
+
+bool configEditVariable(App::Part* studio,
+                        const std::string& input,
+                        const std::string& defaultText,
+                        const std::string& minimum,
+                        const std::string& maximum,
+                        std::string* why)
+{
+    auto cfg = configOrRefuse(studio, docOf(studio), why);
+    if (!cfg) {
+        return false;
+    }
+    json inputs = inputsOf(cfg);
+    json* in = findInput(inputs, input);
+    if (!in || str(*in, "kind") != "variable") {
+        return refuse(why, "No configuration Variable '" + input + "'");
+    }
+    const std::string type = str(*in, "type");
+    if (type == "Text") {
+        (*in)["default"] = defaultText;
+    }
+    else {
+        double def = 0;
+        double lo = -HUGE_VAL;
+        double hi = HUGE_VAL;
+        if (!variableValue(type, defaultText, def, why)
+            || (!minimum.empty() && !variableValue(type, minimum, lo, why))
+            || (!maximum.empty() && !variableValue(type, maximum, hi, why))) {
+            return false;
+        }
+        if (lo > hi || def < lo || def > hi) {
+            return refuse(why, "The default " + defaultText + " is not between the minimum and the maximum");
+        }
+        (*in)["default"] = def;
+        in->erase("min");
+        in->erase("max");
+        if (!minimum.empty()) {
+            (*in)["min"] = lo;
+        }
+        if (!maximum.empty()) {
+            (*in)["max"] = hi;
+        }
+    }
+    store(cfg->Inputs, inputs);
+    return rebind(cfg, why);
+}
+
 bool configRemoveInput(App::Part* studio, const std::string& input, std::string* why)
 {
     auto cfg = configOrRefuse(studio, docOf(studio), why);
@@ -1222,6 +1341,116 @@ bool configSuppressionIsConfigured(const App::DocumentObject* owner)
     }
     json table = tableOf(cfg);
     return findSuppress(table, owner) != nullptr;
+}
+
+std::string configInputOf(const App::DocumentObject* obj, const std::string& path)
+{
+    auto cfg = configOfObject(obj);
+    if (!cfg || cfg == obj || !obj->isAttachedToDocument()) {
+        return {};
+    }
+    try {
+        json table = tableOf(cfg);
+        const json* e = path.empty() ? findSuppress(table, obj) : findParam(table, obj, canonical(obj, path));
+        if (!e) {
+            return {};
+        }
+        const json inputs = inputsOf(cfg);
+        const json* in = findInput(inputs, str(*e, "input"));
+        return in ? str(*in, "name") : std::string();
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+    catch (const std::exception&) {
+        return {};
+    }
+}
+
+std::vector<App::ConfigMenuItem> configMenuItems(const App::DocumentObject* obj, const std::string& path)
+{
+    std::vector<App::ConfigMenuItem> items;
+    if (!obj || !obj->isAttachedToDocument() || obj->isDerivedFrom<StudioConfig>()) {
+        return items;
+    }
+    const bool suppression = path.empty();
+    if (!suppression) {
+        try {
+            canonical(obj, path);
+        }
+        catch (const Base::Exception&) {
+            return items;
+        }
+    }
+    // Onshape (CP2-1, CP2-3): a configured field offers only its unconfigure; an unconfigured one
+    // offers each List and Checkbox, and each configuration Variable ("Set to #len")
+    const std::string configuredBy = configInputOf(obj, path);
+    auto cfg = configOfObject(obj);
+    if (!configuredBy.empty() && cfg) {
+        json table = tableOf(cfg);
+        const json* e = suppression ? findSuppress(table, obj) : findParam(table, obj, canonical(obj, path));
+        items.push_back({suppression ? std::string("Unconfigure suppression") : "Unconfigure from " + configuredBy,
+                         "unconfigure", e ? str(*e, "input") : std::string()});
+        return items;
+    }
+    bool anyInput = false;
+    if (cfg) {
+        for (const auto& in : inputsOf(cfg)["inputs"]) {
+            const std::string kind = str(in, "kind");
+            const std::string name = str(in, "name");
+            if (kind == "list" || kind == "checkbox") {
+                anyInput = true;
+                items.push_back({(suppression ? "Configure suppression with " : "Configure with ") + name,
+                                 "configure", str(in, "id")});
+            }
+            else if (kind == "variable" && !suppression) {
+                items.push_back({"Set to #" + name, "variable", str(in, "id")});
+            }
+        }
+    }
+    if (!anyInput) {
+        // Open in Onshape (CP2-1): with no List or Checkbox, a new List "Configuration" with one
+        // row "Default", like the panel's "Configure Part Studio"
+        items.push_back({suppression ? "Configure suppression..." : "Configure...", "new", std::string()});
+    }
+    return items;
+}
+
+std::vector<ConfigEntry> configEntries(const StudioConfig* config)
+{
+    std::vector<ConfigEntry> out;
+    if (!config) {
+        return out;
+    }
+    const json table = tableOf(config);
+    auto collect = [&](const char* list, bool suppression) {
+        if (!table.contains(list) || !table[list].is_array()) {
+            return;
+        }
+        for (const auto& e : table[list]) {
+            // A stale entry (its object deleted, or its name now another object's) configures
+            // nothing and is not shown; it stays for the undo that brings its object back
+            App::DocumentObject* obj = entryObject(config, e);
+            if (!obj) {
+                continue;
+            }
+            ConfigEntry entry;
+            entry.object = obj;
+            entry.path = suppression ? std::string() : str(e, "path");
+            entry.input = str(e, "input");
+            if (e.contains("cells") && e["cells"].is_object()) {
+                for (const auto& [key, cell] : e["cells"].items()) {
+                    entry.cells[key] = cell.is_string() ? cell.get<std::string>()
+                        : cell.is_boolean()             ? std::string(cell.get<bool>() ? "true" : "false")
+                                                        : cell.dump();
+                }
+            }
+            out.push_back(std::move(entry));
+        }
+    };
+    collect("params", false);
+    collect("suppress", true);
+    return out;
 }
 
 bool configConfigure(App::DocumentObject* obj,
@@ -1612,6 +1841,12 @@ void registerConfigurationHooks()
 {
     App::setExpressionWriteHook(hookWrite);
     App::setConfigReaderCheck(configReaderError);
+    App::setConfiguredQuery([](const App::DocumentObject* obj, const App::ObjectIdentifier& path) {
+        return configInputOf(obj, path.toString());
+    });
+    App::setConfigMenuQuery([](const App::DocumentObject* obj, const App::ObjectIdentifier& path) {
+        return configMenuItems(obj, path.toString());
+    });
     // An undo or redo can bring back expressions a StudioConfig's cells disagree with (a file
     // that failed the load check, then a configReconcile write undone) without restoring any of
     // its properties: touched, its execute() checks again (review R3, round 2)
