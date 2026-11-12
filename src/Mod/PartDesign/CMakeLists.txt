@@ -372,6 +372,7 @@ set(PartDesign_CompatGen1
     PartDesignTests/Compat/gen1/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen1/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen1/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen1/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen1/PartPrimitives.FCStd
     PartDesignTests/Compat/gen1/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen1/PartProfiles.FCStd
@@ -466,6 +467,7 @@ set(PartDesign_CompatGen1Macos
     PartDesignTests/Compat/gen1-macos/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen1-macos/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen1-macos/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen1-macos/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen1-macos/PartPrimitives.FCStd
     PartDesignTests/Compat/gen1-macos/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen1-macos/PartProfiles.FCStd
@@ -560,6 +562,7 @@ set(PartDesign_CompatGen2
     PartDesignTests/Compat/gen2/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen2/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen2/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen2/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen2/PartPrimitives.FCStd
     PartDesignTests/Compat/gen2/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen2/PartProfiles.FCStd
@@ -654,6 +657,7 @@ set(PartDesign_CompatGen2Macos
     PartDesignTests/Compat/gen2-macos/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen2-macos/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen2-macos/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen2-macos/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen2-macos/PartPrimitives.FCStd
     PartDesignTests/Compat/gen2-macos/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen2-macos/PartProfiles.FCStd
@@ -748,6 +752,7 @@ set(PartDesign_CompatGen3
     PartDesignTests/Compat/gen3/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen3/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen3/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen3/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen3/PartPrimitives.FCStd
     PartDesignTests/Compat/gen3/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen3/PartProfiles.FCStd
@@ -842,6 +847,7 @@ set(PartDesign_CompatGen3Macos
     PartDesignTests/Compat/gen3-macos/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen3-macos/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen3-macos/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen3-macos/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen3-macos/PartPrimitives.FCStd
     PartDesignTests/Compat/gen3-macos/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen3-macos/PartProfiles.FCStd
@@ -936,6 +942,7 @@ set(PartDesign_CompatGen4
     PartDesignTests/Compat/gen4/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen4/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen4/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen4/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen4/PartPrimitives.FCStd
     PartDesignTests/Compat/gen4/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen4/PartProfiles.FCStd
@@ -1030,6 +1037,7 @@ set(PartDesign_CompatGen4Macos
     PartDesignTests/Compat/gen4-macos/PartFilletChamfer.oracle.json
     PartDesignTests/Compat/gen4-macos/PartLoftSweep.FCStd
     PartDesignTests/Compat/gen4-macos/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen4-macos/PartLoftSweep.delta.json
     PartDesignTests/Compat/gen4-macos/PartPrimitives.FCStd
     PartDesignTests/Compat/gen4-macos/PartPrimitives.oracle.json
     PartDesignTests/Compat/gen4-macos/PartProfiles.FCStd
