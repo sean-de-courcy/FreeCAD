@@ -74,6 +74,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestOnshapeAssembliesGui.py
     AssemblyTests/TestAssemblyPatterns.py
     AssemblyTests/TestAssemblyPatternsGui.py
+    AssemblyTests/TestTriadGui.py
     AssemblyTests/mocks/__init__.py
     AssemblyTests/mocks/MockGui.py
 )
