@@ -3,9 +3,12 @@
 #include "ElementSolverBatch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iomanip>
@@ -14,8 +17,12 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include <set>
 #include <sstream>
+#include <string_view>
+#include <thread>
+#include <tuple>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -37,6 +44,7 @@
 #include "MappedElement.h"
 #include "PropertyExpressionEngine.h"
 #include "PropertyGeo.h"
+#include "PropertyPythonObject.h"
 #include "RecomputeContinuation.h"
 #include "ReferenceReport.h"
 
@@ -67,7 +75,161 @@ std::map<std::string, MigrationCounts> migrationCounts;
 // solveElementReferences() calls, whose writes aren't edits.
 std::map<const Document*, std::set<const DocumentObject*>> editsSinceOpen;
 int solving = 0;
+
+// The digests of one recompute (PlacementDigestScope, ElementSolverEdits.h). A digest depends on
+// its object's own properties, the keys of the objects they link (IDs and document names, which
+// don't change), whether the object's Placement is a source of the target (`source`) and the
+// target's document (keys name another document's objects by it).
+struct DigestCache
+{
+    enum Mode
+    {
+        Off,
+        On,
+        Verify,
+    };
+    struct Key
+    {
+        std::uintptr_t object = 0;
+        std::uintptr_t doc = 0;
+        bool source = false;
+        bool operator<(const Key& other) const
+        {
+            return std::tie(object, doc, source) < std::tie(other.object, other.doc, other.source);
+        }
+    };
+    std::mutex mutex;
+    int depth = 0;
+    std::thread::id owner;
+    Mode mode = On;
+    std::map<Key, std::uint64_t> digests;
+    // Bumped by every forget: a digest made while one ran (another thread's edit) isn't kept
+    std::uint64_t epoch = 0;
+    // For the log at the end of the outermost scope
+    std::uint64_t calls = 0;
+    std::uint64_t made = 0;
+    std::uint64_t reused = 0;
+    std::uint64_t differed = 0;
+    double seconds = 0.0;
+};
+
+DigestCache& digestCache()
+{
+    static DigestCache cache;
+    return cache;
+}
+
+// The cache's depth, read without its mutex by forgetPlacementDigestOf()
+std::atomic<int> digestDepth {0};
+
+// FREECAD_CH_DIGEST_CACHE, or empty
+std::string digestCacheMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_DIGEST_CACHE") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_DIGEST_CACHE");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+// Whether this thread's recompute keeps digests now (the cache's mutex held)
+bool digestCacheActive(const DigestCache& cache)
+{
+    return cache.depth > 0 && cache.mode != DigestCache::Off
+        && cache.owner == std::this_thread::get_id();
+}
 }  // namespace
+
+PlacementDigestScope::PlacementDigestScope()
+{
+    auto& cache = digestCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.depth == 0) {
+        cache.owner = std::this_thread::get_id();
+        const std::string text = digestCacheMode();
+        cache.mode = text == "off" ? DigestCache::Off
+            : text == "verify"     ? DigestCache::Verify
+                                   : DigestCache::On;
+        cache.digests.clear();
+        cache.calls = cache.made = cache.reused = cache.differed = 0;
+        cache.seconds = 0.0;
+    }
+    else if (cache.owner != std::this_thread::get_id()) {
+        return;
+    }
+    ++cache.depth;
+    ++digestDepth;
+    active = true;
+}
+
+PlacementDigestScope::~PlacementDigestScope()
+{
+    if (!active) {
+        return;
+    }
+    auto& cache = digestCache();
+    // Logged after the mutex is released: a console observer may change a property (a forget)
+    std::uint64_t calls = 0;
+    std::uint64_t made = 0;
+    std::uint64_t reused = 0;
+    std::uint64_t differed = 0;
+    double seconds = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        --digestDepth;
+        if (--cache.depth > 0) {
+            return;
+        }
+        cache.digests.clear();
+        calls = cache.calls;
+        made = cache.made;
+        reused = cache.reused;
+        differed = cache.differed;
+        seconds = cache.seconds;
+    }
+    if (calls > 0) {
+        FC_LOG("placement sources: " << calls << " calls, " << seconds << " s; digests made " << made
+                                     << ", reused " << reused);
+    }
+    if (differed > 0) {
+        FC_ERR("placement digests: " << differed << " kept digests differ from a fresh one");
+    }
+}
+
+void forgetPlacementDigestOf(const PropertyContainer* container)
+{
+    if (container && digestDepth.load(std::memory_order_relaxed) > 0) {
+        forgetPlacementDigest(dynamic_cast<const DocumentObject*>(container));
+    }
+}
+
+void forgetPlacementDigest(const void* obj)
+{
+    auto& cache = digestCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.depth == 0 || !obj) {
+        return;
+    }
+    ++cache.epoch;
+    if (cache.digests.empty()) {
+        return;
+    }
+    const auto key = reinterpret_cast<std::uintptr_t>(obj);
+    auto from = cache.digests.lower_bound(DigestCache::Key {key, 0, false});
+    auto to = from;
+    while (to != cache.digests.end() && to->first.object == key) {
+        ++to;
+    }
+    cache.digests.erase(from, to);
+}
 
 void forgetEditsSinceOpen(const Document* doc)
 {
@@ -83,6 +245,9 @@ void noteEditSinceOpen(const DocumentObject* obj)
 
 void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop)
 {
+    // Any change, the solver's own and an output's included: a digest skips outputs by the
+    // property's status, which a change can set
+    forgetPlacementDigest(obj);
     const Document* doc = obj ? obj->getDocument() : nullptr;
     if (!doc || !prop || solving > 0 || doc->testStatus(Document::Restoring)
         || doc->testStatus(Document::Recomputing) || obj->isRecomputing()
@@ -233,6 +398,21 @@ bool indexMadeOnly(const std::string& name, int depth)
 
 void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprint::Source>& sources)
 {
+    // The time it takes, for the recompute's log line (PlacementDigestScope)
+    struct Timer
+    {
+        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        ~Timer()
+        {
+            const std::chrono::duration<double> spent = std::chrono::steady_clock::now() - started;
+            auto& cache = digestCache();
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (cache.depth > 0 && cache.owner == std::this_thread::get_id()) {
+                ++cache.calls;
+                cache.seconds += spent.count();
+            }
+        }
+    } timer;
     sources.clear();
     if (!geo || !geo->isAttachedToDocument()) {
         return;
@@ -384,7 +564,10 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
     // record); an App::Link's is folded. A link folds the objects and the elements it names (its
     // saved form carries the records), the expression engine its expressions, any other property
     // its saved form
-    auto digestOf = [&](const DocumentObject* object) {
+    // keepable: no property's saved form can change without a property change (a Python proxy's
+    // state can)
+    auto digestOf = [&](const DocumentObject* object, bool& keepable) {
+        keepable = true;
         const bool source = placed.count(object) > 0;
         const bool derived = source || isA(object, featureType) || isA(object, bodyType);
         std::uint64_t digest = Data::ElementFingerprint::DigestSeed;
@@ -413,6 +596,9 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
                 continue;
             }
             fold(name);
+            if (dynamic_cast<PropertyPythonObject*>(property)) {
+                keepable = false;
+            }
             if (auto engine = dynamic_cast<PropertyExpressionEngine*>(property)) {
                 for (const auto& [path, expression] : engine->getExpressions()) {
                     fold(path.toString());
@@ -452,6 +638,54 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
         return digest;
     };
+    // Made once per recompute (PlacementDigestScope): kept until a property of the object changes
+    auto keptDigestOf = [&](const DocumentObject* object) {
+        auto& cache = digestCache();
+        const DigestCache::Key key {reinterpret_cast<std::uintptr_t>(object),
+                                    reinterpret_cast<std::uintptr_t>(doc),
+                                    placed.count(object) > 0};
+        bool keep = false;
+        bool verify = false;
+        std::optional<std::uint64_t> kept;
+        std::uint64_t epoch = 0;
+        {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (digestCacheActive(cache)) {
+                auto it = cache.digests.find(key);
+                if (it != cache.digests.end()) {
+                    ++cache.reused;
+                    if (cache.mode != DigestCache::Verify) {
+                        return it->second;
+                    }
+                    kept = it->second;
+                    verify = true;
+                }
+                keep = true;
+                epoch = cache.epoch;
+            }
+        }
+        bool keepable = true;
+        const std::uint64_t digest = digestOf(object, keepable);
+        bool differs = false;
+        if (keep) {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (verify && kept && *kept != digest) {
+                ++cache.differed;
+                differs = true;
+            }
+            if (!kept) {
+                ++cache.made;
+            }
+            if (keepable && cache.epoch == epoch && digestCacheActive(cache)) {
+                cache.digests[key] = digest;
+            }
+        }
+        if (differs) {
+            FC_ERR("placement digest of " << object->getFullName() << " kept " << *kept
+                                          << ", made " << digest);
+        }
+        return digest;
+    };
     // Only beside sources: a record without them never reads rigid, and keeps its form
     std::set<const DocumentObject*> digested;
     for (const DocumentObject* object : namers) {
@@ -462,7 +696,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         Data::ElementFingerprint::Source source;
         source.key = keyOf(object);
         source.locus = 'D';
-        source.digest = digestOf(object);
+        source.digest = keptDigestOf(object);
         sources.push_back(std::move(source));
     }
     std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {

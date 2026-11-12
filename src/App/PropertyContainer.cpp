@@ -37,6 +37,7 @@
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 
+#include "ElementSolverEdits.h"
 #include "Property.h"
 #include "PropertyContainer.h"
 
@@ -120,6 +121,8 @@ void PropertyContainer::setPropertyStatus(unsigned char bit,bool value)
     getPropertyList(List);
     for(auto it : List)
         it->StatusBits.set(bit,value);
+    // A placement digest leaves out outputs and transients by their status (ops#640)
+    forgetPlacementDigestOf(this);
 }
 
 short PropertyContainer::getPropertyType(const Property* prop) const

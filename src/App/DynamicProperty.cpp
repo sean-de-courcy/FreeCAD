@@ -41,6 +41,7 @@
 #include "Application.h"
 #include "Document.h"
 #include "DocumentObject.h"
+#include "ElementSolverEdits.h"
 #include "Property.h"
 #include "PropertyContainer.h"
 #include "Transactions.h"
@@ -292,6 +293,8 @@ Property* DynamicProperty::addDynamicProperty(
 
     pcProperty->syncType(attr);
     pcProperty->StatusBits.set((size_t)Property::PropDynamic);
+    // A digest folds every property (ops#640)
+    forgetPlacementDigestOf(&pc);
 
     GetApplication().signalAppendDynamicProperty(*pcProperty);
 
@@ -347,6 +350,8 @@ bool DynamicProperty::removeDynamicProperty(const char* name)
             throw Base::RuntimeError("property is not dynamic");
         }
         Property* prop = it->property;
+        PropertyContainer* container = prop->getContainer();
+        forgetPlacementDigestOf(container);
         GetApplication().signalRemoveDynamicProperty(*prop);
 
         // Handle possible recursive calls of removeDynamicProperty
@@ -356,6 +361,8 @@ bool DynamicProperty::removeDynamicProperty(const char* name)
             // memory of myName has been freed
             prop->myName = nullptr;
         }
+        // Again once it is gone: a digest made by a handler above still held it (ops#640)
+        forgetPlacementDigestOf(container);
         return true;
     }
 
@@ -519,8 +526,12 @@ bool DynamicProperty::renameDynamicProperty(Property* prop,
         // manages the memory.
         d.property->myName = d.name.c_str();
     });
+    // A placement digest folds each property's name (ops#640, review prmemo-r2 R2-2): before the
+    // signal, whose handlers may digest, and again after it, as a remove does
+    forgetPlacementDigestOf(container);
 
     GetApplication().signalRenameDynamicProperty(*prop, oldName.c_str());
+    forgetPlacementDigestOf(container);
 
     return true;
 }
