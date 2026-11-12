@@ -225,10 +225,77 @@ def variable_name(obj):
     return obj.Label
 
 
+def measurement_of(holder, name):
+    """The measurement the variable `name` of the VarSet `holder` reads, or None."""
+    for prop, expr in holder.ExpressionEngine:
+        if prop != name:
+            continue
+        target = expr.replace(" ", "")
+        if target.endswith(".Value"):
+            obj = holder.Document.getObject(target[: -len(".Value")])
+            if obj is not None and type(getattr(obj, "Proxy", None)).__name__ == "MeasuredVariable":
+                return obj
+    return None
+
+
+def is_measured_holder(vs):
+    """Whether the VarSet `vs` is a measured variable's own holder: every variable it has is a
+    measured one (design section 2: one VarSet per measured variable, so that a measurement of a
+    feature using another studio variable is no cycle)."""
+    if vs.TypeId != "App::VarSet":
+        return False
+    names = [p for p in vs.PropertiesList if p not in _VARSET_OWN]
+    return bool(names) and all(measurement_of(vs, p) is not None for p in names)
+
+
+# An App::VarSet's own properties (DocumentObject's); every other one is a variable.
+_VARSET_OWN = frozenset(("Label", "Label2", "ExpressionEngine", "Visibility"))
+
+
+def studio_sets(studio):
+    """Every VarSet of `studio` (in the App::Part, or at the top level for the implicit studio):
+    its own set and the measured variables' holders."""
+    if _is_document(studio):
+        return [o for o in studio.Objects
+                if o.TypeId == "App::VarSet" and o.getParentGeoFeatureGroup() is None
+                and not _is_variable_studio(o)]
+    return [o for o in studio.Group if o.TypeId == "App::VarSet" and not _is_variable_studio(o)]
+
+
+def _is_document(studio):
+    return isinstance(studio, App.Document)
+
+
+def _is_variable_studio(obj):
+    try:
+        return bool(App.DocumentTabs.isVariableStudio(obj))
+    except Exception:
+        return False
+
+
 def studio_variables(studio, create=True):
-    """The studio's own VarSet (directly in the App::Part, not a copy); made when missing."""
+    """The studio's own VarSet, made when missing. A studio is an App::Part, or the document itself
+    for the implicit studio (the top level): there the VarSet named, else labelled, "Variables"
+    that no part holds, as the Variables panel's Add picks it. Never a copy (App::VarSetCopy) or a
+    Variable Studio."""
+    if _is_document(studio):
+        doc = studio
+        candidates = [o for o in doc.Objects
+                      if o.TypeId == "App::VarSet" and o.getParentGeoFeatureGroup() is None
+                      and not _is_variable_studio(o) and not is_measured_holder(o)]
+        for o in candidates:
+            if o.Name == "Variables":
+                return o
+        for o in candidates:
+            if o.Label == "Variables":
+                return o
+        if not create:
+            return None
+        vs = doc.addObject("App::VarSet", "Variables")
+        vs.Label = "Variables"
+        return vs
     for o in studio.Group:
-        if o.TypeId == "App::VarSet":
+        if o.TypeId == "App::VarSet" and not _is_variable_studio(o) and not is_measured_holder(o):
             return o
     if not create:
         return None
@@ -236,6 +303,150 @@ def studio_variables(studio, create=True):
     vs.Label = "Variables"
     studio.addObject(vs)
     return vs
+
+
+def studio_of(obj):
+    """The part studio holding `obj`: its App::Part tab object, or its document for the implicit
+    studio; None when it is in another kind of tab (an assembly, a Variable Studio)."""
+    try:
+        name = App.DocumentTabs.tabOf(obj)
+    except Exception:
+        name = None
+    doc = obj.Document
+    if name in (None, "", "*"):
+        part = obj.getParentGeoFeatureGroup() if hasattr(obj, "getParentGeoFeatureGroup") else None
+        while part is not None and not part.isDerivedFrom("App::Part"):
+            part = part.getParentGeoFeatureGroup()
+        if name in (None, "") and part is not None:
+            return part
+        return doc
+    tab = doc.getObject(name)
+    if tab is not None and tab.isDerivedFrom("App::Part"):
+        return tab
+    return None
+
+
+# --- picks: a 3D selection resolved to the feature that made the element (design section 2)
+
+_TOL = 1e-6
+
+
+def _same_point(a, b):
+    return (a - b).Length <= _TOL
+
+
+def _same_points(a, b):
+    """Whether the vertex lists `a` and `b` hold the same points, in any order."""
+    if len(a) != len(b):
+        return False
+    left = [v.Point for v in b]
+    for v in a:
+        match = next((i for i, p in enumerate(left) if _same_point(v.Point, p)), None)
+        if match is None:
+            return False
+        left.pop(match)
+    return True
+
+
+def _same_box(a, b):
+    ba, bb = a.BoundBox, b.BoundBox
+    return all(abs(x - y) <= _TOL for x, y in (
+        (ba.XMin, bb.XMin), (ba.YMin, bb.YMin), (ba.ZMin, bb.ZMin),
+        (ba.XMax, bb.XMax), (ba.YMax, bb.YMax), (ba.ZMax, bb.ZMax)))
+
+
+def _midpoint(edge):
+    return edge.valueAt(edge.FirstParameter + (edge.LastParameter - edge.FirstParameter) / 2)
+
+
+def _same_geometry(a, b):
+    """Whether the subshapes `a` and `b` (one frame) are the same element geometrically, so that a
+    measurement of either reads the same."""
+    if a.ShapeType != b.ShapeType:
+        return False
+    if a.ShapeType == "Vertex":
+        return _same_point(a.Point, b.Point)
+    if a.isSame(b):
+        return True
+    if not _same_box(a, b) or not _same_points(a.Vertexes, b.Vertexes):
+        return False
+    if a.ShapeType == "Edge":
+        return abs(a.Length - b.Length) <= _TOL and _same_point(_midpoint(a), _midpoint(b))
+    if a.ShapeType == "Face":
+        size = max(1.0, a.Area)
+        return (abs(a.Area - b.Area) <= _TOL * size
+                and abs(a.Length - b.Length) <= _TOL * max(1.0, a.Length)
+                and _same_point(a.CenterOfMass, b.CenterOfMass))
+    return False
+
+
+def _element_like(obj, picked):
+    """The name ("Edge7") of the element of `obj`'s shape that is `picked` geometrically (both in
+    the studio's frame), else None."""
+    kind = picked.ShapeType
+    try:
+        whole = _resolve(obj, "")
+    except MeasureError:
+        return None
+    elements = {"Vertex": whole.Vertexes, "Edge": whole.Edges, "Face": whole.Faces}.get(kind, [])
+    for i, element in enumerate(elements, 1):
+        if _same_geometry(picked, element):
+            return "{}{}".format(kind, i)
+    return None
+
+
+def _same_body(a, b):
+    return a.getParentGeoFeatureGroup() == b.getParentGeoFeatureGroup()
+
+
+def resolve_pick(root, subname):
+    """The reference a 3D pick stands for: (feature, element name), the element named in the
+    feature that made it (the design note's section 2).
+
+    `root` and `subname` are a selection's object and subname (a part studio and
+    "Body.Pad2.Edge3", or a body and "Edge3"). A PartDesign body's shape is its tip's. From the
+    feature whose shape was picked, the pick walks back along the body's BaseFeature chain while
+    the earlier feature still has an element of the same geometry, and names the element in the
+    earliest one. An edge that later features left alone is read from the feature that made it,
+    so a feature in between can use the variable without a cycle; an edge a later feature changed
+    (trimmed, split) stays on the feature that changed it, so the value is the one picked.
+    Raises MeasureError for a pick that is not a vertex, an edge or a face."""
+    owner, _parent, _child, element = root.resolve(subname)
+    element = element or ""
+    if owner is None:
+        raise MeasureError("nothing at {}".format(subname))
+    if element and not element[0].isalpha():
+        # a mapped name: its indexed form in the owner's shape
+        try:
+            import Part
+
+            element = Part.getShape(owner).getElementName(element, 1) or element
+        except Exception:
+            pass
+    kind = element.rstrip("0123456789")
+    if kind not in ("Vertex", "Edge", "Face") or kind == element:
+        raise MeasureError("pick a vertex, an edge or a face, not {}".format(
+            owner.Label + ("." + element if element else "")))
+    picked = _resolve(owner, element)
+    if owner.isDerivedFrom("PartDesign::Body"):
+        tip = owner.Tip
+        name = _element_like(tip, picked) if tip is not None else None
+        if name is None:
+            raise MeasureError("{}.{} is not in the body's tip".format(owner.Label, element))
+        owner, element = tip, name
+    feature = owner
+    seen = {feature.Name}
+    while feature.isDerivedFrom("PartDesign::Feature"):
+        base = getattr(feature, "BaseFeature", None)
+        if (base is None or base.Name in seen or not base.isDerivedFrom("PartDesign::Feature")
+                or not _same_body(base, feature)):
+            break
+        seen.add(base.Name)
+        name = _element_like(base, picked)
+        if name is None:
+            break
+        feature, element = base, name
+    return feature, element
 
 
 def set_references(m, references):
@@ -256,37 +467,85 @@ def set_references(m, references):
 _COUNTS = {"Distance": (2, 2), "Length": (1, None), "Diameter": (1, 1)}
 
 
-def add(studio, name, kind, references, distance_type="Minimum"):
-    """Add the measured variable `name` to the part studio `studio` (an App::Part).
+def check_name(studio, name):
+    """Why `name` can't be a new measured variable of `studio`, or "" (the Variables panel's
+    rules: App.checkVariableName, against the studio's VarSet when it has one)."""
+    vs = studio_variables(studio, create=False)
+    try:
+        reason = App.checkVariableName(name, vs) if vs is not None else App.checkVariableName(name)
+    except AttributeError:  # a build without the fork's rules
+        reason = "" if name.isidentifier() else "{!r} is not a valid variable name".format(name)
+    if not reason:
+        for other in studio_sets(studio):
+            if name in other.PropertiesList:
+                reason = "{} already has a variable named {}".format(_studio_name(studio), name)
+                break
+    return reason
+
+
+def _studio_name(studio):
+    if _is_document(studio):
+        try:
+            return App.DocumentTabs.label(studio, "*")
+        except Exception:
+            return studio.Label
+    return studio.Label
+
+
+def check_references(kind, references):
+    """Why `references` can't be measured as `kind` by count, or "" (the values are checked by
+    measuring)."""
+    low, high = _COUNTS[kind]
+    n = len(references)
+    if n < low or (high is not None and n > high):
+        want = str(low) if low == high else "{} or more".format(low)
+        return "{} takes {} reference(s), not {}".format(kind, want, n)
+    return ""
+
+
+def add(studio, name, kind, references, distance_type="Minimum", description=""):
+    """Add the measured variable `name` to the part studio `studio`: an App::Part, or the document
+    for the implicit studio (the top level).
 
     `references`: a list of (object, subelement name) pairs, e.g. [(pad, "Edge5")].
-    Returns (varset, measurement). The caller recomputes (and opens the undo transaction).
+    Returns (holder, measurement): the holder is the variable's own VarSet, in the studio.
+    The caller recomputes (and opens the undo transaction).
     """
-    if studio is None or not studio.isDerivedFrom("App::Part"):
+    implicit = _is_document(studio)
+    if studio is None or not (implicit or studio.isDerivedFrom("App::Part")):
         raise ValueError("a measured variable belongs to a part studio (an App::Part)")
     if kind not in KINDS:
         raise ValueError("kind must be one of {}".format(", ".join(KINDS)))
     if distance_type not in DISTANCE_TYPES:
         raise ValueError("distance type must be one of {}".format(", ".join(DISTANCE_TYPES)))
-    low, high = _COUNTS[kind]
-    n = len(references)
-    if n < low or (high is not None and n > high):
-        want = str(low) if low == high else "{} or more".format(low)
-        raise ValueError("{} takes {} reference(s), not {}".format(kind, want, n))
+    reason = check_references(kind, references)
+    if reason:
+        raise ValueError(reason)
     if not name.isidentifier():
         raise ValueError("{!r} is not a valid variable name".format(name))
-    vs = studio_variables(studio)
-    if name in vs.PropertiesList:
-        raise ValueError("{} already has a variable named {}".format(vs.Label, name))
+    studio_variables(studio)  # the studio's own set, where the panel lists the variable
+    for other in studio_sets(studio):
+        if name in other.PropertiesList:
+            raise ValueError("{} already has a variable named {}".format(_studio_name(studio), name))
 
-    doc = studio.Document
+    doc = studio if implicit else studio.Document
     m = doc.addObject("App::FeaturePython", "Measured")
     MeasuredVariable(m)
     m.Label = "Measured " + name
+    # Its own holder: FreeCAD's dependencies are per object, so a set shared with other variables
+    # would make a measurement of any feature using one of them a cycle.
+    holder = doc.addObject("App::VarSet", "MeasuredVariable")
+    holder.Label = "{} (measured)".format(name)
+    if not implicit:
+        # In the studio before the references are set: a link set outside the App::Part and then
+        # moved into it lost a reference to a split edge at the next recompute (probe on
+        # 5b6ee51f1a, measured variables 2).
+        studio.addObject(m)
+        studio.addObject(holder)
     m.Kind = kind
     m.DistanceType = distance_type
     set_references(m, references)
-    studio.addObject(m)
-    vs.addProperty("App::PropertyLength", name, "", "Measured {}".format(kind.lower()))
-    vs.setExpression(name, m.Name + ".Value")
-    return vs, m
+    holder.addProperty("App::PropertyLength", name, "",
+                       description or "Measured {}".format(kind.lower()))
+    holder.setExpression(name, m.Name + ".Value")
+    return holder, m

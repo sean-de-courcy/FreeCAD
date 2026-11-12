@@ -42,6 +42,7 @@ set(EXT_VARIABLES_FILES
     variables/onshape.py
     variables/copies.py
     variables/measured.py
+    variables/measuredgui.py
     variables/importer.py
     variables/importgui.py
 )

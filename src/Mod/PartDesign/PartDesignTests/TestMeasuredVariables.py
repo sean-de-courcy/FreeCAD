@@ -196,16 +196,16 @@ class TestMeasuredVariables(unittest.TestCase):
         a = edge_named(self.padA.Shape, bottom_circle(5))
         b = edge_named(self.padA.Shape, bottom_circle(15))
         vs, low = self.measured.add(self.studio, "gap", "Distance", [(self.padA, a), (self.padA, b)])
-        _, mid = self.measured.add(self.studio, "pitch", "Distance", [(self.padA, a), (self.padA, b)],
+        hp, mid = self.measured.add(self.studio, "pitch", "Distance", [(self.padA, a), (self.padA, b)],
                                    distance_type="Center")
         x0 = face_named(self.padA.Shape, lambda f: f.BoundBox.XMax < 1e-6)
         x1 = face_named(self.padA.Shape, lambda f: f.BoundBox.XMin > 20 - 1e-6)
-        _, faces = self.measured.add(self.studio, "span", "Distance", [(self.padA, x0), (self.padA, x1)])
+        hs, faces = self.measured.add(self.studio, "span", "Distance", [(self.padA, x0), (self.padA, x1)])
         self.doc.recompute()
-        self.assertValid(low, mid, faces, vs)
+        self.assertValid(low, mid, faces, vs, hp, hs)
         self.assertAlmostEqual(vs.gap.Value, 10 - 2 * 2, places=6)
-        self.assertAlmostEqual(vs.pitch.Value, 10, places=6)
-        self.assertAlmostEqual(vs.span.Value, 20, places=6)
+        self.assertAlmostEqual(hp.pitch.Value, 10, places=6)
+        self.assertAlmostEqual(hs.span.Value, 20, places=6)
 
     def testDistanceAcrossPlacedObjects(self):
         """A's face x = 20 (inside BodyA) and the near face of a box placed at x = 45 in the studio:
@@ -289,6 +289,154 @@ class TestMeasuredVariables(unittest.TestCase):
             self.assertAlmostEqual(pad.Shape.Volume, 16 * 25, places=4)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+    # --- measured variables 2: one holder per variable, picks resolved to the feature that made
+    # the element, the implicit studio
+
+    def testMeasuresFeatureUsingStudioVariable(self):
+        """A's pad is driven by the studio variable h; w measures that pad and drives B. With one
+        set shared by h and w this was a cycle (set -> measurement -> pad -> set)."""
+        own = self.measured.studio_variables(self.studio)
+        own.addProperty("App::PropertyDistance", "h", "", "")
+        own.h = 7
+        self.padA.setExpression("Length", "#h")
+        self.doc.recompute()
+        edge = edge_named(self.padA.Shape, bottom_long)
+        holder, m = self.measured.add(self.studio, "w", "Length", [(self.padA, edge)])
+        pad = self.make_user("#w")
+        self.doc.recompute()
+        self.assertValid(self.padA, m, holder, pad)
+        self.assertIsNot(holder, own)
+        self.assertTrue(self.measured.is_measured_holder(holder))
+        self.assertIs(self.measured.studio_variables(self.studio), own)
+        self.assertAlmostEqual(pad.Shape.Volume, 16 * 20, places=4)
+        own.h = 9  # the measured edge keeps its length; the chain still recomputes
+        self.sketchA.setDatum("W", App.Units.Quantity("30 mm"))
+        self.doc.recompute()
+        self.assertValid(self.padA, m, holder, pad)
+        self.assertAlmostEqual(pad.Shape.Volume, 16 * 30, places=4)
+
+    def testTrueCycleRefused(self):
+        """Measuring a feature that uses the measured variable itself stays a loud error."""
+        pad = self.make_user("5 mm")
+        self.doc.recompute()
+        edge = edge_named(pad.Shape, lambda e: abs(e.Length - 4) < 1e-6
+                          and e.BoundBox.YMax < 1e-6 and e.BoundBox.ZMax < 1e-6)
+        holder, m = self.measured.add(self.studio, "w", "Length", [(pad, edge)])
+        self.doc.recompute()
+        self.assertAlmostEqual(holder.w.Value, 4, places=6)
+        with self.assertRaisesRegex(Exception, "(?i)cycl"):
+            pad.setExpression("Length", "#w")
+
+    def testNameTakenAcrossTheStudio(self):
+        edge = edge_named(self.padA.Shape, bottom_long)
+        self.measured.add(self.studio, "w", "Length", [(self.padA, edge)])
+        self.assertIn("w", self.measured.check_name(self.studio, "w"))
+        self.assertEqual(self.measured.check_name(self.studio, "w2"), "")
+        own = self.measured.studio_variables(self.studio)
+        own.addProperty("App::PropertyDistance", "h", "", "")
+        self.assertIn("h", self.measured.check_name(self.studio, "h"))
+
+    def testImplicitStudio(self):
+        """The document's top level is a part studio too: its holder and measurement sit there."""
+        doc = App.newDocument("MeasuredImplicit")
+        try:
+            body = doc.addObject("PartDesign::Body", "Body")
+            sk = self.sketch(body, "Sk")
+            rectangle(sk, 0, 0, 20, 10)
+            pad = body.newObject("PartDesign::Pad", "Pad")
+            pad.Profile = sk
+            pad.Length = 5
+            doc.recompute()
+            edge = edge_named(pad.Shape, bottom_long)
+            holder, m = self.measured.add(doc, "w", "Length", [(pad, edge)])
+            doc.recompute()
+            self.assertIsNone(holder.getParentGeoFeatureGroup())
+            self.assertAlmostEqual(holder.w.Value, 20, places=6)
+            own = self.measured.studio_variables(doc, create=False)
+            self.assertIsNotNone(own)
+            self.assertEqual(own.Label, "Variables")
+            self.assertIsNot(own, holder)
+            self.assertIs(self.measured.studio_of(pad), doc)
+        finally:
+            App.closeDocument(doc.Name)
+
+    # picks
+
+    def side_pad(self, x=5, y=-2, w=4, h=4, length=5, z=0, name="Pad2"):
+        """A second pad in body A: a w x h rectangle at (x, y) on a plane z above XY."""
+        sk = self.sketch(self.bodyA, name + "Sketch")
+        sk.AttachmentOffset = App.Placement(V(0, 0, z), App.Rotation())
+        rectangle(sk, x, y, w, h)
+        # fully constrained: its corner at (x, y), its size w x h
+        sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 1, x))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 1, y))
+        sk.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, w))
+        sk.addConstraint(Sketcher.Constraint("DistanceY", 1, 1, 1, 2, h))
+        pad = self.bodyA.newObject("PartDesign::Pad", name)
+        pad.Profile = sk
+        pad.Length = length
+        self.doc.recompute()
+        self.assertValid(pad)
+        return pad
+
+    def testPickResolvesToTheFeatureThatMadeIt(self):
+        """An edge a later pad left alone, picked on the tip, names the first pad's edge."""
+        pad2 = self.side_pad(x=5, y=2, z=5, length=3)  # on top, away from the bottom edges
+        tip_edge = edge_named(pad2.Shape, bottom_long)
+        feature, element = self.measured.resolve_pick(
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, tip_edge))
+        self.assertIs(feature, self.padA)
+        self.assertEqual(element, edge_named(self.padA.Shape, bottom_long))
+        # through the body (its shape is the tip's)
+        feature, element = self.measured.resolve_pick(
+            self.studio, "{}.{}".format(self.bodyA.Name, tip_edge))
+        self.assertIs(feature, self.padA)
+        # a face
+        bottom = face_named(pad2.Shape, lambda f: f.BoundBox.ZMax < 1e-6)
+        feature, element = self.measured.resolve_pick(
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, bottom))
+        self.assertIs(feature, self.padA)
+        self.assertEqual(element, face_named(self.padA.Shape, lambda f: f.BoundBox.ZMax < 1e-6))
+
+    def testPickOfAChangedEdgeStaysOnTheFeatureThatChangedIt(self):
+        """A pad across the bottom front edge splits it: the piece picked is not in the first pad,
+        so it is read where it was picked, and measures what was picked (5 mm, not 20)."""
+        pad2 = self.side_pad(x=5, y=-2, z=0, length=5)
+        piece = edge_named(pad2.Shape, lambda e: abs(e.Length - 5) < 1e-6
+                           and e.BoundBox.YMax < 1e-6 and e.BoundBox.XMax < 5 + 1e-6
+                           and e.BoundBox.ZMax < 1e-6)
+        feature, element = self.measured.resolve_pick(
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, piece))
+        self.assertIs(feature, pad2)
+        self.assertEqual(element, piece)
+        holder, m = self.measured.add(self.studio, "w", "Length", [(feature, element)])
+        self.doc.recompute()
+        self.assertAlmostEqual(holder.w.Value, 5, places=6)
+
+    def testPickedEdgeLetsALaterFeatureUseTheVariable(self):
+        """Resolved to the first pad, the pick can drive the later pad that showed it."""
+        pad2 = self.side_pad(x=5, y=2, z=5, length=3)
+        tip_edge = edge_named(pad2.Shape, bottom_long)
+        ref = self.measured.resolve_pick(
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, pad2.Name, tip_edge))
+        holder, m = self.measured.add(self.studio, "w", "Length", [ref])
+        pad2.setExpression("Length", "#w / 4")
+        self.doc.recompute()
+        self.assertValid(m, holder, pad2)
+        self.assertAlmostEqual(pad2.Length.Value, 5, places=6)
+
+    def testPickOfASketchEdge(self):
+        line = "Edge1"
+        feature, element = self.measured.resolve_pick(
+            self.studio, "{}.{}.{}".format(self.bodyA.Name, self.sketchA.Name, line))
+        self.assertIs(feature, self.sketchA)
+        self.assertEqual(element, line)
+
+    def testPickOfAWholeObjectRefused(self):
+        with self.assertRaises(self.measured.MeasureError):
+            self.measured.resolve_pick(self.studio, "{}.{}.".format(self.bodyA.Name, self.padA.Name))
 
 
 if __name__ == "__main__":

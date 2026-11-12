@@ -75,6 +75,7 @@ from PartDesignTests.TestNewSketchDialogGui import TestNewSketchDialogGui
 from PartDesignTests.TestToolbarsGui import TestToolbarsGui  # FreeCAD-CH, ops#605
 from PartDesignTests.TestContextMenuGui import TestContextMenuGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeStudioGui import TestOnshapeStudioGui
+from PartDesignTests.TestMeasuredVariablesGui import TestMeasuredVariablesGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestMergeScopeGui import TestMergeScopeGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestMergeScopeGui import TestMergeScopeListGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestPickFirstGui import TestPickFirstGui  # FreeCAD-CH, ops#640

@@ -137,6 +137,7 @@ if(BUILD_GUI)
         PartDesignTests/TestExtrudeFieldsGui.py
         PartDesignTests/TestNewSketchDialogGui.py
         PartDesignTests/TestOnshapeStudioGui.py
+        PartDesignTests/TestMeasuredVariablesGui.py
         PartDesignTests/TestRollBackBarGui.py
     PartDesignTests/TestFeaturesViewGui.py
         PartDesignTests/TestParkedMarkingGui.py
