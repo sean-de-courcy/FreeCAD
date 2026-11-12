@@ -37,6 +37,7 @@
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
@@ -3244,6 +3245,29 @@ TopoDS_Shape constructShape(
             double again = nearer.IsNull() ? 0.0 : volumeOf(commonOf(tool.solid, nearer));
             if (std::abs(again - clipped) > volumeTolerance * tool.volume) {
                 refuse("the walls behind a tangent strip don't run straight back from its face");
+            }
+            // The piece is bounded by the tool's own surfaces and the walls' run on, and by nothing
+            // else: material in front of the face that isn't the wall (a fin on a ledge, closer to
+            // the wall than both offsets) would trim the tool at its own height (review r1)
+            std::vector<Handle(Geom_Surface)> toolSurfaces;
+            for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+                TopLoc_Location location;
+                toolSurfaces.push_back(BRep_Tool::Surface(TopoDS::Face(it.Current()), location));
+            }
+            for (TopExp_Explorer it(piece, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face& side = TopoDS::Face(it.Current());
+                TopLoc_Location location;
+                Handle(Geom_Surface) surface = BRep_Tool::Surface(side, location);
+                bool ofTool = std::any_of(toolSurfaces.begin(), toolSurfaces.end(), [&](const auto& s) {
+                    return s == surface;
+                });
+                bool ofWall = std::any_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& w) {
+                    return sameDomain(side, w);
+                });
+                if (!ofTool && !ofWall) {
+                    refuse("material in front of a tangent strip's face that is not the wall would trim "
+                           "the dress-up");
+                }
             }
             clipTool(tool, behind);
         }
