@@ -2076,11 +2076,12 @@ App::DocumentObject* FeaturesView::memberOf(const QListWidgetItem* item) const
 bool FeaturesView::eventFilter(QObject* watched, QEvent* event)
 {
     // FreeCAD-CH ops#654 S3: Delete on selected rows with a studio feature is the list's delete
-    // (deleteOwnerRows()), taken from Std_Delete's shortcut, which would ask about its steps
+    // (deleteOwnerRows()), taken from Std_Delete's shortcut, which would ask about its steps;
+    // Backspace too on the Mac (ForkKeymap::isDeleteKey())
     if (watched == features
         && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
         auto key = static_cast<QKeyEvent*>(event);
-        if (key->key() == Qt::Key_Delete && key->modifiers() == Qt::NoModifier) {
+        if (Gui::ForkKeymap::isDeleteKey(key)) {
             std::vector<App::DocumentObject*> rows;
             for (auto item : features->selectedItems()) {
                 if (auto obj = memberOf(item)) {

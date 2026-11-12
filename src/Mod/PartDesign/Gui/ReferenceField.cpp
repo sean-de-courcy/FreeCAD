@@ -3374,7 +3374,7 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             // Esc: armed or not, it goes to the task view and cancels the dialog at once, as
             // Onshape's (ops#640 rank 25, R1; reverses decision 23 Q1 (a))
             auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
-            bool own = Gui::QtTools::matches(ke, QKeySequence(Gui::QtTools::deleteKeySequence()))
+            bool own = Gui::ForkKeymap::isDeleteKey(ke)
                 || ke->matches(QKeySequence::Undo) || matchesRedo(ke) || isSectionMove(ke);
             for (const auto& action : menuActions) {
                 own = own || (action && Gui::QtTools::matches(ke, action->shortcut()));
@@ -3387,7 +3387,8 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
         }
         case QEvent::KeyPress: {
             auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
-            if (Gui::QtTools::matches(ke, QKeySequence(Gui::QtTools::deleteKeySequence()))) {
+            // Delete, and Backspace too on the Mac (both keys there; ops#640 polish)
+            if (Gui::ForkKeymap::isDeleteKey(ke)) {
                 removeSelected();
                 return true;
             }

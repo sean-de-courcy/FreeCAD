@@ -62,6 +62,7 @@
 #include <App/Part.h>
 #include <App/Link.h>
 #include <Base/Console.h>
+#include <Base/Exception.h>
 #include <Base/Parameter.h>
 #include <Base/Tools.h>
 
@@ -177,7 +178,15 @@ bool StdOrthographicCamera::isActive()
         return false;
     }
 
-    const std::string& camera = view->getCamera();
+    // FreeCAD-CH (ops#695): getCamera() throws while the view has no camera (built or torn
+    // down); an exception from isActive() leaves the update timer and aborts FreeCAD on macOS
+    std::string camera;
+    try {
+        camera = view->getCamera();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
     const bool mode = camera.find("OrthographicCamera") != std::string_view::npos;
     _pcAction->setChecked(mode);
 
@@ -224,7 +233,15 @@ bool StdPerspectiveCamera::isActive()
         return false;
     }
 
-    const std::string& camera = view->getCamera();
+    // FreeCAD-CH (ops#695): getCamera() throws while the view has no camera (built or torn
+    // down); an exception from isActive() leaves the update timer and aborts FreeCAD on macOS
+    std::string camera;
+    try {
+        camera = view->getCamera();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
     const bool mode = camera.find("PerspectiveCamera") != std::string_view::npos;
     _pcAction->setChecked(mode);
 

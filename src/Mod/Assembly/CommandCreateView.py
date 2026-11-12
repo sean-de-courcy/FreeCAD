@@ -1379,13 +1379,13 @@ class TaskAssemblyCreateView(QtCore.QObject):
     def eventFilter(self, watched, event):
         if self.form is not None and watched == self.form.stepList:
             if event.type() == QtCore.QEvent.ShortcutOverride:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     event.accept()
                     return True  # Indicate that the event has been handled
                 return False
 
             elif event.type() == QtCore.QEvent.KeyPress:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     selected_indexes = self.form.stepList.selectedIndexes()
                     sorted_indexes = sorted(selected_indexes, key=lambda x: x.row(), reverse=True)
                     for index in sorted_indexes:

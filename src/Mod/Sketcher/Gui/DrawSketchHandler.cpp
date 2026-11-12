@@ -460,7 +460,9 @@ bool DrawSketchHandler::isToolKey(bool pressed, int key)
         return true;
     }
     if (pressed) {
-        if (QGuiApplication::keyboardModifiers() & Qt::ControlModifier) {
+        // Ctrl (Cmd on macOS); Control for M on the Mac, where Cmd+M minimizes (ops#640 polish)
+        auto modifier = Gui::ForkKeymap::toolKeyModifier(key == SoKeyboardEvent::M ? 'M' : 0);
+        if (QGuiApplication::keyboardModifiers() & modifier) {
             toolKeysDown.insert(key);
             return true;
         }
@@ -473,7 +475,13 @@ bool DrawSketchHandler::isToolKey(bool pressed, int key)
 Gui::InputHint::InputSequence SketcherGui::toolKey(Gui::InputHint::UserInput key)
 {
     if (Gui::ForkKeymap::isOnshape()) {
-        return {Gui::InputHint::UserInput::ModifierCtrl, key};
+        bool isM = key == Gui::InputHint::UserInput::KeyM;
+        return {
+            Gui::ForkKeymap::toolKeyModifier(isM ? 'M' : 0) == Qt::MetaModifier
+                ? Gui::InputHint::UserInput::ModifierMeta
+                : Gui::InputHint::UserInput::ModifierCtrl,
+            key
+        };
     }
     return {key};
 }
@@ -485,7 +493,11 @@ QString SketcherGui::toolKeyLabel(const QString& label)
     if (!Gui::ForkKeymap::isOnshape() || !match.hasMatch()) {
         return label;
     }
-    QKeySequence key(QStringLiteral("Ctrl+") + match.captured(1));
+    char letter = match.captured(1).at(0).toLatin1();
+    auto modifier = Gui::ForkKeymap::toolKeyModifier(letter) == Qt::MetaModifier
+        ? QStringLiteral("Meta+")
+        : QStringLiteral("Ctrl+");
+    QKeySequence key(modifier + match.captured(1));
     return label.left(match.capturedStart()) + QStringLiteral("(")
         + key.toString(QKeySequence::NativeText) + QStringLiteral(")");
 }

@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -41,6 +42,7 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -2868,7 +2870,7 @@ void TaskDlgFeatureParameters::open()
         }
     }
     // The first parameter box's title is the feature's name, red while it is in error, as
-    // Onshape's dialog title (ops#640 rank 36, hands-on B-4: no rename in the dialog). The
+    // Onshape's dialog title (ops#640 rank 36; renamed in it, polish P13: addTitleRename). The
     // operation row's box when it is on top (round 6, J9); a pattern's or a mirror's box, which
     // isn't a TaskFeatureParameters (round 6, J16 N1)
     for (QWidget* wgt : Content) {
@@ -2966,15 +2968,131 @@ void TaskDlgFeatureParameters::updateTitle()
     if (box->headerText() != name) {
         box->setHeaderText(name);
     }
-    // The header's title button (QSint's ActionLabel); hovering shows the name, as Onshape's
+    // The header's title button (QSint's ActionLabel); hovering shows the name, as Onshape's. In
+    // error: Onshape's red and its tooltip, "<name> did not regenerate properly: <why>" (polish
+    // P13, PL3a)
     const bool invalid = !feature->isValid();
+    const QString tip = invalid
+        ? tr("%1 did not regenerate properly: %2")
+              .arg(name, QString::fromUtf8(feature->getStatusString()))
+        : name;
     for (QToolButton* title : box->findChildren<QToolButton*>()) {
         if (title->text() == name) {
-            title->setStyleSheet(invalid ? QStringLiteral("color: #d32f2f;") : QString());
-            title->setToolTip(name);
+            title->setStyleSheet(invalid ? QStringLiteral("color: #AA252D;") : QString());
+            title->setToolTip(tip);
             title->setProperty("featureInError", invalid);
         }
     }
+}
+
+namespace
+{
+// Hands a watched widget's events to a function (polish P13)
+class EventHook: public QObject
+{
+public:
+    EventHook(QObject* parent, std::function<bool(QObject*, QEvent*)> handler)
+        : QObject(parent)
+        , handler(std::move(handler))
+    {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        return handler(watched, event);
+    }
+
+private:
+    std::function<bool(QObject*, QEvent*)> handler;
+};
+}  // namespace
+
+void TaskDlgFeatureParameters::addTitleRename()
+{
+    auto box = qobject_cast<Gui::TaskView::TaskBox*>(titleBox.data());
+    App::DocumentObject* feature = getObject();
+    if (!box || !feature) {
+        return;
+    }
+    const QString name = QString::fromUtf8(feature->Label.getValue());
+    QToolButton* title = nullptr;
+    for (QToolButton* button : box->findChildren<QToolButton*>()) {
+        if (button->text() == name) {
+            title = button;
+            break;
+        }
+    }
+    QWidget* header = title ? title->parentWidget() : nullptr;
+    auto row = header ? qobject_cast<QHBoxLayout*>(header->layout()) : nullptr;
+    if (!row) {
+        return;
+    }
+    // Onshape: a pencil shown while the title row is hovered; it turns the title into a text box
+    auto pencil = new QToolButton(header);
+    pencil->setObjectName(QStringLiteral("FreeCAD-CH rename title"));
+    pencil->setIcon(Gui::BitmapFactory().iconFromTheme("edit-edit"));
+    pencil->setAutoRaise(true);
+    pencil->setToolTip(tr("Rename"));
+    pencil->hide();
+    auto edit = new QLineEdit(header);
+    edit->setObjectName(QStringLiteral("FreeCAD-CH rename box"));
+    edit->hide();
+    const int at = row->indexOf(title);
+    row->insertWidget(at + 1, edit, 1);
+    row->insertWidget(at + 1, pencil);
+
+    App::DocumentObjectT featureT(feature);
+    // Enter or leaving the box renames (the edit's transaction takes it: Cancel undoes it, and
+    // OK counts it as a change); Esc only closes the box. An empty name keeps the old one
+    auto finish = [title, edit, featureT](bool rename) {
+        if (!edit->isVisible()) {  // hiding the focused box ends its editing a second time
+            return;
+        }
+        edit->hide();
+        title->show();
+        App::DocumentObject* obj = featureT.getObject();
+        const QString text = edit->text().trimmed();
+        if (rename && obj && !text.isEmpty() && text != QString::fromUtf8(obj->Label.getValue())) {
+            obj->Label.setValue(text.toUtf8().constData());
+        }
+    };
+    QObject::connect(pencil, &QToolButton::clicked, edit, [title, pencil, edit, featureT]() {
+        App::DocumentObject* obj = featureT.getObject();
+        if (!obj) {
+            return;
+        }
+        edit->setText(QString::fromUtf8(obj->Label.getValue()));
+        title->hide();
+        pencil->hide();
+        edit->show();
+        edit->setFocus(Qt::OtherFocusReason);
+        edit->selectAll();
+    });
+    QObject::connect(edit, &QLineEdit::editingFinished, edit, [finish]() { finish(true); });
+    edit->installEventFilter(new EventHook(edit, [finish](QObject*, QEvent* event) {
+        auto key = event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress
+            ? static_cast<QKeyEvent*>(event)
+            : nullptr;
+        const bool enter = key && (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter);
+        if (!key || (!enter && key->key() != Qt::Key_Escape)) {
+            return false;
+        }
+        // The dialog's own Esc (Cancel) and Enter (OK) don't take it: QLineEdit passes Enter on
+        event->accept();
+        if (event->type() == QEvent::KeyPress) {
+            finish(enter);
+        }
+        return true;
+    }));
+    header->installEventFilter(new EventHook(header, [pencil, edit](QObject*, QEvent* event) {
+        if (event->type() == QEvent::Enter && !edit->isVisible()) {
+            pencil->show();
+        }
+        else if (event->type() == QEvent::Leave) {
+            pencil->hide();
+        }
+        return false;
+    }));
 }
 
 void TaskDlgFeatureParameters::flattenForOnshape()
@@ -2997,6 +3115,7 @@ void TaskDlgFeatureParameters::flattenForOnshape()
     if (preview) {
         preview->setOnshapeLayout(hasLaterFeature());
     }
+    addTitleRename();
 }
 
 bool TaskDlgFeatureParameters::hasLaterFeature() const
