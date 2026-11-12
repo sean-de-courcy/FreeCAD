@@ -1397,6 +1397,7 @@ int SketchObject::delConstraintOnPoint(int geoId, PointPos posId, bool onlyCoinc
                 );
             }
             case Sketcher::PointOnObject:
+            case Sketcher::Pierce:      // FreeCAD-CH (Onshape's Pierce): as Point on object
             case Sketcher::Midpoint: {  // FreeCAD-CH (ops#656): as Point on object
                 return transferToReplacement(constr->First, constr->FirstPos);
             }
@@ -2598,6 +2599,7 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
         case Tangent:
         case Group:
         case Midpoint:
+        case Pierce:
             requireSecond = true;
             break;
         case Symmetric:

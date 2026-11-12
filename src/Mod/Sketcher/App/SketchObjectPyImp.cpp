@@ -28,6 +28,7 @@
 #include <Geom_TrimmedCurve.hxx>
 
 #include <App/Document.h>
+#include <App/DocumentObjectPy.h>
 #include <Base/AxisPy.h>
 #include <Base/QuantityPy.h>
 #include <Base/Tools.h>
@@ -674,6 +675,46 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     Py_Return;
+}
+
+// FreeCAD-CH (Onshape's Pierce)
+PyObject* SketchObjectPy::addPierce(PyObject* args)
+{
+    int geoId = 0;
+    int pointPos = 0;
+    PyObject* object = nullptr;
+    char* subName = nullptr;
+    if (!PyArg_ParseTuple(args, "iiOs", &geoId, &pointPos, &object, &subName)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = this->getSketchObjectPtr();
+    App::DocumentObject* obj = nullptr;
+    if (PyObject_TypeCheck(object, &(App::DocumentObjectPy::Type))) {
+        obj = static_cast<App::DocumentObjectPy*>(object)->getDocumentObjectPtr();
+    }
+    else if (PyUnicode_Check(object)) {
+        obj = sketch->getDocument()->getObject(PyUnicode_AsUTF8(object));
+    }
+    if (!obj) {
+        PyErr_SetString(PyExc_ValueError, "addPierce: the edge's object is not in the document");
+        return nullptr;
+    }
+
+    int index = -1;
+    try {
+        index = sketch->addPierce(geoId, static_cast<Sketcher::PointPos>(pointPos), obj, subName);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    // as addConstraint: the point meets the crossing inside the caller's command
+    sketch->solve();
+    if (sketch->noRecomputes) {
+        sketch->setUpSketch();
+        sketch->Constraints.touch();
+    }
+    return Py::new_reference_to(Py::Long(index));
 }
 
 PyObject* SketchObjectPy::delUnusedImplicitExternals(PyObject* args)

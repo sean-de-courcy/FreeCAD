@@ -1073,6 +1073,7 @@ Restart:
                 } break;
                 case PointOnObject:
                 case Midpoint:  // FreeCAD-CH (ops#656): drawn at its point, as PointOnObject
+                case Pierce:    // FreeCAD-CH (Onshape's Pierce): likewise
                 case Tangent:
                 case SnellsLaw: {
                     assert(Constr->First >= -extGeoCount && Constr->First < intGeoCount);
@@ -1081,6 +1082,7 @@ Restart:
                     Base::Vector3d pos, relPos;
                     if (
                         Constr->Type == PointOnObject || Constr->Type == Midpoint
+                        || Constr->Type == Pierce
                         || Constr->Type == SnellsLaw
                         || (Constr->Type == Tangent && Constr->Third != GeoEnum::GeoUndef)
                         ||  // Tangency via point
@@ -2040,6 +2042,7 @@ void EditModeConstraintCoinManager::rebuildConstraintNodes(
             } break;
             case PointOnObject:
             case Midpoint:  // FreeCAD-CH (ops#656)
+            case Pierce:    // FreeCAD-CH (Onshape's Pierce)
             case Tangent:
             case SnellsLaw: {
                 // #define CONSTRAINT_SEPARATOR_INDEX_MATERIAL_OR_DATUMLABEL 0
@@ -2977,6 +2980,8 @@ QString EditModeConstraintCoinManager::iconTypeFromConstraint(Constraint* constr
             return QStringLiteral("Constraint_PointOnObject");
         case Midpoint:  // FreeCAD-CH (ops#656)
             return QStringLiteral("Constraint_PointOnMidPoint");
+        case Pierce:  // FreeCAD-CH (Onshape's Pierce): the point on the crossing point
+            return QStringLiteral("Constraint_PointOnPoint");
         case Tangent:
             return QStringLiteral("Constraint_Tangent");
         case Parallel:

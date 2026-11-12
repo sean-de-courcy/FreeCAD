@@ -2606,6 +2606,32 @@ int Sketch::addConstraint(const Constraint* constraint)
             rtn = ++ConstraintsCounter;
             break;
         }
+        case Pierce: {
+            // FreeCAD-CH (Onshape's Pierce): the point where a model edge crosses the sketch plane
+            // is a point of the edge's Intersection external, fixed: a coincidence with it. Only a
+            // point geometry is a crossing (anything else is malformed: rtn stays -1)
+            const int geoId2 = checkGeoId(constraint->Second);
+            if (Geoms[geoId2].type != Point) {
+                break;
+            }
+            if (constraint->FirstPos == PointPos::none) {
+                // a line (its infinite extension), a circle or an arc (its circle) through the
+                // crossing: a point on object of the crossing on the curve
+                const auto type = Geoms[checkGeoId(constraint->First)].type;
+                if (type != Line && type != Circle && type != Arc) {
+                    break;
+                }
+                rtn = addPointOnObjectConstraint(constraint->Second, PointPos::start, constraint->First);
+                break;
+            }
+            rtn = addPointCoincidentConstraint(
+                constraint->First,
+                constraint->FirstPos,
+                constraint->Second,
+                PointPos::start
+            );
+            break;
+        }
         case Midpoint: {
             // FreeCAD-CH (ops#656): the point on the arc's circle at the parameter u, and u the
             // mean of the arc's end angles: u - start = end - u = h, with u and h two unknowns of

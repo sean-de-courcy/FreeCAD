@@ -55,6 +55,7 @@ from SketcherTests.TestSketchDxf import TestDxfReader, TestDxfFitting, TestDxfEx
 from SketcherTests.TestSketchDxf import TestDxfSkepticCases, TestDxfReviewCases  # FreeCAD-CH, DXF lane
 from SketcherTests.TestSketchTrimSplit import TestSketchRepeatedConstraints  # FreeCAD-CH, ops#656
 from SketcherTests.TestSketchTrimSplit import TestSketchArcMidpoint  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchPierce import TestSketchPierce  # FreeCAD-CH, Onshape's Pierce
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py

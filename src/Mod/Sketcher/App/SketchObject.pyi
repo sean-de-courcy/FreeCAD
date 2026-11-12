@@ -364,6 +364,32 @@ class SketchObject(Part2DObject):
         """
         ...
 
+    def addPierce(self, geoId: int, pointPos: int, obj: object, subName: str, /) -> int:
+        """
+        Constrain a sketch point to where a model edge crosses the sketch plane (Onshape's
+        Pierce), in one constraint of type 'Pierce'. The crossing is a point of the edge's
+        intersection with the sketch plane, an external geometry added as the constraint's
+        helper (addExternal's implicit) unless a link of the edge already gives intersections.
+        When the edge crosses the plane more than once, the crossing nearest the point is taken.
+
+        addPierce(geoId:int, pointPos:int, obj, subName:str) -> int
+
+            Args:
+                geoId: The point's geometry (the sketch's own).
+                pointPos: The point's position on it (1 start, 2 end, 3 mid), or 0 for a
+                    line (its extension then passes through the crossing: the line slides,
+                    keeping its direction and length), a circle or an arc (the crossing on its
+                    circle).
+                obj: The document object holding the edge, or its name.
+                subName: The edge, e.g. 'Edge3'.
+
+            Returns:
+                The index of the new constraint.
+
+            Raises an error when the edge lies in the sketch plane or doesn't reach it.
+        """
+        ...
+
     def delExternal(self, extGeoId: int, /) -> None:
         """
         Delete an external geometry link from the sketch.
