@@ -131,6 +131,7 @@
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeConstruct_Curve.hxx>
 #include <ShapeUpgrade_ShellSewing.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <ShapeFix_Face.hxx>
@@ -9717,15 +9718,16 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         op = Part::OpCodes::Refine;
     }
     bool closed = shape.isClosed();
+    // Refine runs on a topology-only copy, with the shape's element map and Tag (ops#354).
+    // Merging faces of a B-spline surface, ShapeFix_Face adds a curve on surface to their
+    // boundary edges for the merged face's surface, a new copy at every run (ops#316), and
+    // keeps it when the merge is then dropped. The input shares its TShapes with the shapes it
+    // was made from (a cut's untouched edges are its base's), which kept one more curve per
+    // edge at every recompute. The copy's sub-shapes come in the same order, so the result
+    // is named as from the shape.
+    TopoShape input(shape);
+    bool failed = false;
     try {
-        // Refine runs on a topology-only copy, with the shape's element map and Tag (ops#354).
-        // Merging faces of a B-spline surface, ShapeFix_Face adds a curve on surface to their
-        // boundary edges for the merged face's surface, a new copy at every run (ops#316), and
-        // keeps it when the merge is then dropped. The input shares its TShapes with the shapes it
-        // was made from (a cut's untouched edges are its base's), which kept one more curve per
-        // edge at every recompute. The copy's sub-shapes come in the same order, so the result
-        // is named as from the shape.
-        TopoShape input(shape);
         input.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
         MyRefineMaker mkRefine(input.getShape());
         GenericShapeMapper mapper;
@@ -9739,9 +9741,34 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         }
     }
     catch (Standard_Failure&) {
-        if (no_fail == RefineFail::throwException) {
-            throw;
+        failed = true;  // the fallback below, then the policy
+    }
+    // The face uniter re-sews the whole shell after it merges a group; a shell holding a
+    // helix's loose edges (FeatureHelix widens them to about 2e-4 mm so its fusion succeeds)
+    // came back open, or the uniter failed, and every later feature of the body kept split
+    // coplanar faces, silently: Onshape merges them (rehearsal 5, rb43). OCCT's
+    // UnifySameDomain merges in place, without sewing; its result counts only when it stays as
+    // closed as the shape and valid. Elsewhere the face uniter alone decides, as before.
+    try {
+        if (input.getShape().IsNull() || input.getShape().IsSame(shape.getShape())) {
+            input.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
         }
+        ShapeUpgrade_UnifySameDomain unify(input.getShape(), true, true, false);
+        unify.Build();
+        const TopoDS_Shape& unified = unify.Shape();
+        if (!unified.IsNull() && BRepCheck_Analyzer(unified).IsValid()) {
+            makeShapeWithElementMap(unified, MapperHistory(unify.History()), {input}, op);
+            fixSolidOrientation();
+            if (isClosed() == closed) {
+                return *this;
+            }
+        }
+    }
+    catch (Standard_Failure&) {
+        // keep the shape as it was, below
+    }
+    if (failed && no_fail == RefineFail::throwException) {
+        throw Standard_Failure("Removing splitter failed");
     }
     *this = shape;
     return *this;
