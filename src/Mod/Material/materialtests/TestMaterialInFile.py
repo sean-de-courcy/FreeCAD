@@ -634,4 +634,65 @@ class MaterialInFileTestCases(unittest.TestCase):
         warning = [l for l in log.splitlines() if "not saved with the document" in l]
         self.assertTrue(warning, log[-2000:])
         self.assertIn("TestList", warning[0])
-        self.assertNotIn('name="TestList"', self.documentXml(save))
+        xml = self.documentXml(save)
+        self.assertNotIn('<Value name="TestList"', xml)
+        self.assertIn('<Dropped name="TestList"/>', xml)
+        # another computer without the card: the material is incomplete, so it is not learned
+        result, log = self.child(self.settingsFolder("other-settings"), save)
+        self.assertEqual(result["objects"]["Box"]["name"], "E1 list", log[-2000:])
+        self.assertIn("TestList (not saved with the document)", log)
+        self.assertEqual(result["learned"], [])
+
+    # -- the desktop's follow-up (ops#675 comment 6822760173) -----------------------------------
+
+    def testCountsThatAreNoNumbers(self):
+        """Counts that are no numbers (a hand-edited file): the material and the rest of the
+        document are restored, a warning names the part, nothing is learned"""
+        doc = self.newDoc("E1JunkCounts")
+        box = self.cube(doc, "Box")
+        box.ShapeMaterial = self.plaster()
+        made = box.ShapeMaterial.UUID
+        self.cube(doc, "Box2", 20)
+        doc.recompute()
+        path = os.path.join(self.work, "junkcounts.FCStd")
+        doc.saveAs(path)
+        self.editElement(
+            path,
+            made,
+            lambda e: e.replace('models="1"', 'models="abc"').replace('values="1"', 'values="1x"'),
+        )
+
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertEqual(entry["name"], PLASTER, log[-2000:])
+        self.assertEqual(entry["uuid"], made)
+        self.assertAlmostEqual(entry["density"], PLASTER_DENSITY, places=9)
+        self.assertCube(result["objects"]["Box2"], "Box2")
+        warning = [l for l in log.splitlines() if "1 of abc models and 1 of 1x values found" in l]
+        self.assertTrue(warning, log[-2000:])
+        self.assertIn("(Box)", warning[0])
+        self.assertEqual(result["learned"], [])
+
+    def testMissingUuid(self):
+        """No uuid attribute: the material's values are restored, the rest of the document too, a
+        warning names the part, nothing is learned"""
+        doc = self.newDoc("E1NoUuid")
+        box = self.cube(doc, "Box")
+        box.ShapeMaterial = self.plaster()
+        made = box.ShapeMaterial.UUID
+        self.cube(doc, "Box2", 20)
+        doc.recompute()
+        path = os.path.join(self.work, "nouuid.FCStd")
+        doc.saveAs(path)
+        self.editElement(path, made, lambda e: e.replace('uuid="{}" '.format(made), "", 1))
+        self.assertNotIn(made, self.documentXml(path))
+
+        result, log = self.child(self.settingsFolder("empty-settings"), path)
+        entry = result["objects"]["Box"]
+        self.assertEqual(entry["name"], PLASTER, log[-2000:])
+        self.assertAlmostEqual(entry["density"], PLASTER_DENSITY, places=9)
+        self.assertCube(result["objects"]["Box2"], "Box2")
+        warning = [l for l in log.splitlines() if "has no valid UUID ('')" in l]
+        self.assertTrue(warning, log[-2000:])
+        self.assertIn("(Box)", warning[0])
+        self.assertEqual(result["learned"], [])

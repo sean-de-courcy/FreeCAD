@@ -109,6 +109,8 @@ void PropertyMaterial::setPyObject(PyObject* value)
 // Models are the material's physical models; values are its non-empty physical values of a scalar
 // type, at full precision: a quantity in internal units with its unit, a float, an integer, a
 // boolean or a string. Appearance models stay in the library card (a part's colour is its own).
+// A non-empty value of another type (a list, an image...) is named by a <Dropped name="..."/>
+// child, so that a computer without the card knows the material it restores is incomplete.
 // A file from before this change has the uuid only (no "models" attribute).
 
 namespace
@@ -443,6 +445,7 @@ void PropertyMaterial::Save(Base::Writer& writer) const
     }
     std::sort(models.begin(), models.end());
     std::vector<std::pair<QString, std::string>> values;
+    std::vector<QString> droppedNames;
     std::string dropped;
     for (auto& [name, prop] : _material.getPhysicalProperties()) {
         auto attributes = valueAttributes(*prop);
@@ -450,6 +453,7 @@ void PropertyMaterial::Save(Base::Writer& writer) const
             values.emplace_back(name, attributes);
         }
         else if (!prop->isNull()) {
+            droppedNames.push_back(name);
             dropped += (dropped.empty() ? "" : ", ") + name.toStdString();
         }
     }
@@ -466,7 +470,7 @@ void PropertyMaterial::Save(Base::Writer& writer) const
                     << "\" name=\""
                     << encode(_material.getName()) << "\" models=\"" << models.size()
                     << "\" values=\"" << values.size() << "\"";
-    if (models.empty() && values.empty()) {
+    if (models.empty() && values.empty() && droppedNames.empty()) {
         writer.Stream() << "/>" << std::endl;
         return;
     }
@@ -479,6 +483,9 @@ void PropertyMaterial::Save(Base::Writer& writer) const
         writer.Stream() << writer.ind() << "<Value name=\"" << encode(name) << "\"" << attributes
                         << "/>" << std::endl;
     }
+    for (auto& name : droppedNames) {
+        writer.Stream() << writer.ind() << "<Dropped name=\"" << encode(name) << "\"/>" << std::endl;
+    }
     writer.decInd();
     writer.Stream() << writer.ind() << "</PropertyMaterial>" << std::endl;
 }
@@ -486,7 +493,8 @@ void PropertyMaterial::Save(Base::Writer& writer) const
 void PropertyMaterial::Restore(Base::XMLReader& reader)
 {
     reader.readElement("PropertyMaterial");
-    auto uuid = QString::fromLatin1(reader.getAttribute<const char*>("uuid"));
+    bool hasUuid = reader.hasAttribute("uuid");
+    auto uuid = QString::fromLatin1(reader.getAttribute<const char*>("uuid", ""));
     auto& manager = MaterialManager::getManager();
     std::shared_ptr<Material> card;
     if (manager.exists(uuid)) {
@@ -512,8 +520,16 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
     }
 
     auto name = QString::fromUtf8(reader.getAttribute<const char*>("name", ""));
-    auto modelCount = reader.getAttribute<long>("models", 0);
-    auto valueCount = reader.getAttribute<long>("values", 0);
+    // The counts are only compared with the children found, so they are kept as text: a number
+    // parsed from a hand-edited file could throw.
+    std::string modelCount = reader.getAttribute<const char*>("models", "0");
+    std::string valueCount = reader.getAttribute<const char*>("values", "0");
+    if (!hasUuid) {
+        Base::Console().warning("Material '%s' of %s has no valid UUID (''): "
+                                "not added to the user material library\n",
+                                name.toStdString().c_str(),
+                                ownerName(*this).c_str());
+    }
 
     // The file wins: the library card, when there is one, gives only what the file does not carry.
     Material material = card ? Material(*card) : Material();
@@ -535,6 +551,14 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
             ++values;
             restoreNamedValue(material, reader, lost);
         }
+        else if (tag == "Dropped") {
+            // a value the file doesn't carry: the card has it, else the material is incomplete
+            if (!card) {
+                lost.push_back(
+                    QString::fromUtf8(reader.getAttribute<const char*>("name", "")).toStdString()
+                    + " (not saved with the document)");
+            }
+        }
         else {
             lost.push_back("element <" + tag + ">");
         }
@@ -543,10 +567,9 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
     if (std::string(reader.localName()) == "PropertyMaterial") {
         reader.readEndElement("PropertyMaterial");  // returns at once: it is the current element
     }
-    if (models != modelCount || values != valueCount) {
-        lost.push_back(std::to_string(models) + " of " + std::to_string(modelCount) + " models and "
-                       + std::to_string(values) + " of " + std::to_string(valueCount)
-                       + " values found");
+    if (std::to_string(models) != modelCount || std::to_string(values) != valueCount) {
+        lost.push_back(std::to_string(models) + " of " + modelCount + " models and "
+                       + std::to_string(values) + " of " + valueCount + " values found");
     }
     if (!lost.empty()) {
         std::string list;
@@ -560,7 +583,7 @@ void PropertyMaterial::Restore(Base::XMLReader& reader)
     }
     setValue(material);
     // only a material restored whole becomes a card
-    if (!card && lost.empty() && !material.getPhysicalModels()->isEmpty()
+    if (!card && hasUuid && lost.empty() && !material.getPhysicalModels()->isEmpty()
         && openingDocument(*this)) {
         learnMaterial(material, ownerName(*this));
     }
