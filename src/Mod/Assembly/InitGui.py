@@ -72,6 +72,7 @@ class AssemblyWorkbench(Workbench):
         import CommandCreateSimulation
         import CommandCreateSnapshot
         import CommandCreateBom
+        import CommandSnapMode  # FreeCAD-CH (ops#640, design C9)
         import AssemblyPattern  # FreeCAD-CH (asm-patterns): instance patterns
         import Preferences
 
@@ -86,6 +87,7 @@ class AssemblyWorkbench(Workbench):
         cmdList = [
             "Assembly_CreateAssembly",
             "Assembly_Insert",
+            "Assembly_ToggleSnapMode",  # FreeCAD-CH (ops#640, design C9)
             "Assembly_SolveAssembly",
             "Assembly_CreateView",
             "Assembly_CreateSnapshot",
