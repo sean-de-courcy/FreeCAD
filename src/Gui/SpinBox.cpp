@@ -209,7 +209,7 @@ ExpressionSpinBox::ExpressionSpinBox(QAbstractSpinBox* sb)
             QString text = lineedit->text();
             const QLocale locale;
             text.remove(locale.groupSeparator());
-            text.replace(locale.decimalPoint(), QLatin1Char('.'));
+            text.replace(locale.decimalPoint(), QStringLiteral("."));
             std::shared_ptr<Expression> expr(Expression::parse(obj, text.toStdString()));
             ExpressionBinding::setExpression(expr);
         }
