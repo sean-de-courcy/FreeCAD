@@ -29,12 +29,18 @@
 #include <vector>
 
 #include <Inventor/SbVec3f.h>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMenu>
 #include <QPointer>
+#include <QStringList>
 
 #include "Action.h"
 #include "Application.h"
 #include "Command.h"
+#include "Document.h"
 #include "MainWindow.h"
+#include "NamedViews.h"
 #include "SectionView.h"
 #include "View3DInventor.h"
 #include "View3DInventorViewer.h"
@@ -143,6 +149,215 @@ bool StdCmdSectionView::isActive()
 }
 
 //===========================================================================
+// Std_SaveNamedView
+//===========================================================================
+
+DEF_3DV_CMD(StdCmdSaveNamedView)
+
+StdCmdSaveNamedView::StdCmdSaveNamedView()
+    : Command("Std_SaveNamedView")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("Save named &view...");
+    sToolTipText = QT_TR_NOOP("Saves the camera of the view under a name, in the document");
+    sWhatsThis = "Std_SaveNamedView";
+    sStatusTip = sToolTipText;
+    eType = Alter3DView;
+}
+
+void StdCmdSaveNamedView::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    Gui::Document* doc = getActiveGuiDocument();
+    if (!doc) {
+        return;
+    }
+
+    const auto existing = NamedViews::names(doc);
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+                             getMainWindow(),
+                             QObject::tr("Save named view"),
+                             QObject::tr("Name of the view (a view of the same name is replaced):"),
+                             QLineEdit::Normal,
+                             QObject::tr("View %1").arg(existing.size() + 1),
+                             &ok
+    ).trimmed();
+    if (ok && !name.isEmpty()) {
+        if (!NamedViews::saveCurrent(doc, name.toStdString())) {
+            getMainWindow()->showMessage(QObject::tr("The view could not be saved"), 5000);
+        }
+        getMainWindow()->updateActions();
+    }
+}
+
+//===========================================================================
+// Std_NamedViews
+//===========================================================================
+
+class StdCmdNamedViews: public Gui::Command
+{
+public:
+    StdCmdNamedViews();
+    ~StdCmdNamedViews() override = default;
+    const char* className() const override
+    {
+        return "StdCmdNamedViews";
+    }
+
+protected:
+    void activated(int iMsg) override;
+    bool isActive() override;
+    Action* createAction() override;
+
+private:
+    void refresh();
+    QString chooseView(const QString& title);
+
+    static constexpr int maxViews {40};  // the entries made up front, as Std_FreezeViews does
+    int offset {0};
+    QAction* renameItem {nullptr};
+    QAction* deleteItem {nullptr};
+    QAction* separator {nullptr};
+};
+
+StdCmdNamedViews::StdCmdNamedViews()
+    : Command("Std_NamedViews")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("Named views");
+    sToolTipText = QT_TR_NOOP("Restores, renames or deletes the named views of the document");
+    sWhatsThis = "Std_NamedViews";
+    sStatusTip = sToolTipText;
+    eType = Alter3DView;
+}
+
+Action* StdCmdNamedViews::createAction()
+{
+    auto pcAction = new ActionGroup(this, getMainWindow());
+    pcAction->setDropDownMenu(true);
+    applyCommandData(this->className(), pcAction);
+
+    renameItem = pcAction->addAction(QObject::tr("&Rename view..."));
+    renameItem->setWhatsThis(QString::fromLatin1(getWhatsThis()));
+    deleteItem = pcAction->addAction(QObject::tr("&Delete view..."));
+    deleteItem->setWhatsThis(QString::fromLatin1(getWhatsThis()));
+    separator = pcAction->addAction(QString());
+    separator->setSeparator(true);
+    offset = pcAction->actions().count();
+    for (int i = 0; i < maxViews; ++i) {
+        pcAction->addAction(QString())->setVisible(false);
+    }
+
+    // the entries are made from the active document each time the menu opens
+    QObject::connect(pcAction, &ActionGroup::aboutToShow, [this](QMenu*) { refresh(); });
+    return pcAction;
+}
+
+void StdCmdNamedViews::refresh()
+{
+    auto group = qobject_cast<ActionGroup*>(_pcAction);
+    if (!group) {
+        return;
+    }
+    Gui::Document* doc = getActiveGuiDocument();
+    const auto names = doc ? NamedViews::names(doc) : std::vector<std::string>();
+    const bool any = !names.empty();
+    renameItem->setEnabled(any);
+    deleteItem->setEnabled(any);
+    separator->setVisible(any);
+
+    const QList<QAction*> items = group->actions();
+    for (int i = 0; i < maxViews && offset + i < items.size(); ++i) {
+        QAction* item = items[offset + i];
+        if (i < int(names.size())) {
+            const QString name = QString::fromStdString(names[i]);
+            item->setData(name);
+            item->setToolTip(name);
+            item->setText(QString(name).replace(QLatin1Char('&'), QStringLiteral("&&")));
+            item->setVisible(true);
+        }
+        else {
+            item->setData(QString());
+            item->setVisible(false);
+        }
+    }
+}
+
+QString StdCmdNamedViews::chooseView(const QString& title)
+{
+    Gui::Document* doc = getActiveGuiDocument();
+    QStringList items;
+    if (doc) {
+        for (const auto& name : NamedViews::names(doc)) {
+            items << QString::fromStdString(name);
+        }
+    }
+    if (items.isEmpty()) {
+        return {};
+    }
+    bool ok = false;
+    const QString name
+        = QInputDialog::getItem(getMainWindow(), title, QObject::tr("View:"), items, 0, false, &ok);
+    return ok ? name : QString();
+}
+
+void StdCmdNamedViews::activated(int iMsg)
+{
+    Gui::Document* doc = getActiveGuiDocument();
+    if (!doc) {
+        return;
+    }
+    refresh();
+
+    if (iMsg == 0) {
+        const QString oldName = chooseView(QObject::tr("Rename named view"));
+        if (oldName.isEmpty()) {
+            return;
+        }
+        bool ok = false;
+        const QString newName = QInputDialog::getText(
+                                    getMainWindow(),
+                                    QObject::tr("Rename named view"),
+                                    QObject::tr("New name:"),
+                                    QLineEdit::Normal,
+                                    oldName,
+                                    &ok
+        ).trimmed();
+        if (ok && !newName.isEmpty()
+            && !NamedViews::rename(doc, oldName.toStdString(), newName.toStdString())) {
+            getMainWindow()->showMessage(QObject::tr("A view of this name exists already"), 5000);
+        }
+    }
+    else if (iMsg == 1) {
+        const QString name = chooseView(QObject::tr("Delete named view"));
+        if (!name.isEmpty()) {
+            NamedViews::remove(doc, name.toStdString());
+        }
+    }
+    else if (iMsg >= offset) {
+        auto group = qobject_cast<ActionGroup*>(_pcAction);
+        const QList<QAction*> items = group ? group->actions() : QList<QAction*>();
+        if (iMsg < items.size()) {
+            const QString name = items[iMsg]->data().toString();
+            if (!name.isEmpty()) {
+                NamedViews::restore(doc, name.toStdString());
+            }
+        }
+    }
+    refresh();
+}
+
+bool StdCmdNamedViews::isActive()
+{
+    if (!activeView3D()) {
+        return false;
+    }
+    refresh();
+    return true;
+}
+
+//===========================================================================
 // registration
 //===========================================================================
 
@@ -152,5 +367,7 @@ void CreateViewToolCommands()
 {
     CommandManager& rcCmdMgr = Application::Instance->commandManager();
     rcCmdMgr.addCommand(new StdCmdSectionView());
+    rcCmdMgr.addCommand(new StdCmdSaveNamedView());
+    rcCmdMgr.addCommand(new StdCmdNamedViews());
 }
 }  // namespace Gui

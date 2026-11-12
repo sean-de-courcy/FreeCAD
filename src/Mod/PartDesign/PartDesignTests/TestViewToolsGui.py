@@ -28,13 +28,17 @@ Designed model: one 20 x 20 x 20 box at the origin. The oracles are data: what t
 entries and the commands' checked state. What the screen shows (the cap, the dashed hidden
 edges) is not asserted here."""
 
+import os
+import shutil
+import tempfile
 import time
 import unittest
+import zipfile
 
 import FreeCAD as App
 import FreeCADGui as Gui
 
-from PySide import QtWidgets
+from PySide import QtCore, QtWidgets
 
 
 def pump(seconds=0.3):
@@ -180,6 +184,201 @@ class TestSectionViewGui(ViewToolsCase):
         self.assertIsNotNone(entries, "the View menu")
         self.assertIn("Std_SectionView", entries)
         self.assertIn("Std_ToggleClipPlane", entries)  # the clipping dialog stays
+
+
+class TestNamedViewsGui(ViewToolsCase):
+    """Named views: a camera under a name, in the document (ops#640, view tools 2)."""
+
+    docName = "NamedViewsGui"
+
+    def setUp(self):
+        super().setUp()
+        self.view.setAnimationEnabled(False)
+        self.guiDoc = Gui.getDocument(self.doc.Name)
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        self.view.setAnimationEnabled(True)
+        super().tearDown()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def twoViews(self):
+        """Saves "Top" and "Front"; returns the camera strings of the two."""
+        self.view.viewTop()
+        top = self.view.getCamera()
+        self.guiDoc.saveNamedView("Top")
+        self.view.viewFront()
+        front = self.view.getCamera()
+        self.guiDoc.saveNamedView("Front")
+        self.assertNotEqual(top, front)
+        return top, front
+
+    def testNoViewsAtFirst(self):
+        self.assertEqual(self.guiDoc.namedViews(), [])
+
+    def testSaveListRestore(self):
+        top, front = self.twoViews()
+        self.assertEqual(self.guiDoc.namedViews(), ["Top", "Front"])
+        self.guiDoc.restoreNamedView("Top")
+        self.assertEqual(self.view.getCamera(), top)
+        self.guiDoc.restoreNamedView("Front")
+        self.assertEqual(self.view.getCamera(), front)
+
+    def testSameNameReplaces(self):
+        self.twoViews()
+        self.view.viewRear()
+        rear = self.view.getCamera()
+        self.guiDoc.saveNamedView("Top")
+        self.assertEqual(self.guiDoc.namedViews(), ["Top", "Front"])  # same place, no new entry
+        self.view.viewFront()
+        self.guiDoc.restoreNamedView("Top")
+        self.assertEqual(self.view.getCamera(), rear)
+
+    def testRename(self):
+        top, front = self.twoViews()
+        self.guiDoc.renameNamedView("Top", "Roof")
+        self.assertEqual(self.guiDoc.namedViews(), ["Roof", "Front"])
+        self.guiDoc.restoreNamedView("Roof")
+        self.assertEqual(self.view.getCamera(), top)
+        with self.assertRaises(ValueError):
+            self.guiDoc.restoreNamedView("Top")
+        with self.assertRaises(ValueError):
+            self.guiDoc.renameNamedView("Roof", "Front")  # the name is taken
+        with self.assertRaises(ValueError):
+            self.guiDoc.renameNamedView("Nothing", "Other")
+        self.assertEqual(self.guiDoc.namedViews(), ["Roof", "Front"])
+
+    def testDelete(self):
+        self.twoViews()
+        self.guiDoc.deleteNamedView("Top")
+        self.assertEqual(self.guiDoc.namedViews(), ["Front"])
+        with self.assertRaises(ValueError):
+            self.guiDoc.deleteNamedView("Top")
+        with self.assertRaises(ValueError):
+            self.guiDoc.restoreNamedView("Top")
+
+    def testEmptyNameIsRefused(self):
+        with self.assertRaises(RuntimeError):
+            self.guiDoc.saveNamedView("")
+        self.assertEqual(self.guiDoc.namedViews(), [])
+
+    def testViewsBelongToTheirDocument(self):
+        self.twoViews()
+        other = App.newDocument("NamedViewsOther")
+        try:
+            self.assertEqual(Gui.getDocument(other.Name).namedViews(), [])
+        finally:
+            App.closeDocument(other.Name)
+        Gui.ActiveDocument = self.guiDoc
+        self.assertEqual(self.guiDoc.namedViews(), ["Top", "Front"])
+
+    def testViewsSurviveSaveCloseAndReopen(self):
+        top, front = self.twoViews()
+        path = os.path.join(self.tmp, "named_views.FCStd")
+        self.doc.saveAs(path)
+        with zipfile.ZipFile(path) as archive:
+            xml = archive.read("GuiDocument.xml").decode()
+        self.assertIn("<NamedViews", xml)
+        self.assertIn('name="Top"', xml)
+        App.closeDocument(self.doc.Name)
+        pump()
+        self.doc = App.openDocument(path)
+        pump()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.assertEqual(guiDoc.namedViews(), ["Top", "Front"])
+        Gui.ActiveDocument = guiDoc
+        view = guiDoc.ActiveView
+        view.setAnimationEnabled(False)
+        guiDoc.restoreNamedView("Front")
+        self.assertEqual(view.getCamera(), front)
+        guiDoc.restoreNamedView("Top")
+        self.assertEqual(view.getCamera(), top)
+        self.view = view
+        self.guiDoc = guiDoc
+
+    def testDocumentWithoutViewsWritesNoElement(self):
+        path = os.path.join(self.tmp, "no_views.FCStd")
+        self.doc.saveAs(path)
+        with zipfile.ZipFile(path) as archive:
+            xml = archive.read("GuiDocument.xml").decode()
+        self.assertNotIn("NamedViews", xml)
+
+    def testSavingAViewTouchesTheDocument(self):
+        self.doc.saveAs(os.path.join(self.tmp, "touched.FCStd"))
+        self.guiDoc.Modified = False
+        self.guiDoc.saveNamedView("Mark")
+        self.assertTrue(self.guiDoc.Modified)
+
+    def fillDialog(self, text):
+        """Answers the input dialog the next command opens."""
+
+        def answer():
+            dialog = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(dialog, QtWidgets.QInputDialog):
+                dialog.setTextValue(text)
+                dialog.accept()
+            else:
+                QtCore.QTimer.singleShot(50, answer)
+
+        QtCore.QTimer.singleShot(100, answer)
+
+    def testSaveCommandAsksTheNameAndSaves(self):
+        self.view.viewTop()
+        top = self.view.getCamera()
+        self.fillDialog("Asked")
+        Gui.runCommand("Std_SaveNamedView")
+        pump()
+        self.assertEqual(self.guiDoc.namedViews(), ["Asked"])
+        self.view.viewFront()
+        self.guiDoc.restoreNamedView("Asked")
+        self.assertEqual(self.view.getCamera(), top)
+
+    def viewMenu(self):
+        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
+            if menu.title().replace("&", "") == "View":
+                return menu
+        self.fail("the View menu")
+
+    def namedViewsMenu(self):
+        for menu in self.viewMenu().findChildren(QtWidgets.QMenu):
+            if menu.title().replace("&", "") == "Named views":
+                return menu
+        self.fail("the Named views menu in the View menu")
+
+    def testMenusAreInTheViewMenu(self):
+        entries = menuActions("View")
+        self.assertIn("Std_SaveNamedView", entries)
+        self.namedViewsMenu()
+
+    def testMenuListsTheDocumentsViewsEachTimeItOpens(self):
+        menu = self.namedViewsMenu()
+
+        def shown():
+            menu.aboutToShow.emit()
+            return [
+                a.text().replace("&", "")
+                for a in menu.actions()
+                if a.isVisible() and not a.isSeparator()
+            ]
+
+        self.assertEqual(shown(), ["Rename view...", "Delete view..."])
+        self.assertFalse(menu.actions()[0].isEnabled())
+        self.twoViews()
+        entries = shown()
+        self.assertEqual(entries[2:], ["Top", "Front"])
+        self.assertTrue(menu.actions()[0].isEnabled())
+        self.guiDoc.deleteNamedView("Top")
+        self.assertEqual(shown()[2:], ["Front"])
+
+    def testMenuEntryRestoresTheView(self):
+        top, front = self.twoViews()
+        menu = self.namedViewsMenu()
+        menu.aboutToShow.emit()
+        entry = [a for a in menu.actions() if a.isVisible() and a.text() == "Top"]
+        self.assertEqual(len(entry), 1)
+        entry[0].trigger()
+        pump()
+        self.assertEqual(self.view.getCamera(), top)
 
 
 if __name__ == "__main__":

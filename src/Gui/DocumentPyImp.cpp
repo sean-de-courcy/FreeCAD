@@ -29,8 +29,10 @@
 #include <Base/Stream.h>
 
 #include "Application.h"
+#include "MainWindow.h"
 #include "MergeDocuments.h"
 #include "MDIView.h"
+#include "NamedViews.h"
 #include "Tree.h"
 #include "ViewProviderDocumentObject.h"
 #include "ViewProviderExtern.h"
@@ -605,6 +607,77 @@ PyObject* DocumentPy::abortCommand(PyObject* args)
 
     Py_Return;
 }
+PyObject* DocumentPy::saveNamedView(PyObject* args)
+{
+    const char* name = nullptr;
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+    if (!NamedViews::saveCurrent(getDocumentPtr(), name)) {
+        throw Py::RuntimeError("A name and a 3D view of the document are needed");
+    }
+    MainWindow::getInstance()->updateActions();
+
+    Py_Return;
+}
+
+PyObject* DocumentPy::restoreNamedView(PyObject* args)
+{
+    const char* name = nullptr;
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+    if (!NamedViews::has(getDocumentPtr(), name)) {
+        throw Py::ValueError("There is no named view of this name");
+    }
+    if (!NamedViews::restore(getDocumentPtr(), name)) {
+        throw Py::RuntimeError("The document has no 3D view to set");
+    }
+
+    Py_Return;
+}
+
+PyObject* DocumentPy::namedViews(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    Py::List list;
+    for (const auto& name : NamedViews::names(getDocumentPtr())) {
+        list.append(Py::String(name));
+    }
+    return Py::new_reference_to(list);
+}
+
+PyObject* DocumentPy::deleteNamedView(PyObject* args)
+{
+    const char* name = nullptr;
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+    if (!NamedViews::remove(getDocumentPtr(), name)) {
+        throw Py::ValueError("There is no named view of this name");
+    }
+    MainWindow::getInstance()->updateActions();
+
+    Py_Return;
+}
+
+PyObject* DocumentPy::renameNamedView(PyObject* args)
+{
+    const char* oldName = nullptr;
+    const char* newName = nullptr;
+    if (!PyArg_ParseTuple(args, "ss", &oldName, &newName)) {
+        return nullptr;
+    }
+    if (!NamedViews::rename(getDocumentPtr(), oldName, newName)) {
+        throw Py::ValueError("No such named view, or the new name is empty or taken");
+    }
+    MainWindow::getInstance()->updateActions();
+
+    Py_Return;
+}
+
 Py::Boolean DocumentPy::getTransacting() const
 {
     return {getDocumentPtr()->isPerformingTransaction()};

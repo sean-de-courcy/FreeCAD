@@ -1341,6 +1341,7 @@ SET(FreeCADGui_CPP_SRCS
     AutoSaver.cpp
     BitmapFactory.cpp
     Document.cpp
+    NamedViews.cpp
     DocumentModel.cpp
     DocumentPyImp.cpp
     DocumentObserver.cpp
