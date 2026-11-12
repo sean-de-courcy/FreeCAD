@@ -320,6 +320,34 @@ class TestInstanceConfigurationGui(ConfigInsertBase):
         self.assertFalse(CommandInsertLink.CommandInstanceConfiguration().IsActive())
 
 
+class TestConfigUndoGui(ConfigInsertBase):
+    def testUndoAndRedoKeepTheUsersStepsOnly(self):
+        """In the GUI the refill runs from the event loop: after an edit of the shown row's
+        neighbour (Large 20 -> 30) the undo stack holds the edit's step only, its undo keeps Redo
+        and the redo shows 30 again (ruling A, coordinator c752)"""
+        doc, studio, asm = self.model()
+        link = asm.newObject("App::Link", "Instance")
+        link.LinkedObject = self.A
+        self.settle(doc)
+        self.assertTrue(waitFor(lambda: isEntry(link) and abs(linkHeight(link) - 20) < TOL))
+        undos = doc.UndoCount
+        foreign = PartDesign.configCacheStats()["foreignWrites"]
+        pad = doc.getObject("APad")
+        self.edit(doc, lambda: PartDesign.configSetCell(pad, "Length", "Large", "30 mm"))
+        self.settle(doc)
+        self.assertTrue(waitFor(lambda: abs(linkHeight(link) - 30) < TOL), "the edit is not shown")
+        self.assertEqual(doc.UndoCount, undos + 1, doc.UndoNames)
+        doc.undo()
+        self.settle(doc)
+        self.assertTrue(waitFor(lambda: abs(linkHeight(link) - 20) < TOL), "the undo is not shown")
+        self.assertEqual(doc.RedoCount, 1, "the refill after the undo cleared Redo")
+        doc.redo()
+        self.settle(doc)
+        self.assertTrue(waitFor(lambda: abs(linkHeight(link) - 30) < TOL), "the redo is not shown")
+        self.assertEqual(doc.UndoCount, undos + 1, doc.UndoNames)
+        self.assertEqual(PartDesign.configCacheStats()["foreignWrites"], foreign)
+
+
 CHANGE = "Change configuration..."  # Onshape's instance menu entry (CF8)
 
 

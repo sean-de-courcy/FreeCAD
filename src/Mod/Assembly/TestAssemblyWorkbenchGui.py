@@ -42,6 +42,7 @@ from AssemblyTests.TestConfigInsertGui import (  # ops#671, configurations C3 GU
     TestInstanceConfigurationGui,
     TestInstanceMenuGui,
     TestConfiguredInsertSourcesGui,
+    TestConfigUndoGui,
 )
 
 True if TestConfigPassSchedulerGui else False
@@ -49,6 +50,7 @@ True if TestConfigInsertDialogGui else False
 True if TestInstanceConfigurationGui else False
 True if TestInstanceMenuGui else False
 True if TestConfiguredInsertSourcesGui else False
+True if TestConfigUndoGui else False
 
 from AssemblyTests.TestTriadGui import TestTriadGui, TestTriadMouseGui  # ops#640, C8
 
