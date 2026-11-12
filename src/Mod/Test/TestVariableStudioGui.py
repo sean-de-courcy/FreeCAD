@@ -329,6 +329,33 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertNotIn("w", varset.PropertiesList)
         self.assertEqual(set(self.rows(view)), set())
 
+    def testDetachedCopyStudioHasTheNewRow(self):
+        """ops#726: an imported studio, detached and marked as a Variable Studio, shows its
+        variables and ends with the new row, as a plain studio (VS3); a name typed there adds
+        the variable to the copy."""
+        import json
+
+        from freecad.variables import copies
+
+        self.tmp = tempfile.mkdtemp(prefix="vstudio")
+        path = os.path.join(self.tmp, "Studio.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"variableStudioReference": None, "variables": [
+                {"type": "LENGTH", "name": "width", "value": None, "description": "",
+                 "expression": "10 mm"}]}], f)
+        copy = copies.import_studios(self.doc, [path]).copies[0]
+        copies.detach(copy)
+        App.DocumentTabs.setVariableStudio(copy)
+        self.padStudioless()
+        self.assertTrue(GuiTabs.switchTo(self.doc, copy.Name)[0])
+        view = waitFor(lambda: activeWidget() if activeWidget() is not None
+                       and activeWidget().objectName() == "VariableStudioView" else None)
+        self.assertIsNotNone(view, "the detached copy's tab shows no view of its own")
+        self.assertEqual(set(self.rows(view)), {"width"})
+        self.assertTrue(self.tree(view).model().setData(self.newRow(view), "w"))
+        pump(0.4)
+        self.assertIn("w", copy.PropertiesList)
+
     def testAddGoesToTheStudio(self):
         """With another VarSet in the document, the view's Add puts the variable in its studio."""
         other = self.doc.addObject("App::VarSet", "Variables")

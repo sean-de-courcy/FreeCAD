@@ -113,7 +113,8 @@ AppExport void setOrder(Document* doc, const std::vector<std::string>& names);
 AppExport void placeAfter(Document* doc, const std::string& name, const std::string& after);
 
 AppExport bool isVariableStudio(const DocumentObject* obj);
-/// Marks or unmarks an App::VarSet (of exactly that type) as a Variable Studio
+/// Marks or unmarks an App::VarSet (of exactly that type, or an App::VarSetCopy with no source, as
+/// Detach leaves one) as a Variable Studio; unmarking takes any VarSet
 AppExport void setVariableStudio(DocumentObject* varSet, bool marked);
 
 /// The lowest free "<base> N" (N from 1) among the labels of the document's tabs

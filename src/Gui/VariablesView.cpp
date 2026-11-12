@@ -1014,9 +1014,10 @@ void VariablesModel::rebuild(const App::Document* doc)
 void VariablesModel::addNewRow(const App::Document* doc)
 {
     // The studio's own rows end with an empty row, as Onshape's table (VS3): a name typed in it
-    // adds a Length with no value
+    // adds a Length with no value; an attached copy's are read-only, a detached one's aren't
+    // (ops#726)
     App::DocumentObject* studio = doc->getObject(scope.c_str());
-    if (!studio || freecad_cast<App::VarSetCopy*>(studio)) {
+    if (!studio || !isEditableSet(studio)) {
         return;
     }
     QList<QStandardItem*> row;
