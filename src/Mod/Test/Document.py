@@ -3585,7 +3585,11 @@ class DocumentSafeSaveCases(unittest.TestCase):
         done = self.STEPS.index(step) >= self.STEPS.index("replaced")
         self.assertEqual(self._marker(self.path), 2 if done else 1, where)
         backups = [n for n in names if n.endswith(".FCBak")]
-        if self.STEPS.index(step) >= self.STEPS.index("kept"):
+        if step == "kept" and mode != "crash":
+            # Nothing replaced: the backup just made (a hard link to the document's file, which
+            # keeps its name) is removed, so no later write into the file changes it
+            self.assertEqual(backups, [], where)
+        elif self.STEPS.index(step) >= self.STEPS.index("kept"):
             # The previous file is kept, whole
             self.assertEqual(len(backups), 1, where)
             self.assertEqual(self._marker(os.path.join(self.folder, backups[0])), 1, where)
@@ -3738,7 +3742,7 @@ class DocumentSafeSaveCases(unittest.TestCase):
 
     def testLostTemporaryFileFailsTheSave(self):
         # A1 fix review 3: a save whose temporary file is gone before the rename (quarantined)
-        # fails: the document's name keeps the old file, and the backup is kept
+        # fails: the document's name keeps the old file (the backup made for it goes)
         self._freshFolder()
         self._faultedSave("kept", "cut")
         self._checkFolder("kept", "cut")
@@ -4104,6 +4108,60 @@ class DocumentSaveGuardCases(unittest.TestCase):
         kept = doc.resolveConflictCopy(other, "KeepOther")
         self.assertEqual(self._marker(kept), 3)
         self.assertEqual(self._marker(self.path), 9)
+
+    def testSaveMineOverThirdArrivalRefused(self):
+        # A2 fix review f2: a third version arriving while SaveMineOver writes is not overwritten
+        doc = self._opened()
+        self._theirSave()
+        test = self
+
+        class Arrival:
+            done = False
+
+            def slotStartSaveDocument(self, document, filename):
+                if not self.done and document.Name == doc.Name:
+                    self.done = True
+                    test._theirSave(value=8)
+
+        arrival = Arrival()
+        FreeCAD.addDocumentObserver(arrival)
+        try:
+            with self.assertRaises(Exception):
+                doc.resolveFileChange("SaveMineOver")
+        finally:
+            FreeCAD.removeDocumentObserver(arrival)
+        self.assertTrue(arrival.done)
+        self.assertEqual(self._marker(self.path), 8)
+        kept = [n for n in self._documents() if n.startswith("Plate (Sean ")]
+        self.assertEqual(len(kept), 1, self._documents())
+        self.assertEqual(self._marker(os.path.join(self.folder, kept[0])), 9)
+
+    def testCleanReadAfterAFailedOneIsKnown(self):
+        # A2 fix review f6b: a good file read after a damaged one: its save asks nothing
+        doc = self._opened()
+        with open(self.path, "wb") as fh:
+            fh.write(b"not a zip archive, though longer than an empty one")
+        with self.assertRaises(Exception):
+            doc.resolveFileChange("TakeTheirs")
+        self._theirSave(value=7)
+        doc.restore()
+        self.assertTrue(doc.fileChangeOnDisk()["known"])
+        doc.getObject("Marker").Integer = 4
+        doc.save()
+        self.assertEqual(self._marker(self.path), 4)
+
+    def testKeepOtherKeepsAChangedFileToo(self):
+        # A2 persistence review N1: the file under the name changed since it was read (the sync's
+        # winner) and a conflict copy is beside it: KeepOther keeps all three versions
+        doc = self._opened()
+        doc.save()
+        other = os.path.join(self.folder, self.CONFLICTS[0])
+        self._theirSave(other, value=5)
+        self._theirSave(value=9)
+        doc.resolveConflictCopy(other, "KeepOther")
+        markers = sorted(self._marker(os.path.join(self.folder, n)) for n in self._documents())
+        self.assertEqual(markers, [2, 5, 9], self._documents())
+        self.assertEqual(self._marker(self.path), 5)
 
     @unittest.skipUnless(sys.platform == "win32", "case-insensitive names")
     def testSaveCopyOntoOwnFileIsRefused(self):

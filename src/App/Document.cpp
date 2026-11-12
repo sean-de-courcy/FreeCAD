@@ -351,8 +351,6 @@ struct FileStamp
     std::filesystem::file_time_type time {};
 };
 std::map<const Document*, FileStamp> fileStamps;
-// Documents whose next save goes over a changed file on purpose (resolveFileChange)
-std::set<const Document*> guardSkipped;
 
 std::optional<FileStamp> stampOf(const std::string& path)
 {
@@ -2433,7 +2431,6 @@ Document::~Document()
     App::forgetEditsSinceOpen(this);
     formerUids.erase(this);
     fileStamps.erase(this);
-    guardSkipped.erase(this);
     copyUids.erase(this);
 #ifdef FC_LOGUPDATECHAIN
     Console().log("-App::Document: %s %p\n", getName(), this);
@@ -3707,16 +3704,26 @@ std::string Document::resolveFileChange(const std::string& choice)
             throw Base::FileException(
                 "The file changed again while the other version was kept: not saved", file);
         }
-        guardSkipped.insert(this);
-        struct Restore
-        {
-            const Document* doc;
-            ~Restore()
-            {
-                guardSkipped.erase(doc);
+        // The save goes over the version kept, and over no other: the guard's checks compare with
+        // it, so a third version arriving during the save is not overwritten (A2 fix review f2)
+        const auto previous = fileStamps.find(this) != fileStamps.end()
+            ? std::optional<FileStamp>(fileStamps[this])
+            : std::nullopt;
+        fileStamps[this] = *theirs;
+        bool saved = false;
+        try {
+            saved = save();
+        }
+        catch (...) {
+            if (previous) {
+                fileStamps[this] = *previous;
             }
-        } restoreGuard {this};
-        if (!save()) {
+            throw;
+        }
+        if (!saved) {
+            if (previous) {
+                fileStamps[this] = *previous;
+            }
             throw Base::FileException("Cannot save this version", file);
         }
         return kept;
@@ -3787,6 +3794,21 @@ std::string Document::resolveConflictCopy(const std::string& path, const std::st
         if (!saveCopy(kept.c_str())) {
             throw Base::FileException("Cannot keep this version: nothing changed", kept);
         }
+        // The file under the name is another version still when it changed since it was read
+        // (the sync's winner): it is kept too, under its author's name and time (A2 review N1)
+        if (const FileChange change = fileChangeOnDisk(); change.changed) {
+            const std::string winner = namedCopy(file, change.by, change.when);
+            const auto before = stampOf(file);
+            if (!keepFileAs(file, winner)) {
+                throw Base::FileException(
+                    "Cannot keep the version under the document's name: nothing replaced", winner);
+            }
+            const auto after = stampOf(file);
+            if (!before || !after || !sameStamp(*before, *after)) {
+                throw Base::FileException(
+                    "The file changed again while it was kept: nothing replaced", file);
+            }
+        }
         replaceFileWith(*other, file);
         restore();
         return kept;
@@ -3827,7 +3849,7 @@ bool Document::save()
         // document read or last wrote (the other computer's save, carried by the sync) is not
         // overwritten: the save stops, and resolveFileChange() offers the three ways out (a
         // script is guarded too)
-        if (!guardSkipped.contains(this)) {
+        {
             const FileChange change = fileChangeOnDisk();
             if (change.changed) {
                 const std::string who = change.by.empty() ? std::string("Someone") : change.by;
@@ -4042,7 +4064,7 @@ bool Document::saveToFile(const char* filename) const
         backupPolicy.setNumberOfFiles(count_bak);
         // FreeCAD-CH (ops#640, A2 review R1): a file that arrived while this one was written is
         // not overwritten either (the window left is the flush and the rename)
-        if (samePath(filename, FileName.getStrValue()) && !guardSkipped.contains(this)) {
+        if (samePath(filename, FileName.getStrValue())) {
             const FileChange change = fileChangeOnDisk();
             if (change.changed) {
                 throw Base::FileException(
@@ -4173,6 +4195,7 @@ void Document::restore(const char* filename,
     Base::FlagToggler<> flag(globalIsRestoring, false);
 
     setStatus(Document::PartialDoc, false);
+    setStatus(Document::RestoreError, false);  // this read's own (A2 fix review f6b)
 
     d->clearRecomputeLog();
     d->_WarningLog.clear();
