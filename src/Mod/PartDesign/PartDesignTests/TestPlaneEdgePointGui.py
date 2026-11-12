@@ -112,10 +112,71 @@ class TestPlaneEdgePointGui(ResultBoxGuiCase):
         self.assertAlmostEqual(plane.MapPathParameter, 0.5)
         modes = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listOfModes")
         self.assertIsNotNone(modes)
+        selected = modes.selectedItems()
+        self.assertEqual(len(selected), 1, "no mode row selected")
         for row in range(modes.count()):
-            if modes.item(row).text() != modes.currentItem().text():
+            if modes.item(row) is not selected[0]:
                 modes.setCurrentRow(row)
                 break
         pump(0.2)
         self.assertNotEqual(plane.MapMode, "NormalToEdge")
         self.assertAlmostEqual(plane.MapPathParameter, 0.0)
+
+
+class TestPlaneEdgePointNoPickGui(ResultBoxGuiCase):
+    """Selection parity 11 (2): a tree or Python selection has no picked point. Its (0,0,0) lies on
+    every edge through the origin, and zoomed out within 8 px of the edge's middle, so it must not
+    count as a pick. Designed: the box's bottom edge on y = 0 runs from (0,0,0) to (20,0,0); a cube
+    20000 mm away, fitted, puts its 10 mm from end to middle well under a pixel."""
+
+    openPlane = TestPlaneEdgePointGui.openPlane
+    refLine = TestPlaneEdgePointGui.refLine
+
+    def setUp(self):
+        super().setUp()
+        import Part
+
+        self.body = self.doc.addObject("PartDesign::Body", "Body")
+        self.box = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        self.box.Length, self.box.Width, self.box.Height = 20, 20, 10
+        far = self.doc.addObject("Part::Feature", "Far")
+        far.Shape = Part.makeBox(1, 1, 1, V(20000, 20000, 20000))
+        self.doc.recompute()
+        self.origin = edgeName(self.box.Shape, V(0, 0, 0), V(20, 0, 0))
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setActiveObject("pdbody", self.body)
+        view.viewIsometric()
+        view.fitAll()
+        pump(0.2)
+
+    def selectWithoutPick(self):
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, self.box.Name + "." + self.origin)
+        pump(0.3)
+
+    def assertIsTheEdge(self, plane):
+        self.assertEqual(plane.MapMode, "NormalToEdge")
+        self.assertAlmostEqual(plane.MapPathParameter, 0.0)
+        self.assertNotEqual(self.refLine(), "Edge point")
+
+    def testEdgeWithoutPickInTheDialog(self):
+        Gui.Selection.clearSelection()
+        plane = self.openPlane()
+        self.selectWithoutPick()
+        self.assertIsTheEdge(plane)
+
+    def testEdgeWithoutPickPreselected(self):
+        Gui.Selection.clearSelection()
+        self.selectWithoutPick()
+        self.assertIsTheEdge(self.openPlane())
+
+    def testPickAtTheOriginIsTheMiddle(self):
+        # a real pick at (0,0,0) is a pick: 10 mm from the middle is under a pixel here
+        Gui.Selection.clearSelection()
+        plane = self.openPlane()
+        Gui.Selection.addSelection(
+            self.doc.Name, self.body.Name, self.box.Name + "." + self.origin, 0.0, 0.0, 0.0
+        )
+        pump(0.3)
+        self.assertEqual(plane.MapMode, "NormalToEdge")
+        self.assertAlmostEqual(plane.MapPathParameter, 0.5)
+        self.assertEqual(self.refLine(), "Edge point")

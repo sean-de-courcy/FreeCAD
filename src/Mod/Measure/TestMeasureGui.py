@@ -564,6 +564,48 @@ class TestQuickMeasureGui(unittest.TestCase):
         text, _ = self.selectPicked(("A", self.topEdge(), None))
         self.assertIn("Length: " + self.length(10), text)
 
+    # Selection parity 11 (2): a tree or Python selection has no picked point. Its (0,0,0) lies on
+    # every edge through the origin, and zoomed out it is within 8 px of a short edge's middle, so
+    # it must not count as a pick. Designed: a 1 mm cube at the origin and one 2000 mm away,
+    # fitted, so its edges' 0.5 mm from end to middle is well under a pixel.
+    def zoomedOutCube(self):
+        import Part
+
+        tiny = self.doc.addObject("Part::Feature", "Tiny")
+        tiny.Shape = Part.makeBox(1, 1, 1)
+        far = self.doc.addObject("Part::Feature", "Far")
+        far.Shape = Part.makeBox(1, 1, 1, App.Vector(2000, 2000, 2000))
+        self.doc.recompute()
+
+        def edge(end):
+            for i, e in enumerate(tiny.Shape.Edges, 1):
+                ends = {tuple(round(c, 6) for c in v.Point) for v in e.Vertexes}
+                if ends == {(0.0, 0.0, 0.0), end}:
+                    return "Edge%d" % i
+            self.fail("no edge from the origin to %s" % (end,))
+
+        for i, v in enumerate(tiny.Shape.Vertexes, 1):
+            if (v.Point - App.Vector(1, 1, 1)).Length < 1e-9:
+                corner = "Vertex%d" % i
+        return edge((1.0, 0.0, 0.0)), edge((0.0, 1.0, 0.0)), corner
+
+    def testEdgeThroughTheOriginWithoutPickIsTheEdge(self):
+        alongX, _, _ = self.zoomedOutCube()
+        text, _ = self.selectPicked(("Tiny", alongX, None))
+        self.assertIn("Length: " + self.length(1), text)
+
+    def testThreeItemsThroughTheOriginShowSums(self):
+        alongX, alongY, corner = self.zoomedOutCube()
+        text, _ = self.selectPicked(("Tiny", corner, None), ("Tiny", alongX, None), ("Tiny", alongY, None))
+        self.assertEqual(text, "Total length: " + self.length(2))
+
+    def testPickAtTheOriginOnAShortEdgeIsItsMiddle(self):
+        # a real pick at (0,0,0) is a pick: 0.5 mm from the middle is under a pixel here
+        alongX, _, _ = self.zoomedOutCube()
+        text, tip = self.selectPicked(("Tiny", alongX, App.Vector(0, 0, 0)))
+        self.assertEqual(text, "")
+        self.assertIn("X: " + self.length(0.5), tip)
+
 
 class TestMassPropertiesNoMaterial(unittest.TestCase):
     """Rank 16 (ops#640, hands-on D-3): a part with no material is not weighed as water.
