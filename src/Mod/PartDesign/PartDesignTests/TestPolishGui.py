@@ -282,6 +282,69 @@ class TestShowConstraintsGui(SketchCase):
         expected = [d or i in conflicting for i, d in enumerate(dimensions)]
         self.assertEqual(self.drawn(), expected, "the dimension and the solver's conflicting ones")
 
+    def iconPixels(self):
+        """Every constraint glyph's pixels (r, g, b, a), from the constraints' SoImage nodes: pivy
+        can't return an image's bytes, so each node is written as Inventor text (hex pixels)."""
+        import os
+        import re
+        import tempfile
+
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setName("ConstraintGroup")
+        search.setSearchingAll(True)
+        search.apply(self.view.getSceneGraph())
+        board = search.getPath().getTail()
+        images = coin.SoSearchAction()
+        images.setType(coin.SoImage.getClassTypeId())
+        images.setInterest(coin.SoSearchAction.ALL)
+        images.setSearchingAll(True)
+        images.apply(board)
+        pixels = []
+        handle, path = tempfile.mkstemp(suffix=".iv")
+        os.close(handle)
+        try:
+            for i in range(images.getPaths().getLength()):
+                out = coin.SoOutput()
+                self.assertTrue(out.openFile(path))
+                coin.SoWriteAction(out).apply(images.getPaths()[i].getTail())
+                out.closeFile()
+                with open(path, encoding="latin-1") as text:
+                    found = re.search(r"image\s+(\d+)\s+(\d+)\s+(\d+)([^}]*)", text.read())
+                if not found or int(found.group(3)) != 4:
+                    continue
+                for value in re.findall(r"0x[0-9a-fA-F]+", found.group(4)):
+                    v = int(value, 16)
+                    pixels.append((v >> 24 & 255, v >> 16 & 255, v >> 8 & 255, v & 255))
+        finally:
+            os.remove(path)
+        return pixels
+
+    @staticmethod
+    def badgeRed(pixels):
+        """The pixels of Onshape's badge red (PL1d, about #D66E74), opaque."""
+        return [p for p in pixels if p[3] > 200 and abs(p[0] - 0xD6) < 12 and abs(p[1] - 0x6E) < 12 and abs(p[2] - 0x74) < 12]
+
+    def testShowErrorsDrawsTheConflictOnARedBadge(self):
+        """Show errors draws a conflicting constraint's glyph white on a red-filled badge (PL1d);
+        with Show errors off the glyphs (all drawn: Show constraints on) have no badge (ops#640)."""
+        App.ParamGet(SKETCHER_GENERAL).SetBool("ShowConstraints", True)
+        self.sketch.addConstraint(Sketcher.Constraint("Vertical", 0))
+        self.doc.recompute()
+        self.assertTrue(self.sketch.ConflictingConstraints, "Expected the solver to report the conflict")
+        self.openSketch()
+        pixels = self.iconPixels()
+        self.assertTrue(pixels, "Expected the glyphs' images")
+        self.assertEqual(self.badgeRed(pixels), [], "Show errors off: no badge")
+        App.ParamGet(SKETCHER_GENERAL).SetBool("ShowErrors", True)
+        pump()
+        pixels = self.iconPixels()
+        self.assertGreater(len(self.badgeRed(pixels)), 20, "the conflicting glyph's red badge")
+        self.assertTrue(
+            [p for p in pixels if p[3] > 200 and min(p[:3]) > 240], "its icon is drawn white"
+        )
+
     def testSelectedConstraintIsDrawn(self):
         self.openSketch()
         constraint = f"Constraint{self.horizontal + 1}"
@@ -321,6 +384,46 @@ class TestShowConstraintsGui(SketchCase):
         App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
         self.openSketch()
         self.assertTrue(all(self.drawn()))
+
+
+class TestSketchDialogTitleGui(SketchCase):
+    """PL1d: under the Onshape keymap the sketch dialog's title reads red while the sketch could not
+    be solved (a Vertical on the Horizontal line 0); removing the conflict brings the scheme's colour
+    back; the FreeCAD keymap keeps it (ops#640)."""
+
+    def title(self):
+        for frame in Gui.getMainWindow().findChildren(QtWidgets.QFrame):
+            if frame.metaObject().className() == "QSint::TaskHeader" and frame.isVisible():
+                button = frame.findChild(QtWidgets.QToolButton)
+                if button is not None and button.text() == "Sketch Edit":
+                    return button
+        self.fail("Expected the sketch dialog's title")
+
+    def addConflict(self):
+        vertical = self.sketch.addConstraint(Sketcher.Constraint("Vertical", 0))
+        self.doc.recompute()
+        self.assertIn(vertical + 1, self.sketch.ConflictingConstraints)
+        return vertical
+
+    def testConflictTurnsTheTitleRed(self):
+        vertical = self.addConflict()
+        self.openSketch()
+        self.assertIn("#AA252D", self.title().styleSheet())
+        self.sketch.delConstraint(vertical)
+        self.sketch.solve()
+        self.doc.recompute()
+        pump(0.3)
+        self.assertEqual(self.title().styleSheet(), "")
+
+    def testSolvedSketchKeepsTheTitle(self):
+        self.openSketch()
+        self.assertEqual(self.title().styleSheet(), "")
+
+    def testFreeCADKeymapKeepsTheTitle(self):
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        self.addConflict()
+        self.openSketch()
+        self.assertEqual(self.title().styleSheet(), "")
 
 
 class TestSketchDialogCheckboxesGui(SketchCase):

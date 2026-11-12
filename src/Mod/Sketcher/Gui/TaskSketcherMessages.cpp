@@ -25,9 +25,12 @@
 #include <QAction>
 #include <QMenu>
 #include <QCheckBox>
+#include <QFrame>
+#include <QToolButton>
 
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Command.h>
 #include <Gui/CommandT.h>
 #include <Mod/Sketcher/App/SketchObject.h>
@@ -105,11 +108,40 @@ TaskSketcherMessages::TaskSketcherMessages(ViewProviderSketch* sketchView)
     connectionSetUp = sketchView->signalSetUp.connect(std::bind(
         &SketcherGui::TaskSketcherMessages::slotSetUp, this, sp::_1, sp::_2, sp::_3, sp::_4));
     //NOLINTEND
+    connectionTitle = sketchView->signalSetUp.connect(
+        [this](const QString& state, const QString&, const QString&, const QString&) {
+            updateTitleColour(state);
+        });
 }
 
 TaskSketcherMessages::~TaskSketcherMessages()
 {
     connectionSetUp.disconnect();
+    connectionTitle.disconnect();
+}
+
+void TaskSketcherMessages::updateTitleColour(const QString& state)
+{
+    // The box's title is the header's one tool button (QSint's TaskHeader holds the title and
+    // the fold arrow, a label)
+    QToolButton* title = nullptr;
+    for (auto* frame : findChildren<QFrame*>()) {
+        if (QLatin1String(frame->metaObject()->className()) == QLatin1String("QSint::TaskHeader")) {
+            title = frame->findChild<QToolButton*>();
+            break;
+        }
+    }
+    if (!title) {
+        return;
+    }
+    const bool failed = state == QStringLiteral("conflicting_constraints")
+        || state == QStringLiteral("malformed_constraints")
+        || sketchView->getSketchObject()->getLastSolvedAroundConflict();
+    // Onshape's error title red (#AA252D, PL3a and PL4c, as the feature dialogs' title); the FreeCAD
+    // keymap keeps the scheme's colour
+    title->setStyleSheet(Gui::ForkKeymap::isOnshape() && failed
+                             ? QStringLiteral("color: #AA252D;")
+                             : QString());
 }
 
 void TaskSketcherMessages::updateToolTip(const QString& link)
