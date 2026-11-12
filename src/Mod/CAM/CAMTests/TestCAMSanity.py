@@ -541,6 +541,45 @@ class TestCAMSanity(PathTestBase):
             f"Expected squawk mentioning post-processing, got: {squawks}",
         )
 
+    def test245_output_path_is_never_a_file_descriptor(self):
+        """A LastPostProcessOutput that isn't a string is never opened as a file descriptor.
+
+        Given: A mock job whose LastPostProcessOutput converts to an int through
+          __index__, as every MagicMock attribute does (to 1, stdout); here it
+          converts to a write-only descriptor of a regular file.
+        When: _outputData() is called.
+        Then: The descriptor is still open, and the line count is 0 (no file).
+
+        ops#688: with stdout redirected to a regular file, os.path.isfile() took a
+        mock job's output as fd 1 and open() wrapped and closed it, so unittest's
+        stream died and `FreeCADCmd -t 0` stopped in this module.
+        """
+        handle, path = tempfile.mkstemp()
+        os.close(handle)
+        fd = os.open(path, os.O_WRONLY)
+        try:
+            output = MagicMock()
+            output.__index__.return_value = fd
+            mock_job = MagicMock()
+            mock_job.LastPostProcessDate = ""
+            mock_job.LastPostProcessOutput = output
+            mock_job.PostProcessor = "linuxcnc"
+            mock_job.PostProcessorArgs = ""
+            mock_job.PostProcessorOutputFile = ""
+            mock_job.Operations.Group = []
+
+            S = self._make_sanity_with_mock_job(mock_job)
+            data = S._outputData()
+
+            os.fstat(fd)  # OSError (EBADF) if _outputData() closed it
+            self.assertEqual(data["linecount"], "0")
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            os.remove(path)
+
     def test250_no_operations_squawk(self):
         """A job with no operations should produce a WARNING from _validate_job_structure().
 

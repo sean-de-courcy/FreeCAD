@@ -221,7 +221,11 @@ class CAMSanity:
             if "Stop" in op.Name and hasattr(op, "Stop") and op.Stop is True:
                 data["optionalstops"] = "True"
 
-        if obj.LastPostProcessOutput == "":
+        # str(): a job attribute that isn't a string (a MagicMock in the tests) would
+        # otherwise reach os.path.isfile() and open() as a file descriptor through
+        # __index__ (fd 1 for a mock), and open() closes it afterwards (ops#688).
+        output = str(obj.LastPostProcessOutput)
+        if output == "":
             data["filesize"] = str(0.0)
             data["linecount"] = str(0)
             data["squawkData"].append(
@@ -231,9 +235,10 @@ class CAMSanity:
                 )
             )
         else:
-            if os.path.isfile(obj.LastPostProcessOutput):
-                data["filesize"] = str(os.path.getsize(obj.LastPostProcessOutput) / 1000)
-                data["linecount"] = str(sum(1 for line in open(obj.LastPostProcessOutput)))
+            if os.path.isfile(output):
+                data["filesize"] = str(os.path.getsize(output) / 1000)
+                with open(output) as f:
+                    data["linecount"] = str(sum(1 for line in f))
             else:
                 data["filesize"] = str(0.0)
                 data["linecount"] = str(0)
