@@ -4013,10 +4013,12 @@ std::vector<App::DocumentObject*> Document::getTreeRootObjects() const
         }
     }
 
+    // FreeCAD-CH (ops#640): in document order, as the tree shows them; the map's order is its
+    // pointers' hash order, which any change in allocation reshuffles
     std::vector<App::DocumentObject*> rootObjs;
-    for (const auto& it : rootMap) {
-        if (it.second) {
-            rootObjs.push_back(it.first);
+    for (auto obj : docObjects) {
+        if (rootMap[obj]) {
+            rootObjs.push_back(obj);
         }
     }
     return rootObjs;
