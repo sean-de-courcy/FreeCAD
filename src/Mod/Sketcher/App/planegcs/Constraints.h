@@ -85,6 +85,8 @@ enum ConstraintType
     AngleViaPointAndTwoParams = 34,
     AngleViaTwoPoints = 35,
     ArcLength = 36,
+    LinearSum = 37,        // FreeCAD-CH (sketch patterns)
+    PatternRotation = 38,  // FreeCAD-CH (sketch patterns)
 };
 
 enum InternalAlignmentType
@@ -1395,6 +1397,37 @@ private:
 public:
     ConstraintArcLength(Arc& a, double* d);
     ConstraintType getTypeId() override;
+};
+
+// FreeCAD-CH (sketch patterns): q = sum(w_i * p_i) + c, with constant weights w_i and a constant c.
+// Let `pvec = [q, p_1, p_2, ...]`. A linear pattern's copy point is its seed point plus multiples
+// of the direction lines (P' = P + a (E1 - S1) + b (E2 - S2), per coordinate), and an arc copy's
+// end angle is its seed's plus k times the step angle, plus a whole number of turns (c).
+class ConstraintLinearSum: public Constraint
+{
+public:
+    ConstraintLinearSum(const std::vector<double*>& givenpvec, const std::vector<double>& givenweights, double constant);
+    ConstraintType getTypeId() override;
+    void errorgrad(double* err, double* grad, double* param) override;
+
+private:
+    std::vector<double> weights;
+    double constant;
+};
+
+// FreeCAD-CH (sketch patterns): a circular pattern's copy point P' is its seed point P rotated by
+// k times the step angle theta about the pivot C: P' = C + R(k theta) (P - C), one coordinate per
+// constraint (x when `component` is 0, y when it is 1).
+class ConstraintPatternRotation: public Constraint
+{
+public:
+    ConstraintPatternRotation(Point& copy, Point& seed, Point& pivot, double* theta, double k, int component);
+    ConstraintType getTypeId() override;
+    void errorgrad(double* err, double* grad, double* param) override;
+
+private:
+    double k;
+    int component;
 };
 
 }  // namespace GCS

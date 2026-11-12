@@ -392,6 +392,81 @@ class SketchObject(Part2DObject):
         """
         ...
 
+    def addCircularPattern(self, seeds: List[int], count: int, pivot: Vector, angle: float = 6.283185307179586, /) -> int:
+        """
+        Make an editable circular pattern (Onshape's): count instances of the seeds (points,
+        lines, circles, arcs) about a new pattern-owned construction point at pivot, in one
+        constraint of type 'Pattern'. The copies follow edits of their seeds.
+
+        addCircularPattern(seeds:list[int], count:int, pivot:Vector, angle:float=2*pi) -> int
+
+            Args:
+                seeds: The seeds' geometry indices (the sketch's own).
+                count: The number of instances, the seed included (at least 1).
+                pivot: Where the pattern's pivot point is made.
+                angle: The total angle in radians; 2*pi (the default) spreads the instances
+                    evenly over the full turn, a smaller one from the seed to the last copy.
+
+            Returns:
+                The index of the new constraint (getPattern gives the copies).
+        """
+        ...
+
+    def addLinearPattern(
+        self, seeds: List[int], count1: int, direction1: Vector, count2: int = 1, direction2: Vector = None, /
+    ) -> int:
+        """
+        Make an editable linear pattern (Onshape's): count1 instances along direction1 and
+        count2 along direction2, in one constraint of type 'Pattern'. Each direction is a new
+        pattern-owned construction line from the first seed's centre, as long as the spacing:
+        dimension it to change the spacing.
+
+        addLinearPattern(seeds:list[int], count1:int, direction1:Vector, count2:int=1,
+                         direction2:Vector=None) -> int
+
+            Args:
+                seeds: The seeds' geometry indices (the sketch's own).
+                count1, count2: The number of instances in each direction, the seed included.
+                direction1: The step from one instance to the next.
+                direction2: The second direction's step; by default direction1 turned a quarter
+                    counterclockwise. Its line is made once count2 is over 1.
+
+            Returns:
+                The index of the new constraint (getPattern gives the copies).
+        """
+        ...
+
+    def setPatternCount(self, constraintIndex: int, count1: int, count2: int = 0, /) -> None:
+        """
+        Change a pattern's counts (count2 0 keeps it). The copies keep their ids and slots, an
+        empty slot (a deleted copy) stays empty, new slots get new copies, and the copies past
+        the new counts are deleted.
+
+        setPatternCount(constraintIndex:int, count1:int, count2:int=0)
+        """
+        ...
+
+    def setPatternAngle(self, constraintIndex: int, angle: float, /) -> None:
+        """
+        Change a circular pattern's total angle (radians).
+
+        setPatternAngle(constraintIndex:int, angle:float)
+        """
+        ...
+
+    @constmethod
+    def getPattern(self, constraintIndex: int, /) -> dict:
+        """
+        The record of a pattern: a dict with 'Kind' ('Circular' or 'Linear'), 'Seeds',
+        'Counts' (count1, count2), 'Pivot' and 'Angle' (circular) or 'Directions' (two
+        geometry indices, the second None until made; linear), and 'Instances': for every slot
+        (seed index, index along direction 1, index along direction 2) the copy's geometry
+        index, or None for an empty slot.
+
+        getPattern(constraintIndex:int) -> dict
+        """
+        ...
+
     def delExternal(self, extGeoId: int, /) -> None:
         """
         Delete an external geometry link from the sketch.

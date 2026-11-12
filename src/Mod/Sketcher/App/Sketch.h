@@ -614,6 +614,9 @@ private:
         double* value {};
         double* secondvalue {};  ///< Needed for SnellsLaw
     };
+    /// FreeCAD-CH (Onshape's sketch patterns): the solver's equations of one Pattern constraint
+    /// (SketchPattern.h): every copy where the pattern puts its seed. -1 when malformed.
+    int addPatternConstraint(const Constraint* constraint, ConstrDef& c);
 
     std::vector<GeoDef> Geoms;
     std::vector<ConstrDef> Constrs;
