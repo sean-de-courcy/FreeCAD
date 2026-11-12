@@ -312,5 +312,91 @@ class TestStoredTextReadsBack(unittest.TestCase):
         self.assertEqual(self.problems(forms), [])
 
 
+class TestParenthesisedUnits(unittest.TestCase):
+    """`(1/32) in` is a thirty-second of an inch anywhere in an expression (FreeCAD-CH, ops#684).
+
+    The team types its inch fractions as `(1/32) in`, and Onshape reads a unit after a
+    parenthesised operand as that much of the unit, also inside an expression (`#w + (1/32) in`).
+    The grammar took a unit only after a number. Expressions now rewrite `(e) unit` to
+    `((e) * 1 unit)` in front of the lexer; the unit binds to its group as `3 mm` binds to its
+    number. Every expected value is fixed up front: an inch is 25.4 mm.
+    """
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("TestParenthesisedUnits")
+        self.box = self.doc.addObject("Part::Box", "Box")
+        self.varSet = self.doc.addObject("App::VarSet", "VarSet")
+        self.varSet.addProperty("App::PropertyDistance", "w")
+        self.varSet.w = "10 mm"
+        self.doc.recompute()
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def length(self, text):
+        self.box.setExpression("Length", text)
+        self.doc.recompute()
+        self.assertNotIn("Invalid", self.box.State, text)
+        return self.box.Length.Value
+
+    def value(self, text):
+        return self.box.evalExpression(text)
+
+    def test_a_fraction_in_parentheses(self):
+        self.assertAlmostEqual(self.length("(1/32) in"), INCH / 32, places=9)
+        self.assertAlmostEqual(self.length("(1/32)in"), INCH / 32, places=9)
+        self.assertAlmostEqual(self.length("( 1 / 32 ) in"), INCH / 32, places=9)
+
+    def test_after_a_variable(self):
+        """Through a VarSet: by its path and by Onshape's #name."""
+        self.assertAlmostEqual(self.length("VarSet.w + (1/32) in"), 10 + INCH / 32, places=9)
+        self.assertAlmostEqual(self.length("#w + (1/32) in"), 10 + INCH / 32, places=9)
+        self.varSet.w = "20 mm"
+        self.doc.recompute()
+        self.assertAlmostEqual(self.box.Length.Value, 20 + INCH / 32, places=9)
+
+    def test_products(self):
+        self.assertAlmostEqual(self.length("2 * (3/8) in"), 0.75 * INCH, places=9)
+        self.assertAlmostEqual(self.length("(3/8) in * 2"), 0.75 * INCH, places=9)
+
+    def test_with_another_unit(self):
+        self.assertAlmostEqual(self.length("(1/2) in + 3 mm"), 0.5 * INCH + 3, places=9)
+        self.assertAlmostEqual(self.length("3 mm + (1/2) in"), 0.5 * INCH + 3, places=9)
+
+    def test_nesting(self):
+        self.assertAlmostEqual(self.length("((1/16) + (1/32)) in"), 3 * INCH / 32, places=9)
+        self.assertAlmostEqual(self.length("(((1/2))) in"), 0.5 * INCH, places=9)
+        self.assertAlmostEqual(self.length("((1/4) in + (1/8) in) * 2"), 0.75 * INCH, places=9)
+        self.assertAlmostEqual(self.length("((1/4) in + (1/8) in) mm / 1 in"), 0.375, places=9)
+
+    def test_the_unit_binds_to_its_group(self):
+        """`1 in / (1/2) in` is 2, a number: the divisor is the whole (1/2) in."""
+        value = self.value("1 in / (1/2) in")
+        self.assertAlmostEqual(float(value), 2.0, places=12)
+        value = self.value("(1/2) in^2")  # a unit power stays with the unit
+        self.assertAlmostEqual(value.Value, 0.5 * INCH**2, places=9)
+        self.assertEqual(value.Unit, FreeCAD.Units.Quantity("1 mm^2").Unit)
+        self.assertAlmostEqual(self.value("-(1/2) in").Value, -0.5 * INCH, places=9)
+
+    def test_errors_stay_errors(self):
+        for text in ("(1/32) foo", "(1/32) in in", "() in", "sqrt(4) mm", "(1/32) in (1/2)"):
+            with self.assertRaises(Exception, msg=text):
+                self.value(text)
+
+    def test_stored_text_reads_back(self):
+        """The stored text (the expression printed) reads back as the same value, and again
+        prints the same, as a reopened file reads it."""
+        reads = TestStoredTextReadsBack("test_generated_pairs")
+        reads.setUp()
+        try:
+            forms = ["(1/32) in", "2 * (3/8) in", "(1/2) in + 3 mm", "1 in / (1/2) in",
+                     "((1/16) + (1/32)) in", "(1/2) in^2", "-(1/2) in"]
+            for text in forms:
+                self.assertIsNotNone(reads.evaluated(text), text)
+            self.assertEqual(reads.problems(forms), [])
+        finally:
+            reads.tearDown()
+
+
 if __name__ == "__main__":
     unittest.main()
