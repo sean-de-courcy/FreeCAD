@@ -243,6 +243,7 @@ public:
         , kind(options.kind)
         , wholeObject(options.wholeObject)
         , acceptOnly(options.acceptOnly)
+        , elementShapes(options.elementShapes)
     {}
     ~ReferenceFieldGate() override
     {
@@ -295,7 +296,8 @@ public:
                 return false;
             }
         }
-        if (kind == ReferenceField::Kind::Objects && obj == support
+        if (kind == ReferenceField::Kind::Objects
+            && (obj == support || (elementShapes && elementShapes(obj)))
             && !Base::Tools::isNullOrEmpty(sub)) {
             // An element of the shape shown: the pick maps it to the feature that made it, which
             // is tested then (the shape's own feature may be a fillet)
@@ -326,6 +328,7 @@ private:
     ReferenceField::Kind kind;
     bool wholeObject;
     bool acceptOnly;
+    std::function<bool(const App::DocumentObject*)> elementShapes;
 };
 
 // The link properties a field writes: PropertyLinkSub, and PropertyLinkSubList (an up-to-shape)
@@ -1863,8 +1866,10 @@ void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)
         Gui::Selection().clearSelection();
     }
     message.clear();
-    if (obj == target() && !Base::Tools::isNullOrEmpty(sub)) {
-        // A face, edge or vertex of the shape shown: the feature that made it
+    if ((obj == target() || (options.elementShapes && options.elementShapes(obj)))
+        && !Base::Tools::isNullOrEmpty(sub)) {
+        // A face, edge or vertex of the shape shown (or of another part's, for a pattern over
+        // parts): the feature that made it
         obj = featureOfElement(obj, sub);
         if (!obj) {
             message = tr("No feature that adds or removes material made this element.");

@@ -1269,6 +1269,32 @@ void ViewProviderBody::setEditFinal(App::DocumentObject* member, bool final)
     }
 }
 
+void ViewProviderBody::followStudioEdit(App::DocumentObject* edited)
+{
+    const PartDesign::StudioList* list = edited ? PartDesign::StudioList::holding(edited) : nullptr;
+    if (!list || !list->studio() || !PartDesign::isStudioOwner(edited)) {
+        return;
+    }
+    // Only while its dialog's edit is open
+    auto gdoc = Gui::Application::Instance->getDocument(edited->getDocument());
+    auto inEdit = gdoc ? freecad_cast<Gui::ViewProviderDocumentObject*>(gdoc->getInEdit()) : nullptr;
+    if (!inEdit || inEdit->getObject() != edited) {
+        return;
+    }
+    for (auto other : PartDesign::studioBodies(edited->getDocument(), list->studio())) {
+        auto ovpb = freecad_cast<ViewProviderBody*>(Gui::Application::Instance->getViewProvider(other));
+        if (!ovpb || ovpb->editedMember) {
+            continue;
+        }
+        App::DocumentObject* point = studioEditPointFor(other, edited);
+        if (point == other->getEditRollPoint()) {
+            continue;
+        }
+        ovpb->setEditRoll(point);
+        showStudioRollback(ovpb, other);
+    }
+}
+
 void ViewProviderBody::recomputeEditTail(App::DocumentObject* member)
 {
     auto body = PartDesign::Body::findBodyOf(member);

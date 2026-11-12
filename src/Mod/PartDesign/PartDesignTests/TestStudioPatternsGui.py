@@ -695,7 +695,7 @@ class TestStudioPatternsGui(unittest.TestCase):
 
     def testAPartGivenAStepInTheDialogIsPreviewed(self):
         """T1b preview: the Hole patterned, then HoleQ added in the open dialog: Q gets a step,
-        shown in place of Q's solid before it, as P's step is shown."""
+        which the edit's roll-back doesn't hold, so Q shows it computed, as P shows its own."""
         sk = studioSketch(self.doc, self.S, "HoleQSk", z=10, circles=((10, 50, 3),))
         holeQ = makeOwner(self.doc, self.S, "Pocket", "HoleQ", sk, ("Q",), Length=5)
         self.doc.recompute()
@@ -711,10 +711,12 @@ class TestStudioPatternsGui(unittest.TestCase):
             with self.subTest(part):
                 step = self.step(pattern, part)
                 self.assertIsNotNone(step, part)
-                self.assertTrue(step.ViewObject.Visibility, f"{part}'s step is hidden")
-                base = step.BaseFeature
-                self.assertIsNotNone(base)
-                self.assertFalse(base.ViewObject.Visibility, f"{part}'s solid before is shown")
+                body = self.doc.getObject(part)
+                self.assertFalse(body.isRolledBack(), f"{part} holds its step")
+                self.assertTrue(step.isValid(), step.getStatusString())
+                self.assertFalse(step.isTouched(), f"{part}'s step isn't computed")
+        # the copy 25 along x (at (35, 50), partly in Across's cut) takes more of Q
+        self.assertLess(self.step(pattern, "Q").Shape.Volume, PLATE - HOLE - ACROSS - 10)
         self.accept()
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
 

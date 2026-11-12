@@ -34,6 +34,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentObserver.h>
 #include <App/Transactions.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/Origin.h>
@@ -57,6 +58,7 @@
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "Utils.h"
+#include "ViewProviderBody.h"
 
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
@@ -125,6 +127,12 @@ void showStudioRefusal(ReferenceField* field, PartDesign::Transformed* pattern)
     }
 }
 }  // namespace
+
+namespace PartDesign
+{
+// App/StudioList.cpp (ops#654 T1a; declared where used)
+PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
+}  // namespace PartDesign
 
 namespace PartDesignGui
 {
@@ -199,6 +207,21 @@ void TaskTransformedParameters::setupUI()
     options.accept = [this](App::DocumentObject* obj, const char* /*sub*/, std::string& why) {
         return acceptOriginal(obj, why);
     };
+    // A pattern over parts (ops#654 T1b): a face of any part of its studio stands for the
+    // feature that made it, as one of the active part's does
+    if (PartDesign::isStudioOwner(pcTransformed)) {
+        App::DocumentObjectT patternT(pcTransformed);
+        options.elementShapes = [patternT](const App::DocumentObject* obj) {
+            auto pattern = patternT.getObject();
+            const PartDesign::StudioList* list = pattern ? PartDesign::StudioList::holding(pattern) : nullptr;
+            if (!list || !obj || !obj->isDerivedFrom<PartDesign::Feature>()) {
+                return false;
+            }
+            PartDesign::Body* body = PartDesign::Body::findBodyOf(obj);
+            App::Part* studio = nullptr;
+            return body && Part::BodyBase::studioOf(body, studio) && studio == list->studio();
+        };
+    }
     // Not the pattern, nor a feature after it
     options.noDependents = true;
     options.kinds = tr("Features");
@@ -315,6 +338,11 @@ bool TaskTransformedParameters::acceptOriginal(App::DocumentObject* obj, std::st
         const PartDesign::StudioList* list = PartDesign::StudioList::holding(pcTransformed);
         App::DocumentObject* owner = studioOwnerOfPick(obj);
         App::DocumentObject* entry = owner ? owner : obj;
+        // A Parts-list row (ops#654 T1b): Onshape's feature pattern takes features and faces
+        if (obj->isDerivedFrom<PartDesign::Body>()) {
+            why = QT_TR_NOOP("Pick a feature or a face of a part, not a part.");
+            return false;
+        }
         if (!owner && !entry->isDerivedFrom<PartDesign::FeatureAddSub>()
             && !entry->isDerivedFrom<PartDesign::Transformed>()) {
             why = QT_TR_NOOP("Pick a feature that adds or removes material.");
@@ -541,6 +569,9 @@ void TaskTransformedParameters::recomputeFeature()
         if (list && !list->reconcile(&why)) {
             Base::Console().warning("%s\n", why.c_str());
         }
+        // A part given a step (or that lost its step) rolls back to it again (T1b): it shows the
+        // step, as the parts it had when the dialog opened do
+        ViewProviderBody::followStudioEdit(pattern);
         doc->recompute();
     }
     catch (const Base::Exception& e) {
@@ -740,6 +771,29 @@ bool TaskDlgTransformedParameters::accept()
     // A pending "Select reference..." would leave its combo on the empty entry (ops#186)
     parameter->cancelReferencePick();
     parameter->apply();
+
+    // FreeCAD-CH ops#654 T1b: a pattern over parts whose instances make parts or split one (an
+    // Add over several parts, a New seed, a split seed): OK makes them in the dialog's own step,
+    // so one undo takes the pattern and its parts back (the OK below, once the edit has closed
+    // its step, makes what is left, nothing then, in a step of its own). A refusal is the OK
+    // below's to report
+    App::DocumentObject* obj = getObject();
+    if (obj && PartDesign::isStudioFeaturePattern(obj) && obj->getDocument()->hasPendingTransaction()) {
+        try {
+            std::string why;
+            PartDesign::StudioList* list = PartDesign::StudioList::holding(obj);
+            if (list && list->reconcile(&why)) {
+                Gui::Command::doCommand(
+                    Gui::Command::Doc,
+                    "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                    Gui::Command::getObjectCmd(obj).c_str()
+                );
+            }
+        }
+        catch (const Base::Exception& e) {
+            Base::Console().log("%s\n", e.what());
+        }
+    }
 
     return TaskDlgFeatureParameters::accept();
 }
