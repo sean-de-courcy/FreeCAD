@@ -3780,10 +3780,8 @@ class TestNamingSolver(unittest.TestCase):
                 archive.writestr(item, data)
         doc = App.openDocument(path)
         self.documents.append(doc.Name)
-        # The setup: frozen, so a change doesn't touch it (State doesn't show a freeze)
-        frozen = doc.getObject(name)
-        frozen.Label2 = "frozen"
-        self.assertNotIn("Touched", frozen.State)
+        # The setup: frozen (State doesn't show a freeze; review prmemo-r3)
+        self.assertEqual(doc.getObject(name).getStatusString(), "Freezed")
         return doc
 
     def _checkDigestCacheSees(self, change, frozen=False):
