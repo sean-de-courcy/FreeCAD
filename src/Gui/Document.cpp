@@ -68,6 +68,7 @@
 #include "FileDialog.h"
 #include "MainWindow.h"
 #include "MDIView.h"
+#include "NamedViews.h"
 #include "NotificationArea.h"
 #include "Selection.h"
 #include "Thumbnail.h"
@@ -863,6 +864,7 @@ Document::Document(App::Document* pcDocument, Application* app)
 Document::~Document()
 {
     stepDocuments.erase(this);  // FreeCAD-CH (ops#640)
+    NamedViews::forget(this);   // FreeCAD-CH (ops#640)
     // disconnect everything to avoid to be double-deleted
     // in case an exception is raised somewhere
     Data::NameRefCollector::removeSource(d->nameRefSource);
@@ -2608,6 +2610,13 @@ void Document::RestoreDocFile(Base::Reader& reader)
                 Base::Console().error("%s\n", e.what());
             }
         }
+
+        // FreeCAD-CH (ops#640): named views, an optional element after the camera
+        NamedViews::forget(this);
+        if (localreader->readNextElement()
+            && std::string(localreader->localName()) == "NamedViews") {
+            NamedViews::read(this, *localreader);
+        }
     }
 
     reader.initLocalReader(localreader);
@@ -2743,6 +2752,9 @@ void Document::SaveDocFile(Base::Writer& writer) const
     writer.Stream() << writer.ind() << "<Camera settings=\"" << encodeAttribute(getCameraSettings())
                     << "\"/>\n";
     writer.decInd();  // indentation for camera settings
+
+    // FreeCAD-CH (ops#640): the named views follow the camera
+    NamedViews::write(this, writer);
 
     writer.Stream() << "</Document>" << std::endl;
 }

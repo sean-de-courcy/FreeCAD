@@ -53,7 +53,9 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <algorithm>
 #include <cmath>
@@ -67,15 +69,21 @@
 #include <Inventor/details/SoLineDetail.h>
 #include <Inventor/details/SoPointDetail.h>
 #include <Inventor/errors/SoDebugError.h>
+#include <Inventor/nodes/SoBaseColor.h>
 #include <Inventor/nodes/SoCoordinate3.h>
+#include <Inventor/nodes/SoDepthBuffer.h>
 #include <Inventor/nodes/SoDrawStyle.h>
+#include <Inventor/nodes/SoIndexedLineSet.h>
+#include <Inventor/nodes/SoLightModel.h>
 #include <Inventor/nodes/SoMaterial.h>
 #include <Inventor/nodes/SoMaterialBinding.h>
 #include <Inventor/nodes/SoNormal.h>
 #include <Inventor/nodes/SoNormalBinding.h>
+#include <Inventor/nodes/SoPickStyle.h>
 #include <Inventor/nodes/SoPolygonOffset.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoShapeHints.h>
+#include <Inventor/nodes/SoSwitch.h>
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -88,6 +96,7 @@
 
 #include <Gui/BitmapFactory.h>
 #include <Gui/Control.h>
+#include <Gui/Inventor/SoFCDelayedGroup.h>
 #include <Gui/Selection/SoFCSelectionAction.h>
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 #include <Gui/ViewParams.h>
@@ -153,6 +162,51 @@ bool isSmoothSeam(const TopoDS_Edge& edge, const TopoDS_Face& face)
         // crease below this angle can't be seen; a sketch's tangent closure is far below it.
         constexpr double maxAngle = 1e-3;
         return BRepLib::ContinuityOfFaces(edge, face, face, maxAngle) >= GeomAbs_G1;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// FreeCAD-CH (ops#640): the view settings of Onshape's display menu. They are Part view
+// parameters, read where the shape is rendered (as HideSeamEdges is).
+ParameterGrp::handle partViewParameters()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Part/View"
+    );
+}
+
+bool showTangentEdgesSetting()
+{
+    return partViewParameters()->GetBool("ShowTangentEdges", true);
+}
+
+bool showHiddenEdgesSetting()
+{
+    return partViewParameters()->GetBool("ShowHiddenEdges", false);
+}
+
+// FreeCAD-CH (ops#640): an edge between two different faces that meet smoothly (G1), a fillet's
+// run-out for one. A seam (the same face on both sides) is the seam setting's business.
+bool isTangentEdge(const TopoDS_Edge& edge, const TopTools_IndexedDataMapOfShapeListOfShape& faces)
+{
+    // a crease below this angle (rad) can't be seen
+    constexpr double maxAngle = 5e-3;
+    try {
+        if (!faces.Contains(edge)) {
+            return false;
+        }
+        const TopTools_ListOfShape& sides = faces.FindFromKey(edge);
+        if (sides.Extent() != 2) {
+            return false;
+        }
+        const TopoDS_Face face1 = TopoDS::Face(sides.First());
+        const TopoDS_Face face2 = TopoDS::Face(sides.Last());
+        if (face1.IsSame(face2)) {
+            return false;
+        }
+        return BRepLib::ContinuityOfFaces(edge, face1, face2, maxAngle) >= GeomAbs_G1;
     }
     catch (const Standard_Failure&) {
         return false;
@@ -351,6 +405,9 @@ ViewProviderPartExt::~ViewProviderPartExt()
     pcLineStyle->unref();
     pcPointStyle->unref();
     pShapeHints->unref();
+    if (pcHiddenEdges) {
+        pcHiddenEdges->unref();
+    }
     coords->unref();
     faceset->unref();
     norm->unref();
@@ -390,6 +447,9 @@ void ViewProviderPartExt::onChanged(const App::Property* prop)
         else {
             VisualTouched = true;
         }
+    }
+    if (prop == &Visibility) {
+        updateHiddenEdges();
     }
     if (prop == &LineWidth) {
         pcLineStyle->lineWidth = LineWidth.getValue();
@@ -560,11 +620,46 @@ void ViewProviderPartExt::attach(App::DocumentObject* pcFeat)
     wireframe->addChild(pcLineStyle);
     wireframe->addChild(lineset);
 
+    // FreeCAD-CH (ops#640): the edges behind faces, dashed and dim, as Onshape's "hidden edges
+    // visible". The group is drawn after the rest of the scene, so the depth buffer holds all
+    // faces; where an edge is farther than what is drawn, it is behind a face. It is not
+    // pickable and takes the edge indices of the lineset.
+    auto hiddenEdgesGroup = new Gui::SoFCDelayedGroup;
+    hiddenEdgesGroup->setName("HiddenEdgesGroup");
+    auto hiddenDepth = new SoDepthBuffer;
+    hiddenDepth->test = true;
+    hiddenDepth->write = false;
+    hiddenDepth->function = SoDepthBuffer::GREATER;
+    auto hiddenPick = new SoPickStyle;
+    hiddenPick->style = SoPickStyle::UNPICKABLE;
+    auto hiddenLight = new SoLightModel;
+    hiddenLight->model = SoLightModel::BASE_COLOR;
+    auto hiddenColor = new SoBaseColor;
+    hiddenColor->rgb.setValue(0.45F, 0.45F, 0.45F);
+    auto hiddenStyle = new SoDrawStyle;
+    hiddenStyle->style = SoDrawStyle::LINES;
+    hiddenStyle->linePattern = 0xF0F0;
+    hiddenStyle->lineWidth.connectFrom(&pcLineStyle->lineWidth);
+    auto hiddenLines = new SoIndexedLineSet;
+    hiddenLines->coordIndex.connectFrom(&lineset->coordIndex);
+    hiddenEdgesGroup->addChild(hiddenDepth);
+    hiddenEdgesGroup->addChild(hiddenPick);
+    hiddenEdgesGroup->addChild(hiddenLight);
+    hiddenEdgesGroup->addChild(hiddenColor);
+    hiddenEdgesGroup->addChild(hiddenStyle);
+    hiddenEdgesGroup->addChild(hiddenLines);
+    pcHiddenEdges = new SoSwitch;
+    pcHiddenEdges->whichChild = SO_SWITCH_NONE;
+    pcHiddenEdges->ref();
+    pcHiddenEdges->setName("HiddenEdges");
+    pcHiddenEdges->addChild(hiddenEdgesGroup);
+
     // normal viewing with edges and points
     pcNormalRoot->addChild(pcPointsRoot);
     pcNormalRoot->addChild(offset);
     pcNormalRoot->addChild(pcFlatRoot);
     pcNormalRoot->addChild(wireframe);
+    pcNormalRoot->addChild(pcHiddenEdges);
 
     // just faces with no edges or points
     pcFlatRoot->addChild(pShapeHints);
@@ -597,6 +692,18 @@ void ViewProviderPartExt::attach(App::DocumentObject* pcFeat)
     addDisplayMaskMode(pcFlatRoot, "Shaded");
     addDisplayMaskMode(pcWireframeRoot, "Wireframe");
     addDisplayMaskMode(pcPointsRoot, "Point");
+
+    updateHiddenEdges();
+}
+
+void ViewProviderPartExt::updateHiddenEdges()
+{
+    if (pcHiddenEdges) {
+        const int wanted = showHiddenEdgesSetting() ? 0 : SO_SWITCH_NONE;
+        if (pcHiddenEdges->whichChild.getValue() != wanted) {
+            pcHiddenEdges->whichChild = wanted;
+        }
+    }
 }
 
 void ViewProviderPartExt::setDisplayMode(const char* ModeName)
@@ -1519,6 +1626,21 @@ void ViewProviderPartExt::setupCoinGeometry(
         lineSetMap[edgeIndex].push_back(indexedPnt2);
     }
 
+    // FreeCAD-CH (ops#640): with the tangent edges off, the edges where two faces meet smoothly
+    // get no line; the line-to-edge mapping keeps the numbering, as it does for the seams
+    if (!showTangentEdgesSetting()) {
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (auto it = lineSetMap.begin(); it != lineSetMap.end();) {
+            if (isTangentEdge(TopoDS::Edge(edgeMap.FindKey(it->first)), edgeFaces)) {
+                it = lineSetMap.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+    }
+
     // lineSetMap may omit edges that produced no usable polyline. The emitted polyline order
     // can therefore have gaps with respect to the topological edge numbering, so record the
     // real edge index of each polyline rather than inferring it from the line index later.
@@ -1590,7 +1712,12 @@ void ViewProviderPartExt::updateVisual()
 {
     TopoDS_Shape shape = getRenderedShape().getShape();
 
-    if (!VisualTouched && lastRenderedShape.IsPartner(shape)) {
+    // FreeCAD-CH (ops#640): the display settings; a change of the tangent edges' setting
+    // renders the shape again
+    const bool tangentEdges = showTangentEdgesSetting();
+    updateHiddenEdges();
+
+    if (!VisualTouched && lastRenderedShape.IsPartner(shape) && lastTangentEdges == tangentEdges) {
         // shape unchanged so do not rebuild geometry
         // but still re-apply materials in case colors changed
         Gui::SoHighlightElementAction haction;
@@ -1632,6 +1759,7 @@ void ViewProviderPartExt::updateVisual()
         );
 
         lastRenderedShape = shape;
+        lastTangentEdges = tangentEdges;
 
         VisualTouched = false;
     }

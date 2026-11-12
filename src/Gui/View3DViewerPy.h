@@ -77,6 +77,7 @@ public:
     Py::Object grabFramebuffer(const Py::Tuple& args);
 
     Py::Object setOverrideMode(const Py::Tuple& args);
+    Py::Object getOverrideMode(const Py::Tuple& args);
 
     // NaviCube handling
     Py::Object setEnabledNaviCube(const Py::Tuple& args);

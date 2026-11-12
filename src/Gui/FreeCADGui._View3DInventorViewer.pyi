@@ -118,6 +118,10 @@ class _View3DInventorViewer:
         """Set the viewer override rendering mode."""
         ...
 
+    def getOverrideMode(self) -> str:
+        """Return the viewer override rendering mode."""
+        ...
+
     def setEnabledNaviCube(self, enabled: bool, /) -> None:
         """Enable or disable the navigation cube."""
         ...

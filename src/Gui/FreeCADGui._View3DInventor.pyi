@@ -462,6 +462,20 @@ class _View3DInventor:
         """Return whether a clipping plane is active."""
         ...
 
+    def setSectionView(self, origin: Any, normal: Any) -> None:
+        """Cut the view at a plane and cap the cut (view only, nothing is saved).
+
+        origin: a point on the plane. normal: points to the side that is cut away."""
+        ...
+
+    def clearSectionView(self) -> None:
+        """Remove the section view."""
+        ...
+
+    def sectionView(self) -> Any:
+        """Return None, or (origin, normal) of the section view."""
+        ...
+
     def graphicsView(self) -> Any:
         """Return the underlying graphics-view object."""
         ...

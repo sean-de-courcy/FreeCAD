@@ -2980,8 +2980,8 @@ StdViewBoxZoom::StdViewBoxZoom()
     : Command("Std_ViewBoxZoom")
 {
     sGroup = "Standard-View";
-    sMenuText = QT_TR_NOOP("&Box Zoom");
-    sToolTipText = QT_TR_NOOP("Activates the box zoom tool");
+    sMenuText = QT_TR_NOOP("&Zoom to window");
+    sToolTipText = QT_TR_NOOP("Zooms to a window that you drag in the view");
     sWhatsThis = "Std_ViewBoxZoom";
     sStatusTip = sToolTipText;
     sPixmap = "zoom-border";
@@ -4800,6 +4800,9 @@ bool StdCmdSelectOther::isActive()
 namespace Gui
 {
 
+// FreeCAD-CH: the view tools, in CommandViewTools.cpp
+void CreateViewToolCommands();
+
 void CreateViewStdCommands()
 {
     // NOLINTBEGIN
@@ -4855,6 +4858,7 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdOrthographicCamera());
     rcCmdMgr.addCommand(new StdPerspectiveCamera());
     rcCmdMgr.addCommand(new StdCmdToggleClipPlane());
+    CreateViewToolCommands();
     rcCmdMgr.addCommand(new StdCmdDrawStyle());
     rcCmdMgr.addCommand(new StdCmdViewSaveCamera());
     rcCmdMgr.addCommand(new StdCmdViewRestoreCamera());
