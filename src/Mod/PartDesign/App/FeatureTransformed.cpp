@@ -1671,6 +1671,27 @@ App::DocumentObjectExecReturn* executeInstancePartPattern(Transformed& pattern,
         if (std::string left = unclaimedLeftovers(&pattern); !left.empty()) {
             return fail(left);
         }
+        // A copy gone (a lower count): its Body goes with the command's OK when it holds nothing
+        // else; one holding a later feature is loud, never a part dropped in silence (10.16)
+        auto lost = freecad_cast<App::PropertyStringList*>(
+            pattern.getPropertyByName("StudioLeftoverLost")
+        );
+        for (auto body : pieceRecords(&pattern, std::string())) {
+            if (!lost || std::ranges::find(lost->getValues(), studioPartId(body))
+                    == lost->getValues().end()) {
+                continue;
+            }
+            for (auto member : body->Group.getValues()) {
+                if (!StudioList::isStep(member) && Body::isSolidFeature(member)) {
+                    return fail(
+                        quoted(&pattern) + " no longer makes the copy " + quoted(body)
+                        + " holds, and " + quoted(member)
+                        + " is in it: move it to another part or delete it, or give the pattern "
+                          "its instances back"
+                    );
+                }
+            }
+        }
         return App::DocumentObject::StdReturn;
     }
     std::vector<Body*> scope;

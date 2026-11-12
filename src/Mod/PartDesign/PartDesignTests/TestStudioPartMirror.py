@@ -744,6 +744,34 @@ class TestStudioPartPattern(unittest.TestCase):
         self.assertCentres(self.made(pat), [(25, 5, 5)])
         self.assertEqual(len(self.live()), 2)
 
+    def testNewCopyGoneUnderALaterFeatureIsLoud(self):
+        """10.16 (count edit): a copy gone whose Body holds a later feature (a boss on 'Pat:2')
+        is not deleted: loud, never a part dropped in silence."""
+        self.cube()
+        pat = self.linear("Pat", ["Src"], "New", length=40)
+        second = self.made(pat)[1]
+
+        def boss():
+            sk = sketch(second, "BossSk", xyPlane(second), (42, 2, 48, 8), z=10)
+            b = pad(second, "Boss", sk, 2)
+            for obj in (sk, b):
+                if obj not in self.list.Entries:
+                    PartDesign.studioInsert(obj, -1)
+            return b
+
+        b = self.edit("boss", boss)
+        self.assertValid(b)
+        self.assertVolume(second, 1072)
+
+        def fewer():
+            pat.Occurrences = 2
+            pat.Length = 20
+            PartDesign.studioMakePieces(pat)
+
+        self.edit("count", fewer)
+        self.assertIsNotNone(self.doc.getObject(second.Name))
+        self.assertFalse(pat.isValid() and b.isValid(), "a copy gone under a feature: silent")
+
     def testNewCopiesOverlappingEachOtherStaySeparateParts(self):
         """Onshape Q4: cube x 0..10, +5 x 3: three separate parts, the source and two copies of
         1000 at x 5..15 and 10..20, in instance order."""
