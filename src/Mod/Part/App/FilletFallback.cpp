@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <numbers>
 #include <limits>
@@ -904,6 +905,102 @@ gp_Dir awayFrom(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, double* pa
     return gp_Dir(tangent);
 }
 
+/// Whether two faces through the point are pieces of one surface with the material on the same
+/// side: coplanar planes, or one cylinder. The edge between such faces is a split that a refine
+/// removes and Onshape's bodies never have (ops#640 F1: a wall flush with its base's end)
+bool oneSurface(const TopoDS_Face& a, const TopoDS_Face& b, const gp_Pnt& point)
+{
+    BRepAdaptor_Surface first(a, Standard_False);
+    BRepAdaptor_Surface second(b, Standard_False);
+    if (first.GetType() != second.GetType()) {
+        return false;
+    }
+    if (first.GetType() == GeomAbs_Cylinder) {
+        gp_Cylinder one = first.Cylinder();
+        gp_Cylinder other = second.Cylinder();
+        if (std::abs(one.Radius() - other.Radius()) > linearTolerance
+            || !parallel(one.Axis().Direction(), other.Axis().Direction())
+            || gp_Lin(one.Axis()).Distance(other.Location()) > linearTolerance) {
+            return false;
+        }
+    }
+    else if (first.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    // Both pass through the point, so planes with parallel normals are one plane
+    gp_Dir na = outwardNormal(a, point);
+    gp_Dir nb = outwardNormal(b, point);
+    return parallel(na, nb) && na.Dot(nb) > 0;
+}
+
+/// The vertex's edges and faces with its splits folded: an unselected edge between two pieces of
+/// one surface is left out, and each such piece is counted once, by the selected edge's own face
+/// where it is one of them. A body without splits is returned as it is.
+void foldSplits(const Context& ctx,
+                const EdgeData& data,
+                const TopoDS_Vertex& vertex,
+                std::vector<TopoDS_Shape>& edges,
+                std::vector<TopoDS_Shape>& faces)
+{
+    gp_Pnt point = BRep_Tool::Pnt(vertex);
+    auto indexOf = [&](const TopoDS_Shape& face) {
+        for (size_t i = 0; i < faces.size(); ++i) {
+            if (faces[i].IsSame(face)) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    std::vector<int> group(faces.size());
+    for (size_t i = 0; i < faces.size(); ++i) {
+        group[i] = static_cast<int>(i);
+    }
+    std::function<int(int)> root = [&](int i) {
+        return group[i] == i ? i : group[i] = root(group[i]);
+    };
+    std::vector<TopoDS_Shape> kept;
+    for (const auto& shape : edges) {
+        if (!shape.IsSame(data.edge) && !ctx.selected.Contains(shape)) {
+            auto ofEdge = ctx.list(ctx.edgeFaces, shape);
+            if (ofEdge.size() == 2 && !ofEdge[0].IsSame(ofEdge[1])) {
+                int i = indexOf(ofEdge[0]);
+                int j = indexOf(ofEdge[1]);
+                if (i >= 0 && j >= 0
+                    && oneSurface(TopoDS::Face(ofEdge[0]), TopoDS::Face(ofEdge[1]), point)) {
+                    group[root(i)] = root(j);
+                    continue;
+                }
+            }
+        }
+        kept.push_back(shape);
+    }
+    if (kept.size() == edges.size()) {
+        return;
+    }
+    int own0 = indexOf(data.faces[0]);
+    int own1 = indexOf(data.faces[1]);
+    if (own0 >= 0 && own1 >= 0 && root(own0) == root(own1)) {
+        return;  // the selected edge itself is between pieces of one surface: no fold
+    }
+    std::vector<TopoDS_Shape> folded;
+    for (size_t i = 0; i < faces.size(); ++i) {
+        int r = root(static_cast<int>(i));
+        bool own = static_cast<int>(i) == own0 || static_cast<int>(i) == own1;
+        bool groupHasOwn = (own0 >= 0 && root(own0) == r) || (own1 >= 0 && root(own1) == r);
+        bool first = true;
+        for (size_t j = 0; j < i; ++j) {
+            if (root(static_cast<int>(j)) == r) {
+                first = false;
+            }
+        }
+        if (groupHasOwn ? own : first) {
+            folded.push_back(faces[i]);
+        }
+    }
+    edges = std::move(kept);
+    faces = std::move(folded);
+}
+
 struct VertexEnd
 {
     VertexClass kind = VertexClass::Refuse;
@@ -1193,6 +1290,7 @@ VertexEnd classify(
     VertexEnd end;
     auto edges = ctx.list(ctx.vertexEdges, vertex);
     auto faces = ctx.list(ctx.vertexFaces, vertex);
+    foldSplits(ctx, data, vertex, edges, faces);
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
     bool insideCurve = edges.size() == 2 && faces.size() == 2;

@@ -2430,6 +2430,46 @@ class CornerWithACircleTest(unittest.TestCase):
                         plate.makeChamfer(3.0, edges)
 
 
+def wall_end_round(inner, outer, height):
+    """A full round of a curved wall's flat end, r = half the wall: the volume it removes and the
+    area the wall's end, cylinders and new blend change by. Between the end and the meridian of
+    the rounds' common centre (sin beta = r / Rm), the annular sector goes and a half disc stays;
+    the end face (t h) and the cylinders' strips ((Ri + Ro) beta h) give way to a half cylinder
+    (pi r h). The caps' change (the section, on each face the round ends on) is the caller's."""
+    r = (outer - inner) / 2
+    beta = math.asin(r / ((inner + outer) / 2))
+    section = beta * (outer**2 - inner**2) / 2 - math.pi * r * r / 2
+    side = height * ((outer - inner) + (inner + outer) * beta - math.pi * r)
+    return section, height * section, side
+
+
+def wall_on_base(start=0.0, refined=False):
+    """ops#640 F1 (the replica's row 150): a curved wall R 10..11.5, 0..90 deg, z 2..6, joined to
+    a base R 8..13.5, z 0..2, that starts at the angle `start`. At 0 the wall's end (y = 0) is
+    flush with the base's; unrefined, they stay two faces in one plane, so four edges meet at the
+    foot of each straight edge of the wall's end. Below 0 the wall's end stands on the base.
+    Returns the solid and the two straight edges of the wall's end."""
+    base = Part.makeCylinder(13.5, 2, V(0, 0, 0), V(0, 0, 1), 90 - start).cut(
+        Part.makeCylinder(8, 4, V(0, 0, -1))
+    )
+    base.rotate(V(0, 0, 0), V(0, 0, 1), start)
+    wall = Part.makeCylinder(11.5, 4, V(0, 0, 2), V(0, 0, 1), 90).cut(
+        Part.makeCylinder(10, 6, V(0, 0, 1))
+    )
+    shape = base.fuse(wall)
+    if refined:
+        shape = shape.removeSplitter()
+    edges = [edge_between(shape, (x, 0, 2), (x, 0, 6)) for x in (10, 11.5)]
+    return shape, edges
+
+
+def edges_at(shape, point):
+    """The number of the shape's edges with a vertex at the point"""
+    return sum(
+        1 for e in shape.Edges if any((v.Point - V(*point)).Length < 1e-7 for v in e.Vertexes)
+    )
+
+
 class CurvedWallEndTest(unittest.TestCase):
     """A full round of a curved wall's flat end (ops#640, the native replica's #150; Onshape's FR1,
     exact): the end's two straight edges lie between the end face and a cylinder, and rounds of
@@ -2471,3 +2511,50 @@ class CurvedWallEndTest(unittest.TestCase):
         sector, edges = self.wall(10, 11.5, 4)
         with self.assertRaises(Part.OCCError):
             sector.makeChamfer(0.75, edges)
+
+    def testFullRoundOfAWallOnABase(self):
+        # ops#640 F1. The round ends square on the base's top: it removes the section over the
+        # wall's height, the wall's top loses the section and the base's top gains it, and a half
+        # cylinder takes the wall's end. Flush with the base's end and unrefined,
+        # four edges meet at each foot (the end face and the base's are two faces in one plane);
+        # refined (as Onshape's bodies are) or standing on the base, three.
+        section, removed, side = wall_end_round(10, 11.5, 4)
+        self.assertAlmostEqual(removed, 101.3164 - 100.3470, delta=1e-4)  # Onshape's FR1
+        for start, refined, meeting in ((0, False, 4), (0, True, 3), (-10, False, 3)):
+            with self.subTest(start=start, refined=refined):
+                shape, edges = wall_on_base(start, refined)
+                self.assertEqual(edges_at(shape, (10, 0, 2)), meeting)
+                self.assertEqual(edges_at(shape, (11.5, 0, 2)), meeting)
+                result = shape.makeFillet(0.75, edges)
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                self.assertAlmostEqual(result.Volume, shape.Volume - removed, delta=1e-6)
+                self.assertAlmostEqual(result.Area, shape.Area - side, delta=1e-6)
+                # Two blend faces, the two halves of one half cylinder (a refine, as the feature's,
+                # makes them one, as Onshape's), and the wall's end face goes unless it is also
+                # the base's (refined and flush)
+                blends = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"
+                          and abs(f.Surface.Radius - 0.75) < 1e-7]
+                self.assertEqual(len(blends), 2)
+                self.assertAlmostEqual(sum(f.Area for f in blends), math.pi * 0.75 * 4, delta=1e-6)
+                shared = refined and start == 0
+                self.assertEqual(len(result.Faces), len(shape.Faces) + (2 if shared else 1))
+                # The base is untouched: below its top the result is the base
+                below = result.common(Part.makeBox(40, 40, 2, V(-20, -20, 0)))
+                base = shape.common(Part.makeBox(40, 40, 2, V(-20, -20, 0)))
+                self.assertAlmostEqual(below.Volume, base.Volume, delta=1e-6)
+
+    def testWallFlushWithItsBaseStillRefusesAChain(self):
+        # A split on the wall's own cylinder too (the base's inner radius the wall's): the base's
+        # straight edge below the foot runs on from the picked one, and the round would have to
+        # run on down it. Still refused, loudly, as before F1
+        base = Part.makeCylinder(13.5, 2, V(0, 0, 0), V(0, 0, 1), 90).cut(
+            Part.makeCylinder(10, 4, V(0, 0, -1))
+        )
+        wall = Part.makeCylinder(11.5, 4, V(0, 0, 2), V(0, 0, 1), 90).cut(
+            Part.makeCylinder(10, 6, V(0, 0, 1))
+        )
+        shape = base.fuse(wall)
+        edges = [edge_between(shape, (x, 0, 2), (x, 0, 6)) for x in (10, 11.5)]
+        with self.assertRaises(Part.OCCError):
+            shape.makeFillet(0.75, edges)
