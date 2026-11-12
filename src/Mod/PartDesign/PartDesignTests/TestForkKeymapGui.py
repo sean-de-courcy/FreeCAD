@@ -1053,22 +1053,26 @@ class TestForkKeymapGui(unittest.TestCase):
         letters = "VEFC"
         group = list(Gui.Command.get("Part_SelectFilter").getAction())
 
+        # The filters are the group's tools: a filter command has an action of its own only once
+        # a toolbar or menu shows it (else getShortcut() is ""), so only those are compared
+        owned = [i for i, name in enumerate(filters) if hasAction(name)]
+
         def keys():
-            return ([shortcut(name) for name in filters],
+            return ([QtGui.QKeySequence(shortcut(filters[i])).toString() for i in owned],
                     [action.shortcut().toString() for action in group[:4]])
 
         App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
         pump(0.1)
         mac = [QtGui.QKeySequence(f"Meta+Shift+{c}").toString() for c in letters]
         commands, actions = keys()
-        self.assertEqual([QtGui.QKeySequence(k).toString() for k in commands], mac)
         self.assertEqual(actions, mac)
+        self.assertEqual(commands, [mac[i] for i in owned])
         App.ParamGet(KEYMAP).RemBool("KeymapMacKeys")
         pump(0.1)
         windows = [QtGui.QKeySequence(f"Shift+Alt+{c}").toString() for c in letters]
         commands, actions = keys()
-        self.assertEqual([QtGui.QKeySequence(k).toString() for k in commands], windows)
         self.assertEqual(actions, windows)
+        self.assertEqual(commands, [windows[i] for i in owned])
 
     def testAssemblyListsTakeBackspaceOnTheMac(self):
         """The Assembly task panels' lists (BOM columns, motions, view steps) test the key
