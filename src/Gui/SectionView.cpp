@@ -25,6 +25,7 @@
 #include <Inventor/SbPlane.h>
 #include <Inventor/SbVec3f.h>
 #include <Inventor/SoPickedPoint.h>
+#include <Inventor/details/SoFaceDetail.h>
 #include <Inventor/events/SoMouseButtonEvent.h>
 #include <Inventor/nodes/SoClipPlane.h>
 #include <Inventor/nodes/SoEventCallback.h>
@@ -400,10 +401,13 @@ void SectionViewPanel::pickCallback(void* userdata, SoEventCallback* node)
     }
 
     node->setHandled();
-    if (const SoPickedPoint* picked = node->getPickedPoint()) {
-        // the face normal points out of the part: the cut side is the outside
-        self->setPlane(picked->getPoint(), picked->getNormal());
+    const SoPickedPoint* picked = node->getPickedPoint();
+    const SoDetail* detail = picked ? picked->getDetail() : nullptr;
+    if (!detail || !detail->isOfType(SoFaceDetail::getClassTypeId())) {
+        return;  // an edge or a vertex has no normal of its own: wait for a face
     }
+    // the face normal points out of the part: the cut side is the outside
+    self->setPlane(picked->getPoint(), picked->getNormal());
     // the callback list must not change while it is called
     QTimer::singleShot(0, self, [self]() { self->stopPicking(); });
 }

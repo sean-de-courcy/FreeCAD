@@ -56,7 +56,9 @@ namespace Gui
  * the clipped solid. Then it fills the plane with a flat colour where the stencil is non-zero.
  *
  * The model is a shared child: the node is invisible to every other action (bounding box,
- * picking, search, callback), so the model is never seen twice.
+ * search, callback), so the model is never seen twice. A ray pick that meets the cap where it is
+ * seen gets a hit on the plane, which belongs to no view provider: a click on the cap picks
+ * nothing, not the face behind it.
  *
  * The plane is given as the SoClipPlane's: normal points to the side that stays visible.
  */

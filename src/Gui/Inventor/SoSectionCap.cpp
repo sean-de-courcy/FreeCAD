@@ -37,9 +37,14 @@
 
 #include <Inventor/SbBox.h>
 #include <Inventor/SbColor.h>
+#include <Inventor/SbLine.h>
+#include <Inventor/SbMatrix.h>
 #include <Inventor/SbVec3f.h>
+#include <Inventor/SoPickedPoint.h>
 #include <Inventor/actions/SoActions.h>
+#include <Inventor/details/SoFaceDetail.h>
 #include <Inventor/elements/SoCacheElement.h>
+#include <Inventor/elements/SoModelMatrixElement.h>
 #include <Inventor/misc/SoChildList.h>
 #include <Inventor/misc/SoState.h>
 #include <Inventor/nodes/SoDepthBuffer.h>
@@ -236,8 +241,75 @@ void SoSectionCap::handleEvent(SoHandleEventAction*)
 void SoSectionCap::pick(SoPickAction*)
 {}
 
-void SoSectionCap::rayPick(SoRayPickAction*)
-{}
+// The cap is drawn opaque, so a click on it must not reach what lies behind it: the ray passes
+// the clipped half, and the first face it meets on the kept side is the far wall of the solid,
+// seen from inside, which would be picked silently. Where the cap is seen (the ray enters the
+// kept half inside a solid: its first face beyond the plane faces away from it), this adds a hit
+// on the plane. It is the nearest hit and belongs to no view provider, so nothing is picked.
+void SoSectionCap::rayPick(SoRayPickAction* action)
+{
+    if (!on.getValue() || getNumChildren() != 2) {
+        return;
+    }
+    SbVec3f n = normal.getValue();
+    if (n.normalize() == 0.0F) {
+        return;
+    }
+
+    action->setObjectSpace();
+    const SbLine& line = action->getLine();
+    SbVec3f dir = line.getDirection();
+    const float along = dir.dot(n);
+    if (along <= 0.0F) {
+        return;  // the ray goes from the kept side to the cut one: the kept faces hide the cap
+    }
+    const SbVec3f start = line.getPosition();
+    const float toPlane = n.dot(origin.getValue() - start) / along;
+    if (toPlane < 0.0F) {
+        return;  // the ray starts on the kept side
+    }
+    const SbVec3f onPlane = start + dir * toPlane;
+
+    // the faces along the ray, the model alone (no clip plane), in world space
+    const SbMatrix& toWorld = SoModelMatrixElement::get(action->getState());
+    SbVec3f worldStart;
+    SbVec3f worldDir;
+    SbVec3f worldOnPlane;
+    toWorld.multVecMatrix(start, worldStart);
+    toWorld.multDirMatrix(dir, worldDir);
+    toWorld.multVecMatrix(onPlane, worldOnPlane);
+    if (worldDir.normalize() == 0.0F) {
+        return;
+    }
+    const float worldToPlane = (worldOnPlane - worldStart).dot(worldDir);
+
+    SoNode* model = static_cast<SoSeparator*>(getChild(0))->getChild(2);
+    SoRayPickAction faces(action->getViewportRegion());
+    faces.setRay(worldStart, worldDir);
+    faces.setPickAll(true);
+    faces.apply(model);
+    const SoPickedPoint* firstBeyond = nullptr;  // the first face hit on the kept side
+    const SoPickedPointList& hits = faces.getPickedPointList();
+    for (int i = 0; i < hits.getLength() && !firstBeyond; ++i) {
+        const SoDetail* detail = hits[i]->getDetail();
+        if (detail && detail->isOfType(SoFaceDetail::getClassTypeId())
+            && (hits[i]->getPoint() - worldStart).dot(worldDir) > worldToPlane) {
+            firstBeyond = hits[i];
+        }
+    }
+    if (!firstBeyond || firstBeyond->getNormal().dot(worldDir) <= 0.0F) {
+        return;  // no face beyond the plane, or a front face: outside the solid at the plane
+    }
+
+    // a hair on the kept side, so the clip plane itself doesn't drop the hit
+    const float hair = 1e-5F * (1.0F + onPlane.length());
+    const SbVec3f capPoint = onPlane + n * hair;
+    if (action->isBetweenPlanes(capPoint)) {
+        if (SoPickedPoint* pp = action->addIntersection(capPoint)) {
+            pp->setObjectNormal(-n);
+        }
+    }
+}
 
 void SoSectionCap::search(SoSearchAction* action)
 {
