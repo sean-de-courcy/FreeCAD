@@ -55,6 +55,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestRevolve.py
     PartDesignTests/TestLoft.py
     PartDesignTests/TestLoftOnshape.py
+    PartDesignTests/TestLoftConnections.py
     PartDesignTests/TestPipe.py
     PartDesignTests/TestPipeOnshape.py
     PartDesignTests/TestPrimitive.py

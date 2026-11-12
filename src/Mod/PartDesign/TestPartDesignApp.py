@@ -87,6 +87,10 @@ from PartDesignTests.TestLoftOnshape import (  # FreeCAD-CH, ops#655
     TestLoftOnshapeConditions,
     TestLoftOnshapeThreeSections,
 )
+from PartDesignTests.TestLoftConnections import (  # FreeCAD-CH, ops#640
+    TestLoftConnectionsTwist,
+    TestLoftConnectionsUnequal,
+)
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
 from PartDesignTests.TestLostTool import TestLostTool  # FreeCAD-CH, ops#472
