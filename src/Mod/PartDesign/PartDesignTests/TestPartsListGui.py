@@ -324,6 +324,53 @@ class TestPartsListGui(unittest.TestCase):
         self.assertTrue(left.Visibility)
         self.assertAlmostEqual(left.Shape.Volume, 108, places=3)
 
+    def testSplitPiecesGoneWhenTheSplitStopsAreHiddenAndBackWhenItReturns(self):
+        """A slot x 44..46 through C splits it: two pieces (x 40..44, x 46..50, 400 each) with new
+        ids, C no part (P6p). The slot moved to x 48..50 (a notch: C one solid again): the pieces'
+        Bodies, kept for the split's return, are no rows and hidden, C a row again. Moved back:
+        the same Bodies are rows again, shown (ops#654 T2, the no-op Add's leftover check)."""
+        from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
+
+        class Top:  # the studio is the document's top level here
+            @staticmethod
+            def addObject(obj):
+                return None
+
+        self.doc.openTransaction("slot")
+        sk = studioSketch(self.doc, Top, "SlotSk", ((44, -1, 46, 11),), z=10)
+        slot = makeOwner(self.doc, Top, "Pocket", "Slot", sk, ("C",), Length=11)
+        self.doc.recompute()
+        PartDesign.studioMakePieces(slot)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(slot.isValid(), slot.getStatusString())
+        names = lambda: sorted(name for _, name in self.rows())  # noqa: E731
+        pieces = sorted((b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"
+                         and getattr(b, "StudioMadeBy", None) == slot), key=lambda b: b.Name)
+        self.assertEqual(len(pieces), 2, [b.Name for b in pieces])
+        split = sorted(["A", "B"] + [b.Name for b in pieces])
+        self.assertTrue(waitFor(lambda: names() == split), self.rows())
+        for piece in pieces:
+            self.assertTrue(piece.Visibility, piece.Name)
+            self.assertAlmostEqual(piece.Shape.Volume, 400, places=3)
+
+        # A notch at C's end: no split, C whole again, the pieces' Bodies kept: no rows, hidden
+        self.moveSketch(sk, 4)
+        self.assertTrue(slot.isValid(), slot.getStatusString())
+        for piece in pieces:
+            self.assertIsNotNone(self.doc.getObject(piece.Name))
+            self.assertNotIn(piece, PartDesign.studioLiveParts(self.list))
+        self.assertTrue(waitFor(lambda: names() == ["A", "B", "C"]), self.rows())
+        for piece in pieces:
+            self.assertFalse(piece.Visibility, piece.Name)
+        self.assertAlmostEqual(self.body("C").Shape.Volume, 800, places=3)
+
+        # Split again: the same Bodies, rows and shown again
+        self.moveSketch(sk, -4)
+        self.assertTrue(waitFor(lambda: names() == split), self.rows())
+        for piece in pieces:
+            self.assertTrue(piece.Visibility, piece.Name)
+            self.assertAlmostEqual(piece.Shape.Volume, 400, places=3)
 
 if __name__ == "__main__":
     unittest.main()
