@@ -452,6 +452,60 @@ class TestPatternSecondDirectionGui(PatternPanelCase):
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
         self.assertAlmostEqual(self.body.Shape.Volume, 1000, places=4)
 
+    def testClickingACenteredReversedSecondDirectionDot(self):
+        """Y count 2 centered and flipped: three rows along Y, at -25, 0 and +25. The flip makes
+        direction 2's step -Y, so geometric row j = 0 (one step back) is the +Y row. A click on the
+        dot at the centre of the copy (5, 30, 5) skips (0, 0): after OK that copy is gone, the one
+        at (5, -20, 5) stays, and the 2 x 3 grid less one is 5000."""
+        self.runTool("PartDesign_LinearPattern", self.box)
+        pattern = self.only("PartDesign::LinearPattern")
+        secondDirection(self, "Base Y-axis", 2)
+        group = secondGroup()
+        group.findChild(QtWidgets.QCheckBox, "checkCentered2").click()
+        pump()
+        group.findChild(QtWidgets.QToolButton, "PushButtonReverse").click()
+        pump()
+        self.assertTrue(pattern.Centered2)
+        self.assertTrue(pattern.Reversed2)
+        self.doc.recompute()
+        self.secondLook()
+        skip = visible(QtWidgets.QCheckBox, "checkSkip")
+        skip.setChecked(True)
+        pump()
+        self.assertEqual(skip.property("dots"), "(0, 0), (0, 2), (1, 0), (1, 1), (1, 2)")
+        self.click(5, 30, 5)
+        self.assertEqual(pattern.SkippedInstances, [0, 0])
+        self.assertEqual(skip.property("dots"), "(0, 0)*, (0, 2), (1, 0), (1, 1), (1, 2)")
+        self.accept()
+        self.doc.recompute()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        shape = self.body.Shape
+        self.assertFalse(shape.isInside(App.Vector(5, 30, 5), 1e-6, True))
+        self.assertTrue(shape.isInside(App.Vector(5, -20, 5), 1e-6, True))
+        self.assertTrue(shape.isInside(App.Vector(30, 30, 5), 1e-6, True))
+        self.assertAlmostEqual(shape.Volume, 5000, places=4)
+
+    def testReopeningAPatternWithASecondDirectionShowsIt(self):
+        """A pattern saved with Y count 3: reopened, Second direction is ticked, its Direction is
+        Y and its count 3."""
+        self.runTool("PartDesign_LinearPattern", self.box)
+        pattern = self.only("PartDesign::LinearPattern")
+        secondDirection(self, "Base Y-axis", 3)
+        self.accept()
+        self.doc.recompute()
+        self.assertEqual(pattern.Occurrences2, 3)
+        Gui.getDocument(self.doc.Name).setEdit(pattern, 0)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        pump(0.5)
+        group = secondGroup()
+        self.assertIsNotNone(group, "Second direction isn't ticked on reopening")
+        combo = group.findChild(QtWidgets.QComboBox, "comboDirection")
+        spin = group.findChild(QtWidgets.QSpinBox, "spinOccurrences")
+        self.assertEqual(combo.currentText(), "Base Y-axis")
+        self.assertEqual(spin.value() + 2**31, 3)
+        self.accept()
+        self.assertEqual(pattern.Occurrences2, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
