@@ -4369,7 +4369,11 @@ std::string rewriteLiteralFractions(const std::string& s)
             continue;
         }
         if (c == '(') {
-            groups.emplace_back(out.size(), operandStart);
+            // A bare group also after `/` or `^` (no literal fraction starts there, but a group
+            // does: `1 in / (1/2) in`)
+            const std::size_t last = out.find_last_not_of(" \t\n\r");
+            const bool afterSlash = last != std::string::npos && (out[last] == '/' || out[last] == '^');
+            groups.emplace_back(out.size(), operandStart || afterSlash);
         }
         else if (c == ')' && !groups.empty()) {
             const auto [open, bare] = groups.back();
