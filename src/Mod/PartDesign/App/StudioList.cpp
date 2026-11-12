@@ -6,6 +6,7 @@
 // bake-off's prototype (work/standby-a/reconcile.py), which passed 2,400 random edits.
 
 #include <algorithm>
+#include <climits>
 #include <map>
 #include <set>
 #include <string>
@@ -359,12 +360,34 @@ std::vector<Body*> resolveScope(const std::vector<std::string>& ids,
         if (id.empty()) {
             continue;
         }
+        std::vector<Body*> found;
         for (auto body : bodies) {
             if (std::ranges::find(out, body) == out.end() && descends(body, id)
                 && liveAt(body, index, positions, consumed)) {
-                out.push_back(body);
+                found.push_back(body);
             }
         }
+        // In the history's order, never the Bodies' (the studio list is the only truth): id's own
+        // part, then its pieces by their maker's place and their ordinal, so the survivor of a
+        // merge over them (10.13) is the same live and from scratch (ops#654 gate, seed 6 op 77)
+        auto orderOf = [&](const Body* body) {
+            if (studioPartId(body) == id) {
+                return std::pair<int, int>(-1, 0);
+            }
+            const auto at = positions.find(body->StudioMadeBy.getValue());
+            const std::string own = studioPartId(body);
+            const auto mark = own.rfind(':');
+            int ordinal = 0;
+            if (mark != std::string::npos && mark + 1 < own.size() && own.size() - mark <= 9
+                && std::all_of(own.begin() + static_cast<long>(mark) + 1, own.end(), [](char c) {
+                       return c >= '0' && c <= '9';
+                   })) {
+                ordinal = std::stoi(own.substr(mark + 1));
+            }
+            return std::pair<int, int>(at == positions.end() ? INT_MAX : at->second, ordinal);
+        };
+        std::ranges::stable_sort(found, {}, orderOf);
+        out.insert(out.end(), found.begin(), found.end());
     }
     return out;
 }

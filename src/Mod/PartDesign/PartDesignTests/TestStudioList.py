@@ -750,7 +750,8 @@ def oracle(natives, records, bar, live=None):
     # a pick of one resolves to the parent. A piece whose record holds nothing is a part that
     # fails (failed): a scope still resolves to it, and what acts on it fails there (a Boolean
     # with it still consumes its tools). A scope resolves to an id's part and its living
-    # descendants, in the Bodies' order
+    # descendants in the history's order: its own part, then the pieces by their maker's place and
+    # their ordinal, never the Bodies' order (seed 6 op 77: a merge's survivor among pieces)
     pieceRecs = {
         r["name"]: {
             pid: (parent, r.get("sides", {}).get(pid, ("", 0))[0])
@@ -758,9 +759,13 @@ def oracle(natives, records, bar, live=None):
         }
         for r in records
     }
+    def ordinal(pid):
+        tail = pid.rpartition(":")[2]
+        return int(tail) if tail.isdigit() else 0
+
     order = [p for p, _ in PARTS] + [
-        pid for _, pid in sorted(
-            (side[1], pid) for r in records for pid, side in r.get("sides", {}).items()
+        pid for _, _, pid in sorted(
+            (i, ordinal(pid), pid) for i, r in enumerate(records) for pid in r.get("sides", {})
         )
     ]
     parentOf = {}
@@ -785,7 +790,7 @@ def oracle(natives, records, bar, live=None):
             while ident in vanished and ident not in seen:  # a gone split's piece: its parent
                 seen.add(ident)
                 ident = parentOf.get(ident, ident)
-            for key in order:
+            for key in [ident] + order:
                 if (
                     key not in out and (key in shapes or key in failed) and key not in consumed
                     and key not in dead and descends(key, ident)
@@ -1769,6 +1774,64 @@ class TestStudioList(StudioCase):
         self.doc.recompute()
         self.assertFalse([b for b in self.doc.Objects
                           if b.TypeId == "PartDesign::Body" and b.StudioPartId.startswith("F1:")])
+
+    def testMergeSurvivorAmongPiecesFollowsTheHistory(self):
+        """ops#654 gate seed 6 op 77: an Add scoped to a split part merges two of its pieces made
+        by two later splits; the survivor (the scope's first listed part, 10.13) is the piece of
+        the split first in the history, not the piece whose Body happens to come first in the
+        document. In B (x 20..30): X's slot at x 25..26 splits it; F3 (listed first) cuts the
+        right piece at y 4..5, F2 (listed after it, made first by the resync: its name sorts
+        first) the left one; U's boss on top (y 6..8) joins the two upper pieces. The merged part,
+        upper left + upper right + boss, keeps F3's piece's id; F2's upper piece is merged away.
+        The same after undo and redo, after save and reopen, and from scratch."""
+        self.owner("F3", [25.8, 4, 31, 5], 11, "Subtraction", ["B"])  # alone: no split
+        self.owner("F2", [19, 4, 25.2, 5], 11, "Subtraction", ["B"])  # a gap at 25.2..25.8
+        self.owner("U", [22, 6, 29, 8], 1, "Union", ["B"])
+        x = makeOwner(self.doc, self.studio, "X", [25, -1, 26, 11], 11, "Subtraction", ["B"])
+        self.doc.openTransaction("insert X")
+        PartDesign.studioInsert(x, [e.Name for e in self.list.Entries].index("F3"))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+
+        upperLeft = Part.makeBox(5, 5, 10, V(20, 5, 0))
+        upperRight = Part.makeBox(4, 5, 10, V(26, 5, 0))
+        boss = self.tool([22, 6, 29, 8], 1, "Union")
+        merged = upperLeft.fuse(upperRight).fuse(boss).Volume
+
+        def check(doc, when):
+            live = PartDesign.studioLiveParts(studioList(doc))
+            holders = [b for b in live if abs(b.Shape.Volume - merged) < 1e-3]
+            self.assertEqual(len(holders), 1, (when, [(b.StudioPartId, b.Shape.Volume) for b in live]))
+            holder = holders[0]
+            self.assertIs(holder.StudioMadeBy, doc.getObject("F3"), (when, holder.StudioPartId))
+            self.assertAlmostEqual(holder.Shape.BoundBox.XMin, 20, places=3, msg=when)
+            self.assertAlmostEqual(holder.Shape.BoundBox.XMax, 30, places=3, msg=when)
+            # F2's upper piece is merged into it: no live part of F2 above y 5
+            for b in live:
+                if b.StudioMadeBy == doc.getObject("F2"):
+                    self.assertLess(b.Shape.BoundBox.YMax, 4.5, (when, b.StudioPartId))
+            # A, C, the merged part and the two lower pieces
+            self.assertEqual(len(live), 5, (when, [b.StudioPartId for b in live]))
+
+        check(self.doc, "live")
+        self.assertEqual(differences(snapshot(self.doc), fromScratch(*listOf(self.doc))), [])
+        self.doc.undo()
+        self.doc.recompute()
+        self.doc.redo()
+        self.doc.recompute()
+        check(self.doc, "after undo and redo")
+        folder = tempfile.mkdtemp(prefix="studiosurvivor")
+        try:
+            path = os.path.join(folder, "survivor.FCStd")
+            self.doc.saveAs(path)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            self.doc.recompute()
+            check(self.doc, "after save and reopen")
+            self.assertEqual(differences(snapshot(self.doc), fromScratch(*listOf(self.doc))), [])
+            App.closeDocument(self.doc.Name)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def testFailedOwnerContributesNothing(self):
         """Onshape F1: an owner that fails fails its steps only; later features compute against
