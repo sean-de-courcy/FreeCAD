@@ -67,6 +67,47 @@ class TestPipe(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(self.AdditivePipe.Shape.Volume, 3.14159265)
 
+    def testRecomputeWithNothingTouchedRunsNothing(self):
+        """A recompute with nothing touched runs no object of a Body with a pipe (ops#640). Pipe
+        declared a Midplane of its own beside ProfileBased's: the inherited one then was in no
+        property list, so no recompute cleared the touched state it was constructed with, and
+        the pipe, with every feature after it, ran in every recompute."""
+        self.testSimpleAdditivePipeCase()
+        pad = self.Doc.addObject("PartDesign::Pad", "Pad")
+        self.Body.addObject(pad)
+        pad.Profile = self.ProfileSketch
+        pad.Length = 3
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid() and self.AdditivePipe.isValid())
+        volume = self.Body.Shape.Volume
+        for obj in self.Doc.Objects:
+            self.assertFalse(obj.MustExecute, obj.Name)
+            self.assertNotIn("Touched", obj.State, obj.Name)
+        self.assertEqual(self.Doc.recompute(), 0)
+        self.assertEqual(self.Doc.recompute(), 0)
+        # A change of the pipe still runs it and what follows: the wall option that shares the
+        # name (the registered Midplane) is the pipe's one input here
+        self.AdditivePipe.Midplane = True
+        self.assertTrue(self.AdditivePipe.MustExecute)
+        self.assertEqual(self.Doc.recompute(), 3)  # the pipe, the pad, the Body
+        self.assertAlmostEqual(self.Body.Shape.Volume, volume)
+        self.assertEqual(self.Doc.recompute(), 0)
+
+    def testNewPurgedObjectAsksNothing(self):
+        """No PartDesign object asks to run once it is purged with nothing set since (ops#640):
+        one that does reads a property no purge reaches, as the three pipe types did."""
+        made = 0
+        for name in sorted(t for t in self.Doc.supportedTypes() if t.startswith("PartDesign::")):
+            try:
+                obj = self.Doc.addObject(name, "Probe")
+            except Exception:
+                continue  # an abstract type
+            made += 1
+            obj.purgeTouched()
+            self.assertFalse(obj.MustExecute, name)
+            self.Doc.removeObject(obj.Name)
+        self.assertGreater(made, 50)
+
     def testSimpleSubtractivePipeCase(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
         self.ProfileSketch = self.Doc.addObject("Sketcher::SketchObject", "ProfileSketch")
