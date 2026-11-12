@@ -266,15 +266,16 @@ class TestStudioFeaturePattern(unittest.TestCase):
         further are gone, their pieces new parts '<pattern>:k' (S1: both sides new ids)."""
         g, lp = self.splitPattern()
         self.assertValid(lp)
-        cut = [b for b in PartDesign.studioLiveParts(self.list) if b.Shape.Volume > 1000]
+        # Made in the last step at once (10.12 amendment point 4; was loud until the command)
+        ids = {b.StudioParentId for b in self.madeBy(lp)}
+        cut = [b for b in self.doc.Objects if b.TypeId == "PartDesign::Body" and b.StudioPartId in ids]
         self.assertEqual(len(cut), 2)
         for body in cut:
             s = PartDesign.studioStepOf(lp, body)
             self.assertIsNotNone(s, body.StudioPartId)
             self.assertEqual(s.TypeId, "PartDesign::LinearPattern")
             self.assertEqual(list(s.Originals), [self.step(g, "A" if body.StudioParentId == "A" else "B")])
-            self.assertRefused(s, "press OK")
-        made = self.makePieces(lp)
+        made = self.madeBy(lp)
         self.assertEqual(len(made), 6)
         self.assertValid(lp)
         parts = self.assertParts(self.EIGHT)
@@ -293,7 +294,7 @@ class TestStudioFeaturePattern(unittest.TestCase):
         """An instance that reaches no part (the 4th, x 62..68) cuts nothing and makes no piece:
         the same 8 parts, 6 made."""
         g, lp = self.splitPattern(length=60, count=4)
-        self.assertEqual(len(self.makePieces(lp)), 6)
+        self.assertEqual(len(self.madeBy(lp)), 6)
         self.assertValid(lp)
         self.assertParts(self.EIGHT)
 
@@ -724,8 +725,7 @@ class TestStudioFeaturePattern(unittest.TestCase):
         part, 4 -> 2 deletes the Bodies left empty."""
         n = self.newSeed()
         lp = linearOwner(self.doc, self.S, "LP", [n], 40, 3)
-        self.assertRefused(lp, "press OK")
-        made = self.makePieces(lp)
+        made = self.madeBy(lp)  # in the last step at once (10.12 amendment; was loud)
         self.assertEqual(sorted(m.StudioPartId for m in made), ["LP:1", "LP:2"])
         self.assertValid(lp)
         nPart = self.madeBy(n)[0]
@@ -748,8 +748,7 @@ class TestStudioFeaturePattern(unittest.TestCase):
         lp.Occurrences = 4
         lp.Length = 60
         self.doc.recompute()
-        self.assertRefused(lp, "press OK")
-        self.assertEqual(len(self.makePieces(lp)), 1)
+        self.assertValid(lp)
         self.assertEqual(len(self.madeBy(lp)), 3)
         lp.Occurrences = 2
         lp.Length = 20
@@ -776,15 +775,18 @@ class TestStudioFeaturePattern(unittest.TestCase):
         """Acceptance 11 for a New seed: the command's parts go with undo and come back with
         redo; saved and opened again, the same parts and element names."""
         n = self.newSeed()
+        self.doc.openTransaction("pattern")
         lp = linearOwner(self.doc, self.S, "LP", [n], 40, 3)
-        self.makePieces(lp)
-        self.assertEqual(len(self.madeBy(lp)), 2)
+        self.doc.commitTransaction()
+        self.assertEqual(len(self.madeBy(lp)), 2)  # in the pattern's step (10.12 amendment)
         self.doc.undo()
         self.doc.recompute()
-        self.assertEqual(len(self.madeBy(lp)), 0)
-        self.assertRefused(lp, "press OK")
+        self.assertIsNone(self.doc.getObject("LP"))
+        self.assertFalse([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"
+                          and b.StudioPartId.startswith("LP:")])
         self.doc.redo()
         self.doc.recompute()
+        lp = self.doc.getObject("LP")
         self.assertValid(lp)
         before = {b.StudioPartId: elementNames(b.Shape) for b in self.madeBy(lp)}
         self.assertEqual(sorted(before), ["LP:1", "LP:2"])
@@ -901,7 +903,8 @@ class TestStudioFeaturePattern(unittest.TestCase):
         s5 = makeOwner(self.doc, self.S, "Pocket", "S5", sk5, ("A",), Length=11)
         PartDesign.studioMove(s5, list(self.list.Entries).index(s9))
         self.doc.recompute()
-        self.assertEqual(len(self.makePieces(s5)), 2)
+        self.doc.recompute()
+        self.assertEqual(len(self.madeBy(s5)), 2)  # in the last step (10.12 amendment)
         for piece in pieces:
             step = PartDesign.studioStepOf(m, piece)
             self.assertIsNone(step, f"{piece.StudioPartId}: {step and step.getStatusString()}")

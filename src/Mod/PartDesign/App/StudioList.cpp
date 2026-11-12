@@ -2567,12 +2567,11 @@ void resyncPartMirrors(const App::Document& constDoc)
         return;
     }
     // Where the new parts can go (amendment point 3): the active step (a command's, or the last
-    // one 10.15 reopened for this signal), or nowhere to keep together (no step recorded or
-    // undone: a script). Otherwise (Redo not empty, the stack untouched by 10.15's guard) the
-    // entry stays loud with its message; an open dialog's step makes nothing (its OK does)
-    const bool canMake = !doc.isStepLocked()
-        && (doc.hasPendingTransaction()
-            || (doc.getAvailableUndos() == 0 && doc.getAvailableRedos() == 0));
+    // one 10.15 reopened for this signal). Otherwise (Redo not empty, no step recorded yet, inside
+    // undo or redo) the entry stays loud with its message, and an open dialog's step makes
+    // nothing (its OK does). Undo can't be off in this build (Document.UndoMode is fixed at 1): a
+    // script that records no step is 10.15's guard false, loud as today
+    const bool canMake = !doc.isStepLocked() && doc.hasPendingTransaction();
     if (!canMake) {
         due.clear();
     }
