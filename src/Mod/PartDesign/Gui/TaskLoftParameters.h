@@ -65,6 +65,10 @@ public:
 private Q_SLOTS:
     void onClosed(bool);
     void onRuled(bool);
+    void onStartCondition(int);
+    void onStartMagnitude(double);
+    void onEndCondition(int);
+    void onEndMagnitude(double);
 
 protected:
     void changeEvent(QEvent* e) override;

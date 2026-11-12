@@ -94,6 +94,14 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
             this, &TaskLoftParameters::onRuled);
     connect(ui->checkBoxClosed, &QCheckBox::toggled,
             this, &TaskLoftParameters::onClosed);
+    connect(ui->comboStartCondition, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &TaskLoftParameters::onStartCondition);
+    connect(ui->spinStartMagnitude, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, &TaskLoftParameters::onStartMagnitude);
+    connect(ui->comboEndCondition, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &TaskLoftParameters::onEndCondition);
+    connect(ui->spinEndMagnitude, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, &TaskLoftParameters::onEndMagnitude);
     connect(ui->checkBoxUpdateView, &QCheckBox::toggled,
             this, &TaskLoftParameters::onUpdateView);
     // clang-format on
@@ -116,6 +124,12 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
     // get options
     ui->checkBoxRuled->setChecked(loft->Ruled.getValue());
     ui->checkBoxClosed->setChecked(loft->Closed.getValue());
+    // The end conditions, as Onshape's Loft panel (ops#655); the combo's items are the
+    // properties' enums in order
+    ui->comboStartCondition->setCurrentIndex(static_cast<int>(loft->StartCondition.getValue()));
+    ui->spinStartMagnitude->setValue(loft->StartMagnitude.getValue());
+    ui->comboEndCondition->setCurrentIndex(static_cast<int>(loft->EndCondition.getValue()));
+    ui->spinEndMagnitude->setValue(loft->EndMagnitude.getValue());
 
     // activate and de-activate dialog elements as appropriate
     for (QWidget* child : childs) {
@@ -245,6 +259,14 @@ void TaskLoftParameters::updateUI()
         auto view = getViewObject();
         view->makeTemporaryVisible(!loft->Sections.getValues().empty());
     }
+
+    // A condition's magnitude shows only while the condition is set, as in Onshape
+    const bool start = ui->comboStartCondition->currentIndex() != 0;
+    ui->labelStartMagnitude->setVisible(start);
+    ui->spinStartMagnitude->setVisible(start);
+    const bool end = ui->comboEndCondition->currentIndex() != 0;
+    ui->labelEndMagnitude->setVisible(end);
+    ui->spinEndMagnitude->setVisible(end);
 }
 
 void TaskLoftParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
@@ -267,6 +289,40 @@ void TaskLoftParameters::onRuled(bool val)
 {
     if (auto loft = getObject<PartDesign::Loft>()) {
         loft->Ruled.setValue(val);
+        recomputeFeature();
+    }
+}
+
+void TaskLoftParameters::onStartCondition(int index)
+{
+    if (auto loft = getObject<PartDesign::Loft>()) {
+        loft->StartCondition.setValue(index);
+        updateUI();
+        recomputeFeature();
+    }
+}
+
+void TaskLoftParameters::onStartMagnitude(double val)
+{
+    if (auto loft = getObject<PartDesign::Loft>()) {
+        loft->StartMagnitude.setValue(val);
+        recomputeFeature();
+    }
+}
+
+void TaskLoftParameters::onEndCondition(int index)
+{
+    if (auto loft = getObject<PartDesign::Loft>()) {
+        loft->EndCondition.setValue(index);
+        updateUI();
+        recomputeFeature();
+    }
+}
+
+void TaskLoftParameters::onEndMagnitude(double val)
+{
+    if (auto loft = getObject<PartDesign::Loft>()) {
+        loft->EndMagnitude.setValue(val);
         recomputeFeature();
     }
 }
