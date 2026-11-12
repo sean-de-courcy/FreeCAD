@@ -64,6 +64,7 @@
 #include "DrawSketchHandler.h"
 #include "DrawSketchHandlerExternal.h"
 #include "EditDatumDialog.h"
+#include "ModelSnap.h"  // FreeCAD-CH (selection parity 10): findModelSnap
 #include "Utils.h"
 #include "ViewProviderSketch.h"
 #include "ui_InsertDatum.h"
@@ -1372,6 +1373,27 @@ std::string externalSelectionName(Sketcher::SketchObject* sketch, int geoId)
     return "ExternalEdge" + std::to_string(GeoEnum::RefExt + 1 - geoId);
 }
 
+/* FreeCAD-CH (selection parity 10, SP10-Q8): a model edge picked near its middle, in plain edit
+ * mode, is Onshape's midpoint pick: the same radius as the drawing tools' midpoint snap
+ * (findModelSnap, about 8 px along the edge), on the pick's point in the sketch plane. A sketch's
+ * own curves have none (SP10-Q6), nor has a whole circle.
+ */
+bool isModelMidpointPick(const ViewProviderSketch& vp,
+                         Sketcher::SketchObject* sketch,
+                         const App::DocumentObject* object,
+                         const std::string& subName,
+                         const Base::Vector3d& point)
+{
+    if (object == sketch || !subName.starts_with("Edge")) {
+        return false;
+    }
+    Base::Vector3d local;
+    App::GeoFeature::getGlobalPlacement(sketch).inverse().multVec(point, local);
+    const std::optional<ModelSnapHit> hit =
+        findModelSnap(sketch, Base::Vector2d(local.x, local.y), modelSnapTolerance(vp));
+    return hit && hit->isMidpoint && hit->object == object && hit->subName == subName;
+}
+
 /* FreeCAD-CH (ops#634): model edges and vertices picked before a constraint command (plain edit
  * mode's ModelPickSelection) become external geometry of the sketch in edit, and the selection
  * names them as the sketch's, in pick order, so the command reads them as it reads any external
@@ -1399,6 +1421,7 @@ public:
         {
             App::DocumentObject* object;
             std::string subName;
+            Base::Vector3d point;  // where it was picked, in world coordinates
         };
         std::vector<Pick> picks;
         bool modelPicks = false;
@@ -1406,7 +1429,7 @@ public:
             if (!sel.pObject || !sel.SubName) {
                 continue;
             }
-            picks.push_back({sel.pObject, sel.SubName});
+            picks.push_back({sel.pObject, sel.SubName, Base::Vector3d(sel.x, sel.y, sel.z)});
             if (sel.pObject == sketch) {
                 continue;
             }
@@ -1463,6 +1486,9 @@ public:
             }
             names.push_back(name);
             added.push_back({pick.object, pick.subName, geoId});
+            if (isModelMidpointPick(*vp, sketch, pick.object, pick.subName, pick.point)) {
+                midpointGeoIds.push_back(geoId);
+            }
         }
 
         for (const auto& pick : picks) {
@@ -1497,6 +1523,13 @@ public:
     const std::vector<Reference>& references() const
     {
         return added;
+    }
+
+    /// FreeCAD-CH (selection parity 10, SP10-Q8): the model edge was picked at its middle (within
+    /// the midpoint radius of the drawing tools' snap), which Onshape takes as that point
+    bool isMidpoint(int geoId) const
+    {
+        return std::ranges::find(midpointGeoIds, geoId) != midpointGeoIds.end();
     }
 
 private:
@@ -1576,6 +1609,7 @@ private:
     int tid {0};
     std::string sketchName;
     std::vector<Reference> added;
+    std::vector<int> midpointGeoIds;  // FreeCAD-CH (selection parity 10)
     std::vector<std::pair<std::string, std::string>> picked;
 };
 }// namespace SketcherGui
@@ -5802,6 +5836,16 @@ void CmdSketcherConstrainCoincidentUnified::onActivated(CoincicenceType type)
         if (isVertex(id.GeoId, id.PosId)) {
             points.push_back(id);
         }
+    }
+
+    // FreeCAD-CH (selection parity 10, SP10-Q8): a model edge picked at its middle is that
+    // point, so Coincident with a sketch point keeps the point there. Onshape stores it as
+    // coincident with the edge's midpoint; here it is the Midpoint command's constraint to the
+    // linked edge (Symmetric about a line's ends, Midpoint of an arc), as the drawing tools'
+    // inference makes it (bf93ab5e3b; SP10-Q12 is MIDPOINT)
+    if (points.size() == 1 && curves.size() == 1 && modelPicks.isMidpoint(curves[0].GeoId)) {
+        Gui::Application::Instance->commandManager().runCommandByName("Sketcher_ConstrainMidpoint");
+        return;
     }
 
     if (type != CoincicenceType::Coincident && ((points.size() == 1 && !curves.empty()) || (!points.empty() && curves.size() == 1))) {

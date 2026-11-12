@@ -37,6 +37,7 @@
 #include <Mod/Part/App/PreviewExtension.h>
 
 #include "AttacherTexts.h"
+#include "EdgeMidpointMarker.h"
 #include "PropertyEnumAttacherItem.h"
 #include "DlgSettings3DViewPartImp.h"
 #include "DlgSettingsGeneral.h"
@@ -229,6 +230,7 @@ PyMOD_INIT_FUNC(PartGui)
     PartGui::ViewProviderProjectOnSurface           ::init();
 
     PartGui::Workbench                              ::init();
+    PartGui::EdgeMidpointMarker::create();  // FreeCAD-CH, selection parity 10 (SP10-Q8/Q9)
     auto manip = std::make_shared<PartGui::WorkbenchManipulator>();
     Gui::WorkbenchManipulator::installManipulator(manip);
 
