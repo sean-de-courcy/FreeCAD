@@ -514,6 +514,11 @@ void StdCmdDisplayStyle::activated(int iMsg)
         first = false;
     }
     refreshDisplay();
+
+    // isActive() ran before this with the old mode and put the check back on the old entry
+    if (auto group = qobject_cast<ActionGroup*>(_pcAction)) {
+        group->setCheckedAction(iMsg);
+    }
 }
 
 bool StdCmdDisplayStyle::isActive()

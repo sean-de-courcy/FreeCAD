@@ -59,11 +59,14 @@ def waitFor(condition, timeout=5.0):
 
 
 def menuBarMenu(menuTitle):
-    """The menu bar's current menu with this title. Not findChildren: the menus of an earlier
-    workbench stay children of the menu bar after it is cleared, and may come first."""
-    for action in Gui.getMainWindow().menuBar().actions():
-        menu = action.menu()
-        if menu is not None and menu.title().replace("&", "") == menuTitle:
+    """The menu bar's current menu with this title: the menus of an earlier workbench stay
+    children of the menu bar after it is cleared, and may come first in findChildren, so the menu
+    must be one whose action is in the bar. Not QAction.menu(): with it the View menu's submenus
+    were found deleted ("Internal C++ object already deleted") a line later."""
+    bar = Gui.getMainWindow().menuBar()
+    current = bar.actions()
+    for menu in bar.findChildren(QtWidgets.QMenu):
+        if menu.title().replace("&", "") == menuTitle and menu.menuAction() in current:
             return menu
     return None
 
@@ -203,16 +206,17 @@ class TestSectionViewGui(ViewToolsCase):
         self.assertTrue(action.isChecked())
 
     def testClickOnTheCapPicksNothing(self):
-        """The 20 mm box cut at y = 10, the far half kept (normal +y). A ray along +y through
-        the box's middle meets the plane inside the box, where the cap is drawn: it picks
-        nothing, not the far wall (y = 20) behind the cap (review prviewtools-r1 T1)."""
-        self.view.setSectionView(origin=(0, 10, 0), normal=(0, 1, 0))
+        """The 20 mm box cut at y = 10, the near half cut away (the normal points to the cut
+        side, -y). A ray along +y through the box's middle meets the plane inside the box, where
+        the cap is drawn: it picks nothing, not the far wall (y = 20) behind the cap (review
+        prviewtools-r1 T1)."""
+        self.view.setSectionView(origin=(0, 10, 0), normal=(0, -1, 0))
         pump()
         start, direction = App.Vector(10, -50, 10), App.Vector(0, 1, 0)
-        self.assertIsNone(self.view.getObjectInfoRay((start, direction)))
+        self.assertIsNone(self.view.getObjectInfoRay(start, direction))
         self.view.clearSectionView()
         pump()
-        info = self.view.getObjectInfoRay((start, direction))
+        info = self.view.getObjectInfoRay(start, direction)
         self.assertIsNotNone(info, "without the section the ray picks the box")
         self.assertAlmostEqual(info["PickedPoint"].y, 0.0, places=3)  # the near wall
 
@@ -220,9 +224,9 @@ class TestSectionViewGui(ViewToolsCase):
         """The same cut. A ray that crosses y = 10 at x = 24, beside the box, then meets the
         face x = 20 at y = 15 (direction (-0.8, 1, 0) from (40, -10, 10)): that face is seen
         and picked."""
-        self.view.setSectionView(origin=(0, 10, 0), normal=(0, 1, 0))
+        self.view.setSectionView(origin=(0, 10, 0), normal=(0, -1, 0))
         pump()
-        info = self.view.getObjectInfoRay((App.Vector(40, -10, 10), App.Vector(-0.8, 1, 0)))
+        info = self.view.getObjectInfoRay(App.Vector(40, -10, 10), App.Vector(-0.8, 1, 0))
         self.assertIsNotNone(info, "the face x = 20 is seen")
         self.assertEqual(info["Object"], "Box")
         self.assertAlmostEqual(info["PickedPoint"].x, 20.0, places=3)
