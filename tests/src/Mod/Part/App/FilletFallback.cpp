@@ -17,6 +17,7 @@
 #include "src/App/InitApplication.h"
 #include <App/ElementNamingUtils.h>
 #include <Mod/Part/App/FilletFallback.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
@@ -41,12 +42,14 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <TopoDS.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
@@ -2321,6 +2324,76 @@ TEST_F(FilletFallbackTest, trimsADressUpPastTheRisersFootByTheTread)
             }
         }
         EXPECT_EQ(treads, 1);
+    }
+}
+
+/// A closed B-spline through n points about the centre at height z: radius r + w cos(4 t), turned by
+/// the angle
+TopoDS_Wire wavyLoop(gp_Pnt centre, double r, double w, double turn)
+{
+    const int n = 16;
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, n);
+    for (int i = 0; i < n; ++i) {
+        double t = 2 * pi * i / n + turn;
+        double rho = r + w * std::cos(4 * t);
+        points->SetValue(i + 1, centre.Translated(gp_Vec(rho * std::cos(t), rho * std::sin(t), 0)));
+    }
+    GeomAPI_Interpolate curve(points, Standard_True, 1e-9);
+    curve.Perform();
+    return BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(curve.Curve()).Edge()).Wire();
+}
+
+/// Case Base #108's class, designed: a channel 2 deep (x < 10) beside a block 30 x 30 x 10, and a
+/// finger notch, the cylinder r 4 about (10, 0) cut down to the channel's floor (z 8): its rim is a
+/// half circle from (10, -4) to (10, 4), split at the cylinder's seam (14, 0). With freeForm, a
+/// boss lofted between two wavy B-spline loops stands on the top, away from the notch: its side is
+/// a B-spline surface, which OCCT's default volume integration doesn't get exactly
+TopoDS_Shape fingerNotch(bool freeForm)
+{
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -15, 0), 30, 30, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -16, 8), 11, 32, 3).Shape()
+    ).Shape();
+    gp_Ax2 axis(gp_Pnt(10, 0, 8), gp::DZ(), gp::DX());
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(axis, 4, 3).Shape()).Shape();
+    if (freeForm) {
+        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False);
+        loft.AddWire(wavyLoop(gp_Pnt(22, 6, 10), 4, 1.2, 0));
+        loft.AddWire(wavyLoop(gp_Pnt(22, 6, 25), 2.5, 1.0, pi / 8));
+        loft.Build();
+        shape = BRepAlgoAPI_Fuse(shape, loft.Shape()).Shape();
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    return unify.Shape();
+}
+
+TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
+{
+    // Case Base #108: the chamfer 2 of the notch's rim (both pieces), down to the floor: the
+    // triangle 2 x 2 revolved half way at the centroid radius 4 + 2 / 3. The construction measured
+    // its stages by OCCT's default integration, whose error on a free-form face moves with the
+    // shape integrated (the point it integrates about is the shape's): the boss's side, which the
+    // cut leaves alone, then made the cut measure short. On the replica: 2.45e-4, eight times the
+    // bound (ops#640). The volumes here are adaptive: the default can't be the test's reference
+    for (bool freeForm : {false, true}) {
+        TopoShape base(fingerNotch(freeForm), 1L);
+        auto rim = edgesWhere(base, atHeight(10), true);
+        ASSERT_EQ(rim.size(), 2U) << freeForm;
+        GProp_GProps before;
+        BRepGProp::VolumeProperties(base.getShape(), before);
+        double defaultError = before.Mass() - Part::MassProperties::volume(base.getShape(), true);
+        std::string reason;
+        TopoShape result = forced(base, rim, chamfer(2), &reason);
+        ASSERT_FALSE(result.isNull()) << freeForm << ": " << reason << " (default error "
+                                      << defaultError << ")";
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+        EXPECT_NEAR(
+            Part::MassProperties::volume(base.getShape(), true)
+                - Part::MassProperties::volume(result.getShape(), true),
+            pi * (4 + 2.0 / 3) * 2,
+            1e-6 * pi * (4 + 2.0 / 3) * 2
+        ) << freeForm << " (default error " << defaultError << ")";
     }
 }
 
