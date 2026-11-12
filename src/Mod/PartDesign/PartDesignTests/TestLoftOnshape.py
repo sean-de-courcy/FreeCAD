@@ -94,6 +94,41 @@ class TestLoftOnshapePlain(LoftCase):
         self.assertLoft(loft, 400 * H / 3, 1664.91, 5)
 
 
+class TestLoftOnshapeThreeSections(LoftCase):
+    """Circle r 5, square 8 at z 15, circle r 3 at z 30. The seam moves only where the surface stays the same
+    (two profiles, or ruled); a smooth loft through 3+ sections keeps OCCT's plain loft (deferred, ops#655)."""
+
+    def loft3(self, **properties):
+        sketches = [
+            models.sketch(self.doc, "Bottom", [models.circle(0, 0, 5)], self.body),
+            models.sketch(self.doc, "Middle", square(8), self.body, z=15),
+            models.sketch(self.doc, "Top", [models.circle(0, 0, 3)], self.body, z=30),
+        ]
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = sketches[0]
+        loft.Sections = sketches[1:]
+        for name, value in properties.items():
+            setattr(loft, name, value)
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        plain = Part.makeLoft([s.Shape.Wires[0] for s in sketches], True, loft.Ruled)
+        return loft.Shape, plain
+
+    def testSmoothKeepsThePlainLoft(self):
+        shape, plain = self.loft3()
+        self.assertAlmostEqual(shape.Volume, plain.Volume, delta=plain.Volume * 1e-9)
+        self.assertAlmostEqual(shape.Area, plain.Area, delta=plain.Area * 1e-9)
+        # the circles' seam vertex at 0 degrees splits the square's x = 4 side: 5 sides, as OCCT gives
+        self.assertEqual(len(shape.Faces), len(plain.Faces))
+        self.assertEqual(len(shape.Faces), 7)
+
+    def testRuledPairsTheVertices(self):
+        shape, plain = self.loft3(Ruled=True)
+        self.assertAlmostEqual(shape.Volume, plain.Volume, delta=plain.Volume * 1e-9)
+        # 4 sides per span and the two caps (the plain loft has 5 per span)
+        self.assertEqual(len(shape.Faces), 10)
+
+
 class TestLoftOnshapeConditions(LoftCase):
     """GB12 (e): start condition Normal to profile."""
 

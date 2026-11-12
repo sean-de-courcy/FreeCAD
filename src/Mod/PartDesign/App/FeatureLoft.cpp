@@ -826,7 +826,11 @@ App::DocumentObjectExecReturn* Loft::execute()
                 wire.move(invObjLoc);
             }
             const TopoDS_Shape unseamed = sectionWires.front().getShape();
-            reseamSections(sectionWires);  // ops#655: vertices pair up as Onshape's
+            // ops#655: vertices pair up as Onshape's. Only where the surface stays the same: two
+            // profiles, or ruled; a smooth loft through 3+ sections would move (deferred issue)
+            if (sectionWires.size() == 2 || Ruled.getValue()) {
+                reseamSections(sectionWires);
+            }
             frontReseamed = frontReseamed || !unseamed.IsSame(sectionWires.front().getShape());
             // ops#655: a profile condition rebuilds the ruled loft's side faces
             const bool conditioned = StartCondition.getValue() != 0 || EndCondition.getValue() != 0;

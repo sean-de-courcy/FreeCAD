@@ -84,6 +84,7 @@ from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestLoftOnshape import (  # FreeCAD-CH, ops#655
     TestLoftOnshapePlain,
     TestLoftOnshapeConditions,
+    TestLoftOnshapeThreeSections,
 )
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
