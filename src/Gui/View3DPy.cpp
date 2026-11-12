@@ -327,7 +327,7 @@ void View3DInventorPy::init_type()
     add_keyword_method(
         "setSectionView",
         &View3DInventorPy::setSectionView,
-        "setSectionView(origin=(0,0,0), normal=(0,-1,0))\n"
+        "setSectionView(origin=(0,0,0), normal=(0,-1,0)), both arguments required\n"
         "Cuts the view at a plane and caps the cut (view only, nothing is saved).\n\n"
         "origin: a point on the plane\n"
         "normal: points to the side that is cut away and hidden"

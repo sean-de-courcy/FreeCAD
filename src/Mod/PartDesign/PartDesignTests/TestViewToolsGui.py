@@ -442,7 +442,12 @@ class TestDisplayStylesGui(ViewToolsCase):
     def testTangentEdgesIsInTheViewMenu(self):
         entries = menuActions("View")
         self.assertIn("Std_TangentEdges", entries)
-        self.assertIn("Std_DrawStyle", entries)  # the draw styles stay
+        # the draw styles stay: a drop-down submenu without an object name, found by its title
+        titles = []
+        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
+            if menu.title().replace("&", "") == "View":
+                titles = [m.title().replace("&", "") for m in menu.findChildren(QtWidgets.QMenu)]
+        self.assertIn("Draw Style", titles)
 
     def testShadedWithEdgesIsTheDefault(self):
         actions = Gui.Command.get("Std_DisplayStyle").getAction()

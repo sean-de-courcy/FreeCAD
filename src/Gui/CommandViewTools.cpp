@@ -135,7 +135,7 @@ void StdCmdSectionView::activated(int iMsg)
     SbVec3f origin;
     SbVec3f cut;
     if (_pcAction) {
-        _pcAction->setChecked(SectionView::get(view->getViewer(), origin, cut));
+        _pcAction->setBlockedChecked(SectionView::get(view->getViewer(), origin, cut));
     }
 }
 
@@ -149,7 +149,7 @@ bool StdCmdSectionView::isActive()
     SbVec3f cut;
     const bool on = SectionView::get(view->getViewer(), origin, cut);
     if (_pcAction && _pcAction->isChecked() != on) {
-        _pcAction->setChecked(on);
+        _pcAction->setBlockedChecked(on);
     }
     return true;
 }
@@ -580,7 +580,7 @@ bool StdCmdTangentEdges::isActive()
     }
     const bool shown = displayParameters()->GetBool("ShowTangentEdges", true);
     if (_pcAction && _pcAction->isChecked() != shown) {
-        _pcAction->setChecked(shown);
+        _pcAction->setBlockedChecked(shown);
     }
     return true;
 }
