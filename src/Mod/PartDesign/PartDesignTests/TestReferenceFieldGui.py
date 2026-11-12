@@ -5344,7 +5344,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         The user then sets Reversed the other way, chooses the V axis and the line again: Reversed
         stays as the user set it (each axis choice overwrote it, silently)."""
         feature = self.revolutionAsSuggested()
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         combo = self.axisCombo()
         self.selectReference("axis")
         self.pick(self.lines[-1], "")
@@ -5383,7 +5383,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         chosen then sets it as the H axis suggests (off); a one-way "set by the user" mark kept
         it on."""
         feature = self.revolutionAsSuggested()
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
         box.click()
         pump(0.2)
@@ -5400,7 +5400,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         axis suggests off, so the choice kept against it is on (keeping off would turn the way
         the new axis suggests: the other side), and the status bar says so."""
         feature = self.revolutionAsSuggested()
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
         box.click()
         pump(0.2)
@@ -5443,7 +5443,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         suggestion, opened: the line at x = -1 picked keeps Reversed off (against the line's
         suggestion too), the status bar says so, and the profile sweeps the same side."""
         feature = self.quarterRevolutionBesideABlock(reversed=False)
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         self.selectReference("axis")
         self.pick(self.lines[-1], "")
         self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
@@ -5463,7 +5463,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         feature = self.quarterRevolutionBesideABlock(reversed=True)
         feature.ReferenceAxis = None
         self.doc.recompute()
-        self.edit(feature, count=0)
+        self.edit(feature, count=2)
         self.selectReference("axis")
         self.pick(self.lines[-1], "")
         self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
@@ -5561,7 +5561,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         place of the angle, and a pick of a wall is its entry; Type "Angle" hides and disarms it
         again. Only the recompute waits: the shape is the full ring until OK."""
         feature = self.revolution(core=True)
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
         update.setChecked(False)
         settle()
@@ -5613,7 +5613,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         feature, which stayed hidden). B15 is testReferencesPanelDisarmsTheAxisRow."""
         feature = self.revolution(core=True)
         core = self.doc.getObject("Cylinder")
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         shown = self.visibilities(feature, core, self.ringSketch)
         start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "startMode")
         self.choose(start, 2)
