@@ -3873,3 +3873,223 @@ class DocumentSafeSaveCases(unittest.TestCase):
             self.group.SetBool(names[1], saved[1])
             self.group.SetInt(names[2], saved[2])
             self.group.SetString(names[3], saved[3])
+
+
+class DocumentSaveGuardCases(unittest.TestCase):
+    """FreeCAD-CH ops#640, slice A2 (notes/files-saving-history-design.md, sections 3 item 3 and 4).
+
+    The save guard: a document's file replaced on disk after the document was opened or last saved
+    (the other computer's save, carried by the sync) makes the save refuse, and each of the three
+    choices keeps both versions. A sibling with a sync tool's conflict-copy name is found, and each
+    of its choices keeps both versions too.
+
+    Designed documents: one App::FeatureTest, "Marker", whose Integer tells the versions apart (1 at
+    the first save, 2 for this computer's edit, 9 for the other computer's save, which is written by
+    a second document saved elsewhere and copied over the file, as the sync tool's rename would)."""
+
+    NAME = "Plate.FCStd"
+    IGNORED = ("*.fctmp", "*.FCBak", ".DS_Store", "._*", "Thumbs.db", "desktop.ini")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="fcch_saveguard_")
+        self.folder = os.path.join(self.root, "team")
+        self.scratch = os.path.join(self.root, "scratch")
+        os.makedirs(self.folder)
+        os.makedirs(self.scratch)
+        self.path = os.path.join(self.folder, self.NAME)
+        self.group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        self.author = self.group.GetString("prefAuthor", "")
+        self.group.SetString("prefAuthor", "Ward")
+        self.opened = []
+
+    def tearDown(self):
+        for name in self.opened:
+            if name in FreeCAD.listDocuments():
+                FreeCAD.closeDocument(name)
+        self.group.SetString("prefAuthor", self.author)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _new(self, name, value, path):
+        doc = FreeCAD.newDocument(name)
+        self.opened.append(doc.Name)
+        doc.addObject("App::FeatureTest", "Marker").Integer = value
+        doc.saveAs(path)
+        return doc
+
+    def _close(self, doc):
+        name = doc.Name
+        FreeCAD.closeDocument(name)
+        self.opened.remove(name)
+
+    def _marker(self, path):
+        probe = os.path.join(self.scratch, "probe.FCStd")
+        if os.path.exists(probe):
+            os.remove(probe)
+        shutil.copyfile(path, probe)
+        doc = FreeCAD.openDocument(probe)
+        self.opened.append(doc.Name)
+        try:
+            return doc.getObject("Marker").Integer
+        finally:
+            self._close(doc)
+
+    def _theirSave(self, target=None, value=9):
+        """The other computer's save arrives: a file by "Sean" replaces `target`"""
+        theirs = os.path.join(self.scratch, "theirs.FCStd")
+        self.group.SetString("prefAuthor", "Sean")
+        try:
+            doc = self._new("SaveGuardTheirs", value, theirs)
+            self._close(doc)
+        finally:
+            self.group.SetString("prefAuthor", "Ward")
+        shutil.copyfile(theirs, target or self.path)
+
+    def _opened(self):
+        """Plate.FCStd saved (marker 1) and open, with this computer's edit (marker 2)"""
+        doc = self._new("SaveGuardMine", 1, self.path)
+        doc.getObject("Marker").Integer = 2
+        return doc
+
+    def _documents(self):
+        """The documents in the team folder (what the sync carries)"""
+        return sorted(n for n in os.listdir(self.folder)
+                      if not any(fnmatch.fnmatchcase(n, p) for p in self.IGNORED))
+
+    # The guard
+
+    def testReplacedFileRefusesTheSave(self):
+        doc = self._opened()
+        self._theirSave()
+        with self.assertRaises(Exception) as caught:
+            doc.save()
+        self.assertIn("Sean", str(caught.exception))
+        self.assertEqual(self._marker(self.path), 9, "the other computer's save is untouched")
+
+    def testFileChangeSaysWhoAndWhen(self):
+        doc = self._opened()
+        self.assertFalse(doc.fileChangeOnDisk()["changed"])
+        self._theirSave()
+        change = doc.fileChangeOnDisk()
+        self.assertTrue(change["changed"])
+        self.assertEqual(change["by"], "Sean")
+        self.assertNotEqual(change["when"], "")
+
+    def testOwnSavesPass(self):
+        doc = self._opened()
+        doc.save()
+        doc.getObject("Marker").Integer = 3
+        doc.save()
+        self.assertFalse(doc.fileChangeOnDisk()["changed"])
+        self.assertEqual(self._marker(self.path), 3)
+
+    def testReopenedDocumentPasses(self):
+        doc = self._opened()
+        self._theirSave()
+        self._close(doc)
+        doc = FreeCAD.openDocument(self.path)
+        self.opened.append(doc.Name)
+        doc.getObject("Marker").Integer = 4
+        doc.save()
+        self.assertEqual(self._marker(self.path), 4)
+
+    def testRemovedFileIsSavedAgain(self):
+        # Nothing to overwrite: the save makes the file again
+        doc = self._opened()
+        os.remove(self.path)
+        doc.save()
+        self.assertEqual(self._marker(self.path), 2)
+
+    def testKeepMineAsCopy(self):
+        doc = self._opened()
+        self._theirSave()
+        uid = doc.Uid
+        copy = doc.resolveFileChange("KeepMineAsCopy")
+        self.assertTrue(os.path.basename(copy).startswith("Plate (Ward "), copy)
+        self.assertTrue(os.path.samefile(doc.FileName, copy))
+        self.assertNotEqual(doc.Uid, uid, "the copy is a document of its own")
+        self.assertEqual(self._marker(copy), 2)
+        self.assertEqual(self._marker(self.path), 9)
+        self.assertEqual(self._documents(), sorted([self.NAME, os.path.basename(copy)]))
+
+    def testTakeTheirs(self):
+        doc = self._opened()
+        self._theirSave()
+        copy = doc.resolveFileChange("TakeTheirs")
+        self.assertTrue(os.path.basename(copy).startswith("Plate (Ward "), copy)
+        self.assertEqual(self._marker(copy), 2, "mine is kept")
+        self.assertTrue(os.path.samefile(doc.FileName, self.path))
+        self.assertEqual(doc.getObject("Marker").Integer, 9, "the document is theirs now")
+        doc.getObject("Marker").Integer = 5
+        doc.save()
+        self.assertEqual(self._marker(self.path), 5)
+
+    def testSaveMineOver(self):
+        doc = self._opened()
+        self._theirSave()
+        kept = doc.resolveFileChange("SaveMineOver")
+        self.assertTrue(os.path.basename(kept).startswith("Plate (Sean "), kept)
+        self.assertEqual(self._marker(kept), 9, "theirs is kept")
+        self.assertEqual(self._marker(self.path), 2)
+        doc.getObject("Marker").Integer = 6
+        doc.save()
+        self.assertEqual(self._marker(self.path), 6)
+
+    def testNoChangeNoChoice(self):
+        doc = self._opened()
+        with self.assertRaises(Exception):
+            doc.resolveFileChange("SaveMineOver")
+        self.assertEqual(self._documents(), [self.NAME])
+
+    def testCopyNamesDoNotClash(self):
+        doc = self._opened()
+        self._theirSave()
+        first = doc.resolveFileChange("SaveMineOver")
+        self._theirSave(value=8)
+        second = doc.resolveFileChange("SaveMineOver")
+        self.assertNotEqual(first, second)
+        self.assertEqual(self._marker(first), 9)
+        self.assertEqual(self._marker(second), 8)
+
+    # Conflict copies
+
+    CONFLICTS = ("Plate.sync-conflict-20261112-140200-ABCDEF7.FCStd",
+                 "Plate (Sean's conflicted copy 2026-11-12).FCStd",
+                 "Plate (conflicted copy 2026-11-12 140200).FCStd")
+    NOT_CONFLICTS = ("Plate 2.FCStd", "Plates.sync-conflict-20261112-140200-ABCDEF7.FCStd",
+                     "Other.sync-conflict-20261112-140200-ABCDEF7.FCStd", "Plate (Sean 2026-11-12 14-02).FCStd")
+
+    def testConflictCopiesAreFound(self):
+        doc = self._opened()
+        doc.save()
+        for name in self.CONFLICTS + self.NOT_CONFLICTS:
+            self._theirSave(os.path.join(self.folder, name))
+        found = sorted(os.path.basename(p) for p in doc.conflictCopies())
+        self.assertEqual(found, sorted(self.CONFLICTS))
+
+    def testKeepThisNamesTheOther(self):
+        doc = self._opened()
+        doc.save()
+        other = os.path.join(self.folder, self.CONFLICTS[0])
+        self._theirSave(other)
+        kept = doc.resolveConflictCopy(other, "KeepThis")
+        self.assertTrue(os.path.basename(kept).startswith("Plate (Sean "), kept)
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(doc.conflictCopies(), [])
+        self.assertEqual(self._marker(kept), 9)
+        self.assertEqual(self._marker(self.path), 2)
+
+    def testKeepOtherTakesItsPlace(self):
+        doc = self._opened()
+        doc.save()
+        other = os.path.join(self.folder, self.CONFLICTS[1])
+        self._theirSave(other)
+        kept = doc.resolveConflictCopy(other, "KeepOther")
+        self.assertTrue(os.path.basename(kept).startswith("Plate (Ward "), kept)
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(doc.conflictCopies(), [])
+        self.assertEqual(self._marker(kept), 2, "this one is kept")
+        self.assertEqual(self._marker(self.path), 9)
+        self.assertEqual(doc.getObject("Marker").Integer, 9, "the document is the other now")
+        doc.getObject("Marker").Integer = 7
+        doc.save()
+        self.assertEqual(self._marker(self.path), 7)
