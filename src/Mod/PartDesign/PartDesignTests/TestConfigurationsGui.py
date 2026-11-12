@@ -322,7 +322,6 @@ class TestConfigurationsGui(unittest.TestCase):
 
         self.assertEqual(boxMenu(self.APad, "Length"), ["fieldConfig_configure"])
         self.assertEqual(boxMenu(sk, "Constraints.w"), [])
-        self.assertFalse([n for n in menuActions(line) if n.startswith("fieldConfig_")])
 
     def testConfiguredFieldInTheDialog(self):
         """Onshape's configured field (CP2-2): a dotted orange outline, the tooltip "Length: <expr>

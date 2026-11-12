@@ -400,7 +400,9 @@ std::string currentText(App::DocumentObject* obj, const std::string& path)
     if (info.expression) {
         return info.expression->toString();
     }
-    const App::any value = id.getValue();
+    // The property's own path value: a sketch's Constraints.<name> is its dimension (the Python
+    // attribute path knows no constraint names)
+    const App::any value = id.getValue(true);
     if (value.type() == typeid(Base::Quantity)) {
         const auto& q = App::any_cast<Base::Quantity>(value);
         const std::string unit = q.getUnit().getString();

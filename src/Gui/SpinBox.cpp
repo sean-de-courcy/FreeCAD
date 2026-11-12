@@ -405,7 +405,9 @@ void ExpressionSpinBox::showExpression(Number number)
     if (!input.empty()) {
         spinbox->setProperty("configured", QString::fromStdString(input));
         spinbox->setStyleSheet(QStringLiteral("QAbstractSpinBox { border: 1px dotted #e8822a; }"));
-        if (value && freecad_cast<NumberExpression*>(getExpression().get())) {
+        // A plain value ("10 mm" parses as a number times a unit) is typed over
+        std::unique_ptr<App::Expression> simple(getExpression()->simplify());
+        if (value && freecad_cast<NumberExpression*>(simple.get())) {
             spinbox->setReadOnly(false);
             QPalette p(lineedit->palette());
             p.setColor(QPalette::Active, QPalette::Text, defaultPalette.color(QPalette::Text));
