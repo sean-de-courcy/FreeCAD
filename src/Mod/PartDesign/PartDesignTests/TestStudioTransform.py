@@ -302,8 +302,9 @@ class TestStudioTransform(unittest.TestCase):
     def testCopyHasNamesOfItsOwn(self):
         t = self.transform([self.A], copy=True, Y=20)
         copy = T.made_parts(t)[0]
-        source = set(self.A.Shape.ElementMap.values())
-        names = set(copy.Shape.ElementMap.values())
+        # the mapped names (the keys; the values are the indexed names Face1..., the same for any box)
+        source = set(self.A.Shape.ElementMap.keys())
+        names = set(copy.Shape.ElementMap.keys())
         self.assertTrue(names)
         self.assertFalse(names & source)
 

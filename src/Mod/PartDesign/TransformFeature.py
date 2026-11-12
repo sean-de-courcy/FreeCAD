@@ -76,8 +76,13 @@ def _straight(shape):
 
 
 def _edge_ends(edge):
-    """The edge's start and end in its own direction (Onshape: the edge's direction, TR2, TR5)."""
-    start, end = edge.Vertexes[0].Point, edge.Vertexes[-1].Point
+    """The edge's start and end in its own direction (Onshape: the edge's direction, TR2, TR5). An
+    unbounded line (an origin axis has no vertices) gives its point and the point one unit along it."""
+    if len(edge.Vertexes) < 2:
+        start = V(edge.Curve.Location)
+        end = start + V(edge.Curve.Direction).normalize()
+    else:
+        start, end = edge.Vertexes[0].Point, edge.Vertexes[-1].Point
     if edge.Orientation == "Reversed":
         start, end = end, start
     return start, end

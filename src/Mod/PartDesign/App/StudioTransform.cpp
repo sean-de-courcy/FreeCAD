@@ -108,10 +108,13 @@ Part::TopoShape studioTransformStep(
         out.makeElementTransform(
             solid,
             (bodyFrame.inverse() * motion).toMatrix(),
-            Part::OpCodes::Copy,
+            nullptr,
             Part::CheckScale::noScaleCheck,
             Part::CopyType::copy
         );
+        // Names of its own (I-A7): the owner's copy section on every name. V2 keeps a child's
+        // mapped names as they are, so an op given to makeElementTransform() adds nothing here
+        out.appendElementSection(owner->getID(), Part::OpCodes::Copy, "1");
         return out;
     }
     if (base.isNull()) {
