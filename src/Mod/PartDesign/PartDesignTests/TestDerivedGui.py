@@ -334,8 +334,15 @@ class TestDerivedFromFileGui(unittest.TestCase):
             if box is not None:
                 box.accept()
 
-        QtCore.QTimer.singleShot(300, accept)
-        DerivedFromFileGui.CommandDerivedFromFile().Activated()
+        # A repeating timer: the hidden read of the source comes before the chooser, and late in a
+        # full unit run it can take longer than a single shot's delay (the chooser then blocked)
+        timer = QtCore.QTimer()
+        timer.timeout.connect(accept)
+        timer.start(200)
+        try:
+            DerivedFromFileGui.CommandDerivedFromFile().Activated()
+        finally:
+            timer.stop()
         pump(0.5)
         self.assertEqual(self.warnings, [])
         self.assertIs(App.ActiveDocument, self.doc, "Expected the caller's document active again")
