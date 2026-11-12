@@ -1271,7 +1271,30 @@ bool FaceUniter::process()
             }
 
             try {
-                workShell = TopoDS::Shell(sew.SewedShape());
+                // Sewing hands back a face's INTERNAL vertex (one on none of its edges: a
+                // revolved thread cap crossing the wall, rehearsal 5 rb43 at FSLC #31) as a free
+                // vertex beside the shell, in a compound. That compound is the shell, and its merge
+                // stands; the loose vertex is left out. A compound with anything else (two shells,
+                // a free face or edge) stays a failure
+                TopoDS_Shape sewed = sew.SewedShape();
+                if (!sewed.IsNull() && sewed.ShapeType() == TopAbs_COMPOUND) {
+                    TopoDS_Shape shell;
+                    int shells = 0;
+                    bool others = false;
+                    for (TopoDS_Iterator member(sewed); member.More(); member.Next()) {
+                        if (member.Value().ShapeType() == TopAbs_SHELL) {
+                            ++shells;
+                            shell = member.Value();
+                        }
+                        else if (member.Value().ShapeType() != TopAbs_VERTEX) {
+                            others = true;
+                        }
+                    }
+                    if (shells == 1 && !others) {
+                        sewed = shell;
+                    }
+                }
+                workShell = TopoDS::Shell(sewed);
             }
             catch (Standard_Failure&) {
                 return false;
@@ -1471,6 +1494,10 @@ void Part::BRepBuilderAPI_RefineModel::Build()
                         LogModifications(uniter);
                     }
                 }
+                else {
+                    // kept as it was; the caller may try another way (makeElementRefine)
+                    mySkippedShells = true;
+                }
             }
             builder.Add(comp, reshape.Apply(solid));
         }
@@ -1481,6 +1508,11 @@ void Part::BRepBuilderAPI_RefineModel::Build()
             if (uniter.process()) {
                 builder.Add(comp, uniter.getShell());
                 LogModifications(uniter);
+            }
+            else {
+                // kept as it was (it used to be dropped from the result)
+                builder.Add(comp, shell);
+                mySkippedShells = true;
             }
         }
         // the rest: the compound's own faces, wires, edges and vertices, in that order. Only the
