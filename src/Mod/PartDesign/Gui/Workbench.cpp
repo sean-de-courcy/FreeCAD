@@ -551,6 +551,14 @@ void Workbench::activated()
         "PartDesign_MultiTransform"
     ));
 
+    // FreeCAD-CH (ops#640 polish P9): Onshape shows no command boxes in its panel when no
+    // dialog is open, whatever is selected
+    if (Gui::ForkKeymap::isOnshape()) {
+        for (Gui::TaskView::TaskWatcher* watcher : Watcher) {
+            delete watcher;
+        }
+        Watcher.clear();
+    }
     addTaskWatcher(Watcher);
     if (App::GetApplication()
             .GetUserParameter()

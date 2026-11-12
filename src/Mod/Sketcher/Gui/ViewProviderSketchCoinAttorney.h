@@ -25,6 +25,7 @@
 #pragma once
 
 #include <QFont>
+#include <optional>
 #include <vector>
 
 #include <Inventor/SbVec2f.h>
@@ -115,6 +116,9 @@ private:
 
     static inline int getPreselectPoint(const ViewProviderSketch& vp);
     static inline int getPreselectCurve(const ViewProviderSketch& vp);
+    // FreeCAD-CH (ops#640 polish P1b): the hovered curve/point whose glyphs show
+    static inline std::optional<int> getGlyphHoverCurve(const ViewProviderSketch& vp);
+    static inline std::optional<int> getGlyphHoverPoint(const ViewProviderSketch& vp);
     static inline int getPreselectCross(const ViewProviderSketch& vp);
 
     static inline bool isConstraintPreselected(const ViewProviderSketch& vp, int constraintId);
@@ -272,6 +276,20 @@ inline int ViewProviderSketchCoinAttorney::getPreselectPoint(const ViewProviderS
 inline int ViewProviderSketchCoinAttorney::getPreselectCurve(const ViewProviderSketch& vp)
 {
     return vp.getPreselectCurve();
+}
+
+inline std::optional<int> ViewProviderSketchCoinAttorney::getGlyphHoverCurve(
+    const ViewProviderSketch& vp
+)
+{
+    return vp.glyphHoverCurve();
+}
+
+inline std::optional<int> ViewProviderSketchCoinAttorney::getGlyphHoverPoint(
+    const ViewProviderSketch& vp
+)
+{
+    return vp.glyphHoverPoint();
 }
 
 inline int ViewProviderSketchCoinAttorney::getPreselectCross(const ViewProviderSketch& vp)

@@ -34,6 +34,7 @@
 #include <QStringList>
 #include <fastsignals/signal.h>
 #include <memory>
+#include <optional>
 
 #include <Base/Parameter.h>
 #include <Base/Placement.h>
@@ -80,6 +81,7 @@ class QImage;
 class QPoint;
 class QRect;
 class QColor;
+class QTimer;
 
 class SoText2;
 class SoTranslation;
@@ -694,6 +696,42 @@ public:
     bool getIsShownVirtualSpace() const;
     //@}
 
+    /** @name Onshape's "Show constraints" (FreeCAD-CH, ops#640 polish P1) */
+    //@{
+    /** The preference Mod/Sketcher/General/ShowConstraints: every constraint glyph is drawn. Off,
+     * only the dimensions, the selected or hovered constraints, the constraints of the hovered
+     * curve or point (not the selected ones: ops#640 polish P1b) and, with Show errors on, the
+     * over-defining (conflicting, redundant, malformed) ones are, as in Onshape. Its default:
+     * off under the Onshape keymap, on under FreeCAD's.
+     */
+    static bool showConstraintsPreference();
+    static void setShowConstraintsPreference(bool show);
+    /// With the preference off, redraws which constraints are drawn (they follow the hover)
+    void updateConstraintsShownByHover();
+    /** Onshape's "Show errors" (ops#640 polish P1b), Mod/Sketcher/General/ShowErrors, off by
+     * default: the over-defining constraints' glyphs are drawn (their curves turn red either way).
+     */
+    static bool showErrorsPreference();
+    static void setShowErrorsPreference(bool show);
+    /** The curve (GeoId) or point (vertex index) whose constraints are drawn with
+     * ShowConstraints off: the hovered one, kept ~0.8 s after the cursor leaves it so that its
+     * glyphs, drawn beside it, can be reached; none: std::nullopt.
+     */
+    std::optional<int> glyphHoverCurve() const
+    {
+        return glyphHover.curve;
+    }
+    std::optional<int> glyphHoverPoint() const
+    {
+        return glyphHover.point;
+    }
+    /** Onshape's "Show expressions" (ops#640 polish P4), Mod/Sketcher/General/ShowExpressions,
+     * off by default: a dimension set by an expression shows the expression, not its value.
+     */
+    static bool showExpressionsPreference();
+    static void setShowExpressionsPreference(bool show);
+    //@}
+
     /** @name base class implementer */
     //@{
     void attach(App::DocumentObject*) override;
@@ -962,6 +1000,11 @@ private:
     int internalFaceAt(double x, double y);
     /// shades the InternalFaceN of this sketch that are selected (edit mode)
     void updateSelectedRegions();
+    /** FreeCAD-CH (ops#640 polish P7, selection parity P6): Onshape's hover over a region: the
+     * InternalFaceN under the pointer (0: none) tinted and preselected, at the sketch point
+     * (x, y). Returns whether the hovered region changed.
+     */
+    bool updateHoveredRegion(int face, double x, double y);
     //@}
 
     /** @name miscelanea utilities */
@@ -1114,6 +1157,19 @@ private:
     Preselection preselection;
     Selection selection;
 
+    // FreeCAD-CH (ops#640 polish P1b): the curve or point whose glyphs show with
+    // ShowConstraints off (glyphHoverCurve()), and the timer that clears it after the hover leaves
+    struct GlyphHover
+    {
+        std::optional<int> curve;
+        std::optional<int> point;
+    };
+    GlyphHover glyphHover;
+    std::unique_ptr<QTimer> glyphHoverTimer;
+    /// Follows the preselection into glyphHover; true if what is drawn must change
+    bool updateGlyphHover();
+    void clearGlyphHover();
+
     std::unique_ptr<Gui::Rubberband> rubberband;
 
     std::string editDocName;
@@ -1127,6 +1183,11 @@ private:
     /// root (unpickable); rebuilt on each selection change
     Gui::CoinPtr<SoSwitch> pcSelectedRegionsRoot;
     Gui::CoinPtr<SoSketchFaces> pcSelectedRegions;
+    /// FreeCAD-CH (ops#640 polish P7): the region under the pointer (Onshape keymap), its
+    /// InternalFaceN index or 0, shaded beside the selected ones (unpickable)
+    Gui::CoinPtr<SoSwitch> pcHoveredRegionRoot;
+    Gui::CoinPtr<SoSketchFaces> pcHoveredRegion;
+    int hoveredRegion = 0;
 
     std::unique_ptr<ShortcutListener> listener;
 

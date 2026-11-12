@@ -36,6 +36,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <functional>
+#include <string>
 #include <QString>
 
 #include "Workbench.h"
@@ -85,6 +86,13 @@ namespace Gui::TaskView
 {
 GuiExport void setEditStatusText(
     std::function<QString(const App::DocumentObject*, const QString&)> text
+);
+}
+namespace Gui
+{
+// FreeCAD-CH (ops#640 polish P8): Onshape's double click in the 3D view (NavigationStyle.cpp)
+GuiExport void setDoubleClickElement(
+    std::function<void(const std::string&, const std::string&, const std::string&)> handler
 );
 }
 namespace PartDesignGui
@@ -209,6 +217,9 @@ PyMOD_INIT_FUNC(PartDesignGui)
         return ours && Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text)
                                                     : text;
     });
+    // FreeCAD-CH (ops#640 polish P8): under the Onshape keymap a double click on an element
+    // tints the feature that made it, and its sketch, in the list and the view
+    Gui::setDoubleClickElement(&PartDesignGui::FeaturesView::showCreatorOf);
     // FreeCAD-CH (ops#640 round 10): an Assembly tab's list in the Model panel
     PartDesignGui::FeaturesView::followTabs();
 

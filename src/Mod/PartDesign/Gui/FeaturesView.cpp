@@ -35,6 +35,7 @@
 #include <App/Document.h>
 #include <App/DocumentTabs.h>
 #include <App/DocumentObject.h>
+#include <App/ElementNamingUtils.h>
 #include <App/DocumentObjectGroup.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GeoFeature.h>
@@ -62,12 +63,14 @@
 #include <Gui/WorkbenchManager.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
+#include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureChamfer.h>
 #include <Mod/PartDesign/App/FeatureFillet.h>
+#include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Derived.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
@@ -2236,12 +2239,14 @@ void FeaturesView::pushSelection(const std::vector<App::DocumentObject*>& objs)
 
 void FeaturesView::onSelectionChanged(const Gui::SelectionChanges& msg)
 {
-    if (syncing) {
-        return;
-    }
     if (msg.Type != Gui::SelectionChanges::AddSelection && msg.Type != Gui::SelectionChanges::RmvSelection
         && msg.Type != Gui::SelectionChanges::SetSelection
         && msg.Type != Gui::SelectionChanges::ClrSelection) {
+        return;
+    }
+    // A double click's tint lasts until the selection changes (P8)
+    clearCreator();
+    if (syncing) {
         return;
     }
     selectionTimer->start();
@@ -2814,6 +2819,9 @@ void FeaturesView::markDependencies()
     // The feature being made or edited (ops#640 rank 40)
     QColor edited = palette().color(QPalette::Highlight);
     edited.setAlpha(35);
+    // The feature a double click showed and its sketch (P8)
+    QColor creator = palette().color(QPalette::Highlight);
+    creator.setAlpha(110);
     // Not a rename: the rows' data changes
     QScopedValueRollback<bool> quiet(syncing, true);
     for (int i = 0; i < features->count(); ++i) {
@@ -2826,12 +2834,142 @@ void FeaturesView::markDependencies()
         else if (dependencyChildren.count(name)) {
             background = QBrush(child);
         }
+        else if (!name.empty() && (name == creatorName || name == creatorSketchName)
+                 && item->type() != FeatureList::BarType) {
+            background = QBrush(creator);
+        }
         else if (!name.empty() && name == editedName && item->type() != FeatureList::BarType) {
             background = QBrush(edited);
         }
         item->setData(Qt::BackgroundRole, background);
         item->setData(DependencyRole, dependencyParents.count(name) ? 1 : dependencyChildren.count(name) ? 2 : 0);
     }
+}
+
+App::DocumentObject* FeaturesView::creatorOf(App::DocumentObject* shape, const char* element)
+{
+    if (!shape || !element || !*element) {
+        return nullptr;
+    }
+    // The history runs from the shape's feature down to where the element comes from; the items
+    // above that only changed it (a fillet, a fuse), so the last one decides (as the reference
+    // fields' featureOfElement)
+    const std::list<Data::HistoryItem> history = Part::Feature::getElementHistory(shape, element, true);
+    App::DocumentObject* origin = history.empty() ? shape : history.back().obj;
+    if (!origin) {
+        return nullptr;
+    }
+    auto isBinder = [](App::DocumentObject* obj) {
+        return obj->isDerivedFrom<PartDesign::ShapeBinder>()
+            || obj->isDerivedFrom<PartDesign::SubShapeBinder>();
+    };
+    if (origin->isDerivedFrom<PartDesign::Feature>() && !isBinder(origin)) {
+        return origin;
+    }
+    // A sketch or a binder: the feature whose profile it is, or a binder of it; one in the
+    // history first (a sketch two features use)
+    std::vector<App::DocumentObject*> profiles {origin};
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        for (App::DocumentObject* user : profiles[i]->getInList()) {
+            if (isBinder(user) && std::ranges::find(profiles, user) == profiles.end()) {
+                profiles.push_back(user);
+            }
+        }
+    }
+    App::DocumentObject* first = nullptr;
+    for (App::DocumentObject* profile : profiles) {
+        for (App::DocumentObject* user : profile->getInList()) {
+            auto based = freecad_cast<PartDesign::ProfileBased*>(user);
+            if (!based || based->Profile.getValue() != profile || based->Suppressed.getValue()) {
+                continue;
+            }
+            const bool inHistory = std::ranges::any_of(history, [based](const Data::HistoryItem& item) {
+                return item.obj == based;
+            });
+            if (inHistory) {
+                return based;
+            }
+            if (!first) {
+                first = based;
+            }
+        }
+    }
+    return first;
+}
+
+void FeaturesView::showCreatorOf(const std::string& doc, const std::string& obj, const std::string& sub)
+{
+    FeaturesView* view = instance();
+    App::Document* document = App::GetApplication().getDocument(doc.c_str());
+    App::DocumentObject* owner = document ? document->getObject(obj.c_str()) : nullptr;
+    if (!view || !owner) {
+        return;
+    }
+    const char* subElement = nullptr;
+    App::DocumentObject* shape = owner->resolve(sub.c_str(), nullptr, nullptr, &subElement);
+    const std::string element = subElement ? Data::oldElementName(subElement) : std::string();
+    App::DocumentObject* creator = creatorOf(shape, element.c_str());
+    view->clearCreator();
+    if (!creator) {
+        return;
+    }
+    view->creatorName = creator->getNameInDocument();
+    if (auto based = freecad_cast<PartDesign::ProfileBased*>(creator)) {
+        if (App::DocumentObject* profile = based->Profile.getValue()) {
+            view->creatorSketchName = profile->getNameInDocument();
+        }
+    }
+    // The faces the feature made, tinted in the shown shape
+    auto shown = freecad_cast<PartGui::ViewProviderPartExt*>(
+        Gui::Application::Instance->getViewProvider(shape)
+    );
+    const Part::TopoShape topo = shown ? Part::Feature::getTopoShape(shape, Part::ShapeOption::ResolveLink)
+                                         : Part::TopoShape();
+    const int faces = topo.isNull() ? 0 : static_cast<int>(topo.countSubShapes(TopAbs_FACE));
+    const std::vector<App::Material> base = shown ? shown->ShapeAppearance.getValues()
+                                                  : std::vector<App::Material>();
+    if (faces > 1 && !base.empty()) {
+        const QColor tint = view->palette().color(QPalette::Highlight);
+        std::vector<App::Material> materials;
+        materials.reserve(faces);
+        bool any = false;
+        for (int i = 0; i < faces; ++i) {
+            App::Material material = base[std::size_t(i) < base.size() ? i : 0];
+            const std::string face = "Face" + std::to_string(i + 1);
+            if (creatorOf(shape, face.c_str()) == creator) {
+                material.diffuseColor = Base::Color(
+                    static_cast<float>(tint.redF()),
+                    static_cast<float>(tint.greenF()),
+                    static_cast<float>(tint.blueF())
+                );
+                any = true;
+            }
+            materials.push_back(material);
+        }
+        if (any) {
+            shown->setHighlightedFaces(materials);
+            view->creatorShape = App::DocumentObjectT(shape);
+        }
+    }
+    view->markDependencies();
+}
+
+void FeaturesView::clearCreator()
+{
+    if (creatorName.empty() && creatorSketchName.empty() && !creatorShape.getObject()) {
+        return;
+    }
+    creatorName.clear();
+    creatorSketchName.clear();
+    if (App::DocumentObject* shape = creatorShape.getObject()) {
+        if (auto shown = freecad_cast<PartGui::ViewProviderPartExt*>(
+                Gui::Application::Instance->getViewProvider(shape)
+            )) {
+            shown->unsetHighlightedFaces();
+        }
+    }
+    creatorShape = App::DocumentObjectT();
+    markDependencies();
 }
 
 void FeaturesView::onPartClicked(QTreeWidgetItem* item, int column)

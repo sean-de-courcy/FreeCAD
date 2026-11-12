@@ -178,6 +178,13 @@ public:
     void createEditModeInventorNodes();
 
 private:
+    /** Whether each constraint is drawn: the one rule of the switches (updateVirtualSpace()) and
+     * the icons (drawConstraintIcons()). It is in the shown space and visible, and, with
+     * ShowConstraints off (FreeCAD-CH, ops#640 polish P1, Onshape's "Show constraints"), a
+     * dimension, selected, on selected geometry or a selected point, or over-defining.
+     */
+    std::vector<bool> shownConstraints(const std::vector<Sketcher::Constraint*>& constrlist) const;
+
     void rebuildConstraintNodes(const GeoListFacade& geolistfacade);  // with specific geometry
 
     void rebuildConstraintNodes(

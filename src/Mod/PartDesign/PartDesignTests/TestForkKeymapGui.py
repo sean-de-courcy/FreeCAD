@@ -2153,9 +2153,13 @@ OrthographicCamera {{
     def testSelectOtherInSketchListsAConstraintIconAndTheLineUnderIt(self):
         """A constraint icon over a line: the icon of the first line's Horizontal constraint, and
         a second, vertical line drawn through it. The constraint comes first (a hover picks the
-        icon), the line under it is listed too and Enter on it selects it."""
+        icon), the line under it is listed too and Enter on it selects it. Show constraints is
+        on: the Onshape keymap draws no constraint glyph by default (ops#640 polish P1)."""
         import Sketcher
 
+        general = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Sketcher/General")
+        general.SetBool("ShowConstraints", True)
+        self.addCleanup(general.RemBool, "ShowConstraints")
         sketch = self.sketchInEdit(lines=[((0, 5), (20, 5))])
         sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
         self.doc.recompute()

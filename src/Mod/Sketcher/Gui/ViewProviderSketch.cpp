@@ -76,6 +76,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>  // FreeCAD-CH (ops#640 polish P1): ShowConstraints' default
 #include <Gui/MainWindow.h>
 #include <Gui/MenuManager.h>
 #include <Gui/Selection/Selection.h>
@@ -668,6 +669,8 @@ ViewProviderSketch::ViewProviderSketch()
     , pcSketchFacesToggle(new SoToggleSwitch)
     , pcSelectedRegionsRoot(new SoSwitch)
     , pcSelectedRegions(new SoSketchFaces)
+    , pcHoveredRegionRoot(new SoSwitch)
+    , pcHoveredRegion(new SoSketchFaces)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -790,6 +793,15 @@ ViewProviderSketch::ViewProviderSketch()
     selectedRegions->addChild(pcSelectedRegions);
     pcSelectedRegionsRoot->addChild(selectedRegions);
     pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
+
+    // FreeCAD-CH (ops#640 polish P7): the hovered region, unpickable as well
+    auto hoveredRegionNode = new SoSeparator;
+    auto hoverUnpickable = new SoPickStyle;
+    hoverUnpickable->style = SoPickStyle::UNPICKABLE;
+    hoveredRegionNode->addChild(hoverUnpickable);
+    hoveredRegionNode->addChild(pcHoveredRegion);
+    pcHoveredRegionRoot->addChild(hoveredRegionNode);
+    pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
 }
 
 ViewProviderSketch::~ViewProviderSketch()
@@ -1270,6 +1282,9 @@ void ViewProviderSketch::getSelectOtherPicks(
         pick.preselect = [idleSketch, result]() {
             if (ViewProviderSketch* vp = idleSketch()) {
                 if (vp->detectAndShowPreselection(result)) {
+                    if (vp->updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
+                        vp->editCoinManager->updateVirtualSpace();
+                    }
                     vp->editCoinManager->drawConstraintIcons();
                     vp->updateColor();
                 }
@@ -2107,13 +2122,24 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
     }
 
     switch (Mode) {
-        case STATUS_NONE:
+        case STATUS_NONE: {
+            // FreeCAD-CH (ops#640 polish P7): Onshape tints the region under the pointer when
+            // none of the sketch's elements is under it
+            const bool element = preselection.isPreselectPointValid()
+                || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
+                || !preselection.PreselectConstraintSet.empty();
+            const int region = Gui::ForkKeymap::isOnshape() && !element ? internalFaceAt(x, y) : 0;
+            const bool regionChanged = updateHoveredRegion(region, x, y);
             if (preselectChanged) {
+                if (updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
+                    editCoinManager->updateVirtualSpace();
+                }
                 editCoinManager->drawConstraintIcons();
                 updateColor();
                 return true;
             }
-            return false;
+            return regionChanged;
+        }
         case STATUS_SELECT_Point:
             if (!getSolvedSketch().hasConflicts() && preselection.isPreselectPointValid()) {
                 int geoId;
@@ -3042,6 +3068,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                 clearSelectPoints();
                 selection.SelCurvSet.clear();
                 selection.SelConstraintSet.clear();
+                if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1)
+                    editCoinManager->updateVirtualSpace();
+                }
                 editCoinManager->drawConstraintIcons();
                 updateColor();
             }
@@ -3089,6 +3118,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                             Sketcher::PropertyConstraintList::getIndexFromConstraintName(shapetype);
                         selection.SelConstraintSet.insert(ConstrId);
                         if (!selection.selectionBuffering) {
+                            if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 P1)
+                                editCoinManager->updateVirtualSpace();
+                            }
                             editCoinManager->drawConstraintIcons();
                         }
                     }
@@ -3133,6 +3165,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                                 Sketcher::PropertyConstraintList::getIndexFromConstraintName(
                                     shapetype);
                             selection.SelConstraintSet.erase(ConstrId);
+                            if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 P1)
+                                editCoinManager->updateVirtualSpace();
+                            }
                             editCoinManager->drawConstraintIcons();
                         }
                         updateColor();
@@ -3673,6 +3708,9 @@ void ViewProviderSketch::doBoxSelection(const SbVec2s& startPos, const SbVec2s& 
     }
 
     selection.selectionBuffering = false;
+    if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1): follows the selection
+        editCoinManager->updateVirtualSpace();
+    }
     editCoinManager->drawConstraintIcons();
     updateColor();
 }
@@ -3858,6 +3896,9 @@ bool ViewProviderSketch::selectAll()
     }
 
     selection.selectionBuffering = false;
+    if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1): follows the selection
+        editCoinManager->updateVirtualSpace();
+    }
     editCoinManager->drawConstraintIcons();
     updateColor();
 
@@ -4100,6 +4141,118 @@ bool ViewProviderSketch::getIsShownVirtualSpace() const
     return viewProviderParameters.isShownVirtualSpace;
 }
 
+namespace
+{
+ParameterGrp::handle sketcherGeneralGroup()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher/General");
+}
+}  // namespace
+
+bool ViewProviderSketch::showConstraintsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P1): Onshape draws no constraint glyph until "Show constraints"
+    // is on; FreeCAD's keymap keeps FreeCAD's every glyph drawn
+    return sketcherGeneralGroup()->GetBool("ShowConstraints", !Gui::ForkKeymap::isOnshape());
+}
+
+void ViewProviderSketch::setShowConstraintsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the open sketch
+    sketcherGeneralGroup()->SetBool("ShowConstraints", show);
+}
+
+bool ViewProviderSketch::showExpressionsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions", off by default
+    return sketcherGeneralGroup()->GetBool("ShowExpressions", false);
+}
+
+void ViewProviderSketch::setShowExpressionsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the labels
+    sketcherGeneralGroup()->SetBool("ShowExpressions", show);
+}
+
+bool ViewProviderSketch::showErrorsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P1b): Onshape's "Show errors", off by default
+    return sketcherGeneralGroup()->GetBool("ShowErrors", false);
+}
+
+void ViewProviderSketch::setShowErrorsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the open sketch
+    sketcherGeneralGroup()->SetBool("ShowErrors", show);
+}
+
+void ViewProviderSketch::updateConstraintsShownByHover()
+{
+    if (!isInEditMode() || !editCoinManager || showConstraintsPreference()) {
+        return;
+    }
+    editCoinManager->updateVirtualSpace();
+    editCoinManager->drawConstraintIcons();
+}
+
+bool ViewProviderSketch::updateGlyphHover()
+{
+    // FreeCAD-CH (ops#640 polish P1b): Onshape draws a curve's constraint glyphs while it is
+    // hovered (PL1b). FreeCAD draws them beside the curve, away from the cursor, so they stay
+    // ~0.8 s after the hover leaves, and while one of them is hovered, to be clicked
+    if (showConstraintsPreference()) {
+        return false;
+    }
+    GlyphHover hovered;
+    if (preselection.isPreselectPointValid()) {
+        hovered.point = preselection.PreselectPoint;
+    }
+    else if (preselection.isPreselectCurveValid()) {
+        hovered.curve = preselection.PreselectCurve;
+    }
+    if (hovered.curve || hovered.point) {
+        if (glyphHoverTimer) {
+            glyphHoverTimer->stop();
+        }
+        if (hovered.curve == glyphHover.curve && hovered.point == glyphHover.point) {
+            return false;
+        }
+        glyphHover = hovered;
+        return true;
+    }
+    if (!glyphHover.curve && !glyphHover.point) {
+        return false;
+    }
+    if (!preselection.PreselectConstraintSet.empty()) {  // a glyph is hovered: keep it
+        if (glyphHoverTimer) {
+            glyphHoverTimer->stop();
+        }
+        return false;
+    }
+    if (!glyphHoverTimer) {
+        glyphHoverTimer = std::make_unique<QTimer>();
+        glyphHoverTimer->setSingleShot(true);
+        glyphHoverTimer->setInterval(800);
+        QObject::connect(glyphHoverTimer.get(), &QTimer::timeout, [this]() {
+            glyphHover = GlyphHover();
+            updateConstraintsShownByHover();
+        });
+    }
+    if (!glyphHoverTimer->isActive()) {
+        glyphHoverTimer->start();
+    }
+    return false;
+}
+
+void ViewProviderSketch::clearGlyphHover()
+{
+    if (glyphHoverTimer) {
+        glyphHoverTimer->stop();
+    }
+    glyphHover = GlyphHover();
+}
+
 
 void ViewProviderSketch::drawEdit(const std::vector<Base::Vector2d>& EditCurve)
 {
@@ -4183,6 +4336,9 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
                 Deviation.getValue(),
                 AngularDeflection.getValue());
         updateSelectedRegions();  // FreeCAD-CH (selection parity SQ11)
+        // FreeCAD-CH (ops#640 polish P7): the regions are new: the next move finds the hovered one
+        hoveredRegion = 0;
+        pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
     }
 
     if (prop != &getSketchObject()->Constraints) {
@@ -4562,6 +4718,9 @@ bool ViewProviderSketch::setEdit(int ModNum)
     snapManager = std::make_unique<SnapManager>(*this);
     pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
     editCoinManager->getRootEditNode()->addChild(pcSelectedRegionsRoot);
+    hoveredRegion = 0;
+    pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
+    editCoinManager->getRootEditNode()->addChild(pcHoveredRegionRoot);
 
 
     App::DocumentObject* editObj = getSketchObject();
@@ -4868,6 +5027,7 @@ void ViewProviderSketch::unsetEdit(int ModNum)
     if (ModNum != ViewProviderSketch::Default) {
         return PartGui::ViewProvider2DObject::unsetEdit(ModNum);
     }
+    clearGlyphHover();  // FreeCAD-CH (ops#640 polish P1b)
 
     if (dragAutoConstraintHandler) {
         dragAutoConstraintHandler->clear();
@@ -6193,6 +6353,47 @@ void ViewProviderSketch::updateSelectedRegions()
         setupCoinGeometry(selected, pcSelectedRegions, Deviation.getValue(), AngularDeflection.getValue());
     }
     pcSelectedRegionsRoot->whichChild = any ? 0 : SO_SWITCH_NONE;
+}
+
+bool ViewProviderSketch::updateHoveredRegion(int face, double x, double y)
+{
+    if (face == hoveredRegion || !isInEditMode()) {
+        return false;
+    }
+    const bool hadRegion = hoveredRegion > 0;
+    hoveredRegion = 0;
+    TopoDS_Shape region;
+    const TopoDS_Shape& shape = getSketchObject()->InternalShape.getValue();
+    if (face > 0 && !shape.IsNull()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        if (face <= faces.Extent()) {
+            region = faces(face);
+        }
+    }
+    if (region.IsNull()) {
+        pcHoveredRegionRoot->whichChild = SO_SWITCH_NONE;
+        // The region's preselection goes with it; an element's (the pointer on a side) stays
+        const bool element = preselection.isPreselectPointValid()
+            || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
+            || !preselection.PreselectConstraintSet.empty();
+        if (hadRegion && !element) {
+            Gui::Selection().rmvPreselect();
+        }
+        return hadRegion;
+    }
+    hoveredRegion = face;
+    pcHoveredRegion->color.setValue(DrawingParameters::PreselectColor);
+    pcHoveredRegion->transparency.setValue(0.6F);
+    setupCoinGeometry(region, pcHoveredRegion, Deviation.getValue(), AngularDeflection.getValue());
+    pcHoveredRegionRoot->whichChild = 0;
+    Base::Vector3d onPlane;
+    getEditingPlacement().multVec(Base::Vector3d(x, y, 0.0), onPlane);
+    setPreselect("InternalFace" + std::to_string(face),
+                 static_cast<float>(onPlane.x),
+                 static_cast<float>(onPlane.y),
+                 static_cast<float>(onPlane.z));
+    return true;
 }
 
 void ViewProviderSketch::preselectToSelection(const std::stringstream& ss,

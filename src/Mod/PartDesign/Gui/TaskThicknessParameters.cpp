@@ -81,8 +81,10 @@ void TaskThicknessParameters::initControls()
     // Bind input fields to properties
     ui->Value->bind(thickness->Value);
 
+    // Onshape's "Opposite direction" (ops#640 polish P10): walls grow inwards (Reversed) unless
+    // it is ticked
     bool r = thickness->Reversed.getValue();
-    ui->checkReverse->setChecked(r);
+    ui->checkReverse->setChecked(!r);
 
     bool i = thickness->Intersection.getValue();
     ui->checkIntersection->setChecked(i);
@@ -172,7 +174,7 @@ double TaskThicknessParameters::getValue() const
 void TaskThicknessParameters::onReversedChanged(bool on)
 {
     if (PartDesign::Thickness* thickness = onBeforeChange()) {
-        thickness->Reversed.setValue(on);
+        thickness->Reversed.setValue(!on);  // the box is Opposite direction: outwards
         onAfterChange(thickness);
 
         setGizmoPositions();
@@ -181,7 +183,7 @@ void TaskThicknessParameters::onReversedChanged(bool on)
 
 bool TaskThicknessParameters::getReversed() const
 {
-    return ui->checkReverse->isChecked();
+    return !ui->checkReverse->isChecked();  // Opposite direction ticked: outwards
 }
 
 void TaskThicknessParameters::onIntersectionChanged(bool on)

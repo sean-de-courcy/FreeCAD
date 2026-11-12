@@ -87,7 +87,7 @@ std::vector<Part::TopoShape> collectImprint(const Sketcher::SketchObject& sketch
 {
     using Sketcher::SketchObject;
     if (sketch._InternalFaceVersion.getValue() < Sketcher::ImprintInternalFaceVersion
-        || !sketch.MakeInternals.getValue()) {
+        || !sketch.MakeInternals.getValue() || sketch.DisableImprinting.getValue()) {
         return {};
     }
     std::vector<Part::TopoShape> edges;

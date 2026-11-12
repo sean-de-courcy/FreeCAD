@@ -59,6 +59,7 @@
 #include <Mod/PartDesign/App/FeatureChamfer.h>
 #include <Mod/PartDesign/App/FeatureFillet.h>
 #include <Mod/PartDesign/App/StudioList.h>
+#include <Mod/PartDesign/App/FeatureThickness.h>
 #include <Mod/PartDesign/Gui/ReferenceSelection.h>
 
 #include "ReferenceField.h"
@@ -664,7 +665,11 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
     else {
         options.kinds = tr("Edges");
     }
-    auto write = [this](App::DocumentObject* /*target*/, const std::vector<std::string>& subs) {
+    // Onshape's word for the shell's field (ops#640 polish P10)
+    if (getObject<PartDesign::Thickness>()) {
+        options.label = tr("Faces to remove");
+    }
+    auto write =[this](App::DocumentObject* /*target*/, const std::vector<std::string>& subs) {
         if (ViewProviderDressUp* view = getDressUpView()) {
             updateFeature(view->getObject<PartDesign::DressUp>(), subs);
         }
