@@ -21,6 +21,8 @@ from SketcherTests.GuiTestCase import FreeCADGui, QtCore, QtGui, SketcherGuiTest
 V = FreeCAD.Vector
 TOL = 1e-6
 SKETCHER_PARAMS = "User parameter:BaseApp/Preferences/Mod/Sketcher"
+# Outside the box (whose top face is imprinted as a region of the sketch on it) and every region
+OUTSIDE = V(-3, 5, 5)
 
 
 class ModelPicksGuiCase(SketcherGuiTestCase):
@@ -670,10 +672,10 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
         pre = self.preselected()
         return pre[1].split(".")[-1] if pre else None
 
-    def test_hover_inside_a_closed_profile_tints_its_region(self):
+    def test_hover_inside_a_closed_profile_preselects_its_region(self):
         """Polish P7 (selection parity P6, Onshape keymap): the pointer inside a rectangle, on
-        none of its elements, tints its region, which is the preselection; on a side the side
-        is; outside every region nothing is."""
+        none of its elements, preselects its region; on a side the side is; outside every region
+        nothing is."""
         self.add_rectangle(12, 2, 18, 8)
         region = self.region_at(15, 5)
         self.start_edit_from_above()
@@ -707,6 +709,151 @@ class TestSketchModelPicksGui(ModelPicksGuiCase):
                 general.RemString("Keymap")
             else:
                 general.SetString("Keymap", saved)
+
+    def curve_colours(self):
+        """The open sketch's curve colours, one per curve of its first layer."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setName("CurvesMaterials0")
+        search.setSearchingAll(True)
+        search.apply(self.view.getViewer().getSoRenderManager().getSceneGraph())
+        path = search.getPath()
+        self.assertIsNotNone(path, "Expected the sketch's curve materials")
+        values = path.getTail().diffuseColor.getValues()
+        return [tuple(round(v, 3) for v in c.getValue()) for c in values]
+
+    def colours_at(self, point):
+        self.mouse_at(point)
+        self.flush_gui(100)
+        return self.curve_colours()
+
+    @staticmethod
+    def changed(rest, colours):
+        return {i: c for i, (r, c) in enumerate(zip(rest, colours)) if r != c}
+
+    def test_hover_inside_a_closed_profile_turns_its_boundary_curves_hover_coloured(self):
+        """Polish P7 corrected (SP10-Q1, oracle 9e): the pointer inside a rectangle turns its four
+        sides the hover colour (a side's colour with the pointer on it) and no other curve; the
+        region's fill is not tinted."""
+        self.add_rectangle(12, 2, 18, 8)
+        self.start_edit_from_above()
+        rest = self.colours_at(OUTSIDE)
+        side = self.changed(rest, self.colours_at(V(15, 2, 5)))
+        self.assertEqual(len(side), 1, side)
+        hover = next(iter(side.values()))
+        inside = self.changed(rest, self.colours_at(V(15, 5, 5)))
+        self.assertEqual(len(inside), 4, inside)
+        self.assertEqual(set(inside.values()), {hover})
+        self.assertEqual(self.changed(rest, self.colours_at(OUTSIDE)), {})
+
+    def test_hovering_a_selected_region_changes_nothing(self):
+        """SP10-Q4: a selected region hovered: no curve changes colour and the region isn't
+        preselected again."""
+        self.add_rectangle(12, 2, 18, 8)
+        region = self.region_at(15, 5)
+        self.start_edit_from_above()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 5, 5))
+        self.assertEqual(self.selected_regions(), {region}, self.selected())
+        rest = self.colours_at(OUTSIDE)
+        self.assertEqual(self.changed(rest, self.colours_at(V(15, 5, 5))), {})
+        self.assertNotEqual(self.preselected_element(), region)
+
+    def test_a_tool_shows_no_region_hover_and_ends_one_begun_before(self):
+        """SP10-Q2: a hover begun before the Line tool ends when the tool starts, and with the
+        tool active a region shows none."""
+        self.add_rectangle(12, 2, 18, 8)
+        region = self.region_at(15, 5)
+        self.start_edit_from_above()
+        rest = self.colours_at(OUTSIDE)
+        self.assertEqual(len(self.changed(rest, self.colours_at(V(15, 5, 5)))), 4)
+        self.run_command("Sketcher_CreateLine")
+        self.assertEqual(self.changed(rest, self.curve_colours()), {})
+        self.assertNotEqual(self.preselected_element(), region)
+        self.assertEqual(self.changed(rest, self.colours_at(V(15.5, 5.5, 5))), {})
+        self.assertNotEqual(self.preselected_element(), region)
+
+    def start_3d_from_above(self):
+        """The sketch closed, in an orthographic top view, the box hidden (its top face is the
+        sketch's plane)."""
+        from SketcherTests.TestSketchRound3Gui import TOP_VIEW_CAMERA
+
+        FreeCADGui.getMainWindow().show()
+        self.pad.Visibility = False
+        self.sketch.Visibility = True
+        self.doc.recompute()
+        self.view = FreeCADGui.ActiveDocument.ActiveView
+        self.view.setCamera(TOP_VIEW_CAMERA)
+        self.flush_gui(100)
+        self.viewport = self.view.graphicsView().viewport()
+        self.corrected_points = True
+
+    def region_hover_curves(self):
+        """How many curves the closed sketches' region hover draws."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setName("RegionHoverEdges")
+        search.setInterest(coin.SoSearchAction.ALL)
+        search.setSearchingAll(True)
+        search.apply(self.view.getViewer().getSoRenderManager().getSceneGraph())
+        paths = search.getPaths()
+        count = 0
+        for i in range(paths.getLength()):
+            switch = paths[i].getTail()
+            if switch.whichChild.getValue() == 0:
+                count += switch.getChild(0).getChild(4).numVertices.getNum()
+        return count
+
+    def hover_3d(self, point):
+        self.mouse_at(point)
+        self.flush_gui(100)
+        pre = self.preselected_element()
+        if pre is None and point.x == 15:
+            self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
+        return pre
+
+    def test_hover_over_a_region_of_the_closed_sketch_draws_its_boundary_curves(self):
+        """SP10-Q5: the sketch closed, the 3D view with no dialog: the pointer inside the
+        rectangle preselects its region and draws its four sides in the hover colour (the fill
+        isn't tinted); outside, nothing; a selected region hovered draws nothing."""
+        self.add_rectangle(12, 2, 18, 8)
+        region = self.region_at(15, 5)
+        self.start_3d_from_above()
+        self.assertEqual(self.hover_3d(V(15, 5, 5)), region)
+        self.assertEqual(self.region_hover_curves(), 4)
+        self.hover_3d(OUTSIDE)
+        self.assertEqual(self.region_hover_curves(), 0)
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 5, 5))
+        self.assertTrue(
+            any(sub.endswith(region) for sub in self.selected_regions()), self.selected()
+        )
+        self.hover_3d(OUTSIDE)
+        self.hover_3d(V(15, 5, 5))
+        self.assertEqual(self.region_hover_curves(), 0)
+
+    def test_hover_over_a_region_with_an_extrude_profile_field_armed(self):
+        """SP10-Q5: with a new Extrude's Profile field armed, the same hover."""
+        self.add_rectangle(12, 2, 18, 8)
+        region = self.region_at(15, 5)
+        self.start_3d_from_above()
+        self.view.setActiveObject("pdbody", self.body)
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("PartDesign_Pad")
+        try:
+            self.flush_gui(300)
+            self.assertTrue(FreeCADGui.Control.activeDialog(), "no Extrude dialog")
+            from SketcherTests.TestSketchRound3Gui import TOP_VIEW_CAMERA
+
+            self.view.setCamera(TOP_VIEW_CAMERA)  # the dialog's opening may move the camera
+            self.flush_gui(100)
+            self.assertEqual(self.hover_3d(V(15, 5, 5)), region)
+            self.assertEqual(self.region_hover_curves(), 4)
+        finally:
+            FreeCADGui.Control.closeDialog()
+            self.flush_gui(100)
 
     def test_escape_keeps_the_selection_and_the_sketch_open(self):
         """Selection parity P7 (oracle 8, SQ7): Esc in the sketch editor with a sketch line and a

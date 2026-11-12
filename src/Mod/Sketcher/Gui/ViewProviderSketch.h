@@ -33,8 +33,10 @@
 #include <QMetaObject>
 #include <QStringList>
 #include <fastsignals/signal.h>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 
 #include <Base/Parameter.h>
 #include <Base/Placement.h>
@@ -71,6 +73,10 @@ class SoInfo;
 class SoPointSet;
 class SoTransform;
 class SoLineSet;
+class SoBaseColor;
+class SoDrawStyle;
+class SoAction;
+class SbColor;
 class SoMarkerSet;
 class SoPickedPoint;
 class SoPickedPointList;
@@ -130,6 +136,13 @@ public:
 
     SoSFColor color;
     SoSFFloat transparency;
+
+    /** FreeCAD-CH (ops#640 polish P7, SP10-Q1/Q5): under the Onshape keymap the 3D view's hover
+     * highlight of a face goes here (its InternalFaceN's N, 0 when it ends, and the highlight
+     * colour) instead of tinting the face. Unset: the face is tinted as before.
+     */
+    std::function<void(int, const SbColor&)> onHoverHighlight;
+    void doAction(SoAction* action) override;
 };
 
 /** @brief The Sketch ViewProvider
@@ -1000,11 +1013,20 @@ private:
     int internalFaceAt(double x, double y);
     /// shades the InternalFaceN of this sketch that are selected (edit mode)
     void updateSelectedRegions();
-    /** FreeCAD-CH (ops#640 polish P7, selection parity P6): Onshape's hover over a region: the
-     * InternalFaceN under the pointer (0: none) tinted and preselected, at the sketch point
-     * (x, y). Returns whether the hovered region changed.
+    /** FreeCAD-CH (ops#640 polish P7, selection parity P6, SP10-Q1): Onshape's hover over a
+     * region: the InternalFaceN under the pointer (0: none) is preselected at the sketch point
+     * (x, y) and its boundary curves draw in the preselection colour; the fill is unchanged.
+     * Returns whether the hovered region changed (the caller redraws the curves' colours).
      */
     bool updateHoveredRegion(int face, double x, double y);
+    /// FreeCAD-CH (ops#640 polish P7): the geoIds of the curves bounding InternalFaceN (an
+    /// imprinted model edge has none)
+    std::set<int> regionBoundaryCurves(int face) const;
+    /** FreeCAD-CH (ops#640 polish P7, SP10-Q5): the sketch closed, the 3D view's hover over its
+     * InternalFaceN (0: none) draws the region's boundary curves in `color`; a selected region
+     * shows nothing.
+     */
+    void showRegionHover(int face, const SbColor& color);
     //@}
 
     /** @name miscelanea utilities */
@@ -1092,6 +1114,8 @@ private:
     void executeOnSelectionPointSet(std::function<void(const int)>&& operation) const;
 
     bool isCurveSelected(int curveId) const;
+    /// FreeCAD-CH (ops#640 polish P7): a boundary curve of the hovered region
+    bool isCurveRegionHovered(int curveId) const;
 
     bool isConstraintSelected(int constraintId) const;
 
@@ -1184,10 +1208,18 @@ private:
     Gui::CoinPtr<SoSwitch> pcSelectedRegionsRoot;
     Gui::CoinPtr<SoSketchFaces> pcSelectedRegions;
     /// FreeCAD-CH (ops#640 polish P7): the region under the pointer (Onshape keymap), its
-    /// InternalFaceN index or 0, shaded beside the selected ones (unpickable)
-    Gui::CoinPtr<SoSwitch> pcHoveredRegionRoot;
-    Gui::CoinPtr<SoSketchFaces> pcHoveredRegion;
+    /// InternalFaceN index or 0, and the geoIds of its boundary curves (drawn preselected)
     int hoveredRegion = 0;
+    std::set<int> hoveredRegionCurves;
+    /// set while updateHoveredRegion changes the preselection itself
+    bool updatingRegionPreselection = false;
+    /// FreeCAD-CH (ops#640 polish P7): the 3D view's hovered region's boundary curves (sketch
+    /// closed), drawn on top and unpickable; named RegionHoverEdges
+    Gui::CoinPtr<SoSwitch> pcRegionHoverRoot;
+    SoCoordinate3* regionHoverCoords = nullptr;
+    SoLineSet* regionHoverLines = nullptr;
+    SoBaseColor* regionHoverColor = nullptr;
+    SoDrawStyle* regionHoverStyle = nullptr;
 
     std::unique_ptr<ShortcutListener> listener;
 
