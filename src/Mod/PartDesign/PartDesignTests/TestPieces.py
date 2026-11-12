@@ -1041,16 +1041,16 @@ class TestStudioUndo(unittest.TestCase):
                 App.closeDocument(doc.Name)
 
     # ------------------------------------------------------------------------------- the model
-    def model(self):
+    def model(self, regenerate=True):
         from PartDesignTests.TestStudioPartMirror import boxPart
 
         doc = self.doc = App.newDocument("TestStudioUndo")
         doc.UndoMode = 1
         # As the Gui has it (ops#640): an undo or redo regenerates before its own signal, so the
         # resync there sees the records the regeneration re-derives. Without it (FreeCADCmd's
-        # default) the resync at undo()'s own signal reads a record written outside the step
-        # against the restored inputs (ops#654 10.15, left open)
-        doc.RegenerateOnCommit = True
+        # default) the resync at undo()'s own signal would read a record written outside the step
+        # against the restored inputs: it waits for the recompute (10.15's debt, T1a)
+        doc.RegenerateOnCommit = regenerate
         self.S = doc.addObject("App::Part", "S")
         self.y = boxPart(doc, self.S, "Y", 2, 0, 12, 10, 0, 10)
         self.x = boxPart(doc, self.S, "X", -20, 0, -10, 10, 0, 10)
@@ -1133,6 +1133,37 @@ class TestStudioUndo(unittest.TestCase):
         self.assertIsNone(PartDesign.studioStepOf(self.e, self.y))
         self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
         doc.undo()
+        doc.recompute()
+        self.assertEqual(self.state(), before)
+        self.assertIsNone(PartDesign.studioConsumerOf(self.y))
+        self.assertIsNotNone(PartDesign.studioStepOf(self.e, self.y))
+        PartDesign.studioReconcile(self.list)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(doc.UndoNames, ["pocket", "mirror"])
+        doc.redo()
+        doc.recompute()
+        self.assertEqual(self.state(), after)
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+        self.assertEqual(doc.RedoCount, 0)
+
+    def testCommitThenRecomputeUndoesTheResyncWithRegenerateOnCommitOff(self):
+        """10.15's debt (T1a): as above with RegenerateOnCommit off (FreeCADCmd's default). The
+        undo restores the inputs and the records but recomputes nothing: the resync at its signal
+        must not reconcile against the record restored with the inputs it no longer matches (the
+        document needs a recompute); the recompute after it settles everything. Undo: the state
+        before the move, a reconcile succeeds; redo: the moved state."""
+        doc = self.model(regenerate=False)
+        before = self.state()
+        doc.openTransaction("move")
+        self.moveY(-2)
+        doc.commitTransaction()
+        doc.recompute()
+        after = self.state()
+        self.assertIs(PartDesign.studioConsumerOf(self.y), self.mir)
+        self.assertEqual(doc.UndoNames, ["move", "pocket", "mirror"])
+        doc.undo()
+        self.assertNoStray(self.state())
         doc.recompute()
         self.assertEqual(self.state(), before)
         self.assertIsNone(PartDesign.studioConsumerOf(self.y))

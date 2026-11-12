@@ -2326,15 +2326,41 @@ void PartDesign::studioSetPartMirrorConsumes(App::DocumentObject* owner, bool co
 
 namespace
 {
+/// Whether doc needs a recompute: an object touched that a recompute would compute (one held by
+/// its Body's bar, or a rolled-back Body, stays touched after a recompute: ops#127 R5/R7)
+bool needsRecompute(const App::Document& doc)
+{
+    std::set<const App::DocumentObject*> held;
+    for (auto obj : doc.getObjectsOfType(Body::getClassTypeId())) {
+        auto body = static_cast<const Body*>(obj);
+        const auto& group = body->Group.getValues();
+        const App::DocumentObject* bar = body->effectiveBar();
+        auto after = bar ? std::ranges::find(group, bar) : group.begin();
+        if (after != group.end() && bar) {
+            ++after;
+        }
+        held.insert(after, group.end());
+        if (body->isRolledBack()) {
+            held.insert(body);
+        }
+    }
+    return std::ranges::any_of(doc.getObjects(), [&held](const App::DocumentObject* obj) {
+        return obj && obj->isTouched() && !held.count(obj);
+    });
+}
+
 /// After a recompute: a part mirror whose Add decided to consume its source (or no longer) since
 /// the list was last projected changes which parts live after it, so the list is reconciled and
-/// the document computed again (slice 9). Not while undoing, restoring or closing
+/// the document computed again (slice 9). Not while undoing, restoring or closing, nor while the
+/// document needs a recompute (10.15's debt, T1a): an undo with RegenerateOnCommit off restores
+/// inputs and records and computes nothing, and a record restored with inputs it no longer
+/// matches is no decision; the recompute after it re-derives the records and resyncs then
 void resyncPartMirrors(const App::Document& constDoc)
 {
     static bool busy = false;
     auto& doc = const_cast<App::Document&>(constDoc);
     if (busy || doc.isPerformingTransaction() || doc.testStatus(App::Document::Restoring)
-        || App::GetApplication().isClosingAll()) {
+        || App::GetApplication().isClosingAll() || needsRecompute(doc)) {
         return;
     }
     auto staleLists = [&doc]() {
