@@ -432,8 +432,7 @@ def resolve_pick(root, subname):
     except Exception:
         path = []
     for obj in path:
-        if obj.isDerivedFrom("App::Link") or obj.isDerivedFrom("App::LinkElement") \
-                or obj.isDerivedFrom("App::LinkGroup"):
+        if obj.hasExtension("App::LinkBaseExtension"):  # Link, LinkElement, LinkGroup, Draft link arrays
             raise MeasureError("{} is picked through the link {}: pick the original".format(
                 owner.Label, obj.Label))
     if element and not element[0].isalpha():

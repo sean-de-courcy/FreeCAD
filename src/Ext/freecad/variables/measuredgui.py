@@ -272,12 +272,16 @@ class MeasuredPanel:
 
     # selection observer (NoResolve: top-level object and full subname)
     def alive(self):
-        """Whether the document is still open; a dead panel stops observing."""
+        """Whether the document is still open and the dialog's widgets still exist; a dead panel
+        stops observing."""
+        ok = False
         try:
-            return App.getDocument(self.doc.Name) is self.doc
+            ok = App.getDocument(self.doc.Name) is self.doc and _valid(self.form)
         except Exception:
+            ok = False
+        if not ok:
             self.observe(False)
-            return False
+        return ok
 
     def addSelection(self, docName, objName, sub, pnt=None):
         try:
@@ -287,7 +291,7 @@ class MeasuredPanel:
             if root is not None:
                 self.addPick(root, sub)
         except Exception as e:  # never out of a selection callback
-            self.message(str(e))
+            _quietly(self.message, str(e))
 
     def removeSelection(self, docName, objName, sub):
         try:
@@ -297,7 +301,7 @@ class MeasuredPanel:
             if root is not None:
                 self.removePick(root, sub)
         except Exception as e:
-            self.message(str(e))
+            _quietly(self.message, str(e))
 
     def observe(self, on):
         if on and not self.observing:
@@ -369,11 +373,38 @@ class MeasuredPanel:
             pass
 
 
+def _valid(widget):
+    try:
+        import shiboken6
+
+        return shiboken6.isValid(widget)
+    except ImportError:
+        return True
+
+
+def _quietly(call, *args):
+    try:
+        call(*args)
+    except Exception:
+        pass
+
+
+def _still_open(panel):
+    """Whether `panel`'s task dialog is still open in its own document (each document has its
+    own task dialog)."""
+    try:
+        if App.getDocument(panel.doc.Name) is not panel.doc or not _valid(panel.form):
+            return False
+        return bool(Gui.Control.activeDialog(Gui.getDocument(panel.doc.Name)))
+    except Exception:
+        return False
+
+
 def _drop_stale():
-    """A panel whose task dialog was closed some other way (a document closed, another dialog's
-    closeDialog) stops observing."""
+    """A panel whose task dialog was closed some other way (its document closed, another
+    dialog's closeDialog) stops observing."""
     global current
-    if current is not None and not Gui.Control.activeDialog():
+    if current is not None and not _still_open(current):
         current.observe(False)
         current = None
 
