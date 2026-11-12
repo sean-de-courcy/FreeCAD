@@ -197,6 +197,63 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertNotIn("", names)
         self.assertEqual(len(set(names)), len(names), "two faces share a name")
 
+    # ------------------------------------------------------------------- second direction
+    def gridPattern(self, reapply=False, **values):
+        """On a 60 x 40 x 10 plate, the hole owner (r3, 5 deep, at (10, hy)) patterned 3 times 20
+        apart along X, and along Y as the second direction: values set Offset2, Occurrences2,
+        Centered2, SkippedInstances (ops#655)."""
+        self.plate(rect=(0, 0, 60, 40))
+        hole = self.holeOwner(Length=5, y=values.pop("hy", 10.0))
+        p = self.part()
+        lp = p.newObject("PartDesign::LinearPattern", "LP")
+        lp.Originals = [hole]
+        lp.Direction = axis(p, X_AXIS)
+        lp.Mode = "Spacing"
+        lp.Offset = 20
+        lp.Occurrences = 3
+        lp.Direction2 = axis(p, Y_AXIS)
+        lp.Mode2 = "Spacing"
+        for name, value in values.items():
+            setattr(lp, name, value)
+        lp.Reapply = reapply
+        listed(lp)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        return lp
+
+    def holesAt(self, lp, ys):
+        """The (x, y) of the grid places, x 10, 30, 50, that have a hole 2 below the top."""
+        return sorted(
+            (x, y)
+            for x in (10, 30, 50)
+            for y in ys
+            if not lp.Shape.isInside(V(x, y, 8), 1e-6, True)
+        )
+
+    def testSecondDirectionGrid(self):
+        """Onshape's grid: 3 along X times 2 along Y, the seed counted once, six holes, with
+        Reapply off and on; every face keeps its own name (instance numbers i:j)."""
+        for reapply in (False, True):
+            with self.subTest(reapply=reapply):
+                lp = self.gridPattern(reapply, Offset2=15, Occurrences2=2)
+                self.assertTipVolume(60 * 40 * 10 - 6 * self.hole(5))
+                self.assertEqual(
+                    self.holesAt(lp, (10, 25, 40)), [(x, y) for x in (10, 30, 50) for y in (10, 25)]
+                )
+                self.assertNamesDistinct(lp.Shape)
+                App.closeDocument(self.doc.Name)
+
+    def testSecondDirectionCenteredAndSkipped(self):
+        """Centered along Y with count 2 puts rows at y 5, 20, 35 around the seed's y 20 (Onshape's
+        count is per side, the seed included: oracle 9j); skipping (1, 2) leaves out x 30 on the
+        last row (counted from the negative end): eight holes."""
+        lp = self.gridPattern(
+            hy=20.0, Offset2=15, Occurrences2=2, Centered2=True, SkippedInstances=[1, 2]
+        )
+        self.assertTipVolume(60 * 40 * 10 - 8 * self.hole(5))
+        expected = [(x, y) for x in (10, 30, 50) for y in (5, 20, 35) if (x, y) != (30, 35)]
+        self.assertEqual(self.holesAt(lp, (5, 20, 35)), expected)
+
     # ------------------------------------------------------------------------------- copies
     def testLinearPatternOfARemoveOwner(self):
         """Three r3 holes 5 deep in a 60 x 20 x 10 plate: the seed's and two copies 20 apart."""

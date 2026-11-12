@@ -23,12 +23,14 @@
  ******************************************************************************/
 
 #include <limits>
+#include <vector>
 
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Trsf.hxx>
 #include <BRepAdaptor_Curve.hxx>
 
 #include "DatumLine.h"
@@ -57,7 +59,7 @@ PolarPattern::PolarPattern()
         (false),
         "PolarPattern",
         App::Prop_None,
-        "The instances run both ways from the original, which is the middle one"
+        "The instances run both ways from the original, Occurrences on each side, the original included"
     );
     ADD_PROPERTY_TYPE(
         SkippedInstances,
@@ -99,12 +101,28 @@ gp_Ax2 PolarPattern::getRotation() const
 const std::list<gp_Trsf> PolarPattern::getTransformations(const std::vector<App::DocumentObject*>)
 {
     const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
-    return centerInstances(calculateTransformations(), count, 1, Centered.getValue(), false);
+    std::list<gp_Trsf> turns = calculateTransformations();
+    if (!Centered.getValue() || count < 2 || turns.size() != static_cast<std::size_t>(count)) {
+        return turns;
+    }
+    // FreeCAD-CH (ops#655): Onshape's Centered counts per side, the seed included (oracle 9j,
+    // Q-D6): count n makes 2n - 1 instances, the turns mirrored through the seed (the angle is the
+    // extent on each side)
+    const std::vector<gp_Trsf> list(turns.begin(), turns.end());
+    std::list<gp_Trsf> geometric;
+    for (int k = 1 - count; k < count; ++k) {
+        geometric.push_back(
+            k < 0 ? list[static_cast<std::size_t>(-k)].Inverted() : list[static_cast<std::size_t>(k)]
+        );
+    }
+    return centerInstances(geometric, 2 * count - 1, 1, true, false);
 }
 
 std::vector<std::size_t> PolarPattern::getSkippedPositions() const
 {
-    const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    // Centered: 2n - 1 instances, the seed the middle one (oracle 9j)
+    const int occurrences = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    const int count = Centered.getValue() ? 2 * occurrences - 1 : occurrences;
     const int middle = Centered.getValue() ? (count - 1) / 2 : 0;
     std::vector<std::size_t> positions;
     for (long index : SkippedInstances.getValues()) {
