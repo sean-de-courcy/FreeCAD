@@ -161,8 +161,8 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertIn("'B'", f.getStatusString())
         self.assertTrue(self.step(f, "B").isValid())
 
-    # ops#693: Onshape's values; ours refuses r 4 on B's 3 high edge ("a tangent strip runs off its face"): the owner warns, B 300.
-    @unittest.expectedFailure
+    # ops#693: Onshape's values, which kernel safety's fallback gives on the experiment line. This branch's base lacks the
+    # fallback and refuses r 4 on B's 3 high edge ("a tangent strip runs off its face"): red here until it is merged in.
     def testARadiusLargerThanTheFacesRoundsBoth(self):
         """O2 (ops#693): B only 3 high, r 4 on both top front edges: Onshape rounds both, no warning
         (A 965.664, B 266.084)."""
@@ -174,8 +174,7 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertAlmostEqual(a.Shape.Volume, 965.664, delta=0.01)
         self.assertAlmostEqual(b.Shape.Volume, 266.084, delta=0.01)
 
-    # ops#693: Onshape's values; ours refuses r 4 on B's 3 high edge ("a tangent strip runs off its face"): the owner fails, B 300.
-    @unittest.expectedFailure
+    # ops#693: as the test above: green on the experiment line (kernel safety's fallback), red on this branch's base.
     def testARadiusLargerThanTheFaceBuilds(self):
         """O2 (ops#693): r 4 on B's 3 high edge alone: Onshape builds it, no message, B 300 -> 266.084."""
         self.doc.getObject("BPad").Length = 3
