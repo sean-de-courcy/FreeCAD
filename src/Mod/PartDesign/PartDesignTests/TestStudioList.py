@@ -1693,17 +1693,21 @@ class TestStudioList(StudioCase):
             PartDesign.studioProject(self.list)
         self.assertEqual(chainOf(self.doc.getObject("A")), chain)
 
-    def testSplitIsAnError(self):
-        """A cut that splits a part fails, naming the part and the count; the part goes on with
-        the state before it (one solid), as a failed feature contributes nothing."""
+    def testSplitMakesItsPiecesInTheInsertsStep(self):
+        """A cut that splits a part: its two pieces are parts at once, made in the step that
+        inserted it (10.12 amendment point 4, Onshape U1; it was loud until a command), A is no
+        part after it; undoing the insert takes them away."""
         f1 = self.owner("F1", [4, -1, 6, 11], 11, "Subtraction", ["A"])  # z -1..10.001
         step = self.step(f1, "A")
-        self.assertFalse(step.isValid())
-        self.assertIn("splits", step.getStatusString())
-        self.assertIn("2 pieces", step.getStatusString())
-        a = self.doc.getObject("A")
-        self.assertEqual(len(a.Shape.Solids), 1)
-        self.assertVolume("A", 1000)
+        self.assertTrue(step.isValid(), step.getStatusString())
+        pieces = [b for b in self.doc.Objects
+                  if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == f1]
+        self.assertEqual(sorted(b.StudioPartId for b in pieces), ["F1:1", "F1:2"])
+        self.assertNotIn(self.doc.getObject("A"), PartDesign.studioLiveParts(self.list))
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse([b for b in self.doc.Objects
+                          if b.TypeId == "PartDesign::Body" and b.StudioPartId.startswith("F1:")])
 
     def testFailedOwnerContributesNothing(self):
         """Onshape F1: an owner that fails fails its steps only; later features compute against
