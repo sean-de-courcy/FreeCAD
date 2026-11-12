@@ -63,6 +63,7 @@ from PartDesignTests.TestCrossBodyGui import TestMergeGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestCrossBodyGui import TestSplitGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestStudioPicksGui import TestStudioPicksGui  # FreeCAD-CH, ops#640 rank 14
 from PartDesignTests.TestStudioPicksGui import TestStudioDressUpsGui  # FreeCAD-CH, ops#640 rank 14
+from PartDesignTests.TestPlaneEdgePointGui import TestPlaneEdgePointGui  # FreeCAD-CH, ops#673
 from PartDesignTests.TestOpeningScopeGui import TestOpeningScopeGui  # FreeCAD-CH, ops#640 A-1
 from PartDesignTests.TestExtrudeFieldsGui import TestExtrudeFieldsGui  # FreeCAD-CH, ops#640 rank 22
 from PartDesignTests.TestCrossBodyGui import (  # FreeCAD-CH, ops#640

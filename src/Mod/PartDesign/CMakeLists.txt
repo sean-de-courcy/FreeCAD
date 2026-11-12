@@ -98,6 +98,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestMergeScope.py
     PartDesignTests/TestResultRules.py
     PartDesignTests/TestDatumPlanePoint.py
+    PartDesignTests/TestPlaneEdgePoint.py
     PartDesignTests/TestFlipKeepsTheSketch.py
     PartDesignTests/TestFilletDeleteKeepsTheSketch.py
     PartDesignTests/TestBooleanRules.py
@@ -132,6 +133,7 @@ if(BUILD_GUI)
         PartDesignTests/TestReferencePickerGui.py
         PartDesignTests/TestCrossBodyGui.py
         PartDesignTests/TestStudioPicksGui.py
+        PartDesignTests/TestPlaneEdgePointGui.py
         PartDesignTests/TestOpeningScopeGui.py
         PartDesignTests/TestExtrudeFieldsGui.py
         PartDesignTests/TestNewSketchDialogGui.py
