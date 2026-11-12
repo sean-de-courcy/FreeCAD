@@ -479,22 +479,36 @@ struct Check
     int facesChecked {0};
     int facesInvalid {0};
 
-    void run()
+    // The faces it made and those it removed, reversed: they close up into one surface (the
+    // unchanged faces cancel), whose divergence integral is the volume's change
+    TopoDS_Compound cycle() const
     {
-        // The volume's change: the faces it made and those it removed, reversed, close up into one
-        // surface (the unchanged faces cancel), whose divergence integral is the change
         BRep_Builder builder;
         TopoDS_Compound cycle;
         builder.MakeCompound(cycle);
-        bool anyMade = false;
         for (TopoDS_Iterator it(made); it.More(); it.Next()) {
             builder.Add(cycle, it.Value());
-            anyMade = true;
         }
         for (TopoDS_Iterator it(removed); it.More(); it.Next()) {
             builder.Add(cycle, it.Value().Reversed());
         }
-        change = volumeOf(cycle);
+        return cycle;
+    }
+
+    // The change by the adaptive integration, whatever needsAdaptive() says. The change is a small
+    // difference of the changed faces' terms, which are as large as those faces are far from
+    // OCCT's reference point: where a fuse re-trims whole thread flanks and the wall (terms of
+    // 7e4 mm^3), the default fixed-point rule put a correct +0.168 at -0.224 (ops#640 replica,
+    // rb30). Slower: run only where the default's change would refuse the result
+    double preciseChange() const
+    {
+        return Part::MassProperties::volume(cycle(), true);
+    }
+
+    void run()
+    {
+        const bool anyMade = TopoDS_Iterator(made).More();
+        change = volumeOf(cycle());
 
         if (!base.IsNull()) {
             baseVolume = 0.0;
@@ -737,7 +751,7 @@ std::string checkResult(
     }
 
     const double before = check->baseVolume;
-    const double after = check->baseVolume + check->change;
+    double after = check->baseVolume + check->change;
     // A solid of no volume: of less than a billionth of its own bounding box
     constexpr double noVolume = 1e-9;
     if (check->baseHasSolid && check->baseWorstSolid <= noVolume) {
@@ -755,7 +769,26 @@ std::string checkResult(
     }
     const double tolerance = 1e-5 * scale;
     if (!base.IsNull() && !allFaces) {
-        switch (directionOf(feature)) {
+        const Direction direction = directionOf(feature);
+        auto wrongWay = [&](double change) {
+            return (direction == Direction::Grows && change < -tolerance)
+                || (direction == Direction::Shrinks && change > tolerance);
+        };
+        // Refused only by the adaptive integration's change: the default's can be off by more than
+        // the tolerance (preciseChange()). Stopped by the limit, the default's change stands
+        if (wrongWay(check->change)) {
+            auto precise = std::make_shared<double>(check->change);
+            if (Part::KernelBudget::runOptional(
+                    "The check of the result's volume",
+                    [check, precise](const Message_ProgressRange&) {
+                        *precise = check->preciseChange();
+                    }
+                )) {
+                check->change = *precise;
+                after = check->baseVolume + check->change;
+            }
+        }
+        switch (direction) {
             case Direction::Grows:
                 if (check->change < -tolerance) {
                     return "The geometry kernel's result is wrong: adding material made the part "

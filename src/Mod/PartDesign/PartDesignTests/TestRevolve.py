@@ -3987,6 +3987,117 @@ class TestRevolve(unittest.TestCase):
         disc = math.pi * r * r
         self._assertExactSolid(revolution, disc * 10 + disc * r * math.pi / 4)
 
+    def _threadStartCap(self, inner):
+        """A tube's thread, a triangle (1 high, 0.8 deep) swept by a helix of pitch 2.5 about Z on
+        the wall r 77 (outside it, or inside the bore), and the Revolution of the thread's start
+        face (the profile, on the XZ plane) 180 degrees about its edge on the wall: a thread end
+        rounded off as Onshape builds it (ops#640 replica, rb30). The wall cylinder passes through
+        the revolution's axis, which the cones' apexes touch."""
+        V = FreeCAD.Vector
+        R = 77.0
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        origin = {f.Role: f for f in body.Origin.OriginFeatures}
+        tube = body.newObject("Sketcher::SketchObject", "Tube")
+        tube.AttachmentSupport = [(origin["XY_Plane"], "")]
+        tube.MapMode = "FlatFace"
+        for radius in (R + 5, R) if inner else (R, R - 5):
+            tube.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), radius))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = tube
+        pad.Length = 6.6
+        profile = body.newObject("Sketcher::SketchObject", "Profile")
+        profile.AttachmentSupport = [(origin["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        tip = R - 0.8 if inner else R + 0.8
+        corners = [V(R, 1, 0), V(R, 2, 0), V(tip, 1.5, 0)]
+        for a, b in zip(corners, corners[1:] + corners[:1]):
+            profile.addGeometry(Part.LineSegment(a, b))
+        helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
+        helix.Profile = profile
+        helix.ReferenceAxis = (origin["Z_Axis"], [""])
+        helix.Mode = "pitch-height-angle"
+        helix.Pitch = 2.5
+        helix.Height = 4.0
+        helix.Refine = True
+        self.Doc.recompute()
+        base = helix.Shape
+        self.assertTrue(base.isValid())
+        # the start face: the plane triangle with the wall edge (x = R, z 1..2)
+        capIndex = [
+            i
+            for i, f in enumerate(base.Faces)
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.Area - 0.4) < 1e-6
+            and abs(f.CenterOfMass.y) < 1e-6
+        ]
+        self.assertEqual(len(capIndex), 1)
+        wallIndex = [
+            j
+            for j, e in enumerate(base.Edges)
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.Length - 1) < 1e-6
+            and e.CenterOfMass.distanceToPoint(V(R, 0, 1.5)) < 1e-6
+        ]
+        self.assertEqual(len(wallIndex), 1)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = (helix, ["Face%d" % (capIndex[0] + 1)])
+        revolution.ReferenceAxis = (helix, ["Edge%d" % (wallIndex[0] + 1)])
+        revolution.Angle = 180
+        revolution.Reversed = True
+        self.Doc.recompute()
+        return R, base, revolution
+
+    @staticmethod
+    def _capRevolvedInTheWall(R, inner):
+        """The volume of the revolved cap that lies in the wall: at distance rho from the axis on
+        the wall, the half turn from the cap is in the wall where cos t < -s rho / (2 R), s = 1 for
+        an outer thread (the cap points out of the wall), -1 for an inner one"""
+        s = -1 if inner else 1
+        steps = 400
+        total = 0.0
+        for i in range(steps):
+            z = (i + 0.5) / steps
+            depth = 0.8 * (1 - abs(z - 0.5) / 0.5)
+            for j in range(steps):
+                rho = (j + 0.5) * depth / steps
+                turn = math.pi - math.acos(-s * rho / (2 * R))
+                total += rho * turn * (depth / steps) / steps
+        return total
+
+    def testThreadCapRevolvedOutwardBuildsAsOnshape(self):
+        """An outer thread's start face revolved outward, then into the wall: half the half
+        double-cone lies in the wall. The fuse was right (valid, the exact material added), but
+        the result check measured its volume change with OCCT's fixed-point integration over the
+        whole thread flanks and the wall it changed (terms of 7e4 mm^3), -0.224 for +0.168, and
+        refused it: "adding material made the part smaller" (ops#640 replica, rb30)."""
+        R, base, revolution = self._threadStartCap(inner=False)
+        tool = revolution.AddSubShape
+        # outward: away from the thread, which runs on towards +y
+        self.assertLess(tool.CenterOfMass.y, -0.2)
+        self.assertAlmostEqual(tool.Volume, 0.4 * 0.8 / 3 * math.pi, places=5)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        result = revolution.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        added = tool.Volume - self._capRevolvedInTheWall(R, inner=False)
+        self.assertAlmostEqual(result.cut(base).Volume, added, delta=1e-5)
+        self.assertLess(base.cut(result).Volume, 1e-6)
+
+    def testThreadCapRevolvedIntoTheThreadIsNeverWrong(self):
+        """An inner thread's start face revolved into the thread: the tool lies in the part, and
+        Onshape leaves it as it was. OCCT's fuse gives two solids, inside out; the feature stops
+        with an error, never with that solid (ops#640 replica, rb30; F2 of its diagnosis)."""
+        _, base, revolution = self._threadStartCap(inner=True)
+        self.assertGreater(revolution.AddSubShape.CenterOfMass.y, 0.2)
+        if revolution.isValid():
+            result = revolution.Shape
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            self.assertLess(result.cut(base).Volume, 1e-5)
+            self.assertLess(base.cut(result).Volume, 1e-5)
+        else:
+            self.assertIn("geometry kernel", revolution.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")

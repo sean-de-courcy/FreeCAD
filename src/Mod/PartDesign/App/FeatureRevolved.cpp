@@ -3344,22 +3344,35 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
         // only up to a face: a thread's cap revolved one way into the thread fused to nothing,
         // no solid at all, Up-to-date (rehearsal 4; ops#640). Onshape builds it.
         {
-            const auto [baseVolume, baseError] = checkedVolume(base.getShape(), constructedTool);
-            const auto [toolVolume, toolError] = checkedVolume(tool.getShape(), constructedTool);
-            const auto [volume, error] = checkedVolume(result.getShape(), constructedTool);
-            const double slack = 1e-6 * (baseVolume + toolVolume) + baseError + toolError + error
-                + Precision::Confusion();
-            const bool fuse = volume >= std::max(baseVolume, toolVolume) - slack
-                && volume <= baseVolume + toolVolume + slack;
-            const bool cut = volume >= baseVolume - toolVolume - slack
-                && volume <= baseVolume + slack;
-            // an Intersect holds at most the smaller of the two (ops#640 rank 20)
-            const bool common = volume >= -slack
-                && volume <= std::min(baseVolume, toolVolume) + slack;
             const bool intersects = getBooleanOperation() == BooleanOperation::Common;
-            if (!(getAddSubType() == FeatureAddSub::Type::Additive ? fuse
-                      : intersects                                 ? common
-                                                                   : cut)) {
+            auto withinBounds = [&](SolidVolume baseVolume, SolidVolume toolVolume, SolidVolume volume) {
+                const double slack = 1e-6 * (baseVolume.value + toolVolume.value) + baseVolume.error
+                    + toolVolume.error + volume.error + Precision::Confusion();
+                const bool fuse = volume.value
+                        >= std::max(baseVolume.value, toolVolume.value) - slack
+                    && volume.value <= baseVolume.value + toolVolume.value + slack;
+                const bool cut = volume.value >= baseVolume.value - toolVolume.value - slack
+                    && volume.value <= baseVolume.value + slack;
+                // an Intersect holds at most the smaller of the two (ops#640 rank 20)
+                const bool common = volume.value >= -slack
+                    && volume.value <= std::min(baseVolume.value, toolVolume.value) + slack;
+                return getAddSubType() == FeatureAddSub::Type::Additive ? fuse
+                    : intersects                                        ? common
+                                                                        : cut;
+            };
+            // Refused only by the adaptive integration's volumes: the default's whole-part volume
+            // can be off by more than the slack where the part has helical faces of few spans (a
+            // thread's cap revolved into its wall; ops#640 replica, rb30). Slower: only where the
+            // first measure refuses
+            auto precise = [](const TopoShape& shape) {
+                return SolidVolume {Part::MassProperties::volume(shape.getShape(), true), 0.0};
+            };
+            if (!withinBounds(
+                    checkedVolume(base.getShape(), constructedTool),
+                    checkedVolume(tool.getShape(), constructedTool),
+                    checkedVolume(result.getShape(), constructedTool)
+                )
+                && !withinBounds(precise(base), precise(tool), precise(result))) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's volume is wrong"
