@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <numbers>
@@ -308,6 +311,23 @@ struct Blend
     std::vector<Station> stations;
     Handle(Geom_BSplineSurface) surface;
     double length = 0.0;
+    // Places on each wall along OCCT's contact edges: where a foot is looked for first. (A projection
+    // onto a whole free-form wall costs a thousand times a Newton step from nearby)
+    std::array<std::vector<Foot>, 2> seeds;
+
+    const Foot* seed(int side, const gp_Pnt& beside) const
+    {
+        const Foot* nearest = nullptr;
+        double least = Precision::Infinite();
+        for (const Foot& candidate : seeds[side]) {
+            const double distance = candidate.point.SquareDistance(beside);
+            if (distance < least) {
+                least = distance;
+                nearest = &candidate;
+            }
+        }
+        return nearest;
+    }
 
     gp_Pnt oldPoint(double across, double lengthwise) const
     {
@@ -475,9 +495,13 @@ double residualOfSurface(
     const std::array<Handle(Geom_Surface), 2>& walls,
     double radius,
     int acrossCount,
-    int lengthCount
+    int lengthCount,
+    const Blend* seeds = nullptr
 )
 {
+    auto first = [&](int side, const gp_Pnt& centre) {
+        return foot(walls[side], centre, seeds ? seeds->seed(side, centre) : nullptr);
+    };
     // The side of the ball: once, at the middle
     double sign = 0.0;
     {
@@ -488,8 +512,8 @@ double residualOfSurface(
         double best = Precision::Infinite();
         for (const double candidate : {-1.0, 1.0}) {
             const gp_Pnt centre = point.Translated(normal * (candidate * radius));
-            const Foot f0 = foot(walls[0], centre);
-            const Foot f1 = foot(walls[1], centre);
+            const Foot f0 = first(0, centre);
+            const Foot f1 = first(1, centre);
             if (f0.ok && f1.ok) {
                 const double r = std::max(std::fabs(f0.distance - radius), std::fabs(f1.distance - radius));
                 if (r < best) {
@@ -512,7 +536,7 @@ double residualOfSurface(
             const gp_Pnt point = surface->Value(u, v);
             const gp_Pnt centre = point.Translated(surfaceNormal(surface, u, v) * (sign * radius));
             for (int side = 0; side < 2; ++side) {
-                feet[side] = foot(walls[side], centre, &feet[side]);
+                feet[side] = feet[side].ok ? foot(walls[side], centre, &feet[side]) : first(side, centre);
                 if (!feet[side].ok) {
                     return Precision::Infinite();
                 }
@@ -742,6 +766,25 @@ void classify(Context& context, Blend& blend)
         std::swap(blend.sides[0], blend.sides[1]);
         std::swap(blend.acrossAt0, blend.acrossAt1);
     }
+    for (int side = 0; side < 2; ++side) {
+        const Side& s = blend.sides[side];
+        for (const TopoDS_Edge& edge : s.contacts) {
+            double first {}, last {};
+            const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, s.wall, first, last);
+            if (pcurve.IsNull()) {
+                throw NotRecognised {"a contact edge without a pcurve on its wall"};
+            }
+            for (int k = 0; k <= 8; ++k) {
+                const gp_Pnt2d at = pcurve->Value(first + (last - first) * k / 8.0);
+                Foot seed;
+                seed.u = at.X();
+                seed.v = at.Y();
+                seed.point = s.surface->Value(seed.u, seed.v);
+                seed.ok = true;
+                blend.seeds[side].push_back(seed);
+            }
+        }
+    }
 }
 
 int sideAt(const Blend& blend, const TopoDS_Vertex& vertex)
@@ -825,6 +868,14 @@ void solveSeam(Context& context, Seam& seam)
     double vA = 0.0;
     bool hinted = false;
     Foot hintCommon;
+    if (const Foot* seed = blendA.seed(sideA[i], start)) {
+        uA = seed->u;
+        vA = seed->v;
+        hinted = true;
+    }
+    if (const Foot* seed = blendA.seed(1 - sideA[i], start)) {
+        hintCommon = *seed;
+    }
     double sign = 0.0;
     gp_Pnt centre;
     auto residual = [&](double parameter) {
@@ -869,7 +920,7 @@ void solveSeam(Context& context, Seam& seam)
     }
     // The ball must touch the next wall face at the same point: K is a tangent edge
     const gp_Pnt onK = curve->Value(s1);
-    const Foot other = foot(wallB, centre);
+    const Foot other = foot(wallB, centre, blendB.seed(sideB[i], centre));
     if (!other.ok || std::fabs(other.distance - context.radius) > 1e-9 || other.point.Distance(onK) > 1e-7) {
         throw NotRecognised {"walls that are not tangent along their common edge"};
     }
@@ -942,7 +993,15 @@ void solveStations(const Context& context, Blend& blend, int interior)
             if (!blend.oldSection(lengthwise, centre, normal)) {
                 throw NotRecognised {"a section of the blend that is no circle"};
             }
-            const Station station = solveStation(centre, walls, radius, previous.ok ? &previous : nullptr);
+            Station seeded;
+            if (!previous.ok) {
+                for (int side = 0; side < 2; ++side) {
+                    if (const Foot* seed = blend.seed(side, centre)) {
+                        seeded.feet[side] = *seed;
+                    }
+                }
+            }
+            const Station station = solveStation(centre, walls, radius, previous.ok ? &previous : &seeded);
             if (!station.ok) {
                 if (k == 0 || k == interior + 1) {
                     continue;  // OCCT's very end may lie off the walls
@@ -1009,7 +1068,7 @@ void solveStations(const Context& context, Blend& blend, int interior)
             Station anchor;
             anchor.centre = seam.centre;
             for (int side = 0; side < 2; ++side) {
-                anchor.feet[side] = foot(walls[side], seam.centre);
+                anchor.feet[side] = foot(walls[side], seam.centre, blend.seed(side, seam.centre));
                 if (!anchor.feet[side].ok || std::fabs(anchor.feet[side].distance - radius) > 1e-9) {
                     throw Refusal {"a seam's ball does not touch a wall"};
                 }
@@ -1454,7 +1513,50 @@ double ballResidual(const TopoDS_Face& blend, const TopoDS_Face& wall1, const To
     );
 }
 
+namespace
+{
+Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius);
+}
+
 Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius)
+{
+    // FREECAD_CH_ROLLINGBALL=off leaves every fillet as OCCT built it; =trace reports each call on
+    // stderr. For measuring and bisecting only
+    const char* value = std::getenv("FREECAD_CH_ROLLINGBALL");
+    const std::string mode = value ? value : "";
+    if (mode == "off") {
+        Report report;
+        report.reason = "switched off";
+        return report;
+    }
+    if (mode != "trace") {
+        return correctNow(shape, blendFaces, radius);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const Report report = correctNow(shape, blendFaces, radius);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::fprintf(
+        stderr,
+        "ROLLINGBALL %s: %zu faces passed, r %.6g, chains %d, faces %d, stations %d, residual %.3g -> %.3g, moved %.3g, %.3f s%s%s\n",
+        report.outcome == Outcome::Corrected ? "Corrected" : report.outcome == Outcome::Refused ? "Refused" : "NotMine",
+        blendFaces.size(),
+        radius,
+        report.chains,
+        report.faces,
+        report.stations,
+        report.residualBefore,
+        report.residualAfter,
+        report.seamMove,
+        seconds,
+        report.reason.empty() ? "" : " | ",
+        report.reason.c_str()
+    );
+    return report;
+}
+
+namespace
+{
+Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius)
 {
     Report report;
     if (shape.IsNull() || blendFaces.empty() || radius <= Precision::Confusion()) {
@@ -1534,7 +1636,9 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
                 int exact = 0;
                 for (const int index : chain) {
                     const Blend& blend = context.blends[index];
-                    const double r = ballResidual(blend.face, blend.sides[0].wall, blend.sides[1].wall, radius);
+                    double u0 {}, u1 {}, v0 {}, v1 {};
+                    BRepTools::UVBounds(blend.face, u0, u1, v0, v1);
+                    const double r = residualOfSurface(blend.old, u0, u1, v0, v1, blend.walls(), radius, 5, 25, &blend);
                     before = std::max(before, r);
                     exact += r < alreadyBall ? 1 : 0;
                 }
@@ -1818,7 +1922,7 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
         }
         for (const int index : corrected) {
             const Blend& blend = context.blends[index];
-            const double r = residualOfSurface(blend.surface, 0.0, 1.0, 0.0, blend.length, blend.walls(), radius, 7, 61);
+            const double r = residualOfSurface(blend.surface, 0.0, 1.0, 0.0, blend.length, blend.walls(), radius, 7, 61, &blend);
             report.residualAfter = std::max(report.residualAfter, r);
         }
         if (report.residualAfter > resultBound) {
@@ -1850,5 +1954,7 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
     report.blendFaces.clear();
     return report;
 }
+
+}  // namespace
 
 }  // namespace Part::RollingBallBlend
