@@ -2613,9 +2613,18 @@ void Document::RestoreDocFile(Base::Reader& reader)
 
         // FreeCAD-CH (ops#640): named views, an optional element after the camera
         NamedViews::forget(this);
-        if (localreader->readNextElement()
-            && std::string(localreader->localName()) == "NamedViews") {
+        bool next = localreader->readNextElement();
+        if (next && std::string(localreader->localName()) == "NamedViews") {
             NamedViews::read(this, *localreader);
+            next = localreader->readNextElement();
+        }
+        // FreeCAD-CH (ops#710): the active tab, an optional element after the named views; shown
+        // once the document has finished restoring
+        if (next && std::string(localreader->localName()) == "ActiveTab") {
+            DocumentTabs::restoreActiveTab(
+                d->_pcDocument,
+                localreader->getAttribute<const char*>("name")
+            );
         }
     }
 
@@ -2755,6 +2764,15 @@ void Document::SaveDocFile(Base::Writer& writer) const
 
     // FreeCAD-CH (ops#640): the named views follow the camera
     NamedViews::write(this, writer);
+
+    // FreeCAD-CH (ops#710): the active tab, so an open or a recovery comes back on it
+    const std::string tab = DocumentTabs::activeTab(d->_pcDocument);
+    if (!tab.empty()) {
+        writer.incInd();
+        writer.Stream() << writer.ind() << "<ActiveTab name=\"" << encodeAttribute(tab)
+                        << "\"/>\n";
+        writer.decInd();
+    }
 
     writer.Stream() << "</Document>" << std::endl;
 }

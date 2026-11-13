@@ -487,6 +487,122 @@ class TestGuiDocument(unittest.TestCase):
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
         self.assertFalse(os.path.exists(self._recoveryArchive()))
 
+    # FreeCAD-CH (ops#711): a recovery snapshot a moment after a change, not only on the timer, so
+    # a crash before the timer's first pass (a new document's first minutes) or after a step loses
+    # nothing. The timer is minutes long (15 by default, 5 in the Onshape pack): a snapshot within
+    # seconds can only be the soon pass.
+    def _autoSaveTimerMinutes(self):
+        group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        if not group.GetBool("AutoSaveEnabled", True):
+            raise unittest.SkipTest("auto-recovery is off in these preferences")
+        minutes = group.GetInt("AutoSaveTimeout", 15)
+        if minutes < 1:
+            raise unittest.SkipTest("the auto-recovery timer is off in these preferences")
+        return minutes
+
+    def _recoveryLabel(self, label):
+        archive = self._recoveryArchive()
+        if not os.path.isfile(archive):
+            return False
+        try:
+            with zipfile.ZipFile(archive) as recovery:
+                return label in recovery.read("Document.xml").decode("utf-8", errors="replace")
+        except (zipfile.BadZipFile, KeyError, OSError):
+            return False
+
+    def testAutoSaverWritesSoonAfterTheFirstChange(self):
+        self._autoSaveTimerMinutes()
+        obj = self.doc.addObject("App::FeaturePython", "AutoSaveSoonObject")
+        obj.Label = "AutoSaveSoonFirst"
+        self.assertTrue(FreeCADGui.getDocument(self.doc.Name).Modified)
+
+        self.assertTrue(
+            self._processEventsUntil(lambda: self._recoveryLabel("AutoSaveSoonFirst"), 10.0),
+            "no recovery snapshot within 10 s of a new document's first change",
+        )
+
+    def testAutoSaverWritesSoonAfterALaterStep(self):
+        self._autoSaveTimerMinutes()
+        obj = self.doc.addObject("App::FeaturePython", "AutoSaveStepObject")
+        obj.Label = "AutoSaveStepOne"
+        self.assertTrue(
+            self._processEventsUntil(lambda: self._recoveryLabel("AutoSaveStepOne"), 10.0)
+        )
+
+        self.doc.openTransaction("AutoSaveStep")
+        obj.Label = "AutoSaveStepTwo"
+        self.doc.commitTransaction()
+
+        self.assertTrue(
+            self._processEventsUntil(lambda: self._recoveryLabel("AutoSaveStepTwo"), 10.0),
+            "the step after the first snapshot is not in a snapshot within 10 s",
+        )
+
+    def testAutoSaverSoonPassSkipsAnUnmodifiedDocument(self):
+        self._autoSaveTimerMinutes()
+        self.doc.addObject("App::FeaturePython", "AutoSaveUnmodifiedObject")
+        FreeCADGui.getDocument(self.doc.Name).Modified = False
+        self._removeRecoveryArchive()
+
+        # The soon pass comes 2 s after the change at the earliest: it finds nothing to recover
+        self._processEventsUntil(lambda: False, 4.0)
+        self.assertFalse(os.path.exists(self._recoveryArchive()))
+
+    # FreeCAD-CH (ops#710): the active tab is kept in GuiDocument.xml, so an open and a recovery
+    # come back on it
+    def _secondStudio(self):
+        tabs = getattr(FreeCADGui, "DocumentTabs", None)
+        if not tabs or not tabs.isOn():
+            raise unittest.SkipTest("the typed tabs are off (FreeCAD keymap)")
+        FreeCAD.setActiveDocument(self.doc.Name)
+        first = tabs.create(self.doc, "PartStudio")
+        second = tabs.create(self.doc, "PartStudio")
+        self.assertTrue(first and second and first != second, (first, second))
+        done, refusal = tabs.switchTo(self.doc, first)
+        self.assertTrue(done, refusal)
+        done, refusal = tabs.switchTo(self.doc, second)
+        self.assertTrue(done, refusal)
+        FreeCADGui.updateGui()
+        self.assertEqual(tabs.activeTab(self.doc), second)
+        return tabs, second
+
+    def _reopenOn(self, tabs, path, expected):
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = None
+        self.doc = FreeCAD.openDocument(path)
+        FreeCAD.setActiveDocument(self.doc.Name)
+        reopened = self.doc
+        self.assertTrue(
+            self._processEventsUntil(lambda: tabs.activeTab(reopened) == expected, 5.0),
+            f"reopened on {tabs.activeTab(reopened)!r}, saved on {expected!r}",
+        )
+        # Showing the saved tab is no change to the document
+        self.assertFalse(FreeCADGui.getDocument(reopened.Name).Modified)
+
+    def testActiveTabSurvivesSaveAndOpen(self):
+        tabs, second = self._secondStudio()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "active_tab.FCStd")
+            self.doc.saveAs(path)
+            with zipfile.ZipFile(path) as saved:
+                gui_xml = saved.read("GuiDocument.xml").decode("utf-8", errors="replace")
+            self.assertIn(f'<ActiveTab name="{second}"/>', gui_xml)
+            self._reopenOn(tabs, path, second)
+            FreeCAD.closeDocument(self.doc.Name)
+            self.doc = None
+
+    def testActiveTabSurvivesRecovery(self):
+        tabs, second = self._secondStudio()
+        self.assertTrue(FreeCAD.writeRecoverySnapshotToTransientDir(self.doc))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # The Document Recovery dialog opens the snapshot as a file (openDocuments())
+            path = os.path.join(temp_dir, "recovered.FCStd")
+            with open(self._recoveryArchive(), "rb") as source, open(path, "wb") as target:
+                target.write(source.read())
+            self._reopenOn(tabs, path, second)
+            FreeCAD.closeDocument(self.doc.Name)
+            self.doc = None
+
     def testAutoSaverCoalescesBlockedFlushesToLatestCommittedState(self):
         obj = self.doc.addObject("App::FeaturePython", "AutoSaveChurnObject")
         self._removeRecoveryArchive()
