@@ -2335,6 +2335,57 @@ class OverflowTest(unittest.TestCase):
             if not shape.isValid():
                 raise Part.OCCError("invalid")
 
+    def testConvexRoundRollsOnOverATangentEdge(self):
+        # rounded_ring_corner_mirror(): the convex mirror of Case Base #47's designed model. Onshape
+        # builds it as the concave one, rolled on onto the wall x 0 (oracle 18, FR3): -337.099410,
+        # 11 -> 12 faces, one r 6.5 face about (6.5, -18.4929), the r 10 round left at z 2..4
+        base, ends, removed, axis = rounded_ring_corner_mirror()
+        self.assertEqual(len(base.Faces), 11)
+        shape = base.makeFillet(6.5, [edge_between(base, *ends)])
+        self.assertBuilt(shape, base.Volume - removed, faces=12)
+        self.assertAlmostEqual(shape.Volume, base.Volume - removed, delta=1e-6)
+        rounds = [
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - 6.5) < 1e-7
+        ]
+        self.assertEqual(len(rounds), 1)
+        self.assertAlmostEqual(rounds[0].Surface.Center.x, axis[0], delta=1e-6)
+        self.assertAlmostEqual(rounds[0].Surface.Center.y, axis[1], delta=1e-6)
+        self.assertAlmostEqual(rounds[0].Area, 85.458319, delta=1e-5)
+        left = [
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - 10) < 1e-7
+        ]
+        self.assertEqual(len(left), 1)
+        self.assertAlmostEqual(left[0].Area, 25.347863, delta=1e-5)
+
+    def testConvexRoundRolledOnAsAFeature(self):
+        # The same as a PartDesign feature: the checks for lost material and filled recesses pass
+        base, ends, removed, _ = rounded_ring_corner_mirror()
+        doc = FreeCAD.newDocument("ConvexRollOn")
+        try:
+            feature, _ = dressed_in_a_body(doc, "Fillet", base, ends, 6.5)
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            self.assertTrue(feature.Shape.isValid())
+            self.assertEqual(len(feature.Shape.Faces), 12)
+            self.assertAlmostEqual(feature.Shape.Volume, base.Volume - removed, delta=1e-6)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testConvexRolledRoundAgainstALedgeFails(self):
+        # Review of the convex roll-on: rounded_ring_corner_mirror() with a block outside the wall
+        # x 0 (x -3..0, y -40..-15, z 8..10), a ledge on the face the round rolls onto. The rules
+        # for a strip past a ledge are Onshape's for direct rounds only: the rolled round refuses,
+        # rather than build trimmed by the block's walls (15 faces, a 57.5 degree crease)
+        base, ends, _, _ = rounded_ring_corner_mirror()
+        base = base.fuse(Part.makeBox(3, 25, 2, V(-3, -40, 8))).removeSplitter()
+        with self.assertRaises(Part.OCCError):
+            shape = base.makeFillet(6.5, [edge_between(base, *ends)])
+            if not shape.isValid():
+                raise Part.OCCError("invalid")
+
 def ring_corner(kind, size=10):
     """The native replica's Case Base #46, designed: a pocket's concave corner (x 0, y 0; floor z 2,
     top z 10) whose dress-up of the size is wider than the wall y 0 on its right: a ring (centre
@@ -2419,6 +2470,18 @@ def rounded_ring_corner(step=False):
     ).extrude(V(0, 0, 6))
     region = region.cut(Part.makeCylinder(6.5, 8, V(6.5, y, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
     return rounded, (a, b), region.cut(rounded).Volume, (6.5, y)
+
+
+def rounded_ring_corner_mirror():
+    """rounded_ring_corner()'s mirror: its box (45 x 60 x 10 from (-5, -40, 0)) less that body, so
+    the pocket is the material and the crease between the r 10 round and the ring's wall is convex.
+    The ball of r 6.5, now in the material, can't touch both faces either, and Onshape rolls it on
+    over the same tangent edge onto the wall x 0 (oracle 18, FR3: -337.099410, 11 -> 12 faces, one
+    r 6.5 face about (6.5, -18.4929), the r 10 round left at z 2..4 with A 25.347863). Returns the
+    base, the crease's ends, the volume the round removes and its axis in the plane"""
+    body, ends, added, axis = rounded_ring_corner()
+    mirror = Part.makeBox(45, 60, 10, V(-5, -40, 0)).cut(body).removeSplitter()
+    return mirror, ends, added, axis
 
 
 def small_round_ring_corner(top=10):
