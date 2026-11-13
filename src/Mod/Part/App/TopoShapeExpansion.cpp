@@ -7860,6 +7860,9 @@ TopoShape& TopoShape::makeElementFillet(
         if (outcome->thin) {
             raiseThinFaceError("The fillet", outcome->reason);
         }
+        // OCCT's invalid result goes to the feature's check, which repairs it or fails: a
+        // repaired one carries a Warning with the refusal (ops#640)
+        FilletFallback::Recorder::keptInvalid(FilletFallback::Kind::Fillet, outcome->reason);
     }
     return makeElementShape(*mkFillet, input, op);
 }
@@ -7949,6 +7952,8 @@ TopoShape& TopoShape::makeElementChamfer(
         if (outcome->thin) {
             raiseThinFaceError("The chamfer", outcome->reason);
         }
+        // As the fillet's (ops#640)
+        FilletFallback::Recorder::keptInvalid(FilletFallback::Kind::Chamfer, outcome->reason);
     }
     return makeElementShape(mkChamfer, input, op);
 }

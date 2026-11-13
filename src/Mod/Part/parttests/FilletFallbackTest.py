@@ -473,6 +473,18 @@ def pyramid():
     return solid, [e for e in solid.Edges if any(v.Point.isEqual(apex, 1e-9) for v in e.Vertexes)]
 
 
+def wedge_pyramid():
+    """pyramid() built by Part.makeWedge: the same five faces, its shell Forward where pyramid()'s
+    solid holds its shell Reversed (OCCT 8.0.1 then builds a dress-up at the apex with misoriented
+    faces, ops#640 p3); and the four edges at its apex"""
+    apex = V(10, 10, 10)
+    # makeWedge's height is along y: up to the apex at y = 10, then turned so that y goes to z
+    solid = Part.makeWedge(0, 0, 0, 10, 10, 20, 10, 20, 10, 10)
+    solid.rotate(V(0, 0, 0), V(1, 0, 0), 90)
+    solid.translate(V(0, 20, 0))
+    return solid, [e for e in solid.Edges if any(v.Point.isEqual(apex, 1e-9) for v in e.Vertexes)]
+
+
 def pyramid_edge_rounds(r):
     """The volume four rounds of radius r would remove along the full length of the pyramid's
     apex edges (10 sqrt 3 long, where the faces meet at 120 degrees), counting their overlap at
@@ -621,6 +633,58 @@ class InvalidDressUpTest(unittest.TestCase):
             removed = 4000 / 3 - shape.Volume
             self.assertGreater(removed, bounds[kind][0])
             self.assertLess(removed, bounds[kind][1])
+
+    REPAIRED = (
+        "Warning: OCCT built this {} invalid and it was repaired; "
+        "the exact construction refused: "
+    )
+
+    def testRepairedResultCarriesAWarning(self):
+        # The silent path (ops#640, decision 276): OCCT builds the four rounds or chamfers at the
+        # pyramid's apex invalid (its solid holds its shell Reversed), the exact construction
+        # refuses (four edges meet at the apex), and the repair makes a valid solid. The feature
+        # keeps it with a Warning that carries the refusal. The same pyramid with its shell
+        # Forward (wedge_pyramid()): OCCT builds it valid, the same solid, and no Warning
+        chamfers = 4 * math.sqrt(3) / 4 * 10 * math.sqrt(3)  # as testRepairKeepingTheSurface
+        bounds = {
+            "Fillet": (0.98 * pyramid_edge_rounds(1), pyramid_edge_rounds(1)),
+            "Chamfer": (0.9 * chamfers, chamfers),
+        }
+        for kind, word in (("Fillet", "round"), ("Chamfer", "chamfer")):
+            solid, edges = pyramid()
+            self.assertTrue(solid.isValid())
+            self.assertFalse(self.dressUpShape(kind, solid, 1, edges).isValid())
+            feature = self.dressUp(kind, solid, edges, [(1, 1)] * 4)
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            self.assertIn("Warning", feature.State)
+            status = feature.getStatusString()
+            prefix = self.REPAIRED.format(word)
+            self.assertTrue(status.startswith(prefix), status)
+            # The construction's own refusal, as raiseDressUpError() appends it
+            self.assertRegex(status[len(prefix) :], r"^a (vertex|corner) where 4 edges meet$")
+            shape = feature.Shape
+            self.assertTrue(shape.isValid())
+            self.assertEqual(len(shape.Solids), 1)
+            removed = 4000 / 3 - shape.Volume
+            self.assertGreater(removed, bounds[kind][0])
+            self.assertLess(removed, bounds[kind][1])
+
+            # The control: the same geometry, OCCT's result valid, no Warning
+            forward, forward_edges = wedge_pyramid()
+            self.assertAlmostEqual(forward.Volume, solid.Volume, delta=1e-9 * solid.Volume)
+            self.assertTrue(self.dressUpShape(kind, forward, 1, forward_edges).isValid())
+            control = self.dressUp(kind, forward, forward_edges, [(1, 1)] * 4)
+            self.assertTrue(control.isValid(), control.getStatusString())
+            self.assertNotIn("Warning", control.State)
+            self.assertEqual(control.getStatusString(), "Valid")
+            self.assertTrue(control.Shape.isValid())
+            # The repaired rounds are the ones OCCT builds on the Forward shell (1.8e-5 mm3 apart,
+            # probes p1, p3); the repaired chamfers are 0.042 mm3 off them (3.2e-5 of the volume):
+            # what the Warning is for
+            tolerance = {"Fillet": 1e-6, "Chamfer": 1e-4}[kind]
+            self.assertAlmostEqual(
+                shape.Volume, control.Shape.Volume, delta=tolerance * shape.Volume
+            )
 
     def testRepairDropsTheFinOfAnInvalidBase(self):
         # The fin cube's fillet or chamfer: OCCT's result keeps the fin and is invalid, and its

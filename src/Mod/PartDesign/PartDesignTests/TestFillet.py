@@ -455,6 +455,36 @@ class TestFillet(unittest.TestCase):
         self.assertLess(removed, models.pyramid_edge_rounds(1))
         self.assertGreater(removed, 0.98 * models.pyramid_edge_rounds(1))
 
+    def testFilletRepairedResultCarriesAWarning(self):
+        # The silent path (ops#640, decision 276): OCCT's rounds at the pyramid's apex are invalid,
+        # the exact construction refuses and the repair makes a valid solid; the Fillet keeps it
+        # with a Warning carrying the refusal (the replica harness records it as rec["warning"]).
+        # The same pyramid with its shell Forward: OCCT builds it valid, no Warning
+        solid, edges = models.pyramid()
+        fillet = self._fillet_on_base(solid, edges, 1.0)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertIn("Warning", fillet.State)
+        prefix = (
+            "Warning: OCCT built this round invalid and it was repaired; "
+            "the exact construction refused: "
+        )
+        status = fillet.getStatusString()
+        self.assertTrue(status.startswith(prefix), status)
+        self.assertRegex(status[len(prefix) :], r"^a (vertex|corner) where 4 edges meet$")
+        self.assertTrue(fillet.Shape.isValid())
+        removed = 4000 / 3 - fillet.Shape.Volume
+        self.assertLess(removed, models.pyramid_edge_rounds(1))
+        self.assertGreater(removed, 0.98 * models.pyramid_edge_rounds(1))
+
+        forward, forward_edges = models.wedge_pyramid()
+        control = self._fillet_on_base(forward, forward_edges, 1.0)
+        self.assertTrue(control.isValid(), control.getStatusString())
+        self.assertNotIn("Warning", control.State)
+        self.assertTrue(control.Shape.isValid())
+        self.assertAlmostEqual(
+            fillet.Shape.Volume, control.Shape.Volume, delta=1e-6 * control.Shape.Volume
+        )
+
     def testFilletDropsTheLoosePartsOfABaseFeature(self):
         # With Allow Compound, a BaseFeature of a cube beside loose parts: the Fillet keeps solids
         # and shells only, as OCCT returns them, and a Pad on its top works (ops#303; PR 341

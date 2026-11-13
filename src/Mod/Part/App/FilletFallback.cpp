@@ -65,6 +65,8 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
+#include <App/Document.h>
+#include <App/DocumentObject.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 
@@ -3339,6 +3341,39 @@ std::string Recorder::report(const std::string& name) const
          << (corners == 1 ? " corner" : " corners");
     Base::Console().message("%s\n", line.str().c_str());
     return line.str();
+}
+
+void Recorder::keptInvalid(Kind kind, const std::string& reason)
+{
+    if (Recorder* recorder = innermostRecorder) {
+        recorder->invalidKept.push_back(
+            std::string("OCCT built this ") + (kind == Kind::Chamfer ? "chamfer" : "round")
+            + " invalid and it was repaired; the exact construction refused: "
+            + (reason.empty() ? std::string("no reason given") : reason)
+        );
+    }
+}
+
+std::string Recorder::invalidWarning() const
+{
+    std::string text;
+    for (const auto& line : invalidKept) {
+        if (text.find(line) == std::string::npos) {
+            text += (text.empty() ? "" : "\n") + line;
+        }
+    }
+    return text;
+}
+
+std::string Recorder::warnInvalid(App::DocumentObject* feature) const
+{
+    const std::string text = invalidWarning();
+    App::Document* doc = feature ? feature->getDocument() : nullptr;
+    if (!text.empty() && doc) {
+        const char* previous = doc->getWarningDescription(feature);
+        doc->setWarning(feature, previous && *previous ? std::string(previous) + "\n" + text : text);
+    }
+    return text;
 }
 
 bool construct(

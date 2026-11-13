@@ -37,6 +37,11 @@
 #include <Mod/Part/PartGlobal.h>
 #include "TopoShape.h"
 
+namespace App
+{
+class DocumentObject;
+}
+
 namespace Part
 {
 struct ShapeMapper;
@@ -208,11 +213,30 @@ public:
     /// refused, or left a face of zero width or an invalid result)
     std::string report(const std::string& name) const;
 
+    /** Notes in the innermost recorder, if there is one, that OCCT built a dress-up invalid
+     * without an error and the exact construction refused it, saying why: the caller returns
+     * OCCT's result for the feature's check (Part::checkDressUp()), which repairs it or fails
+     * (ops#640)
+     */
+    static void keptInvalid(Kind kind, const std::string& reason);
+
+    /** The feature's Warning once its check has repaired such a result, so that a repaired solid
+     * that may be wrong is never silent (decision 276): "OCCT built this round invalid and it was
+     * repaired; the exact construction refused: <reason>" ("this chamfer" for a chamfer), one line
+     * per result noted. Empty if none was
+     */
+    std::string invalidWarning() const;
+
+    /// Adds invalidWarning(), if any, to the feature's Warning (App::Document::setWarning()),
+    /// after the warning it has already; returns it
+    std::string warnInvalid(App::DocumentObject* feature) const;
+
 private:
     Recorder* outer;
     int builds = 0;
     int edges = 0;
     int corners = 0;
+    std::vector<std::string> invalidKept;
 };
 
 }  // namespace Part::FilletFallback

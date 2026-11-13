@@ -174,6 +174,8 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
+        // As the fillet's (ops#640)
+        recorder.warnInvalid(this);
         this->Shape.setValue(res);
         return Part::FilletBase::execute();
     }

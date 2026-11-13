@@ -245,6 +245,8 @@ App::DocumentObjectExecReturn* Chamfer::execute()
             dressUpReapplied(refineShapeIfActive(shape));
             return App::DocumentObject::StdReturn;
         }
+        // As the fillet's: a repaired result OCCT built invalid carries a Warning (ops#640)
+        recorder.warnInvalid(this);
         // store shape before refinement
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);

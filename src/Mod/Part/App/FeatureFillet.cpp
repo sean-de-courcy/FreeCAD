@@ -189,6 +189,9 @@ App::DocumentObjectExecReturn* Fillet::execute()
         }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
+        // OCCT built it invalid, the exact construction refused and checkDressUp() repaired it:
+        // never silent (decision 276, ops#640)
+        recorder.warnInvalid(this);
         this->Shape.setValue(res);
         return Part::FilletBase::execute();
     }

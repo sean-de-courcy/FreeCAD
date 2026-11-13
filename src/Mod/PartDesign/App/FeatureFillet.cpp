@@ -196,6 +196,9 @@ App::DocumentObjectExecReturn* Fillet::execute()
             dressUpReapplied(refineShapeIfActive(shape));
             return App::DocumentObject::StdReturn;
         }
+        // OCCT built it invalid, the exact construction refused and the check above repaired it: a
+        // valid solid that may be wrong, never silent (decision 276, ops#640)
+        recorder.warnInvalid(this);
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);
         if (!isSingleSolidRuleSatisfied(shape.getShape())) {
