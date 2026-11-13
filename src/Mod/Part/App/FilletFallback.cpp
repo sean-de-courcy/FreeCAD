@@ -748,8 +748,8 @@ struct Tool
     /// The miter piece at a concave corner with a circle: its faces merge into the tools' faces
     /// they continue (one cone, one plane, as Onshape's sharp miter)
     bool miter = false;
-    /// A concave edge's round rolled on over a tangent edge onto the next face (rollOn): it fills
-    /// air only, as its construction assumes
+    /// A round rolled on over a tangent edge onto the next face (rollOn): a concave edge's fills
+    /// air only, a convex edge's removes material only, as its construction assumes
     bool rolled = false;
     /// No closed-form volume (a tight wall arc's canal-surface tool, C4 shape A): checked by its
     /// own construction instead, cut in a stage of its own before the others, and its volume
@@ -1872,8 +1872,8 @@ constexpr double tangentTolerance = 1e-6;
  * Onshape's FR1, exact). Its area in closed form: the triangle of the corner and the tangent
  * points, plus or minus the circles' segments over the chords, less the arc's segment.
  *
- * A concave edge whose ball can't touch one of its faces, where that face ends in a tangent edge
- * along the edge onto a face that is a prism along it, rolls on onto that face (rolledTool)
+ * An edge whose ball can't touch one of its faces, where that face ends in a tangent edge along
+ * the edge onto a face that is a prism along it, rolls on onto that face (rolledTool)
  */
 struct RuledTrace
 {
@@ -2100,7 +2100,8 @@ bool onFace(const TopoDS_Face& face, const gp_Pnt& point)
     return classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON;
 }
 
-/** A concave edge's ball that can't touch the face k (Case Base #47, ops#640): where that face
+/** A ball that can't touch the face k (Case Base #47, ops#640; a concave edge's ball in the air,
+ * or a convex edge's in the material, its mirror image): where that face
  * ends, away from the corner, in a tangent (G1) edge along the edge onto a face that is a prism
  * along it (a plane through its direction, or a cylinder about it), the ball rolls on onto that
  * face, as Onshape's does: one round tangent to the next face and the other face, which covers
@@ -2450,10 +2451,9 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
         }
     }
     if (!reason.empty()) {
-        // A concave edge's ball rolls on over a face's tangent edge onto the next face
-        if (data.convex) {
-            refuse(reason);
-        }
+        // The ball rolls on over a face's tangent edge onto the next face: a concave edge's in the
+        // air, a convex edge's in the material (the mirror image; Onshape builds both, oracle 18's
+        // FR3)
         std::optional<Rolled> rolled[2];
         for (int k = 0; k < 2; ++k) {
             rolled[k] = rollOn(ctx, data, traces, k, r);
@@ -5126,6 +5126,13 @@ TopoDS_Shape constructShape(
                 refuse("a round rolled on over a tangent edge runs into the material");
             }
         }
+        else if (tool.rolled) {
+            // And a convex edge's rolled tool removes material only, all of its section
+            double inBase = volumeOf(commonOf(base.getShape(), tool.solid));
+            if (std::abs(inBase - tool.volume) > volumeTolerance * tool.volume) {
+                refuse("a round rolled on over a tangent edge runs out of the material");
+            }
+        }
         tools.push_back(std::move(tool));
     };
     // The three-edge corners, each with its piece, of the convexity of its edges
@@ -5367,6 +5374,15 @@ TopoDS_Shape constructShape(
                 wallFaces.push_back(face);
             }
         }
+    }
+    // A convex edge's rolled round trimmed like a direct one (past a ledge on the face it rolls
+    // onto, or overlapping another round): the rules for that (Q-LEDGE, K2) are Onshape's for
+    // direct dress-ups only, and the rolled tool was admitted as all material (review of the
+    // convex roll-on). A concave edge's rolled tool refuses there by the fused tools' rules
+    if (trimmed && std::any_of(tools.begin(), tools.end(), [](const Tool& t) {
+            return t.rolled && t.cut;
+        })) {
+        refuse("a round rolled on over a tangent edge runs past its faces or overlaps another");
     }
     // A dress-up past a concave edge into a wall straight back from its face: Onshape trims the
     // tools on that face by the wall's surface run on behind the face (Q-LEDGE, Case Base row
