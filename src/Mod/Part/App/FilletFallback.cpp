@@ -312,7 +312,9 @@ gp_Dir inwardIn(const TopoDS_Face& face, const TopoDS_Edge& edge, double paramet
 gp_Dir outwardNormalAny(const TopoDS_Face& face, const gp_Pnt& point)
 {
     BRepAdaptor_Surface adaptor(face, Standard_False);
-    if (adaptor.GetType() == GeomAbs_Plane || adaptor.GetType() == GeomAbs_Cylinder) {
+    // The surfaces outwardNormal knows, in closed form (a cone: the face beyond an overflowing end)
+    if (adaptor.GetType() == GeomAbs_Plane || adaptor.GetType() == GeomAbs_Cylinder
+        || adaptor.GetType() == GeomAbs_Cone) {
         return outwardNormal(face, point);
     }
     Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
@@ -3469,10 +3471,10 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         // The square corner, end, centre, end revolved, minus the torus (or sphere) about the
         // centre's circle: the round face is analytic (a spindle or horn torus: the section
         // revolved instead, below). Its seam is where the circle's is on a closed edge, and
-        // opposite the arc's middle on an open one: an arc across the circle's seam would get its
-        // round in two faces, and OCCT 8.0.1's cut of Case Base #105's body by such a tool (an R 1
-        // arc rounded at r 1: a sphere) leaves an invalid face, where the same tool on the three
-        // mirrored arcs, off the seam, cuts cleanly
+        // opposite the middle of the tool's turn on an open one: an arc across the seam would get
+        // its round in two faces, and OCCT 8.0.1's cut of Case Base #105's body by such a tool (an
+        // R 1 arc rounded at r 1: a sphere) leaves an invalid face, where the same tool on the
+        // three mirrored arcs, off the seam, cuts cleanly
         BRepBuilderAPI_MakePolygon square(
             section.corner,
             section.ends[0],
@@ -3487,14 +3489,12 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         gp_Pnt axisPoint = circle.Location().Translated(
             gp_Vec(z) * gp_Vec(circle.Location(), section.centre).Dot(gp_Vec(z))
         );
-        // A tool turned on past its ends (Nest Cover #151) has its seam where its turn starts:
-        // the arc's middle is not its own, and the seam opposite it could lie inside the turn
+        // The middle is the turn's, not the arc's: a tool turned on past its ends (Nest Cover
+        // #151) would have the seam opposite the arc's middle inside its turn (its face in two
+        // pieces). The turn is short of a whole one (above), so the seam is outside it
         gp_Dir seam = circle.XAxis().Direction();
-        if (pre + post > 0.0) {
-            seam.Rotate(axis, data.first - pre);
-        }
-        else if (!data.closed) {
-            seam.Rotate(axis, (data.first + data.last) / 2 + pi);
+        if (!data.closed) {
+            seam.Rotate(axis, (data.first - pre + data.last + post) / 2 + pi);
         }
         gp_Ax2 frame(axisPoint, z, seam);
         TopoDS_Shape round;
@@ -4409,8 +4409,10 @@ bool checkRunOff(
             continue;  // onto a curved end face, whose surface trims the tool (Case Base #105)
         }
         BRepAdaptor_Surface nextSurface(next, Standard_False);
-        if (nextSurface.GetType() != GeomAbs_Plane && nextSurface.GetType() != GeomAbs_Cylinder
-            && lengthAlong(edge, off) <= 1000 * linearTolerance) {
+        // The surfaces outwardNormal knows: a cone too (Nest Cover #151's chamfer cone)
+        const bool known = nextSurface.GetType() == GeomAbs_Plane
+            || nextSurface.GetType() == GeomAbs_Cylinder || nextSurface.GetType() == GeomAbs_Cone;
+        if (!known && lengthAlong(edge, off) <= 1000 * linearTolerance) {
             continue;  // a touch at a vertex, where a curved end face meets the strip's face (#105)
         }
         BRepAdaptor_Curve curve(edge);
@@ -4430,9 +4432,9 @@ bool checkRunOff(
                 walls.push_back(next);
             }
         }
-        else if (nextSurface.GetType() != GeomAbs_Plane
-                 && nextSurface.GetType() != GeomAbs_Cylinder) {
-            // As before the walls' surfaces were read: only planes and cylinders are known here
+        else if (!known) {
+            // As before the walls' surfaces were read: only planes, cylinders and cones are known
+            // here (outwardNormal's refusal)
             refuse("a face next to a selected edge is neither a plane nor a cylinder");
         }
         // Along more than the tolerance of a grazing contact, by a margin
@@ -5872,6 +5874,11 @@ TopoDS_Shape constructShape(
             }
             if (next->measured) {
                 refuse("the surface of an end face reaches a tight wall arc's tool");
+            }
+            // An arc turned on past its far end has no end face there: the check that nothing
+            // goes at the far end (trimContinuation) would hold of itself
+            if (!next->overflowFaces.empty()) {
+                refuse("the surface of an end face reaches an overflowing arc's tool");
             }
             trimContinuation(ctx, *next, *nextData, pass);
         }
