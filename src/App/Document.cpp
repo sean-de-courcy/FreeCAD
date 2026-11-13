@@ -3548,7 +3548,9 @@ bool Document::saveToFile(const char* filename) const
 
     auto hGrp = GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Document");
-    int compression = static_cast<int>(hGrp->GetInt("CompressionLevel", 7));
+    // Level 3, not zlib's 7 (deflate_slow): on a 300-object document deflate took 57% of the save
+    // at 7; 3 saves it in about 60% of the time for about 11% more bytes (ops#640)
+    int compression = static_cast<int>(hGrp->GetInt("CompressionLevel", 3));
     compression = Base::clamp<int>(compression, Z_NO_COMPRESSION, Z_BEST_COMPRESSION);
 
     auto canonical_path = [](const char* filename) {

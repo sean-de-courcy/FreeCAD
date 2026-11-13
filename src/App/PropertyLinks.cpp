@@ -902,6 +902,13 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
         !reverse && (App::anyOpenedWithOlderNaming() || !_ConsumerPassLinks.empty());
     std::unordered_map<PropertyLinkBase*, std::vector<std::string>> passed;  // the state before
     std::unordered_set<const PropertyLinkBase*> destroyed;  // since, by a handler
+    // Each object's placement digest is made once for every reference updated below, as in a
+    // recompute (Document.cpp's one scope for all links): without it, each link property's own
+    // scope (_updateElementFingerprints()) ended with its update, and every link re-digested its
+    // chain, printing each sketch's geometry to fold it (ops#640: a third of a 300-object open).
+    // A digest is dropped when a property of its object changes, so the updates here can't read
+    // a stale one.
+    App::PlacementDigestScope digestScope;
     _DestroyedWatches.push_back(&destroyed);
     struct Unwatch
     {
