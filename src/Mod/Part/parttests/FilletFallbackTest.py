@@ -3480,3 +3480,111 @@ class CurvedEndTrimTest(unittest.TestCase):
                 shape = body.makeFillet(0.9, [chord])
                 self.assertTrue(shape.isValid())
                 self.assertEqual(len(shape.Faces), len(body.Faces) + 1)
+
+
+class RoundBetweenCylindersTest(unittest.TestCase):
+    """A round of a straight edge between two cylinders along it (ops#640, Case Base #104), on two
+    cylinders R, height h, axes d apart: fused (two concave edges) and their common part, a lens
+    (two convex edges). The exact round is a cylinder of radius r touching both, as Onshape's.
+    OCCT's is valid, but a B-spline face between B-spline edges, so a later dress-up over one of
+    its ends met "a selected edge that is neither a line nor a circle" (#105): the construction
+    runs first. Closed forms: the plane figure between the two circles and the round's arc."""
+
+    R, D = 10.0, 12.0
+
+    def bodies(self, h):
+        a = Part.makeCylinder(self.R, h)
+        b = Part.makeCylinder(self.R, h, V(self.D, 0, 0))
+        return a.fuse(b), a.common(b)
+
+    def straight_edges(self, shape):
+        y = math.sqrt(self.R**2 - self.D**2 / 4)
+        edges = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.x - self.D / 2) < 1e-7 for v in e.Vertexes)
+            and all(abs(abs(v.Point.y) - y) < 1e-7 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(edges), 2)
+        return edges
+
+    @staticmethod
+    def segment(radius, angle):
+        return radius * radius * (angle - math.sin(angle)) / 2
+
+    def concave(self, r):
+        """What a round r fills at the concave edge of the fused discs (area); its arc's angle"""
+        R, half = self.R, self.D / 2
+        py = math.sqrt(R * R - half * half)  # the edge, at (half, py)
+        cy = math.sqrt((R + r) ** 2 - half * half)  # the ball's centre, at (half, cy)
+        tx, ty = R * half / (R + r), R * cy / (R + r)  # where it touches the disc at the origin
+        triangle = (self.D - 2 * tx) * (ty - py) / 2
+        on_disc = math.atan2(cy, half) - math.atan2(py, half)
+        angle = 2 * math.asin(half / (R + r))
+        return triangle - 2 * self.segment(R, on_disc) - self.segment(r, angle), angle
+
+    def convex(self, r):
+        """What a round r removes at the convex edge of the lens (area), and its arc's angle"""
+        R, half = self.R, self.D / 2
+        py = math.sqrt(R * R - half * half)
+        cy = math.sqrt((R - r) ** 2 - half * half)
+        tx, ty = R * half / (R - r), R * cy / (R - r)  # on the disc at the origin, past x = half
+        kite = 2 * (tx - half) * (py - cy) / 2
+        on_disc = math.atan2(py, half) - math.atan2(cy, half)
+        angle = 2 * math.asin(half / (R - r))
+        return kite + 2 * self.segment(R, on_disc) - r * r * angle / 2, angle
+
+    def assertAnalytic(self, shape):
+        for face in shape.Faces:
+            self.assertNotIn("BSpline", face.Surface.TypeId)
+        for edge in shape.Edges:
+            self.assertIn(edge.Curve.TypeId, ("Part::GeomLine", "Part::GeomCircle"))
+
+    def testTheRoundIsACylinder(self):
+        h, r = 5.0, 2.0
+        self.assertAlmostEqual(self.concave(r)[0], 0.269200651, delta=1e-9)
+        self.assertAlmostEqual(self.convex(r)[0], 0.812864436, delta=1e-9)
+        fused, lens = self.bodies(h)
+        for name, base, (section, angle), sign in (
+            ("fused", fused, self.concave(r), 1),
+            ("lens", lens, self.convex(r), -1),
+        ):
+            with self.subTest(name):
+                result = base.makeFillet(r, self.straight_edges(base))
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                added = result.Volume - base.Volume
+                self.assertAlmostEqual(added, sign * 2 * h * section, delta=1e-6)
+                self.assertAnalytic(result)
+                rounds = [
+                    f
+                    for f in result.Faces
+                    if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - r) < 1e-9
+                ]
+                self.assertAlmostEqual(sum(f.Area for f in rounds), 2 * h * r * angle, delta=1e-6)
+
+    def testARoundOverItsEndsBuilds(self):
+        # #105's kind: the lens h tall with its two edges rounded r, then its top rim rounded h, the
+        # wall's whole height. OCCT fails at that limit; the construction takes the rim only if
+        # the first rounds' ends are circles. The rim's round removes its section s along the
+        # rim, by Pappus s (P - 2 pi c): P the rim's length, c the section's centroid from the wall
+        h, r = 1.0, 2.0
+        lens = self.bodies(h)[1]
+        rounded = lens.makeFillet(r, self.straight_edges(lens))
+        self.assertAnalytic(rounded)
+        rim = [
+            e
+            for e in rounded.Edges
+            if abs(e.BoundBox.ZMin - h) < 1e-7 and abs(e.BoundBox.ZMax - h) < 1e-7
+        ]
+        angle = self.convex(r)[1]
+        length = 2 * self.R * (math.pi - angle) + 2 * r * angle
+        self.assertAlmostEqual(sum(e.Length for e in rim), length, delta=1e-6)
+        result = rounded.makeFillet(h, rim)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        removed = fillet_section(h) * (length - 2 * math.pi * fillet_centroid(h))
+        self.assertAlmostEqual(result.Volume, rounded.Volume - removed, delta=1e-6)
+        for face in result.Faces:
+            self.assertNotIn("BSpline", face.Surface.TypeId)

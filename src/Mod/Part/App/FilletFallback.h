@@ -182,10 +182,13 @@ PartExport bool construct(
     std::string* reason = nullptr
 );
 
-/** Whether the construction should run before OCCT: some selected edge is a convex rim arc on a
- * bulging wall tighter than the round (ops#640, C4 shape A), where OCCT's result is valid but
- * wrong (notes/fillet-tight-arc.md), so its own checks never ask the construction. Reads only
- * plain shapes, as construct(). False for a chamfer, and when an edge can't be analysed.
+/** Whether the construction should run before OCCT, whose own checks never ask it where its
+ * result is valid. Either some selected edge is a convex rim arc on a bulging wall tighter than
+ * the round (ops#640, C4 shape A), where OCCT's result is wrong (notes/fillet-tight-arc.md); or
+ * every selected edge is a straight edge between two cylinders along it (Case Base #104), where
+ * OCCT's round is a B-spline face between B-spline edges and the exact round is a cylinder
+ * (notes/fillet-fallback.md). Reads only plain shapes, as construct(). False for a chamfer, and
+ * when an edge can't be analysed.
  */
 PartExport bool preferConstruction(
     const TopoDS_Shape& base,
