@@ -85,10 +85,17 @@ namespace
 {
 // ops#655: Onshape's loft start and end condition "Normal to profile" (notes/loft-options.md)
 
-/// k per unit magnitude, as a multiple of the distance between the profiles. Oracle fact GB12 (e)
-/// fits k = 30.138 for profiles 30 apart; the rule behind it is asked of the oracle (ops#675), and
-/// this is the one place to change when it answers.
-constexpr double tangentPerDistance = 30.138 / 30.0;
+/// Onshape's tangent length per unit magnitude at one corner rail of a side face, from its point p
+/// on the first profile to its point q on the last, at the end whose normal (towards the other
+/// profile) is `normal`: 0.9 times the rail's reach along that normal plus 0.1 times its length.
+/// Along the face it is linear between the face's two corner rails. Found from oracle 17's surfaces
+/// (LE2, LE4, LE9; notes/loft-end-conditions.md): it gives Onshape's k to 1e-6 on squares, circles,
+/// offset rectangles and a tilted end, where each end gets its own k.
+double tangentLength(const gp_Pnt& p, const gp_Pnt& q, const gp_Dir& normal)
+{
+    const gp_Vec rail(p, q);
+    return 0.9 * rail.Dot(gp_Vec(normal)) + 0.1 * rail.Magnitude();
+}
 
 gp_Pnt wireCentre(const TopoDS_Shape& wire)
 {
@@ -189,13 +196,6 @@ Part::TopoShape withProfileConditions(
     if (across.Dot(normal1) < 0) {
         normal1.Reverse();
     }
-    // ops#640 (decision 396): for profiles that aren't parallel Onshape gives each end its own
-    // tangent length by a rule not known yet (oracle 17 LE4); the team's lofts are all parallel
-    if (normal0.Angle(normal1) > 1e-9) {
-        throw Base::CADKernelError(
-            QT_TRANSLATE_NOOP("Exception", "Loft: Normal to profile needs parallel profiles")
-        );
-    }
     const double distance0 = across.Dot(normal0);
     const double distance1 = across.Dot(normal1);
     if (distance0 < Precision::Confusion() || distance1 < Precision::Confusion()) {
@@ -204,8 +204,6 @@ Part::TopoShape withProfileConditions(
             "Loft: Normal to profile needs each profile's centre off the other profile's plane"
         ));
     }
-    const gp_Vec tangent0 = gp_Vec(normal0) * (startMagnitude * distance0 * tangentPerDistance);
-    const gp_Vec tangent1 = gp_Vec(normal1) * (endMagnitude * distance1 * tangentPerDistance);
 
     constexpr int samples = 101;
     std::vector<double> fractions(samples);
@@ -257,12 +255,16 @@ Part::TopoShape withProfileConditions(
         gp_Pnt middle0;
         gp_Pnt start1;
         gp_Pnt middle1;
+        gp_Pnt end0;  // the face's other corner rail, where the profile rows end
+        gp_Pnt end1;
         if (onPlane(plane0, surface->Value(um, v0)) || onPlane(plane0, surface->Value(um, v1))) {
             const bool low = onPlane(plane0, surface->Value(um, v0));
             start0 = surface->Value(u0, low ? v0 : v1);
             middle0 = surface->Value(uq, low ? v0 : v1);
             start1 = surface->Value(u0, low ? v1 : v0);
             middle1 = surface->Value(uq, low ? v1 : v0);
+            end0 = surface->Value(u1, low ? v0 : v1);
+            end1 = surface->Value(u1, low ? v1 : v0);
         }
         else {
             const bool low = onPlane(plane0, surface->Value(u0, vm));
@@ -270,7 +272,14 @@ Part::TopoShape withProfileConditions(
             middle0 = surface->Value(low ? u0 : u1, vq);
             start1 = surface->Value(low ? u1 : u0, v0);
             middle1 = surface->Value(low ? u1 : u0, vq);
+            end0 = surface->Value(low ? u0 : u1, v1);
+            end1 = surface->Value(low ? u1 : u0, v1);
         }
+        // the tangent lengths at the face's two corner rails (fraction 0 at start0, 1 at end0)
+        const double startA = startMagnitude * tangentLength(start0, start1, normal0);
+        const double startB = startMagnitude * tangentLength(end0, end1, normal0);
+        const double endA = endMagnitude * tangentLength(start0, start1, normal1);
+        const double endB = endMagnitude * tangentLength(end0, end1, normal1);
         GeomFill_Profiler profiler;
         profiler.AddCurve(fit(byArcLength(edge0, start0, middle0, fractions), fractions));
         profiler.AddCurve(fit(byArcLength(edge1, start1, middle1, fractions), fractions));
@@ -280,22 +289,44 @@ Part::TopoShape withProfileConditions(
         TColgp_Array1OfPnt row3(1, count);
         profiler.Poles(1, row0);
         profiler.Poles(2, row3);
+        TColStd_Array1OfReal uKnots(1, profiler.NbKnots());
+        TColStd_Array1OfInteger uMults(1, profiler.NbKnots());
+        profiler.KnotsAndMults(uKnots, uMults);
+        // each pole row's place along the face (Greville abscissa), so a tangent length linear in
+        // the arc-length fraction is exactly linear along the surface
+        const int degree = profiler.Degree();
+        std::vector<double> flat;
+        for (int i = uKnots.Lower(); i <= uKnots.Upper(); ++i) {
+            flat.insert(flat.end(), uMults(i), uKnots(i));
+        }
+        if (static_cast<int>(flat.size()) != count + degree + 1) {
+            throw Base::CADKernelError("Loft: unexpected knots on a profile edge");
+        }
+        const double span = flat.back() - flat.front();
         TColgp_Array2OfPnt poles(1, count, 1, 4);
         for (int j = 1; j <= count; ++j) {
+            double greville = 0;
+            for (int i = j; i < j + degree; ++i) {
+                greville += flat[i];
+            }
+            const double fraction = (greville / degree - flat.front()) / span;
+            const gp_XYZ tangent0
+                = gp_Vec(normal0).XYZ() * (startA + (startB - startA) * fraction);
+            const gp_XYZ tangent1 = gp_Vec(normal1).XYZ() * (endA + (endB - endA) * fraction);
             const gp_XYZ p0 = row0(j).XYZ();
             const gp_XYZ p3 = row3(j).XYZ();
             gp_XYZ p1;
             gp_XYZ p2;
             if (start && end) {
-                p1 = p0 + tangent0.XYZ() / 3;
-                p2 = p3 - tangent1.XYZ() / 3;
+                p1 = p0 + tangent0 / 3;
+                p2 = p3 - tangent1 / 3;
             }
             else if (start) {
-                p1 = p0 + tangent0.XYZ() / 3;
+                p1 = p0 + tangent0 / 3;
                 p2 = (p1 + p3) / 2;
             }
             else {
-                p2 = p3 - tangent1.XYZ() / 3;
+                p2 = p3 - tangent1 / 3;
                 p1 = (p0 + p2) / 2;
             }
             poles(j, 1) = gp_Pnt(p0);
@@ -303,9 +334,6 @@ Part::TopoShape withProfileConditions(
             poles(j, 3) = gp_Pnt(p2);
             poles(j, 4) = gp_Pnt(p3);
         }
-        TColStd_Array1OfReal uKnots(1, profiler.NbKnots());
-        TColStd_Array1OfInteger uMults(1, profiler.NbKnots());
-        profiler.KnotsAndMults(uKnots, uMults);
         TColStd_Array1OfReal vKnots(1, 2);
         TColStd_Array1OfInteger vMults(1, 2);
         vKnots(1) = 0;
