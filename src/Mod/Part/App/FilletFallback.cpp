@@ -152,6 +152,11 @@ constexpr double angularTolerance = 1e-9;
 /// Every measured volume must equal its closed form to this, relative to the tool volumes
 constexpr double volumeTolerance = 1e-6;
 
+/// The refusal where OCCT's contour runs on past the selection (constructShape()): where a narrow
+/// strip explains the failure (narrowStrip()), the user is told that instead
+const char* const tangentChainRefusal
+    = "OCCT's contour runs on along a tangent chain onto an unselected edge";
+
 /// Thrown inside the construction when it refuses; caught by build()
 struct Refusal
 {
@@ -7423,11 +7428,11 @@ TopoDS_Shape constructShape(
             }
         }
     }
-    // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: a pick
-    // propagates (as in Onshape), so the construction takes OCCT's whole contour as selected
+    // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: where it would
+    // have reached an unselected edge, the construction (which stops there) differs from it
     for (const auto& edge : request.contour) {
-        if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
-            ctx.selected.Add(edge);
+        if (!ctx.selected.Contains(edge)) {
+            refuse(tangentChainRefusal);
         }
     }
     for (int i = 1; i <= ctx.selected.Extent(); ++i) {
@@ -12863,7 +12868,8 @@ bool construct(
     catch (const Standard_Failure&) {
     }
     if (!strip.empty()) {
-        why = strip + " (" + why + ")";
+        // The tangent chain is OCCT's propagation, not the cause: dropped (ops#640)
+        why = why.rfind(tangentChainRefusal, 0) == 0 ? strip : strip + " (" + why + ")";
     }
     if (reason) {
         *reason = why;
