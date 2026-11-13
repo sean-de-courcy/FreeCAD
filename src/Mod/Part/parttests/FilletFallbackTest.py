@@ -3342,6 +3342,53 @@ class CuspTest(unittest.TestCase):
         self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
         self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
 
+class CuspRefusalTest(unittest.TestCase):
+    """Kernel layer step 1 (notes/kernel-layer.md P5, ops#640): a chamfer whose edge ends in a cusp is
+    the exact construction's or an error that names the edge. OCCT's result, valid or not, is never
+    kept where the construction refuses (Sean's ruling of 11-13: build like Onshape, else refuse
+    loudly); it was, with no warning at all (Case Base #76)."""
+
+    def testAChamferTheConstructionRefusesRaisesNamingTheEdge(self):
+        # CuspTest's slot, the chamfer 6 on both faces: on the end wall it runs past the block's top
+        # (z 20), and the construction refuses. OCCT built a valid chamfer of 12 faces, not the
+        # cusped section's 11, and makeChamfer returned it
+        shape, rim = CuspTest().slot(V(0, 0, -1))
+        self.assertEqual(len(rim), 1)
+        name = "Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(rim[0]))
+        with self.assertRaises(Exception) as caught:
+            shape.makeChamfer(6, rim)
+        message = str(caught.exception)
+        self.assertIn("ends in a cusp", message)
+        self.assertIn("The chamfer of %s ends" % name, message)
+
+    def testTheFeatureFailsWithTheSameError(self):
+        shape, rim = CuspTest().slot(V(0, 0, -1))
+        doc = FreeCAD.newDocument("CuspRefusalTest")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = shape
+            chamfer = doc.addObject("Part::Chamfer", "Chamfer")
+            chamfer.Base = base
+            index = next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(rim[0]))
+            chamfer.Edges = [(index, 6, 6)]
+            doc.recompute()
+            self.assertFalse(chamfer.isValid())
+            self.assertIn("ends in a cusp", chamfer.getStatusString())
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testChamfersTheConstructionBuildsStay(self):
+        # The control: within the wall the construction builds them, exact (CuspTest's values)
+        shape, rim = CuspTest().slot(V(0, 0, -1))
+        for size in (1, 4, 4.9):
+            with self.subTest(size=size):
+                result = shape.makeChamfer(size, rim)
+                self.assertTrue(result.isValid())
+                expected = cusped_chamfer_volume(5, size, size)
+                self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
+                self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
+
+
 def tight_plate(radii, scoop=False):
     """A 30 x 20 x 5 plate whose four vertical corners are rounded radii, at (0, 0), (30, 0),
     (30, 20) and (0, 20). With scoop, a vertical cylinder R 7.5 about (27, 3) is cut out first,

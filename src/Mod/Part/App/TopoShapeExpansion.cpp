@@ -7748,6 +7748,40 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
     throw StdFail_NotDone(message.c_str());
 }
 
+/** The chamfer's error where an edge ends in a cusp and the exact construction refused: names the
+ * selected edges that end in one by their names in \a shape ("Edge5, Edge7"). */
+[[noreturn]] void raiseCuspError(
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    const std::string& reason
+)
+{
+    std::vector<TopoDS_Shape> picked;
+    picked.reserve(inputEdges.size());
+    for (const auto& edge : inputEdges) {
+        picked.push_back(edge.getShape());
+    }
+    std::vector<std::size_t> which;
+    FilletFallback::endsInCusp(input.getShape(), picked, &which);
+    std::string names;
+    for (const std::size_t i : which) {
+        if (i >= edges.size()) {
+            continue;
+        }
+        names += (names.empty() ? "" : ", ") + TopoShape::shapeName(TopAbs_EDGE)
+            + std::to_string(shape.findShape(edges[i].getShape()));
+    }
+    FC_THROWM(
+        Base::CADKernelError,
+        "The chamfer of " << (names.empty() ? std::string("an edge") : names)
+                          << " ends in a cusp, where OCCT's chamfer differs from Onshape's; its exact "
+                             "construction refused: "
+                          << reason
+    );
+}
+
 [[noreturn]] void raiseThinFaceError(const char* what, const std::string& reason)
 {
     FC_THROWM(
@@ -7764,8 +7798,9 @@ struct DressUpOutcome
     bool failed {false};
     bool thin {false};
     bool invalid {false};
-    /// A chamfer whose edge ends in a cusp (FilletFallback::endsInCusp()): the exact
-    /// construction first, OCCT's result where it refuses
+    /// A chamfer whose edge ends in a cusp (FilletFallback::endsInCusp()), whether OCCT's result
+    /// is valid or not: the exact construction, or an error that names the edge (kernel layer
+    /// step 1, ops#640)
     bool cusp {false};
     /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
     /// edges (FilletFallback::endsInOverflow()): the exact construction, or an error
@@ -7829,8 +7864,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             out.invalid = !out.failed && !out.thin && builtInvalid(*maker, base);
             // Case Base #76: at a cusp OCCT's chamfer can be valid and wrong (oracle 17 Q-CUSP:
             // removing ten times Onshape's volume, a face running out of the body)
-            out.cusp = !out.failed && !out.thin && !out.invalid
-                && request.kind == FilletFallback::Kind::Chamfer
+            out.cusp = !out.failed && !out.thin && request.kind == FilletFallback::Kind::Chamfer
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
@@ -7972,7 +8006,8 @@ TopoShape& TopoShape::makeElementChamfer(
     // By equal distances, a chain of edges at different angles gets Onshape's setbacks
     // (FilletFallback::chainSetbacks(), notes/chamfer-chain-setbacks.md). Where neither OCCT nor
     // the construction builds them, the chamfer is built again with w on every edge, today's
-    // result: a chamfer that built with w never starts failing (ruling A, section 7)
+    // result: a chamfer that built with w never starts failing (ruling A, section 7), except at a
+    // cusp, where OCCT's result with w is no longer kept either (kernel layer step 1)
     for (bool uniform : {false, true}) {
         std::vector<TopoShape> inputEdges = edges;
         const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
@@ -8043,8 +8078,7 @@ TopoShape& TopoShape::makeElementChamfer(
             if (finishConstruction(*this, *outcome, input, op)) {
                 return *this;
             }
-            // At a cusp OCCT built: its result stands where the construction refuses (Case Base #76)
-            if (setbacksDiffer && (outcome->failed || outcome->thin || outcome->invalid)) {
+            if (setbacksDiffer) {
                 continue;  // w on every edge
             }
             if (outcome->failed) {
@@ -8052,6 +8086,12 @@ TopoShape& TopoShape::makeElementChamfer(
             }
             if (outcome->thin) {
                 raiseThinFaceError("The chamfer", outcome->reason);
+            }
+            if (outcome->cusp) {
+                // OCCT's chamfer there can be valid and wrong (Case Base #76, oracle 17 Q-CUSP): never
+                // returned where the construction refuses, valid or not (Sean's ruling of 11-13:
+                // build like Onshape, else refuse loudly; notes/kernel-layer.md P5)
+                raiseCuspError(shape, edges, input, inputEdges, outcome->reason);
             }
             if (outcome->invalid) {
                 FilletFallback::noteInvalidResult(outcome->reason);

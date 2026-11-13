@@ -71,9 +71,9 @@ PartExport void run(
     Inputs inputs = Inputs::Owned
 );
 
-/** As run(), for a check the result doesn't need (work on copies only): false, with nothing noted
- * as a stop, where the limit stopped it or it could not start; the caller warns. Esc and the
- * work's own errors throw as from run(). */
+/** As run(), for a check of the result (work on copies only): false, with nothing noted as a stop,
+ * where the limit stopped it or it could not start; a PartDesign feature then fails (kernel layer
+ * step 2). Esc and the work's own errors throw as from run(). */
 PartExport bool runOptional(
     const char* what,
     const std::function<void(const Message_ProgressRange&)>& work
@@ -119,8 +119,8 @@ PartExport bool orientedConsistently(BRepCheck_Shell& check, const TopoDS_Shell&
 PartExport bool checkValidChanged(const TopoDS_Shape& shape, const TopoDS_Shape& base);
 
 /** Whether this thread's feature (its outermost Scope) has a limit that has passed. A step on the
- * calling thread that can't be stopped, and that the result doesn't need (a refine, a check), is
- * skipped then, with a warning on the feature. */
+ * calling thread that can't be stopped (a refine, a check) doesn't start then: the feature fails
+ * (stopIfPastDeadline(); kernel layer step 2, never skipped with a warning). */
 PartExport bool pastDeadline();
 
 /** Whether this thread runs a feature's recompute (inside a Scope, not on a worker). */

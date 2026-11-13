@@ -6832,7 +6832,11 @@ bool endsInOverflow(
     return false;
 }
 
-bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges)
+bool endsInCusp(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    std::vector<std::size_t>* which
+)
 {
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
@@ -6843,19 +6847,20 @@ bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges
             return e.IsSame(edge);
         });
     };
-    for (const auto& shape : edges) {
+    // Whether this edge ends in a cusp at one of its vertices
+    auto cuspAtAnEnd = [&](const TopoDS_Shape& shape) {
         if (shape.ShapeType() != TopAbs_EDGE || !edgeFaces.Contains(shape)) {
-            continue;
+            return false;
         }
         const TopoDS_Edge& edge = TopoDS::Edge(shape);
         const auto& faces = edgeFaces.FindFromKey(edge);
         if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge)) {
-            continue;
+            return false;
         }
         TopoDS_Vertex ends[2];
         TopExp::Vertices(edge, ends[0], ends[1]);
         if (ends[0].IsNull() || ends[1].IsNull() || ends[0].IsSame(ends[1])) {
-            continue;
+            return false;
         }
         for (const auto& vertex : ends) {
             if (!vertexEdges.Contains(vertex)) {
@@ -6892,8 +6897,20 @@ bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges
                 }
             }
         }
+        return false;
+    };
+    bool any = false;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (!cuspAtAnEnd(edges[i])) {
+            continue;
+        }
+        if (!which) {
+            return true;
+        }
+        which->push_back(i);
+        any = true;
     }
-    return false;
+    return any;
 }
 
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
