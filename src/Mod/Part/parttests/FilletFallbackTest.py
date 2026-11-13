@@ -3753,6 +3753,174 @@ class CuspTest(unittest.TestCase):
         self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
         self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
 
+class CuspRefusalTest(unittest.TestCase):
+    """Kernel layer step 1 (notes/kernel-layer.md P5, ops#640): a chamfer whose edge ends in a cusp is
+    the exact construction's or an error that names the edge. OCCT's result, valid or not, is never
+    kept where the construction refuses (Sean's ruling of 11-13: build like Onshape, else refuse
+    loudly); it was, with no warning at all (Case Base #76)."""
+
+    def slotWithACone(self):
+        """CuspTest's slot with a cone frustum (r 3 to 2, 4 high) standing on the block's top away
+        from the slot. Returns the body, the cusped rim and the frustum's top circle: an edge on a
+        cone, which the construction refuses and OCCT chamfers (5.326054 removed at 1, alone)."""
+        slot, _ = CuspTest().slot(V(0, 0, -1))
+        shape = slot.fuse(Part.makeCone(3, 2, 4, V(6, 10, 20))).removeSplitter()
+        circles = [e for e in shape.Edges if e.Curve.TypeId == "Part::GeomCircle"]
+        rim = [
+            e
+            for e in circles
+            if abs(e.BoundBox.XMin - 15) < 1e-7
+            and abs(e.BoundBox.XMax - 15) < 1e-7
+            and e.BoundBox.ZMin > 10 - 1e-7
+        ]
+        top = [e for e in circles if abs(e.BoundBox.ZMin - 24) < 1e-7]
+        self.assertEqual((len(rim), len(top)), (1, 1))
+        return shape, rim, top
+
+    def testAChamferTheConstructionRefusesRaisesNamingTheEdge(self):
+        # The rim and the cone's edge in one chamfer of 1: the construction refuses the selection
+        # for the cone, and OCCT built both, valid, taking 45.885194 at the rim where the cusped
+        # section is 6.608946. makeChamfer returned that; now the error names the rim, not the cone
+        shape, rim, top = self.slotWithACone()
+        alone = shape.makeChamfer(1, top)
+        self.assertTrue(alone.isValid())
+        self.assertAlmostEqual(shape.Volume - alone.Volume, 5.326054, delta=1e-4)
+        name = "Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(rim[0]))
+        with self.assertRaises(Exception) as caught:
+            shape.makeChamfer(1, rim + top)
+        message = str(caught.exception)
+        self.assertIn("The chamfer of %s ends in a cusp" % name, message)
+        self.assertIn("exact construction refused", message)
+
+    def testTheFeatureFailsWithTheSameError(self):
+        shape, rim, top = self.slotWithACone()
+        doc = FreeCAD.newDocument("CuspRefusalTest")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = shape
+            chamfer = doc.addObject("Part::Chamfer", "Chamfer")
+            chamfer.Base = base
+            picked = [
+                next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge)) for edge in rim + top
+            ]
+            chamfer.Edges = [(i, 1, 1) for i in picked]
+            doc.recompute()
+            self.assertFalse(chamfer.isValid())
+            self.assertIn("ends in a cusp", chamfer.getStatusString())
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testChamfersPastTheTopAreCutOffByIt(self):
+        # The slot alone, 6 on both faces: the strip on the end wall runs past the block's top (10
+        # above the tunnel's axis) and is cut off by it. The cusped section's integral, over the
+        # wall's part below the top (the midpoint rule on 2000 x 400 cells, good to 1e-4)
+        shape, rim = CuspTest().slot(V(0, 0, -1))
+        r, a, top, n, m = 5.0, 6.0, 10.0, 2000, 400
+        expected = 0.0
+        for i in range(n):
+            y = -r + (i + 0.5) * 2 * r / n
+            z0 = math.sqrt(r * r - y * y)
+            z1 = min(math.sqrt((r + a) ** 2 - y * y), top)
+            for j in range(m):
+                z = z0 + (j + 0.5) * (z1 - z0) / m
+                expected += (r + a - math.hypot(y, z)) * (z1 - z0) / m * 2 * r / n
+        result = shape.makeChamfer(6, rim)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-3)
+
+    def testChamfersTheConstructionBuildsStay(self):
+        # The control: within the wall the construction builds them, exact (CuspTest's values)
+        shape, rim = CuspTest().slot(V(0, 0, -1))
+        for size in (1, 4, 4.9):
+            with self.subTest(size=size):
+                result = shape.makeChamfer(size, rim)
+                self.assertTrue(result.isValid())
+                expected = cusped_chamfer_volume(5, size, size)
+                self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
+                self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
+
+
+class VolumeSignTest(unittest.TestCase):
+    """The dress-up's volume-sign post-condition (kernel layer, ops#762): a round or chamfer of convex
+    edges only removes material. OCCT's round of a regular 100-gon prism's top rim (sides 2, r 0.2)
+    passes isValid() with every round face untrimmed at the 3.6 degree corners, and adds 5.39 mm3
+    where 1.714 is removed; makeFillet returned it. Now it is built right or refused."""
+
+    @staticmethod
+    def prism(n, side=2.0, height=3.0):
+        radius = side / (2 * math.sin(math.pi / n))
+        points = [
+            V(radius * math.cos(2 * math.pi * k / n), radius * math.sin(2 * math.pi * k / n), 0)
+            for k in range(n)
+        ]
+        shape = Part.Face(Part.makePolygon(points + points[:1])).extrude(V(0, 0, height))
+        rim = [e for e in shape.Edges if abs(e.BoundBox.ZMin - height) < 1e-9]
+        return shape, rim
+
+    @staticmethod
+    def removed(n, r, side=2.0):
+        """The rim's round of a regular n-gon prism: at the depth h below the top the section is the
+        polygon offset inward by d = r - sqrt(r^2 - (r - h)^2), its area A - P d + n tan(pi/n) d^2
+        (the rounds meet in mitres over the corners). Integrated over h in [0, r]."""
+        return n * side * r * r * (1 - math.pi / 4) - n * math.tan(math.pi / n) * r**3 * (
+            5 / 3 - math.pi / 2
+        )
+
+    def testARimOfFiftySidesIsOcctsAndRight(self):
+        shape, rim = self.prism(50)
+        self.assertEqual(len(rim), 50)
+        result = shape.makeFillet(0.2, rim)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(shape.Volume - result.Volume, self.removed(50, 0.2), delta=1e-5)
+
+    def testARimOfAHundredSidesIsRightOrRefused(self):
+        shape, rim = self.prism(100)
+        self.assertEqual(len(rim), 100)
+        self.assertAlmostEqual(self.removed(100, 0.2), 1.714405, delta=1e-6)
+        try:
+            result = shape.makeFillet(0.2, rim)
+        except Exception as e:
+            self.assertIn("adds material", str(e))
+            self.assertIn("where a dress-up of convex edges only removes it", str(e))
+            return
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(shape.Volume - result.Volume, self.removed(100, 0.2), delta=1e-5)
+
+    def testTheFeatureIsRightOrFailsToo(self):
+        shape, rim = self.prism(100)
+        doc = FreeCAD.newDocument("VolumeSignTest")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = shape
+            fillet = doc.addObject("Part::Fillet", "Fillet")
+            fillet.Base = base
+            fillet.Edges = [
+                (i, 0.2, 0.2) for i, e in enumerate(shape.Edges, 1) if any(e.isSame(x) for x in rim)
+            ]
+            doc.recompute()
+            if fillet.isValid():
+                removed = shape.Volume - fillet.Shape.Volume
+                self.assertAlmostEqual(removed, self.removed(100, 0.2), delta=1e-5)
+            else:
+                self.assertIn("adds material", fillet.getStatusString())
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testConcaveEdgesAddAndConvexRemove(self):
+        # Controls: the sign rule passes OCCT's ordinary results both ways
+        box = Part.makeBox(10, 10, 10)
+        edge = edge_between(box, (0, 0, 10), (10, 0, 10))
+        self.assertAlmostEqual(
+            box.Volume - box.makeFillet(1, [edge]).Volume, fillet_section(1) * 10, delta=1e-6
+        )
+        step = box.cut(Part.makeBox(10, 5, 5, V(0, 0, 5)))
+        inner = edge_between(step, (0, 5, 5), (10, 5, 5))
+        self.assertAlmostEqual(
+            step.makeFillet(1, [inner]).Volume - step.Volume, fillet_section(1) * 10, delta=1e-6
+        )
+        self.assertAlmostEqual(step.makeChamfer(1, [inner]).Volume - step.Volume, 5, delta=1e-6)
+
+
 def tight_plate(radii, scoop=False):
     """A 30 x 20 x 5 plate whose four vertical corners are rounded radii, at (0, 0), (30, 0),
     (30, 20) and (0, 20). With scoop, a vertical cylinder R 7.5 about (27, 3) is cut out first,

@@ -233,10 +233,34 @@ PartExport TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& 
 /** Whether one of the edges ends in a cusp: an unselected edge of one of its faces leaves the
  * vertex the way it does (Case Base #76, a tunnel's half circle on a slot's end wall, the slot's
  * walls tangent to the tunnel). OCCT's chamfer there can be valid and wrong (a face running out
- * of the body), so the exact construction builds it first, and OCCT's result stands where it
- * refuses.
+ * of the body), so the exact construction builds it first, and the chamfer fails where it refuses
+ * (kernel layer step 1, ops#640). With \a which, the indices in \a edges of every edge that ends
+ * in a cusp, for the error that names them.
  */
-PartExport bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges);
+PartExport bool endsInCusp(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    std::vector<std::size_t>* which = nullptr
+);
+
+/** The volume-sign post-condition of a dress-up (kernel layer, notes/kernel-layer.md section 1;
+ * ops#762): a fillet or chamfer of convex edges only removes material, one of concave edges only
+ * adds it. Empty where \a result changes \a base's volume that way, or where the edges (the
+ * selected ones and OCCT's contours, request.contour) aren't all convex or all concave, each
+ * judged at three points along it, or can't be judged. Else what is wrong, with the numbers:
+ * OCCT's round of a regular 100-gon's rim (sides 2, r 0.2) passes BRepCheck with untrimmed faces
+ * and 5.39 mm3 added where 1.714 is removed. The change is integrated over the faces that differ
+ * only, and a wrong sign is confirmed by the adaptive integration before it counts. Checked only
+ * for a base and result of one solid and nothing else, and where every face that differs lies on
+ * a plane, cylinder, cone, sphere or torus (exact integrals): a free-form face's error can exceed a small
+ * dress-up's change. Cost: the volume integrals of the analytic faces the dress-up made or changed.
+ */
+PartExport std::string wrongWay(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
 
 /** Whether one of a fillet's edges is a concave arc ending at a vertex of 4 edges where its tangent
  * chain turns convex (Nest Cover #151; the construction's VertexClass::Overflow). OCCT stops its

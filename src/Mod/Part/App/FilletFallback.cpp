@@ -8734,7 +8734,11 @@ bool endsInOverflow(
     return false;
 }
 
-bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges)
+bool endsInCusp(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    std::vector<std::size_t>* which
+)
 {
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
@@ -8745,19 +8749,20 @@ bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges
             return e.IsSame(edge);
         });
     };
-    for (const auto& shape : edges) {
+    // Whether this edge ends in a cusp at one of its vertices
+    auto cuspAtAnEnd = [&](const TopoDS_Shape& shape) {
         if (shape.ShapeType() != TopAbs_EDGE || !edgeFaces.Contains(shape)) {
-            continue;
+            return false;
         }
         const TopoDS_Edge& edge = TopoDS::Edge(shape);
         const auto& faces = edgeFaces.FindFromKey(edge);
         if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge)) {
-            continue;
+            return false;
         }
         TopoDS_Vertex ends[2];
         TopExp::Vertices(edge, ends[0], ends[1]);
         if (ends[0].IsNull() || ends[1].IsNull() || ends[0].IsSame(ends[1])) {
-            continue;
+            return false;
         }
         for (const auto& vertex : ends) {
             if (!vertexEdges.Contains(vertex)) {
@@ -8794,8 +8799,20 @@ bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges
                 }
             }
         }
+        return false;
+    };
+    bool any = false;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (!cuspAtAnEnd(edges[i])) {
+            continue;
+        }
+        if (!which) {
+            return true;
+        }
+        which->push_back(i);
+        any = true;
     }
-    return false;
+    return any;
 }
 
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
@@ -8841,6 +8858,176 @@ std::string takeInvalidResult()
     std::string reason;
     reason.swap(invalidResultReason);
     return reason;
+}
+
+namespace
+{
+/// +1 for an edge convex along its whole length, -1 for a concave one, 0 where it can't be told
+/// (not between two faces, faces tangent there, or the sign changes along it)
+int convexity(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces, const TopoDS_Shape& shape)
+{
+    if (shape.ShapeType() != TopAbs_EDGE || !edgeFaces.Contains(shape)) {
+        return 0;
+    }
+    const TopoDS_Edge& edge = TopoDS::Edge(shape);
+    const auto& faces = edgeFaces.FindFromKey(edge);
+    if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge)) {
+        return 0;
+    }
+    const TopoDS_Face& first = TopoDS::Face(faces.First());
+    const TopoDS_Face& second = TopoDS::Face(faces.Last());
+    BRepAdaptor_Curve curve(edge);
+    int sign = 0;
+    for (double at : {0.25, 0.5, 0.75}) {
+        const double parameter
+            = curve.FirstParameter() + at * (curve.LastParameter() - curve.FirstParameter());
+        double turn = 0.0;
+        try {
+            turn = gp_Vec(inwardIn(second, edge, parameter))
+                       .Dot(gp_Vec(outwardNormal(first, curve.Value(parameter))));
+        }
+        catch (const Refusal&) {
+            return 0;
+        }
+        catch (const Standard_Failure&) {
+            return 0;
+        }
+        if (std::abs(turn) < angularTolerance) {
+            return 0;
+        }
+        const int here = turn < 0 ? 1 : -1;
+        if (sign != 0 && here != sign) {
+            return 0;
+        }
+        sign = here;
+    }
+    return sign;
+}
+
+/// Whether the face lies on a plane, cylinder, cone, sphere or torus: its volume integral is exact
+bool analyticFace(const TopoDS_Shape& face)
+{
+    switch (BRepAdaptor_Surface(TopoDS::Face(face), Standard_False).GetType()) {
+        case GeomAbs_Plane:
+        case GeomAbs_Cylinder:
+        case GeomAbs_Cone:
+        case GeomAbs_Sphere:
+        case GeomAbs_Torus:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// changedVolume() by the default integration, or the adaptive one. \a analytic: whether every
+/// face that differs is analytic (analyticFace())
+double changedVolumeBy(
+    const TopoDS_Shape& before,
+    const TopoDS_Shape& after,
+    bool adaptive,
+    bool& analytic
+)
+{
+    TopTools_IndexedMapOfShape old;
+    TopTools_IndexedMapOfShape now;
+    TopExp::MapShapes(before, TopAbs_FACE, old);
+    TopExp::MapShapes(after, TopAbs_FACE, now);
+    BRep_Builder builder;
+    TopoDS_Compound changed;
+    builder.MakeCompound(changed);
+    auto addUnshared = [&](const TopTools_IndexedMapOfShape& faces,
+                           const TopTools_IndexedMapOfShape& others,
+                           bool reversed) {
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            const TopoDS_Shape& face = faces(i);
+            const int j = others.FindIndex(face);
+            if (j > 0 && others(j).IsEqual(face)) {
+                continue;
+            }
+            analytic = analytic && analyticFace(face);
+            builder.Add(changed, reversed ? face.Reversed() : face);
+        }
+    };
+    analytic = true;
+    addUnshared(now, old, false);
+    addUnshared(old, now, true);
+    if (!analytic) {
+        return 0.0;
+    }
+    return adaptive ? MassProperties::volume(changed, true) : MassProperties::volume(changed);
+}
+}  // namespace
+
+std::string wrongWay(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    try {
+        // One solid and nothing else: solids that share a face would count it from both sides,
+        // and OCCT drops a base's faces outside its solids, which is no change of volume
+        if (countSolids(base) != 1 || TopExp_Explorer(base, TopAbs_COMPSOLID).More()
+            || TopExp_Explorer(base, TopAbs_FACE, TopAbs_SOLID).More()
+            || countSolids(result) != 1
+            || TopExp_Explorer(result, TopAbs_FACE, TopAbs_SOLID).More()) {
+            return {};
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        int sign = 0;
+        for (const auto* list : {&edges, &request.contour}) {
+            for (const auto& edge : *list) {
+                const int here = convexity(edgeFaces, edge);
+                if (here == 0 || (sign != 0 && here != sign)) {
+                    return {};
+                }
+                sign = here;
+            }
+        }
+        if (sign == 0) {
+            return {};
+        }
+        // A change smaller than the integration's error on the changed faces says nothing: a
+        // billionth of the result's box, and 1e-6 mm3
+        Bnd_Box box;
+        BRepBndLib::Add(result, box);
+        if (box.IsVoid()) {
+            return {};
+        }
+        const double diagonal = std::sqrt(box.SquareExtent());
+        const double tolerance = 1e-6 + 1e-9 * diagonal * diagonal * diagonal;
+        // Convex edges (sign +1): the change must not be positive; concave: not negative
+        auto wrong = [&](double change) {
+            return sign * change > tolerance;
+        };
+        // Only where every face that differs is analytic: a free-form face's integral is off by
+        // more than a small dress-up changes (MassProperties.h), a false alarm and seconds of time
+        bool analytic = true;
+        double change = changedVolumeBy(base, result, false, analytic);
+        if (!analytic || !wrong(change)) {
+            return {};
+        }
+        change = changedVolumeBy(base, result, true, analytic);
+        if (!wrong(change)) {
+            return {};
+        }
+        std::ostringstream text;
+        text << (sign > 0 ? "adds" : "removes") << " material (volume " << (change > 0 ? "+" : "")
+             << change << " mm3) where a dress-up of " << (sign > 0 ? "convex" : "concave")
+             << " edges only " << (sign > 0 ? "removes" : "adds") << " it";
+        return text.str();
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+    catch (const std::exception&) {
+        return {};
+    }
 }
 
 Recorder::Recorder()

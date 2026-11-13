@@ -44,6 +44,7 @@ from parttests.FilletFallbackTest import (
     CurvedEndTrimTest,
     CurvedWallEndTest,
     CuspTest,
+    CuspRefusalTest,
     DroppedBasePartsTest,
     DressUpCheckLimitsTest,
     FilledRecessTest,
@@ -56,6 +57,7 @@ from parttests.FilletFallbackTest import (
     RoundAlongASplineEdgeTest,
     WallOnAChamferedRimTest,
     TightWallArcTest,
+    VolumeSignTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest

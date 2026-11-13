@@ -40,13 +40,11 @@ namespace ResultCheck
 /// refine rebuilds are compared on the shape before it
 void noteRefine(const Feature* feature, const TopoDS_Shape& before, const TopoDS_Shape& after);
 
-/// Whether the feature's time limit has passed (Part::KernelBudget::pastDeadline()): then  step,
-/// a check or a refine the result doesn't need, is skipped, with a warning on the feature that
-/// names it (kernel safety S1: the limit covers the whole recompute, and a step that can't be
-/// stopped doesn't start late)
-bool skippedForTheLimit(const Feature* feature, const char* step);
-
-/// The warning that  step was skipped for the limit
-void warnSkipped(const Feature* feature, const char* step);
+/// Before \a step, a check or a refine of the feature's result: when the feature's time limit has
+/// passed (Part::KernelBudget::pastDeadline()), throws Base::CADKernelError, noted as a stop for
+/// the feature (Part::KernelBudget::stopIfPastDeadline()), which then fails. Never skipped with a
+/// warning (kernel layer step 2, notes/kernel-layer.md P4 and P5): an unchecked or unrefined
+/// result would pass as "Valid", its face count differing from Onshape's silently
+void stopIfPastTheLimit(const char* step);
 }  // namespace ResultCheck
 }  // namespace PartDesign
