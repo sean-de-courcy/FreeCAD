@@ -1891,7 +1891,13 @@ bool isMarkedCap(std::string_view name, bool faceAlone = false)
         if (decoded.connectedElements.size() != 1) {
             return false;
         }
-        const auto markSections = NameAncestry::splitSections(decoded.connectedElements.front());
+        // The mark in its own sections: a reference, in a name as the map holds it, reads as its
+        // content's (ownSectionsOf(); a plain mark is itself)
+        const std::string& front = decoded.connectedElements.front();
+        const std::string mark = !front.empty() && front.front() == NameTable::Marker
+            ? ownSectionsOf(front)
+            : std::string();
+        const auto markSections = NameAncestry::splitSections(mark.empty() ? front : mark);
         return !markSections.empty() && decodeSection(markSections.back()).elementType == 'F';
     });
 }

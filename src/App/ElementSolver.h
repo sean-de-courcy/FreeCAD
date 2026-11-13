@@ -489,6 +489,10 @@ AppExport bool isMarkedCapName(std::string_view name);
  * another order while the pieces slid onto the next face, gives the name to another piece that
  * no longer overlaps the old one: an exact reference to it that moved goes to solveOwner()'s
  * moved check, which breaks it then.
+ *
+ * isOrderedName(), isMarkedCapName() and isMarkedPieceName() read top-level sections only (a
+ * marked cap's one mark through its own sections): a plain name and its own sections
+ * (ownSectionsOf()) give the same answer (ops#640, R1 of notes/names-bounded.md).
  */
 AppExport bool isMarkedPieceName(std::string_view name);
 

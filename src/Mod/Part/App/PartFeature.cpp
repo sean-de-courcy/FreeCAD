@@ -30,6 +30,7 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <QDir>
 #include <QFileInfo>
 #include <Bnd_Box.hxx>
@@ -253,6 +254,35 @@ bool sameName(const Data::MappedName& a, const Data::MappedName& b)
     return Data::NameTable::instance().compareExpanded(a.toString(), b.toString()) == 0;
 }
 
+// The kept answers of Feature::doNamesMatch() for pairs of references, while a
+// matchSimilarNames() scan runs on this thread (MatchMemoScope)
+thread_local int matchMemoDepth = 0;
+thread_local bool matchMemoBypass = false;
+thread_local std::unordered_map<std::string, bool> matchMemo;
+
+struct MatchMemoScope
+{
+    MatchMemoScope()
+    {
+        ++matchMemoDepth;
+    }
+    ~MatchMemoScope()
+    {
+        if (--matchMemoDepth == 0) {
+            matchMemo.clear();
+        }
+    }
+    MatchMemoScope(const MatchMemoScope&) = delete;
+    MatchMemoScope& operator=(const MatchMemoScope&) = delete;
+};
+
+// A name that is one reference `~<ID>` into the name table, nothing else
+bool isBareReference(const Data::MappedName& name)
+{
+    return name.size() == static_cast<int>(Data::NameTable::RefLength)
+        && name[0] == Data::NameTable::Marker;
+}
+
 // The pattern instances a V2 name is in (ops#55): the tag and the instance number of each of its
 // TRF sections, in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(
@@ -309,6 +339,28 @@ bool Feature::doNamesMatch(
 
     if (!name1 || !name2) {
         return false;
+    }
+
+    // Inside one matchSimilarNames() scan, the answers for pairs of references are kept: the
+    // pairing below compares linked and connected names pairwise, and names that share their
+    // history (a chamfer's face made from an edge made from two faces...) bring the same pair
+    // up again under every pair above it, exponentially in the history's depth (ops#640: 31 % of
+    // an edit's re-solve on the replica's Case Lid). The table's entries never change during a scan.
+    if (matchMemoBypass) {
+        matchMemoBypass = false;  // this is the kept pair's own computation; deeper pairs are kept
+    }
+    else if (matchMemoDepth > 0 && !logMatchedElements && isBareReference(name1)
+             && isBareReference(name2)) {
+        std::string key = name1.toString();
+        key += name2.toString();
+        key += strict ? '1' : '0';
+        if (const auto it = matchMemo.find(key); it != matchMemo.end()) {
+            return it->second;
+        }
+        matchMemoBypass = true;
+        const bool match = doNamesMatch(name1, name2, false, strict);
+        matchMemo.emplace(std::move(key), match);
+        return match;
     }
 
     Data::DecodedMappedName decodedName1 = name1.getDecodedMappedName();
@@ -524,6 +576,7 @@ std::vector<Data::MappedElement> Feature::matchSimilarNames(
     ZoneScoped;
     std::vector<Data::MappedElement> ret {};
     ambiguous = false;
+    MatchMemoScope memoScope;  // pairs of references are compared once per scan (ops#640)
 
     // Strict pass: every match counts.
     for (const Data::MappedElement& element : elements) {
