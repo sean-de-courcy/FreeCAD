@@ -2342,17 +2342,15 @@ class OverflowTest(unittest.TestCase):
         # wall, as by a square one (Q-LEDGE, testPastAConcaveEdgeTheWallGrows); the rule here is that result's,
         # the tilted ledge itself was not asked. The dress-up is trimmed by the ledge's own surface run on
         # under it: the ledge grows, F stays 8. Where the ledge's surface ends at the wall's foot ("short")
-        # it is extended, and the part under the dress-up stays a face of its own: F 9. Where it also ends
-        # along the edge ("split", a base of 9 faces), the first patch is run on past its end too and cuts
-        # the dress-up off under both: one face under the dress-up, F 10
-        for wall, faces in (("plane", 8), ("nurbs", 8), ("short", 9), ("split", 10)):
+        # it is extended, and the part under the dress-up stays a face of its own: F 9
+        for wall, faces in (("plane", 8), ("nurbs", 8), ("short", 9)):
             for kind in ("Chamfer", "Fillet"):
                 for h, degrees in ((0.5, 5), (0.5, -5), (0.963, 3)):
                     with self.subTest(wall=wall, kind=kind, h=h, degrees=degrees):
                         t = math.tan(math.radians(degrees))
                         base = self.tiltedLedge(h, t, wall)
                         self.assertAlmostEqual(base.Volume, 2000 - 20 * (4 * h + 8 * t), delta=1e-6)
-                        self.assertEqual(len(base.Faces), 9 if wall == "split" else 8)
+                        self.assertEqual(len(base.Faces), 8)
                         shape = self.dressUp(kind, base, 1.0, [edge_between(base, (0, 4, 10), (20, 4, 10))])
                         volume, u = self.tiltedLedgeResult(kind, h, t)
                         self.assertBuilt(shape, volume, faces)
@@ -2365,6 +2363,28 @@ class OverflowTest(unittest.TestCase):
                         # by its vertices: a B-spline face's bound box is its surface's
                         reach = max(v.Point.y for f in ledge for v in f.Vertexes)
                         self.assertAlmostEqual(reach, 4 + u, delta=1e-6)
+
+    def testATiltedWallThatWouldCutUncheckedIsRefused(self):
+        # Review r1 of the tilted wall's trim (ops#640): two cases that the wall's surface would cut, with
+        # nothing to check the result against. They are refused.
+        # S1, two walls on two surfaces along one foot ("split": two patches that meet under the edge's
+        # middle): the first patch, run on past its end, would cut the dress-up off in front of the second
+        # too. Here the two are one plane, but the construction can't know it of two B-spline surfaces
+        # (a second patch twisted to -5 degrees came out 0.117 mm3 wrong, built).
+        # S2, a steep ledge (30 degrees over a wall 0.3 high): its plane would cut the whole chamfer or
+        # round away and narrow the strip on the top face (it built a shape with no dress-up face)
+        for wall, h, degrees, message in (
+            ("split", 0.5, 5, "in front of another wall"),
+            ("plane", 0.3, 30, "on its other face"),
+            ("plane", 0.3, 60, "on its other face"),
+        ):
+            for kind in ("Chamfer", "Fillet"):
+                with self.subTest(wall=wall, kind=kind, degrees=degrees):
+                    base = self.tiltedLedge(h, math.tan(math.radians(degrees)), wall)
+                    self.assertEqual(len(base.Faces), 9 if wall == "split" else 8)
+                    with self.assertRaises(Part.OCCError) as refused:
+                        self.dressUp(kind, base, 1.0, [edge_between(base, (0, 4, 10), (20, 4, 10))])
+                    self.assertIn(message, str(refused.exception))
 
     def testConcavePastItsFaceIsClippedAtTheRibsTop(self):
         # A concave round past its face: r 8 at a rib's foot, the rib 4 high. Onshape clips it at
