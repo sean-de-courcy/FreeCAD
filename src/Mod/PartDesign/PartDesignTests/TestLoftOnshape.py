@@ -333,6 +333,46 @@ class TestLoftEndConditions(LoftCase):
         self.assertAlmostEqual(loft.Shape.Volume, want, delta=1e-6 * want)
         self.assertEqual(len(loft.Shape.Faces), 3)
 
+    def testEccentricCirclesEachRowItsOwnRule(self):
+        """Oracle 18 Q10 (ops#640): circle r10 -> circle r5 offset 3, 6.35 apart, start Normal to profile.
+        A circle has no corner rails, so each row takes the rule at its own rail, not the seam rail's:
+        congruent lofts agree whichever way the offset points (the seam rail's value on every row gave
+        1365.35 / 1371.55 / 1376.59). Onshape, offset along its seam (+x, -x): V 1372.957 / 1372.915
+        (evVolume; its split-sum 1372.946 / 1372.950: +-0.04), A 814.3348, k 6.380750 at the near side
+        and 6.736382 at the far side."""
+        h = 6.35
+        nearK = 0.9 * h + 0.1 * math.hypot(h, 2)  # the rail on the offset's side reaches 2 inwards
+        farK = 0.9 * h + 0.1 * math.hypot(h, 8)
+        volumes = {}
+        for name, (x, y) in (("+x", (3, 0)), ("-x", (-3, 0)), ("+y", (0, 3))):
+            loft = self.loft(
+                [models.circle(0, 0, 10)],
+                [models.circle(x, y, 5)],
+                height=h,
+                StartCondition="Normal to profile",
+            )
+            self.assertTrue(loft.isValid(), loft.getStatusString())
+            self.assertEqual(len(loft.Shape.Faces), 3)
+            volumes[name] = loft.Shape.Volume
+            (face,) = sides(loft.Shape)
+            ks = []
+            for row in face.Surface.getPoles():
+                step = row[1] - row[0]
+                self.assertLess((step - V(0, 0, step.z)).Length, 1e-9)  # along the normal
+                ks.append(3 * step.z)
+            self.assertAlmostEqual(min(ks), nearK, delta=2e-4, msg=name)
+            self.assertAlmostEqual(max(ks), farK, delta=2e-4, msg=name)
+            if name != "+y":
+                self.assertAlmostEqual(loft.Shape.Volume, 1372.95, delta=0.05, msg=name)
+                self.assertAlmostEqual(loft.Shape.Area, 814.3348, delta=0.01, msg=name)
+            self.body = models.body(self.doc)  # the next case in a body of its own
+        # Offset across Onshape's seam (+y) Onshape gives 1362.002: its plain loft pairs the circles' points
+        # skewed there (1149.644 against 1163.695 with no condition, Q10), while the fork's plain loft pairs
+        # them radially wherever the seam is (1163.698 in every direction). That is the plain loft's
+        # pairing, not this condition: here the fork stays turn-invariant.
+        self.assertAlmostEqual(volumes["+y"], volumes["+x"], delta=1e-6 * volumes["+x"])
+        self.assertAlmostEqual(volumes["-x"], volumes["+x"], delta=1e-6 * volumes["+x"])
+
     def testRemoveIntoABlock(self):
         """Liquid feeder base #8's class (T3): a Remove loft from a rectangle on a block's face to a smaller one
         8 inside, end Normal to profile. The removed volume is the rectangles' closed form in k."""
