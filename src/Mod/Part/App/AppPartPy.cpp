@@ -506,6 +506,22 @@ public:
             "a dict of the limit in seconds and the abandoned calls still running and in all."
         );
         add_varargs_method(
+            "kernelSampleBegin",
+            &Module::kernelSampleBegin,
+            "kernelSampleBegin(delay=10, period=0.5) -- Names a slow step's hot function (FreeCAD-CH, "
+            "ops#640): past `delay` seconds, samples this thread's stack every `period` seconds until "
+            "kernelSampleEnd(). True when it samples (one sampler runs at a time); a second call "
+            "ends the first one's sampling."
+        );
+        add_varargs_method(
+            "kernelSampleEnd",
+            &Module::kernelSampleEnd,
+            "kernelSampleEnd(top=10) -- Ends kernelSampleBegin()'s sampling: a dict of the wall time "
+            "(s), the samples, `top` as [(function, samples it was on the stack in)] most first, "
+            "`self` as [(innermost function, samples)], `phases` as {phase: seconds on this thread} "
+            "and `text`, the whole as one line. None without a kernelSampleBegin()."
+        );
+        add_varargs_method(
             "kernelCheck",
             &Module::kernelCheck,
             "kernelCheck(shape) -- Whether the shape passes the shape check (FreeCAD-CH kernel "
@@ -1051,6 +1067,56 @@ private:
         result.setItem("limit", Py::Float(KernelBudget::limit()));
         result.setItem("abandonedRunning", Py::Long(KernelBudget::abandonedRunning()));
         result.setItem("abandonedTotal", Py::Long(KernelBudget::abandonedTotal()));
+        return result;
+    }
+    // kernelSampleBegin()'s sampler
+    std::unique_ptr<KernelBudget::Sampler> pySampler;
+    Py::Object kernelSampleBegin(const Py::Tuple& args)
+    {
+        double delay = KernelBudget::Sampler::defaultDelay;
+        double period = KernelBudget::Sampler::defaultPeriod;
+        if (!PyArg_ParseTuple(args.ptr(), "|dd", &delay, &period)) {
+            throw Py::Exception();
+        }
+        pySampler.reset();
+        pySampler = std::make_unique<KernelBudget::Sampler>(delay, period);
+        return Py::Boolean(pySampler->armed());
+    }
+    Py::Object kernelSampleEnd(const Py::Tuple& args)
+    {
+        int top = 10;
+        if (!PyArg_ParseTuple(args.ptr(), "|i", &top)) {
+            throw Py::Exception();
+        }
+        if (!pySampler) {
+            return Py::None();
+        }
+        const KernelBudget::SampleReport report = pySampler->finish(top);
+        pySampler.reset();
+        auto frames = [](const std::vector<KernelBudget::SampleFrame>& list) {
+            Py::List result;
+            for (const auto& frame : list) {
+                Py::Tuple item(2);
+                item.setItem(0, Py::String(frame.name));
+                item.setItem(1, Py::Long(frame.count));
+                result.append(item);
+            }
+            return result;
+        };
+        Py::Dict result;
+        result.setItem("wall", Py::Float(report.wall));
+        result.setItem("samples", Py::Long(report.samples));
+        result.setItem("top", frames(report.top));
+        result.setItem("self", frames(report.self));
+        Py::Dict phases;
+        for (int i = 0; i < KernelBudget::phaseCount; ++i) {
+            phases.setItem(
+                KernelBudget::phaseName(static_cast<KernelBudget::Phase>(i)),
+                Py::Float(report.phases[i])
+            );
+        }
+        result.setItem("phases", phases);
+        result.setItem("text", Py::String(KernelBudget::describe(report)));
         return result;
     }
     Py::Object kernelCheck(const Py::Tuple& args)

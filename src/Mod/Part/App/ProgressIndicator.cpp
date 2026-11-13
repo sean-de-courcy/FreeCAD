@@ -25,10 +25,16 @@
 #include "PreCompiled.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <thread>
 #include <chrono>
 #include <condition_variable>
@@ -48,6 +54,10 @@
 #  define WIN32_LEAN_AND_MEAN
 # endif
 # include <windows.h>
+# include <dbghelp.h>
+# include <psapi.h>
+# pragma comment(lib, "dbghelp.lib")
+# pragma comment(lib, "psapi.lib")
 #elif defined(__APPLE__)
 # include <mach/mach.h>
 # include <mach/thread_info.h>
@@ -56,6 +66,15 @@
 #else
 # include <pthread.h>
 # include <time.h>
+#endif
+#if !defined(_WIN32) && !defined(__APPLE__)
+# include <unistd.h>
+#endif
+#ifndef _WIN32
+# include <cxxabi.h>
+# include <dlfcn.h>
+# include <execinfo.h>
+# include <signal.h>
 #endif
 
 #include <initializer_list>
@@ -182,6 +201,42 @@ double ownCpuSeconds()
 #endif
 }
 
+/// The memory the process holds for itself (Windows: private bytes; macOS: its footprint; Linux:
+/// resident), in bytes; 0 where it can't be read
+double processMemory()
+{
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX counters {};
+    counters.cb = sizeof(counters);
+    if (!GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+            sizeof(counters)
+        )) {
+        return 0.0;
+    }
+    return static_cast<double>(counters.PrivateUsage);
+#elif defined(__APPLE__)
+    task_vm_info_data_t info {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count)
+        != KERN_SUCCESS) {
+        return 0.0;
+    }
+    return static_cast<double>(info.phys_footprint);
+#else
+    double pages = 0.0;
+    double resident = 0.0;
+    if (std::FILE* file = std::fopen("/proc/self/statm", "r")) {
+        if (std::fscanf(file, "%lf %lf", &pages, &resident) != 2) {
+            resident = 0.0;
+        }
+        std::fclose(file);
+    }
+    return resident * static_cast<double>(sysconf(_SC_PAGESIZE));
+#endif
+}
+
 /// Another thread's CPU time, read while it runs: the worker opens it on itself (open()), the
 /// caller reads it (seconds())
 class ThreadCpuClock
@@ -262,9 +317,64 @@ private:
 #endif
 };
 
+/// A thread the sampler can read the stack of
+struct SampleTarget
+{
+#ifdef _WIN32
+    HANDLE handle {nullptr};
+    ULONG_PTR stackLow {0};
+    ULONG_PTR stackHigh {0};
+#else
+    pthread_t thread {};
+#endif
+    /// On the thread itself. Windows: the caller closes the handle
+    void open()
+    {
+#ifdef _WIN32
+        handle = nullptr;
+        DuplicateHandle(
+            GetCurrentProcess(),
+            GetCurrentThread(),
+            GetCurrentProcess(),
+            &handle,
+            THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+            FALSE,
+            0
+        );
+        GetCurrentThreadStackLimits(&stackLow, &stackHigh);
+#else
+        thread = pthread_self();
+#endif
+    }
+    bool valid() const
+    {
+#ifdef _WIN32
+        return handle != nullptr;
+#else
+        return true;
+#endif
+    }
+};
+
 /// What the caller and the worker share; the worker frees the work's captures on its thread
 struct Call
 {
+    Call() = default;
+    Call(const Call&) = delete;
+    Call(Call&&) = delete;
+    Call& operator=(const Call&) = delete;
+    Call& operator=(Call&&) = delete;
+    ~Call()
+    {
+#ifdef _WIN32
+        if (sample.handle) {
+            CloseHandle(sample.handle);
+        }
+#endif
+    }
+    // The worker's thread, for the sampler while the caller waits for it
+    SampleTarget sample;
+    std::atomic<bool> sampleReady {false};
     std::mutex mutex;
     std::condition_variable finished;
     bool done {false};
@@ -343,6 +453,10 @@ thread_local double scopeLimit = 0.0;
 thread_local double scopeCpuStart = 0.0;
 thread_local double scopeWorkerCpu = 0.0;
 thread_local Clock::time_point scopeDeadline;
+// The memory ceiling (ops#640, breakthrough 3): the process's memory when the outermost Scope
+// began, and how much it may grow (bytes; 0: no ceiling)
+thread_local double scopeMemoryStart = 0.0;
+thread_local double scopeMemoryLimit = 0.0;
 thread_local bool onWorker = false;
 // Why the outermost Scope's limit or Esc stopped a call, where one did (the first)
 thread_local std::string scopeFired;
@@ -365,6 +479,8 @@ void runWorker(const std::shared_ptr<Call>& call)
 {
     onWorker = true;
     call->clock.open();
+    call->sample.open();
+    call->sampleReady.store(call->sample.valid(), std::memory_order_release);
     try {
         Handle(CancelIndicator) indicator = new CancelIndicator(call);
         call->work(indicator->Start());
@@ -404,6 +520,36 @@ bool scopeOverLimit(double running = 0.0)
         && (scopeSpent() + running >= scopeLimit || Clock::now() >= scopeDeadline);
 }
 
+constexpr double bytesPerGigabyte = 1024.0 * 1024.0 * 1024.0;
+
+/// By how much the process's memory has grown past `start`, where that is `ceiling` bytes or more
+/// (a ceiling of 0: never); else 0
+double grownPast(double start, double ceiling)
+{
+    if (!(ceiling > 0.0)) {
+        return 0.0;
+    }
+    const double grown = processMemory() - start;
+    return grown >= ceiling ? grown : 0.0;
+}
+
+std::string gigabytes(double bytes)
+{
+    std::ostringstream text;
+    text.setf(std::ios::fixed);
+    text.precision(1);
+    text << bytes / bytesPerGigabyte;
+    return text.str();
+}
+
+/// The memory ceiling that was passed, for the error
+std::string memoryText(double grown, double ceiling)
+{
+    return "its memory grew by " + gigabytes(grown)
+        + " GB, over the memory limit for one feature's geometry (" + gigabytes(ceiling)
+        + " GB, Part preference GeometryMemoryLimit)";
+}
+
 /// The limit that has passed, for the error: the CPU time, or the wall clock's backstop
 std::string limitText()
 {
@@ -419,6 +565,660 @@ std::string limitText()
 }
 }  // namespace
 
+// The sampler (ops#640, breakthrough 1): names a slow step's hot function from the stacks of the
+// thread that runs it, taken by a thread of its own past a delay
+namespace
+{
+long long clockNanos()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
+        .count();
+}
+
+// Each Phase's wall time on this thread, and how deep in it this thread is
+thread_local std::array<double, phaseCount> phaseSeconds {};
+thread_local std::array<int, phaseCount> phaseDepth {};
+
+constexpr int maxFrames = 2048;
+// About an hour at the default period: later samples are counted as dropped
+constexpr std::size_t maxSamples = 7200;
+
+/// One sample: the function of each frame above the Sampler's start, innermost first
+using Stack = std::vector<std::uintptr_t>;
+
+struct SamplerService
+{
+    std::mutex mutex;
+    std::condition_variable wake;
+    bool started {false};
+    unsigned long long lastTicket {0};
+    // The armed Sampler's, 0 when none is
+    unsigned long long ticket {0};
+    Clock::time_point next;
+    Clock::duration period {};
+    std::vector<Stack> samples;
+    int dropped {0};
+    SampleTarget target;
+    std::thread::id targetId;
+    // The worker the armed thread waits for in run(): sampled in its place (its work is there)
+    std::thread::id waiting;
+    const Call* worker {nullptr};
+#ifdef _WIN32
+    // The innermost frames where the Sampler was made (return address, stack pointer): a sample's
+    // innermost frame among them and every frame outside it are the start's, left out
+    std::array<std::pair<std::uintptr_t, std::uintptr_t>, 24> armFrames {};
+    int armCount {0};
+#endif
+};
+
+SamplerService& samplerService()
+{
+    // Never destroyed: its thread may outlive static destructors
+    static auto* service = new SamplerService;
+    return *service;
+}
+
+std::uintptr_t frameBuffer[maxFrames];
+std::uintptr_t frameStack[maxFrames];
+
+#ifdef _WIN32
+# if defined(_M_X64)
+/// The return addresses from `context` outwards, and each frame's stack pointer, while that is in
+/// the stack [low, high). No allocation: the thread whose stack this is may be suspended holding
+/// the heap's lock
+int unwindStack(CONTEXT& context, std::uintptr_t* out, std::uintptr_t* sp, int max, ULONG_PTR low, ULONG_PTR high)
+{
+    int count = 0;
+    __try {
+        while (count < max && context.Rip != 0 && context.Rsp >= low && context.Rsp < high) {
+            sp[count] = static_cast<std::uintptr_t>(context.Rsp);
+            out[count++] = static_cast<std::uintptr_t>(context.Rip);
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+            if (function) {
+                PVOID handlerData = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(
+                    UNW_FLAG_NHANDLER,
+                    imageBase,
+                    context.Rip,
+                    function,
+                    &context,
+                    &handlerData,
+                    &establisher,
+                    nullptr
+                );
+            }
+            else {
+                // A leaf function: its return address is on top of the stack
+                if (context.Rsp + sizeof(DWORD64) > high) {
+                    break;
+                }
+                context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+                context.Rsp += sizeof(DWORD64);
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // A stack it cannot read on: the frames read
+    }
+    return count;
+}
+# endif
+
+/// The target's stack: suspended while it is read, nothing allocated meanwhile
+int captureTarget(const SampleTarget& target, std::uintptr_t* out, int max)
+{
+# if defined(_M_X64)
+    if (SuspendThread(target.handle) == static_cast<DWORD>(-1)) {
+        return 0;
+    }
+    alignas(16) CONTEXT context {};
+    context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    int count = 0;
+    if (GetThreadContext(target.handle, &context)) {
+        count = unwindStack(context, out, frameStack, max, target.stackLow, target.stackHigh);
+    }
+    ResumeThread(target.handle);
+    return count;
+# else
+    (void)target;
+    (void)out;
+    (void)max;
+    return 0;
+# endif
+}
+
+/// The start of the function that holds the address (a return address: the call before it)
+std::uintptr_t functionOf(std::uintptr_t address, bool innermost)
+{
+# if defined(_M_X64)
+    const DWORD64 look = innermost ? address : address - 1;
+    DWORD64 imageBase = 0;
+    if (PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(look, &imageBase, nullptr)) {
+        return static_cast<std::uintptr_t>(imageBase + function->BeginAddress);
+    }
+# else
+    (void)innermost;
+# endif
+    return address;
+}
+
+std::string symbolName(std::uintptr_t address)
+{
+    const HANDLE process = GetCurrentProcess();
+    char buffer[sizeof(SYMBOL_INFO) + 512] {};
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 511;
+    DWORD64 displacement = 0;
+    if (SymFromAddr(process, address, &displacement, symbol)) {
+        return symbol->Name;
+    }
+    IMAGEHLP_MODULE64 module {};
+    module.SizeOfStruct = sizeof(module);
+    std::ostringstream text;
+    if (SymGetModuleInfo64(process, address, &module)) {
+        text << module.ModuleName << "+0x" << std::hex << (address - module.BaseOfImage);
+    }
+    else {
+        text << "0x" << std::hex << address;
+    }
+    return text.str();
+}
+
+void prepareNames()
+{
+    // DbgHelp is single-threaded: only finish() calls it, under the service's mutex
+    static const bool initialized = []() {
+        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+        return SymInitialize(GetCurrentProcess(), nullptr, TRUE) != FALSE;
+    }();
+    (void)initialized;
+    // Modules loaded since
+    SymRefreshModuleList(GetCurrentProcess());
+}
+#else
+std::atomic<int> signalWanted {0};
+std::atomic<int> signalBusy {0};
+std::atomic<int> signalDone {0};
+std::atomic<int> signalCount {0};
+void* signalFrames[maxFrames];
+
+void onSampleSignal(int)
+{
+    if (signalWanted.exchange(0) == 0) {
+        return;
+    }
+    const int saved = errno;
+    signalBusy.store(1);
+    signalCount.store(backtrace(signalFrames, maxFrames));
+    signalBusy.store(0);
+    signalDone.store(1);
+    errno = saved;
+}
+
+void installSampleSignal()
+{
+    static const bool installed = []() {
+        // backtrace() loads its unwinder the first time: not in the handler
+        void* frames[4];
+        backtrace(frames, 4);
+        struct sigaction action {};
+        action.sa_handler = onSampleSignal;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        return sigaction(SIGPROF, &action, nullptr) == 0;
+    }();
+    (void)installed;
+}
+
+int captureTarget(const SampleTarget& target, std::uintptr_t* out, int max)
+{
+    // A handler still running from a sample given up on: wait for it
+    for (int i = 0; i < 200 && signalBusy.load() != 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (signalBusy.load() != 0) {
+        return 0;
+    }
+    signalDone.store(0);
+    signalWanted.store(1);
+    if (pthread_kill(target.thread, SIGPROF) != 0) {
+        signalWanted.store(0);
+        return 0;
+    }
+    for (int i = 0; i < 200 && signalDone.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (signalDone.load() == 0) {
+        signalWanted.store(0);
+        return 0;
+    }
+    const int count = std::min(signalCount.load(), max);
+    for (int i = 0; i < count; ++i) {
+        out[i] = reinterpret_cast<std::uintptr_t>(signalFrames[i]);
+    }
+    return count;
+}
+
+std::uintptr_t functionOf(std::uintptr_t address, bool innermost)
+{
+    Dl_info info {};
+    const auto look = innermost ? address : address - 1;
+    if (dladdr(reinterpret_cast<void*>(look), &info) != 0 && info.dli_saddr) {
+        return reinterpret_cast<std::uintptr_t>(info.dli_saddr);
+    }
+    return address;
+}
+
+std::string symbolName(std::uintptr_t address)
+{
+    Dl_info info {};
+    std::ostringstream text;
+    if (dladdr(reinterpret_cast<void*>(address), &info) != 0) {
+        if (info.dli_sname) {
+            int status = 0;
+            char* plain = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+            std::string name = status == 0 && plain ? plain : info.dli_sname;
+            std::free(plain);
+            // Without the parameters, as DbgHelp names them
+            if (const auto open = name.find('('); open != std::string::npos && open > 0) {
+                name.resize(open);
+            }
+            return name;
+        }
+        if (info.dli_fname) {
+            std::string file = info.dli_fname;
+            text << file.substr(file.find_last_of('/') + 1) << "+0x" << std::hex
+                 << (address - reinterpret_cast<std::uintptr_t>(info.dli_fbase));
+            return text.str();
+        }
+    }
+    text << "0x" << std::hex << address;
+    return text.str();
+}
+
+void prepareNames()
+{}
+#endif
+
+/// One sample's frames above the Sampler's start, as their functions
+Stack toStack(const SamplerService& service, const std::uintptr_t* frames, int count, bool ofWorker)
+{
+#ifdef _WIN32
+    if (!ofWorker)
+    // The first frame unchanged since the start (its return address and stack pointer) and
+    // those outside it are the start's: the frame inside it called the Sampler, and is kept
+    for (int i = 1; i < count; ++i) {
+        const std::pair<std::uintptr_t, std::uintptr_t> frame(frames[i], frameStack[i]);
+        const auto end = service.armFrames.begin() + service.armCount;
+        if (std::find(service.armFrames.begin(), end, frame) != end) {
+            count = i;
+            break;
+        }
+    }
+#else
+    // POSIX keeps every frame (backtrace() at each start would cost): the start's frames are in
+    // every sample, and rank after deeper frames in as many
+    (void)service;
+    (void)ofWorker;
+#endif
+    Stack stack;
+    stack.reserve(static_cast<std::size_t>(std::max(count, 0)));
+    for (int i = 0; i < count; ++i) {
+        stack.push_back(functionOf(frames[i], i == 0));
+    }
+    return stack;
+}
+
+/// The process's hard memory stop, in bytes: FREECAD_CH_MEMORY_ABORT_GB (0: none). For unattended
+/// runs: the per-feature ceiling can't stop code no run() covers (a link assignment) nor a call
+/// that doesn't read its cancel, and such a runaway takes the host down
+double hardMemoryStop()
+{
+    static const double bytes = []() {
+        const char* value = std::getenv("FREECAD_CH_MEMORY_ABORT_GB");
+        char* end = nullptr;
+        const double gigabytes = value ? std::strtod(value, &end) : 0.0;
+        return value && end != value && gigabytes > 0.0 ? gigabytes * 1024.0 * 1024.0 * 1024.0 : 0.0;
+    }();
+    return bytes;
+}
+
+/// Past the hard stop: the stack of the last thread that made a Sampler goes to stderr, and the
+/// process ends (exit code 86)
+void stopProcessForMemory(SamplerService& service, double memory)
+{
+    std::fprintf(
+        stderr,
+        "FreeCAD-CH: the process holds %.1f GB, over FREECAD_CH_MEMORY_ABORT_GB: it is stopped "
+        "(exit code 86). The thread that ran the last feature was in (innermost first):\n",
+        memory / (1024.0 * 1024.0 * 1024.0)
+    );
+    // The worker that thread waits for, where there is one: the work is there
+    const bool ofWorker = service.worker && service.waiting == service.targetId
+        && service.worker->sampleReady.load(std::memory_order_acquire)
+        && !service.worker->ended.load(std::memory_order_acquire);
+    const bool known = service.targetId != std::thread::id() && service.target.valid();
+    const int count = ofWorker || known
+        ? captureTarget(ofWorker ? service.worker->sample : service.target, frameBuffer, maxFrames)
+        : 0;
+    if (count > 0) {
+        prepareNames();
+        for (int i = 0; i < count && i < 80; ++i) {
+            std::fprintf(stderr, "  %s\n", symbolName(functionOf(frameBuffer[i], i == 0)).c_str());
+        }
+    }
+    std::fflush(nullptr);
+    std::_Exit(86);
+}
+
+void samplerLoop()
+{
+    SamplerService& service = samplerService();
+    std::unique_lock<std::mutex> lock(service.mutex);
+    const double hardStop = hardMemoryStop();
+    for (;;) {
+        if (hardStop > 0.0) {
+            if (const double memory = processMemory(); memory >= hardStop) {
+                stopProcessForMemory(service, memory);
+            }
+            // Read four times a second, armed or not
+            const auto tick = Clock::now() + std::chrono::milliseconds(250);
+            if (service.ticket == 0 || Clock::now() < service.next) {
+                service.wake.wait_until(lock, service.ticket == 0 ? tick : std::min(tick, service.next));
+                if (service.ticket == 0 || Clock::now() < service.next) {
+                    continue;
+                }
+            }
+        }
+        if (service.ticket == 0) {
+            service.wake.wait(lock);
+            continue;
+        }
+        if (Clock::now() < service.next) {
+            service.wake.wait_until(lock, service.next);
+            continue;
+        }
+        service.next += service.period;
+        if (service.samples.size() >= maxSamples) {
+            ++service.dropped;
+            continue;
+        }
+        // Under the lock: finish() waits for the sample in hand
+        // The worker the armed thread waits for, where there is one: the work is there
+        const bool ofWorker = service.worker && service.waiting == service.targetId
+            && service.worker->sampleReady.load(std::memory_order_acquire)
+            && !service.worker->ended.load(std::memory_order_acquire);
+        const int count = captureTarget(ofWorker ? service.worker->sample : service.target, frameBuffer, maxFrames);
+        if (count > 0) {
+            service.samples.push_back(toStack(service, frameBuffer, count, ofWorker));
+        }
+    }
+}
+
+bool samplerDisabled()
+{
+    static const bool disabled = []() {
+        const char* value = std::getenv("FREECAD_CH_SAMPLER");
+        return value && std::string(value) == "off";
+    }();
+    return disabled;
+}
+
+/// The Scope's sampler's delay: FREECAD_CH_SAMPLER as a number of seconds (for tests), else the default
+double scopeSamplerDelay()
+{
+    static const double delay = []() {
+        const char* value = std::getenv("FREECAD_CH_SAMPLER");
+        char* end = nullptr;
+        const double seconds = value ? std::strtod(value, &end) : 0.0;
+        return value && end != value && seconds >= 0.0 ? seconds : Sampler::defaultDelay;
+    }();
+    return delay;
+}
+
+/// The report of a Sampler's samples
+SampleReport rank(const std::vector<Stack>& samples, int top)
+{
+    SampleReport report;
+    report.samples = static_cast<int>(samples.size());
+    if (samples.empty()) {
+        return report;
+    }
+    prepareNames();
+    std::unordered_map<std::uintptr_t, std::string> names;
+    auto nameOf = [&names](std::uintptr_t function) -> const std::string& {
+        auto found = names.find(function);
+        if (found == names.end()) {
+            found = names.emplace(function, symbolName(function)).first;
+        }
+        return found->second;
+    };
+    struct Count
+    {
+        int samples {0};
+        double depth {0.0};
+        int self {0};
+        // The samples it was in calling each function
+        std::unordered_map<std::string, int> callees;
+    };
+    std::unordered_map<std::string, Count> counts;
+    for (const Stack& stack : samples) {
+        std::unordered_set<std::string> seen;
+        std::unordered_set<std::string> seenCalls;
+        for (std::size_t i = 0; i < stack.size(); ++i) {
+            const std::string& name = nameOf(stack[i]);
+            if (i == 0) {
+                ++counts[name].self;
+            }
+            else if (const std::string& callee = nameOf(stack[i - 1]);
+                     callee != name && seenCalls.insert(name + '\n' + callee).second) {
+                ++counts[name].callees[callee];
+            }
+            if (seen.insert(name).second) {
+                Count& count = counts[name];
+                ++count.samples;
+                // From the outer end: deeper is larger
+                count.depth += static_cast<double>(stack.size() - i);
+            }
+        }
+    }
+    // A function that only passes on (nine tenths of its samples in one callee) names nothing:
+    // the callee is listed instead
+    std::vector<std::pair<std::string, Count>> all;
+    for (const auto& entry : counts) {
+        int most = 0;
+        for (const auto& callee : entry.second.callees) {
+            most = std::max(most, callee.second);
+        }
+        if (10 * most < 9 * entry.second.samples) {
+            all.push_back(entry);
+        }
+    }
+    std::sort(all.begin(), all.end(), [](const auto& one, const auto& other) {
+        if (one.second.samples != other.second.samples) {
+            return one.second.samples > other.second.samples;
+        }
+        return one.second.depth / one.second.samples > other.second.depth / other.second.samples;
+    });
+    for (const auto& [name, count] : all) {
+        if (static_cast<int>(report.top.size()) >= top) {
+            break;
+        }
+        report.top.push_back({name, count.samples});
+    }
+    all.assign(counts.begin(), counts.end());
+    std::sort(all.begin(), all.end(), [](const auto& one, const auto& other) {
+        return one.second.self > other.second.self;
+    });
+    for (const auto& [name, count] : all) {
+        if (count.self == 0 || static_cast<int>(report.self.size()) >= 5) {
+            break;
+        }
+        report.self.push_back({name, count.self});
+    }
+    return report;
+}
+}  // namespace
+
+const char* phaseName(Phase phase)
+{
+    switch (phase) {
+        case Phase::Solve:
+            return "solve";
+        case Phase::BuildShape:
+            return "buildShape";
+        case Phase::Occt:
+            return "occt";
+        case Phase::Check:
+            return "check";
+        case Phase::Refine:
+            return "refine";
+        case Phase::ElementMap:
+            return "elementMap";
+    }
+    return "?";
+}
+
+PhaseTimer::PhaseTimer(Phase phase)
+    : index(static_cast<int>(phase))
+    , outer(phaseDepth[index]++ == 0)
+{
+    if (outer) {
+        began = clockNanos();
+    }
+}
+
+PhaseTimer::~PhaseTimer()
+{
+    --phaseDepth[index];
+    if (outer) {
+        phaseSeconds[index] += static_cast<double>(clockNanos() - began) * 1e-9;
+    }
+}
+
+Sampler::Sampler(double delay, double period)
+    : started(clockNanos())
+    , phasesAtStart(phaseSeconds)
+{
+    if (samplerDisabled() || !(period > 0.0) || !std::isfinite(delay)) {
+        return;
+    }
+    SamplerService& service = samplerService();
+#ifdef _WIN32
+    // This thread's handle, once (a thread arms many; never closed)
+    thread_local const SampleTarget self = []() {
+        SampleTarget target;
+        target.open();
+        return target;
+    }();
+    if (!self.valid()) {
+        return;
+    }
+    const ULONG_PTR low = self.stackLow;
+    const ULONG_PTR high = self.stackHigh;
+    // The frames from here outwards, a few: those a sample still has are the start's
+    std::array<std::pair<std::uintptr_t, std::uintptr_t>, 24> armFrames {};
+    int armCount = 0;
+# if defined(_M_X64)
+    {
+        alignas(16) CONTEXT context {};
+        RtlCaptureContext(&context);
+        std::uintptr_t rips[24];
+        std::uintptr_t sps[24];
+        armCount = unwindStack(context, rips, sps, 24, low, high);
+        for (int i = 0; i < armCount; ++i) {
+            armFrames[i] = {rips[i], sps[i]};
+        }
+    }
+# endif
+#else
+    installSampleSignal();
+#endif
+    std::lock_guard<std::mutex> lock(service.mutex);
+    if (service.ticket != 0) {
+        // Another one samples: this one reports its wall and phases only
+        return;
+    }
+    if (!service.started) {
+        std::thread(samplerLoop).detach();
+        service.started = true;
+    }
+    ticket = ++service.lastTicket;
+    service.ticket = ticket;
+    service.samples.clear();
+    service.dropped = 0;
+    service.period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(period));
+    service.next = Clock::now()
+        + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(std::max(0.0, delay)));
+#ifdef _WIN32
+    service.target = self;
+    service.armFrames = armFrames;
+    service.armCount = armCount;
+#else
+    service.target.open();
+#endif
+    service.targetId = std::this_thread::get_id();
+    service.wake.notify_all();
+}
+
+Sampler::~Sampler()
+{
+    if (!finished) {
+        finish(0);
+    }
+}
+
+SampleReport Sampler::finish(int top)
+{
+    std::vector<Stack> samples;
+    if (!finished && ticket != 0) {
+        SamplerService& service = samplerService();
+        std::lock_guard<std::mutex> lock(service.mutex);
+        if (service.ticket == ticket) {
+            service.ticket = 0;
+            samples.swap(service.samples);
+        }
+    }
+    finished = true;
+    SampleReport report;
+    if (top > 0 && !samples.empty()) {
+        // DbgHelp under the service's lock: one caller at a time
+        SamplerService& service = samplerService();
+        std::lock_guard<std::mutex> lock(service.mutex);
+        report = rank(samples, top);
+    }
+    report.samples = static_cast<int>(samples.size());
+    report.wall = static_cast<double>(clockNanos() - started) * 1e-9;
+    for (int i = 0; i < phaseCount; ++i) {
+        report.phases[i] = phaseSeconds[i] - phasesAtStart[i];
+    }
+    return report;
+}
+
+std::string describe(const SampleReport& report)
+{
+    std::ostringstream text;
+    text.setf(std::ios::fixed);
+    text.precision(1);
+    text << report.wall << " s, " << report.samples << " samples";
+    if (!report.top.empty()) {
+        text << "; hot:";
+        for (std::size_t i = 0; i < report.top.size(); ++i) {
+            text << (i ? ", " : " ") << report.top[i].name << " ("
+                 << std::lround(100.0 * report.top[i].count / std::max(1, report.samples)) << " %)";
+        }
+    }
+    text << "; phases:";
+    for (int i = 0; i < phaseCount; ++i) {
+        text << " " << phaseName(static_cast<Phase>(i)) << " " << report.phases[i] << " s";
+    }
+    return text.str();
+}
+
+
 double limit()
 {
     const double value = App::GetApplication()
@@ -431,10 +1231,24 @@ double limit()
     return value;
 }
 
+double memoryLimit()
+{
+    const double value = App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/General")
+                             ->GetFloat("GeometryMemoryLimit", 4.0);
+    if (!std::isfinite(value) || value <= 0.0 || value > 1e6) {
+        return 0.0;
+    }
+    return value;
+}
+
 Scope::Scope(bool timeLimited)
 {
     if (scopeDepth++ == 0) {
         outermost = true;
+        // Every feature's, time-limited or not: a runaway takes the machine down either way
+        scopeMemoryLimit = onWorker ? 0.0 : memoryLimit() * bytesPerGigabyte;
+        scopeMemoryStart = scopeMemoryLimit > 0.0 ? processMemory() : 0.0;
         // Unlimited: no deadline but Esc (0), or no worker at all when the preference is negative,
         // as a call outside any Scope (run())
         scopeLimit = timeLimited ? limit() : std::min(limit(), 0.0);
@@ -445,17 +1259,39 @@ Scope::Scope(bool timeLimited)
             + std::chrono::duration_cast<Clock::duration>(
                             std::chrono::duration<double>(wallBackstop * std::max(0.0, scopeLimit))
             );
+        // Names the hot function of a feature past the sampler's delay (ops#640, breakthrough 1)
+        if (!onWorker && !samplerDisabled()) {
+            sampler = std::make_unique<Sampler>(scopeSamplerDelay());
+        }
     }
 }
 
 Scope::~Scope()
 {
     --scopeDepth;
+    if (sampler) {
+        const SampleReport report = sampler->finish();
+        if (report.samples > 0) {
+            Base::Console().log("KernelBudget sampler: a feature's recompute took %s\n",
+                                describe(report).c_str());
+        }
+    }
 }
 
 std::string Scope::fired() const
 {
-    return outermost ? scopeFired : std::string();
+    if (!outermost) {
+        return {};
+    }
+    // Steps no run() covers grew past the ceiling: the feature fails with it all the same (no
+    // warning-only stop, decision 418)
+    if (scopeFired.empty()) {
+        if (const double grown = grownPast(scopeMemoryStart, scopeMemoryLimit); grown > 0.0) {
+            scopeFired = "The feature was stopped: " + memoryText(grown, scopeMemoryLimit)
+                + ": the feature is not built";
+        }
+    }
+    return scopeFired;
 }
 
 bool pastDeadline()
@@ -470,6 +1306,18 @@ bool inScope()
 
 void stopIfPastDeadline(const char* what)
 {
+    if (scopeDepth > 0 && !onWorker) {
+        if (const double grown = grownPast(scopeMemoryStart, scopeMemoryLimit); grown > 0.0) {
+            Base::CADKernelError error(
+                std::string(what ? what : "The geometry") + " could not start: "
+                + memoryText(grown, scopeMemoryLimit) + ": the feature is not built"
+            );
+            if (scopeFired.empty()) {
+                scopeFired = error.what();
+            }
+            throw error;
+        }
+    }
     if (!pastDeadline()) {
         return;
     }
@@ -579,6 +1427,7 @@ constexpr auto sharedGrace = std::chrono::seconds(30);
 
 void run(const char* what, const std::function<void(const Message_ProgressRange&)>& work, Inputs inputs)
 {
+    PhaseTimer phase(Phase::Occt);
     if (onWorker) {
         // Inside a worker's own work: it runs under that worker's limit
         work(Message_ProgressRange());
@@ -615,6 +1464,17 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     if (Base::Sequencer().wasCanceled()) {
         throw stopped();
     }
+    // The memory ceiling: the feature's, or this call's own outside one (a script, a command)
+    const double memoryCeiling = scopeDepth > 0 ? scopeMemoryLimit : memoryLimit() * bytesPerGigabyte;
+    const double memoryStart = scopeDepth > 0
+        ? scopeMemoryStart
+        : (memoryCeiling > 0.0 ? processMemory() : 0.0);
+    if (const double grown = grownPast(memoryStart, memoryCeiling); grown > 0.0) {
+        throw fire(Base::CADKernelError(
+            name + " could not start: " + memoryText(grown, memoryCeiling)
+            + ": the feature is not built"
+        ));
+    }
     if (limited && scopeOverLimit()) {
         throw limitStop(Base::CADKernelError(
             name + " could not start: the feature's geometry took longer than " + limitText()
@@ -630,14 +1490,44 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
 
     bool timeout = false;
     bool cancelled = false;
+    // The growth past the memory ceiling, where it was passed: never an optional stop
+    double overMemory = 0.0;
     std::unique_ptr<Base::SequencerLauncher> launcher;
     size_t step = 0;
+    // The sampler reads the worker's stack while this thread waits for it
+    struct Stand
+    {
+        explicit Stand(const Call* call)
+            : call(call)
+        {
+            SamplerService& service = samplerService();
+            std::lock_guard<std::mutex> lock(service.mutex);
+            service.worker = call;
+            service.waiting = std::this_thread::get_id();
+        }
+        ~Stand()
+        {
+            SamplerService& service = samplerService();
+            std::lock_guard<std::mutex> lock(service.mutex);
+            if (service.worker == call) {
+                service.worker = nullptr;
+            }
+        }
+        Stand(const Stand&) = delete;
+        Stand(Stand&&) = delete;
+        Stand& operator=(const Stand&) = delete;
+        Stand& operator=(Stand&&) = delete;
+        const Call* call;
+    };
+    std::unique_ptr<Stand> stand;
     if (!waitFor(call, std::chrono::milliseconds(150))) {
+        stand = std::make_unique<Stand>(call.get());
         try {
             waitProcessing(call, launcher, name, step, [&]() {
                 cancelled = Base::Sequencer().wasCanceled();
                 timeout = !cancelled && limited && scopeOverLimit(call->cpuSeconds());
-                return cancelled || timeout;
+                overMemory = cancelled || timeout ? 0.0 : grownPast(memoryStart, memoryCeiling);
+                return cancelled || timeout || overMemory > 0.0;
             });
         }
         catch (const Base::AbortException&) {
@@ -646,7 +1536,7 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         }
     }
 
-    if (timeout || cancelled) {
+    if (timeout || cancelled || overMemory > 0.0) {
         call->cancel = true;
         bool ended = waitFor(call, std::chrono::milliseconds(300));
         if (!ended && inputs == Inputs::Shared) {
@@ -661,6 +1551,8 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
                 ended = waitFor(call, sharedGrace);
             }
         }
+        // Before the thread ends or is abandoned
+        stand.reset();
         if (scopeDepth > 0) {
             scopeWorkerCpu += call->cpuSeconds();
         }
@@ -674,10 +1566,17 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         if (cancelled) {
             throw stopped();
         }
+        if (overMemory > 0.0) {
+            throw fire(Base::CADKernelError(
+                name + " was stopped: " + memoryText(overMemory, memoryCeiling)
+                + ": the feature is not built"
+            ));
+        }
         throw limitStop(Base::CADKernelError(
             name + " took longer than " + limitText() + ", and was stopped: the feature is not built"
         ));
     }
+    stand.reset();
     thread->wait();
     delete thread;
     if (scopeDepth > 0) {
@@ -728,6 +1627,7 @@ TopoDS_Shape exactCopy(const TopoDS_Shape& shape)
 
 bool isValid(const TopoDS_Shape& shape, const char* what)
 {
+    PhaseTimer phase(Phase::Check);
     if (shape.IsNull()) {
         return false;
     }
@@ -861,6 +1761,7 @@ bool statusOk(const Handle(BRepCheck_Result)& result)
 
 bool checkValid(const TopoDS_Shape& shape)
 {
+    PhaseTimer phase(Phase::Check);
     if (shape.IsNull()) {
         return false;
     }

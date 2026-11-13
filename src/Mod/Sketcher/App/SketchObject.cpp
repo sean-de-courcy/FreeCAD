@@ -58,6 +58,7 @@
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
 #include <Base/Profiler.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/NamingHash.h>
 #include <Mod/Part/App/PartPyCXX.h>
 #include <Mod/Part/App/GeometryMigrationExtension.h>
@@ -511,6 +512,7 @@ static bool inline checkSmallEdge(const Part::TopoShape &s) {
 void SketchObject::buildShape()
 {
     ZoneScoped;
+    Part::KernelBudget::PhaseTimer phase(Part::KernelBudget::Phase::BuildShape);
     // We use the following instead to map element names
 
     // Iterated where vertex names are written, whose Reference IDs are then sorted (ops#19);

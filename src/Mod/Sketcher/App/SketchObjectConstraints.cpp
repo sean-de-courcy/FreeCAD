@@ -37,6 +37,7 @@
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
+#include <Mod/Part/App/KernelBudget.h>
 
 #include <map>
 #include <memory>
@@ -106,6 +107,7 @@ static bool midpointsOffTheirArcs(const SketchObject& sketch)
 
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 {
+    Part::KernelBudget::PhaseTimer phase(Part::KernelBudget::Phase::Solve);
     // no need to check input data validity as this is an sketchobject managed operation.
     Base::StateLocker lock(managedoperation, true);
 
