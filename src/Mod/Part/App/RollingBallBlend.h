@@ -12,9 +12,15 @@
  * correct() keeps OCCT's fillet for the topology and replaces the geometry of its blend faces: per
  * chain of blend faces, every ball position is solved by Newton from OCCT's own section (the centre
  * at distance r from both untrimmed walls), the seam between two blend faces is the ball's circle
- * where a contact point crosses from one wall face to the next, and the new surfaces, curves,
+ * where a contact point crosses from one wall face to the next, a blend that runs out through a
+ * face of the base ends where the ball's surface is cut by that face, and the new surfaces, curves,
  * pcurves and vertices go into the body through one BRepTools_Modification. Faces, edges and
  * vertices stay the same in number and in order, so element names stay as they are.
+ *
+ * Recognised: chains of spline blend faces, each between two walls (a contact side may be several
+ * edges in a row), each end a seam on a tangent edge between two wall faces or an end on one face
+ * of the base. Left as OCCT's: exact forms (cylinders, tori), chains mixing those with spline
+ * faces, ends on several faces, corner patches.
  *
  * Plain shapes only: no TopoShape, no document, no console.
  *
@@ -66,6 +72,8 @@ struct Report
     double seamMove = 0.0;
     /// Corrected: the same topology in the same order, with the new geometry
     TopoDS_Shape shape;
+    /// Corrected: the blend faces as they are in @c shape, one for each of the faces passed in
+    std::vector<TopoDS_Face> blendFaces;
 };
 
 /** Correct the blend faces of a constant-radius fillet.

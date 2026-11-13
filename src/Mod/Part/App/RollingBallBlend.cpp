@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <numbers>
 #include <utility>
@@ -17,6 +18,7 @@
 #include <Geom2dAPI_Interpolate.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <GeomAPI_Interpolate.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -128,6 +130,9 @@ Foot foot(const Handle(Geom_Surface)& surface, const gp_Pnt& from, const Foot* h
     result.normal = gp_Vec(result.point, from);
     result.distance = result.normal.Magnitude();
     if (result.distance < 1e-12) {
+        // On the surface: a foot without a direction
+        result.normal = gp_Vec(0.0, 0.0, 0.0);
+        result.ok = true;
         return result;
     }
     result.normal /= result.distance;
@@ -264,8 +269,25 @@ Handle(Geom2d_BSplineCurve) segment2d(const gp_Pnt2d& p0, const gp_Pnt2d& p1, do
 struct Side
 {
     TopoDS_Face wall;
-    Handle(Geom_Surface) surface;  // untrimmed
-    TopoDS_Edge contact;
+    Handle(Geom_Surface) surface;       // untrimmed
+    std::vector<TopoDS_Edge> contacts;  // one edge, or several in a row
+};
+
+// A blend face's end on a face of the base (where the other end kind is a seam to the next blend face)
+struct FaceEnd
+{
+    bool present = false;
+    TopoDS_Edge edge;
+    TopoDS_Face face;
+    Handle(Geom_Surface) surface;           // untrimmed
+    std::array<TopoDS_Vertex, 2> vertices;  // on side 0 and on side 1
+    std::array<TopoDS_Edge, 2> slides;      // the base's edge between each wall and the end face
+    double sign = 1.0;                      // times the distance to the end face: negative on the blend face's side
+    // The end edge on the new surface, per arc fraction: the lengthwise parameter, the point, the end face's parameters
+    std::vector<double> across;
+    std::vector<double> along;
+    std::vector<gp_Pnt> points;
+    std::vector<gp_Pnt2d> onFace;
 };
 
 struct Blend
@@ -273,8 +295,9 @@ struct Blend
     TopoDS_Face face;
     Handle(Geom_Surface) old;
     std::array<Side, 2> sides;
-    std::array<TopoDS_Edge, 2> cross;  // at the start and at the end of the lengthwise parameter
+    std::array<TopoDS_Edge, 2> cross;  // at the start and at the end of the lengthwise parameter: a seam or an end edge
     std::array<int, 2> seams = {-1, -1};
+    std::array<FaceEnd, 2> ends;
     // OCCT's surface: across from side 0 (0) to side 1 (1), lengthwise from lengthFirst to lengthLast
     bool lengthIsV = true;
     double acrossAt0 = 0.0;
@@ -330,6 +353,7 @@ public:
     std::map<const TopoDS_TShape*, EdgeNew> slides;  // untouched edges whose vertex slides
     std::map<std::pair<const TopoDS_TShape*, const TopoDS_TShape*>, Handle(Geom2d_Curve)> pcurves;
     std::map<const TopoDS_TShape*, gp_Pnt> points;
+    std::map<const TopoDS_TShape*, double> pointTolerances;  // where not the default
 
     Standard_Boolean NewSurface(
         const TopoDS_Face& face,
@@ -376,7 +400,8 @@ public:
             return Standard_False;
         }
         point = found->second;
-        tolerance = newTolerance;
+        const auto wider = pointTolerances.find(vertex.TShape().get());
+        tolerance = wider == pointTolerances.end() ? newTolerance : wider->second;
         return Standard_True;
     }
 
@@ -536,126 +561,184 @@ bool isoLine(const Handle(Geom2d_Curve)& pcurve, double first, double last, int 
     return spread < 1e-7;
 }
 
-// The edges of a blend face sorted into contact edges (the other face is a wall) and cross edges (the other face is a blend)
+// The edges of a blend face sorted into contact edges (iso lines of OCCT's surface along the face; the other face is a
+// wall), and at each end of the face a seam (the other face is a blend) or an end edge (the other face is the base's)
 void classify(Context& context, Blend& blend)
 {
     if (!identity(blend.face)) {
         throw NotRecognised {"a blend face with a location"};
     }
     blend.old = BRep_Tool::Surface(blend.face);
-    std::vector<TopoDS_Edge> contacts;
-    std::vector<TopoDS_Edge> crosses;
+    double u0 {}, u1 {}, v0 {}, v1 {};
+    BRepTools::UVBounds(blend.face, u0, u1, v0, v1);
+    const std::array<double, 2> low = {u0, v0};
+    const std::array<double, 2> high = {u1, v1};
+    struct Info
+    {
+        TopoDS_Edge edge;
+        TopoDS_Face other;
+        bool blend = false;
+        std::array<bool, 2> iso = {false, false};
+        std::array<double, 2> value = {0.0, 0.0};
+        gp_Pnt2d middle;
+    };
+    std::vector<Info> infos;
     TopTools_IndexedMapOfShape edges;
     TopExp::MapShapes(blend.face, TopAbs_EDGE, edges);
     for (int i = 1; i <= edges.Extent(); ++i) {
-        const TopoDS_Edge edge = TopoDS::Edge(edges(i));
-        if (BRep_Tool::Degenerated(edge)) {
+        Info info;
+        info.edge = TopoDS::Edge(edges(i));
+        if (BRep_Tool::Degenerated(info.edge)) {
             throw NotRecognised {"a blend face with a degenerate edge"};
         }
-        const TopTools_ListOfShape& faces = context.edgeFaces.FindFromKey(edge);
-        TopoDS_Face other;
+        if (!identity(info.edge)) {
+            throw NotRecognised {"a blend face's edge with a location"};
+        }
+        const TopTools_ListOfShape& faces = context.edgeFaces.FindFromKey(info.edge);
         int count = 0;
         for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
             ++count;
             if (!it.Value().IsSame(blend.face)) {
-                other = TopoDS::Face(it.Value());
+                info.other = TopoDS::Face(it.Value());
             }
         }
-        if (count != 2 || other.IsNull()) {
+        if (count != 2 || info.other.IsNull()) {
             throw NotRecognised {"a blend face closed on itself or with a free edge"};
         }
-        if (context.blendOf(other) >= 0) {
-            crosses.push_back(edge);
-        }
-        else {
-            contacts.push_back(edge);
-        }
-    }
-    if (contacts.size() != 2 || crosses.size() != 2) {
-        // An end on a face of the base is a third "contact" edge; a corner patch has another count again
-        throw NotRecognised {
-            crosses.size() < 2 ? "a blend that ends on a face of the base" : "a blend face that is not two contact edges and two seams"
-        };
-    }
-    double u0 {}, u1 {}, v0 {}, v1 {};
-    BRepTools::UVBounds(blend.face, u0, u1, v0, v1);
-    for (int side = 0; side < 2; ++side) {
-        Side& s = blend.sides[side];
-        s.contact = contacts[side];
-        const TopTools_ListOfShape& faces = context.edgeFaces.FindFromKey(s.contact);
-        for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
-            if (!it.Value().IsSame(blend.face)) {
-                s.wall = TopoDS::Face(it.Value());
-            }
-        }
-        // (a wall may have a location, a moved copy of a profile for one: its surface is read in place)
-        if (!identity(s.contact)) {
-            throw NotRecognised {"a contact edge with a location"};
-        }
-        s.surface = untrimmed(BRep_Tool::Surface(s.wall));
+        info.blend = context.blendOf(info.other) >= 0;
         double first {}, last {};
-        const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(s.contact, blend.face, first, last);
+        const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(info.edge, blend.face, first, last);
         if (pcurve.IsNull()) {
-            throw NotRecognised {"a contact edge without a pcurve"};
+            throw NotRecognised {"a blend face's edge without a pcurve"};
         }
-        double value {};
-        if (side == 0) {
-            if (isoLine(pcurve, first, last, 0, value)) {
-                blend.lengthIsV = true;
-            }
-            else if (isoLine(pcurve, first, last, 1, value)) {
-                blend.lengthIsV = false;
+        for (int which = 0; which < 2; ++which) {
+            info.iso[which] = isoLine(pcurve, first, last, which, info.value[which]);
+        }
+        info.middle = pcurve->Value(0.5 * (first + last));
+        infos.push_back(info);
+    }
+    auto at = [&](const Info& info, int which, double bound) {
+        return info.iso[which] && std::fabs(info.value[which] - bound) < 1e-7 * std::max(1.0, high[which] - low[which]);
+    };
+    // Across is the parameter in which the walls' edges are the surface's two bounds and the seams are not iso lines
+    auto fits = [&](int across) {
+        bool atLow = false;
+        bool atHigh = false;
+        for (const Info& info : infos) {
+            if (info.blend) {
+                if (!at(info, 1 - across, low[1 - across]) && !at(info, 1 - across, high[1 - across])) {
+                    return false;
+                }
             }
             else {
-                throw NotRecognised {"a contact edge that is not an iso line of the blend surface"};
+                atLow = atLow || at(info, across, low[across]);
+                atHigh = atHigh || at(info, across, high[across]);
             }
-            blend.acrossAt0 = value;
+        }
+        return atLow && atHigh;
+    };
+    bool fitsU = fits(0);
+    bool fitsV = fits(1);
+    if (fitsU && fitsV) {
+        // An end edge that is an iso line too: OCCT's blend is of degree 2 with three poles across
+        const Handle(Geom_BSplineSurface) spline = Handle(Geom_BSplineSurface)::DownCast(blend.old);
+        const bool arcU = !spline.IsNull() && spline->UDegree() == 2 && spline->NbUPoles() == 3;
+        const bool arcV = !spline.IsNull() && spline->VDegree() == 2 && spline->NbVPoles() == 3;
+        if (arcU == arcV) {
+            throw NotRecognised {"a blend surface whose direction across is not clear"};
+        }
+        fitsU = arcU;
+        fitsV = arcV;
+    }
+    if (!fitsU && !fitsV) {
+        throw NotRecognised {"contact edges that are not the blend surface's bounds"};
+    }
+    const int across = fitsU ? 0 : 1;
+    blend.lengthIsV = across == 0;
+    blend.acrossAt0 = low[across];
+    blend.acrossAt1 = high[across];
+    blend.lengthFirst = low[1 - across];
+    blend.lengthLast = high[1 - across];
+    if (blend.acrossAt1 - blend.acrossAt0 < 1e-9 || blend.lengthLast - blend.lengthFirst < 1e-9) {
+        throw NotRecognised {"a blend surface of no width or length"};
+    }
+    const double middle = 0.5 * (blend.lengthFirst + blend.lengthLast);
+    for (const Info& info : infos) {
+        int side = -1;
+        if (!info.blend && at(info, across, low[across])) {
+            side = 0;
+        }
+        else if (!info.blend && at(info, across, high[across])) {
+            side = 1;
+        }
+        if (side >= 0) {
+            Side& s = blend.sides[side];
+            if (!s.contacts.empty() && !s.wall.IsSame(info.other)) {
+                throw NotRecognised {"a wall that changes face along a blend face"};
+            }
+            s.wall = info.other;
+            s.surface = untrimmed(BRep_Tool::Surface(info.other));
+            s.contacts.push_back(info.edge);
+            continue;
+        }
+        const int end = (across == 0 ? info.middle.Y() : info.middle.X()) < middle ? 0 : 1;
+        if (!blend.cross[end].IsNull()) {
+            // Several faces of the base at one end, or a corner patch
+            throw NotRecognised {"a blend face that ends in several edges"};
+        }
+        blend.cross[end] = info.edge;
+        if (info.blend) {
+            if (!at(info, 1 - across, end == 0 ? blend.lengthFirst : blend.lengthLast)) {
+                throw NotRecognised {"a seam that is not the blend surface's end"};
+            }
         }
         else {
-            if (!isoLine(pcurve, first, last, blend.lengthIsV ? 0 : 1, value)) {
-                throw NotRecognised {"a contact edge that is not an iso line of the blend surface"};
-            }
-            blend.acrossAt1 = value;
-        }
-    }
-    if (blend.sides[0].wall.IsSame(blend.sides[1].wall)) {
-        throw NotRecognised {"a blend between a face and itself"};
-    }
-    if (std::fabs(blend.acrossAt0 - blend.acrossAt1) < 1e-9) {
-        throw NotRecognised {"a blend surface of no width"};
-    }
-    blend.lengthFirst = blend.lengthIsV ? v0 : u0;
-    blend.lengthLast = blend.lengthIsV ? v1 : u1;
-    for (const TopoDS_Edge& edge : crosses) {
-        if (!identity(edge)) {
-            throw NotRecognised {"a seam with a location"};
-        }
-        double first {}, last {}, value {};
-        const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, blend.face, first, last);
-        if (pcurve.IsNull() || !isoLine(pcurve, first, last, blend.lengthIsV ? 1 : 0, value)) {
-            throw NotRecognised {"a seam that is not an iso line of the blend surface"};
-        }
-        const double span = blend.lengthLast - blend.lengthFirst;
-        if (std::fabs(value - blend.lengthFirst) < 1e-6 * span) {
-            blend.cross[0] = edge;
-        }
-        else if (std::fabs(value - blend.lengthLast) < 1e-6 * span) {
-            blend.cross[1] = edge;
+            FaceEnd& faceEnd = blend.ends[end];
+            faceEnd.present = true;
+            faceEnd.edge = info.edge;
+            faceEnd.face = info.other;
+            faceEnd.surface = untrimmed(BRep_Tool::Surface(info.other));
         }
     }
     if (blend.cross[0].IsNull() || blend.cross[1].IsNull()) {
-        throw NotRecognised {"seams that are not the blend surface's ends"};
+        throw NotRecognised {"a blend face without an edge at one of its ends"};
+    }
+    if (blend.sides[0].contacts.empty() || blend.sides[1].contacts.empty()
+        || blend.sides[0].wall.IsSame(blend.sides[1].wall)) {
+        throw NotRecognised {"a blend face without two walls"};
+    }
+    // A contact side in several edges: the vertices between them belong to those edges only
+    for (const Side& s : blend.sides) {
+        if (s.contacts.size() < 2) {
+            continue;
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape own;
+        for (const TopoDS_Edge& edge : s.contacts) {
+            TopExp::MapShapesAndAncestors(edge, TopAbs_VERTEX, TopAbs_EDGE, own);
+        }
+        for (int i = 1; i <= own.Extent(); ++i) {
+            if (own(i).Extent() != 2) {
+                continue;
+            }
+            // (the shape's map lists an edge once per face it is found through)
+            TopTools_IndexedMapOfShape arriving;
+            for (TopTools_ListOfShape::Iterator it(context.vertexEdges.FindFromKey(own.FindKey(i))); it.More(); it.Next()) {
+                arriving.Add(it.Value());
+            }
+            if (arriving.Extent() != 2) {
+                throw NotRecognised {"a contact edge split at a vertex where another edge arrives"};
+            }
+        }
     }
     // The new surface runs across from side 0 to side 1 and lengthwise as OCCT's does. Its normal
     // must point as the old surface's (the face keeps its orientation): otherwise the sides swap
-    const double middle = 0.5 * (blend.lengthFirst + blend.lengthLast);
     const double a = 0.5 * (blend.acrossAt0 + blend.acrossAt1);
     gp_Pnt point;
     gp_Vec du, dv;
     blend.lengthIsV ? blend.old->D1(a, middle, point, du, dv) : blend.old->D1(middle, a, point, du, dv);
     const gp_Vec along = blend.lengthIsV ? dv : du;
-    const gp_Vec across(blend.oldPoint(0.0, middle), blend.oldPoint(1.0, middle));
-    if (across.Crossed(along).Dot(du.Crossed(dv)) < 0.0) {
+    const gp_Vec acrossVector(blend.oldPoint(0.0, middle), blend.oldPoint(1.0, middle));
+    if (acrossVector.Crossed(along).Dot(du.Crossed(dv)) < 0.0) {
         std::swap(blend.sides[0], blend.sides[1]);
         std::swap(blend.acrossAt0, blend.acrossAt1);
     }
@@ -664,10 +747,12 @@ void classify(Context& context, Blend& blend)
 int sideAt(const Blend& blend, const TopoDS_Vertex& vertex)
 {
     for (int side = 0; side < 2; ++side) {
-        TopoDS_Vertex v1, v2;
-        TopExp::Vertices(blend.sides[side].contact, v1, v2);
-        if (v1.IsSame(vertex) || v2.IsSame(vertex)) {
-            return side;
+        for (const TopoDS_Edge& edge : blend.sides[side].contacts) {
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (v1.IsSame(vertex) || v2.IsSame(vertex)) {
+                return side;
+            }
         }
     }
     return -1;
@@ -799,109 +884,209 @@ void solveSeam(Context& context, Seam& seam)
     seam.points[1 - i] = hintCommon.point;
 }
 
-// The stations of a face: its two split stations and OCCT's sections between them
+gp_Vec tangentAt(const Station& station)
+{
+    gp_Vec tangent = station.feet[0].normal.Crossed(station.feet[1].normal);
+    if (tangent.Magnitude() < 1e-9) {
+        throw Refusal {"walls that are tangent under the ball"};
+    }
+    return tangent.Normalized();
+}
+
+// A point of a station's arc: 0 at its foot on side 0, 1 at its foot on side 1
+gp_Pnt arcPoint(const Station& station, double fraction)
+{
+    const gp_Vec e0(station.centre, station.feet[0].point);
+    const gp_Vec e1(station.centre, station.feet[1].point);
+    const double angle = e0.Angle(e1);
+    const gp_Vec direction = e0 * std::sin((1.0 - fraction) * angle) + e1 * std::sin(fraction * angle);
+    return station.centre.Translated(direction.Normalized() * e0.Magnitude());
+}
+
+// The signed distance from a point to an end face's surface: negative on the blend face's side
+double endDistance(const FaceEnd& end, const gp_Pnt& point, Foot& hint)
+{
+    hint = foot(end.surface, point, &hint);
+    if (!hint.ok) {
+        throw Refusal {"an end face has no foot"};
+    }
+    return end.sign * gp_Vec(hint.point, point).Dot(surfaceNormal(end.surface, hint.u, hint.v));
+}
+
+// Does a foot lie on the wall's own surface (a spline wall has bounds; beyond them it is only extrapolated)
+bool onWall(const Handle(Geom_Surface)& wall, const Foot& at)
+{
+    if (!wall->IsKind(STANDARD_TYPE(Geom_BSplineSurface)) && !wall->IsKind(STANDARD_TYPE(Geom_BezierSurface))) {
+        return true;
+    }
+    double u0 {}, u1 {}, v0 {}, v1 {};
+    wall->Bounds(u0, u1, v0, v1);
+    return (wall->IsUPeriodic() || (at.u >= u0 - 1e-9 && at.u <= u1 + 1e-9))
+        && (wall->IsVPeriodic() || (at.v >= v0 - 1e-9 && at.v <= v1 + 1e-9));
+}
+
+// The stations of a face. OCCT's sections, each brought onto the centre curve, say where the curve runs; a seam's
+// split station ends it exactly; past an end on a face of the base the curve is marched on until the ball's arc
+// has left that face. The stations are then spread evenly along the curve
 void solveStations(const Context& context, Blend& blend, int interior)
 {
     const auto walls = blend.walls();
-    const Seam& seamFirst = context.seams[blend.seams[0]];
-    const Seam& seamLast = context.seams[blend.seams[1]];
-    auto atSeam = [&](const Seam& seam) {
-        Station station;
-        station.centre = seam.centre;
-        for (int side = 0; side < 2; ++side) {
-            station.feet[side] = foot(walls[side], seam.centre);
-            if (!station.feet[side].ok || std::fabs(station.feet[side].distance - context.radius) > 1e-9) {
-                throw Refusal {"a seam's ball does not touch a wall"};
+    const double radius = context.radius;
+    std::vector<Station> sections;
+    {
+        Station previous;
+        for (int k = 0; k <= interior + 1; ++k) {
+            const double lengthwise = blend.lengthFirst + (blend.lengthLast - blend.lengthFirst) * k / (interior + 1);
+            gp_Pnt centre;
+            gp_Vec normal;
+            if (!blend.oldSection(lengthwise, centre, normal)) {
+                throw NotRecognised {"a section of the blend that is no circle"};
+            }
+            const Station station = solveStation(centre, walls, radius, previous.ok ? &previous : nullptr);
+            if (!station.ok) {
+                if (k == 0 || k == interior + 1) {
+                    continue;  // OCCT's very end may lie off the walls
+                }
+                throw Refusal {"a ball position did not converge"};
+            }
+            sections.push_back(station);
+            previous = station;
+        }
+    }
+    const size_t count = sections.size();
+    if (count < 8) {
+        throw Refusal {"too few ball positions on a blend face"};
+    }
+    const size_t middle = count / 2;
+    double spacing = 0.0;
+    for (size_t k = 1; k < count; ++k) {
+        spacing += sections[k - 1].centre.Distance(sections[k].centre);
+    }
+    spacing /= static_cast<double>(count - 1);
+    // OCCT's sections are not evenly spread and can stall or step back where its surface's parameter
+    // does: from the middle outwards, only those that advance along the centre curve are kept
+    gp_Vec forwardMiddle = tangentAt(sections[middle]);
+    if (forwardMiddle.Dot(gp_Vec(sections[count / 4].centre, sections[(3 * count) / 4].centre)) < 0.0) {
+        forwardMiddle.Reverse();
+    }
+    auto walk = [&](bool forwards, gp_Vec& direction) {
+        std::vector<Station> kept;
+        const Station* last = &sections[middle];
+        direction = forwards ? forwardMiddle : forwardMiddle.Reversed();
+        for (size_t step = 1; forwards ? middle + step < count : step <= middle; ++step) {
+            const Station& candidate = sections[forwards ? middle + step : middle - step];
+            if (gp_Vec(last->centre, candidate.centre).Dot(direction) > 0.05 * spacing) {
+                kept.push_back(candidate);
+                last = &candidate;
+                const gp_Vec tangent = tangentAt(candidate);
+                direction = tangent.Dot(direction) < 0.0 ? tangent.Reversed() : tangent;
             }
         }
-        station.ok = true;
-        return station;
+        return kept;
     };
-    Station first = atSeam(seamFirst);
-    Station last = atSeam(seamLast);
-    std::vector<Station> stations;
-    stations.push_back(first);
-    const double spacing = first.centre.Distance(last.centre) / (interior + 1);
-    // The centre curve's direction at each end, pointing into the face
-    gp_Pnt middle;
-    gp_Vec plane;
-    if (!blend.oldSection(0.5 * (blend.lengthFirst + blend.lengthLast), middle, plane)) {
-        throw NotRecognised {"a section of the blend that is no circle"};
-    }
-    auto inward = [&](const Station& station) {
-        gp_Vec tangent = station.feet[0].normal.Crossed(station.feet[1].normal);
-        if (tangent.Magnitude() < 1e-9) {
-            throw Refusal {"walls that are tangent under the ball"};
-        }
-        tangent.Normalize();
-        return tangent.Dot(gp_Vec(station.centre, middle)) < 0.0 ? tangent.Reversed() : tangent;
-    };
-    const gp_Vec fromFirst = inward(first);
-    const gp_Vec fromLast = inward(last);
-    const Station* warm = nullptr;
-    for (int k = 1; k <= interior; ++k) {
-        const double lengthwise = blend.lengthFirst + (blend.lengthLast - blend.lengthFirst) * k / (interior + 1);
-        gp_Pnt centre;
-        gp_Vec normal;
-        if (!blend.oldSection(lengthwise, centre, normal)) {
-            throw NotRecognised {"a section of the blend that is no circle"};
-        }
-        Station station = solveStation(centre, walls, context.radius, warm);
-        if (!station.ok) {
-            throw Refusal {"a ball position did not converge"};
-        }
-        // Past a split station, or too near it: the split station stands for it
-        // (each end judges its own half: the centre curve may turn by more than a quarter)
-        const bool firstHalf = 2 * k <= interior;
-        if (gp_Vec(firstHalf ? first.centre : last.centre, station.centre).Dot(firstHalf ? fromFirst : fromLast) < 0.3 * spacing) {
+    std::array<gp_Vec, 2> outward;  // the curve's direction out of the face at its start and at its end
+    const std::vector<Station> backwards = walk(false, outward[0]);
+    const std::vector<Station> forwards = walk(true, outward[1]);
+    std::vector<Station> path(backwards.rbegin(), backwards.rend());
+    path.push_back(sections[middle]);
+    path.insert(path.end(), forwards.begin(), forwards.end());
+
+    for (int end = 0; end < 2; ++end) {
+        auto outermost = [&]() -> Station& {
+            return end == 0 ? path.front() : path.back();
+        };
+        auto add = [&](const Station& station) {
+            if (end == 0) {
+                path.insert(path.begin(), station);
+            }
+            else {
+                path.push_back(station);
+            }
+        };
+        if (!blend.ends[end].present) {
+            // A seam: its split station is the end. Sections past it, or too near it, go
+            const Seam& seam = context.seams[blend.seams[end]];
+            Station anchor;
+            anchor.centre = seam.centre;
+            for (int side = 0; side < 2; ++side) {
+                anchor.feet[side] = foot(walls[side], seam.centre);
+                if (!anchor.feet[side].ok || std::fabs(anchor.feet[side].distance - radius) > 1e-9) {
+                    throw Refusal {"a seam's ball does not touch a wall"};
+                }
+            }
+            anchor.ok = true;
+            gp_Vec out = tangentAt(anchor);
+            if (out.Dot(outward[end]) < 0.0) {
+                out.Reverse();
+            }
+            while (path.size() > 2 && gp_Vec(outermost().centre, anchor.centre).Dot(out) < 0.3 * spacing) {
+                if (end == 0) {
+                    path.erase(path.begin());
+                }
+                else {
+                    path.pop_back();
+                }
+            }
+            add(anchor);
             continue;
         }
-        stations.push_back(station);
-        warm = &stations.back();
-    }
-    stations.push_back(last);
-    // OCCT's sections are not evenly spread and can stall or step back where its surface's parameter
-    // does: only those that advance along the centre curve are kept, and they only place the
-    // stations, which are spread evenly along the curve
-    std::vector<Station> advancing;
-    advancing.push_back(stations.front());
-    gp_Vec forward = fromFirst;  // the curve's direction at the last one kept, towards the far end
-    for (size_t k = 1; k + 1 < stations.size(); ++k) {
-        const gp_Vec step(advancing.back().centre, stations[k].centre);
-        if (step.Dot(forward) > 0.05 * spacing) {
-            advancing.push_back(stations[k]);
-            gp_Vec tangent = stations[k].feet[0].normal.Crossed(stations[k].feet[1].normal).Normalized();
-            forward = tangent.Dot(forward) < 0.0 ? tangent.Reversed() : tangent;
+        // An end on a face of the base: on along the centre curve until the whole arc is clear of that face
+        FaceEnd& faceEnd = blend.ends[end];
+        Foot hint;
+        faceEnd.sign = 1.0;
+        if (endDistance(faceEnd, arcPoint(sections[middle], 0.5), hint) > 0.0) {
+            faceEnd.sign = -1.0;
+        }
+        auto clearance = [&](const Station& station) {
+            double least = Precision::Infinite();
+            for (const double fraction : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+                least = std::min(least, endDistance(faceEnd, arcPoint(station, fraction), hint));
+            }
+            return least;
+        };
+        gp_Vec out = outward[end];
+        int beyond = 0;
+        for (int steps = 0;; ++steps) {
+            if (clearance(outermost()) > 2.0 * spacing && ++beyond >= 2) {
+                break;
+            }
+            if (steps > 4000) {
+                throw NotRecognised {"walls that stop at the blend's end"};
+            }
+            const Station from = outermost();
+            const Station next = solveStation(from.centre.Translated(out * spacing), walls, radius, &from);
+            if (!next.ok || !onWall(walls[0], next.feet[0]) || !onWall(walls[1], next.feet[1])) {
+                throw NotRecognised {"walls that stop at the blend's end"};
+            }
+            const gp_Vec tangent = tangentAt(next);
+            out = tangent.Dot(out) < 0.0 ? tangent.Reversed() : tangent;
+            add(next);
         }
     }
-    advancing.push_back(last);
-    std::vector<double> along(advancing.size(), 0.0);
-    for (size_t k = 1; k < advancing.size(); ++k) {
-        along[k] = along[k - 1] + advancing[k - 1].centre.Distance(advancing[k].centre);
+
+    // The stations, spread evenly along the path: each by Newton from between two of its points
+    std::vector<double> along(path.size(), 0.0);
+    for (size_t k = 1; k < path.size(); ++k) {
+        along[k] = along[k - 1] + path[k - 1].centre.Distance(path[k].centre);
     }
-    stations.clear();
-    stations.push_back(first);
+    std::vector<Station> stations;
+    stations.push_back(path.front());
     size_t segment = 0;
     for (int k = 1; k <= interior; ++k) {
         const double target = along.back() * k / (interior + 1);
-        while (segment + 2 < advancing.size() && along[segment + 1] < target) {
+        while (segment + 2 < path.size() && along[segment + 1] < target) {
             ++segment;
         }
         const double span = along[segment + 1] - along[segment];
         const double fraction = span > 0.0 ? (target - along[segment]) / span : 0.0;
-        const gp_Pnt start(
-            advancing[segment].centre.XYZ() * (1.0 - fraction) + advancing[segment + 1].centre.XYZ() * fraction
-        );
-        Station station = solveStation(start, walls, context.radius, &advancing[fraction < 0.5 ? segment : segment + 1]);
+        const gp_Pnt start(path[segment].centre.XYZ() * (1.0 - fraction) + path[segment + 1].centre.XYZ() * fraction);
+        const Station station = solveStation(start, walls, radius, &path[fraction < 0.5 ? segment : segment + 1]);
         if (!station.ok) {
             throw Refusal {"a ball position did not converge"};
         }
         stations.push_back(station);
     }
-    stations.push_back(last);
-    if (stations.size() < 4) {
-        throw Refusal {"too few ball positions on a blend face"};
-    }
+    stations.push_back(path.back());
     // In order along the centre curve: a step back would fold the surface
     for (size_t k = 1; k + 1 < stations.size(); ++k) {
         const gp_Vec before(stations[k - 1].centre, stations[k].centre);
@@ -930,6 +1115,73 @@ void solveStations(const Context& context, Blend& blend, int interior)
     }
     blend.length = stations.back().t;
     blend.stations = std::move(stations);
+}
+
+// The end edge on a face of the base: where the new surface is cut by that face, per arc fraction
+void solveEnd(Blend& blend, int which)
+{
+    FaceEnd& end = blend.ends[which];
+    const int count = 32;
+    end.across.clear();
+    end.along.clear();
+    end.points.clear();
+    end.onFace.clear();
+    // The stations' parameters from the outer end inwards
+    std::vector<double> parameters;
+    for (const Station& station : blend.stations) {
+        parameters.push_back(station.t);
+    }
+    if (which == 1) {
+        std::reverse(parameters.begin(), parameters.end());
+    }
+    Foot hint;
+    for (int j = 0; j <= count; ++j) {
+        const double u = static_cast<double>(j) / count;
+        auto distance = [&](double t) {
+            return endDistance(end, blend.surface->Value(u, t), hint);
+        };
+        double outer = parameters.front();
+        if (distance(outer) <= 0.0) {
+            throw Refusal {"the blend surface does not reach past its end"};
+        }
+        double inner = outer;
+        bool found = false;
+        for (size_t k = 1; k < parameters.size() && !found; ++k) {
+            inner = parameters[k];
+            if (distance(inner) <= 0.0) {
+                found = true;
+            }
+            else {
+                outer = inner;
+            }
+        }
+        if (!found) {
+            throw Refusal {"the blend's end face does not cut the blend"};
+        }
+        for (int iteration = 0; iteration < 100 && std::fabs(outer - inner) > 1e-13; ++iteration) {
+            const double t = 0.5 * (outer + inner);
+            (distance(t) > 0.0 ? outer : inner) = t;
+        }
+        const double t = 0.5 * (outer + inner);
+        const gp_Pnt point = blend.surface->Value(u, t);
+        hint = foot(end.surface, point, &hint);
+        if (!hint.ok) {
+            throw Refusal {"an end face has no foot"};
+        }
+        gp_Pnt2d onFace(hint.u, hint.v);
+        if (!end.onFace.empty()) {
+            if (end.surface->IsUPeriodic()) {
+                onFace.SetX(onFace.X() + end.surface->UPeriod() * std::round((end.onFace.back().X() - onFace.X()) / end.surface->UPeriod()));
+            }
+            if (end.surface->IsVPeriodic()) {
+                onFace.SetY(onFace.Y() + end.surface->VPeriod() * std::round((end.onFace.back().Y() - onFace.Y()) / end.surface->VPeriod()));
+            }
+        }
+        end.across.push_back(u);
+        end.along.push_back(t);
+        end.points.push_back(point);
+        end.onFace.push_back(onFace);
+    }
 }
 
 // The surface: across, the ball's arc as a rational quadratic; lengthwise, a cubic through the stations in homogeneous coordinates
@@ -1020,28 +1272,39 @@ double residualBetweenStations(const Blend& blend, double radius)
     return worst;
 }
 
+// An edge's new curve and pcurves. parameter gives each of the edge's two vertices its place on the curve
 void addEdge(
     Modification& modification,
     const TopoDS_Edge& edge,
     Handle(Geom_Curve) curve,
-    const std::vector<std::pair<TopoDS_Face, Handle(Geom2d_Curve)>>& pcurves
+    const std::vector<std::pair<TopoDS_Face, Handle(Geom2d_Curve)>>& pcurves,
+    const std::function<double(const TopoDS_Vertex&)>& parameter
 )
 {
     const double first = curve->FirstParameter();
     const double last = curve->LastParameter();
     TopoDS_Vertex forward, reversed;
     TopExp::Vertices(TopoDS::Edge(edge.Oriented(TopAbs_FORWARD)), forward, reversed);
+    if (forward.IsSame(reversed)) {
+        throw Refusal {"a closed edge on a blend face"};
+    }
+    double atForward = parameter(forward);
+    double atReversed = parameter(reversed);
     // The modifier keeps the vertices' orientation in the edge: the new curve must run the way the old one does
-    const gp_Pnt at = BRep_Tool::Pnt(forward);
-    const bool flip = at.Distance(curve->Value(first)) > at.Distance(curve->Value(last));
+    const bool flip = atForward > atReversed;
     if (flip) {
         curve = curve->Reversed();
+        atForward = first + last - atForward;
+        atReversed = first + last - atReversed;
+    }
+    if (atReversed - atForward < 1e-9) {
+        throw Refusal {"an edge of a blend face would have no length"};
     }
     EdgeNew entry;
     entry.curve = curve;
     entry.forward = forward;
-    entry.first = first;
-    entry.last = last;
+    entry.first = atForward;
+    entry.last = atReversed;
     modification.curves[edge.TShape().get()] = entry;
     for (const auto& pcurve : pcurves) {
         modification.pcurves[{edge.TShape().get(), pcurve.first.TShape().get()}]
@@ -1055,7 +1318,7 @@ Handle(Geom2d_Curve) wallPcurve(const Blend& blend, int side)
     const Side& s = blend.sides[side];
     const int count = static_cast<int>(blend.stations.size());
     double first {}, last {};
-    const Handle(Geom2d_Curve) old = BRep_Tool::CurveOnSurface(s.contact, s.wall, first, last);
+    const Handle(Geom2d_Curve) old = BRep_Tool::CurveOnSurface(s.contacts.front(), s.wall, first, last);
     if (old.IsNull()) {
         throw Refusal {"a contact edge without a pcurve on its wall"};
     }
@@ -1103,12 +1366,45 @@ double toleranceOf(const TopoDS_Shape& shape)
     }
 }
 
-// One chain: recognise it (NotRecognised leaves it alone), then build it (Refusal fails the fillet)
+// A chain's seams, and its ends on faces of the base
 void recogniseChain(Context& context, const std::vector<int>& chain, std::vector<int>& chainSeams)
 {
     for (const int index : chain) {
         Blend& blend = context.blends[index];
         for (int end = 0; end < 2; ++end) {
+            if (blend.ends[end].present) {
+                FaceEnd& faceEnd = blend.ends[end];
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(faceEnd.edge, v1, v2);
+                for (const TopoDS_Vertex& vertex : {v1, v2}) {
+                    const int side = sideAt(blend, vertex);
+                    if (side >= 0) {
+                        faceEnd.vertices[side] = vertex;
+                    }
+                }
+                if (v1.IsSame(v2) || faceEnd.vertices[0].IsNull() || faceEnd.vertices[1].IsNull()) {
+                    throw NotRecognised {"an end edge that does not join the two contact edges"};
+                }
+                for (int side = 0; side < 2; ++side) {
+                    const TopTools_ListOfShape& edges = context.vertexEdges.FindFromKey(faceEnd.vertices[side]);
+                    for (TopTools_ListOfShape::Iterator it(edges); it.More(); it.Next()) {
+                        const TopTools_ListOfShape& faces = context.edgeFaces.FindFromKey(it.Value());
+                        bool wall = false;
+                        bool base = false;
+                        for (TopTools_ListOfShape::Iterator jt(faces); jt.More(); jt.Next()) {
+                            wall = wall || jt.Value().IsSame(blend.sides[side].wall);
+                            base = base || jt.Value().IsSame(faceEnd.face);
+                        }
+                        if (wall && base) {
+                            faceEnd.slides[side] = TopoDS::Edge(it.Value());
+                        }
+                    }
+                    if (faceEnd.slides[side].IsNull()) {
+                        throw NotRecognised {"an end where a wall and the end face share no edge"};
+                    }
+                }
+                continue;
+            }
             int found = -1;
             for (size_t k = 0; k < context.seams.size(); ++k) {
                 if (context.seams[k].edge.IsSame(blend.cross[end])) {
@@ -1128,7 +1424,7 @@ void recogniseChain(Context& context, const std::vector<int>& chain, std::vector
             }
             blend.seams[end] = found;
         }
-        if (blend.seams[0] == blend.seams[1]) {
+        if (blend.seams[0] >= 0 && blend.seams[0] == blend.seams[1]) {
             throw NotRecognised {"a blend face whose two ends are one seam"};
         }
     }
@@ -1215,18 +1511,30 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
         for (const auto& chain : chains) {
             std::vector<int> chainSeams;
             try {
+                // A chain of exact forms (cylinders between planes, tori) is a rolling ball by form; a
+                // chain with such faces among spline ones is left alone for now
+                size_t splines = 0;
+                for (const int index : chain) {
+                    const Handle(Geom_Surface) surface = BRep_Tool::Surface(context.blends[index].face);
+                    splines += surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
+                            || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface))
+                        ? 1
+                        : 0;
+                }
+                if (splines == 0) {
+                    throw NotRecognised {"a rolling ball already"};
+                }
+                if (splines != chain.size()) {
+                    throw NotRecognised {"a chain with faces of exact form among spline faces"};
+                }
                 for (const int index : chain) {
                     classify(context, context.blends[index]);
                 }
-                // A chain of exact forms is a rolling ball already; a mixed chain is left alone for now
                 double before = 0.0;
                 int exact = 0;
                 for (const int index : chain) {
                     const Blend& blend = context.blends[index];
-                    // An elementary surface (a cylinder between planes, a torus) is the ball by form
-                    const bool spline = blend.old->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
-                        || blend.old->IsKind(STANDARD_TYPE(Geom_BezierSurface));
-                    const double r = spline ? ballResidual(blend.face, blend.sides[0].wall, blend.sides[1].wall, radius) : 0.0;
+                    const double r = ballResidual(blend.face, blend.sides[0].wall, blend.sides[1].wall, radius);
                     before = std::max(before, r);
                     exact += r < alreadyBall ? 1 : 0;
                 }
@@ -1276,6 +1584,13 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
                 }
                 interior = 2 * interior + 1;
             }
+            for (const int index : chain) {
+                for (int end = 0; end < 2; ++end) {
+                    if (context.blends[index].ends[end].present) {
+                        solveEnd(context.blends[index], end);
+                    }
+                }
+            }
             corrected.insert(corrected.end(), chain.begin(), chain.end());
             correctedSeams.insert(correctedSeams.end(), chainSeams.begin(), chainSeams.end());
             ++report.chains;
@@ -1286,6 +1601,34 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
 
         // The modification
         Tolerances before;
+        auto movePoint = [&](const TopoDS_Vertex& vertex, const gp_Pnt& point, double tolerance) {
+            modification->points[vertex.TShape().get()] = point;
+            if (tolerance > newTolerance) {
+                modification->pointTolerances[vertex.TShape().get()] = tolerance;
+            }
+            before.of[vertex.TShape().get()] = toleranceOf(vertex);
+            report.seamMove = std::max(report.seamMove, BRep_Tool::Pnt(vertex).Distance(point));
+        };
+        // An untouched edge of the base keeps its curve; one of its vertices slides along it
+        auto slideAlong = [&](const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, double parameter) {
+            const TopoDS_TShape* key = edge.TShape().get();
+            auto slide = modification->slides.find(key);
+            if (slide == modification->slides.end()) {
+                EdgeNew entry;
+                double first {}, last {};
+                entry.curve = BRep_Tool::Curve(edge, first, last);
+                TopoDS_Vertex forward, reversed;
+                TopExp::Vertices(TopoDS::Edge(edge.Oriented(TopAbs_FORWARD)), forward, reversed);
+                entry.forward = forward;
+                entry.first = first;
+                entry.last = last;
+                slide = modification->slides.emplace(key, entry).first;
+            }
+            (vertex.IsSame(slide->second.forward) ? slide->second.first : slide->second.last) = parameter;
+            if (slide->second.last - slide->second.first < Precision::Confusion()) {
+                throw Refusal {"a seam or an end crosses a vertex of the wall"};
+            }
+        };
         for (const int index : corrected) {
             const Blend& blend = context.blends[index];
             modification->surfaces[blend.face.TShape().get()] = blend.surface;
@@ -1293,14 +1636,108 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
             for (int side = 0; side < 2; ++side) {
                 const Side& s = blend.sides[side];
                 const double across = side == 0 ? 0.0 : 1.0;
-                before.of[s.contact.TShape().get()] = toleranceOf(s.contact);
+                const Handle(Geom_Curve) curve = blend.surface->UIso(across);
+                const Handle(Geom2d_Curve) onBlend
+                    = segment2d(gp_Pnt2d(across, 0.0), gp_Pnt2d(across, blend.length), 0.0, blend.length);
+                const Handle(Geom2d_Curve) onWall = wallPcurve(blend, side);
+                // Where each vertex of the side lies on the contact curve
+                auto parameter = [&](const TopoDS_Vertex& vertex) {
+                    for (int end = 0; end < 2; ++end) {
+                        if (blend.ends[end].present) {
+                            if (blend.ends[end].vertices[side].IsSame(vertex)) {
+                                return side == 0 ? blend.ends[end].along.front() : blend.ends[end].along.back();
+                            }
+                        }
+                        else {
+                            const Seam& seam = context.seams[blend.seams[end]];
+                            if (seam.vertices[0].IsSame(vertex) || seam.vertices[1].IsSame(vertex)) {
+                                return end == 0 ? 0.0 : blend.length;
+                            }
+                        }
+                    }
+                    // A vertex between two edges of the side: it slides to the new curve
+                    GeomAPI_ProjectPointOnCurve projection(BRep_Tool::Pnt(vertex), curve);
+                    if (projection.NbPoints() < 1) {
+                        throw Refusal {"a vertex of a contact edge has no place on the new one"};
+                    }
+                    const double at = projection.LowerDistanceParameter();
+                    movePoint(vertex, curve->Value(at), newTolerance);
+                    return at;
+                };
+                for (const TopoDS_Edge& edge : s.contacts) {
+                    before.of[edge.TShape().get()] = toleranceOf(edge);
+                    addEdge(*modification, edge, curve, {{blend.face, onBlend}, {s.wall, onWall}}, parameter);
+                }
+            }
+            for (int which = 0; which < 2; ++which) {
+                if (!blend.ends[which].present) {
+                    continue;
+                }
+                // The end edge: the new surface cut by the end face, through its points per arc fraction
+                const FaceEnd& end = blend.ends[which];
+                const int count = static_cast<int>(end.across.size());
+                Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, count);
+                Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, count);
+                Handle(TColgp_HArray1OfPnt2d) onBlend = new TColgp_HArray1OfPnt2d(1, count);
+                Handle(TColgp_HArray1OfPnt2d) onFace = new TColgp_HArray1OfPnt2d(1, count);
+                double first {}, last {};
+                const Handle(Geom2d_Curve) old = BRep_Tool::CurveOnSurface(end.edge, end.face, first, last);
+                if (old.IsNull()) {
+                    throw Refusal {"an end edge without a pcurve on its face"};
+                }
+                const gp_Pnt2d oldMiddle = old->Value(0.5 * (first + last));
+                const gp_Pnt2d& middle = end.onFace[count / 2];
+                const double shiftU = end.surface->IsUPeriodic()
+                    ? end.surface->UPeriod() * std::round((oldMiddle.X() - middle.X()) / end.surface->UPeriod())
+                    : 0.0;
+                const double shiftV = end.surface->IsVPeriodic()
+                    ? end.surface->VPeriod() * std::round((oldMiddle.Y() - middle.Y()) / end.surface->VPeriod())
+                    : 0.0;
+                for (int j = 0; j < count; ++j) {
+                    parameters->SetValue(j + 1, end.across[j]);
+                    points->SetValue(j + 1, end.points[j]);
+                    onBlend->SetValue(j + 1, gp_Pnt2d(end.across[j], end.along[j]));
+                    onFace->SetValue(j + 1, gp_Pnt2d(end.onFace[j].X() + shiftU, end.onFace[j].Y() + shiftV));
+                }
+                GeomAPI_Interpolate curve(points, parameters, Standard_False, 1e-12);
+                Geom2dAPI_Interpolate pcurveBlend(onBlend, parameters, Standard_False, 1e-12);
+                Geom2dAPI_Interpolate pcurveFace(onFace, parameters, Standard_False, 1e-12);
+                curve.Perform();
+                pcurveBlend.Perform();
+                pcurveFace.Perform();
+                if (!curve.IsDone() || !pcurveBlend.IsDone() || !pcurveFace.IsDone()) {
+                    throw Refusal {"an end edge could not be interpolated"};
+                }
+                before.of[end.edge.TShape().get()] = toleranceOf(end.edge);
                 addEdge(
                     *modification,
-                    s.contact,
-                    blend.surface->UIso(across),
-                    {{blend.face, segment2d(gp_Pnt2d(across, 0.0), gp_Pnt2d(across, blend.length), 0.0, blend.length)},
-                     {s.wall, wallPcurve(blend, side)}}
+                    end.edge,
+                    curve.Curve(),
+                    {{blend.face, pcurveBlend.Curve()}, {end.face, pcurveFace.Curve()}},
+                    [&](const TopoDS_Vertex& vertex) {
+                        return vertex.IsSame(end.vertices[0]) ? 0.0 : 1.0;
+                    }
                 );
+                // Its two vertices slide along the base's edges between each wall and the end face
+                for (int side = 0; side < 2; ++side) {
+                    const gp_Pnt point = side == 0 ? end.points.front() : end.points.back();
+                    double edgeFirst {}, edgeLast {};
+                    const Handle(Geom_Curve) along = BRep_Tool::Curve(end.slides[side], edgeFirst, edgeLast);
+                    if (along.IsNull()) {
+                        throw Refusal {"an edge of the base without a curve"};
+                    }
+                    GeomAPI_ProjectPointOnCurve projection(point, along);
+                    if (projection.NbPoints() < 1) {
+                        throw Refusal {"an end vertex has no place on the base's edge"};
+                    }
+                    double at = projection.LowerDistanceParameter();
+                    if (along->IsPeriodic()) {
+                        const double was = BRep_Tool::Parameter(end.vertices[side], end.slides[side]);
+                        at += along->Period() * std::round((was - at) / along->Period());
+                    }
+                    movePoint(end.vertices[side], point, std::max(newTolerance, 1.5 * projection.LowerDistance()));
+                    slideAlong(end.slides[side], end.vertices[side], at);
+                }
             }
         }
         for (const int k : correctedSeams) {
@@ -1321,31 +1758,13 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
                 secondBlend.face,
                 segment2d(gp_Pnt2d(sameWay ? 0.0 : 1.0, vSecond), gp_Pnt2d(sameWay ? 1.0 : 0.0, vSecond), 0.0, 1.0)
             );
-            addEdge(*modification, seam.edge, curve, pcurves);
+            addEdge(*modification, seam.edge, curve, pcurves, [&](const TopoDS_Vertex& vertex) {
+                return sideAt(firstBlend, vertex) == 0 ? 0.0 : 1.0;
+            });
             for (int i = 0; i < 2; ++i) {
-                modification->points[seam.vertices[i].TShape().get()] = seam.points[i];
-                before.of[seam.vertices[i].TShape().get()] = toleranceOf(seam.vertices[i]);
-                report.seamMove = std::max(report.seamMove, BRep_Tool::Pnt(seam.vertices[i]).Distance(seam.points[i]));
+                movePoint(seam.vertices[i], seam.points[i], newTolerance);
             }
-            // K keeps its curve; its vertex slides along it
-            const TopoDS_TShape* key = seam.tangentEdge.TShape().get();
-            auto slide = modification->slides.find(key);
-            if (slide == modification->slides.end()) {
-                EdgeNew entry;
-                double first {}, last {};
-                entry.curve = BRep_Tool::Curve(seam.tangentEdge, first, last);
-                TopoDS_Vertex forward, reversed;
-                TopExp::Vertices(TopoDS::Edge(seam.tangentEdge.Oriented(TopAbs_FORWARD)), forward, reversed);
-                entry.forward = forward;
-                entry.first = first;
-                entry.last = last;
-                slide = modification->slides.emplace(key, entry).first;
-            }
-            (seam.vertices[seam.sliding].IsSame(slide->second.forward) ? slide->second.first : slide->second.last)
-                = seam.parameterOnK;
-            if (slide->second.last - slide->second.first < Precision::Confusion()) {
-                throw Refusal {"a seam crosses a vertex of the wall"};
-            }
+            slideAlong(seam.tangentEdge, seam.vertices[seam.sliding], seam.parameterOnK);
         }
 
         Maker maker(shape, modification);
@@ -1405,6 +1824,11 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
         if (report.residualAfter > resultBound) {
             throw Refusal {"the corrected blend is not a rolling ball"};
         }
+        for (const TopoDS_Face& face : blendFaces) {
+            report.blendFaces.push_back(
+                !face.IsNull() && allFaces.Contains(face) ? TopoDS::Face(maker.ModifiedShape(face)) : face
+            );
+        }
         report.faces = static_cast<int>(corrected.size());
         report.outcome = Outcome::Corrected;
         report.shape = result;
@@ -1423,6 +1847,7 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
         report.reason = std::string("the kernel failed: ") + e.what();
     }
     report.shape.Nullify();
+    report.blendFaces.clear();
     return report;
 }
 
