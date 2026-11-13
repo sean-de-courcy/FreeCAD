@@ -8,6 +8,7 @@
 #include <optional>
 #include <sstream>
 
+#include <BOPTools_AlgoTools.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
@@ -3761,6 +3762,20 @@ TopoDS_Shape constructUnderOverhang(
             refuse("OCCT's round in front of the face its edge ends against failed");
         }
         const TopoDS_Shape rounded = maker.Shape();
+        // OCCT's round can leave an edge it kept (here a STEP edge at 5.148e-3) a few microns out
+        // of tolerance on its trimmed face; the Boolean below would raise it in place anyway. Raise
+        // it first, up to the piece's own largest tolerance plus 1e-4, so the check sees the result
+        // that is cut.
+        if (!BRepCheck_Analyzer(rounded).IsValid()) {
+            double largest = Precision::Confusion();
+            for (TopExp_Explorer it(solid, TopAbs_VERTEX); it.More(); it.Next()) {
+                largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+            }
+            for (TopExp_Explorer it(solid, TopAbs_EDGE); it.More(); it.Next()) {
+                largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+            }
+            BOPTools_AlgoTools::CorrectTolerances(rounded, TopTools_IndexedMapOfShape(), largest + 1e-4);
+        }
         if (countSolids(rounded) != 1 || !BRepCheck_Analyzer(rounded).IsValid()) {
             int pieceFaces = 0;
             for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
