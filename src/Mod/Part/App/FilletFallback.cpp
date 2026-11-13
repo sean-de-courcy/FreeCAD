@@ -4650,6 +4650,101 @@ void clipTool(Tool& tool, const TopoDS_Shape& behind)
     tool.volume = volumeOf(solid);
 }
 
+/** A fused tool whose strip runs off its face over an edge across its line, into an opening whose
+ * wall there is a cylinder (ops#640, Nest Insert #163: a floor round's band over the lowest part of
+ * a round opening through the wall; notes/fillet-band-opening.md). Onshape runs the round straight
+ * on and the opening through it: the opening's cylinder grows to meet the round, and nothing is
+ * added in the opening. The tool is clipped by the cylinder's inside, run on through the tool.
+ *
+ * Only where the strip runs off to the cylinder's inside (an opening); to its outside is a boss's
+ * wall, whose material absorbs the tool, left to the checks. As in trimFusedTool: a clip that would
+ * take only the base's material is left out, and one that reaches the tool's edge or its strip on
+ * the other face is refused. Any other wall across the line (a window's plane sides) is left to
+ * checkFusedRunOff, which refuses the run into the air
+ */
+bool trimFusedAcross(
+    Tool& tool,
+    const FusedRun& run,
+    const TopoDS_Edge& edge,
+    const TopoDS_Face& beyond,
+    const TopoDS_Shape& base,
+    std::vector<TopoDS_Face>& wallFaces,
+    double size
+)
+{
+    BRepAdaptor_Surface surface(beyond, Standard_False);
+    if (surface.GetType() != GeomAbs_Cylinder) {
+        return false;
+    }
+    const gp_Cylinder cylinder = surface.Cylinder();
+    // Where the rim comes nearest to the tool's edge: there the strip runs over it
+    BRepExtrema_DistShapeShape nearest(edge, tool.source);
+    if (!nearest.IsDone() || nearest.NbSolution() == 0) {
+        return false;
+    }
+    double parameter = 0.0;
+    if (nearest.SupportTypeShape1(1) == BRepExtrema_IsOnEdge) {
+        nearest.ParOnEdgeS1(1, parameter);
+    }
+    else if (nearest.SupportTypeShape1(1) == BRepExtrema_IsVertex) {
+        parameter = BRep_Tool::Parameter(TopoDS::Vertex(nearest.SupportOnShape1(1)), edge);
+    }
+    else {
+        return false;
+    }
+    const gp_Pnt point = BRepAdaptor_Curve(edge).Value(parameter);
+    // Off the face across the rim, as the strip runs on
+    const gp_Vec off = -gp_Vec(inwardIn(run.face, edge, parameter));
+    const gp_Dir direction = cylinder.Axis().Direction();
+    const gp_Pnt centre = cylinder.Location();
+    const gp_Pnt foot
+        = centre.Translated(gp_Vec(direction) * gp_Vec(centre, point).Dot(gp_Vec(direction)));
+    const gp_Vec radial(foot, point);
+    if (radial.Magnitude() < linearTolerance) {
+        return false;
+    }
+    // Towards the axis: the opening is the cylinder's inside. A wall tangent to the strip's face
+    // there is no rim, and the outside is a boss
+    if (off.Dot(radial.Normalized()) > -1e-3) {
+        return false;
+    }
+    // On the wall's own frame (its axis direction and its X direction), moved along the axis: the
+    // tool's face on it then has the wall's parametrisation, and the two merge
+    const gp_Ax2 axis(
+        foot.Translated(-gp_Vec(direction) * size),
+        direction,
+        cylinder.Position().XDirection()
+    );
+    const TopoDS_Shape trim = BRepPrimAPI_MakeCylinder(axis, cylinder.Radius(), 2 * size).Shape();
+    const TopoDS_Shape piece = commonOf(tool.solid, trim);
+    if (!TopExp_Explorer(piece, TopAbs_SOLID).More()) {
+        return false;
+    }
+    if (volumeOf(piece) - volumeOf(commonOf(piece, base)) <= volumeTolerance * tool.volume) {
+        return false;
+    }
+    bool reachesBack = touch(tool.source, trim);
+    for (const auto& strip : tool.strips) {
+        if (strip.face.IsSame(run.face)) {
+            continue;
+        }
+        for (const auto& contact : strip.contacts) {
+            reachesBack = reachesBack || touch(contact, piece);
+        }
+    }
+    if (reachesBack) {
+        refuse("the opening beyond a fused tool's strip reaches back to the dress-up");
+    }
+    clipTool(tool, trim);
+    // The tool's face on the cylinder merges into the opening's wall: Onshape's wall grows there
+    if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
+            return wall.IsSame(beyond);
+        })) {
+        wallFaces.push_back(beyond);
+    }
+    return true;
+}
+
 /** A fused tool whose strip runs off its face (ops#640, the native replica's Case Base #46):
  * Onshape clips the dress-up by the surface of the face its strip reaches first beyond each edge it
  * runs over, run on, and adds nothing past it. Over a ledge that is a ring's outer wall, under the
@@ -4683,6 +4778,7 @@ bool trimFusedTool(
     for (const auto& [edge, beyond] : run.edges) {
         BRepAdaptor_Curve curve(edge);
         if (curve.GetType() != GeomAbs_Line || !parallel(curve.Line().Direction(), along)) {
+            clipped = trimFusedAcross(tool, run, edge, beyond, base, wallFaces, size) || clipped;
             continue;
         }
         double from = gp_Vec(origin, curve.Value(curve.FirstParameter())).Dot(gp_Vec(along));
@@ -4799,6 +4895,15 @@ bool trimFusedTool(
         }
     }
     if (clipped) {
+        // The opening's other walls, over the rims the strip ran: where the clipped tool has a
+        // face on one of them (a window's sides, across the line), that wall grows too
+        for (const auto& [edge, beyond] : run.edges) {
+            if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
+                    return wall.IsSame(beyond);
+                })) {
+                wallFaces.push_back(beyond);
+            }
+        }
         for (const auto& strip : tool.strips) {
             if (strip.contacts.empty()) {
                 refuse("a fused tool trimmed by the face beyond its strip has no face on a face "
@@ -5770,6 +5875,7 @@ TopoDS_Shape constructShape(
         collectBaseImages();
         NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
         TopTools_IndexedMapOfShape unlocked;
+        std::vector<TopoDS_Face> grownWalls;  // the walls a tool's face merges into
         // A miter piece's faces continue its tools' chamfer faces: Onshape's sharp miter has one
         // cone and one plane there (#15, dF +0 at the limit)
         for (size_t i = 0; i < tools.size(); ++i) {
@@ -5833,7 +5939,23 @@ TopoDS_Shape constructShape(
             for (const auto& wall : wallFaces) {
                 if (face.ShapeType() == TopAbs_FACE && sameDomain(TopoDS::Face(face), wall)) {
                     TopExp::MapShapes(face, TopAbs_EDGE, unlocked);
+                    grownWalls.push_back(wall);
                     break;
+                }
+            }
+        }
+        // A wall that closes on itself (a round hole's whole cylinder) takes the tool's face only
+        // with its seam free to move: with the seam kept, the unification leaves the two apart
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More() && !grownWalls.empty(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            if (std::none_of(grownWalls.begin(), grownWalls.end(), [&](const TopoDS_Face& wall) {
+                    return sameDomain(face, wall);
+                })) {
+                continue;
+            }
+            for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)) {
+                    unlocked.Add(edge.Current());
                 }
             }
         }
@@ -6969,6 +7091,133 @@ bool preferConstruction(
     catch (const Base::Exception&) {
     }
     return false;
+}
+
+TopoDS_Edge bandOpening(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& contour,
+    const Request& request
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0
+        || (request.size2 > 0 && std::abs(request.size2 - request.size1) > linearTolerance)) {
+        return {};
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        TopTools_IndexedMapOfShape chain;
+        TopTools_IndexedMapOfShape chainVertices;
+        for (const auto& edge : contour) {
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            chain.Add(edge);
+            for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+                chainVertices.Add(it.Current());
+            }
+        }
+        constexpr int sections = 17;
+        // A rim tangent to the band's far side is a grazing contact: OCCT's round is right there
+        const double margin = 1000 * linearTolerance;
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+            EdgeData data;
+            std::vector<Section> cuts;
+            std::vector<double> cutAt;
+            try {
+                data = analyse(ctx, edge);
+                BRepAdaptor_Curve curve(edge);
+                const double first = curve.FirstParameter();
+                const double last = curve.LastParameter();
+                for (int k = 0; k < sections; ++k) {
+                    cutAt.push_back(first + (last - first) * (k + 0.5) / sections);
+                    cuts.push_back(sectionAt(ctx, data, cutAt.back()));
+                }
+            }
+            catch (const Refusal&) {
+                // Not analysable: not checked
+                continue;
+            }
+            for (int k = 0; k < 2; ++k) {
+                const TopoDS_Face& face = data.faces[k];
+                // Where the band's far side lies on the face. An opening is a gap between two
+                // such stretches (on a closed edge, beside one): a face narrower than the band
+                // from there to the edge's end is the limit's case (a wall thinner than the round,
+                // KP1-KP4), left as it is
+                std::vector<bool> onTheFace;
+                for (const auto& cut : cuts) {
+                    onTheFace.push_back(onFace(face, cut.ends[k]));
+                }
+                if (std::none_of(onTheFace.begin(), onTheFace.end(), [](bool on) { return on; })) {
+                    continue;
+                }
+                auto between = [&](double at) {
+                    bool before = false;
+                    bool after = false;
+                    for (size_t c = 0; c < cutAt.size(); ++c) {
+                        before = before || (onTheFace[c] && cutAt[c] < at);
+                        after = after || (onTheFace[c] && cutAt[c] > at);
+                    }
+                    return data.closed ? (before || after) : (before && after);
+                };
+                for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge& rim = TopoDS::Edge(it.Current());
+                    if (chain.Contains(rim) || BRep_Tool::Degenerated(rim)
+                        || BRep_Tool::IsClosed(rim, face)) {
+                        continue;
+                    }
+                    bool joined = false;
+                    for (TopExp_Explorer v(rim, TopAbs_VERTEX); v.More(); v.Next()) {
+                        joined = joined || chainVertices.Contains(v.Current());
+                    }
+                    if (joined) {
+                        continue;
+                    }
+                    BRepExtrema_DistShapeShape nearest(rim, edge);
+                    if (!nearest.IsDone()) {
+                        continue;
+                    }
+                    for (int n = 1; n <= nearest.NbSolution(); ++n) {
+                        // Inside the contour edge: past its ends the band has ended
+                        if (nearest.SupportTypeShape2(n) != BRepExtrema_IsOnEdge) {
+                            continue;
+                        }
+                        double at = 0.0;
+                        nearest.ParOnEdgeS2(n, at);
+                        Section cut;
+                        try {
+                            cut = sectionAt(ctx, data, at);
+                        }
+                        catch (const Refusal&) {
+                            continue;
+                        }
+                        if (!(nearest.Value() < cut.length[k] - margin) || !between(at)) {
+                            continue;
+                        }
+                        // Smooth across the rim: the band runs on onto the next face. OCCT's
+                        // own test, which takes any surface (Nest Insert's walls are splines)
+                        bool smooth = false;
+                        for (const auto& other : ctx.list(ctx.edgeFaces, rim)) {
+                            smooth = smooth
+                                || (!other.IsSame(face)
+                                    && ChFi3d::IsTangentFaces(rim, face, TopoDS::Face(other)));
+                        }
+                        if (!smooth) {
+                            return rim;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return {};
 }
 
 void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)

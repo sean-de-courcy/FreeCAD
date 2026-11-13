@@ -1241,12 +1241,16 @@ class FilledRecessTest(unittest.TestCase):
             self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6)
             return
         index = next(i for i, e in enumerate(base.Edges, 1) if e.isSame(edge))
+        status = feature.getStatusString()
+        # A fillet whose band crosses the recess's opening is stopped before OCCT's result is
+        # looked at (FilletFallback::bandOpening()), where its construction refuses
         self.assertTrue(
-            feature.getStatusString().startswith(
+            status.startswith(
                 "The %s fills a recess of the base next to Edge%d:"
                 % (feature.TypeId[6:].lower(), index)
-            ),
-            feature.getStatusString(),
+            )
+            or "The fillet's band crosses an opening of a face next to its edge (Edge" in status,
+            status,
         )
 
     def assertFront(self, recess, kinds=("Chamfer", "Fillet")):
@@ -1711,31 +1715,21 @@ def symmetric_difference(a, b):
 class BridgedRecessTest(unittest.TestCase):
     """Where a round's band crosses a hole, a slot or a round boss in the face next to its edge,
     OCCT builds a B-spline bridge over the gap: a valid solid, slightly wrong (ops#604 gap 3a,
-    decision 283). The fillet fails instead, naming the face. The block 30 x 20 x 10, its front top
-    edge r 2; the right result is the plain block's round with the feature applied afterwards.
+    decision 283). The exact construction builds the right result instead (ops#640, gap 3b:
+    FilletFallback::bandOpening(), notes/fillet-band-opening.md), and where it refuses, the fillet
+    fails, naming the opening's edge. The block 30 x 20 x 10, its front top edge r 2; the right
+    result is the plain block's round with the feature applied afterwards.
     """
 
     setUp = InvalidDressUpTest.setUp
     tearDown = InvalidDressUpTest.tearDown
 
-    def assertBridgeFails(self, shape, top_face=True):
+    def assertOpeningFails(self, shape):
         fillet = filleted_in_a_body(self.doc, shape, front_top, 2)
         self.assertFalse(fillet.isValid())
         status = fillet.getStatusString()
-        self.assertTrue(
-            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
-        )
-        self.assertTrue(status.endswith("; a round that rolls through it is not built yet"), status)
-        if top_face:
-            # The hole is in the top face
-            top = next(
-                i
-                for i, f in enumerate(shape.Faces, 1)
-                if f.Surface.TypeId == "Part::GeomPlane"
-                and abs(f.BoundBox.ZMin - 10) < 1e-9
-                and abs(f.BoundBox.ZMax - 10) < 1e-9
-            )
-            self.assertIn("on Face%d;" % top, status)
+        self.assertIn("The fillet's band crosses an opening of a face next to its edge (Edge", status)
+        self.assertIn("its exact construction refused: ", status)
 
     def assertRight(self, shape, right):
         fillet = filleted_in_a_body(self.doc, shape, front_top, 2)
@@ -1747,16 +1741,20 @@ class BridgedRecessTest(unittest.TestCase):
         return block.makeFillet(2, front_top(block))
 
     def testThroughHoleAcrossTheBand(self):
-        # O1: the hole's rim 1 and 0.5 mm from the edge; OCCT's bridge is 0.75 and 1.34 mm3 off
-        for y in (4.0, 3.5):
-            with self.subTest(y=y):
-                self.assertBridgeFails(
-                    Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, y, 0)))
-                )
+        # O1: the hole's rim 1 mm from the edge; OCCT's bridge is 0.75 mm3 off
+        hole = Part.makeCylinder(3, 10, V(15, 4.0, 0))
+        self.assertRight(Part.makeBox(30, 20, 10).cut(hole), self.rounded().cut(hole))
+
+    def testThroughHoleNearTheEdgeFails(self):
+        # O1 with the rim 0.5 mm from the edge (OCCT's bridge 1.34 mm3 off). Debt (ops#640): the
+        # construction's volume check refuses it ("the cut removed 24.95069524 instead of
+        # 24.95077261", 3e-6), so the fillet fails, naming the hole's rim
+        self.assertOpeningFails(Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 3.5, 0))))
 
     def testBlindHoleAcrossTheBand(self):
         # O2: 4 deep
-        self.assertBridgeFails(Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 4, V(15, 4, 6))))
+        hole = Part.makeCylinder(3, 4, V(15, 4, 6))
+        self.assertRight(Part.makeBox(30, 20, 10).cut(hole), self.rounded().cut(hole))
 
     def testSlotAcrossTheBand(self):
         # O4: a stadium 3 deep, 1 mm from the edge
@@ -1765,12 +1763,15 @@ class BridgedRecessTest(unittest.TestCase):
             .fuse([Part.makeCylinder(2, 3, V(11, 3, 7)), Part.makeCylinder(2, 3, V(19, 3, 7))])
             .removeSplitter()
         )
-        self.assertBridgeFails(Part.makeBox(30, 20, 10).cut(slot))
+        self.assertRight(Part.makeBox(30, 20, 10).cut(slot), self.rounded().cut(slot))
 
     def testRoundBossAcrossTheBand(self):
-        # O5: its wall 1 mm from the edge. The boss's foot is an inner wire of the top face
+        # O5: its wall 1 mm from the edge. The boss's foot is an inner wire of the top face; the
+        # oracle has the boss to the bottom
         boss = Part.makeBox(30, 20, 10).fuse(Part.makeCylinder(3, 4, V(15, 4, 10))).removeSplitter()
-        self.assertBridgeFails(boss)
+        self.assertRight(
+            boss, self.rounded().fuse(Part.makeCylinder(3, 14, V(15, 4, 0))).removeSplitter()
+        )
 
     def testHoleBreakingTheEdgeStillBuilds(self):
         # O1 with the hole through the front face: the edge's two pieces end at the hole's wall
@@ -1823,16 +1824,12 @@ class BridgedRecessTest(unittest.TestCase):
                 self.assertTrue(fillet.Shape.isValid())
 
     def testPartFilletAcrossAHole(self):
-        # Part::Fillet with one radius fails the same; a variable radius isn't checked
-        shape = Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 4, 0)))
+        # Part::Fillet with one radius builds the same; a variable radius isn't checked
+        hole = Part.makeCylinder(3, 10, V(15, 4, 0))
+        shape = Part.makeBox(30, 20, 10).cut(hole)
         feature = InvalidDressUpTest.dressUp(self, "Fillet", shape, front_top(shape), [(2, 2)])
-        self.assertFalse(feature.isValid())
-        self.assertTrue(
-            feature.getStatusString().startswith(
-                "The fillet's band crosses a hole or pocket on Face"
-            ),
-            feature.getStatusString(),
-        )
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertLess(symmetric_difference(feature.Shape, self.rounded().cut(hole)), 1e-6)
 
 
 def tolerances(shape):
@@ -3341,3 +3338,171 @@ class CurvedEndTrimTest(unittest.TestCase):
                 shape = body.makeFillet(0.9, [chord])
                 self.assertTrue(shape.isValid())
                 self.assertEqual(len(shape.Faces), len(body.Faces) + 1)
+
+
+def floor_and_wall(hole=None):
+    """A block 30 x 40 x 20 with the box x 0..20, z 5..20 removed: a floor at z 5 and a wall at
+    x 20, meeting in the concave edge x 20, z 5. hole: a solid cut from it"""
+    shape = Part.makeBox(30, 40, 20).cut(Part.makeBox(20, 40, 15, V(0, 0, 5)))
+    return shape.cut(hole) if hole else shape
+
+
+def floor_wall_edge(shape):
+    """The concave edge x 20, z 5: one, or its pieces where a feature splits it"""
+    return [
+        e
+        for e in shape.Edges
+        if e.Curve.TypeId == "Part::GeomLine"
+        and all(abs(v.Point.x - 20) < 1e-9 and abs(v.Point.z - 5) < 1e-9 for v in e.Vertexes)
+    ]
+
+
+def hole_in_the_band(r, h, R):
+    """A round hole of radius R along x through the wall, its lowest point h inside the band a
+    round r on the concave edge takes on the wall (z 5..5 + r)"""
+    return Part.makeCylinder(R, 30, V(15, 20, 5 + r - h + R), V(1, 0, 0))
+
+
+def notch_in_the_band(r, h, R):
+    """A U notch from the wall's top, R wide each side, its round bottom's lowest point h inside
+    the band: Nest Insert #163's opening"""
+    z = 5 + r - h + R
+    return Part.makeCylinder(R, 30, V(15, 20, z), V(1, 0, 0)).fuse(
+        Part.makeBox(30, 2 * R, 30 - z, V(15, 20 - R, z))
+    )
+
+
+def surface_kinds(shape):
+    kinds = {}
+    for face in shape.Faces:
+        name = face.Surface.TypeId
+        kinds[name] = kinds.get(name, 0) + 1
+    return kinds
+
+
+class BandOpeningTest(unittest.TestCase):
+    """A round whose band crosses an opening of the face it rolls on: a hole, or a notch of the
+    face's outline (ops#640, Nest Insert #163; notes/fillet-band-opening.md, fillet-parity gap 3b).
+    OCCT bridges the opening with a four-sided B-spline patch and splits the round; Onshape cuts
+    the round by the opening: the round of the face without the opening, then the opening cut
+    through. On a concave edge the opening's own wall grows to meet the round.
+    """
+
+    def assertCutByTheOpening(self, base, edges, r, right, faces=None):
+        self.assertTrue(base.isValid())
+        shape = base.makeFillet(r, edges)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, right.Volume, delta=1e-6 * right.Volume)
+        self.assertLess(symmetric_difference(shape, right), 1e-6 * right.Volume)
+        # No patch: the round and the opening's wall, nothing else
+        self.assertNotIn("Part::GeomBSplineSurface", surface_kinds(shape))
+        if faces is not None:
+            self.assertEqual(len(shape.Faces), faces)
+        return shape
+
+    def testConcaveRoundAcrossAHole(self):
+        # The designed model of oracle 18's question (ops#640 6848519274), cases a, b, c. The
+        # deviation of OCCT's bridge is the round's sagitta r - sqrt(r^2 - h^2): 0.040, 0.268, 0.020
+        for r, h, R in ((2.0, 0.4, 4.0), (2.0, 1.0, 4.0), (1.0, 0.2, 3.0)):
+            with self.subTest(r=r, h=h, R=R):
+                hole = hole_in_the_band(r, h, R)
+                base = floor_and_wall(hole)
+                plain = floor_and_wall()
+                right = plain.makeFillet(r, floor_wall_edge(plain)).cut(hole)
+                self.assertEqual(len(floor_wall_edge(base)), 1)
+                shape = self.assertCutByTheOpening(base, floor_wall_edge(base), r, right, faces=10)
+                # One round, the whole 40 long, and one wall of the hole
+                rounds = [
+                    f
+                    for f in shape.Faces
+                    if f.Surface.TypeId == "Part::GeomCylinder"
+                    and abs(f.Surface.Radius - r) < 1e-9
+                ]
+                self.assertEqual(len(rounds), 1)
+                self.assertAlmostEqual(rounds[0].BoundBox.YLength, 40.0, delta=1e-6)
+                walls = [
+                    f
+                    for f in shape.Faces
+                    if f.Surface.TypeId == "Part::GeomCylinder"
+                    and abs(f.Surface.Radius - R) < 1e-9
+                ]
+                self.assertEqual(len(walls), 1)
+                # The hole's lowest generator runs on to the round, by the sagitta
+                self.assertAlmostEqual(
+                    walls[0].BoundBox.XMin, 20 - r + math.sqrt(r * r - h * h), delta=1e-6
+                )
+
+    def testConcaveRoundAcrossANotch(self):
+        # Nest Insert #163's shape: the opening is a notch of the wall's outline, not a hole in it
+        r, h, R = 2.0, 0.4, 4.0
+        notch = notch_in_the_band(r, h, R)
+        base = floor_and_wall(notch).removeSplitter()
+        plain = floor_and_wall()
+        right = plain.makeFillet(r, floor_wall_edge(plain)).cut(notch).removeSplitter()
+        self.assertEqual(len(floor_wall_edge(base)), 1)
+        self.assertCutByTheOpening(base, floor_wall_edge(base), r, right, faces=len(right.Faces))
+
+    def testConvexRoundAcrossAHole(self):
+        # fillet-parity O1: a block 30 x 20 x 10, its front top edge r 2, a through hole of
+        # radius 3 whose rim is 1 mm from the edge
+        hole = Part.makeCylinder(3, 10, V(15, 4, 0))
+        base = Part.makeBox(30, 20, 10).cut(hole)
+        plain = Part.makeBox(30, 20, 10)
+        right = plain.makeFillet(2, front_top(plain)).cut(hole)
+        self.assertCutByTheOpening(base, front_top(base), 2, right, faces=8)
+
+    def testConcaveRoundAcrossAWindow(self):
+        # A rectangular window: its sill runs along the edge, 0.4 inside the band, and its sides
+        # are planes across it. The sill and the sides grow to the round
+        window = Part.makeBox(30, 6, 8, V(15, 17, 6.6))
+        base = floor_and_wall(window)
+        plain = floor_and_wall()
+        right = plain.makeFillet(2.0, floor_wall_edge(plain)).cut(window)
+        self.assertCutByTheOpening(base, floor_wall_edge(base), 2.0, right, faces=13)
+
+    def testAVeeNotchAcrossAConcaveBandFailsNamingIt(self):
+        # A V notch from the wall's top, its tip 0.4 inside the band: both its walls are planes
+        # across the edge, which the construction does not trim by yet. An error that names the
+        # opening's edge, never OCCT's bridge
+        vee = Part.Face(
+            Part.makePolygon([V(15, 20, 6.6), V(15, 26, 16), V(15, 14, 16), V(15, 20, 6.6)])
+        ).extrude(V(30, 0, 0))
+        base = floor_and_wall(vee)
+        with self.assertRaises(Exception) as raised:
+            base.makeFillet(2.0, floor_wall_edge(base))
+        text = str(raised.exception)
+        self.assertIn("crosses an opening of a face next to its edge (Edge", text)
+        self.assertIn("exact construction refused", text)
+
+    def testTheRimClearOfTheBandBuildsAsOcct(self):
+        # The hole's lowest point 0.05 beyond the band's far line: no opening in the band
+        r, R = 2.0, 4.0
+        hole = hole_in_the_band(r, -0.05, R)
+        base = floor_and_wall(hole)
+        plain = floor_and_wall()
+        right = plain.makeFillet(r, floor_wall_edge(plain)).cut(hole)
+        shape = base.makeFillet(r, floor_wall_edge(base))
+        self.assertTrue(shape.isValid())
+        self.assertLess(symmetric_difference(shape, right), 1e-6 * right.Volume)
+
+    def testAHoleCuttingTheEdgeBuildsAsOcct(self):
+        # h > r: the hole reaches the floor and splits the edge; its pieces end at the hole's wall
+        r, R = 2.0, 4.0
+        hole = hole_in_the_band(r, 2.5, R)
+        base = floor_and_wall(hole)
+        plain = floor_and_wall()
+        right = plain.makeFillet(r, floor_wall_edge(plain)).cut(hole)
+        self.assertEqual(len(floor_wall_edge(base)), 2)
+        shape = base.makeFillet(r, floor_wall_edge(base))
+        self.assertTrue(shape.isValid())
+        self.assertLess(symmetric_difference(shape, right), 1e-6 * right.Volume)
+        self.assertEqual(len(shape.Faces), 12)
+
+    def testWithinTheSpeedCondition(self):
+        # 60 s per feature (the user's condition): the designed case, check and construction
+        r, h, R = 2.0, 0.4, 4.0
+        base = floor_and_wall(hole_in_the_band(r, h, R))
+        start = time.monotonic()
+        base.makeFillet(r, floor_wall_edge(base))
+        self.assertLess(time.monotonic() - start, 10.0)

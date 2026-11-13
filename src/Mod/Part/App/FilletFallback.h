@@ -31,6 +31,7 @@
 #include <vector>
 
 #include <gp_Pnt.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopTools_DataMapOfShapeReal.hxx>
 
@@ -66,7 +67,8 @@ struct Request
     /// selected, or OCCT would have run the dress-up on along a tangent chain. Empty: not checked
     std::vector<TopoDS_Shape> contour;
     /// Build only at the limit, where a new edge lands on an existing one or a face vanishes:
-    /// the failures the construction is for. Off only to compare with OCCT below the limit
+    /// the failures the construction is for. Off to compare with OCCT below the limit, and where
+    /// OCCT's result is not trusted whatever the limit (bandOpening())
     bool limitOnly = true;
     /// Each base face's largest tolerance, with its edges and vertices (faceTolerances()), taken
     /// before OCCT's maker ran: the maker raises the base's tolerances in place (to 1e-4 where a
@@ -190,6 +192,31 @@ PartExport bool construct(
 PartExport bool preferConstruction(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
+/** The opening a fillet's band crosses on a face next to one of its edges, or a null edge (ops#640,
+ * Nest Insert #163, notes/fillet-band-opening.md; fillet-parity gap 3b). Where the band of a round
+ * crosses a hole or a notch of the face it rolls on, OCCT bridges the gap with a B-spline patch: a
+ * valid result that is not Onshape's, which cuts the round by the opening. This reads the input, not
+ * OCCT's result, so it holds beside spline faces too (Part::bridgedRecess() does not run there).
+ *
+ * For each edge of the contours that analyse() takes, and each of its faces: an edge of that face
+ * which shares no vertex with the contours, is no seam, is not smooth (the band runs on over a
+ * tangent edge, and OCCT's round there is right), and comes nearer to the contour edge, at a point
+ * inside it, than the band is wide there, by more than a grazing contact. The point must lie
+ * between two stretches of the contour edge where the band's far side is on the face: a face
+ * narrower than the band from there to the edge's end is the limit's case (a wall thinner than
+ * the round), not an opening.
+ *
+ * @param base The shape being dressed up (the makerInput() copy's shape)
+ * @param contour The edges of OCCT's contours: the selected edges and their tangent chains
+ * @param request A fillet of one radius; anything else gives a null edge
+ * @return The first such edge of the base, or a null edge
+ */
+PartExport TopoDS_Edge bandOpening(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& contour,
     const Request& request
 );
 

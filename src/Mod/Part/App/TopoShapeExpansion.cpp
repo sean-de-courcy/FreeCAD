@@ -7771,6 +7771,10 @@ struct DressUpOutcome
     /// A fillet whose OCCT contour runs on from the selection along a tangent chain that turns
     /// between concave and convex (chainTurns()): the exact construction, or an error
     bool turns {false};
+    /// A fillet whose band crosses an opening of a face next to its edge
+    /// (FilletFallback::bandOpening()): OCCT bridges it with a patch, so the exact construction,
+    /// or an error naming this edge
+    TopoDS_Edge opening;
     std::exception_ptr occtError;
     bool constructed {false};
     /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
@@ -7871,6 +7875,20 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 request.contour.clear();
             }
             out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
+            if (!prefer && request.kind == FilletFallback::Kind::Fillet) {
+                // Nest Insert #163: a band over a hole or a notch of its face, where OCCT's
+                // result, when it builds one, is a bridge. The limit is then no condition
+                std::vector<TopoDS_Shape> contour;
+                for (int i = 1; i <= maker->NbContours(); ++i) {
+                    for (int j = 1; j <= maker->NbEdges(i); ++j) {
+                        contour.push_back(maker->Edge(i, j));
+                    }
+                }
+                out.opening = FilletFallback::bandOpening(base, contour, request);
+                if (!out.opening.IsNull()) {
+                    request.limitOnly = false;
+                }
+            }
             // A face of zero width (ops#298): the exact construction builds it at the limit
             out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
             out.invalid = !out.failed && !out.thin && builtInvalid(*maker, base);
@@ -7881,7 +7899,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && request.kind == FilletFallback::Kind::Fillet && chainTurns(*maker, base, edges);
-            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns) && !prefer) {
+            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns
+                 || !out.opening.IsNull())
+                && !prefer) {
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
@@ -7982,6 +8002,20 @@ TopoShape& TopoShape::makeElementFillet(
                     << outcome->reason
             );
         }
+    }
+    if (!outcome->opening.IsNull()) {
+        if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        // OCCT bridges the opening with a patch: never returned silently (decision 150)
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's band crosses an opening of a face next to its edge (Edge"
+                << input.findShape(outcome->opening)
+                << "), where Onshape cuts the round by the opening and OCCT bridges it; its exact "
+                   "construction refused: "
+                << outcome->reason
+        );
     }
     return makeElementShape(*mkFillet, input, op);
 }
