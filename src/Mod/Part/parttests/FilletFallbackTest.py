@@ -161,6 +161,62 @@ class FilletFallbackTest(unittest.TestCase):
             sorted(f.Surface.TypeId for f in result.Faces).count("Part::GeomToroid"), 2
         )
 
+    def fullRoundOfAPlate(self, rho, r=1.5):
+        """Cause C4 (ops#640), designed tests B3 and C3: a 30 x 20 plate 2 r thick, its vertical
+        corners rounded 4 and the one at (30, 0) rounded rho, both rims rounded r. The wall
+        vanishes, so OCCT fails and the exact construction builds the rounds. At the rho corner
+        the round's torus has the major radius M = rho - r: a spindle (M < r) or a horn (M = r)"""
+        radii = [4.0, rho, 4.0, 4.0]
+        corners = [(0, 0), (30, 0), (30, 20), (0, 20)]
+        plate = Part.makeBox(30, 20, 2 * r)
+        for (x, y), radius in zip(corners, radii):
+            plate = plate.makeFillet(radius, [edge_between(plate, (x, y, 0), (x, y, 2 * r))])
+        volume = (600 - (1 - math.pi / 4) * sum(x * x for x in radii)) * 2 * r
+        self.assertAlmostEqual(plate.Volume, volume, delta=1e-9 * volume)
+        rims = [
+            e
+            for e in plate.Edges
+            if abs(e.BoundBox.ZLength) < 1e-9 and abs(e.BoundBox.ZMin - r) > r / 2
+        ]
+        self.assertEqual(len(rims), 16)
+        result = plate.makeFillet(r, rims)
+        # Pappus per rim: straight runs and arcs, each arc at its centroid's radius
+        straight = 100 - 2 * sum(radii)
+        arcs = sum(math.pi / 2 * (x - fillet_centroid(r)) for x in radii)
+        self.assertExact(result, volume - 2 * fillet_section(r) * (straight + arcs))
+        # The rounds at the rho corner: every point at r from the circle of radius M about the
+        # corner's axis, in the plate's middle plane (the kernel stores them as surfaces of
+        # revolution, so the points are checked, not the type)
+        centre, major = V(30 - rho, rho, r), rho - r
+        rounds = 0
+        for face in result.Faces:
+            box = face.BoundBox
+            if (
+                face.Surface.TypeId in ("Part::GeomPlane", "Part::GeomCylinder")
+                or box.XMin < 30 - rho - 1e-7
+                or box.YMax > rho + 1e-7
+            ):
+                continue
+            rounds += 1
+            u0, u1, v0, v1 = face.ParameterRange
+            for a in range(6):
+                for b in range(6):
+                    q = face.valueAt(u0 + (u1 - u0) * (a + 0.5) / 6, v0 + (v1 - v0) * (b + 0.5) / 6)
+                    if not face.isInside(q, 1e-7, True):
+                        continue
+                    radial = math.hypot(q.x - centre.x, q.y - centre.y) - major
+                    self.assertAlmostEqual(math.hypot(radial, q.z - centre.z), r, delta=1e-6)
+        self.assertEqual(rounds, 2)
+
+    def testFullRoundWithASpindleTorus(self):
+        self.fullRoundOfAPlate(2.4)  # B3: M 0.9 < r 1.5
+
+    def testFullRoundWithAHornTorus(self):
+        self.fullRoundOfAPlate(3.0)  # C3: M = r = 1.5
+
+    def testFullRoundWithARingTorus(self):
+        self.fullRoundOfAPlate(4.0)  # N2, the control: M 2.5 > r
+
     def testStepOgee(self):
         step = Part.makeBox(30, 20, 10).fuse(Part.makeBox(30, 10, 4, V(0, 10, 10))).removeSplitter()
         edges = [
