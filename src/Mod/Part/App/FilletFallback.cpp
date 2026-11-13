@@ -52,7 +52,9 @@
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <Geom2d_Curve.hxx>
+#include <GeomAPI_IntSS.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -60,6 +62,9 @@
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
+#include <GeomAdaptor_Curve.hxx>
+#include <Geom_OffsetSurface.hxx>
+#include <Geom_Plane.hxx>
 #include <GeomLib.hxx>
 #include <Geom_BoundedSurface.hxx>
 #include <Geom_Surface.hxx>
@@ -89,6 +94,7 @@
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
+#include <gce_MakeCirc.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -825,6 +831,7 @@ struct Tool
         TopoDS_Edge edge;  // the continuing edge
         gp_Pnt vertex;     // where they meet
         bool cap = false;  // the face is on the end face's own surface (capSurfaces)
+        TopoDS_Face beyond;  // a blend's continuation past its end, split by with the face (blendBeyond)
     };
     std::vector<PassOn> passOn;
     /// The end faces (not planes) whose surfaces trim the tool: a strip that runs off its face
@@ -947,6 +954,26 @@ struct EdgeData
 };
 
 /// The maps the construction reads, built once
+/** A rolling-ball blend's continuation past its own face (Case Base #105's ends, notes
+ * r105-curved-end-trim). An OCCT fillet stores a blend as a B-spline surface that is the blend
+ * inside its face and for a short run past it, and then continues the spine straight: a tool cut
+ * by that surface's natural bounds is cut wrongly (#105: 3.5e-3 at a round 1 high). Onshape
+ * continues the rolling ball: the ball's centre runs on along the intersection of the two
+ * supports' offsets by the radius, and the blend is the canal surface about that spine, each
+ * section the arc between the ball's two contact points.
+ *
+ * alongV, atUpper, bound: the direction the blend runs in the surface's parameters, and the face's
+ * own bound at the end nearest the point; the surface is used up to that bound only. beyond: the
+ * canal surface from that bound on, its first section the surface's own.
+ */
+struct BlendBeyond
+{
+    bool alongV = true;
+    bool atUpper = false;
+    double bound = 0.0;
+    TopoDS_Face beyond;
+};
+
 struct Context
 {
     const TopoShape& base;
@@ -956,6 +983,17 @@ struct Context
     TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
     TopTools_IndexedMapOfShape selected;
     double scale = 1.0;  // the base's size, for the half-spaces
+    /// The blends' continuations built so far, by wall and end (blendBeyond): one per end, so that
+    /// every tool cut by it is cut by the same surface
+    struct KnownBlend
+    {
+        TopoDS_Face wall;
+        bool alongV = true;
+        bool atUpper = false;
+        double reach = 0.0;  // how far past the end it was asked to go
+        std::optional<BlendBeyond> beyond;
+    };
+    mutable std::vector<KnownBlend> blends;
 
     Context(const TopoShape& base, const Request& request)
         : base(base)
@@ -2741,6 +2779,537 @@ bool sideOnFaces(
     return false;
 }
 
+/** The continuation of the wall's surface past the wall's end nearest the point, where the wall is a
+ * rolling-ball blend: a B-spline face whose sections across it are circles of one radius, the
+ * centres one radius from the surfaces of two of its neighbours. None for any other face (its
+ * surface's own bounds or extension are used, as before). A blend whose continuation can't be
+ * built refuses: the surface's own run on is not the blend
+ */
+std::optional<BlendBeyond> blendBeyond(
+    const Context& ctx,
+    const TopoDS_Face& wall,
+    const gp_Pnt& nearPoint,
+    double reach
+)
+{
+    TopLoc_Location location;
+    Handle(Geom_BSplineSurface) blend
+        = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(wall, location));
+    if (blend.IsNull()) {
+        return std::nullopt;
+    }
+    const gp_Trsf toLocal = location.Inverted().Transformation();
+    const gp_Pnt nearLocal = nearPoint.Transformed(toLocal);
+    double natural[4] = {0.0, 0.0, 0.0, 0.0};
+    blend->Bounds(natural[0], natural[1], natural[2], natural[3]);
+    double own[4] = {0.0, 0.0, 0.0, 0.0};
+    BRepTools::UVBounds(wall, own[0], own[1], own[2], own[3]);
+    GeomAPI_ProjectPointOnSurf onBlend(nearLocal, blend);
+    if (onBlend.NbPoints() == 0) {
+        return std::nullopt;
+    }
+    double nearU = 0.0;
+    double nearV = 0.0;
+    onBlend.LowerDistanceParameters(nearU, nearV);
+
+    struct Ring
+    {
+        gp_Pnt centre;
+        double radius = 0.0;
+        gp_Pnt ends[2];
+    };
+    // The section across the blend at a parameter along it: a circle through five of its points
+    auto ringAt = [&](bool alongV, double along) -> std::optional<Ring> {
+        const double from = alongV ? natural[0] : natural[2];
+        const double to = alongV ? natural[1] : natural[3];
+        gp_Pnt points[5];
+        for (int k = 0; k < 5; ++k) {
+            const double across = from + (to - from) * k / 4.0;
+            points[k] = alongV ? blend->Value(across, along) : blend->Value(along, across);
+        }
+        if (points[0].Distance(points[2]) < linearTolerance
+            || points[2].Distance(points[4]) < linearTolerance
+            || points[0].Distance(points[4]) < linearTolerance) {
+            return std::nullopt;
+        }
+        gce_MakeCirc make(points[0], points[2], points[4]);
+        if (!make.IsDone()) {
+            return std::nullopt;
+        }
+        const gp_Circ circle = make.Value();
+        const double allowed = 1e-6 * std::max(1.0, circle.Radius());
+        if (circle.Distance(points[1]) > allowed || circle.Distance(points[3]) > allowed) {
+            return std::nullopt;
+        }
+        Ring ring;
+        ring.centre = circle.Location();
+        ring.radius = circle.Radius();
+        ring.ends[0] = points[0];
+        ring.ends[1] = points[4];
+        return ring;
+    };
+    std::optional<BlendBeyond> found;
+    std::vector<Ring> rings;
+    for (bool alongV : {true, false}) {
+        const double first = alongV ? own[2] : own[0];
+        const double last = alongV ? own[3] : own[1];
+        if (last - first < Precision::PConfusion()) {
+            continue;
+        }
+        const double nearAlong = alongV ? nearV : nearU;
+        const bool atUpper = std::abs(nearAlong - last) < std::abs(nearAlong - first);
+        const double bound = atUpper ? last : first;
+        // Five sections in the face's last quarter towards that end
+        std::vector<Ring> candidate;
+        for (int k = 0; k < 5; ++k) {
+            auto ring = ringAt(alongV, bound + (atUpper ? -1.0 : 1.0) * (last - first) * k / 16.0);
+            if (!ring
+                || (k > 0
+                    && std::abs(ring->radius - candidate[0].radius)
+                        > 1e-5 * std::max(1.0, candidate[0].radius))) {
+                candidate.clear();
+                break;
+            }
+            candidate.push_back(*ring);
+        }
+        if (candidate.empty()) {
+            continue;
+        }
+        if (!found || candidate[0].radius < rings[0].radius) {
+            found = BlendBeyond {alongV, atUpper, bound, {}};
+            rings = candidate;
+        }
+    }
+    if (!found) {
+        return std::nullopt;
+    }
+    // One continuation per end, as long as the longest reach asked of it: a tool with a longer
+    // reach gets a new one (its faces then don't merge with the earlier tools')
+    size_t slot = ctx.blends.size();
+    for (size_t i = 0; i < ctx.blends.size(); ++i) {
+        const auto& known = ctx.blends[i];
+        if (known.wall.IsSame(wall) && known.alongV == found->alongV
+            && known.atUpper == found->atUpper) {
+            if (!known.beyond || known.reach >= reach) {
+                return known.beyond;
+            }
+            slot = i;
+        }
+    }
+    if (slot == ctx.blends.size()) {
+        ctx.blends.push_back({wall, found->alongV, found->atUpper, reach, std::nullopt});
+    }
+    else {
+        ctx.blends[slot].reach = reach;
+        ctx.blends[slot].beyond.reset();
+    }
+    const double radius = rings[0].radius;
+    const double rolled = 2e-5 * std::max(1.0, radius);
+    // The supports: the neighbours whose surfaces the ball's centre stays one radius from
+    std::vector<Handle(Geom_Surface)> supports;
+    TopTools_IndexedMapOfShape seen;
+    for (TopExp_Explorer edge(wall, TopAbs_EDGE); edge.More(); edge.Next()) {
+        for (const auto& shape : ctx.list(ctx.edgeFaces, edge.Current())) {
+            if (shape.IsSame(wall) || seen.Contains(shape)) {
+                continue;
+            }
+            seen.Add(shape);
+            Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(shape));
+            if (surface.IsNull()) {
+                continue;
+            }
+            if (!location.IsIdentity()) {
+                surface = Handle(Geom_Surface)::DownCast(surface->Transformed(toLocal));
+            }
+            bool rolls = true;
+            for (const auto& ring : rings) {
+                GeomAPI_ProjectPointOnSurf onSupport(ring.centre, surface);
+                rolls = onSupport.NbPoints() > 0
+                    && std::abs(onSupport.LowerDistance() - radius) < rolled;
+                if (!rolls) {
+                    break;
+                }
+            }
+            if (rolls
+                && std::find(supports.begin(), supports.end(), surface) == supports.end()) {
+                supports.push_back(surface);
+            }
+        }
+    }
+    if (supports.size() != 2) {
+        return std::nullopt;
+    }
+    // The surface is still the blend for some way past the face (OCCT's fillet runs its end on as
+    // far as it needed), and only then leaves it: the surface is used as far as its section's
+    // centre stays one radius from both supports, so that a small tool is cut by the surface
+    // alone, on the wall's own surface
+    {
+        const double limit = found->alongV ? (found->atUpper ? natural[3] : natural[2])
+                                           : (found->atUpper ? natural[1] : natural[0]);
+        const double exact = 5e-6 * std::max(1.0, radius);
+        const int steps = 64;
+        int good = 0;
+        for (int k = 1; k <= steps; ++k) {
+            const double along = found->bound + (limit - found->bound) * k / steps;
+            auto ring = ringAt(found->alongV, along);
+            bool rolls = ring && std::abs(ring->radius - radius) < exact;
+            for (size_t i = 0; i < supports.size() && rolls; ++i) {
+                GeomAPI_ProjectPointOnSurf onSupport(ring->centre, supports[i]);
+                rolls = onSupport.NbPoints() > 0
+                    && std::abs(onSupport.LowerDistance() - radius) < exact;
+            }
+            if (!rolls) {
+                break;
+            }
+            // rings[0] becomes the last section that is the blend's, rings[1] the one before it
+            rings.insert(rings.begin(), *ring);
+            good = k;
+        }
+        found->bound += (limit - found->bound) * good / steps;
+    }
+
+    // A rolling-ball blend from here on: its continuation is built, or the dress-up is refused
+    gp_Pnt contact[2];
+    Handle(Geom_Surface) offsets[2];
+    for (int i = 0; i < 2; ++i) {
+        GeomAPI_ProjectPointOnSurf onSupport(rings[0].centre, supports[i]);
+        if (onSupport.NbPoints() == 0) {
+            refuse("a blend's support is not under the blend's end");
+        }
+        double u = 0.0;
+        double v = 0.0;
+        onSupport.LowerDistanceParameters(u, v);
+        gp_Vec du;
+        gp_Vec dv;
+        supports[i]->D1(u, v, contact[i], du, dv);
+        gp_Vec normal = du.Crossed(dv);
+        if (normal.Magnitude() < gp::Resolution()) {
+            refuse("a blend's support has no normal at the blend's end");
+        }
+        normal.Normalize();
+        const double side = gp_Vec(contact[i], rings[0].centre).Dot(normal) > 0 ? 1.0 : -1.0;
+        if (Handle(Geom_Plane) plane = Handle(Geom_Plane)::DownCast(supports[i])) {
+            offsets[i] = Handle(Geom_Surface)::DownCast(plane->Translated(normal * (side * radius)));
+        }
+        else {
+            try {
+                offsets[i] = new Geom_OffsetSurface(supports[i], side * radius);
+            }
+            catch (const Standard_Failure&) {
+                refuse("a blend's support can't be offset by the blend's radius");
+            }
+        }
+    }
+    // Which end of the section lies on which support
+    if (rings[0].ends[0].Distance(contact[0]) > rings[0].ends[0].Distance(contact[1])) {
+        std::swap(supports[0], supports[1]);
+        std::swap(contact[0], contact[1]);
+    }
+    // Past its face the surface's section may end a little off the contact lines (its arc is run on
+    // too): the continuation's sections keep those two overhangs, so that it joins the surface's
+    // last section along its whole length
+    double overhang[2] = {0.0, 0.0};
+    {
+        gp_Vec toContact[2] = {gp_Vec(rings[0].centre, contact[0]), gp_Vec(rings[0].centre, contact[1])};
+        gp_Vec axis = toContact[0].Crossed(toContact[1]);
+        if (axis.Magnitude() < gp::Resolution()) {
+            refuse("a blend's section at its end is not an arc");
+        }
+        for (int i = 0; i < 2; ++i) {
+            overhang[i] = toContact[i].AngleWithRef(gp_Vec(rings[0].centre, rings[0].ends[i]), axis);
+            if (std::abs(overhang[i]) > 0.2) {
+                refuse("a blend's section does not end on its supports");
+            }
+        }
+    }
+    const double onSpine = 1e-4 * std::max(1.0, radius);
+    Handle(Geom_Curve) spine;
+    double start = 0.0;
+    try {
+        GeomAPI_IntSS intersection(offsets[0], offsets[1], 1e-7);
+        if (!intersection.IsDone()) {
+            refuse("a blend's spine past its end: intersecting its supports' offsets failed");
+        }
+        double best = onSpine;
+        for (int i = 1; i <= intersection.NbLines(); ++i) {
+            GeomAPI_ProjectPointOnCurve onLine(rings[0].centre, intersection.Line(i));
+            if (onLine.NbPoints() > 0 && onLine.LowerDistance() < best) {
+                best = onLine.LowerDistance();
+                spine = intersection.Line(i);
+                start = onLine.LowerDistanceParameter();
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        refuse("a blend's spine past its end: intersecting its supports' offsets failed");
+    }
+    if (spine.IsNull()) {
+        refuse("a blend's spine past its end was not found");
+    }
+    double inside = 0.0;
+    {
+        GeomAPI_ProjectPointOnCurve onLine(rings[1].centre, spine);
+        if (onLine.NbPoints() == 0 || onLine.LowerDistance() > onSpine) {
+            refuse("a blend's spine past its end does not follow the blend");
+        }
+        inside = onLine.LowerDistanceParameter();
+    }
+    const double first = spine->FirstParameter();
+    const double last = spine->LastParameter();
+    double step = start - inside;
+    if (spine->IsPeriodic() && std::abs(step) > (last - first) / 2) {
+        step -= std::copysign(last - first, step);
+    }
+    if (std::abs(step) < Precision::PConfusion()) {
+        refuse("a blend's spine past its end has no direction");
+    }
+    const double outward = step > 0 ? 1.0 : -1.0;
+    GeomAdaptor_Curve adaptor(spine);
+    const double total = GCPnts_AbscissaPoint::Length(adaptor, first, last);
+    const double length = std::min(reach, 0.45 * total);
+    double finish = outward > 0 ? last : first;
+    {
+        GCPnts_AbscissaPoint at(adaptor, outward * length, start);
+        if (at.IsDone()) {
+            finish = at.Parameter();
+        }
+    }
+    if (!spine->IsPeriodic()) {
+        finish = std::clamp(finish, first, last);
+    }
+    // No further than a quarter turn of the spine: on a closed spine the continuation would come
+    // back to the blend's other end, or to another blend on the same supports (a wall's two
+    // blends on a sphere are one torus), and cut the tool there
+    {
+        gp_Pnt at;
+        gp_Vec leaving;
+        spine->D1(start, at, leaving);
+        const int probes = 64;
+        for (int k = 1; k <= probes; ++k) {
+            const double parameter = start + (finish - start) * k / probes;
+            gp_Vec tangent;
+            spine->D1(parameter, at, tangent);
+            if (leaving.Magnitude() < gp::Resolution() || tangent.Magnitude() < gp::Resolution()
+                || leaving.Angle(tangent) > std::numbers::pi / 2) {
+                finish = start + (finish - start) * (k - 1) / probes;
+                break;
+            }
+        }
+        if (std::abs(finish - start) < Precision::PConfusion()) {
+            refuse("a blend's spine past its end turns back at once");
+        }
+    }
+    // The sections: at the blend's end the surface's own, then the ball's on the spine. As many as
+    // keep the surface through them within 1e-8 of the canal surface: a cubic through sections a
+    // step h apart is off by about h^4 / (384 R^3) where the spine's radius of curvature is R. No
+    // more: every Boolean with a tool cut by this surface pays for its control points (#105: 161
+    // sections over a quarter turn cost 68 s)
+    int count = 9;
+    {
+        double tightest = Precision::Infinite();
+        for (int k = 0; k <= 16; ++k) {
+            gp_Pnt at;
+            gp_Vec d1;
+            gp_Vec d2;
+            spine->D2(start + (finish - start) * k / 16.0, at, d1, d2);
+            const double cross = d1.Crossed(d2).Magnitude();
+            if (cross > gp::Resolution()) {
+                tightest = std::min(tightest, std::pow(d1.Magnitude(), 3) / cross);
+            }
+        }
+        tightest = std::max(tightest, radius);
+        const double run = std::abs(GCPnts_AbscissaPoint::Length(adaptor, start, finish));
+        const double step = std::pow(384 * 1e-8 * std::pow(tightest, 3), 0.25);
+        count = std::clamp(int(std::ceil(run / step)) + 1, 9, 161);
+    }
+    std::vector<gp_Pnt> rows[4];
+    for (int k = 0; k < count; ++k) {
+        gp_Pnt centre = rings[0].centre;
+        gp_Pnt ends[2] = {rings[0].ends[0], rings[0].ends[1]};
+        if (k > 0) {
+            centre = spine->Value(start + (finish - start) * k / (count - 1.0));
+            bool rolls = true;
+            for (int i = 0; i < 2 && rolls; ++i) {
+                GeomAPI_ProjectPointOnSurf onSupport(centre, supports[i]);
+                rolls = onSupport.NbPoints() > 0
+                    && std::abs(onSupport.LowerDistance() - radius) < rolled;
+                if (rolls) {
+                    gp_Vec to(centre, onSupport.NearestPoint());
+                    ends[i] = centre.Translated(to.Normalized() * radius);
+                }
+            }
+            if (!rolls) {
+                break;  // a support ends here: the continuation goes no further
+            }
+            gp_Vec toContact[2] = {gp_Vec(centre, ends[0]), gp_Vec(centre, ends[1])};
+            gp_Vec axis = toContact[0].Crossed(toContact[1]);
+            if (axis.Magnitude() < gp::Resolution()) {
+                refuse("a blend's section past its end is not an arc");
+            }
+            for (int i = 0; i < 2; ++i) {
+                ends[i] = centre.Translated(toContact[i].Rotated(gp_Ax1(centre, gp_Dir(axis)), overhang[i]));
+            }
+        }
+        gp_Vec arms[2] = {gp_Vec(centre, ends[0]), gp_Vec(centre, ends[1])};
+        const double turn = arms[0].Angle(arms[1]);
+        if (turn < 1e-3 || turn > 2.9) {
+            refuse("a blend's section past its end is not an arc under 166 degrees");
+        }
+        const double weight = std::cos(turn / 2);
+        gp_Vec bisector = arms[0].Normalized() + arms[1].Normalized();
+        gp_Pnt middle = centre.Translated(bisector.Normalized() * (arms[0].Magnitude() / weight));
+        rows[0].push_back(ends[0]);
+        rows[1].emplace_back(middle.XYZ() * weight);
+        rows[2].push_back(ends[1]);
+        rows[3].emplace_back(weight, double(k), 0.0);
+    }
+    const int stations = int(rows[0].size());
+    if (stations < 9) {
+        refuse("a blend's supports end where the blend does: it has no continuation");
+    }
+    // Through the sections' control points, in homogeneous coordinates for the middle row
+    Handle(Geom_BSplineCurve) through[4];
+    for (int row = 0; row < 4; ++row) {
+        Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, stations);
+        Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, stations);
+        for (int k = 0; k < stations; ++k) {
+            points->SetValue(k + 1, rows[row][k]);
+            parameters->SetValue(k + 1, double(k));
+        }
+        try {
+            GeomAPI_Interpolate interpolate(points, parameters, false, 1e-9);
+            interpolate.Perform();
+            if (interpolate.IsDone()) {
+                through[row] = interpolate.Curve();
+            }
+        }
+        catch (const Standard_Failure&) {
+        }
+        if (through[row].IsNull() || through[row]->NbPoles() != through[0]->NbPoles()
+            || through[row]->NbKnots() != through[0]->NbKnots()) {
+            refuse("interpolating a blend's continuation failed");
+        }
+    }
+    const int poleCount = through[0]->NbPoles();
+    TColgp_Array2OfPnt poles(1, 3, 1, poleCount);
+    TColStd_Array2OfReal weights(1, 3, 1, poleCount);
+    for (int j = 1; j <= poleCount; ++j) {
+        const double weight = through[3]->Pole(j).X();
+        if (weight < 0.05) {
+            refuse("a blend's continuation has a section that is not an arc");
+        }
+        poles.SetValue(1, j, through[0]->Pole(j));
+        poles.SetValue(2, j, gp_Pnt(through[1]->Pole(j).XYZ() / weight));
+        poles.SetValue(3, j, through[2]->Pole(j));
+        weights.SetValue(1, j, 1.0);
+        weights.SetValue(2, j, weight);
+        weights.SetValue(3, j, 1.0);
+    }
+    TColStd_Array1OfReal acrossKnots(1, 2);
+    acrossKnots.SetValue(1, 0.0);
+    acrossKnots.SetValue(2, 1.0);
+    TColStd_Array1OfInteger acrossMults(1, 2);
+    acrossMults.SetValue(1, 3);
+    acrossMults.SetValue(2, 3);
+    TColStd_Array1OfReal alongKnots(1, through[0]->NbKnots());
+    through[0]->Knots(alongKnots);
+    TColStd_Array1OfInteger alongMults(1, through[0]->NbKnots());
+    through[0]->Multiplicities(alongMults);
+    TopoDS_Face canal;
+    try {
+        Handle(Geom_BSplineSurface) surface = new Geom_BSplineSurface(
+            poles,
+            weights,
+            acrossKnots,
+            alongKnots,
+            acrossMults,
+            alongMults,
+            2,
+            through[0]->Degree()
+        );
+        BRepBuilderAPI_MakeFace make(surface, Precision::Confusion());
+        if (make.IsDone()) {
+            canal = make.Face();
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    if (canal.IsNull()) {
+        refuse("building a blend's continuation failed");
+    }
+    found->beyond = TopoDS::Face(canal.Moved(location));
+    ctx.blends[slot].beyond = found;
+    return found;
+}
+
+/** The sheet of a wall's or an end face's surface: where the face is a rolling-ball blend, the surface
+ * only up to the face's own bound along the blend (past it the canal surface continues it,
+ * blendBeyond), else sheetOf
+ */
+TopoDS_Face sheetUpTo(
+    const Handle(Geom_Surface)& surface,
+    const TopLoc_Location& location,
+    const TopoDS_Face& face,
+    double reach,
+    const std::optional<BlendBeyond>& blend
+)
+{
+    if (!blend) {
+        return sheetOf(surface, location, face, reach);
+    }
+    // An extended copy must still be the face's surface in the face's parameters
+    {
+        TopLoc_Location ownLocation;
+        const Handle(Geom_Surface)& ownSurface = BRep_Tool::Surface(face, ownLocation);
+        double u0 = 0.0;
+        double u1 = 0.0;
+        double v0 = 0.0;
+        double v1 = 0.0;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        if (ownSurface->Value((u0 + u1) / 2, (v0 + v1) / 2)
+                .Distance(surface->Value((u0 + u1) / 2, (v0 + v1) / 2))
+            > linearTolerance) {
+            refuse("a blend's extended surface is not the blend in its own parameters");
+        }
+    }
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    surface->Bounds(u0, u1, v0, v1);
+    (blend->alongV ? (blend->atUpper ? v1 : v0) : (blend->atUpper ? u1 : u0)) = blend->bound;
+    BRepBuilderAPI_MakeFace make(surface, u0, u1, v0, v1, Precision::Confusion());
+    if (!make.IsDone()) {
+        refuse("a blend's surface up to its end can't be made a face");
+    }
+    return TopoDS::Face(make.Face().Moved(location));
+}
+
+/** A sheet and a blend's continuation past it as one splitting tool: sewn along the section they
+ * share (the surface's own at the face's bound, and the canal's first), so that a cut that
+ * crosses from one to the other closes. Apart, the two sections agree only to about 1e-7, and a cut
+ * that runs a short way onto the continuation was left open
+ */
+TopoDS_Shape sheetWith(const TopoDS_Face& sheet, const TopoDS_Face& beyond)
+{
+    if (beyond.IsNull()) {
+        return sheet;
+    }
+    BRepBuilderAPI_Sewing sewing(1e-6);
+    sewing.Add(sheet);
+    sewing.Add(beyond);
+    sewing.Perform();
+    const TopoDS_Shape sewn = sewing.SewedShape();
+    int faces = 0;
+    for (TopExp_Explorer it(sewn, TopAbs_FACE); it.More(); it.Next()) {
+        ++faces;
+    }
+    if (sewn.IsNull() || sewn.ShapeType() != TopAbs_SHELL || faces != 2) {
+        refuse("a blend's continuation does not join the blend's surface");
+    }
+    return sewn;
+}
+
 /** The end face's surface as a face reaching past the face (Case Base #105): the surface's natural
  * bounds where they are finite, else the face's own bounds run on by the reach. With extend, a
  * bounded surface is first extended by the reach (GeomLib::ExtendSurfByLength) on each side through
@@ -2749,19 +3318,24 @@ bool sideOnFaces(
  * extend
  */
 TopoDS_Face surfaceFace(
+    const Context& ctx,
     const TopoDS_Face& face,
     const TopoDS_Face (&faces)[2],
     const gp_Pnt& vertex,
     double reach,
     bool extend,
     Handle(Geom_Surface)& surface,
-    TopLoc_Location& location
+    TopLoc_Location& location,
+    TopoDS_Face& beyond
 )
 {
     surface = BRep_Tool::Surface(face, location);
     if (surface.IsNull()) {
         refuse("an end face without a surface");
     }
+    // A rolling-ball blend is continued past its end by the canal surface, at every level
+    const std::optional<BlendBeyond> blend = blendBeyond(ctx, face, vertex, reach);
+    beyond = blend ? blend->beyond : TopoDS_Face();
     if (extend) {
         Handle(Geom_BoundedSurface) bounded
             = Handle(Geom_BoundedSurface)::DownCast(surface->Copy());
@@ -2807,7 +3381,7 @@ TopoDS_Face surfaceFace(
         }
         surface = bounded;
     }
-    return sheetOf(surface, location, face, reach);
+    return sheetUpTo(surface, location, face, reach, blend);
 }
 
 /** A wall's surface as a face reaching past the wall, under the strip's face (Case Base #105, a
@@ -2822,18 +3396,32 @@ TopoDS_Face surfaceFace(
  * nothing to extend
  */
 TopoDS_Face wallSheet(
+    const Context& ctx,
     const TopoDS_Face& wall,
     const TopoDS_Edge& foot,
     double reach,
     int extend,
     Handle(Geom_Surface)& surface,
-    TopLoc_Location& location
+    TopLoc_Location& location,
+    TopoDS_Face& beyond
 )
 {
     surface = BRep_Tool::Surface(wall, location);
     if (surface.IsNull()) {
         refuse("a wall without a surface");
     }
+    // A rolling-ball blend is continued past its end nearest the foot by the canal surface
+    std::optional<BlendBeyond> blend;
+    {
+        BRepAdaptor_Curve along(foot);
+        blend = blendBeyond(
+            ctx,
+            wall,
+            along.Value((along.FirstParameter() + along.LastParameter()) / 2),
+            reach
+        );
+    }
+    beyond = blend ? blend->beyond : TopoDS_Face();
     if (extend) {
         Handle(Geom_BoundedSurface) bounded
             = Handle(Geom_BoundedSurface)::DownCast(surface->Copy());
@@ -2890,7 +3478,7 @@ TopoDS_Face wallSheet(
         }
         surface = bounded;
     }
-    return sheetOf(surface, location, wall, reach);
+    return sheetUpTo(surface, location, wall, reach, blend);
 }
 
 /// The surface as a face: its natural bounds where finite, else the face's own run on by the reach
@@ -2940,6 +3528,7 @@ TopoDS_Face sheetOf(
  * the end face, and stays a face of the dress-up's (Onshape's end face grows instead: one face)
  */
 double trimBySurface(
+    const Context& ctx,
     TopoDS_Shape& solid,
     Tool& tool,
     const EdgeData& data,
@@ -2973,15 +3562,25 @@ double trimBySurface(
     for (bool extend : {false, true}) {
         Handle(Geom_Surface) surface;
         TopLoc_Location location;
-        TopoDS_Face face
-            = surfaceFace(endFace, data.faces, vertex, 2 * size, extend, surface, location);
+        TopoDS_Face beyond;
+        TopoDS_Face face = surfaceFace(
+            ctx,
+            endFace,
+            data.faces,
+            vertex,
+            2 * size,
+            extend,
+            surface,
+            location,
+            beyond
+        );
         if (face.IsNull()) {
             break;
         }
         TopTools_ListOfShape arguments;
         arguments.Append(endPart);
         TopTools_ListOfShape tools;
-        tools.Append(face);
+        tools.Append(sheetWith(face, beyond));
         BRepAlgoAPI_Splitter splitter;
         splitter.SetArguments(arguments);
         splitter.SetTools(tools);
@@ -3034,7 +3633,7 @@ double trimBySurface(
             if (continuation.IsNull()) {
                 refuse("the surface of an end face crosses its tool away from the end");
             }
-            tool.passOn.push_back({face, endFace, continuation, innerEnd.point, !extend});
+            tool.passOn.push_back({face, endFace, continuation, innerEnd.point, !extend, beyond});
         }
         BRepAlgoAPI_Cut cut(solid, away);
         if (!cut.IsDone() || cut.HasErrors()) {
@@ -3083,7 +3682,7 @@ void trimContinuation(const Context& ctx, Tool& tool, const EdgeData& data, cons
     TopTools_ListOfShape arguments;
     arguments.Append(tool.solid);
     TopTools_ListOfShape tools;
-    tools.Append(pass.face);
+    tools.Append(sheetWith(pass.face, pass.beyond));
     BRepAlgoAPI_Splitter splitter;
     splitter.SetArguments(arguments);
     splitter.SetTools(tools);
@@ -3132,7 +3731,9 @@ void trimContinuation(const Context& ctx, Tool& tool, const EdgeData& data, cons
         refuse("trimming a tangent edge's tool by an end face's surface failed");
     }
     double measured = volumeOf(cut.Shape());
-    if (std::abs(measured + removed - tool.volume) > volumeTolerance * tool.volume) {
+    // As its siblings (trimBySurface, trimByWall): what the split's raised tolerances can cost
+    const double allowance = raisedTolerance(cut.Shape(), {}) * squareSize(cut.Shape());
+    if (std::abs(measured + removed - tool.volume) > volumeTolerance * tool.volume + allowance) {
         refuse("a tangent edge's tool trimmed by an end face's surface: " + describe(measured)
                + " left and " + describe(removed) + " cut away of " + describe(tool.volume));
     }
@@ -3280,6 +3881,7 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
         }
         if (!ends[i].surfaceEnd.IsNull()) {
             removed += trimBySurface(
+                ctx,
                 solid,
                 tool,
                 data,
@@ -5556,14 +6158,16 @@ bool trimByWall(
     for (int extend : {0, 1, 2}) {
         Handle(Geom_Surface) surface;
         TopLoc_Location location;
-        TopoDS_Face sheet = wallSheet(at.wall, at.foot, reach, extend, surface, location);
+        TopoDS_Face beyond;
+        TopoDS_Face sheet
+            = wallSheet(ctx, at.wall, at.foot, reach, extend, surface, location, beyond);
         if (sheet.IsNull()) {
             break;
         }
         TopTools_ListOfShape arguments;
         arguments.Append(tool.solid);
         TopTools_ListOfShape tools;
-        tools.Append(sheet);
+        tools.Append(sheetWith(sheet, beyond));
         BRepAlgoAPI_Splitter splitter;
         splitter.SetArguments(arguments);
         splitter.SetTools(tools);
