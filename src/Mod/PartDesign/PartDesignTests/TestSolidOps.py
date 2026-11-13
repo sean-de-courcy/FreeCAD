@@ -1257,3 +1257,78 @@ class TestThickenSeamLeg(unittest.TestCase):
         s = self.thicken(srf, 0.75, 0.75, True)
         self.assertAlmostEqual(s.Volume, 12 * math.pi * (14 + 22 + 4 * math.pi), delta=1e-3)
         self.assertBox(s, (15.25, 15.25, 3.25), (50 + 4 * math.tan(math.radians(30)), 24.75, 30))
+
+
+class TestThickenPlanarCaps(unittest.TestCase):
+    """A thickened sheet's end caps that lie in a plane are Plane faces, as in Onshape (ops#640, #69: the
+    replica's harness finds a profile face by its class). OCC's offset builds them as planar B-splines.
+    Models: a bore of radius 4 straight through a 40 x 30 x 20 box (the sheet is its full-turn cylinder face,
+    normal toward the axis), and a half cylinder of radius 10, height 20. Expected: the caps lie in z = 0
+    and z = 20, normal out of the solid (-z, +z), on a Plane; the volume is the annulus times the height."""
+
+    def setUp(self):
+        self.doc = App.newDocument("ThickenPlanarCaps")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def thicken(self, shape, t1=0.0, t2=0.0, midplane=None):
+        a = self.doc.addObject("Part::Feature", "A")
+        a.Shape = shape
+        names = tuple("Face%d" % (k + 1) for k, f in enumerate(shape.Faces) if isinstance(f.Surface, Part.Cylinder))
+        self.assertEqual(len(names), 1)
+        t = S.make_thicken(self.doc.addObject("PartDesign::Body", "T"), [(a, names)], 0.75, 0.0, name="Thk")
+        if midplane is not None:
+            t.Midplane, t.Thickness = True, midplane
+        else:
+            t.Thickness1, t.Thickness2 = t1, t2
+        self.doc.recompute()
+        self.assertEqual(t.State, ["Up-to-date"], t.getStatusString())
+        self.assertTrue(t.Shape.isValid())
+        self.assertEqual(len(t.Shape.Solids), 1)
+        self.feat = t
+        return t.Shape
+
+    def assertNamesKept(self, s):
+        # the same Thicken recomputed without the rebuild (OCC's B-spline caps) gives every face the same name
+        from unittest import mock
+
+        with mock.patch.object(S, "_plane_caps", lambda tool: tool):
+            self.feat.touch()
+            self.doc.recompute()
+            ref = self.feat.Shape
+        self.assertNotEqual([f.Surface.__class__.__name__ for f in ref.Faces], [f.Surface.__class__.__name__ for f in s.Faces])
+        self.assertEqual(len(ref.Faces), len(s.Faces))
+        for k in range(len(s.Faces)):
+            name = "Face%d" % (k + 1)
+            self.assertTrue(s.getElementMappedName(name))
+            self.assertEqual(s.getElementMappedName(name), ref.getElementMappedName(name), name)
+
+    def assertCaps(self, s):
+        caps = [(k, f) for k, f in enumerate(s.Faces) if f.findPlane() is not None
+                and abs(abs(f.findPlane().Axis.z) - 1) < 1e-9]
+        self.assertEqual(len(caps), 2)
+        for k, f in caps:
+            self.assertEqual(f.Surface.__class__.__name__, "Plane")
+            z = f.CenterOfMass.z
+            self.assertTrue(abs(z) < 1e-9 or abs(z - 20) < 1e-9, z)
+            u0, u1, v0, v1 = f.ParameterRange
+            n = f.normalAt(0.5 * (u0 + u1), 0.5 * (v0 + v1))
+            self.assertAlmostEqual(n.z, 1.0 if z > 10 else -1.0, places=9)  # out of the solid
+
+    def testBoreCapsArePlanes(self):
+        box = Part.makeBox(40, 30, 20).cut(Part.makeCylinder(4, 20, App.Vector(15, 15, 0))).removeSplitter()
+        s = self.thicken(box, t1=1.0)  # toward the axis: radii 3 to 4
+        self.assertAlmostEqual(s.Volume, math.pi * (16 - 9) * 20, delta=1e-6)
+        self.assertCaps(s)
+        self.assertNamesKept(s)
+        self.assertEqual(sum(1 for f in s.Faces if isinstance(f.Surface, Part.Cylinder)), 2)
+
+    def testHalfCylinderMidplaneCapsArePlanes(self):
+        half = Part.makeCylinder(10, 20, App.Vector(0, 0, 0), App.Vector(0, 0, 1), 180)
+        s = self.thicken(half, midplane=3.0)  # radii 8.5 to 11.5
+        self.assertAlmostEqual(s.Volume, 0.5 * math.pi * (11.5 ** 2 - 8.5 ** 2) * 20, delta=1e-6)
+        self.assertCaps(s)
+        self.assertNamesKept(s)
+        # the side faces in y = 0 were planes already: every planar face is a Plane
+        self.assertEqual([f.Surface.__class__.__name__ for f in s.Faces if f.findPlane() is not None], ["Plane"] * 4)

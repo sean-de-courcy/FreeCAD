@@ -477,6 +477,64 @@ def _has_full_cylinder(group):
     return False
 
 
+def _oriented_normal(face):
+    """The face's normal at the middle of its parameter range, its orientation included."""
+    u0, u1, v0, v1 = face.ParameterRange
+    return face.normalAt(0.5 * (u0 + u1), 0.5 * (v0 + v1))
+
+
+def _plane_caps(shape):
+    """The shape with every face that lies in a plane but is built on another surface (OCC's offset gives a
+    thick sheet's end caps as planar B-splines) rebuilt on a real Plane with the same boundary and side, so
+    the caps are planes, as in Onshape (ops#640, #69). The replaced faces keep their element names. Where a
+    rebuild or its checks fail (validity, volume, names), the shape is returned unchanged."""
+    pairs, names = [], []
+    for k, f in enumerate(shape.Faces):
+        if isinstance(f.Surface, Part.Plane):
+            continue
+        try:
+            pl = f.findPlane(TOL)
+        except Exception:
+            pl = None
+        if pl is None:
+            continue
+        try:
+            n = _oriented_normal(f)
+            axis = App.Vector(pl.Axis)
+            if axis.dot(n) < 0:
+                axis = -axis
+            outer = f.OuterWire
+            nf = Part.Face(Part.Plane(pl.Position, axis), outer)
+            holes = [w for w in f.Wires if not w.isSame(outer)]
+            if holes:
+                nf.cutHoles(holes)
+            if _oriented_normal(nf).dot(n) < 0:
+                nf.reverse()
+            if not nf.isValid() or abs(nf.Area - f.Area) > TOL * max(1.0, f.Area):
+                continue
+        except Exception:
+            continue
+        pairs.append((f, nf))
+        names.append("Face%d" % (k + 1))
+    if not pairs:
+        return shape
+    try:
+        names = [shape.getElementMappedName(n) for n in names]
+        res = shape.replaceShape(pairs)
+        if (res.isNull() or not res.isValid() or len(res.Solids) != len(shape.Solids)
+                or len(res.Faces) != len(shape.Faces)
+                or abs(res.Volume - shape.Volume) > TOL * max(1.0, abs(shape.Volume))):
+            return shape
+        for (_, nf), name in zip(pairs, names):
+            if not name:
+                continue
+            k = next(i for i, g in enumerate(res.Faces) if g.isSame(nf) or g.isPartner(nf))
+            res.setElementName(element="Face%d" % (k + 1), name=name, overwrite=True)
+    except Exception:
+        return shape
+    return res
+
+
 def thicken_tool(faces, t1, t2):
     """Solid thickened from the faces: t1 along each face's normal, t2 against it."""
     if t1 < 0 or t2 < 0:
@@ -505,7 +563,7 @@ def thicken_tool(faces, t1, t2):
     tool = pieces[0]
     if len(pieces) > 1:
         tool = pieces[0].fuse(pieces[1:])
-    return tool
+    return _plane_caps(tool)
 
 
 def offset_surface(faces, distance):
