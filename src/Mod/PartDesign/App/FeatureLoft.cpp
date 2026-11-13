@@ -88,9 +88,11 @@ namespace
 /// Onshape's tangent length per unit magnitude at one corner rail of a side face, from its point p
 /// on the first profile to its point q on the last, at the end whose normal (towards the other
 /// profile) is `normal`: 0.9 times the rail's reach along that normal plus 0.1 times its length.
-/// Along the face it is linear between the face's two corner rails. Found from oracle 17's surfaces
-/// (LE2, LE4, LE9; notes/loft-end-conditions.md): it gives Onshape's k to 1e-6 on squares, circles,
-/// offset rectangles and a tilted end, where each end gets its own k.
+/// Along a face between two corner rails it is linear between them; a face bounded by one closed
+/// edge on each profile (a circle) has no corners, and each row takes the rule at its own rail
+/// (oracle 18 Q10). Found from oracle 17's surfaces (LE2, LE4, LE9; notes/loft-end-conditions.md):
+/// it gives Onshape's k to 1e-6 on squares, circles, offset rectangles and a tilted end, where each
+/// end gets its own k.
 double tangentLength(const gp_Pnt& p, const gp_Pnt& q, const gp_Dir& normal)
 {
     const gp_Vec rail(p, q);
@@ -279,9 +281,16 @@ Part::TopoShape withProfileConditions(
         const double startB = startMagnitude * tangentLength(points0.back(), points1.back(), normal0);
         const double endA = endMagnitude * tangentLength(points0.front(), points1.front(), normal1);
         const double endB = endMagnitude * tangentLength(points0.back(), points1.back(), normal1);
+        // a closed profile edge (a circle) has no corner rails: each row takes the rule at its own
+        // rail, the points at its fraction on the two edges (oracle 18 Q10: an off-centre circle's
+        // rows each get their own value, not the seam rail's)
+        const bool closed = BRep_Tool::IsClosed(edge0)
+            || points0.front().Distance(points0.back()) < 1e-7;
+        const Handle(Geom_BSplineCurve) curve0 = fit(points0, fractions);
+        const Handle(Geom_BSplineCurve) curve1 = fit(points1, fractions);
         GeomFill_Profiler profiler;
-        profiler.AddCurve(fit(points0, fractions));
-        profiler.AddCurve(fit(points1, fractions));
+        profiler.AddCurve(curve0);
+        profiler.AddCurve(curve1);
         profiler.Perform(Precision::PConfusion());
         const int count = profiler.NbPoles();
         TColgp_Array1OfPnt row0(1, count);
@@ -309,9 +318,17 @@ Part::TopoShape withProfileConditions(
                 greville += flat[i];
             }
             const double fraction = (greville / degree - flat.front()) / span;
-            const gp_XYZ tangent0
-                = gp_Vec(normal0).XYZ() * (startA + (startB - startA) * fraction);
-            const gp_XYZ tangent1 = gp_Vec(normal1).XYZ() * (endA + (endB - endA) * fraction);
+            double kStart = startA + (startB - startA) * fraction;
+            double kEnd = endA + (endB - endA) * fraction;
+            if (closed) {
+                // the fitted edges are parameterised by the fractions, 0 to 1
+                const gp_Pnt p = curve0->Value(fraction);
+                const gp_Pnt q = curve1->Value(fraction);
+                kStart = startMagnitude * tangentLength(p, q, normal0);
+                kEnd = endMagnitude * tangentLength(p, q, normal1);
+            }
+            const gp_XYZ tangent0 = gp_Vec(normal0).XYZ() * kStart;
+            const gp_XYZ tangent1 = gp_Vec(normal1).XYZ() * kEnd;
             const gp_XYZ p0 = row0(j).XYZ();
             const gp_XYZ p3 = row3(j).XYZ();
             gp_XYZ p1;
