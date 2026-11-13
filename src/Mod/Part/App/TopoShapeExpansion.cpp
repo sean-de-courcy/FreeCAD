@@ -7918,72 +7918,93 @@ TopoShape& TopoShape::makeElementChamfer(
         }
     }
     // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
-    std::vector<TopoShape> inputEdges = edges;
-    const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
-    auto mkChamferPtr = std::make_shared<BRepFilletAPI_MakeChamfer>(input.getShape());
-    BRepFilletAPI_MakeChamfer& mkChamfer = *mkChamferPtr;
     // By equal distances, a chain of edges at different angles gets Onshape's setbacks
-    // (FilletFallback::chainSetbacks(), notes/chamfer-chain-setbacks.md)
-    std::vector<double> setbacks;
-    if (chamferType == ChamferType::equalDistance) {
-        setbacks = FilletFallback::chainSetbacks(input, inputEdges, radius1);
-    }
-    for (std::size_t i = 0; i < inputEdges.size(); ++i) {
-        const auto& edge = inputEdges[i].getShape();
-        if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
-            FC_THROWM(Base::CADKernelError, "chamfer edge is degenerated");
+    // (FilletFallback::chainSetbacks(), notes/chamfer-chain-setbacks.md). Where neither OCCT nor
+    // the construction builds them, the chamfer is built again with w on every edge, today's
+    // result: a chamfer that built with w never starts failing (ruling A, section 7)
+    for (bool uniform : {false, true}) {
+        std::vector<TopoShape> inputEdges = edges;
+        const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
+        auto mkChamferPtr = std::make_shared<BRepFilletAPI_MakeChamfer>(input.getShape());
+        BRepFilletAPI_MakeChamfer& mkChamfer = *mkChamferPtr;
+        std::vector<double> setbacks;
+        if (chamferType == ChamferType::equalDistance) {
+            setbacks = uniform ? std::vector<double>(inputEdges.size(), radius1)
+                               : FilletFallback::chainSetbacks(input, inputEdges, radius1);
         }
-        // Add edge to fillet algorithm
-        TopoDS_Shape face;
-        if (flipDirection == Flip::flip) {
-            const auto faces = input.findAncestorsShapes(edge, TopAbs_FACE);
-            if (faces.empty()) {
+        const bool setbacksDiffer
+            = std::any_of(setbacks.begin(), setbacks.end(), [&](double setback) {
+                  return setback != radius1;
+              });
+        for (std::size_t i = 0; i < inputEdges.size(); ++i) {
+            const auto& edge = inputEdges[i].getShape();
+            if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
+                FC_THROWM(Base::CADKernelError, "chamfer edge is degenerated");
+            }
+            // Add edge to fillet algorithm
+            TopoDS_Shape face;
+            if (flipDirection == Flip::flip) {
+                const auto faces = input.findAncestorsShapes(edge, TopAbs_FACE);
+                if (faces.empty()) {
+                    FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
+                }
+                face = faces.back();
+            }
+            else {
+                face = input.findAncestorShape(edge, TopAbs_FACE);
+            }
+            if (face.IsNull()) {
                 FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
             }
-            face = faces.back();
+            switch (chamferType) {
+                case ChamferType::equalDistance:  // The edge's setback on both faces
+                    mkChamfer
+                        .Add(setbacks[i], setbacks[i], TopoDS::Edge(edge), TopoDS::Face(face));
+                    break;
+                case ChamferType::twoDistances:  // Two distances
+                    mkChamfer.Add(radius1, radius2, TopoDS::Edge(edge), TopoDS::Face(face));
+                    break;
+                case ChamferType::distanceAngle:  // Distance and angle
+                    mkChamfer.AddDA(
+                        radius1,
+                        Base::toRadians(radius2),
+                        TopoDS::Edge(edge),
+                        TopoDS::Face(face)
+                    );
+                    break;
+            }
         }
-        else {
-            face = input.findAncestorShape(edge, TopAbs_FACE);
+        Part::SignalException sig;
+        FilletFallback::Request request;
+        // Before the maker raises the copy's tolerances in place
+        request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
+        request.kind = FilletFallback::Kind::Chamfer;
+        request.size1 = radius1;
+        request.size2 = radius2;
+        request.chamferType = chamferType;
+        request.flipDirection = flipDirection;
+        if (setbacksDiffer) {
+            request.setbacks = setbacks;
         }
-        if (face.IsNull()) {
-            FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
+        auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
+        if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp) {
+            if (finishConstruction(*this, *outcome, input, op)) {
+                return *this;
+            }
+            // At a cusp OCCT built: its result stands where the construction refuses (Case Base #76)
+            if (setbacksDiffer && (outcome->failed || outcome->thin || outcome->invalid)) {
+                continue;  // w on every edge
+            }
+            if (outcome->failed) {
+                raiseDressUpError(mkChamfer, outcome->occtError, outcome->reason);
+            }
+            if (outcome->thin) {
+                raiseThinFaceError("The chamfer", outcome->reason);
+            }
         }
-        switch (chamferType) {
-            case ChamferType::equalDistance:  // Equal distance, the edge's setback on both faces
-                mkChamfer.Add(setbacks[i], setbacks[i], TopoDS::Edge(edge), TopoDS::Face(face));
-                break;
-            case ChamferType::twoDistances:  // Two distances
-                mkChamfer.Add(radius1, radius2, TopoDS::Edge(edge), TopoDS::Face(face));
-                break;
-            case ChamferType::distanceAngle:  // Distance and angle
-                mkChamfer
-                    .AddDA(radius1, Base::toRadians(radius2), TopoDS::Edge(edge), TopoDS::Face(face));
-                break;
-        }
+        return makeElementShape(mkChamfer, input, op);
     }
-    Part::SignalException sig;
-    FilletFallback::Request request;
-    // Before the maker raises the copy's tolerances in place
-    request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
-    request.kind = FilletFallback::Kind::Chamfer;
-    request.size1 = radius1;
-    request.size2 = radius2;
-    request.chamferType = chamferType;
-    request.flipDirection = flipDirection;
-    request.setbacks = setbacks;
-    auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
-    if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp) {
-        if (finishConstruction(*this, *outcome, input, op)) {
-            return *this;
-        }
-        if (outcome->failed) {
-            raiseDressUpError(mkChamfer, outcome->occtError, outcome->reason);
-        }
-        if (outcome->thin) {
-            raiseThinFaceError("The chamfer", outcome->reason);
-        }
-    }
-    return makeElementShape(mkChamfer, input, op);
+    return *this;  // not reached: the second pass has no setbacks that differ
 }
 
 TopoShape& TopoShape::makeElementDefeaturing(

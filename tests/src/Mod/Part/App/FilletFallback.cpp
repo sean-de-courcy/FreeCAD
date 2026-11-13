@@ -563,6 +563,64 @@ testing::AssertionResult sameAsOcct(
     return sameAs(exactRoute, occt);
 }
 
+/// A chamfer by equal distances w over a chain whose angles differ is OCCT's with the setbacks
+/// (notes/chamfer-chain-setbacks.md): the same solid with the same faces as OCCT given the
+/// expected setbacks directly. Where OCCT fails with them, the construction refuses the corner
+/// between setbacks that differ and builds w on every edge instead (ruling A, section 7).
+testing::AssertionResult sameAsOcctWithSetbacks(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double w,
+    const std::vector<double>& expected
+)
+{
+    auto setbacks = FF::chainSetbacks(base, edges, w);
+    if (setbacks.size() != expected.size()) {
+        return testing::AssertionFailure() << setbacks.size() << " setbacks";
+    }
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        if (std::abs(setbacks[i] - expected[i]) > 1e-9) {
+            return testing::AssertionFailure()
+                << "setback " << i << " " << setbacks[i] << " != " << expected[i];
+        }
+    }
+    TopoShape result = dressUp(base, edges, chamfer(w));
+    BRepFilletAPI_MakeChamfer maker(base.getShape());
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        const auto& edge = TopoDS::Edge(edges[i].getShape());
+        auto face = TopoDS::Face(base.findAncestorShape(edge, TopAbs_FACE));
+        maker.Add(expected[i], expected[i], edge, face);
+    }
+    bool built = false;
+    try {
+        maker.Build();
+        built = maker.IsDone() && BRepCheck_Analyzer(maker.Shape()).IsValid();
+    }
+    catch (const Standard_Failure&) {
+        built = false;
+    }
+    if (!built) {
+        FF::Request uniform = chamfer(w);
+        uniform.limitOnly = false;
+        return sameAs(forced(base, edges, uniform), result);
+    }
+    const auto& a = result.getShape();
+    const TopoDS_Shape& b = maker.Shape();
+    if (a.IsNull()) {
+        return testing::AssertionFailure() << "null shape";
+    }
+    double difference
+        = volume(BRepAlgoAPI_Cut(a, b).Shape()) + volume(BRepAlgoAPI_Cut(b, a).Shape());
+    if (difference > 1e-7 * volume(b)) {
+        return testing::AssertionFailure() << "symmetric difference " << difference;
+    }
+    if (count(a, TopAbs_FACE) != count(b, TopAbs_FACE)) {
+        return testing::AssertionFailure()
+            << count(a, TopAbs_FACE) << " faces != " << count(b, TopAbs_FACE);
+    }
+    return testing::AssertionSuccess();
+}
+
 /// The last section of each of the element's names: the op and flag the dress-up gave it
 bool namedBy(const TopoShape& shape, const char* element, const char* op, const char* flag)
 {
@@ -1667,9 +1725,31 @@ TEST_F(FilletFallbackTest, unequalCornersSameAsOcctBelowTheLimit)
             edgeBetween(plate, {a, 0, 4}, {a, 20, 4})
         };
         EXPECT_TRUE(sameAsOcct(plate, two, fillet(2))) << degrees;
-        EXPECT_TRUE(sameAsOcct(plate, two, chamfer(2))) << degrees;
         EXPECT_TRUE(sameAsOcct(plate, top, fillet(degrees < 0 ? 2 : 3.9))) << degrees;
-        EXPECT_TRUE(sameAsOcct(plate, top, chamfer(degrees < 0 ? 2 : 3.9))) << degrees;
+        // Chamfers by equal distances: the chain's first edge gets w, every other edge
+        // w tan(a1 / 2) / tan(a / 2), where the top meets the walls at 90 degrees and the
+        // leaning end at 90 + degrees (notes/chamfer-chain-setbacks.md section 4)
+        auto angleOf = [&](const TopoShape& edge) {
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(TopoDS::Edge(edge.getShape()), v1, v2);
+            bool leaning = std::abs(BRep_Tool::Pnt(v1).X() - a) < 1e-9
+                && std::abs(BRep_Tool::Pnt(v2).X() - a) < 1e-9;
+            return (leaning ? 90 + degrees : 90.0) * pi / 180;
+        };
+        auto setbacksOf = [&](const std::vector<TopoShape>& edges, double w) {
+            std::vector<double> setbacks;
+            for (const auto& edge : edges) {
+                setbacks.push_back(
+                    w * std::tan(angleOf(edges.front()) / 2) / std::tan(angleOf(edge) / 2)
+                );
+            }
+            setbacks.front() = w;
+            return setbacks;
+        };
+        double w = degrees < 0 ? 2 : 3.9;
+        EXPECT_TRUE(sameAsOcctWithSetbacks(plate, two, 2, setbacksOf(two, 2))) << degrees;
+        EXPECT_TRUE(sameAsOcctWithSetbacks(plate, top, w, setbacksOf(top, w))) << degrees;
     }
 }
 
@@ -2093,12 +2173,34 @@ TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
     auto mixed = edgesAt(boss, {15, 15, 4});
     ASSERT_EQ(mixed.size(), 3U);
     EXPECT_TRUE(refusedFor(boss, mixed, fillet(2), "mixed convexity"));
-    // A15: the triangle and hexagon plates' edges chamfered: their corners aren't square
-    for (int n : {3, 6}) {
-        TopoShape plate(regularPlate(n), 1L);
-        auto all = plate.getSubTopoShapes(TopAbs_EDGE);
-        EXPECT_TRUE(refusedFor(plate, all, chamfer(2), "not square")) << n;
+    // A15: the hexagon plate's edges chamfered: its corners aren't square. OCCT fails with the
+    // setbacks too (vertical edges at 120 degrees, the others at 90), so the construction builds
+    // w on every edge (ruling A, notes/chamfer-chain-setbacks.md section 7) and refuses that
+    TopoShape hexagon(regularPlate(6), 1L);
+    auto hexagonEdges = hexagon.getSubTopoShapes(TopAbs_EDGE);
+    EXPECT_TRUE(refusedFor(hexagon, hexagonEdges, chamfer(2), "not square"));
+    // The triangle plate's: OCCT fails with w, but builds with the setbacks (the chain's first
+    // edge gets w, every other edge w tan(a1 / 2) / tan(a / 2); the vertical edges are at 60
+    // degrees, the others at 90)
+    TopoShape triangle(regularPlate(3), 1L);
+    auto triangleEdges = triangle.getSubTopoShapes(TopAbs_EDGE);
+    EXPECT_TRUE(occtFails(triangle, triangleEdges, chamfer(2)));
+    auto angleOf = [](const TopoShape& edge) {
+        TopoDS_Vertex v1;
+        TopoDS_Vertex v2;
+        TopExp::Vertices(TopoDS::Edge(edge.getShape()), v1, v2);
+        bool vertical = std::abs(BRep_Tool::Pnt(v1).Z() - BRep_Tool::Pnt(v2).Z()) > 1;
+        return (vertical ? 60.0 : 90.0) * pi / 180;
+    };
+    std::vector<double> setbacks;
+    for (const auto& edge : triangleEdges) {
+        setbacks.push_back(
+            2 * std::tan(angleOf(triangleEdges.front()) / 2) / std::tan(angleOf(edge) / 2)
+        );
     }
+    setbacks.front() = 2;
+    EXPECT_TRUE(sameAsOcctWithSetbacks(triangle, triangleEdges, 2, setbacks));
+    EXPECT_TRUE(dressUp(triangle, triangleEdges, chamfer(2)).isValid());
     // The D plate: a line and a half circle meeting at an angle, top edges at r = t
     BRepBuilderAPI_MakeWire outline;
     outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, -10, 0), gp_Pnt(0, 10, 0)).Edge());
