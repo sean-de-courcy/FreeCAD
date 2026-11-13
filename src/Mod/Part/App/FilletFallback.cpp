@@ -6739,6 +6739,64 @@ std::vector<TopoShape> makerInputs(const std::vector<TopoShape>& shapes)
     return copies;
 }
 
+bool withinWholeTools(
+    const TopoDS_Shape& baseShape,
+    const TopoDS_Shape& result,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::string& why
+)
+{
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        for (const auto& edge : edges) {
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                refuse("not an edge");
+            }
+            ctx.selected.Add(edge);
+        }
+        // Each edge's whole tool, in closed form: its section along a line, or about a circle's
+        // axis at the section's centroid (Pappus)
+        double removed = 0.0;
+        double added = 0.0;
+        for (int i = 1; i <= ctx.selected.Extent(); ++i) {
+            EdgeData data = analyse(ctx, TopoDS::Edge(ctx.selected(i)));
+            if (data.ruled) {
+                refuse("an edge beside a cylinder along it has no whole tool in closed form here");
+            }
+            Section section = sectionAt(ctx, data, data.first);
+            double volume = 0.0;
+            if (data.line) {
+                volume = section.area * data.start.Distance(data.end);
+            }
+            else {
+                gp_Pnt centroid = section.corner.Translated(section.centroid);
+                double span = data.closed ? 2 * pi : data.last - data.first;
+                volume = section.area * gp_Lin(data.circle.Axis()).Distance(centroid) * span;
+            }
+            (data.convex ? removed : added) += volume;
+        }
+        double before = volumeOf(baseShape);
+        double change = volumeOf(result) - before;
+        // The volumes are measured: a millionth of the body's, and a hundredth of the tools'
+        double slack = volumeTolerance * before + 0.01 * (removed + added);
+        if (change < -removed - slack || change > added + slack) {
+            why = "it changes the volume by " + describe(change) + ", outside what its edges' whole "
+                  "tools can take (" + describe(-removed) + ") or add (" + describe(added) + ")";
+            return false;
+        }
+        return true;
+    }
+    catch (const Refusal& refusal) {
+        why = "its edges' whole tools are not known (" + refusal.reason + ")";
+    }
+    catch (const Standard_Failure& e) {
+        why = std::string("its edges' whole tools are not known (OCCT: ") + e.GetMessageString() + ")";
+    }
+    return false;
+}
+
 bool endsInOverflow(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,

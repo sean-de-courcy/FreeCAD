@@ -213,10 +213,26 @@ PartExport TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& 
 /** Whether one of the edges ends in a cusp: an unselected edge of one of its faces leaves the
  * vertex the way it does (Case Base #76, a tunnel's half circle on a slot's end wall, the slot's
  * walls tangent to the tunnel). OCCT's chamfer there can be valid and wrong (a face running out
- * of the body), and so can its fillet (ops#748), so the exact construction builds it first, and
- * OCCT's result stands where it refuses.
+ * of the body), and so can its fillet (ops#748), so the exact construction builds it first. Where
+ * it refuses, OCCT's chamfer stands; its fillet stands only within its edges' whole tools
+ * (withinWholeTools()), else the fillet fails.
  */
 PartExport bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges);
+
+/** Whether a dress-up's result changes the base's volume by no more than its edges' whole tools can:
+ * each edge's section (its fillet's spandrel or its chamfer's triangle) along the edge, in closed
+ * form, the convex edges' taken away and the concave edges' added. Walls, ends and corners only
+ * ever trim the tools, so a right result lies inside these bounds; OCCT's valid and wrong results at
+ * a cusp do not (CU5: 58.46 taken, or 126.30 added, where the whole tool is 3.5; ops#748). False,
+ * with why, when it does not, or when an edge's whole tool is not known (not a line or a circle).
+ */
+PartExport bool withinWholeTools(
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& result,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::string& why
+);
 
 /** Whether one of a fillet's edges is a concave arc ending at a vertex of 4 edges where its tangent
  * chain turns convex (Nest Cover #151; the construction's VertexClass::Overflow). OCCT stops its

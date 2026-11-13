@@ -7915,7 +7915,7 @@ TopoShape& TopoShape::makeElementFillet(
         // Naming it failed: OCCT, as without the preference
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
     }
-    // At a cusp OCCT built: its result stands where the construction refuses, as a chamfer's does
+    // At a cusp OCCT built: where the construction refuses, its result stands only if it passes below
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns || outcome->cusp) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
@@ -7925,6 +7925,24 @@ TopoShape& TopoShape::makeElementFillet(
         }
         if (outcome->thin) {
             raiseThinFaceError("The fillet", outcome->reason);
+        }
+        if (outcome->cusp && !outcome->invalid && !outcome->turns) {
+            // At a cusp OCCT's valid result can be the wrong round (CU5: 58.46 taken, or 126.30
+            // added, for 2.922055): it stands only within its edges' whole tools
+            std::string why;
+            if (!FilletFallback::withinWholeTools(
+                    input.getShape(),
+                    mkFillet->Shape(),
+                    edgeShapes,
+                    request,
+                    why
+                )) {
+                FC_THROWM(
+                    Base::CADKernelError,
+                    "The fillet's edge ends in a cusp, where OCCT's round is not to be trusted ("
+                        << why << "), and its exact construction refused: " << outcome->reason
+                );
+            }
         }
         if (outcome->turns) {
             // OCCT's ends there aren't Onshape's: never returned silently (decision 150)
