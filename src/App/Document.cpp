@@ -194,7 +194,11 @@ namespace
 // whole) names its side faces as the merge of its turns; a Thin pipe names its wall's edges and side
 // faces from the profile's curves (by index before); the solver keeps a helix's turn 1 and the lone
 // face of one turn as one element at the same place (a 1 <-> 2 turn edit).
-constexpr int ForkNamingRevision = 18;
+// 19: ops#640 (name growth at split faces), a piece of a split element no longer takes as a
+// Connected Name a neighbour whose name holds the element's own name as it was (a face made from
+// the split edge, a dress-up's or refine's edge named from the split face): such a mark multiplied
+// the name's full length per split. The pieces keep their other marks.
+constexpr int ForkNamingRevision = 19;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
