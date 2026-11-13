@@ -3299,7 +3299,7 @@ TEST_F(FilletFallbackTest, concaveRunEndingWhereItsChainTurnsConvex)
               .Shape();
     TopoShape fused;
     fused.makeElementBoolean(OpCodes::Fuse, {TopoShape(plate), TopoShape(wall)});
-    TopoShape base(fused.removeSplitter().getShape(), 1L);
+    TopoShape base(fused.removeSplitter(), 1L);
     ASSERT_EQ(base.countSubElements("Face"), 11);
     auto run = footRun(base, h, [&](const gp_Pnt& p) {
         return p.Y() > 1e-7 && p.Y() < t + 1e-7;
@@ -3412,7 +3412,7 @@ TEST_F(FilletFallbackTest, concaveArcRunEndingAtAChamferCone)
         OpCodes::Fuse,
         {TopoShape(parts[0]), TopoShape(parts[1]), TopoShape(parts[2]), TopoShape(parts[3])}
     );
-    TopoShape base(fused.removeSplitter().getShape(), 1L);
+    TopoShape base(fused.removeSplitter(), 1L);
     int baseFaces = base.countSubElements("Face");
     auto run = footRun(base, h, [&](const gp_Pnt& p) {
         double radial = std::hypot(p.X(), p.Y());
