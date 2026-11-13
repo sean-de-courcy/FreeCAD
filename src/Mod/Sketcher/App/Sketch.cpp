@@ -152,6 +152,7 @@ Sketch::~Sketch()
 
 void Sketch::clear()
 {
+    holdingNarrowed = false;
     // clear all internal data sets
     Points.clear();
     Lines.clear();
@@ -5071,7 +5072,7 @@ int Sketch::solve()
 
 int Sketch::solveHolding(
     const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
-    const std::vector<int>& tagsToHold
+    const std::map<int, double>& allowedErrors
 )
 {
     if (isInitMove) {
@@ -5096,6 +5097,7 @@ int Sketch::solveHolding(
     if (!anyGeometry) {
         return GCS::Failed;
     }
+    const bool whole = unknowns.size() == Parameters.size();
 
     captureGroupStates();
     Base::TimeElapsed start_time;
@@ -5105,33 +5107,41 @@ int Sketch::solveHolding(
     for (double* param : Parameters) {
         before.push_back(*param);
     }
-    auto restore = [&]() {
-        for (std::size_t i = 0; i < Parameters.size(); ++i) {
-            *Parameters[i] = before[i];
-        }
-    };
 
     // Least motion: the Gauss-Newton step of least norm moves only what the changed constraints
     // need (a length's end along the line, an arc's ends out from its centre); the full-pivot LU
     // step zeroes some unknowns instead and moves the others further
-    clearTemporaryConstraints();
-    const GCS::DogLegGaussStep gaussStep = GCSsys.dogLegGaussStep;
+    struct GaussStepGuard
+    {
+        GCS::System& system;
+        GCS::DogLegGaussStep saved;
+        ~GaussStepGuard()
+        {
+            system.dogLegGaussStep = saved;
+        }
+    } guard {GCSsys, GCSsys.dogLegGaussStep};
     GCSsys.dogLegGaussStep = GCS::LeastNormFullPivLU;
-    GCSsys.invalidatedDiagnosis();
-    GCSsys.declareUnknowns(unknowns);
-    GCSsys.declareDrivenParams(DrivenParameters);
-    GCSsys.initSolution(defaultSolverRedundant);
-    int ret = GCSsys.solve(isFine, GCS::DogLeg);
-    GCSsys.dogLegGaussStep = gaussStep;
+
+    clearTemporaryConstraints();
+    if (!whole || holdingNarrowed) {
+        // a whole system set up at the drawn parameters (setUpSketch's) is solved as it is
+        GCSsys.invalidatedDiagnosis();
+        GCSsys.declareUnknowns(unknowns);
+        GCSsys.declareDrivenParams(DrivenParameters);
+        GCSsys.initSolution(defaultSolverRedundant);
+        holdingNarrowed = !whole;
+    }
+    const int ret = GCSsys.solve(isFine, GCS::DogLeg);
 
     bool holds = ret == GCS::Success;
     if (holds) {
         GCSsys.applySolution();
         // a constraint none of whose parameters is an unknown is in no subsystem the solver
-        // checks: every one is read here (NaN: a constraint the solver does not hold at all)
-        for (int tag : tagsToHold) {
-            const double error = GCSsys.calculateConstraintErrorByTag(tag);
-            if (!std::isnan(error) && !(std::abs(error) < 1e-7)) {
+        // checks: every one is read here, in one pass (a tag absent: not in the solve at all)
+        const std::map<int, double> errors = GCSsys.calculateConstraintErrorsByTag();
+        for (const auto& [tag, allowed] : allowedErrors) {
+            const auto error = errors.find(tag);
+            if (error != errors.end() && !(std::abs(error->second) <= allowed)) {
                 holds = false;
                 break;
             }
@@ -5141,32 +5151,49 @@ int Sketch::solveHolding(
         holds = false;
     }
     if (!holds) {
-        restore();
-        updateGeometry();
-    }
-
-    // the whole sketch again, for what follows (a drag, a later solve); the diagnosis is redone
-    // for it, at the new parameters, and the lists read from it at set up are kept
-    clearTemporaryConstraints();
-    GCSsys.invalidatedDiagnosis();
-    GCSsys.declareUnknowns(Parameters);
-    GCSsys.declareDrivenParams(DrivenParameters);
-    GCSsys.initSolution(defaultSolverRedundant);
-
-    if (holds) {
-        updateNonDrivingConstraints();
-        if (resolveAfterGeometryUpdated) {
-            // as internalSolve: geometry OCCT computes is read back once (it starts solved)
-            std::string solvername;
-            internalSolve(solvername, 1);
+        for (std::size_t i = 0; i < Parameters.size(); ++i) {
+            *Parameters[i] = before[i];
         }
-        applyGroupTransformations();
+        updateGeometry();
     }
 
     Base::TimeElapsed end_time;
     SolveTime = Base::TimeElapsed::diffTimeF(start_time, end_time);
 
     return holds ? GCS::Success : GCS::Failed;
+}
+
+int Sketch::endHolding(bool solved)
+{
+    clearTemporaryConstraints();
+    if (holdingNarrowed) {
+        // the whole sketch again, for what follows (a drag, a later solve); the diagnosis is
+        // redone for it at the current parameters, and the lists read at set up are kept
+        GCSsys.invalidatedDiagnosis();
+        GCSsys.declareUnknowns(Parameters);
+        GCSsys.declareDrivenParams(DrivenParameters);
+        GCSsys.initSolution(defaultSolverRedundant);
+        holdingNarrowed = false;
+    }
+    if (!solved) {
+        return GCS::Failed;
+    }
+    updateNonDrivingConstraints();
+    int ret = GCS::Success;
+    if (resolveAfterGeometryUpdated) {
+        // as internalSolve: geometry OCCT computes is read back once (it starts solved)
+        std::string solvername;
+        ret = internalSolve(solvername, 1);
+    }
+    if (ret == GCS::Success) {
+        applyGroupTransformations();
+    }
+    return ret;
+}
+
+std::map<int, double> Sketch::calculateConstraintErrors() const
+{
+    return GCSsys.calculateConstraintErrorsByTag();
 }
 
 int Sketch::internalSolve(std::string& solvername, int level)

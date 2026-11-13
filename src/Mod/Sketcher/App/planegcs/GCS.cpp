@@ -49,6 +49,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -1710,6 +1711,24 @@ double System::calculateConstraintErrorByTag(int tagId)
         default:
             return sqrt(sqErr / (double)cnt);
     }
+}
+
+std::map<int, double> System::calculateConstraintErrorsByTag() const
+{
+    std::map<int, std::pair<int, double>> sums;  // tag: (count, sum of squared errors)
+    std::map<int, double> last;                  // tag: the signed error, for a single constraint
+    for (const auto& constr : clist) {
+        const double err = constr->error();
+        auto& [count, sqErr] = sums[constr->getTag()];
+        ++count;
+        sqErr += err * err;
+        last[constr->getTag()] = err;
+    }
+    std::map<int, double> errors;
+    for (const auto& [tag, sum] : sums) {
+        errors[tag] = sum.first == 1 ? last[tag] : std::sqrt(sum.second / sum.first);
+    }
+    return errors;
 }
 
 void System::rescaleConstraint(int id, double coeff)

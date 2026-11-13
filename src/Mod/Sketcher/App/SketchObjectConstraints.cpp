@@ -319,34 +319,56 @@ bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
 // 1. only the movers' parameters are unknowns;
 // 2. everything but the references (the dimensions' other entities);
 // 3. everything, by least motion;
-// otherwise today's solve. A dimension "changed" when the drawn geometry does not meet it; when
-// anything else is unmet (a constraint just added, external geometry moved), the ladder stands
-// aside. A fully defined sketch has one solution, wherever the rungs look for it.
+// otherwise today's solve. A dimension "changed" when the drawn geometry misses it by more than the
+// solver's own bar (1e-5). The ladder stands aside when anything else is missed (a constraint just
+// added), when a missed dimension is on external geometry (the model moved under it: today's solve,
+// as before), and when the diagnosis names a missed dimension as redundant. A fully defined sketch
+// has one solution, wherever the rungs look for it.
 //
 // The movers read the roles the Dimension tool stores: a distance's First (the point of a point
 // to a line, the second-picked of two lines, the circle of a circle and a line), the end of a
 // length (start to end, or the line alone), an angle's Second, a radius's curve without its centre.
+// A circle or an arc moved by a distance keeps its radius (it translates, as in Onshape).
 int SketchObject::solveLadder()
 {
     using Test = std::function<bool(int geoId, PointPos pos, int index)>;
     const std::vector<Constraint*>& constraints = Constraints.getValues();
+    const std::map<int, double> errors = solvedSketch.calculateConstraintErrors();
     std::vector<Test> movers;
     std::vector<Test> references;
-    std::vector<int> tagsToHold;
+    std::map<int, double> allowedErrors;
+    const double changedBar = 1e-5;  // the solver's convergence: err^2 < 1e-10
+    const double holdBar = 1e-7;     // as the repeats' check in solve()
 
+    const std::vector<int>& redundant = solvedSketch.getRedundant();
+    const std::vector<int>& partly = solvedSketch.getPartiallyRedundant();
+    auto named = [&](int tag) {
+        return std::find(redundant.begin(), redundant.end(), tag) != redundant.end()
+            || std::find(partly.begin(), partly.end(), tag) != partly.end();
+    };
     auto whole = [](int geo) -> Test {
         return [geo](int geoId, PointPos, int) { return geoId == geo; };
     };
     auto point = [](int geo, PointPos at) -> Test {
         return [geo, at](int geoId, PointPos pos, int) { return geoId == geo && pos == at; };
     };
-    auto isLine = [this](int geo) {
+    auto isType = [this](int geo, Base::Type type) {
         const Part::Geometry* g = getGeometry(geo);
-        return g && g->getTypeId() == Part::GeomLineSegment::getClassTypeId();
+        return g && g->getTypeId() == type;
     };
-    auto isArc = [this](int geo) {
-        const Part::Geometry* g = getGeometry(geo);
-        return g && g->getTypeId() == Part::GeomArcOfCircle::getClassTypeId();
+    auto isLine = [&](int geo) { return isType(geo, Part::GeomLineSegment::getClassTypeId()); };
+    auto isArc = [&](int geo) { return isType(geo, Part::GeomArcOfCircle::getClassTypeId()); };
+    auto isRound = [&](int geo) {
+        return isArc(geo) || isType(geo, Part::GeomCircle::getClassTypeId());
+    };
+    // a whole entity moved by a distance or an angle: a circle or an arc keeps its radius
+    auto translated = [&](int geo) -> Test {
+        if (!isRound(geo)) {
+            return whole(geo);
+        }
+        return [geo](int geoId, PointPos pos, int index) {
+            return geoId == geo && !(pos == PointPos::none && index == 0);
+        };
     };
 
     for (std::size_t i = 0; i < constraints.size(); ++i) {
@@ -355,26 +377,36 @@ int SketchObject::solveLadder()
         if (!c->isDriving || !c->isActive) {
             continue;
         }
-        const double error = solvedSketch.calculateConstraintError(tag);
-        if (std::isnan(error)) {
+        const auto found = errors.find(tag);
+        if (found == errors.end() || std::isnan(found->second)) {
             continue;  // not in the solve (on fixed geometry only)
         }
-        tagsToHold.push_back(tag);
-        if (std::abs(error) < 1e-7) {
+        const double error = std::abs(found->second);
+        if (!(error > changedBar)) {
+            // met as drawn, to the solver's bar: it must stay as well met as it is
+            allowedErrors[tag] = std::max(holdBar, error);
             continue;
         }
-        if (!c->isDimensional()) {
+        allowedErrors[tag] = holdBar;
+        if (!c->isDimensional() || named(tag)) {
             return -1;
         }
         int moving = c->First;
         PointPos movingPos = c->FirstPos;
         int other = c->Second;
         PointPos otherPos = c->SecondPos;
+        if (moving <= GeoEnum::RefExt || other <= GeoEnum::RefExt
+            || (c->Third != GeoEnum::GeoUndef && c->Third <= GeoEnum::RefExt)) {
+            return -1;
+        }
         switch (c->Type) {
             case Distance:
             case DistanceX:
             case DistanceY:
                 if (other == GeoEnum::GeoUndef) {
+                    if (moving < 0) {
+                        return -1;
+                    }
                     if (movingPos == PointPos::none && isLine(moving)) {
                         // a length: the start stays, the end moves along the line (SF-B8, SF-E4)
                         movers.push_back(point(moving, PointPos::end));
@@ -397,6 +429,9 @@ int SketchObject::solveLadder()
                 break;
             case Angle:
                 if (other == GeoEnum::GeoUndef) {
+                    if (moving < 0) {
+                        return -1;
+                    }
                     if (isLine(moving)) {
                         movers.push_back(point(moving, PointPos::end));
                         references.push_back(point(moving, PointPos::start));
@@ -420,6 +455,9 @@ int SketchObject::solveLadder()
                 break;
             case Radius:
             case Diameter: {
+                if (moving < 0) {
+                    return -1;
+                }
                 // the centre stays, the rest grows (SF-B10, GA3-20)
                 const int curve = moving;
                 movers.push_back([curve](int geoId, PointPos pos, int) {
@@ -431,14 +469,14 @@ int SketchObject::solveLadder()
             default:
                 return -1;
         }
-        // two entities: external geometry and the axes cannot move, so the other one does
+        // two entities: the axes cannot move, so the other one does
         if (moving < 0 && other >= 0) {
             std::swap(moving, other);
         }
         if (moving < 0) {
             return -1;
         }
-        movers.push_back(whole(moving));
+        movers.push_back(translated(moving));
         if (other >= 0) {
             references.push_back(whole(other));
         }
@@ -452,27 +490,27 @@ int SketchObject::solveLadder()
             return test(geoId, pos, index);
         });
     };
-    if (solvedSketch.solveHolding(
-            [&](int geoId, PointPos pos, int index) { return any(movers, geoId, pos, index); },
-            tagsToHold
-        )
-        == 0) {
-        return 0;
+    bool solved = solvedSketch.solveHolding(
+                      [&](int geoId, PointPos pos, int index) {
+                          return any(movers, geoId, pos, index);
+                      },
+                      allowedErrors
+                  )
+        == 0;
+    if (!solved && !references.empty()) {
+        solved = solvedSketch.solveHolding(
+                     [&](int geoId, PointPos pos, int index) {
+                         return !any(references, geoId, pos, index);
+                     },
+                     allowedErrors
+                 )
+            == 0;
     }
-    if (!references.empty()
-        && solvedSketch.solveHolding(
-               [&](int geoId, PointPos pos, int index) {
-                   return !any(references, geoId, pos, index);
-               },
-               tagsToHold
-           )
-            == 0) {
-        return 0;
+    if (!solved) {
+        solved = solvedSketch.solveHolding([](int, PointPos, int) { return true; }, allowedErrors)
+            == 0;
     }
-    if (solvedSketch.solveHolding([](int, PointPos, int) { return true; }, tagsToHold) == 0) {
-        return 0;
-    }
-    return -1;
+    return solvedSketch.endHolding(solved) == 0 ? 0 : -1;
 }
 
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
