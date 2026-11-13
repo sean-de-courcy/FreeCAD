@@ -3588,30 +3588,55 @@ TEST_F(FilletFallbackTest, roundEndingUnderALipIsTheRoundBelowItCutOffByItsUnder
     EXPECT_FALSE(elementNames(round).empty());
 }
 
-// A round on the rim that ends in cusps, CU5's own figures (oracle 17 Q-CUSP, notes/onshape-facts.md
-// "Case Base #76 designed check"). The construction refused it ("an end face parallel to the edge")
-// until the line's later picks built it (batch 14c, b14f)
+// A round on the rim that ends in cusps (the construction refused it, "an end face parallel to the
+// edge", until the line's later picks built it; batch 14c). At the END of the file: it uses area()
+// and spandrel()
 TEST_F(FilletFallbackTest, roundsARimEndingInCuspsAsOnshape)
 {
-    // CU5: r 1 on the rim: dV -2.922055 (evVolume, ~1.5e-4), dA -5.057250, 10 -> 11 faces, one torus
-    // face 20.915168, cut off by the slot's wall planes y = +-5
+    // CU5 (oracle 17 Q-CUSP): r 1 on the tunnel's upper half circle ending in cusps: dV -2.922055
+    // (evVolume, ~1.5e-4), dA -5.057250, 10 -> 11 faces, one torus face 20.915168, cut off by the
+    // slot's wall planes y = +-5. The other radii against the same shape by other Booleans: the
+    // round's spandrel turned a whole turn about the tunnel's axis, kept between the wall planes
+    // above the axis
     for (const gp_Dir& seam : {gp_Dir(0, 0, -1), gp_Dir(0, 1, 0)}) {
-        TopoShape base(cuspedSlot(seam), 1L);
-        auto rim = cuspedRim(base);
-        std::string reason;
-        TopoShape result = forced(base, rim, fillet(1), &reason);
-        ASSERT_FALSE(result.isNull()) << reason;
-        EXPECT_NEAR(volume(base.getShape()) - volume(result.getShape()), 2.922055, 3e-4);
-        EXPECT_NEAR(area(base.getShape()) - area(result.getShape()), 5.057250, 1e-5);
-        EXPECT_EQ(result.countSubElements("Face"), base.countSubElements("Face") + 1);
-        int tori = 0;
-        for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
-            if (surfaceType(it.Current()) == GeomAbs_Torus) {
-                ++tori;
-                EXPECT_NEAR(area(it.Current()), 20.915168, 1e-5);
+        for (double r : {1.0, 0.5, 2.0}) {
+            TopoShape base(cuspedSlot(seam), 1L);
+            auto rim = cuspedRim(base);
+            TopoDS_Shape ring = BRepPrimAPI_MakeRevol(
+                                    spandrel(gp_Pnt(15, 0, 15), gp::DX().Reversed(), gp::DZ(), r),
+                                    gp_Ax1(gp_Pnt(0, 0, 10), gp::DX()),
+                                    2 * pi
+            )
+                                    .Shape();
+            TopoDS_Shape slab = BRepPrimAPI_MakeBox(gp_Pnt(0, -5, 10), 30, 10, 20).Shape();
+            TopoDS_Shape tool = BRepAlgoAPI_Common(ring, slab).Shape();
+            double removed = volume(base.getShape())
+                - volume(BRepAlgoAPI_Cut(base.getShape(), tool).Shape());
+            if (r == 1.0) {
+                EXPECT_NEAR(removed, 2.922055, 3e-4);  // Onshape's
+            }
+            std::string reason;
+            TopoShape result = forced(base, rim, fillet(r), &reason);
+            if (result.isNull()) {
+                ADD_FAILURE() << "r " << r << " refused: " << reason;
+                continue;
+            }
+            int tori = 0;
+            double torusArea = 0.0;
+            for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+                if (surfaceType(it.Current()) == GeomAbs_Torus) {
+                    ++tori;
+                    torusArea += area(it.Current());
+                }
+            }
+            EXPECT_TRUE(exact(result, volume(base.getShape()) - removed)) << "r " << r;
+            EXPECT_EQ(result.countSubElements("Face"), base.countSubElements("Face") + 1) << "r " << r;
+            EXPECT_EQ(tori, 1) << "r " << r;
+            if (r == 1.0) {
+                EXPECT_NEAR(area(base.getShape()) - area(result.getShape()), 5.057250, 1e-5);
+                EXPECT_NEAR(torusArea, 20.915168, 1e-5);
             }
         }
-        EXPECT_EQ(tori, 1);
     }
 }
 
