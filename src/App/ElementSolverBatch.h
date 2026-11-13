@@ -330,6 +330,20 @@ AppExport bool elementUpToFaces(
 /// which is outside the grammar: Data::ownSectionsOf()).
 AppExport std::string twinKeyForTesting(const std::string& name, bool plain);
 
+/** While one lives on this thread, elementTwinCentroid() keeps each target shape's names of a type
+ * indexed by their twin key, made at its first call, so that N references assigned at once read
+ * the target's names once instead of once per reference (ops#640: TestScaling's edge picks grew
+ * as N^2). The shapes must not change while one lives; the outermost one's end drops the indexes.
+ */
+class AppExport TwinIndexScope
+{
+public:
+    TwinIndexScope();
+    ~TwinIndexScope();
+    TwinIndexScope(const TwinIndexScope&) = delete;
+    TwinIndexScope& operator=(const TwinIndexScope&) = delete;
+};
+
 AppExport bool elementTwinCentroid(
     const GeoFeature* geo,
     const char* element,

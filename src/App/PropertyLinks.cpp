@@ -1261,6 +1261,8 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // The list was rebuilt: the old fingerprints can't be matched to the references.
         fingerprints.assign(subs.size(), std::string());
     }
+    // The targets' names are read once for the whole list's twin tests (ops#640)
+    App::TwinIndexScope twinScope;
     // Restored, or attached to a target restored later: the saved fingerprints are kept until a
     // check has confirmed the element each name gives now (ops#116, the updates after opening),
     // since the target may have changed while this document was closed. Taken from the name's

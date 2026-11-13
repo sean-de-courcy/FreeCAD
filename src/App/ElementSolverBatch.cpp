@@ -23,6 +23,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -1132,7 +1133,10 @@ bool isAttachmentSupport(const SolverEntry& entry)
 // only modified (a Pad's top through a Pocket, MOD) was made by an earlier feature.
 bool madeByItsTarget(const SolverEntry& entry)
 {
-    const std::string name = plainName(entry.oldName.empty() ? entry.exactName : entry.oldName);
+    // Its own sections (Data::ownSectionsOf()): the last section's tag and flags are the plain
+    // form's, without the whole history the plain form writes out (ops#640)
+    const std::string name =
+        Data::ownSectionsOf(entry.oldName.empty() ? entry.exactName : entry.oldName);
     DocumentObject* target = entry.obj;
     if (target && !entry.prefix.empty()) {
         target = target->getSubObject(entry.prefix.c_str());
@@ -1214,8 +1218,12 @@ bool exactNeedsSolving(const SolverEntry& entry,
     // moved too: nothing at its old place, solveOwner() compares the twins' distances. A marked
     // far cap may have taken another's name from a reordered up-to shell (ops#386, PR 366 round
     // 2): solveOwner() checks that it holds its old centre. Any marked piece may have, while the
-    // pieces slid onto the next face (round 3): solveOwner() checks that it overlaps its old place
-    const std::string plain = plainName(entry.exactName);
+    // pieces slid onto the next face (round 3): solveOwner() checks that it overlaps its old place.
+    // Read in the name's own sections (Data::ownSectionsOf()): the three tests read top-level
+    // sections' flags and lists, and a marked cap's one mark through its own sections, so they
+    // answer as for the plain form. Every exact reference with a record comes here at every
+    // recompute; the plain form of one face of the replica's Case Lid was 4.9e8 characters (ops#640)
+    const std::string plain = Data::ownSectionsOf(entry.exactName);
     // An ordered hit saved among two twins or more that holds its old place (PR 390 round 2k,
     // decision 241): a lone crossing may have taken its gone twin's role exactly there.
     // solveOwner() counts its twins
@@ -3432,6 +3440,42 @@ std::string twinKeyForTesting(const std::string& name, bool plain)
     return twinKey(plain ? plainName(name) : ownSections(name));
 }
 
+namespace
+{
+// A target shape's names of one type by twin key: each element's index and the name's own
+// sections (elementTwinCentroid())
+using TwinIndex = std::unordered_map<std::string, std::vector<std::pair<int, std::string>>>;
+thread_local int twinIndexDepth = 0;
+thread_local std::map<std::pair<const Data::ComplexGeoData*, std::string>, TwinIndex> twinIndexes;
+
+TwinIndex makeTwinIndex(const Data::ComplexGeoData* data, const char* type)
+{
+    TwinIndex index;
+    const auto elements = data->countSubElements(type);
+    for (unsigned long i = 1; i <= elements; ++i) {
+        const Data::IndexedName indexed(type, static_cast<int>(i));
+        for (const auto& mapped : data->getElementMappedNames(indexed)) {
+            std::string own = ownSections(mapped.first.toString());
+            std::string key = twinKey(own);
+            index[std::move(key)].emplace_back(static_cast<int>(i), std::move(own));
+        }
+    }
+    return index;
+}
+}  // namespace
+
+TwinIndexScope::TwinIndexScope()
+{
+    ++twinIndexDepth;
+}
+
+TwinIndexScope::~TwinIndexScope()
+{
+    if (--twinIndexDepth == 0) {
+        twinIndexes.clear();
+    }
+}
+
 bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vector3d& centroid, int& count)
 {
     count = 0;
@@ -3469,25 +3513,36 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     // for child-mapped elements only. Reading the pool's way here cost 3 times more again (round
     // 3), and no model was found where the difference decides; a count that differs is a trade
     // (loud), the ORD pieces' desync D3's (round 2's cloud review, F4).
-    std::set<std::string> twins;
-    const auto elements = data->countSubElements(indexed.getType());
-    for (unsigned long i = 1; i <= elements; ++i) {
-        const Data::IndexedName index(indexed.getType(), static_cast<int>(i));
-        if (index == indexed) {
+    // The names of its type by twin key (makeTwinIndex()), kept while a TwinIndexScope lives: each
+    // reference of a list tests only the names that share a key with one of its own
+    TwinIndex local;
+    const TwinIndex* byKey = &local;
+    if (twinIndexDepth > 0) {
+        const auto slot = std::make_pair(data, std::string(indexed.getType()));
+        auto it = twinIndexes.find(slot);
+        if (it == twinIndexes.end()) {
+            it = twinIndexes.emplace(slot, makeTwinIndex(data, indexed.getType())).first;
+        }
+        byKey = &it->second;
+    }
+    else {
+        local = makeTwinIndex(data, indexed.getType());
+    }
+    std::set<int> found;
+    for (std::size_t k = 0; k < names.size(); ++k) {
+        const auto it = byKey->find(keys[k]);
+        if (it == byKey->end()) {
             continue;
         }
-        for (const auto& mapped : data->getElementMappedNames(index)) {
-            const std::string own = ownSections(mapped.first.toString());
-            const std::string key = twinKey(own);
-            bool twin = false;
-            for (std::size_t k = 0; k < names.size() && !twin; ++k) {
-                twin = keys[k] == key && Data::isTwinName(own, names[k]);
-            }
-            if (twin) {
-                twins.insert(index.toString());
-                break;
+        for (const auto& [i, own] : it->second) {
+            if (i != indexed.getIndex() && found.count(i) == 0 && Data::isTwinName(own, names[k])) {
+                found.insert(i);
             }
         }
+    }
+    std::set<std::string> twins;
+    for (const int i : found) {
+        twins.insert(Data::IndexedName(indexed.getType(), i).toString());
     }
     if (twins.empty()) {
         // Alone, with a name keyed by its order: one twin, so that the solver tells a later pick
