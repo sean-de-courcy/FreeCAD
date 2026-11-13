@@ -28,15 +28,19 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numbers>
 #include <numeric>
 #include <optional>
 #include <queue>
+#include <string_view>
 #include <tuple>
+#include <unordered_map>
 
 #include <fmt/format.h>
 
@@ -140,6 +144,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/NameTable.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
@@ -3170,10 +3175,332 @@ bool isValidSolid(const Part::TopoShape& shape)
     return true;
 }
 
+/// What a name says, in three numbers taken from the name's own text and the name table's nodes,
+/// without writing the name out (NameDigester)
+struct NameDigest
+{
+    /// Of the name without the tags of its sections and of the names in them, at every depth
+    std::uint64_t bare = 0;
+    /// Of the name as it is
+    std::uint64_t tagged = 0;
+    /// The length of the name in full form, each tag one character; at most sizeCap
+    std::uint64_t size = 0;
+    /// The delimiters in that form: each takes one more character where the name is linked
+    std::uint64_t delimiters = 0;
+    /// Whether every node the name refers to is in the name table
+    bool whole = true;
+};
+
+/** The digests of names (ops#640).
+ *
+ * A name in full form holds the names it links in full, and a split piece its whole history, so
+ * one name can be gigabytes long while the name table holds it in a few dozen nodes
+ * (`notes\name-growth.md`). Written out with NameTable::toPlain(), a Pipe's spine edges' names
+ * cost minutes and kept gigabytes (`notes\pipe-corner-names-memory.md`). The digest of a name is
+ * made from its sections' fields and the digests of the names in them, each node of the table
+ * once, so its cost follows the number of nodes and not the name's length. It is the same for
+ * the full, the interned and any mixed form of one name (the digest of a name is that of its
+ * sections in turn, so a prefix's digest is where its piece's starts), and the same on every
+ * platform.
+ *
+ * A node's digest is kept for the process's life: an entry of the table never changes or goes.
+ * One that refers to a node the table doesn't have (the entry may still be loaded) isn't kept.
+ */
+class NameDigester
+{
+public:
+    static constexpr std::uint64_t sizeCap = std::uint64_t {1} << 62U;
+
+    /// The digest of \a name, a name in any form
+    NameDigest of(std::string_view name)
+    {
+        NameDigest result = empty();
+        bool first = true;
+        forEachTopLevel(name, *Data::NAME_SECTION_DELIMINATOR, [&](std::string_view section) {
+            const auto prefix = first ? Data::NameTable::parseRef(section) : std::nullopt;
+            first = false;
+            result = prefix ? ofNode(*prefix) : extended(result, ofSection(section));
+        });
+        return result;
+    }
+
+private:
+    struct IdHash
+    {
+        std::size_t operator()(const Data::NameId& id) const
+        {
+            std::size_t value = 0;
+            std::memcpy(&value, id.bytes().data(), sizeof(value));
+            return value;
+        }
+    };
+
+    /// FNV-1a, 64 bits: fed bytes, and numbers as their eight bytes from the lowest
+    struct Hash
+    {
+        std::uint64_t value = 14695981039346656037ULL;
+
+        void add(unsigned char byte)
+        {
+            value ^= byte;
+            value *= 1099511628211ULL;
+        }
+        void add(std::string_view text)
+        {
+            for (const char c : text) {
+                add(static_cast<unsigned char>(c));
+            }
+        }
+        void add(std::uint64_t number)
+        {
+            for (int k = 0; k < 8; ++k) {
+                add(static_cast<unsigned char>(number >> (8U * static_cast<unsigned>(k))));
+            }
+        }
+    };
+
+    /// Calls \a visit with each part of \a text between top-level \a delimiter characters: one
+    /// inside an embedded name is escaped, so it has a `^` right before it (NameTable.cpp)
+    template<typename Visit>
+    static void forEachTopLevel(std::string_view text, char delimiter, Visit visit)
+    {
+        std::size_t start = 0;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == delimiter && (i == 0 || text[i - 1] != *Data::SUB_SECTION_ESCAPE_CHAR)) {
+                visit(text.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        visit(text.substr(start));
+    }
+
+    /// One level of unescaping, as the decoder does it: the first `^` of each run goes
+    static std::string unescapedOnce(std::string_view text)
+    {
+        std::string result;
+        result.reserve(text.size());
+        bool afterCaret = false;
+        for (const char c : text) {
+            if (c == *Data::SUB_SECTION_ESCAPE_CHAR && !afterCaret) {
+                afterCaret = true;
+                continue;
+            }
+            afterCaret = c == *Data::SUB_SECTION_ESCAPE_CHAR;
+            result += c;
+        }
+        return result;
+    }
+
+    static std::uint64_t capped(std::uint64_t size)
+    {
+        return std::min(size, sizeCap);
+    }
+
+    /// The delimiters in  text, a field that holds no names
+    static std::uint64_t delimitersIn(std::string_view text)
+    {
+        return static_cast<std::uint64_t>(std::ranges::count_if(text, [](char c) {
+            return c == *Data::NAME_SECTION_DELIMINATOR || c == *Data::SECTION_SUB_DELIMINATOR
+                || c == *Data::SUB_SECTION_LIST_DELIMINATOR;
+        }));
+    }
+
+    /// The digest of a name of no section
+    static NameDigest empty()
+    {
+        return {Hash().value, Hash().value, 0, 0, true};
+    }
+
+    /// The digest of the name of digest \a name with the section of digest \a section added
+    static NameDigest extended(const NameDigest& name, const NameDigest& section)
+    {
+        Hash bare {name.bare};
+        bare.add(section.bare);
+        Hash tagged {name.tagged};
+        tagged.add(section.tagged);
+        // The `|` between them, but for a name's first section
+        const std::uint64_t bar = name.size > 0 ? 1 : 0;
+        return {
+            bare.value,
+            tagged.value,
+            capped(capped(name.size + section.size) + bar),
+            capped(capped(name.delimiters + section.delimiters) + bar),
+            name.whole && section.whole
+        };
+    }
+
+    /// The digest of the section \a section. A text that isn't a V2 section (a sketch's name, an
+    /// element's index) is taken as it is.
+    NameDigest ofSection(std::string_view section)
+    {
+        int count = 0;
+        forEachTopLevel(section, *Data::SECTION_SUB_DELIMINATOR, [&count](std::string_view) {
+            ++count;
+        });
+        Hash bare;
+        Hash tagged;
+        if (count <= Data::SECTION_CONNECTED_ELEMENTS_INDEX) {
+            bare.add(section);
+            return {bare.value, bare.value, capped(section.size()), delimitersIn(section), true};
+        }
+        // The fields' delimiters, and the tag's one character
+        std::uint64_t size = static_cast<std::uint64_t>(count);
+        std::uint64_t delimiters = static_cast<std::uint64_t>(count) - 1;
+        bool whole = true;
+        int field = 0;
+        forEachTopLevel(section, *Data::SECTION_SUB_DELIMINATOR, [&](std::string_view text) {
+            const int at = field++;
+            bare.add(static_cast<unsigned char>(*Data::SECTION_SUB_DELIMINATOR));
+            tagged.add(static_cast<unsigned char>(*Data::SECTION_SUB_DELIMINATOR));
+            if (at == Data::SECTION_ITERATION_TAG_INDEX) {
+                tagged.add(text);
+                return;
+            }
+            const bool names = at == Data::SECTION_LINKED_NAME_INDEX
+                || at == Data::SECTION_CONNECTED_ELEMENTS_INDEX;
+            if (!names || text.empty() || text == Data::EMPTY_VALUE) {
+                bare.add(text);
+                tagged.add(text);
+                size = capped(size + text.size());
+                delimiters = capped(delimiters + delimitersIn(text));
+                return;
+            }
+            bool first = true;
+            forEachTopLevel(text, *Data::SUB_SECTION_LIST_DELIMINATOR, [&](std::string_view entry) {
+                // An entry without a caret is its own unescaped form
+                const NameDigest name = entry.find(*Data::SUB_SECTION_ESCAPE_CHAR)
+                        == std::string_view::npos
+                    ? of(entry)
+                    : of(unescapedOnce(entry));
+                bare.add(static_cast<unsigned char>(*Data::SUB_SECTION_LIST_DELIMINATOR));
+                bare.add(name.bare);
+                tagged.add(static_cast<unsigned char>(*Data::SUB_SECTION_LIST_DELIMINATOR));
+                tagged.add(name.tagged);
+                // The name, a caret before each of its delimiters, and the `,` before it
+                const std::uint64_t comma = first ? 0 : 1;
+                first = false;
+                size = capped(capped(capped(size + name.size) + name.delimiters) + comma);
+                delimiters = capped(capped(delimiters + name.delimiters) + comma);
+                whole = whole && name.whole;
+            });
+        });
+        return {bare.value, tagged.value, size, delimiters, whole};
+    }
+
+    /// The digest of the name of the table's node \a id. A split piece's node refers to its
+    /// prefix's, as deep as the element's history is long: the chain is walked in a loop.
+    NameDigest ofNode(const Data::NameId& id)
+    {
+        const Data::NameTable& table = Data::NameTable::instance();
+        // The nodes from \a id down its prefixes whose digests aren't known, each with its last
+        // section; the last of them with its whole content when no prefix is below it
+        std::vector<std::pair<Data::NameId, std::string>> chain;
+        NameDigest name = empty();
+        bool below = false;
+        for (Data::NameId at = id;;) {
+            if (const auto it = known.find(at); it != known.end()) {
+                name = it->second;
+                below = true;
+                break;
+            }
+            std::optional<std::string> content = table.lookup(at);
+            if (!content) {
+                // An unknown node: its reference stands for it
+                Hash hash;
+                hash.add(Data::NameTable::makeRef(at));
+                name = {hash.value, hash.value, Data::NameTable::RefLength, 0, false};
+                below = true;
+                break;
+            }
+            const std::size_t bar = Data::NameTable::lastTopLevelBar(*content);
+            const auto prefix = bar == std::string::npos
+                ? std::nullopt
+                : Data::NameTable::parseRef(std::string_view(*content).substr(0, bar));
+            if (!prefix) {
+                chain.emplace_back(at, std::move(*content));
+                break;
+            }
+            chain.emplace_back(at, content->substr(bar + 1));
+            at = *prefix;
+        }
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            name = below ? extended(name, ofSection(it->second)) : of(it->second);
+            below = true;
+            if (name.whole) {
+                known.emplace(it->first, name);
+            }
+        }
+        return name;
+    }
+
+    std::unordered_map<Data::NameId, NameDigest, IdHash> known;
+};
+
+/// The digest of \a name, a name in any form (NameDigester)
+NameDigest digestOf(std::string_view name)
+{
+    static std::mutex guard;
+    static NameDigester digester;
+    const std::scoped_lock lock(guard);
+    return digester.of(name);
+}
+
+/// The length in full form (NameDigest::size) up to which a spine edge's name is keyed by its
+/// text, as it always was; a longer one is keyed by its digest (firstName). Its text costs about
+/// 5 microseconds a byte to key and stays in the decoder's cache, so at this length a corner
+/// costs a tenth of a second.
+constexpr std::uint64_t textKeyLimit = 16384;
+
+/// What starts the token that stands for a name too long to write out (firstName):
+/// `#pcd;<the name's digest without tags>;<its last tag>;<its digest with tags>`, the digests
+/// 16 hex digits each. No name starts so: a V2 name starts with an element's reference, `_` or
+/// `~`, and a V1 name's `#` is followed by hex digits.
+constexpr std::string_view digestMark = "#pcd;";
+constexpr std::size_t digestDigits = 16;
+
+/// The tag of the last section of \a name, a V2 name in any form; 0 for any other name. Only
+/// the last section is read.
+long lastSectionTag(std::string_view name)
+{
+    std::optional<std::string> content;
+    if (const auto ref = Data::NameTable::parseRef(name)) {
+        content = Data::NameTable::instance().lookup(*ref);
+        if (!content) {
+            return 0;
+        }
+        name = *content;
+    }
+    const std::size_t bar = Data::NameTable::lastTopLevelBar(name);
+    const std::string_view section = bar == std::string_view::npos ? name : name.substr(bar + 1);
+    std::vector<std::string_view> fields;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= section.size(); ++i) {
+        if (i == section.size()
+            || (section[i] == *Data::SECTION_SUB_DELIMINATOR
+                && (i == 0 || section[i - 1] != *Data::SUB_SECTION_ESCAPE_CHAR))) {
+            fields.push_back(section.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    if (static_cast<int>(fields.size()) <= Data::SECTION_CONNECTED_ELEMENTS_INDEX) {
+        return 0;
+    }
+    try {
+        return std::stol(std::string(fields[Data::SECTION_ITERATION_TAG_INDEX]));
+    }
+    catch (const std::exception&) {
+        return 0;
+    }
+}
+
 /// The V2 name \a name with the tags of its sections, and of the names in them, left out: what
-/// it says without the IDs of the objects that made it. Any other name as it is.
+/// it says without the IDs of the objects that made it; of a long name's token (digestMark),
+/// its part without tags. Any other name as it is.
 std::string withoutTags(const std::string& name)
 {
+    if (name.starts_with(digestMark)) {
+        return name.substr(0, digestMark.size() + digestDigits);
+    }
     const Data::DecodedMappedName& decoded = Data::MappedName::getDecodedMappedName(name);
     if (decoded.empty()) {
         return name;
@@ -3195,9 +3522,18 @@ std::string withoutTags(const std::string& name)
     return result;
 }
 
-/// The tag of the V2 name \a name's last section, the object that made it; 0 for any other name
+/// The tag of the V2 name \a name's last section, the object that made it, also from a long
+/// name's token (digestMark); 0 for any other name
 long lastTag(const std::string& name)
 {
+    if (name.starts_with(digestMark)) {
+        try {
+            return std::stol(name.substr(digestMark.size() + digestDigits + 1));
+        }
+        catch (const std::exception&) {
+            return 0;
+        }
+    }
     const Data::DecodedMappedName& decoded = Data::MappedName::getDecodedMappedName(name);
     if (decoded.empty()) {
         return 0;
@@ -3212,7 +3548,13 @@ long lastTag(const std::string& name)
 
 /// \a element's mapped name in \a path, in full (not interned), the first in text order without
 /// tags when it has several (so object IDs don't choose); without one, its type's letter and index
-/// (`E<n>`, `V<n>`)
+/// (`E<n>`, `V<n>`).
+/// A name longer than textKeyLimit isn't written out: its token stands for it (digestMark), the
+/// same text for the same name and another for another, which withoutTags() and lastTag() read
+/// as they read a name (ops#640). In full, a name of 2.5 MB cost 11 s a corner and kept 45 MB,
+/// and a real document's names reach half a gigabyte (`notes\pipe-corner-names-memory.md`). The
+/// names the callers key, compare and store stay what they were up to the limit, so no corner's
+/// key changes there.
 std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element)
 {
     const int index = path.findShape(element);
@@ -3221,7 +3563,25 @@ std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element)
     if (index > 0) {
         for (const auto& [name, sids] :
              path.getElementMappedNames(Data::IndexedName::fromConst(typeName.c_str(), index))) {
-            names.push_back(Data::NameTable::instance().toPlain(name.toString()));
+            const std::string text = name.toString();
+            const NameDigest digest = digestOf(text);
+            if (digest.size <= textKeyLimit) {
+                names.push_back(Data::NameTable::instance().toPlain(text));
+                continue;
+            }
+            Base::Console().log(
+                "Pipe: a spine name of about %llu bytes is keyed by its digest\n",
+                static_cast<unsigned long long>(digest.size)
+            );
+            names.push_back(
+                fmt::format(
+                    "{}{:016x};{};{:016x}",
+                    digestMark,
+                    digest.bare,
+                    lastSectionTag(text),
+                    digest.tagged
+                )
+            );
         }
     }
     if (names.empty()) {
