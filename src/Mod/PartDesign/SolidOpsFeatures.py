@@ -483,11 +483,40 @@ def _oriented_normal(face):
     return face.normalAt(0.5 * (u0 + u1), 0.5 * (v0 + v1))
 
 
+def _cap_wires(face, plane):
+    """The outer wire and the hole wires of a planar face, for its rebuild on the plane. The end cap of a sheet
+    that goes all the way round (a bore's wall: an annulus) comes out of OCC's offset on a periodic surface, as
+    one wire that runs along the surface's seam edge both ways. On a plane that edge is a slit: the face passes
+    as valid, but its extrusion is an invalid solid, so a Pocket or Pad whose profile is the cap fails ("The cut
+    failed: BOPAlgo_AlertBOPNotAllowed", ops#640, replica #69). Onshape's cap is an annulus with two circular
+    edges and no seam. So the face's seam edges, and any edge a wire runs twice, are left out, and the rest are
+    sorted into closed loops: the one that encloses the largest area is the outer wire, the others are holes."""
+    uses = []
+    for w in face.Wires:
+        for e in w.OrderedEdges:
+            for u in uses:
+                if u[0].isSame(e):
+                    u[1] += 1
+                    break
+            else:
+                uses.append([e, 1])
+    kept = [e for e, n in uses if n == 1 and not e.isSeam(face)]
+    if len(kept) == len(uses):
+        outer = face.OuterWire
+        return outer, [w for w in face.Wires if not w.isSame(outer)]
+    loops = [Part.Wire(es) for es in Part.sortEdges(kept)]
+    if not loops or not all(w.isClosed() for w in loops):
+        raise SolidOpsError("a cap's boundary without its seam is not closed loops")
+    loops.sort(key=lambda w: abs(Part.Face(plane, w).Area), reverse=True)
+    return loops[0], loops[1:]
+
+
 def _plane_caps(shape):
     """The shape with every face that lies in a plane but is built on another surface (OCC's offset gives a
     thick sheet's end caps as planar B-splines) rebuilt on a real Plane with the same boundary and side, so
-    the caps are planes, as in Onshape (ops#640, #69). The replaced faces keep their element names. Where a
-    rebuild or its checks fail (validity, volume, names), the shape is returned unchanged."""
+    the caps are planes, as in Onshape (ops#640, #69), and without the seam edge of a cap that goes all the way
+    round (_cap_wires). The replaced faces keep their element names. Where a rebuild or its checks fail
+    (validity, volume, names, a closed solid), the shape is returned unchanged."""
     pairs, names = [], []
     for k, f in enumerate(shape.Faces):
         if isinstance(f.Surface, Part.Plane):
@@ -503,9 +532,9 @@ def _plane_caps(shape):
             axis = App.Vector(pl.Axis)
             if axis.dot(n) < 0:
                 axis = -axis
-            outer = f.OuterWire
-            nf = Part.Face(Part.Plane(pl.Position, axis), outer)
-            holes = [w for w in f.Wires if not w.isSame(outer)]
+            plane = Part.Plane(pl.Position, axis)
+            outer, holes = _cap_wires(f, plane)
+            nf = Part.Face(plane, outer)
             if holes:
                 nf.cutHoles(holes)
             if _oriented_normal(nf).dot(n) < 0:
@@ -523,6 +552,7 @@ def _plane_caps(shape):
         res = shape.replaceShape(pairs)
         if (res.isNull() or not res.isValid() or len(res.Solids) != len(shape.Solids)
                 or len(res.Faces) != len(shape.Faces)
+                or not all(x.isClosed() for x in res.Solids)
                 or abs(res.Volume - shape.Volume) > TOL * max(1.0, abs(shape.Volume))):
             return shape
         for (_, nf), name in zip(pairs, names):

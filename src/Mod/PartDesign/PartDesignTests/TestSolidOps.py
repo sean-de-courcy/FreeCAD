@@ -1340,6 +1340,50 @@ class TestThickenPlanarCaps(unittest.TestCase):
         self.assertNamesKept(s)
         self.assertEqual(sum(1 for f in s.Faces if isinstance(f.Surface, Part.Cylinder)), 2)
 
+    def testFullTurnCapsAreAnnuli(self):
+        """The bore's thickened wall (radii 3 to 4): each end cap is an annulus, as in Onshape: one face with two
+        wires, its two edges the circles of radius 3 and 4, and no edge that a wire runs twice (OCC's offset
+        gives the cap one wire with the seam edge run twice: a slit on a plane). Expected: cap area pi (16 - 9);
+        the cap extruded 5 into the wall is a valid solid of pi (16 - 9) 5; the solid has 6 edges (four circles
+        and the two cylinders' seams); the volume is unchanged."""
+        box = Part.makeBox(40, 30, 20).cut(Part.makeCylinder(4, 20, App.Vector(15, 15, 0))).removeSplitter()
+        s = self.thicken(box, t1=1.0)
+        self.assertAlmostEqual(s.Volume, math.pi * (16 - 9) * 20, delta=1e-6)
+        self.assertCaps(s)
+        caps = [f for f in s.Faces if isinstance(f.Surface, Part.Plane)]
+        self.assertEqual(len(caps), 2)
+        for f in caps:
+            self.assertEqual(len(f.Wires), 2)
+            for w in f.Wires:
+                self.assertEqual(len(w.OrderedEdges), 1)  # one circle, run once
+                self.assertTrue(w.isClosed())
+            self.assertEqual(sorted(round(e.Curve.Radius, 9) for e in f.Edges), [3.0, 4.0])
+            self.assertAlmostEqual(f.Area, math.pi * (16 - 9), delta=1e-6)
+            prism = f.extrude(App.Vector(0, 0, -5 if f.CenterOfMass.z > 10 else 5))
+            self.assertTrue(prism.isValid())
+            self.assertAlmostEqual(prism.Volume, math.pi * (16 - 9) * 5, delta=1e-6)
+        self.assertEqual(len(s.Edges), 6)
+        self.assertNamesKept(s)
+
+    def testPocketOnAFullTurnCap(self):
+        """A Pocket whose profile is the top cap of the bore's thickened wall, 5 deep, removes the wall's top 5:
+        pi (16 - 9) 15 is left, one valid solid (the cap with a slit made the cut fail)."""
+        box = Part.makeBox(40, 30, 20).cut(Part.makeCylinder(4, 20, App.Vector(15, 15, 0))).removeSplitter()
+        s = self.thicken(box, t1=1.0)
+        top = ["Face%d" % (k + 1) for k, f in enumerate(s.Faces)
+               if isinstance(f.Surface, Part.Plane) and f.CenterOfMass.z > 10]
+        self.assertEqual(len(top), 1)
+        cut = self.feat.getParentGeoFeatureGroup().newObject("PartDesign::Pocket", "Cut")
+        cut.Profile = (self.feat, top)
+        cut.Type = "Length"
+        cut.Length = 5
+        self.doc.recompute()
+        self.assertEqual(cut.State, ["Up-to-date"], cut.getStatusString())
+        self.assertTrue(cut.Shape.isValid())
+        self.assertEqual(len(cut.Shape.Solids), 1)
+        self.assertAlmostEqual(cut.Shape.Volume, math.pi * (16 - 9) * 15, delta=1e-6)
+        self.assertAlmostEqual(cut.Shape.BoundBox.ZMax, 15.0, places=6)
+
     def testHalfCylinderMidplaneCapsArePlanes(self):
         half = Part.makeCylinder(10, 20, App.Vector(0, 0, 0), App.Vector(0, 0, 1), 180)
         s = self.thicken(half, midplane=3.0)  # radii 8.5 to 11.5
