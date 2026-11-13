@@ -1250,6 +1250,34 @@ class TestThickenSeamLeg(unittest.TestCase):
         self.assertAlmostEqual(s.Volume, 858.957221, delta=1e-3)  # = pi (4^2 - 3.25^2) (18 + 26 + 2 pi)
         self.assertBox(s, (16, 16, 4), (50 + 4 * math.tan(math.radians(30)), 24, 30))
 
+    def testHornBendInwardCutsAsASolid(self):
+        # a later feature's boolean on the thick tube works (ops#640, rb 93: the top ring cap rebuilt on a plane
+        # kept its seam edge, a slit there, and every boolean on the solid came back empty). The half space
+        # x > 45 takes the leg's end: the rulings keep x, so that part is the ring times 5 whatever the tilt
+        srf, _ = self.sheet(4.0)
+        s = self.thicken(srf, 0.75, 0.0)
+        for f in s.Faces:
+            if isinstance(f.Surface, Part.Plane):
+                self.assertEqual([k for k, e in enumerate(f.Edges) if e.isSeam(f)], [])
+        half = Part.makeBox(100, 100, 100, App.Vector(45, -30, -30))
+        cut, common = s.cut(half), s.common(half)
+        self.assertEqual((len(cut.Solids), len(common.Solids)), (1, 1))
+        self.assertAlmostEqual(common.Volume, 5 * math.pi * (16 - 3.25 ** 2), delta=1e-4)
+        self.assertAlmostEqual(cut.Volume + common.Volume, s.Volume, delta=1e-4)
+        # the refined cut keeps its volume (on the leg's C0 NURBS radius faces a refine merged faces wrongly)
+        self.assertAlmostEqual(cut.removeSplitter().Volume, cut.Volume, delta=1e-6)
+
+    def testLegPieceRadiusFacesAreCylinders(self):
+        # the rebuilt leg piece's faces at the two radii are exact cylinders, coaxial with the leg
+        _, leg = self.sheet(None)
+        for t1, t2 in ((0.75, 0.0), (0.0, 0.75), (0.75, 0.75)):
+            with self.subTest(t1=t1, t2=t2):
+                p = S._ruled_cylinder_piece(leg, t1, t2, S._cylinder_piece_volume(leg, t1, t2)[1])
+                radii = sorted(round(f.Surface.Radius, 9) for f in p.Faces if isinstance(f.Surface, Part.Cylinder))
+                self.assertEqual(radii, [4.0 - t1, 4.0 + t2])  # the bore's normal points to its axis: t1 inward
+                exact = S._cylinder_piece_volume(leg, t1, t2)[0]
+                self.assertAlmostEqual(p.Volume, exact, delta=1e-6 * exact)  # _leg_piece's own bound
+
     def testStraightBore(self):
         for tilt, t1, t2, mid, ring in ((30.0, 0.75, 0.75, True, 12 * math.pi),
                                         (10.0, 0.0, 1.5, False, math.pi * (5.5 ** 2 - 16))):
