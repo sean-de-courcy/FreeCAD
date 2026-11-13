@@ -240,11 +240,11 @@ class TestFillet(unittest.TestCase):
                 self._assertBaseKept(first, tolerances)
 
     def testFilletAroundRoundedCorners(self):
-        # The shape of the report: a block 2a x 2a x h with its vertical corners filleted
-        # (radius R), then a small fillet (radius r) on one bottom edge. The bottom edges and the
-        # corner arcs are tangent, so the fillet runs around the whole bottom; along each arc
-        # the section turns about the corner's axis (Pappus).
-        a, h, R, r = 50.8, 22.225, 11.3125, 1.5875
+        # A block 2a x 2a x h with its vertical corners filleted (radius R), then a small fillet
+        # (radius r) on one bottom edge. The bottom edges and the corner arcs are tangent, so the
+        # fillet runs around the whole bottom; along each arc the section turns about the
+        # corner's axis (Pappus). Volumes 198283.185307, then 198099.349866.
+        a, h, R, r = 50.0, 20.0, 10.0, 1.5
         body = self.Doc.addObject("PartDesign::Body", "Body")
         box = self._add_box(body, 2 * a, 2 * a, h, (-a, -a, 0))
         corners = [
