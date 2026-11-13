@@ -1360,6 +1360,43 @@ class TestSketcherSolver(unittest.TestCase):
             self.assertTrue(message.startswith("Invalid parameters"), message)
         self.assertIn("'Fixed', 0, 1", messages[0])
 
+    def testManyLoopsNameEveryVertexByItsEdgeEnds(self):
+        """ops#640: a sketch of many closed loops (150 unit squares, 600 lines). Its wires' vertices
+        come unnamed and collide on one name before the sketch names them, which the element map
+        resolves by counting; the count search is linear now, and the names are what they were.
+        Expected, from the geometry: edge i is named after geometry i alone, and each vertex after
+        the edge ends that meet at its point (the end of one line and the start of the next)."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "ManyLoops")
+        lines = []
+        for k in range(150):
+            x, y = 2.0 * (k % 15), 2.0 * (k // 15)
+            corners = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)]
+            for i in range(4):
+                a, b = corners[i], corners[(i + 1) % 4]
+                lines.append(Part.LineSegment(FreeCAD.Vector(*a, 0), FreeCAD.Vector(*b, 0)))
+        sketch.addGeometry(lines, False)
+        self.Doc.recompute()
+        self.assertTrue(sketch.isValid())
+        shape = sketch.Shape
+        self.assertEqual(len(shape.Edges), 600)
+        self.assertEqual(len(shape.Vertexes), 600)
+        self.assertEqual(len(shape.Wires), 150)
+
+        ends = {}
+        for i, line in enumerate(lines, start=1):
+            for end, point in ((1, line.StartPoint), (2, line.EndPoint)):
+                ends.setdefault((round(point.x, 6), round(point.y, 6)), []).append(f"g{i}v{end}")
+        tag = sketch.ID
+        expected = {f"g{i};_;{tag};SKT;0;E;0;SRC;_" for i in range(1, 601)}
+        for i, vertex in enumerate(shape.Vertexes, start=1):
+            point = vertex.Point
+            ids = ",".join(sorted(ends[(round(point.x, 6), round(point.y, 6))]))
+            name = f"{ids};_;{tag};SKT;0;V;0;SRC;_"
+            self.assertEqual(shape.getElementMappedName(f"Vertex{i}"), name)
+            expected.add(name)
+        self.assertEqual(len(expected), 1200)
+        self.assertEqual(set(shape.ElementMap), expected)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("SketchSolverTest")
