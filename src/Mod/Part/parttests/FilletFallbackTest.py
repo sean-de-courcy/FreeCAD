@@ -2975,10 +2975,16 @@ class CurvedWallEndTest(unittest.TestCase):
                 base = shape.common(Part.makeBox(40, 40, 2, V(-20, -20, 0)))
                 self.assertAlmostEqual(below.Volume, base.Volume, delta=1e-6)
 
-    def testWallFlushWithItsBaseStillRefusesAChain(self):
+    def testWallFlushWithItsBaseRoundsDownTheChain(self):
         # A split on the wall's own cylinder too (the base's inner radius the wall's): the base's
-        # straight edge below the foot runs on from the picked one, and the round would have to
-        # run on down it. Still refused, loudly, as before F1
+        # straight edge below the foot runs on from the picked one, so the inner round runs on
+        # down it, z 0..6, as tangent propagation gives it, and the outer one ends on the base's
+        # top, z 2..6. The exact construction refuses a chain onto an unselected edge; since the
+        # round under an overhang (#103) OCCT's own round on the piece in front of the base's top
+        # builds it. It is the round of the same solid refined, where the inner edge is one edge.
+        # Closed form: the wall's section over its height (wall_end_round(), Onshape's FR1), and
+        # the inner round's own section over the base's: the triangle of the axis, the ball's
+        # foot on the end plane and its centre, less the inner cylinder's sector and the ball's
         base = Part.makeCylinder(13.5, 2, V(0, 0, 0), V(0, 0, 1), 90).cut(
             Part.makeCylinder(10, 4, V(0, 0, -1))
         )
@@ -2987,8 +2993,38 @@ class CurvedWallEndTest(unittest.TestCase):
         )
         shape = base.fuse(wall)
         edges = [edge_between(shape, (x, 0, 2), (x, 0, 6)) for x in (10, 11.5)]
-        with self.assertRaises(Part.OCCError):
-            shape.makeFillet(0.75, edges)
+        r, inner, middle = 0.75, 10.0, 10.75
+        section, removed, _ = wall_end_round(10, 11.5, 4)
+        beta = math.asin(r / middle)
+        centre = math.sqrt(middle**2 - r**2)
+        inner_section = centre * r / 2 - inner**2 * beta / 2 - r**2 * (math.pi / 2 - beta) / 2
+        self.assertAlmostEqual(inner_section, 0.108070, delta=1e-6)
+        result = shape.makeFillet(r, edges)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, shape.Volume - removed - 2 * inner_section, delta=1e-6)
+        # Below the base's top only the inner round: the base loses its section over its height
+        slab = Part.makeBox(40, 40, 2, V(-20, -20, 0))
+        self.assertAlmostEqual(
+            result.common(slab).Volume, shape.common(slab).Volume - 2 * inner_section, delta=1e-6
+        )
+        # One half cylinder at the wall's end and a quarter down the base, about one axis
+        blends = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"
+                  and abs(f.Surface.Radius - r) < 1e-7]
+        self.assertEqual(len(blends), 3)
+        for blend in blends:
+            self.assertAlmostEqual(blend.Surface.Center.x, centre, delta=1e-6)
+            self.assertAlmostEqual(blend.Surface.Center.y, r, delta=1e-6)
+        self.assertAlmostEqual(
+            sum(f.Area for f in blends), math.pi * r * 4 + (math.pi / 2 - beta) * r * 2, delta=1e-6
+        )
+        # The same solid refined, its inner edge picked whole: the same round
+        refined = shape.removeSplitter()
+        whole = [edge_between(refined, (10, 0, 0), (10, 0, 6)), edge_between(refined, (11.5, 0, 2), (11.5, 0, 6))]
+        again = refined.makeFillet(r, whole)
+        self.assertTrue(again.isValid())
+        self.assertAlmostEqual(again.Volume, result.Volume, delta=1e-6)
+        self.assertLess(again.cut(result).Volume + result.cut(again).Volume, 1e-6)
 
 
 def wall_on_a_chamfered_rim(inset=0.0, chamfer=1.5):
