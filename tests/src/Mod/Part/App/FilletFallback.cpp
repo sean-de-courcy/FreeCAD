@@ -2447,11 +2447,13 @@ TEST_F(FilletFallbackTest, refusesATrimByAFinInAnotherLedgesPlane)
     }
 }
 
-TEST_F(FilletFallbackTest, refusesATrimByWallsAtTwoHeights)
+TEST_F(FilletFallbackTest, trimsARiserOverTwoLedgeHeightsByEachLedge)
 {
-    // Review r2's T2: one riser (y 4) whose foot meets the ledge at z 9.037 for x 0..10 and at
-    // z 9.537 for x 10..20. Its strip runs into two walls on two planes: which plane trims where
-    // isn't the base's section in front of the face, so it stays refused (the literal rule)
+    // Review r2's T2 without its fin: one riser (y 4) whose foot meets the ledge at z 9.037 for
+    // x 0..10 and at z 9.537 for x 10..20. The strip runs into walls on two planes; each part of
+    // the tool is trimmed by the ledge behind it. Closed forms: the base 2000 - 40 (0.963 + 0.463)
+    // less, per 10 of length, the section above its ledge (chamfer 1/2 - d^2/2, fillet
+    // (1 - pi/4) - (d - (d sqrt(1 - d^2) + asin d) / 2)), d = 0.037 and 0.537 past the foot
     TopoDS_Shape shape = BRepAlgoAPI_Cut(
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
         BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 11, 5, 2).Shape()
@@ -2464,10 +2466,21 @@ TEST_F(FilletFallbackTest, refusesATrimByWallsAtTwoHeights)
     // The top edge is split where the two ledges meet (x 10): both halves are dressed up
     TopoShape left = edgeBetween(base, {0, 4, 10}, {10, 4, 10});
     TopoShape right = edgeBetween(base, {10, 4, 10}, {20, 4, 10});
-    for (const auto& request : {chamfer(1), fillet(1)}) {
-        std::string reason;
-        EXPECT_TRUE(forced(base, {left, right}, request, &reason).isNull()) << reason;
-    }
+    const double baseVolume = 2000 - 40 * (0.963 + 0.463);
+    auto filletPast = [](double d) {
+        return d - (d * std::sqrt(1 - d * d) + std::asin(d)) / 2;
+    };
+    const double chamfered = baseVolume - 10 * (0.5 - 0.037 * 0.037 / 2)
+        - 10 * (0.5 - 0.537 * 0.537 / 2);
+    const double rounded = baseVolume - 10 * ((1 - M_PI / 4) - filletPast(0.037))
+        - 10 * ((1 - M_PI / 4) - filletPast(0.537));
+    std::string reason;
+    TopoShape result = forced(base, {left, right}, chamfer(1), &reason);
+    EXPECT_TRUE(exact(result, chamfered)) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 11);
+    result = forced(base, {left, right}, fillet(1), &reason);
+    EXPECT_TRUE(exact(result, rounded)) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 11);
 }
 
 TEST_F(FilletFallbackTest, refusesADressUpPastAConcaveEdgeIntoASlopedWall)
