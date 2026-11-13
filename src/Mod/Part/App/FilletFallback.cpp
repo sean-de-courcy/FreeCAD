@@ -128,7 +128,8 @@ double areaOf(const TopoDS_Shape& shape)
  * hold (the same face, placed and oriented the same) adds the same to both volumes about any one
  * point, so it is left out, and the faces after adds count less those before loses, reversed. The
  * error of a whole-body difference grows with the body (with its free-form faces, about 1e-9 of
- * it even adaptively); this one's with the faces a stage rebuilt */
+ * it even adaptively); this one's with the faces a stage rebuilt. Each face is taken once
+ * (MapShapes): a face two solids of one shape share would count once, so it serves one solid */
 double changedVolume(const TopoDS_Shape& before, const TopoDS_Shape& after)
 {
     TopTools_IndexedMapOfShape old;
@@ -428,6 +429,10 @@ enum class VertexClass
     /// All three edges at the vertex are selected (a three-edge corner): the edge tools end
     /// where a corner tool (a sphere patch, or a chamfer's corner triangle) begins
     Corner3,
+    /// A chamfer's edge that ends in a cusp: an unselected edge of one of its faces leaves the
+    /// vertex the way it does, on an end face that holds both (Case Base #76). The tool ends on
+    /// the plane through the vertex normal to the edge, as Onshape's; nothing caps it there
+    CuspEnd,
     /// Outside the scope
     Refuse
 };
@@ -1226,6 +1231,28 @@ VertexEnd classify(
     VertexEnd end;
     auto edges = ctx.list(ctx.vertexEdges, vertex);
     auto faces = ctx.list(ctx.vertexFaces, vertex);
+    // An unselected seam, or a degenerate edge, bounds nothing here: left out (Case Base #76, a
+    // tunnel's seam on the cusp where its upper half circle meets a slot's wall)
+    edges.erase(
+        std::remove_if(
+            edges.begin(),
+            edges.end(),
+            [&](const TopoDS_Shape& shape) {
+                const TopoDS_Edge& edge = TopoDS::Edge(shape);
+                if (edge.IsSame(data.edge) || ctx.selected.Contains(edge)) {
+                    return false;
+                }
+                if (BRep_Tool::Degenerated(edge)) {
+                    return true;
+                }
+                // A seam: one face on both sides (an edge between the face and another can carry
+                // two curves on it too, where the seam's line goes on past the face)
+                auto ofEdge = ctx.list(ctx.edgeFaces, edge);
+                return ofEdge.size() == 1 && BRep_Tool::IsClosed(edge, TopoDS::Face(ofEdge.front()));
+            }
+        ),
+        edges.end()
+    );
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
     bool insideCurve = edges.size() == 2 && faces.size() == 2;
@@ -1285,6 +1312,27 @@ VertexEnd classify(
     }
     gp_Dir normal = surface.Plane().Axis().Direction();
     if (std::abs(normal.Dot(away)) < 1e-6) {
+        // A cusp: an unselected edge of one of this edge's faces leaves the vertex the way this
+        // edge does (Case Base #76: a tunnel's upper half circle on a slot's end wall, the slot's
+        // walls tangent to the tunnel). Onshape ends a chamfer there on the plane through the
+        // vertex normal to the edge, and the walls trim it as walls behind a strip that runs off
+        // its face. A fillet there isn't known from Onshape: refused
+        bool cusp = std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& shape) {
+            const TopoDS_Edge& other = TopoDS::Edge(shape);
+            if (other.IsSame(data.edge)) {
+                return false;
+            }
+            auto ofOther = ctx.list(ctx.edgeFaces, other);
+            bool onOwnFace = std::any_of(ofOther.begin(), ofOther.end(), [&](const TopoDS_Shape& f) {
+                return f.IsSame(data.faces[0]) || f.IsSame(data.faces[1]);
+            });
+            return onOwnFace && awayFrom(other, vertex).Dot(away) > 1 - angularTolerance;
+        });
+        if (cusp && ctx.request.kind == Kind::Chamfer) {
+            end.kind = VertexClass::CuspEnd;
+            end.trims = {{point, away.Reversed()}};
+            return end;
+        }
         end.reason = "an end face parallel to the edge";
         return end;
     }
@@ -3590,6 +3638,54 @@ std::vector<TopoShape> makerInputs(const std::vector<TopoShape>& shapes)
         copies.push_back(copy);
     }
     return copies;
+}
+
+bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    auto selected = [&](const TopoDS_Shape& edge) {
+        return std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& e) {
+            return e.IsSame(edge);
+        });
+    };
+    for (const auto& shape : edges) {
+        if (shape.ShapeType() != TopAbs_EDGE || !edgeFaces.Contains(shape)) {
+            continue;
+        }
+        const TopoDS_Edge& edge = TopoDS::Edge(shape);
+        const auto& faces = edgeFaces.FindFromKey(edge);
+        if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        TopoDS_Vertex ends[2];
+        TopExp::Vertices(edge, ends[0], ends[1]);
+        if (ends[0].IsNull() || ends[1].IsNull() || ends[0].IsSame(ends[1])) {
+            continue;
+        }
+        for (const auto& vertex : ends) {
+            if (!vertexEdges.Contains(vertex)) {
+                continue;
+            }
+            gp_Dir away = awayFrom(edge, vertex);
+            for (const auto& item : vertexEdges.FindFromKey(vertex)) {
+                if (item.IsSame(edge) || selected(item) || !edgeFaces.Contains(item)
+                    || BRep_Tool::Degenerated(TopoDS::Edge(item))) {
+                    continue;
+                }
+                const auto& ofOther = edgeFaces.FindFromKey(item);
+                bool onOwnFace = std::any_of(ofOther.begin(), ofOther.end(), [&](const TopoDS_Shape& f) {
+                    return f.IsSame(faces.First()) || f.IsSame(faces.Last());
+                });
+                if (onOwnFace && awayFrom(TopoDS::Edge(item), vertex).Dot(away) > 1 - angularTolerance) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)

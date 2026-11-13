@@ -2512,3 +2512,72 @@ class CurvedWallEndTest(unittest.TestCase):
         sector, edges = self.wall(10, 11.5, 4)
         with self.assertRaises(Part.OCCError):
             sector.makeChamfer(0.75, edges)
+
+
+def cusped_chamfer_volume(r, a, b):
+    """The triangle (a on the end wall, b along the tunnel) swept round the half circle r and cut
+    by the planes y = +-r: the integral over rho in [r, r + a] of 2 rho asin(r / rho) b (r + a - rho) / a."""
+
+    def s(p):
+        return math.sqrt(p * p - r * r)
+
+    def f1(p):
+        return p * p / 2 * math.asin(r / p) + r / 2 * s(p)
+
+    def f2(p):
+        return p**3 / 3 * math.asin(r / p) + r / 6 * (p * s(p) + r * r * math.log(p + s(p)))
+
+    def g(p):
+        return 2 * (r + a) * f1(p) - 2 * f2(p)
+
+    return b / a * (g(r + a) - g(r))
+
+
+class CuspTest(unittest.TestCase):
+    """Case Base #76, designed (oracle 17 Q-CUSP, facts CU1-CU5): a tunnel r 5 along x through a block,
+    and a slot as wide as the tunnel above its axis from x 15 on. The tunnel's upper half circle on the
+    slot's end wall ends in cusps, where the slot's walls are tangent to the tunnel. Onshape chamfers
+    it and ends the chamfer face on the wall planes y = +-5; OCCT left a face of zero width (two
+    distances), or built a valid result removing ten times as much (equal distance)."""
+
+    def slot(self, seam):
+        V = FreeCAD.Vector
+        block = Part.makeBox(30, 30, 20, V(0, -15, 0))
+        tunnel = Part.makeCylinder(5, 32, V(-1, 0, 10), V(1, 0, 0))
+        # turn the tunnel about its axis until its seam (a line edge) lies along `seam`
+        line = [e for e in tunnel.Edges if e.Curve.TypeId == "Part::GeomLine"][0]
+        p = line.Vertexes[0].Point
+        now = V(0, p.y, p.z - 10)
+        angle = math.degrees(math.atan2(now.cross(seam).x, now.dot(seam)))
+        tunnel.rotate(V(0, 0, 10), V(1, 0, 0), angle)
+        shape = block.cut(tunnel).cut(Part.makeBox(16, 10, 11, V(15, -5, 10)))
+        rim = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.BoundBox.XMin - 15) < 1e-7
+            and abs(e.BoundBox.XMax - 15) < 1e-7
+            and e.BoundBox.ZMin > 10 - 1e-7
+        ]
+        return shape, rim
+
+    def testChamfersAsOnshape(self):
+        V = FreeCAD.Vector
+        # the seam below the rim, on its top (the rim in two pieces), and on the cusp (as in Case Base)
+        for seam in (V(0, 0, -1), V(0, 0, 1), V(0, 1, 0)):
+            shape, rim = self.slot(seam)
+            for wall, tunnel in ((1, 1), (1, 3), (3, 1)):
+                with self.subTest(seam=tuple(seam), wall=wall, tunnel=tunnel):
+                    if wall == tunnel:
+                        result = shape.makeChamfer(wall, rim)
+                    else:
+                        # The first distance is on the edge's first face, here the tunnel
+                        first = shape.ancestorsOfType(rim[0], Part.Face)[0]
+                        on_tunnel = first.Surface.TypeId == "Part::GeomCylinder"
+                        result = shape.makeChamfer(
+                            tunnel if on_tunnel else wall, wall if on_tunnel else tunnel, rim
+                        )
+                    self.assertTrue(result.isValid())
+                    expected = cusped_chamfer_volume(5, wall, tunnel)
+                    self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
+                    self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))

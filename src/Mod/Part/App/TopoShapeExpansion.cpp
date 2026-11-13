@@ -7745,6 +7745,9 @@ struct DressUpOutcome
     bool failed {false};
     bool thin {false};
     bool invalid {false};
+    /// A chamfer whose edge ends in a cusp (FilletFallback::endsInCusp()): the exact
+    /// construction first, OCCT's result where it refuses
+    bool cusp {false};
     std::exception_ptr occtError;
     bool constructed {false};
     FilletFallback::Construction construction;
@@ -7780,7 +7783,12 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             // A face of zero width (ops#298): the exact construction builds it at the limit
             out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
             out.invalid = !out.failed && !out.thin && builtInvalid(*maker);
-            if (out.failed || out.thin || out.invalid) {
+            // Case Base #76: at a cusp OCCT's chamfer can be valid and wrong (oracle 17 Q-CUSP:
+            // removing ten times Onshape's volume, a face running out of the body)
+            out.cusp = !out.failed && !out.thin && !out.invalid
+                && request.kind == FilletFallback::Kind::Chamfer
+                && FilletFallback::endsInCusp(base, edges);
+            if (out.failed || out.thin || out.invalid || out.cusp) {
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
@@ -7939,7 +7947,7 @@ TopoShape& TopoShape::makeElementChamfer(
     request.chamferType = chamferType;
     request.flipDirection = flipDirection;
     auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
-    if (outcome->failed || outcome->thin || outcome->invalid) {
+    if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }

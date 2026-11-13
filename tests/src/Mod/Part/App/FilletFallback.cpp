@@ -2407,6 +2407,104 @@ TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideALargeFreeFormBody)
     EXPECT_NEAR(Part::MassProperties::volume(removed, true), expected, 1e-6 * expected);
 }
 
+/// Case Base #76, designed: a block x 0..30, |y| <= 15, z 0..20; a tunnel r 5 along x about
+/// (y 0, z 10); a slot |y| <= 5 above the tunnel's axis (z 10..20) from x 15 on. The rim is the
+/// tunnel's upper half circle on the slot's end wall x = 15, from (15, 5, 10) over (15, 0, 15) to
+/// (15, -5, 10). At each end the slot's wall is tangent to the tunnel, and the wall's edge on the
+/// end wall leaves the vertex upward as the arc does: a cusp. seam: the direction of the tunnel
+/// cylinder's seam from its axis (+y puts it on the cusp at y 5, as in Case Base)
+TopoDS_Shape cuspedSlot(const gp_Dir& seam)
+{
+    gp_Ax2 axis(gp_Pnt(-1, 0, 10), gp::DX(), seam);
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -15, 0), 30, 30, 20).Shape(),
+        BRepPrimAPI_MakeCylinder(axis, 5, 32).Shape()
+    ).Shape();
+    return BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(15, -5, 10), 16, 10, 11).Shape())
+        .Shape();
+}
+
+std::vector<TopoShape> cuspedRim(const TopoShape& base)
+{
+    return edgesWhere(
+        base,
+        [](const gp_Pnt& p) { return std::abs(p.X() - 15) < 1e-7 && p.Z() > 10 - 1e-7; },
+        true
+    );
+}
+
+/// The volume of the triangle (a on the top, b down the bore) swept round the half circle r about
+/// its axis and cut by the planes y = +-r: the integral over rho in [r, r + a] of
+/// 2 rho asin(r / rho) b (r + a - rho) / a
+double cuspedChamferVolume(double r, double a, double b)
+{
+    auto s = [r](double rho) { return std::sqrt(rho * rho - r * r); };
+    auto f1 = [&](double rho) { return rho * rho / 2 * std::asin(r / rho) + r / 2 * s(rho); };
+    auto f2 = [&](double rho) {
+        return rho * rho * rho / 3 * std::asin(r / rho)
+            + r / 6 * (rho * s(rho) + r * r * std::log(rho + s(rho)));
+    };
+    auto g = [&](double rho) { return 2 * (r + a) * f1(rho) - 2 * f2(rho); };
+    return b / a * (g(r + a) - g(r));
+}
+
+TEST_F(FilletFallbackTest, chamfersARimEndingInCuspsAsOnshape)
+{
+    // Case Base #76 (oracle 17, Q-CUSP, facts CU1-CU5): Onshape chamfers the half circle and ends
+    // the chamfer face on the slot's wall planes y = +-5, adding one face. OCCT leaves a face of zero
+    // width; the construction refused "an end face parallel to the edge", or "a vertex where 4 edges
+    // meet" with the tunnel's seam on the cusp (as in Case Base). Removed: the triangle swept round
+    // the half circle and cut by the wall planes, in closed form (Onshape's volumes are within 2.4e-4
+    // of it, OCCT's own on a rib bounding the same region within 1e-6)
+    struct Case
+    {
+        double wall, tunnel, removed;
+    };
+    const Case cases[] = {
+        {1, 3, cuspedChamferVolume(5, 1, 3)},  // C1: 19.826838
+        {1, 1, cuspedChamferVolume(5, 1, 1)},  // C3: 6.608946
+        {3, 1, cuspedChamferVolume(5, 3, 1)},  // C4: 18.290831
+    };
+    // The seam below the rim, on its top (the rim in two pieces), and on the cusp
+    for (const gp_Dir& seam : {gp_Dir(0, 0, -1), gp_Dir(0, 0, 1), gp_Dir(0, 1, 0)}) {
+        TopoShape base(cuspedSlot(seam), 1L);
+        auto rim = cuspedRim(base);
+        ASSERT_FALSE(rim.empty());
+        auto face = base.findAncestorShape(rim[0].getShape(), TopAbs_FACE);
+        bool onWall = BRepAdaptor_Surface(TopoDS::Face(face)).GetType() == GeomAbs_Plane;
+        int faces = base.countSubShapes(TopAbs_FACE);
+        for (const auto& c : cases) {
+            auto request = onWall ? chamfer(c.wall, c.tunnel, ChamferType::twoDistances)
+                                  : chamfer(c.tunnel, c.wall, ChamferType::twoDistances);
+            if (c.wall == c.tunnel) {
+                request = chamfer(c.wall);
+            }
+            TopoShape result = dressUp(base, rim, request);
+            ASSERT_FALSE(result.isNull()) << seam.Z() << " " << c.wall << "/" << c.tunnel;
+            EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+            EXPECT_NEAR(
+                volume(base.getShape()) - volume(result.getShape()),
+                c.removed,
+                1e-6 * c.removed
+            ) << seam.Z() << " " << c.wall << "/" << c.tunnel;
+            // One chamfer face per piece of the rim
+            EXPECT_EQ(result.countSubShapes(TopAbs_FACE), faces + static_cast<int>(rim.size()))
+                << seam.Z() << " " << c.wall << "/" << c.tunnel;
+        }
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesARoundOfARimEndingInCusps)
+{
+    // Onshape rounds it too (CU5: a torus face cut off by the walls, -2.922055), but the
+    // construction's cusp end is a chamfer's only: OCCT's error stands (debt)
+    TopoShape base(cuspedSlot(gp_Dir(0, 1, 0)), 1L);
+    auto rim = cuspedRim(base);
+    std::string reason;
+    EXPECT_TRUE(forced(base, rim, fillet(1), &reason).isNull());
+    EXPECT_NE(reason.find("an end face parallel to the edge"), std::string::npos) << reason;
+}
+
 TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
 {
     // Case Base #108: the chamfer 2 of the notch's rim (both pieces), down to the floor: the
