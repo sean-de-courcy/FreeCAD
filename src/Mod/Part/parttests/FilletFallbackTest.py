@@ -4071,6 +4071,111 @@ class TightWallArcTest(unittest.TestCase):
         apexes = [V(28.5, 3 + t, 5), V(27 - t, 1.5, 5)]
         self.check(shape, (2416.468426, 1380.349941, 22, 2.821144), apexes, centres)
 
+    def scalloped(self, hole):
+        """A plate 60 x 40 x 6: two opposite corners rounded 5, the other two scalloped by a
+        concave cylinder R 8 about the corner's edge, joined to both walls by arcs rho 1: four wall
+        arcs tighter than the round 1.5875, each between a plane and the scoop. With hole, a
+        through hole R 4 that touches both straight top edges of the round beside a rounded corner
+        (the lid's hole). Returns the plate, its top rim (without the hole's) and the round."""
+        lx, ly, top, big, scoop, rho, r = 60.0, 40.0, 6.0, 5.0, 8.0, 1.0, 1.5875
+        k = math.sqrt((scoop + rho) ** 2 - rho**2)
+        a = math.degrees(math.atan2(rho, k))
+
+        def arc(cx, cy, radius, a0, a1):
+            circle = Part.Circle(V(cx, cy, 0), V(0, 0, 1), radius)
+            return Part.ArcOfCircle(circle, math.radians(a0), math.radians(a1)).toShape()
+
+        def half():
+            return [
+                Part.makeLine(V(big, 0, 0), V(lx - k, 0, 0)),
+                arc(lx - k, rho, rho, -90, -a),
+                arc(lx, 0, scoop, 90 + a, 180 - a),
+                arc(lx - rho, k, rho, -(90 - a), 0),
+                Part.makeLine(V(lx, k, 0), V(lx, ly - big, 0)),
+                arc(lx - big, ly - big, big, 0, 90),
+            ]
+
+        other = half()
+        for e in other:
+            e.rotate(V(lx / 2, ly / 2, 0), V(0, 0, 1), 180)
+        plate = Part.Face(Part.Wire(Part.__sortEdges__(half() + other))).extrude(V(0, 0, top))
+        if hole:
+            centre = V(lx - r - 4, ly - r - 4, -1)
+            plate = plate.cut(Part.makeCylinder(4, top + 2, centre, V(0, 0, 1)))
+        rim = [
+            e
+            for e in plate.Edges
+            if abs(e.BoundBox.ZMin - top) < 1e-9
+            and abs(e.BoundBox.ZMax - top) < 1e-9
+            and not (abs(e.BoundBox.XLength - 8) < 1e-6 and abs(e.BoundBox.YLength - 8) < 1e-6)
+        ]
+        return plate, rim, r
+
+    def testFourWallArcsOnOneRim(self):
+        # Case Lid #121's rim, designed (probes/c4/rim_four.py): the whole top rim of the scalloped
+        # plate, 12 edges with four tight wall arcs. A whole loop on a plane face with walls square
+        # to it is assembled directly (notes/boolean-free-mitre.md): each tight arc's face is the
+        # canal patch, its sides the neighbouring rounds' ends, and the neighbours' top edges cross
+        # in one vertex, at r from the wall and 8 + r from the scoop's axis. One face per rim
+        # edge; the four patches are equal by the model's symmetries. The patch's area and the
+        # volume have no closed form: they are the construction by Booleans' on the same model
+        # (lx6 adf71674be, where it took 60 s), whose patches lie on the canal surface to 2e-14.
+        # With the hole, its rim touches two top edges: the top plane comes out in two faces, as
+        # in Onshape, the smaller between the hole and the corner's top edges:
+        # 4^2 - 4 pi - (5 - r)^2 (1 - pi/4)
+        for hole, volume in ((False, 13627.9151), (True, 13326.3222)):
+            with self.subTest(hole=hole):
+                plate, rim, r = self.scalloped(hole)
+                self.assertEqual(len(rim), 12)
+                result = plate.makeFillet(r, rim)
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                self.assertEqual(len(result.Faces), len(plate.Faces) + 12 + (1 if hole else 0))
+                analytic = ("Part::GeomPlane", "Part::GeomCylinder", "Part::GeomToroid")
+                free = [f for f in result.Faces if f.Surface.TypeId not in analytic]
+                self.assertEqual(len(free), 4)
+                for f in free:
+                    self.assertEqual(f.Surface.TypeId, "Part::GeomBSplineSurface")
+                    self.assertAlmostEqual(f.Area, 2.364206, delta=1e-5)
+                self.assertAlmostEqual(result.Volume, volume, delta=1e-3)
+                t = math.sqrt((8 + r) ** 2 - r**2)
+                for apex in (V(60 - t, r, 6), V(60 - r, t, 6), V(t, 40 - r, 6), V(r, 40 - t, 6)):
+                    self.assertLess(min((v.Point - apex).Length for v in result.Vertexes), 1e-6)
+                tops = [
+                    f
+                    for f in result.Faces
+                    if f.Surface.TypeId == "Part::GeomPlane"
+                    and abs(f.BoundBox.ZMin - 6) < 1e-9
+                    and abs(f.BoundBox.ZMax - 6) < 1e-9
+                ]
+                self.assertEqual(len(tops), 2 if hole else 1)
+                if hole:
+                    island = 16 - 4 * math.pi - (5 - r) ** 2 * (1 - math.pi / 4)
+                    self.assertAlmostEqual(min(f.Area for f in tops), island, delta=1e-6)
+
+    def testAHoleCrossingTheTopEdgeIsNotBuiltDirectly(self):
+        # The same plate with the hole 0.5 further out: its rim crosses the round's top edges, so
+        # the hole's wall cuts into the round. That is not the direct assembly's case (it refuses,
+        # and the construction by Booleans or OCCT answers): whatever is returned is valid and
+        # removes material from the plate, and nothing is pinched off the top
+        plate, rim, r = self.scalloped(False)
+        centre = V(60 - r - 4 + 0.5, 40 - r - 4 + 0.5, -1)
+        plate = plate.cut(Part.makeCylinder(4, 8, centre, V(0, 0, 1)))
+        rim = [
+            e
+            for e in plate.Edges
+            if abs(e.BoundBox.ZMin - 6) < 1e-9
+            and abs(e.BoundBox.ZMax - 6) < 1e-9
+            and not (abs(e.BoundBox.XLength - 8) < 1e-6 and abs(e.BoundBox.YLength - 8) < 1e-6)
+        ]
+        self.assertEqual(len(rim), 12)
+        try:
+            result = plate.makeFillet(r, rim)
+        except Part.OCCError:
+            return
+        self.assertTrue(result.isValid())
+        self.assertLess(result.Volume, plate.Volume)
+
 
 class CurvedEndTrimTest(unittest.TestCase):
     """Case Base #105, designed (notes r105-curved-end-trim): a block x -10..10, y 0..8, z 0..5 with
