@@ -1215,7 +1215,23 @@ class TestThickenSeamLeg(unittest.TestCase):
         s = th.Shape
         self.assertTrue(s.isValid())
         self.assertEqual(len(s.Solids), 1)
+        self.assertExactEdges(s)
         return s
+
+    def assertExactEdges(self, s):
+        # every edge valid and the box computable on an untessellated copy (remote brief 3: an edge whose range
+        # lies outside its curve breaks a later feature's result check, Geom_BSplineCurve::Segment)
+        self.assertEqual([k + 1 for k, e in enumerate(s.Edges) if not e.isValid()], [])
+        self.assertTrue(s.copy().BoundBox.isValid())
+
+    def testLegPieceEdgesAreExact(self):
+        # the leg's own piece, rebuilt where OCC's offset is wrong (_ruled_cylinder_piece), on brief 2's oblique leg
+        for t1, t2 in ((0.75, 0.0), (0.0, 0.75), (0.75, 0.75)):
+            with self.subTest(t1=t1, t2=t2):
+                _, leg = self.sheet(None)
+                p = S._leg_piece(leg, t1, t2)
+                self.assertTrue(p.isValid())
+                self.assertExactEdges(p)
 
     def assertBox(self, s, lo, hi):
         b = s.optimalBoundingBox(False, False)

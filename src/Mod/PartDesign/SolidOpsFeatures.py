@@ -535,6 +535,18 @@ def _plane_caps(shape):
     return res
 
 
+def _check_edges(tool):
+    """Every edge of the tool valid, and its box computable from the exact geometry (a copy without
+    triangulation). An edge whose range lies outside its curve's, or reversed, makes the box fail
+    (Geom_BSplineCurve::Segment) in PartDesign's result check after a later feature, while the volume can
+    still be right (ops#675 remote brief 3, replica #92): Thicken refuses it here instead."""
+    bad = sum(1 for e in tool.Edges if not e.isValid())
+    if bad:
+        raise SolidOpsError("Thicken failed: %d edge(s) of the result are not valid" % bad)
+    if not tool.copy().BoundBox.isValid():
+        raise SolidOpsError("Thicken failed: the result's box can't be computed (an edge's range lies outside its curve)")
+
+
 def thicken_tool(faces, t1, t2):
     """Solid thickened from the faces: t1 along each face's normal, t2 against it."""
     if t1 < 0 or t2 < 0:
@@ -563,7 +575,9 @@ def thicken_tool(faces, t1, t2):
     tool = pieces[0]
     if len(pieces) > 1:
         tool = pieces[0].fuse(pieces[1:])
-    return _plane_caps(tool)
+    tool = _plane_caps(tool)
+    _check_edges(tool)
+    return tool
 
 
 def offset_surface(faces, distance):
