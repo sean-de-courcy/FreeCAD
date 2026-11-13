@@ -46,8 +46,10 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -6682,6 +6684,219 @@ TopoShape& TopoShape::makeElementThickSolid(
 }
 
 
+namespace
+{
+/// The edges makeElementWires() may still connect to the wire it is building (ops#640).
+///
+/// BRepBuilderAPI_MakeWire::Add() joins an edge to the wire only at a vertex: one of the edge's
+/// vertices within tolerance of one of the wire's (the vertices' tolerances, and the curve ends
+/// that lie within them). An edge with no vertex within `reach()` of any wire vertex cannot be
+/// joined, so the wire loop asks Add() only of the others, the candidates, in input order: the
+/// first one Add() takes is the edge the whole scan would take, and the wires, their edge order
+/// and so the element names are unchanged. Cells of the edges' vertices make each new wire vertex
+/// cost a constant lookup instead of a scan of every remaining edge. Reach is generous on
+/// purpose: a wider candidate set only costs an Add() that fails, as before.
+class WireEdgeIndex
+{
+public:
+    explicit WireEdgeIndex(const std::vector<TopoShape>& edges)
+        : points(edges.size())
+        , taken(edges.size(), false)
+    {
+        for (std::size_t i = 0; i < edges.size(); ++i) {
+            const TopoDS_Shape& edge = edges[i].getShape();
+            if (edge.IsNull()) {
+                always.push_back(i);
+                continue;
+            }
+            if (edge.ShapeType() == TopAbs_EDGE) {
+                edgeTol = std::max(edgeTol, BRep_Tool::Tolerance(TopoDS::Edge(edge)));
+            }
+            for (TopExp_Explorer xp(edge, TopAbs_VERTEX); xp.More(); xp.Next()) {
+                const TopoDS_Vertex& vertex = TopoDS::Vertex(xp.Current());
+                points[i].push_back(BRep_Tool::Pnt(vertex));
+                edgeTol = std::max(edgeTol, BRep_Tool::Tolerance(vertex));
+            }
+            if (points[i].empty()) {
+                always.push_back(i);
+            }
+        }
+        rebuildCells(2 * reach());
+    }
+
+    /// The first edge at or after `from` not yet in a wire, or the edge count
+    std::size_t firstFree(std::size_t from) const
+    {
+        while (from < taken.size() && taken[from]) {
+            ++from;
+        }
+        return from;
+    }
+
+    /// Starts a wire whose first edge, as the wire holds it, is `edge` (input edge `index`)
+    void startWire(std::size_t index, const TopoDS_Shape& edge)
+    {
+        taken[index] = true;
+        candidates.clear();
+        wirePoints.clear();
+        wireTol = 0;
+        reachUsed = 0;
+        for (std::size_t i : always) {
+            if (!taken[i]) {
+                candidates.insert(i);
+            }
+        }
+        addWireEdge(edge);
+    }
+
+    /// Adds `edge`, as the wire holds it (input edge `index`), to the wire
+    void takeEdge(std::size_t index, const TopoDS_Shape& edge)
+    {
+        taken[index] = true;
+        candidates.erase(index);
+        addWireEdge(edge);
+    }
+
+    /// The edges Add() may join to the wire, in input order
+    const std::set<std::size_t>& connectible() const
+    {
+        return candidates;
+    }
+
+private:
+    using CellKey = std::array<long long, 3>;
+    struct CellKeyHash
+    {
+        std::size_t operator()(const CellKey& key) const
+        {
+            std::size_t hash = std::hash<long long> {}(key[0]);
+            hash = hash * 1000003U ^ std::hash<long long> {}(key[1]);
+            return hash * 1000003U ^ std::hash<long long> {}(key[2]);
+        }
+    };
+
+    double reach() const
+    {
+        return 2 * (edgeTol + std::max(edgeTol, wireTol)) + Precision::Confusion();
+    }
+
+    bool cellOf(const gp_Pnt& point, CellKey& key) const
+    {
+        const double limit = 1e15;
+        const std::array<double, 3> scaled {
+            point.X() / cellSize,
+            point.Y() / cellSize,
+            point.Z() / cellSize
+        };
+        for (int i = 0; i < 3; ++i) {
+            if (!(std::abs(scaled[i]) < limit)) {
+                return false;
+            }
+            key[i] = static_cast<long long>(std::floor(scaled[i]));
+        }
+        return true;
+    }
+
+    void rebuildCells(double size)
+    {
+        cellSize = size;
+        cells.clear();
+        uncelled.clear();
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            for (const auto& point : points[i]) {
+                CellKey key;
+                if (cellOf(point, key)) {
+                    auto& cell = cells[key];
+                    if (cell.empty() || cell.back() != i) {
+                        cell.push_back(i);
+                    }
+                }
+                else if (uncelled.empty() || uncelled.back() != i) {
+                    uncelled.push_back(i);
+                }
+            }
+        }
+    }
+
+    void consider(std::size_t i, const gp_Pnt& point, double within)
+    {
+        if (taken[i] || candidates.count(i)) {
+            return;
+        }
+        for (const auto& end : points[i]) {
+            if (end.Distance(point) <= within) {
+                candidates.insert(i);
+                return;
+            }
+        }
+    }
+
+    void query(const gp_Pnt& point)
+    {
+        const double within = reachUsed;
+        CellKey key;
+        if (!cellOf(point, key)) {
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                consider(i, point, within);
+            }
+            return;
+        }
+        for (long long dx = -1; dx <= 1; ++dx) {
+            for (long long dy = -1; dy <= 1; ++dy) {
+                for (long long dz = -1; dz <= 1; ++dz) {
+                    auto found = cells.find({key[0] + dx, key[1] + dy, key[2] + dz});
+                    if (found == cells.end()) {
+                        continue;
+                    }
+                    for (std::size_t i : found->second) {
+                        consider(i, point, within);
+                    }
+                }
+            }
+        }
+        for (std::size_t i : uncelled) {
+            consider(i, point, within);
+        }
+    }
+
+    void addWireEdge(const TopoDS_Shape& edge)
+    {
+        std::size_t first = wirePoints.size();
+        if (edge.ShapeType() == TopAbs_EDGE) {
+            wireTol = std::max(wireTol, BRep_Tool::Tolerance(TopoDS::Edge(edge)));
+        }
+        for (TopExp_Explorer xp(edge, TopAbs_VERTEX); xp.More(); xp.Next()) {
+            const TopoDS_Vertex& vertex = TopoDS::Vertex(xp.Current());
+            wirePoints.push_back(BRep_Tool::Pnt(vertex));
+            wireTol = std::max(wireTol, BRep_Tool::Tolerance(vertex));
+        }
+        if (reach() > reachUsed) {
+            // A wider reach (a tolerance grew): look again from every wire vertex
+            reachUsed = reach();
+            if (reachUsed > cellSize) {
+                rebuildCells(2 * reachUsed);
+            }
+            first = 0;
+        }
+        for (std::size_t k = first; k < wirePoints.size(); ++k) {
+            query(wirePoints[k]);
+        }
+    }
+
+    std::vector<std::vector<gp_Pnt>> points;  // each input edge's vertices
+    std::vector<bool> taken;
+    std::vector<std::size_t> always;  // edges without a vertex: always asked
+    std::unordered_map<CellKey, std::vector<std::size_t>, CellKeyHash> cells;
+    std::vector<std::size_t> uncelled;
+    std::set<std::size_t> candidates;
+    std::vector<gp_Pnt> wirePoints;
+    double edgeTol {0};
+    double wireTol {0};
+    double reachUsed {0};
+    double cellSize {0};
+};
+}  // namespace
+
 TopoShape& TopoShape::makeElementWires(
     const TopoShape& shape,
     const char* op,
@@ -6750,7 +6965,7 @@ TopoShape& TopoShape::makeElementWires(
     }
 
     std::vector<TopoShape> wires;
-    std::list<TopoShape> edgeList;
+    std::vector<TopoShape> edgeList;
 
     for (const auto& shape : shapes) {
         for (const auto& e : shape.getSubTopoShapes(TopAbs_EDGE)) {
@@ -6762,18 +6977,21 @@ TopoShape& TopoShape::makeElementWires(
     edges.reserve(edgeList.size());
     wires.reserve(edgeList.size());
 
+    WireEdgeIndex index(edgeList);
+    std::size_t next = 0;
+
     // sort them together to wires
-    while (!edgeList.empty()) {
+    while ((next = index.firstFree(next)) < edgeList.size()) {
         BRepBuilderAPI_MakeWire mkWire;
-        // add and erase first edge
+        // add the first edge left
         edges.clear();
-        edges.push_back(edgeList.front());
+        edges.push_back(edgeList[next]);
         mkWire.Add(TopoDS::Edge(edges.back().getShape()));
         edges.back().setShape(mkWire.Edge(), false);
         if (output) {
-            (*output)[edges.back()] = edgeList.front();
+            (*output)[edges.back()] = edgeList[next];
         }
-        edgeList.pop_front();
+        index.startWire(next, mkWire.Edge());
 
         // current new wire. V1 starts it bare, as upstream does: with this shape's hasher,
         // mapSubElement() would add an empty tag section after `op` to every name (ops#44)
@@ -6781,29 +6999,34 @@ TopoShape& TopoShape::makeElementWires(
             ? TopoShape {0, App::StringHasherRef(), mkWire.Wire(), App::HistoryAlgorithm::V1}
             : TopoShape {Tag, Hasher, mkWire.Wire(), getHistoryAlgorithm()};
 
-        // try to connect each edge to the wire, the wire is complete if no more edges are
-        // connectible
+        // try to connect each edge left to the wire, in input order; the wire is complete if no
+        // more edges are connectible. Only the edges with a vertex near the wire's are asked.
         bool found = true;
         while (found) {
             found = false;
-            for (auto it = edgeList.begin(); it != edgeList.end(); ++it) {
-                mkWire.Add(TopoDS::Edge(it->getShape()));
+            std::size_t joined = 0;
+            for (std::size_t candidate : index.connectible()) {
+                mkWire.Add(TopoDS::Edge(edgeList[candidate].getShape()));
                 if (mkWire.Error() != BRepBuilderAPI_DisconnectedWire) {
-                    // edge added ==> remove it from list
                     found = true;
-                    edges.push_back(*it);
-                    // MakeWire will replace vertex of connected edge, which
-                    // effectively creat a new edge. So we need to update the
-                    // shape in order to preserve element mapping.
-                    edges.back().setShape(mkWire.Edge(), false);
-                    if (output) {
-                        (*output)[edges.back()] = *it;
-                    }
-                    edgeList.erase(it);
-                    new_wire.setShape(mkWire.Wire(), false);
+                    joined = candidate;
                     break;
                 }
             }
+            if (!found) {
+                break;
+            }
+            // edge added ==> take it from the edges left
+            edges.push_back(edgeList[joined]);
+            // MakeWire will replace vertex of connected edge, which
+            // effectively creat a new edge. So we need to update the
+            // shape in order to preserve element mapping.
+            edges.back().setShape(mkWire.Edge(), false);
+            if (output) {
+                (*output)[edges.back()] = edgeList[joined];
+            }
+            index.takeEdge(joined, mkWire.Edge());
+            new_wire.setShape(mkWire.Wire(), false);
         }
 
         if (elementMapPolicy == ElementMapPolicy::Propagate) {

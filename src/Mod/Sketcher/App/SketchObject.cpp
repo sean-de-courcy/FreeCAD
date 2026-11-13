@@ -23,7 +23,9 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 
 #include <BRep_Tool.hxx>
@@ -680,11 +682,54 @@ void SketchObject::buildShape()
     TopTools_IndexedMapOfShape resultVertexMap;
     TopExp::MapShapes(result.getShape(), TopAbs_VERTEX, resultVertexMap);
 
+    // The history entries by cells of twice the tolerance (ops#640): an entry within
+    // Precision::Confusion() of a vertex lies in the vertex's cell or a neighbouring one, so each
+    // vertex reads 27 cells instead of every entry. The test and the sorted set of names are
+    // unchanged; a coordinate too large for a cell index takes the whole scan, as before.
+    using HistoryEntry = decltype(vertexHistoryMap)::value_type;
+    using CellKey = std::array<long long, 3>;
+    struct CellKeyHash
+    {
+        std::size_t operator()(const CellKey& key) const
+        {
+            std::size_t hash = std::hash<long long> {}(key[0]);
+            hash = hash * 1000003U ^ std::hash<long long> {}(key[1]);
+            return hash * 1000003U ^ std::hash<long long> {}(key[2]);
+        }
+    };
+    const double cellSize = 2 * Precision::Confusion();
+    auto cellOf = [cellSize](const gp_Pnt& point, CellKey& key) {
+        const double limit = 1e15;
+        const std::array<double, 3> scaled {
+            point.X() / cellSize,
+            point.Y() / cellSize,
+            point.Z() / cellSize
+        };
+        for (int i = 0; i < 3; ++i) {
+            if (!(std::abs(scaled[i]) < limit)) {
+                return false;
+            }
+            key[i] = static_cast<long long>(std::floor(scaled[i]));
+        }
+        return true;
+    };
+    std::unordered_map<CellKey, std::vector<const HistoryEntry*>, CellKeyHash> historyCells;
+    std::vector<const HistoryEntry*> uncelledHistory;
+    for (const auto& entry : vertexHistoryMap) {
+        CellKey key;
+        if (cellOf(entry.first, key)) {
+            historyCells[key].push_back(&entry);
+        }
+        else {
+            uncelledHistory.push_back(&entry);
+        }
+    }
+
     for (int vertexIdx = 1; vertexIdx <= resultVertexMap.Extent(); vertexIdx++) {
         std::vector<std::string> referenceIDs;
         gp_Pnt mainVertexPoint = BRep_Tool::Pnt(TopoDS::Vertex(resultVertexMap(vertexIdx)));
 
-        for (const auto& vertexHistoryEntry : vertexHistoryMap) {
+        auto match = [&referenceIDs, &mainVertexPoint](const HistoryEntry& vertexHistoryEntry) {
             if (vertexHistoryEntry.second.size()
                 && vertexHistoryEntry.first.IsEqual(mainVertexPoint, Precision::Confusion())) {
                 referenceIDs.insert(
@@ -692,6 +737,30 @@ void SketchObject::buildShape()
                     vertexHistoryEntry.second.begin(),
                     vertexHistoryEntry.second.end()
                 );
+            }
+        };
+        CellKey key;
+        if (!cellOf(mainVertexPoint, key)) {
+            for (const auto& vertexHistoryEntry : vertexHistoryMap) {
+                match(vertexHistoryEntry);
+            }
+        }
+        else {
+            for (long long dx = -1; dx <= 1; ++dx) {
+                for (long long dy = -1; dy <= 1; ++dy) {
+                    for (long long dz = -1; dz <= 1; ++dz) {
+                        auto cell = historyCells.find({key[0] + dx, key[1] + dy, key[2] + dz});
+                        if (cell == historyCells.end()) {
+                            continue;
+                        }
+                        for (const HistoryEntry* entry : cell->second) {
+                            match(*entry);
+                        }
+                    }
+                }
+            }
+            for (const HistoryEntry* entry : uncelledHistory) {
+                match(*entry);
             }
         }
 
