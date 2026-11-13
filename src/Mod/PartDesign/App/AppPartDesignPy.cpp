@@ -632,7 +632,7 @@ public:
             &Module::studioPickId,
             "studioPickId(obj, element) -- The pick of element (e.g. 'Edge3') of obj's shape (a "
             "Body, or a feature of one) as a dress-up studio feature stores it in StudioPickIds: "
-            "'<part id>|<element name>', the name expanded."
+            "'<part id>|<element name>', the name interned (App.expandMappedName() expands it)."
         );
         add_varargs_method(
             "studioSetPickIds",
@@ -2394,7 +2394,7 @@ private:
         }
         return Py::String(
             PartDesign::studioPartId(body) + "|"
-            + Data::NameTable::instance().toPlain(names.front().first.toString())
+            + Data::NameTable::instance().toInterned(names.front().first.toString())
         );
     }
 

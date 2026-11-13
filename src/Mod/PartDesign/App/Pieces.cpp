@@ -183,11 +183,14 @@ using Score = std::tuple<int, int, int>;
 Score scoreOf(const std::vector<std::string>& witness, const std::set<std::string>& names)
 {
     int hits[3] = {0, 0, 0};
+    const auto& table = Data::NameTable::instance();
     for (const auto& entry : witness) {
         if (entry.size() < 3 || entry[0] < '1' || entry[0] > '3') {
             continue;
         }
-        const std::string name = entry.substr(2);
+        // Stored interned (ops#640 C2; an older build's, expanded, reads the same): scored
+        // expanded, as the names it is scored against
+        const std::string name = table.toPlain(std::string_view(entry).substr(2));
         if (entry[0] != '2') {
             const std::size_t sections = Data::MappedName::getDecodedMappedName(name).size();
             if (placedByOrder(name, entry[0] == '1' || sections == 0 ? 0 : sections - 1)) {
@@ -392,6 +395,7 @@ pieceWitness(const Part::TopoShape& source, int index, const Part::TopoShape& ba
         return out;
     }
     const std::set<std::string> baseNames = faceNames(base);
+    auto& table = Data::NameTable::instance();
     for (const auto& name : unique[index]) {
         int tier = 1;
         std::size_t inherited = 0;  // the sections the parent's face had: E added the rest
@@ -418,7 +422,8 @@ pieceWitness(const Part::TopoShape& source, int index, const Part::TopoShape& ba
         if (inherited != std::string::npos && placedByOrder(name, inherited)) {
             continue;
         }
-        out.push_back(std::to_string(tier) + " " + name);
+        // Stored interned (ops#640 C2): bounded, its table entries saved with the file
+        out.push_back(std::to_string(tier) + " " + table.toInterned(name));
     }
     std::ranges::sort(out);
     return out;
