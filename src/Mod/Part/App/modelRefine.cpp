@@ -24,6 +24,9 @@
 
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
+#include <utility>
 #include <numbers>
 #include <iterator>
 #include <memory>
@@ -258,26 +261,81 @@ void FaceAdjacencySplitter::recursiveFind(const TopoDS_Face& face, FaceVectorTyp
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
+static Handle(Geom_Plane) getGeomPlane(const TopoDS_Face& faceIn);
+
+// FaceTypedPlane::isEqual() on the planes themselves: the first group face's plane, then the face's
+static bool planesEqual(const gp_Pln& planeOne, const gp_Pln& planeTwo)
+{
+    // The distance first: it is the cheaper test, and most planes of a body differ by it
+    return planeOne.Distance(planeTwo.Position().Location()) < Precision::Confusion()
+        && planeOne.Position().Direction().IsParallel(
+            planeTwo.Position().Direction(),
+            Precision::Confusion()
+        );
+}
+
 void FaceEqualitySplitter::split(const FaceVectorType& faces, FaceTypedBase* object)
 {
     std::vector<FaceVectorType> tempVector;
     tempVector.reserve(faces.size());
     FaceVectorType::const_iterator faceIt;
-    for (faceIt = faces.begin(); faceIt != faces.end(); ++faceIt) {
-        bool foundMatch(false);
-        std::vector<FaceVectorType>::iterator tempIt;
-        for (tempIt = tempVector.begin(); tempIt != tempVector.end(); ++tempIt) {
-            if (object->isEqual((*tempIt).front(), *faceIt)) {
-                (*tempIt).push_back(*faceIt);
-                foundMatch = true;
-                break;
+    // FREECAD_CH_REFINE_PLANES=off groups planes through isEqual() as before, to compare
+    static const bool planesOnce = [] {
+#ifdef _MSC_VER
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_REFINE_PLANES") != 0 || !value) {
+            return true;
+        }
+        const bool on = std::string(value) != "off";
+        std::free(value);
+        return on;
+#else
+        const char* value = std::getenv("FREECAD_CH_REFINE_PLANES");
+        return !value || std::string(value) != "off";
+#endif
+    }();
+    if (planesOnce && object->getType() == GeomAbs_Plane) {
+        // The same groups as below, with each face's plane read once: isEqual() reads both
+        // faces' surfaces (a copy of each, for a face with a location) at every comparison,
+        // a third of a 14600-face pattern's time (ops#640, perf profile 6). A face without a
+        // plane equals nothing, as in isEqual()
+        std::vector<std::pair<bool, gp_Pln>> firstPlanes;
+        firstPlanes.reserve(faces.size());
+        for (faceIt = faces.begin(); faceIt != faces.end(); ++faceIt) {
+            const Handle(Geom_Plane) surface = getGeomPlane(*faceIt);
+            const bool hasPlane = !surface.IsNull();
+            const gp_Pln plane = hasPlane ? surface->Pln() : gp_Pln();
+            bool foundMatch = false;
+            for (std::size_t k = 0; hasPlane && k < tempVector.size(); ++k) {
+                if (firstPlanes[k].first && planesEqual(firstPlanes[k].second, plane)) {
+                    tempVector[k].push_back(*faceIt);
+                    foundMatch = true;
+                    break;
+                }
+            }
+            if (!foundMatch) {
+                tempVector.emplace_back(1, *faceIt);
+                firstPlanes.emplace_back(hasPlane, plane);
             }
         }
-        if (!foundMatch) {
-            FaceVectorType another;
-            another.reserve(faces.size());
-            another.push_back(*faceIt);
-            tempVector.push_back(another);
+    }
+    else {
+        for (faceIt = faces.begin(); faceIt != faces.end(); ++faceIt) {
+            bool foundMatch(false);
+            std::vector<FaceVectorType>::iterator tempIt;
+            for (tempIt = tempVector.begin(); tempIt != tempVector.end(); ++tempIt) {
+                if (object->isEqual((*tempIt).front(), *faceIt)) {
+                    (*tempIt).push_back(*faceIt);
+                    foundMatch = true;
+                    break;
+                }
+            }
+            if (!foundMatch) {
+                // (no reserve for the whole input in every group: with most surfaces different
+                // that asked for faces x faces of memory)
+                tempVector.emplace_back(1, *faceIt);
+            }
         }
     }
     std::vector<FaceVectorType>::iterator it;
@@ -388,15 +446,7 @@ bool FaceTypedPlane::isEqual(const TopoDS_Face& faceOne, const TopoDS_Face& face
         return false;  // error?
     }
 
-    gp_Pln planeOne(planeSurfaceOne->Pln());
-    gp_Pln planeTwo(planeSurfaceTwo->Pln());
-    return (
-        planeOne.Position().Direction().IsParallel(
-            planeTwo.Position().Direction(),
-            Precision::Confusion()
-        )
-        && planeOne.Distance(planeTwo.Position().Location()) < Precision::Confusion()
-    );
+    return planesEqual(planeSurfaceOne->Pln(), planeSurfaceTwo->Pln());
 }
 
 GeomAbs_SurfaceType FaceTypedPlane::getType() const
