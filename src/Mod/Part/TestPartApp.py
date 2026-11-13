@@ -42,6 +42,7 @@ from parttests.FilletFallbackTest import (
     BridgedRecessTest,
     CornerWithACircleTest,
     CurvedWallEndTest,
+    CuspTest,
     DroppedBasePartsTest,
     DressUpCheckLimitsTest,
     FilledRecessTest,
