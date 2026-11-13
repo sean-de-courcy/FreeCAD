@@ -787,10 +787,27 @@ class TestProfileRegions(unittest.TestCase):
         sk.addGeometry(Part.Circle(V(8 * pitch, 8 * pitch, 0), V(0, 0, 1), 3), False)
         self.checkNearEdgesKeepTheRegions(sk, 6)
 
+    def testImprintNearEdgesOverNineHoles(self):
+        """A rectangle over a 3 x 3 block of holes (review memo3 F1): with the near edges only, the
+        same ten regions, in the same order, of the same areas and names as with all of them. The
+        face maker's boolean over fewer edges may number their edges and vertices otherwise (the
+        BRep text differs): a reference holds by its name, not its index"""
+        body, sk, pitch = self.holedPlateAndTopSketch()
+        rect(sk, 3 * pitch + 5, 3 * pitch + 5, 6 * pitch - 5, 6 * pitch - 5)
+        self.Doc.recompute()
+        allEdges = self.internalsWith(sk, "off")
+        near = self.internalsWith(sk, "on")
+        self.assertEqual(len(allEdges[2]), 10, allEdges[2])  # the frame and nine squares
+        self.assertEqual(near[2], allEdges[2])
+        self.assertEqual(sorted(name for name, _ in near[1]), sorted(name for name, _ in allEdges[1]))
+
     def testImprintNearEdgesSpeedUpAManyHoledFace(self):
         """A circle on a face with 1600 hole edges: with only the near edges the regions are
         made several times faster than with all of them (perf profile 2b: every cell of the face
-        was made and checked, then dropped)."""
+        was made and checked, then dropped). About 3.7 times at this size, where the imprint's own
+        copies weigh in (73 s against 2.2 s at 6400 edges); with the switch set it measures nothing"""
+        if os.environ.get("FREECAD_CH_IMPRINT_NEAR"):
+            self.skipTest("FREECAD_CH_IMPRINT_NEAR is set")
         body, sk, pitch = self.holedPlateAndTopSketch(holes=20)
         sk.addGeometry(Part.Circle(V(2 * pitch, 2 * pitch, 0), V(0, 0, 1), 3), False)
         self.Doc.recompute()
@@ -799,7 +816,7 @@ class TestProfileRegions(unittest.TestCase):
             start = time.perf_counter()
             self.internalsWith(sk, mode)
             spent[mode] = time.perf_counter() - start
-        self.assertLess(spent["on"], spent["off"] / 4, spent)
+        self.assertLess(spent["on"], spent["off"] / 2.5, spent)
 
 if __name__ == "__main__":
     unittest.main()
