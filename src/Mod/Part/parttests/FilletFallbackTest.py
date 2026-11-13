@@ -550,16 +550,21 @@ class InvalidDressUpTest(unittest.TestCase):
             return shape.makeFillet(size, edges)
         return shape.makeChamfer(size, edges)
 
+    def assertShapeRaises(self, kind, shape, size, edges):
+        """The Python API never returns OCCT's invalid result (decision 418, ops#640): it raises,
+        with why the exact construction refused"""
+        with self.assertRaises(Part.OCCError) as raised:
+            self.dressUpShape(kind, shape, size, edges)
+        self.assertIn("is not a valid shape (exact construction refused: ", str(raised.exception))
+
     def testOverlongFullRoundsFail(self):
-        # Just over a full round, OCCT returns two invalid solids with more volume than the base,
+        # Just over a full round, OCCT builds two invalid solids with more volume than the base,
         # which no fillet can have. (Debt, ops#640: Onshape builds them, K2E. The chamfers build
         # since S3: OverflowTest.testOverlongFullChamfers)
         for kind in ("Fillet",):
             for model, size in ((stadium_plate, 2.0002), (disk, 1.00001)):
                 shape, edges = model()
-                raw = self.dressUpShape(kind, shape, size, edges)
-                self.assertFalse(raw.isValid())  # returned as OCCT built it
-                self.assertEqual(len(raw.Solids), 2)
+                self.assertShapeRaises(kind, shape, size, edges)
                 feature = self.dressUp(kind, shape, edges, [(size, size)] * len(edges))
                 self.assertFails(feature)
 
@@ -569,7 +574,7 @@ class InvalidDressUpTest(unittest.TestCase):
         # (and 16.75 mm2 for the fillet)
         for kind in ("Fillet", "Chamfer"):
             block, edges = notched_block()
-            self.assertFalse(self.dressUpShape(kind, block, 2.65, edges).isValid())
+            self.assertShapeRaises(kind, block, 2.65, edges)
             self.assertFails(self.dressUp(kind, block, edges, [(2.65, 2.65)] * 4))
 
     def testOverlappingRoundsOnALargePartFail(self):
@@ -577,7 +582,7 @@ class InvalidDressUpTest(unittest.TestCase):
         # (0.17 mm2) is far below a millionth of the block's (2 m2)
         for kind in ("Fillet", "Chamfer"):
             block, edges = notched_block(0.1, (1000, 1000, 1))
-            self.assertFalse(self.dressUpShape(kind, block, 0.265, edges).isValid())
+            self.assertShapeRaises(kind, block, 0.265, edges)
             self.assertFails(self.dressUp(kind, block, edges, [(0.265, 0.265)] * 4))
 
     def testOverlappingRoundsOnAnInvalidBaseFail(self):
@@ -605,19 +610,15 @@ class InvalidDressUpTest(unittest.TestCase):
         }
         for kind in ("Fillet", "Chamfer"):
             solid, edges = pyramid()
-            raw = self.dressUpShape(kind, solid, 1, edges)
-            self.assertFalse(raw.isValid())
+            self.assertShapeRaises(kind, solid, 1, edges)
             feature = self.dressUp(kind, solid, edges, [(1, 1)] * 4)
             self.assertTrue(feature.isValid(), feature.getStatusString())
             shape = feature.Shape
             self.assertTrue(shape.isValid())
             self.assertEqual(len(shape.Solids), 1)
-            self.assertEqual(len(shape.Faces), len(raw.Faces))
-            # raw is a second OCCT run, not the one the feature repaired: on macOS the chamfer's
-            # (planar) faces came out 1.1e-6 apart in total between the two, the repair accepted
-            # (each face within 1e-6 of the feature's own run). A wrong repair adds faces and
-            # about 1 % of the area (the notch)
-            self.assertAlmostEqual(shape.Area, raw.Area, delta=1e-5 * raw.Area)
+            # OCCT's faces, each kept: the pyramid's 5, a face per edge, and the apex's. A wrong
+            # repair adds faces (the notch: two)
+            self.assertEqual(len(shape.Faces), 10)
             removed = 4000 / 3 - shape.Volume
             self.assertGreater(removed, bounds[kind][0])
             self.assertLess(removed, bounds[kind][1])
@@ -2302,6 +2303,54 @@ class OverflowTest(unittest.TestCase):
         self.assertBuilt(shape, base.Volume + added)
         self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
 
+    def testConcaveRoundAsBigAsTheRoundItLeavesRollsOn(self):
+        # Nudge sweep of #47, gap 1 (ops#640): rounded_ring_corner()'s crease with r at and above the
+        # corner's r 10. No ball that big rolls inside the r 10 round at all; OCCT returns a shape
+        # that is not valid. The rule is the same as below r 10: the ball rolls on over the round's
+        # tangent edge onto the wall x 0, one round tangent to the wall and the ring
+        for corner, r in ((10, 10), (10, 12), (10, 22), (7, 9), (13, 14)):
+            with self.subTest(corner=corner, r=r):
+                base, ends, added, axis = rolled_ring_corner(corner, r)
+                shape = base.makeFillet(r, [edge_between(base, *ends)])
+                self.assertBuilt(shape, base.Volume + added)
+                self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
+                rounds = [
+                    f
+                    for f in shape.Faces
+                    if f.Surface.TypeId == "Part::GeomCylinder"
+                    and abs(f.Surface.Radius - r) < 1e-7
+                    and abs(f.Surface.Center.x - axis[0]) < 1e-6
+                    and abs(f.Surface.Center.y - axis[1]) < 1e-6
+                ]
+                self.assertEqual(len(rounds), 1)
+
+    def testConcaveRoundAsBigAsTheRoundItLeavesAsAFeature(self):
+        # The same through the PartDesign feature (it refused: "Resulting shape is invalid"), and
+        # the corner r 7 with r 4 (gap 2): the rolled round covers the r 7 round beyond the band
+        # the check for lost material allows a direct round, which refused it ("drops a part of the
+        # base"); the construction measured what it fused against its closed form
+        for corner, r in ((10, 12), (7, 4)):
+            with self.subTest(corner=corner, r=r):
+                base, ends, added, _ = rolled_ring_corner(corner, r)
+                doc = FreeCAD.newDocument("RollOnAsBig")
+                try:
+                    feature, _ = dressed_in_a_body(doc, "Fillet", base, ends, r)
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertTrue(feature.Shape.isValid())
+                    self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-6)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testInvalidResultTheConstructionRefusesRaises(self):
+        # Decision 418 (ops#640): where OCCT builds a shape that is not valid and the construction
+        # refuses, the dress-up raises with the construction's reason; it never returns the invalid
+        # shape. small_round_ring_corner() with r 2.5: the ball would roll on over two faces (the
+        # r 3 round and the wall x 0 beyond it), which the construction does not build
+        base, ends, _ = small_round_ring_corner()
+        with self.assertRaises(Part.OCCError) as raised:
+            base.makeFillet(2.5, [edge_between(base, *ends)])
+        self.assertIn("is not a valid shape (exact construction refused: ", str(raised.exception))
+
     def testConcaveRoundPastASharpEndIsAbsorbedByTheWall(self):
         # Review r2 of #47: ring_corner()'s base, sharp corner, r 5 on the crease between the wall
         # y 0 and the ring. The ball (centre on y -5, 20 from the ring's axis) touches the wall's
@@ -2470,6 +2519,46 @@ def rounded_ring_corner(step=False):
     ).extrude(V(0, 0, 6))
     region = region.cut(Part.makeCylinder(6.5, 8, V(6.5, y, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
     return rounded, (a, b), region.cut(rounded).Volume, (6.5, y)
+
+
+def rolled_ring_corner(corner, r):
+    """rounded_ring_corner()'s body with its corner rounded r `corner`, and the crease between that
+    round and the ring's outer wall (R 15, about (19, -1)), z 4..10, for a round of r that rolls on
+    over the round's tangent edge (x 0, y -corner) onto the wall x 0: its centre is r from the wall
+    and 15 + r from the ring's axis. Returns the base, the crease's ends, the volume the round adds
+    (the region between the wall, the ring, the round and the base, over z 4..10) and the round's
+    axis in the plane"""
+    base, _, _, _ = ring_corner("Fillet")
+    arc = Part.ArcOfCircle(Part.Circle(V(corner, -corner, 2), V(0, 0, 1), corner), math.pi / 2, math.pi)
+    rim = [
+        Part.makeLine(V(0, 0, 2), V(corner, 0, 2)),
+        arc.toShape(),
+        Part.makeLine(V(0, -corner, 2), V(0, 0, 2)),
+    ]
+    filled = Part.Face(Part.Wire(rim)).extrude(V(0, 0, 8)).cut(base)
+    filled = filled.cut(Part.makeCylinder(12, 10, V(19, -1, 1)))
+    rounded = base.fuse(filled).removeSplitter()
+    # the crease: the left crossing of the round's circle (about (corner, -corner)) and the ring's
+    a, b = V(corner, -corner, 0), V(19, -1, 0)
+    d = (b - a).Length
+    along = (corner**2 - 15**2 + d**2) / (2 * d)
+    u = (b - a) * (1 / d)
+    w = V(-u.y, u.x, 0)
+    h = math.sqrt(corner**2 - along**2)
+    cross = min((a + u * along + w * h, a + u * along - w * h), key=lambda p: p.x)
+    ends = ((cross.x, cross.y, 4), (cross.x, cross.y, 10))
+    y = -1 - math.sqrt((15 + r) ** 2 - (19 - r) ** 2)
+    centre = V(r, y, 0)
+    toward = b - centre
+    toward.normalize()
+    touch = centre + toward * r
+    region = Part.Face(
+        Part.makePolygon(
+            [V(0, y, 4), V(r, y, 4), V(touch.x, touch.y, 4), V(19, -1, 4), V(19, 0, 4), V(0, 0, 4), V(0, y, 4)]
+        )
+    ).extrude(V(0, 0, 6))
+    region = region.cut(Part.makeCylinder(r, 8, V(r, y, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
+    return rounded, ends, region.cut(rounded).Volume, (r, y)
 
 
 def rounded_ring_corner_mirror():

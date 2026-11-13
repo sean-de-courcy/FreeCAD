@@ -175,9 +175,12 @@ App::DocumentObjectExecReturn* Fillet::execute()
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
         // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
-        // (ops#603)
+        // (ops#603). Not for a round the exact construction rolled on over a tangent edge: it
+        // covers its face beyond the band this check allows a direct round, and the construction
+        // measured what it cut or fused against the tool's closed form (ops#640, #47 at R1 7, r 4)
         const std::string lost
-            = ResultCheck::skippedForTheLimit(this, "The fillet's check for lost material")
+            = recorder.rolledOn()
+                || ResultCheck::skippedForTheLimit(this, "The fillet's check for lost material")
             ? std::string()
             : Part::lostMaterial(shape, baseShape, edges, radius);
         if (!lost.empty()) {

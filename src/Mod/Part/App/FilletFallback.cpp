@@ -1326,7 +1326,12 @@ struct RuledTrace
     gp_Pnt centre;      // circle
     double radius = 0;  // circle
     double offset = 0;  // circle: the radius of the locus of the ball's centre
+    /// A circle the ball rolls inside and is as big as: it touches it nowhere (it may roll on over
+    /// the face's tangent edge, rollOn)
+    bool tooSmall = false;
 };
+
+const char* const tooSmallReason = "a round as big as the cylinder it rolls inside";
 
 /// The trace of the face in the section plane through the corner, starting at the point
 RuledTrace ruledTrace(
@@ -1354,9 +1359,7 @@ RuledTrace ruledTrace(
         bool materialInside = gp_Vec(t.centre, at).Dot(gp_Vec(outward)) > 0;
         bool ballInside = data.convex == materialInside;
         t.offset = ballInside ? t.radius - r : t.radius + r;
-        if (t.offset <= linearTolerance) {
-            refuse("a round as big as the cylinder it rolls inside");
-        }
+        t.tooSmall = t.offset <= linearTolerance;
     }
     else if (surface.GetType() == GeomAbs_Plane) {
         t.toCentre = data.convex ? outward.Reversed() : outward;
@@ -1371,6 +1374,9 @@ RuledTrace ruledTrace(
 std::vector<gp_Pnt> ruledCentres(const RuledTrace& a, const RuledTrace& b, const gp_Dir& direction, double r)
 {
     std::vector<gp_Pnt> found;
+    if (a.tooSmall || b.tooSmall) {
+        return found;
+    }
     gp_Vec z(direction);
     auto lineAndCircle = [&](const RuledTrace& line, const RuledTrace& circle) {
         gp_Pnt q = line.origin.Translated(gp_Vec(line.toCentre) * r);
@@ -1699,6 +1705,9 @@ std::optional<Rolled> rollOn(
         onward = gp_Dir(z.Crossed(radial) * (first.angle > 0 ? 1.0 : -1.0));
     }
     RuledTrace next = ruledTrace(data, rolled->next, corner, tangentPoint, onward, r);
+    if (next.tooSmall || other.tooSmall) {
+        return std::nullopt;
+    }
     std::optional<gp_Pnt> best;
     for (const auto& centre : ruledCentres(next, other, direction, r)) {
         gp_Pnt touchNext = ruledTouch(next, centre);
@@ -1857,7 +1866,10 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
     gp_Pnt centre;
     gp_Pnt touches[2];
     std::string reason;
-    if (candidates.empty()) {
+    if (traces[0].tooSmall || traces[1].tooSmall) {
+        reason = tooSmallReason;
+    }
+    else if (candidates.empty()) {
         reason = "no round of the radius fits between a straight edge's faces";
     }
     else {
@@ -3443,9 +3455,11 @@ TopoDS_Shape constructShape(
     const std::vector<TopoDS_Shape>& edges,
     const Request& request,
     ShapeMapper& mapper,
-    int& cornerCount
+    int& cornerCount,
+    bool& rolledOn
 )
 {
+    rolledOn = false;
     // Its own TopoShape: no element map, no hasher, a cache of its own
     const TopoShape base(baseShape);
     if (base.isNull() || countSolids(base.getShape()) != 1) {
@@ -4264,6 +4278,7 @@ TopoDS_Shape constructShape(
         }
     }
     cornerCount = cornerVertices.Extent();
+    rolledOn = std::any_of(tools.begin(), tools.end(), [](const Tool& t) { return t.rolled; });
     return shape;
 }
 
@@ -4352,6 +4367,23 @@ TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
     return {};
 }
 
+namespace
+{
+thread_local std::string invalidResultReason;
+}
+
+void noteInvalidResult(const std::string& reason)
+{
+    invalidResultReason = reason.empty() ? std::string("no reason given") : reason;
+}
+
+std::string takeInvalidResult()
+{
+    std::string reason;
+    reason.swap(invalidResultReason);
+    return reason;
+}
+
 Recorder::Recorder()
     : outer(innermostRecorder)
 {
@@ -4363,9 +4395,10 @@ Recorder::~Recorder()
     innermostRecorder = outer;
 }
 
-void Recorder::add(int edges, int corners)
+void Recorder::add(int edges, int corners, bool rolledOn)
 {
     if (Recorder* recorder = innermostRecorder) {
+        recorder->rolled = recorder->rolled || rolledOn;
         ++recorder->builds;
         recorder->edges += edges;
         recorder->corners += corners;
@@ -4397,7 +4430,8 @@ bool construct(
     try {
         auto mapper = std::make_shared<ShapeMapper>();
         int corners = 0;
-        TopoDS_Shape shape = constructShape(base, edges, request, *mapper, corners);
+        bool rolledOn = false;
+        TopoDS_Shape shape = constructShape(base, edges, request, *mapper, corners, rolledOn);
         TopTools_IndexedMapOfShape selected;
         for (const auto& edge : edges) {
             selected.Add(edge);
@@ -4406,6 +4440,7 @@ bool construct(
         out.mapper = mapper;
         out.edges = selected.Extent();
         out.corners = corners;
+        out.rolledOn = rolledOn;
         return true;
     }
     catch (const Refusal& refusal) {
@@ -4436,7 +4471,7 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
     built.makeShapeWithElementMap(construction.shape, *construction.mapper, {base}, op);
     result = built;
     FC_LOG("built exactly: " << construction.edges << " edges, " << construction.corners << " corners");
-    Recorder::add(construction.edges, construction.corners);
+    Recorder::add(construction.edges, construction.corners, construction.rolledOn);
 }
 
 bool build(

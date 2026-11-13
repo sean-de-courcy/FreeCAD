@@ -7689,8 +7689,9 @@ bool buildDressUpFailed(
 }
 
 /** Whether OCCT built the dress-up invalid without an error (ops#297), which the exact construction
- * may build instead. If it doesn't, the invalid result is returned as before, and the feature's
- * check (Part::checkDressUp()) repairs it or fails.
+ * may build instead. If it doesn't, the invalid result is returned as before, noted with the
+ * construction's reason (FilletFallback::noteInvalidResult()): the feature's check
+ * (Part::checkDressUp()) repairs it or fails, and the Python API raises (decision 418, ops#640).
  */
 bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
 {
@@ -7849,6 +7850,7 @@ TopoShape& TopoShape::makeElementFillet(
     request.size1 = radius1;
     request.size2 = radius2;
     Part::SignalException sig;
+    FilletFallback::takeInvalidResult();
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
     if (outcome->failed || outcome->thin || outcome->invalid) {
         if (finishConstruction(*this, *outcome, input, op)) {
@@ -7860,6 +7862,7 @@ TopoShape& TopoShape::makeElementFillet(
         if (outcome->thin) {
             raiseThinFaceError("The fillet", outcome->reason);
         }
+        FilletFallback::noteInvalidResult(outcome->reason);
     }
     return makeElementShape(*mkFillet, input, op);
 }
@@ -7938,6 +7941,7 @@ TopoShape& TopoShape::makeElementChamfer(
     request.size2 = radius2;
     request.chamferType = chamferType;
     request.flipDirection = flipDirection;
+    FilletFallback::takeInvalidResult();
     auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
     if (outcome->failed || outcome->thin || outcome->invalid) {
         if (finishConstruction(*this, *outcome, input, op)) {
@@ -7949,6 +7953,7 @@ TopoShape& TopoShape::makeElementChamfer(
         if (outcome->thin) {
             raiseThinFaceError("The chamfer", outcome->reason);
         }
+        FilletFallback::noteInvalidResult(outcome->reason);
     }
     return makeElementShape(mkChamfer, input, op);
 }

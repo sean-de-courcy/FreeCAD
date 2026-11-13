@@ -174,7 +174,12 @@ App::DocumentObjectExecReturn* Fillet::execute()
         }
         // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
         // (ops#603)
-        const std::string lost = Part::lostMaterial(res, baseTopoShape, edgeShapes, largest);
+        // Not for a round the exact construction rolled on over a tangent edge: it covers its face
+        // beyond the band this check allows a direct round, and the construction measured what it
+        // cut or fused against the tool's closed form (ops#640, #47 at R1 7, r 4)
+        const std::string lost = recorder.rolledOn()
+            ? std::string()
+            : Part::lostMaterial(res, baseTopoShape, edgeShapes, largest);
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + lost);
         }
