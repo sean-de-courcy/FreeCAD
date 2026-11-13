@@ -369,9 +369,10 @@ class TestLoftEndConditions(LoftCase):
         # Offset across Onshape's seam (+y) Onshape gives 1362.002: its plain loft pairs the circles' points
         # skewed there (1149.644 against 1163.695 with no condition, Q10), while the fork's plain loft pairs
         # them radially wherever the seam is (1163.698 in every direction). That is the plain loft's
-        # pairing, not this condition: here the fork stays turn-invariant.
-        self.assertAlmostEqual(volumes["+y"], volumes["+x"], delta=1e-6 * volumes["+x"])
-        self.assertAlmostEqual(volumes["-x"], volumes["+x"], delta=1e-6 * volumes["+x"])
+        # pairing, not this condition: here the fork stays turn-invariant, to the edges' fit (each is
+        # sampled from its seam: 0.004 apart on macOS CI), far inside the seam rail's spread of 11.
+        self.assertAlmostEqual(volumes["+y"], volumes["+x"], delta=0.05)
+        self.assertAlmostEqual(volumes["-x"], volumes["+x"], delta=0.05)
 
     def testRemoveIntoABlock(self):
         """Liquid feeder base #8's class (T3): a Remove loft from a rectangle on a block's face to a smaller one
