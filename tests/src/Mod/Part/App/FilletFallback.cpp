@@ -26,6 +26,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -62,6 +63,7 @@
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
 #include <gp_GTrsf.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
 #include <gp_XY.hxx>
@@ -3649,6 +3651,63 @@ TEST_F(FilletFallbackTest, roundsARimEndingInCuspsAsOnshape)
                 EXPECT_NEAR(torusArea, 20.915168, 1e-5);
             }
         }
+    }
+}
+
+// Case Base #163 Fillet 6 (rb164/rb166, oracle 21): a concave round between a floor and a wall, where a
+// hole through the wall dips below the round's contact line. Over the hole the round has no wall to
+// roll on; OCCT builds that stretch as a rational B-spline up to 0.03-0.06 mm off the cylinder its
+// two neighbouring stripes lie on, where Onshape keeps the one exact cylinder, trimmed by the hole.
+// Expected, geometrically: every face of the round lies on the cylinder of radius 2 along y through
+// (18, y, 7), and none is a B-spline; the topology stays OCCT's.
+TEST_F(FilletFallbackTest, roundAcrossAHoleInItsWallStaysTheCylinder)
+{
+    const double r = 2.0;
+    // {hole radius, hole centre z}: the hole's bottom between the floor (z 5) and the contact line (z 7)
+    for (auto [holeRadius, holeZ] : std::vector<std::pair<double, double>> {{4.7625, 11.4}, {3.0, 9.5}}) {
+        TopoDS_Shape block = BRepAlgoAPI_Fuse(box(20, 20, 5, gp_Pnt(0, -10, 0)), box(5, 20, 20, gp_Pnt(20, -10, 0)))
+                                 .Shape();
+        ShapeUpgrade_UnifySameDomain unify(block);
+        unify.Build();
+        TopoDS_Shape hole = BRepPrimAPI_MakeCylinder(
+                                gp_Ax2(gp_Pnt(18, 0, holeZ), gp::DX()),
+                                holeRadius,
+                                10
+        )
+                                .Shape();
+        TopoShape base(BRepAlgoAPI_Cut(unify.Shape(), hole).Shape(), 1L);
+        std::vector<TopoShape> edges {edgeBetween(base, {20, -10, 5}, {20, 10, 5})};
+        TopoShape result = dressUp(base, edges, fillet(r));
+        ASSERT_FALSE(result.isNull()) << "hole " << holeRadius;
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid()) << "hole " << holeRadius;
+        const gp_Lin axis(gp_Pnt(18, 0, 7), gp::DY());
+        int roundFaces = 0;
+        for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            Bnd_Box bounds;
+            BRepBndLib::Add(face, bounds);
+            double x1 {}, y1 {}, z1 {}, x2 {}, y2 {}, z2 {};
+            bounds.Get(x1, y1, z1, x2, y2, z2);
+            if (x1 < 18 - 1e-3 || x2 > 20 + 1e-3 || z1 < 5 - 1e-3 || z2 > 7 + 1e-3
+                || surfaceType(face) == GeomAbs_Plane) {
+                continue;  // not a face of the round
+            }
+            ++roundFaces;
+            EXPECT_NE(surfaceType(face), GeomAbs_BSplineSurface) << "hole " << holeRadius;
+            BRepAdaptor_Surface surface(face);
+            double worst = 0.0;
+            for (int i = 0; i <= 20; ++i) {
+                for (int j = 0; j <= 20; ++j) {
+                    const double u = surface.FirstUParameter()
+                        + (surface.LastUParameter() - surface.FirstUParameter()) * i / 20;
+                    const double v = surface.FirstVParameter()
+                        + (surface.LastVParameter() - surface.FirstVParameter()) * j / 20;
+                    worst = std::max(worst, std::abs(axis.Distance(surface.Value(u, v)) - r));
+                }
+            }
+            EXPECT_LT(worst, 1e-7) << "hole " << holeRadius << ": a face of the round off the cylinder";
+        }
+        EXPECT_EQ(roundFaces, 3) << "hole " << holeRadius;  // OCCT's stripes, kept
     }
 }
 
