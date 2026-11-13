@@ -31,6 +31,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchCornerSteps.py
     SketcherTests/TestSketchTrimSplit.py
     SketcherTests/TestSketchConflicts.py
+    SketcherTests/TestSketchLadder.py
     SketcherTests/TestSketchTrimSplitAttacks.py
     SketcherTests/TestSketchPierce.py
     SketcherTests/TestSketchExtend.py
