@@ -1397,7 +1397,11 @@ std::vector<Document*> Application::openDocuments(const std::vector<std::string>
         Base::Console().log("%s restore time: %f\n", doc.getDocumentName(), timing.d1.count());
         Base::Console().log("%s postprocess time: %f\n", doc.getDocumentName(), timing.d2.count());
     }
-    PropertyLinkBase::updateAllElementReferences();
+    // Measurement switch for scout 4's 3b (ops#640, pending format change G2): how much of an open
+    // the reference update is, and what skipping it changes. Not a feature: unset, nothing changes.
+    if (!getenvUTF8("FREECAD_CH_OPEN_SKIP_REF_UPDATE")) {
+        PropertyLinkBase::updateAllElementReferences();
+    }
     _isRestoring = false;
 
     signalFinishOpenDocument();
