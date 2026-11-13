@@ -10,6 +10,8 @@
 # (Union) or a Remove (Subtraction) otherwise; the command moves a New one into a new part with
 # PartDesign.newPartFrom, as a native Pad's dialog does.
 
+import math
+
 import FreeCAD as App
 import Part
 
@@ -105,6 +107,344 @@ def _check_offset(src, res, what):
         )
 
 
+def _revolved_circle(face):
+    """A face on a surface of revolution whose meridian is a circle (a bent tube's bend): its frame,
+    or None. The face must be the whole (u, v) patch of its surface (u the revolution angle)."""
+    surf = face.Surface
+    kind = surf.__class__.__name__
+    if kind == "Toroid":
+        base, axis = surf.Center, surf.Axis
+    elif kind == "SurfaceOfRevolution":
+        base, axis = surf.Location, surf.Direction
+    else:
+        return None
+    u0, u1, v0, v1 = face.ParameterRange
+    if u1 - u0 <= TOL:
+        return None
+    try:
+        merid = surf.uIso(u0)
+        patch = surf.toShape(u0, u1, v0, v1)
+    except Exception:
+        return None
+    circ = merid.Circle if isinstance(merid, Part.ArcOfCircle) else merid
+    if not isinstance(circ, Part.Circle):
+        return None
+    if abs(patch.Area - face.Area) > 1e-6 * max(1.0, face.Area):
+        return None  # trimmed inside its patch: not a plain bend
+    axis = App.Vector(axis).normalize()
+    centre = circ.Center
+    foot = base + axis * (centre - base).dot(axis)
+    out = centre - foot
+    d = out.Length
+    if d <= TOL or abs(circ.Axis.dot(out)) > 1e-7 * d or abs(circ.Axis.dot(axis)) > 1e-7:
+        return None  # the meridian circle does not lie in a plane through the axis
+    # the axis must turn u0's meridian toward u1's: a Reversed face's torus can be parametrised the other
+    # way round (Axis -y for a sweep about +y), and the ring revolved about it would be mirrored (review r3)
+    vs = max((v0 + (v1 - v0) * k / 8.0 for k in range(9)),
+             key=lambda v: _axis_distance(surf.value(u0, v), base, axis))
+    du = min(0.1, 0.5 * (u1 - u0))
+    p0, p1 = surf.value(u0, vs) - foot, surf.value(u0 + du, vs)
+    ahead = lambda s: (foot + App.Rotation(axis * s, math.degrees(du)).multVec(p0) - p1).Length
+    if ahead(-1.0) < ahead(1.0):
+        axis = -axis
+    elif not ahead(1.0) <= 1e-6 * max(1.0, d + circ.Radius):
+        return None  # u is not the revolution angle about this axis
+    # sample the face where it is farthest from the axis: a horn torus has no normal at its apex
+    um = 0.5 * (u0 + u1)
+    vm = max((v0 + (v1 - v0) * k / 8.0 for k in range(1, 8)),
+             key=lambda v: _axis_distance(face.valueAt(um, v), base, axis))
+    p, n = face.valueAt(um, vm), face.normalAt(um, vm)
+    radial = p - surf.uIso(um).Center
+    return {
+        "circle": circ, "u0": u0, "u1": u1, "v0": v0, "v1": v1, "full": v1 - v0 >= 2 * math.pi - 1e-9,
+        "axis": axis, "foot": foot, "out": out.normalize(), "d": d, "r": circ.Radius,
+        "outward": n.dot(radial) > 0,  # the face normal points away from the meridian circle's centre
+        "mid": p,
+    }
+
+
+def _axis_distance(p, base, axis):
+    q = p - base
+    return (q - axis * q.dot(axis)).Length
+
+
+def _bend_radii(info, t1, t2):
+    """The thick ring's inner and outer radius about the meridian circle's centre."""
+    t_out, t_in = (t1, t2) if info["outward"] else (t2, t1)
+    return info["r"] - t_in, info["r"] + t_out
+
+
+def _reaches_axis(info, t1, t2):
+    return _bend_radii(info, t1, t2)[1] >= info["d"] - TOL
+
+
+def _bend_solids(face, info, t1, t2):
+    """The bend thickened: the ring between the two radii in the meridian plane at u0, revolved
+    through the face's angle. Where the ring crosses the axis, its two sides are revolved apart (each is
+    a valid revolve; the whole ring would fold over itself): their union is the swept ring, filled up to
+    the axis (Onshape TK1-TK4)."""
+    r_in, r_out = _bend_radii(info, t1, t2)
+    if r_in < -TOL:
+        raise SolidOpsError("Thicken failed: the thickness toward the bend's centre exceeds its radius")
+    circ = info["circle"]
+
+    def arc(radius):
+        c = circ.copy()
+        c.Radius = radius
+        return c if info["full"] else Part.ArcOfCircle(c, info["v0"], info["v1"])
+
+    if info["full"]:
+        ring = Part.Face(Part.Wire(arc(r_out).toShape()))
+        if r_in > TOL:
+            ring = ring.cut(Part.Face(Part.Wire(arc(r_in).toShape()))).Faces[0]
+    else:
+        outer = arc(r_out).toShape()
+        if r_in > TOL:
+            inner = arc(r_in).toShape()
+            ends = [Part.LineSegment(inner.Vertexes[0].Point, outer.Vertexes[0].Point).toShape(),
+                    Part.LineSegment(inner.Vertexes[-1].Point, outer.Vertexes[-1].Point).toShape()]
+            ring = Part.Face(Part.Wire(Part.__sortEdges__([outer, inner] + ends)))
+        else:
+            c = circ.Center
+            ends = [Part.LineSegment(c, outer.Vertexes[0].Point).toShape(),
+                    Part.LineSegment(c, outer.Vertexes[-1].Point).toShape()]
+            ring = Part.Face(Part.Wire(Part.__sortEdges__([outer] + ends)))
+    regions = [ring]
+    if r_out > info["d"] - TOL:
+        # split at the axis: a rectangle in the meridian plane on each side of it
+        size = 2.0 * (info["d"] + r_out) + 1.0
+        a, foot = info["axis"], info["foot"]
+        regions = []
+        for e in (info["out"], -info["out"]):
+            pts = [foot - a * size, foot + a * size, foot + a * size + e * size, foot - a * size + e * size]
+            part = ring.common(Part.Face(Part.makePolygon(pts + [pts[0]])))
+            regions.extend(f for f in part.Faces if f.Area > TOL)
+        if not regions:
+            raise SolidOpsError("Thicken failed: the bend could not be thickened")
+    angle = math.degrees(info["u1"] - info["u0"])
+    half = App.Rotation(info["axis"], 0.5 * angle)
+    solids, probes = [], []
+    for region in regions:
+        solid = region.revolve(info["foot"], info["axis"], angle)
+        # each region lies on one side of the axis, so its sweep's volume is exact (Pappus): OCC's revolve
+        # of a region touching an oblique axis gave a valid wrong solid (654.0505 for 461.4811, review r4)
+        exact = math.radians(angle) * region.Area * _axis_distance(region.CenterOfMass, info["foot"], info["axis"])
+        if not solid.isValid() or solid.Volume <= TOL or abs(solid.Volume - exact) > 1e-6 * max(1.0, exact):
+            raise SolidOpsError("Thicken failed: the bend could not be thickened")
+        solids.append(solid)
+        # points inside the piece: the region's inner points, turned through half the angle
+        probes.extend(info["foot"] + half.multVec(q - info["foot"]) for q in _inner_points(region))
+    if not any(s.isInside(info["mid"], 1e-5, True) for s in solids):
+        raise SolidOpsError("Thicken failed: the bend could not be thickened")
+    return solids, probes
+
+
+def _inner_points(face, offset=0.0):
+    """Points of the face's interior on a 3 x 3 parameter grid, moved by offset along its normal."""
+    u0, u1, v0, v1 = face.ParameterRange
+    pts = []
+    for a in (0.25, 0.5, 0.75):
+        for b in (0.25, 0.5, 0.75):
+            u, v = u0 + a * (u1 - u0), v0 + b * (v1 - v0)
+            if not face.isPartOfDomain(u, v):
+                continue
+            try:
+                pts.append(face.valueAt(u, v) + face.normalAt(u, v) * offset)
+            except Exception:
+                continue  # no normal there (a horn's apex)
+    return pts
+
+
+def _tangent_joins(group):
+    """True when every edge two faces of the group share is smooth (the normals agree along it)."""
+    for i, a in enumerate(group):
+        for b in group[i + 1:]:
+            for ea in a.Edges:
+                if not any(ea.isSame(eb) for eb in b.Edges):
+                    continue
+                p0, p1 = ea.ParameterRange
+                for k in (0.1, 0.5, 0.9):
+                    p = ea.valueAt(p0 + k * (p1 - p0))
+                    na = a.normalAt(*a.Surface.parameter(p))
+                    nb = b.normalAt(*b.Surface.parameter(p))
+                    if na.dot(nb) < 1.0 - 1e-6:
+                        return False
+    return True
+
+
+def _cylinder_piece_volume(face, t1, t2):
+    """The exact volume of a cylinder face thickened t1 along its normal and t2 against it: the layer at
+    signed distance s from the face (s > 0 away from the axis) has the face's area times (R + s) / R."""
+    surf = face.Surface
+    u0, u1, v0, v1 = face.ParameterRange
+    um, vm = 0.5 * (u0 + u1), 0.5 * (v0 + v1)
+    out = 1.0 if face.normalAt(um, vm).dot(face.valueAt(um, vm) - _axis_foot(face.valueAt(um, vm), surf)) > 0 else -1.0
+    lo, hi = (-t2, t1) if out > 0 else (-t1, t2)  # the piece's signed radial extent
+    return face.Area * ((hi - lo) + (hi * hi - lo * lo) / (2.0 * surf.Radius)), out
+
+
+def _axis_foot(p, surf):
+    a = App.Vector(surf.Axis).normalize()
+    return surf.Center + a * (p - surf.Center).dot(a)
+
+
+def _radial_scale(surf, k):
+    """The affine map that scales distances from the cylinder's axis by k and keeps the axial
+    coordinate: it takes the cylinder of radius R to the coaxial one of radius k R."""
+    a = App.Vector(surf.Axis).normalize()
+    av = (a.x, a.y, a.z)
+    p = [[k * (i == j) + (1.0 - k) * av[i] * av[j] for j in range(3)] for i in range(3)]
+    c = surf.Center
+    cv = (c.x, c.y, c.z)
+    m = App.Matrix()
+    m.A11, m.A12, m.A13 = p[0]
+    m.A21, m.A22, m.A23 = p[1]
+    m.A31, m.A32, m.A33 = p[2]
+    m.A14, m.A24, m.A34 = (cv[i] - sum(p[i][j] * cv[j] for j in range(3)) for i in range(3))
+    return m
+
+
+def _ruled_cylinder_piece(face, t1, t2, out):
+    """A cylinder face's thick piece built directly: the face moved to the two radii by _radial_scale,
+    closed by ruled faces along each boundary edge (the rulings are the face's normals, as an offset's
+    caps). Used where OCC's offset of the face comes out wrong (#90: a leg whose free end is two
+    edges meeting at its seam gave twisted caps, 763.83 for 279.17)."""
+    R = face.Surface.Radius
+    k_hi, k_lo = (R + t1) / R, (R - t2) / R
+    if out < 0:
+        k_hi, k_lo = (R + t2) / R, (R - t1) / R
+    if k_lo < TOL:
+        raise SolidOpsError("Thicken failed: the thickness toward the axis exceeds the radius")
+    m_hi, m_lo = _radial_scale(face.Surface, k_hi), _radial_scale(face.Surface, k_lo)
+    faces = [face.transformGeometry(m_hi), face.transformGeometry(m_lo)]
+    for e in face.Edges:
+        if e.isSeam(face):
+            continue
+        faces.extend(Part.makeRuledSurface(e.transformGeometry(m_hi), e.transformGeometry(m_lo)).Faces)
+    sewn = Part.Compound(faces)
+    sewn.sewShape(1e-6)
+    solid = Part.Solid(Part.Shell(sewn.Faces))
+    if solid.Volume < 0:
+        solid.reverse()
+    return solid
+
+
+def _offset_piece(face, t1, t2):
+    """OCC's thick piece of one face: offset by -t2, then filled through t1 + t2."""
+    start = face.makeOffsetShape(-t2, TOL) if t2 > TOL else face
+    return start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
+
+
+def _leg_piece(face, t1, t2):
+    """One non-bend face of a sheet thickened alone: OCC's offset, checked. A cylinder face's piece must
+    also hold its exact volume (_cylinder_piece_volume); where the offset misses it, the piece is built
+    directly (_ruled_cylinder_piece) and checked the same way, else Thicken fails loudly."""
+    try:
+        piece, error = _offset_piece(face, t1, t2), None
+    except Exception as e:
+        piece, error = None, SolidOpsError("Thicken failed: %s" % e)
+    if not isinstance(face.Surface, Part.Cylinder):
+        if error is not None:
+            raise error
+        _check_offset(face, piece, "Thicken")
+        if not piece.Solids:
+            raise SolidOpsError("Thicken failed: the result has no solid")
+        return piece
+    exact, out = _cylinder_piece_volume(face, t1, t2)
+
+    def right(p):
+        return (p is not None and not p.isNull() and p.isValid() and len(p.Solids) == 1
+                and abs(p.Volume - exact) <= 1e-6 * max(1.0, exact))
+
+    if right(piece):
+        return piece
+    try:
+        piece = _ruled_cylinder_piece(face, t1, t2, out)
+    except SolidOpsError:
+        raise
+    except Exception as e:
+        raise SolidOpsError("Thicken failed: %s" % e)
+    if not right(piece):
+        raise SolidOpsError("Thicken failed: the result is not valid (it folds over itself)")
+    return piece
+
+
+def _thicken_per_face(group, infos, t1, t2):
+    """The union of each face's own thick piece, for a smooth sheet with a bend whose ring reaches the
+    bend's axis (the whole-sheet offset folds over itself or fails there)."""
+    if not _tangent_joins(group):
+        raise SolidOpsError("Thicken failed: a bend's thickness reaches its axis where the sheet has a sharp edge")
+    pieces, probes = [], []
+    for f, info in zip(group, infos):
+        if info is not None:
+            solids, inner = _bend_solids(f, info, t1, t2)
+            pieces.extend(solids)
+            probes.extend(inner)
+            continue
+        probes.extend(_inner_points(f, 0.5 * (t1 - t2)))  # the face's middle layer
+        pieces.append(_leg_piece(f, t1, t2))
+    pinched = all(abs(_bend_radii(i, t1, t2)[1] - i["d"]) <= TOL for i in infos if i is not None and _reaches_axis(i, t1, t2))
+    return _fused(pieces, probes, pinched)
+
+
+def _self_intersects(shape, pinched):
+    """BOPAlgo's self-intersection check. A fuse of tangent pieces can self-intersect yet pass isValid
+    (a U-turn bend whose legs' rings collide: 179 degrees, 457.6406 for 457.6189, review r2). Where
+    each ring only touches its bend's axis, the pieces meet at a pinch point, which BOPAlgo reports
+    as a vertex or edge self-intersection on a right result (Onshape TK2): those count only when no
+    ring merely touches. Tolerance reports (InvalidCurveOnSurface, TooSmallEdge) are left to the
+    volume and probe checks. A check that could not run (no BOPAlgo report, OperationAborted,
+    CheckUnknown) counts as a self-intersection (review r3). The report names no sub-shape
+    (TopoShape::analyze), so the pinch allowance can't be limited to the axis."""
+    try:
+        shape.check(True)
+        return False
+    except Exception as e:
+        report = str(e).splitlines()
+    if not any("BOPAlgo" in l for l in report) or any("OperationAborted" in l or "CheckUnknown" in l for l in report):
+        return True
+    lines = [l for l in report if "SelfIntersect" in l]
+    if pinched:
+        lines = [l for l in lines if not ("Vertex" in l or "Edge" in l)]
+    return bool(lines)
+
+
+def _fused(pieces, probes, pinched=False):
+    """The pieces' union as one checked solid. The pieces meet along tangent faces, where OCC's fuse
+    depends on the order (the horn bore's three pieces fused one by one gave two solids; a 150 degree
+    bend's list fuse collapsed into a smaller valid solid). So try a list fuse, then one piece at a time
+    in each order, and take the first result that is one valid solid, no smaller than its largest piece
+    and no larger than their sum, with every probe point (inside each piece) inside it; else fail
+    loudly. The result must also pass BOPAlgo's self-intersection check. A ring crossing its axis with
+    no neighbour beside it (a lone bend) gives two solids that meet along the axis: that fails too."""
+    if len(pieces) == 1:
+        return pieces[0]
+
+    def one_by_one(ps):
+        res = ps[0]
+        for p in ps[1:]:
+            res = res.fuse(p)
+        return res
+
+    total = sum(p.Volume for p in pieces)
+    tol = 1e-6 * max(1.0, total)
+    for build in (lambda ps: ps[0].fuse(ps[1:]), one_by_one, lambda ps: one_by_one(ps[::-1])):
+        try:
+            res = build(pieces).removeSplitter()
+            if res.isNull() or not res.isValid() or len(res.Solids) != 1:
+                continue
+            if not max(p.Volume for p in pieces) - tol <= res.Volume <= total + tol:
+                continue
+            if not all(res.isInside(q, 1e-6, True) for q in probes):
+                continue
+            if _self_intersects(res, pinched):
+                continue
+            return res
+        except Exception:
+            continue  # past the geometry time limit, the next try stops at once
+    raise SolidOpsError("Thicken failed: the thickened bend is not one valid solid")
+
+
 def thicken_tool(faces, t1, t2):
     """Solid thickened from the faces: t1 along each face's normal, t2 against it."""
     if t1 < 0 or t2 < 0:
@@ -113,6 +453,12 @@ def thicken_tool(faces, t1, t2):
         raise SolidOpsError("Thickness is zero")
     pieces = []
     for group in _components(faces):
+        infos = [_revolved_circle(f) for f in group]
+        if any(i is not None and _reaches_axis(i, t1, t2) for i in infos):
+            # a bend's ring reaches its axis: the whole-sheet offset is a spindle torus there, which
+            # throws or folds over itself while still passing as valid (Onshape TK1-TK4 fill it to the axis)
+            pieces.append(_thicken_per_face(group, infos, t1, t2))
+            continue
         surf = _as_surface(group)
         try:
             start = surf.makeOffsetShape(-t2, TOL) if t2 > TOL else surf
