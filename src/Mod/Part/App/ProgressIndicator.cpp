@@ -619,9 +619,10 @@ SamplerService& samplerService()
 }
 
 std::uintptr_t frameBuffer[maxFrames];
-std::uintptr_t frameStack[maxFrames];
 
 #ifdef _WIN32
+// Each sampled frame's stack pointer (only the Windows unwinder records them)
+std::uintptr_t frameStack[maxFrames];
 # if defined(_M_X64)
 /// The return addresses from `context` outwards, and each frame's stack pointer, while that is in
 /// the stack [low, high). No allocation: the thread whose stack this is may be suspended holding
