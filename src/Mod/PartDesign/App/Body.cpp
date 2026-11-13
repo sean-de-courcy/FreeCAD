@@ -87,7 +87,8 @@ Body::Body()
                       (),
                       "Studio",
                       App::Prop_Hidden,
-                      "Element names of the parent part that lie on this piece");
+                      "Element names of the parent part that lie on this piece: '<tier> <name>', "
+                      "the name interned (ops#640 C2)");
 
     _GroupTouched.setStatus(App::Property::Output, true);
     // An identity, not an input of the shape (ops#640, FMCVW #167): writing it, its adoption
