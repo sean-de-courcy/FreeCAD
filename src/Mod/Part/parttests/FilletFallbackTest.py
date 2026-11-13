@@ -2268,6 +2268,104 @@ class OverflowTest(unittest.TestCase):
                 self.assertEqual(len(floor), 1)
                 self.assertAlmostEqual(floor[0].BoundBox.YMax, ledge, delta=1e-6)
 
+    def testAnArcAcrossItsCirclesSeamGetsOneRound(self):
+        # Case Base #105's R 1 arcs rounded at r 1 (ops#640): a plate 10 x 10 x 1 with the corner at (10, 10)
+        # rounded R 1, its top edges along x 10, the arc and y 10 rounded 1.0 (at the limit: the plate is 1
+        # thick, so OCCT refuses). The arc's round is an octant of a sphere. Where the arc lies across its
+        # circle's seam (the circle's X axis at 45 or 60 degrees: the arc runs 5.5..7.07), the round came in
+        # two faces, split at the sphere's seam: F 8. On #105's body OCCT's cut by such a tool left an invalid
+        # face. One face wherever the seam is: F 7. The volume: the plate less two prisms 9 long and the
+        # quarter cylinder less the octant, pi / 4 - pi / 6
+        for seam in (0.0, math.pi / 4, math.pi / 3, -math.pi / 2):
+            with self.subTest(seam=seam):
+                circle = Part.Circle(V(9, 9, 0), V(0, 0, 1), 1)
+                circle.AngleXU = seam
+                arc = Part.ArcOfCircle(circle, -seam, math.pi / 2 - seam).toShape()
+                corners = [V(9, 10, 0), V(0, 10, 0), V(0, 0, 0), V(10, 0, 0), V(10, 9, 0)]
+                lines = [Part.makeLine(a, b) for a, b in zip(corners, corners[1:])]
+                base = Part.Face(Part.Wire([arc] + lines)).extrude(V(0, 0, 1))
+                edges = [
+                    edge_between(base, (10, 0, 1), (10, 9, 1)),
+                    edge_between(base, (10, 9, 1), (9, 10, 1)),
+                    edge_between(base, (9, 10, 1), (0, 10, 1)),
+                ]
+                shape = self.dressUp("Fillet", base, 1.0, edges)
+                volume = 100 - (1 - math.pi / 4) - 18 * (1 - math.pi / 4) - math.pi / 12
+                self.assertBuilt(shape, volume, 7)
+                self.assertAlmostEqual(shape.Volume, volume, delta=1e-5)
+                self.assertEqual(len([f for f in shape.Faces if f.Surface.TypeId == "Part::GeomSphere"]), 1)
+
+    @staticmethod
+    def tiltedLedge(h, t, wall):
+        # testPastAConcaveEdgeTheWallGrows' step with its ledge tilted about the wall's foot (the line y 4,
+        # z 10 - h): z = 10 - h + (y - 4) t, so the ledge is not square to the wall y 4 above it.
+        # "plane": the ledge is a plane. "nurbs": the same plane as a bilinear B-spline patch that runs on
+        # under the step (to y 6). "short": the patch ends at the wall's foot (y 4). "split": two such
+        # patches, which meet at x 10, the middle of the dressed-up edge
+        zl = lambda y: 10 - h + (y - 4) * t
+        if wall == "plane":
+            section = [V(-1, -1, zl(-1)), V(-1, 4, 10 - h), V(-1, 4, 11), V(-1, -1, 11)]
+            air = Part.Face(Part.makePolygon(section + section[:1])).extrude(V(22, 0, 0))
+            return Part.makeBox(20, 10, 10).cut(air)
+        y1 = 6 if wall == "nurbs" else 4
+        lower = []
+        for x0, x1 in ((-5, 10), (10, 25)) if wall == "split" else ((-5, 25),):
+            patch = Part.BSplineSurface()
+            patch.buildFromPolesMultsKnots(
+                [[V(x0, -1, zl(-1)), V(x0, y1, zl(y1))], [V(x1, -1, zl(-1)), V(x1, y1, zl(y1))]],
+                [2, 2], [2, 2], [0, 1], [0, 1], False, False, 1, 1,
+            )
+            lower.append(patch.toShape().extrude(V(0, 0, -12)).common(Part.makeBox(20, 4, 10)))
+        return Part.makeBox(20, 6, 10, V(0, 4, 0)).fuse(lower).removeSplitter()
+
+    @staticmethod
+    def tiltedLedgeResult(kind, h, t):
+        # The base: the box less the air above the ledge, 20 int_0^4 (h - (y - 4) t) dy. The dress-up 1.0
+        # removes its section above the ledge's plane run on under it (u = y - 4): the ledge grows to u,
+        # where its line z = 10 - h + u t meets the dress-up. Returns the volume and that u
+        base = 2000 - 20 * (4 * h + 8 * t)
+        if kind == "Chamfer":
+            # the triangle (0, 10), (1, 10), (0, 9) less its part under the line: 1 - h on u = 0, u wide
+            u = (1 - h) / (1 - t)
+            return base - 20 * (0.5 - (1 - h) * u / 2), u
+        # the round's arc about (1, 9), z = 9 + sqrt(1 - (1 - u)^2), meets the line at the smaller root of
+        # (1 + t^2) u^2 + 2 ((1 - h) t - 1) u + (1 - h)^2 = 0. Under the line up to there, then under the
+        # arc: int_u^1 (1 - sqrt(1 - (1 - u)^2)) du = w - (w sqrt(1 - w^2) + asin w) / 2, w = 1 - u
+        a, b, c = 1 + t * t, 2 * ((1 - h) * t - 1), (1 - h) ** 2
+        u = (-b - math.sqrt(b * b - 4 * a * c)) / (2 * a)
+        w = 1 - u
+        return base - 20 * (h * u - t * u * u / 2 + w - (w * math.sqrt(1 - w * w) + math.asin(w)) / 2), u
+
+    def testPastAConcaveEdgeATiltedWallGrows(self):
+        # Case Base #105 (ops#640): a round's strip runs off its face over a concave edge into a wall that
+        # does not rise square from the face (#103's blend, at 87 degrees). Onshape cuts the round off by the
+        # wall, as by a square one (Q-LEDGE, testPastAConcaveEdgeTheWallGrows); the rule here is that result's,
+        # the tilted ledge itself was not asked. The dress-up is trimmed by the ledge's own surface run on
+        # under it: the ledge grows, F stays 8. Where the ledge's surface ends at the wall's foot ("short")
+        # it is extended, and the part under the dress-up stays a face of its own: F 9. Where it also ends
+        # along the edge ("split", a base of 9 faces), the first patch is run on past its end too and cuts
+        # the dress-up off under both: one face under the dress-up, F 10
+        for wall, faces in (("plane", 8), ("nurbs", 8), ("short", 9), ("split", 10)):
+            for kind in ("Chamfer", "Fillet"):
+                for h, degrees in ((0.5, 5), (0.5, -5), (0.963, 3)):
+                    with self.subTest(wall=wall, kind=kind, h=h, degrees=degrees):
+                        t = math.tan(math.radians(degrees))
+                        base = self.tiltedLedge(h, t, wall)
+                        self.assertAlmostEqual(base.Volume, 2000 - 20 * (4 * h + 8 * t), delta=1e-6)
+                        self.assertEqual(len(base.Faces), 9 if wall == "split" else 8)
+                        shape = self.dressUp(kind, base, 1.0, [edge_between(base, (0, 4, 10), (20, 4, 10))])
+                        volume, u = self.tiltedLedgeResult(kind, h, t)
+                        self.assertBuilt(shape, volume, faces)
+                        self.assertAlmostEqual(shape.Volume, volume, delta=1e-5)
+                        ledge = [
+                            f for f in shape.Faces
+                            if all(abs(v.Point.z - (10 - h + (v.Point.y - 4) * t)) < 1e-6 for v in f.Vertexes)
+                        ]
+                        self.assertEqual(len(ledge), faces - 7)
+                        # by its vertices: a B-spline face's bound box is its surface's
+                        reach = max(v.Point.y for f in ledge for v in f.Vertexes)
+                        self.assertAlmostEqual(reach, 4 + u, delta=1e-6)
+
     def testConcavePastItsFaceIsClippedAtTheRibsTop(self):
         # A concave round past its face: r 8 at a rib's foot, the rib 4 high. Onshape clips it at
         # the rib's top (the face its strip reaches first, run on; ops#640, Case Base #46's rule):
