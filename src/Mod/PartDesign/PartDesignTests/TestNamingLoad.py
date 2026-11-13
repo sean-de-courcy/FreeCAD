@@ -89,7 +89,7 @@ __all__ = [
 
 BOGUS = "Collision;_;1;XYZ;0;F;0;_;_"
 UNKNOWN = re.compile(r"~!([0-9a-v]{13})")
-NEWER_WARNING = "which this build doesn't read"
+NEWER_WARNING = "its name table is refused"
 UNKNOWN_WARNING = "missing from the file's name table"
 
 
@@ -105,13 +105,17 @@ def rewriteFile(source, target, rewrite):
 
 
 def newerFormat(name, text):
-    """A rewrite for rewriteFile: Document.xml's NamingFormat raised by one."""
+    """A rewrite for rewriteFile: Document.xml's NamingFormat raised by one, and the oldest reader
+    its table needs with it (`NamingFormatOldestRead`, the reader policy, ops#640 B1): a file
+    this build can't read."""
     if name != "Document.xml":
         return text
-    old = f'NamingFormat="{save.FORMAT}"'
-    if old not in text:
-        raise AssertionError(f"no {old}")
-    return text.replace(old, f'NamingFormat="{save.FORMAT + 1}"', 1)
+    for attribute in ("NamingFormat", "NamingFormatOldestRead"):
+        old = f'{attribute}="{save.FORMAT}"'
+        if old not in text:
+            raise AssertionError(f"no {old}")
+        text = text.replace(old, f'{attribute}="{save.FORMAT + 1}"', 1)
+    return text
 
 
 def withoutEntry(ids, id):
