@@ -8095,6 +8095,10 @@ struct DressUpOutcome
     bool constructed {false};
     /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
     bool preferred {false};
+    /// The preferred construction refused, its rim rounds because another part of the body lies
+    /// within their reach (Construction::rimBlocked): OCCT's round would run through that part,
+    /// so the maker wasn't built and the caller raises an error
+    bool blocked {false};
     /// OCCT built a result, but the selection has a reflex corner with a circle
     /// (FilletFallback::reflexCircleCorner()), where its rounds don't meet in Onshape's mitre:
     /// the exact construction, or an error
@@ -8146,6 +8150,10 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
                 if (out.preferred) {
                     out.constructed = true;
+                    return;
+                }
+                if (out.construction.rimBlocked) {
+                    out.blocked = true;
                     return;
                 }
                 request.contour.clear();
@@ -8324,6 +8332,17 @@ TopoShape& TopoShape::makeElementFillet(
         }
     }
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);
+    if (outcome->blocked) {
+        // Neither construction builds it, and OCCT's own round is valid and wrong there: never
+        // returned silently (decision 150)
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's round would meet a part of the body under its rim (a cavity or a hole "
+            "nearer to the rounded edges than the radius), where OCCT's round runs through that "
+            "part; its exact construction refused: "
+                << outcome->reason
+        );
+    }
     if (outcome->preferred) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;

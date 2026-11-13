@@ -9701,6 +9701,9 @@ namespace
 {
 
 constexpr double rimTolerance = 1e-7;
+/// The refusal of a rim whose rounds would meet another part of the body (Construction::rimBlocked)
+const char* const rimReachRefusal
+    = "a face that is neither the rim's plane face nor a wall within the round's reach";
 
 /// A wall's outline in the plane face's own coordinates, in the loop's direction
 struct RimCurve
@@ -11536,6 +11539,52 @@ TopoDS_Shape rimRounds(
     if (request.limitOnly && !rimReflexCircle(loops) && !rimTightArc(loops)) {
         refuse("no reflex corner with a circle");
     }
+    // The plan knows the plane faces and the walls only. What the rounds remove lies within r of
+    // the rim's edges, so no other face of the body may come that near: a cavity or a blind hole
+    // under the rim (a shelled plate with a thin wall) would be met by the round, which is then
+    // not the body assembled here (valid, with the right counts, areas and volume, and wrong).
+    // A hole's wall touching a top edge is at r (the pinch)
+    {
+        TopTools_IndexedMapOfShape planned;
+        std::vector<std::pair<TopoDS_Shape, Bnd_Box>> reach;
+        for (const auto& edge : edges) {
+            if (!edgeFaces.Contains(edge)) {
+                refuse("a rim edge without two faces");
+            }
+            for (const auto& face : edgeFaces.FindFromKey(edge)) {
+                planned.Add(face);
+            }
+            Bnd_Box box;
+            BRepBndLib::Add(edge, box, false);
+            box.Enlarge(r);
+            reach.emplace_back(edge, box);
+        }
+        const double margin = 1e-5;
+        for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+            if (planned.Contains(it.Current())) {
+                continue;
+            }
+            Bnd_Box box;
+            BRepBndLib::Add(it.Current(), box, false);
+            BRep_Builder gather;
+            TopoDS_Compound close;
+            gather.MakeCompound(close);
+            bool any = false;
+            for (const auto& [edge, edgeBox] : reach) {
+                if (!box.IsOut(edgeBox)) {
+                    gather.Add(close, edge);
+                    any = true;
+                }
+            }
+            if (!any) {
+                continue;
+            }
+            BRepExtrema_DistShapeShape distance(close, it.Current());
+            if (!distance.IsDone() || distance.Value() < r - margin) {
+                refuse(rimReachRefusal);
+            }
+        }
+    }
 
     BRep_Builder builder;
     TopTools_DataMapOfShapeShape replaced;  // in the walls: rim edges and the edges down
@@ -12527,6 +12576,7 @@ bool construct(
     }
     catch (const Refusal& refusal) {
         out.rimRefusal = refusal.reason;
+        out.rimBlocked = refusal.reason == rimReachRefusal;
     }
     catch (const Standard_Failure& e) {
         out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();

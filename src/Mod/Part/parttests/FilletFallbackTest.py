@@ -4176,6 +4176,115 @@ class TightWallArcTest(unittest.TestCase):
         self.assertTrue(result.isValid())
         self.assertLess(result.Volume, plate.Volume)
 
+    def testAHoleInAReflexCornersRunOnIsNotBuiltDirectly(self):
+        # An L-plate 60 x 40 x 6 (the notch x > 30, y > 20) with one wall arc rho 1 tighter than
+        # the round r 1.5875, and a through hole R 0.5 inside the reflex corner's run-on: the
+        # rounds of the walls x = 30 and y = 20 run on past the corner to where their top edges
+        # cross, at r from both, and the hole touches both top edges from the rounds' side. Its
+        # wall cuts through both rounds, which is not the direct assembly's case (a body built as
+        # if the hole only pinched the top plane was valid and wrong). At depths d1, d2 behind
+        # the two walls the rounds take min(h(d1), h(d2)) off the top, h(d) = r - sqrt(r^2 -
+        # (r - d)^2): the plate with the hole loses that much less than the plate without it,
+        # integrated over the hole's circle
+        r, hole = 1.5875, 0.5
+
+        def removed(withHole):
+            plate = self.ell()
+            if withHole:
+                centre = V(30 - r + hole, 20 - r + hole, -1)
+                cylinder = Part.makeCylinder(hole, 8, centre, V(0, 0, 1))
+                # The hole's seam turned away from the top edges it touches
+                cylinder.rotate(V(centre.x, centre.y, 0), V(0, 0, 1), 200)
+                plate = plate.cut(cylinder)
+            rim = [
+                e
+                for e in plate.Edges
+                if abs(e.BoundBox.ZMin - 6) < 1e-9
+                and abs(e.BoundBox.ZMax - 6) < 1e-9
+                and not e.isClosed()  # the hole's rim
+            ]
+            self.assertEqual(len(rim), 7)
+            result = plate.makeFillet(r, rim)
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            return plate.Volume - result.Volume
+
+        def height(d):
+            return r - math.sqrt(r * r - (r - d) ** 2) if d < r else 0.0
+
+        inHole, rings, spokes = 0.0, 200, 400
+        for i in range(rings):
+            rho = hole * (i + 0.5) / rings
+            for j in range(spokes):
+                phi = 2 * math.pi * (j + 0.5) / spokes
+                d1 = r - hole + rho * math.cos(phi)
+                d2 = r - hole + rho * math.sin(phi)
+                inHole += min(height(d1), height(d2)) * rho
+        inHole *= (hole / rings) * (2 * math.pi / spokes)
+        self.assertAlmostEqual(inHole, 0.041565, delta=2e-6)
+        self.assertAlmostEqual(removed(False) - removed(True), inHole, delta=1e-4)
+
+    def testABodyPartUnderTheRimIsNotBuiltThrough(self):
+        # The same L-plate, hollowed from below 0.2 r from the wall y = 0 and from the top: (a) a
+        # cavity 40 long, (b) a blind hole R 1. The cavity's top corner lies inside what the round
+        # removes (anything nearer than r (1 - 1/sqrt 2) to both does), so the round opens into
+        # it. The direct assembly knows the plane face and the walls only: it built the round
+        # through the cavity, valid and with the plain plate's volume. Now it refuses (another
+        # face within r of the rim); the construction by Booleans refuses too, and OCCT's own
+        # round, which runs through the cavity as well, is not returned: an error. A result would
+        # have to remove less than from the plain plate by the round's corner over the hollow: the heights above the hollow's
+        # top, h(d) - t for d from t to where the round is t deep, times the hollow's width there
+        r, top = 1.5875, 6.0
+        t = 0.2 * r
+        rim = lambda body: [
+            e for e in body.Edges if abs(e.BoundBox.ZMin - top) < 1e-9 and abs(e.BoundBox.ZMax - top) < 1e-9
+        ]
+        plain = self.ell()
+        result = plain.makeFillet(r, rim(plain))
+        self.assertTrue(result.isValid())
+        plainRemoved = plain.Volume - result.Volume
+
+        def height(d):
+            return r - math.sqrt(r * r - (r - d) ** 2)
+
+        reach = r - math.sqrt(r * r - (r - t) ** 2)
+        self.assertGreater(reach, t)
+
+        def over(width, steps=2000):  # Simpson
+            f = lambda d: (height(d) - t) * width(d)
+            h = (reach - t) / steps
+            inner = sum((4 if i % 2 else 2) * f(t + i * h) for i in range(1, steps))
+            return h / 3 * (f(t) + f(reach) + inner)
+
+        cavity = Part.makeBox(40, 10 - t, top - t + 1, V(10, t, -1))
+        hole = Part.makeCylinder(1.0, top - t + 1, V(20, t + 1.0, -1), V(0, 0, 1))
+        chord = lambda d: 2 * math.sqrt(max(1.0 - (d - t - 1.0) ** 2, 0.0))
+        for name, tool, less in (("cavity", cavity, over(lambda d: 40.0)), ("hole", hole, over(chord))):
+            with self.subTest(hollow=name):
+                body = plain.cut(tool)
+                self.assertEqual(len(rim(body)), 7)
+                try:
+                    result = body.makeFillet(r, rim(body))
+                except FreeCAD.Base.CADKernelError as error:
+                    self.assertIn("a part of the body under its rim", str(error))
+                    continue
+                self.assertTrue(result.isValid())
+                self.assertAlmostEqual(plainRemoved - (body.Volume - result.Volume), less, delta=1e-3)
+
+    def ell(self):
+        """An L-plate 60 x 40 x 6 (the notch x > 30, y > 20) with one wall arc rho 1 at (59, 19)."""
+        circle = Part.Circle(V(59, 19, 0), V(0, 0, 1), 1.0)
+        outline = [
+            Part.makeLine(V(0, 0, 0), V(60, 0, 0)),
+            Part.makeLine(V(60, 0, 0), V(60, 19, 0)),
+            Part.ArcOfCircle(circle, 0, math.pi / 2).toShape(),
+            Part.makeLine(V(59, 20, 0), V(30, 20, 0)),
+            Part.makeLine(V(30, 20, 0), V(30, 40, 0)),
+            Part.makeLine(V(30, 40, 0), V(0, 40, 0)),
+            Part.makeLine(V(0, 40, 0), V(0, 0, 0)),
+        ]
+        return Part.Face(Part.Wire(outline)).extrude(V(0, 0, 6))
+
 
 class CurvedEndTrimTest(unittest.TestCase):
     """Case Base #105, designed (notes r105-curved-end-trim): a block x -10..10, y 0..8, z 0..5 with

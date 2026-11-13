@@ -181,6 +181,10 @@ struct PartExport Construction
     bool rolledOn {false};
     /// Why the rim rounds were not built directly, where the construction by Booleans ran
     std::string rimRefusal;
+    /// The rim rounds were not built directly because a part of the body that is neither their
+    /// plane face nor a wall lies within their reach (a cavity or a blind hole under the rim):
+    /// OCCT's own round runs through that part as well, valid and wrong
+    bool rimBlocked {false};
 };
 
 /** build() in two steps, so that the long one can run on a worker thread (KernelBudget::run()):
