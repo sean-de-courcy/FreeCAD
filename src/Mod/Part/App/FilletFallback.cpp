@@ -629,8 +629,8 @@ struct Tool
     TopoDS_Shape source;
     /// The tool's volume in closed form, not measured
     double volume = 0.0;
-    /// On the faces next to the source: an edge tool's two, in the order of EdgeData::faces; a
-    /// corner piece's three
+    /// On the faces next to the source: an edge tool's two, in the order of EdgeData::faces (and a
+    /// third on the face a rolled round rolls onto, rollOn); a corner piece's three
     std::vector<Strip> strips;
     /// The faces of the tool that lie on the faces adjacent to the edge: the result must not
     /// keep any part of them (each tangent strip must be backed by material, or by air)
@@ -1559,14 +1559,31 @@ struct Rolled
     gp_Pnt touchNext;
     gp_Pnt touchOther;
     RuledTrace traceNext;
+    /// How far along face k's trace from the corner the tangent point lies (traceTravel)
+    double travel = 0.0;
 };
 
-std::optional<Rolled> rollOn(
+/// How far along the trace from its start the point lies: a length on a line, an angle on a circle
+double traceTravel(const RuledTrace& t, const gp_Pnt& point, const gp_Vec& z)
+{
+    if (t.circle) {
+        return std::abs(tracePiece(t, point, z).angle);
+    }
+    return gp_Vec(t.origin, point).Dot(gp_Vec(t.inward));
+}
+
+/** Face k's tangent edge along the edge onto a prism along it that runs the edge's whole length,
+ * the first its trace reaches from the corner (rollOn), with the face beyond and the tangent point;
+ * empty if it has none. Not strict: any straight edge along the edge on the trace, where the face
+ * beyond is tangent to it or is neither a plane nor a cylinder (review r3 of #47: a touch past such
+ * an edge must roll on, or refuse)
+ */
+std::optional<Rolled> tangentEdgeOf(
     const Context& ctx,
     const EdgeData& data,
     const RuledTrace traces[2],
     int k,
-    double r
+    bool strict = true
 )
 {
     gp_Dir direction(gp_Vec(data.start, data.end));
@@ -1575,8 +1592,6 @@ std::optional<Rolled> rollOn(
     const gp_Pnt& corner = data.start;
     const TopoDS_Face& face = data.faces[k];
     const RuledTrace& mine = traces[k];
-    const RuledTrace& other = traces[1 - k];
-    // The face's tangent edges along the edge: the first one its trace reaches from the corner
     std::optional<Rolled> rolled;
     double travel = std::numeric_limits<double>::infinity();
     for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
@@ -1602,16 +1617,21 @@ std::optional<Rolled> rollOn(
             continue;
         }
         gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
-        if (gp_Vec(outwardNormal(face, middle)).Crossed(gp_Vec(outwardNormal(next, middle))).Magnitude()
-                > tangentTolerance
-            || outwardNormal(face, middle).Dot(outwardNormal(next, middle)) <= 0) {
+        BRepAdaptor_Surface surface(next, Standard_False);
+        bool known = surface.GetType() == GeomAbs_Plane || surface.GetType() == GeomAbs_Cylinder;
+        if (!known && strict) {
             continue;
         }
-        BRepAdaptor_Surface surface(next, Standard_False);
+        if (known
+            && (gp_Vec(outwardNormal(face, middle)).Crossed(gp_Vec(outwardNormal(next, middle))).Magnitude()
+                    > tangentTolerance
+                || outwardNormal(face, middle).Dot(outwardNormal(next, middle)) <= 0)) {
+            continue;
+        }
         bool prism = surface.GetType() == GeomAbs_Plane
             || (surface.GetType() == GeomAbs_Cylinder
                 && parallel(surface.Cylinder().Axis().Direction(), direction));
-        if (!prism) {
+        if (!prism && strict) {
             continue;
         }
         // The tangent edge must run the edge's whole length
@@ -1620,36 +1640,51 @@ std::optional<Rolled> rollOn(
         double sa = gp_Vec(corner, a).Dot(z);
         double sb = gp_Vec(corner, b).Dot(z);
         double tolerance = std::max(linearTolerance, BRep_Tool::Tolerance(edge));
-        if (std::min(sa, sb) > tolerance || std::max(sa, sb) < length - tolerance) {
+        if (strict && (std::min(sa, sb) > tolerance || std::max(sa, sb) < length - tolerance)) {
             continue;
         }
         gp_Pnt point = a.Translated(z * -sa);
         // How far along the trace, from the corner in its sense
-        double here = 0.0;
-        if (mine.circle) {
-            if (std::abs(point.Distance(mine.centre) - mine.radius) > tolerance) {
-                continue;
-            }
-            here = std::abs(tracePiece(mine, point, z).angle);
+        bool onTrace = mine.circle
+            ? std::abs(point.Distance(mine.centre) - mine.radius) <= tolerance
+            : gp_Lin(corner, mine.inward).Distance(point) <= tolerance;
+        if (!onTrace) {
+            continue;
         }
-        else {
-            if (gp_Lin(corner, mine.inward).Distance(point) > tolerance) {
-                continue;
-            }
-            here = gp_Vec(corner, point).Dot(gp_Vec(mine.inward));
-        }
+        double here = traceTravel(mine, point, z);
         if (here <= linearTolerance || here >= travel) {
             continue;
         }
         Rolled candidate;
         candidate.next = next;
         candidate.tangentPoint = point;
+        candidate.travel = here;
         travel = here;
         rolled = candidate;
     }
+    return rolled;
+}
+
+std::optional<Rolled> rollOn(
+    const Context& ctx,
+    const EdgeData& data,
+    const RuledTrace traces[2],
+    int k,
+    double r
+)
+{
+    gp_Dir direction(gp_Vec(data.start, data.end));
+    gp_Vec z(direction);
+    double length = data.start.Distance(data.end);
+    const gp_Pnt& corner = data.start;
+    const TopoDS_Face& face = data.faces[k];
+    const RuledTrace& mine = traces[k];
+    const RuledTrace& other = traces[1 - k];
+    std::optional<Rolled> rolled = tangentEdgeOf(ctx, data, traces, k);
     if (!rolled) {
         return std::nullopt;
     }
+    const double travel = rolled->travel;
     const gp_Pnt& tangentPoint = rolled->tangentPoint;
     RuledPiece first = tracePiece(mine, tangentPoint, z);
     // The face holds its trace up to the tangent edge: nothing else bounds it first
@@ -1706,6 +1741,10 @@ std::optional<Rolled> rollOn(
         refuse("a round rolled on over a tangent edge onto a face cut short before it");
     }
     rolled->touchOther = ruledTouch(other, *best);
+    // And the other face holds its trace up to the round
+    if (!onFace(data.faces[1 - k], rolled->touchOther.Translated(z * (length / 2)))) {
+        refuse("a round rolled on over a tangent edge that runs off its other face");
+    }
     rolled->traceNext = next;
     return rolled;
 }
@@ -1832,6 +1871,20 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
             touches[k] = ruledTouch(traces[k], centre);
             if (!ruledTouches(traces[k], touches[k], centre, r)) {
                 reason = "a round of a straight edge on a cylinder that does not touch its faces";
+            }
+            // A concave round's touch past its face's tangent edge (onto a round beyond, review r1
+            // of #47) would leave the tool's strip in the material there, absorbed, and the round
+            // not tangent to the face beyond: Onshape's ball rolls on over that edge instead. A
+            // touch past any other end of the face is left to the run-off rules (#46: over a
+            // concave edge into a wall, the material absorbs it; into the air, it refuses)
+            else if (!data.convex
+                     && !onFace(data.faces[k], touches[k].Translated(gp_Vec(direction) * (length / 2)))) {
+                auto tangent = tangentEdgeOf(ctx, data, traces, k, false);
+                if (tangent
+                    && tangent->travel <= traceTravel(traces[k], touches[k], gp_Vec(direction))) {
+                    reason = "a concave round of a straight edge on a cylinder that runs off its face "
+                             "over its tangent edge";
+                }
             }
         }
     }

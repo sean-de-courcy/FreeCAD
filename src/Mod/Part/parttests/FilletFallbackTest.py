@@ -2291,6 +2291,50 @@ class OverflowTest(unittest.TestCase):
         self.assertAlmostEqual(left[0].BoundBox.ZMax, 4, delta=1e-6)
         self.assertAlmostEqual(left[0].Area, 25.347863, delta=1e-5)
 
+    def testConcaveRoundPastItsFacesTangentEdgeRollsOn(self):
+        # Review r1 of #47 (small_round_ring_corner()): the ball of r 2 between the wall y 0 and the
+        # ring would touch the wall's plane past the wall's end, over the tangent edge onto the
+        # corner's r 3 round. It rolls on onto that round (13.762038), never left absorbed in its
+        # material (4.836788, a crease of 22.85 degrees with the round)
+        base, ends, added = small_round_ring_corner()
+        self.assertAlmostEqual(added, 13.762038, delta=1e-5)
+        shape = base.makeFillet(2, [edge_between(base, *ends)])
+        self.assertBuilt(shape, base.Volume + added)
+        self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
+
+    def testConcaveRoundPastASharpEndIsAbsorbedByTheWall(self):
+        # Review r2 of #47: ring_corner()'s base, sharp corner, r 5 on the crease between the wall
+        # y 0 and the ring. The ball (centre on y -5, 20 from the ring's axis) touches the wall's
+        # plane at x -0.596, past the wall's end at x 0, a sharp concave edge onto the wall x 0: no
+        # tangent edge to roll over. As past the limit (#46), the wall's material absorbs the part
+        # past its end: the base plus the region between the walls, the ring and the ball
+        base, _, _, _ = ring_corner("Fillet")
+        x = 19 - math.sqrt(224)
+        cx = 19 - math.sqrt(20**2 - 4**2)
+        c = V(cx, -5, 0)
+        b = V(19, -1, 0)
+        touch = c + (b - c) * (5 / (b - c).Length)
+        points = [V(cx, 0, 4), V(cx, -5, 4), V(touch.x, touch.y, 4), V(19, -1, 4), V(19, 0, 4), V(cx, 0, 4)]
+        region = Part.Face(Part.makePolygon(points)).extrude(V(0, 0, 6))
+        region = region.cut(Part.makeCylinder(5, 8, V(cx, -5, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
+        added = region.cut(base).Volume
+        self.assertAlmostEqual(added, 24.126342, delta=1e-5)
+        shape = base.makeFillet(5, [edge_between(base, (x, 0, 4), (x, 0, 10))])
+        self.assertBuilt(shape, base.Volume + added)
+        self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
+
+    def testConcaveRoundPastAShortTangentEdgeFails(self):
+        # Review r3 of #47: small_round_ring_corner(top=8), the corner rounded r 3 only up to z 8.
+        # The wall's tangent edge onto that round runs z 2..8, the crease z 4..10: the ball of r 2
+        # would roll on below z 8 and not above it (a mixed round the construction can't build).
+        # It refuses, rather than leave the strip absorbed in the round's material (+4.867757, at a
+        # crease of 22.85 degrees with the round)
+        base, ends, _ = small_round_ring_corner(top=8)
+        with self.assertRaises(Part.OCCError):
+            shape = base.makeFillet(2, [edge_between(base, *ends)])
+            if not shape.isValid():
+                raise Part.OCCError("invalid")
+
 def ring_corner(kind, size=10):
     """The native replica's Case Base #46, designed: a pocket's concave corner (x 0, y 0; floor z 2,
     top z 10) whose dress-up of the size is wider than the wall y 0 on its right: a ring (centre
@@ -2375,6 +2419,39 @@ def rounded_ring_corner(step=False):
     ).extrude(V(0, 0, 6))
     region = region.cut(Part.makeCylinder(6.5, 8, V(6.5, y, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
     return rounded, (a, b), region.cut(rounded).Volume, (6.5, y)
+
+
+def small_round_ring_corner(top=10):
+    """ring_corner()'s base with its corner rounded r 3 (by Booleans, as rounded_ring_corner()), and
+    the crease between the wall y 0 and the ring's outer wall (R 15) at x 19 - sqrt(224), z 4..10:
+    the wall ends at x 3 in the r 3 round's tangent edge (review r1 of #47). A ball of r 2 tangent to
+    the wall's plane and the ring would touch the plane at x 2.03, past the wall's end; by #47's rule
+    it rolls on onto the r 3 round, tangent to it and to the ring. Returns the base, the crease's
+    ends, and the volume that round adds: the region between the base, the ring and the ball, whose
+    centre is 1 from the round's axis (3, -3) and 17 from the ring's (19, -1). With top under 10,
+    the corner is rounded only up to z top, and sharp above it"""
+    base, _, _, _ = ring_corner("Fillet")
+    arc = Part.ArcOfCircle(Part.Circle(V(3, -3, 2), V(0, 0, 1), 3), math.pi / 2, math.pi)
+    rim = [Part.makeLine(V(0, 0, 2), V(3, 0, 2)), arc.toShape(), Part.makeLine(V(0, -3, 2), V(0, 0, 2))]
+    corner = Part.Face(Part.Wire(rim)).extrude(V(0, 0, top - 2)).cut(base)
+    corner = corner.cut(Part.makeCylinder(12, 10, V(19, -1, 1)))
+    rounded = base.fuse(corner).removeSplitter()
+    x = 19 - math.sqrt(224)
+    ends = ((x, 0, 4), (x, 0, 10))
+    # the ball's centre: on the circle r 1 about A (3, -3) and the circle r 17 about B (19, -1), the
+    # crossing on the corner's side (y above A's)
+    a, b = V(3, -3, 0), V(19, -1, 0)
+    d = (b - a).Length
+    along = (1 - 17**2 + d**2) / (2 * d)
+    u = (b - a) * (1 / d)
+    w = V(-u.y, u.x, 0)
+    c = a + u * along + w * math.sqrt(1 - along**2)
+    touch_round = a + (c - a) * (3 / (c - a).Length)
+    touch_ring = c + (b - c) * (2 / (b - c).Length)
+    points = [touch_round, c, touch_ring, b, V(19, 0, 0), V(0, 0, 0), touch_round]
+    region = Part.Face(Part.makePolygon([V(q.x, q.y, 4) for q in points])).extrude(V(0, 0, 6))
+    region = region.cut(Part.makeCylinder(2, 8, V(c.x, c.y, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
+    return rounded, ends, region.cut(rounded).Volume
 
 
 def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
