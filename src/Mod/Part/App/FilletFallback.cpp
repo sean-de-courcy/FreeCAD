@@ -2092,18 +2092,29 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         if (std::abs(major) <= linearTolerance) {
             round = BRepPrimAPI_MakeSphere(frame, section.radius).Shape();
         }
-        else if (major < section.radius + linearTolerance) {
-            // A spindle torus: not built yet
+        else if (major < 0) {
+            // The centre's circle is on the other side of the axis: no ball of the radius fits
+            // against the arc (cause C4, shape A)
             refuse("a fillet whose torus crosses its axis");
+        }
+        else if (major < section.radius + linearTolerance) {
+            // A spindle or horn torus (cause C4, shapes B and C): the round uses only the part of
+            // it between the radii major and major + radius, which never reaches the axis, but
+            // BRepPrimAPI_MakeTorus needs major > minor. Revolve the section itself instead; its
+            // volume is the closed form's (Pappus), and OCCT stores the round as a surface of
+            // revolution rather than a torus
+            solid = BRepPrimAPI_MakeRevol(section.face(), axis, span, Standard_True).Shape();
         }
         else {
             round = BRepPrimAPI_MakeTorus(frame, major, section.radius).Shape();
         }
-        BRepAlgoAPI_Cut cut(ring, round);
-        if (!cut.IsDone() || cut.HasErrors()) {
-            refuse("building a revolved tool failed");
+        if (solid.IsNull()) {
+            BRepAlgoAPI_Cut cut(ring, round);
+            if (!cut.IsDone() || cut.HasErrors()) {
+                refuse("building a revolved tool failed");
+            }
+            solid = cut.Shape();
         }
-        solid = cut.Shape();
     }
     tool.solid = solid;
     for (int i = 0; i < 2 && !data.closed; ++i) {
