@@ -3,8 +3,17 @@
 #include <gtest/gtest.h>
 #include "src/App/InitApplication.h"
 
+#include <chrono>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <optional>
+
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/MappedName.h>
+#include <App/NameTable.h>
+#include "Mod/Part/App/PartFeature.h"
 #include "Mod/PartDesign/App/Body.h"
 #include "Mod/PartDesign/App/ShapeBinder.h"
 #include "Mod/PartDesign/App/FeaturePipe.h"
@@ -17,6 +26,17 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
+
+// The process's memory, for memoryHeld()
+#if defined(_WIN32)
+# ifndef NOMINMAX
+#  define NOMINMAX
+# endif
+# include <windows.h>
+# include <psapi.h>
+#elif defined(__linux__)
+# include <unistd.h>
+#endif
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -308,6 +328,135 @@ TEST(PipeCapsFacing, ProfileBeyondTheBendsCentre)
     const PartDesign::PipeCapFacing tangentOnly
         = PartDesign::pipeCapsFacing(swept.solid, spine, swept.starts, swept.ends, false);
     EXPECT_EQ(tangentOnly.inward, 2);
+}
+
+namespace
+{
+/// Two names whose full form is at least \a atLeast bytes long while the name table holds them
+/// in two nodes a level: each level's two names link both names of the level below, so the full
+/// form more than doubles per level. A split face's name grows so when a dress-up's edge on it
+/// is named from the face (`notes\name-growth.md`); built here directly, since the writer no
+/// longer makes such names by that road.
+std::pair<std::string, std::string> namesLongInFull(std::size_t atLeast)
+{
+    Data::NameTable& table = Data::NameTable::instance();
+    auto section = [](const std::vector<std::string>& linked, const char* op) {
+        return Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            linked,
+            std::string("7"),
+            op,
+            std::string("0"),
+            'E',
+            std::string("0"),
+            std::vector<std::string> {Data::MAPPER_FLAG_MODIFIED},
+            std::vector<std::string> {}
+        );
+    };
+    std::string one = section({"g1"}, "TSA");
+    std::string other = section({"g2"}, "TSB");
+    while (table.toPlain(one).size() < atLeast) {
+        const std::string refOne = Data::NameTable::makeRef(*table.internName(one));
+        const std::string refOther = Data::NameTable::makeRef(*table.internName(other));
+        one = section({refOne, refOther}, "TSA");
+        other = section({refOther, refOne}, "TSB");
+    }
+    return {one, other};
+}
+
+/// The memory the process holds, in bytes, where the system tells
+std::optional<std::uint64_t> memoryHeld()
+{
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX counters {};
+    if (GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),  // NOLINT
+            sizeof(counters)
+        )) {
+        return counters.PrivateUsage;
+    }
+    return std::nullopt;
+#elif defined(__linux__)
+    std::ifstream statm("/proc/self/statm");
+    std::uint64_t total = 0;
+    std::uint64_t resident = 0;
+    if (statm >> total >> resident) {
+        return resident * static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+    }
+    return std::nullopt;
+#else
+    return std::nullopt;
+#endif
+}
+}  // namespace
+
+// A Pipe keys each corner of its spine by the names of the two edges there. Written out in full
+// to be keyed, a name of megabytes cost seconds a megabyte and stayed in the decoder's cache for
+// the process's life; a real document's names reach half a gigabyte, and its Pipe never ended
+// (ops#640, `notes\pipe-corner-names-memory.md`). The names are keyed from the name table's
+// nodes instead: a spine of two edges with such names costs what a spine of one edge costs (which
+// has no corner, and never read its names), and keeps no memory.
+TEST_F(FeaturePipeTest, aCornerBetweenEdgesWithLongNamesCostsWhatNoCornerCosts)
+{
+    doc_->InternNames.setValue(true);
+    const std::size_t longName = 8'000'000;
+    const auto [nameOne, nameOther] = namesLongInFull(longName);
+    auto spine = doc_->addObject<Part::Feature>("spine");
+    const TopoDS_Edge first = BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(0, 0, 5)).Edge();
+    const TopoDS_Edge second = BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(0, 2, 10)).Edge();
+    Part::TopoShape wire(spine->getID());
+    wire.setInternNames(true);
+    wire.setShape(BRepBuilderAPI_MakeWire(first, second).Wire());
+    wire.setElementName(
+        Data::IndexedName::fromConst("Edge", 1),
+        Data::MappedName(nameOne),
+        spine->getID()
+    );
+    wire.setElementName(
+        Data::IndexedName::fromConst("Edge", 2),
+        Data::MappedName(nameOther),
+        spine->getID()
+    );
+    spine->Shape.setValue(wire);
+    // The spine's edges have the long names
+    for (const char* edge : {"Edge1", "Edge2"}) {
+        const auto names = spine->Shape.getShape().getElementMappedNames(
+            Data::IndexedName(edge)
+        );
+        ASSERT_EQ(names.size(), 1) << edge;
+        ASSERT_GE(Data::NameTable::instance().toPlain(names.front().first.toString()).size(), longName)
+            << edge;
+    }
+
+    // The seconds a pipe of the circle along \a edges of the spine takes, the pipe valid
+    auto secondsAlong = [&](const std::vector<std::string>& edges, double volumeAtLeast) {
+        auto pipe = doc_->addObject<PartDesign::AdditivePipe>("pipe");
+        body_->addObject(pipe);
+        pipe->Profile.setValue(sketch_circle_);
+        pipe->Spine.setValue(spine, edges);
+        const auto start = std::chrono::steady_clock::now();
+        doc_->recompute();
+        const std::chrono::duration<double> taken = std::chrono::steady_clock::now() - start;
+        EXPECT_TRUE(pipe->isValid()) << pipe->getStatusString();
+        EXPECT_GT(getVolume(pipe->Shape.getShape().getShape()), volumeAtLeast);
+        doc_->removeObject(pipe->getNameInDocument());
+        return taken.count();
+    };
+    // The circle's area, pi / 4, along 5, and along 5 and the square root of 29
+    const double withoutCorner = secondsAlong({"Edge1"}, 3.9);
+    const std::optional<std::uint64_t> before = memoryHeld();
+    const double withCorner = secondsAlong({"Edge1", "Edge2"}, 7.5);
+    const std::optional<std::uint64_t> after = memoryHeld();
+    // Written out, two names of 3 MB took 3.5 s and kept 35 MB
+    EXPECT_LT(withCorner, withoutCorner + 1.5);
+    if (before && after) {
+        EXPECT_LT(*after, *before + 16'000'000);
+        std::cout << "memory kept: " << static_cast<double>(*after) - static_cast<double>(*before)
+                  << " bytes" << std::endl;
+    }
+    std::cout << "seconds without a corner " << withoutCorner << ", with one " << withCorner
+              << std::endl;
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
