@@ -860,8 +860,55 @@ void solveStations(const Context& context, Blend& blend, int interior)
         warm = &stations.back();
     }
     stations.push_back(last);
+    // OCCT's sections are not evenly spread and can stall or step back where its surface's parameter
+    // does: only those that advance along the centre curve are kept, and they only place the
+    // stations, which are spread evenly along the curve
+    std::vector<Station> advancing;
+    advancing.push_back(stations.front());
+    gp_Vec forward = fromFirst;  // the curve's direction at the last one kept, towards the far end
+    for (size_t k = 1; k + 1 < stations.size(); ++k) {
+        const gp_Vec step(advancing.back().centre, stations[k].centre);
+        if (step.Dot(forward) > 0.05 * spacing) {
+            advancing.push_back(stations[k]);
+            gp_Vec tangent = stations[k].feet[0].normal.Crossed(stations[k].feet[1].normal).Normalized();
+            forward = tangent.Dot(forward) < 0.0 ? tangent.Reversed() : tangent;
+        }
+    }
+    advancing.push_back(last);
+    std::vector<double> along(advancing.size(), 0.0);
+    for (size_t k = 1; k < advancing.size(); ++k) {
+        along[k] = along[k - 1] + advancing[k - 1].centre.Distance(advancing[k].centre);
+    }
+    stations.clear();
+    stations.push_back(first);
+    size_t segment = 0;
+    for (int k = 1; k <= interior; ++k) {
+        const double target = along.back() * k / (interior + 1);
+        while (segment + 2 < advancing.size() && along[segment + 1] < target) {
+            ++segment;
+        }
+        const double span = along[segment + 1] - along[segment];
+        const double fraction = span > 0.0 ? (target - along[segment]) / span : 0.0;
+        const gp_Pnt start(
+            advancing[segment].centre.XYZ() * (1.0 - fraction) + advancing[segment + 1].centre.XYZ() * fraction
+        );
+        Station station = solveStation(start, walls, context.radius, &advancing[fraction < 0.5 ? segment : segment + 1]);
+        if (!station.ok) {
+            throw Refusal {"a ball position did not converge"};
+        }
+        stations.push_back(station);
+    }
+    stations.push_back(last);
     if (stations.size() < 4) {
         throw Refusal {"too few ball positions on a blend face"};
+    }
+    // In order along the centre curve: a step back would fold the surface
+    for (size_t k = 1; k + 1 < stations.size(); ++k) {
+        const gp_Vec before(stations[k - 1].centre, stations[k].centre);
+        const gp_Vec after(stations[k].centre, stations[k + 1].centre);
+        if (before.Dot(after) <= 0.0) {
+            throw Refusal {"ball positions out of order along a blend face"};
+        }
     }
     // One branch of a periodic wall's parameters along the face
     for (int side = 0; side < 2; ++side) {
