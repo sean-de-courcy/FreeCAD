@@ -11745,6 +11745,13 @@ TEST(NameAncestry, twinNamesAsTheMapHoldsThem)
     for (const auto& a : names) {
         for (const auto& b : names) {
             const bool plain = Data::isTwinName(a, b);
+            // The twin index's digest never rules out a pair of twins (ops#640)
+            if (plain) {
+                const auto digestA = App::twinDigestForTesting(table.toInterned(a));
+                const auto digestB = App::twinDigestForTesting(table.toInterned(b));
+                EXPECT_TRUE(!digestA || !digestB || *digestA == *digestB) << a << " | " << b;
+                EXPECT_TRUE(digestA.has_value()) << a;
+            }
             const std::string storedA = table.toInterned(a);
             const std::string storedB = table.toInterned(b);
             EXPECT_EQ(Data::isTwinName(Data::ownSectionsOf(storedA), Data::ownSectionsOf(storedB)), plain)
@@ -11788,6 +11795,10 @@ TEST(NameAncestry, twinNamesOfADeepHistoryAreToldWithoutTheirPlainForms)
     EXPECT_FALSE(Data::isTwinName(Data::ownSectionsOf(first), Data::ownSectionsOf(other)));
     EXPECT_FALSE(Data::isTwinName(first, first));
     EXPECT_EQ(App::twinKeyForTesting(first, false), App::twinKeyForTesting(second, false));
+    // The twin index's digest: the same for the twins, read once per entry (2^40 names plain)
+    ASSERT_TRUE(App::twinDigestForTesting(first).has_value());
+    EXPECT_EQ(App::twinDigestForTesting(first), App::twinDigestForTesting(second));
+    EXPECT_NE(App::twinDigestForTesting(first), App::twinDigestForTesting(other));
 }
 
 TEST(NameAncestry, twinNamesTheTableLearnsLaterAreTwins)

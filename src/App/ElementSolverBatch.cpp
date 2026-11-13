@@ -3442,9 +3442,126 @@ std::string twinKeyForTesting(const std::string& name, bool plain)
 
 namespace
 {
-// A target shape's names of one type by twin key: each element's index and the name's own
-// sections (elementTwinCentroid())
-using TwinIndex = std::unordered_map<std::string, std::vector<std::pair<int, std::string>>>;
+void mixInto(std::size_t& hash, std::string_view text)
+{
+    hash ^= std::hash<std::string_view> {}(text) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+}
+
+// The fields of one section that Data::isTwinName() requires equal in a pair of names below its
+// top level (ElementSolver.cpp sameSectionsUpToOrder() with top false: the reference IDs, the
+// iteration tag, the element type, the flags besides ORD and CLS in order, the number of linked
+// names, and each linked name the same up to order), mixed into \a hash. The op code, the Index
+// and the connected elements are left out: the test lets them differ. Nothing for a section that
+// doesn't decode as one.
+bool mixSection(std::size_t& hash, std::string_view section, int depth);
+
+/* A digest of \a name below the top level of a twin test: two names that are the same up to
+ * order (sameUpToOrder() with top false) have the same digest, so a differing digest rules a
+ * pair out and an equal one leaves it to the test. Nothing where a part of the name can't be read
+ * (a reference the table doesn't know, a section that doesn't decode as one, an empty name):
+ * such a name is tested against every name of its twin key. Kept per reference (a table entry
+ * never changes or goes), so each entry is read once (ops#640, R1 of notes/names-bounded.md).
+ */
+std::optional<std::size_t> orderFreeDigest(const std::string& name, int depth)
+{
+    constexpr std::size_t limit = 1000000;
+    thread_local std::unordered_map<std::string, std::size_t> kept;
+    if (depth > 256) {
+        return std::nullopt;
+    }
+    const bool reference =
+        name.size() == Data::NameTable::RefLength && name.front() == Data::NameTable::Marker;
+    if (reference) {
+        if (const auto it = kept.find(name); it != kept.end()) {
+            return it->second;
+        }
+    }
+    const std::string own = Data::ownSectionsOf(name);
+    if (own.empty() || (reference && own == name)) {
+        return std::nullopt;
+    }
+    const auto sections = Data::NameAncestry::splitSections(own);
+    if (sections.empty()) {
+        return std::nullopt;
+    }
+    std::size_t hash = sections.size();
+    for (const auto section : sections) {
+        if (!mixSection(hash, section, depth)) {
+            return std::nullopt;
+        }
+    }
+    if (reference) {
+        if (kept.size() >= limit) {
+            kept.clear();
+        }
+        kept.emplace(name, hash);
+    }
+    return hash;
+}
+
+bool mixSection(std::size_t& hash, std::string_view section, int depth)
+{
+    const Data::DecodedMappedName& decoded =
+        Data::MappedName::getDecodedMappedName(std::string(section));
+    if (decoded.size() != 1) {
+        return false;
+    }
+    const Data::DecodedMappedSection& x = decoded.front();
+    for (const auto& id : x.referenceIDs) {
+        mixInto(hash, id);
+    }
+    mixInto(hash, "|");
+    mixInto(hash, x.iterationTag);
+    mixInto(hash, std::string_view(&x.elementType, 1));
+    for (const auto& flag : x.mapperFlags) {
+        if (flag != "ORD" && flag != "CLS") {
+            mixInto(hash, flag);
+        }
+    }
+    mixInto(hash, std::to_string(x.linkedNames.size()));
+    for (const auto& linked : x.linkedNames) {
+        const auto digest = orderFreeDigest(linked, depth + 1);
+        if (!digest) {
+            return false;
+        }
+        mixInto(hash, std::to_string(*digest));
+    }
+    return true;
+}
+
+// A name in its own sections at the top level of a twin test: the digests of the linked names
+// of each of its sections, which the test requires the same up to order at the top level too
+// (twinKey() holds the rest of what it reads there). Nothing where orderFreeDigest() gives none.
+std::optional<std::size_t> topLinkedDigest(const std::string& own)
+{
+    std::size_t hash = 0;
+    for (const auto section : Data::NameAncestry::splitSections(own)) {
+        const Data::DecodedMappedName& decoded =
+            Data::MappedName::getDecodedMappedName(std::string(section));
+        if (decoded.size() != 1) {
+            return std::nullopt;
+        }
+        mixInto(hash, std::to_string(decoded.front().linkedNames.size()));
+        for (const auto& linked : decoded.front().linkedNames) {
+            const auto digest = orderFreeDigest(linked, 1);
+            if (!digest) {
+                return std::nullopt;
+            }
+            mixInto(hash, std::to_string(*digest));
+        }
+    }
+    return hash;
+}
+
+// A target shape's names of one type by twin key, then by topLinkedDigest(): each element's
+// index and the name's own sections (elementTwinCentroid()). A name without a digest is `loose`:
+// tested against every name of its twin key.
+struct TwinGroup
+{
+    std::unordered_map<std::size_t, std::vector<std::pair<int, std::string>>> byDigest;
+    std::vector<std::pair<int, std::string>> loose;
+};
+using TwinIndex = std::unordered_map<std::string, TwinGroup>;
 thread_local int twinIndexDepth = 0;
 thread_local std::map<std::pair<const Data::ComplexGeoData*, std::string>, TwinIndex> twinIndexes;
 
@@ -3456,13 +3573,23 @@ TwinIndex makeTwinIndex(const Data::ComplexGeoData* data, const char* type)
         const Data::IndexedName indexed(type, static_cast<int>(i));
         for (const auto& mapped : data->getElementMappedNames(indexed)) {
             std::string own = ownSections(mapped.first.toString());
-            std::string key = twinKey(own);
-            index[std::move(key)].emplace_back(static_cast<int>(i), std::move(own));
+            TwinGroup& group = index[twinKey(own)];
+            if (const auto digest = topLinkedDigest(own)) {
+                group.byDigest[*digest].emplace_back(static_cast<int>(i), std::move(own));
+            }
+            else {
+                group.loose.emplace_back(static_cast<int>(i), std::move(own));
+            }
         }
     }
     return index;
 }
 }  // namespace
+
+std::optional<std::size_t> twinDigestForTesting(const std::string& name)
+{
+    return topLinkedDigest(ownSections(name));
+}
 
 TwinIndexScope::TwinIndexScope()
 {
@@ -3529,14 +3656,30 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
         local = makeTwinIndex(data, indexed.getType());
     }
     std::set<int> found;
+    const auto test = [&](const std::vector<std::pair<int, std::string>>& entries, std::size_t k) {
+        for (const auto& [i, own] : entries) {
+            if (i != indexed.getIndex() && found.count(i) == 0 && Data::isTwinName(own, names[k])) {
+                found.insert(i);
+            }
+        }
+    };
     for (std::size_t k = 0; k < names.size(); ++k) {
         const auto it = byKey->find(keys[k]);
         if (it == byKey->end()) {
             continue;
         }
-        for (const auto& [i, own] : it->second) {
-            if (i != indexed.getIndex() && found.count(i) == 0 && Data::isTwinName(own, names[k])) {
-                found.insert(i);
+        const TwinGroup& group = it->second;
+        test(group.loose, k);
+        // Only the names whose digest is this name's: another digest rules the pair out
+        // (topLinkedDigest()). A name without one is tested against all.
+        if (const auto digest = topLinkedDigest(names[k])) {
+            if (const auto same = group.byDigest.find(*digest); same != group.byDigest.end()) {
+                test(same->second, k);
+            }
+        }
+        else {
+            for (const auto& [digest, entries] : group.byDigest) {
+                test(entries, k);
             }
         }
     }
