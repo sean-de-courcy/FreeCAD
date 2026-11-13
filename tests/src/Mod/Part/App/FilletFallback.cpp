@@ -16,11 +16,13 @@
 
 #include "src/App/InitApplication.h"
 #include <App/ElementNamingUtils.h>
+#include <Base/Exception.h>
 #include <Mod/Part/App/FilletFallback.h>
 #include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
@@ -37,6 +39,7 @@
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
@@ -3035,6 +3038,255 @@ TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
         outer.report("Chamfer"),
         "Chamfer: built by the exact construction where OCCT failed: 2 edges, 0 corners"
     );
+}
+
+namespace
+{
+double area(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+}
+
+/// The concave fillet section r at the corner, filling towards +along and +up (a spandrel), in
+/// the plane those two directions span
+TopoDS_Face spandrel(const gp_Pnt& corner, const gp_Dir& along, const gp_Dir& up, double r)
+{
+    gp_Pnt onFloor = corner.Translated(gp_Vec(along) * r);
+    gp_Pnt onWall = corner.Translated(gp_Vec(up) * r);
+    gp_Pnt centre = onFloor.Translated(gp_Vec(up) * r);
+    gp_Pnt middle = centre.Translated((gp_Vec(along) + gp_Vec(up)).Normalized() * -r);
+    BRepBuilderAPI_MakeWire wire(
+        BRepBuilderAPI_MakeEdge(corner, onFloor).Edge(),
+        BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(onFloor, middle, onWall).Value()).Edge(),
+        BRepBuilderAPI_MakeEdge(onWall, corner).Edge()
+    );
+    return BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+}
+
+TopoDS_Shape fuseAll(const std::vector<TopoDS_Shape>& shapes)
+{
+    TopoDS_Shape result = shapes.front();
+    for (size_t i = 1; i < shapes.size(); ++i) {
+        result = BRepAlgoAPI_Fuse(result, shapes[i]).Shape();
+    }
+    return result;
+}
+
+/// The run's edges on the floor z = h: the concave foot edges whose midpoint passes the test
+std::vector<TopoShape> footRun(const TopoShape& base, double h, const std::function<bool(const gp_Pnt&)>& test)
+{
+    std::vector<TopoShape> result;
+    for (const auto& edge : edgesWhere(base, atHeight(h))) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edge.getShape()));
+        if (test(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2))) {
+            result.push_back(edge);
+        }
+    }
+    return result;
+}
+
+int facesOn(const TopoDS_Shape& shape, GeomAbs_SurfaceType type)
+{
+    int n = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        n += surfaceType(it.Current()) == type ? 1 : 0;
+    }
+    return n;
+}
+}  // namespace
+
+TEST_F(FilletFallbackTest, concaveRunEndingWhereItsChainTurnsConvex)
+{
+    // Nest Cover #151's topology with straight edges (oracle 17 Q-OVF v2, onshape-facts OV3): a plate
+    // 40 x 20 with its outer edge bevelled down and in, 45 deg through the whole thickness C; a stadium
+    // wall (x 10..30, y 0..T, round ends r T/2, 4 high) flush with the bevel; a fillet r T/2 on the
+    // wall's inner foot line and the round ends' feet. At (10, 0, 10) and (30, 0, 10) four edges meet,
+    // and the floor/bevel edge carries the run on tangentially but convex. OCCT's fillet runs on along
+    // it and returns a valid solid with 2 faces too many, 29 mm3 short. Onshape stops the chain there,
+    // and each end torus rolls on past the vertex, trimmed by the bevel (and the wall's outer face):
+    // V 1358.018700 (evVolume, ~1e-3), A 1923.543821, 14 faces, 34 edges, 22 vertices; 3 new faces,
+    // the tori 3.883267 each; the outer face starts at z 10.79375 at x 10 (79.246377)
+    const double c = 1.5875;
+    const double t = 1.5875;
+    const double h = 10;
+    const double r = t / 2;
+    BRepBuilderAPI_MakePolygon outline(
+        gp_Pnt(0, 0, h),
+        gp_Pnt(0, c, h - c),
+        gp_Pnt(0, 20, h - c),
+        gp_Pnt(0, 20, h),
+        Standard_True
+    );
+    TopoDS_Shape plate = BRepPrimAPI_MakePrism(
+                             BRepBuilderAPI_MakeFace(outline.Wire(), Standard_True).Face(),
+                             gp_Vec(40, 0, 0)
+    )
+                             .Shape();
+    BRepBuilderAPI_MakeWire stadium;
+    stadium.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(10, 0, h), gp_Pnt(30, 0, h)).Edge());
+    stadium.Add(BRepBuilderAPI_MakeEdge(
+                    GC_MakeArcOfCircle(gp_Pnt(30, 0, h), gp_Pnt(30 + r, r, h), gp_Pnt(30, t, h)).Value()
+    )
+                    .Edge());
+    stadium.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(30, t, h), gp_Pnt(10, t, h)).Edge());
+    stadium.Add(BRepBuilderAPI_MakeEdge(
+                    GC_MakeArcOfCircle(gp_Pnt(10, t, h), gp_Pnt(10 - r, r, h), gp_Pnt(10, 0, h)).Value()
+    )
+                    .Edge());
+    TopoDS_Shape wall
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(stadium.Wire(), Standard_True).Face(), gp_Vec(0, 0, 4))
+              .Shape();
+    TopoShape fused;
+    fused.makeElementBoolean(OpCodes::Fuse, {TopoShape(plate), TopoShape(wall)});
+    TopoShape base(fused.removeSplitter().getShape(), 1L);
+    ASSERT_EQ(base.countSubElements("Face"), 11);
+    auto run = footRun(base, h, [&](const gp_Pnt& p) {
+        return p.Y() > 1e-7 && p.Y() < t + 1e-7;
+    });
+    ASSERT_EQ(run.size(), 3);
+    // Onshape's shape by other Booleans: the line's spandrel, and each end's spandrel turned a whole
+    // turn about its axis, kept where the bevel's plane (y + z >= h) has the material
+    TopoDS_Shape fill = BRepPrimAPI_MakePrism(spandrel(gp_Pnt(10, t, h), gp::DY(), gp::DZ(), r), gp_Vec(20, 0, 0))
+                            .Shape();
+    BRepBuilderAPI_MakePolygon side(
+        gp_Pnt(-10, h / 2, h / 2),
+        gp_Pnt(-10, -25, h + 25),
+        gp_Pnt(-10, 40, h + 25),
+        gp_Pnt(-10, 40, h / 2),
+        Standard_True
+    );
+    TopoDS_Shape bevelSide
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(side.Wire(), Standard_True).Face(), gp_Vec(60, 0, 0))
+              .Shape();
+    for (double x : {10.0, 30.0}) {
+        gp_Ax1 axis(gp_Pnt(x, r, h), gp::DZ());
+        TopoDS_Shape ring = BRepPrimAPI_MakeRevol(
+                                spandrel(gp_Pnt(x - r, r, h), gp::DX().Reversed(), gp::DZ(), r),
+                                axis,
+                                2 * pi
+        )
+                                .Shape();
+        fill = BRepAlgoAPI_Fuse(fill, BRepAlgoAPI_Common(ring, bevelSide).Shape()).Shape();
+    }
+    double expected = volume(BRepAlgoAPI_Fuse(base.getShape(), fill).Shape());
+    EXPECT_NEAR(expected, 1358.018700, 2e-3);  // Onshape's evVolume
+    TopoShape result = dressUp(base, run, fillet(r));
+    EXPECT_TRUE(exact(result, expected));
+    EXPECT_NEAR(result.getShape().IsNull() ? 0.0 : area(result.getShape()), 1923.543821, 1e-5);
+    EXPECT_EQ(result.countSubElements("Face"), 14);
+    EXPECT_EQ(result.countSubElements("Edge"), 34);
+    EXPECT_EQ(result.countSubElements("Vertex"), 22);
+    EXPECT_EQ(facesOn(result.getShape(), GeomAbs_Torus), 2);
+    for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        if (surfaceType(it.Current()) == GeomAbs_Torus) {
+            EXPECT_NEAR(area(it.Current()), 3.883267, 1e-5);
+        }
+    }
+    // The inner line alone: OCCT's contour runs on the same way (tangent propagation), and the
+    // selection stops short of Onshape's chain at the round ends: never OCCT's result silently
+    std::vector<TopoShape> line;
+    for (const auto& edge : run) {
+        if (BRepAdaptor_Curve(TopoDS::Edge(edge.getShape())).GetType() == GeomAbs_Line) {
+            line.push_back(edge);
+        }
+    }
+    ASSERT_EQ(line.size(), 1);
+    EXPECT_THROW(dressUp(base, line, fillet(r)), Base::Exception);
+}
+
+TEST_F(FilletFallbackTest, concaveArcRunEndingAtAChamferCone)
+{
+    // The same on a round plate, as Nest Cover's (#151): the plate r 20 with its rim bevelled down
+    // and in (a cone, 45 deg, C deep); on it a wall along the rim (r 20 - T .. 20, -30..30 deg, 4
+    // high) with round ends r T/2; the fillet r T/2 on its inner foot arc and the ends' feet. At each
+    // end the floor/cone rim carries the run on tangentially but convex: each end torus rolls on
+    // past the vertex, trimmed by the cone, which grows there by the tool's faces on it (3 new
+    // faces, as Onshape's 17 -> 20 on Nest Cover)
+    const double c = 1.5875;
+    const double t = 1.5875;
+    const double h = 10;
+    const double r = t / 2;
+    const double rim = 20;
+    const double half = pi / 6;
+    BRepBuilderAPI_MakePolygon outline(
+        gp_Pnt(0, 0, h),
+        gp_Pnt(rim, 0, h),
+        gp_Pnt(rim - c, 0, h - c),
+        gp_Pnt(0, 0, h - c),
+        Standard_True
+    );
+    TopoDS_Shape plate = BRepPrimAPI_MakeRevol(
+                             BRepBuilderAPI_MakeFace(outline.Wire(), Standard_True).Face(),
+                             gp_Ax1(gp::Origin(), gp::DZ()),
+                             2 * pi
+    )
+                             .Shape();
+    gp_Trsf away;
+    away.SetRotation(gp_Ax1(gp::Origin(), gp::DZ()), pi);
+    plate = plate.Moved(TopLoc_Location(away));
+    BRepBuilderAPI_MakePolygon band(
+        gp_Pnt(rim - t, 0, h),
+        gp_Pnt(rim, 0, h),
+        gp_Pnt(rim, 0, h + 4),
+        gp_Pnt(rim - t, 0, h + 4),
+        Standard_True
+    );
+    gp_Trsf toStart;
+    toStart.SetRotation(gp_Ax1(gp::Origin(), gp::DZ()), -half);
+    TopoDS_Shape arc = BRepPrimAPI_MakeRevol(
+                           BRepBuilderAPI_MakeFace(band.Wire(), Standard_True).Face().Moved(TopLoc_Location(toStart)),
+                           gp_Ax1(gp::Origin(), gp::DZ()),
+                           2 * half
+    )
+                           .Shape();
+    std::vector<TopoDS_Shape> parts {plate, arc};
+    std::vector<gp_Pnt> ends;
+    for (double a : {-half, half}) {
+        gp_Pnt centre((rim - r) * std::cos(a), (rim - r) * std::sin(a), h);
+        ends.push_back(centre);
+        parts.push_back(BRepPrimAPI_MakeCylinder(gp_Ax2(centre, gp::DZ()), r, 4).Shape());
+    }
+    TopoShape fused;
+    fused.makeElementBoolean(
+        OpCodes::Fuse,
+        {TopoShape(parts[0]), TopoShape(parts[1]), TopoShape(parts[2]), TopoShape(parts[3])}
+    );
+    TopoShape base(fused.removeSplitter().getShape(), 1L);
+    int baseFaces = base.countSubElements("Face");
+    auto run = footRun(base, h, [&](const gp_Pnt& p) {
+        double radial = std::hypot(p.X(), p.Y());
+        return radial < rim - 1e-7 && radial > rim - t - 1e-7 && p.X() > 0;
+    });
+    ASSERT_EQ(run.size(), 3);
+    // Onshape's shape by other Booleans: the arc's spandrel turned about the plate's axis, and each
+    // end's a whole turn about its own, kept inside the cone (r <= rim + (z - h))
+    TopoDS_Shape fill = BRepPrimAPI_MakeRevol(
+                            spandrel(gp_Pnt(rim - t, 0, h), gp::DX().Reversed(), gp::DZ(), r)
+                                .Moved(TopLoc_Location(toStart)),
+                            gp_Ax1(gp::Origin(), gp::DZ()),
+                            2 * half
+    )
+                            .Shape();
+    TopoDS_Shape cone
+        = BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(0, 0, h - 5), gp::DZ()), rim - 5, rim + 10, 15).Shape();
+    for (const auto& centre : ends) {
+        gp_Vec out(gp::Origin(), gp_Pnt(centre.X(), centre.Y(), 0));
+        out.Normalize();
+        TopoDS_Shape ring = BRepPrimAPI_MakeRevol(
+                                spandrel(centre.Translated(out * r), gp_Dir(out), gp::DZ(), r),
+                                gp_Ax1(centre, gp::DZ()),
+                                2 * pi
+        )
+                                .Shape();
+        fill = BRepAlgoAPI_Fuse(fill, BRepAlgoAPI_Common(ring, cone).Shape()).Shape();
+    }
+    double expected = volume(BRepAlgoAPI_Fuse(base.getShape(), fill).Shape());
+    TopoShape result = dressUp(base, run, fillet(r));
+    EXPECT_TRUE(exact(result, expected));
+    EXPECT_EQ(result.countSubElements("Face"), baseFaces + 3);
+    EXPECT_EQ(facesOn(result.getShape(), GeomAbs_Torus), 3);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
