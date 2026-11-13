@@ -99,6 +99,10 @@ struct DocumentP
     // FreeCAD-CH (ops#640): the step lock (Document::lockStep()): an open feature dialog's
     // transaction is a step in progress that only its explicit commit or abort ends
     unsigned int StepLock {0};
+    // FreeCAD-CH (ops#640, the recompute cut-off): undo, redo and a rollback put old results
+    // back without running anything, so a ResultState kept before them says nothing about what
+    // the dependants were made from: each bumps this, and a state of another epoch is void
+    std::uint64_t resultEpoch {1};
     // FreeCAD-CH (ops#640): regenerate at the close of a transaction and after undo/redo
     // (Document::setRegenerateOnCommit(); off in App, the Gui turns it on)
     bool regenerateOnCommit {false};

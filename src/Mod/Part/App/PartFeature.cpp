@@ -30,6 +30,11 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <cstring>
+#include <iomanip>
+#include <locale>
+#include <QByteArray>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <Bnd_Box.hxx>
@@ -88,6 +93,11 @@
 #include <App/Document.h>
 #include <App/FeaturePythonPyImp.h>
 #include <App/GeoFeature.h>
+#include <App/Expression.h>
+#include <App/GroupExtension.h>
+#include <App/MappedElement.h>
+#include <App/PropertyPythonObject.h>
+#include <Base/Writer.h>
 #include <App/Link.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/ElementFingerprint.h>
@@ -183,6 +193,208 @@ App::DocumentObjectExecReturn* Feature::execute()
 {
     this->Shape.touch();
     return GeoFeature::execute();
+}
+
+// FreeCAD-CH (ops#640, notes/recompute-cutoff.md in the ops repo): the recompute cut-off's state
+// of a Part::Feature. Every property is in it, since a dependant may read any of them:
+// - a shape property by content, in two levels. The quick digest (the sub-shape count, each
+//   sub-shape's type, each vertex's point, bit for bit) is made after every run: it differs
+//   after nearly every real edit, and costs a walk over the sub-shapes. The content digest
+//   (the BREP text without triangulation, as a file saves it, and the element map) is made only
+//   when everything else agrees, so a real edit never pays for a BREP export;
+// - a link by its objects and elements, the expression engine by its expressions, any other
+//   property by its saved form (the same split as the placement digest, ElementSolverBatch.cpp:
+//   a link's saved form carries the solver's records, which no dependant reads).
+namespace
+{
+std::string resultDigest(const std::string& text)
+{
+    return QCryptographicHash::hash(
+               QByteArray::fromRawData(text.data(), static_cast<qsizetype>(text.size())),
+               QCryptographicHash::Sha1
+    )
+        .toHex()
+        .toStdString();
+}
+
+struct ShapeResult
+{
+    std::string name;
+    // Shares the shape and its element map with the property: no copy. It also keeps the old
+    // result's string IDs alive, so an ID in the new map can't stand for another string
+    TopoShape shape;
+    std::uint64_t quick {Data::ElementFingerprint::DigestSeed};
+    std::string content;
+
+    void makeQuick()
+    {
+        const TopoDS_Shape& whole = shape.getShape();
+        if (whole.IsNull()) {
+            return;
+        }
+        // In the order of the walk, which is the same for the same structure; a result with the
+        // same geometry in another order reads as changed, which only costs the cut-off
+        TopTools_IndexedMapOfShape subs;
+        TopExp::MapShapes(whole, subs);
+        std::string bytes;
+        const int count = subs.Extent();
+        bytes.reserve(static_cast<std::size_t>(count) * 4U + sizeof(count));
+        bytes.append(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (int i = 1; i <= count; ++i) {
+            const TopoDS_Shape& sub = subs(i);
+            bytes.push_back(static_cast<char>(sub.ShapeType()));
+            if (sub.ShapeType() == TopAbs_VERTEX) {
+                // With the locations above it, so a moved result differs
+                const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(sub));
+                const double xyz[3] = {point.X(), point.Y(), point.Z()};
+                bytes.append(reinterpret_cast<const char*>(xyz), sizeof(xyz));
+            }
+        }
+        Data::ElementFingerprint::foldDigest(quick, bytes);
+    }
+
+    const std::string& makeContent()
+    {
+        if (content.empty()) {
+            std::ostringstream text;
+            text.imbue(std::locale::classic());
+            if (!shape.isNull()) {
+                shape.exportBrep(text);
+            }
+            text << "\nElementMap\n";
+            for (const auto& element : shape.getElementMap()) {
+                text << element.index << ' ' << element.name << '\n';
+            }
+            content = resultDigest(text.str());
+        }
+        return content;
+    }
+};
+
+class FeatureResultState: public App::ResultState
+{
+public:
+    // In the order of the property names
+    std::vector<std::pair<std::string, std::string>> others;
+    std::vector<ShapeResult> shapes;
+
+    bool sameAs(App::ResultState& nextState, std::string* difference) override
+    {
+        auto differs = [difference](const std::string& name) {
+            if (difference) {
+                *difference = name;
+            }
+            return false;
+        };
+        auto next = dynamic_cast<FeatureResultState*>(&nextState);
+        if (!next || others.size() != next->others.size()
+            || shapes.size() != next->shapes.size()) {
+            return differs("its properties");
+        }
+        for (std::size_t i = 0; i < others.size(); ++i) {
+            if (others[i] != next->others[i]) {
+                return differs(next->others[i].first);
+            }
+        }
+        for (std::size_t i = 0; i < shapes.size(); ++i) {
+            if (shapes[i].name != next->shapes[i].name
+                || shapes[i].quick != next->shapes[i].quick) {
+                return differs(next->shapes[i].name);
+            }
+        }
+        // Only now the BREP text: once for the new result, and for the old one only if no
+        // comparison made it before
+        for (std::size_t i = 0; i < shapes.size(); ++i) {
+            if (shapes[i].makeContent() != next->shapes[i].makeContent()) {
+                return differs(next->shapes[i].name + " (content)");
+            }
+        }
+        return true;
+    }
+};
+}  // namespace
+
+std::unique_ptr<App::ResultState> Feature::resultState() const
+{
+    // Readers reach a container's or a link's members through it, by subname paths, and are in
+    // no in-list of the members': a Body or a Link never cuts off
+    if (hasExtension(App::GroupExtension::getExtensionClassTypeId())
+        || hasExtension(App::LinkBaseExtension::getExtensionClassTypeId())) {
+        return nullptr;
+    }
+    std::vector<App::Property*> properties;
+    getPropertyList(properties);
+    properties.erase(
+        std::remove_if(
+            properties.begin(),
+            properties.end(),
+            [](const App::Property* property) { return !property || !property->getName(); }
+        ),
+        properties.end()
+    );
+    std::sort(properties.begin(), properties.end(), [](const auto* a, const auto* b) {
+        return std::strcmp(a->getName(), b->getName()) < 0;
+    });
+    auto state = std::make_unique<FeatureResultState>();
+    for (const App::Property* property : properties) {
+        const std::string name = property->getName();
+        if (property == &Visibility || property == &Label || property == &Label2) {
+            // The no-touch properties of every object: a change of one never ran a dependant,
+            // and a dialog shows and hides the feature it edits. A reader by name is enforced
+            // by Document::recompute() all the same
+            continue;
+        }
+        if (dynamic_cast<const App::PropertyPythonObject*>(property)) {
+            // A proxy's state isn't in the properties
+            return nullptr;
+        }
+        if (auto shape = dynamic_cast<const PropertyPartShape*>(property)) {
+            ShapeResult result;
+            result.name = name;
+            result.shape = shape->getShape();
+            result.makeQuick();
+            state->shapes.push_back(std::move(result));
+            continue;
+        }
+        if (dynamic_cast<const App::PropertyComplexGeoData*>(property)) {
+            // Geometry of another kind (a mesh): no content digest here
+            return nullptr;
+        }
+        std::string text;
+        if (auto engine = dynamic_cast<const App::PropertyExpressionEngine*>(property)) {
+            for (const auto& [path, expression] : engine->getExpressions()) {
+                text += path.toString();
+                text += '=';
+                text += expression ? expression->toString(true) : std::string();
+                text += '\n';
+            }
+        }
+        else if (auto link = dynamic_cast<const App::PropertyLinkBase*>(property)) {
+            std::vector<App::DocumentObject*> linked;
+            std::vector<std::string> subs;
+            link->getLinks(linked, true, &subs, false);
+            for (const App::DocumentObject* target : linked) {
+                text += target && target->isAttachedToDocument() ? target->getFullName() : "?";
+                text += '\n';
+            }
+            text += '|';
+            for (const std::string& sub : subs) {
+                text += sub;
+                text += '\n';
+            }
+        }
+        else {
+            // Inline: a list saved to a file otherwise writes only the file's name
+            Base::StringWriter writer;
+            writer.setForceXML(true);
+            writer.Stream().imbue(std::locale::classic());
+            writer.Stream() << std::setprecision(std::numeric_limits<double>::max_digits10);
+            property->Save(writer);
+            text = writer.getString();
+        }
+        state->others.emplace_back(name, resultDigest(text));
+    }
+    return state;
 }
 
 PyObject* Feature::getPyObject()

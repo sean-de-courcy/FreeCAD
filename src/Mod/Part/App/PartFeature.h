@@ -79,6 +79,8 @@ public:
     /** @name methods override feature */
     //@{
     short mustExecute() const override;
+    /// FreeCAD-CH (ops#640): the recompute cut-off's state: every property, shapes by content
+    std::unique_ptr<App::ResultState> resultState() const override;
     //@}
 
     /// returns the type name of the ViewProvider

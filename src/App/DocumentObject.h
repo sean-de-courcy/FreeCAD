@@ -36,6 +36,7 @@
 #include <Base/Placement.h>
 
 #include <bitset>
+#include <cstdint>
 #include <unordered_map>
 #include <memory>
 #include <map>
@@ -134,6 +135,34 @@ public:
     DocumentObject* Which;
 };
 
+
+/**
+ * @brief What an object's dependants can read of it after a run (FreeCAD-CH, ops#640).
+ *
+ * Document::recompute() keeps the state of an object's last run and compares it with the state
+ * after the next: when nothing readable differs, the object's dependants don't run for it (the
+ * recompute cut-off, notes/recompute-cutoff.md in the ops repo). In memory only.
+ */
+class AppExport ResultState
+{
+public:
+    ResultState() = default;
+    virtual ~ResultState() = default;
+    ResultState(const ResultState&) = delete;
+    ResultState& operator=(const ResultState&) = delete;
+
+    /**
+     * @brief Whether the same object reads the same after its next run.
+     *
+     * A state may finish itself here (a digest made only when the cheaper parts agree), so
+     * neither is const.
+     *
+     * @param[in,out] next The object's state after its next run.
+     * @param[out] difference If given and the answer is false: the property that differs.
+     * @return true only when no property a dependant can read differs. When in doubt, false.
+     */
+    virtual bool sameAs(ResultState& next, std::string* difference) = 0;
+};
 
 /**
  * @brief %Base class of all objects handled in the @ref App::Document "Document".
@@ -367,6 +396,23 @@ public:
      * @return true if document object must be recomputed, false if not.
      */
     bool mustRecompute() const;
+
+    /**
+     * @brief What dependants can read of this object now (FreeCAD-CH, ops#640).
+     *
+     * Called by Document::recompute() after a run without error. It must cover every property:
+     * a dependant reads more than the shape (a MultiTransform its steps' counts, an expression
+     * a length, anything the Placement). All but Visibility, Label and Label2, whose readers by
+     * name Document::recompute() enforces itself.
+     *
+     * @return The state, or null when it isn't known: the dependants then run as before. Null
+     * for an object whose dependants read other objects through it (a container, a link) and
+     * for one whose state isn't in its properties (a Python proxy).
+     */
+    virtual std::unique_ptr<ResultState> resultState() const
+    {
+        return nullptr;
+    }
 
     /// Reset the touch flags of the document object.
     void purgeTouched()
@@ -1535,6 +1581,13 @@ private:
 
 private:
     std::unordered_set<std::string> touchedProps;
+
+    // FreeCAD-CH (ops#640): the state after the last run in Document::recompute()'s loop, and
+    // the document's result epoch it was made in. Written only there, where the dependants are
+    // enforced or not: a feature's own recompute (Document::recomputeFeature) enforces nobody,
+    // so a state kept there would hide the edit from the document recompute that follows
+    std::unique_ptr<ResultState> _resultState;
+    std::uint64_t _resultEpoch {0};
 
 private:
     // Back pointer to all the fathers in a DAG of the document

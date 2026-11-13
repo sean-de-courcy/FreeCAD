@@ -1160,6 +1160,7 @@ bool Document::undo(const int id)
 
     {
         Base::FlagToggler<bool> flag(d->undoing);
+        ++d->resultEpoch;  // the recompute cut-off's states are void (ops#640)
         // applying the undo
         mUndoTransactions.back()->apply(*this, false);
 
@@ -1238,6 +1239,7 @@ bool Document::redo(const int id)
     // do the redo
     {
         Base::FlagToggler<bool> flag(d->undoing);
+        ++d->resultEpoch;  // the recompute cut-off's states are void (ops#640)
         mRedoTransactions.back()->apply(*this, true);
 
         mUndoMap[d->activeUndoTransaction->getID()] = d->activeUndoTransaction;
@@ -1815,6 +1817,7 @@ void Document::_abortTransaction()
     if (d->activeUndoTransaction) {
         {
             Base::FlagToggler<bool> flag(d->rollback);
+            ++d->resultEpoch;  // the recompute cut-off's states are void (ops#640)
             Application::TransactionSignaller signaller(true, true);
 
             // applying the so far made changes
@@ -4678,6 +4681,47 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
         GetApplication().GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document");
     bool canAbort = hGrp->GetBool("CanAbortRecompute", true);
 
+    // FreeCAD-CH (ops#640, notes/recompute-cutoff.md): the recompute cut-off. obj ran without
+    // error: true when what its dependants can read of it is what it was after its last run
+    // here, so they don't run for it. The new state is kept either way. Off (the parameter):
+    // no state is made, and every run enforces its dependants as before
+    const bool cutOffOn = hGrp->GetBool("RecomputeCutOff", true);
+    auto sameResult = [this, cutOffOn](DocumentObject* obj) {
+        if (!cutOffOn) {
+            obj->_resultState.reset();
+            return false;
+        }
+        std::unique_ptr<ResultState> state;
+        bool same = false;
+        try {
+            // Nobody reads it: no state (its first run with a dependant enforces it)
+            if (!obj->getInList().empty()) {
+                state = obj->resultState();
+            }
+            if (state && obj->_resultState && obj->_resultEpoch == d->resultEpoch) {
+                std::string difference;
+                const bool log = FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG);
+                same = obj->_resultState->sameAs(*state, log ? &difference : nullptr);
+                if (log) {
+                    if (same) {
+                        FC_LOG(obj->getFullName() << " result unchanged: dependants not enforced");
+                    }
+                    else {
+                        FC_LOG(obj->getFullName() << " result differs in " << difference);
+                    }
+                }
+            }
+        }
+        catch (...) {
+            // A state that can't be made or compared is no state
+            state.reset();
+            same = false;
+        }
+        obj->_resultState = std::move(state);
+        obj->_resultEpoch = d->resultEpoch;
+        return same;
+    };
+
     tracker.checkpoint("pre-recompute & topo sort");
 
     // FreeCAD-CH (ops#579): 'failed' failed and no rule claims it. Its dependants are touched; one
@@ -4808,6 +4852,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         res = _recomputeFeature(obj);
                     }
                     if (res != 0) {
+                        // Its dependants are enforced or fail below; whatever it reads as now
+                        // isn't a result to cut off against (ops#640)
+                        obj->_resultState.reset();
                         if (hasError) {
                             *hasError = true;
                         }
@@ -4862,7 +4909,27 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                 }
                 if (obj->isTouched() || doRecompute) {
                     signalRecomputedObject(*obj);
-                    if (fineGrained) {
+                    // FreeCAD-CH (ops#640): the cut-off. doRecompute here means it ran without
+                    // error (every failure left the iteration above), and its state is kept.
+                    // Not after an error: the dependants that failed naming it run (wasError,
+                    // below). One that is only touched (it didn't run) enforces as before
+                    const bool unchanged = doRecompute && sameResult(obj);
+                    if (unchanged && !wasError) {
+                        if (fineGrained) {
+                            // Visibility, Label and Label2 are in no state (a dialog shows
+                            // and hides the feature it edits): a reader of one by name, an
+                            // expression, runs as before
+                            for (auto& [objFrom, propFrom, objTo, propTo] : obj->getInListProp()) {
+                                if ((propTo == "Visibility" || propTo == "Label"
+                                     || propTo == "Label2")
+                                    && obj->touchedProps.contains(propTo)) {
+                                    objFrom->enforceRecompute(propFrom);
+                                }
+                            }
+                        }
+                        obj->purgeTouched();
+                    }
+                    else if (fineGrained) {
                         // set all dependent objects touched based on properties
                         std::vector<DepEdge> inList = obj->getInListProp();
                         // FreeCAD-CH (ops#154): an edge may name the property otherwise

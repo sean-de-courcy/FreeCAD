@@ -92,6 +92,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingGate.py
     PartDesignTests/TestNamingConsumerPass.py
     PartDesignTests/TestFailurePassThrough.py
+    PartDesignTests/TestRecomputeCutoff.py
     PartDesignTests/TestBodyReorder.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestMerge.py
