@@ -1180,6 +1180,20 @@ class FilledRecessTest(unittest.TestCase):
                 feature = self.dressUp(kind, base, [edge], [(3, 3)])
                 self.assertExactOrFails(feature, base, edge, expected.Volume)
 
+    def testConcavePastItsFaceIntoARingFillsNothing(self):
+        # Case Base #46 designed (ring_corner()), as a feature: the dress-up clipped by the ring
+        # lies on the ring's outer wall and under its underside, faces beside the wall at the edge,
+        # on the strip's side of them; the check for a filled recess lets it pass (it refused it,
+        # "fills a recess ... next to" the edge), and nothing is added in the well
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                base, ends, added, well = ring_corner(kind)
+                feature, _ = dressed_in_a_body(self.doc, kind, base, ends, 10)
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertTrue(feature.Shape.isValid())
+                self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-6)
+                self.assertLess(feature.Shape.common(well).Volume, 1e-9)
+
     def testBandAcrossABlindPocket(self):
         # The issue's pocket, open at the top: chamfer 951 (OCCT 955), fillet 973.439 (980.686)
         self.assertFront(Part.makeBox(4, 1, 2, V(3, 1.5, 8)))
@@ -2152,13 +2166,20 @@ class OverflowTest(unittest.TestCase):
                 self.assertEqual(len(floor), 1)
                 self.assertAlmostEqual(floor[0].BoundBox.YMax, ledge, delta=1e-6)
 
-    def testConcavePastItsFaceFails(self):
-        # Not built yet: a concave round past its face (the rib's top) has no face to trim it.
-        # Onshape clips it at the rib's top; the construction refuses with OCCT's error
+    def testConcavePastItsFaceIsClippedAtTheRibsTop(self):
+        # A concave round past its face: r 8 at a rib's foot, the rib 4 high. Onshape clips it at
+        # the rib's top (the face its strip reaches first, run on; ops#640, Case Base #46's rule):
+        # the base plus the round's corner below z 14
         base = Part.makeBox(40, 20, 10).fuse(Part.makeBox(10, 20, 4, V(15, 0, 10))).removeSplitter()
         edge = [edge_between(base, (15, 0, 10), (15, 20, 10))]
-        with self.assertRaises(Part.OCCError):
-            base.makeFillet(8, edge)
+        corner = Part.makeBox(8, 20, 8, V(7, 0, 10)).cut(
+            Part.makeCylinder(8, 20, V(7, 0, 18), V(0, 1, 0))
+        )
+        added = corner.common(Part.makeBox(8, 20, 4, V(7, 0, 10))).Volume
+        shape = base.makeFillet(8, edge)
+        self.assertBuilt(shape, base.Volume + added)
+        self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
+        self.assertLessEqual(shape.BoundBox.ZMax, 14 + 1e-6)
 
     def channel(self, wall):
         # A U channel 20 long in z: left wall x -5..0, slot floor x 0..2 at y 0, right wall x 2..2+wall, up to y 10
@@ -2179,22 +2200,21 @@ class OverflowTest(unittest.TestCase):
         prim = lambda u: u / 2 * math.sqrt(r * r - u * u) + r * r / 2 * math.asin(u / r)
         return 2 * r - (prim(r) - prim(r - 2))
 
-    def testConcaveThroughAThinWallIsClippedOrRefused(self):
-        # Integrator 11 T2: the slot's floor edge dressed up at 6, wider than the slot (2): the floor strip runs
-        # off the floor into the right wall. A wall 3 thick ends at x 5, so the strip goes on into the air
-        # (x 5..6). checkFusedRunOff's one sample per off face (in the wall) lets it pass, but the piece past
-        # the wall keeps part of the strip's contact face, so "a tool's face on a face next to its edge is
-        # left in the result" refuses it (loud). Onshape clips the dress-up by the wall's back face (oracle
-        # 9d): one solid with nothing past x 5, the base plus the section inside the slot.
+    def testConcaveThroughAThinWallIsClipped(self):
+        # Integrator 11 T2: the slot's floor edge dressed up at 6, wider than the slot (2): the
+        # floor strip runs off the floor into the right wall. A wall 3 thick ends at x 5, so the
+        # strip goes on into the air (x 5..6). Onshape clips the dress-up by the wall's back face
+        # (oracle 9d): one solid with nothing past x 5, the base plus the section inside the slot.
+        # The construction clips the tool by the wall's face its strip reaches first (x 2, ops#640
+        # Case Base #46), the same result: the wall absorbs the rest
         for kind in ("Chamfer", "Fillet"):
             with self.subTest(kind=kind):
                 base, edges = self.channel(3)
-                try:
-                    shape = self.dressUp(kind, base, 6, edges)
-                except Part.OCCError:
-                    continue
+                shape = self.dressUp(kind, base, 6, edges)
+                expected = base.Volume + 20 * self.slotSection(kind, 6)
                 self.assertLessEqual(shape.BoundBox.XMax, 5 + 1e-6)
-                self.assertBuilt(shape, base.Volume + 20 * self.slotSection(kind, 6))
+                self.assertBuilt(shape, expected)
+                self.assertAlmostEqual(shape.Volume, expected, delta=1e-6)
 
     def testConcaveIntoAThickWallBuilds(self):
         # The control: a wall 10 thick (x 2..12) holds the strip's end (x 6): it builds, the base plus the slot's section
@@ -2206,50 +2226,56 @@ class OverflowTest(unittest.TestCase):
                 self.assertBuilt(shape, base.Volume + 20 * self.slotSection(kind, 6))
 
     def testConcavePastItsFaceIntoARingIsClippedByTheRing(self):
-        # The native replica's Case Base #46 (ops#640), designed: a pocket's concave corner (x 0,
-        # y 0; floor z 2, top z 10) dressed up 10, wider than the wall y 0 on its right: a ring
-        # (centre (19, -1), R 15, r 12, z 4..10) stands 4.03 from the corner, and under it (z 2..4)
-        # the ring's well, cut from z 2, ends the wall at 7.04. Onshape clips the dress-up by the
-        # cylinder its strip reaches first: R 15 above the ring's underside, r 12 under it (#46,
-        # read off Onshape's own result), so nothing is added inside the well. The tool fused
-        # whole would leave a fin there
-        def cylinder(r, z0, z1):
-            return Part.makeCylinder(r, z1 - z0, V(19, -1, z0))
-
-        well = cylinder(12, 2, 10)
-        base = (
-            Part.makeBox(45, 60, 10, V(-5, -40, 0))
-            .cut(Part.makeBox(40, 40, 8, V(0, -40, 2)))
-            .fuse(cylinder(15, 4, 10))
-            .cut(well)
-            .removeSplitter()
-        )
-        edges = [edge_between(base, (0, 0, 2), (0, 0, 10))]
-        size = 10
+        # The native replica's Case Base #46 (ops#640), designed (ring_corner()): Onshape clips the
+        # dress-up by the cylinder its strip reaches first, R 15 above the ring's underside, r 12
+        # under it (#46, read off Onshape's own result), so nothing is added inside the well. The
+        # tool fused whole would leave a fin there
         for kind in ("Fillet", "Chamfer"):
             with self.subTest(kind=kind):
-                if kind == "Fillet":
-                    arc = Part.ArcOfCircle(
-                        Part.Circle(V(size, -size, 2), V(0, 0, 1), size), math.pi / 2, math.pi
-                    ).toShape()
-                    rim = [
-                        Part.makeLine(V(0, 0, 2), V(size, 0, 2)),
-                        arc,
-                        Part.makeLine(V(0, -size, 2), V(0, 0, 2)),
-                    ]
-                else:
-                    rim = [
-                        Part.makeLine(V(0, 0, 2), V(size, 0, 2)),
-                        Part.makeLine(V(size, 0, 2), V(0, -size, 2)),
-                        Part.makeLine(V(0, -size, 2), V(0, 0, 2)),
-                    ]
-                prism = Part.Face(Part.Wire(rim)).extrude(V(0, 0, 8))
-                added = prism.cut(base).cut(cylinder(12, 1, 11)).Volume
-                shape = self.dressUp(kind, base, size, edges)
+                base, ends, added, well = ring_corner(kind)
+                shape = self.dressUp(kind, base, 10, [edge_between(base, *ends)])
                 self.assertBuilt(shape, base.Volume + added)
                 self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
                 self.assertLess(shape.common(well).Volume, 1e-9)
 
+
+def ring_corner(kind, size=10):
+    """The native replica's Case Base #46, designed: a pocket's concave corner (x 0, y 0; floor z 2,
+    top z 10) whose dress-up of the size is wider than the wall y 0 on its right: a ring (centre
+    (19, -1), R 15, r 12, z 4..10) stands 4.03 from the corner, and under it (z 2..4) the ring's
+    well, cut from z 2, ends the wall at 7.04. Returns the base, the corner edge's ends, the volume
+    Onshape's dress-up adds (its corner, less the base, less everything inside the well's
+    cylinder) and the well"""
+
+    def cylinder(r, z0, z1):
+        return Part.makeCylinder(r, z1 - z0, V(19, -1, z0))
+
+    well = cylinder(12, 2, 10)
+    base = (
+        Part.makeBox(45, 60, 10, V(-5, -40, 0))
+        .cut(Part.makeBox(40, 40, 8, V(0, -40, 2)))
+        .fuse(cylinder(15, 4, 10))
+        .cut(well)
+        .removeSplitter()
+    )
+    if kind == "Fillet":
+        arc = Part.ArcOfCircle(
+            Part.Circle(V(size, -size, 2), V(0, 0, 1), size), math.pi / 2, math.pi
+        ).toShape()
+        rim = [
+            Part.makeLine(V(0, 0, 2), V(size, 0, 2)),
+            arc,
+            Part.makeLine(V(0, -size, 2), V(0, 0, 2)),
+        ]
+    else:
+        rim = [
+            Part.makeLine(V(0, 0, 2), V(size, 0, 2)),
+            Part.makeLine(V(size, 0, 2), V(0, -size, 2)),
+            Part.makeLine(V(0, -size, 2), V(0, 0, 2)),
+        ]
+    prism = Part.Face(Part.Wire(rim)).extrude(V(0, 0, 8))
+    added = prism.cut(base).cut(cylinder(12, 1, 11)).Volume
+    return base, ((0, 0, 2), (0, 0, 10)), added, well
 
 def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
     """A keyhole-shaped wall (the native replica's #15, designed): the opening is a disc r 6.35
