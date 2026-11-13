@@ -15,6 +15,7 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -34,6 +35,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRepTools.hxx>
 #include <BRepTools_History.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -48,6 +50,8 @@
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Circle.hxx>
+#include <GeomLib.hxx>
+#include <Geom_BoundedSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
@@ -697,6 +701,10 @@ struct Tool
     /// The tool's faces in those planes: whatever they become must be the end face's image (the
     /// end face covers them, or they merge into it)
     std::vector<TopoDS_Shape> capFaces;
+    /// The surfaces (not planes) of the end faces that bound the tool at free ends (Case Base #105),
+    /// as the faces the tool was split by carry them: its faces on them are capFaces too, and
+    /// merge into the end face where they lie on its own surface
+    std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> capSurfaces;
     /// The planes of its ends at two-edge corners with unequal dihedral angles: the other edge's
     /// side face, which its faces there lie on. They join contactFaces: nothing of them may be
     /// left (the side face covers them, or the other edge's tool removes them)
@@ -1227,6 +1235,9 @@ struct VertexEnd
     VertexClass kind = VertexClass::Refuse;
     /// The planes that bound the tool here: one, but two at a chamfer's three-edge corner
     std::vector<TrimPlane> trims;
+    /// FreeEnd: an end face that is not a plane, whose surface bounds the tool (Case Base #105);
+    /// trims then holds its tangent plane at the vertex
+    TopoDS_Face surfaceEnd;
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
     std::string reason;
 };
@@ -1591,7 +1602,34 @@ VertexEnd classify(
     }
     BRepAdaptor_Surface surface(endFace, Standard_False);
     if (surface.GetType() != GeomAbs_Plane) {
-        end.reason = "an end face that is not a plane";
+        // A round ending against a curved face (Case Base #105: a lip's round at its limit, cut
+        // off by an end blend's B-spline face, as Onshape's): the face's surface, extended past
+        // the face, bounds the tool, as OCCT's own fillet ends there below the limit (lineTool)
+        if (ctx.request.kind != Kind::Fillet) {
+            end.reason = "a chamfer's end face that is not a plane";
+            return end;
+        }
+        gp_Pnt2d uv = BRep_Tool::Parameters(vertex, endFace);
+        gp_Pnt onSurface;
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(uv.X(), uv.Y(), onSurface, du, dv);
+        gp_Vec tangentNormal = du.Crossed(dv);
+        if (tangentNormal.Magnitude() < linearTolerance) {
+            end.reason = "an end face that is not a plane, degenerate at the vertex";
+            return end;
+        }
+        gp_Dir normal(tangentNormal);
+        if (std::abs(normal.Dot(away)) < 1e-6) {
+            end.reason = "an end face that is not a plane, tangent to the edge";
+            return end;
+        }
+        if (normal.Dot(away) > 0) {
+            normal.Reverse();
+        }
+        end.kind = VertexClass::FreeEnd;
+        end.trims = {{point, normal}};
+        end.surfaceEnd = endFace;
         return end;
     }
     gp_Dir normal = surface.Plane().Axis().Direction();
@@ -2151,6 +2189,9 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
     gp_Dir direction(gp_Vec(data.start, data.end));
     double length = data.start.Distance(data.end);
     for (int i = 0; i < 2; ++i) {
+        if (!ends[i].surfaceEnd.IsNull()) {
+            refuse("a round of a straight edge on a cylinder that ends on a face that is not a plane");
+        }
         if (ends[i].kind != VertexClass::FreeEnd || ends[i].trims.size() != 1
             || !parallel(ends[i].trims.front().normal, direction)) {
             refuse("a round of a straight edge on a cylinder that does not end square to it");
@@ -2273,6 +2314,201 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
     return tool;
 }
 
+bool inPlane(const TopoDS_Shape& shape, const TrimPlane& plane);
+TopoDS_Shape commonOf(const TopoDS_Shape& shape, const TopoDS_Shape& other);
+
+/** The end face's surface as a face reaching past the face (Case Base #105): the surface's natural
+ * bounds where they are finite, else the face's own bounds run on by the reach. With extend, a
+ * bounded surface is first extended by the reach on each side where it is not closed
+ * (GeomLib::ExtendSurfByLength); null when there is nothing to extend
+ */
+TopoDS_Face surfaceFace(
+    const TopoDS_Face& face,
+    double reach,
+    bool extend,
+    Handle(Geom_Surface)& surface,
+    TopLoc_Location& location
+)
+{
+    surface = BRep_Tool::Surface(face, location);
+    if (surface.IsNull()) {
+        refuse("an end face without a surface");
+    }
+    if (extend) {
+        Handle(Geom_BoundedSurface) bounded
+            = Handle(Geom_BoundedSurface)::DownCast(surface->Copy());
+        if (bounded.IsNull()) {
+            return {};
+        }
+        bool extended = false;
+        for (bool inU : {true, false}) {
+            if (inU ? bounded->IsUClosed() : bounded->IsVClosed()) {
+                continue;
+            }
+            for (bool after : {false, true}) {
+                GeomLib::ExtendSurfByLength(bounded, reach, 1, inU, after);
+                extended = true;
+            }
+        }
+        if (!extended || bounded.IsNull()) {
+            return {};
+        }
+        surface = bounded;
+    }
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    surface->Bounds(u0, u1, v0, v1);
+    double fu0 = 0.0;
+    double fu1 = 0.0;
+    double fv0 = 0.0;
+    double fv1 = 0.0;
+    BRepTools::UVBounds(face, fu0, fu1, fv0, fv1);
+    if (Precision::IsInfinite(u0)) {
+        u0 = fu0 - reach;
+    }
+    if (Precision::IsInfinite(u1)) {
+        u1 = fu1 + reach;
+    }
+    if (Precision::IsInfinite(v0)) {
+        v0 = fv0 - reach;
+    }
+    if (Precision::IsInfinite(v1)) {
+        v1 = fv1 + reach;
+    }
+    BRepBuilderAPI_MakeFace make(surface, u0, u1, v0, v1, Precision::Confusion());
+    if (!make.IsDone()) {
+        refuse("extending an end face's surface failed");
+    }
+    return TopoDS::Face(make.Face().Moved(location));
+}
+
+/** A prism's end trimmed by the end face's surface, not its plane (Case Base #105). A box over the
+ * end's half of the prism and its run on is split by the surface, extended past the face, and the
+ * pieces that don't hold the prism beside the edge are cut from it. The prism must come out closed
+ * there (its run on's end gone), and untouched at the box's inner end, where the surface would
+ * cross the tool further in than a box over the end can see. The section's parameters along the
+ * edge run from its corner: inner, the box's inner end; outer, the prism's end. Returns the volume
+ * cut away
+ */
+double trimBySurface(
+    TopoDS_Shape& solid,
+    Tool& tool,
+    const TopoDS_Face& endFace,
+    const Section& section,
+    const gp_Dir& direction,
+    double inner,
+    double outer
+)
+{
+    const double sign = outer > inner ? 1.0 : -1.0;
+    const double span = std::abs(outer - inner);
+    gp_Dir x = section.inward[0];
+    gp_Dir y = direction.Crossed(x);
+    // The box: around the section (within the triangle of its corner and ends) by a tenth of its
+    // size, so that a surface ending not far past the face still splits it; along the edge from
+    // inner to past outer
+    const double margin = 0.1 * std::max(section.length[0], section.length[1]);
+    double x0 = 0.0;
+    double x1 = 0.0;
+    double y0 = 0.0;
+    double y1 = 0.0;
+    for (const auto& p : section.ends) {
+        gp_Vec v(section.corner, p);
+        x0 = std::min(x0, v.Dot(gp_Vec(x)));
+        x1 = std::max(x1, v.Dot(gp_Vec(x)));
+        y0 = std::min(y0, v.Dot(gp_Vec(y)));
+        y1 = std::max(y1, v.Dot(gp_Vec(y)));
+    }
+    double low = std::min(inner, outer + sign * margin);
+    double high = std::max(inner, outer + sign * margin);
+    gp_Pnt origin = section.corner.Translated(
+        gp_Vec(direction) * low + gp_Vec(x) * (x0 - margin) + gp_Vec(y) * (y0 - margin)
+    );
+    TopoDS_Shape box = BRepPrimAPI_MakeBox(
+                           gp_Ax2(origin, direction, x),
+                           x1 - x0 + 2 * margin,
+                           y1 - y0 + 2 * margin,
+                           high - low
+    )
+                           .Shape();
+    // Inside the tool beside the edge, near the box's inner end; and at the run on's end
+    double offset = 0.05 * std::min(section.length[0], section.length[1]);
+    gp_Pnt beside = section.corner.Translated(
+        (gp_Vec(section.inward[0]) + gp_Vec(section.inward[1])) * offset
+    );
+    gp_Pnt kept = beside.Translated(gp_Vec(direction) * (inner + sign * 0.01 * span));
+    gp_Pnt runOn = beside.Translated(gp_Vec(direction) * (outer - sign * 0.01 * span));
+    auto holds = [](const TopoDS_Shape& piece, const gp_Pnt& point) {
+        BRepClass3d_SolidClassifier classifier(piece, point, linearTolerance);
+        return classifier.State() == TopAbs_IN;
+    };
+    const double reach = 2 * (span + margin + x1 - x0 + y1 - y0);
+    for (bool extend : {false, true}) {
+        Handle(Geom_Surface) surface;
+        TopLoc_Location location;
+        TopoDS_Face face = surfaceFace(endFace, reach, extend, surface, location);
+        if (face.IsNull()) {
+            break;
+        }
+        TopTools_ListOfShape arguments;
+        arguments.Append(box);
+        TopTools_ListOfShape tools;
+        tools.Append(face);
+        BRepAlgoAPI_Splitter splitter;
+        splitter.SetArguments(arguments);
+        splitter.SetTools(tools);
+        splitter.SetRunParallel(Standard_False);
+        splitter.Build();
+        if (!splitter.IsDone() || splitter.HasErrors()) {
+            refuse("splitting by an end face's surface failed");
+        }
+        std::vector<TopoDS_Shape> pieces;
+        for (TopExp_Explorer it(splitter.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+            pieces.push_back(it.Current());
+        }
+        int holding = 0;
+        BRep_Builder builder;
+        TopoDS_Compound away;
+        builder.MakeCompound(away);
+        bool closed = true;
+        for (const auto& piece : pieces) {
+            if (holds(piece, kept)) {
+                ++holding;
+                closed = !holds(piece, runOn);
+            }
+            else {
+                builder.Add(away, piece);
+            }
+        }
+        if (holding != 1) {
+            refuse(
+                "the surface of an end face that is not a plane leaves "
+                + std::to_string(holding) + " pieces beside its edge"
+            );
+        }
+        if (pieces.size() < 2 || !closed) {
+            continue;  // the surface ends before it closes the tool: extended, once
+        }
+        TopoDS_Shape removed = commonOf(solid, away);
+        TrimPlane innerEnd {section.corner.Translated(gp_Vec(direction) * inner), direction};
+        for (TopExp_Explorer it(removed, TopAbs_FACE); it.More(); it.Next()) {
+            if (inPlane(it.Current(), innerEnd)) {
+                refuse("the surface of an end face crosses its tool away from the end");
+            }
+        }
+        BRepAlgoAPI_Cut cut(solid, away);
+        if (!cut.IsDone() || cut.HasErrors()) {
+            refuse("trimming a tool by an end face's surface failed");
+        }
+        solid = cut.Shape();
+        tool.capSurfaces.emplace_back(surface, location);
+        return volumeOf(removed);
+    }
+    refuse("the surface of an end face that is not a plane does not close its tool");
+}
+
 /** A prism along a straight edge, bounded by the planes at its ends. None where those planes
  * leave it no length (the rounds of a slab's vertical edges at r = t / 2 vanish into the sphere
  * patches): the tool is dropped, so that the result gets no degenerate face (5.2)
@@ -2366,10 +2602,13 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
         tool.strips[k].farSide.valid = true;
         tool.strips[k].farSide.lin = gp_Lin(section.ends[k], direction);
     }
-    // An end bounded by one plane normal to the edge needs no trim: the prism ends there
+    // An end bounded by one plane normal to the edge needs no trim: the prism ends there. An end
+    // on a face that is not a plane is trimmed by its surface, past its tangent plane
+    const bool curved = !ends[0].surfaceEnd.IsNull() || !ends[1].surfaceEnd.IsNull();
     bool trim[2];
     for (int i = 0; i < 2; ++i) {
-        trim[i] = ends[i].trims.size() != 1 || !parallel(ends[i].trims.front().normal, direction);
+        trim[i] = !ends[i].surfaceEnd.IsNull() || ends[i].trims.size() != 1
+            || !parallel(ends[i].trims.front().normal, direction);
     }
     double margin = 1.0 + section.length[0] + section.length[1];
     double begin = trim[0] ? from - margin : beginAt(section.corner);
@@ -2387,21 +2626,49 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
     face = TopoDS::Face(face.Moved(TopLoc_Location(move)));
     TopoDS_Shape solid
         = BRepPrimAPI_MakePrism(face, step * (finish - begin), Standard_True).Shape();
+    // With a curved end the tool's volume is measured: the prism's, in closed form, must be what is
+    // left plus what each trim cut away
+    const double prism = section.area * (finish - begin);
+    double removed = 0.0;
     for (int i = 0; i < 2; ++i) {
         if (!trim[i]) {
             continue;
         }
+        if (!ends[i].surfaceEnd.IsNull()) {
+            removed += trimBySurface(
+                solid,
+                tool,
+                ends[i].surfaceEnd,
+                section,
+                direction,
+                length / 2,
+                i == 0 ? begin : finish
+            );
+            continue;
+        }
         for (const auto& plane : ends[i].trims) {
-            BRepAlgoAPI_Cut cut(solid, halfSpaceBeyond(plane, 4 * ctx.scale + 4 * margin));
+            TopoDS_Shape beyond = halfSpaceBeyond(plane, 4 * ctx.scale + 4 * margin);
+            if (curved) {
+                removed += volumeOf(commonOf(solid, beyond));
+            }
+            BRepAlgoAPI_Cut cut(solid, beyond);
             if (!cut.IsDone() || cut.HasErrors()) {
                 refuse("trimming a tool failed");
             }
             solid = cut.Shape();
         }
     }
+    if (curved) {
+        double measured = volumeOf(solid);
+        if (std::abs(measured + removed - prism) > volumeTolerance * prism) {
+            refuse("a tool trimmed by an end face's surface: " + describe(measured) + " left and "
+                   + describe(removed) + " cut away of " + describe(prism));
+        }
+        tool.volume = measured;
+    }
     tool.solid = solid;
     for (int i = 0; i < 2; ++i) {
-        if (ends[i].kind == VertexClass::FreeEnd) {
+        if (ends[i].kind == VertexClass::FreeEnd && ends[i].surfaceEnd.IsNull()) {
             tool.caps.push_back(ends[i].trims.front());
         }
         else if (ends[i].kind == VertexClass::Corner2Unequal) {
@@ -2494,6 +2761,9 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         refuse("a degenerate arc");
     }
     for (int i = 0; i < 2 && !data.closed; ++i) {
+        if (!ends[i].surfaceEnd.IsNull()) {
+            refuse("an arc that ends on a face that is not a plane");
+        }
         const TrimPlane& plane = ends[i].trims.front();
         if (std::abs(plane.normal.Dot(z)) > angularTolerance
             || gp_Pln(plane.point, plane.normal).Distance(circle.Location()) > linearTolerance) {
@@ -3185,6 +3455,16 @@ void findContactFaces(Tool& tool)
             if (inPlane(face, cap)) {
                 tool.capFaces.push_back(face);
                 break;
+            }
+        }
+        if (!tool.capSurfaces.empty()) {
+            TopLoc_Location location;
+            const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+            for (const auto& [capSurface, capLocation] : tool.capSurfaces) {
+                if (surface == capSurface && location.IsEqual(capLocation)) {
+                    tool.capFaces.push_back(face);
+                    break;
+                }
             }
         }
         for (const auto& end : tool.openEnds) {
@@ -5078,8 +5358,10 @@ TopoDS_Shape constructShape(
     // The faces of the tools left in the planes of free ends merge into the base's coplanar
     // faces, as OCCT's fillet extends those (5.6, interface point 4)
     std::vector<TrimPlane> caps;
+    std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> capSurfaces;
     for (const auto& tool : tools) {
         caps.insert(caps.end(), tool.caps.begin(), tool.caps.end());
+        capSurfaces.insert(capSurfaces.end(), tool.capSurfaces.begin(), tool.capSurfaces.end());
     }
     TopTools_IndexedMapOfShape baseImages;
     auto collectBaseImages = [&]() {
@@ -5095,7 +5377,7 @@ TopoDS_Shape constructShape(
     const bool miters = std::any_of(tools.begin(), tools.end(), [](const Tool& tool) {
         return tool.miter;
     });
-    if (!caps.empty() || miters || !wallFaces.empty()) {
+    if (!caps.empty() || !capSurfaces.empty() || miters || !wallFaces.empty()) {
         collectBaseImages();
         NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
         TopTools_IndexedMapOfShape unlocked;
@@ -5143,6 +5425,18 @@ TopoDS_Shape constructShape(
                 if (inPlane(face, cap)) {
                     TopExp::MapShapes(face, TopAbs_EDGE, unlocked);
                     break;
+                }
+            }
+            // A tool's face on a curved end face's surface merges into that face: the end face
+            // grows by the dress-up's section where the surface cuts it off (Case Base #105)
+            if (!capSurfaces.empty() && face.ShapeType() == TopAbs_FACE) {
+                TopLoc_Location location;
+                const Handle(Geom_Surface)& surface = BRep_Tool::Surface(TopoDS::Face(face), location);
+                for (const auto& [capSurface, capLocation] : capSurfaces) {
+                    if (surface == capSurface && location.IsEqual(capLocation)) {
+                        TopExp::MapShapes(face, TopAbs_EDGE, unlocked);
+                        break;
+                    }
                 }
             }
             // A trimmed tool's face on a wall's surface, run on under the dress-up, merges into
