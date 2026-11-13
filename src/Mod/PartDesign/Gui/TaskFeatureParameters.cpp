@@ -3275,7 +3275,11 @@ bool TaskDlgFeatureParameters::accept()
             );
             return bodies() != before;
         };
-        if (isUpdateBlocked || PartDesign::isStudioOwner(feature)) {
+        // A feature still touched (a value written outside the panel while it was open: the
+        // property editor, a macro, an expression) was not computed with it: recompute it, or
+        // the purge below keeps its stale result and error (ops#640 F3)
+        const bool stale = feature->isTouched() || feature->mustExecute() > 0;
+        if (isUpdateBlocked || stale || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
         else {

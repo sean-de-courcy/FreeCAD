@@ -350,6 +350,27 @@ class TestRevolveFieldsGui(RevolveCase):
         self.assertTrue(waitFor(lambda: field is not None and field.property("armed")), "not armed")
 
 
+    def testAnAxisWrittenWhileTheDialogIsOpenIsComputedAtOk(self):
+        """ops#640 F3: the sketch selected, then Revolve (no axis yet: red), the axis written
+        outside the panel while the dialog is open (the property editor, a macro), then OK with
+        no other recompute: the Revolution is computed with the axis, not left red with "Select
+        the axis to revolve around", and the tube is added: 4000 + 105 pi."""
+        self.model()
+        sketch = models.sketch(
+            self.doc, "FreeSk", models.rectangle(2, 0, 5, 10), self.body, placement=XZ
+        )
+        self.doc.recompute()
+        rev = self.runRevolve(sketch)
+        self.assertFalse(rev.isValid())
+        rev.ReferenceAxis = (sketch, ["V_Axis"])
+        ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+        self.assertIsNotNone(ok, "no OK button")
+        ok.click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays open")
+        self.assertNotIn("Touched", rev.State)
+        self.assertTrue(rev.isValid(), rev.getStatusString())
+        self.assertAlmostEqual(rev.Shape.Volume, 4000 + 105 * math.pi, places=3)
+
 class TestOperationRowGui(RevolveCase):
     """Rank 20: the Result row (New part, Add, Remove, Intersect) on a Revolve, Loft, Sweep and
     Helix, as on an Extrude. A Revolve flips its direction between adding and cutting, as a Pad
