@@ -7002,8 +7002,29 @@ int convexity(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces, const 
     return sign;
 }
 
-/// changedVolume() by the default integration, or the adaptive one
-double changedVolumeBy(const TopoDS_Shape& before, const TopoDS_Shape& after, bool adaptive)
+/// Whether the face lies on a plane, cylinder, cone, sphere or torus: its volume integral is exact
+bool analyticFace(const TopoDS_Shape& face)
+{
+    switch (BRepAdaptor_Surface(TopoDS::Face(face), Standard_False).GetType()) {
+        case GeomAbs_Plane:
+        case GeomAbs_Cylinder:
+        case GeomAbs_Cone:
+        case GeomAbs_Sphere:
+        case GeomAbs_Torus:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// changedVolume() by the default integration, or the adaptive one. \a analytic: whether every
+/// face that differs is analytic (analyticFace())
+double changedVolumeBy(
+    const TopoDS_Shape& before,
+    const TopoDS_Shape& after,
+    bool adaptive,
+    bool& analytic
+)
 {
     TopTools_IndexedMapOfShape old;
     TopTools_IndexedMapOfShape now;
@@ -7021,11 +7042,16 @@ double changedVolumeBy(const TopoDS_Shape& before, const TopoDS_Shape& after, bo
             if (j > 0 && others(j).IsEqual(face)) {
                 continue;
             }
+            analytic = analytic && analyticFace(face);
             builder.Add(changed, reversed ? face.Reversed() : face);
         }
     };
+    analytic = true;
     addUnshared(now, old, false);
     addUnshared(old, now, true);
+    if (!analytic) {
+        return 0.0;
+    }
     return adaptive ? MassProperties::volume(changed, true) : MassProperties::volume(changed);
 }
 }  // namespace
@@ -7038,6 +7064,14 @@ std::string wrongWay(
 )
 {
     try {
+        // One solid and nothing else: solids that share a face would count it from both sides,
+        // and OCCT drops a base's faces outside its solids, which is no change of volume
+        if (countSolids(base) != 1 || TopExp_Explorer(base, TopAbs_COMPSOLID).More()
+            || TopExp_Explorer(base, TopAbs_FACE, TopAbs_SOLID).More()
+            || countSolids(result) != 1
+            || TopExp_Explorer(result, TopAbs_FACE, TopAbs_SOLID).More()) {
+            return {};
+        }
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
         TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
         int sign = 0;
@@ -7066,11 +7100,14 @@ std::string wrongWay(
         auto wrong = [&](double change) {
             return sign * change > tolerance;
         };
-        double change = changedVolumeBy(base, result, false);
-        if (!wrong(change)) {
+        // Only where every face that differs is analytic: a free-form face's integral is off by
+        // more than a small dress-up changes (MassProperties.h), a false alarm and seconds of time
+        bool analytic = true;
+        double change = changedVolumeBy(base, result, false, analytic);
+        if (!analytic || !wrong(change)) {
             return {};
         }
-        change = changedVolumeBy(base, result, true);
+        change = changedVolumeBy(base, result, true, analytic);
         if (!wrong(change)) {
             return {};
         }
@@ -7084,6 +7121,9 @@ std::string wrongWay(
         return {};
     }
     catch (const Base::Exception&) {
+        return {};
+    }
+    catch (const std::exception&) {
         return {};
     }
 }

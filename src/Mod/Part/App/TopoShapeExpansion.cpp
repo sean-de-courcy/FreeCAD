@@ -7880,7 +7880,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
-            if (!out.failed && !out.thin && !out.invalid) {
+            if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns) {
                 out.wrongWay = FilletFallback::wrongWay(maker->Shape(), base, edges, request);
             }
             if ((out.failed || out.thin || out.invalid || out.cusp || out.turns

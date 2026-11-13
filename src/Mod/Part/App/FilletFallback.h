@@ -232,8 +232,10 @@ PartExport bool endsInCusp(
  * judged at three points along it, or can't be judged. Else what is wrong, with the numbers:
  * OCCT's round of a regular 100-gon's rim (sides 2, r 0.2) passes BRepCheck with untrimmed faces
  * and 5.39 mm3 added where 1.714 is removed. The change is integrated over the faces that differ
- * only, and a wrong sign is confirmed by the adaptive integration before it counts. Cost: the
- * volume integrals of the faces the dress-up made or changed.
+ * only, and a wrong sign is confirmed by the adaptive integration before it counts. Checked only
+ * for a base and result of one solid and nothing else, and where every face that differs lies on
+ * a plane, cylinder, cone, sphere or torus (exact integrals): a free-form face's error can exceed a small
+ * dress-up's change. Cost: the volume integrals of the analytic faces the dress-up made or changed.
  */
 PartExport std::string wrongWay(
     const TopoDS_Shape& result,
