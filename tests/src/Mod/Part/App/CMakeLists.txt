@@ -28,6 +28,7 @@ add_executable(Part_tests_run
         PartTestHelpers.cpp
         PreviewExtension.cpp
         PropertyTopoShape.cpp
+        RollingBallBlend.cpp
         TopoDS_Shape.cpp
         TopoShape.cpp
         TopoShapeCache.cpp

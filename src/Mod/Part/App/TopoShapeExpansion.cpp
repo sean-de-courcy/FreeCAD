@@ -158,6 +158,7 @@
 #include "modelRefine.h"
 #include "CrossSection.h"
 #include "FilletFallback.h"
+#include "RollingBallBlend.h"
 #include "MassProperties.h"
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
@@ -8199,6 +8200,49 @@ bool finishConstruction(TopoShape& result, DressUpOutcome& outcome, const TopoSh
     }
     return false;
 }
+
+// FreeCAD-CH (ops#640, decision 425): a constant-radius blend is the surface a ball of that radius
+// sweeps while it touches both walls. OCCT's fillet is that only where the walls' normals lie in
+// the plane normal to the edge; on a twisted wall its surface is off by 1e-3 mm and more, and each
+// seam between two blend faces lands elsewhere (Case Base #103 against Onshape). After OCCT's
+// fillet is named, the blend faces of every chain RollingBallBlend recognises get the ball's
+// geometry. The topology and its order stay, so the element map (the names) is kept as it is. A
+// recognised chain that cannot be corrected fails the fillet: never OCCT's faces handed back
+// silently (the kernel contract, decision 418).
+void makeFilletRollingBall(
+    TopoShape& fillet,
+    BRepFilletAPI_MakeFillet& maker,
+    const std::vector<TopoShape>& edges,
+    double radius
+)
+{
+    std::vector<TopoDS_Face> blends;
+    for (const auto& edge : edges) {
+        for (TopTools_ListIteratorOfListOfShape it(maker.Generated(edge.getShape())); it.More();
+             it.Next()) {
+            if (it.Value().ShapeType() == TopAbs_FACE) {
+                blends.push_back(TopoDS::Face(it.Value()));
+            }
+        }
+    }
+    const RollingBallBlend::Report report
+        = RollingBallBlend::correct(fillet.getShape(), blends, radius);
+    if (report.outcome == RollingBallBlend::Outcome::Corrected) {
+        fillet.setShape(report.shape, false);
+        FC_LOG(
+            "The fillet's blend is corrected to a rolling ball: " << report.faces << " faces, ball residual "
+                << report.residualBefore << " -> " << report.residualAfter << " mm, a seam moved by "
+                << report.seamMove << " mm"
+        );
+    }
+    else if (report.outcome == RollingBallBlend::Outcome::Refused) {
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's blend is not the surface of a rolling ball (off by "
+                << report.residualBefore << " mm), and its correction refused: " << report.reason
+        );
+    }
+}
 }  // namespace
 
 TopoShape& TopoShape::makeElementFillet(
@@ -8297,7 +8341,11 @@ TopoShape& TopoShape::makeElementFillet(
             FilletFallback::noteInvalidResult(outcome->reason);
         }
     }
-    return makeElementShape(*mkFillet, input, op);
+    makeElementShape(*mkFillet, input, op);
+    if (radius1 == radius2 && !outcome->invalid) {
+        makeFilletRollingBall(*this, *mkFillet, inputEdges, radius1);
+    }
+    return *this;
 }
 
 TopoShape& TopoShape::makeElementChamfer(
