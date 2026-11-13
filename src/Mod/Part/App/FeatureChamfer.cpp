@@ -157,17 +157,17 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         if (!Part::checkDressUp(res, baseTopoShape)) {
             return new App::DocumentObjectExecReturn("Resulting shape is invalid");
         }
+        double largest = 0.0;
+        for (const auto& [size1, size2] : sizes) {
+            largest = std::max({largest, size1, size2});
+        }
         // OCCT fills a recess its band crosses, in a valid solid (ops#393)
-        const std::string filled = Part::filledPocket(res, baseTopoShape, edgeShapes);
+        const std::string filled = Part::filledPocket(res, baseTopoShape, edgeShapes, largest);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + filled);
         }
         // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
         // (ops#603)
-        double largest = 0.0;
-        for (const auto& [size1, size2] : sizes) {
-            largest = std::max({largest, size1, size2});
-        }
         const std::string lost = Part::lostMaterial(res, baseTopoShape, edgeShapes, largest);
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + lost);
