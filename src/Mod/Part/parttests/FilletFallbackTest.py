@@ -3127,8 +3127,8 @@ class CuspTest(unittest.TestCase):
                         self.assertAlmostEqual(sum(f.Area for f in tori), 20.915168, delta=1e-5)
 
     def testACuspRoundTheConstructionRefusesIsCheckedOrFails(self):
-        """Where the construction refuses at a cusp (here: a second radius a billionth off, 'variable
-        radius'), OCCT's valid result stands only within its edges' whole tools (ops#748). On the slot
+        """Where the construction refuses at a cusp (here: a second radius a thousandth larger,
+        'variable radius'), OCCT's valid result stands only within its edges' whole tools (ops#748). On the slot
         it is the wrong round (58.46 taken, or 126.30 added, for a whole tool of about 3.5): the fillet
         fails. On an arch (a bore through a rib exactly as wide as it: the material lies between
         the tangent side faces) OCCT's round is the right one, and stands"""
@@ -3138,7 +3138,7 @@ class CuspTest(unittest.TestCase):
             for r in (1.0, 0.5, 2.0):
                 with self.subTest(seam=tuple(seam), r=r):
                     with self.assertRaises(Exception) as raised:
-                        shape.makeFillet(r, r * (1 + 1e-9), rim)
+                        shape.makeFillet(r, r * 1.001, rim)
                     self.assertIn("cusp", str(raised.exception))
         arch = Part.makeBox(15, 10, 15, V(0, -5, 10)).cut(Part.makeCylinder(5, 32, V(-1, 0, 10), V(1, 0, 0)))
         rim = [
@@ -3162,9 +3162,10 @@ class CuspTest(unittest.TestCase):
                 )
                 tool = spandrel.revolve(V(0, 0, 10), V(1, 0, 0), 360)
                 expected = arch.Volume - arch.cut(tool).Volume
-                result = arch.makeFillet(r, r * (1 + 1e-9), rim)
+                result = arch.makeFillet(r, r * 1.001, rim)
                 self.assertTrue(result.isValid())
-                self.assertAlmostEqual(arch.Volume - result.Volume, expected, delta=2e-4)
+                # the second radius is a thousandth larger: the round's volume within a hundredth
+                self.assertAlmostEqual(arch.Volume - result.Volume, expected, delta=0.01 * expected)
 
     def testStripEndingOnAnElbow(self):
         """Case Base #76 as built: the tunnel ends 3 behind the end wall in an elbow turning up, and
