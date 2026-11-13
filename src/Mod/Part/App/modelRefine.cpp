@@ -26,6 +26,8 @@
 #include <algorithm>
 #include <numbers>
 #include <iterator>
+#include <memory>
+#include <vector>
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -1496,6 +1498,134 @@ void Part::BRepBuilderAPI_RefineModel::Build()
     }
 
     Done();
+}
+
+namespace
+{
+// FaceUniter::process() up to its first adjacency group: the same face types, the same equality
+// groups (in the same order, so the same first faces) and the same adjacency. A merge needs one.
+// The grouping compares every face with every group's first face: its time grows with the square
+// of the faces where most surfaces differ (a logo's walls)
+bool shellMayMergeByGroups(const TopoDS_Shell& shell)
+{
+    std::vector<ModelRefine::FaceTypedBase*> typeObjects {
+        &ModelRefine::getPlaneObject(),
+        &ModelRefine::getCylinderObject(),
+        &ModelRefine::getBSplineObject()
+    };
+    ModelRefine::FaceTypeSplitter splitter;
+    splitter.addShell(shell);
+    for (auto* object : typeObjects) {
+        splitter.registerType(object->getType());
+    }
+    splitter.split();
+    std::unique_ptr<ModelRefine::FaceAdjacencySplitter> adjacency;
+    for (auto* object : typeObjects) {
+        ModelRefine::FaceEqualitySplitter equality;
+        equality.split(splitter.getTypedFaceVector(object->getType()), object);
+        for (std::size_t k = 0; k < equality.getGroupCount(); ++k) {
+            if (!adjacency) {
+                adjacency = std::make_unique<ModelRefine::FaceAdjacencySplitter>(shell);
+            }
+            adjacency->split(equality.getGroup(k));
+            if (adjacency->getGroupCount() > 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// One walk over the shell's edges: whether some edge joins two faces of one of the refine's types
+// that the type's own isEqual() takes as one surface. The refine merges only faces of one equality
+// group that share an edge, so without such an edge it merges nothing. (The groups compare with
+// their first face, this compares the two neighbours: they can differ only where two surfaces are
+// apart by about the comparison's own tolerance.)
+bool shellMayMergeByEdges(const TopoDS_Shell& shell)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shell, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    for (int k = 1; k <= edgeFaces.Extent(); ++k) {
+        const TopTools_ListOfShape& faces = edgeFaces(k);
+        for (TopTools_ListOfShape::Iterator one(faces); one.More(); one.Next()) {
+            TopTools_ListOfShape::Iterator two = one;
+            for (two.Next(); two.More(); two.Next()) {
+                if (one.Value().IsSame(two.Value())) {
+                    continue;  // a seam, or the face listed once per use of the edge
+                }
+                const TopoDS_Face& faceOne = TopoDS::Face(one.Value());
+                const TopoDS_Face& faceTwo = TopoDS::Face(two.Value());
+                const GeomAbs_SurfaceType type = ModelRefine::FaceTypedBase::getFaceType(faceOne);
+                if (type != ModelRefine::FaceTypedBase::getFaceType(faceTwo)) {
+                    continue;
+                }
+                ModelRefine::FaceTypedBase* object = nullptr;
+                if (type == GeomAbs_Plane) {
+                    object = &ModelRefine::getPlaneObject();
+                }
+                else if (type == GeomAbs_Cylinder) {
+                    object = &ModelRefine::getCylinderObject();
+                }
+                else if (type == GeomAbs_BSplineSurface) {
+                    object = &ModelRefine::getBSplineObject();
+                }
+                if (object && object->isEqual(faceOne, faceTwo)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool shellMayMerge(const TopoDS_Shell& shell, bool byGroups)
+{
+    return byGroups ? shellMayMergeByGroups(shell) : shellMayMergeByEdges(shell);
+}
+}  // namespace
+
+bool Part::BRepBuilderAPI_RefineModel::mayMerge(const TopoDS_Shape& shape, bool byGroups)
+{
+    if (shape.IsNull()) {
+        return true;
+    }
+    switch (shape.ShapeType()) {
+        case TopAbs_SOLID:
+            // Build() makes the solid anew from its shells alone, without a location: a solid
+            // with another member (an INTERNAL vertex a fuse left) or a location takes the refine
+            if (!shape.Location().IsIdentity()) {
+                return true;
+            }
+            for (TopoDS_Iterator member(shape); member.More(); member.Next()) {
+                if (member.Value().ShapeType() != TopAbs_SHELL) {
+                    return true;
+                }
+            }
+            for (TopExp_Explorer it(shape, TopAbs_SHELL); it.More(); it.Next()) {
+                if (shellMayMerge(TopoDS::Shell(it.Current()), byGroups)) {
+                    return true;
+                }
+            }
+            return false;
+        case TopAbs_SHELL:
+            return shellMayMerge(TopoDS::Shell(shape), byGroups);
+        case TopAbs_COMPOUND:
+            // Only a compound of solids alone: Build() rebuilds any other compound flat and in
+            // its own order (solids, free shells, then the rest), a different shape to skip to
+            for (TopoDS_Iterator member(shape); member.More(); member.Next()) {
+                if (member.Value().ShapeType() != TopAbs_SOLID) {
+                    return true;
+                }
+                for (TopExp_Explorer it(member.Value(), TopAbs_SHELL); it.More(); it.Next()) {
+                    if (shellMayMerge(TopoDS::Shell(it.Current()), byGroups)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        default:
+            return true;
+    }
 }
 
 void Part::BRepBuilderAPI_RefineModel::LogModifications(const ModelRefine::FaceUniter& uniter)

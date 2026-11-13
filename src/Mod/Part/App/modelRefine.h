@@ -249,6 +249,14 @@ public:
     const TopTools_ListOfShape& Modified(const TopoDS_Shape& S) override;
     Standard_Boolean IsDeleted(const TopoDS_Shape& S) override;
 
+    /** Whether refining \a shape could merge faces: some shell the refine works on (a solid's,
+     * a shell, the solids' of a compound of solids) has an edge between two faces that the refine
+     * takes as one surface. False means the refine merges nothing and leaves every face as it
+     * is, so it can be skipped. One walk over the edges; with \a byGroups, the refine's own
+     * grouping instead (exactly its groups, in time that grows with the square of the faces).
+     * Shapes of other types: true. */
+    static bool mayMerge(const TopoDS_Shape& shape, bool byGroups = false);
+
 private:
     void LogModifications(const ModelRefine::FaceUniter& uniter);
 

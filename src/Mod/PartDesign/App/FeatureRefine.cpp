@@ -21,6 +21,9 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <cstdlib>
+#include <string>
+
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Standard_Failure.hxx>
@@ -40,6 +43,41 @@
 
 
 using namespace PartDesign;
+
+namespace
+{
+// How a refine that can merge no face is found and skipped (FREECAD_CH_REFINE_SKIP): by one walk
+// over the edges (the default), "groups" (the refine's own grouping), or "off" (never skipped)
+enum class RefineSkip
+{
+    Off,
+    Edges,
+    Groups
+};
+RefineSkip refineSkip()
+{
+    static const RefineSkip mode = [] {
+        std::string text;
+#ifdef _MSC_VER
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_REFINE_SKIP") == 0 && value) {
+            text = value;
+            std::free(value);
+        }
+#else
+        if (const char* value = std::getenv("FREECAD_CH_REFINE_SKIP")) {
+            text = value;
+        }
+#endif
+        if (text == "off") {
+            return RefineSkip::Off;
+        }
+        return text == "groups" ? RefineSkip::Groups : RefineSkip::Edges;
+    }();
+    return mode;
+}
+}  // namespace
 
 namespace PartDesign
 {
@@ -129,6 +167,26 @@ TopoShape FeatureRefine::refineShapeIfActive(
     }
     TopoShape shape(oldShape);
     try {
+        // A refine that can merge no face is skipped (ops#640, OCCT settings audit: on FMCVW #116
+        // and #117 the whole-body refine merged nothing and took 2.4 s and 11.2 s). It would
+        // copy the whole shape and rebuild its element map to give back the same faces. The skip
+        // keeps what the no-merge refine does besides: its free-form faces checked, the solid's
+        // orientation (a solid it would turn takes the refine), the note for the result's check.
+        // FREECAD_CH_REFINE_SKIP=off refines as before, to compare.
+        if (refineSkip() != RefineSkip::Off
+            && !Part::BRepBuilderAPI_RefineModel::mayMerge(
+                oldShape.getShape(),
+                refineSkip() == RefineSkip::Groups
+            )) {
+            TopoShape oriented(oldShape);
+            if (!oriented.fixSolidOrientation()) {
+                ResultCheck::noteRefine(this, oldShape.getShape(), oldShape.getShape());
+                if (booleanInputsValid && !freeFormFacesValid(oldShape)) {
+                    booleanInputsValid = false;
+                }
+                return oldShape;
+            }
+        }
         TopoShape refinedShape = shape.makeElementRefine();
         // The result's check compares the base with the shape before the refine (kernel safety S2)
         ResultCheck::noteRefine(this, oldShape.getShape(), refinedShape.getShape());
