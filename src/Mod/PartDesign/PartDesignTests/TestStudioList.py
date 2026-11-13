@@ -312,7 +312,7 @@ def ownerRecord(box):
         picks = []
         for text in box.StudioPickIds:
             part, _, name = text.partition("|")
-            picks.append(part + "|" + masker.v2(name))
+            picks.append(part + "|" + masker.v2(App.expandMappedName(name)))
         return dict(
             name=box.Name,
             id=box.ID,
@@ -352,7 +352,7 @@ def ownerRecord(box):
         (
             b.StudioPartId,
             b.StudioParentId,
-            tuple(w[:2] + masker.v2(w[2:]) for w in b.StudioPieceWitness),
+            tuple(w[:2] + masker.v2(App.expandMappedName(w[2:])) for w in b.StudioPieceWitness),
         )
         for b in box.Document.Objects
         if b.TypeId == "PartDesign::Body" and b.StudioMadeBy == box and b.StudioPieceWitness

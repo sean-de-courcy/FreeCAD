@@ -15,9 +15,11 @@
 # and x 31..100 (6900). Expected values come from the boxes themselves.
 
 import os
+import re
 import shutil
 import tempfile
 import unittest
+import zipfile
 
 import FreeCAD as App
 import Part
@@ -34,6 +36,14 @@ SLOT = (30, -1, 31, 11)
 
 def box(x0, y0, z0, x1, y1, z1):
     return Part.makeBox(x1 - x0, y1 - y0, z1 - z0, V(x0, y0, z0))
+
+
+def stringListOf(xml, obj, prop):
+    """The values of obj's PropertyStringList prop as a saved Document.xml holds them (ops#640)."""
+    start = xml.index('<Object name="%s"' % obj, xml.index("<ObjectData"))
+    at = xml.index('<Property name="%s"' % prop, start)
+    end = xml.index("</StringList>", at)
+    return re.findall(r'<String value="([^"]*)"/>', xml[at:end])
 
 
 class TestPieces(unittest.TestCase):
@@ -137,8 +147,61 @@ class TestPieces(unittest.TestCase):
             for body in (left, right):
                 names = self.faceNames(body.Shape)
                 for w in body.StudioPieceWitness:
-                    self.assertIn(w[2:], names, (refine, body.Name, w))
+                    self.assertIn(App.expandMappedName(w[2:]), names, (refine, body.Name, w))
             App.closeDocument(self.doc.Name)
+
+    # ------------------------------------------------------------------------------- ops#640 C2
+    def testWitnessIsStoredInternedAndSurvivesSaveAndReopen(self):
+        """ops#640 C2 and A3: each piece's witness names are stored in interned (canonical) form,
+        bounded, some with references to the name table; saved, Document.xml holds them so, and no
+        StudioTags. Reopened, the witnesses are the same text, and the slot moved +40 keeps each
+        piece on its side: left x 0..70 (7000), right x 71..100 (2900)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        names = (left.Name, right.Name)
+        ids = (left.StudioPartId, right.StudioPartId)
+        witnesses = {}
+        for body in (left, right):
+            ws = list(body.StudioPieceWitness)
+            for w in ws:
+                self.assertEqual(w[2:], App.internMappedName(App.expandMappedName(w[2:])), w)
+            self.assertTrue([w for w in ws if "~" in w], ws)
+            witnesses[body.Name] = ws
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "interned.FCStd")
+        self.doc.saveAs(path)
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("Document.xml").decode("utf-8")
+        self.assertIn("<NameTable", xml)
+        self.assertNotIn("StudioTags", xml)
+        for name, ws in witnesses.items():
+            self.assertEqual(stringListOf(xml, name, "StudioPieceWitness"), ws)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.list = studioList(self.doc)
+        self.doc.recompute()
+        left, right = (self.doc.getObject(n) for n in names)
+        for body in (left, right):
+            self.assertEqual(list(body.StudioPieceWitness), witnesses[body.Name])
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+        self.moveSketch(self.doc.getObject("E"), 40)
+        self.assertEqual((left.StudioPartId, right.StudioPartId), ids)
+        self.assertVolume(left, 7000)
+        self.assertVolume(right, 2900)
+
+    def testAnExpandedWitnessIsStillRead(self):
+        """ops#640 C2, decision 58: witnesses in the expanded form an older build stored keep each
+        piece on its side when the slot moves +40 (no migration: toPlain keeps a plain name)."""
+        e, made = self.slotSplit()
+        left, right = self.leftRight(made)
+        for body in (left, right):
+            body.StudioPieceWitness = [
+                w[:2] + App.expandMappedName(w[2:]) for w in body.StudioPieceWitness
+            ]
+        self.moveSketch(e, 40)
+        self.assertVolume(left, 7000)
+        self.assertVolume(right, 2900)
 
     # ------------------------------------------------------------------------------- S1/S2
     def testS1SplitGivesTwoNewPartsAndTheOldIdIsGone(self):
@@ -398,7 +461,10 @@ class TestPieces(unittest.TestCase):
                 made = self.command(e)
                 self.assertEqual(len(made), 2)
                 for body in made:
-                    self.assertFalse([w for w in body.StudioPieceWitness if "ORD" in w], body.Name)
+                    self.assertFalse(
+                        [w for w in body.StudioPieceWitness if "ORD" in App.expandMappedName(w[2:])],
+                        body.Name,
+                    )
                     if stored:
                         # As an older build stored it: the cylinder's pieces in tier 1 too
                         ordered = [n for n in self.faceNames(body.Shape) if "ORD" in n]
