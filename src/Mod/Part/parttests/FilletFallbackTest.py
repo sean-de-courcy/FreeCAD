@@ -2295,6 +2295,39 @@ class OverflowTest(unittest.TestCase):
                 self.assertAlmostEqual(shape.Volume, volume, delta=1e-5)
                 self.assertEqual(len([f for f in shape.Faces if f.Surface.TypeId == "Part::GeomSphere"]), 1)
 
+    def testAnArcStoredAsASplineIsRefused(self):
+        # Case Base #105 on the fork's own body (ops#640): its R 1 corner arcs are B-spline curves within 1e-7
+        # of a circle, on B-spline faces within as much of a cylinder (OCCT's fillet of an earlier feature;
+        # Onshape's are arcs on cylinders), and the fillet fails with this message. The seam test's plate with
+        # its corner arc stored as a B-spline, exact (rational) or interpolated through 41 points: the corner
+        # face is then an extrusion of it. Not built yet: the construction knows lines and circles only, and
+        # refuses, loudly. Built, it is the seam test's result (its volume, F 7)
+        for how in ("rational", "interpolated"):
+            with self.subTest(how=how):
+                arc = Part.ArcOfCircle(Part.Circle(V(9, 9, 0), V(0, 0, 1), 1), 0, math.pi / 2)
+                if how == "rational":
+                    curve = arc.toBSpline()
+                else:
+                    curve = Part.BSplineCurve()
+                    curve.interpolate(
+                        [arc.value(math.pi / 2 * i / 40) for i in range(41)],
+                        InitialTangent=V(0, 1, 0),
+                        FinalTangent=V(-1, 0, 0),
+                    )
+                corners = [V(9, 10, 0), V(0, 10, 0), V(0, 0, 0), V(10, 0, 0), V(10, 9, 0)]
+                lines = [Part.makeLine(a, b) for a, b in zip(corners, corners[1:])]
+                base = Part.Face(Part.Wire([curve.toShape()] + lines)).extrude(V(0, 0, 1))
+                self.assertTrue(base.isValid())
+                edges = [
+                    edge_between(base, (10, 0, 1), (10, 9, 1)),
+                    edge_between(base, (10, 9, 1), (9, 10, 1)),
+                    edge_between(base, (9, 10, 1), (0, 10, 1)),
+                ]
+                self.assertEqual(edges[1].Curve.TypeId, "Part::GeomBSplineCurve")
+                with self.assertRaises(Part.OCCError) as refused:
+                    self.dressUp("Fillet", base, 1.0, edges)
+                self.assertIn("a selected edge that is neither a line nor a circle", str(refused.exception))
+
     @staticmethod
     def tiltedLedge(h, t, wall):
         # testPastAConcaveEdgeTheWallGrows' step with its ledge tilted about the wall's foot (the line y 4,
