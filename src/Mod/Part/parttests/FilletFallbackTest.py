@@ -413,7 +413,9 @@ class FilletFallbackTest(unittest.TestCase):
         r = 0.5
         ring = fillet_section(r) * 2 * math.pi * (30 - fillet_centroid(r))
         removed = []
-        for teeth, faces in ((1, 10), (2, 19)):
+        # One face per arc of the rim: the root's arc that the second tooth leaves in two pieces
+        # on one wall gets one round, as in Onshape (19 faces while each piece had its own)
+        for teeth, faces in ((1, 10), (2, 18)):
             wheel, rims = toothed_wheel(teeth)
             result = wheel.makeFillet(r, rims)
             self.assertNoPatch(result)
@@ -434,6 +436,30 @@ class FilletFallbackTest(unittest.TestCase):
         self.assertNoPatch(result)
         self.assertEqual(len(result.Faces), len(wheel.Faces) + 128)
         self.assertAlmostEqual(wheel.Volume - result.Volume, ring + 32 * 0.07166, delta=32 * 1.5e-4)
+
+    def testReflexCornersBesideALoopOutOfTheDirectScope(self):
+        # The wheel's rim with a countersunk hole's rim (a cone's, which the direct builder does
+        # not take) in one fillet: the wheel's loop is built directly and the hole's rim is
+        # rounded on the result, so the two remove what each removes alone, and one loop out of
+        # scope does not send 64 corners to the construction by Booleans (FSLC #50, ops#640)
+        r = 0.5
+        wheel, rims = toothed_wheel(32)
+        wheel = wheel.cut(Part.makeCone(2, 4, 3, V(0, 0, 0))).Solids[0]
+        top = rim_edges(wheel, 3.0)
+        hole = [
+            e
+            for e in top
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - 4) < 1e-9
+            and e.Curve.Center.distanceToPoint(V(0, 0, 3)) < 1e-9
+        ]
+        self.assertEqual(len(hole), 1)
+        outer = [e for e in top if not e.isSame(hole[0])]
+        alone = [wheel.Volume - wheel.makeFillet(r, edges).Volume for edges in (hole, outer)]
+        result = wheel.makeFillet(r, top)
+        self.assertNoPatch(result)
+        self.assertEqual(len(result.Faces), len(wheel.Faces) + 128 + 1)
+        self.assertAlmostEqual(wheel.Volume - result.Volume, sum(alone), delta=1e-6)
 
     def assertFailsAtAReflexCorner(self, shape, r, reason):
         """The fillet fails, and its error names the reflex corner and why it was not built: OCCT's
