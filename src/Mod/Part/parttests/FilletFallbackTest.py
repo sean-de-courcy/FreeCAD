@@ -3007,6 +3007,36 @@ class CuspTest(unittest.TestCase):
                     self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
                     self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
 
+    def testStripEndingOnAnElbow(self):
+        """Case Base #76 as built: the tunnel ends 3 behind the end wall in an elbow turning up, and
+        the 3 along the tunnel ends exactly on the tangent edge into it. The elbow only gains the
+        cusps' vertices on that edge; the chamfer is CU1's (Onshape's on the replica's own body)"""
+        V = FreeCAD.Vector
+        block = Part.makeBox(30, 30, 20, V(0, -15, 0))
+        tunnel = Part.makeCylinder(5, 19, V(12, 0, 10), V(1, 0, 0))
+        disc = Part.Face(Part.Wire(Part.makeCircle(5, V(12, 0, 10), V(1, 0, 0))))
+        elbow = disc.revolve(V(12, 0, 18), V(0, 1, 0), 90)
+        riser = Part.makeCylinder(5, 3, V(4, 0, 18), V(0, 0, 1))
+        shape = block.cut(tunnel).cut(elbow).cut(riser).cut(Part.makeBox(16, 10, 11, V(15, -5, 10)))
+        shape = shape.removeSplitter()
+        self.assertTrue(shape.isValid())
+        rim = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.BoundBox.XMin - 15) < 1e-7
+            and abs(e.BoundBox.XMax - 15) < 1e-7
+            and e.BoundBox.ZMin > 10 - 1e-7
+        ]
+        self.assertTrue(rim)
+        first = shape.ancestorsOfType(rim[0], Part.Face)[0]
+        on_tunnel = first.Surface.TypeId == "Part::GeomCylinder"
+        result = shape.makeChamfer(3 if on_tunnel else 1, 1 if on_tunnel else 3, rim)
+        self.assertTrue(result.isValid())
+        expected = cusped_chamfer_volume(5, 1, 3)
+        self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
+        self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
+
 
 class CurvedEndTrimTest(unittest.TestCase):
     """Case Base #105, designed (notes r105-curved-end-trim): a block x -10..10, y 0..8, z 0..5 with
