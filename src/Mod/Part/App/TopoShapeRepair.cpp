@@ -40,6 +40,8 @@
 #include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
@@ -1154,6 +1156,90 @@ void addSmoothNeighbours(
     }
 }
 
+// The plane of a plane face, its normal out of the material
+bool outwardPlane(const TopoDS_Face& face, gp_Pln& plane, gp_Dir& normal)
+{
+    BRepAdaptor_Surface surface(face, Standard_False);
+    if (surface.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    plane = surface.Plane();
+    normal = plane.Axis().Direction();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return true;
+}
+
+/* Adds the changed faces of the base that lie in the plane of a straight concave edge's end face
+ * (a plane at one of its vertices, normal to it), facing the other way, and meet one of the faces
+ * across an edge. A concave round ends flat in that plane, and where it reaches past its faces
+ * (rolled on over a tangent edge onto the next face, Case Base #47, ops#640) its flat end lands on
+ * such a floor beside the face it reaches: Onshape's #47 lands 1.345 of it on one (z 3.075). The
+ * material it adds lies on that floor; a recess it filled would still show on the recess's walls */
+void addFloorsAtEnds(
+    const TopoDS_Shape& base,
+    const TopTools_IndexedMapOfShape& concave,
+    const TopTools_IndexedMapOfShape& changed,
+    TopTools_IndexedMapOfShape& faces
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfVertices;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_FACE, facesOfVertices);
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    std::vector<std::pair<gp_Pln, gp_Dir>> ends;
+    for (int i = 1; i <= concave.Extent(); ++i) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(concave(i)));
+        if (curve.GetType() != GeomAbs_Line) {
+            continue;
+        }
+        const gp_Dir along = curve.Line().Direction();
+        for (TopExp_Explorer it(concave(i), TopAbs_VERTEX); it.More(); it.Next()) {
+            const int index = facesOfVertices.FindIndex(it.Current());
+            if (index == 0) {
+                continue;
+            }
+            for (const auto& face : facesOfVertices(index)) {
+                gp_Pln plane;
+                gp_Dir normal;
+                if (outwardPlane(TopoDS::Face(face), plane, normal)
+                    && normal.IsParallel(along, Precision::Angular())) {
+                    ends.emplace_back(plane, normal);
+                }
+            }
+        }
+    }
+    if (ends.empty()) {
+        return;
+    }
+    const int count = faces.Extent();
+    for (int i = 1; i <= count; ++i) {
+        const TopoDS_Face face = TopoDS::Face(faces(i));
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const int index = facesOfEdges.FindIndex(it.Current());
+            if (index == 0) {
+                continue;
+            }
+            for (const auto& other : facesOfEdges(index)) {
+                gp_Pln plane;
+                gp_Dir normal;
+                if (other.IsSame(face) || faces.Contains(other) || !changed.Contains(other)
+                    || !outwardPlane(TopoDS::Face(other), plane, normal)) {
+                    continue;
+                }
+                for (const auto& [end, outward] : ends) {
+                    if (normal.IsOpposite(outward, Precision::Angular())
+                        && end.Distance(plane.Location()) <= Precision::Confusion()) {
+                        faces.Add(other);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 Bnd_Box boundsOf(const TopoDS_Shape& shape)
 {
     Bnd_Box bounds;
@@ -1314,6 +1400,7 @@ std::optional<Prepared> prepare(
     if (prepared.concave.Extent() > 0) {
         prepared.allowed = facesAt(facesAtVertices, prepared.concave);
         addSmoothNeighbours(dressed, changes.changed, prepared.allowed);
+        addFloorsAtEnds(dressed, prepared.concave, changes.changed, prepared.allowed);
     }
     // Every recess the result fills has a changed face in the region, so the Boolean runs on what
     // lies there (PR 346 review, M1). Its sides keep clear of the faces in it. It holds the concave
