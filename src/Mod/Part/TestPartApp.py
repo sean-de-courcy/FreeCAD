@@ -52,6 +52,7 @@ from parttests.FilletFallbackTest import (
     LostStepTest,
     OverflowTest,
     RoundBetweenCylindersTest,
+    RoundOverASliverTest,
     WallOnAChamferedRimTest,
     TightWallArcTest,
 )

@@ -2431,6 +2431,7 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
     gp_Pnt centre;
     gp_Pnt touches[2];
     std::string reason;
+    bool convexPastTangent = false;
     if (candidates.empty()) {
         reason = "no round of the radius fits between a straight edge's faces";
     }
@@ -2451,19 +2452,29 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
             // of #47) would leave the tool's strip in the material there, absorbed, and the round
             // not tangent to the face beyond: Onshape's ball rolls on over that edge instead. A
             // touch past any other end of the face is left to the run-off rules (#46: over a
-            // concave edge into a wall, the material absorbs it; into the air, it refuses)
-            else if (!data.convex
-                     && !onFace(data.faces[k], touches[k].Translated(gp_Vec(direction) * (length / 2)))) {
+            // concave edge into a wall, the material absorbs it; into the air, it refuses).
+            // A convex round's touch past its face's tangent edge is the mirror image (Case Base
+            // #104, ops#640: a sliver of a corner's cylinder, tangent to the wall beyond; the round
+            // between the two cylinders would touch the sliver's cylinder past that edge, inside
+            // the wall). Onshape's ball rolls on there too: the round is tangent to the wall, and
+            // the sliver vanishes. Tried first; where the ball doesn't roll on, the run-off rules
+            // as before
+            else if (!onFace(data.faces[k], touches[k].Translated(gp_Vec(direction) * (length / 2)))) {
                 auto tangent = tangentEdgeOf(ctx, data, traces, k, false);
                 if (tangent
                     && tangent->travel <= traceTravel(traces[k], touches[k], gp_Vec(direction))) {
-                    reason = "a concave round of a straight edge on a cylinder that runs off its face "
-                             "over its tangent edge";
+                    if (data.convex) {
+                        convexPastTangent = true;
+                    }
+                    else {
+                        reason = "a concave round of a straight edge on a cylinder that runs off its "
+                                 "face over its tangent edge";
+                    }
                 }
             }
         }
     }
-    if (!reason.empty()) {
+    if (!reason.empty() || convexPastTangent) {
         // The ball rolls on over a face's tangent edge onto the next face: a concave edge's in the
         // air, a convex edge's in the material (the mirror image; Onshape builds both, oracle 18's
         // FR3)
@@ -2479,7 +2490,9 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
                 return rolledTool(data, ends, traces, k, *rolled[k], r);
             }
         }
-        refuse(reason);
+        if (!reason.empty()) {
+            refuse(reason);
+        }
     }
     // The section's boundary, and its area
     auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {

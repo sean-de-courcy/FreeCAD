@@ -3588,3 +3588,162 @@ class RoundBetweenCylindersTest(unittest.TestCase):
         self.assertAlmostEqual(result.Volume, rounded.Volume - removed, delta=1e-6)
         for face in result.Faces:
             self.assertNotIn("BSpline", face.Surface.TypeId)
+
+
+class RoundOverASliverTest(unittest.TestCase):
+    """A round of a convex straight edge between two cylinders, where the ball can't stay on one of
+    them (ops#640, Case Base #104). A plate H thick with one vertical corner rounded R about
+    a = (R, R), and a hole rho about m, the middle of the corner's arc. The hole leaves two slivers
+    of the corner's cylinder, each from an edge E to the tangent edge T where the cylinder runs
+    into its wall plane; the two vertical edges at E are rounded r.
+
+    The round between the two cylinders would touch the corner's cylinder past T (3.4 degrees past
+    it here), 0.018 mm inside the wall plane. Onshape's ball rolls on over T: the round is a
+    cylinder tangent to the wall plane and the hole, and the sliver vanishes (oracle 19's face
+    dumps before and after Case Base #104 fit this closed form to 1e-12: the round's centre, its
+    area and the volume removed). OCCT builds the same shape with a B-spline round."""
+
+    R, H, r = 10.0, 1.0, 1.0
+    SLIVER = math.radians(5.0)  # the sliver's angle about a
+
+    def geometry(self):
+        R, r = self.R, self.r
+        a = (R, R)
+        m = (R - R / math.sqrt(2), R - R / math.sqrt(2))
+        theta = math.radians(45.0) - self.SLIVER
+        rho = 2 * R * math.sin(theta / 2)
+        at = math.radians(225.0) - theta
+        E = (a[0] + R * math.cos(at), a[1] + R * math.sin(at))
+        T = (0.0, R)
+        # The rolled-on round's centre: r from the wall x = 0, rho + r from m
+        c = (r, m[1] + math.sqrt((rho + r) ** 2 - (r - m[0]) ** 2))
+        P1 = (0.0, c[1])
+        P2 = (m[0] + rho * (c[0] - m[0]) / (rho + r), m[1] + rho * (c[1] - m[1]) / (rho + r))
+        return dict(a=a, m=m, rho=rho, E=E, T=T, c=c, P1=P1, P2=P2)
+
+    @staticmethod
+    def turned(centre, p, q):
+        a0 = math.atan2(p[1] - centre[1], p[0] - centre[0])
+        a1 = math.atan2(q[1] - centre[1], q[0] - centre[0])
+        return (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+
+    def section(self, g):
+        """The area the round removes: the sliver's arc E-T, the wall T-P1, the round's arc P1-P2
+        and the hole's arc P2-E (the polygon, plus each arc's signed segment)"""
+        pieces = [
+            (g["E"], g["T"], g["a"]),
+            (g["T"], g["P1"], None),
+            (g["P1"], g["P2"], g["c"]),
+            (g["P2"], g["E"], g["m"]),
+        ]
+        o = pieces[0][0]
+        area = 0.0
+        for p, q, centre in pieces:
+            area += ((p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])) / 2
+            if centre is not None:
+                radius = math.dist(centre, p)
+                t = self.turned(centre, p, q)
+                area += radius * radius * (t - math.sin(t)) / 2
+        return abs(area)
+
+    def body(self, g):
+        R, H, size = self.R, self.H, 40.0
+        mid = V(g["m"][0], g["m"][1], 0)
+        outline = Part.Wire(
+            [
+                Part.makeLine(V(R, 0, 0), V(size, 0, 0)),
+                Part.makeLine(V(size, 0, 0), V(size, size, 0)),
+                Part.makeLine(V(size, size, 0), V(0, size, 0)),
+                Part.makeLine(V(0, size, 0), V(0, R, 0)),
+                Part.Arc(V(0, R, 0), mid, V(R, 0, 0)).toShape(),
+            ]
+        )
+        plate = Part.Face(outline).extrude(V(0, 0, H))
+        hole = Part.makeCylinder(g["rho"], H, mid)
+        return plate.cut(hole)
+
+    def picks(self, body, g):
+        ex, ey = g["E"]
+        edges = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.Length - self.H) < 1e-7
+            and all(
+                min(
+                    math.hypot(v.Point.x - ex, v.Point.y - ey),
+                    math.hypot(v.Point.x - ey, v.Point.y - ex),
+                )
+                < 1e-6
+                for v in e.Vertexes
+            )
+        ]
+        self.assertEqual(len(edges), 2)
+        return edges
+
+    def testTheClosedForm(self):
+        g = self.geometry()
+        self.assertAlmostEqual(g["rho"], 6.840402866513, delta=1e-9)
+        self.assertAlmostEqual(g["c"][1], 10.528349121216, delta=1e-9)
+        self.assertAlmostEqual(self.section(g), 0.418488287552, delta=1e-9)
+        angle = abs(self.turned(g["c"], g["P1"], g["P2"]))
+        self.assertAlmostEqual(angle, 1.819372996450, delta=1e-9)
+        # The premise: the round between the two cylinders touches the corner's cylinder past T
+        R, r = self.R, self.r
+        d = math.dist(g["a"], g["m"])
+        x = (d * d + (R - r) ** 2 - (g["rho"] + r) ** 2) / (2 * d)
+        h = math.sqrt((R - r) ** 2 - x * x)
+        ux, uy = (g["m"][0] - g["a"][0]) / d, (g["m"][1] - g["a"][1]) / d
+        between = min(
+            ((g["a"][0] + x * ux - s * h * uy, g["a"][1] + x * uy + s * h * ux) for s in (1, -1)),
+            key=lambda p: math.dist(p, g["E"]),
+        )
+        touch = math.degrees(math.atan2(between[1] - g["a"][1], between[0] - g["a"][0])) % 360
+        self.assertLess(touch, 180.0)  # the sliver runs from 185 (E) to 180 (T)
+        self.assertAlmostEqual(touch, 176.609094764, delta=1e-6)
+
+    def testTheRoundRollsOnOntoTheWall(self):
+        g = self.geometry()
+        body = self.body(g)
+        self.assertTrue(body.isValid())
+        slivers = [
+            f
+            for f in body.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - self.R) < 1e-9
+        ]
+        self.assertEqual(len(slivers), 2)
+        for f in slivers:
+            self.assertAlmostEqual(f.Area, self.R * self.SLIVER * self.H, delta=1e-7)
+        result = body.makeFillet(self.r, self.picks(body, g))
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        removed = 2 * self.H * self.section(g)
+        self.assertAlmostEqual(result.Volume, body.Volume - removed, delta=1e-6)
+        for face in result.Faces:
+            self.assertNotIn("BSpline", face.Surface.TypeId)
+        for edge in result.Edges:
+            self.assertIn(edge.Curve.TypeId, ("Part::GeomLine", "Part::GeomCircle"))
+        # The slivers are gone, and two rounds took their place
+        self.assertEqual(len(result.Faces), len(body.Faces))
+        left = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - self.R) < 1e-9
+        ]
+        self.assertEqual(left, [])
+        rounds = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - self.r) < 1e-9
+        ]
+        self.assertEqual(len(rounds), 2)
+        angle = abs(self.turned(g["c"], g["P1"], g["P2"]))
+        self.assertAlmostEqual(sum(f.Area for f in rounds), 2 * self.H * self.r * angle, delta=1e-6)
+        # Each round's axis is r from its wall plane: (r, c) and (c, r)
+        cx, cy = g["c"]
+        for f in rounds:
+            axis = f.Surface.Axis
+            self.assertAlmostEqual(abs(axis.z), 1.0, delta=1e-9)
+            p = f.Surface.Center
+            off = min(math.hypot(p.x - cx, p.y - cy), math.hypot(p.x - cy, p.y - cx))
+            self.assertLess(off, 1e-7)
