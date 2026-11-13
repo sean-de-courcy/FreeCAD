@@ -3,7 +3,7 @@
 #
 # notes/parts-design.md 10.14 (its skeptic's seven points included), notes/onshape-facts.md O2,
 # Q2c and oracle 9's P1/P2. In a listed studio a Fillet or a Chamfer is an owner outside every
-# Body: it holds the parameters and the picks (StudioPickIds, "<part id>|<expanded name>"), and each
+# Body: it holds the parameters and the picks (StudioPickIds, "<part id>|<interned name>"), and each
 # part its picks resolve to at its place gets one step of its own type, reading the owner's values
 # when it runs. A part whose step fails is left unchanged and the owner warns (O2); none rounded,
 # the owner fails. A pick follows its part into a merge (Q2c) and into the piece of a split that
@@ -18,6 +18,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import zipfile
 
 import FreeCAD as App
 import PartDesign
@@ -25,6 +26,7 @@ import PartDesign
 from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
 from PartDesignTests.TestStudioList import booleanOwner, newStudio, studioList
 from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
+from PartDesignTests.TestPieces import stringListOf
 
 V = App.Vector
 
@@ -119,7 +121,9 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertVolume("C", 1000)
         self.assertClean(f)
         self.assertTrue(f.Shape.isNull())
-        self.assertNotIn("~", "".join(f.StudioPickIds))  # expanded: no name-table ids
+        for pick in f.StudioPickIds:  # interned (ops#640 C1): the map's own form, bounded
+            name = pick.partition("|")[2]
+            self.assertEqual(name, App.internMappedName(App.expandMappedName(name)))
         self.assertEqual([p.split("|")[0] for p in f.StudioPickIds], ["A", "B"])
 
     def testParametersLiveFromTheOwner(self):
@@ -392,7 +396,7 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertVolume("B", 1000 - rounded(2))
 
     def testSaveAndReopen(self):
-        """Expanded picks survive the save: reopened, the parts are rounded, and an edit after
+        """Picks survive the save: reopened, the parts are rounded, and an edit after
         the reopen re-resolves A's pick."""
         self.filletAB()
         self.dir = tempfile.mkdtemp()
@@ -406,6 +410,72 @@ class TestStudioDressUp(unittest.TestCase):
         self.doc.recompute()
         self.assertVolume("A", 1200 - rounded(2))
         f = self.doc.getObject("F")
+        self.assertClean(f)
+
+
+    # ------------------------------------------------------------------------------- ops#640 C1
+    def notchedFillet(self, r=1):
+        """A notch x 24.5..25.5, y -1..3 through B (a Remove), then F (fillet r) on B's top front
+        edge left of it (x 20..24.5, y 0, z 10): an edge the notch cut, its name with history."""
+        self.slot((24.5, -1, 25.5, 3))
+        return makeDressUp(self.doc, self.S, "F", [pickAt(self.body("B"), V(22.25, 0, 10))], r)
+
+    @staticmethod
+    def notchedVolume(r):
+        """B less the notch (1 x 3 x 10) and a round r on 4.5 mm of edge, square at both ends."""
+        return 1000 - 30 - rounded(r, 4.5)
+
+    def testPicksAreStoredInterned(self):
+        """ops#640 C1: a pick is stored in the element map's own (interned, canonical) form,
+        bounded: the name of an edge a notch cut holds references to the name table and is shorter
+        than its expansion; the edge is rounded."""
+        f = self.notchedFillet()
+        [pick] = list(f.StudioPickIds)
+        part, _, name = pick.partition("|")
+        self.assertEqual(part, "B")
+        expanded = App.expandMappedName(name)
+        self.assertEqual(name, App.internMappedName(expanded))
+        self.assertIn("~", name)
+        self.assertLess(len(name), len(expanded))
+        self.assertVolume("B", self.notchedVolume(1))
+        self.assertClean(f)
+
+    def testInternedPicksSurviveSaveAndReopen(self):
+        """ops#640 C1 and A3: saved, Document.xml holds the picks interned (with the file's name
+        table) and no StudioTags. Reopened, B is rounded as before, and a new radius 0.5
+        re-resolves the pick: B = 1000 - 30 - 0.25 (1 - pi/4) 4.5."""
+        f = self.notchedFillet()
+        stored = list(f.StudioPickIds)
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "TestStudioDressUpInterned.FCStd")
+        self.doc.saveAs(path)
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("Document.xml").decode("utf-8")
+        self.assertIn("<NameTable", xml)
+        self.assertNotIn("StudioTags", xml)
+        saved = stringListOf(xml, "F", "StudioPickIds")
+        self.assertEqual(saved, stored)
+        self.assertIn("~", "".join(saved))
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        f = self.doc.getObject("F")
+        self.assertEqual(list(f.StudioPickIds), stored)
+        self.assertVolume("B", self.notchedVolume(1))
+        f.Radius = 0.5
+        self.doc.recompute()
+        self.assertVolume("B", self.notchedVolume(0.5))
+        self.assertClean(f)
+
+    def testAnExpandedPickIsStillRead(self):
+        """ops#640 C1, decision 58: a pick in the expanded form an older build stored rounds the
+        same edge (no migration: toPlain keeps a name without references)."""
+        f = self.notchedFillet()
+        [pick] = list(f.StudioPickIds)
+        part, _, name = pick.partition("|")
+        f.StudioPickIds = [part + "|" + App.expandMappedName(name)]
+        f.Radius = 0.5
+        self.doc.recompute()
+        self.assertVolume("B", self.notchedVolume(0.5))
         self.assertClean(f)
 
 

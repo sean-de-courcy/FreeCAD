@@ -148,11 +148,6 @@ PartDesignExport void setStudioScopeIds(
 PartDesignExport std::vector<Body*> studioScopeOf(const App::DocumentObject* owner);
 /// Sets owner's scope to the ids of parts (no reconcile)
 PartDesignExport void setStudioScope(App::DocumentObject* owner, const std::vector<Body*>& parts);
-/** The naming tag owner's step in body names its result with (rule 2 of
- * notes/one-history-design.md 5): the owner's StudioTags entry for body's part id when there is
- * one, else the owner's object ID (the tool's own names: today's behaviour, until the naming
- * code is known to accept a tag that is no live object's ID) */
-PartDesignExport long studioTagFor(const App::DocumentObject* owner, const Body* body);
 /// The type of the step owner makes in each part: "PartDesign::FeatureApply" for every feature
 /// that makes a tool; the owner's own type for dress-ups, Shell, Draft and Thickness (P8a)
 PartDesignExport std::string studioStepType(const App::DocumentObject* owner);

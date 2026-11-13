@@ -117,7 +117,7 @@ DressUp::DressUp()
         (),
         "Studio",
         App::Prop_Hidden,
-        "A studio dress-up's picks: '<part id>|<element name>', the name expanded (ops#654 P8a)"
+        "A studio dress-up's picks: '<part id>|<element name>', the name interned (ops#640 C1)"
     );
     // FreeCAD-CH ops#701 (F2b): the dress-up of the first part, for one over several parts
     ADD_PROPERTY_TYPE(
@@ -672,7 +672,7 @@ PartDesignExport Part::TopoShape reapplyDressUp(
 
 // FreeCAD-CH ops#654 P8a (notes/parts-design.md 10.14): one fillet or chamfer over several parts.
 // The owner, a Fillet or a Chamfer outside every Body, holds the parameters and the picks
-// (StudioPickIds, "<part id>|<element name>", the name expanded); a step of its own type in each
+// (StudioPickIds, "<part id>|<element name>", the name interned, ops#640 C1); a step of its own type in each
 // part its picks resolve to does the work there, its parameters read from the owner when it runs.
 // The owner computes no shape: it finds its picks at its place, writes them into a step's Base when
 // they or its base changed (StudioPicksSeen), tries each part (as a pattern's instance re-run, T3)
@@ -698,7 +698,7 @@ PartDesignExport std::vector<Body*> studioPickPartsAt(const App::DocumentObject*
 /// (the map's own name and the index) of its elements there
 struct StudioDressUpPick
 {
-    std::string text;  ///< as stored, "<part id>|<element name>"
+    std::string text;  ///< as stored, "<part id>|<element name>" (interned, or expanded by an older build)
     std::string id;    ///< the part id
     std::vector<std::pair<Body*, std::vector<std::string>>> found;
 };
@@ -843,7 +843,11 @@ std::vector<StudioDressUpPick> studioDressUpPicks(const DressUp* owner)
         pick.text = text;
         const auto bar = text.find('|');
         pick.id = text.substr(0, bar);
-        const std::string name = bar == std::string::npos ? std::string() : text.substr(bar + 1);
+        // The stored name is interned (ops#640 C1; an older build's, expanded, reads the same:
+        // toPlain() keeps a name without references): matched expanded, as every candidate is
+        const std::string name = bar == std::string::npos
+            ? std::string()
+            : Data::NameTable::instance().toPlain(std::string_view(text).substr(bar + 1));
         for (auto part : studioPickPartsAt(owner, pick.id)) {
             if (name.empty() || std::ranges::find(scope, part) == scope.end()) {
                 continue;
@@ -1040,7 +1044,8 @@ PartDesignExport std::vector<std::string> studioDressUpRows(const DressUp* owner
 }
 
 /// The pick of element ("Edge3") of obj (a Body, or a feature of one) as owner stores it in
-/// StudioPickIds, "<part id>|<element name>" with the name expanded (P8a-2, the dialog's picks).
+/// StudioPickIds, "<part id>|<element name>" with the name interned (P8a-2, the dialog's picks;
+/// ops#640 C1: the map's own canonical form, bounded, its table entries saved with the file).
 /// The part shows owner's own step once it rounds it: an element of that step is the same
 /// element of the step's base, found by its geometry (a face the round made has none). Empty, with
 /// why, when there is no pick. Declared where used
@@ -1087,7 +1092,8 @@ PartDesignExport std::string studioDressUpPickOf(const DressUp* owner,
         why = "the element has no name";
         return {};
     }
-    return studioPartId(body) + "|" + Data::NameTable::instance().toPlain(mapped.front().first.toString());
+    return studioPartId(body) + "|"
+        + Data::NameTable::instance().toInterned(mapped.front().first.toString());
 }
 
 }  // namespace PartDesign
