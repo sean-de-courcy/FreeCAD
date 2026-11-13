@@ -3006,3 +3006,121 @@ class CuspTest(unittest.TestCase):
                     expected = cusped_chamfer_volume(5, wall, tunnel)
                     self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
                     self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
+
+
+class CurvedEndTrimTest(unittest.TestCase):
+    """Case Base #105, designed (notes r105-curved-end-trim): a block x -10..10, y 0..8, z 0..5 with
+    a notch below z = 4, open at the front and the bottom, under a lip 1 tall. The lip's front-bottom
+    chord (y 0, z 4, x -4..4) is rounded with r 1, the lip's height: the round is at its limit. The
+    notch's wall meets the front at the chord's ends, the underside coming to a spike of 53.13 deg,
+    narrower than r near the ends: the wall's surface cuts the round off there, as Onshape's #105
+    ("cut off by #103's blend"), and grows by the round's section where it passes. The wall is the
+    cylinder x^2 + (y + 3)^2 = 25, analytic or as a B-spline surface (as #105's end face); the control
+    is two slanted planes with the same spike.
+
+    In the section (y, z - 4) the round removes the corner of the unit square outside the circle about
+    (1, 1), h(y) = 1 - sqrt(1 - (1 - y)^2) tall, kept where y < s(x), the underside's depth:
+    dV = -int A(min(s, 1)) dx, A(w) = w - pi/4 + ((1 - w) sqrt(1 - (1 - w)^2) + asin(1 - w)) / 2;
+    dA = blend int min(acos(1 - s), pi/2) dx - front band 8 - underside int min(s, 1) dx + the wall's
+    growth int h(y) ds along the wall; faces +2 (the blend, and the front face split in two)."""
+
+    rho, d = 5.0, 3.0
+
+    def body(self, wall):
+        rho, d = self.rho, self.d
+        block = Part.makeBox(20, 8, 5, V(-10, 0, 0))
+        if wall == "plane":
+            c = math.sqrt(rho * rho - d * d)
+            top = c * math.tan(math.acos(d / rho))
+            w = Part.makePolygon([V(-c, 0, -1), V(c, 0, -1), V(0, top, -1), V(-c, 0, -1)])
+            notch = Part.Face(w).extrude(V(0, 0, 5))
+            notch = notch.fuse(Part.makeBox(2 * c, 1, 5, V(-c, -1, -1))).removeSplitter()
+        else:
+            # the seam turned out of the block (to -y)
+            notch = Part.makeCylinder(rho, 7 if wall == "bsp" else 5, V(0, -d, -1))
+            notch.rotate(V(0, -d, 0), V(0, 0, 1), -90)
+            if wall == "bsp":
+                # a B-spline surface whose domain runs on past the lip
+                notch = notch.toNurbs().common(Part.makeBox(4 * rho, 4 * rho, 6, V(-2 * rho, -d - 2 * rho, -2)))
+        body = block.cut(notch).removeSplitter()
+        chord = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.y) < 1e-9 and abs(v.Point.z - 4) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(chord), 1)
+        return body, chord[0]
+
+    def depth(self, wall, x):
+        rho, d = self.rho, self.d
+        if wall == "plane":
+            c = math.sqrt(rho * rho - d * d)
+            return (c - abs(x)) * math.tan(math.acos(d / rho))
+        return -d + math.sqrt(max(rho * rho - x * x, 0.0))
+
+    def expected(self, wall):
+        rho, d = self.rho, self.d
+        c = math.sqrt(rho * rho - d * d)
+        alpha = math.acos(d / rho)
+        x1 = math.sqrt(rho * rho - (1 + d) ** 2) if wall != "plane" else c - 1 / math.tan(alpha)
+
+        def h(y):
+            return 1 - math.sqrt(max(1 - (1 - y) ** 2, 0.0))
+
+        def section(w):
+            u = 1 - min(max(w, 0.0), 1.0)
+            return 1 - u - math.pi / 4 + (u * math.sqrt(max(1 - u * u, 0.0)) + math.asin(u)) / 2
+
+        def graded(f, a, b, at_b=True):
+            # the integral over [a, b], graded towards a square root's end point (b, else a)
+            total = 0.0
+            for k in range(40):
+                lo, hi = 1 - 2.0**-k, 1 - 2.0 ** -(k + 1)
+                if at_b:
+                    total += gauss_legendre(f, a + (b - a) * lo, a + (b - a) * hi)
+                else:
+                    total += gauss_legendre(f, b - (b - a) * hi, b - (b - a) * lo)
+            return total
+
+        def integral(f):
+            # smooth pieces, split where s = 1; acos(1 - s) goes as sqrt(s) towards the spikes
+            middle = sum(gauss_legendre(f, -x1 + 2 * x1 * k / 8, -x1 + 2 * x1 * (k + 1) / 8) for k in range(8))
+            return middle + graded(f, x1, c) + graded(f, -c, -x1, at_b=False)
+
+        s = lambda x: self.depth(wall, x)
+        dV = -integral(lambda x: section(s(x)))
+        blend = integral(lambda x: min(math.acos(max(1 - s(x), -1.0)), math.pi / 2))
+        under = -integral(lambda x: min(s(x), 1.0))
+        # h goes as sqrt(y) at y = 0, where the wall meets the front
+        if wall == "plane":
+            grown = 2 * graded(h, 0.0, 1.0, at_b=False) / math.sin(alpha)
+        else:
+            f0, f1 = math.acos((1 + d) / rho), alpha
+            grown = 2 * rho * graded(lambda f: h(-d + rho * math.cos(f)), f0, f1)
+        return dV, blend - 2 * c + under + grown
+
+    def testRoundCutOffByTheEndFacesSurface(self):
+        # closed forms (notes r105-curved-end-trim): cylinder -1.636982 / -2.985847, plane -1.644912 / -3.003319
+        known = {"cyl": (-1.636982, -2.985847), "plane": (-1.644912, -3.003319)}
+        for wall in ("cyl", "bsp", "plane"):
+            with self.subTest(wall=wall):
+                body, chord = self.body(wall)
+                dV, dA = self.expected(wall)
+                self.assertAlmostEqual(dV, known["plane" if wall == "plane" else "cyl"][0], delta=1e-6)
+                self.assertAlmostEqual(dA, known["plane" if wall == "plane" else "cyl"][1], delta=1e-6)
+                shape = body.makeFillet(1.0, [chord])
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Volume - body.Volume, dV, delta=1e-5)
+                self.assertAlmostEqual(shape.Area - body.Area, dA, delta=1e-5)
+                self.assertEqual(len(shape.Faces), len(body.Faces) + 2)
+
+    def testBelowTheLimitAsOcct(self):
+        # Below the limit OCCT builds, and trims at the wall's surface: the fallback isn't asked
+        for wall in ("cyl", "bsp"):
+            with self.subTest(wall=wall):
+                body, chord = self.body(wall)
+                shape = body.makeFillet(0.9, [chord])
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Faces), len(body.Faces) + 1)
