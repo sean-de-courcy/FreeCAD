@@ -5,6 +5,7 @@
 // geometric: the ball of the fillet's radius touches both walls (the residual), and where the model
 // has a closed form, the seam's place.
 
+#include <array>
 #include <cmath>
 #include <set>
 #include <string>
@@ -52,6 +53,8 @@ enum class Lid
     TopPlane  // the prism's own top plane
 };
 
+Handle(Geom_BSplineSurface) lidSurface(double twist);
+
 /// A stadium prism (two planes y = -10 and y = 10, two half cylinders of radius 10 about x = -20
 /// and x = 20) under a lid. The plane and the cylinder walls meet along four vertical tangent lines
 TopoDS_Shape stadiumBase(double twist, Lid kind, TopoDS_Face& lid)
@@ -77,6 +80,21 @@ TopoDS_Shape stadiumBase(double twist, Lid kind, TopoDS_Face& lid)
         }
         return prism;
     }
+    const Handle(Geom_BSplineSurface) surface = lidSurface(twist);
+    const TopoDS_Shape tool
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(surface, 1e-7).Face(), gp_Vec(0, 0, 60)).Shape();
+    const TopoDS_Shape base = BRepAlgoAPI_Cut(prism, tool).Shape();
+    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+        if (BRep_Tool::Surface(TopoDS::Face(it.Current()))->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) {
+            lid = TopoDS::Face(it.Current());
+        }
+    }
+    return base;
+}
+
+/// The twisted lid's surface, z = 20 + twist x y, as a B-spline
+Handle(Geom_BSplineSurface) lidSurface(double twist)
+{
     TColgp_Array2OfPnt poles(1, 2, 1, 2);
     const double x = 45;
     const double y = 25;
@@ -93,8 +111,36 @@ TopoDS_Shape stadiumBase(double twist, Lid kind, TopoDS_Face& lid)
     Handle(Geom_BSplineSurface) surface
         = new Geom_BSplineSurface(poles, knots, knots, multiplicities, multiplicities, 1, 1);
     surface->IncreaseDegree(3, 3);
+    return surface;
+}
+
+/// A rounded-rectangle prism (four planes, four quarter cylinders of radius 5) under the twisted lid
+TopoDS_Shape roundedBoxBase(double twist, TopoDS_Face& lid)
+{
+    const double a = 20;
+    const double b = 12;
+    const double c = 5;
+    const double d = c * (1 - std::sqrt(0.5));
+    const std::array<gp_Pnt, 8> corner = {
+        gp_Pnt(-a + c, -b, 0), gp_Pnt(a - c, -b, 0), gp_Pnt(a, -b + c, 0), gp_Pnt(a, b - c, 0),
+        gp_Pnt(a - c, b, 0),   gp_Pnt(-a + c, b, 0), gp_Pnt(-a, b - c, 0), gp_Pnt(-a, -b + c, 0)
+    };
+    const std::array<gp_Pnt, 4> middle = {
+        gp_Pnt(a - d, -b + d, 0), gp_Pnt(a - d, b - d, 0), gp_Pnt(-a + d, b - d, 0), gp_Pnt(-a + d, -b + d, 0)
+    };
+    BRepBuilderAPI_MakeWire wire;
+    for (int i = 0; i < 4; ++i) {
+        wire.Add(BRepBuilderAPI_MakeEdge(corner[2 * i], corner[2 * i + 1]).Edge());
+        wire.Add(
+            BRepBuilderAPI_MakeEdge(
+                GC_MakeArcOfCircle(corner[2 * i + 1], middle[i], corner[(2 * i + 2) % 8]).Value()
+            ).Edge()
+        );
+    }
+    const TopoDS_Shape prism
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), gp_Vec(0, 0, 40)).Shape();
     const TopoDS_Shape tool
-        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(surface, 1e-7).Face(), gp_Vec(0, 0, 60)).Shape();
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(lidSurface(twist), 1e-7).Face(), gp_Vec(0, 0, 60)).Shape();
     const TopoDS_Shape base = BRepAlgoAPI_Cut(prism, tool).Shape();
     for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
         if (BRep_Tool::Surface(TopoDS::Face(it.Current()))->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) {
@@ -209,6 +255,27 @@ TEST_F(RollingBallBlendTest, closedChainOnTwistedLid)
         EXPECT_EQ(count(report.shape, TopAbs_VERTEX), count(occt.shape, TopAbs_VERTEX));
         EXPECT_LE(maxTolerance(report.shape), 1e-6);
         EXPECT_GT(report.seamMove, 0.01);  // the seams are elsewhere
+    }
+}
+
+// Eight blends, eight seams, quarter cylinders of radius 5. At radius 3 OCCT's own sections stall and
+// step back along two of the corner faces: the stations are spread along the centre curve instead
+TEST_F(RollingBallBlendTest, closedChainRoundACornerOfSmallRadius)
+{
+    for (const double radius : {1.0, 3.0}) {
+        TopoDS_Face lid;
+        const TopoDS_Shape base = roundedBoxBase(0.02, lid);
+        const Filleted occt = occtFillet(base, lid, radius);
+        ASSERT_FALSE(occt.shape.IsNull());
+
+        const RB::Report report = RB::correct(occt.shape, occt.blends, radius);
+
+        ASSERT_EQ(report.outcome, RB::Outcome::Corrected) << report.reason;
+        EXPECT_EQ(report.faces, 8);
+        EXPECT_GT(report.residualBefore, 1e-3);
+        EXPECT_LT(report.residualAfter, 1e-6);
+        EXPECT_TRUE(BRepCheck_Analyzer(report.shape).IsValid());
+        EXPECT_LE(maxTolerance(report.shape), 1e-6);
     }
 }
 
