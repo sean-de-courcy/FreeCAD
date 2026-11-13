@@ -63,19 +63,13 @@ std::string quoted(const App::DocumentObject* obj)
 }
 
 /// Adopts a part's id: an empty StudioPartId already reads as the Body's name
-/// (studioPartId()), so writing that name changes no id and must not touch the Body. A touched
-/// Body re-executes and reassigns its Shape, which touches everything linking it (Booleans,
-/// binders) and their histories: FMCVW #167's first piece split re-ran the earlier fillets for
-/// 819 s (ops#640).
+/// (studioPartId()), so writing that name changes no id. StudioPartId is an output property
+/// (Body.cpp), so the write doesn't touch the Body (ops#640, FMCVW #167).
 void adoptPartId(Body* body)
 {
-    if (!body || !std::string(body->StudioPartId.getValue()).empty()) {
-        return;
+    if (body && std::string(body->StudioPartId.getValue()).empty()) {
+        body->StudioPartId.setValue(body->getNameInDocument());
     }
-    const bool noTouch = body->testStatus(App::ObjectStatus::NoTouch);
-    body->setStatus(App::ObjectStatus::NoTouch, true);
-    body->StudioPartId.setValue(body->getNameInDocument());
-    body->setStatus(App::ObjectStatus::NoTouch, noTouch);
 }
 
 /// A MultiTransform's step (Studio.cpp's rule): a member of the Body run as part of its

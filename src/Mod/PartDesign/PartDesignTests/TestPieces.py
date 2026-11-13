@@ -1026,8 +1026,9 @@ class TestPieces(unittest.TestCase):
         part (FMCVW: 819 s of earlier fillets for a 1 s Pocket).
         Bodies A (box 40 x 20 x 10 at x 0), B (the same at x 100), C (40 x 20 x 5 at x 0) fused
         with A, then a chamfer; a slot 2 wide through B at x 119..121 splits B into two
-        19 x 20 x 10 pieces."""
+        19 x 20 x 10 pieces. Undoing the command puts the ids back to "", again without touching."""
         self.doc = App.newDocument("TestPieces")
+        self.doc.UndoMode = 1
 
         def boxBody(name, x0, height):
             body = self.doc.addObject("PartDesign::Body", name)
@@ -1066,17 +1067,29 @@ class TestPieces(unittest.TestCase):
         observer = Observer()
         App.addDocumentObserver(observer)
         try:
-            made = list(PartDesign.studioMakePieces(slot))
+            made = list(self.command(slot))
+            self.assertEqual(len(made), 2)
+            for body in (a, c):
+                self.assertEqual(body.StudioPartId, body.Name)
+            others = ("A", "APad", "C", "CFuse", "CChamfer")
+            self.assertIn("BSlot", recomputed)
+            for name in others:
+                self.assertNotIn(name, recomputed)
+            del recomputed[:]
+            self.doc.undo()
+            self.doc.recompute()
+            for name in others:
+                self.assertNotIn(name, recomputed)
+            self.assertEqual(c.StudioPartId, "")
+            self.doc.redo()
+            self.doc.recompute()
+            for name in others:
+                self.assertNotIn(name, recomputed)
         finally:
             App.removeDocumentObserver(observer)
-        self.assertEqual(len(made), 2)
         for piece in made:
             self.assertAlmostEqual(piece.Shape.Volume, 19 * 20 * 10, places=6)
-        for body in (a, c):
-            self.assertEqual(body.StudioPartId, body.Name)
-        self.assertIn("BSlot", recomputed)
-        for name in ("A", "APad", "C", "CFuse", "CChamfer"):
-            self.assertNotIn(name, recomputed)
+        self.assertEqual(c.StudioPartId, c.Name)
         self.assertEqual(list(chamfer.State), ["Up-to-date"])
 
 
