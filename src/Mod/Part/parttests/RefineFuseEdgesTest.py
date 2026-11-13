@@ -17,8 +17,9 @@ next cut into that wall failed. The refine now joins such a curve again from its
 leaves the edges unfused where that fails, and undoes a fuse after which a tolerance grew
 (modelRefine.cpp, "The fuse of edges, checked"). The spans here carry no stored 2D curve on the
 cap's plane (a Boolean stores none on a plane), so OCCT's fuse is right on this model with and
-without that code: the spans with stored curves are what the exact construction of a round leaves,
-and no scripted model has them yet (notes/refine-fuse-edges.md).
+without that code. The failing model is this one with each span's 2D curve stored on the plane, as
+the exact construction of a round leaves them: tests/src/Mod/Part/App/ModelRefine.cpp,
+RefineFuseEdgesTest, which writes them with BRep_Builder.
 
 Expected, geometrically: the cap one face of 20 * 10 - 2/3 * 10 * 1 = 193 1/3 mm2 with 4 edges (the
 three spans one edge again, which follows its 3D curve on both its faces), the volume
