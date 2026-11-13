@@ -124,9 +124,10 @@ TopoShape FeatureRefine::refineShapeIfActive(
     const RefineErrorPolicy onError
 ) const
 {
-    if (!this->Refine.getValue() || ResultCheck::skippedForTheLimit(this, "The refine")) {
+    if (!this->Refine.getValue()) {
         return oldShape;
     }
+    ResultCheck::stopIfPastTheLimit("The refine");
     TopoShape shape(oldShape);
     try {
         TopoShape refinedShape = shape.makeElementRefine();

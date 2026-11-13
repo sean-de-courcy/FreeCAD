@@ -209,10 +209,11 @@ App::DocumentObjectExecReturn* Fillet::build()
             );
         }
         // OCCT fills a recess its band crosses, in a valid solid (ops#393)
+        if (!edges.empty()) {
+            ResultCheck::stopIfPastTheLimit("The fillet's check for a filled recess");
+        }
         const std::string filled
-            = edges.empty() || ResultCheck::skippedForTheLimit(this, "The fillet's check for a filled recess")
-            ? std::string()
-            : Part::filledPocket(shape, baseShape, edges, radius);
+            = edges.empty() ? std::string() : Part::filledPocket(shape, baseShape, edges, radius);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
@@ -220,19 +221,21 @@ App::DocumentObjectExecReturn* Fillet::build()
         // (ops#603). Not for a round the exact construction rolled on over a tangent edge: it
         // covers its face beyond the band this check allows a direct round, and the construction
         // measured what it cut or fused against the tool's closed form (ops#640, #47 at R1 7, r 4)
+        const bool checkLost = !edges.empty() && !recorder.rolledOn();
+        if (checkLost) {
+            ResultCheck::stopIfPastTheLimit("The fillet's check for lost material");
+        }
         const std::string lost
-            = edges.empty() || recorder.rolledOn()
-                || ResultCheck::skippedForTheLimit(this, "The fillet's check for lost material")
-            ? std::string()
-            : Part::lostMaterial(shape, baseShape, edges, radius);
+            = checkLost ? Part::lostMaterial(shape, baseShape, edges, radius) : std::string();
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + lost);
         }
         // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
+        if (!edges.empty()) {
+            ResultCheck::stopIfPastTheLimit("The fillet's check for a bridged recess");
+        }
         const std::string bridged
-            = edges.empty() || ResultCheck::skippedForTheLimit(this, "The fillet's check for a bridged recess")
-            ? std::string()
-            : Part::bridgedRecess(shape, baseShape, edges, radius);
+            = edges.empty() ? std::string() : Part::bridgedRecess(shape, baseShape, edges, radius);
         if (!bridged.empty()) {
             return new App::DocumentObjectExecReturn("The fillet" + bridged);
         }

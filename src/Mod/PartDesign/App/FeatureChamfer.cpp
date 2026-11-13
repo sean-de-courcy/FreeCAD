@@ -301,8 +301,10 @@ App::DocumentObjectExecReturn* Chamfer::build()
                 );
             }
             // OCCT fills a recess its band crosses, in a valid solid (ops#393)
+            if (!passEdges.empty()) {
+                ResultCheck::stopIfPastTheLimit("The chamfer's check for a filled recess");
+            }
             const std::string filled = passEdges.empty()
-                    || ResultCheck::skippedForTheLimit(this, "The chamfer's check for a filled recess")
                 ? std::string()
                 : Part::filledPocket(shape, TopShape, passEdges, passReach);
             if (!filled.empty()) {
@@ -310,8 +312,10 @@ App::DocumentObjectExecReturn* Chamfer::build()
             }
             // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
             // (ops#603)
+            if (!passEdges.empty()) {
+                ResultCheck::stopIfPastTheLimit("The chamfer's check for lost material");
+            }
             const std::string lost = passEdges.empty()
-                    || ResultCheck::skippedForTheLimit(this, "The chamfer's check for lost material")
                 ? std::string()
                 : Part::lostMaterial(shape, TopShape, passEdges, passReach);
             if (!lost.empty()) {

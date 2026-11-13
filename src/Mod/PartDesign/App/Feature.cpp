@@ -742,12 +742,15 @@ std::string checkResult(
             check->base = copies.Value();
         }
     }
-    // Not needed for the result: stopped by the limit, it is skipped with a warning (kernel-4)
+    // Stopped by the limit, the feature fails: an unchecked result never passes (kernel layer
+    // step 2; it was skipped with a warning, kernel-4)
     if (!Part::KernelBudget::runOptional("The check of the result", [check](const Message_ProgressRange&) {
             check->run();
         })) {
-        ResultCheck::warnSkipped(&feature, "The check of the result");
-        return {};
+        return "The check of the result did not finish: the feature took longer than "
+            + number(Part::KernelBudget::limit())
+            + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)"
+            + notBuilt;
     }
 
     const double before = check->baseVolume;
@@ -832,30 +835,9 @@ void ResultCheck::noteRefine(const Feature* feature, const TopoDS_Shape& before,
     }
 }
 
-bool ResultCheck::skippedForTheLimit(const Feature* feature, const char* step)
+void ResultCheck::stopIfPastTheLimit(const char* step)
 {
-    if (!Part::KernelBudget::pastDeadline()) {
-        return false;
-    }
-    warnSkipped(feature, step);
-    return true;
-}
-
-void ResultCheck::warnSkipped(const Feature* feature, const char* step)
-{
-    if (auto doc = feature ? feature->getDocument() : nullptr) {
-        const std::string text = std::string(step)
-            + " was skipped: the feature took longer than " + number(Part::KernelBudget::limit())
-            + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
-        const std::string previous
-            = doc->getWarningDescription(feature) ? doc->getWarningDescription(feature) : "";
-        if (previous.find(text) == std::string::npos) {
-            doc->setWarning(
-                const_cast<Feature*>(feature),
-                previous.empty() ? text : previous + '\n' + text
-            );
-        }
-    }
+    Part::KernelBudget::stopIfPastDeadline(step);
 }
 
 App::DocumentObjectExecReturn* Feature::recompute()
@@ -942,10 +924,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature. A
     // BaseFeature builds nothing: the first feature on it checks the base it passes on
     if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
-        && !isDerivedFrom<FeatureBase>() && checkingResults()
-        && !ResultCheck::skippedForTheLimit(this, "The check of the result")) {
+        && !isDerivedFrom<FeatureBase>() && checkingResults()) {
         std::string why;
         try {
+            ResultCheck::stopIfPastTheLimit("The check of the result");
             why = checkResult(*this, booleanInputsValid, lastVouched, checkedWhole);
         }
         catch (const Base::Exception& e) {

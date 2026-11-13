@@ -49,6 +49,25 @@ def outer_top_edges(shape):
     return names
 
 
+class LateBox:
+    """A PartDesign Python feature whose execute takes 0.6 s on the calling thread, then adds a cube"""
+
+    def __init__(self, obj):
+        obj.Proxy = self
+
+    def execute(self, obj):
+        time.sleep(0.6)
+        box = Part.makeBox(4, 4, 4)
+        obj.AddSubShape = box
+        obj.Shape = box
+
+    def dumps(self):
+        return None
+
+    def loads(self, state):
+        return None
+
+
 class KernelBudgetTest(unittest.TestCase):
     def setUp(self):
         self.params = FreeCAD.ParamGet(PARAMS)
@@ -121,6 +140,29 @@ class KernelBudgetTest(unittest.TestCase):
         ext.LengthFwd = 7
         ext.Solid = True
         return prof, ext
+
+    def testACheckPastTheLimitFailsTheFeature(self):
+        """Kernel layer step 2 (notes/kernel-layer.md, P4 and P5): the check of a feature's result is
+        never skipped past the limit. A feature whose own work ends past it (here a Python
+        feature's execute, on the calling thread, which the limit can't stop) fails, where it
+        passed its result unchecked, "Valid", with a warning."""
+        doc = FreeCAD.newDocument("KernelBudgetLate")
+        self.docs.append(doc)
+        body = doc.addObject("PartDesign::Body", "Body")
+        late = doc.addObject("PartDesign::FeatureAdditivePython", "Late")
+        LateBox(late)
+        body.addObject(late)
+        self.setLimit(0.3)
+        doc.recompute()
+        self.assertFalse(late.isValid())
+        self.assertIn("took longer than 0.3 s", late.getStatusString())
+        self.assertIn("the feature is not built", late.getStatusString())
+        # Within the limit it builds and its result is checked
+        self.setLimit(60)
+        late.touch()
+        doc.recompute()
+        self.assertTrue(late.isValid(), late.getStatusString())
+        self.assertAlmostEqual(late.Shape.Volume, 64, places=6)
 
     def testOnlyPartDesignFeaturesHaveTheLimit(self):
         """The limit is PartDesign features' (the ruling of 11-11): a Part::Cut over it, as an
