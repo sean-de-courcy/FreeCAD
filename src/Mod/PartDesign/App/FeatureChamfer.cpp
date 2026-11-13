@@ -228,7 +228,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         const std::string filled
             = ResultCheck::skippedForTheLimit(this, "The chamfer's check for a filled recess")
             ? std::string()
-            : Part::filledPocket(shape, TopShape, edges);
+            : Part::filledPocket(shape, TopShape, edges, reach);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + filled);
         }

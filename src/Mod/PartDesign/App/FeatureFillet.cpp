@@ -170,7 +170,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         const std::string filled
             = ResultCheck::skippedForTheLimit(this, "The fillet's check for a filled recess")
             ? std::string()
-            : Part::filledPocket(shape, baseShape, edges);
+            : Part::filledPocket(shape, baseShape, edges, radius);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
