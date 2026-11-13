@@ -35,8 +35,14 @@ namespace App
 
 class DocumentObject;
 
-/** The variable `#name` means when several sets of a document define the name, by the choice
- * recorded on the copies (FreeCAD-CH, ops#640, decision 317), or nullptr: `#name` stays ambiguous.
+/** The variable `#name` means when several sets of a document define the name, by a Variable
+ * Studio's order or by the choice recorded on the copies (FreeCAD-CH, ops#640, decision 317), or
+ * nullptr: `#name` stays ambiguous.
+ *
+ * Onshape's order first (ops#722, notes/variable-studio-references.md section 3): when every set
+ * among @a refs is one Variable Studio S or an attached copy in S's reference list
+ * (DocumentTabs::variableReferences), S's own variable wins, then the last-listed reference,
+ * silently. Recorded choices don't count there.
  *
  * A local variable (a plain VarSet's) and an imported one (an App::VarSetCopy's) of the same name
  * make `#name` ambiguous for new expressions. The user's choice of which one it means is kept in

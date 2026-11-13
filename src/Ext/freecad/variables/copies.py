@@ -782,10 +782,34 @@ def choose(doc, name: str, path: str):
     if (prop != name or holder is None or not holder.isDerivedFrom("App::VarSet")
             or not _defines(holder, name)):
         raise ValueError(f"{path} isn't a variable {name} of {doc.Name}")
+    studio = ordering_studio(doc, name)
+    if studio is not None:
+        raise ValueError(f"#{name} is ordered by {studio.Label}'s references (own variables first, "
+                         "then the last listed): it takes no choice")
     found = copies_defining(doc, name)
     if not found:
         raise ValueError(f"No copy defines {name}: #{name} needs no choice")
     _record(found, name, path)
+
+
+def _group_of(obj):
+    """The Variable Studio whose order covers @a obj: itself, or the studio listing it."""
+    if App.DocumentTabs.isVariableStudio(obj):
+        return obj
+    return App.DocumentTabs.studioOf(obj) if obj.TypeId == COPY_TYPE else None
+
+
+def ordering_studio(doc, name: str):
+    """The Variable Studio whose order decides what `#name` means in @a doc (ops#722: every set
+    defining @a name is the studio or a copy in its reference list, and there are two or more),
+    or None: the recorded choice, or the ambiguity, decides as before (App/VariableChoice.h)."""
+    holders = _all_holders(doc, name)
+    if len(holders) < 2:
+        return None
+    groups = {None if g is None else g.Name for g in map(_group_of, holders)}
+    if len(groups) != 1 or None in groups:
+        return None
+    return _group_of(holders[0])
 
 
 def _plan_clashes(doc, plan, made: Mapping[str, List[str]], provided: Mapping[str, str],
@@ -1088,9 +1112,9 @@ def reference_from_fcstd(studio, path: str, varset: str, **choices):
     Returns the copy."""
     _check_studio(studio)
     doc = studio.Document
-    # One plan, then one transaction: plan_copy refuses inside an open one, so it runs before
-    # (review R1)
-    plan = plan_copy(doc, path, varset, **choices)
+    # One plan, the dialog's own (the studio's order settles its clashes), and one transaction:
+    # plan_copy refuses inside an open one, so it runs before (review R1)
+    plan = plan_copy(doc, path, varset, studio, **choices)
     if not plan.ok:
         raise RefreshBlocked(plan)
     made = []
@@ -1859,6 +1883,9 @@ def plan_refresh(copy, path: Optional[str] = None, *, entry: Optional[int] = Non
     # a name chosen before keeps its choice
     made = {t.fc_name: [f"{copy.Name}.{t.fc_name}"] for t in plan.targets
             if choice_key(t.fc_name) not in copy.Bindings}
+    studio = App.DocumentTabs.studioOf(copy)
+    if studio is not None:  # ops#722: its studio's order settles them, silently
+        made = _ordered_names(plan, studio, made, quiet=True)
     _plan_clashes(doc, plan, made, {}, c.clashes,
                   {copy.Name: f"{copy.Label} ({os.path.basename(plan.path)})"})
     _list_problems(plan)
@@ -1877,10 +1904,12 @@ def refresh(copy, path: Optional[str] = None, **choices) -> RefreshPlan:
     return plan
 
 
-def plan_copy(doc, path: str, varset: str, **choices) -> RefreshPlan:
+def plan_copy(doc, path: str, varset: str, studio=None, **choices) -> RefreshPlan:
     """What copying the VarSet @a varset (internal name) of the saved FreeCAD document @a path
     into @a doc would do, and what stands in its way (section 3.3); changes nothing. The choices
-    are plan_refresh()'s (`freeze` included)."""
+    are plan_refresh()'s (`freeze` included). With @a studio, the copy goes last in its
+    reference list (reference_from_fcstd): a name the studio's order then settles isn't a
+    clash (ops#722)."""
     plan = RefreshPlan(None, doc, FCSTD_KIND)
     if doc.getBookedTransactionID() != 0:
         plan.problems.append("Another edit is open: finish it first")
@@ -1894,6 +1923,8 @@ def plan_copy(doc, path: str, varset: str, **choices) -> RefreshPlan:
     if plan.label:
         plan.name = _unique_name(doc, plan.label, ())
         made = {t.fc_name: [f"{plan.name}.{t.fc_name}"] for t in plan.targets}
+        if studio is not None:
+            made = _ordered_names(plan, studio, made)
         _plan_clashes(doc, plan, made, {}, c.clashes,
                       {plan.name: f"{plan.label} ({os.path.basename(plan.path)})"})
     for obj in doc.findObjects(COPY_TYPE):
@@ -1903,6 +1934,29 @@ def plan_copy(doc, path: str, varset: str, **choices) -> RefreshPlan:
     _diff(plan)
     _list_problems(plan)
     return plan
+
+
+def _ordered_names(plan: RefreshPlan, studio, made, quiet=False):
+    """@a made without the names @a studio's order settles once the copy is one of its
+    references (the last, for a new one); unless @a quiet each gets a line in @a plan's
+    warnings instead (Onshape is silent: VR6)."""
+    group = {studio.Name} | {c.Name for c in references(studio)}
+    rest = {}
+    for fc, paths in made.items():
+        holders = _all_holders(studio.Document, fc)
+        if holders and all(h.Name in group for h in holders):
+            if quiet:
+                continue
+            if _defines(studio, fc):
+                plan.warnings.append(f"#{fc}: {studio.Label}'s own {fc} comes first, before "
+                                     f"{plan.label}'s")
+            else:
+                plan.warnings.append(f"#{fc} means {plan.label}'s {fc} for new expressions: the "
+                                     "last-listed reference comes first; existing expressions "
+                                     "keep the variable they use")
+        else:
+            rest[fc] = paths
+    return rest
 
 
 def copy_from_fcstd(doc, path: str, varset: str, **choices):

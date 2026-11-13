@@ -2004,5 +2004,124 @@ class TestVariableStudioReferences(StudioReferences):
         self.assertAmbiguous()
 
 
+
+class TestVariableStudioPrecedence(StudioReferences):
+    """G3 (ops#722): own variables first, then the references, the last listed first, silently
+    (Onshape VR6); everything else stays ambiguous."""
+
+    def test_later_reference_wins(self):
+        """B (w 10) then C (w 20): #w is C's, 20 mm (V 2000); with C moved first: B's (V 1000)."""
+        b, c = self.source("B", w=10), self.source("C", w=20)
+        tab = self.tab()
+        cb = self.reference(tab, b)
+        cc = self.reference(tab, c)
+        first = self.box("#w")
+        self.assertVolume(first, 2000)
+        self.assertEqual(expression(first, "Height"), f"{cc.Name}.w")
+        copies.move_reference(cc, 0)
+        second = self.box("#w", "Box2")
+        self.assertVolume(second, 1000)
+        self.assertEqual(expression(second, "Height"), f"{cb.Name}.w")
+
+    def test_own_wins(self):
+        """Own w = 30 mm beside B's w = 20 mm: 30 mm (V 3000), no error."""
+        tab = self.tab(w=30)
+        self.reference(tab, self.source("B", w=20))
+        pad = self.box("#w")
+        self.assertVolume(pad, 3000)
+        self.assertEqual(expression(pad, "Height"), f"{tab.Name}.w")
+
+    def test_reorder_keeps_stored_binding(self):
+        """A pad made with #w (C's, V 2000) keeps C's path after C moves first, and the move's
+        preview names it."""
+        tab = self.tab()
+        self.reference(tab, self.source("B", w=10))
+        cc = self.reference(tab, self.source("C", w=20))
+        pad = self.box("#w")
+        plan = copies.plan_move_reference(cc, 0)
+        self.assertTrue(any("Box" in w and "#w now means" in w for w in plan.warnings),
+                        plan.warnings)
+        copies.move_reference(cc, 0)
+        self.doc.recompute()
+        self.assertVolume(pad, 2000)
+        self.assertEqual(expression(pad, "Height"), f"{cc.Name}.w")
+
+    def test_remove_names_expressions(self):
+        """Removing the last reference C (w 20) from B, C: the copy stays, unlisted, so #w is
+        ambiguous for new input; the preview names the pad keeping C's w, and it keeps it."""
+        tab = self.tab()
+        self.reference(tab, self.source("B", w=10))
+        cc = self.reference(tab, self.source("C", w=20))
+        pad = self.box("#w")
+        plan = copies.plan_remove_reference(cc)
+        self.assertTrue(any("Box.Height" in w and "#w is ambiguous now" in w
+                            for w in plan.warnings), plan.warnings)
+        copies.remove_reference(cc)
+        self.doc.recompute()
+        self.assertVolume(pad, 2000)
+        self.assertAmbiguous()
+
+    def test_no_warning_when_ambiguous_either_way(self):
+        """A plain set defining w too makes #w ambiguous before and after a move: no warning."""
+        tab = self.tab()
+        self.reference(tab, self.source("B", w=10))
+        cc = self.reference(tab, self.source("C", h=5))
+        plain = self.doc.addObject("App::VarSet", "Plain")
+        plain.addProperty("App::PropertyLength", "w")
+        plain.w = 7
+        self.doc.recompute()
+        self.box(f"{copies.references(tab)[0].Name}.w")
+        self.assertEqual(copies.plan_move_reference(cc, 0).warnings, [])
+
+    def test_refresh_of_a_listed_copy_no_clash(self):
+        """Refreshing a listed copy whose w the studio's own w overrides: no "stays ambiguous"
+        line, since the studio's order settles it (review R4)."""
+        b = self.source("B", w=20)
+        tab = self.tab(w=30)
+        copy = self.reference(tab, b)
+        self.edit(b, lambda doc: setattr(doc.getObject("Studio"), "w", 25))
+        plan = copies.plan_refresh(copy)
+        self.assertTrue(plan.ok, plan.report())
+        self.assertFalse([w for w in plan.warnings if "ambiguous" in w], plan.warnings)
+
+    def test_still_ambiguous(self):
+        """Outside one studio's group the rule is today's: a studio's group and a plain set are
+        ambiguous."""
+        tab = self.tab(w=30)
+        self.reference(tab, self.source("B", w=20))
+        plain = self.doc.addObject("App::VarSet", "Plain")
+        plain.addProperty("App::PropertyLength", "w")
+        plain.w = 7
+        self.doc.recompute()
+        self.assertAmbiguous()
+
+    def test_add_over_unlisted_copy_names_expressions(self):
+        """Listing a copy that defines w too: an expression keeping B's w is named, since #w now
+        means the new last reference's."""
+        tab = self.tab()
+        self.reference(tab, self.source("B", w=10))
+        pad = self.box("#w")
+        loose = copies.copy_from_fcstd(self.doc, self.source("C", w=20), "Studio")
+        plan = copies.plan_add_reference(tab, loose)
+        self.assertTrue(any("Box.Height" in w and f"#w now means {loose.Name}.w" in w
+                            for w in plan.warnings), plan.warnings)
+        copies.add_reference(tab, loose)
+        self.doc.recompute()
+        self.assertVolume(pad, 1000)
+
+    def test_two_studios_ambiguous(self):
+        self.tab("One", w=10)
+        self.tab("Two", w=20)
+        self.assertAmbiguous()
+
+    def test_choose_refused_in_group(self):
+        """A name the group orders takes no recorded choice."""
+        tab = self.tab(w=30)
+        cb = self.reference(tab, self.source("B", w=20))
+        with self.assertRaises(Exception) as caught:
+            copies.choose(self.doc, "w", f"{cb.Name}.w")
+        self.assertIn("ordered by", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

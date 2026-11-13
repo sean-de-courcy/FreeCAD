@@ -22,11 +22,13 @@
  ****************************************************************************/
 
 #include <algorithm>
+#include <cstddef>
 #include <regex>
 
 #include "VariableLookup.h"
 
 #include "Document.h"
+#include "DocumentTabs.h"
 #include "DocumentObject.h"
 #include "Expression.h"
 #include "ExpressionParser.h"
@@ -192,11 +194,58 @@ const VarSetCopy* importedSet(const DocumentObject* holder)
 }
 }  // namespace
 
+namespace
+{
+/// FreeCAD-CH ops#722: Onshape's precedence inside one Variable Studio (VR6): when every holder
+/// among @a refs is the studio S or a copy in S's reference list, S's own variable first, then
+/// the last-listed reference; else nullptr (no such studio, or holders of several)
+const DocumentObject* studioPrecedence(const std::vector<VariableRef>& refs)
+{
+    const DocumentObject* group = nullptr;
+    std::vector<DocumentObject*> list;
+    const DocumentObject* best = nullptr;
+    std::ptrdiff_t bestRank = 0;
+    for (const auto& ref : refs) {
+        const DocumentObject* studio = DocumentTabs::isVariableStudio(ref.holder)
+            ? ref.holder
+            : DocumentTabs::studioOf(ref.holder);
+        if (!studio || (group && studio != group)) {
+            return nullptr;
+        }
+        if (!group) {
+            group = studio;
+            list = DocumentTabs::variableReferences(studio);
+        }
+        std::ptrdiff_t rank = 0;  // the studio's own
+        if (ref.holder != studio) {
+            auto it = std::find(list.begin(), list.end(), ref.holder);
+            if (it == list.end()) {
+                return nullptr;
+            }
+            rank = list.end() - it;  // the last listed: 1
+        }
+        if (best && rank == bestRank) {
+            return nullptr;  // one holder twice: not an order
+        }
+        if (!best || rank < bestRank) {
+            best = ref.holder;
+            bestRank = rank;
+        }
+    }
+    return best;
+}
+}  // namespace
+
 const DocumentObject* App::chosenVariableHolder(const std::vector<VariableRef>& refs)
 {
     // FreeCAD-CH (ops#640, decision 317): VariableChoice.h has the rule.
     if (refs.size() < 2) {
         return nullptr;
+    }
+    // FreeCAD-CH ops#722: inside one Variable Studio the order decides, silently, as Onshape's;
+    // recorded choices count only outside it
+    if (auto ordered = studioPrecedence(refs)) {
+        return ordered;
     }
     std::string chosen;
     int others = 0;  // the sets among refs that aren't (attached) copies

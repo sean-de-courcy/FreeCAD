@@ -896,7 +896,7 @@ def copy_from_file(doc=None, path=None, varset=None, studio=None):
         doc = App.ActiveDocument or App.newDocument()
 
     def planner(choices):
-        return copies.plan_copy(doc, path, varset, **choices)
+        return copies.plan_copy(doc, path, varset, studio, **choices)
 
     def applier(choices):
         if studio is not None:
