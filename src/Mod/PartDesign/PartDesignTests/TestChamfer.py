@@ -586,6 +586,41 @@ class TestChamfer(unittest.TestCase):
         self.assertTrue(shape.isInside(V(5 - 0.55, 1, 0.01), 1e-9, True))
         self.assertTrue(shape.isInside(V(15 + 0.55, 1, 0.01), 1e-9, True))
 
+    # Two chamfered edges meeting at a corner with unequal wedge angles (notes/chamfer-chain-
+    # setbacks.md section 13 in the ops repository): a prism 10 high over the trapezoid (0, 0)
+    # (40, 0) (40, 20) (x, 20), size 2 on its top edge along y = 0 (90 degrees, picked first) and
+    # on the vertical edge at the origin (45 degrees for x = 20, 135 degrees for x = -20). The
+    # vertical edge gets 2 / tan(a / 2). Expected numbers: Onshape's, equal-distance chamfer with
+    # the Offset measurement (oracle 17, CM1), which the rule's closed form gives to 1e-8.
+
+    def _assertCornerChamfer(self, x, volume, area):
+        V = FreeCAD.Vector
+        outline = Part.makePolygon([V(0, 0, 0), V(40, 0, 0), V(40, 20, 0), V(x, 20, 0), V(0, 0, 0)])
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        feature = self.Doc.addObject("Part::Feature", "Prism")
+        feature.Shape = Part.Face(outline).extrude(V(0, 0, 10))
+        body.BaseFeature = feature
+        self.Doc.recompute()
+        base = body.BaseFeature
+        top = self._edge_between(base.Shape, (0, 0, 10), (40, 0, 10))
+        vertical = self._edge_between(base.Shape, (0, 0, 0), (0, 0, 10))
+        chamfer = self._add_chamfer(body, base, [top, vertical], 2)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        shape = chamfer.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), 8)
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-6)
+        self.assertAlmostEqual(shape.Area, area, delta=1e-6)
+
+    def testChamferCornerAcuteEdgeAfterASquareOne(self):
+        # 45 degrees: the vertical edge gets 2 / tan 22.5 = 4.828427 (the plain mitre: 5909.352958)
+        self._assertCornerChamfer(20, 5846.67816263, 2161.71637050)
+
+    def testChamferCornerObtuseEdgeAfterASquareOne(self):
+        # 135 degrees: the vertical edge gets 2 / tan 67.5 = 0.828427 (the plain mitre: 9906.686292)
+        self._assertCornerChamfer(-20, 9916.67816263, 3430.59074771)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")
