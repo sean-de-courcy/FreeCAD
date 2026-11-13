@@ -137,17 +137,19 @@ class TestFilletFailureText(FailureCase):
         self.assertAlmostEqual(body.Shape.Volume, 4000, delta=1e-6)
 
     def testTheReasonFollowsTheMessage(self):
-        """r 5.01 at an exact 5 step (FilletFallbackTest's stepped body, ops#601): OCCT fails and
-        the exact construction refuses; the message is Onshape's, the refusal's reason after it."""
+        """r 5.01 at an exact 5 step on its four edges (FilletFallbackTest's stepped body, ops#601):
+        OCCT fails and the exact construction refuses (the strips meet past the ledge's outer loop,
+        Onshape's *_OVERLAPS_EDGE_LOOP); the message is Onshape's, the refusal's reason after it.
+        On the one edge it now builds, trimmed by the step's wall (casebase #15, LD1-LD3)."""
         from parttests.FilletFallbackTest import stepped_body
 
         for kind, verb in (("Fillet", "fillet"), ("Chamfer", "chamfer")):
             with self.subTest(kind=kind):
                 doc = models.newDocument("PartDesignTestFilletFailureStep")
                 try:
-                    feature, _ = stepped_body(doc, kind, 5.01, 5, "one")
+                    feature, _ = stepped_body(doc, kind, 5.01, 5, "four")
                     self.assertOnshapeFailure(feature, verb)
-                    self.assertIn("runs off its face", feature.getStatusString())
+                    self.assertIn("run past the face's outer loop", feature.getStatusString())
                 finally:
                     App.closeDocument(doc.Name)
 
