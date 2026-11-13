@@ -3003,12 +3003,47 @@ TEST_F(FilletFallbackTest, roundEndingUnderALipIsTheRoundBelowItCutOffByItsUnder
     EXPECT_GT(removed, 16.0);
     EXPECT_LT(removed, 17.5);
     // Under the lip: one valid solid, the same volume gone, the lip's underside grown over it
+    {
+        // The construction's own verdict: its reason where it refuses
+        std::vector<TopoDS_Shape> shapes;
+        for (const auto& edge : edges) {
+            shapes.push_back(edge.getShape());
+        }
+        FF::Construction construction;
+        std::string reason;
+        EXPECT_TRUE(FF::construct(base.getShape(), shapes, fillet(lipRound), construction, &reason))
+            << reason;
+    }
     TopoShape round = dressUp(base, edges, fillet(lipRound));
     EXPECT_TRUE(BRepCheck_Analyzer(round.getShape()).IsValid());
     EXPECT_EQ(count(round.getShape(), TopAbs_SOLID), 1);
     double gone = Part::MassProperties::volume(base.getShape(), true)
         - Part::MassProperties::volume(round.getShape(), true);
-    EXPECT_NEAR(gone, removed, 1e-4);
+    // Both are differences of whole-body volumes (56 500 mm3, good to about 1e-8 of it)
+    EXPECT_NEAR(gone, removed, 2e-3);
+    // Onshape's own result on this model (oracle 17, Q-LIP, facts LP0-LP1): its round under the lip
+    // is the round without the lip cut off at z 21.225; the lip's underside grows from 8.100316
+    // to 9.120288, and two slivers of the corner cylinder, 0.474914 each, are split off in the
+    // lip's band. (Its dV is -16.72 +- 0.01; OCCT's own blend, with or without the lip, removes
+    // 16.665: the round's shape is OCCT's, not this construction's)
+    int slivers = 0;
+    bool underside = false;
+    for (TopExp_Explorer it(round.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(it.Current(), props);
+        if (surface.GetType() == GeomAbs_Cylinder
+            && std::abs(surface.Cylinder().Radius() - lipCorner) < 1e-9
+            && std::abs(props.Mass() - 0.474914) < 1e-3) {
+            ++slivers;
+        }
+        if (surface.GetType() == GeomAbs_Plane && std::abs(props.Mass() - 9.120288) < 2e-3
+            && std::abs(props.CentreOfMass().Z() - lipUnderside) < 1e-7) {
+            underside = true;
+        }
+    }
+    EXPECT_EQ(slivers, 2);
+    EXPECT_TRUE(underside);
     // Four blend faces (the seam splits the middle one) and the corner cylinder's two slivers
     // above them, split off; no step under the lip (the cap merges into the underside)
     EXPECT_EQ(count(round.getShape(), TopAbs_FACE), count(base.getShape(), TopAbs_FACE) + 6);

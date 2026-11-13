@@ -3701,7 +3701,9 @@ TopoDS_Shape constructUnderOverhang(
     if (countSolids(tool) < 1 || !BRepCheck_Analyzer(tool).IsValid()) {
         refuse("a round under an overhang removes no valid solid");
     }
-    const double toolVolume = volumeOf(tool);
+    // Adaptively: the tool is a sliver between free-form faces, and OCCT's default integration
+    // of it is off by more than a percent (16.863 for 16.665 on the designed case)
+    const double toolVolume = MassProperties::volume(tool, true);
     if (toolVolume <= 0) {
         refuse("a round under an overhang removes no valid solid");
     }
