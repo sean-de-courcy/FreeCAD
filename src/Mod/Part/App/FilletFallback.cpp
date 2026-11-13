@@ -7424,11 +7424,11 @@ TopoDS_Shape constructShape(
             }
         }
     }
-    // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: where it would
-    // have reached an unselected edge, the construction (which stops there) differs from it
+    // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: a pick
+    // propagates (as in Onshape), so the construction takes OCCT's whole contour as selected
     for (const auto& edge : request.contour) {
-        if (!ctx.selected.Contains(edge)) {
-            refuse("OCCT's contour runs on along a tangent chain onto an unselected edge");
+        if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+            ctx.selected.Add(edge);
         }
     }
     for (int i = 1; i <= ctx.selected.Extent(); ++i) {
@@ -12662,6 +12662,123 @@ bool constructRims(
     return false;
 }
 
+namespace
+{
+
+/** Where a selected edge's round or chamfer, with OCCT's tangent chain, would run across a strip of
+ * face narrower than its setback, onto the face beyond: the user's reason when the dress-up fails
+ * (ops#640; a 0.06 mm strip between a hole's round and the plate's outer round). The strip is the
+ * shortest distance, on a face of a chain edge, from that edge to an edge of the face that is not
+ * in the chain and touches none of it. Empty where every strip is wide enough */
+std::string narrowStrip(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopTools_IndexedMapOfShape chain;
+    auto addEdges = [&](const std::vector<TopoDS_Shape>& shapes) {
+        for (const auto& edge : shapes) {
+            if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                chain.Add(edge);
+            }
+        }
+    };
+    addEdges(edges);
+    addEdges(request.contour);
+    TopTools_IndexedMapOfShape chainVertices;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        TopExp::MapShapes(chain(i), TopAbs_VERTEX, chainVertices);
+    }
+    auto touchesChain = [&](const TopoDS_Shape& edge) {
+        for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+            if (chainVertices.Contains(it.Current())) {
+                return true;
+            }
+        }
+        return false;
+    };
+    double size = request.size1;
+    if (request.kind == Kind::Chamfer && request.chamferType == ChamferType::twoDistances) {
+        size = std::max(request.size1, request.size2);
+    }
+    double width = std::numeric_limits<double>::infinity();
+    TopoDS_Face beyond;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        if (BRep_Tool::Degenerated(edge) || !edgeFaces.Contains(edge)) {
+            continue;
+        }
+        const TopTools_ListOfShape& faces = edgeFaces.FindFromKey(edge);
+        if (faces.Extent() != 2) {
+            continue;
+        }
+        // The setback on the faces: a round's contact line lies r tan(a/2) from the edge, a the
+        // angle between the faces' normals at the edge's middle (r on a right angle)
+        double setback = size;
+        if (request.kind == Kind::Fillet) {
+            BRepAdaptor_Curve curve(edge);
+            gp_Pnt middle = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
+            try {
+                gp_Dir n1 = outwardNormalAny(TopoDS::Face(faces.First()), middle);
+                gp_Dir n2 = outwardNormalAny(TopoDS::Face(faces.Last()), middle);
+                double angle = n1.Angle(n2);
+                if (angle < 1e-3) {
+                    continue;
+                }
+                setback = size * std::tan(0.5 * angle);
+            }
+            catch (const Refusal&) {
+                // No normal there: a right angle's setback
+            }
+            catch (const Standard_Failure&) {
+            }
+        }
+        for (const auto& faceShape : faces) {
+            const TopoDS_Face& face = TopoDS::Face(faceShape);
+            for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& other = TopoDS::Edge(it.Current());
+                if (chain.Contains(other) || BRep_Tool::Degenerated(other) || touchesChain(other)) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape distance(edge, other);
+                if (!distance.IsDone() || distance.Value() >= setback - linearTolerance
+                    || distance.Value() >= width) {
+                    continue;
+                }
+                width = distance.Value();
+                beyond = face;
+                for (const auto& across : edgeFaces.FindFromKey(other)) {
+                    if (!across.IsSame(face)) {
+                        beyond = TopoDS::Face(across);
+                    }
+                }
+            }
+        }
+    }
+    if (beyond.IsNull()) {
+        return {};
+    }
+    auto shortly = [](double value) {
+        std::ostringstream ss;
+        ss.precision(4);
+        ss << value;
+        return ss.str();
+    };
+    GeomAbs_SurfaceType type = BRepAdaptor_Surface(beyond, Standard_False).GetType();
+    bool round = type == GeomAbs_Cylinder || type == GeomAbs_Torus || type == GeomAbs_Sphere
+        || type == GeomAbs_BSplineSurface || type == GeomAbs_SurfaceOfRevolution;
+    std::string what = request.kind == Kind::Fillet ? "the round of radius " + shortly(request.size1)
+                                                    : "the chamfer of size " + shortly(size);
+    return what + " mm would overflow a strip of face " + shortly(width)
+        + " mm wide onto the neighbouring " + (round ? "round" : "face")
+        + ", which is not built";
+}
+
+}  // namespace
+
 bool construct(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
@@ -12768,6 +12885,16 @@ bool construct(
     }
     if (!second.empty()) {
         why += "; built in front of the face its edge ends against: " + second;
+    }
+    // The cause the user can act on first, where there is one (ops#640)
+    std::string strip;
+    try {
+        strip = narrowStrip(base, edges, request);
+    }
+    catch (const Standard_Failure&) {
+    }
+    if (!strip.empty()) {
+        why = strip + " (" + why + ")";
     }
     if (reason) {
         *reason = why;
