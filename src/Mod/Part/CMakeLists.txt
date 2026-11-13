@@ -83,6 +83,7 @@ set(Part_tests
     parttests/part_test_objects.py
     parttests/regression_tests.py
     parttests/RefineElementMapTest.py
+    parttests/RefineFuseEdgesTest.py
     parttests/RefineInternalVertexTest.py
     parttests/SplitEdgeNamesTest.py
     parttests/TopoShapeListTest.py

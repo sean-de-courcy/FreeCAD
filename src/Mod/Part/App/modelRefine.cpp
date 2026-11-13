@@ -25,12 +25,15 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <utility>
 #include <numbers>
 #include <iterator>
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_TEdge.hxx>
+#include <BRep_TVertex.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
@@ -38,11 +41,17 @@
 #include <BRepLib_FuseEdges.hxx>
 #include <BRepLib_MakeWire.hxx>
 #include <BRepTools.hxx>
+#include <BSplCLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2dConvert_CompCurveToBSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Conic.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
@@ -52,6 +61,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
+#include <Precision.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <ShapeAnalysis_Shell.hxx>
 #include <ShapeBuild_ReShape.hxx>
@@ -964,6 +974,254 @@ static void collectSeamEdges(const TopoDS_Shell& shell, TopTools_IndexedMapOfSha
     }
 }
 
+// The fuse of edges, checked (ops#640, Case Base's Finger Hole after an exact Finger Grip Overhang
+// Fillet 2). BRepLib_FuseEdges joins the 2D curves of the edges it fuses (UpdatePCurve): where
+// the first edge's does not span the fused edge, it adds the others' whole, not over each edge's
+// own range. Two spans of one B-spline on a wall, the first with a 2D curve of its own on the
+// wall's plane and the second on a part of a longer one, gave an edge whose 2D curve ran back
+// along the whole of the second: 7.98 mm off its 3D curve. The shape check passes that, because
+// the face fix raises the edge's and its vertices' tolerance to cover the gap, and every later
+// Boolean on the wall is wrong. So: a fused edge whose curve on a face leaves its 3D curve gets
+// that curve joined again from its edges' own ranges; one that still leaves it is not fused; and
+// a fuse after which any tolerance grew past growthAllowed() is undone for its edges.
+
+// What a tolerance may become through a fuse of edges
+static double growthAllowed(double tolerance)
+{
+    return 10.0 * std::max(tolerance, 1e-6);
+}
+
+// The largest distance of an edge's curve on one surface from its 3D curve, at the same parameter
+static double curveOnSurfaceGap(
+    const Handle(Geom_Curve) & curve,
+    const TopLoc_Location& location,
+    double first,
+    double last,
+    const Handle(Geom2d_Curve) & curve2d,
+    const Handle(Geom_Surface) & surface,
+    const TopLoc_Location& where,
+    double first2d,
+    double last2d
+)
+{
+    constexpr double unknown = 1e100;
+    try {
+        const gp_Trsf toWorld = location.Transformation();
+        const gp_Trsf surfaceToWorld = where.Transformation();
+        double gap = 0.0;
+        constexpr int samples = 9;
+        for (int index = 0; index < samples; ++index) {
+            const double at = static_cast<double>(index) / (samples - 1);
+            const gp_Pnt on3d = curve->Value(first + (last - first) * at).Transformed(toWorld);
+            const gp_Pnt2d uv = curve2d->Value(first2d + (last2d - first2d) * at);
+            const gp_Pnt onFace = surface->Value(uv.X(), uv.Y()).Transformed(surfaceToWorld);
+            gap = std::max(gap, on3d.Distance(onFace));
+        }
+        return gap;
+    }
+    catch (const Standard_Failure&) {
+        return unknown;
+    }
+}
+
+// The curve of a fused edge on one surface, joined from its edges' own curves there: each over
+// its edge's own range, in the order of the parameter. Null where they don't adjoin
+static Handle(Geom2d_Curve) joinedCurveOnSurface(
+    const TopTools_ListOfShape& edges,
+    const Handle(Geom_Surface) & surface,
+    const TopLoc_Location& where,
+    double first,
+    double last
+)
+{
+    struct Piece
+    {
+        double first;
+        double last;
+        Handle(Geom2d_Curve) curve;
+    };
+    try {
+        std::vector<Piece> pieces;
+        TopTools_ListIteratorOfListOfShape member;
+        for (member.Initialize(edges); member.More(); member.Next()) {
+            double pieceFirst = 0.0;
+            double pieceLast = 0.0;
+            const Handle(Geom2d_Curve) curve = BRep_Tool::CurveOnSurface(
+                TopoDS::Edge(member.Value()),
+                surface,
+                where,
+                pieceFirst,
+                pieceLast
+            );
+            if (curve.IsNull()) {
+                return {};
+            }
+            pieces.push_back({pieceFirst, pieceLast, curve});
+        }
+        std::sort(pieces.begin(), pieces.end(), [](const Piece& a, const Piece& b) {
+            return a.first < b.first;
+        });
+        const double slack = 1e-9 * std::max(1.0, std::abs(last - first));
+        if (pieces.empty() || std::abs(pieces.front().first - first) > slack
+            || std::abs(pieces.back().last - last) > slack) {
+            return {};
+        }
+        for (std::size_t index = 1; index < pieces.size(); ++index) {
+            if (std::abs(pieces[index - 1].last - pieces[index].first) > slack) {
+                return {};
+            }
+        }
+        Geom2dConvert_CompCurveToBSplineCurve join(
+            new Geom2d_TrimmedCurve(pieces[0].curve, pieces[0].first, pieces[0].last)
+        );
+        for (std::size_t index = 1; index < pieces.size(); ++index) {
+            const Handle(Geom2d_BoundedCurve) next
+                = new Geom2d_TrimmedCurve(pieces[index].curve, pieces[index].first, pieces[index].last);
+            if (!join.Add(next, 1e-6, Standard_True)) {
+                return {};
+            }
+        }
+        const Handle(Geom2d_BSplineCurve) joined = join.BSplineCurve();
+        if (joined.IsNull()) {
+            return {};
+        }
+        if (std::abs(joined->FirstParameter() - first) > slack
+            || std::abs(joined->LastParameter() - last) > slack) {
+            TColStd_Array1OfReal knots(1, joined->NbKnots());
+            joined->Knots(knots);
+            BSplCLib::Reparametrize(first, last, knots);
+            joined->SetKnots(knots);
+        }
+        return joined;
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
+// Whether a fused edge's curves on its faces follow its 3D curve within \a allowed, after
+// joining again those that don't (above)
+static bool fusedEdgeFollowsItsFaces(
+    const TopoDS_Edge& fused,
+    const TopTools_ListOfShape& edges,
+    double allowed
+)
+{
+    TopLoc_Location location;
+    double first = 0.0;
+    double last = 0.0;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(fused, location, first, last);
+    if (curve.IsNull()) {
+        return true;
+    }
+    struct OnSurface
+    {
+        Handle(Geom_Surface) surface;
+        TopLoc_Location where;
+    };
+    auto gapOf = [&](int rank, OnSurface& on) {
+        Handle(Geom2d_Curve) curve2d;
+        double first2d = 0.0;
+        double last2d = 0.0;
+        BRep_Tool::CurveOnSurface(fused, curve2d, on.surface, on.where, first2d, last2d, rank);
+        if (curve2d.IsNull() || on.surface.IsNull()) {
+            return -1.0;
+        }
+        return curveOnSurfaceGap(
+            curve,
+            location,
+            first,
+            last,
+            curve2d,
+            on.surface,
+            on.where,
+            first2d,
+            last2d
+        );
+    };
+    std::vector<OnSurface> off;
+    for (int rank = 1;; ++rank) {
+        OnSurface on;
+        const double gap = gapOf(rank, on);
+        if (gap < 0.0) {
+            break;
+        }
+        if (gap > allowed) {
+            off.push_back(on);
+        }
+    }
+    if (off.empty()) {
+        return true;
+    }
+    BRep_Builder builder;
+    for (const OnSurface& on : off) {
+        const Handle(Geom2d_Curve) joined
+            = joinedCurveOnSurface(edges, on.surface, on.where, first, last);
+        if (joined.IsNull()) {
+            return false;
+        }
+        builder.UpdateEdge(fused, joined, on.surface, on.where, BRep_Tool::Tolerance(fused));
+    }
+    for (int rank = 1;; ++rank) {
+        OnSurface on;
+        const double gap = gapOf(rank, on);
+        if (gap < 0.0) {
+            break;
+        }
+        if (gap > allowed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The tolerances of a shape's edges and vertices: read before a fuse of edges, compared and put
+// back after one that is undone (the face fix writes into what the fused shape shares with it)
+struct Tolerances
+{
+    TopTools_IndexedMapOfShape shapes;
+    std::vector<double> values;
+
+    explicit Tolerances(const TopoDS_Shape& shape)
+    {
+        TopExp::MapShapes(shape, TopAbs_EDGE, shapes);
+        TopExp::MapShapes(shape, TopAbs_VERTEX, shapes);
+        values.reserve(shapes.Extent());
+        for (int index = 1; index <= shapes.Extent(); ++index) {
+            values.push_back(now(shapes(index)));
+        }
+    }
+    static double now(const TopoDS_Shape& shape)
+    {
+        return shape.ShapeType() == TopAbs_EDGE ? BRep_Tool::Tolerance(TopoDS::Edge(shape))
+                                                : BRep_Tool::Tolerance(TopoDS::Vertex(shape));
+    }
+    bool grew() const
+    {
+        for (int index = 1; index <= shapes.Extent(); ++index) {
+            if (now(shapes(index)) > growthAllowed(values[index - 1])) {
+                return true;
+            }
+        }
+        return false;
+    }
+    void putBack() const
+    {
+        for (int index = 1; index <= shapes.Extent(); ++index) {
+            const TopoDS_Shape& shape = shapes(index);
+            if (now(shape) == values[index - 1]) {
+                continue;
+            }
+            if (shape.ShapeType() == TopAbs_EDGE) {
+                Handle(BRep_TEdge)::DownCast(shape.TShape())->Tolerance(values[index - 1]);
+            }
+            else {
+                Handle(BRep_TVertex)::DownCast(shape.TShape())->Tolerance(values[index - 1]);
+            }
+        }
+    }
+};
+
 FaceTypedBSpline::FaceTypedBSpline()
     : FaceTypedBase(GeomAbs_BSplineSurface)
 {}
@@ -1379,21 +1637,85 @@ bool FaceUniter::process()
             }
         }
 
-        BRepLib_FuseEdges edgeFuse(workShell);
         TopTools_IndexedMapOfShape map;
 // TODO: change this version after occ fix. Freecad Mantis 1450
 #if OCC_VERSION_HEX <= 0x7fffff
         collectConicEdges(workShell, map);
 #endif
         collectSeamEdges(workShell, map);
-        edgeFuse.AvoidEdges(map);
+        // The fuse, checked (above, "The fuse of edges, checked"): run again without the edges
+        // whose fused edge fails, until none does
+        const Tolerances before(workShell);
+        std::unique_ptr<BRepLib_FuseEdges> fuser;
+        TopTools_DataMapIteratorOfDataMapOfShapeShape mapIt;
+        while (true) {
+            fuser = std::make_unique<BRepLib_FuseEdges>(workShell);
+            fuser->AvoidEdges(map);
+            TopTools_DataMapOfIntegerListOfShape fusedEdges;
+            TopTools_DataMapOfIntegerShape resultEdges;
+            fuser->Edges(fusedEdges);
+            fuser->ResultEdges(resultEdges);
+            const int avoided = map.Extent();
+            auto avoid = [&map](const TopTools_ListOfShape& edges) {
+                TopTools_ListIteratorOfListOfShape member;
+                for (member.Initialize(edges); member.More(); member.Next()) {
+                    map.Add(member.Value());
+                }
+            };
+            auto inputTolerance = [](const TopTools_ListOfShape& edges) {
+                double tolerance = 0.0;
+                TopTools_ListIteratorOfListOfShape member;
+                for (member.Initialize(edges); member.More(); member.Next()) {
+                    tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(member.Value())));
+                }
+                return tolerance;
+            };
+            // Before the substitution and the face fix: each fused edge's curves on its faces
+            TopTools_DataMapIteratorOfDataMapOfIntegerListOfShape group;
+            for (group.Initialize(fusedEdges); group.More(); group.Next()) {
+                if (resultEdges.IsBound(group.Key())
+                    && !fusedEdgeFollowsItsFaces(
+                        TopoDS::Edge(resultEdges(group.Key())),
+                        group.Value(),
+                        growthAllowed(inputTolerance(group.Value()))
+                    )) {
+                    avoid(group.Value());
+                }
+            }
+            if (map.Extent() != avoided) {
+                continue;
+            }
+            TopTools_DataMapOfShapeShape fixedFaces;
+            fuser->Faces(fixedFaces);
+            for (mapIt.Initialize(fixedFaces); mapIt.More(); mapIt.Next()) {
+                ShapeFix_Face faceFixer(TopoDS::Face(mapIt.Value()));
+                faceFixer.Perform();
+            }
+            // After them: no tolerance grew, of a fused edge or of anything the shape had
+            bool grew = false;
+            for (group.Initialize(fusedEdges); group.More(); group.Next()) {
+                if (resultEdges.IsBound(group.Key())
+                    && BRep_Tool::Tolerance(TopoDS::Edge(resultEdges(group.Key())))
+                        > growthAllowed(inputTolerance(group.Value()))) {
+                    avoid(group.Value());
+                    grew = true;
+                }
+            }
+            if (!grew && before.grew()) {
+                // not one fused edge's own: none of this fuse is kept
+                for (group.Initialize(fusedEdges); group.More(); group.Next()) {
+                    avoid(group.Value());
+                }
+                grew = true;
+            }
+            if (!grew || map.Extent() == avoided) {
+                break;
+            }
+            before.putBack();
+        }
+        BRepLib_FuseEdges& edgeFuse = *fuser;
         TopTools_DataMapOfShapeShape affectedFaces;
         edgeFuse.Faces(affectedFaces);
-        TopTools_DataMapIteratorOfDataMapOfShapeShape mapIt;
-        for (mapIt.Initialize(affectedFaces); mapIt.More(); mapIt.Next()) {
-            ShapeFix_Face faceFixer(TopoDS::Face(mapIt.Value()));
-            faceFixer.Perform();
-        }
         workShell = TopoDS::Shell(edgeFuse.Shape());
 
         // A difference of orientation between original and fused faces was previously detected
