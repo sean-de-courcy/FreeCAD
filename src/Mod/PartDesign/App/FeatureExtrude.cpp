@@ -1079,18 +1079,18 @@ gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
     return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
 }
 
-// A point, in global coordinates, of the plane a side up to a face ends on, where that side is
-// better built blind (FreeCAD-CH ops#751): the face lies in a plane parallel to the profile plane,
-// and the profile holds an edge that is neither a line nor a circle (an ellipse, a spline). A
-// straight extrusion ends on such a plane whatever the face's extent (the up-to prism takes the
+// The plane (a point and its normal, in global coordinates) of the face a side goes up to, where
+// that side is better built blind when the plane is parallel to the profile plane (FreeCAD-CH
+// ops#751; the caller tests that in the frame it builds in): the face is planar, and the profile
+// holds an edge that is neither a line nor a circle (an ellipse, a spline). A straight extrusion
+// ends on a plane parallel to its profile whatever the face's extent (the up-to prism takes the
 // whole plane of a face smaller than the profile too), so the blind side reaching it is the same
 // solid. BRepFeat's prism returns such an edge's end on the face as an approximated intersection
 // curve, in pieces (the replica's #161: two B-splines where Onshape has one ellipse, so a later
 // feature finds two edges, and two faces, for one). Nothing for any other reference (a datum, a
-// curved or tilted face) or profile (lines and circles end exact either way, and keep their names)
-std::optional<gp_Pnt> parallelPlaneEnd(
+// curved face) or profile (lines and circles end exact either way, and keep their names)
+std::optional<gp_Ax1> upToPlaneForBlindSide(
     const App::PropertyLinkSub& link,
-    const Base::Vector3d& profileNormal,
     const TopoShape& profile
 )
 {
@@ -1136,12 +1136,7 @@ std::optional<gp_Pnt> parallelPlaneEnd(
     if (surface.GetType() != GeomAbs_Plane) {
         return std::nullopt;
     }
-    const gp_Pln plane = surface.Plane();
-    const gp_Dir normal(profileNormal.x, profileNormal.y, profileNormal.z);
-    if (!plane.Axis().Direction().IsParallel(normal, Precision::Angular())) {
-        return std::nullopt;
-    }
-    return plane.Location();
+    return surface.Plane().Axis();
 }
 
 // Set while a studio owner builds one region of its profile (ops#654 S2), so that the region's
@@ -1597,11 +1592,24 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // One side up to a face in a plane parallel to the profile plane ends the same way
         // (FreeCAD-CH ops#751): where its profile holds an ellipse or a spline, it is built blind
         // to that plane, so its far edges are the profile's own curves, as Onshape's are
-        // (parallelPlaneEnd()). A face in the profile plane, or an offset that leaves nothing,
-        // stays with the up-to prism and its messages
+        // (upToPlaneForBlindSide()). Parallel is tested where the side is built: in the feature's
+        // frame, and at a pattern's instance (Reapply) on the face carried onto the seed, which a
+        // rotation may tilt. A face in the profile plane, or an offset that leaves nothing, stays
+        // with the up-to prism and its messages
         std::optional<gp_Pnt> planeEnd;
         if (method == "UpToFace" && Sidemethod == "One side") {
-            planeEnd = parallelPlaneEnd(UpToFace, SketchVector, sketchshape);
+            if (const auto plane = upToPlaneForBlindSide(UpToFace, sketchshape)) {
+                gp_Dir faceNormal = plane->Direction();
+                faceNormal.Transform(invTrsf);
+                if (reapplyRun) {
+                    faceNormal.Transform(reapplyRun->toSeed);
+                }
+                gp_Dir sketchNormal(SketchVector.x, SketchVector.y, SketchVector.z);
+                sketchNormal.Transform(invTrsf);
+                if (faceNormal.IsParallel(sketchNormal, Precision::Angular())) {
+                    planeEnd = plane->Location();
+                }
+            }
         }
         if (method == "UpToVertex" || planeEnd
             || (Sidemethod == "Two sides" && method2 == "UpToVertex")) {
