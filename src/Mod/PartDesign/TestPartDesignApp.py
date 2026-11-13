@@ -180,6 +180,7 @@ from PartDesignTests.TestRevolveOperations import TestRevolveOperations  # FreeC
 from PartDesignTests.TestSiblings import TestSiblings  # FreeCAD-CH, ops#325
 from PartDesignTests.TestMerge import TestMerge  # FreeCAD-CH, ops#325
 from PartDesignTests.TestSplit import TestSplit  # FreeCAD-CH, ops#325
+from PartDesignTests.TestScaling import TestScaling  # FreeCAD-CH, ops#640 item 8
 from PartDesignTests.TestMergeScope import TestMergeScope  # FreeCAD-CH, ops#640
 from PartDesignTests.TestResultRules import TestResultRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDatumPlanePoint import TestDatumPlanePoint  # FreeCAD-CH, ops#640

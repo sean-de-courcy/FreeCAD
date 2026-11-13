@@ -100,6 +100,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestSiblings.py
     PartDesignTests/TestSketch.py
     PartDesignTests/TestSplit.py
+    PartDesignTests/TestScaling.py
     PartDesignTests/TestDeletePart.py
     PartDesignTests/TestStudio.py
     PartDesignTests/TestStudioSequence.py
