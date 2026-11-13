@@ -16,8 +16,8 @@
  * TopoShape::makeElementFillet / makeElementChamfer try it only after OCCT has failed, has built
  * an invalid result without an error (ops#297), or has left a face of zero width (thinFace(),
  * ops#298), and, for a fillet with a reflex corner with a circle (reflexCircleCorner(), ops#640),
- * before OCCT's valid result is trusted: there it is kept, with a warning, only if the construction
- * refuses. Whenever a configuration is outside the scope or a check fails, build() refuses and
+ * where OCCT's valid result is not Onshape's: there the fillet fails if the construction refuses.
+ * Whenever a configuration is outside the scope or a check fails, build() refuses and
  * the caller raises OCCT's original error or one for the thin face, or returns OCCT's invalid
  * result for the feature's check (Part::checkDressUp()): never a silent wrong solid.
  *
@@ -161,11 +161,13 @@ PartExport bool build(
  * vertex where exactly two selected edges meet, at least one of them a circle, the third edge
  * unselected, and each selected edge leaves the vertex towards the outer side of the other's wall
  * (the outline is reflex there). OCCT's round there can be valid and still wrong (a patch, or a
- * misplaced mitre with a ring torus), so makeElementFillet asks the exact construction first.
+ * misplaced mitre with a ring torus), so makeElementFillet asks the exact construction, and fails
+ * where it refuses. corner, if not null, receives the first such vertex.
  */
 PartExport bool reflexCircleCorner(
     const TopoDS_Shape& base,
-    const std::vector<TopoDS_Shape>& edges
+    const std::vector<TopoDS_Shape>& edges,
+    gp_Pnt* corner = nullptr
 );
 
 /// What construct() makes: a shape and its history from the base, without names (kernel safety S1)

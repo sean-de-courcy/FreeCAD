@@ -381,6 +381,38 @@ class FilletFallbackTest(unittest.TestCase):
                 # (the integral above is good to about 1e-6 of it)
                 self.assertAlmostEqual(base.Volume - result.Volume, removed, delta=1e-5 * removed)
 
+    def assertFailsAtAReflexCorner(self, shape, r, reason):
+        """The fillet fails, and its error names the reflex corner and why it was not built: OCCT's
+        own result there is not Onshape's, and is never returned"""
+        with self.assertRaises(Exception) as raised:
+            shape.makeFillet(r, rim_edges(shape, 2.0))
+        message = str(raised.exception)
+        self.assertIn("reflex corner with a circle", message)
+        self.assertIn(reason, message)
+
+    def testReflexCornerWithASpindleTorusFails(self):
+        # The round three quarters of the bump's radius (a spindle torus, M < r): the mitre runs
+        # on to the corner's mirror image, which is not built yet. OCCT's result (valid, two
+        # B-spline patches, 0.002 short of the rule's 0.54125010) is not returned
+        base, box, bump = bump_on_an_edge(0.4)
+        self.assertAlmostEqual(bump_rim_removed(0.4, 0.3), 0.54125010, delta=1e-6)
+        self.assertFailsAtAReflexCorner(base, 0.3, "do not close within their run on")
+
+    def testReflexCornersOfARidgeStripFail(self):
+        # A row of bumps on a straight edge with valleys between them, each bump meeting its
+        # valleys at right angles: the end bumps' reflex corners are built, the convex corners of
+        # a bump with a valley are not yet (and OCCT fails there too)
+        rho = valley = 0.4
+        pitch = 2 * math.hypot(rho, valley)
+        strip = Part.makeBox(4 * pitch, 4, 2).fuse(
+            [Part.makeCylinder(rho, 2, V(pitch * (i + 1), 4, 0)) for i in range(3)]
+        )
+        strip = strip.removeSplitter().cut(
+            [Part.makeCylinder(valley, 2, V(pitch * (i + 1.5), 4, 0)) for i in range(2)]
+        )
+        with self.assertRaises(Exception):
+            strip.removeSplitter().makeFillet(0.2, rim_edges(strip.removeSplitter(), 2.0))
+
     def testReflexCornerOfStraightEdges(self):
         # An L plate's inner corner: OCCT's own mitre, left alone (closed form)
         outline = [V(0, 0, 0), V(20, 0, 0), V(20, 8, 0), V(8, 8, 0), V(8, 20, 0), V(0, 20, 0)]

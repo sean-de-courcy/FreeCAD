@@ -5395,15 +5395,116 @@ void sectionNodes(double r, F f)
     }
 }
 
-/** The volume of the part of the sweep where inside(point) holds: over the section, the length of
- * each point's path inside, found by sampling the path and bisecting each change. Where fine(point)
- * holds at either end of a step (near the corner), the step is sampled 32 times as finely: a
- * stretch inside shorter than a step would be missed, and the pieces thin out to nothing there
+/** Where a condition may change along the path of one point of a sweep's section: the path is a
+ * circle about the sweep's axis or a line along it, and the conditions of a reflex corner are
+ * distances from vertical axes and from vertical planes, so the changes are roots of
+ * a + b cos(t - c) or of a quadratic, in closed form
  */
-template<class In, class Fine>
-double sweptInside(const Sweep& sweep, In inside, Fine fine)
+struct PathChanges
+{
+    const Sweep& sweep;
+    gp_Dir up;  // the shared face's normal: the conditions are taken in the plane square to it
+    gp_Pnt x0;
+    double from = 0.0;
+    double to = 0.0;
+    double rho = 0.0;  // circle: the path's radius, and the angle of x0 in the sweep's frame
+    double theta0 = 0.0;
+    std::vector<double>& changes;
+
+    PathChanges(
+        const Sweep& sweep,
+        const gp_Dir& up,
+        const gp_Pnt& x0,
+        double from,
+        double to,
+        std::vector<double>& changes
+    )
+        : sweep(sweep)
+        , up(up)
+        , x0(x0)
+        , from(from)
+        , to(to)
+        , changes(changes)
+    {
+        if (!sweep.line) {
+            gp_Vec w(sweep.frame.Location(), x0);
+            double x = w.Dot(gp_Vec(sweep.frame.XDirection()));
+            double y = w.Dot(gp_Vec(sweep.frame.YDirection()));
+            rho = std::hypot(x, y);
+            theta0 = std::atan2(y, x);
+        }
+    }
+
+    void add(double t)
+    {
+        if (t > from && t < to) {
+            changes.push_back(t);
+        }
+    }
+    /// rho * amplitude * cos(t + theta0 - phase) = value
+    void cosine(double amplitude, double phase, double value)
+    {
+        double scale = rho * amplitude;
+        if (scale < 1e-12 || std::abs(value) > scale) {
+            return;
+        }
+        double angle = std::acos(value / scale);
+        for (int k = -2; k <= 2; ++k) {
+            add(phase - theta0 + angle + 2 * pi * k);
+            add(phase - theta0 - angle + 2 * pi * k);
+        }
+    }
+    /// The path's point is at the distance from the vertical axis through the point
+    void distance(const gp_Pnt& axisPoint, double radius)
+    {
+        if (radius <= 0) {
+            return;
+        }
+        if (sweep.line) {
+            gp_Vec w(axisPoint, x0);
+            w -= gp_Vec(up) * w.Dot(gp_Vec(up));
+            double half = w.Dot(gp_Vec(sweep.direction));
+            double rest = half * half - (w.Dot(w) - radius * radius);
+            if (rest >= 0) {
+                add(-half + std::sqrt(rest));
+                add(-half - std::sqrt(rest));
+            }
+            return;
+        }
+        gp_Vec a(sweep.frame.Location(), axisPoint);
+        double ax = a.Dot(gp_Vec(sweep.frame.XDirection()));
+        double ay = a.Dot(gp_Vec(sweep.frame.YDirection()));
+        double d = std::hypot(ax, ay);
+        // |p - a|^2 = rho^2 + d^2 - 2 rho d cos(t + theta0 - alpha)
+        cosine(2 * d, std::atan2(ay, ax), rho * rho + d * d - radius * radius);
+    }
+    /// The path's point is at the (signed) offset from the vertical plane through the point
+    void offset(const gp_Pnt& planePoint, const gp_Dir& normal, double value)
+    {
+        if (sweep.line) {
+            double along = gp_Vec(normal).Dot(gp_Vec(sweep.direction));
+            if (std::abs(along) > 1e-12) {
+                add((value - gp_Vec(planePoint, x0).Dot(gp_Vec(normal))) / along);
+            }
+            return;
+        }
+        double nx = gp_Vec(normal).Dot(gp_Vec(sweep.frame.XDirection()));
+        double ny = gp_Vec(normal).Dot(gp_Vec(sweep.frame.YDirection()));
+        double base = gp_Vec(planePoint, sweep.frame.Location()).Dot(gp_Vec(normal));
+        // n . (p - p0) = base + rho |n| cos(t + theta0 - beta)
+        cosine(std::hypot(nx, ny), std::atan2(ny, nx), value - base);
+    }
+};
+
+/** The volume of the part of the sweep where inside(point) holds: over the section, the length of
+ * each point's path inside. changes(point, from, to, list) lists where inside() may change along
+ * the path (PathChanges); between two of them it is taken at the middle
+ */
+template<class In, class Changes>
+double sweptInside(const Sweep& sweep, In inside, Changes changes)
 {
     double volume = 0.0;
+    std::vector<double> at;
     sectionNodes(sweep.r, [&](double u, double v, double w) {
         gp_Pnt x0 = sweep.node(u, v);
         double from = 0.0;
@@ -5413,48 +5514,16 @@ double sweptInside(const Sweep& sweep, In inside, Fine fine)
         if (!(to > from)) {
             return;
         }
-        int samples = static_cast<int>(
-            std::clamp(std::ceil((to - from) * speed / (sweep.r / 8)), 16.0, 20000.0)
-        );
-        double dt = (to - from) / samples;
+        at.clear();
+        changes(x0, from, to, at);
+        at.push_back(from);
+        at.push_back(to);
+        std::sort(at.begin(), at.end());
         double length = 0.0;
-        // One step [t0, t1], the state at t0 known
-        auto step = [&](double t0, double t1, bool& previous) {
-            bool now = inside(sweep.at(x0, t1));
-            if (now == previous) {
-                if (now) {
-                    length += t1 - t0;
-                }
+        for (size_t i = 0; i + 1 < at.size(); ++i) {
+            if (at[i + 1] - at[i] > 1e-14 && inside(sweep.at(x0, (at[i] + at[i + 1]) / 2))) {
+                length += at[i + 1] - at[i];
             }
-            else {
-                double lo = t0;
-                double hi = t1;
-                for (int it = 0; it < 40; ++it) {
-                    double mid = (lo + hi) / 2;
-                    (inside(sweep.at(x0, mid)) == previous ? lo : hi) = mid;
-                }
-                double change = (lo + hi) / 2;
-                length += previous ? change - t0 : t1 - change;
-            }
-            previous = now;
-        };
-        gp_Pnt p0 = sweep.at(x0, from);
-        bool previous = inside(p0);
-        bool fine0 = fine(p0);
-        for (int k = 1; k <= samples; ++k) {
-            double t0 = from + (k - 1) * dt;
-            double t1 = k == samples ? to : from + k * dt;
-            bool fine1 = fine(sweep.at(x0, t1));
-            if (fine0 || fine1) {
-                const int parts = 32;
-                for (int j = 1; j <= parts; ++j) {
-                    step(t0 + (t1 - t0) * (j - 1) / parts, t0 + (t1 - t0) * j / parts, previous);
-                }
-            }
-            else {
-                step(t0, t1, previous);
-            }
-            fine0 = fine1;
         }
         volume += w * length * speed;
     });
@@ -5872,10 +5941,23 @@ struct ReflexCorners
                     return s.own.local(p) && s.other.depth(p) > s.own.depth(p);
                 });
             },
-            [&](const gp_Pnt& p) {
-                return std::any_of(sides.begin(), sides.end(), [&](const Sides& s) {
-                    return s.own.local(p);
-                });
+            [&](const gp_Pnt& x0, double from, double to, std::vector<double>& list) {
+                for (const auto& s : sides) {
+                    PathChanges path(sweep, s.own.normal, x0, from, to, list);
+                    // The own wall's depth is the same all along the path
+                    double depth = s.own.depth(x0);
+                    if (s.other.line) {
+                        path.offset(s.other.point, s.other.inward, depth);
+                    }
+                    else {
+                        path.distance(
+                            s.other.point,
+                            s.other.insideCircle ? s.other.radius - depth : s.other.radius + depth
+                        );
+                    }
+                    path.distance(s.own.vertex, s.own.reach);
+                    path.offset(s.own.mirrorPoint, s.own.mirrorNormal, 0.0);
+                }
             }
         );
         tool.volume -= removed;
@@ -7315,7 +7397,11 @@ thread_local Recorder* innermostRecorder = nullptr;
 
 }  // namespace
 
-bool reflexCircleCorner(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges)
+bool reflexCircleCorner(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    gp_Pnt* corner
+)
 {
     try {
         TopTools_IndexedMapOfShape selected;
@@ -7386,6 +7472,9 @@ bool reflexCircleCorner(const TopoDS_Shape& base, const std::vector<TopoDS_Shape
             gp_Dir away1 = awayFrom(picked[1], vertex);
             if (away0.Dot(outwardNormal(walls[1], point)) > 1e-6
                 && away1.Dot(outwardNormal(walls[0], point)) > 1e-6) {
+                if (corner) {
+                    *corner = point;
+                }
                 return true;
             }
         }
