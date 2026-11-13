@@ -581,10 +581,8 @@ bool transactionStateBlocksRecoveryWrite(const DocumentP& documentPrivate)
         || documentPrivate.activeUndoTransaction != nullptr || documentPrivate.committing;
 }
 
-/// The format of the interned names a file holds and of its `NameTable` element (ops#6). A build
-/// reads files of this format only: 2 writes references in the maps and the table as indices
-/// into the table (T2), and format 1 never shipped.
-constexpr int namingFormat = 2;
+// The naming formats this build writes and reads: Data::NamingFormatWritten and
+// Data::NamingFormatOldestRead (NameTable.h; the reader policy, ops#640 B1).
 
 /** Collects the references to interned names (ops#6) in everything written to a stream while it
  * lives: its NameRefScanBuffer stands in front of the stream's buffer. release() (or the
@@ -667,7 +665,8 @@ public:
         std::ostream& stream = writer.Stream();
         stream << startTag;
         if (!entries.empty()) {
-            stream << " NamingFormat=\"" << namingFormat << '"';
+            stream << " NamingFormat=\"" << Data::NamingFormatWritten << '"'
+                   << " NamingFormatOldestRead=\"" << Data::NamingFormatOldestRead << '"';
         }
         stream << ">\n";
         if (!entries.empty()) {
@@ -691,27 +690,48 @@ private:
 /** Reads the `NameTable` element that follows a `Document` start tag with `NamingFormat` into
  * the process's table, through \a remap (ops#6): the names read afterwards are remapped where
  * the file's IDs collide with this process's, or where the file lacks them. A file without the
- * attribute has no table, and every reference in it is unknown.
+ * attribute has no table, and every reference in it is unknown. The table is read in the format
+ * namingFormatToRead() picks from the file's \a fileWritten and \a fileOldestRead (the reader
+ * policy, ops#640 B1).
  */
 void restoreNameTable(Base::XMLReader& reader,
-                      int format,
+                      int fileWritten,
+                      int fileOldestRead,
                       Data::NameRemap& remap,
                       const char* documentName)
 {
-    if (format == 0) {
-        return;
-    }
-    if (format != namingFormat) {
-        // A newer format, or format 1, which never shipped (ops#6 T2)
-        FC_WARN(documentName << ": the file's interned names are in naming format " << format
-                             << ", which this build doesn't read (it reads " << namingFormat << ')'
-                             << ": its element maps with interned names are dropped and "
-                                "recomputed, and the references to interned names are missing");
-        remap.setNewerFormat();
-        return;  // the element's layout is unknown; the next readElement() passes over it
+    using Verdict = Data::NamingFormatRead::Verdict;
+    const auto read = Data::namingFormatToRead(fileWritten, fileOldestRead);
+    switch (read.verdict) {
+        case Verdict::NoTable:
+            return;
+        case Verdict::NeedsNewerReader:
+            FC_ERR(documentName << ": the file's interned names are in naming format "
+                                << fileWritten << " and need a reader of naming format "
+                                << fileOldestRead << " or newer; this build reads formats "
+                                << Data::NamingFormatOldestRead << " to "
+                                << Data::NamingFormatWritten
+                                << ": its name table is refused, its element maps with interned "
+                                   "names are dropped and recomputed, and the references to "
+                                   "interned names are missing");
+            remap.setNewerFormat();
+            return;  // the element's layout is unknown; the next readElement() passes over it
+        case Verdict::Unreadable:
+            // Format 1, which never shipped (ops#6 T2), or no format at all
+            FC_WARN(documentName << ": the file's interned names are in naming format "
+                                 << fileWritten << ", which this build doesn't read (it reads "
+                                 << Data::NamingFormatOldestRead << " to "
+                                 << Data::NamingFormatWritten
+                                 << "): its element maps with interned names are dropped and "
+                                    "recomputed, and the references to interned names are "
+                                    "missing");
+            remap.setNewerFormat();
+            return;
+        case Verdict::Read:
+            break;
     }
     reader.readElement("NameTable");
-    auto summary = remap.load(reader.beginCharStream());
+    auto summary = remap.load(reader.beginCharStream(), read.format);
     reader.readEndElement("NameTable");
     if (remap.inlineCount() != 0) {
         FC_WARN(documentName << ": " << summary.refused.size()
@@ -781,8 +801,16 @@ void noteNewerMarkers(Base::XMLReader& reader, const Document* doc)
     if (!format.readable) {
         noteNewerFormat(doc, unreadableMarker("NamingFormat", format));
     }
-    else if (format.value > namingFormat) {
+    else if (format.value > Data::NamingFormatWritten) {
         noteNewerFormat(doc, "NamingFormat " + std::to_string(format.value));
+    }
+    // The oldest reader the file's table needs, when it is newer than this build's (ops#640 B1)
+    const auto oldestRead = intAttribute(reader, "NamingFormatOldestRead");
+    if (!oldestRead.readable) {
+        noteNewerFormat(doc, unreadableMarker("NamingFormatOldestRead", oldestRead));
+    }
+    else if (oldestRead.value > Data::NamingFormatWritten) {
+        noteNewerFormat(doc, "NamingFormatOldestRead " + std::to_string(oldestRead.value));
     }
     const auto revision = intAttribute(reader, "NamingRevision");
     if (!revision.readable) {
@@ -2496,7 +2524,8 @@ void Document::Restore(Base::XMLReader& reader)
         remap = &ownRemap.emplace();
     }
     const int format = namingFormatOf(intAttribute(reader, "NamingFormat"));
-    restoreNameTable(reader, format, *remap, getName());
+    const int oldestRead = namingFormatOf(intAttribute(reader, "NamingFormatOldestRead"));
+    restoreNameTable(reader, format, oldestRead, *remap, getName());
 
     if (hasStringHasher) {
         d->Hasher->Restore(reader);
@@ -3294,7 +3323,8 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     noteNewerMarkers(reader, this);
     // The entries of the imported interned names come first (ops#6)
     const int format = namingFormatOf(intAttribute(reader, "NamingFormat"));
-    restoreNameTable(reader, format, *remap, getName());
+    const int oldestRead = namingFormatOf(intAttribute(reader, "NamingFormatOldestRead"));
+    restoreNameTable(reader, format, oldestRead, *remap, getName());
     if (hasStringHasher) {
         StringHasherRef sourceHasher = new StringHasher;
         sourceHasher->Restore(reader);
