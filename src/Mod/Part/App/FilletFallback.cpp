@@ -6544,6 +6544,594 @@ TopoDS_Shape constructUnderOverhang(
     return shape;
 }
 
+/// An opening a fillet's band crosses (bandOpening()): its rim, the face it opens in, the contour
+/// edge whose band it is, and which of that edge's faces (EdgeData::faces) the face is
+struct BandOpening
+{
+    TopoDS_Edge rim;
+    TopoDS_Face face;
+    TopoDS_Edge edge;
+    int side = 0;
+};
+
+/// bandOpening()'s search: the first opening, or every one (a rim once for each contour edge whose
+/// band it enters)
+std::vector<BandOpening> bandOpenings(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& contour,
+    const Request& request,
+    bool every
+)
+{
+    std::vector<BandOpening> found;
+    if (request.kind != Kind::Fillet || request.size1 <= 0
+        || (request.size2 > 0 && std::abs(request.size2 - request.size1) > linearTolerance)) {
+        return found;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        TopTools_IndexedMapOfShape chain;
+        TopTools_IndexedMapOfShape chainVertices;
+        for (const auto& edge : contour) {
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            chain.Add(edge);
+            for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+                chainVertices.Add(it.Current());
+            }
+        }
+        constexpr int sections = 17;
+        // A rim tangent to the band's far side is a grazing contact: OCCT's round is right there
+        const double margin = 1000 * linearTolerance;
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+            EdgeData data;
+            std::vector<Section> cuts;
+            std::vector<double> cutAt;
+            try {
+                data = analyse(ctx, edge);
+                BRepAdaptor_Curve curve(edge);
+                const double first = curve.FirstParameter();
+                const double last = curve.LastParameter();
+                for (int k = 0; k < sections; ++k) {
+                    cutAt.push_back(first + (last - first) * (k + 0.5) / sections);
+                    cuts.push_back(sectionAt(ctx, data, cutAt.back()));
+                }
+            }
+            catch (const Refusal&) {
+                // Not analysable: not checked
+                continue;
+            }
+            for (int k = 0; k < 2; ++k) {
+                const TopoDS_Face& face = data.faces[k];
+                // Where the band's far side lies on the face. An opening is a gap between two
+                // such stretches (on a closed edge, beside one): a face narrower than the band
+                // from there to the edge's end is the limit's case (a wall thinner than the round,
+                // KP1-KP4), left as it is
+                std::vector<bool> onTheFace;
+                for (const auto& cut : cuts) {
+                    onTheFace.push_back(onFace(face, cut.ends[k]));
+                }
+                if (std::none_of(onTheFace.begin(), onTheFace.end(), [](bool on) { return on; })) {
+                    continue;
+                }
+                auto between = [&](double at) {
+                    bool before = false;
+                    bool after = false;
+                    for (size_t c = 0; c < cutAt.size(); ++c) {
+                        before = before || (onTheFace[c] && cutAt[c] < at);
+                        after = after || (onTheFace[c] && cutAt[c] > at);
+                    }
+                    return data.closed ? (before || after) : (before && after);
+                };
+                for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge& rim = TopoDS::Edge(it.Current());
+                    if (chain.Contains(rim) || BRep_Tool::Degenerated(rim)
+                        || BRep_Tool::IsClosed(rim, face)) {
+                        continue;
+                    }
+                    bool joined = false;
+                    for (TopExp_Explorer v(rim, TopAbs_VERTEX); v.More(); v.Next()) {
+                        joined = joined || chainVertices.Contains(v.Current());
+                    }
+                    if (joined) {
+                        continue;
+                    }
+                    BRepExtrema_DistShapeShape nearest(rim, edge);
+                    if (!nearest.IsDone()) {
+                        continue;
+                    }
+                    for (int n = 1; n <= nearest.NbSolution(); ++n) {
+                        // Inside the contour edge: past its ends the band has ended
+                        if (nearest.SupportTypeShape2(n) != BRepExtrema_IsOnEdge) {
+                            continue;
+                        }
+                        double at = 0.0;
+                        nearest.ParOnEdgeS2(n, at);
+                        Section cut;
+                        try {
+                            cut = sectionAt(ctx, data, at);
+                        }
+                        catch (const Refusal&) {
+                            continue;
+                        }
+                        if (!(nearest.Value() < cut.length[k] - margin) || !between(at)) {
+                            continue;
+                        }
+                        // Smooth across the rim: the band runs on onto the next face. OCCT's
+                        // own test, which takes any surface (Nest Insert's walls are splines)
+                        bool smooth = false;
+                        for (const auto& other : ctx.list(ctx.edgeFaces, rim)) {
+                            smooth = smooth
+                                || (!other.IsSame(face)
+                                    && ChFi3d::IsTangentFaces(rim, face, TopoDS::Face(other)));
+                        }
+                        if (!smooth) {
+                            found.push_back({rim, face, edge, k});
+                            if (!every) {
+                                return found;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return found;
+}
+
+/// Thrown where the construction across an opening does not apply at all: the first refusal stands
+struct NoOpening
+{};
+
+/** A round whose band crosses an opening of a planar face it rolls on (bandOpening(); ops#640, Nest
+ * Insert #163, notes/fillet-band-opening.md). Onshape's result is the round of the body without the
+ * opening, with the opening then cut through: a convex round is cut by it, and through the material
+ * a concave round adds the opening runs on, its walls growing to the round.
+ *
+ * So the round is OCCT's own, built on the base with each opening closed where the band crosses it:
+ * the strip of the face's plane along the contour edge there, two bands wide, less the face, swept
+ * back by two bands (the plug). OCCT rounds the whole chain on that (tangent chains, spline walls,
+ * tight corners: whatever it builds on the body without the opening). What the round removes from
+ * the closed base and what it adds to it are the tools. The result is the base itself less the
+ * first, plus the second less the openings run on in front of the face (each plug's footprint swept
+ * forward): the base keeps its opening, and nothing is added in it.
+ *
+ * Built where the contour edge under the opening is a line, the face a plane, and the opening's
+ * walls run straight back from the face (a hole or a notch square to it); anything else is refused.
+ * The closed base must have no opening left in the band, and the result's volume must have changed
+ * by the tools', measured by other Booleans.
+ */
+TopoDS_Shape constructAcrossOpenings(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    ShapeMapper& mapper
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0
+        || (request.size2 > 0 && std::abs(request.size1 - request.size2) > linearTolerance)
+        || edges.empty() || countSolids(baseShape) != 1) {
+        throw NoOpening {};
+    }
+    const double radius = request.size1;
+    std::vector<TopoDS_Shape> contour = edges;
+    for (const auto& edge : request.contour) {
+        if (std::none_of(contour.begin(), contour.end(), [&](const TopoDS_Shape& c) {
+                return c.IsSame(edge);
+            })) {
+            contour.push_back(edge);
+        }
+    }
+    const auto openings = bandOpenings(baseShape, contour, request, true);
+    if (openings.empty()) {
+        throw NoOpening {};
+    }
+    const TopoShape base(baseShape);
+    Context ctx(base, request);
+    auto boolean = [](BRepAlgoAPI_BooleanOperation& operation,
+                      const TopoDS_Shape& argument,
+                      const TopTools_ListOfShape& tools,
+                      const char* failure) {
+        TopTools_ListOfShape arguments;
+        arguments.Append(argument);
+        operation.SetArguments(arguments);
+        operation.SetTools(tools);
+        operation.SetNonDestructive(Standard_True);
+        operation.SetRunParallel(Standard_False);
+        operation.Build();
+        if (!operation.IsDone() || operation.HasErrors()) {
+            refuse(failure);
+        }
+        return operation.Shape();
+    };
+    auto solidsOf = [](const TopoDS_Shape& shape) {
+        TopTools_ListOfShape solids;
+        for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) {
+            solids.Append(it.Current());
+        }
+        return solids;
+    };
+    // The plugs, and the openings run on in front of their faces
+    TopTools_ListOfShape plugs;
+    TopTools_ListOfShape forwards;
+    for (const auto& opening : openings) {
+        BRepAdaptor_Surface surface(opening.face, Standard_False);
+        if (surface.GetType() != GeomAbs_Plane) {
+            refuse("an opening in the band of a round on a face that is not a plane");
+        }
+        for (const auto& other : ctx.list(ctx.edgeFaces, opening.rim)) {
+            if (!other.IsSame(opening.face) && !wallAlongNormal(opening.face, TopoDS::Face(other))) {
+                refuse("an opening in a round's band whose wall does not run straight back from "
+                       "its face");
+            }
+        }
+        const EdgeData data = analyse(ctx, opening.edge);
+        if (!data.line) {
+            refuse("an opening in the band of a round along a curved edge");
+        }
+        BRepAdaptor_Curve curve(opening.edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const Section middle = sectionAt(ctx, data, (first + last) / 2);
+        const double band = middle.length[opening.side];
+        const double width = 2 * band;
+        // The stretch of the edge under the opening: where the rim is within two bands of it,
+        // and a band more each way, inside the edge
+        const gp_Lin line = curve.Line();
+        BRepAdaptor_Curve rim(opening.rim);
+        double from = Precision::Infinite();
+        double to = -Precision::Infinite();
+        constexpr int samples = 64;
+        for (int k = 0; k <= samples; ++k) {
+            const gp_Pnt point = rim.Value(
+                rim.FirstParameter() + (rim.LastParameter() - rim.FirstParameter()) * k / samples
+            );
+            if (line.Distance(point) < width) {
+                const double at = ElCLib::Parameter(line, point);
+                from = std::min(from, at);
+                to = std::max(to, at);
+            }
+        }
+        const double inset = 1000 * linearTolerance;
+        from = std::max(std::min(first, last) + inset, from - band);
+        to = std::min(std::max(first, last) - inset, to + band);
+        if (!(to - from > 2 * inset)) {
+            refuse("an opening in a round's band has no stretch of the edge under it");
+        }
+        const gp_Vec inward(middle.inward[opening.side]);
+        const gp_Pnt a = ElCLib::Value(from, line);
+        const gp_Pnt b = ElCLib::Value(to, line);
+        BRepBuilderAPI_MakePolygon outline(
+            a,
+            b,
+            b.Translated(inward * width),
+            a.Translated(inward * width),
+            Standard_True
+        );
+        const TopoDS_Face strip = BRepBuilderAPI_MakeFace(outline.Wire(), Standard_True).Face();
+        BRepAlgoAPI_Cut open(strip, opening.face);
+        if (!open.IsDone() || open.HasErrors()) {
+            refuse("finding the opening in a round's band failed");
+        }
+        const gp_Vec outward(outwardNormal(opening.face, a.Translated(inward * (band / 2))));
+        bool any = false;
+        for (TopExp_Explorer it(open.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+            if (std::abs(areaOf(it.Current())) <= areaToleranceOf(it.Current())) {
+                continue;
+            }
+            any = true;
+            plugs.Append(BRepPrimAPI_MakePrism(it.Current(), outward * -width, Standard_True).Shape());
+            forwards.Append(BRepPrimAPI_MakePrism(it.Current(), outward * width, Standard_True).Shape());
+        }
+        if (!any) {
+            refuse("an opening in a round's band is not open in its strip");
+        }
+    }
+    // The base with the openings closed, the plugs' faces in the faces' planes merged into them
+    std::vector<Stage> closing;
+    BRepAlgoAPI_Fuse fill;
+    TopoDS_Shape closed = boolean(fill, baseShape, plugs, "closing an opening in a round's band failed");
+    closing.emplace_back(fill.History(), closed);
+    {
+        TopTools_IndexedMapOfShape kept;
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE}) {
+            for (TopExp_Explorer it(baseShape, type); it.More(); it.Next()) {
+                for (const auto& image : closing.front().images(it.Current())) {
+                    kept.Add(image);
+                }
+            }
+        }
+        TopTools_IndexedMapOfShape unlocked;
+        for (TopExp_Explorer it(closed, TopAbs_FACE); it.More(); it.Next()) {
+            if (!kept.Contains(it.Current())) {
+                TopExp::MapShapes(it.Current(), TopAbs_EDGE, unlocked);
+            }
+        }
+        // The selected edges and their chains stay as they are
+        for (const auto& edge : contour) {
+            for (const auto& image : closing.front().images(edge)) {
+                kept.Add(image);
+            }
+        }
+        NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+        TopTools_IndexedMapOfShape allEdges;
+        TopExp::MapShapes(closed, TopAbs_EDGE, allEdges);
+        bool chainTouched = false;
+        for (int i = 1; i <= allEdges.Extent(); ++i) {
+            if (!unlocked.Contains(allEdges(i))) {
+                keep.Add(allEdges(i));
+            }
+        }
+        for (const auto& edge : contour) {
+            for (const auto& image : closing.front().images(edge)) {
+                chainTouched = chainTouched || unlocked.Contains(image);
+            }
+        }
+        if (chainTouched) {
+            refuse("an opening in a round's band reaches the round's edge");
+        }
+        ShapeUpgrade_UnifySameDomain unify(closed, false, true, false);
+        unify.KeepShapes(keep);
+        unify.Build();
+        closed = unify.Shape();
+        closing.emplace_back(unify.History(), closed);
+    }
+    if (countSolids(closed) != 1 || !BRepCheck_Analyzer(closed).IsValid()) {
+        refuse("the base with an opening in a round's band closed is not a valid solid");
+    }
+    const TopoDS_Shape solid = closed.ShapeType() == TopAbs_SOLID
+        ? closed
+        : TopExp_Explorer(closed, TopAbs_SOLID).Current();
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Edge>> inClosed;
+    std::vector<TopoDS_Shape> closedContour;
+    for (const auto& edge : contour) {
+        auto images = imagesThrough(closing, 0, edge);
+        if (images.size() != 1 || images.front().ShapeType() != TopAbs_EDGE) {
+            refuse("an edge of the round is not whole on the base with the opening closed");
+        }
+        closedContour.push_back(images.front());
+        if (std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& e) {
+                return e.IsSame(edge);
+            })) {
+            inClosed.emplace_back(edge, TopoDS::Edge(images.front()));
+        }
+    }
+    if (!bandOpenings(solid, closedContour, request, false).empty()) {
+        refuse("an opening is left in the round's band on the base with the openings closed");
+    }
+    BRepFilletAPI_MakeFillet maker(solid);
+    for (const auto& pair : inClosed) {
+        maker.Add(radius, pair.second);
+    }
+    try {
+        maker.Build();
+    }
+    catch (const Standard_Failure&) {
+        refuse("OCCT's round on the base with the opening closed failed");
+    }
+    if (!maker.IsDone()) {
+        refuse("OCCT's round on the base with the opening closed failed");
+    }
+    const TopoDS_Shape rounded = maker.Shape();
+    if (!BRepCheck_Analyzer(rounded).IsValid()) {
+        double largest = Precision::Confusion();
+        for (TopExp_Explorer it(solid, TopAbs_VERTEX); it.More(); it.Next()) {
+            largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+        }
+        for (TopExp_Explorer it(solid, TopAbs_EDGE); it.More(); it.Next()) {
+            largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+        }
+        BOPTools_AlgoTools::CorrectTolerances(rounded, TopTools_IndexedMapOfShape(), largest + 1e-4);
+    }
+    if (countSolids(rounded) != 1 || !BRepCheck_Analyzer(rounded).IsValid()) {
+        refuse("OCCT's round on the base with the opening closed is not a valid solid");
+    }
+    // What the round removes from the closed base, and what it adds to it
+    TopTools_ListOfShape roundedList;
+    roundedList.Append(rounded);
+    TopTools_ListOfShape solidList;
+    solidList.Append(solid);
+    BRepAlgoAPI_Cut removal;
+    const TopoDS_Shape removed
+        = boolean(removal, solid, roundedList, "finding what a round across an opening removes failed");
+    const Stage removedStage(removal.History(), removed);
+    BRepAlgoAPI_Cut addition;
+    TopoDS_Shape added
+        = boolean(addition, rounded, solidList, "finding what a round across an opening adds failed");
+    std::vector<Stage> addedStages;
+    addedStages.emplace_back(addition.History(), added);
+    // Through what the round adds the openings run on
+    if (countSolids(added) > 0) {
+        BRepAlgoAPI_Cut clip;
+        added = boolean(clip, added, forwards, "cutting an opening through what a round adds failed");
+        addedStages.emplace_back(clip.History(), added);
+    }
+    const bool removes = countSolids(removed) > 0;
+    const bool adds = countSolids(added) > 0;
+    if (!removes && !adds) {
+        refuse("a round across an opening changes nothing");
+    }
+    if ((removes && !BRepCheck_Analyzer(removed).IsValid())
+        || (adds && !BRepCheck_Analyzer(added).IsValid())) {
+        refuse("what a round across an opening removes or adds is not a valid solid");
+    }
+    // The base itself, less what is removed and plus what is added
+    TopoDS_Shape shape = baseShape;
+    std::vector<Stage> stages;
+    double removedVolume = 0.0;
+    size_t addedAt = 0;
+    if (removes) {
+        TopTools_ListOfShape baseList;
+        baseList.Append(baseShape);
+        BRepAlgoAPI_Common inBase;
+        removedVolume = MassProperties::volume(
+            boolean(inBase, removed, baseList, "measuring what a round across an opening removes failed"),
+            true
+        );
+        BRepAlgoAPI_Cut cut;
+        shape = boolean(cut, shape, solidsOf(removed), "cutting a round across an opening failed");
+        stages.emplace_back(cut.History(), shape);
+    }
+    double addedVolume = 0.0;
+    if (adds) {
+        addedVolume = MassProperties::volume(added, true);
+        addedAt = stages.size();
+        BRepAlgoAPI_Fuse fuse;
+        shape = boolean(fuse, shape, solidsOf(added), "adding a round across an opening failed");
+        stages.emplace_back(fuse.History(), shape);
+    }
+    // The openings' walls grow by the added tool's faces on them (Onshape's wall runs on to the
+    // round): a new face on the surface of a base face next to it merges into that face. The edge
+    // between them is free to go, and so is the seam of a wall that closes on itself (a round
+    // hole's), which the unification needs
+    {
+        TopTools_IndexedMapOfShape ofBase;
+        for (TopExp_Explorer it(baseShape, TopAbs_FACE); it.More(); it.Next()) {
+            for (const auto& image : imagesThrough(stages, 0, it.Current())) {
+                ofBase.Add(image);
+            }
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape facesOf;
+        TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, facesOf);
+        TopTools_IndexedMapOfShape unlocked;
+        std::vector<TopoDS_Face> walls;
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            if (ofBase.Contains(face)) {
+                continue;
+            }
+            for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                const auto* around = facesOf.Seek(edge.Current());
+                if (!around) {
+                    continue;
+                }
+                for (const auto& other : *around) {
+                    if (!other.IsSame(face) && ofBase.Contains(other)
+                        && sameDomain(face, TopoDS::Face(other))) {
+                        unlocked.Add(edge.Current());
+                        walls.push_back(TopoDS::Face(other));
+                    }
+                }
+            }
+        }
+        for (const auto& wall : walls) {
+            for (TopExp_Explorer edge(wall, TopAbs_EDGE); edge.More(); edge.Next()) {
+                if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), wall)) {
+                    unlocked.Add(edge.Current());
+                }
+            }
+        }
+        if (!unlocked.IsEmpty()) {
+            NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+            TopTools_IndexedMapOfShape allEdges;
+            TopExp::MapShapes(shape, TopAbs_EDGE, allEdges);
+            for (int i = 1; i <= allEdges.Extent(); ++i) {
+                if (!unlocked.Contains(allEdges(i))) {
+                    keep.Add(allEdges(i));
+                }
+            }
+            ShapeUpgrade_UnifySameDomain unify(shape, false, true, false);
+            unify.KeepShapes(keep);
+            unify.Build();
+            shape = unify.Shape();
+            stages.emplace_back(unify.History(), shape);
+        }
+    }
+    // The checks of the result
+    if (countSolids(shape) != 1) {
+        refuse("the result is not one solid");
+    }
+    if (!BRepCheck_Analyzer(shape).IsValid()) {
+        refuse("the result is not valid");
+    }
+    if (!thinFace(shape, baseShape).IsNull()) {
+        refuse("the result has a face of zero width");
+    }
+    if (removes) {
+        for (TopExp_Explorer it(removed, TopAbs_SOLID); it.More(); it.Next()) {
+            if (materialIn(shape, it.Current())) {
+                refuse("the cut left material of a round across an opening");
+            }
+        }
+    }
+    const double baseVolume = volumeOf(baseShape);
+    const double expected = addedVolume - removedVolume;
+    const double bound = volumeTolerance * (baseVolume + addedVolume + removedVolume);
+    double change = volumeOf(shape) - baseVolume;
+    if (std::abs(change - expected) > bound) {
+        // Over the faces that differ only: a whole-body difference is off by more than the bound
+        // on a body with free-form faces (changedVolume())
+        change = changedVolume(baseShape, shape);
+    }
+    if (std::abs(change - expected) > bound) {
+        refuse("the round across an opening changed the volume by " + describe(change)
+               + " instead of " + describe(expected));
+    }
+    // The history: the base's elements are modified into their images; the tools' other faces are
+    // generated by the edge whose blend they are (OCCT's own Generated), else by the first edge
+    TopTools_IndexedMapOfShape baseImages;
+    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        for (TopExp_Explorer it(baseShape, type); it.More(); it.Next()) {
+            const TopoDS_Shape& element = it.Current();
+            auto images = imagesThrough(stages, 0, element);
+            for (const auto& image : images) {
+                baseImages.Add(image);
+            }
+            if (images.size() == 1 && images.front().IsSame(element)) {
+                continue;
+            }
+            for (const auto& image : images) {
+                mapper.insert(MappingStatus::Modified, element, image);
+            }
+        }
+    }
+    TopTools_IndexedMapOfShape named;
+    auto generate = [&](const TopoDS_Shape& source, const TopoDS_Shape& toolFace, size_t from) {
+        for (const auto& image : imagesThrough(stages, from, toolFace)) {
+            if (image.ShapeType() == TopAbs_FACE && !baseImages.Contains(image)
+                && !named.Contains(image)) {
+                named.Add(image);
+                mapper.insert(MappingStatus::Generated, source, image);
+            }
+        }
+    };
+    for (const auto& pair : inClosed) {
+        for (const auto& blend : maker.Generated(pair.second)) {
+            if (removes) {
+                for (const auto& face : removedStage.images(blend)) {
+                    generate(pair.first, face, 0);
+                }
+            }
+            if (adds) {
+                for (const auto& face : imagesThrough(addedStages, 0, blend)) {
+                    generate(pair.first, face, addedAt);
+                }
+            }
+        }
+    }
+    if (removes) {
+        for (TopExp_Explorer it(removed, TopAbs_FACE); it.More(); it.Next()) {
+            generate(edges.front(), it.Current(), 0);
+        }
+    }
+    if (adds) {
+        for (TopExp_Explorer it(added, TopAbs_FACE); it.More(); it.Next()) {
+            generate(edges.front(), it.Current(), addedAt);
+        }
+    }
+    return shape;
+}
+
 thread_local Recorder* innermostRecorder = nullptr;
 
 }  // namespace
@@ -7054,6 +7642,42 @@ bool construct(
     if (!second.empty()) {
         why += "; built in front of the face its edge ends against: " + second;
     }
+    // A round whose band crosses an opening of its face: OCCT's own round on the base with the
+    // opening closed, the opening then cut through. Where it doesn't apply, the reasons above stand
+    std::string third;
+    try {
+        auto mapper = std::make_shared<ShapeMapper>();
+        TopoDS_Shape shape = constructAcrossOpenings(base, edges, request, *mapper);
+        TopTools_IndexedMapOfShape selected;
+        for (const auto& edge : edges) {
+            selected.Add(edge);
+        }
+        out.shape = shape;
+        out.mapper = mapper;
+        out.edges = selected.Extent();
+        out.corners = 0;
+        return true;
+    }
+    catch (const NoOpening&) {
+    }
+    catch (const Refusal& refusal) {
+        third = refusal.reason;
+    }
+    catch (const Standard_Failure& e) {
+        third = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        third = e.what();
+    }
+    catch (const std::exception& e) {
+        third = e.what();
+    }
+    catch (...) {
+        third = "an unknown exception";
+    }
+    if (!third.empty()) {
+        why += "; rounded on the base with the opening closed: " + third;
+    }
     if (reason) {
         *reason = why;
     }
@@ -7099,125 +7723,8 @@ TopoDS_Edge bandOpening(
     const Request& request
 )
 {
-    if (request.kind != Kind::Fillet || request.size1 <= 0
-        || (request.size2 > 0 && std::abs(request.size2 - request.size1) > linearTolerance)) {
-        return {};
-    }
-    try {
-        const TopoShape base(baseShape);
-        Context ctx(base, request);
-        TopTools_IndexedMapOfShape chain;
-        TopTools_IndexedMapOfShape chainVertices;
-        for (const auto& edge : contour) {
-            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
-                continue;
-            }
-            chain.Add(edge);
-            for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
-                chainVertices.Add(it.Current());
-            }
-        }
-        constexpr int sections = 17;
-        // A rim tangent to the band's far side is a grazing contact: OCCT's round is right there
-        const double margin = 1000 * linearTolerance;
-        for (int i = 1; i <= chain.Extent(); ++i) {
-            const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
-            EdgeData data;
-            std::vector<Section> cuts;
-            std::vector<double> cutAt;
-            try {
-                data = analyse(ctx, edge);
-                BRepAdaptor_Curve curve(edge);
-                const double first = curve.FirstParameter();
-                const double last = curve.LastParameter();
-                for (int k = 0; k < sections; ++k) {
-                    cutAt.push_back(first + (last - first) * (k + 0.5) / sections);
-                    cuts.push_back(sectionAt(ctx, data, cutAt.back()));
-                }
-            }
-            catch (const Refusal&) {
-                // Not analysable: not checked
-                continue;
-            }
-            for (int k = 0; k < 2; ++k) {
-                const TopoDS_Face& face = data.faces[k];
-                // Where the band's far side lies on the face. An opening is a gap between two
-                // such stretches (on a closed edge, beside one): a face narrower than the band
-                // from there to the edge's end is the limit's case (a wall thinner than the round,
-                // KP1-KP4), left as it is
-                std::vector<bool> onTheFace;
-                for (const auto& cut : cuts) {
-                    onTheFace.push_back(onFace(face, cut.ends[k]));
-                }
-                if (std::none_of(onTheFace.begin(), onTheFace.end(), [](bool on) { return on; })) {
-                    continue;
-                }
-                auto between = [&](double at) {
-                    bool before = false;
-                    bool after = false;
-                    for (size_t c = 0; c < cutAt.size(); ++c) {
-                        before = before || (onTheFace[c] && cutAt[c] < at);
-                        after = after || (onTheFace[c] && cutAt[c] > at);
-                    }
-                    return data.closed ? (before || after) : (before && after);
-                };
-                for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
-                    const TopoDS_Edge& rim = TopoDS::Edge(it.Current());
-                    if (chain.Contains(rim) || BRep_Tool::Degenerated(rim)
-                        || BRep_Tool::IsClosed(rim, face)) {
-                        continue;
-                    }
-                    bool joined = false;
-                    for (TopExp_Explorer v(rim, TopAbs_VERTEX); v.More(); v.Next()) {
-                        joined = joined || chainVertices.Contains(v.Current());
-                    }
-                    if (joined) {
-                        continue;
-                    }
-                    BRepExtrema_DistShapeShape nearest(rim, edge);
-                    if (!nearest.IsDone()) {
-                        continue;
-                    }
-                    for (int n = 1; n <= nearest.NbSolution(); ++n) {
-                        // Inside the contour edge: past its ends the band has ended
-                        if (nearest.SupportTypeShape2(n) != BRepExtrema_IsOnEdge) {
-                            continue;
-                        }
-                        double at = 0.0;
-                        nearest.ParOnEdgeS2(n, at);
-                        Section cut;
-                        try {
-                            cut = sectionAt(ctx, data, at);
-                        }
-                        catch (const Refusal&) {
-                            continue;
-                        }
-                        if (!(nearest.Value() < cut.length[k] - margin) || !between(at)) {
-                            continue;
-                        }
-                        // Smooth across the rim: the band runs on onto the next face. OCCT's
-                        // own test, which takes any surface (Nest Insert's walls are splines)
-                        bool smooth = false;
-                        for (const auto& other : ctx.list(ctx.edgeFaces, rim)) {
-                            smooth = smooth
-                                || (!other.IsSame(face)
-                                    && ChFi3d::IsTangentFaces(rim, face, TopoDS::Face(other)));
-                        }
-                        if (!smooth) {
-                            return rim;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    catch (const Refusal&) {
-    }
-    catch (const Standard_Failure&) {
-    }
-    catch (const Base::Exception&) {
-    }
-    return {};
+    const auto found = bandOpenings(baseShape, contour, request, false);
+    return found.empty() ? TopoDS_Edge() : found.front().rim;
 }
 
 void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)

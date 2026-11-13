@@ -7878,7 +7878,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             if (!prefer && request.kind == FilletFallback::Kind::Fillet) {
                 // Nest Insert #163: a band over a hole or a notch of its face, where OCCT's
                 // result, when it builds one, is a bridge. The limit is then no condition
-                std::vector<TopoDS_Shape> contour;
+                // The selected edges, and what OCCT's contours add (none after some failures)
+                std::vector<TopoDS_Shape> contour = edges;
                 for (int i = 1; i <= maker->NbContours(); ++i) {
                     for (int j = 1; j <= maker->NbEdges(i); ++j) {
                         contour.push_back(maker->Edge(i, j));
@@ -7983,6 +7984,21 @@ TopoShape& TopoShape::makeElementFillet(
         // Naming it failed: OCCT, as without the preference
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
     }
+    if (!outcome->opening.IsNull()) {
+        if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        // OCCT bridges the opening with a patch, where it builds at all: never returned silently
+        // (decision 150), and the error names the opening
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's band crosses an opening of a face next to its edge (Edge"
+                << input.findShape(outcome->opening)
+                << "), where Onshape cuts the round by the opening and OCCT "
+                << (outcome->failed ? "fails" : "bridges it")
+                << "; its exact construction refused: " << outcome->reason
+        );
+    }
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
@@ -8002,20 +8018,6 @@ TopoShape& TopoShape::makeElementFillet(
                     << outcome->reason
             );
         }
-    }
-    if (!outcome->opening.IsNull()) {
-        if (finishConstruction(*this, *outcome, input, op)) {
-            return *this;
-        }
-        // OCCT bridges the opening with a patch: never returned silently (decision 150)
-        FC_THROWM(
-            Base::CADKernelError,
-            "The fillet's band crosses an opening of a face next to its edge (Edge"
-                << input.findShape(outcome->opening)
-                << "), where Onshape cuts the round by the opening and OCCT bridges it; its exact "
-                   "construction refused: "
-                << outcome->reason
-        );
     }
     return makeElementShape(*mkFillet, input, op);
 }

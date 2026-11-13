@@ -1342,9 +1342,17 @@ class FilledRecessTest(unittest.TestCase):
         edge = edge_between(base, (0, 5, 5), (10, 5, 5))
         for kind in ("Fillet", "Chamfer"):
             with self.subTest(kind=kind):
-                expected = concave_block().fuse(concave_added(kind, 2)).cut(recess)
+                # The round is cut by the pocket, which runs on up through what the round adds
+                # (FilletFallback::bandOpening(), the rule Onshape shows on Nest Insert #163: the
+                # opening's walls grow to the round; oracle question ops#640 6848519274). The
+                # chamfer keeps the earlier expectation: the pocket under the added material
+                through = Part.makeBox(4, 1, 4, V(3, 5.5, 4)) if kind == "Fillet" else recess
+                expected = concave_block().fuse(concave_added(kind, 2)).cut(through)
                 feature = self.dressUp(kind, base, [edge], [(2, 2)])
                 self.assertExactOrFails(feature, base, edge, expected.Volume)
+                if kind == "Fillet":
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertLess(symmetric_difference(feature.Shape, expected), 1e-6)
 
     def testConcaveBandStays(self):
         # The concave edge's round or chamfer adds material: right, and kept, also beside a
@@ -1724,13 +1732,6 @@ class BridgedRecessTest(unittest.TestCase):
     setUp = InvalidDressUpTest.setUp
     tearDown = InvalidDressUpTest.tearDown
 
-    def assertOpeningFails(self, shape):
-        fillet = filleted_in_a_body(self.doc, shape, front_top, 2)
-        self.assertFalse(fillet.isValid())
-        status = fillet.getStatusString()
-        self.assertIn("The fillet's band crosses an opening of a face next to its edge (Edge", status)
-        self.assertIn("its exact construction refused: ", status)
-
     def assertRight(self, shape, right):
         fillet = filleted_in_a_body(self.doc, shape, front_top, 2)
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
@@ -1741,15 +1742,13 @@ class BridgedRecessTest(unittest.TestCase):
         return block.makeFillet(2, front_top(block))
 
     def testThroughHoleAcrossTheBand(self):
-        # O1: the hole's rim 1 mm from the edge; OCCT's bridge is 0.75 mm3 off
-        hole = Part.makeCylinder(3, 10, V(15, 4.0, 0))
-        self.assertRight(Part.makeBox(30, 20, 10).cut(hole), self.rounded().cut(hole))
-
-    def testThroughHoleNearTheEdgeFails(self):
-        # O1 with the rim 0.5 mm from the edge (OCCT's bridge 1.34 mm3 off). Debt (ops#640): the
-        # construction's volume check refuses it ("the cut removed 24.95069524 instead of
-        # 24.95077261", 3e-6), so the fillet fails, naming the hole's rim
-        self.assertOpeningFails(Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 3.5, 0))))
+        # O1: the hole's rim 1 and 0.5 mm from the edge; OCCT's bridge is 0.75 and 1.34 mm3 off.
+        # At 0.5 the tools' construction refuses (its volume check, 3e-6), and the round is OCCT's
+        # on the block with the hole closed, the hole then cut through
+        for y in (4.0, 3.5):
+            with self.subTest(y=y):
+                hole = Part.makeCylinder(3, 10, V(15, y, 0))
+                self.assertRight(Part.makeBox(30, 20, 10).cut(hole), self.rounded().cut(hole))
 
     def testBlindHoleAcrossTheBand(self):
         # O2: 4 deep
@@ -3461,19 +3460,42 @@ class BandOpeningTest(unittest.TestCase):
         right = plain.makeFillet(2.0, floor_wall_edge(plain)).cut(window)
         self.assertCutByTheOpening(base, floor_wall_edge(base), 2.0, right, faces=13)
 
-    def testAVeeNotchAcrossAConcaveBandFailsNamingIt(self):
+    def testConcaveRoundAcrossAVeeNotch(self):
         # A V notch from the wall's top, its tip 0.4 inside the band: both its walls are planes
-        # across the edge, which the construction does not trim by yet. An error that names the
-        # opening's edge, never OCCT's bridge
+        # across the edge, which the tools' construction does not trim by. OCCT's round on the base
+        # with the notch closed, the notch then cut through (constructAcrossOpenings)
         vee = Part.Face(
             Part.makePolygon([V(15, 20, 6.6), V(15, 26, 16), V(15, 14, 16), V(15, 20, 6.6)])
         ).extrude(V(30, 0, 0))
         base = floor_and_wall(vee)
+        plain = floor_and_wall()
+        right = plain.makeFillet(2.0, floor_wall_edge(plain)).cut(vee)
+        self.assertCutByTheOpening(
+            base, floor_wall_edge(base), 2.0, right, faces=len(right.Faces)
+        )
+
+    def testAnOpeningUnderACurvedEdgeFails(self):
+        # A round pocket R 12, 10 deep, in a block 40 x 40 x 20, and a hole of radius 3 through
+        # its floor whose rim is 0.4 inside the band of a round 2 on the floor's circle. Neither
+        # construction takes a curved edge over an opening yet, and OCCT fails there: an error,
+        # never a bridge. (Debt, ops#640: the detection doesn't name this opening; OCCT's own
+        # error stands)
+        base = (
+            Part.makeBox(40, 40, 20)
+            .cut(Part.makeCylinder(12, 10, V(20, 20, 10)))
+            .cut(Part.makeCylinder(3, 10, V(27.4, 20, 0)))
+        )
+        rim = [
+            e
+            for e in base.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - 12) < 1e-9
+            and all(abs(v.Point.z - 10) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(rim), 1)
         with self.assertRaises(Exception) as raised:
-            base.makeFillet(2.0, floor_wall_edge(base))
-        text = str(raised.exception)
-        self.assertIn("crosses an opening of a face next to its edge (Edge", text)
-        self.assertIn("exact construction refused", text)
+            base.makeFillet(2.0, rim)
+        self.assertIn("exact construction refused", str(raised.exception))
 
     def testTheRimClearOfTheBandBuildsAsOcct(self):
         # The hole's lowest point 0.05 beyond the band's far line: no opening in the band
