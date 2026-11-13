@@ -255,16 +255,12 @@ Part::TopoShape withProfileConditions(
         gp_Pnt middle0;
         gp_Pnt start1;
         gp_Pnt middle1;
-        gp_Pnt end0;  // the face's other corner rail, where the profile rows end
-        gp_Pnt end1;
         if (onPlane(plane0, surface->Value(um, v0)) || onPlane(plane0, surface->Value(um, v1))) {
             const bool low = onPlane(plane0, surface->Value(um, v0));
             start0 = surface->Value(u0, low ? v0 : v1);
             middle0 = surface->Value(uq, low ? v0 : v1);
             start1 = surface->Value(u0, low ? v1 : v0);
             middle1 = surface->Value(uq, low ? v1 : v0);
-            end0 = surface->Value(u1, low ? v0 : v1);
-            end1 = surface->Value(u1, low ? v1 : v0);
         }
         else {
             const bool low = onPlane(plane0, surface->Value(u0, vm));
@@ -272,17 +268,20 @@ Part::TopoShape withProfileConditions(
             middle0 = surface->Value(low ? u0 : u1, vq);
             start1 = surface->Value(low ? u1 : u0, v0);
             middle1 = surface->Value(low ? u1 : u0, vq);
-            end0 = surface->Value(low ? u0 : u1, v1);
-            end1 = surface->Value(low ? u1 : u0, v1);
         }
-        // the tangent lengths at the face's two corner rails (fraction 0 at start0, 1 at end0)
-        const double startA = startMagnitude * tangentLength(start0, start1, normal0);
-        const double startB = startMagnitude * tangentLength(end0, end1, normal0);
-        const double endA = endMagnitude * tangentLength(start0, start1, normal1);
-        const double endB = endMagnitude * tangentLength(end0, end1, normal1);
+        // both profile edges by arc length, walked from the ends nearest the face's first rows
+        const std::vector<gp_Pnt> points0 = byArcLength(edge0, start0, middle0, fractions);
+        const std::vector<gp_Pnt> points1 = byArcLength(edge1, start1, middle1, fractions);
+        // the tangent lengths at the face's two corner rails (fraction 0 and 1), from the edges'
+        // own end points: a planar side face's surface corners can lie off its edges
+        const double startA
+            = startMagnitude * tangentLength(points0.front(), points1.front(), normal0);
+        const double startB = startMagnitude * tangentLength(points0.back(), points1.back(), normal0);
+        const double endA = endMagnitude * tangentLength(points0.front(), points1.front(), normal1);
+        const double endB = endMagnitude * tangentLength(points0.back(), points1.back(), normal1);
         GeomFill_Profiler profiler;
-        profiler.AddCurve(fit(byArcLength(edge0, start0, middle0, fractions), fractions));
-        profiler.AddCurve(fit(byArcLength(edge1, start1, middle1, fractions), fractions));
+        profiler.AddCurve(fit(points0, fractions));
+        profiler.AddCurve(fit(points1, fractions));
         profiler.Perform(Precision::PConfusion());
         const int count = profiler.NbPoles();
         TColgp_Array1OfPnt row0(1, count);
@@ -454,8 +453,8 @@ bool crossesACap(const TopoDS_Shape& solid, const TopoDS_Shape& first, const Top
         if (surface.GetType() == GeomAbs_Plane) {
             const gp_Pln plane = surface.Plane();
             for (int i = 0; i < 2 && !cap; ++i) {
-                if (planes[i].Distance(plane.Location()) < 1e-7
-                    && plane.Axis().Direction().IsParallel(planes[i].Axis().Direction(), 1e-9)) {
+                if (planes[i].Distance(plane.Location()) < 1e-6
+                    && plane.Axis().Direction().IsParallel(planes[i].Axis().Direction(), 1e-7)) {
                     caps[i].push_back(face);
                     cap = true;
                 }
@@ -465,8 +464,17 @@ bool crossesACap(const TopoDS_Shape& solid, const TopoDS_Shape& first, const Top
             sides.push_back(face);
         }
     }
+    // across the faces: evenly, plus rows close to both ends, where a small negative magnitude's dip
+    // behind a plane ends early (v ~ 2 |k| / 3 h)
     constexpr int rows = 24;
-    constexpr int columns = 48;
+    std::vector<double> spans;
+    for (int j = 0; j <= 48; ++j) {
+        spans.push_back(j / 48.0);
+    }
+    for (double v : {1e-5, 1e-4, 1e-3, 3e-3, 1e-2}) {
+        spans.push_back(v);
+        spans.push_back(1 - v);
+    }
     for (const auto& face : sides) {
         BRepAdaptor_Surface surface(face);
         double u0 = 0;
@@ -475,9 +483,8 @@ bool crossesACap(const TopoDS_Shape& solid, const TopoDS_Shape& first, const Top
         double v1 = 0;
         BRepTools::UVBounds(face, u0, u1, v0, v1);
         for (int i = 0; i <= rows; ++i) {
-            for (int j = 0; j <= columns; ++j) {
-                const gp_Pnt point
-                    = surface.Value(u0 + (u1 - u0) * i / rows, v0 + (v1 - v0) * j / columns);
+            for (double v : spans) {
+                const gp_Pnt point = surface.Value(u0 + (u1 - u0) * i / rows, v0 + (v1 - v0) * v);
                 for (int k = 0; k < 2; ++k) {
                     const double depth = gp_Vec(planes[k].Location(), point).Dot(gp_Vec(inward[k]));
                     if (depth > -1e-6) {

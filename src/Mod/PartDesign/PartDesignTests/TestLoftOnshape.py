@@ -392,6 +392,10 @@ class TestLoftEndConditions(LoftCase):
         """LE3: m -1 on square 20 -> square 10 is LOFT_INVALID: the side dips through the bottom face."""
         loft = self.loft(square(20), square(10), StartCondition="Normal to profile", StartMagnitude=-1.0)
         self.assertStops(loft, "crosses", "LOFT_INVALID")
+        # a small negative magnitude dips only near the profile (until v ~ 2 |k| / 3 h): still a crossing
+        loft.StartMagnitude = -0.01
+        self.doc.recompute()
+        self.assertStops(loft, "crosses", "LOFT_INVALID")
 
     def testNegativeMagnitudeOnAWideningLoftBuilds(self):
         """The fork's rule (Onshape's result for this shape is not known): square 10 -> square 20 with m -1 bulges
@@ -449,7 +453,7 @@ class TestLoftEndConditions(LoftCase):
 
     def testOffsetRectanglesTakeEachCornersLength(self):
         """LE9 (Q9c): rectangle 12 x 6 on y = 0 to 6 x 4 centred (1.5, 7.5) on y = 8, end N: each face's tangent length
-        runs from one corner rail's value to the other's (Onshape: 8.027646 .. 8.130057), V and A as Onshape's."""
+        runs from one corner rail's value to the other's (Onshape, on one face: 8.027646 .. 8.130057), V and A as Onshape's."""
         turn = App.Rotation(V(1, 0, 0), 90)  # sketch (x, y) -> (x, 0, y)
         front = models.sketch(self.doc, "Front", models.rectangle(-6, 4, 6, 10), self.body,
                               placement=App.Placement(V(0, 0, 0), turn))
@@ -472,7 +476,9 @@ class TestLoftEndConditions(LoftCase):
                 self.assertAlmostEqual(3 * (row[3] - row[2]).dot(n), rule(row[0], row[3]), delta=1e-9)
                 seen.append(rule(row[0], row[3]))
         self.assertAlmostEqual(max(seen), 0.9 * 8 + 0.1 * math.sqrt(64 + 22.5), delta=1e-9)
-        self.assertAlmostEqual(min(seen), 0.9 * 8 + 0.1 * math.sqrt(64 + 4.5), delta=1e-9)
+        # the corners' in-plane offsets squared are 22.5, 4.5, 2.5, 20.5; Onshape read 8.027646 .. 8.130057 on the
+        # face whose corners are 22.5 and 4.5
+        self.assertAlmostEqual(min(seen), 0.9 * 8 + 0.1 * math.sqrt(64 + 2.5), delta=1e-9)
 
     def testThreeProfilesStop(self):
         sketches = [
