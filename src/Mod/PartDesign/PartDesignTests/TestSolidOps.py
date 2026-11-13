@@ -1244,6 +1244,13 @@ class TestThickenSeamLeg(unittest.TestCase):
                 r = 4 + t2
                 self.assertBox(s, (0, 20 - r, 8 - r), (50 + 4 * math.tan(math.radians(tilt)), 20 + r, 8 + r))  # rulings keep x
 
+    def testRingBendInward(self):
+        # the face-by-face fuse here comes closest to the pieces' sum check (review r6: 9.4e-7 relative)
+        srf, _ = self.sheet(8.0)
+        s = self.thicken(srf, 0.75, 0.0)
+        self.assertAlmostEqual(s.Volume, math.pi * (16 - 3.25 ** 2) * (14 + 22 + 4 * math.pi), delta=1e-3)
+        self.assertBox(s, (16, 16, 4), (50 + 4 * math.tan(math.radians(30)), 24, 30))
+
     def testRingBendMidplane(self):
         # the whole-sheet path (the ring stays off its axis): legs 14 and 22, the bend's centroid arc 4 pi
         srf, _ = self.sheet(8.0)

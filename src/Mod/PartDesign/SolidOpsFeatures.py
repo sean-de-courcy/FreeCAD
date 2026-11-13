@@ -438,7 +438,9 @@ def _fused(pieces, probes, pinched=False, disjoint=False):
                 continue
             if not max(p.Volume for p in pieces) - tol <= res.Volume <= total + tol:
                 continue
-            if disjoint and abs(res.Volume - total) > tol:
+            # a fuse of tangent pieces loses up to ~1e-6 of the sum (review r6, a B-spline seam leg); a real
+            # overlap is orders larger
+            if disjoint and abs(res.Volume - total) > 1e-5 * max(1.0, total):
                 continue
             if not all(res.isInside(q, 1e-6, True) for q in probes):
                 continue
