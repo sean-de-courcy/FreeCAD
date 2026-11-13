@@ -1,0 +1,10 @@
+# TestThickenSeamLeg.testOffsetOfTheSeamLegIsInvalid (fix/thicken-horn-torus) is a witness, not a product
+# check: it asserts that OCC's offset of the designed seam leg is invalid, the defect Thicken's guards work
+# around. On macOS CI (run 43394673927, the first CI run of the class anywhere) that offset comes out valid,
+# so the witness fails; the other 56 Thicken tests of TestSolidOps pass there, TestThickenObliqueLeg included.
+# Remove this file when ops#753 settles what OCC builds per host.
+
+issue: ops#753
+
+reason: OCC's offset of the seam leg is valid on macOS, so the witness that it is invalid fails
+cli  PartDesignTests.TestSolidOps.TestThickenSeamLeg.testOffsetOfTheSeamLegIsInvalid  macos
