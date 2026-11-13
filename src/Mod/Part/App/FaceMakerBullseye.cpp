@@ -22,6 +22,9 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <limits>
+
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
@@ -29,6 +32,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepLib_FindSurface.hxx>
+#include <ElSLib.hxx>
 #include <Geom_Plane.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Precision.hxx>
@@ -120,19 +124,77 @@ void FaceMakerBullseye::Build_Essence()
     // Sort wires by length of diagonal of bounding box.
     std::stable_sort(wireInfos.begin(), wireInfos.end());
 
+    // Where on the plane a face's wires can be: the box of the projections of their boxes' corners,
+    // which holds the projection of each of their edges (the curves a planar face classifies on)
+    // and of their vertices. FaceDriller::hitTest() of a wire whose first vertex projects outside
+    // a face's box, by more than twice that vertex's tolerance and the confusion, can only say
+    // HitNone: the vertex is on none of the face's wires, and the classifier finds the point OUT.
+    // So it isn't asked: asked of every face made so far, separate regions cost a classification
+    // per pair (perf profile 3: a through-all Pocket of 1600 squares, 520 s and refused)
+    struct Reach
+    {
+        double uMin = std::numeric_limits<double>::max();
+        double vMin = std::numeric_limits<double>::max();
+        double uMax = -std::numeric_limits<double>::max();
+        double vMax = -std::numeric_limits<double>::max();
+        bool whole = false;  // a box that can't be bounded: every point may be in it
+    };
+    auto addBox = [&plane](Reach& reach, const Bnd_Box& box) {
+        if (box.IsVoid()) {
+            return;
+        }
+        if (box.IsOpen()) {
+            reach.whole = true;
+            return;
+        }
+        double x[2], y[2], z[2];
+        box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
+        for (double cx : x) {
+            for (double cy : y) {
+                for (double cz : z) {
+                    double u = 0.0;
+                    double v = 0.0;
+                    ElSLib::Parameters(plane, gp_Pnt(cx, cy, cz), u, v);
+                    reach.uMin = std::min(reach.uMin, u);
+                    reach.vMin = std::min(reach.vMin, v);
+                    reach.uMax = std::max(reach.uMax, u);
+                    reach.vMax = std::max(reach.vMax, v);
+                }
+            }
+        }
+    };
+    auto away = [](const Reach& reach, double u, double v, double margin) {
+        return !reach.whole
+            && (u < reach.uMin - margin || u > reach.uMax + margin || v < reach.vMin - margin
+                || v > reach.vMax + margin);
+    };
+
     for (int i = 0; i < (reuseInnerWire ? 2 : 1); ++i) {
         // add wires one by one to current set of faces.
         std::vector<std::unique_ptr<FaceDriller>> faces;
+        std::vector<Reach> reaches;  // each face's, in the same order
         for (auto it = wireInfos.begin(); it != wireInfos.end();) {
+
+            // The point FaceDriller::hitTest() classifies: the wire's first vertex, on the plane
+            const auto vertex = TopoDS::Vertex(it->wire.getSubShape(TopAbs_VERTEX, 1));
+            const double margin = 2 * BRep_Tool::Tolerance(vertex) + Precision::Confusion();
+            double pointU = 0.0;
+            double pointV = 0.0;
+            ElSLib::Parameters(plane, BRep_Tool::Pnt(vertex), pointU, pointV);
 
             // test if this wire is on any of existing faces (if yes, it's a hole;
             //  if no, it's a beginning of a new face).
             FaceDriller* foundFace = nullptr;
+            Reach* foundReach = nullptr;
             bool hitted = false;
-            for (auto rit = faces.rbegin(); rit != faces.rend(); ++rit) {
-                switch ((*rit)->hitTest(it->wire)) {
+            for (std::size_t k = faces.size(); k-- > 0;) {
+                if (away(reaches[k], pointU, pointV, margin)) {
+                    continue;
+                }
+                switch (faces[k]->hitTest(it->wire)) {
                     case FaceDriller::HitTest::Hit:
-                        foundFace = rit->get();
+                        foundFace = faces[k].get();
+                        foundReach = &reaches[k];
                         hitted = true;
                         break;
                     case FaceDriller::HitTest::HitOuter:
@@ -156,10 +218,15 @@ void FaceMakerBullseye::Build_Essence()
                 else {
                     foundFace->addHole(w);
                 }
+                // Inside the outer wire's box when the wires are sound; added all the same, so
+                // that a vertex shared with a hole wire is never skipped
+                addBox(*foundReach, it->bound);
             }
             else {
                 // wire is not on a face. Start a new face.
                 faces.push_back(std::make_unique<FaceDriller>(plane, w));
+                reaches.emplace_back();
+                addBox(reaches.back(), it->bound);
             }
 
             if (i == 0 && reuseInnerWire && !hitted) {

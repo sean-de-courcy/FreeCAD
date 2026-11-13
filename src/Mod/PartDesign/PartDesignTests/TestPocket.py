@@ -572,6 +572,27 @@ class TestPocket(unittest.TestCase):
                 )
                 self.Doc.removeObject("Body")
 
+    def testPocketUpToFaceOfManyRegionsTakesAboutAsLongAsByLength(self):
+        """Sweep G5 (ops#640): 196 separate squares pocketed up to a face, with no base of the
+        Pocket's own (each square's prism is its own base). The chained fuses grew with the square
+        of the regions; now the extra over the Pocket by length is a fraction of its own time."""
+        from PartDesignTests.TestPad import C_VOLUME, C_FACES, PIN_GAP, PIN_SIDE, cWithPins, pinSquares
+
+        squares = pinSquares(14)
+        found = {}
+        for upTo in (False, True):
+            _, _, pocket, found[upTo] = cWithPins(self.Doc, squares, kind="Pocket", upTo=upTo)
+            self.assertTrue(pocket.isValid(), pocket.getStatusString())
+            shape = pocket.Shape
+            self.assertTrue(shape.isValid())
+            self.assertEqual(len(shape.Solids), 1)
+            self.assertAlmostEqual(
+                shape.Volume, C_VOLUME - len(squares) * PIN_SIDE * PIN_SIDE * PIN_GAP, places=4
+            )
+            self.assertEqual(len(shape.Faces), C_FACES + 4 * len(squares))
+            self.Doc.removeObject("Body")
+        self.assertLess(found[True], 3 * found[False] + 2.0, found)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")

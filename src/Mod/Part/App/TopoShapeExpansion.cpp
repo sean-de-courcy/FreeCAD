@@ -9263,8 +9263,6 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
     }
 
-    BRepFeat_MakePrism PrismMaker;
-
     // don't remove limits of concave face. The default centre of a long curved B-spline profile is
     // millimetres off, enough to take the wrong side of a curved face (ops#428)
     if (checkLimits && __uptoface.shapeType(true) == TopAbs_FACE) {
@@ -9409,22 +9407,33 @@ TopoShape& TopoShape::makeElementPrismUntil(
     }
     while (!bySplit) {
         try {
-            result = base;
-
             // We do not rely on BRepFeat_MakePrism to perform fuse or cut for
             // us because of its poor support of shape history.
-            auto mode = PrismMode::None;
+            //
+            // Each face's prism is made on its own against the same base, and one fuse joins
+            // them (sweep G5, ops#640). Chained, face k's prism was fused by BRepFeat into the
+            // prisms of faces 1..k-1 and the growing result renamed each time: the work grew with
+            // the square of the faces (229 regions of an up-to pad took minutes and passed the
+            // feature's limit). With no base of its own (the profile, or an infinite shape),
+            // each face is its own base: the whole profile as every face's base would be
+            // quadratic again. Not `_base.isNull()`: the retry gives a Pocket a base of its own
+            std::vector<TopoShape> pieces;
+            const bool ownBase = base.isSame(profile) || base.isInfinite();
 
             for (auto& face : profile.getSubTopoShapes(
                      profile.hasSubShape(TopAbs_FACE) ? TopAbs_FACE : TopAbs_WIRE
                  )) {
+                // A step the result needs, on this thread: past the feature's limit it stops
+                // here, not minutes later in the boolean's input check
+                KernelBudget::stopIfPastDeadline("The extrusion up to the face");
+                const TopoShape& on = ownBase ? face : base;
                 srcShapes.clear();
                 if (!profile.isNull()
-                    && (!result.findShape(profile.getShape())
+                    && (!on.findShape(profile.getShape())
                         || historyAlgorithm == App::HistoryAlgorithm::V2)) {
                     srcShapes.push_back(profile);
                 }
-                if (!supportFace.isNull() && !result.findShape(supportFace.getShape())) {
+                if (!supportFace.isNull() && !on.findShape(supportFace.getShape())) {
                     srcShapes.push_back(supportFace);
                 }
 
@@ -9439,24 +9448,21 @@ TopoShape& TopoShape::makeElementPrismUntil(
                 //     srcShapes.push_back(uptoface);
 
                 // the MapperPrism used in coordination with the V2 topological naming algorithm
-                // does not want `result` as an input, so omit it.
+                // does not want the base as an input, so omit it.
                 if (historyAlgorithm == App::HistoryAlgorithm::V1) {
-                    srcShapes.push_back(result);
+                    srcShapes.push_back(on);
                 }
 
-                if (result.isInfinite()) {
-                    result = face;
-                }
-
+                // One maker per face: its history names that face's prism
+                BRepFeat_MakePrism PrismMaker;
                 PrismMaker.Init(
-                    result.getShape(),
+                    on.getShape(),
                     face.getShape(),
                     TopoDS::Face(supportFace.getShape()),
                     direction,
-                    mode,
+                    PrismMode::None,
                     Standard_False
                 );
-                mode = PrismMode::FuseWithBase;
 
                 PrismMaker.Perform(uptoface.getShape());
 
@@ -9469,26 +9475,38 @@ TopoShape& TopoShape::makeElementPrismUntil(
                     FC_THROWM(Base::CADKernelError, "BRepFeat_MakePrism: extrusion failed");
                 }
 
-                if (historyAlgorithm == App::HistoryAlgorithm::V2) {
-                    result.Tag = Tag;
-                }
-
-                result.makeElementShape(PrismMaker, srcShapes, uptoface, op);
+                TopoShape piece(Tag, Hasher, historyAlgorithm);
+                piece.makeElementShape(PrismMaker, srcShapes, uptoface, op);
+                pieces.push_back(piece);
+            }
+            // One fuse joins them: regions that touch become one solid, as the chained fuses
+            // made them. It runs under the feature's limit, with Esc (makeElementBoolean). A
+            // profile with nothing to extrude fails (chained, it gave the base back as the prism)
+            if (pieces.empty()) {
+                FC_THROWM(Base::CADKernelError, "BRepFeat_MakePrism: nothing to extrude");
+            }
+            if (pieces.size() == 1) {
+                result = pieces.front();
+            }
+            else {
+                result = TopoShape(Tag, Hasher, historyAlgorithm);
+                result.makeElementFuse(pieces, op);
             }
             break;
         }
+        // Past the feature's limit, a retry would only spend more: the stop stands
         catch (Base::Exception&) {
-            if (!retry()) {
+            if (KernelBudget::pastDeadline() || !retry()) {
                 throw;
             }
         }
         catch (Standard_Failure&) {
-            if (!retry()) {
+            if (KernelBudget::pastDeadline() || !retry()) {
                 throw;
             }
         }
     }
-    // As the split refuses it (ops#356). `result` is the profile's prisms alone here: the first
+    // As the split refuses it (ops#356). `result` is the profile's prisms alone here: each
     // face's prism is made with mode None
     if (!bySplit
         && reachesPast(result.getShape(), profile.getShape(), uptoface.getShape(), direction)) {
