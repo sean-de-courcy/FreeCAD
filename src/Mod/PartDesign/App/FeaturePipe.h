@@ -92,8 +92,10 @@ public:
     App::PropertyEnumeration BodyType;
     App::PropertyLength Thickness1;
     App::PropertyLength Thickness2;
-    /// The wall centred on the profile's curves, Thickness1 in all
-    App::PropertyBool Midplane;
+    // The wall centred on the profile's curves, Thickness1 in all: ProfileBased's Midplane. Not
+    // a Midplane of Pipe's own: of two static properties of one name only the derived class's
+    // is in the property list, so the inherited one was never purged, stayed touched from its
+    // construction, and ProfileBased::mustExecute() ran every pipe in every recompute (ops#640)
     /// The wall on the other side of the profile's curves
     App::PropertyBool FlipWall;
     /// Onshape's Thin option; no effect, as in Onshape (SW14: on and off gave the same in every case)
