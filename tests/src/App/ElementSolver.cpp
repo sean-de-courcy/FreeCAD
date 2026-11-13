@@ -11647,3 +11647,130 @@ TEST(IndexMadeOnly, theRecursionFailsClosed)
     EXPECT_FALSE(App::indexMadeOnly(name));
     EXPECT_TRUE(App::indexMadeOnly(name, 9));
 }
+
+// The twin walk of a reference's fingerprint reads names as the map holds them (ops#640): a name's
+// own sections in full, the names they embed as references. On the replica's Case Lid the plain
+// forms took 129 s per referenced edge, and one face's name gigabytes.
+#include <App/NameTable.h>
+
+TEST(NameAncestry, twinKeyOfOwnSectionsIsThePlainForms)
+{
+    auto& table = Data::NameTable::instance();
+    const auto ref = [&](const std::string& content) {
+        return Data::NameTable::makeRef(*table.intern(content));
+    };
+    HoledBend h;
+    const std::string two = h.cyl + "|" + section({}, {}, 12, "FUS", 0, 'F', {"MOD"});
+    const std::string deep = section({}, {h.hole1, h.seam1}, 13, "CUT", 0, 'V', {"GEN"}, {h.seamNow});
+    // An ID no content has (indexStandIn() holds a space, which no name does)
+    const std::string absent = Data::NameTable::makeRef(Data::NameTable::indexStandIn(77));
+    std::vector<std::string> names = {
+        "",
+        h.edge1,
+        two,
+        ref(two),                              // a whole name behind a reference
+        ref(ref(two)),                         // behind two
+        ref(two) + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),           // a split piece's prefix
+        ref(ref(two) + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"})) + "|"
+            + section({}, {}, 15, "CHF", 0, 'F', {"MOD"}),                      // a prefix in a prefix
+        ref("") + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),            // an empty prefix
+        absent,
+        absent + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),
+        table.toInterned(deep),                // references in both name lists, two deep
+        table.toInterned(two + "|" + deep),
+        "F1;" + ref(h.cyl) + "," + ref(two) + ";t;MKR;1;E;_;_;" + absent,
+        "F1;x^;y^|z;t;MKR;1;E;_;_;_",
+        "F1;_;_;MKR;1;E;_;_;_;",               // an empty last field
+        // A list of two with its last entry empty: the table holds the empty entry as a reference
+        table.toInterned("F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ","),
+        table.toInterned("F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;_;_"),
+        table.toInterned("F1;,;7;MKR;1;E;_;_;,"),
+    };
+    for (const auto& name : names) {
+        EXPECT_EQ(App::twinKeyForTesting(name, false), App::twinKeyForTesting(name, true)) << name;
+        // The own sections of a name hold the plain form's fields besides its name lists
+        EXPECT_EQ(Data::ownSectionsOf(table.toPlain(name)), table.toPlain(name)) << name;
+        EXPECT_EQ(table.toPlain(Data::ownSectionsOf(name)), table.toPlain(name)) << name;
+    }
+}
+
+TEST(NameAncestry, twinNamesAsTheMapHoldsThem)
+{
+    // isTwinName() of interned names is the plain names' answer
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto rank = [&](int index, const std::vector<std::string>& flags) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", index, 'V', flags);
+    };
+    const auto told = [&](const std::vector<std::string>& connected) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", 0, 'E', {"GEN"}, connected);
+    };
+    // Twins below the top level: a piece made from each of two twins
+    const auto above = [&](const std::string& below) {
+        return section({}, {below, h.cyl}, 12, "FLT", 0, 'F', {"GEN"});
+    };
+    const std::vector<std::string> names = {
+        rank(0, {"GEN"}),
+        rank(1, {"GEN"}),
+        rank(1, {"GEN", "ORD"}),
+        told({}),
+        told({h.x0}),
+        told({h.edge1}),
+        above(rank(0, {"GEN"})),
+        above(rank(1, {"GEN", "ORD"})),
+        above(told({h.x0})),
+        h.cyl,
+        h.cyl + "|" + section({}, {}, 12, "FUS", 0, 'F', {"MOD"}),
+        "F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ",",
+        "F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ","
+            + Data::MappedName::escapeString(h.cyl),
+    };
+    for (const auto& a : names) {
+        for (const auto& b : names) {
+            const bool plain = Data::isTwinName(a, b);
+            const std::string storedA = table.toInterned(a);
+            const std::string storedB = table.toInterned(b);
+            EXPECT_EQ(Data::isTwinName(Data::ownSectionsOf(storedA), Data::ownSectionsOf(storedB)), plain)
+                << a << "\n" << b;
+            EXPECT_EQ(Data::isTwinName(storedA, storedB), plain) << a << "\n" << b;
+            EXPECT_EQ(Data::isTwinName(Data::ownSectionsOf(storedA), b), plain) << a << "\n" << b;
+        }
+    }
+}
+
+TEST(NameAncestry, twinNamesOfADeepHistoryAreToldWithoutTheirPlainForms)
+{
+    // Forty generations, each name made from two of the generation before: a plain form holds
+    // 2^40 names. Two such names that differ by the ORD flag at the bottom are twins, and a third
+    // with another tag at the bottom is not: told through the references, where the two differ
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto stored = [&](const std::string& name) {
+        return Data::NameTable::makeRef(*table.intern(name));
+    };
+    const auto bottom = [&](int tag, bool ordered) {
+        const std::vector<std::string> flags = ordered ? std::vector<std::string> {"GEN", "ORD"}
+                                                       : std::vector<std::string> {"GEN"};
+        return stored(section({}, {stored(h.edge1), stored(h.cyl)}, tag, "CUT", 0, 'E', flags));
+    };
+    const auto grown = [&](std::string name, const std::string& beside) {
+        for (int generation = 0; generation < 40; ++generation) {
+            name = stored(section({}, {name, beside}, 100 + generation, "FLT", 0, 'E', {"GEN"}));
+        }
+        return name;
+    };
+    // The other parent of every generation: a history of its own, as deep
+    std::string beside = stored(h.cyl);
+    for (int generation = 0; generation < 40; ++generation) {
+        beside = stored(section({}, {beside, beside}, 200 + generation, "FUS", 0, 'F', {"MOD"}));
+    }
+    const std::string first = Data::ownSectionsOf(grown(bottom(11, false), beside));
+    const std::string second = Data::ownSectionsOf(grown(bottom(11, true), beside));
+    const std::string other = Data::ownSectionsOf(grown(bottom(12, false), beside));
+    EXPECT_TRUE(Data::isTwinName(first, second));
+    EXPECT_TRUE(Data::isTwinName(second, first));
+    EXPECT_FALSE(Data::isTwinName(first, other));
+    EXPECT_FALSE(Data::isTwinName(first, first));
+    EXPECT_EQ(App::twinKeyForTesting(grown(bottom(11, false), beside), false),
+              App::twinKeyForTesting(grown(bottom(11, true), beside), false));
+}

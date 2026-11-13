@@ -1440,35 +1440,16 @@ std::string twinKey(std::string_view name)
     return key;
 }
 
-// A name with its own sections in full and the names they embed left as the map holds them (a
-// reference stays a reference): what plainName() gives at the top level, without the history
-// below it. twinKey() reads only fields that hold no embedded name (each top-level section's
-// reference IDs, iteration tag and element type), so this form has the plain form's key, at the
-// cost of the name's own text instead of its whole history's. On the replica's Case Lid at its
-// feature 137 the plain forms of every edge's names, built once per referenced edge, took 574 s
-// of a chamfer's link assignment (ops#640).
+// A name with its own sections in full and the names they embed left as the map holds them
+// (Data::ownSectionsOf()). twinKey() reads only fields that hold no embedded name (each top-level
+// section's reference IDs, iteration tag and element type), so this form has the plain form's
+// key, at the cost of the name's own text instead of its whole history's. On the replica's Case
+// Lid after its circular pattern, the plain forms of every edge's names, built once per
+// referenced edge, took 129 s per edge of a chamfer's link assignment, and one face's name took
+// gigabytes (ops#640).
 std::string ownSections(const std::string& name)
 {
-    using Data::NameTable;
-    std::string text = name;
-    // A leading reference (the whole name, or the prefix of a split piece) becomes its content,
-    // as NameTable::toPlain() expands it. A content is a hash's preimage, so it never leads back
-    // to itself; the bound is a guard only
-    for (int round = 0; round < 4096; ++round) {
-        if (text.size() < NameTable::RefLength || text.front() != NameTable::Marker
-            || (text.size() > NameTable::RefLength
-                && text[NameTable::RefLength] != *Data::NAME_SECTION_DELIMINATOR)) {
-            return text;
-        }
-        const auto id = NameTable::parseRef(std::string_view(text).substr(0, NameTable::RefLength));
-        const auto content = id ? NameTable::instance().lookup(*id) : std::nullopt;
-        if (!content) {
-            return text;
-        }
-        text.replace(0, NameTable::RefLength, *content);
-    }
-    // Deeper than any history: the plain form's own key
-    return plainName(name);
+    return Data::ownSectionsOf(name);
 }
 
 }  // namespace
@@ -3446,6 +3427,11 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
     );
 }
 
+std::string twinKeyForTesting(const std::string& name, bool plain)
+{
+    return twinKey(plain ? plainName(name) : ownSections(name));
+}
+
 bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vector3d& centroid, int& count)
 {
     count = 0;
@@ -3458,10 +3444,13 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     if (!indexed) {
         return false;
     }
-    // The element's names, plain, as the solver sees them (poolOf())
+    // The element's names with their own sections in full and the names they embed as the map
+    // holds them (ownSections()): Data::isTwinName() and Data::isOrderKeyedName() read a
+    // reference as its content and answer as for the plain forms the solver sees (poolOf()),
+    // without building them
     std::vector<std::string> names;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
-        names.push_back(plainName(mapped.first.toString()));
+        names.push_back(ownSections(mapped.first.toString()));
     }
     if (names.empty()) {
         return false;
@@ -3488,17 +3477,11 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
             continue;
         }
         for (const auto& mapped : data->getElementMappedNames(index)) {
-            // The key first, off the name's own sections: a name with another key is no twin,
-            // and its history isn't expanded (ownSections())
-            const std::string text = mapped.first.toString();
-            const std::string key = twinKey(ownSections(text));
-            if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
-                continue;
-            }
-            const std::string plain = plainName(text);
+            const std::string own = ownSections(mapped.first.toString());
+            const std::string key = twinKey(own);
             bool twin = false;
             for (std::size_t k = 0; k < names.size() && !twin; ++k) {
-                twin = keys[k] == key && Data::isTwinName(plain, names[k]);
+                twin = keys[k] == key && Data::isTwinName(own, names[k]);
             }
             if (twin) {
                 twins.insert(index.toString());
@@ -3562,11 +3545,13 @@ bool elementUpToFaces(
     // its own up-to faces aren't theirs (review pr398-r3). The piece's name names the extrusion
     // that made it (ops#524)
     const long tag = namingTagOf(geo);  // FreeCAD-CH ops#654 S2: a step names by its owner
+    // Told off the name's own sections (ownSections()): the mark is in a top-level section's
+    // fields, and the plain form, the whole history, is built for a marked piece only
     std::string own;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
-        std::string name = plainName(mapped.first.toString());
-        if (Data::isMarkedPieceOf(name, tag)) {
-            own = std::move(name);
+        const std::string name = mapped.first.toString();
+        if (Data::isMarkedPieceOf(ownSections(name), tag)) {
+            own = plainName(name);
             break;
         }
     }
