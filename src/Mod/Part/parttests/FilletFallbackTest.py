@@ -3480,3 +3480,87 @@ class CurvedEndTrimTest(unittest.TestCase):
                 shape = body.makeFillet(0.9, [chord])
                 self.assertTrue(shape.isValid())
                 self.assertEqual(len(shape.Faces), len(body.Faces) + 1)
+
+
+class RoundAlongASplineEdgeTest(unittest.TestCase):
+    """A constant round along a spline edge is OCCT's (NEW-165, ops#640, notes/fillet-spline-edge.md).
+
+    A prism of height 8 over a convex G1 stadium: two straight sides of 30 at y = +-10, and caps that
+    are cubic Bezier curves with poles (+-15, -+10), (+-27, -+10), (+-27, +-10), (+-15, +-10). The
+    round of the whole top rim has the same section everywhere, square to the rim; Pappus over the
+    closed convex rim, whose inward offset by d has length P - 2 pi d, gives the removed volume
+    r^2 (1 - pi/4) (P - 2 pi k r), k = (5/6 - pi/4) / (1 - pi/4), and the round's area
+    (pi r / 2) (P - 2 pi r + 4 r). Faces: the 6 base faces plus 4 rounds, two of them cylinders and
+    two B-splines (the pipe about the cap's offset). The least radius of curvature on a cap is
+    7.9609: past it no round exists, and the failure names OCCT and the curve kind."""
+
+    H = 8.0
+    LIMIT = 7.9609
+
+    def rim(self, z):
+        def bezier(poles):
+            curve = Part.BezierCurve()
+            curve.setPoles([V(x, y, z) for x, y in poles])
+            return curve.toShape()
+
+        return Part.Wire(
+            [
+                Part.makeLine(V(-15, -10, z), V(15, -10, z)),
+                bezier([(15, -10), (27, -10), (27, 10), (15, 10)]),
+                Part.makeLine(V(15, 10, z), V(-15, 10, z)),
+                bezier([(-15, 10), (-27, 10), (-27, -10), (-15, -10)]),
+            ]
+        )
+
+    def prism(self, walls):
+        if walls == "extrusion":
+            return Part.Face(self.rim(0)).extrude(V(0, 0, self.H))
+        # A ruled loft: the caps' walls are B-spline surfaces, #165's kind
+        return Part.makeLoft([self.rim(0), self.rim(self.H)], True, True)
+
+    def top(self, body):
+        return [
+            e
+            for e in body.Edges
+            if abs(e.BoundBox.ZMin - self.H) < 1e-9 and abs(e.BoundBox.ZMax - self.H) < 1e-9
+        ]
+
+    def testRoundAsClosedForm(self):
+        k = (5 / 6 - math.pi / 4) / (1 - math.pi / 4)
+        for walls in ("extrusion", "loft"):
+            body = self.prism(walls)
+            self.assertTrue(body.isValid())
+            P = self.rim(0).Length
+            for r in (0.5, 2.0, 4.0):
+                with self.subTest(walls=walls, r=r):
+                    shape = body.makeFillet(r, self.top(body))
+                    self.assertTrue(shape.isValid())
+                    self.assertEqual(len(shape.Solids), 1)
+                    self.assertEqual(len(shape.Faces), 10)
+                    removed = r * r * (1 - math.pi / 4) * (P - 2 * math.pi * k * r)
+                    self.assertAlmostEqual(
+                        (body.Volume - shape.Volume) / removed, 1.0, delta=1e-5
+                    )
+                    rounds = [
+                        f
+                        for f in shape.Faces
+                        if f.BoundBox.ZMin > self.H - r - 1e-7
+                        and f.Surface.TypeId != "Part::GeomPlane"
+                    ]
+                    self.assertEqual(len(rounds), 4)
+                    area = math.pi * r / 2 * (P - 2 * math.pi * r + 4 * r)
+                    self.assertAlmostEqual(sum(f.Area for f in rounds) / area, 1.0, delta=1e-5)
+                    kinds = sorted(f.Surface.TypeId for f in rounds)
+                    self.assertEqual(kinds.count("Part::GeomCylinder"), 2)
+                    self.assertEqual(kinds.count("Part::GeomBSplineSurface"), 2)
+
+    def testPastTheCurvatureLimitFailsTruthfully(self):
+        for walls in ("extrusion", "loft"):
+            with self.subTest(walls=walls):
+                body = self.prism(walls)
+                with self.assertRaises(Part.OCCError) as caught:
+                    body.makeFillet(1.05 * self.LIMIT, self.top(body))
+                message = str(caught.exception)
+                self.assertNotIn("neither a line nor a circle", message)
+                self.assertIn("OCCT failed on a round along", message)
+                self.assertTrue("Bezier" in message or "B-spline" in message, message)

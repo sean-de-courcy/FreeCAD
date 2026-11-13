@@ -132,6 +132,27 @@ struct Refusal
     throw Refusal {reason};
 }
 
+/// The kind of an edge's curve, for a refusal's text
+std::string curveKind(GeomAbs_CurveType type)
+{
+    switch (type) {
+        case GeomAbs_Ellipse:
+            return "an ellipse";
+        case GeomAbs_Hyperbola:
+            return "a hyperbola";
+        case GeomAbs_Parabola:
+            return "a parabola";
+        case GeomAbs_BezierCurve:
+            return "a Bezier";
+        case GeomAbs_BSplineCurve:
+            return "a B-spline";
+        case GeomAbs_OffsetCurve:
+            return "an offset curve's";
+        default:
+            return "a free-form";
+    }
+}
+
 std::string describe(double value)
 {
     std::ostringstream ss;
@@ -980,7 +1001,13 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
         }
     }
     else {
-        refuse("a selected edge that is neither a line nor a circle");
+        // OCCT's own round is the one along any other curve (notes/fillet-spline-edge.md): the
+        // refusal says that OCCT failed there, not that the edge isn't allowed (NEW-165, ops#640)
+        refuse(
+            std::string("the exact construction covers lines and circles; OCCT failed on a ")
+            + (ctx.request.kind == Kind::Chamfer ? "chamfer" : "round") + " along "
+            + curveKind(curve.GetType()) + " edge"
+        );
     }
     // Convex when the second face turns away from the first's outward normal
     double middle = (data.first + data.last) / 2;
@@ -7030,6 +7057,17 @@ bool preferConstruction(
 {
     if (request.kind != Kind::Fillet || request.size1 <= 0) {
         return false;
+    }
+    // A selection with an edge along another curve stays OCCT's first: the construction would
+    // refuse it there anyway (NEW-165, notes/fillet-spline-edge.md)
+    for (const auto& edge : edges) {
+        if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE
+            && !BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
+            const GeomAbs_CurveType type = BRepAdaptor_Curve(TopoDS::Edge(edge)).GetType();
+            if (type != GeomAbs_Line && type != GeomAbs_Circle) {
+                return false;
+            }
+        }
     }
     try {
         const TopoShape base(baseShape);
