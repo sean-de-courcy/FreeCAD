@@ -4043,6 +4043,100 @@ class CurvedEndTrimTest(unittest.TestCase):
                 self.assertEqual(len(shape.Faces), len(body.Faces) + 1)
 
 
+class BlendEndTrimTest(unittest.TestCase):
+    """Case Base #105's ends, designed (notes r105-curved-end-trim): a round at its limit cut off by an
+    earlier blend's continuation past the blend's own face.
+
+    A block x -10..10, y 0..8, z 0..4 + h0 with a notch below z = 4 under a lip h0 tall. The notch is
+    the ball of radius 5 about (0, -d, 2): its wall is a sphere that meets the front (y = 0) along a
+    circle about (0, 0, 2). Those two wall/front edges get an OCCT fillet r_b, which ends at the lip's
+    underside and which OCCT stores as a B-spline surface. The blend widens the underside's front edge
+    by two stubs that run into the blend tangentially (as #105's 0.74 lines). The lip is then
+    thickened to h (a slab fused on top, as a later feature would), and the three edges are rounded
+    with r = h, the round's limit: the blend cuts the round off at both ends, above its own face.
+
+    The blend's exact continuation is a torus (the ball rolls on the plane and the sphere): its axis
+    goes through the sphere's centre along y, the centres' circle lies in the plane y = r_b with
+    radius sqrt((5 + r_b)^2 - (d + r_b)^2), and the minor radius is r_b. Expected, defined
+    geometrically: every point of the round's edges on the blend lies on that torus.
+
+    OCCT's own blend surface past its face is the blend only as far as the fillet needed it (about to
+    the lip's top as it was then, 2e-6), and then continues the spine straight (7.6e-4 off 0.1
+    further, 6.3e-3 off 0.2 further). Cut by that surface, the round of d 1, r_b 1, h 0.6 over h0 0.1
+    was built 3.8e-4 off the torus, silently, and the other two cases were refused."""
+
+    rho, zc = 5.0, 2.0
+
+    def torusDeviation(self, p, d, rb):
+        major = math.sqrt((self.rho + rb) ** 2 - (d + rb) ** 2)
+        return abs(math.hypot(math.hypot(p.x, p.z - self.zc) - major, p.y - rb) - rb)
+
+    def blended(self, d, rb, h, h0):
+        block = Part.makeBox(20, 8, 4 + h0, V(-10, 0, 0))
+        ball = Part.makeSphere(self.rho, V(0, -d, self.zc))
+        notch = ball.common(Part.makeBox(40, 40, 10, V(-20, -20, -6)))  # below z = 4
+        body = block.cut(notch).removeSplitter()
+
+        def onFront(e):
+            middle = e.valueAt((e.FirstParameter + e.LastParameter) / 2)
+            return abs(middle.y) < 1e-7 and all(abs(v.Point.y) < 1e-7 for v in e.Vertexes)
+
+        arcs = [e for e in body.Edges if onFront(e) and e.Curve.TypeId != "Part::GeomLine"]
+        self.assertEqual(len(arcs), 2)
+        blended = body.makeFillet(rb, arcs)
+        self.assertTrue(blended.isValid())
+        if h > h0:
+            blended = blended.fuse(Part.makeBox(20, 8, h - h0, V(-10, 0, 4 + h0))).removeSplitter()
+            self.assertTrue(blended.isValid())
+        chain = [
+            e
+            for e in blended.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.y) < 1e-7 and abs(v.Point.z - 4) < 1e-7 for v in e.Vertexes)
+        ]
+        # the chord and its two stubs; one edge once the slab's refine has merged them
+        self.assertEqual(len(chain), 3 if h == h0 else 1)
+        return blended, chain
+
+    def check(self, d, rb, h, h0, allowed):
+        blended, chain = self.blended(d, rb, h, h0)
+        shape = blended.makeFillet(h, chain)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        worst = 0.0
+        cut = 0
+        for f in shape.Faces:
+            s = f.Surface
+            if s.TypeId != "Part::GeomCylinder" or abs(s.Radius - h) > 1e-9:
+                continue
+            for e in f.Edges:
+                if e.Curve.TypeId != "Part::GeomBSplineCurve":
+                    continue  # the round's own lines and section arcs
+                cut += 1
+                for k in range(17):
+                    p = e.valueAt(e.FirstParameter + (e.LastParameter - e.FirstParameter) * k / 16.0)
+                    worst = max(worst, self.torusDeviation(p, d, rb))
+        self.assertGreaterEqual(cut, 2)  # a cut edge at each end
+        self.assertLess(worst, allowed)
+        return shape, blended
+
+    def testARoundWithinTheBlendSurfacesOwnRunOn(self):
+        # the lip as tall as when the blend was made: the cut lies where OCCT's surface is still the
+        # blend, on the wall's own surface (measured 1e-8; the blend, the front split, two grown walls)
+        shape, blended = self.check(3.0, 0.5, 0.1, 0.1, 1e-6)
+        self.assertEqual(len(shape.Faces), len(blended.Faces) + 4)
+
+    def testARoundPastTheBlendSurfacesOwnRunOn(self):
+        # d, r_b, h, h0. On 17c18a4dc3: the first built 3.8e-4 off (2 new faces), the other two refused
+        # ("the surface of an end face that is not a plane leaves 0 pieces beside its edge").
+        # Measured 7.5e-7, 2.9e-6, 4.0e-6: the blend's own surface is that far from the torus inside
+        # its face. Each end's continuation is one face more than the blend (Onshape: one face)
+        for d, rb, h, h0 in ((1.0, 1.0, 0.6, 0.1), (0.0, 1.5, 1.0, 0.2), (0.0, 1.0, 0.8, 0.2)):
+            with self.subTest(d=d, rb=rb, h=h):
+                shape, blended = self.check(d, rb, h, h0, 1e-5)
+                self.assertEqual(len(shape.Faces), len(blended.Faces) + 4)
+
+
 class RoundBetweenCylindersTest(unittest.TestCase):
     """A round of a straight edge between two cylinders along it (ops#640, Case Base #104), on two
     cylinders R, height h, axes d apart: fused (two concave edges) and their common part, a lens
