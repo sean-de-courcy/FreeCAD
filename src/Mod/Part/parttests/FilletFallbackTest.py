@@ -2576,7 +2576,8 @@ class OverflowTest(unittest.TestCase):
                 self.assertEqual(edges[1].Curve.TypeId, "Part::GeomBSplineCurve")
                 with self.assertRaises(Part.OCCError) as refused:
                     self.dressUp("Fillet", base, 1.0, edges)
-                self.assertIn("a selected edge that is neither a line nor a circle", str(refused.exception))
+                # NEW-165: the refusal says OCCT failed on the curve, not that the edge is not allowed
+                self.assertIn("the exact construction covers lines and circles", str(refused.exception))
 
     @staticmethod
     def tiltedLedge(h, t, wall):
