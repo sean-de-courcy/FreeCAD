@@ -217,6 +217,29 @@ class FilletFallbackTest(unittest.TestCase):
     def testFullRoundWithARingTorus(self):
         self.fullRoundOfAPlate(4.0)  # N2, the control: M 2.5 > r
 
+    def testFullRoundOfADiskWithSpindleTori(self):
+        # Closed circles: a disk of radius 2.4, 3 thick, both rims rounded 1.5 (M 0.9 < r)
+        rho, r = 2.4, 1.5
+        disk = Part.makeCylinder(rho, 2 * r)
+        rims = [e for e in disk.Edges if e.Curve.TypeId == "Part::GeomCircle"]
+        self.assertEqual(len(rims), 2)
+        result = disk.makeFillet(r, rims)
+        removed = 2 * fillet_section(r) * 2 * math.pi * (rho - fillet_centroid(r))
+        self.assertExact(result, math.pi * rho * rho * 2 * r - removed)
+
+    def testFullRoundOfABlindHoleWithASpindleTorus(self):
+        # A concave circle, its tool fused: a hole of radius 2.4, 3 deep, in a block, its top rim
+        # (a ring torus about the hole's axis, M 3.9) and its floor edge (a spindle, M 0.9) both
+        # rounded 1.5, so the hole's wall vanishes
+        rho, r = 2.4, 1.5
+        block = Part.makeBox(10, 10, 6).cut(Part.makeCylinder(rho, 2 * r, V(5, 5, 6 - 2 * r)))
+        rims = [e for e in block.Edges if e.Curve.TypeId == "Part::GeomCircle"]
+        self.assertEqual(len(rims), 2)
+        result = block.makeFillet(r, rims)
+        top = fillet_section(r) * 2 * math.pi * (rho + fillet_centroid(r))
+        floor = fillet_section(r) * 2 * math.pi * (rho - fillet_centroid(r))
+        self.assertExact(result, 600 - math.pi * rho * rho * 2 * r - top + floor)
+
     def testStepOgee(self):
         step = Part.makeBox(30, 20, 10).fuse(Part.makeBox(30, 10, 4, V(0, 10, 10))).removeSplitter()
         edges = [
