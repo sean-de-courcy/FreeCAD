@@ -44,6 +44,7 @@
 #include <GeomAPI_Interpolate.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
@@ -2223,6 +2224,68 @@ Tool tightTool(
     }
     TopoDS_Solid solid = makeSolid.Solid();
     BRepLib::OrientClosedSolid(solid);
+    // The patch's edge at theta = 0 is the wall arc at depth r, exactly a circle: given as one, so
+    // that the result keeps the wall's own arc where the patch meets the wall (as Onshape does)
+    {
+        gp_Circ wallArc(gp_Ax2(frame.point(gp_XY(0.0, 0.0), z0), frame.z, frame.x), rho);
+        auto onArc = [&](const gp_Pnt& p) {
+            gp_Vec v(frame.point(gp_XY(0.0, 0.0), z0), p);
+            double height = v.Dot(gp_Vec(frame.z));
+            double radial = (v - gp_Vec(frame.z) * height).Magnitude();
+            return std::abs(height) < 1e-7 * std::max(1.0, r) && std::abs(radial - rho) < 1e-7 * std::max(1.0, r);
+        };
+        int replaced = 0;
+        BRep_Builder builder;
+        for (TopExp_Explorer it(solid, TopAbs_EDGE); it.More(); it.Next()) {
+            TopoDS_Edge edge = TopoDS::Edge(it.Current());
+            double first = 0.0;
+            double last = 0.0;
+            Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+            if (curve.IsNull() || curve->IsKind(STANDARD_TYPE(Geom_Circle))) {
+                continue;
+            }
+            gp_Pnt a = curve->Value(first);
+            gp_Pnt b = curve->Value(last);
+            gp_Pnt m = curve->Value((first + last) / 2);
+            if (!onArc(a) || !onArc(b) || !onArc(m) || a.Distance(b) < linearTolerance) {
+                continue;
+            }
+            // Counterclockwise about z from a to b through m, or the reversed circle
+            gp_Circ c = wallArc;
+            double ua = ElCLib::Parameter(c, a);
+            double ub = ElCLib::Parameter(c, b);
+            double um = ElCLib::Parameter(c, m);
+            auto inRange = [](double u0, double u1, double u) {
+                while (u1 < u0) {
+                    u1 += 2 * pi;
+                }
+                while (u < u0) {
+                    u += 2 * pi;
+                }
+                return u <= u1;
+            };
+            if (!inRange(ua, ub, um)) {
+                c = gp_Circ(gp_Ax2(c.Location(), c.Axis().Direction().Reversed(), c.XAxis().Direction()), rho);
+                ua = ElCLib::Parameter(c, a);
+                ub = ElCLib::Parameter(c, b);
+            }
+            while (ub < ua) {
+                ub += 2 * pi;
+            }
+            builder.UpdateEdge(edge, new Geom_Circle(c), BRep_Tool::Tolerance(edge));
+            builder.Range(edge, ua, ub, Standard_True);
+            builder.SameRange(edge, Standard_False);
+            builder.SameParameter(edge, Standard_False);
+            BRepLib::SameParameter(edge, 1e-7);
+            if (!BRep_Tool::SameParameter(edge) || BRep_Tool::Tolerance(edge) > 1e-6) {
+                refuse("a tight corner's wall arc could not be given as a circle");
+            }
+            ++replaced;
+        }
+        if (replaced != 1) {
+            refuse("a tight corner's tool has no single edge on the wall arc");
+        }
+    }
     if (!BRepCheck_Analyzer(solid).IsValid() || volumeOf(solid) <= 0.0) {
         refuse("a tight corner's tool is not a valid solid");
     }
@@ -3663,6 +3726,10 @@ TopoDS_Shape constructShape(
             return volumeTolerance * std::min(cutTools[i]->volume, cutTools[j]->volume);
         };
         std::vector<std::vector<bool>> pairs(cutTools.size(), std::vector<bool>(cutTools.size()));
+        std::vector<std::vector<TopoDS_Shape>> pairCommons(
+            cutTools.size(),
+            std::vector<TopoDS_Shape>(cutTools.size())
+        );
         for (size_t i = 0; i < cutTools.size(); ++i) {
             for (size_t j = i + 1; j < cutTools.size(); ++j) {
                 if (boxes[i].IsOut(boxes[j])) {
@@ -3672,6 +3739,7 @@ TopoDS_Shape constructShape(
                 double both = volumeOf(common);
                 if (both > overlapTolerance(i, j)) {
                     pairs[i][j] = true;
+                    pairCommons[i][j] = common;
                     lenses.push_back(common);
                     trimmedVolume -= both;
                     trimmedAllowance += raisedTolerance(common, {inside[i], cutTools[j]->solid})
@@ -3679,13 +3747,33 @@ TopoDS_Shape constructShape(
                 }
             }
         }
-        // Three tools overlapping in one place would be subtracted once too often
+        // Three tools overlapping in one place would be subtracted once too often. A tight wall
+        // arc's tool (measured) overlaps both neighbours' tools, whose strips overlap each other
+        // on the top (C4 shape A): the three's common part is measured and added back, the third
+        // term of the inclusion and exclusion. Four tools in one place are refused
         for (size_t i = 0; i < cutTools.size(); ++i) {
             for (size_t j = i + 1; j < cutTools.size(); ++j) {
                 for (size_t k = j + 1; k < cutTools.size(); ++k) {
-                    if (pairs[i][j] && pairs[i][k] && pairs[j][k]) {
+                    if (!pairs[i][j] || !pairs[i][k] || !pairs[j][k]) {
+                        continue;
+                    }
+                    if (!cutTools[i]->measured && !cutTools[j]->measured
+                        && !cutTools[k]->measured) {
                         refuse("three tools of a dress-up past its faces overlap");
                     }
+                    for (size_t l = k + 1; l < cutTools.size(); ++l) {
+                        if (pairs[i][l] && pairs[j][l] && pairs[k][l]) {
+                            refuse("four tools of a dress-up past its faces overlap");
+                        }
+                    }
+                    TopoDS_Shape triple = commonOf(pairCommons[i][j], cutTools[k]->solid);
+                    trimmedVolume += volumeOf(triple);
+                    trimmedAllowance += raisedTolerance(triple, {pairCommons[i][j], cutTools[k]->solid})
+                        * std::min(
+                              {squareSize(cutTools[i]->solid),
+                               squareSize(cutTools[j]->solid),
+                               squareSize(cutTools[k]->solid)}
+                        );
                 }
             }
         }
