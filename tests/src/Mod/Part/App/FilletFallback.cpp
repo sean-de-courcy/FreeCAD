@@ -3711,4 +3711,91 @@ TEST_F(FilletFallbackTest, roundAcrossAHoleInItsWallStaysTheCylinder)
     }
 }
 
+// Case Base #165 (ops#640): OCCT's walker failed on a tangent chain by the edge its contour was
+// seeded from. A pocket corner: walls x = 0 and y = 0, floor z = 0, both floor edges rounded r 2
+// (their mitre an ellipse), the vertical corner edge sharp up to z h, where a U-slot through the
+// x-wall (radius R, axis along X at y = R, z = h, its side the y-wall's plane) ends it with a
+// tangent arc. Rounding the ellipse and the corner edge is one tangent chain; seeded from the
+// ellipse (listed first) OCCT failed, seeded from the line it built. The selection is a set: the
+// same round either way
+TEST_F(FilletFallbackTest, tangentChainRoundsWhicheverEdgeIsListedFirst)
+{
+    const double r = 0.22;
+    const double R = 4.7625;
+    const double h = 6.4;
+    auto volumeOf = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return props.Mass();
+    };
+    // Built as a Part script builds it (fillet, cut, fuse, refine): the corner edge's curve then
+    // runs against the chain from the ellipse, as in #165's input
+    const TopoShape pocket(box(20, 20, 30, gp_Pnt(-20, 0, 0)), 1L);
+    std::vector<TopoShape> floorEdges;
+    for (const auto& edge : pocket.getSubTopoShapes(TopAbs_EDGE)) {
+        Bnd_Box bounds;
+        BRepBndLib::Add(edge.getShape(), bounds);
+        double x1 {}, y1 {}, z1 {}, x2 {}, y2 {}, z2 {};
+        bounds.Get(x1, y1, z1, x2, y2, z2);
+        if (std::abs(z1) < 1e-6 && std::abs(z2) < 1e-6
+            && ((std::abs(x1) < 1e-6 && std::abs(x2) < 1e-6)
+                || (std::abs(y1) < 1e-6 && std::abs(y2) < 1e-6))) {
+            floorEdges.push_back(edge);
+        }
+    }
+    ASSERT_EQ(floorEdges.size(), 2U);
+    TopoShape tool(2L);
+    tool.makeElementFillet(pocket, floorEdges, 2.0, 2.0);
+    TopoShape cornered(3L);
+    cornered.makeElementBoolean(OpCodes::Cut, {TopoShape(box(20, 25, 20, gp_Pnt(-10, -10, -5)), 4L), tool});
+    TopoShape slot(5L);
+    slot.makeElementBoolean(
+        OpCodes::Fuse,
+        {TopoShape(BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-15, R, h), gp::DX()), R, 30).Shape(), 6L),
+         TopoShape(box(30, 2 * R, 30, gp_Pnt(-15, 0, h)), 7L)}
+    );
+    TopoShape slotted(8L);
+    slotted.makeElementBoolean(OpCodes::Cut, {cornered, slot.makeElementRefine()});
+    ASSERT_EQ(slotted.countSubShapes(TopAbs_SOLID), 1);
+    const TopoShape base = slotted.getSubTopoShape(TopAbs_SOLID, 1).makeElementRefine();
+    ASSERT_EQ(base.countSubShapes(TopAbs_FACE), 15);
+    const TopoShape ellipse = edgeBetween(base, {-2, 2, 0}, {0, 0, 2});
+    const TopoShape line = edgeBetween(base, {0, 0, 2}, {0, 0, h});
+    ASSERT_FALSE(ellipse.isNull());
+    ASSERT_FALSE(line.isNull());
+    ASSERT_EQ(BRepAdaptor_Curve(TopoDS::Edge(ellipse.getShape())).GetType(), GeomAbs_Ellipse);
+    const double baseVolume = volumeOf(base.getShape());
+    // The round adds a concave section of area r^2 (1 - pi/4) along the chain, less near its ends
+    GProp_GProps lengths;
+    BRepGProp::LinearProperties(ellipse.getShape(), lengths);
+    const double section = r * r * (1 - std::numbers::pi / 4);
+    std::vector<double> added;
+    for (const auto& edges : {std::vector<TopoShape> {ellipse, line}, std::vector<TopoShape> {line, ellipse}}) {
+        TopoShape result;
+        ASSERT_NO_THROW(result = dressUp(base, edges, fillet(r)));
+        ASSERT_FALSE(result.isNull());
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+        EXPECT_EQ(result.countSubShapes(TopAbs_FACE), 17);  // a round face along each edge
+        added.push_back(volumeOf(result.getShape()) - baseVolume);
+        // Along the corner edge, the round is the cylinder of radius r about the vertical line
+        // at (-r, r), in the pocket's air
+        const gp_Lin axis(gp_Pnt(-r, r, 0), gp::DZ());
+        int alongLine = 0;
+        for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+            if (surface.GetType() == GeomAbs_Cylinder
+                && std::abs(surface.Cylinder().Radius() - r) < 1e-9
+                && surface.Cylinder().Axis().IsParallel(axis.Position(), 1e-9)
+                && axis.Distance(surface.Cylinder().Location()) < 1e-9) {
+                ++alongLine;
+            }
+        }
+        EXPECT_EQ(alongLine, 1);
+    }
+    ASSERT_EQ(added.size(), 2U);
+    EXPECT_NEAR(added[0], added[1], 1e-6);  // the walker's approximation, ~2e-6 relative
+    EXPECT_GT(added[0], section * (h - 2 - 2 * r));
+    EXPECT_LT(added[0], section * (h - 2 + lengths.Mass()));
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
