@@ -3435,6 +3435,12 @@ void TopoShape::bakeInTransform()
     *this = result;
 }
 
+namespace Part
+{
+// TopoShapeExpansion.cpp: a plane under a general transform is a plane
+void planesAfterGTransform(const TopoDS_Shape& shape);
+}  // namespace Part
+
 TopoDS_Shape TopoShape::transformGShape(const Base::Matrix4D& rclTrf, bool copy) const
 {
     if (this->_Shape.IsNull()) {
@@ -3458,7 +3464,9 @@ TopoDS_Shape TopoShape::transformGShape(const Base::Matrix4D& rclTrf, bool copy)
     BRepBuilderAPI_Copy copier(this->_Shape);
     // geometric transformation
     BRepBuilderAPI_GTransform mkTrf(copier.Shape(), mat, copy);
-    return mkTrf.Shape();
+    const TopoDS_Shape transformed = mkTrf.Shape();
+    Part::planesAfterGTransform(transformed);
+    return transformed;
 }
 
 bool TopoShape::transformShape(const Base::Matrix4D& rclTrf, bool copy, bool checkScale)

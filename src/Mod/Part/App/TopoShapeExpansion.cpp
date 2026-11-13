@@ -7083,6 +7083,45 @@ TopoShape& TopoShape::makeElementTransform(
     return *this;
 }
 
+// A plane under a general transform is a plane. BRepBuilderAPI_GTransform turns every surface into
+// a B-spline, a plane into a bilinear patch (degree 1 x 1, 2 x 2 poles): the same points, but a
+// face that is no plane to anything that reads its type (a profile or cap face picked by its
+// plane, a refine's merge with a coplanar plane face, a comparison by surface type: FMCVW Case
+// Base's Under-Acrylic Carveout, whose profile is the flat cap of a tool scaled per axis and cut
+// from the part, ops#640). Each such patch that is a parallelogram gets its plane again, in
+// place: the plane has the patch's own normal (u x v), so the face's orientation stands, and a
+// plane's 2D curves are computed where they are read.
+// Also called by TopoShape::transformGShape() (TopoShape.cpp), the transform the Python shape and
+// the Scale feature use.
+void planesAfterGTransform(const TopoDS_Shape& shape)
+{
+    BRep_Builder builder;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        TopLoc_Location location;
+        const Handle(Geom_BSplineSurface) patch
+            = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(face, location));
+        if (patch.IsNull() || patch->UDegree() != 1 || patch->VDegree() != 1
+            || patch->NbUPoles() != 2 || patch->NbVPoles() != 2 || patch->IsURational()
+            || patch->IsVRational()) {
+            continue;
+        }
+        const gp_Pnt origin = patch->Pole(1, 1);
+        const gp_Vec alongU(origin, patch->Pole(2, 1));
+        const gp_Vec alongV(origin, patch->Pole(1, 2));
+        const gp_Vec normal = alongU.Crossed(alongV);
+        const double size = std::max(alongU.Magnitude(), alongV.Magnitude());
+        // a parallelogram: the fourth pole where the other three put it
+        const gp_Pnt fourth = origin.Translated(alongU + alongV);
+        if (size <= Precision::Confusion() || normal.Magnitude() <= 1e-12 * size * size
+            || fourth.Distance(patch->Pole(2, 2)) > 1e-12 * std::max(1.0, size)) {
+            continue;
+        }
+        const Handle(Geom_Plane) plane = new Geom_Plane(gp_Ax3(origin, gp_Dir(normal), gp_Dir(alongU)));
+        builder.UpdateFace(face, plane, location, BRep_Tool::Tolerance(face));
+    }
+}
+
 TopoShape& TopoShape::makeElementGTransform(
     const TopoShape& shape,
     const Base::Matrix4D& mat,
@@ -7112,7 +7151,9 @@ TopoShape& TopoShape::makeElementGTransform(
     // geometric transformation
     TopoShape tmp(shape);
     BRepBuilderAPI_GTransform mkTrf(shape.getShape(), matrix, copy == CopyType::copy);
-    tmp.setShape(mkTrf.Shape(), false);
+    const TopoDS_Shape transformed = mkTrf.Shape();
+    planesAfterGTransform(transformed);
+    tmp.setShape(transformed, false);
     if (op || (shape.Tag && shape.Tag != Tag)) {
         setShape(tmp._Shape);
         initCache();
