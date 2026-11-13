@@ -876,11 +876,12 @@ def locate(copy, path=None, entry=None, varset=None):
     return refresh(copy, path, entry=entry, varset=varset)
 
 
-def copy_from_file(doc=None, path=None, varset=None):
+def copy_from_file(doc=None, path=None, varset=None, studio=None):
     """"Copy variables from a FreeCAD file...": a saved document (asked for when @a path is
     None) and a VarSet in it (asked for when it has several), read from the file without opening
     it; the dialog shows what will be copied and the choices, its Copy button makes the copy
-    (section 3.3). Returns the dialog, or None."""
+    (section 3.3). With @a studio (a Variable Studio's "Insert Variable Studio..."), the copy
+    joins the end of its reference list (ops#721). Returns the dialog, or None."""
     title = translate("Variables", "Copy variables from a FreeCAD file")
     if path is None:
         path, _filter = QtWidgets.QFileDialog.getOpenFileName(Gui.getMainWindow(), title, "",
@@ -898,7 +899,10 @@ def copy_from_file(doc=None, path=None, varset=None):
         return copies.plan_copy(doc, path, varset, **choices)
 
     def applier(choices):
-        copy = copies.copy_from_fcstd(doc, path, varset, **choices)
+        if studio is not None:
+            copy = copies.reference_from_fcstd(studio, path, varset, **choices)
+        else:
+            copy = copies.copy_from_fcstd(doc, path, varset, **choices)
         App.Console.PrintMessage(translate("Variables", "Copied {} from {}").format(
             copy.Label, os.path.basename(path)) + "\n")
         return copy

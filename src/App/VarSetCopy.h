@@ -45,7 +45,7 @@ class AppExport VarSetCopy: public App::VarSet
 
 public:
     /// The format of this table; raised by any later change to it, with an upgrade.
-    static constexpr long Format = 1;
+    static constexpr long Format = 2;
 
     VarSetCopy();
     ~VarSetCopy() override = default;
@@ -63,6 +63,13 @@ public:
     PropertyMap Bindings;
     PropertyStringList Skipped;
     PropertyStringList Orphans;
+    /// FreeCAD-CH ops#721: the internal name of the Variable Studio whose reference list holds
+    /// this copy, empty for none (notes/variable-studio-references.md section 1)
+    PropertyString Studio;
+    /// That studio's object ID: a later object reusing a deleted studio's name isn't it
+    PropertyInteger StudioID;
+    /// Its place in that list, 0 first
+    PropertyInteger StudioPosition;
 
     /// Whether the copy still has a source (SourceKind isn't "None").
     bool isAttached() const;

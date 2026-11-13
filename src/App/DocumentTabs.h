@@ -115,6 +115,13 @@ AppExport void placeAfter(Document* doc, const std::string& name, const std::str
 AppExport bool isVariableStudio(const DocumentObject* obj);
 /// Marks or unmarks an App::VarSet (of exactly that type) as a Variable Studio
 AppExport void setVariableStudio(DocumentObject* varSet, bool marked);
+/// FreeCAD-CH ops#721: the attached copies (App::VarSetCopy) in @a studio's reference list, in
+/// list order (StudioPosition, then document order); empty unless @a studio is a Variable Studio
+/// (notes/variable-studio-references.md section 1)
+AppExport std::vector<DocumentObject*> variableReferences(const DocumentObject* studio);
+/// The Variable Studio whose reference list holds @a copy, or nullptr (unlisted, detached, or a
+/// studio gone or unmarked)
+AppExport DocumentObject* studioOf(const DocumentObject* copy);
 
 /// The lowest free "<base> N" (N from 1) among the labels of the document's tabs
 AppExport std::string nextLabel(const Document* doc, const std::string& base);

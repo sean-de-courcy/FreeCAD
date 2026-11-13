@@ -58,6 +58,9 @@ FORMAT = {
     "Bindings": "App::PropertyMap",
     "Skipped": "App::PropertyStringList",
     "Orphans": "App::PropertyStringList",
+    "Studio": "App::PropertyString",  # format 2 (ops#721): a Variable Studio's reference list
+    "StudioID": "App::PropertyInteger",
+    "StudioPosition": "App::PropertyInteger",
 }
 
 
@@ -558,10 +561,10 @@ class TestVariablesCopies(unittest.TestCase):
     # I-6
 
     def test_format(self):
-        """I-6. CopyFormat is 1 and every static property of section 3.1 exists, of its type,
+        """I-6. CopyFormat is 2 and every static property of section 3.1 exists, of its type,
         in the group "Source": the format oracle for the beta's reopen gate."""
         copy = self.doc.addObject("App::VarSetCopy", "Copy")
-        self.assertEqual(copy.CopyFormat, 1)
+        self.assertEqual(copy.CopyFormat, 2)
         self.assertEqual(copy.SourceKind, "None")
         self.assertEqual(copy.getEnumerationsOfProperty("SourceKind"),
                          ["FreeCAD document", "Onshape JSON", "None"])
@@ -596,6 +599,9 @@ class TestVariablesCopies(unittest.TestCase):
             "Bindings": {"Gap": "Variables.Gap", "Lit": "12 mm"},
             "Skipped": ["Unused", "Z"],
             "Orphans": ["Old", "Older"],
+            "Studio": 'Studio <&> "A"',
+            "StudioID": 42,
+            "StudioPosition": 3,
         }
         for name, value in values.items():
             setattr(copy, name, value)
@@ -607,18 +613,18 @@ class TestVariablesCopies(unittest.TestCase):
         for name, value in values.items():
             with self.subTest(name=name):
                 self.assertEqual(getattr(copy, name), value)
-        self.assertEqual(copy.CopyFormat, 1)
+        self.assertEqual(copy.CopyFormat, 2)
 
     def test_newer_format(self):
         """A copy saved with a higher CopyFormat marks the reopened document as newer: the
         notice and the save guard of decision 65 see it."""
         copy = self.doc.addObject("App::VarSetCopy", "Copy")
-        copy.CopyFormat = 2
+        copy.CopyFormat = 3
         saved = os.path.join(self.folder, "newer.FCStd")
         self.doc.saveAs(saved)
         App.closeDocument(self.doc.Name)
         self.doc = App.openDocument(saved)
-        self.assertIn("CopyFormat 2", App.getNewerFormat(self.doc))
+        self.assertIn("CopyFormat 3", App.getNewerFormat(self.doc))
 
     # R-9
 
@@ -1781,6 +1787,221 @@ class TestVariablesPaths(unittest.TestCase):
         self.assertEqual(self.paths("2.5e3 + .5"), [])
         self.assertEqual(self.paths("Box@.Length"),
                          [("Box@.Length", None, "Box", False, ["Length"], False)])
+
+
+# --- Variable Studio references and Onshape's precedence (ops#721 G2, ops#722 G3) --------------
+
+
+class StudioReferences(FreeCADSource):
+    """Saved studios B, C as sources; A's Variable Studio tab with own variables and an ordered
+    reference list; a 10 x 10 mm box whose height is an expression (V = 100 mm^2 * height)."""
+
+    def setUp(self):
+        super().setUp()
+        import Part  # noqa: F401  (Part::Box)
+
+    def source(self, name, **values):
+        """A saved file @a name.FCStd whose Variable Studio "Studio" holds @a values (mm)."""
+        def build(doc):
+            studio = doc.addObject("App::VarSet", "Studio")
+            for var, mm in values.items():
+                studio.addProperty("App::PropertyLength", var)
+                setattr(studio, var, mm)
+            App.DocumentTabs.setVariableStudio(studio, True)
+        return self.save(name, build)
+
+    def tab(self, name="Local", **values):
+        """A Variable Studio tab of the document with own @a values (mm)."""
+        tab = self.doc.addObject("App::VarSet", name)
+        for var, mm in values.items():
+            tab.addProperty("App::PropertyLength", var)
+            setattr(tab, var, mm)
+        App.DocumentTabs.setVariableStudio(tab, True)
+        self.doc.recompute()
+        return tab
+
+    def reference(self, tab, path):
+        """A copy of @a path's "Studio", appended to @a tab's references."""
+        copy = copies.reference_from_fcstd(tab, path, "Studio")
+        self.doc.recompute()
+        return copy
+
+    def box(self, text, name="Box"):
+        """A 10 x 10 mm Part::Box of height @a text; its volume after a recompute (mm^3)."""
+        box = self.doc.getObject(name) or self.doc.addObject("Part::Box", name)
+        box.Length = 10
+        box.Width = 10
+        box.setExpression("Height", text)
+        self.doc.recompute()
+        return box
+
+    def assertVolume(self, box, mm3):
+        self.assertAlmostEqual(box.Shape.Volume, mm3, places=6)
+
+    def assertAmbiguous(self, name="w"):
+        with self.assertRaises(Exception) as caught:
+            self.box(f"#{name}", "Probe")
+        self.assertIn("ambiguous", str(caught.exception))
+        if self.doc.getObject("Probe") is not None:
+            self.doc.removeObject("Probe")
+
+
+class TestVariableStudioReferences(StudioReferences):
+    """G2 (ops#721): a Variable Studio tab holds its own variables plus an ordered list of
+    references, each a copy of another saved file's studio (Onshape VR5, VR6)."""
+
+    def test_tab_holds_own_and_reference(self):
+        """A's tab with own w = 5 mm and B's studio (h = 10 mm) listed: the list is [copy], the
+        copy names the tab, #h pads 10 mm (V 1000) and #w 5 mm (V 500)."""
+        b = self.source("B", h=10)
+        tab = self.tab(w=5)
+        copy = self.reference(tab, b)
+        self.assertEqual(copies.references(tab), [copy])
+        self.assertEqual(App.DocumentTabs.variableReferences(tab), [copy])
+        self.assertEqual(copy.Studio, tab.Name)
+        self.assertEqual(copy.StudioPosition, 0)
+        self.assertEqual(copies.source_state(copy).state, copies.UP_TO_DATE)
+        pad_h = self.box("#h")
+        self.assertVolume(pad_h, 1000)
+        self.assertEqual(expression(pad_h, "Height"), f"{copy.Name}.h")
+        self.assertVolume(self.box("#w", "BoxW"), 500)
+
+    def test_survives_reopen_and_follows_versions(self):
+        """Saved, closed and reopened with B closed: still listed, V 1000, "up to date". B edited
+        to h = 20 and saved: "out of date", V still 1000; Refresh: V 2000."""
+        b = self.source("B", h=10)
+        tab = self.tab(w=5)
+        self.reference(tab, b)
+        self.box("#h")
+        path = os.path.join(self.folder, "A.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        tab = self.doc.getObject("Local")
+        listed = copies.references(tab)
+        self.assertEqual(len(listed), 1)
+        copy = listed[0]
+        self.assertEqual(copies.source_state(copy).state, copies.UP_TO_DATE)
+        self.doc.recompute()
+        self.assertVolume(self.doc.getObject("Box"), 1000)
+        self.edit(b, lambda doc: setattr(doc.getObject("Studio"), "h", 20))
+        self.assertEqual(copies.source_state(copy).state, copies.OUT_OF_DATE)
+        self.doc.recompute()
+        self.assertVolume(self.doc.getObject("Box"), 1000)
+        copies.refresh(copy)
+        self.doc.recompute()
+        self.assertVolume(self.doc.getObject("Box"), 2000)
+        self.assertEqual(copies.references(tab), [copy])
+
+    def test_order_add_move_remove(self):
+        """References keep their order; move renumbers 0..n-1; remove unlists, keeping the copy."""
+        tab = self.tab()
+        one = self.reference(tab, self.source("B", p=1))
+        two = self.reference(tab, self.source("C", q=2))
+        self.assertEqual(copies.references(tab), [one, two])
+        copies.move_reference(two, 0)
+        self.assertEqual(copies.references(tab), [two, one])
+        self.assertEqual([two.StudioPosition, one.StudioPosition], [0, 1])
+        copies.remove_reference(two)
+        self.assertEqual(copies.references(tab), [one])
+        self.assertEqual(two.Studio, "")
+        self.assertIsNotNone(self.doc.getObject(two.Name))
+        self.assertEqual(one.StudioPosition, 0)
+
+    def test_refusals(self):
+        """Only an attached copy joins a list, only a Variable Studio holds one, and a copy is in
+        one studio's list."""
+        b = self.source("B", h=10)
+        tab = self.tab()
+        other = self.tab("Other")
+        plain = self.doc.addObject("App::VarSet", "Plain")
+        copy = copies.copy_from_fcstd(self.doc, b, "Studio")
+        with self.assertRaises(TypeError):
+            copies.add_reference(tab, plain)
+        with self.assertRaises((TypeError, RuntimeError)):
+            copies.add_reference(plain, copy)
+        copies.add_reference(tab, copy)
+        with self.assertRaises(RuntimeError) as caught:
+            copies.add_reference(other, copy)
+        self.assertIn(tab.Name, str(caught.exception))
+        self.assertEqual(copies.references(other), [])
+        loose = copies.copy_from_fcstd(self.doc, b, "Studio")
+        copies.detach(loose)
+        with self.assertRaises(TypeError):
+            copies.add_reference(tab, loose)
+
+    def test_detach_unlists(self):
+        tab = self.tab()
+        copy = self.reference(tab, self.source("B", h=10))
+        copies.detach(copy)
+        self.assertEqual(copies.references(tab), [])
+        self.assertEqual(copy.Studio, "")
+
+    def test_delete_and_undo(self):
+        """Deleting a listed copy shortens the list; one undo brings it back in its place."""
+        tab = self.tab()
+        one = self.reference(tab, self.source("B", p=1))
+        two = self.reference(tab, self.source("C", q=2))
+        name = one.Name
+        self.doc.openTransaction("Delete")
+        self.doc.removeObject(name)
+        self.doc.commitTransaction()
+        self.assertEqual(copies.references(tab), [two])
+        self.doc.undo()
+        self.assertEqual([c.Name for c in copies.references(tab)], [name, two.Name])
+
+    def test_pasted_copy_unlisted(self):
+        """A copied (pasted) reference is in no studio's list (review R2): the studio keeps its one
+        reference, and #w stays B's."""
+        tab = self.tab()
+        copy = self.reference(tab, self.source("B", w=20))
+        pasted = self.doc.copyObject(copy)
+        self.doc.recompute()
+        self.assertEqual(pasted.Studio, "")
+        self.assertEqual(copies.references(tab), [copy])
+        self.assertIsNone(App.DocumentTabs.studioOf(pasted))
+
+    def test_reused_studio_name(self):
+        """A studio deleted and a new one under its name: the old copies aren't its references
+        (review R3; the object ID tells)."""
+        tab = self.tab()
+        copy = self.reference(tab, self.source("B", h=10))
+        name = tab.Name
+        self.doc.removeObject(name)
+        again = self.tab(name)
+        self.assertEqual(again.Name, name)
+        self.assertEqual(copies.references(again), [])
+        self.assertIsNone(App.DocumentTabs.studioOf(copy))
+
+    def test_undo_studio_delete_lists_again(self):
+        """Deleting a studio and undoing it gives its list back (the same object, the same ID)."""
+        tab = self.tab()
+        copy = self.reference(tab, self.source("B", h=10))
+        name = tab.Name
+        self.doc.openTransaction("Delete")
+        self.doc.removeObject(name)
+        self.doc.commitTransaction()
+        self.doc.undo()
+        tab = self.doc.getObject(name)
+        self.assertEqual(copies.references(tab), [copy])
+
+    def test_unmarked_studio_unlists(self):
+        """A studio unmarked as a tab holds no references: its copies read as unlisted."""
+        tab = self.tab()
+        copy = self.reference(tab, self.source("B", h=10))
+        App.DocumentTabs.setVariableStudio(tab, False)
+        self.assertEqual(App.DocumentTabs.variableReferences(tab), [])
+        self.assertIsNone(App.DocumentTabs.studioOf(copy))
+
+    def test_unlisted_copy_as_before(self):
+        """A copy in no list (every copy of an older file) behaves as today: beside an own w it is
+        ambiguous."""
+        tab = self.tab(w=30)
+        copy = copies.copy_from_fcstd(self.doc, self.source("B", w=20), "Studio")
+        self.doc.recompute()
+        self.assertEqual(copy.Studio, "")
+        self.assertEqual(copies.references(tab), [])
+        self.assertAmbiguous()
 
 
 if __name__ == "__main__":

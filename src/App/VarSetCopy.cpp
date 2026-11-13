@@ -127,6 +127,25 @@ VarSetCopy::VarSetCopy()
         type,
         "Variables removed at the source but still used here"
     );
+    // FreeCAD-CH ops#721 (format 2): a Variable Studio's reference list, kept on its copies so
+    // that it is undoable and a deleted copy leaves nothing behind; a string, not a link, since a
+    // studio's own variable may use a referenced one (no dependency cycle)
+    const auto hidden = static_cast<PropertyType>(type | Prop_Hidden);
+    ADD_PROPERTY_TYPE(
+        Studio,
+        (""),
+        group,
+        hidden,
+        "The internal name of the Variable Studio whose references list this copy"
+    );
+    ADD_PROPERTY_TYPE(
+        StudioID,
+        (0L),
+        group,
+        hidden,
+        "That studio's object ID (a later object reusing its name isn't it)"
+    );
+    ADD_PROPERTY_TYPE(StudioPosition, (0L), group, hidden, "The copy's place in that list, 0 first");
 }
 
 bool VarSetCopy::isAttached() const
@@ -153,6 +172,13 @@ void VarSetCopy::onChanged(const Property* prop)
 void VarSetCopy::onDocumentRestored()
 {
     VarSet::onDocumentRestored();
+    // FreeCAD-CH ops#721: a pasted, duplicated or merged copy is in no studio's list (design
+    // section 1): its Studio names the original's studio, which would list both
+    if (testStatus(ObjImporting)) {
+        Studio.setValue("");
+        StudioID.setValue(0L);
+        StudioPosition.setValue(0L);
+    }
     // A variable added to an attached copy afterwards (from Python) got no ReadOnly bit: every
     // variable of an attached copy is read-only once it is opened again.
     if (isAttached()) {

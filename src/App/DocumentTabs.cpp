@@ -43,6 +43,7 @@
 #include "OriginGroupExtension.h"
 #include "Part.h"
 #include "VarSet.h"
+#include "VarSetCopy.h"
 
 using namespace App;
 using namespace App::DocumentTabs;
@@ -512,6 +513,45 @@ void DocumentTabs::setVariableStudio(DocumentObject* varSet, bool marked)
     writeRegistry(varSet->getDocument(), registry);
 }
 
+std::vector<DocumentObject*> DocumentTabs::variableReferences(const DocumentObject* studio)
+{
+    // FreeCAD-CH ops#721: the list is kept on the copies (Studio, StudioPosition), so that it is
+    // undoable and a deleted copy leaves nothing behind
+    std::vector<DocumentObject*> result;
+    if (!isVariableStudio(studio)) {
+        return result;
+    }
+    const std::string name = studio->getNameInDocument();
+    for (auto* obj : studio->getDocument()->getObjects()) {
+        auto copy = freecad_cast<VarSetCopy*>(obj);
+        if (copy && copy->isAttached() && name == copy->Studio.getValue()
+            && copy->StudioID.getValue() == studio->getID()) {
+            result.push_back(copy);
+        }
+    }
+    std::stable_sort(result.begin(), result.end(), [](DocumentObject* a, DocumentObject* b) {
+        return static_cast<VarSetCopy*>(a)->StudioPosition.getValue()
+            < static_cast<VarSetCopy*>(b)->StudioPosition.getValue();
+    });
+    return result;
+}
+
+DocumentObject* DocumentTabs::studioOf(const DocumentObject* obj)
+{
+    auto copy = freecad_cast<const VarSetCopy*>(obj);
+    if (!copy || !copy->isAttachedToDocument() || !copy->isAttached()) {
+        return nullptr;
+    }
+    const char* name = copy->Studio.getValue();
+    if (!name || !*name) {
+        return nullptr;
+    }
+    DocumentObject* studio = copy->getDocument()->getObject(name);
+    // the name may be a later object's, reusing a deleted studio's name: the ID tells
+    return isVariableStudio(studio) && studio->getID() == copy->StudioID.getValue() ? studio
+                                                                                   : nullptr;
+}
+
 std::string DocumentTabs::nextLabel(const Document* doc, const std::string& base)
 {
     std::set<std::string> labels;
@@ -837,6 +877,16 @@ public:
             &Module::pySetVariableStudio,
             "setVariableStudio(varset, marked=True)"
         );
+        add_varargs_method(
+            "variableReferences",
+            &Module::pyVariableReferences,
+            "variableReferences(studio) -> [copies]: the studio's reference list, in order"
+        );
+        add_varargs_method(
+            "studioOf",
+            &Module::pyStudioOf,
+            "studioOf(copy) -> the Variable Studio whose reference list holds the copy, or None"
+        );
         add_varargs_method("nextLabel", &Module::pyNextLabel, "nextLabel(doc, base) -> '<base> N'");
         add_varargs_method(
             "members",
@@ -999,6 +1049,26 @@ private:
             throw Py::TypeError(e.what());
         }
         return Py::None();
+    }
+    Py::Object pyVariableReferences(const Py::Tuple& args)
+    {
+        PyObject* pyObj = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pyObj)) {
+            throw Py::Exception();
+        }
+        return objectList(variableReferences(objectArg(pyObj)));
+    }
+    Py::Object pyStudioOf(const Py::Tuple& args)
+    {
+        PyObject* pyObj = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pyObj)) {
+            throw Py::Exception();
+        }
+        DocumentObject* studio = studioOf(objectArg(pyObj));
+        if (!studio) {
+            return Py::None();
+        }
+        return Py::asObject(studio->getPyObject());
     }
     Py::Object pyNextLabel(const Py::Tuple& args)
     {

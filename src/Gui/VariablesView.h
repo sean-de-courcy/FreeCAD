@@ -165,7 +165,16 @@ public:
     static QString unitMismatch(App::DocumentObject* obj, App::Property* prop);
 
 private:
-    void addHolderRows(const App::DocumentObject* holder, const std::vector<std::string>& names);
+    /// @a shadowed: the names a later table overwrites (Onshape's info mark, VR9); @a referenced:
+    /// a studio's reference, its rows grey
+    void addHolderRows(
+        const App::DocumentObject* holder,
+        const std::vector<std::string>& names,
+        const std::set<std::string>* shadowed = nullptr,
+        bool referenced = false
+    );
+    /// A header row with no holder: the studio's "Other copies in this document"
+    void addSectionRow(const QString& text);
     void addNewRow(const App::Document* doc);
     bool rename(const QModelIndex& index, const QString& newName);
     bool setExpression(const QModelIndex& index, const QString& text);

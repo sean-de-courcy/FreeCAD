@@ -84,7 +84,8 @@ VARIABLES = "Variables"  # the document's own set, as the panel finds it
 # The copy's static properties (section 3.1); a variable can't take one of these names.
 SOURCE_PROPERTIES = ("CopyFormat", "SourceKind", "SourcePath", "SourceRelativePath",
                      "SourceObject", "SourceEntries", "SourceStamp", "SourceRefreshed",
-                     "SourceExpressions", "NameMap", "Bindings", "Skipped", "Orphans")
+                     "SourceExpressions", "NameMap", "Bindings", "Skipped", "Orphans",
+                     "Studio", "StudioID", "StudioPosition")
 
 # A test hook (I-4): called as hook(result, value) for each variable checked, its return value
 # replaces the translator's in the check.
@@ -850,12 +851,13 @@ def detach(copy):
     own = doc.getBookedTransactionID() == 0
     # SourceKind last: until it changes, the copy is still attached and read-only.
     # The choices of what `#name` means (decision 317) stay: they are the document's, not the
-    # source's.
+    # source's. A detached copy is a local set: it leaves its studio's reference list (ops#721).
     records = {key: path for key, path in dict(copy.Bindings).items() if key.startswith("#")}
     cleared = {"SourcePath": "", "SourceRelativePath": "", "SourceObject": "",
                "SourceEntries": 0, "SourceStamp": "", "SourceRefreshed": "",
                "SourceExpressions": {}, "NameMap": {}, "Bindings": records, "Skipped": [],
-               "Orphans": [], "SourceKind": DETACHED}
+               "Orphans": [], "Studio": "", "StudioID": 0, "StudioPosition": 0,
+               "SourceKind": DETACHED}
     before = {name: getattr(copy, name) for name in cleared}
     if own:
         doc.openTransaction(f"Detach {copy.Label}")
@@ -875,6 +877,231 @@ def detach(copy):
     if own:
         doc.commitTransaction()
 
+
+
+# --- A Variable Studio's references (ops#721 G2; notes/variable-studio-references.md) ----------
+# A Variable Studio tab holds its own variables and an ordered list of references, each an
+# attached copy of another file's studio, as Onshape's (VR5, VR6). The list is kept on the copies:
+# Studio (the studio's internal name), StudioID (its object ID) and StudioPosition (0 first);
+# App.DocumentTabs reads it.
+
+@dataclass
+class ReferencePlan:
+    """What a change to a studio's reference list would do: @a warnings name the stored
+    expressions whose `#name` form would mean another variable afterwards (they keep theirs)."""
+    studio: object
+    order: list
+    warnings: List[str] = field(default_factory=list)
+
+
+def references(studio) -> list:
+    """@a studio's references, in list order (App.DocumentTabs.variableReferences)."""
+    return list(App.DocumentTabs.variableReferences(studio))
+
+
+def _check_studio(studio):
+    if studio is None or not App.DocumentTabs.isVariableStudio(studio):
+        label = getattr(studio, "Label", studio)
+        raise TypeError(f"{label} isn't a Variable Studio: only a Variable Studio holds references")
+
+
+def _check_reference(copy):
+    if copy is None or copy.TypeId != COPY_TYPE or not is_imported(copy):
+        label = getattr(copy, "Label", copy)
+        raise TypeError(f"{label}: a reference is a copy of another file's studio")
+
+
+def _meaning(studio, order, name, holders):
+    """What `#name` means when @a holders (_all_holders) define it and @a studio lists @a order:
+    (the holder, None), or (None, "ambiguous"), as App/VariableChoice.h decides it: the studio's
+    order inside its group, else the choice recorded on the copies (for the warnings only, never
+    a binding)."""
+    if len(holders) == 1:
+        return holders[0], None
+    group = {studio.Name} | {c.Name for c in order}
+    if holders and all(h.Name in group for h in holders):
+        names = {h.Name for h in holders}
+        if studio.Name in names:
+            return studio, None
+        for copy in reversed(list(order)):
+            if copy.Name in names:
+                return copy, None
+    # chosenVariableHolder's record rule: every copy holds the same record, naming one of them,
+    # with at most one other set (the chosen one, or the one a chosen copy was chosen over)
+    imported = [h for h in holders if is_imported(h)]
+    records = {dict(h.Bindings).get(choice_key(name), "") for h in imported}
+    others = len(holders) - len(imported)
+    if imported and len(records) == 1 and "" not in records:
+        record = records.pop()
+        for h in holders:
+            if f"{h.Name}.{name}" == record:
+                if (others <= 1) if is_imported(h) else (others == 1):
+                    return h, None
+                break
+    return None, "ambiguous"
+
+
+def _rebinding(studio, before, after) -> List[str]:
+    """The stored expressions of @a studio's document that keep a variable of @a studio's group
+    while its `#name` means another one, or nothing, after the list goes from @a before to
+    @a after (list orders): each keeps the variable it names (ops#732 is the rebind)."""
+    doc = studio.Document
+    names = set()
+    for holder in [studio] + list(before) + list(after):
+        names.update(n for n in holder.PropertiesList if _defines(holder, n))
+    warnings = []
+    for name in sorted(names):
+        holders = _all_holders(doc, name)
+        old, _ = _meaning(studio, before, name, holders)
+        new, why = _meaning(studio, after, name, holders)
+        if old is None and new is None:
+            continue  # ambiguous either way: nothing showed as #name, nothing does
+        # The variables `#name` showed before: the winner, or each of the group's when it was
+        # ambiguous (a reference added over an unlisted copy)
+        group = {studio.Name} | {c.Name for c in before}
+        shown = [old] if old is not None else [h for h in holders if h.Name in group]
+        for holder in shown:
+            if new is not None and new.Name == holder.Name:
+                continue
+            now = f"#{name} now means {new.Name}.{name}" if new is not None else \
+                f"#{name} is {why} now (write the full path)"
+            for obj in doc.Objects:
+                if obj.Name == holder.Name:
+                    continue
+                for prop, text in _expressions_of(obj):
+                    if any(_names_variable(p, holder, name, True) for p in fc_paths(text)):
+                        warnings.append(f"{obj.Label}.{prop} keeps {holder.Name}.{name}; {now}")
+    return warnings
+
+
+def _all_holders(doc, name: str) -> list:
+    """Every object of @a doc that `#name` can find: VarSets (copies included) and sheets."""
+    found = []
+    for obj in doc.Objects:
+        if obj.isDerivedFrom("App::VarSet"):
+            if _defines(obj, name):
+                found.append(obj)
+        elif obj.TypeId == "Spreadsheet::Sheet" and obj.getCellFromAlias(name):
+            found.append(obj)
+    return found
+
+
+def _write_order(studio, order, own_transaction_title: Optional[str]):
+    """Writes @a order as @a studio's list (positions 0..n-1) and unlists the copies it dropped,
+    in one transaction titled @a own_transaction_title unless one is open already."""
+    doc = studio.Document
+    dropped = [c for c in references(studio) if c.Name not in {o.Name for o in order}]
+
+    def body():
+        for copy in dropped:
+            copy.Studio = ""
+            copy.StudioID = 0
+            copy.StudioPosition = 0
+        for position, copy in enumerate(order):
+            if copy.CopyFormat < 2:  # a copy from an older file: its list needs format 2
+                copy.CopyFormat = 2
+            if copy.Studio != studio.Name:
+                copy.Studio = studio.Name
+            if copy.StudioID != studio.ID:
+                copy.StudioID = studio.ID
+            if copy.StudioPosition != position:
+                copy.StudioPosition = position
+
+    if own_transaction_title and doc.getBookedTransactionID() == 0:
+        _transaction(doc, own_transaction_title, body)
+    else:
+        body()
+
+
+def _placed(order, copy, index: Optional[int]) -> list:
+    rest = [c for c in order if c.Name != copy.Name]
+    index = len(rest) if index is None else max(0, min(int(index), len(rest)))
+    return rest[:index] + [copy] + rest[index:]
+
+
+def plan_add_reference(studio, copy, index: Optional[int] = None) -> ReferencePlan:
+    """What add_reference(@a studio, @a copy, @a index) would do; changes nothing."""
+    _check_studio(studio)
+    _check_reference(copy)
+    holder = App.DocumentTabs.studioOf(copy)
+    if holder is not None and holder.Name != studio.Name:
+        raise RuntimeError(f"{copy.Label} is a reference of {holder.Label} ({holder.Name}) already: "
+                           "a copy is in one studio's list")
+    before = references(studio)
+    plan = ReferencePlan(studio, _placed(before, copy, index))
+    plan.warnings = _rebinding(studio, before, plan.order)
+    return plan
+
+
+def add_reference(studio, copy, index: Optional[int] = None) -> ReferencePlan:
+    """Puts @a copy into @a studio's reference list at @a index (the end by default), as one
+    undo step. A copy is in at most one studio's list (RuntimeError naming it). Stored
+    expressions keep the variables they name; the plan's warnings list those whose `#name`
+    now means another one."""
+    plan = plan_add_reference(studio, copy, index)
+    _write_order(studio, plan.order, f"Add reference {copy.Label}")
+    return plan
+
+
+def plan_move_reference(copy, index: int) -> ReferencePlan:
+    """What move_reference(@a copy, @a index) would do; changes nothing."""
+    _check_reference(copy)
+    studio = App.DocumentTabs.studioOf(copy)
+    if studio is None:
+        raise ValueError(f"{copy.Label} isn't in a Variable Studio's references")
+    before = references(studio)
+    plan = ReferencePlan(studio, _placed(before, copy, index))
+    plan.warnings = _rebinding(studio, before, plan.order)
+    return plan
+
+
+def move_reference(copy, index: int) -> ReferencePlan:
+    """Moves @a copy to @a index of its studio's reference list (0 first), as one undo step."""
+    plan = plan_move_reference(copy, index)
+    _write_order(plan.studio, plan.order, f"Move reference {copy.Label}")
+    return plan
+
+
+def plan_remove_reference(copy) -> ReferencePlan:
+    """What remove_reference(@a copy) would do; changes nothing."""
+    _check_reference(copy)
+    studio = App.DocumentTabs.studioOf(copy)
+    if studio is None:
+        raise ValueError(f"{copy.Label} isn't in a Variable Studio's references")
+    before = references(studio)
+    plan = ReferencePlan(studio, [c for c in before if c.Name != copy.Name])
+    plan.warnings = _rebinding(studio, before, plan.order)
+    return plan
+
+
+def remove_reference(copy) -> ReferencePlan:
+    """Takes @a copy out of its studio's reference list, as one undo step; the copy stays, an
+    unlisted copy of the document (its variables are still found, as every copy's)."""
+    plan = plan_remove_reference(copy)
+    _write_order(plan.studio, plan.order, f"Remove reference {copy.Label}")
+    return plan
+
+
+def reference_from_fcstd(studio, path: str, varset: str, **choices):
+    """Copies the VarSet @a varset of the saved FreeCAD document @a path, as copy_from_fcstd(),
+    and appends the copy to @a studio's reference list, in one transaction ("Insert <label>").
+    Returns the copy."""
+    _check_studio(studio)
+    doc = studio.Document
+    # One plan, then one transaction: plan_copy refuses inside an open one, so it runs before
+    # (review R1)
+    plan = plan_copy(doc, path, varset, **choices)
+    if not plan.ok:
+        raise RefreshBlocked(plan)
+    made = []
+
+    def body():
+        copy = _make_copy(doc, plan)
+        made.append(copy)
+        _write_order(studio, references(studio) + [copy], None)
+
+    _transaction(doc, f"Insert {plan.label}", body)
+    return made[0]
 
 
 # --- The source's state and Refresh (PR E2), FreeCAD documents as a source (PR F) -------------
@@ -1687,16 +1914,17 @@ def copy_from_fcstd(doc, path: str, varset: str, **choices):
     if not plan.ok:
         raise RefreshBlocked(plan)
     made = []
-
-    def body():
-        copy = doc.addObject(COPY_TYPE, plan.name)
-        copy.Label = plan.label
-        made.append(copy)
-        _apply(plan, copy)
-        copy.SourceKind = FCSTD_KIND  # last: the variables become read-only
-
-    _transaction(doc, f"Copy {plan.label}", body)
+    _transaction(doc, f"Copy {plan.label}", lambda: made.append(_make_copy(doc, plan)))
     return made[0]
+
+
+def _make_copy(doc, plan: RefreshPlan):
+    """The copy @a plan (plan_copy's) describes, made in the caller's transaction."""
+    copy = doc.addObject(COPY_TYPE, plan.name)
+    copy.Label = plan.label
+    _apply(plan, copy)
+    copy.SourceKind = FCSTD_KIND  # last: the variables become read-only
+    return copy
 
 
 def _transaction(doc, title: str, body):

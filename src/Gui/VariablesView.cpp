@@ -32,6 +32,7 @@
 #include <vector>
 
 #include <QAction>
+#include <QApplication>
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -49,6 +50,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QStyle>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeView>
@@ -990,25 +992,79 @@ void VariablesModel::rebuild(const App::Document* doc)
         }
         groups.back().second.push_back(var.name);
     }
-    if (!scope.empty()) {
-        std::stable_partition(groups.begin(), groups.end(), [this](const auto& group) {
-            return group.first->getNameInDocument() == scope;
-        });
-    }
-    bool newRow = !scope.empty();
-    for (const auto& [holder, names] : groups) {
-        if (newRow && holder->getNameInDocument() != scope) {
-            addNewRow(doc);
-            newRow = false;
-        }
-        addHolderRows(holder, names);
-    }
-    if (newRow) {
-        addNewRow(doc);
-    }
     if (scope.empty()) {
+        for (const auto& [holder, names] : groups) {
+            addHolderRows(holder, names);
+        }
         foldMeasuredHolders(this, doc);
+        return;
     }
+    // FreeCAD-CH (ops#721, Onshape VR9): a Variable Studio's table is its referenced tables in
+    // list order, the first at the top, then its own table last (the bottom-most definition
+    // wins, ops#722); a name a later table defines again carries Onshape's info mark. The
+    // document's copies in no studio's list follow, apart.
+    using Group = std::pair<const App::DocumentObject*, std::vector<std::string>>;
+    const Group* own = nullptr;
+    std::vector<const Group*> others;
+    const App::DocumentObject* studio = doc->getObject(scope.c_str());
+    const auto references = App::DocumentTabs::variableReferences(studio);
+    // Every reference gets its table, one with no variables too (so it can be moved or removed)
+    std::vector<Group> referenced;
+    for (const auto* reference : references) {
+        referenced.emplace_back(reference, std::vector<std::string>());
+    }
+    for (const auto& group : groups) {
+        auto it = std::find(references.begin(), references.end(), group.first);
+        if (group.first->getNameInDocument() == scope) {
+            own = &group;
+        }
+        else if (it != references.end()) {
+            referenced[static_cast<std::size_t>(it - references.begin())].second = group.second;
+        }
+        else {
+            others.push_back(&group);
+        }
+    }
+    std::vector<const Group*> listed;
+    for (const auto& group : referenced) {
+        listed.push_back(&group);
+    }
+    for (std::size_t i = 0; i < listed.size(); ++i) {
+        std::set<std::string> later;
+        for (std::size_t j = i + 1; j < listed.size(); ++j) {
+            later.insert(listed[j]->second.begin(), listed[j]->second.end());
+        }
+        if (own) {
+            later.insert(own->second.begin(), own->second.end());
+        }
+        addHolderRows(listed[i]->first, listed[i]->second, &later, true);
+    }
+    if (own) {
+        addHolderRows(own->first, own->second);
+    }
+    addNewRow(doc);
+    if (!others.empty()) {
+        addSectionRow(tr("Other copies in this document"));
+        for (const Group* group : others) {
+            addHolderRows(group->first, group->second);
+        }
+    }
+}
+
+void VariablesModel::addSectionRow(const QString& text)
+{
+    QList<QStandardItem*> row;
+    for (int column = 0; column < ColumnCount; ++column) {
+        auto item = new QStandardItem();
+        item->setData(HeaderKind, KindRole);
+        row << item;
+    }
+    row.front()->setText(text);
+    row.front()->setToolTip(
+        tr("Copies of other files' studios that this Variable Studio doesn't list: \"Add to this "
+           "studio's references\" lists one that no other studio lists")
+    );
+    appendRow(row);
 }
 
 void VariablesModel::addNewRow(const App::Document* doc)
@@ -1036,7 +1092,9 @@ void VariablesModel::addNewRow(const App::Document* doc)
 
 void VariablesModel::addHolderRows(
     const App::DocumentObject* holder,
-    const std::vector<std::string>& names
+    const std::vector<std::string>& names,
+    const std::set<std::string>* shadowed,
+    bool referenced
 )
 {
     bool sheet = isSheet(holder);
@@ -1199,6 +1257,22 @@ void VariablesModel::addHolderRows(
             for (auto item : row) {
                 item->setToolTip(tr("%1: %2").arg(varName, orphan->second));
             }
+        }
+        if (referenced) {
+            // Onshape's referenced tables: every row grey (read-only), shadowed or not (VR9)
+            for (auto item : row) {
+                if (item->foreground() == QBrush()) {
+                    item->setForeground(Qt::gray);
+                }
+            }
+        }
+        if (shadowed && shadowed->count(name)) {
+            // ... and a name a later table defines again marked, as Onshape's: "Overwritten in
+            // another variable table." (ops#722: own variables, then the last-listed reference)
+            nameItem->setIcon(
+                QApplication::style()->standardIcon(QStyle::SP_MessageBoxInformation)
+            );
+            nameItem->setToolTip(tr("Overwritten in another variable table."));
         }
         parent->appendRow(row);
     }
@@ -1735,7 +1809,13 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
     };
     QAction* copyAction = toolBar->addAction(tr("Copy from FreeCAD file..."), this, [this, runGui] {
         if (App::Document* doc = currentDocument()) {
-            runGui("copy_from_file(FreeCAD.getDocument(\"" + std::string(doc->getName()) + "\"))");
+            std::string docCall = "FreeCAD.getDocument(\"" + std::string(doc->getName()) + "\")";
+            // FreeCAD-CH ops#721: a studio's Insert puts the copy into its reference list
+            App::DocumentObject* obj = this->studio();
+            std::string studioArg = obj
+                ? ", studio=" + docCall + ".getObject(\"" + obj->getNameInDocument() + "\")"
+                : std::string();
+            runGui("copy_from_file(" + docCall + studioArg + ")");
         }
     });
     copyAction->setObjectName(QStringLiteral("copyFromFreeCAD"));
@@ -1761,6 +1841,91 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
     connect(locateAction, &QAction::triggered, this, [runGui, currentCopy, copyCall] {
         if (App::VarSetCopy* copy = currentCopy()) {
             runGui(copyCall("locate", copy));
+        }
+    });
+    // FreeCAD-CH ops#721: a Variable Studio's reference list (notes/variable-studio-references.md
+    // section 2), in its table's context menu: Move up, Move down, Remove reference, and Add to
+    // this studio's references for a copy in no list. Stored expressions keep their variables;
+    // the message names those whose #name now means another one (ops#732 is the rebind).
+    auto referenceCall = [this](const char* function, App::DocumentObject* a, App::DocumentObject* b,
+                                int index) {
+        Base::PyGILStateLocker lock;
+        try {
+            PyObject* imported = PyImport_ImportModule("freecad.variables.copies");
+            if (!imported) {
+                throw Py::Exception();
+            }
+            Py::Module module(imported, true);
+            Py::Callable call(module.getAttr(function));
+            Py::Tuple args(b ? 2 : (index >= 0 ? 2 : 1));
+            args.setItem(0, Py::asObject(a->getPyObject()));
+            if (b) {
+                args.setItem(1, Py::asObject(b->getPyObject()));
+            }
+            else if (index >= 0) {
+                args.setItem(1, Py::Long(index));
+            }
+            Py::Object plan = call.apply(args);
+            QStringList lines;
+            Py::List warnings(plan.getAttr("warnings"));
+            for (const auto& line : warnings) {
+                lines << QString::fromStdString(Py::String(line).as_std_string("utf-8"));
+            }
+            showMessage(lines.join(QLatin1Char('\n')), false);
+        }
+        catch (Py::Exception&) {
+            Base::PyException error;
+            showMessage(QString::fromUtf8(error.what()), true);
+        }
+    };
+    auto listedCopy = [this, currentCopy]() -> std::pair<App::VarSetCopy*, int> {
+        App::VarSetCopy* copy = currentCopy();
+        App::DocumentObject* obj = this->studio();
+        if (!copy || !obj || App::DocumentTabs::studioOf(copy) != obj) {
+            return {nullptr, -1};
+        }
+        const auto list = App::DocumentTabs::variableReferences(obj);
+        auto it = std::find(list.begin(), list.end(), copy);
+        return {copy, static_cast<int>(it - list.begin())};
+    };
+    auto moveUpAction = new QAction(tr("Move reference up"), this);
+    moveUpAction->setObjectName(QStringLiteral("moveReferenceUp"));
+    moveUpAction->setToolTip(tr("Move the selected reference up: a later reference wins"));
+    connect(moveUpAction, &QAction::triggered, this, [listedCopy, referenceCall] {
+        auto [copy, position] = listedCopy();
+        if (copy && position > 0) {
+            referenceCall("move_reference", copy, nullptr, position - 1);
+        }
+    });
+    auto moveDownAction = new QAction(tr("Move reference down"), this);
+    moveDownAction->setObjectName(QStringLiteral("moveReferenceDown"));
+    moveDownAction->setToolTip(tr("Move the selected reference down: a later reference wins"));
+    connect(moveDownAction, &QAction::triggered, this, [listedCopy, referenceCall] {
+        auto [copy, position] = listedCopy();
+        if (copy) {
+            referenceCall("move_reference", copy, nullptr, position + 1);
+        }
+    });
+    auto removeReferenceAction = new QAction(tr("Remove reference"), this);
+    removeReferenceAction->setObjectName(QStringLiteral("removeReference"));
+    removeReferenceAction->setToolTip(
+        tr("Take the selected reference out of this studio's list; the copy stays in the document")
+    );
+    connect(removeReferenceAction, &QAction::triggered, this, [listedCopy, referenceCall] {
+        auto [copy, position] = listedCopy();
+        (void)position;
+        if (copy) {
+            referenceCall("remove_reference", copy, nullptr, -1);
+        }
+    });
+    auto addReferenceAction = new QAction(tr("Add to this studio's references"), this);
+    addReferenceAction->setObjectName(QStringLiteral("addReference"));
+    addReferenceAction->setToolTip(tr("List the selected copy last in this studio's references"));
+    connect(addReferenceAction, &QAction::triggered, this, [this, currentCopy, referenceCall] {
+        App::VarSetCopy* copy = currentCopy();
+        App::DocumentObject* obj = this->studio();
+        if (copy && obj && !App::DocumentTabs::studioOf(copy)) {
+            referenceCall("add_reference", obj, copy, -1);
         }
     });
     // FreeCAD-CH (ops#640): the toolbar's text actions don't set the panel's width (a dock 441 px
@@ -1827,6 +1992,11 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent, App::DocumentO
     tree->addAction(copyAction);
     tree->addAction(refreshAction);
     tree->addAction(locateAction);
+    if (!studioName.empty()) {
+        for (QAction* action : {moveUpAction, moveDownAction, removeReferenceAction, addReferenceAction}) {
+            tree->addAction(action);
+        }
+    }
     layout->addWidget(tree);
 
     hint = new QLabel(
@@ -2220,6 +2390,28 @@ void VariablesView::updateActions()
     }
     if (auto action = findChild<QAction*>(QStringLiteral("copyFromFreeCAD"))) {
         action->setEnabled(currentDocument() != nullptr);
+    }
+    // A studio's reference actions (ops#721): on a copy's header or variable
+    App::DocumentObject* obj = studio();
+    App::DocumentObject* listedIn = attached ? App::DocumentTabs::studioOf(copy) : nullptr;
+    bool listed = obj && listedIn == obj;
+    int position = -1;
+    int count = 0;
+    if (listed) {
+        const auto list = App::DocumentTabs::variableReferences(obj);
+        count = static_cast<int>(list.size());
+        position = static_cast<int>(std::find(list.begin(), list.end(), copy) - list.begin());
+    }
+    const std::pair<const char*, bool> referenceStates[] = {
+        {"moveReferenceUp", listed && position > 0},
+        {"moveReferenceDown", listed && position + 1 < count},
+        {"removeReference", listed},
+        {"addReference", obj && attached && !listedIn},
+    };
+    for (const auto& [name, enabled] : referenceStates) {
+        if (auto action = findChild<QAction*>(QString::fromLatin1(name))) {
+            action->setEnabled(enabled);
+        }
     }
     // A copy's variable can't be deleted or described while the copy is attached (ops#317).
     bool readOnly = VariablesModel::isReadOnly(current);

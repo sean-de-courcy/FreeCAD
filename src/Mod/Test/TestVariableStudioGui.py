@@ -38,6 +38,7 @@ import unittest
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
+from freecad.variables import copies
 
 from PySide import QtCore, QtGui, QtWidgets
 
@@ -47,6 +48,8 @@ V = App.Vector
 
 NAME, TYPE, EXPRESSION, VALUE, DESCRIPTION = range(5)
 KIND_ROLE = QtCore.Qt.UserRole + 1
+HOLDER_ROLE = QtCore.Qt.UserRole + 3
+HEADER_KIND = 0
 VARSET_KIND = 1
 NEW_KIND = 3
 
@@ -401,6 +404,139 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertTrue(model.setData(self.index(view, "w", EXPRESSION), "20 mm"))
         self.doc.recompute()
         self.assertAlmostEqual(self.doc.getObject("Pad").Shape.Volume, 2000, 6)
+
+
+    # -- references (ops#721 G2, ops#722 G3; notes/variable-studio-references.md section 2) --
+    def sourceFile(self, name, **values):
+        """A saved file @a name.FCStd whose Variable Studio "Studio" holds @a values (mm)."""
+        if not self.tmp:
+            self.tmp = tempfile.mkdtemp(prefix="TestVariableStudioGui")
+        doc = App.newDocument("TestVariableStudioGuiSource")
+        studio = doc.addObject("App::VarSet", "Studio")
+        for var, mm in values.items():
+            studio.addProperty("App::PropertyLength", var)
+            setattr(studio, var, mm)
+        Tabs.setVariableStudio(studio, True)
+        doc.recompute()
+        path = os.path.join(self.tmp, name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        pump(0.1)
+        return path
+
+    def headers(self, view):
+        """[(text, holder name or None)] of the table's header rows, in order."""
+        pump(0.3)
+        model = self.tree(view).model()
+        result = []
+        for row in range(model.rowCount()):
+            index = model.index(row, NAME)
+            if model.data(index, KIND_ROLE) == HEADER_KIND:
+                result.append((model.data(index), model.data(index, HOLDER_ROLE)))
+        return result
+
+    def child(self, view, holder, name):
+        """The item of variable @a name under @a holder's header row."""
+        model = self.tree(view).model()
+        for row in range(model.rowCount()):
+            index = model.index(row, NAME)
+            if model.data(index, HOLDER_ROLE) == holder and model.data(index, KIND_ROLE) == HEADER_KIND:
+                for sub in range(model.rowCount(index)):
+                    item = model.index(sub, NAME, index)
+                    if model.data(item) == name:
+                        return item
+        self.fail(f"no row {name} under {holder}")
+
+    def topRows(self, view):
+        """[(kind, text)] of the table's top-level rows, in order."""
+        pump(0.3)
+        model = self.tree(view).model()
+        return [(model.data(model.index(row, NAME), KIND_ROLE), model.data(model.index(row, NAME)))
+                for row in range(model.rowCount())]
+
+    def testReferencesListedInOrder(self):
+        """Onshape's order (VR9): the referenced tables in list order at the top, then the studio's
+        own rows (ending with the new row), then the document's other copies under "Other copies
+        in this document"; moving a reference reorders the headers; the reference actions exist."""
+        name, view = self.studio()
+        tab = self.doc.getObject(name)
+        tab.addProperty("App::PropertyLength", "w")
+        tab.w = 5
+        b = copies.reference_from_fcstd(tab, self.sourceFile("B", h=10), "Studio")
+        c = copies.reference_from_fcstd(tab, self.sourceFile("C", q=2), "Studio")
+        loose = copies.copy_from_fcstd(self.doc, self.sourceFile("D", r=3), "Studio")
+        self.doc.recompute()
+        holders = [holder for _, holder in self.headers(view)]
+        texts = [text for text, _ in self.headers(view)]
+        self.assertEqual(holders[:2], [b.Name, c.Name])
+        other = texts.index("Other copies in this document")
+        self.assertLess(other, holders.index(loose.Name))
+        top = self.topRows(view)
+        kinds = [kind for kind, _ in top]
+        own = [text for kind, text in top].index("w")
+        self.assertEqual(kinds[:2], [HEADER_KIND, HEADER_KIND])
+        self.assertEqual(kinds[own], VARSET_KIND)
+        self.assertEqual(kinds[own + 1], NEW_KIND)
+        self.assertGreater(own, 1)
+        self.assertGreater([text for _, text in top].index("Other copies in this document"), own)
+        copies.move_reference(c, 0)
+        holders = [holder for _, holder in self.headers(view)]
+        self.assertEqual(holders[:2], [c.Name, b.Name])
+        for action in ("moveReferenceUp", "moveReferenceDown", "removeReference", "addReference"):
+            self.action(view, action)
+        # On the first reference's header: down and remove, not up; on the loose copy: add only
+        tree = self.tree(view)
+        model = tree.model()
+
+        def select(holder):
+            for row in range(model.rowCount()):
+                index = model.index(row, NAME)
+                if model.data(index, HOLDER_ROLE) == holder:
+                    tree.setCurrentIndex(index)
+                    pump(0.1)
+                    return
+            self.fail("no header " + holder)
+
+        select(c.Name)
+        enabled = {a: self.action(view, a).isEnabled()
+                   for a in ("moveReferenceUp", "moveReferenceDown", "removeReference", "addReference")}
+        self.assertEqual(enabled, {"moveReferenceUp": False, "moveReferenceDown": True,
+                                   "removeReference": True, "addReference": False})
+        select(loose.Name)
+        self.assertTrue(self.action(view, "addReference").isEnabled())
+        self.assertFalse(self.action(view, "removeReference").isEnabled())
+
+    def testShadowedReferenceMarked(self):
+        """Onshape's marking (VR9): with references B (w 20, h 10) and C (w 40) and an own w = 30,
+        B's w and C's w carry an information icon with the tooltip "Overwritten in another
+        variable table."; B's h doesn't; no row is dimmed (all referenced rows are drawn alike).
+        Without the own w only B's w is marked."""
+        overwritten = "Overwritten in another variable table."
+        name, view = self.studio()
+        tab = self.doc.getObject(name)
+        b = copies.reference_from_fcstd(tab, self.sourceFile("B", w=20, h=10), "Studio")
+        c = copies.reference_from_fcstd(tab, self.sourceFile("C", w=40), "Studio")
+        self.doc.recompute()
+        pump(0.3)
+
+        def marked(holder, var):
+            item = self.child(view, holder, var)
+            tip = item.data(QtCore.Qt.ToolTipRole) or ""
+            icon = item.data(QtCore.Qt.DecorationRole)
+            return overwritten in tip and icon is not None and not icon.isNull()
+
+        self.assertTrue(marked(b.Name, "w"))
+        self.assertFalse(marked(c.Name, "w"))
+        self.assertFalse(marked(b.Name, "h"))
+        tab.addProperty("App::PropertyLength", "w")
+        tab.w = 30
+        self.doc.recompute()
+        pump(0.3)
+        self.assertTrue(marked(b.Name, "w"))
+        self.assertTrue(marked(c.Name, "w"))
+        self.assertFalse(marked(b.Name, "h"))
+        fore = lambda holder, var: self.child(view, holder, var).data(QtCore.Qt.ForegroundRole)
+        self.assertEqual(fore(b.Name, "w"), fore(b.Name, "h"), "a shadowed row is drawn differently")
 
 
 if __name__ == "__main__":
