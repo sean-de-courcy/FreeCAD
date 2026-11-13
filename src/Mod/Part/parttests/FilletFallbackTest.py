@@ -3492,3 +3492,78 @@ class CurvedEndTrimTest(unittest.TestCase):
                 shape = body.makeFillet(0.9, [chord])
                 self.assertTrue(shape.isValid())
                 self.assertEqual(len(shape.Faces), len(body.Faces) + 1)
+
+
+class CanonicalFacesTest(unittest.TestCase):
+    """OCCT's rounds that are exact surfaces become those surfaces (ops#640, Case Base #105).
+
+    OCCT has closed forms for a round between a plane and a plane, cylinder or cone. Between two
+    cylinders along a straight edge (Case Base #104's picks) its walker returns a B-spline within 1e-7
+    of the exact cylinder, with B-spline ends. Part::CanonicalFaces replaces such faces and edges, with
+    the maker's names (notes/canonical-faces-after-fillet.md in the ops repository). The model is the
+    lens: the common part of two cylinders of radius 10 whose axes are 12 apart, 0.5 high.
+    """
+
+    R, D, H = 10.0, 6.0, 0.5
+
+    def lens(self):
+        a = Part.makeCylinder(self.R, self.H, V(-self.D, 0, 0))
+        return a.common(Part.makeCylinder(self.R, self.H, V(self.D, 0, 0)))
+
+    def area(self, r):
+        # The lens with its corners rounded r: the lens opened by a disc (eroded, then dilated)
+        rho = self.R - r
+        a = math.acos(self.D / rho)
+        return 2 * rho * rho * a - 2 * self.D * rho * math.sin(a) + r * 4 * rho * a + math.pi * r * r
+
+    def length(self, r):
+        return 4 * (self.R - r) * math.acos(self.D / (self.R - r)) + 2 * math.pi * r
+
+    def rounded(self):
+        base = self.lens()
+        picks = [
+            e
+            for e in base.Edges
+            if e.Curve.TypeId == "Part::GeomLine" and all(abs(v.Point.x) < 1e-6 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(picks), 2)
+        return base.makeFillet(1.0, picks)
+
+    def testARoundBetweenTwoCylindersIsACylinder(self):
+        shape = self.rounded()
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Faces), 7)
+        kinds = sorted(f.Surface.TypeId for f in shape.Faces)
+        self.assertEqual(kinds.count("Part::GeomBSplineSurface"), 0)
+        rounds = [
+            f for f in shape.Faces if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - 1) < 1e-6
+        ]
+        self.assertEqual(len(rounds), 2)
+        for face in rounds:
+            self.assertEqual(
+                sorted(e.Curve.TypeId for e in face.Edges),
+                ["Part::GeomCircle", "Part::GeomCircle", "Part::GeomLine", "Part::GeomLine"],
+            )
+        self.assertEqual([e for e in shape.Edges if e.Curve.TypeId == "Part::GeomBSplineCurve"], [])
+        self.assertAlmostEqual(shape.Volume, self.area(1.0) * self.H, delta=1e-6)
+
+    def testARoundOverTheRoundsBuildsAtTheLimit(self):
+        # Case Base #105: the rim rounded as high as the plate. Its chain runs over the ends of the first
+        # rounds; OCCT refuses at the limit, and the exact construction refused those ends while they were
+        # B-splines ("a selected edge that is neither a line nor a circle"). The volume: the plate less
+        # the round's section along the outline's inner parallels,
+        # int_0^r (r - sqrt(r^2 - t^2)) (P - 2 pi (r - t)) dt
+        first = self.rounded()
+        h = self.H
+        rim = [
+            e
+            for e in first.Edges
+            if all(abs(e.valueAt(e.FirstParameter + (e.LastParameter - e.FirstParameter) * i / 4).z - h) < 1e-7 for i in range(5))
+        ]
+        self.assertEqual(len(rim), 5)
+        shape = first.makeFillet(h, rim)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        removed = (self.length(1.0) - 2 * math.pi * h) * h * h * (1 - math.pi / 4) + math.pi * h**3 / 3
+        self.assertAlmostEqual(shape.Volume, self.area(1.0) * h - removed, delta=1e-5)
+        self.assertEqual([f for f in shape.Faces if f.Surface.TypeId == "Part::GeomBSplineSurface"], [])

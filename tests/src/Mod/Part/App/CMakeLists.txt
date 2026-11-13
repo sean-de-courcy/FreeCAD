@@ -18,6 +18,7 @@ add_executable(Part_tests_run
         FeaturePartCut.cpp
         FeaturePartFuse.cpp
         FeatureRevolution.cpp
+        CanonicalFaces.cpp
         FilletFallback.cpp
         FuzzyBoolean.cpp
         MassProperties.cpp

@@ -40,6 +40,7 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     BridgedRecessTest,
+    CanonicalFacesTest,
     CornerWithACircleTest,
     CurvedEndTrimTest,
     CurvedWallEndTest,

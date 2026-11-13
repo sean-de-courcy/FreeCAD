@@ -559,6 +559,8 @@ SET(Part_SRCS
     CrossSection.h
     ExtrusionHelper.cpp
     ExtrusionHelper.h
+    CanonicalFaces.cpp
+    CanonicalFaces.h
     FilletFallback.cpp
     FilletFallback.h
     FuzzyHelper.cpp

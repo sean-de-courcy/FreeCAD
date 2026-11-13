@@ -157,6 +157,7 @@
 
 #include "modelRefine.h"
 #include "CrossSection.h"
+#include "CanonicalFaces.h"
 #include "FilletFallback.h"
 #include "MassProperties.h"
 #include "TopoShape.h"
@@ -7775,6 +7776,11 @@ struct DressUpOutcome
     bool preferred {false};
     FilletFallback::Construction construction;
     std::string reason;
+    /// OCCT's result with its B-spline rounds that are elementary surfaces converted
+    /// (CanonicalFaces::convert()): the shape to name, through the maker's history
+    bool converted {false};
+    CanonicalFaces::Conversion conversion;
+    std::string conversionRefused;
 };
 
 /** Builds a fillet or chamfer maker under the feature's time limit, on a worker thread
@@ -7837,9 +7843,43 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
+            // OCCT's result stands: its rounds between faces it has no closed form for are B-splines
+            // of exact surfaces, which become those surfaces (ops#640, Case Base #105)
+            if (!out.constructed && !out.failed && !out.thin && !out.invalid && !out.turns) {
+                out.converted = CanonicalFaces::convert(
+                    maker->Shape(),
+                    base,
+                    out.conversion,
+                    &out.conversionRefused
+                );
+            }
         }
     );
     return outcome;
+}
+
+/// Names OCCT's dress-up into result: the converted shape through the maker's history where
+/// CanonicalFaces converted it, the maker's own shape otherwise
+TopoShape& nameDressUp(
+    TopoShape& result,
+    BRepBuilderAPI_MakeShape& maker,
+    const DressUpOutcome& outcome,
+    const TopoShape& input,
+    const char* op
+)
+{
+    if (outcome.converted) {
+        FC_LOG(
+            "canonical faces: " << outcome.conversion.faces << " faces, " << outcome.conversion.edges
+                                << " edges, gap " << outcome.conversion.gap
+        );
+        const CanonicalFaces::Mapper mapper(maker, outcome.conversion);
+        return result.makeShapeWithElementMap(outcome.conversion.shape, mapper, {input}, op);
+    }
+    if (!outcome.conversionRefused.empty()) {
+        FC_LOG("canonical faces: none: " << outcome.conversionRefused);
+    }
+    return result.makeElementShape(maker, input, op);
 }
 
 /// Names the exact construction into result: false, with the reason, if that fails
@@ -7935,7 +7975,7 @@ TopoShape& TopoShape::makeElementFillet(
             );
         }
     }
-    return makeElementShape(*mkFillet, input, op);
+    return nameDressUp(*this, *mkFillet, *outcome, input, op);
 }
 
 TopoShape& TopoShape::makeElementChamfer(
@@ -8050,7 +8090,7 @@ TopoShape& TopoShape::makeElementChamfer(
                 raiseThinFaceError("The chamfer", outcome->reason);
             }
         }
-        return makeElementShape(mkChamfer, input, op);
+        return nameDressUp(*this, mkChamfer, *outcome, input, op);
     }
     return *this;  // not reached: the second pass has no setbacks that differ
 }
