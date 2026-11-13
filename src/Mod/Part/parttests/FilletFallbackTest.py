@@ -2512,3 +2512,79 @@ class CurvedWallEndTest(unittest.TestCase):
         sector, edges = self.wall(10, 11.5, 4)
         with self.assertRaises(Part.OCCError):
             sector.makeChamfer(0.75, edges)
+
+
+class RoundUnderALipTest(unittest.TestCase):
+    """A round that ends under a lip is built on the piece of the base in front of the lip's
+    underside (ops#640, Case Base #103): only where every group of edges ends under one, and only
+    where the round removes material."""
+
+    C = 11.3125
+    U = 21.225
+    R = 0.79375
+
+    def model(self):
+        # A block with a corner rounded r 11.3125 about z, scooped below z 21.225 by an ellipsoid
+        # under a 1 mm lip, and a 45 degree ramp rising on its top from the line x = -10
+        c, u, top = self.C, self.U, self.U + 1
+        block = Part.makeBox(40 + c, 40 + c, top, V(-40, -c, 0))
+        block = block.cut(Part.makeBox(c, c, top, V(0, -c, 0)).cut(Part.makeCylinder(c, top)))
+        m = FreeCAD.Matrix()
+        m.scale(8, 8, 14)
+        m.move(V(6, -6, 21.667))
+        scoop = Part.makeSphere(1).transformGeometry(m)
+        shape = block.cut(scoop.common(Part.makeBox(200, 200, u + 50, V(-100, -100, -50))))
+        shape = shape.cut(Part.makeCylinder(7.658, 2, V(6, -6, u), V(0, 0, 1)))
+        ramp = Part.makePolygon(
+            [V(-10, -c, top), V(-20, -c, top + 10), V(-40, -c, top + 10), V(-40, -c, top), V(-10, -c, top)]
+        )
+        base = shape.fuse(Part.Face(ramp).extrude(V(0, 40 + c, 0))).removeSplitter()
+
+        def ends(e):
+            return [v.Point for v in e.Vertexes]
+
+        def kinds(e):
+            return [f.Surface.TypeId for f in base.ancestorsOfType(e, Part.Face)]
+
+        lip = [
+            e
+            for e in base.Edges
+            if "Part::GeomCylinder" in kinds(e)
+            and any(k not in ("Part::GeomPlane", "Part::GeomCylinder") for k in kinds(e))
+        ]
+        back = [
+            e
+            for e in base.Edges
+            if len(ends(e)) == 2
+            and all(abs(q.y - 40) < 1e-7 and abs(q.z - top) < 1e-7 for q in ends(e))
+            and abs(min(q.x for q in ends(e)) + 10) < 1e-7
+            and abs(max(q.x for q in ends(e)) - c) < 1e-7
+        ]
+        foot = [
+            e
+            for e in base.Edges
+            if len(ends(e)) == 2 and all(abs(q.x + 10) < 1e-7 and abs(q.z - top) < 1e-7 for q in ends(e))
+        ]
+        self.assertEqual((len(lip), len(back), len(foot)), (2, 1, 1))
+        return base, lip, back, foot
+
+    def testAConcaveEdgeInAnotherGroupIsNotLost(self):
+        # Review pr103lip-r1, F1: with the lip's edges, a convex edge and the concave edge at the
+        # ramp's foot (one group, no lip) came out valid without the foot's round: 0.69 mm3 of
+        # material missing. The foot's round fills the point just inside the corner.
+        base, lip, back, foot = self.model()
+        inFoot = V(-9.95, 0, self.U + 1.05)
+        alone = base.makeFillet(self.R, lip)
+        self.assertTrue(alone.isValid())
+        self.assertAlmostEqual(base.Volume - alone.Volume, 16.6663, delta=2e-3)
+        others = base.makeFillet(self.R, back + foot)
+        self.assertTrue(others.isValid())
+        self.assertTrue(others.isInside(inFoot, 1e-7, True))
+        expected = (base.Volume - alone.Volume) + (base.Volume - others.Volume)
+        try:
+            shape = base.makeFillet(self.R, lip + back + foot)
+        except Part.OCCError:
+            return
+        if shape.isValid():
+            self.assertTrue(shape.isInside(inFoot, 1e-7, True))
+            self.assertAlmostEqual(base.Volume - shape.Volume, expected, delta=2e-3)

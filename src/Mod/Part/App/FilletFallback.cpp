@@ -3585,7 +3585,9 @@ TopoDS_Shape constructUnderOverhang(
         std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> blends;  // (selected edge, tool face)
     };
     std::vector<Group> groups;
-    bool anyOverhang = false;
+    // Every group must end under an overhang: a group that doesn't is no case of this
+    // construction, and OCCT's round on a piece of the base isn't known to be right for it
+    bool allOverhang = true;
     for (int r = 1; r <= chain.Extent(); ++r) {
         if (find(r) != r) {
             continue;
@@ -3664,10 +3666,10 @@ TopoDS_Shape constructUnderOverhang(
                 }
             }
         }
-        anyOverhang = anyOverhang || !group.overhangs.empty();
+        allOverhang = allOverhang && !group.overhangs.empty();
         groups.push_back(std::move(group));
     }
-    if (!anyOverhang) {
+    if (groups.empty() || !allOverhang) {
         throw NoOverhang {};
     }
     auto boolean = [](BRepAlgoAPI_BooleanOperation& operation,
@@ -3796,6 +3798,13 @@ TopoDS_Shape constructUnderOverhang(
         const double volume = MassProperties::volume(group.tool, true);
         if (volume <= 0) {
             refuse("a round under an overhang removes no valid solid");
+        }
+        // The tool is only what the round removes: a round that also adds material (a concave
+        // edge in the group) would lose the addition, so the piece's volumes must balance
+        const double before = MassProperties::volume(solid, true);
+        const double after = MassProperties::volume(rounded, true);
+        if (std::abs(before - after - volume) > 1e-2 * volume + 1e-6 * std::abs(before)) {
+            refuse("a round under an overhang adds material (a concave edge)");
         }
         toolVolume += volume;
         Bnd_Box toolBounds;
