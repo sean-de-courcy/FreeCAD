@@ -1243,6 +1243,45 @@ bool runBoolean(Boolean& boolean, const TopoDS_Shape& object, const TopoDS_Shape
     return boolean.IsDone() && !boolean.HasErrors();
 }
 
+// Where the cut of a result by its base handed back a piece of more than half of the result (a
+// Boolean that failed silently), what the result adds measured by the volumes: an empty string if
+// nothing, a reason if something or if that can't be told. No value where the cut is plausible.
+std::optional<std::string> addedByVolumes(
+    const TopoDS_Shape& added,
+    const TopoDS_Shape& object,
+    const TopoDS_Shape& tool
+)
+{
+    const double whole = std::abs(MassProperties::volume(object, true));
+    bool failed = false;
+    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !failed; it.Next()) {
+        failed = std::abs(MassProperties::volume(it.Current())) > whole / 2;
+    }
+    if (!failed) {
+        return std::nullopt;
+    }
+    const std::string unchecked = "changes faces away from its edges in a way that can't be checked";
+    BRepAlgoAPI_Cut cut;
+    if (!runBoolean(cut, tool, object)) {
+        return unchecked;
+    }
+    double removed = 0.0;
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        const double piece = std::abs(MassProperties::volume(it.Current(), true));
+        if (piece > whole / 2) {
+            return unchecked;
+        }
+        removed += piece;
+    }
+    // V(object - tool) = V(object) - V(tool) + V(tool - object); the bound covers the adaptive
+    // integration of the whole solids (1e-6 of them) and of the removed slivers (1e-3)
+    const double gained = whole - std::abs(MassProperties::volume(tool, true)) + removed;
+    if (std::abs(gained) <= 1e-6 * whole + 1e-3 * removed) {
+        return std::string();
+    }
+    return unchecked;
+}
+
 // The images of a shape in a Boolean's result: none if it was deleted, the shape itself if it
 // came through unchanged
 void addImages(
@@ -1332,45 +1371,6 @@ std::optional<Prepared> prepare(
         return std::nullopt;
     }
     return prepared;
-}
-
-// Where the cut of a result by its base handed back a piece of more than half of the result (a
-// Boolean that failed silently), what the result adds measured by the volumes: an empty string if
-// nothing, a reason if something or if that can't be told. No value where the cut is plausible.
-std::optional<std::string> addedByVolumes(
-    const TopoDS_Shape& added,
-    const TopoDS_Shape& object,
-    const TopoDS_Shape& tool
-)
-{
-    const double whole = std::abs(MassProperties::volume(object, true));
-    bool failed = false;
-    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !failed; it.Next()) {
-        failed = std::abs(MassProperties::volume(it.Current())) > whole / 2;
-    }
-    if (!failed) {
-        return std::nullopt;
-    }
-    const std::string unchecked = "changes faces away from its edges in a way that can't be checked";
-    BRepAlgoAPI_Cut cut;
-    if (!runBoolean(cut, tool, object)) {
-        return unchecked;
-    }
-    double removed = 0.0;
-    for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
-        const double piece = std::abs(MassProperties::volume(it.Current(), true));
-        if (piece > whole / 2) {
-            return unchecked;
-        }
-        removed += piece;
-    }
-    // V(object - tool) = V(object) - V(tool) + V(tool - object); the bound covers the adaptive
-    // integration of the whole solids (1e-6 of them) and of the removed slivers (1e-3)
-    const double gained = whole - std::abs(MassProperties::volume(tool, true)) + removed;
-    if (std::abs(gained) <= 1e-6 * whole + 1e-3 * removed) {
-        return std::string();
-    }
-    return unchecked;
 }
 
 // The material the result has that the base didn't, and why it is wrong, or an empty string
