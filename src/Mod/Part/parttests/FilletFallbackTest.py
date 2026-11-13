@@ -3348,34 +3348,74 @@ class CuspRefusalTest(unittest.TestCase):
     kept where the construction refuses (Sean's ruling of 11-13: build like Onshape, else refuse
     loudly); it was, with no warning at all (Case Base #76)."""
 
+    def slotWithACone(self):
+        """CuspTest's slot with a cone frustum (r 3 to 2, 4 high) standing on the block's top away
+        from the slot. Returns the body, the cusped rim and the frustum's top circle: an edge on a
+        cone, which the construction refuses and OCCT chamfers (5.326054 removed at 1, alone)."""
+        slot, _ = CuspTest().slot(V(0, 0, -1))
+        shape = slot.fuse(Part.makeCone(3, 2, 4, V(6, 10, 20))).removeSplitter()
+        circles = [e for e in shape.Edges if e.Curve.TypeId == "Part::GeomCircle"]
+        rim = [
+            e
+            for e in circles
+            if abs(e.BoundBox.XMin - 15) < 1e-7
+            and abs(e.BoundBox.XMax - 15) < 1e-7
+            and e.BoundBox.ZMin > 10 - 1e-7
+        ]
+        top = [e for e in circles if abs(e.BoundBox.ZMin - 24) < 1e-7]
+        self.assertEqual((len(rim), len(top)), (1, 1))
+        return shape, rim, top
+
     def testAChamferTheConstructionRefusesRaisesNamingTheEdge(self):
-        # CuspTest's slot, the chamfer 6 on both faces: on the end wall it runs past the block's top
-        # (z 20), and the construction refuses. OCCT built a valid chamfer of 12 faces, not the
-        # cusped section's 11, and makeChamfer returned it
-        shape, rim = CuspTest().slot(V(0, 0, -1))
-        self.assertEqual(len(rim), 1)
+        # The rim and the cone's edge in one chamfer of 1: the construction refuses the selection
+        # for the cone, and OCCT built both, valid, taking 45.885194 at the rim where the cusped
+        # section is 6.608946. makeChamfer returned that; now the error names the rim, not the cone
+        shape, rim, top = self.slotWithACone()
+        alone = shape.makeChamfer(1, top)
+        self.assertTrue(alone.isValid())
+        self.assertAlmostEqual(shape.Volume - alone.Volume, 5.326054, delta=1e-4)
         name = "Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(rim[0]))
         with self.assertRaises(Exception) as caught:
-            shape.makeChamfer(6, rim)
+            shape.makeChamfer(1, rim + top)
         message = str(caught.exception)
-        self.assertIn("ends in a cusp", message)
-        self.assertIn("The chamfer of %s ends" % name, message)
+        self.assertIn("The chamfer of %s ends in a cusp" % name, message)
+        self.assertIn("exact construction refused", message)
 
     def testTheFeatureFailsWithTheSameError(self):
-        shape, rim = CuspTest().slot(V(0, 0, -1))
+        shape, rim, top = self.slotWithACone()
         doc = FreeCAD.newDocument("CuspRefusalTest")
         try:
             base = doc.addObject("Part::Feature", "Base")
             base.Shape = shape
             chamfer = doc.addObject("Part::Chamfer", "Chamfer")
             chamfer.Base = base
-            index = next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(rim[0]))
-            chamfer.Edges = [(index, 6, 6)]
+            picked = [
+                next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge)) for edge in rim + top
+            ]
+            chamfer.Edges = [(i, 1, 1) for i in picked]
             doc.recompute()
             self.assertFalse(chamfer.isValid())
             self.assertIn("ends in a cusp", chamfer.getStatusString())
         finally:
             FreeCAD.closeDocument(doc.Name)
+
+    def testChamfersPastTheTopAreCutOffByIt(self):
+        # The slot alone, 6 on both faces: the strip on the end wall runs past the block's top (10
+        # above the tunnel's axis) and is cut off by it. The cusped section's integral, over the
+        # wall's part below the top (the midpoint rule on 2000 x 400 cells, good to 1e-4)
+        shape, rim = CuspTest().slot(V(0, 0, -1))
+        r, a, top, n, m = 5.0, 6.0, 10.0, 2000, 400
+        expected = 0.0
+        for i in range(n):
+            y = -r + (i + 0.5) * 2 * r / n
+            z0 = math.sqrt(r * r - y * y)
+            z1 = min(math.sqrt((r + a) ** 2 - y * y), top)
+            for j in range(m):
+                z = z0 + (j + 0.5) * (z1 - z0) / m
+                expected += (r + a - math.hypot(y, z)) * (z1 - z0) / m * 2 * r / n
+        result = shape.makeChamfer(6, rim)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-3)
 
     def testChamfersTheConstructionBuildsStay(self):
         # The control: within the wall the construction builds them, exact (CuspTest's values)
