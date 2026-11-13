@@ -9750,6 +9750,54 @@ struct RimCurve
     }
 };
 
+/** A wall arc of a loop tighter than the round (C4 shape A, notes/fillet-tight-arc.md): its round
+ * would be a spindle torus, and the corner's face is the canal surface of a ball of the arc's
+ * radius rho whose centre S(theta) lies at r - rho from both neighbouring rounds' spines: in plan
+ * at the inward depth r - (r - rho) cos(theta) from both neighbours' walls, at the height
+ * (r - rho) sin(theta) above the rounds' centres, theta from 0 (S at the arc's centre) to 90 deg
+ * (under the point where the neighbours' top edges cross). The patch's two sides are the
+ * neighbouring rounds' ends: side k at theta is S + rho u_k, u_k the direction from neighbour k's
+ * spine through S, which is that round's section at the angle theta (as tightTool(), whose tool
+ * the construction by Booleans cuts with).
+ */
+struct RimTight
+{
+    PlanWall walls[2];  // the neighbours before and after, in the loop's plan
+    double r = 0.0;
+    double rho = 0.0;
+    std::vector<gp_XY> table;  // S's plan points at even steps of theta, for the solver's start
+
+    /// S's plan point at theta
+    gp_XY spine(double theta) const
+    {
+        const int last = static_cast<int>(table.size()) - 1;
+        int i = static_cast<int>(std::lround(theta / (pi / 2) * last));
+        i = std::max(0, std::min(last, i));
+        return solveCentre(walls, table[i], r - (r - rho) * std::cos(theta));
+    }
+    /// Side k's plan point at theta: on neighbour k's wall offset at the depth r (1 - cos(theta))
+    gp_XY side(int k, double theta) const
+    {
+        gp_XY q = spine(theta);
+        return q - walls[k].gradient(q) * (rho * std::cos(theta));
+    }
+    /// Side k's plan point at the depth d
+    gp_XY sideAt(int k, double d) const
+    {
+        return side(k, std::acos(std::max(-1.0, std::min(1.0, 1.0 - d / r))));
+    }
+    void prepare(const gp_XY& centre)
+    {
+        constexpr int intervals = 96;
+        table.resize(intervals + 1);
+        gp_XY q = centre;
+        for (int i = 0; i <= intervals; ++i) {
+            q = solveCentre(walls, q, r - (r - rho) * std::cos(pi / 2 * i / intervals));
+            table[i] = q;
+        }
+    }
+};
+
 /// A corner between two walls of a loop
 struct RimCorner
 {
@@ -9758,12 +9806,18 @@ struct RimCorner
     gp_XY vertex;
     bool tangent = false;
     gp_XY inward;
+    // At an end of a tight wall arc: the neighbouring round ends on the corner patch's side
+    const RimTight* tight = nullptr;
+    int side = 0;
 
     /// Where the two walls' offsets at the depth d cross, on the branch through hint
     gp_XY at(double d, const gp_XY& hint) const
     {
         if (d < 0.0) {
             return vertex;
+        }
+        if (tight) {
+            return tight->sideAt(side, d);
         }
         if (tangent) {
             return vertex + inward * d;
@@ -9857,6 +9911,8 @@ struct RimRound
     double topFirst = 0.0;
     double topLast = 0.0;
     TopoDS_Face face;
+    // A wall arc tighter than the round: its face is a canal patch, and it has no top edge
+    std::shared_ptr<RimTight> tight;
 
     /// A plan point's angle about the torus's axis, pi at the middle of the wall arc
     double angle(const gp_XY& p) const
@@ -9941,6 +9997,8 @@ struct RimExpected
     double volumeSlack = 0.0;
 };
 
+void rimTightMeasures(const RimLoop& loop, const RimRound& round, double r, double& area, double& lens);
+
 RimExpected rimExpected(const RimLoop& loop, double r)
 {
     const int steps = 512;
@@ -9967,6 +10025,12 @@ RimExpected rimExpected(const RimLoop& loop, double r)
             const RimRound& round = loop.rounds[i];
             const gp_XY& p = at[i];
             const gp_XY& q = at[(i + 1) % n];
+            if (round.tight) {
+                // The flat chord from one side of the patch to the other at this height; what
+                // lies between the chords and the patch is measured on the patch below
+                area += 0.5 * (p - middle).Crossed(q - middle);
+                continue;
+            }
             if (round.curve.line) {
                 if ((q - p).Dot(round.curve.direction) <= rimTolerance) {
                     refuse("a rim round with no length");
@@ -10022,6 +10086,21 @@ RimExpected rimExpected(const RimLoop& loop, double r)
     expected.volume = std::abs(volume * h);
     expected.roundArea *= h;
     expected.band = std::abs(last);
+    for (const auto& round : loop.rounds) {
+        if (!round.tight) {
+            continue;
+        }
+        // Beyond the chords: the wall arc's segment over the round's height, less what stays
+        // between the chords and the patch
+        const double rho = round.curve.rho;
+        const double segment = 0.5 * rho * rho * (round.sweep - std::sin(round.sweep));
+        double area = 0.0;
+        double lens = 0.0;
+        rimTightMeasures(loop, round, r, area, lens);
+        expected.band += segment;
+        expected.volume += r * segment - lens;
+        expected.roundArea += area;
+    }
     expected.bandSlack = loop.slack * loop.reach;
     expected.volumeSlack = loop.slack * loop.reach * (r + loop.height);
     return expected;
@@ -10189,6 +10268,8 @@ TopoDS_Edge rimEdge(
     builder.Range(edge, first, last);
     return edge;
 }
+
+PlanWall rimPlanWall(const RimCurve& curve);
 
 /// The loops of the selection, or a refusal where it is not whole loops on plane faces
 std::vector<RimLoop> rimLoops(
@@ -10406,9 +10487,16 @@ std::vector<RimLoop> rimLoops(
                     if (round.sweep >= 2 * pi - 1e-6) {
                         refuse("a rim arc of a full turn");
                     }
-                    // A spindle torus (the wall arc tighter than twice the round) crosses itself
+                    // A spindle torus (the wall arc tighter than twice the round) crosses itself.
+                    // Tighter than the round itself (tightArc()): a canal patch instead
                     if (round.curve.convex > 0 && round.curve.rho - r < r - 1e-9 * r) {
-                        refuse("a rim arc tighter than twice the round");
+                        if (round.curve.rho >= r - linearTolerance) {
+                            refuse("a rim arc tighter than twice the round");
+                        }
+                        if (round.sweep >= pi - 1e-9) {
+                            refuse("a wall arc tighter than the round spanning a half circle or more");
+                        }
+                        round.tight = std::make_shared<RimTight>();
                     }
                 }
                 RimVertex& corner = loop.corners[i];
@@ -10425,6 +10513,20 @@ std::vector<RimLoop> rimLoops(
                     }
                     corner.geometry.tangent = true;
                     corner.geometry.inward = n1;
+                }
+            }
+            for (size_t i = 0; i < loop.rounds.size(); ++i) {
+                if (!loop.rounds[i].tight) {
+                    continue;
+                }
+                const size_t n = loop.rounds.size();
+                if (n < 3 || !loop.corners[i].geometry.tangent
+                    || !loop.corners[(i + 1) % n].geometry.tangent) {
+                    refuse("a wall arc tighter than the round that does not continue tangentially "
+                           "at both ends");
+                }
+                if (loop.rounds[(i + n - 1) % n].tight || loop.rounds[(i + 1) % n].tight) {
+                    refuse("two wall arcs tighter than the round in a row");
                 }
             }
             loops.push_back(std::move(loop));
@@ -10466,6 +10568,23 @@ std::vector<RimLoop> rimLoops(
         }
         for (size_t i = 0; i < n; ++i) {
             loop.reach = std::max(loop.reach, (loop.corners[i].plan - middle).Modulus());
+        }
+        // The tight wall arcs' centre curves, between their neighbours' walls
+        for (size_t i = 0; i < n; ++i) {
+            RimRound& round = loop.rounds[i];
+            if (!round.tight) {
+                continue;
+            }
+            RimTight& tight = *round.tight;
+            tight.walls[0] = rimPlanWall(loop.rounds[(i + n - 1) % n].curve);
+            tight.walls[1] = rimPlanWall(loop.rounds[(i + 1) % n].curve);
+            tight.r = r;
+            tight.rho = round.curve.rho;
+            tight.prepare(round.curve.centre);
+            loop.corners[i].geometry.tight = &tight;
+            loop.corners[i].geometry.side = 0;
+            loop.corners[(i + 1) % n].geometry.tight = &tight;
+            loop.corners[(i + 1) % n].geometry.side = 1;
         }
     }
     // Each vertex: three edges, the third straight down from the plane face and longer than r,
@@ -10561,6 +10680,19 @@ bool rimReflexCircle(const std::vector<RimLoop>& loops)
             const RimCorner& g = corner.geometry;
             if (!g.tangent && (!g.before->line || !g.after->line)
                 && g.after->tangentAt(g.vertex).Dot(g.before->inwardAt(g.vertex)) < 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Whether some round of the loops is a wall arc tighter than the round (preferConstruction())
+bool rimTightArc(const std::vector<RimLoop>& loops)
+{
+    for (const auto& loop : loops) {
+        for (const auto& round : loop.rounds) {
+            if (round.tight) {
                 return true;
             }
         }
@@ -10682,6 +10814,293 @@ void rimMitre(RimLoop& loop, size_t index, double r)
            + (touching ? " (offsets that touch)" : ""));
 }
 
+/// A loop curve as a wall of a tight corner
+PlanWall rimPlanWall(const RimCurve& curve)
+{
+    PlanWall wall;
+    wall.line = curve.line;
+    if (curve.line) {
+        wall.point = curve.point;
+        wall.normal = curve.inward / curve.inward.Modulus();
+    }
+    else {
+        wall.centre = curve.centre;
+        wall.radius = curve.rho;
+        wall.sign = -curve.convex;
+    }
+    return wall;
+}
+
+/// The canal patch of a tight wall arc: along theta (u) a cubic through 97 sections, across (v)
+/// each section's arc of the ball's great circle between the two sides, rational of degree 2
+void rimTightPatch(RimLoop& loop, size_t index, double r)
+{
+    RimRound& round = loop.rounds[index];
+    const RimTight& tight = *round.tight;
+    const int intervals = static_cast<int>(tight.table.size()) - 1;
+    const double rho = tight.rho;
+    const double d = r - rho;
+    Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, intervals + 1);
+    std::vector<gp_Pnt> side[2];
+    std::vector<gp_Pnt> homogeneous;
+    std::vector<gp_Pnt> weight;
+    for (int i = 0; i <= intervals; ++i) {
+        const double t = pi / 2 * i / intervals;
+        parameters->SetValue(i + 1, t);
+        const gp_XY& q = tight.table[i];
+        gp_Pnt spine = loop.point(q, -r + d * std::sin(t));
+        gp_Vec u[2];
+        for (int k = 0; k < 2; ++k) {
+            gp_XY n = tight.walls[k].gradient(q);
+            u[k] = loop.vector(n * -std::cos(t)) + gp_Vec(loop.normal) * std::sin(t);
+        }
+        gp_Vec m = u[0] + u[1];
+        if (m.Magnitude() < 1e-9) {
+            refuse("the rounds at a tight corner meet head on");
+        }
+        m.Normalize();
+        double ch = std::max(-1.0, std::min(1.0, m.Dot(u[0])));  // cos(alpha / 2)
+        if (ch < 1e-6) {
+            refuse("the rounds at a tight corner meet at a straight angle or more");
+        }
+        for (int k = 0; k < 2; ++k) {
+            side[k].push_back(spine.Translated(u[k] * rho));
+        }
+        homogeneous.emplace_back(spine.Translated(m * (rho / ch)).XYZ() * ch);
+        weight.emplace_back(ch, 0.0, 0.0);
+    }
+    Handle(Geom_BSplineCurve) columns[4] = {
+        interpolated(side[0], parameters),
+        interpolated(homogeneous, parameters),
+        interpolated(side[1], parameters),
+        interpolated(weight, parameters)
+    };
+    const Handle(Geom_BSplineCurve)& model = columns[0];
+    for (int c = 1; c < 4; ++c) {
+        bool same = columns[c]->NbKnots() == model->NbKnots()
+            && columns[c]->NbPoles() == model->NbPoles() && columns[c]->Degree() == model->Degree();
+        for (int i = 1; same && i <= model->NbKnots(); ++i) {
+            same = std::abs(columns[c]->Knot(i) - model->Knot(i)) <= 1e-12
+                && columns[c]->Multiplicity(i) == model->Multiplicity(i);
+        }
+        if (!same) {
+            refuse("a tight corner's columns have different knots");
+        }
+    }
+    const int poleCount = model->NbPoles();
+    const int knotCount = model->NbKnots();
+    TColgp_Array2OfPnt poles(1, poleCount, 1, 3);
+    TColStd_Array2OfReal weights(1, poleCount, 1, 3);
+    for (int i = 1; i <= poleCount; ++i) {
+        const double w = columns[3]->Pole(i).X();
+        if (w <= 1e-9) {
+            refuse("a tight corner's surface has a weight that is not positive");
+        }
+        poles.SetValue(i, 1, columns[0]->Pole(i));
+        poles.SetValue(i, 2, gp_Pnt(columns[1]->Pole(i).XYZ() / w));
+        poles.SetValue(i, 3, columns[2]->Pole(i));
+        weights.SetValue(i, 1, 1.0);
+        weights.SetValue(i, 2, w);
+        weights.SetValue(i, 3, 1.0);
+    }
+    TColStd_Array1OfReal uKnots(1, knotCount);
+    TColStd_Array1OfInteger uMults(1, knotCount);
+    for (int i = 1; i <= knotCount; ++i) {
+        uKnots.SetValue(i, model->Knot(i));
+        uMults.SetValue(i, model->Multiplicity(i));
+    }
+    TColStd_Array1OfReal vKnots(1, 2);
+    vKnots.SetValue(1, 0.0);
+    vKnots.SetValue(2, 1.0);
+    TColStd_Array1OfInteger vMults(1, 2);
+    vMults.SetValue(1, 3);
+    vMults.SetValue(2, 3);
+    Handle(Geom_BSplineSurface) patch
+        = new Geom_BSplineSurface(poles, weights, uKnots, vKnots, uMults, vMults, model->Degree(), 2);
+    // Between the sections: every point of the patch at the ball's radius from its centre
+    double deviation = 0.0;
+    for (int i = 0; i < intervals; ++i) {
+        const double t = pi / 2 * (i + 0.5) / intervals;
+        gp_Pnt centre = loop.point(tight.spine(t), -r + d * std::sin(t));
+        for (double v : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+            deviation = std::max(deviation, std::abs(patch->Value(t, v).Distance(centre) - rho));
+        }
+    }
+    if (deviation > rimTolerance * std::max(1.0, r)) {
+        refuse("a tight corner's face is " + describe(deviation) + " from its canal surface");
+    }
+    round.surface = patch;
+}
+
+/// The two sides of a tight wall arc's patch, each the end of the neighbouring round: an edge on
+/// the patch's boundary with its curve on that round, held to the formula between its samples.
+/// They meet in one vertex on the plane face, where the neighbours' top edges cross
+void rimTightSides(RimLoop& loop, size_t index, double r)
+{
+    const size_t n = loop.rounds.size();
+    RimRound& round = loop.rounds[index];
+    const RimTight& tight = *round.tight;
+    Handle(Geom_BSplineSurface) patch = Handle(Geom_BSplineSurface)::DownCast(round.surface);
+    const int samples = static_cast<int>(tight.table.size());
+    const gp_XY topPlan = tight.table.back();
+    TopoDS_Vertex top = rimVertex(loop.point(topPlan, 0.0));
+    BRep_Builder builder;
+    for (int k = 0; k < 2; ++k) {
+        RimVertex& corner = loop.corners[k == 0 ? index : (index + 1) % n];
+        const RimRound& neighbour = loop.rounds[k == 0 ? (index + n - 1) % n : (index + 1) % n];
+        auto uvOn = [&](const gp_XY& p, double t) {
+            if (neighbour.curve.line) {
+                gp_Pnt at = loop.point(p, 0.0);
+                return gp_Pnt2d(t, gp_Vec(neighbour.origin, at).Dot(gp_Vec(neighbour.zAxis)));
+            }
+            return gp_Pnt2d(neighbour.angle(p), neighbour.curve.convex > 0 ? t : pi - t);
+        };
+        Handle(TColgp_HArray1OfPnt2d) uv = new TColgp_HArray1OfPnt2d(1, samples);
+        Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, samples);
+        for (int i = 0; i < samples; ++i) {
+            const double t = pi / 2 * i / (samples - 1);
+            parameters->SetValue(i + 1, t);
+            uv->SetValue(i + 1, uvOn(tight.side(k, t), t));
+        }
+        Geom2dAPI_Interpolate flat(uv, parameters, false, Precision::Confusion());
+        flat.Perform();
+        if (!flat.IsDone()) {
+            refuse("a tight corner's side on its round could not be interpolated");
+        }
+        Handle(Geom2d_Curve) onNeighbour = flat.Curve();
+        Handle(Geom_Curve) curve = patch->VIso(double(k));
+        double deviation = 0.0;
+        for (int i = -1; i <= samples - 1; ++i) {
+            const double t = i < 0 ? 0.0
+                : i == samples - 1 ? pi / 2
+                                   : pi / 2 * (i + 0.5) / (samples - 1);
+            gp_Pnt exact = loop.point(tight.side(k, t), -r + r * std::sin(t));
+            gp_Pnt2d at = onNeighbour->Value(t);
+            deviation = std::max(deviation, curve->Value(t).Distance(exact));
+            deviation
+                = std::max(deviation, neighbour.surface->Value(at.X(), at.Y()).Distance(exact));
+        }
+        if (deviation > 10 * rimTolerance) {
+            refuse("a tight corner's side is " + describe(deviation) + " from its definition");
+        }
+        const double tolerance = std::max(Precision::Confusion(), 2 * deviation);
+        corner.topPlan = topPlan;
+        corner.onTop = top;
+        corner.mitre = rimEdge(curve, 0.0, pi / 2, corner.lowered, top, tolerance);
+        builder.UpdateEdge(
+            corner.mitre,
+            uvLine(0.0, double(k), 1.0, 0.0),
+            round.surface,
+            TopLoc_Location(),
+            tolerance
+        );
+        builder.UpdateEdge(corner.mitre, onNeighbour, neighbour.surface, TopLoc_Location(), tolerance);
+    }
+}
+
+/// A lowered wall arc's curve on its tight corner's patch: the patch's edge at theta = 0, whose
+/// parameter is not the arc's angle
+Handle(Geom2d_Curve) rimArcOnPatch(
+    const Handle(Geom_Curve)& arc,
+    double first,
+    double last,
+    const Handle(Geom_BSplineSurface)& patch
+)
+{
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    patch->Bounds(u0, u1, v0, v1);
+    Handle(Geom_Curve) edge = patch->UIso(u0);
+    double least = std::numeric_limits<double>::max();
+    for (int samples : {33, 65, 129}) {
+        Handle(TColgp_HArray1OfPnt2d) uv = new TColgp_HArray1OfPnt2d(1, samples);
+        Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, samples);
+        for (int i = 0; i < samples; ++i) {
+            const double s = first + (last - first) * i / (samples - 1);
+            GeomAPI_ProjectPointOnCurve projection(arc->Value(s), edge, v0, v1);
+            if (projection.NbPoints() < 1) {
+                refuse("a tight wall arc is not on its corner's face");
+            }
+            parameters->SetValue(i + 1, s);
+            uv->SetValue(i + 1, gp_Pnt2d(u0, projection.LowerDistanceParameter()));
+        }
+        Geom2dAPI_Interpolate flat(uv, parameters, false, Precision::Confusion());
+        flat.Perform();
+        if (!flat.IsDone()) {
+            refuse("a tight wall arc's curve on its corner's face could not be interpolated");
+        }
+        Handle(Geom2d_Curve) curve = flat.Curve();
+        double deviation = 0.0;
+        for (int i = 0; i <= 2 * (samples - 1); ++i) {
+            const double s = first + (last - first) * i / (2 * (samples - 1));
+            gp_Pnt2d at = curve->Value(s);
+            deviation = std::max(deviation, patch->Value(at.X(), at.Y()).Distance(arc->Value(s)));
+        }
+        if (deviation <= rimTolerance) {
+            return curve;
+        }
+        least = std::min(least, deviation);
+    }
+    refuse("a tight wall arc's curve on its corner's face is " + describe(least) + " off");
+}
+
+/// A tight corner's patch measured: its area, and the volume between it and the flat chords from
+/// one side to the other at each height (down to the wall arc's segment at the rounds' centres)
+void rimTightMeasures(const RimLoop& loop, const RimRound& round, double r, double& area, double& lens)
+{
+    Handle(Geom_BSplineSurface) patch = Handle(Geom_BSplineSurface)::DownCast(round.surface);
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    patch->Bounds(u0, u1, v0, v1);
+    const double node[3] = {-std::sqrt(0.6), 0.0, std::sqrt(0.6)};
+    const double weight[3] = {5.0 / 9, 8.0 / 9, 5.0 / 9};
+    const int uCells = 96;
+    const int vCells = 8;
+    const gp_Vec up(loop.normal);
+    auto height = [&](const gp_Pnt& p) {
+        return gp_Vec(loop.origin, p).Dot(up) + r;
+    };
+    area = 0.0;
+    double onPatch = 0.0;
+    double onChords = 0.0;
+    for (int i = 0; i < uCells; ++i) {
+        for (int a = 0; a < 3; ++a) {
+            const double du = (u1 - u0) / uCells;
+            const double u = u0 + du * (i + 0.5 + node[a] / 2);
+            for (int j = 0; j < vCells; ++j) {
+                for (int b = 0; b < 3; ++b) {
+                    const double dv = (v1 - v0) / vCells;
+                    const double v = v0 + dv * (j + 0.5 + node[b] / 2);
+                    gp_Pnt p;
+                    gp_Vec pu;
+                    gp_Vec pv;
+                    patch->D1(u, v, p, pu, pv);
+                    gp_Vec normal = pu.Crossed(pv);
+                    const double w = weight[a] * weight[b] * du * dv / 4;
+                    area += w * normal.Magnitude();
+                    onPatch += w * height(p) * normal.Dot(up);
+                }
+            }
+            // The chords at this theta, from side 0 to side 1: over the chord, the flux is half
+            // the sum of the two ends' speeds crossed with the chord
+            gp_Pnt p0;
+            gp_Pnt p1;
+            gp_Vec s0;
+            gp_Vec s1;
+            gp_Vec unused;
+            patch->D1(u, v0, p0, s0, unused);
+            patch->D1(u, v1, p1, s1, unused);
+            onChords += weight[a] * du / 2 * height(p0) * 0.5
+                * (s0 + s1).Crossed(gp_Vec(p0, p1)).Dot(up);
+        }
+    }
+    lens = std::abs(onPatch - onChords);
+}
+
 /// The wires of a face with its edges replaced; onTop: the loops whose wires become their rounds'
 /// top edges
 TopoDS_Face rimRebuilt(
@@ -10709,6 +11128,9 @@ TopoDS_Face rimRebuilt(
         }
         if (loop) {
             for (const auto& round : loop->rounds) {
+                if (round.tight) {
+                    continue;
+                }
                 // The top edge runs with its own parameter; the loop's first member's orientation
                 // in the wire says which way the wire held that member
                 const RimMember& member = round.members.front();
@@ -10784,7 +11206,7 @@ TopoDS_Shape rimRounds(
     std::vector<RimLoop> loops = rimLoops(base, edges, r, edgeFaces, vertexEdges);
     // Below the limit OCCT's own result stands, except where it is known to be wrong: a reflex
     // corner with a circle (reflexCircleCorner(), where the fillet asks the construction first)
-    if (request.limitOnly && !rimReflexCircle(loops)) {
+    if (request.limitOnly && !rimReflexCircle(loops) && !rimTightArc(loops)) {
         refuse("no reflex corner with a circle");
     }
 
@@ -10811,7 +11233,12 @@ TopoDS_Shape rimRounds(
             }
         }
         // Each round's surface and frame
-        for (auto& round : loop.rounds) {
+        for (size_t i = 0; i < n; ++i) {
+            RimRound& round = loop.rounds[i];
+            if (round.tight) {
+                rimTightPatch(loop, i, r);
+                continue;
+            }
             if (round.curve.line) {
                 gp_XY spine = round.start + round.curve.inward * r;
                 round.origin = loop.point(spine, -r);
@@ -10838,7 +11265,12 @@ TopoDS_Shape rimRounds(
             }
         }
         for (size_t i = 0; i < n; ++i) {
-            rimMitre(loop, i, r);
+            if (loop.rounds[i].tight) {
+                rimTightSides(loop, i, r);
+            }
+            else if (!loop.rounds[(i + n - 1) % n].tight) {
+                rimMitre(loop, i, r);
+            }
         }
         RimExpected own = rimExpected(loop, r);
         expected.volume += own.volume;
@@ -10904,7 +11336,15 @@ TopoDS_Shape rimRounds(
                 BRepAdaptor_Curve own(member.edge);
                 Handle(Geom2d_Curve) onRound;
                 double middle = (f + l) / 2;
-                if (round.curve.line) {
+                if (round.tight) {
+                    onRound = rimArcOnPatch(
+                        moved,
+                        f,
+                        l,
+                        Handle(Geom_BSplineSurface)::DownCast(round.surface)
+                    );
+                }
+                else if (round.curve.line) {
                     gp_Lin line = own.Line();
                     double way = gp_Vec(line.Direction()).Dot(gp_Vec(round.zAxis)) > 0 ? 1.0 : -1.0;
                     double v = gp_Vec(round.origin, own.Value(middle).Translated(down))
@@ -10919,6 +11359,55 @@ TopoDS_Shape rimRounds(
                 builder.UpdateEdge(member.lowered, onRound, round.surface, TopLoc_Location(), tolerance);
                 replaced.Bind(member.edge, member.lowered);
                 rimEdges.Add(member.edge);
+            }
+            if (round.tight) {
+                // The patch's face: in its own parameters, counter-clockwise, side 0 up (theta),
+                // the point on the plane face (a degenerated edge), side 1 down, the wall arc back
+                TopoDS_Edge apex;
+                builder.MakeEdge(apex);
+                builder.Degenerated(apex, true);
+                builder.Add(apex, from.onTop.Oriented(TopAbs_FORWARD));
+                builder.Add(apex, from.onTop.Oriented(TopAbs_REVERSED));
+                builder.UpdateEdge(
+                    apex,
+                    uvLine(pi / 2, 0.0, 0.0, 1.0),
+                    round.surface,
+                    TopLoc_Location(),
+                    Precision::Confusion()
+                );
+                builder.Range(apex, 0.0, 1.0);
+                TopoDS_Wire wire;
+                builder.MakeWire(wire);
+                builder.Add(wire, from.mitre.Oriented(TopAbs_FORWARD));
+                builder.Add(wire, apex.Oriented(TopAbs_FORWARD));
+                builder.Add(wire, to.mitre.Oriented(TopAbs_REVERSED));
+                for (const auto& member : round.members) {
+                    builder.Add(
+                        wire,
+                        member.lowered.Oriented(member.along > 0 ? TopAbs_REVERSED : TopAbs_FORWARD)
+                    );
+                }
+                wire.Closed(true);
+                builder.MakeFace(round.face, round.surface, Precision::Confusion());
+                builder.Add(round.face, wire);
+                // Its natural normal points out of the material where it points away from the
+                // ball's centre
+                gp_Pnt at;
+                gp_Vec du;
+                gp_Vec dv;
+                round.surface->D1(pi / 4, 0.5, at, du, dv);
+                gp_Pnt centre = loop.point(
+                    round.tight->spine(pi / 4),
+                    -r + (r - round.tight->rho) * std::sin(pi / 4)
+                );
+                if (du.Crossed(dv).Dot(gp_Vec(centre, at)) < 0) {
+                    round.face.Reverse();
+                }
+                roundFaces.push_back(round.face);
+                for (const auto& member : round.members) {
+                    mapper.insert(MappingStatus::Generated, member.edge, round.face);
+                }
+                continue;
             }
             // The top edge, on the plane face at the depth r
             Handle(Geom_Curve) topCurve;
@@ -11050,6 +11539,9 @@ TopoDS_Shape rimRounds(
             const size_t n = loop.rounds.size();
             for (size_t i = 0; i < n; ++i) {
                 const RimRound& round = loop.rounds[i];
+                if (round.tight) {
+                    continue;
+                }
                 RimPiece piece;
                 piece.line = round.curve.line;
                 piece.p = loop.corners[i].topPlan;
@@ -11331,7 +11823,7 @@ bool constructRims(
         for (const auto& group : groups) {
             try {
                 std::vector<RimLoop> own = rimLoops(base, group, r, edgeFaces, vertexEdges);
-                if (request.limitOnly && !rimReflexCircle(own)) {
+                if (request.limitOnly && !rimReflexCircle(own) && !rimTightArc(own)) {
                     continue;
                 }
                 ++alone;
