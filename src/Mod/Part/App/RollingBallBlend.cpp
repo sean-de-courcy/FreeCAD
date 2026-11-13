@@ -20,7 +20,9 @@
 #include <BRep_Tool.hxx>
 #include <Geom2dAPI_Interpolate.hxx>
 #include <Geom2d_BSplineCurve.hxx>
+#include <Geom2dAPI_PointsToBSpline.hxx>
 #include <GeomAPI_Interpolate.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -55,7 +57,7 @@ namespace
 {
 
 // A blend face whose ball residual is below this is a rolling ball already (a cylinder between planes, a torus)
-constexpr double alreadyBall = 1e-7;
+constexpr double alreadyBall = 1e-6;
 // The new surface between its stations: the stations are doubled until the residual is below this
 constexpr double surfaceBound = 2e-7;
 // The checks on the result
@@ -63,6 +65,9 @@ constexpr double resultBound = 1e-6;
 // The tolerance the new geometry is handed over with
 constexpr double newTolerance = 1e-7;
 constexpr int firstStations = 31;
+// The degree the surface's rows and the walls' pcurves are fitted with lengthwise: at 14 a face of 30 mm takes one
+// to four spans at 1e-8 (measured: degree 8 takes 17 knots, degree 5 does not get there)
+constexpr int fitDegree = 14;
 constexpr int maxDoublings = 5;
 
 struct NotRecognised
@@ -1243,8 +1248,34 @@ void solveEnd(Blend& blend, int which)
     }
 }
 
+// A curve through points at given parameters: fitted to 1e-8 with few spans, or the cubic through every point
+Handle(Geom_BSplineCurve) fitted(
+    const Handle(TColgp_HArray1OfPnt)& points,
+    const Handle(TColStd_HArray1OfReal)& parameters,
+    bool compact
+)
+{
+    if (compact) try {
+        GeomAPI_PointsToBSpline fit(points->Array1(), parameters->Array1(), fitDegree, fitDegree, GeomAbs_C2, 1e-8);
+        if (fit.IsDone() && !fit.Curve().IsNull()
+            && std::fabs(fit.Curve()->FirstParameter() - parameters->First()) < 1e-12
+            && std::fabs(fit.Curve()->LastParameter() - parameters->Last()) < 1e-12) {
+            return fit.Curve();
+        }
+    }
+    catch (const Standard_Failure&) {
+        // the cubic below
+    }
+    GeomAPI_Interpolate interpolate(points, parameters, Standard_False, 1e-12);
+    interpolate.Perform();
+    if (!interpolate.IsDone()) {
+        throw Refusal {"the blend surface could not be interpolated"};
+    }
+    return interpolate.Curve();
+}
+
 // The surface: across, the ball's arc as a rational quadratic; lengthwise, a cubic through the stations in homogeneous coordinates
-void buildSurface(Blend& blend, double radius)
+void buildSurface(Blend& blend, double radius, bool compact = true)
 {
     const int count = static_cast<int>(blend.stations.size());
     Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, count);
@@ -1269,14 +1300,34 @@ void buildSurface(Blend& blend, double radius)
         // (the parameter rides along: equal weights would be coincident points to the interpolation)
         rows[3]->SetValue(k + 1, gp_Pnt(weight, station.t, 0.0));
     }
+    // Each row as a compact curve over the stations' parameters (a few spans of high degree, as OCCT's own blend
+    // is: a Boolean's edge/face step costs by the knot, and a cubic through every station made Case Base #103
+    // six times slower), then all four on one knot vector, which changes no curve
     std::array<Handle(Geom_BSplineCurve), 4> curves;
+    int degree = 0;
     for (int i = 0; i < 4; ++i) {
-        GeomAPI_Interpolate interpolate(rows[i], parameters, Standard_False, 1e-12);
-        interpolate.Perform();
-        if (!interpolate.IsDone()) {
-            throw Refusal {"the blend surface could not be interpolated"};
+        curves[i] = fitted(rows[i], parameters, compact);
+        degree = std::max(degree, curves[i]->Degree());
+    }
+    for (int i = 0; i < 4; ++i) {
+        curves[i]->IncreaseDegree(degree);
+    }
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            if (i == j) {
+                continue;
+            }
+            TColStd_Array1OfReal knots(1, curves[j]->NbKnots());
+            TColStd_Array1OfInteger multiplicities(1, curves[j]->NbKnots());
+            curves[j]->Knots(knots);
+            curves[j]->Multiplicities(multiplicities);
+            curves[i]->InsertKnots(knots, multiplicities, 1e-10, Standard_False);
         }
-        curves[i] = interpolate.Curve();
+    }
+    for (int i = 1; i < 4; ++i) {
+        if (curves[i]->NbPoles() != curves[0]->NbPoles() || curves[i]->NbKnots() != curves[0]->NbKnots()) {
+            throw Refusal {"the blend surface's rows could not be brought onto one knot vector"};
+        }
     }
     const int poleCount = curves[0]->NbPoles();
     TColgp_Array2OfPnt poles(1, 3, 1, poleCount);
@@ -1397,6 +1448,17 @@ Handle(Geom2d_Curve) wallPcurve(const Blend& blend, int side)
         const Foot& f = blend.stations[k].feet[side];
         parameters->SetValue(k + 1, blend.stations[k].t);
         points->SetValue(k + 1, gp_Pnt2d(f.u + shiftU, f.v + shiftV));
+    }
+    try {
+        Geom2dAPI_PointsToBSpline fit(points->Array1(), parameters->Array1(), fitDegree, fitDegree, GeomAbs_C2, 1e-10);
+        if (fit.IsDone() && !fit.Curve().IsNull()
+            && std::fabs(fit.Curve()->FirstParameter() - parameters->First()) < 1e-12
+            && std::fabs(fit.Curve()->LastParameter() - parameters->Last()) < 1e-12) {
+            return fit.Curve();
+        }
+    }
+    catch (const Standard_Failure&) {
+        // the cubic below
     }
     Geom2dAPI_Interpolate interpolate(points, parameters, Standard_False, 1e-12);
     interpolate.Perform();
@@ -1537,13 +1599,14 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::fprintf(
         stderr,
-        "ROLLINGBALL %s: %zu faces passed, r %.6g, chains %d, faces %d, stations %d, residual %.3g -> %.3g, moved %.3g, %.3f s%s%s\n",
+        "ROLLINGBALL %s: %zu faces passed, r %.6g, chains %d, faces %d, stations %d, poles %d, residual %.3g -> %.3g, moved %.3g, %.3f s%s%s\n",
         report.outcome == Outcome::Corrected ? "Corrected" : report.outcome == Outcome::Refused ? "Refused" : "NotMine",
         blendFaces.size(),
         radius,
         report.chains,
         report.faces,
         report.stations,
+        report.poles,
         report.residualBefore,
         report.residualAfter,
         report.seamMove,
@@ -1677,8 +1740,13 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                     Blend& blend = context.blends[index];
                     solveStations(context, blend, interior);
                     buildSurface(blend, radius);
-                    worst = std::max(worst, residualBetweenStations(blend, radius));
-                    report.stations = std::max(report.stations, static_cast<int>(blend.stations.size()));
+                    double between = residualBetweenStations(blend, radius);
+                    if (between > surfaceBound) {
+                        // The compact fit did not get there: the cubic through every station
+                        buildSurface(blend, radius, false);
+                        between = residualBetweenStations(blend, radius);
+                    }
+                    worst = std::max(worst, between);
                 }
                 if (worst <= surfaceBound) {
                     break;
@@ -1689,6 +1757,8 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                 interior = 2 * interior + 1;
             }
             for (const int index : chain) {
+                report.stations = std::max(report.stations, static_cast<int>(context.blends[index].stations.size()));
+                report.poles = std::max(report.poles, context.blends[index].surface->NbVPoles());
                 for (int end = 0; end < 2; ++end) {
                     if (context.blends[index].ends[end].present) {
                         solveEnd(context.blends[index], end);
