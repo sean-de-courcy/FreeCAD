@@ -36,6 +36,7 @@
 
 #include "DrawSketchControllableHandler.h"
 #include "DrawSketchDefaultWidgetController.h"
+#include "DrawSketchHandlerSplitting.h"  // SketchCurveTracer, curvesThrough
 #include "Utils.h"
 #include "ViewProviderSketch.h"
 
@@ -73,6 +74,11 @@ public:
                     return true;
                 }
             }
+        }
+        else if (element.substr(0, 6) == "Vertex") {
+            // FreeCAD-CH (sketcher 4, Onshape SK19): the cursor can rest on any point with the
+            // normal cursor, as in Onshape; a click on a point trims nothing
+            return true;
         }
         return false;
     }
@@ -112,7 +118,11 @@ public:
     bool pressButton(Base::Vector2d onSketchPos) override
     {
         mousePressed = true;
-        return DrawSketchControllableHandler::pressButton(onSketchPos);
+        pressing = hasHover;  // the press trims what the last hover showed
+        // FreeCAD-CH (sketcher 4): a button event's position is the point the pick hit, often a
+        // vertex of the curve's drawn polyline (a line's middle, millimetres from the cursor), so
+        // a click trimmed the wrong piece; the last hover's position is the cursor's
+        return DrawSketchControllableHandler::pressButton(hasHover ? hoverPos : onSketchPos);
     }
 
     bool releaseButton(Base::Vector2d onSketchPos) override
@@ -121,15 +131,52 @@ public:
         return DrawSketchControllableHandler::releaseButton(onSketchPos);
     }
 
+    // FreeCAD-CH (sketcher 4, Onshape SK19-SK25): near a point where another curve crosses the
+    // curve the cursor came along (the traced curve, as Split's), the pick snaps to the crossing
+    // (Onshape's exact crossing), and Trim trims the highest piece there of all the curves through
+    // it, whichever curve was traced (Onshape trims a circle's upper arc at either crossing with a
+    // line, along either curve, and the upper piece of a vertical line). Where another curve only ends inside the
+    // traced one, the traced curve's piece on the cursor's side goes. On a point: a curve's free
+    // end trims that curve, a corner trims the other curve there, a centre does nothing.
     void updateDataAndDrawToPosition(Base::Vector2d onSketchPos) override
     {
-        trimPos = onSketchPos;
-        geoIdToTrim = getPreselectCurve();
+        int preselect = getPreselectCurve();
 
-        // Hold-and-drag trim
+        // Hold-and-drag trim; the press itself trims what the last hover resolved
         if (mousePressed) {
+            if (!pressing) {
+                trimPos = onSketchPos;
+                geoIdToTrim = preselect;
+            }
+            pressing = false;
             executeCommands();
             return;
+        }
+
+        hoverPos = onSketchPos;
+        hasHover = true;
+        trimPos = onSketchPos;
+        geoIdToTrim = preselect;
+        tracer.trace(sketchgui, onSketchPos, preselect, [this](int geoId) {
+            return isTrimmable(geoId);
+        });
+        int resolvedGeoId = Sketcher::GeoEnum::GeoUndef;
+        Base::Vector2d resolvedPos;
+        if (tracer.isSnapped()) {
+            if (resolveAtSnap(onSketchPos, resolvedGeoId, resolvedPos)) {
+                geoIdToTrim = resolvedGeoId;
+                trimPos = resolvedPos;
+            }
+            else {
+                tracer.dropSnap();  // nothing to resolve there: trim as usual
+            }
+        }
+        else if (preselect < 0) {
+            geoIdToTrim = Sketcher::GeoEnum::GeoUndef;
+            if (resolveAtPoint(getPreselectPoint(), onSketchPos, resolvedGeoId, resolvedPos)) {
+                geoIdToTrim = resolvedGeoId;
+                trimPos = resolvedPos;
+            }
         }
 
         if (geoIdToTrim < 0) {
@@ -142,7 +189,7 @@ public:
         Base::Vector3d intersect1, intersect2;
         if (!sk->seekTrimPoints(
                 geoIdToTrim,
-                Base::Vector3d(onSketchPos.x, onSketchPos.y, 0),
+                Base::Vector3d(trimPos.x, trimPos.y, 0),
                 includeAxes,
                 GeoId1,
                 intersect1,
@@ -199,7 +246,7 @@ public:
             openCommand(QT_TRANSLATE_NOOP("Command", "Trim edge"));
             Gui::cmdAppObjectArgs(
                 sketchgui->getObject(),
-                "trim(%d,App.Vector(%f,%f,0),%s)",
+                "trim(%d,App.Vector(%.12g,%.12g,0),%s)",
                 geoIdToTrim,
                 trimPos.x,
                 trimPos.y,
@@ -216,6 +263,8 @@ public:
             );
             abortCommand();
         }
+        // the geometry changed: the traced curve's index and its crossings are stale
+        tracer.reset();
     }
 
 private:
@@ -251,8 +300,202 @@ private:
         return QString(tr("Trimming Parameters"));
     }
 
+    bool isTrimmable(int geoId) const
+    {
+        if (geoId < 0) {
+            return false;
+        }
+        const Part::Geometry* geo = sketchgui->getSketchObject()->getGeometry(geoId);
+        return geo
+            && (geo->isDerivedFrom<Part::GeomTrimmedCurve>() || geo->is<Part::GeomCircle>()
+                || geo->is<Part::GeomEllipse>() || geo->is<Part::GeomBSplineCurve>())
+            && Sketcher::GeometryFacade::isInternalType(geo, Sketcher::InternalType::None);
+    }
+
+    bool endsAt(int geoId, const Base::Vector2d& p) const
+    {
+        const auto* sketch = sketchgui->getSketchObject();
+        const Part::Geometry* geom = sketch->getGeometry(geoId);
+        Base::Vector3d at(p.x, p.y, 0);
+        return geom && geom->isDerivedFrom<Part::GeomBoundedCurve>()
+            && ((sketch->getPoint(geoId, Sketcher::PointPos::start) - at).Length() <= 1e-7
+                || (sketch->getPoint(geoId, Sketcher::PointPos::end) - at).Length() <= 1e-7);
+    }
+
+    /// A point inside the piece of curve geoId next to p (just off p, on the curve), on the side
+    /// takeAfter picks from the point before p and the one after it in the curve's direction; at
+    /// an end of the curve, the one side there is. False if p isn't on the curve.
+    bool pointBeside(
+        int geoId,
+        const Base::Vector2d& p,
+        const std::function<bool(const Base::Vector2d&, const Base::Vector2d&, const Base::Vector2d&)>& takeAfter,
+        Base::Vector2d& inside
+    ) const
+    {
+        const auto* curve
+            = dynamic_cast<const Part::GeomCurve*>(sketchgui->getSketchObject()->getGeometry(geoId));
+        Base::Vector3d at(p.x, p.y, 0);
+        double u0 = 0;
+        if (!curve || !curve->closestParameter(at, u0) || (curve->value(u0) - at).Length() > 1e-7) {
+            return false;
+        }
+        double speed = curve->firstDerivativeAtParameter(u0).Length();
+        if (speed <= 0) {
+            return false;
+        }
+        double step = 1e-3 * SketchCurveTracer::pickRadius(sketchgui) / speed;  // NOLINT
+        bool periodic = curve->is<Part::GeomCircle>() || curve->is<Part::GeomEllipse>();
+        if (const auto* bspline = dynamic_cast<const Part::GeomBSplineCurve*>(curve)) {
+            periodic = bspline->isPeriodic();
+        }
+        double first = curve->getFirstParameter();
+        double last = curve->getLastParameter();
+        auto at2d = [&](double u) {
+            Base::Vector3d v = curve->value(u);
+            return Base::Vector2d(v.x, v.y);
+        };
+        bool hasBefore = periodic || u0 - step >= first;
+        bool hasAfter = periodic || u0 + step <= last;
+        if (hasBefore && hasAfter) {
+            Base::Vector2d before = at2d(u0 - step);
+            Base::Vector2d after = at2d(u0 + step);
+            inside = takeAfter(p, before, after) ? after : before;
+            return true;
+        }
+        if (hasBefore || hasAfter) {
+            inside = at2d(hasAfter ? u0 + step : u0 - step);
+            return true;
+        }
+        return false;
+    }
+
+    /// The snapped crossing: Onshape trims the highest piece of the curves through it, the traced
+    /// one included (SK19-SK23); where the other curves only end there, the traced curve's piece
+    /// on the cursor's side (SK25).
+    bool resolveAtSnap(const Base::Vector2d& cursorPos, int& geoId, Base::Vector2d& inside) const
+    {
+        const auto* sketch = sketchgui->getSketchObject();
+        const Base::Vector2d& p = tracer.snapPoint();
+        int traced = tracer.tracedGeoId();
+        auto others = curvesThrough(sketch, p, [&](int g) {
+            return g == traced || !isTrimmable(g);
+        });
+        // each curve's higher piece there (level: the one to the right), then the highest of them
+        auto higher = [](const Base::Vector2d& a, const Base::Vector2d& b) {
+            if (std::abs(a.y - b.y) > 1e-12) {  // NOLINT
+                return a.y > b.y;
+            }
+            return a.x > b.x;
+        };
+        auto upper = [&](const Base::Vector2d&, const Base::Vector2d& before, const Base::Vector2d& after) {
+            return higher(after, before);
+        };
+        bool crossing = false;
+        std::vector<int> through(1, traced);
+        for (int other : others) {
+            if (!endsAt(other, p)) {
+                crossing = true;
+                through.push_back(other);
+            }
+        }
+        if (crossing) {
+            bool found = false;
+            for (int g : through) {
+                Base::Vector2d candidate;
+                if (g >= 0 && pointBeside(g, p, upper, candidate) && (!found || higher(candidate, inside))) {
+                    inside = candidate;
+                    geoId = g;
+                    found = true;
+                }
+            }
+            return found;
+        }
+        if (others.empty() || traced < 0) {
+            return false;
+        }
+        if (pointBeside(traced, p, cursorSide(cursorPos), inside)) {
+            geoId = traced;
+            return true;
+        }
+        return false;
+    }
+
+    /// Picks the piece on the cursor's side of a point along a curve (level: the piece before).
+    std::function<bool(const Base::Vector2d&, const Base::Vector2d&, const Base::Vector2d&)>
+    cursorSide(const Base::Vector2d& cursorPos) const
+    {
+        double radius = SketchCurveTracer::pickRadius(sketchgui);
+        return [cursorPos, radius](const Base::Vector2d& at, const Base::Vector2d&, const Base::Vector2d& after) {
+            Base::Vector2d direction = after - at;
+            direction.Normalize();
+            return (cursorPos - at) * direction > 0.1 * radius;  // NOLINT
+        };
+    }
+
+    /// A point under the cursor (Onshape SK24, SK25). Inside a curve (another curve's end on it):
+    /// that curve's piece on the cursor's side, the traced one if it passes there. Else the curves
+    /// that end there: the other curve than the traced one if there is one, else that curve (a
+    /// free end: a curve with no crossing goes whole). A centre or a lone point: nothing.
+    bool resolveAtPoint(int vertex, const Base::Vector2d& cursorPos, int& geoId, Base::Vector2d& inside) const
+    {
+        if (vertex < 0) {
+            return false;
+        }
+        const auto* sketch = sketchgui->getSketchObject();
+        int pointGeoId = Sketcher::GeoEnum::GeoUndef;
+        Sketcher::PointPos pointPos = Sketcher::PointPos::none;
+        sketch->getGeoVertexIndex(vertex, pointGeoId, pointPos);
+        if (pointGeoId == Sketcher::GeoEnum::GeoUndef) {
+            return false;
+        }
+        Base::Vector3d at = sketch->getPoint(pointGeoId, pointPos);
+        Base::Vector2d p(at.x, at.y);
+        int traced = tracer.tracedGeoId();
+        auto passing = curvesThrough(sketch, p, [&](int g) {
+            return g < 0 || !isTrimmable(g) || endsAt(g, p);
+        });
+        if (!passing.empty()) {
+            int chosen = std::find(passing.begin(), passing.end(), traced) != passing.end()
+                ? traced
+                : passing.front();
+            if (pointBeside(chosen, p, cursorSide(cursorPos), inside)) {
+                geoId = chosen;
+                return true;
+            }
+            return false;
+        }
+        std::vector<int> ending;
+        for (int g = 0; g <= sketch->getHighestCurveIndex(); ++g) {
+            if (isTrimmable(g) && endsAt(g, p)) {
+                ending.push_back(g);
+            }
+        }
+        if (ending.empty()) {
+            return false;
+        }
+        int chosen = ending.front();
+        for (int g : ending) {
+            if (g != traced) {
+                chosen = g;
+                break;
+            }
+        }
+        auto either = [](const Base::Vector2d&, const Base::Vector2d&, const Base::Vector2d&) {
+            return false;
+        };
+        if (pointBeside(chosen, p, either, inside)) {
+            geoId = chosen;
+            return true;
+        }
+        return false;
+    }
+
 private:
     std::vector<Base::Vector2d> EditMarkers;
+    SketchCurveTracer tracer;
+    Base::Vector2d hoverPos;  // the cursor's position at the last move without a button held
+    bool hasHover = false;
+    bool pressing = false;  // the press's own update: it trims what the last hover resolved
     bool mousePressed = false;
     Base::Vector2d trimPos;
     int geoIdToTrim = Sketcher::GeoEnum::GeoUndef;

@@ -112,6 +112,9 @@ public:
     Part::PropertyPartShape InternalShape;
     App::PropertyPrecision InternalTolerance;
     App::PropertyBool MakeInternals;
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Disable imprinting": the edges of the face the
+    // sketch lies on don't split its regions (SketchImprint.h)
+    App::PropertyBool DisableImprinting;
     // Internal-face pipeline: 1 = legacy FaceMakerRing (<= 1.1), 2 = FaceMakerBuildFace.
     // Kept so old documents' internal-face names stay stable and references resolve.
     App::PropertyInteger _InternalFaceVersion;
@@ -257,13 +260,38 @@ public:
 
     /// Carbon copy another sketch geometry and constraints
     int carbonCopy(App::DocumentObject* pObj, bool construction = true);
-    /// add an external geometry reference
+    /** add an external geometry reference
+     *  implicit: the link is a constraint's helper (a model pick, FreeCAD-CH ops#634), marked in
+     *  ExternalTypes so that it goes with its last constraint (delUnusedImplicitExternals). An
+     *  add that isn't implicit on a marked link of that kind keeps the link: the mark goes (the
+     *  External geometry tool takes it), with the defining flag asked for
+     *  pierce: (FreeCAD-CH, Onshape's Pierce; an edge, with intersection) the link's intersection
+     *  is one point, where the edge's underlying curve crosses the sketch plane, the first along
+     *  the edge from its start (pierceExternalMark)
+     */
     int addExternal(
         App::DocumentObject* Obj,
         const char* SubName,
         bool defining = false,
-        bool intersection = false
+        bool intersection = false,
+        bool implicit = false,
+        bool pierce = false
     );
+    /// FreeCAD-CH (ops#634): the links marked implicit that nothing uses (no constraint on any of
+    /// their geometries, none of them defining), by index in ExternalGeometry
+    std::vector<int> unusedImplicitExternals() const;
+    /// FreeCAD-CH (ops#634): deletes the links unusedImplicitExternals() gives; returns how many
+    int delUnusedImplicitExternals();
+    /** FreeCAD-CH (Onshape's Pierce): constrains the sketch point (pointGeoId, pos) to where the
+     *  model edge obj's edgeSub crosses the sketch plane, in one constraint. The crossing is a
+     *  point of the edge's Intersection external, added implicit (a constraint's helper, ops#634)
+     *  and pierce (the edge's underlying curve, the first crossing along the edge from its start,
+     *  as Onshape) unless a link of that edge already gives intersections. Raises
+     *  (Base::ValueError) when the point isn't the sketch's own, the edge isn't an edge, lies in
+     *  the sketch plane, or its curve doesn't reach the plane, as Onshape refuses such a Pierce.
+     *  Returns the new constraint's index.
+     */
+    int addPierce(int pointGeoId, PointPos pos, App::DocumentObject* obj, const char* edgeSub);
     /** delete external
      *  ExtGeoId >= 0 with 0 corresponding to the first user defined
      *  external geometry
@@ -279,8 +307,32 @@ public:
     /// intersection, -1 none recorded (saved before ops#264, or both flags set)
     int externalGeometryKind(long id) const;
     /// The type of ExternalGeometry's entry `entry` as the projection uses it (0 projection,
-    /// 1 intersection, 2 both)
+    /// 1 intersection, 2 both), with the implicit mark if it has it: paths that keep the link
+    /// keep the mark; externalKind() gives the type alone
     int externalType(int entry) const;
+    /// FreeCAD-CH (ops#634): the bit of an ExternalTypes entry that marks an implicit link (a
+    /// constraint's helper, addExternal). A build before reads such an entry as no known type
+    static constexpr long implicitExternalMark = 0x100;
+    /// FreeCAD-CH (Onshape's Pierce): the bit of an ExternalTypes entry that marks a Pierce's
+    /// link: its intersection is where the edge's underlying curve (not the bounded edge) crosses
+    /// the sketch plane, one point, the first along the edge from its start (SketchObject::addPierce)
+    static constexpr long pierceExternalMark = 0x200;
+    /// an ExternalTypes entry without the implicit and pierce marks (the repair mark, negative, as
+    /// it is)
+    static constexpr long externalKind(long type)
+    {
+        return type < 0 ? type : type & ~(implicitExternalMark | pierceExternalMark);
+    }
+    static constexpr bool isPierceType(long type)
+    {
+        return type >= 0 && (type & pierceExternalMark) != 0;
+    }
+    static constexpr bool isImplicitType(long type)
+    {
+        return type >= 0 && (type & implicitExternalMark) != 0;
+    }
+    /// whether ExternalGeometry's entry `entry` is marked implicit
+    bool isImplicitExternal(int entry) const;
     /// The reference of the external geometry with Id `id`: empty when it has no link (a parked
     /// projection), none when the sketch has no external geometry with that Id
     std::optional<std::string> externalGeometryRefOf(long id) const;
@@ -566,6 +618,28 @@ public:
     int trim(int geoId, const Base::Vector3d& point, bool includeSketchAxes = false);
     /// extend a curve
     int extend(int geoId, double increment, PointPos endPoint);
+    /** FreeCAD-CH (Onshape's Extend, ops#640): extends a line's end by increment, but the end
+     *  stops at the first boundary in its way (seekExtendBoundary), where a constraint holds it:
+     *  PointOnObject on a curve, Coincident on a point. Other curves, and a shrink, as extend.
+     */
+    int extendToBoundary(int geoId, double increment, PointPos endPoint);
+    /** FreeCAD-CH (Onshape's Extend, ops#640): the increment that takes line geoId's end
+     *  endPoint, moving away from the line's other end by increment, to the first boundary in its
+     *  way: a curve of the sketch (construction ones too) or a Use'd (external) one crossing the
+     *  path, or a point on it (a sketch point, a curve's end point; at the same place a point wins
+     *  over a crossing). Not boundaries: the origin axes, a constraint's helper link (a model pick,
+     *  ops#634), internal geometry (an ellipse's axes, a B-spline's poles), anything at the old end,
+     *  another curve's extension. boundaryGeoId is GeoUndef (and increment is returned) when
+     *  nothing is in the way, the increment isn't positive or geoId isn't a line; boundaryPos is
+     *  the boundary's point, or none for a crossing.
+     */
+    double seekExtendBoundary(
+        int geoId,
+        PointPos endPoint,
+        double increment,
+        int& boundaryGeoId,
+        PointPos& boundaryPos
+    ) const;
     /// Once smaller pieces have been created from a larger curve (by split or trim, say), derive
     /// the constraint that will replace the given one (which is to be deleted). NOTE: Currently
     /// assuming all constraints on the end points of the old curve have been transferred or
@@ -590,6 +664,8 @@ public:
 
     /// split a curve
     int split(int geoId, const Base::Vector3d& point);
+    /// FreeCAD-CH (ops#656 F3): split a circle at two points into two arcs that stay one closed circle
+    int split(int geoId, const Base::Vector3d& point1, const Base::Vector3d& point2);
     /*!
       \brief Join one or two curves at the given end points
       \details The combined curve will be a b-spline
@@ -839,6 +915,12 @@ public:
     inline bool getLastHasMalformedConstraints() const
     {
         return lastHasMalformedConstraints;
+    }
+    /// FreeCAD-CH (ops#640): the last solve left conflicting (or redundant, contradicting)
+    /// constraints out and solved the rest, as Onshape does; the diagnosis lists still name them
+    inline bool getLastSolvedAroundConflict() const
+    {
+        return lastSolvedAroundConflict;
     }
     /// gets solver status of last solver execution
     inline int getLastSolverStatus() const
@@ -1190,6 +1272,8 @@ protected:
 
     // retrieves redundant, conflicting and malformed constraint information from the solver
     void retrieveSolverDiagnostics();
+    /// FreeCAD-CH (ops#640): solve leaving out the constraints of a conflict (tags 1-based)
+    bool solveAroundConflict(const std::vector<int>& tags);
 
     // retrieves whether a geometry blocked state corresponds to this constraint
     // returns true of the constraint is of Block type, false otherwise
@@ -1283,6 +1367,7 @@ private:
     bool lastHasMalformedConstraints;
     int lastSolverStatus;
     float lastSolveTime;
+    bool lastSolvedAroundConflict {false};
 
     std::vector<int> lastConflicting;
     std::vector<int> lastRedundant;
@@ -1338,6 +1423,9 @@ private:
     // The entry that marks a type list whose repair on open couldn't tell every link's type: the
     // next open repairs only the links that are still undecided (ops#140). No type has this value.
     static constexpr long pendingTypeRepairMark = -1;
+    // FreeCAD-CH (ops#634): addExternal's add, not implicit, of a link marked implicit whose kind
+    // it already has: the link stays without the mark; returns its index
+    int keepImplicitExternal(int entry, bool defining, bool intersection);
     bool externalTypeRepairPending = false;
     // the keys of the links whose type the open couldn't tell: a full rebuild matches them with
     // their saved geometry once their element is back (ops#140)

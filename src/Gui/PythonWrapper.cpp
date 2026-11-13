@@ -431,7 +431,11 @@ public:
             Base::PyGILStateLocker lock;
 
             if (auto sbkPtr = reinterpret_cast<SbkObject*>(pyobj); sbkPtr) {
-                Shiboken::Object::setValidCpp(sbkPtr, false);
+                // Invalid and out of the binding map: a wrapper only marked invalid stays mapped
+                // to the freed address while anything holds it (findChildren makes it a child of
+                // the main window's wrapper), and the next object there gets it, "already
+                // deleted" (FreeCAD-CH, ops#640)
+                Shiboken::Object::invalidate(sbkPtr);
             }
             else {
                 Base::Console().developerError(

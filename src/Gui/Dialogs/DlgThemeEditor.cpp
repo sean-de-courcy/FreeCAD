@@ -21,6 +21,7 @@
  *                                                                          *
  ***************************************************************************/
 
+#include "ForkKeymap.h"
 #include "Tools.h"
 #include "Application.h"
 #include "OverlayManager.h"
@@ -324,7 +325,6 @@ void TokenTreeView::keyPressEvent(QKeyEvent* event)
 {
     static constexpr auto expressionEditKeys = {Qt::Key_Return, Qt::Key_Enter, Qt::Key_Space};
     static constexpr auto nameEditKeys = {Qt::Key_F2};
-    static constexpr auto deleteKeys = {Qt::Key_Delete};
 
     const auto isCorrectKey = [&event](auto key) {
         return event->key() == key;
@@ -341,7 +341,8 @@ void TokenTreeView::keyPressEvent(QKeyEvent* event)
             return;
         }
 
-        if (std::ranges::any_of(deleteKeys, isCorrectKey)) {
+        // FreeCAD-CH: Backspace too on the Mac (ops#640 polish, the Mac keys)
+        if (ForkKeymap::isDeleteKey(event)) {
             requestRemove(currentIndex());
             return;
         }

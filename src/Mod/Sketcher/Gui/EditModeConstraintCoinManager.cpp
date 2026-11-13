@@ -28,10 +28,13 @@
 #include <QRegularExpression>
 #include <Bnd_Box.hxx>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <ranges>
+#include <set>
 #include <stack>
+#include <utility>
 #include <cmath>
 
 #include <Inventor/SbImage.h>
@@ -60,11 +63,13 @@
 #include <Gui/SoDatumLabel.h>
 #include <Gui/Tools.h>
 #include <Gui/Utilities.h>
+#include <Gui/VariableDisplay.h>
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/Sketcher/App/Constraint.h>
 #include <Mod/Sketcher/App/GeoEnum.h>
 #include <Mod/Sketcher/App/GeoList.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
+#include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/Sketcher/App/SolverGeometryExtension.h>
 
 #include "EditModeConstraintCoinManager.h"
@@ -97,22 +102,98 @@ EditModeConstraintCoinManager::EditModeConstraintCoinManager(
 
 EditModeConstraintCoinManager::~EditModeConstraintCoinManager() = default;
 
+std::vector<bool> EditModeConstraintCoinManager::shownConstraints(
+    const std::vector<Sketcher::Constraint*>& constrlist
+) const
+{
+    const bool isshownvirtualspace = ViewProviderSketchCoinAttorney::isShownVirtualSpace(viewProvider);
+    const bool showAll = ViewProviderSketch::showConstraintsPreference();
+
+    std::vector<bool> shown(constrlist.size(), false);
+
+    // FreeCAD-CH (ops#640 polish P1, P1b): with ShowConstraints off, Onshape's rule (PL1b,
+    // PL1d): the dimensions, the selected or hovered constraints, the constraints of the hovered
+    // curve or point (not of the selected ones), and the over-defining ones with Show errors on.
+    // The solver's over-defining constraints are 1-based numbers, as EditModeGeometryCoinManager
+    // reads them
+    std::set<int> overdefined;
+    std::optional<int> hoverCurve;
+    std::optional<std::pair<int, Sketcher::PointPos>> hoverPoint;
+    if (!showAll) {
+        const Sketcher::SketchObject* sketch = viewProvider.getSketchObject();
+        if (ViewProviderSketch::showErrorsPreference()) {
+            for (const auto* numbers :
+                 {&sketch->getLastConflicting(),
+                  &sketch->getLastRedundant(),
+                  &sketch->getLastMalformedConstraints()}) {
+                for (int number : *numbers) {
+                    overdefined.insert(number - 1);
+                }
+            }
+        }
+        hoverCurve = ViewProviderSketchCoinAttorney::getGlyphHoverCurve(viewProvider);
+        if (auto vertexId = ViewProviderSketchCoinAttorney::getGlyphHoverPoint(viewProvider)) {
+            int geoId = Sketcher::GeoEnum::GeoUndef;
+            Sketcher::PointPos posId = Sketcher::PointPos::none;
+            sketch->getGeoVertexIndex(*vertexId, geoId, posId);
+            if (geoId != Sketcher::GeoEnum::GeoUndef) {
+                hoverPoint.emplace(geoId, posId);
+            }
+        }
+    }
+
+    auto onHover = [&](int constrId, const Sketcher::Constraint* constraint) {
+        if (ViewProviderSketchCoinAttorney::isConstraintSelected(viewProvider, constrId)
+            || ViewProviderSketchCoinAttorney::isConstraintPreselected(viewProvider, constrId)) {
+            return true;
+        }
+        const std::array<std::pair<int, Sketcher::PointPos>, 3> elements {{
+            {constraint->First, constraint->FirstPos},
+            {constraint->Second, constraint->SecondPos},
+            {constraint->Third, constraint->ThirdPos},
+        }};
+        for (const auto& element : elements) {
+            if (element.first == Sketcher::GeoEnum::GeoUndef) {
+                continue;
+            }
+            if (hoverCurve && element.first == *hoverCurve) {
+                return true;
+            }
+            if (hoverPoint && element.second != Sketcher::PointPos::none && element == *hoverPoint) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (size_t i = 0; i < constrlist.size(); i++) {
+        const Sketcher::Constraint* constraint = constrlist[i];
+        // XOR of constraint mode and VP mode
+        if (constraint->isInVirtualSpace != isshownvirtualspace || !constraint->isVisible) {
+            continue;
+        }
+        shown[i] = showAll || constraint->isDimensional()
+            || overdefined.contains(static_cast<int>(i))
+            || onHover(static_cast<int>(i), constraint);
+    }
+    return shown;
+}
+
 void EditModeConstraintCoinManager::updateVirtualSpace()
 {
     const std::vector<Sketcher::Constraint*>& constrlist
         = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
 
-    bool isshownvirtualspace = ViewProviderSketchCoinAttorney::isShownVirtualSpace(viewProvider);
-
     if (constrlist.size() == vConstrType.size()) {
+
+        const std::vector<bool> shown = shownConstraints(constrlist);
 
         editModeScenegraphNodes.constrGroup->enable.setNum(constrlist.size());
 
         SbBool* sws = editModeScenegraphNodes.constrGroup->enable.startEditing();
 
         for (size_t i = 0; i < constrlist.size(); i++) {
-            sws[i] = !(constrlist[i]->isInVirtualSpace != isshownvirtualspace)
-                && constrlist[i]->isVisible;  // XOR of constraint mode and VP mode
+            sws[i] = shown[i];
         }
 
 
@@ -1072,6 +1153,8 @@ Restart:
                     asciiText->param2 = Constr->LabelPosition;
                 } break;
                 case PointOnObject:
+                case Midpoint:  // FreeCAD-CH (ops#656): drawn at its point, as PointOnObject
+                case Pierce:    // FreeCAD-CH (Onshape's Pierce): likewise
                 case Tangent:
                 case SnellsLaw: {
                     assert(Constr->First >= -extGeoCount && Constr->First < intGeoCount);
@@ -1079,7 +1162,9 @@ Restart:
 
                     Base::Vector3d pos, relPos;
                     if (
-                        Constr->Type == PointOnObject || Constr->Type == SnellsLaw
+                        Constr->Type == PointOnObject || Constr->Type == Midpoint
+                        || Constr->Type == Pierce
+                        || Constr->Type == SnellsLaw
                         || (Constr->Type == Tangent && Constr->Third != GeoEnum::GeoUndef)
                         ||  // Tangency via point
                         (Constr->Type == Tangent
@@ -2037,6 +2122,8 @@ void EditModeConstraintCoinManager::rebuildConstraintNodes(
                 vConstrType.push_back(it->Type);
             } break;
             case PointOnObject:
+            case Midpoint:  // FreeCAD-CH (ops#656)
+            case Pierce:    // FreeCAD-CH (Onshape's Pierce)
             case Tangent:
             case SnellsLaw: {
                 // #define CONSTRAINT_SEPARATOR_INDEX_MATERIAL_OR_DATUMLABEL 0
@@ -2141,6 +2228,25 @@ QString EditModeConstraintCoinManager::getPresentationString(
     auto valueStr = QString::fromStdString(constrPresValue);
 
     auto fixedValueStr = fixValueStr(valueStr, unitStr).value_or(valueStr);
+    const auto& constrlist = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
+    const auto it = std::ranges::find(constrlist, constraint);
+    const int constraintIndex = it != constrlist.end()
+        ? static_cast<int>(std::distance(constrlist.begin(), it))
+        : -1;
+    const bool hasExpression = constraintIndex >= 0
+        && ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex);
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions" (PL5a): a dimension set by
+    // an expression keeps its value and (fx) marker and gets a tag above it with the expression
+    // (variables as #Name): "tag\nvalue", which SoDatumLabel draws as a light-blue tag
+    QString expressionTag;
+    if (hasExpression && ViewProviderSketch::showExpressionsPreference()) {
+        auto* sketch = viewProvider.getSketchObject();
+        const auto info = sketch->getExpression(sketch->Constraints.createPath(constraintIndex));
+        if (info.expression) {
+            expressionTag = Gui::expressionDisplayText(info.expression.get());
+        }
+    }
+
     if (!prefix.empty()) {
         fixedValueStr.prepend(QString::fromStdString(prefix));
     }
@@ -2166,20 +2272,17 @@ QString EditModeConstraintCoinManager::getPresentationString(
         }
     }
 
-    int constraintIndex = -1;
-    const auto& constrlist = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
-    auto it = std::ranges::find(constrlist, constraint);
-    if (it != constrlist.end()) {
-        constraintIndex = std::distance(constrlist.begin(), it);
-        if (ViewProviderSketchCoinAttorney::constraintHasExpression(viewProvider, constraintIndex)) {
-            fixedValueStr += QStringLiteral(" (ƒ𝑥)");
-        }
+    if (hasExpression) {
+        fixedValueStr += QStringLiteral(" (ƒ𝑥)");
     }
 
     if (!constraint->isDriving) {
         fixedValueStr = QStringLiteral("(") + fixedValueStr + QStringLiteral(")");
     }
 
+    if (!expressionTag.isEmpty()) {
+        fixedValueStr = expressionTag + QLatin1Char('\n') + fixedValueStr;
+    }
     return fixedValueStr;
 }
 
@@ -2428,6 +2531,8 @@ void EditModeConstraintCoinManager::drawConstraintIcons(const GeoListFacade& geo
         static_cast<int>(constraints.size())
     );
 
+    const std::vector<bool> shown = shownConstraints(constraints);
+
     for (int constrId = 0; constrId < maxNumberOfConstraints; ++constrId) {
         Sketcher::Constraint* constraint = constraints[constrId];
 
@@ -2518,9 +2623,7 @@ void EditModeConstraintCoinManager::drawConstraintIcons(const GeoListFacade& geo
         thisIcon.position = absPos;
         thisIcon.destination = coinIconPtr;
         thisIcon.infoPtr = infoPtr;
-        thisIcon.visible = (constraint->isInVirtualSpace
-                            == ViewProviderSketchCoinAttorney::isShownVirtualSpace(viewProvider))
-            && constraint->isVisible;
+        thisIcon.visible = shown[constrId];  // as the switches (updateVirtualSpace())
 
         if (constraint->Type == Symmetric) {
             Base::Vector3d startingpoint
@@ -2733,6 +2836,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
         iconRotation = i->iconRotation;
 
         maxColorPriority = constrColorPriority(i->constraintId);
+        // FreeCAD-CH (ops#640): one error among the merged constraints badges the glyph
+        bool badged = isErrorBadge(i->constraintId);
 
         if (idString.length()) {
             idString.append(QStringLiteral(","));
@@ -2749,6 +2854,7 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
             labels.append(i->label);
             ids.push_back(i->constraintId);
             labelColors.append(constrColor(i->constraintId));
+            badged = badged || isErrorBadge(i->constraintId);
 
             if (constrColorPriority(i->constraintId) > maxColorPriority) {
                 maxColorPriority = constrColorPriority(i->constraintId);
@@ -2764,6 +2870,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
         std::vector<QRect> boundingBoxesVec;
         int oldHeight = 0;
 
+        const QColor badge = badged ? badgeFill(iconColor, maxColorPriority) : QColor();
+
         // Render the icon here.
         if (compositeIcon.isNull()) {
             compositeIcon = renderConstrIcon(
@@ -2773,7 +2881,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
                 labelColors,
                 iconRotation,
                 &boundingBoxesVec,
-                &lastVPad
+                &lastVPad,
+                badge
             );
         }
         else {
@@ -2785,7 +2894,8 @@ void EditModeConstraintCoinManager::drawMergedConstraintIcons(IconQueue iconQueu
                 labelColors,
                 iconRotation,
                 &boundingBoxesVec,
-                &thisVPad
+                &thisVPad,
+                badge
             );
 
             // Stack vertically for now.  Down the road, it might make sense
@@ -2849,7 +2959,8 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
     const QList<QColor>& labelColors,
     double iconRotation,
     std::vector<QRect>* boundingBoxes,
-    int* vPad
+    int* vPad,
+    const QColor& badgeColor
 )
 {
     // Constants to help create constraint icons
@@ -2900,7 +3011,18 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
     // Render the Icons
     QPainter qp(&image);
     qp.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    qp.fillRect(roticon.rect(), iconColor);
+    qp.fillRect(roticon.rect(), badgeColor.isValid() ? QColor(Qt::white) : iconColor);
+
+    // FreeCAD-CH (ops#640): Onshape's Show errors draws a conflicting constraint's glyph white on
+    // a red-filled badge (PL1d): the badge goes behind the whitened icon
+    if (badgeColor.isValid()) {
+        qp.setCompositionMode(QPainter::CompositionMode_DestinationOver);
+        qp.setRenderHint(QPainter::Antialiasing);
+        qp.setPen(Qt::NoPen);
+        qp.setBrush(badgeColor);
+        const double radius = roticon.width() / 5.0;
+        qp.drawRoundedRect(QRectF(roticon.rect()), radius, radius);
+    }
 
     // Render constraint label if necessary
     if (!labels.join(QString()).isEmpty()) {
@@ -2949,9 +3071,20 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
 void EditModeConstraintCoinManager::drawTypicalConstraintIcon(const constrIconQueueItem& i)
 {
     QColor color = constrColor(i.constraintId);
+    const QColor badge = isErrorBadge(i.constraintId)
+        ? badgeFill(color, constrColorPriority(i.constraintId))
+        : QColor();
 
-    QImage image
-        = renderConstrIcon(i.type, color, QStringList(i.label), QList<QColor>() << color, i.iconRotation);
+    QImage image = renderConstrIcon(
+        i.type,
+        color,
+        QStringList(i.label),
+        QList<QColor>() << color,
+        i.iconRotation,
+        nullptr,
+        nullptr,
+        badge
+    );
 
     i.infoPtr->string.setValue(QString::number(i.constraintId).toLatin1().data());
     sendConstraintIconToCoin(image, i.destination);
@@ -2972,6 +3105,10 @@ QString EditModeConstraintCoinManager::iconTypeFromConstraint(Constraint* constr
             return QStringLiteral("Constraint_Vertical");
         case PointOnObject:
             return QStringLiteral("Constraint_PointOnObject");
+        case Midpoint:  // FreeCAD-CH (ops#656)
+            return QStringLiteral("Constraint_PointOnMidPoint");
+        case Pierce:  // FreeCAD-CH (Onshape's Pierce): the point on the crossing point
+            return QStringLiteral("Constraint_PointOnPoint");
         case Tangent:
             return QStringLiteral("Constraint_Tangent");
         case Parallel:
@@ -3043,6 +3180,27 @@ int EditModeConstraintCoinManager::constrColorPriority(int constraintId)
     }
 
     return 1;
+}
+
+bool EditModeConstraintCoinManager::isErrorBadge(int constraintId) const
+{
+    if (!ViewProviderSketch::showErrorsPreference()) {
+        return false;
+    }
+    // The solver's lists hold 1-based numbers
+    const Sketcher::SketchObject* sketch = viewProvider.getSketchObject();
+    for (const auto* numbers : {&sketch->getLastConflicting(), &sketch->getLastMalformedConstraints()}) {
+        if (std::ranges::find(*numbers, constraintId + 1) != numbers->end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QColor EditModeConstraintCoinManager::badgeFill(const QColor& iconColor, int priority)
+{
+    // Onshape's badge red (PL1d, about #D66E74); a selected or preselected glyph keeps that colour
+    return priority > 1 ? iconColor : QColor(0xD6, 0x6E, 0x74);
 }
 
 SoSeparator* EditModeConstraintCoinManager::getConstraintIdSeparator(int i) const

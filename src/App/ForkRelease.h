@@ -28,10 +28,12 @@ class Document;
 
 /** This build's fork release: the count of fork releases, the next one included. fork-0.1.0 to
  * fork-0.6.1 are 1 to 7, fork-0.7.0 is 8, fork-0.8.1 is 9 (as was fork-0.8.0, superseded before
- * it was handed off). The release routine bumps it in the first commit on `integration` after each
- * release tag, so a release build carries its own number and every later build a higher one.
+ * it was handed off), fork-0.9.0 (the Onshape experiment's first modelling build, tagged on
+ * `feat/onshape-experiment`) is 10, fork-0.10.0 (tagged on the same branch) is 11. The release
+ * routine bumps it in the first commit after each release tag on the branch it was cut from, so a
+ * release build carries its own number and every later build a higher one.
  */
-constexpr int ForkRelease = 10;
+constexpr int ForkRelease = 12;
 
 /// The `ForkRelease` \a doc was opened from, 0 for a file without one; this build's for a new
 /// document and after a save to the document's own file.

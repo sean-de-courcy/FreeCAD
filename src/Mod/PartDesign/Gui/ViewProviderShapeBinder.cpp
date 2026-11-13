@@ -226,7 +226,11 @@ void ViewProviderShapeBinder::setupContextMenu(QMenu* menu, QObject* receiver, c
     Gui::ActionFunction* func = new Gui::ActionFunction(menu);
     func->trigger(act, [this]() {
         QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(getObject()->Label.getValue()));
-        getDocument()->openCommand(text.toUtf8());
+        // FreeCAD-CH (ops#640): a feature dialog stayed open (its accept failed): stop
+        if (getDocument()->openCommand(text.toUtf8()) == 0
+            && getDocument()->getDocument()->isStepLocked()) {
+            return;
+        }
 
         Gui::Document* document = this->getDocument();
         if (document) {
@@ -437,7 +441,11 @@ void ViewProviderSubShapeBinder::updatePlacement(bool transaction)
     }
 
 
-    getDocument()->openCommand("Sync binder");
+    // FreeCAD-CH (ops#640): a feature dialog stayed open: the sync would land in its step
+    if (getDocument()->openCommand("Sync binder") == 0
+        && getDocument()->getDocument()->isStepLocked()) {
+        return;
+    }
     try {
         if (relative) {
             self->Context.setValue(parent, parentSub.c_str());

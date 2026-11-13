@@ -40,18 +40,34 @@ SKETCH = [
     "Sketcher_Offset",
     "Sketcher_Symmetry",
     "Sketcher_CompExternal",
+    "Sketcher_InsertDxf",  # FreeCAD-CH, the DXF lane: SketcherDxfGui's manipulator puts it here
     "Sketcher_ToggleConstruction",
     SEP,
     "Sketcher_CompDimensionTools",
     "Sketcher_ConstrainCoincidentUnified",
+    "Sketcher_ConstrainConcentric",  # ops#640, rank 44
     "Sketcher_CompHorVer",
     "Sketcher_ConstrainParallel",
     "Sketcher_ConstrainPerpendicular",
     "Sketcher_ConstrainTangent",
     "Sketcher_ConstrainEqual",
+    "Sketcher_ConstrainMidpoint",
+    "Sketcher_ConstrainPierce",  # Onshape's Pierce
     "Sketcher_ConstrainSymmetric",
     "Sketcher_ConstrainBlock",
 ]
+
+# Under Onshape's keymap the toolbar ends with Extrude and Revolve, Part Design's (ops#640, rank 73,
+# gap W7); setUp loads Part Design's commands
+FEATURES = [SEP, "PartDesign_Pad", "PartDesign_Revolution"]
+
+
+def sketch_toolbar():
+    keymap = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/General").GetString(
+        "Keymap", "Onshape"
+    )
+    return SKETCH + (FEATURES if keymap != "FreeCAD" else [])
+
 
 EDIT_MODE = ["Sketcher_LeaveSketch", "Sketcher_ViewSketch", "Sketcher_ViewSection"]
 
@@ -111,6 +127,8 @@ def drop_toolbar(name):
 class TestSketchToolbarGui(SketcherGuiTestCase):
     def setUp(self):
         super().setUp()
+        import PartDesignGui  # noqa: F401  the Extrude and Revolve buttons' commands
+
         # leaving a workbench saves its toolbars' visibility: leave first, then forget what was saved
         FreeCADGui.activateWorkbench("PartWorkbench")
         self.saved_toolbars = {}
@@ -165,11 +183,12 @@ class TestSketchToolbarGui(SketcherGuiTestCase):
         self.edit()
         tb = toolbar("Sketch")
         self.assertIsNotNone(tb, "Expected a toolbar named Sketch in a sketch")
-        self.assertEqual(commands(tb), SKETCH)
+        self.assertEqual(commands(tb), sketch_toolbar())
         self.assertFalse(tb.isHidden(), "Expected the Sketch toolbar shown in a sketch")
 
     def test_the_dimensioning_tools_preference_is_honoured(self):
-        start = SKETCH.index("Sketcher_CompDimensionTools")
+        expected_toolbar = sketch_toolbar()
+        start = expected_toolbar.index("Sketcher_CompDimensionTools")
         for mode, (single, separated, tools) in DIMENSION_MODES.items():
             with self.subTest(mode):
                 FreeCADGui.activateWorkbench("PartWorkbench")
@@ -180,7 +199,7 @@ class TestSketchToolbarGui(SketcherGuiTestCase):
                 FreeCADGui.activateWorkbench("SketcherWorkbench")
                 self.flush_gui(100)
                 self.edit()
-                expected = SKETCH[:start] + tools + SKETCH[start + 1 :]
+                expected = expected_toolbar[:start] + tools + expected_toolbar[start + 1 :]
                 self.assertEqual(commands(toolbar("Sketch")), expected)
                 FreeCADGui.ActiveDocument.resetEdit()
                 self.flush_gui(300)

@@ -79,6 +79,8 @@ import unittest.mock
 import FreeCAD as App
 import Part
 
+import CompatRecord
+
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import Masker, face
 
@@ -927,7 +929,7 @@ class TestNamingGolden(unittest.TestCase):
             return
         with open(os.path.join(GOLDEN_DIR, fileName), encoding="utf-8") as fh:
             expected = fh.read().replace("\r\n", "\n")
-        if actual != expected:
+        if not _sameDump(expected, actual):
             path = _save(model, mode, "actual", dumpModel(model, mode, indexed=True))
             self.fail(
                 f"names differ from {fileName} (full dump with indexes: {path}):\n"
@@ -935,15 +937,44 @@ class TestNamingGolden(unittest.TestCase):
             )
 
 
+def _sameDump(expected, actual):
+    """Whether two dumps are the same line by line, each line's `m=` (an area or length printed
+    beside the name) within CompatRecord.NAMES_MEASURE_REL: a measure, not a name; the float
+    records own the readouts (the coordinator's ruling c742, ops#640)."""
+    if expected == actual:
+        return True
+    el, al = expected.split("\n"), actual.split("\n")
+    return len(el) == len(al) and all(
+        e == a or CompatRecord.unmatchedNameLines([e], [a]) == ([], []) for e, a in zip(el, al)
+    )
+
+
+_MEASURES = re.compile(r" (?:c=\([^)]*\)|m=-?[0-9.]+)")
+
+
+def measureBlind(text):
+    """The dump without its measures (each line's `c=` and `m=` before the name): what the
+    naming revision's digest covers, since a readout change isn't a name change (ruling c742)."""
+    out = []
+    for line in text.split("\n"):
+        head, sep, tail = line.partition(" : ")
+        out.append(_MEASURES.sub("", head) + sep + tail)
+    return "\n".join(out)
+
+
+def goldenDigest(text):
+    return hashlib.sha256(measureBlind(text).encode("utf-8")).hexdigest()
+
+
 def goldenDigests():
     """The SHA-256 of each V2 golden dump, by file name. The V1 dumps are FreeCAD's names (V1
     files aren't migrated), and the interned IDs are a representation (`.N2`): neither needs a
-    new naming revision."""
+    new naming revision. The measures are left out (`measureBlind`)."""
     digests = {}
     for name in sorted(n for n in os.listdir(GOLDEN_DIR) if n.endswith(".V2.txt")):
-        with open(os.path.join(GOLDEN_DIR, name), "rb") as fh:
-            text = fh.read().replace(b"\r\n", b"\n")
-        digests[name] = hashlib.sha256(text).hexdigest()
+        with open(os.path.join(GOLDEN_DIR, name), encoding="utf-8") as fh:
+            text = fh.read().replace("\r\n", "\n")
+        digests[name] = goldenDigest(text)
     return digests
 
 
@@ -969,6 +1000,13 @@ class TestNamingRevision(unittest.TestCase):
     REVISION is recorded again. A new or removed dump model needs only the record. The failure
     message gives the lines to record. A name change the dump models don't reach still needs the
     author's judgement (the pull request template's checklist)."""
+
+    def testTheDigestLeavesOutTheMeasures(self):
+        line = "Face c=(1.0000,2.0000,3.0000) m={} : _;_;{{Box}};MLN;26;F;0;_;_"
+        golden = "[Box Part::Box] faces=6\n" + line.format("10.0000") + "\n"
+        measures = golden.replace("m=10.0000", "m=10.5000").replace("c=(1.0000", "c=(1.5000")
+        self.assertEqual(goldenDigest(golden), goldenDigest(measures))
+        self.assertNotEqual(goldenDigest(golden), goldenDigest(golden.replace("{Box}", "{Cyl}")))
 
     def testGoldenDumpsMatchTheRevision(self):
         revision, digests = None, {}
@@ -1085,7 +1123,7 @@ class TestNamingInterning(unittest.TestCase):
             return
         with open(os.path.join(GOLDEN_DIR, fileName), encoding="utf-8") as fh:
             expected = fh.read().replace("\r\n", "\n")
-        if interned != expected:
+        if not _sameDump(expected, interned):
             path = _save(model, "V2i", "ids", interned)
             self.fail(
                 f"interned names differ from {fileName} ({path}):\n"

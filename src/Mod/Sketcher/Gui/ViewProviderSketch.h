@@ -33,7 +33,10 @@
 #include <QMetaObject>
 #include <QStringList>
 #include <fastsignals/signal.h>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <set>
 
 #include <Base/Parameter.h>
 #include <Base/Placement.h>
@@ -60,6 +63,7 @@
 class TopoDS_Shape;
 class TopoDS_Face;
 class SoSeparator;
+class SoSwitch;
 class SbLine;
 class SbVec2f;
 class SbVec2s;
@@ -69,6 +73,10 @@ class SoInfo;
 class SoPointSet;
 class SoTransform;
 class SoLineSet;
+class SoBaseColor;
+class SoDrawStyle;
+class SoAction;
+class SbColor;
 class SoMarkerSet;
 class SoPickedPoint;
 class SoPickedPointList;
@@ -79,6 +87,7 @@ class QImage;
 class QPoint;
 class QRect;
 class QColor;
+class QTimer;
 
 class SoText2;
 class SoTranslation;
@@ -127,6 +136,13 @@ public:
 
     SoSFColor color;
     SoSFFloat transparency;
+
+    /** FreeCAD-CH (ops#640 polish P7, SP10-Q1/Q5): under the Onshape keymap the 3D view's hover
+     * highlight of a face goes here (its InternalFaceN's N, 0 when it ends, and the highlight
+     * colour) instead of tinting the face. Unset: the face is tinted as before.
+     */
+    std::function<void(int, const SbColor&)> onHoverHighlight;
+    void doAction(SoAction* action) override;
 };
 
 /** @brief The Sketch ViewProvider
@@ -693,6 +709,42 @@ public:
     bool getIsShownVirtualSpace() const;
     //@}
 
+    /** @name Onshape's "Show constraints" (FreeCAD-CH, ops#640 polish P1) */
+    //@{
+    /** The preference Mod/Sketcher/General/ShowConstraints: every constraint glyph is drawn. Off,
+     * only the dimensions, the selected or hovered constraints, the constraints of the hovered
+     * curve or point (not the selected ones: ops#640 polish P1b) and, with Show errors on, the
+     * over-defining (conflicting, redundant, malformed) ones are, as in Onshape. Its default:
+     * off under the Onshape keymap, on under FreeCAD's.
+     */
+    static bool showConstraintsPreference();
+    static void setShowConstraintsPreference(bool show);
+    /// With the preference off, redraws which constraints are drawn (they follow the hover)
+    void updateConstraintsShownByHover();
+    /** Onshape's "Show errors" (ops#640 polish P1b), Mod/Sketcher/General/ShowErrors, off by
+     * default: the over-defining constraints' glyphs are drawn (their curves turn red either way).
+     */
+    static bool showErrorsPreference();
+    static void setShowErrorsPreference(bool show);
+    /** The curve (GeoId) or point (vertex index) whose constraints are drawn with
+     * ShowConstraints off: the hovered one, kept ~0.8 s after the cursor leaves it so that its
+     * glyphs, drawn beside it, can be reached; none: std::nullopt.
+     */
+    std::optional<int> glyphHoverCurve() const
+    {
+        return glyphHover.curve;
+    }
+    std::optional<int> glyphHoverPoint() const
+    {
+        return glyphHover.point;
+    }
+    /** Onshape's "Show expressions" (ops#640 polish P4), Mod/Sketcher/General/ShowExpressions,
+     * off by default: a dimension set by an expression shows the expression, not its value.
+     */
+    static bool showExpressionsPreference();
+    static void setShowExpressionsPreference(bool show);
+    //@}
+
     /** @name base class implementer */
     //@{
     void attach(App::DocumentObject*) override;
@@ -954,6 +1006,27 @@ private:
     void clearSelectPoints();
 
     void preselectToSelection(const std::stringstream& ss, const Base::Vector3d& pickedPoint, bool toggle);
+    /** FreeCAD-CH (selection parity SQ11): the N of the InternalFaceN holding the sketch point
+     * (x, y), the smallest if regions nest; 0 for none. A sketch changed in edit since its last
+     * recompute is recomputed first, so a region just drawn is there (as in Onshape).
+     */
+    int internalFaceAt(double x, double y);
+    /// shades the InternalFaceN of this sketch that are selected (edit mode)
+    void updateSelectedRegions();
+    /** FreeCAD-CH (ops#640 polish P7, selection parity P6, SP10-Q1): Onshape's hover over a
+     * region: the InternalFaceN under the pointer (0: none) is preselected at the sketch point
+     * (x, y) and its boundary curves draw in the preselection colour; the fill is unchanged.
+     * Returns whether the hovered region changed (the caller redraws the curves' colours).
+     */
+    bool updateHoveredRegion(int face, double x, double y);
+    /// FreeCAD-CH (ops#640 polish P7): the geoIds of the curves bounding InternalFaceN (an
+    /// imprinted model edge has none)
+    std::set<int> regionBoundaryCurves(int face) const;
+    /** FreeCAD-CH (ops#640 polish P7, SP10-Q5): the sketch closed, the 3D view's hover over its
+     * InternalFaceN (0: none) draws the region's boundary curves in `color`; a selected region
+     * shows nothing.
+     */
+    void showRegionHover(int face, const SbColor& color);
     //@}
 
     /** @name miscelanea utilities */
@@ -1041,6 +1114,8 @@ private:
     void executeOnSelectionPointSet(std::function<void(const int)>&& operation) const;
 
     bool isCurveSelected(int curveId) const;
+    /// FreeCAD-CH (ops#640 polish P7): a boundary curve of the hovered region
+    bool isCurveRegionHovered(int curveId) const;
 
     bool isConstraintSelected(int constraintId) const;
 
@@ -1106,6 +1181,19 @@ private:
     Preselection preselection;
     Selection selection;
 
+    // FreeCAD-CH (ops#640 polish P1b): the curve or point whose glyphs show with
+    // ShowConstraints off (glyphHoverCurve()), and the timer that clears it after the hover leaves
+    struct GlyphHover
+    {
+        std::optional<int> curve;
+        std::optional<int> point;
+    };
+    GlyphHover glyphHover;
+    std::unique_ptr<QTimer> glyphHoverTimer;
+    /// Follows the preselection into glyphHover; true if what is drawn must change
+    bool updateGlyphHover();
+    void clearGlyphHover();
+
     std::unique_ptr<Gui::Rubberband> rubberband;
 
     std::string editDocName;
@@ -1115,6 +1203,23 @@ private:
     Gui::CoinPtr<SoSketchFaces> pcSketchFaces;
     Gui::CoinPtr<SoToggleSwitch> pcSketchFacesToggle;
     bool regionEmphasis = false;
+    /// FreeCAD-CH (selection parity SQ11): the regions selected in edit mode, shaded in the edit
+    /// root (unpickable); rebuilt on each selection change
+    Gui::CoinPtr<SoSwitch> pcSelectedRegionsRoot;
+    Gui::CoinPtr<SoSketchFaces> pcSelectedRegions;
+    /// FreeCAD-CH (ops#640 polish P7): the region under the pointer (Onshape keymap), its
+    /// InternalFaceN index or 0, and the geoIds of its boundary curves (drawn preselected)
+    int hoveredRegion = 0;
+    std::set<int> hoveredRegionCurves;
+    /// set while updateHoveredRegion changes the preselection itself
+    bool updatingRegionPreselection = false;
+    /// FreeCAD-CH (ops#640 polish P7): the 3D view's hovered region's boundary curves (sketch
+    /// closed), drawn on top and unpickable; named RegionHoverEdges
+    Gui::CoinPtr<SoSwitch> pcRegionHoverRoot;
+    SoCoordinate3* regionHoverCoords = nullptr;
+    SoLineSet* regionHoverLines = nullptr;
+    SoBaseColor* regionHoverColor = nullptr;
+    SoDrawStyle* regionHoverStyle = nullptr;
 
     std::unique_ptr<ShortcutListener> listener;
 

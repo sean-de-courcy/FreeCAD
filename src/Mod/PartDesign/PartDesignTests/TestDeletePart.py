@@ -246,3 +246,91 @@ class TestDeletePart(unittest.TestCase):
             self.assertTrue(body.Shape.isNull())
         finally:
             os.remove(path)
+
+    # ---------------------------------------- a New part's empty Body (ops#640 rank 30, F50)
+
+    def deleteFeature(self, feature):
+        """The Features list's delete of a feature: out of its Body, then out of the document."""
+        body = feature.getParentGeoFeatureGroup()
+        body.removeObject(feature)
+        self.doc.removeObject(feature.Name)
+
+    def testAnEmptiedPartsSketchGoesToThePartItIsOn(self):
+        """The boss deleted from Other (its only solid): its sketch, on the cube's top face, goes
+        to the cube's Body after the cube's Pad, keeps its face reference and place, and Other is
+        removed with its origin, in the delete's step; undo brings Other back as it was."""
+        name = self.other.Name
+        originName = self.other.Origin.Name
+        bossSketch = self.boss.Profile[0]
+        support = [(o.Name, subs) for o, subs in bossSketch.AttachmentSupport]
+        placement = bossSketch.Placement
+        self.doc.openTransaction("Delete")
+        self.deleteFeature(self.boss)
+        taker = PartDesign.removeEmptyPart(self.other)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertIs(taker, self.body)
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertIsNone(self.doc.getObject(originName))
+        self.assertEqual([o.Name for o in self.body.Group], ["Sketch", "Pad", bossSketch.Name])
+        self.assertIs(self.body.Tip, self.pad)
+        self.assertEqual([(o.Name, subs) for o, subs in bossSketch.AttachmentSupport], support)
+        self.assertTrue(bossSketch.Placement.isSame(placement, 1e-9))
+        self.assertTrue(bossSketch.isValid())
+        self.assertAlmostEqual(self.body.Shape.Volume, 1000, places=6)
+        self.assertEqual([o.Name for o in PartDesign.studioSequence(self.doc)][-1], bossSketch.Name)
+
+        self.doc.undo()
+        self.doc.recompute()
+        other = self.doc.getObject(name)
+        self.assertIsNotNone(other)
+        self.assertEqual([o.Name for o in other.Group], [bossSketch.Name, "Boss"])
+        self.assertEqual([o.Name for o in self.body.Group], ["Sketch", "Pad"])
+        self.assertAlmostEqual(other.Shape.Volume, 108, places=6)
+
+    def testASketchOnItsOwnOriginIsRelinked(self):
+        """A New part drawn on its own Body's XY plane: emptied, its sketch goes to the cube's
+        Body on that Body's XY plane, in the same place."""
+        third = self.doc.addObject("PartDesign::Body", "Third")
+        sk = sketch(third, "ThirdSketch", (20, 0, 24, 4))
+        self.pad_(third, "ThirdPad", sk, 2)
+        self.doc.recompute()
+        placement = sk.Placement
+        self.deleteFeature(self.doc.getObject("ThirdPad"))
+        self.assertIs(PartDesign.removeEmptyPart(third), self.body)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("Third"))
+        self.assertIs(sk.getParentGeoFeatureGroup(), self.body)
+        self.assertIs(sk.AttachmentSupport[0][0], self.body.Origin.OriginFeatures[3])
+        self.assertTrue(sk.Placement.isSame(placement, 1e-9))
+        self.assertTrue(sk.isValid())
+
+    def testAPlacedPartsSketchStaysWhereItIs(self):
+        """Review R7W-1: a New part whose Body is placed 50 mm up, emptied: no other Body has its
+        placement, so it stays (its sketch isn't relinked to another frame, where it would move
+        50 mm in the world); its sketch keeps its place."""
+        import FreeCAD as App
+
+        third = self.doc.addObject("PartDesign::Body", "Third")
+        third.Placement = App.Placement(App.Vector(0, 0, 50), App.Rotation())
+        sk = sketch(third, "ThirdSketch", (20, 0, 24, 4))
+        self.pad_(third, "ThirdPad", sk, 2)
+        self.doc.recompute()
+        world = sk.getGlobalPlacement()
+        self.deleteFeature(self.doc.getObject("ThirdPad"))
+        self.assertIsNone(PartDesign.removeEmptyPart(third))
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Third"))
+        self.assertIs(sk.getParentGeoFeatureGroup(), third)
+        self.assertTrue(sk.getGlobalPlacement().isSame(world, 1e-9))
+
+    def testAPartWithASolidOrTheOnlyBodyStays(self):
+        """A Body with a solid feature, or the studio's only one, isn't removed."""
+        self.assertIsNone(PartDesign.removeEmptyPart(self.other))
+        self.assertIsNotNone(self.doc.getObject("Other"))
+        self.deleteFeature(self.boss)
+        self.deleteFeature(self.pad)
+        self.doc.removeObject("Other")
+        self.doc.recompute()
+        self.assertIsNone(PartDesign.removeEmptyPart(self.body))
+        self.assertIsNotNone(self.doc.getObject("Body"))

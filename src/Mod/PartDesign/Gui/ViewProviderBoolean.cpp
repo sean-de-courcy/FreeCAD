@@ -372,7 +372,12 @@ void ViewProviderBoolean::acceptMerge()
         return;
     }
     Gui::Document* doc = Gui::Application::Instance->getDocument(feature->getDocument());
-    doc->openCommand(QT_TRANSLATE_NOOP("Command", "Accept Merge"));
+    // FreeCAD-CH (ops#640): with a feature dialog open, openCommand accepts it first; 0 under
+    // the step lock means it stayed, and the merge would land in the dialog's step
+    if (doc->openCommand(QT_TRANSLATE_NOOP("Command", "Accept Merge")) == 0
+        && doc->getDocument()->isStepLocked()) {
+        return;
+    }
     FCMD_OBJ_CMD(feature, "MergeAccepted = True");
     Gui::cmdAppDocument(feature, "recompute()");
     doc->commitCommand();

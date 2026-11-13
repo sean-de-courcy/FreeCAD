@@ -118,8 +118,13 @@ public:
      */
     static App::DocumentObject* barFeatureFor(const PartDesign::Body* body,
                                               App::DocumentObject* member);
-    /// The features show one at a time, as in "Through" mode: the mode says so, or rolled back
+    /// The features show one at a time, as in "Through" mode: the mode says so, or rolled back;
+    /// not while stopped (isStopped): then the Body shows its own, empty, Shape
     bool showsThrough() const;
+    /** FreeCAD-CH (ops#640, F37): the recompute stopped the Body (in error, its Shape the empty
+     * one, Body::writeStoppedShape), it isn't rolled back and no member is in edit
+     */
+    bool isStopped() const;
     /** While an object of doc is in edit, or a task dialog on doc bars other changes, the bar
      * and the Body's rows don't move: their transaction would commit the edit's
      */
@@ -148,6 +153,8 @@ public:
     std::map<std::string, Base::Color> getElementColors(const char* element) const override;
 
     void show() override;
+    /// A Body saved stopped (F37, ops#640) opens showing nothing (isStopped)
+    void finishRestoring() override;
 
 protected:
     /// Copy over all visual properties to the child features
@@ -166,6 +173,16 @@ private:
     /// Applies DisplayModeBody, or "Through" while rolled back (ops#127)
     void applyBodyDisplay();
     bool displayedThrough = false;
+    /// Applies the display when isStopped() changed what showsThrough() says (F37, ops#640)
+    void updateStoppedDisplay();
+
+    /// FreeCAD-CH (ops#640): after an undo or a redo that changed the Body's Group, Tip or a
+    /// member's Visibility (undoChangedShown), a Body showing none of its features shows its Tip
+    void afterUndoRedo(const App::Document& doc);
+    /// Set while an undo or a redo is applied and changes what the Body shows
+    bool undoChangedShown = false;
+    fastsignals::scoped_connection m_UndoConn;
+    fastsignals::scoped_connection m_RedoConn;
 
     void onInEdit(const Gui::ViewProviderDocumentObject& vp);
     void onResetEdit(const Gui::ViewProviderDocumentObject& vp);

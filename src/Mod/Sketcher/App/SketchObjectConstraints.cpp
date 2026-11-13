@@ -37,6 +37,7 @@
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
+#include <Mod/Part/App/KernelBudget.h>
 
 #include <map>
 #include <memory>
@@ -58,6 +59,10 @@ FC_LOG_LEVEL_INIT("Sketch", true, true)
 
 int SketchObject::hasConflicts() const
 {
+    // FreeCAD-CH (ops#640): a conflict solved around blocks nothing (Onshape lets a dimension of
+    // a sketch that could not be solved be edited, which is how a conflict is fixed)
+    if (lastSolvedAroundConflict)
+        return 0;
     if (lastDoF < 0)// over-constrained sketch
         return -2;
     if (solvedSketch.hasConflicts())// conflicting constraints
@@ -78,13 +83,244 @@ void SketchObject::retrieveSolverDiagnostics()
     lastMalformedConstraints = solvedSketch.getMalformedConstraints();
 }
 
+// FreeCAD-CH (ops#656): whether a Midpoint's point is off the middle of its arc as written
+// (counterclockwise from the start to the end angle)
+static bool midpointsOffTheirArcs(const SketchObject& sketch)
+{
+    for (const Constraint* c : sketch.Constraints.getValues()) {
+        if (c->Type != Midpoint) {
+            continue;
+        }
+        const Part::Geometry* geo = sketch.getGeometry(c->Second);
+        if (!geo || !geo->is<Part::GeomArcOfCircle>()) {
+            continue;
+        }
+        const auto* arc = static_cast<const Part::GeomArcOfCircle*>(geo);
+        double first = 0.0;
+        double last = 0.0;
+        arc->getRange(first, last, /*emulateCCWXY=*/true);
+        const double angle = (first + last) / 2.0;
+        const Base::Vector3d middle = arc->getCenter()
+            + Base::Vector3d(std::cos(angle), std::sin(angle), 0.0) * arc->getRadius();
+        if ((sketch.getPoint(c->First, c->FirstPos) - middle).Length() > 1e-6) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// FreeCAD-CH (ops#640): whether the solver's solution shrinks a curve the sketch has with a size
+// to a point (a line with no length, an arc with no radius or whose ends meet). The solver can
+// meet constraints that conflict that way: a Perpendicular between two horizontal lines holds when
+// one has no length, and the rank test at the drawn parameters sees no conflict. Onshape keeps
+// the lines and names the conflict (PL1d), so such a solution counts as a failed one. The size is
+// the GUI's refusal's (ConflictRefusal.cpp).
+static bool collapsesACurve(const SketchObject& sketch, const Sketch& solved)
+{
+    constexpr double size = 1e-3;
+    const int count = std::min(sketch.getHighestCurveIndex() + 1, solved.getGeometrySize());
+    try {
+        for (int geoId = 0; geoId < count; ++geoId) {
+            const Part::Geometry* drawn = sketch.getGeometry(geoId);
+            if (!drawn) {
+                continue;
+            }
+            auto at = [&](PointPos pos) { return solved.getPoint(geoId, pos); };
+            if (const auto* line = dynamic_cast<const Part::GeomLineSegment*>(drawn)) {
+                if ((line->getEndPoint() - line->getStartPoint()).Length() >= size
+                    && (at(PointPos::end) - at(PointPos::start)).Length() < size) {
+                    return true;
+                }
+            }
+            else if (const auto* arc = dynamic_cast<const Part::GeomArcOfCircle*>(drawn)) {
+                const bool sized = arc->getRadius() >= size
+                    && (arc->getEndPoint() - arc->getStartPoint()).Length() >= size;
+                if (sized
+                    && ((at(PointPos::start) - at(PointPos::mid)).Length() < size
+                        || (at(PointPos::end) - at(PointPos::start)).Length() < size)) {
+                    return true;
+                }
+            }
+        }
+    }
+    catch (const Base::Exception&) {
+        return false;  // the solver's geometry is not the sketch's: nothing to compare
+    }
+    return false;
+}
+
+// FreeCAD-CH (ops#640): leaves the constraints of a conflict out of the solve and solves the rest.
+// The solver's conflicting set is a superset of the conflict (it can hold the corners'
+// coincidences and dimensions the conflict does not involve), so:
+// 1. every constraint of the set (conflicting, redundant, partially redundant) that the drawn
+//    geometry does not satisfy is left out at once and the satisfied ones are kept: the conflict's
+//    entities stay as drawn (Onshape SK7b, SK8b, PL1d; oracle 10b q-a: Horizontal + Angle 30 leaves
+//    the line as drawn), kept only when that alone resolves the conflict;
+// 2. otherwise the same rule over the whole sketch, for a conflict the diagnosis misses: what does
+//    not hold as drawn is left out and put back one at a time (below); also called with no tags
+//    for a solve that does not converge with no diagnosis;
+// 3. otherwise the newest constraint still in conflict is left out, one per diagnosis (at most 10
+//    such steps, then all that is still in conflict).
+// A redundant constraint that does not hold is left out the same way. Returns false, with nothing
+// left out, when the rest still fails (malformed, no convergence).
+bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
+{
+    const std::vector<Constraint*>& constraints = Constraints.getValues();
+    const int count = static_cast<int>(constraints.size());
+    auto indicesOf = [&](const std::vector<int>& list, const std::set<int>& skipped) {
+        std::vector<int> indices;  // 0-based, not yet left out
+        for (int tag : list) {
+            const int index = tag - 1;
+            if (index >= 0 && index < count && !skipped.count(index)) {
+                indices.push_back(index);
+            }
+        }
+        return indices;
+    };
+    std::vector<int> pending;  // tags still in conflict (or failing repeats) after an attempt
+    auto attempt = [&](const std::set<int>& skipped) {
+        solvedSketch.setSkippedConstraints(skipped);
+        solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+        pending.clear();
+        if (solvedSketch.hasMalformedConstraints()) {
+            return false;
+        }
+        if (solvedSketch.hasConflicts()) {
+            pending = solvedSketch.getConflicting();
+            return false;
+        }
+        const int status = solvedSketch.solve();
+        if (status == 0 && !collapsesACurve(*this, solvedSketch)) {
+            const std::vector<int>& redundant = solvedSketch.getRedundant();
+            const bool allHold = std::all_of(redundant.begin(), redundant.end(), [&](int tag) {
+                return std::abs(solvedSketch.calculateConstraintError(tag)) < 1e-7;
+            });
+            if (allHold) {
+                lastSolverStatus = status;
+                lastSolvedAroundConflict = true;
+                return true;
+            }
+        }
+        if (solvedSketch.hasRedundancies()) {
+            pending = solvedSketch.getRedundant();
+        }
+        return false;
+    };
+
+    // 1. As drawn: every driving constraint of the failing group that the drawn geometry does not
+    //    satisfy is left out, the ones it satisfies are kept, so the conflict's entities stay as drawn.
+    std::set<int> unsatisfied;
+    solvedSketch.setSkippedConstraints({});
+    solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+    std::vector<int> group = tags;
+    for (const std::vector<int>* list : {&solvedSketch.getConflicting(),
+                                         &solvedSketch.getRedundant(),
+                                         &solvedSketch.getPartiallyRedundant()}) {
+        group.insert(group.end(), list->begin(), list->end());
+    }
+    for (int index : indicesOf(group, {})) {
+        // parameters are still the drawn ones (set up, not solved); NaN counts as not satisfied
+        const double error = solvedSketch.calculateConstraintError(index + 1);
+        if (constraints[index]->isDriving && !(std::abs(error) < 1e-7)) {
+            unsatisfied.insert(index);
+        }
+    }
+    if (!unsatisfied.empty() && attempt(unsatisfied)) {
+        return true;
+    }
+
+    // 2. As drawn, by putting back: planegcs finds a conflict by rank at the drawn parameters
+    //    only, so its lists can name none of the constraints that fail as drawn (Horizontal +
+    //    Angle 30 on a line drawn horizontal names only the Horizontal) or nothing at all (the
+    //    same pair on a line drawn at 10 degrees: the solve does not converge). Every driving
+    //    constraint the drawn geometry does not satisfy is left out, then each is put back,
+    //    oldest first, and kept when the rest still solves. One that does not is left out with
+    //    the ones put back before it whose removal lets it solve: the conflict's members that do
+    //    not hold as drawn, as pass 1 leaves out (oracle 10b q-a).
+    {
+        solvedSketch.setSkippedConstraints({});
+        solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+        std::vector<int> drawnFails;  // ascending, so oldest first
+        for (int index = 0; index < count; ++index) {
+            // a constraint the solver does not hold (NaN: on fixed geometry only) changes nothing
+            const double error = solvedSketch.calculateConstraintError(index + 1);
+            if (constraints[index]->isDriving && !std::isnan(error) && !(std::abs(error) < 1e-7)) {
+                drawnFails.push_back(index);
+            }
+        }
+        // bounded: each put-back is a solve of the whole sketch
+        std::set<int> out(drawnFails.begin(), drawnFails.end());
+        if (!drawnFails.empty() && drawnFails.size() <= 64 && attempt(out)) {
+            std::vector<int> back;
+            std::set<int> leftOut;
+            for (int index : drawnFails) {
+                out.erase(index);
+                if (attempt(out)) {
+                    back.push_back(index);
+                    continue;
+                }
+                std::vector<int> members {index};
+                for (int earlier : back) {
+                    std::set<int> trial = out;
+                    trial.insert(earlier);
+                    if (attempt(trial)) {
+                        members.push_back(earlier);
+                    }
+                }
+                for (int member : members) {
+                    out.insert(member);
+                    leftOut.insert(member);
+                    back.erase(std::remove(back.begin(), back.end(), member), back.end());
+                }
+            }
+            lastSolvedAroundConflict = false;
+            if (!leftOut.empty() && attempt(out)) {
+                // the marks and messages name what was left out, with the diagnosis
+                std::set<int> named(lastConflicting.begin(), lastConflicting.end());
+                for (int index : leftOut) {
+                    named.insert(index + 1);
+                }
+                lastConflicting.assign(named.begin(), named.end());
+                lastHasConflict = true;
+                return true;
+            }
+        }
+        lastSolvedAroundConflict = false;
+    }
+
+    std::set<int> skipped;
+    pending = tags;
+    for (int step = 0; step < 32; ++step) {
+        const std::vector<int> candidates = indicesOf(pending, skipped);
+        if (candidates.empty()) {
+            break;
+        }
+        if (step < 10) {
+            skipped.insert(*std::max_element(candidates.begin(), candidates.end()));
+        }
+        else {
+            skipped.insert(candidates.begin(), candidates.end());
+        }
+        if (attempt(skipped)) {
+            return true;
+        }
+    }
+    // the rest fails too: the sketch stays in error, set up as the diagnosis found it
+    solvedSketch.setSkippedConstraints({});
+    solvedSketch.setUpSketch(getCompleteGeometry(), constraints, getExternalGeometryCount());
+    return false;
+}
+
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 {
+    Part::KernelBudget::PhaseTimer phase(Part::KernelBudget::Phase::Solve);
     // no need to check input data validity as this is an sketchobject managed operation.
     Base::StateLocker lock(managedoperation, true);
 
     // Reset the initial movement in case of a dragging operation was ongoing on the solver.
     solvedSketch.resetInitMove();
+    lastSolvedAroundConflict = false;
+    solvedSketch.setSkippedConstraints({});
 
     // if updateGeoAfterSolving=false, the solver information is updated, but the Sketch is nothing
     // updated. It is useful to avoid triggering an OnChange when the goeometry did not change but
@@ -137,6 +373,57 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         if (lastSolverStatus != 0) {// solving
             err = -1;
         }
+        else if (err == -2) {
+            // FreeCAD-CH (ops#656): a constraint that repeats what the others impose, and agrees
+            // with them, is accepted as Onshape accepts it: the solve is a success (the geometry
+            // is written, a dimension can be set, the recompute goes on), and the diagnosis still
+            // names the repeated constraints. The solver leaves them out of the solve, so each
+            // must hold at the solution; one that does not is a contradiction and stays an error.
+            // The bar is 1e-7 (mm or rad), well under the solver's own 1e-5: an angle 1e-6 rad
+            // off is 4 um at 4 m and is refused, as a conflict would be (skeptic, 11-10).
+            const bool allHold =
+                std::all_of(lastRedundant.begin(), lastRedundant.end(), [&](int tag) {
+                    const double residual = solvedSketch.calculateConstraintError(tag);
+                    return std::abs(residual) < 1e-7;  // false for NaN
+                });
+            if (allHold) {
+                err = 0;
+            }
+        }
+    }
+
+    // FreeCAD-CH (ops#640, sketch conflicts): as Onshape does, a conflict does not stop the
+    // sketch: its constraints are left out and the rest is solved (Onshape SK7b, SK8b). The same
+    // for a repeated constraint that contradicts the others (a redundant one that does not hold).
+    // The diagnosis above is kept: it names the constraints the marks show.
+    if (!lastHasMalformedConstraints) {
+        if ((err == -3 || err == -4) && lastHasConflict) {
+            if (solveAroundConflict(lastConflicting)) {
+                err = 0;
+            }
+        }
+        else if ((err == -2 || err == -1) && lastHasRedundancies) {
+            if (solveAroundConflict(lastRedundant)) {
+                err = 0;
+            }
+        }
+        else if (err == -1) {
+            // no convergence and no diagnosis: a conflict the rank test at the drawn parameters
+            // does not see (Horizontal + Angle 30 on a line drawn at 10 degrees); pass 2 finds it
+            if (solveAroundConflict({})) {
+                err = 0;
+            }
+        }
+        else if (err == 0 && collapsesACurve(*this, solvedSketch)) {
+            // solved by shrinking a curve to a point: a conflict too (PL1d); when nothing can be
+            // left out to keep the curve, the solution stands as before
+            if (!solveAroundConflict({})) {
+                solvedSketch.setSkippedConstraints({});
+                solvedSketch.setUpSketch(
+                    getCompleteGeometry(), Constraints.getValues(), getExternalGeometryCount());
+                lastSolverStatus = solvedSketch.solve();
+            }
+        }
     }
 
     if (lastHasMalformedConstraints) {
@@ -170,13 +457,24 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
     // does not converge. We avoid marking a sketch as fully constrained when no convergence is
     // achieved.
     if (err == 0) {
-        FullyConstrained.setValue(lastDoF == 0);
+        FullyConstrained.setValue(lastDoF == 0 && !lastSolvedAroundConflict);
         if (updateGeoAfterSolving) {
             // set the newly solved geometry
             std::vector<Part::Geometry*> geomlist = solvedSketch.extractGeometry();
             Part::PropertyGeometryList tmp;
             tmp.setValues(std::move(geomlist));
             Geometry.moveValues(std::move(tmp));
+
+            // FreeCAD-CH (ops#656): a solve that takes an arc's sweep through 0 (an Angle on the
+            // arc is solved modulo 2 pi: 270 -> 72 degrees can land on -288) leaves a Midpoint's
+            // point on the far side once the arc is written counterclockwise. Solve once more
+            // from the written geometry, where the Midpoint's unknowns start at the arc's middle
+            // (what the next recompute would do).
+            static thread_local bool solvingAgain = false;
+            if (!solvingAgain && midpointsOffTheirArcs(*this)) {
+                Base::StateLocker again(solvingAgain, true);
+                return solve(true);
+            }
         }
     }
 
@@ -775,10 +1073,28 @@ int SketchObject::setVisibility(int ConstrId, bool isVisible)
 
 int SketchObject::setUpSketch()
 {
+    // FreeCAD-CH (ops#640): the full diagnosis (constraint numbers may have changed since the
+    // last solve left some out); the next solve leaves a conflict out again
+    solvedSketch.setSkippedConstraints({});
     lastDoF = solvedSketch.setUpSketch(
         getCompleteGeometry(), Constraints.getValues(), getExternalGeometryCount());
 
+    // the last solve's names stay while its solve around stands: a conflict the diagnosis does not
+    // see at the drawn parameters (solveAroundConflict, pass 2) is named only by that solve, and
+    // the GUI sets up again right after adding a constraint (the marks went blank)
+    const std::vector<int> namedBySolve = lastSolvedAroundConflict ? lastConflicting
+                                                                   : std::vector<int>();
     retrieveSolverDiagnostics();
+    if (!namedBySolve.empty()) {
+        std::set<int> named(lastConflicting.begin(), lastConflicting.end());
+        for (int tag : namedBySolve) {
+            if (tag >= 1 && tag <= Constraints.getSize()) {
+                named.insert(tag);
+            }
+        }
+        lastConflicting.assign(named.begin(), named.end());
+        lastHasConflict = !lastConflicting.empty();
+    }
 
     if (lastHasRedundancies || lastDoF < 0 || lastHasConflict || lastHasMalformedConstraints
         || lastHasPartialRedundancies)
@@ -1342,7 +1658,9 @@ int SketchObject::delConstraintOnPoint(int geoId, PointPos posId, bool onlyCoinc
                     || transferToReplacement(constr->Second, constr->SecondPos)
                 );
             }
-            case Sketcher::PointOnObject: {
+            case Sketcher::PointOnObject:
+            case Sketcher::Pierce:      // FreeCAD-CH (Onshape's Pierce): as Point on object
+            case Sketcher::Midpoint: {  // FreeCAD-CH (ops#656): as Point on object
                 return transferToReplacement(constr->First, constr->FirstPos);
             }
             case Sketcher::Tangent:
@@ -1738,6 +2056,52 @@ std::optional<size_t> findPieceContainingPoint(
     return std::nullopt;
 }
 
+// FreeCAD-CH (ops#656): the pieces of a line or of a conic share their carrier (the infinite line, the
+// full circle or ellipse): Trim and Split tie them (collinear, or the same centre and radii), and the
+// solver measures curve-level constraints (point on object, distances, tangency) on the carrier. A
+// constraint on such a curve can go to any piece and keeps measuring the same thing.
+static bool piecesShareCarrier(const Part::Geometry* geo)
+{
+    // Only the curves whose pieces are tied: parabolas and hyperbolas aren't (yet).
+    return geo->is<Part::GeomLineSegment>() || geo->isDerivedFrom<Part::GeomCircle>()
+        || geo->isDerivedFrom<Part::GeomArcOfCircle>() || geo->isDerivedFrom<Part::GeomEllipse>()
+        || geo->isDerivedFrom<Part::GeomArcOfEllipse>();
+}
+
+// FreeCAD-CH (ops#656): the piece that holds `point`'s projection onto the old curve, or else the piece
+// with an end nearest to that projection (the point lies on the part a Trim removed).
+static size_t nearestPiece(
+    const SketchObject* obj,
+    const Part::Geometry* geo,
+    const Base::Vector3d& point,
+    const std::vector<int>& newIds,
+    const std::vector<const Part::Geometry*>& newGeos
+)
+{
+    if (auto idx = findPieceContainingPoint(obj, geo, point, newIds, newGeos)) {
+        return idx.value();
+    }
+    auto* geoAsCurve = static_cast<const Part::GeomCurve*>(geo);
+    double param {};
+    geoAsCurve->closestParameter(point, param);
+    const Base::Vector3d onCurve = geoAsCurve->pointAtParameter(param);
+    size_t best = 0;
+    double bestDistance = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < newGeos.size(); ++i) {
+        auto* piece = static_cast<const Part::GeomCurve*>(newGeos[i]);
+        for (const auto& end :
+             {piece->pointAtParameter(piece->getFirstParameter()),
+              piece->pointAtParameter(piece->getLastParameter())}) {
+            const double d = (end - onCurve).Length();
+            if (d < bestDistance) {
+                bestDistance = d;
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
 bool SketchObject::deriveConstraintsForPieces(
     const int oldId,
     const std::vector<int>& newIds,
@@ -1834,6 +2198,16 @@ bool SketchObject::deriveConstraintsForPieces(
                     return true;
                 }
             }
+            // FreeCAD-CH (ops#656): a tangency that touches none of the pieces (the touching point was
+            // on the removed part, or the intersection of tangent curves isn't found numerically)
+            // still holds on the carrier the pieces share: keep it on the first piece, don't drop it.
+            if (piecesShareCarrier(geo) && con->FirstPos == PointPos::none
+                && con->SecondPos == PointPos::none) {
+                Constraint* trans = con->copy();
+                trans->substituteIndex(oldId, newIds.front());
+                newConstraints.push_back(trans);
+                return true;
+            }
         } break;
         case Angle: {
             const auto [thirdGeo, thirdPos] = con->getElement(2);
@@ -1896,15 +2270,35 @@ bool SketchObject::deriveConstraintsForPieces(
         case DistanceY:
         case Coincident:
         case PointOnObject: {
-            if (con->FirstPos == PointPos::none && con->SecondPos == PointPos::none
-                && newIds.size() > 1) {
-                Constraint* dist = con->copy();
-                dist->First = newIds.front();
-                dist->FirstPos = PointPos::start;
-                dist->Second = newIds.back();
-                dist->SecondPos = PointPos::end;
-                newConstraints.push_back(dist);
-                return true;
+            if (con->FirstPos == PointPos::none && con->SecondPos == PointPos::none) {
+                if (con->Second != GeoEnum::GeoUndef) {
+                    // FreeCAD-CH (ops#656, report 27): a dimension between two whole curves (a
+                    // concentric offset, a circle-to-line distance) stays one between whole curves,
+                    // on one piece: the pieces share the carrier the solver measures on. It used to
+                    // become "first piece's start to last piece's end", a different dimension.
+                    if (!piecesShareCarrier(geo)) {
+                        return false;
+                    }
+                    Constraint* trans = con->copy();
+                    trans->substituteIndex(oldId, newIds.front());
+                    newConstraints.push_back(trans);
+                    return true;
+                }
+                if (newIds.size() > 1) {
+                    // A curve's own length. For a line, the length between the outer ends of its
+                    // pieces is still the old line's length. An arc's length has no equivalent on its
+                    // pieces: drop it, visibly, rather than turn it into a chord.
+                    if (!geo->is<Part::GeomLineSegment>()) {
+                        return false;
+                    }
+                    Constraint* dist = con->copy();
+                    dist->First = newIds.front();
+                    dist->FirstPos = PointPos::start;
+                    dist->Second = newIds.back();
+                    dist->SecondPos = PointPos::end;
+                    newConstraints.push_back(dist);
+                    return true;
+                }
             }
 
             if (conId == GeoEnum::GeoUndef || newGeosLikelyNotCreated) {
@@ -1913,6 +2307,18 @@ bool SketchObject::deriveConstraintsForPieces(
             }
 
             Base::Vector3d conPoint(getPoint(conId, conPos));
+            if (piecesShareCarrier(geo)) {
+                // FreeCAD-CH (ops#656): a point on (or a distance to) a line or conic holds on the
+                // carrier: keep it on the piece nearest the point, even when the point lies on the
+                // part a Trim removed, instead of letting the point come loose.
+                Constraint* trans = con->copy();
+                trans->First = conId;
+                trans->FirstPos = conPos;
+                trans->Second = newIds[nearestPiece(this, geo, conPoint, newIds, newGeos)];
+                trans->SecondPos = PointPos::none;
+                newConstraints.push_back(trans);
+                return true;
+            }
             double conParam;
             auto* geoAsCurve = static_cast<const Part::GeomCurve*>(geo);
             geoAsCurve->closestParameter(conPoint, conParam);
@@ -1951,7 +2357,29 @@ bool SketchObject::deriveConstraintsForPieces(
                 Constraint* trans = con->copy();
                 trans->substituteIndex(oldId, newIds.front());
                 newConstraints.push_back(trans);
-                break;
+                return true;  // FreeCAD-CH (ops#656): carried, not released
+            }
+        } break;
+        case Block: {
+            // FreeCAD-CH (ops#656): a Blocked curve's pieces stay Blocked (they used to come loose).
+            // Each piece needs its own Block: the ties between the pieces don't fix them.
+            for (auto& newId : newIds) {
+                Constraint* trans = con->copy();
+                trans->substituteIndex(oldId, newId);
+                newConstraints.push_back(trans);
+            }
+            return true;
+        }
+        case Symmetric: {
+            // FreeCAD-CH (ops#656): two points symmetric about a line that is cut stay symmetric
+            // about its carrier (the pieces of a line are collinear).
+            const auto [thirdGeo, thirdPos] = con->getElement(2);
+            if (thirdGeo == oldId && thirdPos == PointPos::none && geo->is<Part::GeomLineSegment>()
+                && con->getElement(0).GeoId != oldId && con->getElement(1).GeoId != oldId) {
+                Constraint* trans = con->copy();
+                trans->substituteIndex(oldId, newIds.front());
+                newConstraints.push_back(trans);
+                return true;
             }
         } break;
         default:
@@ -2432,6 +2860,8 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
             break;
         case Tangent:
         case Group:
+        case Midpoint:
+        case Pierce:
             requireSecond = true;
             break;
         case Symmetric:

@@ -26,13 +26,20 @@
 #include <memory>
 #include <sstream>
 
+#include <cmath>
+#include <initializer_list>
 #include <QAction>
 #include <QAbstractButton>
+#include <QCheckBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QPointer>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QVBoxLayout>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
 
 
 #include <App/Datums.h>
@@ -45,9 +52,15 @@
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/Inventor/Draggers/SoLinearDragger.h>
 #include <Gui/Inventor/Draggers/SoRotationDragger.h>
+#include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
+#include <Mod/PartDesign/App/FeaturePocket.h>
+#include <Mod/PartDesign/App/StudioList.h>
+#include <App/Part.h>
 #include <Mod/Part/App/GizmoHelper.h>
 #include <Mod/Sketcher/Gui/ViewProviderSketch.h>
 
@@ -63,6 +76,28 @@ using namespace Gui;
 
 namespace
 {
+// A face of a solid that isn't planar (FreeCAD-CH ops#640, rank 5): the profile's gate refuses it
+// at pick time, as Onshape's Extrude field does (B3-4: no highlight, nothing selected)
+bool isCurvedFace(App::DocumentObject* obj, const std::string& sub)
+{
+    auto feature = freecad_cast<Part::Feature*>(obj);
+    if (!feature || sub.rfind("Face", 0) != 0) {
+        return false;
+    }
+    try {
+        const Part::TopoShape face(
+            feature->Shape.getShape().getSubShape(sub.c_str(), /*silent=*/true)
+        );
+        return !face.isNull() && !face.isPlanar(Attacher::AttachEnginePlane::planarPrecision());
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
 // What the profile takes (ops#125): a sketch or other 2D object of the body, whole or by its
 // edges and regions, or faces and edges of the solid before the feature. \a why: the refusal.
 bool acceptProfile(const App::DocumentObject* feature,
@@ -83,6 +118,10 @@ bool acceptProfile(const App::DocumentObject* feature,
         return element.rfind(prefix, 0) == 0;
     };
     if (obj == base) {
+        if (startsWith("Face") && isCurvedFace(obj, element)) {
+            why = QT_TR_NOOP("Pick a planar face.");
+            return false;
+        }
         if (startsWith("Face") || startsWith("Edge")) {
             return true;
         }
@@ -90,12 +129,31 @@ bool acceptProfile(const App::DocumentObject* feature,
         return false;
     }
     auto body = PartDesign::Body::findBodyOf(feature);
+    // FreeCAD-CH (ops#654 S4): a studio feature is in no Body: every part of its studio is
+    // another part, and a sketch outside every Body of the studio is its own
+    const bool owner = !body && PartDesign::isStudioOwner(feature);
+    auto inOwnersStudio = [feature, obj]() {
+        const PartDesign::StudioList* list = PartDesign::StudioList::holding(feature);
+        if (!list || obj->getDocument() != feature->getDocument()) {
+            return false;
+        }
+        App::Part* studio = nullptr;
+        if (auto objBody = PartDesign::Body::findBodyOf(obj)) {
+            return Part::BodyBase::studioOf(objBody, studio) && studio == list->studio();
+        }
+        return App::Part::getPartOfObject(obj, /*recursive=*/true) == list->studio();
+    };
     // FreeCAD-CH (ops#325): another Body of the same studio, linked directly
-    const bool otherBody = body && !body->hasObject(obj);
-    const bool inStudio = otherBody && Part::BodyBase::isInOneStudio(feature, obj);
+    const bool otherBody = owner || (body && !body->hasObject(obj));
+    const bool inStudio = otherBody
+        && (owner ? inOwnersStudio() : Part::BodyBase::isInOneStudio(feature, obj));
     if (inStudio && !obj->isDerivedFrom<Part::Part2DObject>()
         && obj->isDerivedFrom<Part::Feature>() && (startsWith("Face") || startsWith("Edge"))) {
-        if (PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
+        if (startsWith("Face") && isCurvedFace(obj, element)) {
+            why = QT_TR_NOOP("Pick a planar face.");
+            return false;
+        }
+        if (owner || PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
             return true;
         }
         why = QT_TR_NOOP("Pick a face of another part directly, not through a link.");
@@ -195,6 +253,7 @@ void TaskExtrudeParameters::setupDialog()
     translateSidesList(extrude->SideType.getValue());
 
     connectSlots();
+    createOnshapeFields();  // FreeCAD-CH (ops#640, rank 22)
 
     this->propReferenceAxis = &(extrude->ReferenceAxis);
     updateStartUI();
@@ -247,10 +306,50 @@ void TaskExtrudeParameters::createSideFields(SideController& side, Side which)
     QWidget* facesPlaceholder =
         first ? ui->shapeFacesFieldPlaceholder : ui->shapeFacesFieldPlaceholder2;
 
-    side.faceField = createFaceField(facePlaceholder,
-                                     first ? "UpToFace" : "UpToFace2",
-                                     tr("Face"),
-                                     /*refuseWholeSketch=*/true);
+    // The face's and the vertex's fields share the face's row (ops#640 rank 22): a holder in
+    // the placeholder's place, the fields one under the other
+    auto holder = new QWidget(proxy);
+    holder->setObjectName(first ? QStringLiteral("upToFaceOrVertex")
+                                : QStringLiteral("upToFaceOrVertex2"));
+    auto holderLayout = new QVBoxLayout(holder);
+    holderLayout->setContentsMargins(0, 0, 0, 0);
+    auto faceSlot = new QWidget(holder);
+    auto vertexSlot = new QWidget(holder);
+    holderLayout->addWidget(faceSlot);
+    holderLayout->addWidget(vertexSlot);
+    if (QWidget* parent = facePlaceholder->parentWidget(); parent && parent->layout()) {
+        delete parent->layout()->replaceWidget(facePlaceholder, holder, Qt::FindChildrenRecursively);
+    }
+    facePlaceholder->hide();
+    facePlaceholder->deleteLater();
+
+    const char* faceProperty = first ? "UpToFace" : "UpToFace2";
+    side.faceField = createFaceField(faceSlot, faceProperty, tr("Face"), /*refuseWholeSketch=*/true);
+
+    // Up to vertex: a vertex of a part or a sketch, or a datum point, in the same UpToFace
+    {
+        ReferenceField::Options vertex = faceFieldOptions(
+            tr("Vertex"),
+            [this]() -> App::DocumentObject* { return baseSolid(); },
+            /*refuseWholeSketch=*/false
+        );
+        vertex.flags = AllowSelection::POINT;
+        vertex.kinds = tr("A vertex or a point");
+        auto vertexSelf = std::make_shared<QPointer<ReferenceField>>();
+        auto writeVertex = [this, vertexSelf](App::DocumentObject* obj,
+                                              const std::vector<std::string>& subs) {
+            if (*vertexSelf) {
+                (*vertexSelf)->assign(obj, subs);
+            }
+            tryRecomputeFeature();
+            setGizmoPositions();
+        };
+        side.vertexField = new ReferenceField(getObject(), faceProperty, vertex, writeVertex, proxy);
+        *vertexSelf = side.vertexField;
+        side.vertexField->setObjectName(first ? QStringLiteral("fieldUpToVertex")
+                                              : QStringLiteral("fieldUpToVertex2"));
+        side.vertexField->takePlaceOf(vertexSlot);
+    }
 
     // The up-to-shape: a whole shape; a pick of another one takes all its faces
     QCheckBox* allFaces = side.checkBoxAllFaces;
@@ -340,6 +439,8 @@ void TaskExtrudeParameters::createProfileField()
         if (axesInList.empty()) {
             fillDirectionCombo();
         }
+        // A new Extrude's first profile decides where it opens, Add or New (hands-on check A-1)
+        TaskResultParameters::profileTaken(getObject());
     };
     profileField = new ReferenceField(getObject(), "Profile", profile, write, proxy);
     *self = profileField;
@@ -486,9 +587,11 @@ std::vector<ReferenceField*> TaskExtrudeParameters::referenceFields() const
                                   m_side1.faceField,
                                   m_side1.shapeField,
                                   m_side1.shapeFacesField,
+                                  m_side1.vertexField,
                                   m_side2.faceField,
                                   m_side2.shapeField,
                                   m_side2.shapeFacesField,
+                                  m_side2.vertexField,
                                   axisField}) {
         if (field) {
             fields.push_back(field);
@@ -559,6 +662,199 @@ void TaskExtrudeParameters::updateStartUI()
     if (!hasReference) {
         startField->setArmed(false);
     }
+    updateOnshapeUI();
+}
+
+void TaskExtrudeParameters::createOnshapeFields()
+{
+    QGridLayout* grid = ui->gridLayout;
+    auto extrude = getObject<PartDesign::FeatureExtrude>();
+    if (!grid || !extrude) {
+        return;
+    }
+    // The Sides box goes (its index is still what is written); Symmetric, Draft and Second end
+    // position come between the first end and the second, as in Onshape's dialog
+    grid->removeWidget(ui->sidesLabel);
+    grid->removeWidget(ui->sidesMode);
+    ui->sidesLabel->hide();
+    ui->sidesMode->hide();
+    constexpr int firstSide2Row = 12;
+    constexpr int shift = 4;
+    struct Moved
+    {
+        QLayoutItem* item;
+        int row;
+        int column;
+        int rowSpan;
+        int columnSpan;
+    };
+    std::vector<Moved> moved;
+    int row = 0;
+    int column = 0;
+    int rowSpan = 0;
+    int columnSpan = 0;
+    for (int index = grid->count() - 1; index >= 0; --index) {
+        grid->getItemPosition(index, &row, &column, &rowSpan, &columnSpan);
+        if (row < firstSide2Row) {
+            continue;
+        }
+        if (QLayoutItem* item = grid->takeAt(index)) {
+            moved.push_back({item, row, column, rowSpan, columnSpan});
+        }
+    }
+    for (const Moved& entry : moved) {
+        if (QLayout* layout = entry.item->layout()) {
+            if (layout->parent()) {
+                layout->setParent(nullptr);
+            }
+            grid->addLayout(layout, entry.row + shift, entry.column, entry.rowSpan, entry.columnSpan);
+        }
+        else {
+            grid->addItem(entry.item, entry.row + shift, entry.column, entry.rowSpan, entry.columnSpan);
+        }
+    }
+    // The draft angle under its checkbox
+    grid->removeWidget(ui->labelTaperAngle);
+    grid->removeWidget(ui->taperEdit);
+    symmetric = new QCheckBox(tr("Symmetric"), proxy);
+    symmetric->setObjectName(QStringLiteral("checkBoxSymmetric"));
+    grid->addWidget(symmetric, firstSide2Row, 0, 1, 2);
+    draft = new QCheckBox(tr("Draft"), proxy);
+    draft->setObjectName(QStringLiteral("checkBoxDraft"));
+    grid->addWidget(draft, firstSide2Row + 1, 0, 1, 2);
+    grid->addWidget(ui->labelTaperAngle, firstSide2Row + 2, 0);
+    grid->addWidget(ui->taperEdit, firstSide2Row + 2, 1);
+    secondEnd = new QCheckBox(tr("Second end position"), proxy);
+    secondEnd->setObjectName(QStringLiteral("checkBoxSecondEnd"));
+    grid->addWidget(secondEnd, firstSide2Row + 3, 0, 1, 2);
+    // Starting offset in the Start box's empty row, above its depth
+    startingOffset = new QCheckBox(tr("Starting offset"), proxy);
+    startingOffset->setObjectName(QStringLiteral("checkBoxStartingOffset"));
+    grid->addWidget(startingOffset, 2, 0, 1, 2);
+    // Recompute on change: always (Onshape has no such box)
+    ui->checkBoxUpdateView->hide();
+
+    draft->setChecked(
+        std::abs(extrude->TaperAngle.getValue()) > Precision::Angular()
+        || std::abs(extrude->TaperAngle2.getValue()) > Precision::Angular()
+    );
+    setOnshapeWords();
+
+    connect(symmetric, &QCheckBox::toggled, this, [this](bool on) {
+        setSides(on ? SidesMode::Symmetric : SidesMode::OneSide);
+    });
+    connect(secondEnd, &QCheckBox::toggled, this, [this](bool on) {
+        setSides(on ? SidesMode::TwoSides : SidesMode::OneSide);
+    });
+    connect(startingOffset, &QCheckBox::toggled, this, [this](bool on) {
+        // The Start box's own signal writes StartType and updates the fields
+        ui->startMode->setCurrentIndex(
+            static_cast<int>(on ? StartMode::Offset : StartMode::ProfilePlane)
+        );
+    });
+    connect(draft, &QCheckBox::toggled, this, [this](bool on) {
+        if (!on) {
+            // No draft: no taper on either end
+            {
+                QSignalBlocker block(ui->taperEdit);
+                QSignalBlocker block2(ui->taperEdit2);
+                ui->taperEdit->setValue(0.0);
+                ui->taperEdit2->setValue(0.0);
+            }
+            if (auto extrude = getObject<PartDesign::FeatureExtrude>()) {
+                // an expression on either angle would put it back at the next recompute
+                extrude->clearExpression(App::ObjectIdentifier(extrude->TaperAngle));
+                extrude->clearExpression(App::ObjectIdentifier(extrude->TaperAngle2));
+                extrude->TaperAngle.setValue(0.0);
+                extrude->TaperAngle2.setValue(0.0);
+            }
+            tryRecomputeFeature();
+        }
+        updateUI(Side::First);
+        setGizmoPositions();
+    });
+}
+
+void TaskExtrudeParameters::setSides(SidesMode mode)
+{
+    // The Sides box's own signal writes SideType, updates the fields and recomputes
+    ui->sidesMode->setCurrentIndex(static_cast<int>(mode));
+}
+
+void TaskExtrudeParameters::setOnshapeWords()
+{
+    if (!draft) {
+        return;
+    }
+    ui->textLabel1->setText(tr("End type"));
+    ui->typeLabel2->setText(tr("End type"));
+    ui->labelLength->setText(tr("Depth"));
+    ui->labelLength2->setText(tr("Depth"));
+    ui->labelTaperAngle->setText(tr("Draft angle"));
+    ui->labelTaperAngle2->setText(tr("Draft angle"));
+    ui->labelStartOffset->setText(tr("Starting offset depth"));
+    symmetric->setText(tr("Symmetric"));
+    draft->setText(tr("Draft"));
+    secondEnd->setText(tr("Second end position"));
+    startingOffset->setText(tr("Starting offset"));
+}
+
+void TaskExtrudeParameters::updateOnshapeUI()
+{
+    if (!draft) {
+        return;
+    }
+    const auto sidesMode = static_cast<SidesMode>(ui->sidesMode->currentIndex());
+    {
+        QSignalBlocker block(symmetric);
+        symmetric->setChecked(sidesMode == SidesMode::Symmetric);
+    }
+    {
+        QSignalBlocker block(secondEnd);
+        secondEnd->setChecked(sidesMode == SidesMode::TwoSides);
+    }
+    ui->sidesLabel->hide();
+    ui->sidesMode->hide();
+    // Symmetric and Second end position exclude each other, as in Onshape's dialog; the first
+    // side's header shows only with a second end
+    symmetric->setVisible(sidesMode != SidesMode::TwoSides);
+    secondEnd->setVisible(sidesMode != SidesMode::Symmetric);
+    ui->side1Label->hide();
+    ui->line1->hide();
+    ui->side2Label->hide();
+    ui->line2->hide();
+
+    // Draft: where an end takes a taper (Blind, Through all), the angle only when ticked
+    const bool pocket = getObject() && getObject()->isDerivedFrom<PartDesign::Pocket>();
+    const auto taperOffered = [pocket](int index) {
+        const auto mode = static_cast<Mode>(index);
+        return mode == Mode::Dimension || (pocket ? mode == Mode::ThroughAll : mode == Mode::Appended);
+    };
+    const bool twoSides = sidesMode == SidesMode::TwoSides;
+    const bool offered = taperOffered(getMode()) || (twoSides && taperOffered(getMode2()));
+    draft->setVisible(offered);
+    if (!draft->isChecked()) {
+        for (QWidget* widget : std::initializer_list<QWidget*> {
+                 ui->labelTaperAngle,
+                 ui->taperEdit,
+                 ui->labelTaperAngle2,
+                 ui->taperEdit2,
+             }) {
+            widget->hide();
+            widget->setEnabled(false);
+        }
+    }
+
+    // Start: Starting offset stands for the Offset start; the box shows only for a reference
+    const auto start = static_cast<StartMode>(ui->startMode->currentIndex());
+    {
+        QSignalBlocker block(startingOffset);
+        startingOffset->setChecked(start == StartMode::Offset);
+    }
+    const bool reference = start == StartMode::Reference;
+    startingOffset->setVisible(!reference);
+    ui->labelStart->setVisible(reference);
+    ui->startMode->setVisible(reference);
 }
 
 void TaskExtrudeParameters::createSideControllers()
@@ -683,16 +979,42 @@ void TaskExtrudeParameters::connectSlots()
     // clang-format on
 }
 
-void TaskExtrudeParameters::onModeChanged_Side1(int index)
+void TaskExtrudeParameters::onModeChanged_Side1(int)
 {
-    onModeChanged(index, Side::First);
+    // the row's mode, not the row (ops#640 rank 22)
+    dropUpToFaceOfOtherKind(Side::First, static_cast<Mode>(getMode()));
+    onModeChanged(getMode(), Side::First);
     setGizmoPositions();
 }
 
-void TaskExtrudeParameters::onModeChanged_Side2(int index)
+void TaskExtrudeParameters::onModeChanged_Side2(int)
 {
-    onModeChanged(index, Side::Second);
+    dropUpToFaceOfOtherKind(Side::Second, static_cast<Mode>(getMode2()));
+    onModeChanged(getMode2(), Side::Second);
     setGizmoPositions();
+}
+
+void TaskExtrudeParameters::dropUpToFaceOfOtherKind(Side side, Mode mode)
+{
+    if (mode != Mode::ToFace && mode != Mode::ToVertex) {
+        return;  // the link stays until OK (applyParameters() drops it), as before
+    }
+    App::PropertyLinkSub* link = getSideController(side).UpToFace;
+    App::DocumentObject* obj = link ? link->getValue() : nullptr;
+    if (!obj) {
+        return;
+    }
+    const std::vector<std::string> subs = link->getSubValues();
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    App::DocumentObject* named = sub.empty() || !obj->getDocument()
+        ? nullptr
+        : obj->getDocument()->getObject(sub.c_str());
+    // an origin point is linked whole (no LCS sub): a vertex too
+    const bool isVertex = sub.starts_with("Vertex") || obj->isDerivedFrom<PartDesign::Point>()
+        || obj->isDerivedFrom<App::Point>() || (named && named->isDerivedFrom<App::Point>());
+    if (isVertex != (mode == Mode::ToVertex)) {
+        link->setValue(nullptr);
+    }
 }
 
 void TaskExtrudeParameters::tryRecomputeFeature()
@@ -911,8 +1233,8 @@ void TaskExtrudeParameters::addAxisToCombo(
 void TaskExtrudeParameters::updateWholeUI(Type type, Side side)
 {
     SidesMode sidesMode = static_cast<SidesMode>(ui->sidesMode->currentIndex());
-    Mode mode1 = static_cast<Mode>(ui->changeMode->currentIndex());
-    Mode mode2 = static_cast<Mode>(ui->changeMode2->currentIndex());
+    Mode mode1 = static_cast<Mode>(getMode());
+    Mode mode2 = static_cast<Mode>(getMode2());
 
     // --- Global UI visibility based on SidesMode ---
     const bool isSide2GroupVisible = (sidesMode == SidesMode::TwoSides);
@@ -930,6 +1252,7 @@ void TaskExtrudeParameters::updateWholeUI(Type type, Side side)
     updateSideUI(m_side2, type, mode2, isSide2GroupVisible, (side == Side::Second));
 
     ui->checkBoxReversed->setEnabled(sidesMode != SidesMode::Symmetric || mode1 != Mode::Dimension);
+    updateOnshapeUI();
 }
 
 void TaskExtrudeParameters::updateSideUI(
@@ -946,6 +1269,7 @@ void TaskExtrudeParameters::updateSideUI(
     bool isTaperVisible = false;
     bool isFaceVisible = false;
     bool isShapeVisible = false;
+    bool isVertexVisible = false;
 
     // This logic block is a direct translation of the original 'if/else if' chain
     if (sideMode == Mode::Dimension) {
@@ -956,10 +1280,14 @@ void TaskExtrudeParameters::updateSideUI(
             QMetaObject::invokeMethod(s.lengthEdit, "setFocus", Qt::QueuedConnection);
         }
     }
-    else if (sideMode == Mode::ThroughAll && featureType == Type::Pocket) {
+    else if ((sideMode == Mode::ThroughAll && featureType == Type::Pocket)
+             || (sideMode == Mode::Appended && featureType == Type::Pad)) {
+        // Through all
         isTaperVisible = true;
     }
-    else if (sideMode == Mode::ToLast && featureType == Type::Pad) {
+    else if ((sideMode == Mode::ToLast && featureType == Type::Pad)
+             || (sideMode == Mode::Appended && featureType == Type::Pocket)) {
+        // To last
         isOffsetVisible = true;
     }
     else if (sideMode == Mode::ToFirst) {
@@ -977,6 +1305,14 @@ void TaskExtrudeParameters::updateSideUI(
         isShapeVisible = true;
         if (setFocus && !s.checkBoxAllFaces->isChecked()) {
             armField(s.shapeFacesField);
+        }
+    }
+    else if (sideMode == Mode::ToVertex) {
+        // Up to vertex (ops#640 rank 22): its field arms while it is empty, as the face's
+        isOffsetVisible = true;
+        isVertexVisible = true;
+        if (setFocus && s.vertexField->entries().empty()) {
+            armField(s.vertexField);
         }
     }
 
@@ -1003,6 +1339,15 @@ void TaskExtrudeParameters::updateSideUI(
     s.faceField->setRequired(faceShown);
     if (!faceShown) {
         s.faceField->setArmed(false);
+    }
+    const bool vertexShown = isParentVisible && isVertexVisible;
+    s.vertexField->setVisible(vertexShown);
+    s.vertexField->setRequired(vertexShown);
+    if (!vertexShown) {
+        s.vertexField->setArmed(false);
+    }
+    if (QWidget* holder = s.faceField->parentWidget()) {
+        holder->setVisible(faceShown || vertexShown);
     }
 
     const bool shapeShown = isParentVisible && isShapeVisible;
@@ -1188,6 +1533,8 @@ void TaskExtrudeParameters::setDirectionMode(int index)
 void TaskExtrudeParameters::onReversedChanged(bool on)
 {
     if (auto extrude = getObject<PartDesign::FeatureExtrude>()) {
+        // the user's direction: an operation switch keeps it now (FreeCAD-CH ops#640 H4)
+        TaskResultParameters::noteReversedTouched(extrude);
         extrude->Reversed.setValue(on);
         // update the direction
         tryRecomputeFeature();
@@ -1270,14 +1617,29 @@ bool TaskExtrudeParameters::getReversed() const
     return ui->checkBoxReversed->isChecked();
 }
 
+namespace
+{
+// The end type box's rows carry their Mode (ops#640 rank 22: Onshape's order, not the Modes')
+int modeOfRow(const QComboBox* box)
+{
+    const QVariant data = box->currentData();
+    return data.isValid() ? data.toInt() : box->currentIndex();
+}
+}  // namespace
+
 int TaskExtrudeParameters::getMode() const
 {
-    return ui->changeMode->currentIndex();
+    return modeOfRow(ui->changeMode);
 }
 
 int TaskExtrudeParameters::getMode2() const
 {
-    return ui->changeMode2->currentIndex();
+    return modeOfRow(ui->changeMode2);
+}
+
+int TaskExtrudeParameters::rowOfMode(const QComboBox* box, Mode mode)
+{
+    return box->findData(static_cast<int>(mode));
 }
 
 int TaskExtrudeParameters::getSidesMode() const
@@ -1321,9 +1683,11 @@ void TaskExtrudeParameters::changeEvent(QEvent* e)
         ui->directionCB->setCurrentIndex(index);
 
         // Translate mode items
-        translateModeList(ui->changeMode, ui->changeMode->currentIndex());
-        translateModeList(ui->changeMode2, ui->changeMode2->currentIndex());
+        translateModeList(ui->changeMode, getMode());
+        translateModeList(ui->changeMode2, getMode2());
         translateSidesList(ui->sidesMode->currentIndex());
+        setOnshapeWords();
+        updateOnshapeUI();
     }
 }
 
@@ -1353,13 +1717,14 @@ void TaskExtrudeParameters::applyParameters()
             && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
     };
 
-    // Handle deprecated 'TwoLength' mode.
+    // Handle deprecated 'TwoLength' mode: the UI skips it, so the modes from ToShape on are
+    // one index below their Type (Appended is Type index 6, ops#640; ToVertex 7, rank 22).
     int type1 = getMode();
-    if (static_cast<Mode>(type1) == Mode::ToShape) {
+    if (type1 >= static_cast<int>(Mode::ToShape)) {
         type1++;
     }
     int type2 = getMode2();
-    if (static_cast<Mode>(type2) == Mode::ToShape) {
+    if (type2 >= static_cast<int>(Mode::ToShape)) {
         type2++;
     }
 
@@ -1387,10 +1752,14 @@ void TaskExtrudeParameters::applyParameters()
     FCMD_OBJ_CMD(obj, "Type2 = " << type2);
     // The faces and the start reference are written by their fields as they are picked
     // (ops#150); a side that doesn't go up to a face drops its face
-    if (extrude && static_cast<Mode>(getMode()) != Mode::ToFace && extrude->UpToFace.getValue()) {
+    // (or a vertex: Up to vertex holds it in UpToFace, ops#640 rank 22)
+    auto upToFaceKept = [](int mode) {
+        return static_cast<Mode>(mode) == Mode::ToFace || static_cast<Mode>(mode) == Mode::ToVertex;
+    };
+    if (extrude && !upToFaceKept(getMode()) && extrude->UpToFace.getValue()) {
         FCMD_OBJ_CMD(obj, "UpToFace = None");
     }
-    if (extrude && static_cast<Mode>(getMode2()) != Mode::ToFace && extrude->UpToFace2.getValue()) {
+    if (extrude && !upToFaceKept(getMode2()) && extrude->UpToFace2.getValue()) {
         FCMD_OBJ_CMD(obj, "UpToFace2 = None");
     }
     FCMD_OBJ_CMD(obj, "Reversed = " << (getReversed() ? 1 : 0));
@@ -1518,11 +1887,13 @@ void TaskExtrudeParameters::setGizmoPositions()
     lengthGizmo1->Gizmo::setDraggerPlacement(center1, direction);
     lengthGizmo1->setVisibility(extrudeType == "Length");
     taperAngleGizmo1->placeOverLinearGizmo(lengthGizmo1);
-    taperAngleGizmo1->setVisibility(extrudeType == "Length");
+    // the draft angle's handle only with Draft ticked (FreeCAD-CH ops#640, rank 22)
+    const bool drafted = !draft || draft->isChecked();
+    taperAngleGizmo1->setVisibility(drafted && extrudeType == "Length");
     lengthGizmo2->Gizmo::setDraggerPlacement(center2, -direction);
     lengthGizmo2->setVisibility(sideType == "Two sides" && extrudeType2 == "Length");
     taperAngleGizmo2->placeOverLinearGizmo(lengthGizmo2);
-    taperAngleGizmo2->setVisibility(sideType == "Two sides" && extrudeType2 == "Length");
+    taperAngleGizmo2->setVisibility(drafted && sideType == "Two sides" && extrudeType2 == "Length");
 
     Base::Vector3d padDir = extrude->Direction.getValue().Normalized();
     Base::Vector3d sketchDir = extrude->getProfileNormal().Normalized();
