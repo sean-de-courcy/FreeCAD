@@ -3503,7 +3503,8 @@ struct NoOverhang
  * face's plane, cut off by the plane: the lip's underside grows over what the round removes.
  *
  * So the round is OCCT's own, built on a piece of the base: the base within a box around the
- * edges (their extent and four radii more), less what lies behind the plane of every such face.
+ * edges (their extent and four radii more), less what lies behind the plane of every such face;
+ * one piece for each connected group of edges (two grips' edges are two rounds).
  * What the round removes from the piece is the tool, and the result is the whole base less the
  * tool. The tool must stay a radius clear of the box's walls (OCCT's round on the piece is then
  * the base's round, which depends only on the faces near it), nothing of it may be left in the
@@ -3525,8 +3526,10 @@ TopoDS_Shape constructUnderOverhang(
     const double radius = request.size1;
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
     TopExp::MapShapesAndAncestors(baseShape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
     TopExp::MapShapesAndAncestors(baseShape, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+    TopExp::MapShapesAndAncestors(baseShape, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
     // The edges OCCT rounds: the selected ones, and what its contours add along tangent chains
     TopTools_IndexedMapOfShape chain;
     for (const auto& edge : edges) {
@@ -3540,68 +3543,130 @@ TopoDS_Shape constructUnderOverhang(
             chain.Add(edge);
         }
     }
-    TopTools_IndexedMapOfShape ownFaces;
-    std::vector<gp_Pnt> samples;
+    // The edges in connected groups (two grips' edges are two rounds, each on its own piece)
+    std::vector<int> root(chain.Extent() + 1);
     for (int i = 1; i <= chain.Extent(); ++i) {
-        for (const auto& face : edgeFaces.FindFromKey(chain(i))) {
-            ownFaces.Add(face);
+        root[i] = i;
+    }
+    auto find = [&](int i) {
+        while (root[i] != i) {
+            i = root[i] = root[root[i]];
         }
-        BRepAdaptor_Curve curve(TopoDS::Edge(chain(i)));
-        const int steps = 16;
-        for (int k = 0; k <= steps; ++k) {
-            samples.push_back(curve.Value(
-                curve.FirstParameter() + (curve.LastParameter() - curve.FirstParameter()) * k / steps
-            ));
+        return i;
+    };
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        for (TopExp_Explorer it(chain(i), TopAbs_VERTEX); it.More(); it.Next()) {
+            const auto* around = vertexEdges.Seek(it.Current());
+            if (!around) {
+                continue;
+            }
+            for (const auto& other : *around) {
+                int j = chain.FindIndex(other);
+                if (j > 0) {
+                    root[find(i)] = find(j);
+                }
+            }
         }
     }
-    // The planar faces at the edges' vertices, not next to the edges, that face them: every
-    // sample in front of the face, and the edges a radius or more out from it
     struct Overhang
     {
         gp_Pnt point;
         gp_Dir outward;
     };
-    std::vector<Overhang> overhangs;
-    for (int i = 1; i <= chain.Extent(); ++i) {
-        for (TopExp_Explorer it(chain(i), TopAbs_VERTEX); it.More(); it.Next()) {
-            const auto* faces = vertexFaces.Seek(it.Current());
-            if (!faces) {
+    struct Group
+    {
+        std::vector<TopoDS_Shape> selected;
+        std::vector<gp_Pnt> samples;
+        std::vector<Overhang> overhangs;
+        // What its round removes, and where the tool's faces come from
+        TopoDS_Shape tool;
+        TopTools_IndexedMapOfShape ofPiece;
+        std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> blends;  // (selected edge, tool face)
+    };
+    std::vector<Group> groups;
+    bool anyOverhang = false;
+    for (int r = 1; r <= chain.Extent(); ++r) {
+        if (find(r) != r) {
+            continue;
+        }
+        Group group;
+        TopTools_IndexedMapOfShape members;
+        TopTools_IndexedMapOfShape ownFaces;
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            if (find(i) != r) {
                 continue;
             }
-            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
-            for (const auto& shape : *faces) {
-                if (ownFaces.Contains(shape)) {
+            members.Add(chain(i));
+            for (const auto& face : edgeFaces.FindFromKey(chain(i))) {
+                ownFaces.Add(face);
+            }
+            BRepAdaptor_Curve curve(TopoDS::Edge(chain(i)));
+            const int steps = 16;
+            for (int k = 0; k <= steps; ++k) {
+                group.samples.push_back(curve.Value(
+                    curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * k / steps
+                ));
+            }
+        }
+        for (const auto& edge : edges) {
+            if (members.Contains(edge)) {
+                group.selected.push_back(edge);
+            }
+        }
+        if (group.selected.empty()) {
+            continue;
+        }
+        // The planar faces at the group's vertices, not next to its edges, that face them:
+        // every sample in front of the face, and the edges a radius or more out from it
+        for (int i = 1; i <= members.Extent(); ++i) {
+            for (TopExp_Explorer it(members(i), TopAbs_VERTEX); it.More(); it.Next()) {
+                const auto* faces = vertexFaces.Seek(it.Current());
+                if (!faces) {
                     continue;
                 }
-                const TopoDS_Face& face = TopoDS::Face(shape);
-                if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
-                    continue;
-                }
-                const gp_Dir outward = outwardNormal(face, point);
-                double most = 0.0;
-                bool behind = false;
-                for (const auto& sample : samples) {
-                    double distance = gp_Vec(point, sample).Dot(gp_Vec(outward));
-                    if (distance < -100 * linearTolerance) {
-                        behind = true;
-                        break;
+                const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+                for (const auto& shape : *faces) {
+                    if (ownFaces.Contains(shape)) {
+                        continue;
                     }
-                    most = std::max(most, distance);
-                }
-                if (behind || most < radius) {
-                    continue;
-                }
-                bool known = std::any_of(overhangs.begin(), overhangs.end(), [&](const Overhang& o) {
-                    return o.outward.Dot(outward) > 1 - angularTolerance
-                        && std::abs(gp_Vec(o.point, point).Dot(gp_Vec(outward))) < linearTolerance;
-                });
-                if (!known) {
-                    overhangs.push_back({point, outward});
+                    const TopoDS_Face& face = TopoDS::Face(shape);
+                    if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+                        continue;
+                    }
+                    const gp_Dir outward = outwardNormal(face, point);
+                    double most = 0.0;
+                    bool behind = false;
+                    for (const auto& sample : group.samples) {
+                        double distance = gp_Vec(point, sample).Dot(gp_Vec(outward));
+                        if (distance < -100 * linearTolerance) {
+                            behind = true;
+                            break;
+                        }
+                        most = std::max(most, distance);
+                    }
+                    if (behind || most < radius) {
+                        continue;
+                    }
+                    bool known = std::any_of(
+                        group.overhangs.begin(),
+                        group.overhangs.end(),
+                        [&](const Overhang& o) {
+                            return o.outward.Dot(outward) > 1 - angularTolerance
+                                && std::abs(gp_Vec(o.point, point).Dot(gp_Vec(outward)))
+                                    < linearTolerance;
+                        }
+                    );
+                    if (!known) {
+                        group.overhangs.push_back({point, outward});
+                    }
                 }
             }
         }
+        anyOverhang = anyOverhang || !group.overhangs.empty();
+        groups.push_back(std::move(group));
     }
-    if (overhangs.empty()) {
+    if (!anyOverhang) {
         throw NoOverhang {};
     }
     auto boolean = [](BRepAlgoAPI_BooleanOperation& operation,
@@ -3622,120 +3687,166 @@ TopoDS_Shape constructUnderOverhang(
         }
         return operation.Shape();
     };
-    // The piece: the base within the box, less what lies behind each overhang's plane
-    Bnd_Box bounds;
-    for (const auto& sample : samples) {
-        bounds.Add(sample);
-    }
-    bounds.Enlarge(4 * radius);
-    const gp_Pnt low = bounds.CornerMin();
-    const gp_Pnt high = bounds.CornerMax();
-    std::vector<Stage> toPiece;
-    BRepAlgoAPI_Common within;
-    TopoDS_Shape piece = boolean(
-        within,
-        baseShape,
-        BRepPrimAPI_MakeBox(low, high).Shape(),
-        "cutting the piece of the base around a round under an overhang failed"
-    );
-    toPiece.emplace_back(within.History(), piece);
-    const double reach = 2 * low.Distance(high) + 1;
-    for (const auto& overhang : overhangs) {
-        gp_Ax2 axes(overhang.point, overhang.outward.Reversed());
-        axes.SetLocation(overhang.point.Translated(
-            gp_Vec(axes.XDirection()) * -reach + gp_Vec(axes.YDirection()) * -reach
-        ));
-        BRepAlgoAPI_Cut behind;
-        piece = boolean(
-            behind,
-            piece,
-            BRepPrimAPI_MakeBox(axes, 2 * reach, 2 * reach, reach).Shape(),
+    double toolVolume = 0.0;
+    TopoDS_Compound allTools;
+    BRep_Builder builder;
+    builder.MakeCompound(allTools);
+    for (auto& group : groups) {
+        // The piece: the base within a box around the group, less what lies behind each
+        // overhang's plane
+        Bnd_Box bounds;
+        for (const auto& sample : group.samples) {
+            bounds.Add(sample);
+        }
+        bounds.Enlarge(4 * radius);
+        const gp_Pnt low = bounds.CornerMin();
+        const gp_Pnt high = bounds.CornerMax();
+        std::vector<Stage> toPiece;
+        BRepAlgoAPI_Common within;
+        TopoDS_Shape piece = boolean(
+            within,
+            baseShape,
+            BRepPrimAPI_MakeBox(low, high).Shape(),
             "cutting the piece of the base around a round under an overhang failed"
         );
-        toPiece.emplace_back(behind.History(), piece);
-    }
-    // The selected edges in the piece, whole, and the one solid of it that holds them
-    std::vector<std::pair<TopoDS_Shape, TopoDS_Edge>> inPiece;
-    for (const auto& edge : edges) {
-        auto images = imagesThrough(toPiece, 0, edge);
-        if (images.size() != 1 || images.front().ShapeType() != TopAbs_EDGE) {
-            refuse("a selected edge is not whole in front of the face it ends against");
+        toPiece.emplace_back(within.History(), piece);
+        const double reach = 2 * low.Distance(high) + 1;
+        for (const auto& overhang : group.overhangs) {
+            gp_Ax2 axes(overhang.point, overhang.outward.Reversed());
+            axes.SetLocation(overhang.point.Translated(
+                gp_Vec(axes.XDirection()) * -reach + gp_Vec(axes.YDirection()) * -reach
+            ));
+            BRepAlgoAPI_Cut behind;
+            piece = boolean(
+                behind,
+                piece,
+                BRepPrimAPI_MakeBox(axes, 2 * reach, 2 * reach, reach).Shape(),
+                "cutting the piece of the base around a round under an overhang failed"
+            );
+            toPiece.emplace_back(behind.History(), piece);
         }
-        inPiece.emplace_back(edge, TopoDS::Edge(images.front()));
-    }
-    TopoDS_Shape solid;
-    for (TopExp_Explorer it(piece, TopAbs_SOLID); it.More() && solid.IsNull(); it.Next()) {
-        TopTools_IndexedMapOfShape held;
-        TopExp::MapShapes(it.Current(), TopAbs_EDGE, held);
-        if (std::all_of(inPiece.begin(), inPiece.end(), [&](const auto& pair) {
-                return held.Contains(pair.second);
-            })) {
-            solid = it.Current();
+        // The selected edges in the piece, whole, and the one solid of it that holds them
+        std::vector<std::pair<TopoDS_Shape, TopoDS_Edge>> inPiece;
+        for (const auto& edge : group.selected) {
+            auto images = imagesThrough(toPiece, 0, edge);
+            if (images.size() != 1 || images.front().ShapeType() != TopAbs_EDGE) {
+                refuse("a selected edge is not whole in front of the face it ends against");
+            }
+            inPiece.emplace_back(edge, TopoDS::Edge(images.front()));
+        }
+        TopoDS_Shape solid;
+        for (TopExp_Explorer it(piece, TopAbs_SOLID); it.More() && solid.IsNull(); it.Next()) {
+            TopTools_IndexedMapOfShape held;
+            TopExp::MapShapes(it.Current(), TopAbs_EDGE, held);
+            if (std::all_of(inPiece.begin(), inPiece.end(), [&](const auto& pair) {
+                    return held.Contains(pair.second);
+                })) {
+                solid = it.Current();
+            }
+        }
+        if (solid.IsNull()) {
+            refuse("the selected edges are not on one solid in front of the face they end against");
+        }
+        BRepFilletAPI_MakeFillet maker(solid);
+        for (const auto& pair : inPiece) {
+            maker.Add(radius, pair.second);
+        }
+        try {
+            maker.Build();
+        }
+        catch (const Standard_Failure&) {
+            refuse("OCCT's round in front of the face its edge ends against failed");
+        }
+        if (!maker.IsDone()) {
+            refuse("OCCT's round in front of the face its edge ends against failed");
+        }
+        const TopoDS_Shape rounded = maker.Shape();
+        if (countSolids(rounded) != 1 || !BRepCheck_Analyzer(rounded).IsValid()) {
+            int pieceFaces = 0;
+            for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+                ++pieceFaces;
+            }
+            Bnd_Box pieceBox;
+            BRepBndLib::Add(solid, pieceBox);
+            refuse("OCCT's round in front of the face its edge ends against is not a valid solid (DIAG solids "
+                   + std::to_string(countSolids(rounded)) + ", valid "
+                   + std::to_string(BRepCheck_Analyzer(rounded).IsValid()) + ", overhangs "
+                   + std::to_string(group.overhangs.size()) + ", piece solids "
+                   + std::to_string(countSolids(piece)) + ", piece faces " + std::to_string(pieceFaces)
+                   + ", piece valid " + std::to_string(BRepCheck_Analyzer(solid).IsValid())
+                   + ", piece top z " + describe(pieceBox.CornerMax().Z()) + ", low z "
+                   + describe(pieceBox.CornerMin().Z()) + ", contour "
+                   + std::to_string(request.contour.size()) + ")");
+        }
+        // What the round removes from the piece: the tool
+        BRepAlgoAPI_Cut removal;
+        group.tool = boolean(
+            removal,
+            solid,
+            rounded,
+            "finding what a round under an overhang removes failed"
+        );
+        const Stage removed(removal.History(), group.tool);
+        if (countSolids(group.tool) < 1 || !BRepCheck_Analyzer(group.tool).IsValid()) {
+            refuse("a round under an overhang removes no valid solid (DIAG solids "
+                   + std::to_string(countSolids(group.tool)) + ", valid "
+                   + std::to_string(BRepCheck_Analyzer(group.tool).IsValid()) + ", overhangs "
+                   + std::to_string(group.overhangs.size()) + ", piece solids "
+                   + std::to_string(countSolids(piece)) + ", round faces "
+                   + std::to_string(group.selected.size()) + ")");
+        }
+        // Adaptively: the tool is a sliver between free-form faces, and OCCT's default
+        // integration of it is off by more than a percent (16.863 for 16.665 on the designed case)
+        const double volume = MassProperties::volume(group.tool, true);
+        if (volume <= 0) {
+            refuse("a round under an overhang removes no valid solid");
+        }
+        toolVolume += volume;
+        Bnd_Box toolBounds;
+        BRepBndLib::AddOptimal(group.tool, toolBounds, Standard_False, Standard_False);
+        const gp_Pnt toolLow = toolBounds.CornerMin();
+        const gp_Pnt toolHigh = toolBounds.CornerMax();
+        if (toolLow.X() < low.X() + radius || toolLow.Y() < low.Y() + radius
+            || toolLow.Z() < low.Z() + radius || toolHigh.X() > high.X() - radius
+            || toolHigh.Y() > high.Y() - radius || toolHigh.Z() > high.Z() - radius) {
+            refuse("a round under an overhang reaches the walls of the piece it is built on");
+        }
+        for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+            for (const auto& image : removed.images(it.Current())) {
+                group.ofPiece.Add(image);
+            }
+        }
+        for (const auto& pair : inPiece) {
+            for (const auto& blend : maker.Generated(pair.second)) {
+                for (const auto& face : removed.images(blend)) {
+                    group.blends.emplace_back(pair.first, face);
+                }
+            }
+        }
+        for (TopExp_Explorer it(group.tool, TopAbs_SOLID); it.More(); it.Next()) {
+            builder.Add(allTools, it.Current());
         }
     }
-    if (solid.IsNull()) {
-        refuse("the selected edges are not on one solid in front of the face they end against");
-    }
-    BRepFilletAPI_MakeFillet maker(solid);
-    for (const auto& pair : inPiece) {
-        maker.Add(radius, pair.second);
-    }
-    try {
-        maker.Build();
-    }
-    catch (const Standard_Failure&) {
-        refuse("OCCT's round in front of the face its edge ends against failed");
-    }
-    if (!maker.IsDone()) {
-        refuse("OCCT's round in front of the face its edge ends against failed");
-    }
-    const TopoDS_Shape rounded = maker.Shape();
-    if (countSolids(rounded) != 1 || !BRepCheck_Analyzer(rounded).IsValid()) {
-        refuse("OCCT's round in front of the face its edge ends against is not a valid solid");
-    }
-    // What the round removes from the piece: the tool
-    BRepAlgoAPI_Cut removal;
-    const TopoDS_Shape tool
-        = boolean(removal, solid, rounded, "finding what a round under an overhang removes failed");
-    const Stage removed(removal.History(), tool);
-    if (countSolids(tool) < 1 || !BRepCheck_Analyzer(tool).IsValid()) {
-        refuse("a round under an overhang removes no valid solid");
-    }
-    // Adaptively: the tool is a sliver between free-form faces, and OCCT's default integration
-    // of it is off by more than a percent (16.863 for 16.665 on the designed case)
-    const double toolVolume = MassProperties::volume(tool, true);
-    if (toolVolume <= 0) {
-        refuse("a round under an overhang removes no valid solid");
-    }
-    Bnd_Box toolBounds;
-    BRepBndLib::AddOptimal(tool, toolBounds, Standard_False, Standard_False);
-    const gp_Pnt toolLow = toolBounds.CornerMin();
-    const gp_Pnt toolHigh = toolBounds.CornerMax();
-    if (toolLow.X() < low.X() + radius || toolLow.Y() < low.Y() + radius
-        || toolLow.Z() < low.Z() + radius || toolHigh.X() > high.X() - radius
-        || toolHigh.Y() > high.Y() - radius || toolHigh.Z() > high.Z() - radius) {
-        refuse("a round under an overhang reaches the walls of the piece it is built on");
-    }
-    // The whole base less the tool
+    // The whole base less the tools
     BRepAlgoAPI_Cut whole;
-    TopoDS_Shape shape
-        = boolean(whole, baseShape, tool, "cutting a round under an overhang from the base failed");
+    TopoDS_Shape shape = boolean(
+        whole,
+        baseShape,
+        allTools,
+        "cutting a round under an overhang from the base failed"
+    );
     std::vector<Stage> stages;
     stages.emplace_back(whole.History(), shape);
-    // The tool's faces on the piece's own faces: of those only its caps in the overhangs' planes
+    // The tools' faces on their pieces' own faces: of those only the caps in the overhangs' planes
     // are left in the result, each beside the face that hangs over it. Their edges alone are
     // free to go, so that the face grows over what the round removed (Onshape's, no step)
-    TopTools_IndexedMapOfShape ofPiece;
-    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
-        for (const auto& image : removed.images(it.Current())) {
-            ofPiece.Add(image);
-        }
-    }
     TopTools_IndexedMapOfShape unlocked;
-    for (int i = 1; i <= ofPiece.Extent(); ++i) {
-        for (const auto& image : stages.front().images(ofPiece(i))) {
-            if (image.ShapeType() == TopAbs_FACE) {
-                TopExp::MapShapes(image, TopAbs_EDGE, unlocked);
+    for (const auto& group : groups) {
+        for (int i = 1; i <= group.ofPiece.Extent(); ++i) {
+            for (const auto& image : stages.front().images(group.ofPiece(i))) {
+                if (image.ShapeType() == TopAbs_FACE) {
+                    TopExp::MapShapes(image, TopAbs_EDGE, unlocked);
+                }
             }
         }
     }
@@ -3764,7 +3875,7 @@ TopoDS_Shape constructUnderOverhang(
     if (!thinFace(shape, baseShape).IsNull()) {
         refuse("the result has a face of zero width");
     }
-    for (TopExp_Explorer it(tool, TopAbs_SOLID); it.More(); it.Next()) {
+    for (TopExp_Explorer it(allTools, TopAbs_SOLID); it.More(); it.Next()) {
         if (materialIn(shape, it.Current())) {
             refuse("the cut left material of a round under an overhang");
         }
@@ -3778,8 +3889,9 @@ TopoDS_Shape constructUnderOverhang(
     if (std::abs(change - toolVolume) > bound) {
         refuse("the cut removed " + describe(change) + " instead of " + describe(toolVolume));
     }
-    // The history: the base's elements are modified into their images; the tool's other faces
+    // The history: the base's elements are modified into their images; the tools' other faces
     // are generated by the edge whose blend they are (OCCT's own Generated), else by the first
+    // selected edge of their group
     TopTools_IndexedMapOfShape baseImages;
     for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
         for (TopExp_Explorer it(baseShape, type); it.More(); it.Next()) {
@@ -3806,15 +3918,15 @@ TopoDS_Shape constructUnderOverhang(
             }
         }
     };
-    for (const auto& pair : inPiece) {
-        for (const auto& blend : maker.Generated(pair.second)) {
-            for (const auto& face : removed.images(blend)) {
-                generate(pair.first, face);
-            }
+    for (const auto& group : groups) {
+        for (const auto& blend : group.blends) {
+            generate(blend.first, blend.second);
         }
     }
-    for (TopExp_Explorer it(tool, TopAbs_FACE); it.More(); it.Next()) {
-        generate(edges.front(), it.Current());
+    for (const auto& group : groups) {
+        for (TopExp_Explorer it(group.tool, TopAbs_FACE); it.More(); it.Next()) {
+            generate(group.selected.front(), it.Current());
+        }
     }
     return shape;
 }
@@ -3992,6 +4104,7 @@ bool construct(
         return true;
     }
     catch (const NoOverhang&) {
+        Base::Console().warning("DIAG overhang: does not apply\n");
     }
     catch (const Refusal& refusal) {
         second = refusal.reason;
@@ -4009,6 +4122,7 @@ bool construct(
         second = "an unknown exception";
     }
     if (!second.empty()) {
+        Base::Console().warning("DIAG overhang: %s\n", second.c_str());
         why += "; built in front of the face its edge ends against: " + second;
     }
     if (reason) {
