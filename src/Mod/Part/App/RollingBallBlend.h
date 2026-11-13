@@ -65,6 +65,8 @@ struct Report
     int faces = 0;
     /// Stations per face in the last (accepted) pass, the largest
     int stations = 0;
+    /// The new surfaces' poles lengthwise, the largest
+    int poles = 0;
     /// The worst ball residual |dist(centre, wall) - r| over the recognised chains, OCCT's and ours
     double residualBefore = 0.0;
     double residualAfter = 0.0;
