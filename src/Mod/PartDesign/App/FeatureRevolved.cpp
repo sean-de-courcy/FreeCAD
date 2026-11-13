@@ -51,6 +51,7 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -62,7 +63,9 @@
 #include <BOPTools_AlgoTools3D.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
@@ -98,6 +101,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
@@ -2730,6 +2734,146 @@ TopoShape seatAxisTouches(const TopoShape& profile, const gp_Ax1& axis)
     return result;
 }
 
+// Whether an edge's 3D curve is a free-form one (B-spline or Bezier, under any trimming)
+bool freeFormEdge(const TopoDS_Edge& edge)
+{
+    double first = 0.0;
+    double last = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+    while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve)) {
+        curve = trimmed->BasisCurve();
+    }
+    return !curve.IsNull()
+        && (curve->DynamicType() == STANDARD_TYPE(Geom_BSplineCurve)
+            || curve->DynamicType() == STANDARD_TYPE(Geom_BezierCurve));
+}
+
+// The profile with fresh edges in every planar face where a free-form edge ends on the axis
+// (FreeCAD-CH ops#640, Case Base #113). BRepPrimAPI_MakeRevol turned such a face, taken from a
+// solid (a rational B-spline half-ellipse cap whose chord lies on the axis), into an invalid solid
+// with no volume, and a quarter turn into the wrong volume (-0.454 for 2.681); the same curves as
+// new edges revolve right. A Groove then cut nothing and reported success. The face is rebuilt
+// on its surface from new edges and vertices made from the edges' located 3D curves; the edges,
+// vertices and face are named as modified from the old ones. Other faces are kept as they are.
+TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
+{
+    const gp_Lin line(axis);
+    auto onAxis = [&](const TopoDS_Vertex& vertex) {
+        return !vertex.IsNull()
+            && line.Distance(BRep_Tool::Pnt(vertex))
+            <= std::max(BRep_Tool::Tolerance(vertex), Precision::Confusion());
+    };
+    auto needsFresh = [&](const TopoDS_Face& face) {
+        TopLoc_Location location;
+        if (BRep_Tool::Surface(face, location)->DynamicType() != STANDARD_TYPE(Geom_Plane)) {
+            return false;
+        }
+        for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(ex.Current());
+            TopoDS_Vertex first;
+            TopoDS_Vertex last;
+            TopExp::Vertices(edge, first, last);
+            if (freeFormEdge(edge) && (onAxis(first) || onAxis(last))) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    Part::ShapeMapper mapper;
+    BRep_Builder builder;
+    std::vector<TopoDS_Shape> faces;
+    bool rebuiltAny = false;
+    for (TopExp_Explorer xp(profile.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xp.Current());
+        if (!needsFresh(face)) {
+            faces.push_back(face);
+            continue;
+        }
+        TopTools_DataMapOfShapeShape vertices;  // old vertex -> new
+        TopTools_DataMapOfShapeShape edges;     // old edge (forward) -> new (forward)
+        auto freshVertex = [&](const TopoDS_Vertex& vertex) {
+            if (!vertices.IsBound(vertex)) {
+                const TopoDS_Vertex fresh = BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(vertex));
+                vertices.Bind(vertex, fresh);
+                mapper.insert(Part::MappingStatus::Modified, vertex, fresh);
+            }
+            return TopoDS::Vertex(vertices(vertex));
+        };
+        bool ok = true;
+        for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More() && ok; ex.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(ex.Current().Oriented(TopAbs_FORWARD));
+            if (edges.IsBound(edge)) {
+                continue;
+            }
+            double first = 0.0;
+            double last = 0.0;
+            const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);  // located
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (curve.IsNull() || v1.IsNull() || v2.IsNull()) {
+                ok = false;
+                break;
+            }
+            BRepBuilderAPI_MakeEdge make(curve, freshVertex(v1), freshVertex(v2), first, last);
+            if (!make.IsDone()) {
+                ok = false;
+                break;
+            }
+            edges.Bind(edge, make.Edge());
+            mapper.insert(Part::MappingStatus::Modified, edge, make.Edge());
+        }
+        if (!ok) {
+            faces.push_back(face);  // left as it was: the tool's check below refuses what comes of it
+            continue;
+        }
+        const TopoDS_Face forward = TopoDS::Face(face.Oriented(TopAbs_FORWARD));
+        TopoDS_Face fresh;
+        builder.MakeFace(fresh, BRep_Tool::Surface(forward), BRep_Tool::Tolerance(forward));
+        TopTools_ListOfShape newEdges;
+        for (TopoDS_Iterator wires(forward); wires.More(); wires.Next()) {
+            const TopoDS_Shape& wire = wires.Value();
+            TopoDS_Wire rebuilt;
+            builder.MakeWire(rebuilt);
+            // as in seatAxisTouches(): the edges as the wire holds them, the wire's own
+            // orientation set on the rebuilt wire
+            for (TopoDS_Iterator it(wire, false, true); it.More(); it.Next()) {
+                const TopoDS_Shape& edge = it.Value();
+                const TopoDS_Shape& made = edges(edge.Oriented(TopAbs_FORWARD));
+                builder.Add(rebuilt, made.Oriented(edge.Orientation()));
+                newEdges.Append(made);
+            }
+            rebuilt.Closed(wire.Closed());
+            rebuilt.Orientation(wire.Orientation());
+            builder.Add(fresh, rebuilt);
+        }
+        BRepLib::BuildPCurveForEdgesOnPlane(newEdges, fresh);
+        fresh.Orientation(face.Orientation());
+        mapper.insert(Part::MappingStatus::Modified, face, fresh);
+        faces.push_back(fresh);
+        rebuiltAny = true;
+    }
+    if (!rebuiltAny) {
+        return profile;
+    }
+    TopoDS_Shape shape;
+    if (faces.size() == 1 && profile.getShape().ShapeType() == TopAbs_FACE) {
+        shape = faces.front();
+    }
+    else {
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& face : faces) {
+            builder.Add(compound, face);
+        }
+        shape = compound;
+    }
+    TopoShape result(profile);
+    result.makeShapeWithElementMap(shape, mapper, {profile}, Part::OpCodes::Copy);
+    return result;
+}
+
 }  // namespace
 
 Revolved::Revolved()
@@ -3001,6 +3145,8 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     const TopoShape seatedProfile = seatAxisTouches(sketchshape, revolutionAxis);
     const bool profileTouchesAxis = !seatedProfile.getShape().IsSame(sketchshape.getShape());
     sketchshape = seatedProfile;
+    // A free-form edge ending on the axis in a face taken from a solid: fresh edges (ops#640, #113)
+    sketchshape = freshAxisEdges(sketchshape, revolutionAxis);
     // Such a profile turned both ways from its plane is built as two sides from the plane only
     // where the base meets the profile (below). Elsewhere the one primitive is right and keeps
     // the revolved face whole, as Onshape does: two halves split it, and a reference to it kept
@@ -3275,6 +3421,23 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     }
     else {
         result.makeElementXor(revolutions, Part::OpCodes::Revolve);
+    }
+
+    // A tool with no solid, no volume or (turned by angles) not a valid solid is refused, never
+    // applied as nothing: #113's Groove cut nothing from Case Base and reported success, where
+    // Onshape removes 2.681 (FreeCAD-CH ops#640; refuse loudly, decision 418)
+    {
+        const bool upTo = revolvesUpToFace(method, revolMode)
+            || (sideType == "Two sides" && revolvesUpToFace(method2, revolMode));
+        const TopoDS_Shape& tool = result.getShape();
+        const bool hasSolid = !tool.IsNull() && TopExp_Explorer(tool, TopAbs_SOLID).More();
+        if (!hasSolid || std::fabs(solidVolume(tool).value) <= Precision::Confusion()
+            || (!upTo && !BRepCheck_Analyzer(tool).IsValid())) {
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The revolution of the profile is not a valid solid: nothing was revolved"
+            ));
+        }
     }
 
     // An up-to-face tool's fuse or cut with the base gave a wrong volume where a torus's seam

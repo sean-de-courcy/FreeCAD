@@ -178,6 +178,7 @@ from PartDesignTests.TestRegenerate import (  # FreeCAD-CH, ops#640
 from PartDesignTests.TestNewPart import TestMapOrigin, TestNewPart  # FreeCAD-CH, ops#311
 from PartDesignTests.TestNewPart import TestOperations  # FreeCAD-CH, ops#640
 from PartDesignTests.TestRevolveOperations import TestRevolveOperations  # FreeCAD-CH, ops#640 rank 20
+from PartDesignTests.TestRevolveFaceProfile import TestRevolveFaceProfile  # FreeCAD-CH, ops#640 #113
 from PartDesignTests.TestSiblings import TestSiblings  # FreeCAD-CH, ops#325
 from PartDesignTests.TestMerge import TestMerge  # FreeCAD-CH, ops#325
 from PartDesignTests.TestSplit import TestSplit  # FreeCAD-CH, ops#325
