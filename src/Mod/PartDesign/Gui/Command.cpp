@@ -3414,6 +3414,10 @@ static void makeFacePattern(Gui::Command* cmd, const std::string& which)
             FCMD_OBJ_CMD(Feat, "Mode = 'Spacing'");
             FCMD_OBJ_CMD(Feat, "Offset = 20");
             FCMD_OBJ_CMD(Feat, "Occurrences = 2");
+            // The second direction has Onshape's own, as the linear pattern's (ops#655): a spacing
+            // of 25, count 1 (its box unticked), so a count of 2 puts the row 25 away
+            FCMD_OBJ_CMD(Feat, "Mode2 = 'Spacing'");
+            FCMD_OBJ_CMD(Feat, "Offset2 = 25");
         }
         else if (which == "FacePolarPattern") {
             FCMD_OBJ_CMD(
@@ -3693,9 +3697,9 @@ void prepareTransformed(
     std::string FeatName = cmd->getUniqueObjectName(which.c_str(), pcActiveBody);
     // FreeCAD-CH (ops#640, rank 13): Mirror and the patterns with nothing selected stay in
     // Features mode, their Features field armed for the first pick, as Onshape's open; Scale and
-    // Multi-Transform still transform the whole shape
-    const bool waitsForFeatures
-        = which == "Mirrored" || which == "LinearPattern" || which == "PolarPattern";
+    // Multi-Transform still transform the whole shape. The curve pattern (ops#655 T6) waits too
+    const bool waitsForFeatures = which == "Mirrored" || which == "LinearPattern"
+        || which == "PolarPattern" || which == "CurvePattern";
 
     // FreeCAD-CH ops#654: the studio's list is made on first use, before the pattern (adopted
     // with the Body's members, then the pattern inserted at its bar)
