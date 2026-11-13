@@ -278,10 +278,11 @@ jobs:
         pixi run install-${{ env.config }}
 
     # macOS only. Green runs took 6.4-9.9 min on 2026-10-12, and 10 min timed out (ops#302). On 2026-10-27 the
-    # same tests took 946-1213 s (runner variance), and 20 min timed out.
+    # same tests took 946-1213 s (runner variance), and 20 min timed out. On 2026-11-13 (fork PR 445, lx6) 35 min
+    # timed out with the suite still passing, grown past 9000 tests, as the build-dir step before it (ops#640).
     - name: FreeCAD CLI tests on install
       if: runner.os != 'Windows' && !cancelled() && steps.build.outcome == 'success'
-      timeout-minutes: 35
+      timeout-minutes: 75
       uses: ./.github/workflows/actions/runPythonTests
       with:
         testDescription: "CLI tests on install"
