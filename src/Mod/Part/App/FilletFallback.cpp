@@ -19,6 +19,8 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -34,10 +36,14 @@
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepLib.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom2d_Curve.hxx>
+#include <GeomAPI_Interpolate.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GProp_GProps.hxx>
@@ -56,7 +62,15 @@
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array2OfReal.hxx>
+#include <TColStd_HArray1OfReal.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -69,6 +83,7 @@
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_XY.hxx>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -656,6 +671,10 @@ struct Tool
     /// The miter piece at a concave corner with a circle: its faces merge into the tools' faces
     /// they continue (one cone, one plane, as Onshape's sharp miter)
     bool miter = false;
+    /// No closed-form volume (a tight wall arc's canal-surface tool, C4 shape A): checked by its
+    /// own construction instead, cut in a stage of its own before the others, and its volume
+    /// set to what that stage measures
+    bool measured = false;
 };
 
 /** The common part of the two tools at a two-edge corner with unequal dihedral angles (convex
@@ -1786,6 +1805,470 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     return tool;
 }
 
+/** A wall next to a rim edge, seen in the plane of the rim's top face (ops#640, C4 shape A;
+ * notes/fillet-tight-arc.md): a plane or a cylinder normal to the top face. depth() is the inward
+ * depth into the material, gradient() its unit gradient (into the material).
+ */
+struct PlanWall
+{
+    bool line = true;
+    gp_XY point;   // line: a point on the wall
+    gp_XY normal;  // line: inward
+    gp_XY centre;  // cylinder: its axis
+    double radius = 0.0;
+    /// +1: the material lies outside the cylinder (a hollow wall), -1: inside (a bulging wall)
+    double sign = 1.0;
+
+    double depth(const gp_XY& q) const
+    {
+        return line ? normal.Dot(q - point) : sign * ((q - centre).Modulus() - radius);
+    }
+
+    gp_XY gradient(const gp_XY& q) const
+    {
+        if (line) {
+            return normal;
+        }
+        gp_XY v = q - centre;
+        double length = v.Modulus();
+        if (length < linearTolerance) {
+            refuse("a tight corner's centre on a wall cylinder's axis");
+        }
+        return v * (sign / length);
+    }
+};
+
+/// The frame of a tight wall arc: origin at the arc's centre, z the top face's outward normal
+struct TightFrame
+{
+    gp_Pnt origin;
+    gp_Dir x;
+    gp_Dir y;
+    gp_Dir z;
+
+    gp_XY plan(const gp_Vec& v) const
+    {
+        return gp_XY(v.Dot(gp_Vec(x)), v.Dot(gp_Vec(y)));
+    }
+
+    gp_XY plan(const gp_Pnt& p) const
+    {
+        return plan(gp_Vec(origin, p));
+    }
+
+    gp_Pnt point(const gp_XY& q, double height) const
+    {
+        return origin.Translated(gp_Vec(x) * q.X() + gp_Vec(y) * q.Y() + gp_Vec(z) * height);
+    }
+
+    gp_Vec vector(const gp_XY& q, double height) const
+    {
+        return gp_Vec(x) * q.X() + gp_Vec(y) * q.Y() + gp_Vec(z) * height;
+    }
+};
+
+/// The wall of a rim edge whose other face is the top, in plan; empty when it is not a plane or
+/// a cylinder normal to the top
+std::optional<PlanWall> planWall(const TightFrame& frame, const EdgeData& data, const TopoDS_Face& top)
+{
+    int k = 0;
+    if (data.faces[0].IsSame(top)) {
+        k = 1;
+    }
+    else if (!data.faces[1].IsSame(top)) {
+        return std::nullopt;
+    }
+    const TopoDS_Face& wall = data.faces[k];
+    BRepAdaptor_Curve curve(data.edge);
+    gp_Pnt middle = curve.Value((data.first + data.last) / 2);
+    gp_Dir out = outwardNormal(wall, middle);
+    if (std::abs(out.Dot(frame.z)) > 1e-9) {
+        return std::nullopt;
+    }
+    gp_XY outPlan = frame.plan(gp_Vec(out));
+    BRepAdaptor_Surface surface(wall, Standard_False);
+    PlanWall result;
+    if (surface.GetType() == GeomAbs_Plane) {
+        result.line = true;
+        result.point = frame.plan(middle);
+        result.normal = -outPlan.Normalized();
+        return result;
+    }
+    if (surface.GetType() == GeomAbs_Cylinder) {
+        gp_Cylinder cylinder = surface.Cylinder();
+        if (std::abs(cylinder.Axis().Direction().Dot(frame.z)) < 1 - 1e-9) {
+            return std::nullopt;
+        }
+        result.line = false;
+        result.centre = frame.plan(cylinder.Location());
+        result.radius = cylinder.Radius();
+        gp_XY radial = frame.plan(middle) - result.centre;
+        result.sign = outPlan.Dot(radial) < 0 ? 1.0 : -1.0;
+        return result;
+    }
+    return std::nullopt;
+}
+
+/** A convex rim arc on a bulging wall whose radius is below the round's (C4 shape A): its round
+ * would be a spindle torus, and Onshape's corner is a canal surface instead (tightTool).
+ */
+bool tightArc(const Context& ctx, const EdgeData& data)
+{
+    if (data.line || data.ruled || !data.convex || ctx.request.kind != Kind::Fillet) {
+        return false;
+    }
+    double r = ctx.request.size1;
+    if (data.circle.Radius() >= r - linearTolerance) {
+        return false;
+    }
+    const TopoDS_Face& top = data.faces[data.planeFace];
+    const TopoDS_Face& wall = data.faces[1 - data.planeFace];
+    BRepAdaptor_Surface surface(wall, Standard_False);
+    if (surface.GetType() != GeomAbs_Cylinder) {
+        return false;
+    }
+    TightFrame frame;
+    frame.origin = data.circle.Location();
+    frame.z = outwardNormal(top, data.start);
+    frame.x = data.circle.XAxis().Direction();
+    frame.y = frame.z.Crossed(frame.x);
+    auto plan = planWall(frame, data, top);
+    return plan && !plan->line && plan->sign < 0;
+}
+
+/// The plan point at the same inward depth from both walls, by Newton from q
+gp_XY solveCentre(const PlanWall walls[2], gp_XY q, double depth)
+{
+    for (int iteration = 0; iteration < 60; ++iteration) {
+        double f1 = walls[0].depth(q) - depth;
+        double f2 = walls[1].depth(q) - depth;
+        gp_XY a = walls[0].gradient(q);
+        gp_XY b = walls[1].gradient(q);
+        double det = a.X() * b.Y() - a.Y() * b.X();
+        if (std::abs(det) < 1e-14) {
+            refuse("the walls at a tight corner are parallel");
+        }
+        double dx = (f1 * b.Y() - f2 * a.Y()) / det;
+        double dy = (a.X() * f2 - b.X() * f1) / det;
+        q.SetCoord(q.X() - dx, q.Y() - dy);
+        if (std::abs(dx) + std::abs(dy) < 1e-14) {
+            break;
+        }
+    }
+    if (std::abs(walls[0].depth(q) - depth) + std::abs(walls[1].depth(q) - depth) > 1e-9) {
+        refuse("a tight corner's centre curve did not converge");
+    }
+    return q;
+}
+
+/// Interpolates the points at the parameters with a cubic B-spline curve
+Handle(Geom_BSplineCurve) interpolated(
+    const std::vector<gp_Pnt>& points,
+    const Handle(TColStd_HArray1OfReal) & parameters
+)
+{
+    Handle(TColgp_HArray1OfPnt) array = new TColgp_HArray1OfPnt(1, static_cast<int>(points.size()));
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        array->SetValue(static_cast<int>(i) + 1, points[i]);
+    }
+    GeomAPI_Interpolate interpolate(array, parameters, Standard_False, linearTolerance);
+    interpolate.Perform();
+    if (!interpolate.IsDone()) {
+        refuse("interpolating a tight corner's surface failed");
+    }
+    return interpolate.Curve();
+}
+
+/** The tool of a tight wall arc (C4 shape A, notes/fillet-tight-arc.md, a port of
+ * probes/c4/tight.py): Onshape's corner face is the canal surface of a ball of radius rho (the
+ * arc's) whose centre S(theta) lies at d = r - rho from both neighbouring rounds' spines, in plan
+ * at the inward depth r - d cos(theta) from both neighbour walls, at the height z0 + d sin(theta)
+ * (z0 = top - r), theta from 0 (S at the arc's centre) to 90 deg (under the point where the two
+ * rounds' top edges cross). The tool is everything beyond that canal patch between the two fans
+ * that leave the neighbouring rounds along their normals: five B-spline faces sharing their
+ * boundary poles, sewn into one solid. With the neighbours' tools unchanged, base - their tools -
+ * this one is Onshape's solid. It has no closed-form volume: it is measured (Tool::measured), and
+ * checked instead by the patch's distance from S and the solid's validity.
+ */
+Tool tightTool(
+    const Context& ctx,
+    const EdgeData& data,
+    const VertexEnd ends[2],
+    const std::vector<EdgeData>& all
+)
+{
+    const gp_Circ& circle = data.circle;
+    const TopoDS_Face& top = data.faces[data.planeFace];
+    double r = ctx.request.size1;
+    double rho = circle.Radius();
+    double d = r - rho;
+    TightFrame frame;
+    frame.origin = circle.Location();
+    frame.z = outwardNormal(top, data.start);
+    frame.x = circle.XAxis().Direction();
+    frame.y = frame.z.Crossed(frame.x);
+    if (data.closed) {
+        refuse("a closed wall arc tighter than the round");
+    }
+    PlanWall walls[2];
+    for (int i = 0; i < 2; ++i) {
+        if (ends[i].kind != VertexClass::TangentContinuation) {
+            refuse("a wall arc tighter than the round that does not continue tangentially at both ends");
+        }
+        auto other = std::find_if(all.begin(), all.end(), [&](const EdgeData& e) {
+            return e.edge.IsSame(ends[i].continuation);
+        });
+        if (other == all.end()) {
+            refuse("a tangent edge that was not analysed");
+        }
+        if (tightArc(ctx, *other)) {
+            refuse("two wall arcs tighter than the round in a row");
+        }
+        auto wall = planWall(frame, *other, top);
+        if (!wall) {
+            refuse("a tight wall arc's neighbour is not a plane or a cylinder normal to the top face");
+        }
+        walls[i] = *wall;
+    }
+
+    // The centre curve S, its plan points and heights
+    constexpr int intervals = 96;
+    double z0 = -r;
+    std::vector<double> theta(intervals + 1);
+    std::vector<gp_XY> plan(intervals + 1);
+    std::vector<gp_Pnt> spine(intervals + 1);
+    gp_XY q(0.0, 0.0);
+    for (int i = 0; i <= intervals; ++i) {
+        theta[i] = pi / 2 * i / intervals;
+        q = solveCentre(walls, q, r - d * std::cos(theta[i]));
+        plan[i] = q;
+        spine[i] = frame.point(q, z0 + d * std::sin(theta[i]));
+    }
+
+    // Per theta, at the distance lambda from S: the contact points along the two directions from
+    // the neighbours' spines through S, and the rational middle pole between them
+    struct Columns
+    {
+        std::vector<gp_Pnt> side[2];
+        std::vector<gp_Pnt> homogeneous;
+        std::vector<gp_Pnt> weight;
+    };
+    auto columns = [&](double lambda) {
+        Columns c;
+        for (int i = 0; i <= intervals; ++i) {
+            double t = theta[i];
+            gp_Vec u[2];
+            for (int k = 0; k < 2; ++k) {
+                gp_XY n = walls[k].gradient(plan[i]);
+                u[k] = frame.vector(n * -std::cos(t), std::sin(t));
+            }
+            gp_Vec m = u[0] + u[1];
+            if (m.Magnitude() < 1e-9) {
+                refuse("the rounds at a tight corner meet head on");
+            }
+            m.Normalize();
+            double ch = std::max(-1.0, std::min(1.0, m.Dot(u[0])));  // cos(alpha / 2)
+            if (ch < 1e-6) {
+                refuse("the rounds at a tight corner meet at a straight angle or more");
+            }
+            for (int k = 0; k < 2; ++k) {
+                c.side[k].push_back(spine[i].Translated(u[k] * lambda));
+            }
+            gp_XYZ middle = spine[i].Translated(m * (lambda / ch)).XYZ() * ch;
+            c.homogeneous.emplace_back(middle);
+            c.weight.emplace_back(ch, 0.0, 0.0);
+        }
+        return c;
+    };
+    Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, intervals + 1);
+    for (int i = 0; i <= intervals; ++i) {
+        parameters->SetValue(i + 1, theta[i]);
+    }
+    struct Row
+    {
+        std::vector<gp_Pnt> poles[3];  // side 0, middle, side 1
+        std::vector<double> weights;
+    };
+    Handle(Geom_BSplineCurve) model;
+    auto sameKnots = [&](const Handle(Geom_BSplineCurve)& curve) {
+        if (model.IsNull()) {
+            model = curve;
+            return;
+        }
+        if (curve->NbKnots() != model->NbKnots() || curve->NbPoles() != model->NbPoles()
+            || curve->Degree() != model->Degree()) {
+            refuse("a tight corner's columns have different knots");
+        }
+        for (int i = 1; i <= curve->NbKnots(); ++i) {
+            if (std::abs(curve->Knot(i) - model->Knot(i)) > 1e-12
+                || curve->Multiplicity(i) != model->Multiplicity(i)) {
+                refuse("a tight corner's columns have different knots");
+            }
+        }
+    };
+    auto polesOf = [&](const std::vector<gp_Pnt>& points) {
+        Handle(Geom_BSplineCurve) curve = interpolated(points, parameters);
+        sameKnots(curve);
+        std::vector<gp_Pnt> poles;
+        for (int i = 1; i <= curve->NbPoles(); ++i) {
+            poles.push_back(curve->Pole(i));
+        }
+        return poles;
+    };
+    double outer = 2.0 * r;
+    Row rows[2];
+    for (int j = 0; j < 2; ++j) {
+        Columns c = columns(j == 0 ? rho : outer);
+        rows[j].poles[0] = polesOf(c.side[0]);
+        rows[j].poles[2] = polesOf(c.side[1]);
+        std::vector<gp_Pnt> homogeneous = polesOf(c.homogeneous);
+        std::vector<gp_Pnt> weight = polesOf(c.weight);
+        for (std::size_t i = 0; i < homogeneous.size(); ++i) {
+            double w = weight[i].X();
+            if (w <= 1e-9) {
+                refuse("a tight corner's surface has a weight that is not positive");
+            }
+            rows[j].poles[1].emplace_back(homogeneous[i].XYZ() / w);
+            rows[j].weights.push_back(w);
+        }
+    }
+    int poleCount = model->NbPoles();
+    int knotCount = model->NbKnots();
+    TColStd_Array1OfReal uKnots(1, knotCount);
+    TColStd_Array1OfInteger uMults(1, knotCount);
+    for (int i = 1; i <= knotCount; ++i) {
+        uKnots.SetValue(i, model->Knot(i));
+        uMults.SetValue(i, model->Multiplicity(i));
+    }
+    TColStd_Array1OfReal vKnots(1, 2);
+    vKnots.SetValue(1, 0.0);
+    vKnots.SetValue(2, 1.0);
+    // Along theta (u) the columns' degree, across (v) degree 2 rational (the canal patch and its
+    // copy at the outer radius) or 1 (the fans)
+    auto surface = [&](const std::vector<std::vector<gp_Pnt>>& across,
+                       const std::vector<std::vector<double>>& weights,
+                       int vDegree) -> Handle(Geom_BSplineSurface) {
+        int nv = static_cast<int>(across.size());
+        TColgp_Array2OfPnt poles(1, poleCount, 1, nv);
+        TColStd_Array2OfReal w(1, poleCount, 1, nv);
+        for (int i = 1; i <= poleCount; ++i) {
+            for (int k = 1; k <= nv; ++k) {
+                poles.SetValue(i, k, across[k - 1][i - 1]);
+                w.SetValue(i, k, weights[k - 1][i - 1]);
+            }
+        }
+        TColStd_Array1OfInteger vMults(1, 2);
+        vMults.SetValue(1, vDegree + 1);
+        vMults.SetValue(2, vDegree + 1);
+        return new Geom_BSplineSurface(poles, w, uKnots, vKnots, uMults, vMults, model->Degree(), vDegree);
+    };
+    std::vector<double> ones(poleCount, 1.0);
+    std::vector<Handle(Geom_Surface)> surfaces;
+    for (int j = 0; j < 2; ++j) {
+        surfaces.push_back(surface(
+            {rows[j].poles[0], rows[j].poles[1], rows[j].poles[2]},
+            {ones, rows[j].weights, ones},
+            2
+        ));
+    }
+    for (int k : {0, 2}) {
+        surfaces.push_back(surface({rows[0].poles[k], rows[1].poles[k]}, {ones, ones}, 1));
+    }
+    {
+        // The flat end in the z0 plane, at theta = 0: degree 1 from the patch to the outer
+        // radius, degree 2 rational across
+        TColgp_Array2OfPnt poles(1, 2, 1, 3);
+        TColStd_Array2OfReal w(1, 2, 1, 3);
+        for (int j = 0; j < 2; ++j) {
+            for (int k = 0; k < 3; ++k) {
+                poles.SetValue(j + 1, k + 1, rows[j].poles[k].front());
+                w.SetValue(j + 1, k + 1, k == 1 ? rows[j].weights.front() : 1.0);
+            }
+        }
+        TColStd_Array1OfReal knots(1, 2);
+        knots.SetValue(1, 0.0);
+        knots.SetValue(2, 1.0);
+        TColStd_Array1OfInteger uM(1, 2);
+        uM.SetValue(1, 2);
+        uM.SetValue(2, 2);
+        TColStd_Array1OfInteger vM(1, 2);
+        vM.SetValue(1, 3);
+        vM.SetValue(2, 3);
+        surfaces.push_back(new Geom_BSplineSurface(poles, w, knots, knots, uM, vM, 1, 2));
+    }
+
+    // Sewn into one closed shell, one valid solid
+    BRepBuilderAPI_Sewing sewing(1e-6);
+    for (const auto& s : surfaces) {
+        BRepBuilderAPI_MakeFace face(s, Precision::Confusion());
+        if (!face.IsDone()) {
+            refuse("building a tight corner's face failed");
+        }
+        sewing.Add(face.Face());
+    }
+    sewing.Perform();
+    TopoDS_Shape sewn = sewing.SewedShape();
+    TopoDS_Shell shell;
+    int shells = 0;
+    for (TopExp_Explorer it(sewn, TopAbs_SHELL); it.More(); it.Next()) {
+        shell = TopoDS::Shell(it.Current());
+        ++shells;
+    }
+    if (shells != 1 || !BRep_Tool::IsClosed(shell)) {
+        refuse("a tight corner's faces do not sew into one closed shell");
+    }
+    BRepBuilderAPI_MakeSolid makeSolid(shell);
+    if (!makeSolid.IsDone()) {
+        refuse("building a tight corner's solid failed");
+    }
+    TopoDS_Solid solid = makeSolid.Solid();
+    BRepLib::OrientClosedSolid(solid);
+    if (!BRepCheck_Analyzer(solid).IsValid() || volumeOf(solid) <= 0.0) {
+        refuse("a tight corner's tool is not a valid solid");
+    }
+
+    // The patch lies at rho from S: sampled against a dense S
+    std::vector<gp_Pnt> dense;
+    {
+        constexpr int denseIntervals = 4000;
+        gp_XY p(0.0, 0.0);
+        for (int i = 0; i <= denseIntervals; ++i) {
+            double t = pi / 2 * i / denseIntervals;
+            p = solveCentre(walls, p, r - d * std::cos(t));
+            dense.push_back(frame.point(p, z0 + d * std::sin(t)));
+        }
+    }
+    auto distanceToSpine = [&](const gp_Pnt& point) {
+        double best = std::numeric_limits<double>::max();
+        for (std::size_t i = 0; i + 1 < dense.size(); ++i) {
+            gp_Vec segment(dense[i], dense[i + 1]);
+            gp_Vec to(dense[i], point);
+            double length2 = segment.SquareMagnitude();
+            double s = length2 > 0 ? std::clamp(to.Dot(segment) / length2, 0.0, 1.0) : 0.0;
+            best = std::min(best, point.Distance(dense[i].Translated(segment * s)));
+        }
+        return best;
+    };
+    const Handle(Geom_Surface)& patch = surfaces.front();
+    double worst = 0.0;
+    for (int i = 0; i < intervals; ++i) {
+        double u = (theta[i] + theta[i + 1]) / 2;
+        for (double v : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+            worst = std::max(worst, std::abs(distanceToSpine(patch->Value(u, v)) - rho));
+        }
+    }
+    if (worst > 1e-5 * std::max(1.0, r)) {
+        refuse("a tight corner's surface strays " + describe(worst) + " from its canal surface");
+    }
+
+    Tool tool;
+    tool.solid = solid;
+    tool.source = data.edge;
+    tool.cut = true;
+    tool.measured = true;
+    return tool;
+}
+
 bool inPlane(const TopoDS_Shape& shape, const TrimPlane& plane)
 {
     gp_Pln pln(plane.point, plane.normal);
@@ -2779,7 +3262,7 @@ TopoDS_Shape constructShape(
             refuse("a tool is not one solid");
         }
         double measured = volumeOf(tool.solid);
-        if (std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
+        if (!tool.measured && std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
             refuse("a tool's volume " + describe(measured) + " differs from its closed form "
                    + describe(tool.volume));
         }
@@ -2904,6 +3387,9 @@ TopoDS_Shape constructShape(
             if (auto tool = lineTool(ctx, edgeData, ends)) {
                 admit(std::move(*tool));
             }
+        }
+        else if (tightArc(ctx, edgeData)) {
+            admit(tightTool(ctx, edgeData, ends, data));
         }
         else {
             admit(circleTool(ctx, edgeData, ends));
@@ -3217,11 +3703,37 @@ TopoDS_Shape constructShape(
     std::vector<Stage> stages;
     std::vector<size_t> toolStage(tools.size(), 0);
     TopoDS_Shape shape = base.getShape();
+    // The measured tools (a tight wall arc's, C4 shape A) first, each on its own: cut after the
+    // others they remove nothing, their patch tangent to the neighbouring rounds already made
+    // (work/c4 probe A3). What one removes is measured; the part of it that the other cut tools'
+    // closed forms count as well is taken off the grouped cut's expectation and off the measured
+    // tool's volume, so the final sum holds
+    double measuredOverlap = 0.0;
+    for (size_t i = 0; i < tools.size(); ++i) {
+        if (!tools[i].measured) {
+            continue;
+        }
+        TopoDS_Shape common = commonOf(shape, tools[i].solid);
+        double removal = volumeOf(common);
+        double overlap = 0.0;
+        for (size_t j = 0; j < tools.size(); ++j) {
+            if (tools[j].cut && !tools[j].measured) {
+                overlap += volumeOf(commonOf(common, tools[j].solid));
+            }
+        }
+        double allowance = raisedTolerance(common, {shape, tools[i].solid})
+            * squareSize(tools[i].solid);
+        toolStage[i] = stages.size();
+        tools[i].volume = removal;
+        shape = applyTools(shape, {&tools[i]}, removal, true, stages, allowance);
+        tools[i].volume = removal - overlap;
+        measuredOverlap += overlap;
+    }
     for (bool cut : {true, false}) {
         if (cut && trimmed) {
             // One cut per tool, each checked against its common part with the shape it cuts
             for (size_t i = 0; i < tools.size(); ++i) {
-                if (tools[i].cut) {
+                if (tools[i].cut && !tools[i].measured) {
                     toolStage[i] = stages.size();
                     TopoDS_Shape common = commonOf(shape, tools[i].solid);
                     double expected = volumeOf(common);
@@ -3233,9 +3745,9 @@ TopoDS_Shape constructShape(
             continue;
         }
         std::vector<const Tool*> group;
-        double expected = cut ? -overlapVolume : 0.0;
+        double expected = cut ? -overlapVolume - measuredOverlap : 0.0;
         for (size_t i = 0; i < tools.size(); ++i) {
-            if (tools[i].cut == cut) {
+            if (tools[i].cut == cut && !tools[i].measured) {
                 group.push_back(&tools[i]);
                 toolStage[i] = stages.size();
                 // A fused tool adds only what lies outside the material (inBase: none, or past
