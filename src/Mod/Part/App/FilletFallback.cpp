@@ -6958,6 +6958,136 @@ std::string takeInvalidResult()
     return reason;
 }
 
+namespace
+{
+/// +1 for an edge convex along its whole length, -1 for a concave one, 0 where it can't be told
+/// (not between two faces, faces tangent there, or the sign changes along it)
+int convexity(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces, const TopoDS_Shape& shape)
+{
+    if (shape.ShapeType() != TopAbs_EDGE || !edgeFaces.Contains(shape)) {
+        return 0;
+    }
+    const TopoDS_Edge& edge = TopoDS::Edge(shape);
+    const auto& faces = edgeFaces.FindFromKey(edge);
+    if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge)) {
+        return 0;
+    }
+    const TopoDS_Face& first = TopoDS::Face(faces.First());
+    const TopoDS_Face& second = TopoDS::Face(faces.Last());
+    BRepAdaptor_Curve curve(edge);
+    int sign = 0;
+    for (double at : {0.25, 0.5, 0.75}) {
+        const double parameter
+            = curve.FirstParameter() + at * (curve.LastParameter() - curve.FirstParameter());
+        double turn = 0.0;
+        try {
+            turn = gp_Vec(inwardIn(second, edge, parameter))
+                       .Dot(gp_Vec(outwardNormal(first, curve.Value(parameter))));
+        }
+        catch (const Refusal&) {
+            return 0;
+        }
+        catch (const Standard_Failure&) {
+            return 0;
+        }
+        if (std::abs(turn) < angularTolerance) {
+            return 0;
+        }
+        const int here = turn < 0 ? 1 : -1;
+        if (sign != 0 && here != sign) {
+            return 0;
+        }
+        sign = here;
+    }
+    return sign;
+}
+
+/// changedVolume() by the default integration, or the adaptive one
+double changedVolumeBy(const TopoDS_Shape& before, const TopoDS_Shape& after, bool adaptive)
+{
+    TopTools_IndexedMapOfShape old;
+    TopTools_IndexedMapOfShape now;
+    TopExp::MapShapes(before, TopAbs_FACE, old);
+    TopExp::MapShapes(after, TopAbs_FACE, now);
+    BRep_Builder builder;
+    TopoDS_Compound changed;
+    builder.MakeCompound(changed);
+    auto addUnshared = [&](const TopTools_IndexedMapOfShape& faces,
+                           const TopTools_IndexedMapOfShape& others,
+                           bool reversed) {
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            const TopoDS_Shape& face = faces(i);
+            const int j = others.FindIndex(face);
+            if (j > 0 && others(j).IsEqual(face)) {
+                continue;
+            }
+            builder.Add(changed, reversed ? face.Reversed() : face);
+        }
+    };
+    addUnshared(now, old, false);
+    addUnshared(old, now, true);
+    return adaptive ? MassProperties::volume(changed, true) : MassProperties::volume(changed);
+}
+}  // namespace
+
+std::string wrongWay(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    try {
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        int sign = 0;
+        for (const auto* list : {&edges, &request.contour}) {
+            for (const auto& edge : *list) {
+                const int here = convexity(edgeFaces, edge);
+                if (here == 0 || (sign != 0 && here != sign)) {
+                    return {};
+                }
+                sign = here;
+            }
+        }
+        if (sign == 0) {
+            return {};
+        }
+        // A change smaller than the integration's error on the changed faces says nothing: a
+        // billionth of the result's box, and 1e-6 mm3
+        Bnd_Box box;
+        BRepBndLib::Add(result, box);
+        if (box.IsVoid()) {
+            return {};
+        }
+        const double diagonal = std::sqrt(box.SquareExtent());
+        const double tolerance = 1e-6 + 1e-9 * diagonal * diagonal * diagonal;
+        // Convex edges (sign +1): the change must not be positive; concave: not negative
+        auto wrong = [&](double change) {
+            return sign * change > tolerance;
+        };
+        double change = changedVolumeBy(base, result, false);
+        if (!wrong(change)) {
+            return {};
+        }
+        change = changedVolumeBy(base, result, true);
+        if (!wrong(change)) {
+            return {};
+        }
+        std::ostringstream text;
+        text << (sign > 0 ? "adds" : "removes") << " material (volume " << (change > 0 ? "+" : "")
+             << change << " mm3) where a dress-up of " << (sign > 0 ? "convex" : "concave")
+             << " edges only " << (sign > 0 ? "removes" : "adds") << " it";
+        return text.str();
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+}
+
 Recorder::Recorder()
     : outer(innermostRecorder)
 {

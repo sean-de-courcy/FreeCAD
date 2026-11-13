@@ -54,6 +54,7 @@ from parttests.FilletFallbackTest import (
     OverflowTest,
     WallOnAChamferedRimTest,
     TightWallArcTest,
+    VolumeSignTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest

@@ -7782,6 +7782,15 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
     );
 }
 
+/// The error for OCCT's valid result that changes the volume the wrong way (ops#762)
+[[noreturn]] void raiseWrongWayError(const char* what, const std::string& how, const std::string& reason)
+{
+    FC_THROWM(
+        Base::CADKernelError,
+        what << " as OCCT builds it " << how << "; its exact construction refused: " << reason
+    );
+}
+
 [[noreturn]] void raiseThinFaceError(const char* what, const std::string& reason)
 {
     FC_THROWM(
@@ -7805,6 +7814,9 @@ struct DressUpOutcome
     /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
     /// edges (FilletFallback::endsInOverflow()): the exact construction, or an error
     bool turns {false};
+    /// OCCT's valid result changes the volume the wrong way (FilletFallback::wrongWay(), ops#762):
+    /// the exact construction, or an error with this text
+    std::string wrongWay;
     std::exception_ptr occtError;
     bool constructed {false};
     /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
@@ -7868,7 +7880,12 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
-            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns) && !prefer) {
+            if (!out.failed && !out.thin && !out.invalid) {
+                out.wrongWay = FilletFallback::wrongWay(maker->Shape(), base, edges, request);
+            }
+            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns
+                 || !out.wrongWay.empty())
+                && !prefer) {
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
@@ -7951,7 +7968,8 @@ TopoShape& TopoShape::makeElementFillet(
         // Naming it failed: OCCT, as without the preference
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
     }
-    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns) {
+    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
+        || !outcome->wrongWay.empty()) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
@@ -7960,6 +7978,9 @@ TopoShape& TopoShape::makeElementFillet(
         }
         if (outcome->thin) {
             raiseThinFaceError("The fillet", outcome->reason);
+        }
+        if (!outcome->wrongWay.empty()) {
+            raiseWrongWayError("The fillet", outcome->wrongWay, outcome->reason);
         }
         if (outcome->turns) {
             // OCCT's ends there aren't Onshape's: never returned silently (decision 150)
@@ -7970,7 +7991,9 @@ TopoShape& TopoShape::makeElementFillet(
                     << outcome->reason
             );
         }
-        FilletFallback::noteInvalidResult(outcome->reason);
+        if (outcome->invalid) {
+            FilletFallback::noteInvalidResult(outcome->reason);
+        }
     }
     return makeElementShape(*mkFillet, input, op);
 }
@@ -8074,7 +8097,8 @@ TopoShape& TopoShape::makeElementChamfer(
         }
         FilletFallback::takeInvalidResult();
         auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
-        if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp) {
+        if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp
+            || !outcome->wrongWay.empty()) {
             if (finishConstruction(*this, *outcome, input, op)) {
                 return *this;
             }
@@ -8086,6 +8110,9 @@ TopoShape& TopoShape::makeElementChamfer(
             }
             if (outcome->thin) {
                 raiseThinFaceError("The chamfer", outcome->reason);
+            }
+            if (!outcome->wrongWay.empty()) {
+                raiseWrongWayError("The chamfer", outcome->wrongWay, outcome->reason);
             }
             if (outcome->cusp) {
                 // OCCT's chamfer there can be valid and wrong (Case Base #76, oracle 17 Q-CUSP): never
