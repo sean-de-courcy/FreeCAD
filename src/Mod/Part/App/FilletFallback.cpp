@@ -113,6 +113,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cone.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Elips.hxx>
@@ -120,6 +121,8 @@
 #include <gp_Lin.hxx>
 #include <gp_Parab.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Sphere.hxx>
+#include <gp_Torus.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
@@ -11493,6 +11496,53 @@ std::vector<TopoDS_Face> rimPinched(
     return pieces;
 }
 
+/// The distance from p to the whole surface of a face, for the surfaces that have it in closed
+/// form (no more than the distance to the face itself); negative for any other surface
+double rimSurfaceDistance(const BRepAdaptor_Surface& surface, const gp_Pnt& p)
+{
+    auto polar = [&p](const gp_Ax1& axis, double& along, double& radial) {
+        gp_Vec v(axis.Location(), p);
+        along = v.Dot(gp_Vec(axis.Direction()));
+        radial = std::sqrt(std::max(v.SquareMagnitude() - along * along, 0.0));
+    };
+    double along = 0.0;
+    double radial = 0.0;
+    switch (surface.GetType()) {
+        case GeomAbs_Plane:
+            return surface.Plane().Distance(p);
+        case GeomAbs_Cylinder: {
+            polar(surface.Cylinder().Axis(), along, radial);
+            return std::abs(radial - surface.Cylinder().Radius());
+        }
+        case GeomAbs_Sphere:
+            return std::abs(surface.Sphere().Location().Distance(p) - surface.Sphere().Radius());
+        case GeomAbs_Torus: {
+            polar(surface.Torus().Axis(), along, radial);
+            return std::abs(std::hypot(radial - surface.Torus().MajorRadius(), along)
+                            - surface.Torus().MinorRadius());
+        }
+        case GeomAbs_Cone: {
+            // Both nappes: in the half plane through the axis, two rays from the apex
+            const gp_Cone cone = surface.Cone();
+            polar(gp_Ax1(cone.Apex(), cone.Axis().Direction()), along, radial);
+            const double angle = std::abs(cone.SemiAngle());
+            double best = std::hypot(along, radial);
+            for (double side : {1.0, -1.0}) {
+                const double onRay = side * along * std::cos(angle) + radial * std::sin(angle);
+                if (onRay > 0.0) {
+                    best = std::min(
+                        best,
+                        std::abs(side * along * std::sin(angle) - radial * std::cos(angle))
+                    );
+                }
+            }
+            return best;
+        }
+        default:
+            return -1.0;
+    }
+}
+
 TopoDS_Shape rimRounds(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
@@ -11564,24 +11614,54 @@ TopoDS_Shape rimRounds(
             if (planned.Contains(it.Current())) {
                 continue;
             }
+            const TopoDS_Face face = TopoDS::Face(it.Current());
             Bnd_Box box;
-            BRepBndLib::Add(it.Current(), box, false);
-            BRep_Builder gather;
-            TopoDS_Compound close;
-            gather.MakeCompound(close);
-            bool any = false;
+            BRepBndLib::Add(face, box, false);
+            const BRepAdaptor_Surface surface(face);
             for (const auto& [edge, edgeBox] : reach) {
-                if (!box.IsOut(edgeBox)) {
-                    gather.Add(close, edge);
-                    any = true;
+                if (box.IsOut(edgeBox)) {
+                    continue;
                 }
-            }
-            if (!any) {
-                continue;
-            }
-            BRepExtrema_DistShapeShape distance(close, it.Current());
-            if (!distance.IsDone() || distance.Value() < r - margin) {
-                refuse(rimReachRefusal);
+                // Along the rim edge (a line or a circle: its points move evenly with the
+                // parameter), the distance to the face's whole surface, which is no more than
+                // the distance to the face: where that is d, the next d - r of the edge on
+                // either side is farther than r. The exact distance to the face only where the
+                // surface comes within r or has no closed form (large rims: FSLC #50's 916
+                // edges beside a cone)
+                bool exact = false;
+                try {
+                    BRepAdaptor_Curve curve(TopoDS::Edge(edge));
+                    const double first = curve.FirstParameter();
+                    const double last = curve.LastParameter();
+                    gp_Pnt at;
+                    gp_Vec speed;
+                    curve.D1(first, at, speed);
+                    const double perUnit = speed.Magnitude();
+                    if (perUnit < 1e-12 || last <= first) {
+                        exact = true;
+                    }
+                    for (double t = first; !exact;) {
+                        const double clear = rimSurfaceDistance(surface, curve.Value(t)) - (r - margin);
+                        if (clear < 0.05 * r) {
+                            exact = true;
+                            break;
+                        }
+                        if (t >= last) {
+                            break;
+                        }
+                        t = std::min(last, t + 2 * clear / perUnit);
+                    }
+                }
+                catch (const Standard_Failure&) {
+                    exact = true;
+                }
+                if (!exact) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape distance(edge, face);
+                if (!distance.IsDone() || distance.Value() < r - margin) {
+                    refuse(rimReachRefusal);
+                }
             }
         }
     }
@@ -12439,7 +12519,8 @@ bool constructRims(
                 taken = std::move(trial);
                 takenGroups.push_back(&group);
             }
-            catch (const Refusal&) {
+            catch (const Refusal& refusal) {
+                FC_LOG("rim loop of " << group.size() << " edges not built directly: " << refusal.reason);
             }
             catch (const Standard_Failure&) {
             }
@@ -12587,6 +12668,8 @@ bool construct(
     catch (const std::exception& e) {
         out.rimRefusal = e.what();
     }
+    // (Now, not with the result: the construction by Booleans below can take very long)
+    FC_LOG("rim rounds not built directly: " << out.rimRefusal);
     std::string why;
     try {
         auto mapper = std::make_shared<ShapeMapper>();
