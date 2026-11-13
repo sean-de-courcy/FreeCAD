@@ -2737,17 +2737,29 @@ TEST_F(FilletFallbackTest, trimsARiserOverTwoLedgeHeightsByEachLedge)
     EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 11);
 }
 
-TEST_F(FilletFallbackTest, refusesADressUpPastAConcaveEdgeIntoASlopedWall)
+TEST_F(FilletFallbackTest, trimsADressUpPastAConcaveEdgeIntoASlopedWallByItsPlane)
 {
-    // The same strip past the riser's foot, but the tread slopes: its plane isn't square to the
-    // riser, so the trim by its surface run on behind the riser isn't the base's section swept
-    // back. That stays refused
+    // The same strip past the riser's foot, but the tread slopes (z = 11 - y / 10): its plane isn't
+    // square to the riser, so the trim isn't the base's section swept back. The dress-up is trimmed
+    // by the tread's own plane run on behind the riser (Case Base #105's rule; it was refused): the
+    // tread grows, F stays 8. In the section (u = y - 10, z) the chamfer 5 loses its part under the
+    // tread's line, the triangle (0, 9), (0, 10), (u, 10 - u / 10) with u = 1 / 1.1. The round 5
+    // (its arc about (5, 9)) meets the line at u = 0.2 / 2.02: under the line up to there, then
+    // under the arc
     TopoShape base(profileAlongX({{0, 0}, {20, 0}, {20, 14}, {10, 14}, {10, 10}, {0, 11}}, 30),
                    1L);
+    const double baseVolume = 30 * 245.0;
     std::string reason;
     TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
-    EXPECT_TRUE(forced(base, {convex}, chamfer(5), &reason).isNull());
-    EXPECT_NE(reason.find("runs off its face into a wall"), std::string::npos) << reason;
+    TopoShape result = forced(base, {convex}, chamfer(5), &reason);
+    EXPECT_TRUE(exact(result, baseVolume - 30 * (12.5 - 0.5 / 1.1))) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 8);
+    const double u = 0.2 / 2.02;
+    const double w = 5 - u;
+    const double underArc = 5 * w - (w / 2 * std::sqrt(25 - w * w) + 12.5 * std::asin(w / 5));
+    result = forced(base, {convex}, fillet(5), &reason);
+    EXPECT_TRUE(exact(result, baseVolume - 30 * (4 * u + 0.05 * u * u + underArc))) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 8);
 }
 
 TEST_F(FilletFallbackTest, refusesATangentChainOntoUnselectedEdges)
