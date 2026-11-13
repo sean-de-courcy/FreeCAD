@@ -1740,6 +1740,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     else {
         // The square corner, end, centre, end revolved, minus the torus (or sphere) about the
         // centre's circle: the round face is analytic, with its seam where the circle's is
+        // (a spindle or horn torus: the section revolved instead, below)
         BRepBuilderAPI_MakePolygon square(
             section.corner,
             section.ends[0],
