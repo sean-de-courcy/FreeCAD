@@ -87,7 +87,6 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
-#include <ChFi3d.hxx>
 #include <BRepLib.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeFilling.hxx>
@@ -114,7 +113,6 @@
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_DataMapOfShapeInteger.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
-#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
@@ -7750,60 +7748,14 @@ struct DressUpOutcome
     /// A chamfer whose edge ends in a cusp (FilletFallback::endsInCusp()): the exact
     /// construction first, OCCT's result where it refuses
     bool cusp {false};
-    /// A fillet whose OCCT contour runs on from the selection along a tangent chain that turns
-    /// between concave and convex (chainTurns()): the exact construction, or an error
+    /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
+    /// edges (FilletFallback::endsInOverflow()): the exact construction, or an error
     bool turns {false};
     std::exception_ptr occtError;
     bool constructed {false};
     FilletFallback::Construction construction;
     std::string reason;
 };
-
-/** Whether one of OCCT's contours runs on from the selected edges along a tangent chain onto an
- * unselected edge of the other convexity (Nest Cover #151: a concave foot run onto the floor's convex
- * chamfer edge). Onshape's tangent propagation stops where the chain turns (onshape-facts TP1), so
- * OCCT's result, valid or not, is not Onshape's there (oracle 17 Q-OVF: 2 faces too many, V 29 mm3
- * short).
- */
-bool chainTurns(
-    const BRepFilletAPI_LocalOperation& maker,
-    const TopoDS_Shape& base,
-    const std::vector<TopoDS_Shape>& selected
-)
-{
-    TopTools_IndexedMapOfShape chosen;
-    for (const auto& edge : selected) {
-        chosen.Add(edge);
-    }
-    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
-    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
-    for (int c = 1; c <= maker.NbContours(); ++c) {
-        bool concave = false;
-        bool convex = false;
-        bool runsOn = false;
-        for (int e = 1; e <= maker.NbEdges(c); ++e) {
-            const TopoDS_Edge& edge = maker.Edge(c, e);
-            runsOn = runsOn || !chosen.Contains(edge);
-            const auto* faces = edgeFaces.Seek(edge);
-            if (!faces || faces->Extent() != 2) {
-                continue;
-            }
-            auto type = ChFi3d::DefineConnectType(
-                edge,
-                TopoDS::Face(faces->First()),
-                TopoDS::Face(faces->Last()),
-                Precision::Angular(),
-                Standard_False
-            );
-            concave = concave || type == ChFiDS_Concave;
-            convex = convex || type == ChFiDS_Convex;
-        }
-        if (runsOn && concave && convex) {
-            return true;
-        }
-    }
-    return false;
-}
 
 /** Builds a fillet or chamfer maker under the feature's time limit, on a worker thread
  * (KernelBudget::run()): OCCT's build, the checks of its result, and where OCCT failed or built
@@ -7840,7 +7792,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && request.kind == FilletFallback::Kind::Chamfer
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
-                && request.kind == FilletFallback::Kind::Fillet && chainTurns(*maker, base, edges);
+                && FilletFallback::endsInOverflow(base, edges, request);
             if (out.failed || out.thin || out.invalid || out.cusp || out.turns) {
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
@@ -7922,11 +7874,11 @@ TopoShape& TopoShape::makeElementFillet(
             raiseThinFaceError("The fillet", outcome->reason);
         }
         if (outcome->turns) {
-            // OCCT's result rounds the convex edges too: never returned silently (decision 150)
+            // OCCT's ends there aren't Onshape's: never returned silently (decision 150)
             FC_THROWM(
                 Base::CADKernelError,
-                "The fillet's tangent chain turns from concave to convex, where Onshape stops it, "
-                "and OCCT's fillet runs on; its exact construction refused: "
+                "The fillet's tangent chain turns from concave to convex at a vertex of 4 edges, "
+                "where OCCT's ends differ from Onshape's; its exact construction refused: "
                     << outcome->reason
             );
         }
