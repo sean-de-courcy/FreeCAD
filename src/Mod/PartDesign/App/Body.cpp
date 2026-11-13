@@ -90,6 +90,12 @@ Body::Body()
                       "Element names of the parent part that lie on this piece");
 
     _GroupTouched.setStatus(App::Property::Output, true);
+    // An identity, not an input of the shape (ops#640, FMCVW #167): writing it, its adoption
+    // from "" to the Body's name included (studioPartId() reads "" as that name), and its undo
+    // don't touch the Body. A touched Body re-executes and touches everything linking it
+    // (Booleans, binders) and their histories: the first piece split re-ran FMCVW's earlier
+    // fillets for 819 s.
+    StudioPartId.setStatus(App::Property::Output, true);
     // The roll-back bar is the Tip: moving it doesn't touch the Body (ops#127, R7); onChanged()
     // enforces a recompute only when the Body isn't rolled back and the Tip's shape is new
     Tip.setStatus(App::Property::Output, true);
