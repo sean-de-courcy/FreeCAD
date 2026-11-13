@@ -1897,10 +1897,15 @@ VertexEnd classify(
         }
         gp_Dir normal(tangentNormal);
         if (std::abs(normal.Dot(away)) < 1e-6) {
-            end.reason = "an end face that is not a plane, tangent to the edge";
-            return end;
+            // The end face is tangent to the edge at the vertex: a blend that runs out tangent to
+            // one of the edge's faces, which is what Case Base #105's ends are (the fork's own
+            // blend gives 0 here; Onshape's STEP body 1.8e-6, which passed by its noise). The
+            // tangent plane bounds nothing there, and nothing reads it: the tool is bounded by
+            // the surface, from the vertex (lineTool, trimBySurface). The plane kept is the one
+            // through the vertex square to the edge
+            normal = away.Reversed();
         }
-        if (normal.Dot(away) > 0) {
+        else if (normal.Dot(away) > 0) {
             normal.Reverse();
         }
         end.kind = VertexClass::FreeEnd;
@@ -5493,8 +5498,21 @@ bool trimByWall(
             refuse("finding where a tangent strip runs off its face failed");
         }
         const TopoDS_Shape off = outside.Shape();
-        return TopExp_Explorer(off, TopAbs_FACE).More() && touch(at.foot, off)
-            && lengthAlong(at.foot, off) > 1000 * linearTolerance;
+        // A part off the face is behind this wall where the foot bounds it along a stretch that
+        // counts against its own size. Case Base #105 natively: an R 1 arc's strip is off its
+        // face by 0.018 behind the short blend, and the long blend's foot, which ends 4e-4 inside
+        // that tool, bounds that part along 4e-4. The long blend's surface is no wall there (run
+        // on, it crosses the face in front of the short blend); a STEP's foot, with a tolerance
+        // of 4e-3, hid it
+        for (TopExp_Explorer it(off, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Shape& part = it.Current();
+            if (touch(at.foot, part)
+                && lengthAlong(at.foot, part)
+                    > std::max(1000 * linearTolerance, 0.02 * std::sqrt(areaOf(part)))) {
+                return true;
+            }
+        }
+        return false;
     };
     if (std::none_of(strip->contacts.begin(), strip->contacts.end(), pastFoot)) {
         // Nothing runs past this foot along a stretch: the strip only touches it, or the same
@@ -5591,10 +5609,13 @@ bool trimByWall(
                 }
             }
             // Nor in front of another wall: its own surface cuts the dress-up off there
+            // Along a stretch that counts against the piece's own size, as in pastFoot: #105's
+            // piece behind the short blend touches the long blend's foot along 4e-4
+            const double stretch
+                = std::max(1000 * linearTolerance, 0.02 * std::cbrt(volumeOf(piece)));
             for (const auto& foot : otherFeet) {
                 for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
-                    if (touch(foot, it.Current())
-                        && lengthAlong(foot, it.Current()) > 1000 * linearTolerance) {
+                    if (touch(foot, it.Current()) && lengthAlong(foot, it.Current()) > stretch) {
                         refuse("a wall's surface cuts a dress-up off in front of another wall");
                     }
                 }
