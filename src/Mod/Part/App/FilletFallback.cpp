@@ -23,6 +23,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -90,7 +91,10 @@
 #include <gp_Circ.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Hypr.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Parab.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
@@ -468,6 +472,11 @@ enum class VertexClass
     /// the wedge of air between their end planes takes the miter piece (miterTool), as Onshape's
     /// sharp miter
     Corner2Union,
+    /// Two convex edges at a vertex reflex in the plane face they share, where an edge is a
+    /// circle (FSLC #50; fillet-tight-arc 8): Onshape's mitre, the higher round kept where both
+    /// reach. Each tool runs on past the vertex (VertexEnd::runOn) and ends on the mitre, the
+    /// vertical cylinder over the two walls' bisector. No face of the corner's own
+    Corner2Reflex,
     /// All three edges at the vertex are selected (a three-edge corner): the edge tools end
     /// where a corner tool (a sphere patch, or a chamfer's corner triangle) begins
     Corner3,
@@ -760,6 +769,9 @@ struct Tool
     /// neighbours' rounds end on the fans (which cross them at right angles) instead of meeting
     /// the canal patch tangentially inside a face, which leaves sliver faces (C4 shape A3)
     TopoDS_Shape wedge;
+    /// The relative tolerance of the volume check: the closed forms' own, or a quadrature's
+    /// (a reflex corner's cut tools, Corner2Reflex)
+    double relTolerance = volumeTolerance;
 };
 
 /** The common part of the two tools at a two-edge corner with unequal dihedral angles (convex
@@ -1283,6 +1295,10 @@ struct VertexEnd
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
     TopoDS_Face beyond;        // Overflow: the face whose surface trims the end round
     std::string reason;
+    /// Corner2Reflex: the other selected edge, and how far the tool runs on past the vertex (an
+    /// angle about a circle's axis, a length along a line), set before the tool is built
+    TopoDS_Edge other;
+    double runOn = 0.0;
 };
 
 /// The angle between the faces at the edge, through the material, at the parameter
@@ -1429,6 +1445,19 @@ VertexEnd classifyUnionCorner(
     // leaves it away from the face's side of the other, and the tools, fused, leave a wedge of air
     // between their end planes that the miter piece fills (miterTool)
     double sign = concave ? -1.0 : 1.0;
+    // Convex edges at a vertex reflex in the shared face: each edge leaves the vertex away from
+    // the face's side of the other (FSLC #50): Onshape's mitre (Corner2Reflex)
+    if (!concave && inwardIn(shared, data.edge, here).Dot(otherAway) < -angularTolerance
+        && inwardIn(shared, other->edge, there).Dot(away) < -angularTolerance) {
+        if (ctx.request.kind != Kind::Fillet) {
+            end.reason = "a chamfer at a reflex corner with a circle";
+            return end;
+        }
+        end.kind = VertexClass::Corner2Reflex;
+        end.other = other->edge;
+        end.trims = {{BRepAdaptor_Curve(data.edge).Value(here), away.Reversed()}};
+        return end;
+    }
     if (sign * inwardIn(shared, data.edge, here).Dot(otherAway) < angularTolerance
         || sign * inwardIn(shared, other->edge, there).Dot(away) < angularTolerance) {
         end.reason = concave ? "a concave corner with a circle that is not convex in the material"
@@ -3104,14 +3133,32 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     // into the material behind the wall its cylinder carries on into
     const double pre = !data.closed && ends[0].kind == VertexClass::Overflow ? pi / 2 : 0.0;
     const double post = !data.closed && ends[1].kind == VertexClass::Overflow ? pi / 2 : 0.0;
-    const double turn = span + pre + post;
+    // Run on past reflex corners (Corner2Reflex): the section is taken that much before the first
+    // end (on the circle run on: a moved copy of the section would revolve into a surface of
+    // revolution, not a torus), and the revolution is that much longer; a whole turn is a ring
+    double runBefore = 0.0;
+    double runAfter = 0.0;
+    if (!data.closed) {
+        runBefore = ends[0].kind == VertexClass::Corner2Reflex ? ends[0].runOn : 0.0;
+        runAfter = ends[1].kind == VertexClass::Corner2Reflex ? ends[1].runOn : 0.0;
+    }
+    double turn = span + pre + post + runBefore + runAfter;
     if (pre + post > 0.0 && turn > 2 * pi - angularTolerance) {
         refuse("an arc that runs on past its ends would turn into itself");
+    }
+    if (pre + post > 0.0 && runBefore + runAfter > 0.0) {
+        refuse("an arc with an overflowing end and a reflex corner");
+    }
+    if (turn > 2 * pi - angularTolerance) {
+        turn = 2 * pi;
     }
     gp_Trsf startTurn;
     startTurn.SetRotation(axis, -pre);
     const TopLoc_Location atStart(startTurn);
     for (int i = 0; i < 2 && !data.closed; ++i) {
+        if (ends[i].kind == VertexClass::Corner2Reflex) {
+            continue;
+        }
         if (!ends[i].surfaceEnd.IsNull()) {
             refuse("an arc that ends on a face that is not a plane");
         }
@@ -3121,7 +3168,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             refuse("the plane at the end of an arc does not contain its axis");
         }
     }
-    Section section = sectionAt(ctx, data, data.first);
+    Section section = sectionAt(ctx, data, data.first - runBefore);
     // The inward directions are radial and axial: snap them
     gp_Dir radial(gp_Vec(circle.Location(), section.corner));
     for (auto& d : section.inward) {
@@ -3193,9 +3240,44 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             // A spindle or horn torus (cause C4, shapes B and C): the round uses only the part of
             // it between the radii major and major + radius, which never reaches the axis, but
             // BRepPrimAPI_MakeTorus needs major > minor. Revolve the section itself instead; its
-            // volume is the closed form's (Pappus), and OCCT stores the round as a surface of
-            // revolution rather than a torus
-            solid = BRepPrimAPI_MakeRevol(section.face(), axis, span, Standard_True).Shape();
+            // volume is the closed form's (Pappus), and OCCT stores a spindle's round as a surface
+            // of revolution rather than a torus.
+            // A horn torus (major = minor) it stores as either, by the last digit of major as it
+            // comes out at the tool's place: a torus where major is above the radius, a surface of
+            // revolution where not (two teeth of one wheel differed), and its Booleans are wrong on
+            // the latter at a reflex corner (the fuse of two such tools gained 3e-3 of volume). So
+            // a horn's section is stepped out, by the last digit, until the round is a torus
+            const bool horn = major > section.radius - linearTolerance;
+            auto isTorus = [](const TopoDS_Shape& shape) {
+                for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                    if (BRepAdaptor_Surface(TopoDS::Face(it.Current()), Standard_False).GetType()
+                        == GeomAbs_Torus) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const double step = 4 * std::numeric_limits<double>::epsilon()
+                * (gp_Vec(gp::Origin(), section.centre).Magnitude() + section.radius);
+            for (int k = 0; k < (horn ? 64 : 1); ++k) {
+                Section revolved = section;
+                if (k > 0) {
+                    revolved = makeSection(
+                        section.corner.Translated(gp_Vec(radial) * (k * step)),
+                        section.inward[0],
+                        section.inward[1],
+                        ctx.request
+                    );
+                }
+                TopoDS_Shape start = revolved.face();
+                if (pre > 0.0) {
+                    start.Move(atStart);
+                }
+                solid = BRepPrimAPI_MakeRevol(start, axis, turn, Standard_True).Shape();
+                if (!horn || isTorus(solid)) {
+                    break;
+                }
+            }
         }
         else {
             round = BRepPrimAPI_MakeTorus(frame, major, section.radius).Shape();
@@ -4394,6 +4476,12 @@ bool checkStrips(
             for (const auto& contact : strip->contacts) {
                 double area = areaOf(contact);
                 double tolerance = areaToleranceOf(contact, *strip);
+                if (group.owners[k]->relTolerance > volumeTolerance) {
+                    // A tool cut by a reflex corner's mitre: its contact ends on a conic, and OCCT
+                    // measures it and its part in the face 2e-6 of the area apart (a 2-tooth
+                    // wheel: 0.663398705 and 0.663397377), which is not a strip off its face
+                    tolerance = std::max(tolerance, 1e-5 * area);
+                }
                 if (area - areaOf(commonOf(group.face, contact)) > tolerance) {
                     if (!group.owners[k]->cut) {
                         // checkFusedRunOff runs once the caller has trimmed the tool
@@ -4918,7 +5006,8 @@ TopoDS_Shape applyTools(
     double size = 0.0;
     for (const auto* tool : tools) {
         toolShapes.Append(tool->solid);
-        scale += tool->volume;
+        // Each tool to its own tolerance: the closed forms', or a reflex corner's quadrature's
+        scale += tool->relTolerance * tool->volume;
         size = std::max(size, squareSize(tool->solid));
     }
     std::unique_ptr<BRepAlgoAPI_BooleanOperation> operation;
@@ -4948,7 +5037,7 @@ TopoDS_Shape applyTools(
         inputs.push_back(tool->solid);
     }
     double raised = raisedTolerance(result, inputs);
-    double bound = volumeTolerance * scale + raised * size + expectedAllowance;
+    double bound = scale + raised * size + expectedAllowance;
     if (std::abs(change - expected) > bound) {
         // OCCT's default integration is not exact on free-form faces, and its error there moves
         // with the shape it integrates (about a point it takes from the shape): the faces the stage
@@ -5070,6 +5159,893 @@ TopoDS_Edge grownEdge(
 
 /// The construction, of plain shapes (kernel safety S1: it may run on a worker thread): the result
 /// and its history from the base in mapper; cornerCount receives how many corners it built
+/* Reflex corners with a circle (VertexClass::Corner2Reflex; fillet-tight-arc 8, FSLC #50).
+ *
+ * Near a vertex where two convex rims meet and the outline is reflex, the material is M1 u M2,
+ * M_i the material side of wall i run on past the vertex, and Onshape's result is
+ * (M1 - T1) u (M2 - T2), T_i the round's tool along wall i run on: each round runs on past the
+ * vertex, and where both reach the higher one is kept. With one radius that is the round of the
+ * wall the point lies deeper behind, so each edge's tool runs on (prepareReflexEnd) and is cut by
+ * the mitre: the vertical cylinder over the walls' bisector (mitreRegions), of which it keeps the
+ * side where its own wall is the deeper one. The cut tools have no closed form: their volumes are
+ * quadratures over the round's section of path lengths (sweptInside), checked against the solids
+ * OCCT builds.
+ */
+
+/// A tool as a sweep of its section, for the quadratures
+struct Sweep
+{
+    bool line = true;
+    gp_Ax2 frame;     // circle: Z the axis, X towards the start section's corner
+    double total = 0.0;  // circle: the angle of the revolution
+    gp_Dir direction;    // line
+    std::vector<TrimPlane> begin;  // line: the planes at its start and at its end
+    std::vector<TrimPlane> finish;
+    gp_Pnt corner;  // the section where the sweep starts
+    gp_Dir in0;
+    gp_Dir in1;
+    double r = 0.0;
+
+    bool closed() const
+    {
+        return !line && total >= 2 * pi - angularTolerance;
+    }
+    /// Where the path of the section's point X0 runs: [from, to], and the length per parameter
+    void range(const gp_Pnt& x0, double& from, double& to, double& speed) const
+    {
+        if (line) {
+            from = -std::numeric_limits<double>::infinity();
+            to = std::numeric_limits<double>::infinity();
+            for (const auto& plane : begin) {
+                from = std::max(from, crossing(plane, x0, direction));
+            }
+            for (const auto& plane : finish) {
+                to = std::min(to, crossing(plane, x0, direction));
+            }
+            speed = 1.0;
+            return;
+        }
+        from = 0.0;
+        to = total;
+        gp_Vec w(frame.Location(), x0);
+        speed = (w - gp_Vec(frame.Direction()) * w.Dot(gp_Vec(frame.Direction()))).Magnitude();
+    }
+    gp_Pnt at(const gp_Pnt& x0, double t) const
+    {
+        if (line) {
+            return x0.Translated(gp_Vec(direction) * t);
+        }
+        gp_Vec w(frame.Location(), x0);
+        double z = w.Dot(gp_Vec(frame.Direction()));
+        double x = w.Dot(gp_Vec(frame.XDirection()));
+        double y = w.Dot(gp_Vec(frame.YDirection()));
+        double c = std::cos(t);
+        double s = std::sin(t);
+        return frame.Location().Translated(
+            gp_Vec(frame.Direction()) * z + gp_Vec(frame.XDirection()) * (x * c - y * s)
+            + gp_Vec(frame.YDirection()) * (x * s + y * c)
+        );
+    }
+    /// The section's point (u along in0, v along in1 from the corner)
+    gp_Pnt node(double u, double v) const
+    {
+        return corner.Translated(gp_Vec(in0) * u + gp_Vec(in1) * v);
+    }
+};
+
+/// The vertex at an end of a selected edge (slot 0: at its first parameter)
+TopoDS_Vertex vertexAt(const EdgeData& data, int slot)
+{
+    TopoDS_Vertex vertices[2];
+    TopExp::Vertices(data.edge, vertices[0], vertices[1]);
+    const gp_Pnt& at = slot == 0 ? data.start : data.end;
+    return BRep_Tool::Pnt(vertices[0]).Distance(at) <= BRep_Tool::Pnt(vertices[1]).Distance(at)
+        ? vertices[0]
+        : vertices[1];
+}
+
+const EdgeData& edgeDataOf(const std::vector<EdgeData>& all, const TopoDS_Shape& edge)
+{
+    auto it = std::find_if(all.begin(), all.end(), [&](const EdgeData& d) {
+        return d.edge.IsSame(edge);
+    });
+    if (it == all.end()) {
+        refuse("a reflex corner's edge that was not analysed");
+    }
+    return *it;
+}
+
+/// The plane face the two edges at a reflex corner share
+TopoDS_Face sharedFace(const EdgeData& a, const EdgeData& b)
+{
+    for (const auto& mine : a.faces) {
+        for (const auto& theirs : b.faces) {
+            if (mine.IsSame(theirs)) {
+                return mine;
+            }
+        }
+    }
+    refuse("a reflex corner whose edges share no face");
+    return {};
+}
+
+/** How far a tool runs on past a reflex corner: an angle for a circle, a length for a line. Up to
+ * the middle of the stretch its edge's curve spends inside the other wall's material side (the
+ * mirror plane of that stretch: beyond it lies the mirror image of this corner, another corner's
+ * or none), and no further than a few radii
+ */
+double runOnOf(
+    const Context& ctx,
+    const std::vector<EdgeData>& /*all*/,
+    const EdgeData& data,
+    const TopoDS_Vertex& vertex,
+    const EdgeData& other
+)
+{
+    double r = ctx.request.size1;
+    gp_Pnt v = BRep_Tool::Pnt(vertex);
+    gp_Dir away = awayFrom(data.edge, vertex);
+    double otherParameter = 0.0;
+    gp_Dir otherAway = awayFrom(other.edge, vertex, &otherParameter);
+    double sine = gp_Vec(away).Crossed(gp_Vec(otherAway)).Magnitude();
+    if (sine < 0.1) {
+        refuse("a reflex corner whose edges are nearly tangent");
+    }
+    // The other wall's material side in the shared face
+    TopoDS_Face shared = sharedFace(data, other);
+    gp_Dir otherInward = inwardIn(shared, other.edge, otherParameter);
+    bool otherBulges = false;
+    gp_Pnt otherCentre;
+    if (!other.line) {
+        gp_Dir z = other.circle.Axis().Direction();
+        gp_Vec pc(other.circle.Location(), v);
+        pc -= gp_Vec(z) * pc.Dot(gp_Vec(z));
+        otherCentre = v.Translated(-pc);
+        otherBulges = otherInward.Dot(gp_Dir(pc)) < 0;
+    }
+    if (data.line) {
+        double length = 4 * r / sine;
+        if (otherBulges) {
+            // Half the chord of the other's circle
+            double half = gp_Vec(v, otherCentre).Dot(gp_Vec(away.Reversed()));
+            if (half > linearTolerance) {
+                length = std::min(length, half);
+            }
+        }
+        return length;
+    }
+    gp_Dir z = data.circle.Axis().Direction();
+    gp_Vec cv(data.circle.Location(), v);
+    cv -= gp_Vec(z) * cv.Dot(gp_Vec(z));
+    gp_Pnt centre = v.Translated(-cv);
+    double radius = data.circle.Radius();
+    double span = data.last - data.first;
+    double angle = std::min(4 * r / (sine * radius), 2 * pi - span - 0.05);
+    // The middle of the stretch inside the other wall's side: on the line through this circle's
+    // centre square to a straight wall, or through both centres
+    gp_Vec across;
+    if (other.line) {
+        across = gp_Vec(otherInward);
+    }
+    else {
+        across = gp_Vec(centre, otherCentre);
+        if (across.Magnitude() < linearTolerance) {
+            refuse("a reflex corner of two coaxial circles");
+        }
+        across.Normalize();
+        if (!otherBulges) {
+            across.Reverse();
+        }
+    }
+    // (towards the other's centre if it bulges, away from it if it is hollow, into a half-space)
+    double cosine = std::clamp(gp_Vec(gp_Dir(cv)).Dot(across), -1.0, 1.0);
+    double middle = std::acos(cosine);
+    if (middle > 1e-6) {
+        angle = std::min(angle, middle);
+    }
+    if (angle <= 1e-6) {
+        refuse("no room to run a round on past a reflex corner");
+    }
+    return angle;
+}
+
+/// How far from the vertex a run-on tool reaches, in the shared face
+double reachOf(const EdgeData& data, double runOn)
+{
+    if (data.line) {
+        return runOn;
+    }
+    double radius = data.circle.Radius();
+    return runOn >= pi ? 2 * radius : 2 * radius * std::sin(runOn / 2);
+}
+
+/// Sets up a reflex end before its tool is built: its run on, and for a line its end plane
+void prepareReflexEnd(
+    const Context& ctx,
+    const std::vector<EdgeData>& all,
+    const EdgeData& data,
+    VertexEnd ends[2],
+    int slot
+)
+{
+    TopoDS_Vertex vertex = vertexAt(data, slot);
+    const EdgeData& other = edgeDataOf(all, ends[slot].other);
+    ends[slot].runOn = runOnOf(ctx, all, data, vertex, other);
+    if (data.line) {
+        gp_Dir away = awayFrom(data.edge, vertex);
+        gp_Pnt v = BRep_Tool::Pnt(vertex);
+        ends[slot].trims = {{v.Translated(-gp_Vec(away) * ends[slot].runOn), away.Reversed()}};
+    }
+}
+
+/// The sweep of a tool built by circleTool or lineTool with these ends
+Sweep sweepOf(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
+{
+    Sweep sweep;
+    double runBefore = 0.0;
+    if (!data.line && ends[0].kind == VertexClass::Corner2Reflex) {
+        runBefore = ends[0].runOn;
+    }
+    Section section = sectionAt(ctx, data, data.first - runBefore);
+    if (data.line) {
+        sweep.line = true;
+        sweep.direction = gp_Dir(gp_Vec(data.start, data.end));
+        sweep.begin = ends[0].trims;
+        sweep.finish = ends[1].trims;
+        sweep.corner = section.corner;
+        sweep.in0 = section.inward[0];
+        sweep.in1 = section.inward[1];
+        sweep.r = section.radius;
+        return sweep;
+    }
+    const gp_Circ& circle = data.circle;
+    gp_Ax1 axis = circle.Axis();
+    const gp_Dir& z = axis.Direction();
+    gp_Dir radial(gp_Vec(circle.Location(), section.corner));
+    for (auto& d : section.inward) {
+        double rr = d.Dot(radial);
+        if (std::abs(rr) > 0.5) {
+            d = rr > 0 ? radial : radial.Reversed();
+        }
+        else {
+            d = d.Dot(z) > 0 ? z : z.Reversed();
+        }
+    }
+    double runAfter = ends[1].kind == VertexClass::Corner2Reflex ? ends[1].runOn : 0.0;
+    sweep.line = false;
+    sweep.total = std::min(2 * pi, data.last - data.first + runBefore + runAfter);
+    if (sweep.total > 2 * pi - angularTolerance) {
+        sweep.total = 2 * pi;
+    }
+    sweep.corner = section.corner;
+    sweep.in0 = section.inward[0];
+    sweep.in1 = section.inward[1];
+    sweep.r = section.radius;
+    gp_Vec toCorner(circle.Location(), sweep.corner);
+    gp_Vec across = toCorner - gp_Vec(z) * toCorner.Dot(gp_Vec(z));
+    sweep.frame = gp_Ax2(circle.Location(), z, gp_Dir(across));
+    return sweep;
+}
+
+/// The 8-point Gauss-Legendre rule on [-1, 1]
+constexpr double gaussNodes[8] = {-0.9602898564975363, -0.7966664774136267, -0.5255324099163290,
+                                  -0.1834346424956498, 0.1834346424956498,  0.5255324099163290,
+                                  0.7966664774136267,  0.9602898564975363};
+constexpr double gaussWeights[8] = {0.1012285362903763, 0.2223810344533745, 0.3137066458778873,
+                                    0.3626837833783620, 0.3626837833783620, 0.3137066458778873,
+                                    0.2223810344533745, 0.1012285362903763};
+
+/** Calls f(u, v, weight) at the quadrature nodes of a round's section: the square [0, r]^2 less
+ * the disc of radius r about (r, r), in polar coordinates about that centre
+ */
+template<class F>
+void sectionNodes(double r, F f)
+{
+    const int panels = 4;
+    for (int half = 0; half < 2; ++half) {
+        for (int pa = 0; pa < panels; ++pa) {
+            double a0 = pi + half * pi / 4 + pa * (pi / 4) / panels;
+            double a1 = a0 + (pi / 4) / panels;
+            for (int i = 0; i < 8; ++i) {
+                double phi = (a0 + a1) / 2 + (a1 - a0) / 2 * gaussNodes[i];
+                double wphi = (a1 - a0) / 2 * gaussWeights[i];
+                double rhoMax = r / std::max(-std::cos(phi), -std::sin(phi));
+                for (int pr = 0; pr < panels; ++pr) {
+                    double b0 = r + (rhoMax - r) * pr / panels;
+                    double b1 = r + (rhoMax - r) * (pr + 1) / panels;
+                    for (int j = 0; j < 8; ++j) {
+                        double rho = (b0 + b1) / 2 + (b1 - b0) / 2 * gaussNodes[j];
+                        double w = wphi * (b1 - b0) / 2 * gaussWeights[j] * rho;
+                        f(r + rho * std::cos(phi), r + rho * std::sin(phi), w);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Where a condition may change along the path of one point of a sweep's section: the path is a
+ * circle about the sweep's axis or a line along it, and the conditions of a reflex corner are
+ * distances from vertical axes and from vertical planes, so the changes are roots of
+ * a + b cos(t - c) or of a quadratic, in closed form
+ */
+struct PathChanges
+{
+    const Sweep& sweep;
+    gp_Dir up;  // the shared face's normal: the conditions are taken in the plane square to it
+    gp_Pnt x0;
+    double from = 0.0;
+    double to = 0.0;
+    double rho = 0.0;  // circle: the path's radius, and the angle of x0 in the sweep's frame
+    double theta0 = 0.0;
+    std::vector<double>& changes;
+
+    PathChanges(
+        const Sweep& sweep,
+        const gp_Dir& up,
+        const gp_Pnt& x0,
+        double from,
+        double to,
+        std::vector<double>& changes
+    )
+        : sweep(sweep)
+        , up(up)
+        , x0(x0)
+        , from(from)
+        , to(to)
+        , changes(changes)
+    {
+        if (!sweep.line) {
+            gp_Vec w(sweep.frame.Location(), x0);
+            double x = w.Dot(gp_Vec(sweep.frame.XDirection()));
+            double y = w.Dot(gp_Vec(sweep.frame.YDirection()));
+            rho = std::hypot(x, y);
+            theta0 = std::atan2(y, x);
+        }
+    }
+
+    void add(double t)
+    {
+        if (t > from && t < to) {
+            changes.push_back(t);
+        }
+    }
+    /// rho * amplitude * cos(t + theta0 - phase) = value
+    void cosine(double amplitude, double phase, double value)
+    {
+        double scale = rho * amplitude;
+        if (scale < 1e-12 || std::abs(value) > scale) {
+            return;
+        }
+        double angle = std::acos(value / scale);
+        for (int k = -2; k <= 2; ++k) {
+            add(phase - theta0 + angle + 2 * pi * k);
+            add(phase - theta0 - angle + 2 * pi * k);
+        }
+    }
+    /// The path's point is at the distance from the vertical axis through the point
+    void distance(const gp_Pnt& axisPoint, double radius)
+    {
+        if (radius <= 0) {
+            return;
+        }
+        if (sweep.line) {
+            gp_Vec w(axisPoint, x0);
+            w -= gp_Vec(up) * w.Dot(gp_Vec(up));
+            double half = w.Dot(gp_Vec(sweep.direction));
+            double rest = half * half - (w.Dot(w) - radius * radius);
+            if (rest >= 0) {
+                add(-half + std::sqrt(rest));
+                add(-half - std::sqrt(rest));
+            }
+            return;
+        }
+        gp_Vec a(sweep.frame.Location(), axisPoint);
+        double ax = a.Dot(gp_Vec(sweep.frame.XDirection()));
+        double ay = a.Dot(gp_Vec(sweep.frame.YDirection()));
+        double d = std::hypot(ax, ay);
+        // |p - a|^2 = rho^2 + d^2 - 2 rho d cos(t + theta0 - alpha)
+        cosine(2 * d, std::atan2(ay, ax), rho * rho + d * d - radius * radius);
+    }
+    /// The path's point is at the (signed) offset from the vertical plane through the point
+    void offset(const gp_Pnt& planePoint, const gp_Dir& normal, double value)
+    {
+        if (sweep.line) {
+            double along = gp_Vec(normal).Dot(gp_Vec(sweep.direction));
+            if (std::abs(along) > 1e-12) {
+                add((value - gp_Vec(planePoint, x0).Dot(gp_Vec(normal))) / along);
+            }
+            return;
+        }
+        double nx = gp_Vec(normal).Dot(gp_Vec(sweep.frame.XDirection()));
+        double ny = gp_Vec(normal).Dot(gp_Vec(sweep.frame.YDirection()));
+        double base = gp_Vec(planePoint, sweep.frame.Location()).Dot(gp_Vec(normal));
+        // n . (p - p0) = base + rho |n| cos(t + theta0 - beta)
+        cosine(std::hypot(nx, ny), std::atan2(ny, nx), value - base);
+    }
+};
+
+/** The volume of the part of the sweep where inside(point) holds: over the section, the length of
+ * each point's path inside. changes(point, from, to, list) lists where inside() may change along
+ * the path (PathChanges); between two of them it is taken at the middle
+ */
+template<class In, class Changes>
+double sweptInside(const Sweep& sweep, In inside, Changes changes)
+{
+    double volume = 0.0;
+    std::vector<double> at;
+    sectionNodes(sweep.r, [&](double u, double v, double w) {
+        gp_Pnt x0 = sweep.node(u, v);
+        double from = 0.0;
+        double to = 0.0;
+        double speed = 1.0;
+        sweep.range(x0, from, to, speed);
+        if (!(to > from)) {
+            return;
+        }
+        at.clear();
+        changes(x0, from, to, at);
+        at.push_back(from);
+        at.push_back(to);
+        std::sort(at.begin(), at.end());
+        double length = 0.0;
+        for (size_t i = 0; i + 1 < at.size(); ++i) {
+            if (at[i + 1] - at[i] > 1e-14 && inside(sweep.at(x0, (at[i] + at[i + 1]) / 2))) {
+                length += at[i + 1] - at[i];
+            }
+        }
+        volume += w * length * speed;
+    });
+    return volume;
+}
+
+/// Calls f(point) at the run-on end of the sweep's path for each node (slot 0: its start)
+template<class F>
+void runOnEnds(const Sweep& sweep, int slot, F f)
+{
+    if (sweep.closed()) {
+        return;
+    }
+    sectionNodes(sweep.r, [&](double u, double v, double) {
+        gp_Pnt x0 = sweep.node(u, v);
+        double from = 0.0;
+        double to = 0.0;
+        double speed = 1.0;
+        sweep.range(x0, from, to, speed);
+        f(sweep.at(x0, slot == 0 ? from : to));
+    });
+}
+
+/// The material side of a wall (the face of the edge that is not the shared face), near a vertex
+struct WallSide
+{
+    bool line = true;
+    gp_Pnt point;   // line: on the wall; circle: on the axis
+    gp_Dir inward;  // line: into the material; circle: the axis
+    double radius = 0.0;
+    bool insideCircle = true;
+    gp_Pnt vertex;
+    gp_Dir normal;  // the shared face's
+    double reach = 0.0;
+    /// The corner's mirror plane (cornerDomain): a point on it, and its normal away from the vertex
+    gp_Pnt mirrorPoint;
+    gp_Dir mirrorNormal;
+
+    /// In the corner's domain: within reach of the vertex, on its side of the mirror plane
+    bool local(const gp_Pnt& p) const
+    {
+        gp_Vec w(vertex, p);
+        w -= gp_Vec(normal) * w.Dot(gp_Vec(normal));
+        return w.Magnitude() < reach && gp_Vec(mirrorPoint, p).Dot(gp_Vec(mirrorNormal)) < 0;
+    }
+    /// How deep the point lies behind the wall, in its material side (negative: in front of it)
+    double depth(const gp_Pnt& p) const
+    {
+        if (line) {
+            return gp_Vec(point, p).Dot(gp_Vec(inward));
+        }
+        gp_Vec w(point, p);
+        w -= gp_Vec(inward) * w.Dot(gp_Vec(inward));
+        double d = w.Magnitude();
+        return insideCircle ? radius - d : d - radius;
+    }
+    /// The direction in which the depth grows fastest (a unit vector, in the shared face)
+    gp_Vec gradient(const gp_Pnt& p) const
+    {
+        if (line) {
+            return gp_Vec(inward);
+        }
+        gp_Vec w(point, p);
+        w -= gp_Vec(inward) * w.Dot(gp_Vec(inward));
+        w.Normalize();
+        return insideCircle ? -w : w;
+    }
+};
+
+WallSide wallSideOf(
+    const EdgeData& wall,
+    const TopoDS_Face& shared,
+    const TopoDS_Vertex& vertex,
+    double reach
+)
+{
+    WallSide side;
+    double parameter = 0.0;
+    awayFrom(wall.edge, vertex, &parameter);
+    side.vertex = BRep_Tool::Pnt(vertex);
+    side.normal = outwardNormal(shared, side.vertex);
+    side.reach = reach;
+    gp_Dir inward = inwardIn(shared, wall.edge, parameter);
+    if (wall.line) {
+        side.line = true;
+        side.point = side.vertex;
+        side.inward = inward;
+        return side;
+    }
+    side.line = false;
+    side.point = wall.circle.Location();
+    side.inward = wall.circle.Axis().Direction();
+    side.radius = wall.circle.Radius();
+    gp_Vec radial(side.point, side.vertex);
+    radial -= gp_Vec(side.inward) * radial.Dot(gp_Vec(side.inward));
+    side.insideCircle = inward.Dot(gp_Dir(radial)) < 0;
+    return side;
+}
+
+/** Sets the mirror plane of a reflex corner on both its walls' sides. Each wall's side is only
+ * known near the vertex: a straight wall's half-space, or a hollow wall's outside, says nothing
+ * of where its body ends (a box's far side, hidden in the disc fused to it). The corner's model
+ * holds up to the plane about which its two walls' curves mirror each other's crossings: through
+ * both circles' axes, or through a circle's axis square to a straight wall. Beyond it lies the
+ * mirror image of the corner, another corner's domain or none; the run on ends there too
+ */
+void cornerDomain(WallSide& a, WallSide& b)
+{
+    gp_Pnt on;
+    gp_Vec normal;
+    if (a.line && b.line) {
+        refuse("a reflex corner of two straight edges");
+    }
+    if (a.line != b.line) {
+        const WallSide& circle = a.line ? b : a;
+        const WallSide& line = a.line ? a : b;
+        on = circle.point;
+        normal = gp_Vec(a.normal).Crossed(gp_Vec(line.inward));
+    }
+    else {
+        on = a.point;
+        gp_Vec between(a.point, b.point);
+        between -= gp_Vec(a.normal) * between.Dot(gp_Vec(a.normal));
+        if (between.Magnitude() < 1e3 * linearTolerance) {
+            refuse("a reflex corner of two coaxial circles");
+        }
+        normal = gp_Vec(a.normal).Crossed(between);
+    }
+    normal.Normalize();
+    double side = gp_Vec(on, a.vertex).Dot(normal);
+    if (std::abs(side) < 1e3 * linearTolerance) {
+        refuse("a reflex corner on its own mirror plane");
+    }
+    if (side > 0) {
+        normal.Reverse();
+    }
+    a.mirrorPoint = b.mirrorPoint = on;
+    a.mirrorNormal = b.mirrorNormal = gp_Dir(normal);
+}
+
+/** The two regions a reflex corner's mitre parts the neighbourhood of its vertex into (within the
+ * cylinder of radius reach about the vertex): where a point lies deeper behind wall a than behind
+ * wall b, and the rest. Both rounds have the same radius, so they are equally high exactly where a
+ * point is equally deep behind both walls: the mitre lies on the vertical cylinder over that
+ * bisector, a conic in the shared face (two circles that both bulge or are both hollow: a
+ * hyperbola about their centres, or their centres' bisecting line when the radii are equal; a
+ * bulging and a hollow circle: an ellipse; a circle and a line: a parabola about the centre).
+ * The tools are cut by that cylinder, which crosses both rounds squarely all the way: OCCT's
+ * common part of the two tori themselves is wrong where they touch (a horn torus)
+ */
+struct MitreRegions
+{
+    TopoDS_Shape deeperA;  // depth behind a >= depth behind b
+    TopoDS_Shape deeperB;
+};
+
+MitreRegions mitreRegions(const WallSide& a, const WallSide& b, double r, double scale)
+{
+    const gp_Dir& up = a.normal;
+    const double reach = a.reach;
+    const double height = 5 * r;
+    gp_Pnt bottom = a.vertex.Translated(-gp_Vec(up) * (4 * r));
+    auto flat = [&](const gp_Pnt& p) {
+        gp_Vec w(bottom, p);
+        return p.Translated(-gp_Vec(up) * w.Dot(gp_Vec(up)));
+    };
+    TopoDS_Shape local = BRepPrimAPI_MakeCylinder(gp_Ax2(bottom, up), reach, height).Shape();
+    {
+        // The corner's domain (cornerDomain): the vertex's side of the mirror plane
+        gp_Pnt on = flat(a.mirrorPoint).Translated(gp_Vec(up) * (height / 2));
+        BRepAlgoAPI_Cut domain(local, halfSpaceBeyond({on, a.mirrorNormal}, 4 * scale + 4 * reach));
+        if (!domain.IsDone() || domain.HasErrors() || countSolids(domain.Shape()) != 1) {
+            refuse("building a reflex corner's domain failed");
+        }
+        local = domain.Shape();
+    }
+    // The side of the bisector that holds its focus (its convex side), as a solid
+    TopoDS_Shape convex;
+    auto prismOf = [&](const TopoDS_Edge& arc,
+                       const gp_Dir& axis,
+                       const gp_Dir& across,
+                       double level) {
+        // The arc, closed along its axis at the level (measured from the bottom point along axis)
+        BRepAdaptor_Curve curve(arc);
+        gp_Pnt first = curve.Value(curve.FirstParameter());
+        gp_Pnt last = curve.Value(curve.LastParameter());
+        auto atLevel = [&](const gp_Pnt& p) {
+            gp_Vec w(bottom, p);
+            return bottom.Translated(gp_Vec(across) * w.Dot(gp_Vec(across)) + gp_Vec(axis) * level);
+        };
+        BRepBuilderAPI_MakeWire wire(
+            arc,
+            BRepBuilderAPI_MakeEdge(last, atLevel(last)).Edge(),
+            BRepBuilderAPI_MakeEdge(atLevel(last), atLevel(first)).Edge(),
+            BRepBuilderAPI_MakeEdge(atLevel(first), first).Edge()
+        );
+        if (!wire.IsDone()) {
+            refuse("building a reflex corner's mitre failed");
+        }
+        TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+        return BRepPrimAPI_MakePrism(face, gp_Vec(up) * height, Standard_True).Shape();
+    };
+    auto axial = [&](const gp_Pnt& p, const gp_Dir& axis) {
+        return gp_Vec(bottom, p).Dot(gp_Vec(axis));
+    };
+    const double width = 2 * reach + r;  // how far the arc runs to either side of the vertex
+    if (a.line != b.line) {
+        // A parabola: its focus the circle's centre, its directrix the line moved by the radius
+        // (into the line's material for a bulging circle, out of it for a hollow one)
+        const WallSide& circle = a.line ? b : a;
+        const WallSide& line = a.line ? a : b;
+        gp_Pnt focus = flat(circle.point);
+        double s = gp_Vec(flat(line.point), focus).Dot(gp_Vec(line.inward));
+        double p = circle.insideCircle ? circle.radius - s : circle.radius + s;
+        if (p <= 1e3 * linearTolerance) {
+            refuse("a reflex corner whose mitre has no room");
+        }
+        gp_Dir axis = circle.insideCircle ? line.inward.Reversed() : line.inward;  // apex to focus
+        gp_Pnt apex = focus.Translated(-gp_Vec(axis) * (p / 2));
+        gp_Ax2 frame(apex, up, axis);
+        gp_Parab parabola(frame, p / 2);
+        double at = gp_Vec(apex, flat(a.vertex)).Dot(gp_Vec(frame.YDirection()));
+        TopoDS_Edge arc = BRepBuilderAPI_MakeEdge(parabola, at - width, at + width).Edge();
+        double widest = std::max(std::abs(at - width), std::abs(at + width));
+        double level = axial(apex, axis) + widest * widest / (2 * p) + 2 * reach;
+        convex = prismOf(arc, axis, frame.YDirection(), level);
+    }
+    else if (a.line) {
+        refuse("a reflex corner of two straight edges");
+    }
+    else {
+        gp_Pnt ca = flat(a.point);
+        gp_Pnt cb = flat(b.point);
+        double between = ca.Distance(cb);
+        if (between < 1e3 * linearTolerance) {
+            refuse("a reflex corner of two coaxial circles");
+        }
+        gp_Pnt middle((ca.XYZ() + cb.XYZ()) / 2);
+        if (a.insideCircle == b.insideCircle) {
+            // |P ca| - |P cb| = ra - rb: a hyperbola's branch about the centre of the smaller
+            // circle; a line when the radii are equal
+            double difference = a.radius - b.radius;
+            if (std::abs(difference) < 1e-9 * between) {
+                gp_Dir normal(gp_Vec(ca, cb));
+                gp_Pnt on = middle.Translated(gp_Vec(up) * (height / 2));
+                convex = halfSpaceBeyond({on, normal}, 4 * scale);
+            }
+            else {
+                gp_Dir axis(difference > 0 ? gp_Vec(ca, cb) : gp_Vec(cb, ca));
+                double major = std::abs(difference) / 2;
+                double focal = between / 2;
+                if (focal <= major + 1e3 * linearTolerance) {
+                    refuse("a reflex corner whose mitre has no room");
+                }
+                double minor = std::sqrt(focal * focal - major * major);
+                gp_Ax2 frame(middle, up, axis);
+                gp_Hypr hyperbola(frame, major, minor);
+                double at = gp_Vec(middle, flat(a.vertex)).Dot(gp_Vec(frame.YDirection()));
+                double u0 = std::asinh((at - width) / minor);
+                double u1 = std::asinh((at + width) / minor);
+                TopoDS_Edge arc = BRepBuilderAPI_MakeEdge(hyperbola, u0, u1).Edge();
+                double level = axial(middle, axis)
+                    + major * std::cosh(std::max(std::abs(u0), std::abs(u1))) + 2 * reach;
+                convex = prismOf(arc, axis, frame.YDirection(), level);
+            }
+        }
+        else {
+            // |P ca| + |P cb| = ra + rb: an ellipse about both centres
+            double major = (a.radius + b.radius) / 2;
+            double focal = between / 2;
+            if (major <= focal + 1e3 * linearTolerance) {
+                refuse("a reflex corner whose mitre has no room");
+            }
+            double minor = std::sqrt(major * major - focal * focal);
+            gp_Elips ellipse(gp_Ax2(middle, up, gp_Dir(gp_Vec(ca, cb))), major, minor);
+            BRepBuilderAPI_MakeWire wire(BRepBuilderAPI_MakeEdge(ellipse).Edge());
+            TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+            convex = BRepPrimAPI_MakePrism(face, gp_Vec(up) * height, Standard_True).Shape();
+        }
+    }
+    if (convex.IsNull() || countSolids(convex) != 1) {
+        refuse("building a reflex corner's mitre failed");
+    }
+    if (volumeOf(convex) < 0) {
+        convex.Reverse();
+    }
+    // Which side is deeper behind a: a point a little off the vertex, along the depths' gradient
+    gp_Vec gradient = a.gradient(a.vertex) - b.gradient(a.vertex);
+    if (gradient.Magnitude() < 0.1) {
+        refuse("a reflex corner whose edges are nearly tangent");
+    }
+    gp_Pnt probe = a.vertex.Translated(gradient.Normalized() * (r / 4) - gp_Vec(up) * (r / 2));
+    BRepClass3d_SolidClassifier classifier(convex, probe, linearTolerance);
+    const bool inConvex = classifier.State() == TopAbs_IN;
+    if (!inConvex && classifier.State() != TopAbs_OUT) {
+        refuse("a reflex corner's mitre passes through its probe point");
+    }
+    BRepAlgoAPI_Common common(local, convex);
+    BRepAlgoAPI_Cut cut(local, convex);
+    if (!common.IsDone() || common.HasErrors() || !cut.IsDone() || cut.HasErrors()) {
+        refuse("building a reflex corner's mitre failed");
+    }
+    MitreRegions regions;
+    regions.deeperA = inConvex ? common.Shape() : cut.Shape();
+    regions.deeperB = inConvex ? cut.Shape() : common.Shape();
+    return regions;
+}
+
+/// The reflex corners' run-on tools
+struct ReflexCorners
+{
+    struct Corner
+    {
+        TopoDS_Vertex vertex;
+        TopoDS_Shape first;  // the edge whose tool was built first
+        MitreRegions regions;  // a: the first edge's wall
+    };
+    std::vector<Corner> corners;
+    bool found = false;
+
+    bool any() const
+    {
+        return found;
+    }
+
+    /// The reach of the cylinder about the vertex that bounds the corner's cuts
+    static double reachAt(
+        const Context& ctx,
+        const std::vector<EdgeData>& all,
+        const EdgeData& a,
+        const EdgeData& b,
+        const TopoDS_Vertex& vertex
+    )
+    {
+        double r = ctx.request.size1;
+        return std::max(
+                   reachOf(a, runOnOf(ctx, all, a, vertex, b)),
+                   reachOf(b, runOnOf(ctx, all, b, vertex, a))
+               )
+            + 2 * r;
+    }
+
+    /// The edge's tool, run on: cut away what lies deeper behind the other wall at each reflex
+    /// end, and its closed form less that part's quadrature becomes its volume
+    void add(
+        const Context& ctx,
+        const std::vector<EdgeData>& all,
+        const EdgeData& data,
+        const VertexEnd ends[2],
+        Tool& tool
+    )
+    {
+        found = true;
+        double r = ctx.request.size1;
+        Sweep sweep = sweepOf(ctx, data, ends);
+        std::vector<Handle(Geom_Surface)> regionSurfaces;
+        struct Sides
+        {
+            WallSide own;
+            WallSide other;
+        };
+        std::vector<Sides> sides;
+        for (int slot = 0; slot < 2; ++slot) {
+            if (ends[slot].kind != VertexClass::Corner2Reflex) {
+                continue;
+            }
+            TopoDS_Vertex vertex = vertexAt(data, slot);
+            const EdgeData& other = edgeDataOf(all, ends[slot].other);
+            TopoDS_Face shared = sharedFace(data, other);
+            double reach = reachAt(ctx, all, data, other, vertex);
+            Sides pair {
+                wallSideOf(data, shared, vertex, reach),
+                wallSideOf(other, shared, vertex, reach)
+            };
+            cornerDomain(pair.own, pair.other);
+            auto corner = std::find_if(corners.begin(), corners.end(), [&](const Corner& c) {
+                return c.vertex.IsSame(vertex);
+            });
+            if (corner == corners.end()) {
+                corners.push_back(
+                    {vertex, data.edge, mitreRegions(pair.own, pair.other, r, ctx.scale)}
+                );
+                corner = std::prev(corners.end());
+            }
+            const TopoDS_Shape& beyond = corner->first.IsSame(data.edge) ? corner->regions.deeperB
+                                                                          : corner->regions.deeperA;
+            BRepAlgoAPI_Cut cut(tool.solid, beyond);
+            if (!cut.IsDone() || cut.HasErrors()) {
+                refuse("cutting a tool at a reflex corner failed");
+            }
+            tool.solid = cut.Shape();
+            for (TopExp_Explorer it(beyond, TopAbs_FACE); it.More(); it.Next()) {
+                TopLoc_Location location;
+                regionSurfaces.push_back(BRep_Tool::Surface(TopoDS::Face(it.Current()), location));
+            }
+            // The run on ends beyond the mitre, where it is cut away: the rounds close within it
+            // (a spindle round's do not: its mitre runs on to the corner's mirror image)
+            // (it may end on the mirror plane itself)
+            runOnEnds(sweep, slot, [&](const gp_Pnt& p) {
+                gp_Vec fromVertex(pair.own.vertex, p);
+                fromVertex -= gp_Vec(pair.own.normal) * fromVertex.Dot(gp_Vec(pair.own.normal));
+                gp_Vec fromMirror(pair.own.mirrorPoint, p);
+                if (fromVertex.Magnitude() >= pair.own.reach
+                    || fromMirror.Dot(gp_Vec(pair.own.mirrorNormal)) > 1e-6 * r
+                    || pair.other.depth(p) - pair.own.depth(p) < 1e-9 * r) {
+                    refuse("the rounds at a reflex corner do not close within their run on");
+                }
+            });
+            sides.push_back(pair);
+        }
+        double removed = sweptInside(
+            sweep,
+            [&](const gp_Pnt& p) {
+                return std::any_of(sides.begin(), sides.end(), [&](const Sides& s) {
+                    return s.own.local(p) && s.other.depth(p) > s.own.depth(p);
+                });
+            },
+            [&](const gp_Pnt& x0, double from, double to, std::vector<double>& list) {
+                for (const auto& s : sides) {
+                    PathChanges path(sweep, s.own.normal, x0, from, to, list);
+                    // The own wall's depth is the same all along the path
+                    double depth = s.own.depth(x0);
+                    if (s.other.line) {
+                        path.offset(s.other.point, s.other.inward, depth);
+                    }
+                    else {
+                        path.distance(
+                            s.other.point,
+                            s.other.insideCircle ? s.other.radius - depth : s.other.radius + depth
+                        );
+                    }
+                    path.distance(s.own.vertex, s.own.reach);
+                    path.offset(s.own.mirrorPoint, s.own.mirrorNormal, 0.0);
+                }
+            }
+        );
+        tool.volume -= removed;
+        tool.relTolerance = 1e-4;
+        // The tool's faces on the regions' surfaces: the mitre, which the other edge's tool ends on
+        // too, so that nothing of it is left once both are cut. A face left on it, or on the
+        // domain's own boundary, means the corner's model does not hold there (unionEndFaces'
+        // check refuses)
+        for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+            TopLoc_Location location;
+            Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(it.Current()), location);
+            if (std::find(regionSurfaces.begin(), regionSurfaces.end(), surface)
+                != regionSurfaces.end()) {
+                tool.unionEndFaces.push_back(it.Current());
+            }
+        }
+    }
+};
+
 TopoDS_Shape constructShape(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,
@@ -5132,13 +6108,15 @@ TopoDS_Shape constructShape(
     }
 
     std::vector<Tool> tools;
+    ReflexCorners reflex;
     // Each tool's checks before any Boolean
     auto admit = [&](Tool&& tool) {
         if (countSolids(tool.solid) != 1) {
             refuse("a tool is not one solid");
         }
         double measured = volumeOf(tool.solid);
-        if (!tool.measured && std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
+        if (!tool.measured
+            && std::abs(measured - tool.volume) > tool.relTolerance * tool.volume) {
             refuse("a tool's volume " + describe(measured) + " differs from its closed form "
                    + describe(tool.volume));
         }
@@ -5202,7 +6180,12 @@ TopoDS_Shape constructShape(
                     || kind == VertexClass::Corner2Union || kind == VertexClass::Corner3) {
                     cornerVertices.Add(vertices[i]);
                 }
+                // (a reflex corner's tools are interior-disjoint, with volumes of their own: they
+                // are cut together, not one by one as overlapping tools are)
                 unionCorners = unionCorners || kind == VertexClass::Corner2Union;
+                if (kind == VertexClass::Corner2Reflex) {
+                    cornerVertices.Add(vertices[i]);
+                }
                 auto known = [&](const TopoDS_Vertex& v) {
                     return v.IsSame(vertices[i]);
                 };
@@ -5266,19 +6249,39 @@ TopoDS_Shape constructShape(
                 }
             }
         }
+        bool reflexEnd = false;
+        for (int slot = 0; slot < 2 && !edgeData.closed; ++slot) {
+            if (ends[slot].kind == VertexClass::Corner2Reflex) {
+                reflexEnd = true;
+                prepareReflexEnd(ctx, data, edgeData, ends, slot);
+            }
+        }
         if (edgeData.ruled) {
+            if (reflexEnd) {
+                refuse("a reflex corner with a straight edge on a cylinder");
+            }
             admit(ruledTool(ctx, edgeData, ends, request.size1));
         }
         else if (edgeData.line) {
             if (auto tool = lineTool(ctx, edgeData, ends)) {
+                if (reflexEnd) {
+                    reflex.add(ctx, data, edgeData, ends, *tool);
+                }
                 admit(std::move(*tool));
+            }
+            else if (reflexEnd) {
+                refuse("a tool at a reflex corner has no length");
             }
         }
         else if (tightArc(ctx, edgeData)) {
             admit(tightTool(ctx, edgeData, ends, data));
         }
         else {
-            admit(circleTool(ctx, edgeData, ends));
+            Tool tool = circleTool(ctx, edgeData, ends);
+            if (reflexEnd) {
+                reflex.add(ctx, data, edgeData, ends, tool);
+            }
+            admit(std::move(tool));
         }
     }
     for (const auto& [vertex, convex] : corners) {
@@ -5384,7 +6387,7 @@ TopoDS_Shape constructShape(
     const bool trimmed = checkStrips(
                              tools,
                              overlaps,
-                             limitOnly,
+                             limitOnly && !reflex.any(),
                              ctx.edgeFaces,
                              ctx.selected,
                              fusedOff,
@@ -5729,6 +6732,7 @@ TopoDS_Shape constructShape(
                     double expected = volumeOf(common);
                     double allowance = raisedTolerance(common, {shape, tools[i].solid})
                         * squareSize(tools[i].solid);
+
                     shape = applyTools(shape, {&tools[i]}, expected, true, stages, allowance);
                 }
             }
@@ -5902,8 +6906,13 @@ TopoDS_Shape constructShape(
             ShapeUpgrade_UnifySameDomain unify(shape, false, true, false);
             unify.KeepShapes(keep);
             unify.Build();
-            shape = unify.Shape();
-            stages.emplace_back(unify.History(), shape);
+            // At a horn round's reflex corner the rounds' pieces meet in a point: merged into one
+            // face across it, the face is not orientable. Then they stay apart (no face of the
+            // corner's own either way: the pieces lie on the rounds' surfaces)
+            if (!reflex.any() || BRepCheck_Analyzer(unify.Shape()).IsValid()) {
+                shape = unify.Shape();
+                stages.emplace_back(unify.History(), shape);
+            }
         }
     }
 
@@ -6488,6 +7497,95 @@ TopoDS_Shape constructUnderOverhang(
 thread_local Recorder* innermostRecorder = nullptr;
 
 }  // namespace
+
+bool reflexCircleCorner(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    gp_Pnt* corner
+)
+{
+    try {
+        TopTools_IndexedMapOfShape selected;
+        for (const auto& edge : edges) {
+            if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                selected.Add(edge);
+            }
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (int i = 1; i <= vertexEdges.Extent(); ++i) {
+            const TopoDS_Vertex& vertex = TopoDS::Vertex(vertexEdges.FindKey(i));
+            const auto& around = vertexEdges(i);
+            if (around.Extent() != 3) {
+                continue;
+            }
+            std::vector<TopoDS_Edge> picked;
+            for (const auto& edge : around) {
+                if (selected.Contains(edge)) {
+                    picked.push_back(TopoDS::Edge(edge));
+                }
+            }
+            if (picked.size() != 2) {
+                continue;
+            }
+            bool circle = false;
+            for (const auto& edge : picked) {
+                circle = circle || BRepAdaptor_Curve(edge).GetType() == GeomAbs_Circle;
+            }
+            if (!circle) {
+                continue;
+            }
+            const auto* faces0 = edgeFaces.Seek(picked[0]);
+            const auto* faces1 = edgeFaces.Seek(picked[1]);
+            if (!faces0 || !faces1 || faces0->Extent() != 2 || faces1->Extent() != 2) {
+                continue;
+            }
+            // Each edge's wall: its face that the other edge does not border
+            TopoDS_Face walls[2];
+            for (int k = 0; k < 2; ++k) {
+                const auto* mine = k == 0 ? faces0 : faces1;
+                const auto* theirs = k == 0 ? faces1 : faces0;
+                for (const auto& face : *mine) {
+                    bool sharedFace = false;
+                    for (const auto& other : *theirs) {
+                        sharedFace = sharedFace || other.IsSame(face);
+                    }
+                    if (!sharedFace) {
+                        walls[k] = TopoDS::Face(face);
+                    }
+                }
+            }
+            if (walls[0].IsNull() || walls[1].IsNull()) {
+                continue;
+            }
+            gp_Pnt point = BRep_Tool::Pnt(vertex);
+            BRepAdaptor_Surface s0(walls[0], Standard_False);
+            BRepAdaptor_Surface s1(walls[1], Standard_False);
+            auto planeOrCylinder = [](const BRepAdaptor_Surface& s) {
+                return s.GetType() == GeomAbs_Plane || s.GetType() == GeomAbs_Cylinder;
+            };
+            if (!planeOrCylinder(s0) || !planeOrCylinder(s1)) {
+                continue;
+            }
+            gp_Dir away0 = awayFrom(picked[0], vertex);
+            gp_Dir away1 = awayFrom(picked[1], vertex);
+            if (away0.Dot(outwardNormal(walls[1], point)) > 1e-6
+                && away1.Dot(outwardNormal(walls[0], point)) > 1e-6) {
+                if (corner) {
+                    *corner = point;
+                }
+                return true;
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return false;
+}
 
 TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
 {

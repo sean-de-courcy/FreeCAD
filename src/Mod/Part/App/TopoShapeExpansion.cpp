@@ -7774,6 +7774,10 @@ struct DressUpOutcome
     bool constructed {false};
     /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
     bool preferred {false};
+    /// OCCT built a result, but the selection has a reflex corner with a circle
+    /// (FilletFallback::reflexCircleCorner()), where its rounds don't meet in Onshape's mitre:
+    /// the exact construction, or an error
+    bool reflexFirst {false};
     FilletFallback::Construction construction;
     std::string reason;
 };
@@ -7789,7 +7793,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
     const std::vector<TopoShape>& inputEdges,
     const FilletFallback::Request& request,
     const char* what,
-    bool prefer = false
+    bool prefer = false,
+    bool reflex = false
 )
 {
     auto outcome = std::make_shared<DressUpOutcome>();
@@ -7805,7 +7810,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
          edges,
          request = FilletFallback::Request(request),
          outcome,
-         prefer](const Message_ProgressRange& /*range*/) mutable {
+         prefer,
+         reflex](const Message_ProgressRange& /*range*/) mutable {
             DressUpOutcome& out = *outcome;
             if (prefer) {
                 // OCCT's result would be valid but wrong (a tight wall arc): the construction
@@ -7834,7 +7840,15 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
-            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns) && !prefer) {
+            // At a reflex corner with a circle OCCT's valid result is wrong (fillet-tight-arc 8: a
+            // patch, or a misplaced mitre): the construction builds it, below the limit too. (Where
+            // the preferred construction above refused, its reason stands)
+            out.reflexFirst = reflex && !out.failed && !out.thin && !out.invalid && !out.turns;
+            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns || out.reflexFirst)
+                && !prefer) {
+                if (reflex) {
+                    request.limitOnly = false;
+                }
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
@@ -7909,15 +7923,18 @@ TopoShape& TopoShape::makeElementFillet(
         edgeShapes.push_back(e.getShape());
     }
     bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
-    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer);
+    gp_Pnt reflexAt;
+    const bool reflex = FilletFallback::reflexCircleCorner(input.getShape(), edgeShapes, &reflexAt);
+    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);
     if (outcome->preferred) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
         // Naming it failed: OCCT, as without the preference
-        outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
+        outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", false, reflex);
     }
-    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns) {
+    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
+        || outcome->reflexFirst) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
@@ -7933,6 +7950,18 @@ TopoShape& TopoShape::makeElementFillet(
                 Base::CADKernelError,
                 "The fillet's tangent chain turns from concave to convex at a vertex of 4 edges, "
                 "where OCCT's ends differ from Onshape's; its exact construction refused: "
+                    << outcome->reason
+            );
+        }
+        if (outcome->reflexFirst) {
+            // OCCT's rounds there are valid and not Onshape's: never returned silently (the
+            // user's ruling, 2026-11-13: build like Onshape, or refuse loudly)
+            FC_THROWM(
+                Base::CADKernelError,
+                "The fillet has a reflex corner with a circle, at ("
+                    << reflexAt.X() << ", " << reflexAt.Y() << ", " << reflexAt.Z()
+                    << "), where Onshape's rounds meet in a mitre and OCCT's do not; its exact "
+                       "construction refused: "
                     << outcome->reason
             );
         }
