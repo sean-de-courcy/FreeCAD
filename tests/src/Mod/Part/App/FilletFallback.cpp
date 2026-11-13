@@ -3157,4 +3157,38 @@ TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
     );
 }
 
+// C4 shape A (ops#640, notes/fillet-tight-arc.md): the top rim's round of 1.5 on a 30 x 20 x 5
+// plate whose corner at (30, 0) is rounded rho < 1.5, the others 4. OCCT's result is valid but
+// wrong; the construction runs first. Onshape's volumes (oracle 17, TA1 and TA2) and face count
+TEST_F(FilletFallbackTest, roundAlongAWallArcTighterThanTheRound)
+{
+    for (auto [rho, onshape] : {std::pair {1.0, 2902.820914}, std::pair {0.5, 2903.543273}}) {
+        TopoShape plate(box(30, 20, 5), 1L);
+        std::vector<TopoShape> corners {
+            edgeBetween(plate, {0, 0, 0}, {0, 0, 5}),
+            edgeBetween(plate, {30, 20, 0}, {30, 20, 5}),
+            edgeBetween(plate, {0, 20, 0}, {0, 20, 5})
+        };
+        TopoShape rounded = dressUp(plate, corners, fillet(4));
+        TopoShape base = dressUp(rounded, {edgeBetween(rounded, {30, 0, 0}, {30, 0, 5})}, fillet(rho));
+        auto top = edgesWhere(base, atHeight(5));
+        ASSERT_EQ(top.size(), 8U);
+        TopoShape result = dressUp(base, top, fillet(1.5));
+        const auto& shape = result.getShape();
+        ASSERT_FALSE(shape.IsNull());
+        EXPECT_TRUE(BRepCheck_Analyzer(shape).IsValid());
+        EXPECT_EQ(count(shape, TopAbs_SOLID), 1);
+        EXPECT_FALSE(hasZeroAreaFace(shape));
+        EXPECT_NEAR(volume(shape), onshape, 1e-3) << "rho " << rho;
+        EXPECT_EQ(count(shape, TopAbs_FACE), 18) << "rho " << rho;
+        // The wall arc stays whole at depth r, a circle
+        auto arcs = edgesWhere(result, atHeight(3.5), true);
+        EXPECT_TRUE(std::any_of(arcs.begin(), arcs.end(), [rho = rho](const TopoShape& edge) {
+            return std::abs(BRepAdaptor_Curve(TopoDS::Edge(edge.getShape())).Circle().Radius() - rho)
+                < 1e-9;
+        })) << "rho "
+            << rho;
+    }
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
