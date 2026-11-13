@@ -3284,7 +3284,10 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
     }
     if (curved) {
         double measured = volumeOf(solid);
-        if (std::abs(measured + removed - prism) > volumeTolerance * prism) {
+        // With what the split's own tolerances allow, as admit() and trimByWall() do: an end
+        // surface tangent to the prism's side (a blend running out of it) splits it less sharply
+        double allowance = raisedTolerance(solid, {}) * squareSize(solid);
+        if (std::abs(measured + removed - prism) > volumeTolerance * prism + allowance) {
             refuse("a tool trimmed by an end face's surface: " + describe(measured) + " left and "
                    + describe(removed) + " cut away of " + describe(prism));
         }

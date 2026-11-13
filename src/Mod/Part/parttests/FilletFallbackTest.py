@@ -3972,6 +3972,67 @@ class CurvedEndTrimTest(unittest.TestCase):
                 self.assertAlmostEqual(shape.Area - body.Area, dA, delta=1e-5)
                 self.assertEqual(len(shape.Faces), len(body.Faces) + 2)
 
+    def testAnEndWallTangentToTheEdge(self):
+        # Case Base #105 on the fork's own body (ops#640): the end blend runs out tangent to the lip's side,
+        # so at the round's end the end face's normal is square to the edge (refused: "an end face that is
+        # not a plane, tangent to the edge"; Onshape's STEP body passed that test on its noise, 1.8e-6).
+        # The notch's wall here leaves the front tangentially at both ends of the chord: arcs R 3 about
+        # (+-4, 3) from (+-4, 0) to (+-1, 3), joined by a half circle R 1 about (0, 3). The underside's depth
+        # is s = 3 - sqrt(9 - t^2) at t = 4 - |x| from the end (a cusp of angle 0), 1 at t = sqrt(5). The
+        # class's closed form with that s; on the arcs x = 4 - 3 sin(f), the wall's arc length 3 df
+        block = Part.makeBox(20, 8, 5, V(-10, 0, 0))
+
+        def arc(centre, r, a0, a1):
+            circle = Part.Circle(V(centre[0], centre[1], -1), V(0, 0, 1), r)
+            return Part.ArcOfCircle(circle, math.radians(a0), math.radians(a1)).toShape()
+
+        corners = [V(4, 0, -1), V(4, -1, -1), V(-4, -1, -1), V(-4, 0, -1)]
+        edges = [arc((4, 3), 3, 180, 270), arc((0, 3), 1, 0, 180), arc((-4, 3), 3, 270, 360)]
+        edges += [Part.makeLine(a, b) for a, b in zip(corners, corners[1:])]
+        notch = Part.Face(Part.Wire(Part.__sortEdges__(edges))).extrude(V(0, 0, 5))
+        body = block.cut(notch).removeSplitter()
+        chord = [
+            e
+            for e in body.Edges
+            if e.Length > 7.9 and all(abs(v.Point.y) < 1e-9 and abs(v.Point.z - 4) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(chord), 1)
+
+        def h(y):
+            return 1 - math.sqrt(max(1 - (1 - y) ** 2, 0.0))
+
+        def section(w):
+            u = 1 - min(max(w, 0.0), 1.0)
+            return 1 - u - math.pi / 4 + (u * math.sqrt(max(1 - u * u, 0.0)) + math.asin(u)) / 2
+
+        def s(x):
+            t = 4 - abs(x)
+            return 3 - math.sqrt(9 - t * t)
+
+        f1 = math.acos(2 / 3)  # where s = 1
+        x1 = 4 - 3 * math.sin(f1)
+
+        def pieces(g):
+            return sum(gauss_legendre(g, f1 * k / 16, f1 * (k + 1) / 16) for k in range(16))
+
+        def ends(g):
+            # both ends' parts, where s < 1
+            return 2 * pieces(lambda f: g(4 - 3 * math.sin(f)) * 3 * math.cos(f))
+
+        dV = -(ends(lambda x: section(s(x))) + 2 * x1 * section(1.0))
+        blend = ends(lambda x: math.acos(1 - s(x))) + 2 * x1 * math.pi / 2
+        under = -(ends(s) + 2 * x1)
+        grown = 2 * 3 * pieces(lambda f: h(3 * (1 - math.cos(f))))
+        dA = blend - 8 + under + grown
+        self.assertAlmostEqual(dV, -1.280342, delta=1e-6)
+        self.assertAlmostEqual(dA, -2.277730, delta=1e-6)
+        shape = body.makeFillet(1.0, chord)
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume - body.Volume, dV, delta=1e-5)
+        self.assertAlmostEqual(shape.Area - body.Area, dA, delta=1e-5)
+        self.assertEqual(len(shape.Faces), len(body.Faces) + 2)
+
     def testBelowTheLimitAsOcct(self):
         # Below the limit OCCT builds, and trims at the wall's surface: the fallback isn't asked
         for wall in ("cyl", "bsp"):
