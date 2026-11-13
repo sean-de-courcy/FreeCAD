@@ -3084,6 +3084,48 @@ class CuspTest(unittest.TestCase):
                     self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * expected)
                     self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
 
+    def testRoundsAsOnshape(self):
+        """CU5 (ops#748): a fillet of the cusped rim through the public path. OCCT's own result there
+        is valid and wrong (r 1: -58.46, or +126.30 with the seam on top, for Onshape's -2.922055).
+        Onshape's round is one torus face cut off by the wall planes y = +-5: dV -2.922055 (evVolume,
+        about 1.5e-4), dA -5.057250, 10 -> 11 faces, the torus 20.915168. The other radii against
+        the same shape by other Booleans: the round's spandrel turned a whole turn about the tunnel's
+        axis, kept between the wall planes above the axis"""
+        V = FreeCAD.Vector
+        for seam in (V(0, 0, -1), V(0, 0, 1), V(0, 1, 0)):
+            shape, rim = self.slot(seam)
+            for r in (1.0, 0.5, 2.0):
+                with self.subTest(seam=tuple(seam), r=r):
+                    # the corner (15, 0, 15), r along the tunnel and r up the wall, less the quarter
+                    # disc about (15 - r, 0, 15 + r)
+                    centre = V(15 - r, 0, 15 + r)
+                    middle = centre + V(1, 0, -1).normalize() * r
+                    arc = Part.Arc(V(15 - r, 0, 15), middle, V(15, 0, 15 + r)).toShape()
+                    spandrel = Part.Face(
+                        Part.Wire(
+                            [
+                                Part.makeLine(V(15, 0, 15), V(15 - r, 0, 15)),
+                                arc,
+                                Part.makeLine(V(15, 0, 15 + r), V(15, 0, 15)),
+                            ]
+                        )
+                    )
+                    ring = spandrel.revolve(V(0, 0, 10), V(1, 0, 0), 360)
+                    tool = ring.common(Part.makeBox(30, 10, 20, V(0, -5, 10)))
+                    expected = shape.Volume - shape.cut(tool).Volume
+                    if r == 1.0:
+                        self.assertAlmostEqual(expected, 2.922055, delta=3e-4)  # Onshape's
+                    result = shape.makeFillet(r, rim)
+                    self.assertTrue(result.isValid())
+                    self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-6 * shape.Volume)
+                    self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=2e-4)
+                    self.assertEqual(len(result.Faces), len(shape.Faces) + len(rim))
+                    tori = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomToroid"]
+                    self.assertEqual(len(tori), len(rim))
+                    if r == 1.0:
+                        self.assertAlmostEqual(shape.Area - result.Area, 5.057250, delta=1e-5)
+                        self.assertAlmostEqual(sum(f.Area for f in tori), 20.915168, delta=1e-5)
+
     def testStripEndingOnAnElbow(self):
         """Case Base #76 as built: the tunnel ends 3 behind the end wall in an elbow turning up, and
         the 3 along the tunnel ends exactly on the tangent edge into it. The elbow only gains the

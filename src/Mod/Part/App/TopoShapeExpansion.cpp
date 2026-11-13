@@ -7763,7 +7763,7 @@ struct DressUpOutcome
     bool failed {false};
     bool thin {false};
     bool invalid {false};
-    /// A chamfer whose edge ends in a cusp (FilletFallback::endsInCusp()): the exact
+    /// A chamfer or fillet whose edge ends in a cusp (FilletFallback::endsInCusp()): the exact
     /// construction first, OCCT's result where it refuses
     bool cusp {false};
     /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
@@ -7827,9 +7827,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
             out.invalid = !out.failed && !out.thin && builtInvalid(*maker, base);
             // Case Base #76: at a cusp OCCT's chamfer can be valid and wrong (oracle 17 Q-CUSP:
-            // removing ten times Onshape's volume, a face running out of the body)
+            // removing ten times Onshape's volume, a face running out of the body), and so can its
+            // fillet (CU5: -58.46 or +126.30 for Onshape's -2.922055; ops#748)
             out.cusp = !out.failed && !out.thin && !out.invalid
-                && request.kind == FilletFallback::Kind::Chamfer
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
@@ -7915,7 +7915,8 @@ TopoShape& TopoShape::makeElementFillet(
         // Naming it failed: OCCT, as without the preference
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
     }
-    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns) {
+    // At a cusp OCCT built: its result stands where the construction refuses, as a chamfer's does
+    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns || outcome->cusp) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }

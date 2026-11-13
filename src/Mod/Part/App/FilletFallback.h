@@ -213,8 +213,8 @@ PartExport TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& 
 /** Whether one of the edges ends in a cusp: an unselected edge of one of its faces leaves the
  * vertex the way it does (Case Base #76, a tunnel's half circle on a slot's end wall, the slot's
  * walls tangent to the tunnel). OCCT's chamfer there can be valid and wrong (a face running out
- * of the body), so the exact construction builds it first, and OCCT's result stands where it
- * refuses.
+ * of the body), and so can its fillet (ops#748), so the exact construction builds it first, and
+ * OCCT's result stands where it refuses.
  */
 PartExport bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges);
 
