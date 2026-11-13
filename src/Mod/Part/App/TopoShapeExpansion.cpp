@@ -9730,6 +9730,7 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // is named as from the shape.
     TopoShape input(shape);
     bool failed = false;
+    TopoShape partial;  // the uniter's result when it kept a compound's shell unrefined
     try {
         input.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
         MyRefineMaker mkRefine(input.getShape());
@@ -9740,7 +9741,10 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         // For some reason, refine operation may reverse the solid
         fixSolidOrientation();
         if (isClosed() == closed) {
-            return *this;
+            if (!mkRefine.skippedShells()) {
+                return *this;
+            }
+            partial = *this;  // the fallback below, else this
         }
     }
     catch (Standard_Failure&) {
@@ -9749,11 +9753,15 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // The face uniter re-sews the whole shell after it merges a group; a shell holding a
     // helix's loose edges (FeatureHelix widens them to about 2e-4 mm so its fusion succeeds)
     // came back open, or the uniter failed, and every later feature of the body kept split
-    // coplanar faces, silently: Onshape merges them (rehearsal 5, rb43). OCCT's
-    // UnifySameDomain merges in place, without sewing. It merges only the face uniter's kinds
-    // (planes, cylinders, B-splines: the others are kept), so a helix earlier in the body never
-    // decides whether cones or tori merge (review replc r1, T3); it runs on a fresh copy, as the
-    // uniter may have changed its own (T2); and its result counts only when it is valid, as
+    // coplanar faces, silently: Onshape merges them (rehearsal 5, rb43). In a compound (most
+    // features' shapes) the uniter's failure kept that shell unrefined without an error, so the
+    // fallback runs then too (review replc r2), and the partial result stands when it is refused.
+    // OCCT's UnifySameDomain merges in place, without sewing. It merges only the face uniter's
+    // kinds (planes, cylinders, B-splines): the edges of every other face are kept, since
+    // KeepShapes honours only edges and vertices (review replc r2, T-A: two torus halves merged),
+    // so a helix earlier in the body never decides whether cones or tori merge (review replc r1,
+    // T3); it runs on a fresh copy, as the uniter may have changed its own (T2); and its result
+    // counts only when it is valid, as
     // closed as the shape, with as many solids, and the same area and volume (T1: a frustum's
     // fillet once came out 7 % larger). Elsewhere the face uniter alone decides, as before.
     // It unifies edges too, as the uniter's BRepLib_FuseEdges does (faces only broke a fillet's
@@ -9774,7 +9782,9 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         for (TopExp_Explorer xp(fresh.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
             const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(TopoDS::Face(xp.Current())).GetType();
             if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_BSplineSurface) {
-                keep.Add(xp.Current());
+                for (TopExp_Explorer xe(xp.Current(), TopAbs_EDGE); xe.More(); xe.Next()) {
+                    keep.Add(xe.Current());
+                }
             }
         }
         unify.KeepShapes(keep);
@@ -9815,6 +9825,10 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     }
     catch (Standard_Failure&) {
         // keep the shape as it was, below
+    }
+    if (!partial.isNull()) {
+        *this = partial;
+        return *this;
     }
     if (failed && no_fail == RefineFail::throwException) {
         throw Standard_Failure("Removing splitter failed");

@@ -481,5 +481,50 @@ class TestHelix(unittest.TestCase):
         self.assertEqual(len(top), 1, [f.Area for f in top])
         self.assertAlmostEqual(top[0].Area, pi * (23**2 - 10**2), places=6)
 
+    def testRefineAfterThreadKeepsTorusHalvesApart(self):
+        """The refine after a thread merges only what it merges without one.
+
+        A tube (r 10..20, height 8) carries an outer thread; two refined AdditiveTorus halves
+        (R 15, r 3, 180 degrees each, turned 180 degrees apart) sit on its top. The face uniter
+        never merges toroidal faces, with or without the thread, so the bead keeps two of them.
+        The refine's fallback after a thread merged them (review replc r2, T-A)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+        sketch = body.newObject("Sketcher::SketchObject", "TubeSketch")
+        sketch.AttachmentSupport = [(planes["XY_Plane"], "")]
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 20))
+        sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 10))
+        tube = body.newObject("PartDesign::Pad", "Tube")
+        tube.Profile = sketch
+        tube.Length = 8
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = [Base.Vector(20, 1.0, 0), Base.Vector(20, 2.0, 0), Base.Vector(20.8, 1.5, 0)]
+        for i in range(3):
+            profile.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 3]))
+        thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-height-angle"
+        thread.Pitch = 2.5
+        thread.Height = 4.0
+        thread.Refine = True
+        for i, angle in enumerate((0, 180)):
+            bead = body.newObject("PartDesign::AdditiveTorus", "Bead%d" % i)
+            bead.Radius1 = 15
+            bead.Radius2 = 3
+            bead.Angle3 = 180
+            bead.Placement = FreeCAD.Placement(
+                Base.Vector(0, 0, 8), FreeCAD.Rotation(Base.Vector(0, 0, 1), angle)
+            )
+            bead.Refine = True
+        self.Doc.recompute()
+
+        self.assertTrue(bead.isValid(), bead.getStatusString())
+        tori = [f for f in bead.Shape.Faces if f.Surface.__class__.__name__ == "Toroid"]
+        self.assertEqual(len(tori), 2, [f.Area for f in tori])
+
     def tearDown(self):
         FreeCAD.closeDocument("PartDesignTestHelix")
