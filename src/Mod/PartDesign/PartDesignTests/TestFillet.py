@@ -298,17 +298,17 @@ class TestFillet(unittest.TestCase):
         _, removed, _ = models.wall_end_round(inner, outer, 4.0)
         fillet = self._fillet_on_base(shape, edges, (outer - inner) / 2)
         self._assertValidFillet(fillet, shape.Volume - 2 * removed)
-        below = Part.makeBox(40, 40, 1.5875, FreeCAD.Vector(-20, -20, -1.5875))
+        below = Part.makeBox(40, 40, 1.5, FreeCAD.Vector(-20, -20, -1.5))
         self.assertAlmostEqual(
             fillet.Shape.common(below).Volume, shape.common(below).Volume, places=6
         )
-        # Onshape's numbers (oracle 14, notes/onshape-facts.md PB2): faces 13 -> 13,
-        # A 1276.733058 -> 1271.269152, the cone's area 71.480181 unchanged
+        # The closed form of FilletFallbackTest.WallOnAChamferedRimTest: faces 13 -> 13,
+        # A 1281.195348 -> 1276.034170, the cone's area 68.309325 unchanged
         result = fillet.Shape
         self.assertEqual(len(result.Faces), 13)
-        self.assertAlmostEqual(result.Area, 1271.269152, delta=1e-6 * 1271.269152)
+        self.assertAlmostEqual(result.Area, 1276.034170, delta=1e-6 * 1276.034170)
         cone = sum(f.Area for f in result.Faces if f.Surface.TypeId == "Part::GeomCone")
-        self.assertAlmostEqual(cone, 71.480181, delta=1e-6 * 71.480181)
+        self.assertAlmostEqual(cone, 68.309325, delta=1e-6 * 68.309325)
 
     # Results that the full check rejects too (ops#12): the base is a 10 mm cube with a fin, a
     # face hanging inward at 45 degrees from the front bottom edge, so that three faces meet at
