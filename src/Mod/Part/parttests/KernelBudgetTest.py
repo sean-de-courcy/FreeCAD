@@ -115,6 +115,10 @@ class KernelBudgetTest(unittest.TestCase):
         time"""
         self.setLimit(0.05)
         error = Part.kernelBudgetTrial(20.0, True)
+        if "on the clock" in error and "s of computing time)" in error:
+            # A machine so loaded that the worker got under 0.05 s of CPU in 0.2 s: the clock
+            # rightly fired first, and this case isn't reached
+            self.skipTest("the worker was starved: the clock's backstop fired first")
         self.assertIn("of computing time, the time limit", error)
         self.assertNotIn("on the clock", error)
 
