@@ -31,6 +31,9 @@
   and adds nothing; a MultiTransform's step, which has none of its own, stays valid.
 - Centered and Skip instances (rank 8, E-1); Distance as the spacing keeps it when the count
   changes (B3-6).
+- Reapply on: an original that makes nothing at every instance contributes nothing, with no
+  message, while another original is made; a pattern that makes nothing at all is refused
+  (ops#640, a replica's circular pattern; Onshape builds it).
 
 Designed models, built by each test:
 - Block: a 40 x 20 x 10 pad, x -20..20, y -10..10, z 0..10: 8000.
@@ -39,6 +42,8 @@ Designed models, built by each test:
 - Stub: a 4 x 4 x 5 pad on the block's top centred at the origin, z 10..15: 80.
 - Square: a 40 x 40 x 10 pad centred at the origin (16000) with a 4 x 4 x 5 boss at x 12..16,
   y -2..2 (80), for the circular pattern about Z.
+- Tunnelled block: a 40 x 40 x 5 block with a slot, a tunnel up to the slot's wall and a hole, for
+  a half-turn pattern whose tunnel instance has no length (tunnelled()).
 """
 
 import math
@@ -393,6 +398,102 @@ class TestPatternRules(unittest.TestCase):
             a = math.radians(degrees)
             self.assertTrue(self.inside(14 * math.cos(a), 14 * math.sin(a), 12.5), degrees)
         self.assertFalse(self.inside(-14, 0, 12.5))
+
+    # -- Reapply: an original that makes nothing at every instance (ops#640) ---------------------
+
+    def tunnelled(self):
+        """A block x, y -20..20, z 0..5 (8000) with a through-all slot x 12..18, y -12..-10 (-60).
+        The slot's wall on y = -10 is the Tunnel's up-to face: a 2 x 2 rectangle x
+        14..16, z 1..3 in a sketch on the plane y = 10 (its normal -y), a Pocket up to that wall,
+        y -10..10 (-80). The Hole: a through-all 2 x 2 square at (0, 15), on z = 5 (-20)."""
+        self.block(-20, -20, 20, 20)
+        self.blockPad.Length = 5
+        slotSketch = models.sketch(
+            self.doc, "SlotSketch", models.rectangle(12, -12, 18, -10), self.body, z=5
+        )
+        self.slot = models.pocketThroughAll(self.body, slotSketch, name="Slot")
+        self.recompute()
+        self.assertBody(8000 - 60)
+        wall = [
+            index + 1
+            for index, face in enumerate(self.slot.Shape.Faces)
+            if abs(face.CenterOfMass.y + 10) < 1e-9 and abs(face.CenterOfMass.x - 15) < 1e-9
+        ]
+        self.assertEqual(len(wall), 1)
+        tunnelSketch = models.sketch(
+            self.doc,
+            "TunnelSketch",
+            models.rectangle(14, 1, 16, 3),
+            self.body,
+            placement=App.Placement(V(0, 10, 0), App.Rotation(V(1, 0, 0), 90)),
+        )
+        self.tunnel = self.body.newObject("PartDesign::Pocket", "Tunnel")
+        self.tunnel.Profile = tunnelSketch
+        self.tunnel.Type = "UpToFace"
+        self.tunnel.UpToFace = (self.slot, [f"Face{wall[0]}"])
+        self.recompute()
+        self.assertValid(self.tunnel)
+        self.assertBody(8000 - 60 - 80)
+        self.assertFalse(self.inside(15, 0, 2))
+        holeSketch = models.sketch(
+            self.doc, "HoleSketch", models.rectangle(-1, 14, 1, 16), self.body, z=5
+        )
+        self.hole = models.pocketThroughAll(self.body, holeSketch, name="Hole")
+        self.recompute()
+        self.assertBody(8000 - 60 - 80 - 20)
+        self.seeded = self.body.Shape.Volume
+
+    def halfTurn(self, originals, reapply):
+        """A polar pattern of the originals about Z (a datum line at the origin), 360 deg, 2
+        occurrences: instance 2 is the originals turned 180 deg. The Tunnel's sketch lies there on
+        y = -10, the plane of its up-to face, so its re-run there has no length."""
+        line = self.body.newObject("PartDesign::Line", "ZLine")
+        pattern = self.body.newObject("PartDesign::PolarPattern", "PolarPattern")
+        pattern.Originals = originals
+        pattern.Axis = (line, [""])
+        pattern.Mode = "Extent"
+        pattern.Angle = 360
+        pattern.Occurrences = 2
+        pattern.Reapply = reapply
+        self.body.Tip = pattern
+        self.recompute()
+        return pattern
+
+    def testReapplyOriginalMakingNothingAtEveryInstanceIsDropped(self):
+        """Onshape (ops#640, a replica's circular pattern): with Reapply on, an original whose
+        re-run fails at every instance contributes nothing there, with no message, while another
+        original is made. Tunnel and Hole turned 180 deg: the Hole at (0, -15), -20; the Tunnel's
+        instance makes nothing (before: refused, "can't be made at any instance")."""
+        self.tunnelled()
+        pattern = self.halfTurn([self.tunnel, self.hole], reapply=True)
+        self.assertValid(pattern)
+        self.assertBody(self.seeded - 20)
+        self.assertFalse(self.inside(0, -15, 2.5))
+        self.assertTrue(self.inside(-15, 0, 2))
+
+    def testReapplyOriginalMakingNothingControls(self):
+        """The Hole alone, Reapply on: -20 (the same as above). Tunnel and Hole with Reapply off:
+        the Tunnel's prism is copied, x -16..-14, y -10..10 (-80), with the Hole's (-20)."""
+        self.tunnelled()
+        pattern = self.halfTurn([self.hole], reapply=True)
+        self.assertValid(pattern)
+        self.assertBody(self.seeded - 20)
+        pattern.Originals = [self.tunnel, self.hole]
+        pattern.Reapply = False
+        self.recompute()
+        self.assertValid(pattern)
+        self.assertBody(self.seeded - 100)
+        self.assertFalse(self.inside(-15, 0, 2))
+        self.assertFalse(self.inside(0, -15, 2.5))
+
+    def testReapplyPatternMakingNothingAtAllFailsLoudly(self):
+        """With Reapply on, a pattern none of whose originals is made at any instance stays
+        refused: the Tunnel alone turned 180 deg."""
+        self.tunnelled()
+        pattern = self.halfTurn([self.tunnel], reapply=True)
+        self.assertFailed(pattern, "can't be made at any instance")
+        self.assertFailed(pattern, "instance 2")
+
 
 if __name__ == "__main__":
     unittest.main()
