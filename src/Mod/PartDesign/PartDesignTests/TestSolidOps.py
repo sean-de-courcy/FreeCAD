@@ -1019,3 +1019,143 @@ class TestThickenPipe(unittest.TestCase):
         outward = face.normalAt(math.pi / 4, 0.0).dot(p - V(4 * math.cos(math.pi / 4), 4 * math.sin(math.pi / 4), 0)) > 0
         t = self.thicken(f, t1=0.0 if outward else 0.75, t2=0.75 if outward else 0.0)  # toward the ring's centre
         self.assertOneSolid(t, self.expected(3.25, 4.0))
+
+
+class TestThickenObliqueLeg(unittest.TestCase):
+    """A straight leg of a bent bore that ends obliquely (#90, ops#640), beside a horn bend, so that
+    Thicken builds the sheet face by face. The leg's piece is a cylinder face thickened alone. Its exact
+    volume (Steiner): the layer at signed distance s from the face (s > 0 away from the axis) has the face's
+    area times (R + s) / R, so a piece from s = a to s = b holds area (b - a) (1 + (a + b) / (2 R)).
+
+    On the replica (TEST DOC #90), OCC's offset of such a leg (a full turn whose free end is two edges
+    meeting at a degree-1 B-spline seam) built twisted caps along the end: a valid-looking 763.83 for
+    279.17, then "folds over itself". That exact face topology could not be rebuilt from designed
+    primitives here, so the guard is tested with a wrong offset put in OCC's place, and the direct
+    construction is tested for exactness on designed oblique legs."""
+
+    R = 4.0
+
+    def setUp(self):
+        self.doc = App.newDocument("ThickenOblique")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def bore(self, tilt, ridge=True):
+        """The bore of TestThickenBend at major 4 (a horn bend), its leg leaving through a wall at x = 40
+        made of two planes meeting along the line through the leg's axis (y direction): each turned by
+        `tilt` degrees from x = 40, the lower one the other way round when ridge (a "<" wall), else one
+        tilted plane. The circles' x axes are fixed so the faces' seams are reproducible."""
+        V = App.Vector
+        R, major = self.R, 4.0
+        z0 = 6.0 + major
+        ap, ad = V(15 + major, 0, z0), V(0, -1, 0)
+        rot = App.Rotation(ad, 90.0)
+        ls = ap + rot.multVec(V(15, 15, z0) - ap)
+        ld = rot.multVec(V(0, 0, -1))
+        self.leg = (ls, ld)
+
+        def disc(c, n, x):
+            ci = Part.Circle(c, n, R)
+            ci.XAxis = x
+            return Part.Face(Part.Wire(ci.toShape()))
+
+        cut = [disc(V(15, 15, 20), V(0, 0, 1), V(1, 0, 0)).extrude(V(0, 0, z0 - 20)),
+               disc(V(15, 15, z0), V(0, 0, 1), V(0, -1, 0)).revolve(ap, ad, 90.0),
+               disc(ls, ld, V(0, -1, 0)).extrude(ld * 40)]
+        zc, h = ls.z, 30.0
+        dx = h * math.tan(math.radians(tilt))
+        pts = [V(40, -1, zc), V(40 + dx, -1, zc + h), V(100, -1, zc + h), V(100, -1, zc - h),
+               V(40 + (dx if ridge else -dx), -1, zc - h), V(40, -1, zc)]
+        self.wedge = Part.Face(Part.makePolygon(pts)).extrude(V(0, 32, 0))
+        a = self.doc.addObject("Part::Feature", "A")
+        a.Shape = Part.makeBox(80, 30, 20).cut(self.wedge).cut(cut)
+        names = tuple("Face%d" % (k + 1) for k, f in enumerate(a.Shape.Faces) if f.Surface.__class__.__name__ != "Plane")
+        self.assertEqual(len(names), 4)  # the two legs, and the bend split in two by these seams
+        return a, names
+
+    def legFace(self, a, names):
+        legs = [a.Shape.getElement(n) for n in names
+                if a.Shape.getElement(n).Surface.__class__.__name__ == "Cylinder"
+                and any(e.Curve.__class__.__name__ == "Ellipse" for e in a.Shape.getElement(n).Edges)]
+        self.assertEqual(len(legs), 1)
+        return legs[0]
+
+    def steiner(self, face, t1, t2):
+        """The exact volume of the face's piece; a bore's faces point toward the axis, so t1 goes inward."""
+        a, b = -t1, t2
+        return face.Area * (b - a) * (1.0 + (a + b) / (2.0 * self.R))
+
+    def testDirectPieceIsExact(self):
+        for tilt, ridge in ((20.0, True), (3.6, True), (20.0, False)):
+            leg = self.legFace(*self.bore(tilt, ridge))
+            for t1, t2 in ((0.75, 0.75), (0.75, 0.0), (0.0, 0.75), (1.5, 0.25)):
+                with self.subTest(tilt=tilt, ridge=ridge, t1=t1, t2=t2):
+                    _, out = S._cylinder_piece_volume(leg, t1, t2)
+                    self.assertEqual(out, -1.0)  # a bore's face points toward its axis
+                    p = S._ruled_cylinder_piece(leg, t1, t2, out)
+                    self.assertTrue(p.isValid())
+                    self.assertEqual(len(p.Solids), 1)
+                    self.assertAlmostEqual(p.Volume, self.steiner(leg, t1, t2), delta=1e-6)
+                    # each cap is ruled along the face's normals: the end edge's points moved radially
+                    for e in leg.Edges:
+                        if e.Curve.__class__.__name__ != "Ellipse":
+                            continue
+                        q = e.valueAt(0.5 * (e.FirstParameter + e.LastParameter))
+                        foot = self.leg[0] + self.leg[1] * (q - self.leg[0]).dot(self.leg[1])
+                        mid = foot + (q - foot) * ((self.R + 0.5 * (t2 - t1)) / self.R)
+                        self.assertLess(p.distToShape(Part.Vertex(mid))[0], 1e-6)
+
+    def testAWrongOffsetIsRebuilt(self):
+        leg = self.legFace(*self.bore(20.0))
+        real = S._offset_piece
+        try:
+            # OCC's twisted caps on the replica: one valid solid of the wrong volume; then one that throws
+            for wrong in (lambda f, t1, t2: Part.makeBox(5, 5, 5), lambda f, t1, t2: Part.Shape().makeOffsetShape(1, 1)):
+                with self.subTest(wrong=wrong):
+                    S._offset_piece = wrong
+                    p = S._leg_piece(leg, 0.75, 0.75)
+                    self.assertTrue(p.isValid())
+                    self.assertAlmostEqual(p.Volume, self.steiner(leg, 0.75, 0.75), delta=1e-6)
+        finally:
+            S._offset_piece = real
+
+    def testARightOffsetIsKept(self):
+        leg = self.legFace(*self.bore(20.0))
+        p = S._leg_piece(leg, 0.75, 0.75)
+        self.assertAlmostEqual(p.Volume, self.steiner(leg, 0.75, 0.75), delta=1e-6)
+        self.assertEqual(len(p.Faces), len(S._offset_piece(leg, 0.75, 0.75).Faces))
+
+    def testAWrongPieceThatCantBeRebuiltFails(self):
+        leg = self.legFace(*self.bore(20.0))
+        real, direct = S._offset_piece, S._ruled_cylinder_piece
+        try:
+            S._offset_piece = lambda f, t1, t2: Part.makeBox(5, 5, 5)
+            S._ruled_cylinder_piece = lambda f, t1, t2, out: Part.makeBox(6, 6, 6)
+            with self.assertRaises(S.SolidOpsError):
+                S._leg_piece(leg, 0.75, 0.75)
+        finally:
+            S._offset_piece, S._ruled_cylinder_piece = real, direct
+
+    def testHornBendWithAVShapedLegEnd(self):
+        # the sheet thickened face by face (the bend's ring reaches its axis). Expected: the two annular
+        # tubes (the leg's cut by the "<" wall) and the bend's near side revolved (TestThickenBend), less
+        # the tubes' overlap; the leg's end caps follow its normals, not the wall's planes, which takes
+        # 8/3 t^3 tan(tilt) off the cut tube (each ruling keeps the end's x; integrated over both halves)
+        tilt, t = 3.6, 0.75
+        a, names = self.bore(tilt)
+        th = S.make_thicken(self.doc.addObject("PartDesign::Body", "T"), [(a, names)], 0.75, 0.0, name="Thk")
+        th.Midplane, th.Thickness = True, 2 * t
+        self.doc.recompute()
+        self.assertEqual(th.State, ["Up-to-date"], th.getStatusString())
+        V = App.Vector
+        ls, ld = self.leg
+        z0 = 10.0
+        A = annular_tube(V(15, 15, z0), V(0, 0, 1), self.R - t, self.R + t, 20 - z0)
+        B = annular_tube(ls, ld, self.R - t, self.R + t, 60).cut(self.wedge)
+        bend = math.radians(90) * (ring_moment(self.R + t, 4.0) - ring_moment(self.R - t, 4.0))
+        want = A.Volume + B.Volume + bend - A.common(B).Volume - 8.0 / 3.0 * t ** 3 * math.tan(math.radians(tilt))
+        s = th.Shape
+        self.assertTrue(s.isValid())
+        self.assertEqual(len(s.Solids), 1)
+        self.assertAlmostEqual(s.Volume, want, delta=2e-3)
