@@ -5746,7 +5746,10 @@ void System::identifyConflictingRedundantConstraints(
 // the two apart is each block's own.
 //
 // Returns false, with nothing changed, when there is nothing to gain (one block, no free
-// parameter) or a constraint has no gradient at all: the caller diagnoses the whole, as before.
+// parameter) or a constraint acts on no diagnosed parameter (all of them fixed): the caller
+// diagnoses the whole, as before. Each block's QR finds its rank against its own largest pivot,
+// not the whole system's: a nearly dependent pair of constraints beside a block of far larger
+// gradients is judged in its own scale.
 bool System::diagnoseByBlocks(
     Algorithm alg,
     const Eigen::MatrixXd& J,
@@ -5760,14 +5763,33 @@ bool System::diagnoseByBlocks(
     if (rows == 0 || cols == 0) {
         return false;
     }
-    // each row's parameters, in column order
-    std::vector<std::vector<int>> rowCols(rows);
+    // each row's parameters, in column order: the diagnosed parameters its constraint acts on,
+    // and any other with a gradient. Not the gradient alone: a parameter whose gradient is zero
+    // where the sketch stands (the other line of a Perpendicular to a line of no length) still
+    // moves in the trial solve that tells a redundant constraint from a conflicting one
+    std::map<double*, int> column;
     for (int c = 0; c < cols; ++c) {
-        for (int r = 0; r < rows; ++r) {
-            if (J(r, c) != 0.0) {
-                rowCols[r].push_back(c);
+        column[pdiagnoselist[c]] = c;
+    }
+    std::vector<std::vector<int>> rowCols(rows);
+    for (int r = 0; r < rows; ++r) {
+        std::vector<int>& columns = rowCols[r];
+        const auto acted = c2p.find(clist[jacobianconstraintmap.at(r)]);
+        if (acted != c2p.end()) {
+            for (double* param : acted->second) {
+                const auto found = column.find(param);
+                if (found != column.end()) {
+                    columns.push_back(found->second);
+                }
             }
         }
+        for (int c = 0; c < cols; ++c) {
+            if (J(r, c) != 0.0) {
+                columns.push_back(c);
+            }
+        }
+        std::ranges::sort(columns);
+        columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
     }
     // components of parameters; a component's root is its first column
     std::vector<int> parent(cols);
@@ -5887,7 +5909,8 @@ bool System::diagnoseByBlocks(
         int rank = 0;
         int nonredundant = constrNum;
         Eigen::MatrixXd R;
-        bool dense = paramsNum < autoQRThreshold;
+        bool dense = autoChooseAlgorithm ? paramsNum < autoQRThreshold
+                                         : qrAlgorithm == EigenDenseQR;
 #ifndef EIGEN_SPARSEQR_COMPATIBLE
         dense = true;
 #endif

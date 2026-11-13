@@ -7020,7 +7020,8 @@ struct MapperPrism: MapperMaker
 
     // `maker` is a BRepFeat maker, or in V2 any maker whose result holds the sources' edges and
     // vertices as they are (a plain prism of a profile face: makeElementPrismUntil()'s closed
-    // form, ops#640): the V2 mapper reads the result's shape only, never the maker's history
+    // form, ops#640): the V2 mapper names from the result's shape. Of the maker's history only
+    // MapperMaker::modified() is asked, and a plain prism modifies nothing
     MapperPrism(
         BRepBuilderAPI_MakeShape& maker,
         const TopoShape& upTo,
@@ -9330,7 +9331,7 @@ TopoShape joinPrisms(const TopoShape& blank, const std::vector<TopoShape>& piece
     const std::size_t count = pieces.size();
     std::vector<Bnd_Box> boxes(count);
     for (std::size_t i = 0; i < count; ++i) {
-        BRepBndLib::Add(pieces[i].getShape(), boxes[i]);
+        BRepBndLib::Add(pieces[i].getShape(), boxes[i], Standard_False);
         boxes[i].Enlarge(Precision::Confusion());
     }
     // groups of pieces whose boxes meet, directly or through others
@@ -9690,12 +9691,12 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
         // Past the feature's limit, a retry would only spend more: the stop stands
         catch (Base::Exception&) {
-            if (KernelBudget::pastDeadline() || !retry()) {
+            if (flatLength || KernelBudget::pastDeadline() || !retry()) {
                 throw;
             }
         }
         catch (Standard_Failure&) {
-            if (KernelBudget::pastDeadline() || !retry()) {
+            if (flatLength || KernelBudget::pastDeadline() || !retry()) {
                 throw;
             }
         }
