@@ -1179,7 +1179,7 @@ NameRemap* NameRemap::active()
     return activeRemap;
 }
 
-NamingFormatRead namingFormatToRead(int fileWritten,
+NamingFormatRead Data::namingFormatToRead(int fileWritten,
                                     int fileOldestRead,
                                     int readerWritten,
                                     int readerOldestRead)
