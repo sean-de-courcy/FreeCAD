@@ -7705,10 +7705,11 @@ bool buildDressUpFailed(
 }
 
 /** Whether OCCT built the dress-up invalid without an error (ops#297), which the exact construction
- * may build instead. If it doesn't, the invalid result is returned as before, and the feature's
- * check (Part::checkDressUp()) repairs it or fails. Checked where the maker changed its input \a base
- * (KernelBudget::checkValidChanged(): the faces it made or changed and their neighbours, its shells
- * and solids whole; perf profile 3, ops#640).
+ * may build instead. If it doesn't, the invalid result is returned as before, noted with the
+ * construction's reason (FilletFallback::noteInvalidResult()): the feature's check
+ * (Part::checkDressUp()) repairs it or fails, and the Python API raises (decision 418, ops#640).
+ * Checked where the maker changed its input \a base (KernelBudget::checkValidChanged(): the
+ * faces it made or changed and their neighbours, its shells and solids whole; perf profile 3).
  */
 bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
 {
@@ -7906,6 +7907,7 @@ TopoShape& TopoShape::makeElementFillet(
     for (const auto& e : inputEdges) {
         edgeShapes.push_back(e.getShape());
     }
+    FilletFallback::takeInvalidResult();
     bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer);
     if (outcome->preferred) {
@@ -7934,6 +7936,7 @@ TopoShape& TopoShape::makeElementFillet(
                     << outcome->reason
             );
         }
+        FilletFallback::noteInvalidResult(outcome->reason);
     }
     return makeElementShape(*mkFillet, input, op);
 }
@@ -8034,6 +8037,7 @@ TopoShape& TopoShape::makeElementChamfer(
         if (setbacksDiffer) {
             request.setbacks = setbacks;
         }
+        FilletFallback::takeInvalidResult();
         auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
         if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp) {
             if (finishConstruction(*this, *outcome, input, op)) {
@@ -8048,6 +8052,9 @@ TopoShape& TopoShape::makeElementChamfer(
             }
             if (outcome->thin) {
                 raiseThinFaceError("The chamfer", outcome->reason);
+            }
+            if (outcome->invalid) {
+                FilletFallback::noteInvalidResult(outcome->reason);
             }
         }
         return makeElementShape(mkChamfer, input, op);
