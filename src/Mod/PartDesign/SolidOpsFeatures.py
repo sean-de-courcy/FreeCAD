@@ -320,19 +320,22 @@ def _ruled_cylinder_piece(face, t1, t2, out):
     # with pcurves off their edges (BOPAlgo GeomAbs_C0, InvalidCurveOnSurface), and refining a later cut
     # on them merged faces wrongly (ops#640, rb 93: the volume moved by 0.016). The ruled faces join the
     # offsets' own edges, so that the sewing has nothing to reconcile
+    m_a, m_b = (m_hi, m_lo) if out > 0 else (m_lo, m_hi)  # the offset by t1 lies at the radius m_a gives
+
     def moved(d):
         if abs(d) <= TOL:
             return face.copy()
-        got = face.makeOffsetShape(d, TOL)
+        try:
+            got = face.makeOffsetShape(d, TOL)
+        except Exception:
+            return None
         if len(got.Faces) != 1 or not isinstance(got.Faces[0].Surface, Part.Cylinder):
-            raise SolidOpsError("Thicken failed: a leg face's offset is not one cylinder face")
+            return None
         return got.Faces[0]
-    f_a, f_b = moved(t1), moved(-t2)
-    faces = [f_a, f_b]
-    m_a, m_b = (m_hi, m_lo) if out > 0 else (m_lo, m_hi)  # f_a lies at the radius m_a gives
 
     def image(e, f, m):
-        """f's edge that is the radial image of the face's edge e, oriented as e (else None)"""
+        """f's edge that is the radial image of the face's edge e, its curve's parameter running as e's
+        (else None)"""
         mid = m.multVec(e.valueAt(0.5 * (e.FirstParameter + e.LastParameter)))
         best = min(f.Edges, key=lambda x: x.distToShape(Part.Vertex(mid))[0])
         if best.distToShape(Part.Vertex(mid))[0] > 1e-6 * max(1.0, R):
@@ -345,12 +348,17 @@ def _ruled_cylinder_piece(face, t1, t2, out):
             best = Part.Edge(c, c.reversedParameter(b), c.reversedParameter(a))
         return best
 
-    for e in face.Edges:
-        if e.isSeam(face):
-            continue
-        ea, eb = image(e, f_a, m_a), image(e, f_b, m_b)
-        if ea is None or eb is None:
-            ea, eb = e.transformGeometry(m_a), e.transformGeometry(m_b)
+    edges = [e for e in face.Edges if not e.isSeam(face)]
+    f_a, f_b, pairs = moved(t1), moved(-t2), None
+    if f_a is not None and f_b is not None:
+        pairs = [(image(e, f_a, m_a), image(e, f_b, m_b)) for e in edges]
+        if any(a is None or b is None for a, b in pairs):
+            pairs = None
+    if pairs is None:  # no exact offsets here: the scaled copies, which _leg_piece checks as any piece
+        f_a, f_b = face.transformGeometry(m_a), face.transformGeometry(m_b)
+        pairs = [(e.transformGeometry(m_a), e.transformGeometry(m_b)) for e in edges]
+    faces = [f_a, f_b]
+    for ea, eb in pairs:
         faces.extend(Part.makeRuledSurface(ea, eb).Faces)
     sewn = Part.Compound(faces)
     sewn.sewShape(1e-6)
