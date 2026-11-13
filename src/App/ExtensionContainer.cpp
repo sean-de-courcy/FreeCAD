@@ -31,6 +31,7 @@
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 
+#include "ElementSolverEdits.h"
 #include "Extension.h"
 #include "ExtensionContainer.h"
 
@@ -58,6 +59,8 @@ void ExtensionContainer::registerExtension(Base::Type extension, Extension* ext)
         throw Base::ValueError(
             "ExtensionContainer::registerExtension: Extension has not this as base object");
     }
+    // A placement digest folds every property, an extension's included (ops#640)
+    forgetPlacementDigestOf(this);
 
     // no duplicate extensions (including base classes)
     if (hasExtension(extension)) {

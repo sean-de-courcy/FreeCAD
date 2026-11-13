@@ -25,8 +25,13 @@
 
 #pragma once
 
+#include <optional>
+#include <vector>
+
 #include <QObject>
 #include <QStringList>
+
+#include <Base/Vector3D.h>
 
 #include <Mod/Measure/MeasureGlobal.h>
 
@@ -72,6 +77,8 @@ private:
     QTimer* selectionTimer;
     bool pendingProcessing;
     QString label;  // FreeCAD-CH (ops#153): the selection type's values
+    // FreeCAD-CH (ops#673): per reference, the edge middle it was picked at (it measures as a point)
+    std::vector<std::optional<Base::Vector3d>> points;
 };
 
 }  // namespace MeasureGui

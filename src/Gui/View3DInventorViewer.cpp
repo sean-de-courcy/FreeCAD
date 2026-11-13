@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <Inventor/SoFCPlacementIndicatorKit.h>
 
@@ -126,6 +127,8 @@
 #include "Application.h"
 #include "Camera.h"
 #include "Command.h"
+#include "Control.h"
+#include "DocumentTabBar.h"
 #include "Document.h"
 #include "GLPainter.h"
 #include "RubberbandOverlay.h"
@@ -135,6 +138,7 @@
 #include "MainWindow.h"
 #include "Multisample.h"
 #include "NaviCube.h"
+#include "OverlayWidgets.h"
 #include "ForkKeymap.h"
 #include "Navigation/NavigationStyle.h"
 #include "Navigation/GestureNavigationStyle.h"
@@ -1517,9 +1521,27 @@ void View3DInventorViewer::onSelectionChanged(const SelectionChanges& reason)
         case SelectionChanges::SetSelection:
         case SelectionChanges::AddSelection:
         case SelectionChanges::RmvSelection:
-        case SelectionChanges::ClrSelection:
-            inventorSelection->checkGroupOnTop(Reason);
+        case SelectionChanges::ClrSelection: {
+            // FreeCAD-CH (ops#640, R6T-6): a typed tab's view draws no on-top highlight of
+            // another tab's object (the tree's hover or selection)
+            SelectionChanges onTop(Reason);
+            if ((onTop.Type == SelectionChanges::AddSelection
+                 || onTop.Type == SelectionChanges::SetSelection
+                 || onTop.Type == SelectionChanges::SetPreselect)
+                && onTop.pObjectName && *onTop.pObjectName) {
+                App::DocumentObject* obj
+                    = getDocument()->getDocument()->getObject(onTop.pObjectName);
+                ViewProvider* vp = obj ? getDocument()->getViewProvider(obj) : nullptr;
+                if (vp && !DocumentTabs::accepts(this, vp)) {
+                    if (onTop.Type != SelectionChanges::SetSelection) {
+                        break;
+                    }
+                    onTop.Type = SelectionChanges::ClrSelection;
+                }
+            }
+            inventorSelection->checkGroupOnTop(onTop);
             break;
+        }
         case SelectionChanges::SetPreselectSignal:
             break;
         default:
@@ -1566,6 +1588,10 @@ bool View3DInventorViewer::containsViewProvider(const ViewProvider* vp) const
 /// adds an ViewProvider to the view, e.g. from a feature
 void View3DInventorViewer::addViewProvider(ViewProvider* pcProvider)
 {
+    // FreeCAD-CH (ops#640, rank 59): a typed tab's view shows only the tab's objects
+    if (!DocumentTabs::accepts(this, pcProvider)) {
+        return;
+    }
     SoSeparator* root = pcProvider->getRoot();
 
     if (root) {
@@ -3702,6 +3728,12 @@ bool View3DInventorViewer::processSoEvent(const SoEvent* ev)
 
         switch (ke->getKey()) {
             case SoKeyboardEvent::ESCAPE:
+                if (inherited::processSoEvent(ev)) {
+                    return true;
+                }
+                // FreeCAD-CH (selection parity P7): Esc never clears a selection, as in Onshape
+                // (oracle 8, SQ1/SQ7; ops#640 rank 53 had made it clear one); Space clears.
+                return false;
             case SoKeyboardEvent::Q:  // ignore 'Q' keys (to prevent app from being closed)
                 return inherited::processSoEvent(ev);
             default:
@@ -4502,6 +4534,114 @@ bool View3DInventorViewer::getSceneBoundBox(SbBox3f& box) const
     return true;
 }
 
+namespace
+{
+/* FreeCAD-CH (ops#640, rank 85, hands-on D-4): Onshape's Zoom to fit. The fitted extent fills
+ * about 95 % of the graphics area's limiting dimension (a margin of 2.5 % on each side), and the
+ * graphics area is what the overlay panels docked left or right (the Tasks panel) leave of the
+ * 3D view. Coin's own fit frames the box's bounding sphere, which fills a view seen square-on to
+ * a cube only 58 %, and lays the model under the panels. Orthographic cameras under the fork's
+ * keymap only; a perspective camera keeps Coin's fit. */
+constexpr float onshapeFitFill = 0.95F;
+
+/** The horizontal span of \a view, as fractions of its width, that no visible overlay panel
+ * docked left or right covers: [0, 1] where there is none, or where they would leave less than a
+ * third of the view. */
+void freeFitSpan(const QWidget* view, float& spanLeft, float& spanRight)
+{
+    spanLeft = 0.0F;
+    spanRight = 1.0F;
+    MainWindow* mainWindow = getMainWindow();
+    if (!view || !mainWindow || view->width() <= 0) {
+        return;
+    }
+    const QRect viewRect(view->mapToGlobal(QPoint(0, 0)), view->size());
+    int x0 = viewRect.left();
+    int x1 = viewRect.left() + viewRect.width();
+    const auto panels = mainWindow->findChildren<OverlayTabWidget*>();
+    for (auto panel : panels) {
+        if (!panel->isVisible() || panel->count() == 0) {
+            continue;
+        }
+        const QRect panelRect(panel->mapToGlobal(QPoint(0, 0)), panel->size());
+        if (!panelRect.intersects(viewRect)) {
+            continue;
+        }
+        if (panel->getDockArea() == Qt::LeftDockWidgetArea) {
+            x0 = std::max(x0, panelRect.left() + panelRect.width());
+        }
+        else if (panel->getDockArea() == Qt::RightDockWidgetArea) {
+            x1 = std::min(x1, panelRect.left());
+        }
+    }
+    if (3 * (x1 - x0) < viewRect.width()) {
+        return;
+    }
+    spanLeft = float(x0 - viewRect.left()) / float(viewRect.width());
+    spanRight = float(x1 - viewRect.left()) / float(viewRect.width());
+}
+
+/** Onshape's fit of \a box for the orthographic camera \a cam, with the view's \a aspect (width
+ * over height) under ADJUST_CAMERA: the camera's \a height, and the \a shift from the box's
+ * centre line to the camera's (in the camera's plane), that centre the box's projected extent
+ * (its eight corners) in the free span and make it fill onshapeFitFill of the span's limiting
+ * dimension. False where Coin's fit applies: another keymap or camera, or an empty box. */
+bool onshapeFit(
+    const QWidget* view,
+    const SoCamera* cam,
+    const SbBox3f& box,
+    float aspect,
+    SbVec3f& shift,
+    float& height
+)
+{
+    if (!ForkKeymap::isOnshape() || !cam || !cam->isOfType(SoOrthographicCamera::getClassTypeId())
+        || box.isEmpty() || !(aspect > 0.0F)) {
+        return false;
+    }
+    const SbRotation orientation = cam->orientation.getValue();
+    SbVec3f right;
+    SbVec3f up;
+    orientation.multVec(SbVec3f(1, 0, 0), right);
+    orientation.multVec(SbVec3f(0, 1, 0), up);
+    const SbVec3f center = box.getCenter();
+    const SbVec3f& low = box.getMin();
+    const SbVec3f& high = box.getMax();
+    float minX = std::numeric_limits<float>::max();
+    float minY = minX;
+    float maxX = -minX;
+    float maxY = -minX;
+    for (int i = 0; i < 8; ++i) {
+        const SbVec3f corner(
+            (i & 1) != 0 ? high[0] : low[0],
+            (i & 2) != 0 ? high[1] : low[1],
+            (i & 4) != 0 ? high[2] : low[2]
+        );
+        const SbVec3f offset = corner - center;
+        const float x = offset.dot(right);
+        const float y = offset.dot(up);
+        minX = std::min(minX, x);
+        maxX = std::max(maxX, x);
+        minY = std::min(minY, y);
+        maxY = std::max(maxY, y);
+    }
+    float spanLeft {};
+    float spanRight {};
+    freeFitSpan(view, spanLeft, spanRight);
+    const float span = spanRight - spanLeft;
+    // ADJUST_CAMERA: the view shows height * k high and height * k * aspect wide
+    const float k = aspect >= 1.0F ? 1.0F : 1.0F / aspect;
+    height = std::max((maxX - minX) / (aspect * span), maxY - minY) / (k * onshapeFitFill);
+    if (!(height > 0.0F)) {
+        return false;
+    }
+    // the free span's centre lies this far right of the view's centre
+    const float spanCenter = ((spanLeft + spanRight) / 2.0F - 0.5F) * height * k * aspect;
+    shift = right * ((minX + maxX) / 2.0F - spanCenter) + up * ((minY + maxY) / 2.0F);
+    return true;
+}
+}  // namespace
+
 void View3DInventorViewer::animatedViewAll(const SbBox3f& box, int steps, int ms)
 {
     SoCamera* cam = this->getSoRenderManager()->getCamera();
@@ -4539,6 +4679,13 @@ void View3DInventorViewer::animatedViewAll(const SbBox3f& box, int steps, int ms
             diff = sphere.getRadius() * 2 - height;
         }
         pos = (box.getCenter() - direction * sphere.getRadius());
+        // FreeCAD-CH (ops#640, rank 85): animate toward Onshape's fit, which viewBoundBox sets
+        SbVec3f shift;
+        float target {};
+        if (onshapeFit(getGLWidget(), cam, box, aspectRatio, shift, target)) {
+            diff = target - height;
+            pos += shift;
+        }
     }
     else if (cam->isOfType(SoPerspectiveCamera::getClassTypeId())) {
         // NOLINTBEGIN
@@ -5020,6 +5167,13 @@ void View3DInventorViewer::viewBoundBox(const SbBox3f& box)
             break;
     }
     cam->viewBoundingBox(box, aspectratio, 1.0);
+
+    SbVec3f shift;
+    float height {};
+    if (onshapeFit(getGLWidget(), cam, box, aspectratio, shift, height)) {
+        cam->position = cam->position.getValue() + shift;
+        static_cast<SoOrthographicCamera*>(cam)->height = height;  // NOLINT
+    }
 }
 
 /**

@@ -94,7 +94,17 @@ public:
 
 protected:
     void onDocumentRestored() override;
+    /// Whether the class sweeps its profile against the profile's normal (a Pocket), whatever its
+    /// Operation: Pads and Pockets take every operation (FreeCAD-CH ops#640)
+    virtual bool sweepsAgainstNormal() const
+    {
+        return false;
+    }
     Base::Vector3d computeDirection(const Base::Vector3d& sketchVector, bool inverse);
+    /// Notes on the feature that its Remove or Intersect misses its base: a warning, Onshape's
+    /// info "Selected tools and targets do not intersect"; the feature stays valid (FreeCAD-CH
+    /// ops#640 H3)
+    void noteReachesNothing();
     bool hasTaperedAngle() const;
     void onChanged(const App::Property* prop) override;
 

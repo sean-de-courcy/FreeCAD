@@ -126,8 +126,8 @@ private:
         Part::RevolMode revolMode,
         bool markSeam = false
     );
-    // With `checkVolume`, the base operation's volume must be possible for a correct fuse or
-    // cut of the two (an up-to-face tool, ops#293)
+    // The base operation's volume must be possible for a correct fuse or cut of the two; with
+    // `checkVolume` (an up-to-face tool, ops#293), its edges must also meet within tolerance
     void setResult(const TopoShape& base, const TopoShape& revolved, bool checkVolume = false);
     // A side's tool was built by constructFirstContact() in this recompute (ops#293 D2): its
     // volume checks integrate over knot spans (FirstContact::spanVolume())

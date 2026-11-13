@@ -35,10 +35,12 @@
 #include <Base/Exception.h>
 #include <Base/ServiceProvider.h>
 #include <App/Document.h>
+#include <App/DocumentObserver.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Document.h>
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 #include <Gui/Inventor/So3DAnnotation.h>
@@ -46,12 +48,16 @@
 #include <Gui/Utilities.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureDeletePart.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/Gui/ViewProvider.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
 
 #include "ReferenceField.h"
+#include "TaskDeletePart.h"
 #include "TaskFeatureParameters.h"
+#include "Utils.h"
 #include "StyleParameters.h"
 
 #include "ViewProvider.h"
@@ -76,33 +82,67 @@ void ViewProvider::beforeDelete()
     ViewProviderPart::beforeDelete();
 }
 
+namespace
+{
+// The preview's colour: the operation's, adding or cutting. An Extrude's operation can change in
+// its dialog (New part / Add / Remove / Intersect, ops#640), so it is read again at each preview
+// update, not only once at attach (review gui-3)
+void setPreviewColor(App::PropertyColor& color, PartDesign::FeatureAddSub* feature)
+{
+    auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
+    const bool isAdditive = feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive;
+    const Base::Color wanted = isAdditive
+        ? styleParameterManager->resolve(PartDesignGui::StyleParameters::PreviewAdditiveColor)
+        : styleParameterManager->resolve(PartDesignGui::StyleParameters::PreviewSubtractiveColor);
+    if (color.getValue() != wanted) {
+        color.setValue(wanted);
+    }
+}
+}  // namespace
+
 void ViewProvider::attach(App::DocumentObject* pcObject)
 {
     ViewProviderPart::attach(pcObject);
 
-    auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
-
     if (auto addSubFeature = getObject<PartDesign::FeatureAddSub>()) {
-        bool isAdditive = addSubFeature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive;
-
-        PreviewColor.setValue(
-            isAdditive ? styleParameterManager->resolve(StyleParameters::PreviewAdditiveColor)
-                       : styleParameterManager->resolve(StyleParameters::PreviewSubtractiveColor)
-        );
+        setPreviewColor(PreviewColor, addSubFeature);
     }
 }
 
 bool ViewProvider::doubleClicked()
 {
+    // A Delete part row reopens its dialog (FreeCAD-CH ops#640 rank 30, blind test F48)
+    if (auto deleter = getObject<PartDesign::DeletePart>()) {
+        if (!Gui::Control().activeDialog()) {
+            Gui::Control().showDialog(new TaskDlgDeletePart(deleter->getDocument(), {}, deleter));
+        }
+        return true;
+    }
     try {
         QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(getObject()->Label.getValue()));
-        getDocument()->openCommand(text.toUtf8());
+        // FreeCAD-CH (ops#640): 0 under the step lock means the open dialog stayed (its accept
+        // failed and showed why): stop here, or trySetEdit would try the accept a second time
+        if (getDocument()->openCommand(text.toUtf8()) == 0
+            && getDocument()->getDocument()->isStepLocked()) {
+            return true;
+        }
         Gui::cmdSetEdit(pcObject, Gui::Application::Instance->getUserEditMode());
+        // FreeCAD-CH (ops#640, journey J7): a refused edit (a dress-up whose base is gone says
+        // so and opens nothing) left its "Edit" command open, and it became an undo step: the
+        // first Undo after a delete then did nothing visible. Nothing in edit: nothing to keep
+        if (!getDocument()->getInEdit()) {
+            getDocument()->abortCommand();
+        }
     }
     catch (const Base::Exception&) {
         getDocument()->abortCommand();
     }
     return true;
+}
+
+bool ViewProvider::editHoldsOneStep(int ModNum) const
+{
+    return ModNum == ViewProvider::Default;
 }
 
 void ViewProvider::setupContextMenu(QMenu* menu, QObject* receiver, const char* member)
@@ -117,16 +157,9 @@ void ViewProvider::setupContextMenu(QMenu* menu, QObject* receiver, const char* 
 
 bool ViewProvider::keyPressed(bool pressed, int key)
 {
-    // Esc there is posted to the task view and resets the edit; with a field armed, the first Esc
-    // only ends the picking (Q1)
-    if (key == SoKeyboardEvent::ESCAPE) {
-        if (ReferenceField* field = ReferenceField::armedField()) {
-            if (!pressed) {
-                field->setArmed(false);
-            }
-            return true;
-        }
-    }
+    // Esc there is posted to the task view and resets the edit, a reference field armed or not:
+    // one Esc cancels the dialog, as Onshape's (ops#640 rank 25, R1; decision 23 Q1 (a) had the
+    // first Esc only end the picking)
     return PartGui::ViewProviderPart::keyPressed(pressed, key);
 }
 
@@ -311,6 +344,8 @@ void ViewProvider::updatePreview()
     ViewProviderPreviewExtension::updatePreview();
 
     if (auto* addSubFeature = getObject<PartDesign::FeatureAddSub>()) {
+        setPreviewColor(PreviewColor, addSubFeature);
+
         // we only want to show the additional tool preview for subtractive features
         if (addSubFeature->getAddSubType() != PartDesign::FeatureAddSub::Type::Subtractive) {
             return;
@@ -450,6 +485,27 @@ bool ViewProvider::onDelete(const std::vector<std::string>&)
     if (!isShow() || previousShown) {
         keepHidden = profileObjects(feature);
     }
+    // Under the Onshape keymap the deleted feature's sketches reappear, as Onshape's (hands-on:
+    // a deleted pattern original's sketch reappears), the same as after an undo of the
+    // feature's creation (ops#640 round 6, blind test F39). One that another feature still uses
+    // stays hidden; a binder too (Onshape has none)
+    if (Gui::ForkKeymap::isOnshape()) {
+        std::erase_if(keepHidden, [feature](App::DocumentObject* profile) {
+            if (!profile || !profile->isDerivedFrom<Part::Part2DObject>()) {
+                return false;
+            }
+            for (App::DocumentObject* user : profile->getInList()) {
+                if (user == feature || !user->isDerivedFrom<PartDesign::Feature>()) {
+                    continue;
+                }
+                const std::vector<App::DocumentObject*> used = profileObjects(user);
+                if (std::ranges::find(used, profile) != used.end()) {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
 
     // find surrounding features in the tree
     Part::BodyBase* body = PartDesign::Body::findBodyOf(getObject());
@@ -473,6 +529,30 @@ bool ViewProvider::onDelete(const std::vector<std::string>&)
     }
 
     makeChildrenVisible(keepHidden);
+
+    // Under the Onshape keymap, the Body of a New part whose last solid feature this was goes
+    // in the same step: its sketch stays, in another part's Body where history has it, as
+    // Onshape's sketch of no part (ops#640 rank 30, blind test F50)
+    auto partBody = freecad_cast<PartDesign::Body*>(body);
+    if (partBody && Gui::ForkKeymap::isOnshape() && !partBody->Tip.getValue()
+        && std::ranges::none_of(partBody->Group.getValues(), [](const App::DocumentObject* obj) {
+               return PartDesign::Body::isSolidFeature(obj);
+           })) {
+        const bool active = PartDesignGui::getBody(false, false) == partBody;
+        App::Document* doc = partBody->getDocument();
+        const auto& members = partBody->Group.getValues();
+        App::DocumentObjectT first(members.empty() ? nullptr : members.front());
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::Command::doCommand(Gui::Command::Doc,
+                                "PartDesign.removeEmptyPart(%s)",
+                                Gui::Command::getObjectCmd(partBody).c_str());
+        // The part that took the sketch is the active one when the removed one was
+        App::DocumentObject* moved = first.getObject();
+        PartDesign::Body* taker = moved ? PartDesign::Body::findBodyOf(moved) : nullptr;
+        if (active && taker && taker != partBody) {
+            PartDesignGui::makeBodyActive(taker, doc);
+        }
+    }
 
     return true;
 }

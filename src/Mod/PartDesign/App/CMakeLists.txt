@@ -30,6 +30,24 @@ SET(Features_SRCS
     Body.h
     Studio.cpp
     Studio.h
+    StudioList.cpp
+    StudioList.h
+    StudioConfig.cpp
+    StudioConfig.h
+    StudioEdit.cpp
+    StudioEdit.h
+    StudioOwner.cpp
+    StudioOwner.h
+    StudioPattern.cpp
+    StudioPattern.h
+    FeatureApply.cpp
+    FeatureApply.h
+    StudioTransform.cpp
+    StudioTransform.h
+    Pieces.cpp
+    Pieces.h
+    Derived.cpp
+    Derived.h
     ContainerMoves.cpp
     ContainerMoves.h
     FeatureBase.h
@@ -60,6 +78,8 @@ SET(FeaturesTransformed_SRCS
     FeatureLinearPattern.cpp
     FeaturePolarPattern.h
     FeaturePolarPattern.cpp
+    FeatureCurvePattern.h
+    FeatureCurvePattern.cpp
     FeatureScaled.h
     FeatureScaled.cpp
     FeatureMultiTransform.h
@@ -80,6 +100,8 @@ SET(FeaturesDressUp_SRCS
     FeatureThickness.h
     FeatureDefeaturing.cpp
     FeatureDefeaturing.h
+    FeatureFacePattern.cpp
+    FeatureFacePattern.h
 )
 SOURCE_GROUP("DressUpFeatures" FILES ${FeaturesDressUp_SRCS})
 
@@ -88,6 +110,9 @@ SET(FeaturesSketchBased_SRCS
     FeatureExtrude.h
     FeatureSketchBased.cpp
     FeatureSketchBased.h
+    ProfileRegions.cpp
+    ProfileRegions.h
+    StraightEdge.h
     FeaturePad.cpp
     FeaturePad.h
     FeaturePocket.cpp

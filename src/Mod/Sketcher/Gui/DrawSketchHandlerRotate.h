@@ -439,7 +439,8 @@ private:
                         (cstr->Type == Coincident || cstr->Type == Tangent
                          || cstr->Type == Symmetric || cstr->Type == Perpendicular
                          || cstr->Type == Parallel || cstr->Type == Equal || cstr->Type == Angle
-                         || cstr->Type == PointOnObject || cstr->Type == InternalAlignment)
+                         || cstr->Type == PointOnObject || cstr->Type == Midpoint
+                         || cstr->Type == InternalAlignment)
                         && firstIndex >= 0 && secondIndex >= 0 && thirdIndex == GeoEnum::GeoUndef
                     ) {
                         newConstr->Second = secondIndexi;

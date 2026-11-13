@@ -35,6 +35,166 @@
     <widget class="QWidget" name="sectionsFieldPlaceholder" native="true"/>
    </item>
    <item>
+    <layout class="QGridLayout" name="conditionsLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="labelStartCondition">
+       <property name="text">
+        <string>Start condition</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QComboBox" name="comboStartCondition">
+       <item>
+        <property name="text">
+         <string>None</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Normal to profile</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="labelStartMagnitude">
+       <property name="text">
+        <string>Magnitude</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QDoubleSpinBox" name="spinStartMagnitude">
+       <property name="toolTip">
+        <string>Scale of the start condition's tangent</string>
+       </property>
+       <property name="decimals">
+        <number>3</number>
+       </property>
+       <property name="minimum">
+        <double>0.001000000000000</double>
+       </property>
+       <property name="maximum">
+        <double>1000.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.100000000000000</double>
+       </property>
+       <property name="value">
+        <double>1.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="labelEndCondition">
+       <property name="text">
+        <string>End condition</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QComboBox" name="comboEndCondition">
+       <item>
+        <property name="text">
+         <string>None</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Normal to profile</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="labelEndMagnitude">
+       <property name="text">
+        <string>Magnitude</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QDoubleSpinBox" name="spinEndMagnitude">
+       <property name="toolTip">
+        <string>Scale of the end condition's tangent</string>
+       </property>
+       <property name="decimals">
+        <number>3</number>
+       </property>
+       <property name="minimum">
+        <double>0.001000000000000</double>
+       </property>
+       <property name="maximum">
+        <double>1000.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.100000000000000</double>
+       </property>
+       <property name="value">
+        <double>1.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupConnections">
+     <property name="title">
+      <string>Connections</string>
+     </property>
+     <property name="toolTip">
+      <string>Vertex pairs the loft joins: one vertex on the profile, one on the section</string>
+     </property>
+     <layout class="QVBoxLayout" name="connectionsLayout">
+      <item>
+       <widget class="QListWidget" name="listConnections">
+        <property name="selectionMode">
+         <enum>QAbstractItemView::ExtendedSelection</enum>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>16777215</width>
+          <height>100</height>
+         </size>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="connectionButtonsLayout">
+        <item>
+         <widget class="QPushButton" name="buttonAddConnection">
+          <property name="text">
+           <string>Add connection</string>
+          </property>
+          <property name="toolTip">
+           <string>Pick a vertex on the profile, then one on the section</string>
+          </property>
+          <property name="checkable">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="buttonRemoveConnection">
+          <property name="text">
+           <string>Remove</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="labelConnectionHint">
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="Line" name="line">
      <property name="orientation">
       <enum>Qt::Horizontal</enum>
@@ -56,6 +216,13 @@
  <tabstops>
   <tabstop>checkBoxRuled</tabstop>
   <tabstop>checkBoxClosed</tabstop>
+  <tabstop>comboStartCondition</tabstop>
+  <tabstop>spinStartMagnitude</tabstop>
+  <tabstop>comboEndCondition</tabstop>
+  <tabstop>spinEndMagnitude</tabstop>
+  <tabstop>listConnections</tabstop>
+  <tabstop>buttonAddConnection</tabstop>
+  <tabstop>buttonRemoveConnection</tabstop>
   <tabstop>checkBoxUpdateView</tabstop>
  </tabstops>
  <resources/>

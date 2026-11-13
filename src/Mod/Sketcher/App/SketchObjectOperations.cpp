@@ -24,7 +24,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
+#include <set>
 #include <tuple>
+
+#include <Geom2dAPI_InterCurveCurve.hxx>
+#include <Geom2dInt_GInter.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <GeomAPI.hxx>
+#include <Geom_Curve.hxx>
+#include <IntRes2d_IntersectionSegment.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
+#include <gp_Pln.hxx>
 
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
@@ -61,17 +74,22 @@ int SketchObject::moveGeometries(const std::vector<GeoElementId>& geoEltIds, con
 
 
     if (updateGeoBeforeMoving || solverNeedsUpdate) {
-        lastDoF = solvedSketch.setUpSketch(
+        // FreeCAD-CH (ops#640): a conflict solved around stays left out while dragging (the
+        // skip set of the last solve), and its diagnosis stays the one the marks show
+        const int dof = solvedSketch.setUpSketch(
             getCompleteGeometry(), Constraints.getValues(), getExternalGeometryCount());
 
-        retrieveSolverDiagnostics();
+        if (!lastSolvedAroundConflict) {
+            lastDoF = dof;
+            retrieveSolverDiagnostics();
+        }
 
         solverNeedsUpdate = false;
     }
 
-    if (lastDoF < 0)// over-constrained sketch
+    if (solvedSketch.hasConflicts())  // conflicting constraints in what the solver holds
         return -1;
-    if (lastHasConflict)// conflicting constraints
+    if (!lastSolvedAroundConflict && (lastDoF < 0 || lastHasConflict))  // over-constrained
         return -1;
 
     // move the point and solve
@@ -522,6 +540,179 @@ int SketchObject::extend(int GeoId, double increment, PointPos endpoint)
     return retcode;
 }
 
+// FreeCAD-CH (ops#640): the GeoIds of the geometry of ExternalGeometry's entries marked implicit (a
+// constraint's helper link, a model pick, ops#634). Onshape's model edges in the sketch plane, not
+// Use'd, bound neither Trim nor Extend (GA3-25)
+static std::set<int> implicitHelperGeoIds(const SketchObject& obj, const std::map<long, int>& geoMap)
+{
+    std::set<int> helpers;
+    for (int entry = 0; entry < obj.ExternalGeometry.getSize(); ++entry) {
+        if (!obj.isImplicitExternal(entry)) {
+            continue;
+        }
+        for (long id : obj.externalGeometryIds(entry)) {
+            auto it = geoMap.find(id);
+            if (it != geoMap.end()) {
+                helpers.insert(-it->second - 1);  // ExternalGeo[k] has GeoId -1 - k
+            }
+        }
+    }
+    return helpers;
+}
+
+// FreeCAD-CH (Onshape's Extend, ops#640; see the header)
+double SketchObject::seekExtendBoundary(
+    int GeoId,
+    PointPos endpoint,
+    double increment,
+    int& boundaryGeoId,
+    PointPos& boundaryPos
+) const
+{
+    boundaryGeoId = GeoEnum::GeoUndef;
+    boundaryPos = PointPos::none;
+    if (GeoId < 0 || GeoId > getHighestCurveIndex() || !(increment > 0)
+        || (endpoint != PointPos::start && endpoint != PointPos::end)) {
+        return increment;
+    }
+    const auto* seg = dynamic_cast<const Part::GeomLineSegment*>(getGeometry(GeoId));
+    if (!seg) {
+        return increment;
+    }
+    const Base::Vector3d end = endpoint == PointPos::start ? seg->getStartPoint() : seg->getEndPoint();
+    Base::Vector3d dir = end - (endpoint == PointPos::start ? seg->getEndPoint() : seg->getStartPoint());
+    if (dir.Length() < Precision::Confusion()) {
+        return increment;
+    }
+    dir.Normalize();
+
+    // as Trim's (arePointsWithinPrecision): a point within this of the path is on it
+    const double tol = 500 * Precision::Confusion();
+    double best = increment + tol;  // a boundary at the click (within tol) is reached
+    // a candidate at distance t along the path from the old end: the nearest wins, and at the
+    // same distance a point (an end point, a sketch point) wins over a curve's crossing
+    auto consider = [&](const Base::Vector3d& p, int geoId, PointPos pos) {
+        const Base::Vector3d v = p - end;
+        const double t = v * dir;
+        if (t <= tol || (v - dir * t).Length() > tol) {
+            return;  // behind or at the old end (a curve through it doesn't stop it), or off the path
+        }
+        const bool point = pos != PointPos::none;
+        const bool first = boundaryGeoId == GeoEnum::GeoUndef;
+        const bool samePlace = std::abs(t - best) <= tol;
+        if ((first && t <= best) || (!first && t < best - tol)
+            || (!first && samePlace && point && boundaryPos == PointPos::none)) {
+            best = t;
+            boundaryGeoId = geoId;
+            boundaryPos = pos;
+        }
+    };
+
+    // a constraint's helper link (a model pick, ops#634) is not Use'd: it doesn't stop it
+    const std::set<int> helpers = implicitHelperGeoIds(*this, externalGeoMap);
+
+    gp_Pln plane(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+    Handle(Geom2d_Curve) path = new Geom2d_TrimmedCurve(
+        new Geom2d_Line(gp_Pnt2d(end.x, end.y), gp_Dir2d(dir.x, dir.y)),
+        0.0,
+        increment + tol
+    );
+    std::vector<int> ids;
+    for (int id = 0; id <= getHighestCurveIndex(); ++id) {
+        ids.push_back(id);
+    }
+    // not the origin axes (GeoIds -1 and -2): Onshape's don't stop it
+    for (int id = GeoEnum::RefExt; id >= -getExternalGeometryCount(); --id) {
+        ids.push_back(id);
+    }
+    for (int id : ids) {
+        const Part::Geometry* geo = getGeometry(id);
+        if (id == GeoId || !geo || helpers.count(id) != 0
+            || GeometryFacade::isInternalAligned(geo)) {
+            continue;  // an ellipse's axes, a B-spline's poles and knots are the curve's own
+        }
+        if (geo->is<Part::GeomPoint>()) {
+            consider(static_cast<const Part::GeomPoint*>(geo)->getPoint(), id, PointPos::start);
+            continue;
+        }
+        if (geo->isDerivedFrom<Part::GeomBoundedCurve>()) {
+            const auto* bounded = static_cast<const Part::GeomBoundedCurve*>(geo);
+            consider(bounded->getStartPoint(), id, PointPos::start);
+            consider(bounded->getEndPoint(), id, PointPos::end);
+        }
+        Handle(Geom_Curve) curve3d = Handle(Geom_Curve)::DownCast(geo->handle());
+        if (curve3d.IsNull()) {
+            continue;
+        }
+        try {
+            Geom2dAPI_InterCurveCurve intersector(path, GeomAPI::To2d(curve3d, plane), 1.0e-12);
+            for (int i = 1; i <= intersector.NbPoints(); ++i) {
+                const gp_Pnt2d p = intersector.Point(i);
+                consider(Base::Vector3d(p.X(), p.Y(), 0), id, PointPos::none);
+            }
+            // a collinear overlap: its first point (an end point, considered above, or the path's)
+            const Geom2dInt_GInter& inter = intersector.Intersector();
+            for (int i = 1; i <= inter.NbSegments(); ++i) {
+                const IntRes2d_IntersectionSegment& overlap = inter.Segment(i);
+                if (overlap.HasFirstPoint()) {
+                    const gp_Pnt2d p = overlap.FirstPoint().Value();
+                    consider(Base::Vector3d(p.X(), p.Y(), 0), id, PointPos::none);
+                }
+            }
+        }
+        catch (const Standard_Failure&) {
+            continue;  // a curve OCCT can't intersect doesn't stop it
+        }
+    }
+    if (boundaryGeoId == GeoEnum::GeoUndef) {
+        return increment;
+    }
+    // a crossing at one of the boundary's end points is that point (a corner, a curve's end)
+    if (boundaryPos == PointPos::none) {
+        const Base::Vector3d at = end + dir * best;
+        for (PointPos pos : {PointPos::start, PointPos::end}) {
+            const Part::Geometry* geo = getGeometry(boundaryGeoId);
+            if (geo->isDerivedFrom<Part::GeomBoundedCurve>()
+                && (getPoint(boundaryGeoId, pos) - at).Length() < tol) {
+                boundaryPos = pos;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+int SketchObject::extendToBoundary(int GeoId, double increment, PointPos endpoint)
+{
+    int boundaryGeoId;
+    PointPos boundaryPos;
+    const double bounded = seekExtendBoundary(GeoId, endpoint, increment, boundaryGeoId, boundaryPos);
+    if (boundaryGeoId == GeoEnum::GeoUndef) {
+        return extend(GeoId, increment, endpoint);
+    }
+    // the end goes onto the boundary, and the constraint holds it there
+    int retcode = extend(GeoId, bounded, endpoint);
+    if (retcode != 0) {
+        return retcode;
+    }
+    auto constraint = std::make_unique<Constraint>();
+    constraint->First = GeoId;
+    constraint->FirstPos = endpoint;
+    constraint->Second = boundaryGeoId;
+    if (boundaryPos == PointPos::none) {
+        constraint->Type = Sketcher::PointOnObject;
+    }
+    else {
+        constraint->Type = Sketcher::Coincident;
+        constraint->SecondPos = boundaryPos;
+    }
+    addConstraint(std::move(constraint));
+    if (noRecomputes) {
+        solve();
+    }
+    return 0;
+}
+
 // clang-format on
 bool SketchObject::seekTrimPoints(
     int GeoId,
@@ -557,6 +748,42 @@ bool SketchObject::seekTrimPoints(
         geos.push_back(&vAxis);
     }
 
+    // FreeCAD-CH (Onshape GA3-25, GA3-25b, ops#640): a constraint's helper link (a model pick) bounds
+    // no trim, and a point on the curve (a sketch point, a Use'd one) does. Part's search takes only
+    // curves: a helper's entry is replaced by a point (which it skips), and each point on the curve
+    // stands in as a short segment across the curve through it (the crossing is the point)
+    const std::set<int> helpers = implicitHelperGeoIds(*this, externalGeoMap);
+    Part::GeomPoint skipped;
+    std::vector<std::unique_ptr<Part::GeomLineSegment>> standIns;
+    std::map<int, int> standInGeoIds;  // index in geos -> the point's GeoId
+    const auto* trimmed = getGeometry<Part::GeomCurve>(GeoId);
+    const std::size_t ownCount = geos.size() - (includeSketchAxes ? 2 : 0);
+    for (std::size_t i = 0; i < ownCount; ++i) {
+        const int id = getGeoIdFromCompleteGeometryIndex(static_cast<int>(i));
+        if (helpers.count(id) != 0) {
+            geos[i] = &skipped;
+            continue;
+        }
+        if (!trimmed || id == GeoId || !geos[i]->is<Part::GeomPoint>()
+            || GeometryFacade::isInternalAligned(geos[i])) {
+            continue;
+        }
+        const Base::Vector3d p = static_cast<const Part::GeomPoint*>(geos[i])->getPoint();
+        double u;
+        Base::Vector3d tangent;
+        if (!trimmed->closestParameter(p, u) || (trimmed->pointAtParameter(u) - p).Length() > Precision::Confusion()
+            || !trimmed->tangent(u, tangent)) {
+            continue;
+        }
+        tangent.Normalize();
+        const Base::Vector3d across(-tangent.y * 1e-4, tangent.x * 1e-4, 0);
+        auto standIn = std::make_unique<Part::GeomLineSegment>();
+        standIn->setPoints(p - across, p + across);
+        standInGeoIds[static_cast<int>(geos.size())] = id;
+        geos.push_back(standIn.get());
+        standIns.push_back(std::move(standIn));
+    }
+
     int localindex1, localindex2;
 
     // Not found in will be returned as -1, not as GeoUndef, Part WB is agnostic to the concept
@@ -569,6 +796,9 @@ bool SketchObject::seekTrimPoints(
 
     // invalid complete geometry indices are mapped to GeoUndef
     auto getGeoIdForIndex = [&](int index) {
+        if (auto it = standInGeoIds.find(index); it != standInGeoIds.end()) {
+            return it->second;
+        }
         if (includeSketchAxes && index == hAxisIndex) {
             return Part::Part2DObject::H_Axis;
         }
@@ -700,11 +930,15 @@ std::unique_ptr<Constraint> getNewConstraintAtTrimCut(
     newConstr->First = cutGeoId;
     newConstr->FirstPos = cutPosId;
     newConstr->Second = cuttingGeoId;
-    if (isPointAtPosition(obj, cuttingGeoId, PointPos::start, cutPointVec)) {
+    // FreeCAD-CH (ops#656): a closed cutting curve (a circle, an ellipse) has no ends: its point at
+    // parameter 0 is not a "start" to be coincident with (that made a malformed constraint).
+    const auto* cutting = obj->getGeometry(cuttingGeoId);
+    const bool cuttingHasEnds = cutting && !SketchObject::isClosedCurve(cutting);
+    if (cuttingHasEnds && isPointAtPosition(obj, cuttingGeoId, PointPos::start, cutPointVec)) {
         newConstr->Type = Sketcher::Coincident;
         newConstr->SecondPos = PointPos::start;
     }
-    else if (isPointAtPosition(obj, cuttingGeoId, PointPos::end, cutPointVec)) {
+    else if (cuttingHasEnds && isPointAtPosition(obj, cuttingGeoId, PointPos::end, cutPointVec)) {
         newConstr->Type = Sketcher::Coincident;
         newConstr->SecondPos = PointPos::end;
     }
@@ -714,6 +948,140 @@ std::unique_ptr<Constraint> getNewConstraintAtTrimCut(
         newConstr->SecondPos = PointPos::none;
     }
     return newConstr;
+}
+
+// FreeCAD-CH (ops#656): the constraints that keep the pieces of one cut curve behaving as that curve:
+// arcs of one circle or ellipse keep one size (Equal; they already share the centre), the pieces of a
+// line stay collinear (Tangent between lines). Without them a radius or a distance on the old curve
+// governs only its first piece (probe P3). Split's pieces
+// are `joined` end to end: for arcs of one circle that joint (with the shared centre) already makes the
+// radii equal, and for lines its tangency makes them collinear.
+static void addTiesBetweenPieces(
+    const Part::Geometry* oldGeo,
+    const std::vector<int>& newIds,
+    bool joined,
+    std::vector<Constraint*>& ties
+)
+{
+    if (newIds.size() < 2) {
+        return;
+    }
+    auto tie = [&](ConstraintType type, PointPos firstPos, PointPos secondPos) {
+        auto* c = new Constraint();
+        c->Type = type;
+        c->First = newIds.front();
+        c->FirstPos = firstPos;
+        c->Second = newIds.back();
+        c->SecondPos = secondPos;
+        ties.push_back(c);
+    };
+    const bool circular = oldGeo->isDerivedFrom<Part::GeomCircle>()
+        || oldGeo->isDerivedFrom<Part::GeomArcOfCircle>();
+    const bool elliptic = oldGeo->isDerivedFrom<Part::GeomEllipse>()
+        || oldGeo->isDerivedFrom<Part::GeomArcOfEllipse>();
+    if ((circular && !joined) || elliptic) {
+        tie(Equal, PointPos::none, PointPos::none);
+    }
+    if (elliptic && !joined) {
+        // Equal radii and a shared centre leave an ellipse arc free to turn about the centre: an end
+        // of the second piece on the first piece's ellipse holds its orientation (one equation).
+        auto* c = new Constraint();
+        c->Type = PointOnObject;
+        c->First = newIds.back();
+        c->FirstPos = PointPos::start;
+        c->Second = newIds.front();
+        c->SecondPos = PointPos::none;
+        ties.push_back(c);
+    }
+    else if (!joined && oldGeo->is<Part::GeomLineSegment>()) {
+        tie(Tangent, PointPos::none, PointPos::none);
+    }
+}
+
+// FreeCAD-CH (ops#656): whether two curves lie on one carrier (the same circle, ellipse or infinite
+// line), as the pieces Split joins end to end do.
+static bool onSameCarrier(const Part::Geometry* a, const Part::Geometry* b)
+{
+    constexpr double tol = 1e-7;
+    auto circle = [](const Part::Geometry* g, Base::Vector3d& c, double& r) {
+        if (const auto* arc = dynamic_cast<const Part::GeomArcOfCircle*>(g)) {
+            c = arc->getCenter();
+            r = arc->getRadius();
+            return true;
+        }
+        return false;
+    };
+    Base::Vector3d ca, cb;
+    double ra {}, rb {};
+    if (circle(a, ca, ra) && circle(b, cb, rb)) {
+        return (ca - cb).Length() < tol && std::abs(ra - rb) < tol;
+    }
+    const auto* la = dynamic_cast<const Part::GeomLineSegment*>(a);
+    const auto* lb = dynamic_cast<const Part::GeomLineSegment*>(b);
+    if (la && lb) {
+        const Base::Vector3d s = la->getStartPoint();
+        const Base::Vector3d d = (la->getEndPoint() - s).Normalize();
+        auto off = [&](const Base::Vector3d& p) {
+            const Base::Vector3d v = p - s;
+            return (v - d * v.Dot(d)).Length();
+        };
+        return off(lb->getStartPoint()) < tol && off(lb->getEndPoint()) < tol;
+    }
+    return false;
+}
+
+// FreeCAD-CH (ops#656): where the rest of the sketch already implies a tie, the sketch has become
+// redundant. The solver may name the tie or one of the user's constraints (it prefers to name the one
+// that removes fewer degrees of freedom), so take the ties out one at a time, last first, and keep each
+// one out only if that lowers the number of redundant constraints without freeing anything (a two-equation
+// tie can be only half implied). A redundancy the sketch had before the cut stays, and the ties stay with
+// it: loud, never a silent loss. `tieIndices` are constraint indices (0-based).
+static void dropRedundantTies(SketchObject* obj, std::vector<int> tieIndices)
+{
+    if (tieIndices.empty()) {
+        return;
+    }
+    obj->solve();
+    std::ranges::sort(tieIndices, std::greater<>());
+    for (int i : tieIndices) {
+        const size_t before = obj->getLastRedundant().size();
+        const int dofBefore = obj->getLastDoF();
+        if (before == 0) {
+            return;
+        }
+        std::unique_ptr<Constraint> tie(obj->Constraints.getValues()[i]->copy());
+        obj->delConstraint(i, DeleteOption::NoSolve);
+        obj->solve();
+        if (obj->getLastRedundant().size() >= before || obj->getLastDoF() > dofBefore) {
+            // not this tie: put it back (at the end; the ties still to try have lower indices)
+            obj->addConstraint(std::move(tie));
+            obj->solve();
+        }
+    }
+}
+
+// FreeCAD-CH (ops#656): say which constraints a cut released because they have no equivalent on the
+// pieces (an arc's length, an equal length of lines), so the loss is never silent. Numbers as the
+// constraint list shows them (1-based).
+static void warnReleased(const SketchObject* obj, const char* tool, const std::vector<int>& released)
+{
+    if (released.empty()) {
+        return;
+    }
+    const auto& constraints = obj->Constraints.getValues();
+    std::string list;
+    for (int i : released) {
+        list += (list.empty() ? "" : ", ") + std::to_string(i + 1);
+        if (i >= 0 && i < int(constraints.size()) && !constraints[i]->Name.empty()) {
+            list += " (" + constraints[i]->Name + ")";
+        }
+    }
+    Base::Console().warning(
+        obj->getFullLabel(),
+        "%s removed constraint(s) %s (numbered as before it): they have no equivalent on the pieces.\n",
+        tool,
+        list.c_str()
+    );
 }
 
 bool isGeoIdAllowedForTrim(const SketchObject* obj, int GeoId)
@@ -802,7 +1170,10 @@ void createNewConstraintsForTrim(
     std::vector<int>& idsOfOldConstraints,
     std::vector<Constraint*>& newConstraints,
     std::set<int, std::greater<>>& geoIdsToBeDeleted,
-    std::map<Constraint*, int>& newToOldConstraintMap
+    std::map<Constraint*, int>& newToOldConstraintMap,
+    bool piecesTied,
+    std::vector<Constraint*>& carrierTies,
+    std::vector<int>& released
 )
 {
     const auto& allConstraints = obj->Constraints.getValues();
@@ -861,11 +1232,35 @@ void createNewConstraintsForTrim(
         // We have already transferred all constraints on endpoints to the new pieces.
         // If there is still any left, this means one of the remaining pieces was degenerate.
         if (!(con->Type == Angle || con->involvesGeoIdAndPosId(GeoId, PointPos::none))) {
+            // FreeCAD-CH (ops#656): an end that is cut away may be the joint Split made to the other
+            // piece of a line, the only thing that kept the two collinear. An end-to-end Tangent of two
+            // lines says "collinear" whoever made it, so it is kept as an edge-to-edge (collinear)
+            // Tangent. Arcs are left alone: Split's joint of two arcs looks the same as two arcs a user
+            // drew meeting at a common centre, and a user's polyline vertex (a Coincident) ties nothing.
+            const bool endToEnd = con->First != con->Second && con->FirstPos != PointPos::none
+                && con->FirstPos != PointPos::mid && con->SecondPos != PointPos::none
+                && con->SecondPos != PointPos::mid;
+            const int other = con->First == GeoId ? con->Second : con->First;
+            const auto* otherGeo = other >= 0 ? obj->getGeometry(other) : nullptr;
+            bool splitJoint = false;
+            if (endToEnd && otherGeo && trimmedGeo->is<Part::GeomLineSegment>()) {
+                splitJoint = con->Type == Tangent;
+            }
+            if (splitJoint && onSameCarrier(trimmedGeo, otherGeo)) {
+                auto* tie = new Constraint();
+                tie->Type = Tangent;
+                tie->First = newIds.front();
+                tie->Second = other;
+                carrierTies.push_back(tie);
+            }
             continue;
         }
         // constraint has not yet been changed
         size_t sizeBefore = newConstraints.size();
-        obj->deriveConstraintsForPieces(GeoId, newIds, newGeos, con, newConstraints, false);
+        // FreeCAD-CH (ops#656): tied pieces (collinear lines) take a line's orientation once.
+        if (!obj->deriveConstraintsForPieces(GeoId, newIds, newGeos, con, newConstraints, piecesTied)) {
+            released.push_back(oldConstrId);
+        }
         // Map all newly added derived constraints to the old ID
         for (size_t i = sizeBefore; i < newConstraints.size(); ++i) {
             newToOldConstraintMap[newConstraints[i]] = oldConstrId;
@@ -1007,6 +1402,10 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
         return (allConstraints[i]->involvesGeoIdAndPosId(GeoId, PointPos::mid));
     });
 
+    // FreeCAD-CH (ops#656): the two pieces of a line are tied collinear below.
+    const bool piecesTied = newIds.size() > 1 && geoAsCurve->is<Part::GeomLineSegment>();
+    std::vector<Constraint*> carrierTies;
+    std::vector<int> released;
     createNewConstraintsForTrim(
         this,
         GeoId,
@@ -1017,7 +1416,10 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
         idsOfOldConstraints,
         newConstraints,
         geoIdsToBeDeleted,
-        newToOldConstraintMap
+        newToOldConstraintMap,
+        piecesTied,
+        carrierTies,
+        released
     );
 
     //******************* Step D => Replacing geometries and constraints
@@ -1046,6 +1448,7 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
         }
     }
 
+    warnReleased(this, "Trim", released);  // before the deletion renumbers them
     delConstraints(std::move(idsOfOldConstraints), DeleteOption::NoFlag);
 
     if (!isOriginalCurveClosed) {
@@ -1080,6 +1483,11 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
             // TODO: ensure alignment as well?
         }
     }
+    // FreeCAD-CH (ops#656): tie the pieces (fix 2); `ties` stay at the end of newConstraints.
+    std::vector<Constraint*> ties;
+    addTiesBetweenPieces(geoAsCurve, newIds, /*joined=*/false, ties);
+    ties.insert(ties.end(), carrierTies.begin(), carrierTies.end());
+    newConstraints.insert(newConstraints.end(), ties.begin(), ties.end());
 
     replaceGeometries({GeoId}, newGeos);
     for (auto newId : newIds) {
@@ -1100,12 +1508,17 @@ int SketchObject::trim(int GeoId, const Base::Vector3d& point, bool includeSketc
     int firstAddedIndex = lastAddedIndex - (int)newConstraints.size() + 1;
 
     // Restore expressions
+    std::vector<int> tieIndices;
     for (int i = 0; i < (int)newConstraints.size(); ++firstAddedIndex, ++i) {
         auto it = exprBackup.find(newConstraints[i]);
         if (it != exprBackup.end()) {
             setExpression(Constraints.createPath(firstAddedIndex), it->second);
         }
+        if (std::ranges::find(ties, newConstraints[i]) != ties.end()) {
+            tieIndices.push_back(firstAddedIndex);
+        }
     }
+    dropRedundantTies(this, std::move(tieIndices));
 
     if (noRecomputes) {
         solve();
@@ -1138,6 +1551,19 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
     const auto* geoAsCurve = getGeometry<Part::GeomCurve>(GeoId);
 
     bool isOriginalCurveClosed = isClosedCurve(geoAsCurve);
+    // FreeCAD-CH (ops#656, fix 3, probe P7): a circle or an ellipse cut at one point is still one closed
+    // curve. Split used to turn it into a full-turn arc whose two ends nothing held together (the
+    // profile could open), and the solver has no robust single equation to hold them. Refuse, like
+    // other CAD systems do: two arcs come from Trim, or from drawing arcs.
+    if (isOriginalCurveClosed && !geoAsCurve->is<Part::GeomBSplineCurve>()) {
+        Base::Console().error(
+            getFullLabel(),
+            "Split: a circle or an ellipse has no ends, so one cut leaves it whole. Split a circle at "
+            "two points; trim an ellipse between two crossing curves, or draw arcs.\n"
+        );
+        return -1;
+    }
+    const bool isOriginalCurveConstruction = GeometryFacade::getConstruction(geoAsCurve);
     std::vector<int> newIds;
     std::vector<Part::Geometry*> newGeos;
     std::vector<Constraint*> newConstraints;
@@ -1194,10 +1620,38 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
         transferConstraints(GeoId, PointPos::start, newIds.front(), PointPos::start, true);
         transferConstraints(GeoId, PointPos::end, newIds.back(), PointPos::end, true);
     }
+    const bool isConic = geoAsCurve->isDerivedFrom<Part::GeomConic>()
+        || geoAsCurve->isDerivedFrom<Part::GeomArcOfConic>();
+    // FreeCAD-CH (ops#656): which old constraint each new one comes from, to carry its expression over
+    // (Split used to drop them; Trim keeps them the same way).
+    std::map<Constraint*, int> newToOld;
+    std::vector<int> released;
     for (const auto& oldConstrId : idsOfOldConstraints) {
         Constraint* con = allConstraints[oldConstrId];
-        deriveConstraintsForPieces(GeoId, newIds, newGeosConst, con, newConstraints, true);
+        if (con->Type == InternalAlignment && isConic) {
+            // FreeCAD-CH (ops#656): an ellipse's axes and foci stay with its first piece, as Trim
+            // keeps them. They used to be released, which left the pieces free to change shape.
+            auto* moved = con->copy();
+            moved->Second = newIds.front();
+            newConstraints.push_back(moved);
+            continue;
+        }
+        const size_t sizeBefore = newConstraints.size();
+        if (!deriveConstraintsForPieces(GeoId, newIds, newGeosConst, con, newConstraints, true)) {
+            released.push_back(oldConstrId);
+        }
+        for (size_t i = sizeBefore; i < newConstraints.size(); ++i) {
+            newToOld[newConstraints[i]] = oldConstrId;
+        }
     }
+    std::map<Constraint*, std::shared_ptr<App::Expression>> exprBackup;
+    for (auto const& [newConstr, oldId] : newToOld) {
+        auto exprInfo = getExpression(Constraints.createPath(oldId));
+        if (exprInfo.expression) {
+            exprBackup[newConstr] = std::shared_ptr<App::Expression>(exprInfo.expression->copy());
+        }
+    }
+    warnReleased(this, "Split", released);
 
     Constraint* joint = nullptr;
     // newIds.size() > 1 because a splitted circle gives an arc of circle, so we don't have a second
@@ -1240,9 +1694,43 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
         transferConstraints(GeoId, PointPos::mid, newIds.front(), PointPos::mid);
     }
 
+    // FreeCAD-CH (ops#656): tie the pieces (fix 2; split's line pieces are already collinear by their
+    // joint, circle arcs equal by the joint and the shared centre), and keep a periodic B-spline cut at
+    // one point closed (fix 3): it becomes an open one whose end poles are free, held by a coincidence.
+    std::vector<Constraint*> ties;
+    addTiesBetweenPieces(geoAsCurve, newIds, /*joined=*/true, ties);
+    if (isOriginalCurveClosed && newIds.size() == 1) {
+        if (geoAsCurve->is<Part::GeomBSplineCurve>()) {
+            auto* close = new Constraint();
+            close->Type = Coincident;
+            close->First = newIds.front();
+            close->FirstPos = PointPos::end;
+            close->Second = newIds.front();
+            close->SecondPos = PointPos::start;
+            ties.push_back(close);
+        }
+    }
+    newConstraints.insert(newConstraints.end(), ties.begin(), ties.end());
+
     delConstraints(std::move(idsOfOldConstraints), DeleteOption::NoSolve);
     replaceGeometries({GeoId}, newGeos);
-    addConstraints(newConstraints);
+    for (auto newId : newIds) {
+        // FreeCAD-CH (ops#656): construction stays construction (it used to be lost for closed curves).
+        setConstruction(newId, isOriginalCurveConstruction);
+    }
+    const int lastAddedIndex = addConstraints(newConstraints);
+    const int firstAddedIndex = lastAddedIndex - int(newConstraints.size()) + 1;
+    std::vector<int> tieIndices;
+    for (size_t i = 0; i < newConstraints.size(); ++i) {
+        auto it = exprBackup.find(newConstraints[i]);
+        if (it != exprBackup.end()) {
+            setExpression(Constraints.createPath(firstAddedIndex + int(i)), it->second);
+        }
+        if (std::ranges::find(ties, newConstraints[i]) != ties.end()) {
+            tieIndices.push_back(firstAddedIndex + int(i));
+        }
+    }
+    dropRedundantTies(this, std::move(tieIndices));
 
     if (noRecomputes) {
         solve();
@@ -1252,6 +1740,114 @@ int SketchObject::split(int GeoId, const Base::Vector3d& point)
         delete cons;
     }
 
+    return 0;
+}
+
+// FreeCAD-CH (ops#656, rehearsal 3 F3; Onshape SK11): a circle has no ends, so Split takes two points on it
+// and replaces it with two arcs of that circle, joined end to end at both points. The first arc keeps the
+// circle's id and what was on its centre; the second is new. The two joints are one Coincident and one
+// end-to-end Tangent: together 5 equations, exactly what makes the second arc the first one's circle
+// (a Coincident at both joints plus a shared centre would repeat one equation, and two Coincidents plus
+// an Equal lose the centre when the points are opposite). Ellipses are refused, as before.
+int SketchObject::split(int GeoId, const Base::Vector3d& point1, const Base::Vector3d& point2)
+{
+    Base::StateLocker lock(managedoperation, true);
+
+    if (GeoId < 0 || GeoId > getHighestCurveIndex()) {
+        return -1;
+    }
+    const auto* circle = dynamic_cast<const Part::GeomCircle*>(getGeometry(GeoId));
+    if (!circle || !GeometryFacade::isInternalType(circle, InternalType::None)) {
+        Base::Console().error(
+            getFullLabel(),
+            "Split at two points: only a whole circle is split that way. Split other curves at one point.\n"
+        );
+        return -1;
+    }
+    double u1 {}, u2 {};
+    circle->closestParameter(point1, u1);
+    circle->closestParameter(point2, u2);
+    if (u2 < u1) {
+        std::swap(u1, u2);
+    }
+    const double period = 2 * std::numbers::pi;
+    const double sweep = u2 - u1;
+    // two points the same on the circle (within a micrometre on a 1 m circle) give no second arc
+    if (sweep < 1e-9 || period - sweep < 1e-9) {
+        Base::Console().error(getFullLabel(), "Split: pick two different points on the circle.\n");
+        return -1;
+    }
+    const bool isConstruction = GeometryFacade::getConstruction(circle);
+
+    std::vector<int> newIds {GeoId, getHighestCurveIndex() + 1};
+    std::vector<Part::Geometry*> newGeos;
+    createArcsFromGeoWithLimits(circle, {{u1, u2}, {u2, u1 + period}}, newGeos);
+    std::vector<const Part::Geometry*> newGeosConst(newGeos.begin(), newGeos.end());
+
+    // the circle's edge constraints go to the pieces (its centre constraints stay on GeoId, the first arc)
+    std::vector<int> idsOfOldConstraints;
+    getConstraintIndices(GeoId, idsOfOldConstraints);
+    const auto& allConstraints = this->Constraints.getValues();
+    std::erase_if(idsOfOldConstraints, [&GeoId, &allConstraints](const auto& i) {
+        return !allConstraints[i]->involvesGeoIdAndPosId(GeoId, PointPos::none);
+    });
+    std::vector<Constraint*> newConstraints;
+    std::map<Constraint*, int> newToOld;
+    std::vector<int> released;
+    for (const auto& oldConstrId : idsOfOldConstraints) {
+        const size_t sizeBefore = newConstraints.size();
+        if (!deriveConstraintsForPieces(
+                GeoId, newIds, newGeosConst, allConstraints[oldConstrId], newConstraints, true
+            )) {
+            released.push_back(oldConstrId);
+        }
+        for (size_t i = sizeBefore; i < newConstraints.size(); ++i) {
+            newToOld[newConstraints[i]] = oldConstrId;
+        }
+    }
+    std::map<Constraint*, std::shared_ptr<App::Expression>> exprBackup;
+    for (auto const& [newConstr, oldId] : newToOld) {
+        auto exprInfo = getExpression(Constraints.createPath(oldId));
+        if (exprInfo.expression) {
+            exprBackup[newConstr] = std::shared_ptr<App::Expression>(exprInfo.expression->copy());
+        }
+    }
+    warnReleased(this, "Split", released);
+
+    auto* joint = new Constraint();
+    joint->Type = Coincident;
+    joint->First = newIds.front();
+    joint->FirstPos = PointPos::end;
+    joint->Second = newIds.back();
+    joint->SecondPos = PointPos::start;
+    newConstraints.push_back(joint);
+    auto* closing = new Constraint();
+    closing->Type = Tangent;
+    closing->First = newIds.back();
+    closing->FirstPos = PointPos::end;
+    closing->Second = newIds.front();
+    closing->SecondPos = PointPos::start;
+    newConstraints.push_back(closing);
+
+    delConstraints(std::move(idsOfOldConstraints), DeleteOption::NoSolve);
+    replaceGeometries({GeoId}, newGeos);
+    for (auto newId : newIds) {
+        setConstruction(newId, isConstruction);
+    }
+    const int lastAddedIndex = addConstraints(newConstraints);
+    const int firstAddedIndex = lastAddedIndex - int(newConstraints.size()) + 1;
+    for (size_t i = 0; i < newConstraints.size(); ++i) {
+        auto it = exprBackup.find(newConstraints[i]);
+        if (it != exprBackup.end()) {
+            setExpression(Constraints.createPath(firstAddedIndex + int(i)), it->second);
+        }
+    }
+    if (noRecomputes) {
+        solve();
+    }
+    for (auto& cons : newConstraints) {
+        delete cons;
+    }
     return 0;
 }
 // clang-format off
@@ -1577,6 +2173,7 @@ int SketchObject::addSymmetric(
                       || constr->Type == Sketcher::Equal          //
                       || constr->Type == Sketcher::Angle          //
                       || constr->Type == Sketcher::PointOnObject  //
+                      || constr->Type == Sketcher::Midpoint       // FreeCAD-CH (ops#656)
                       || constr->Type == Sketcher::InternalAlignment)) {
                     continue;
                 }

@@ -138,7 +138,7 @@ std::vector<ReferenceRow> referenceRows(const DocumentObject* obj)
     for (const auto& slot : slots) {
         auto entry = ReferenceReport::find(slot.prop, slot.localIndex);
         if (!entry && !Data::hasMissingElement(slot.sub.c_str())
-            && (slot.guess.empty() || coveredGuess(slot))) {
+            && (slot.guess.empty() || coveredGuess(slot) || slot.guess.kind == "equivalent")) {
             continue;
         }
         ReferenceRow row;

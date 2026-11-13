@@ -50,6 +50,7 @@ SelectionObject::SelectionObject(const Gui::SelectionChanges& msg)
     if (msg.pSubName) {
         SubNames.emplace_back(msg.pSubName);
         SelPoses.emplace_back(msg.x, msg.y, msg.z);
+        SelPicked.push_back(msg.hasPickedPoint);
     }
 }
 

@@ -19,6 +19,7 @@ SET(Test_SRCS
     TestApp.py
     TestGui.py
     TestVariablesPanelGui.py
+    TestOnshapeNavigationGui.py
     UnicodeTests.py
     UnitTests.py
     Workbench.py
@@ -39,9 +40,14 @@ SET(Test_SRCS
     TestVariablesOnshape.py
     TestVariablesCopies.py
     TestExpressionUnits.py
+    TestLiteralFractions.py
     TestNotificationArea.py
     TestPropertyEditorGui.py
     TestVariablesGui.py
+    TestVariableFieldsGui.py
+    TestDocumentTabs.py
+    TestDocumentTabsGui.py
+    TestVariableStudioGui.py
 )
 
 SET(TestData_SRCS

@@ -87,6 +87,7 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
         self.pump(200)
         self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit(), "Expected sketch edit mode")
         self.view = FreeCADGui.ActiveDocument.ActiveView
+        self.fix_view_height(self.view)
         self.view.setCamera(TOP_VIEW_CAMERA)
         self.flush_gui(100)
         self.viewport = self.view.graphicsView().viewport()
@@ -340,3 +341,37 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
         self.sketch.solve()
         self.assertEqual(list(self.sketch.RedundantConstraints), old_redundant)
         self.assertEqual(list(self.sketch.ConflictingConstraints), [])
+
+    # ops#656: the middle of an arc is inferred while drawing, as a line's middle is -------------
+
+    def add_blocked_arc(self):
+        """Arc 0: centre (5, 0), radius 5, from 30 to 150 degrees (its middle at (5, 5)), blocked."""
+        arc = Part.ArcOfCircle(
+            Part.Circle(V(5, 0, 0), V(0, 0, 1), 5), math.radians(30), math.radians(150))
+        self.sketch.addGeometry(arc, False)
+        self.sketch.addConstraint(Sketcher.Constraint("Block", 0))
+        self.doc.recompute()
+
+    def test_m1_a_line_started_at_an_arcs_middle(self):
+        """M1: a line started at the arc's middle gets Midpoint (not Point on object), and its
+        start is exactly there."""
+        self.add_blocked_arc()
+        self.start_edit()
+        self.draw_line((5, 5), (8.7, 8.3))
+        self.assertTrue(
+            self.has_constraint("Midpoint", 1, 1, 0), f"Expected a Midpoint, got {self.describe()}")
+        self.assertFalse(
+            self.has_constraint("PointOnObject", 1, 1, 0), f"Got {self.describe()}")
+        self.sketch.solve()
+        self.assertLess((self.sketch.Geometry[1].StartPoint - V(5, 5, 0)).Length, 1e-7)
+
+    def test_m2_a_line_started_elsewhere_on_the_arc(self):
+        """M2: started at 60 degrees on the arc, the line gets Point on object, no Midpoint."""
+        self.add_blocked_arc()
+        self.start_edit()
+        a = math.radians(60)
+        self.draw_line((5 + 5 * math.cos(a), 5 * math.sin(a)), (8.7, 8.3))
+        self.assertTrue(
+            self.has_constraint("PointOnObject", 1, 1, 0), f"Got {self.describe()}")
+        self.assertFalse(
+            any(c.Type == "Midpoint" for c in self.sketch.Constraints), f"Got {self.describe()}")

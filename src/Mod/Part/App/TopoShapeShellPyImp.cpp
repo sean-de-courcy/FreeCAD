@@ -47,6 +47,7 @@
 #include "TopoShapeShellPy.cpp"
 #include "TopoShapeSolidPy.h"
 #include "TopoShapeOpCode.h"
+#include "MassProperties.h"
 
 using namespace Part;
 
@@ -191,7 +192,7 @@ PyObject* TopoShapeShellPy::makeHalfSpace(PyObject* args) const
 Py::Object TopoShapeShellPy::getMass() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     double c = props.Mass();
     return Py::Float(c);
 }
@@ -199,7 +200,7 @@ Py::Object TopoShapeShellPy::getMass() const
 Py::Object TopoShapeShellPy::getCenterOfMass() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     gp_Pnt c = props.CentreOfMass();
     return Py::Vector(Base::Vector3d(c.X(), c.Y(), c.Z()));
 }
@@ -207,7 +208,7 @@ Py::Object TopoShapeShellPy::getCenterOfMass() const
 Py::Object TopoShapeShellPy::getMatrixOfInertia() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     gp_Mat m = props.MatrixOfInertia();
     Base::Matrix4D mat;
     for (int i = 0; i < 3; i++) {
@@ -221,7 +222,7 @@ Py::Object TopoShapeShellPy::getMatrixOfInertia() const
 Py::Object TopoShapeShellPy::getStaticMoments() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     Standard_Real lx, ly, lz;
     props.StaticMoments(lx, ly, lz);
     Py::Tuple tuple(3);
@@ -234,7 +235,7 @@ Py::Object TopoShapeShellPy::getStaticMoments() const
 Py::Dict TopoShapeShellPy::getPrincipalProperties() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     GProp_PrincipalProps pprops = props.PrincipalProperties();
 
     Py::Dict dict;

@@ -54,6 +54,11 @@ public:
 
     void setPlane(const gp_Pln& plane) override;
 
+    /// The plane a FaceMakerBuildFace fits over `shapes` (as makeElementFace() adds them), so a
+    /// run over part of the edges can take the whole list's plane (setPlane()) and make the same
+    /// faces (the sketch imprint's near edges). False where no plane is found.
+    static bool planeOf(const std::vector<TopoShape>& shapes, gp_Pln& plane);
+
 protected:
     void Build_Essence() override;
 

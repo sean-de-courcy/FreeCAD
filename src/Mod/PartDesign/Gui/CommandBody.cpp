@@ -81,6 +81,10 @@ FC_LOG_LEVEL_INIT("PartDesignGui", true, true)
 namespace PartDesignGui
 {
 
+/// FreeCAD-CH (ops#640 round 6, J22): defined and explained in Utils.cpp (no header names it):
+/// Onshape's "Part N" for a new part, under its keymap
+void nameNewPart(PartDesign::Body* body, App::Part* studioHint);
+
 /// The objects' labels for a list to choose from; a label that more than one has gets the
 /// object's name too, so the user can tell them apart (ops#252)
 static QStringList labelsToChoose(
@@ -299,6 +303,11 @@ void CmdPartDesignBody::activated(int iMsg)
         "App.ActiveDocument.getObject('%s').AllowCompound = %s",
         bodyString,
         Gui::asString(allowCompound)
+    );
+    // Onshape's "Part N" under its keymap (ops#640 round 6, J22)
+    PartDesignGui::nameNewPart(
+        freecad_cast<PartDesign::Body*>(getDocument()->getObject(bodyString)),
+        actPart
     );
     if (actPart) {
         // BaseFeature placement is computed in the body's local coordinate system.

@@ -28,6 +28,7 @@ from AssemblyTests.TestCommandInsertLink import TestCommandInsertLink
 from AssemblyTests.TestCommandCreateView import TestCommandCreateView
 from AssemblyTests.TestSimulationExport import TestSimulationExport
 from AssemblyTests.TestJointRecords import TestJointRecords  # FreeCAD-CH, ops#504
+from AssemblyTests.TestFloatingSolve import TestFloatingSolve  # FreeCAD-CH, ops#640
 from AssemblyTests.TestVariantLinks import (
     TestLinkRetargetJoints,
     TestLinkRetargetProperties,
@@ -36,6 +37,11 @@ from AssemblyTests.TestVariantLinks import (
     TestVariantTopologyChanged,
     TestRetargetCheckSaved,
 )
+from AssemblyTests.TestOnshapeAssemblies import (  # FreeCAD-CH, ops#640
+    TestSeveralAssemblies,
+    TestJointErrors,
+)
+from AssemblyTests.TestAssemblyPatterns import TestAssemblyPatterns  # FreeCAD-CH (asm-patterns)
 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestCore else False
@@ -43,9 +49,13 @@ True if TestCommandInsertLink else False
 True if TestCommandCreateView else False
 True if TestSimulationExport else False
 True if TestJointRecords else False
+True if TestFloatingSolve else False
 True if TestLinkRetargetJoints else False
 True if TestLinkRetargetProperties else False
 True if TestLinkTargetReopened else False
 True if TestVariantLinkRecompute else False
 True if TestVariantTopologyChanged else False
 True if TestRetargetCheckSaved else False
+True if TestSeveralAssemblies else False
+True if TestJointErrors else False
+True if TestAssemblyPatterns else False

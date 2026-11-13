@@ -34,6 +34,7 @@
 #include <Mod/Part/App/Attacher.h>
 #include <App/PropertyOverrides.h>
 
+#include <array>
 #include <functional>
 
 #include <QPointer>
@@ -74,6 +75,10 @@ class PartGuiExport TaskAttacher: public Gui::TaskView::TaskBox, public Gui::Sel
     Q_OBJECT
 
 public:
+    /// FreeCAD-CH (ops#673): the datum command attached obj to an edge preselected at its middle;
+    /// the next dialog opened on obj treats it as a midpoint pick (the selection is gone by then)
+    static void markMidpointPick(const App::DocumentObject* obj);
+
     using VisibilityFunction = std::function<
         void(bool, const std::string&, Gui::ViewProviderDocumentObject*, App::DocumentObject*, const std::string&)>;
 
@@ -159,6 +164,7 @@ private:
     {
         std::string objName;
         std::string subName;
+        bool midpoint = false;  // FreeCAD-CH (ops#673): an edge picked at its middle
     };
     void addToReference(SubAndObjName pair);
     void addToReference(const std::vector<SubAndObjName>& pairs);
@@ -202,6 +208,16 @@ private:
     bool completed;
     bool userSelectedMode;  // true when the user has explicitly clicked a mode in the list
     bool supportEdited = false;
+
+    /** FreeCAD-CH (ops#673, selection parity 11): an edge picked at its middle (the midpoint
+     * marker showing) as the only reference of "Normal to edge" puts the plane at the edge's
+     * middle (MapPathParameter 0.5), and the field reads "Edge point", as Onshape's Plane takes an
+     * edge's midpoint (SP10-Q10). Per reference slot: picked at the middle.
+     */
+    std::array<bool, 4> midpointPicks {};
+    bool pathParameterByPick = false;  // MapPathParameter set by a midpoint pick
+    double pathParameterBefore = 0.0;  // its value before
+    void applyMidpointPick(bool updateLabel = true);
 
     using Connection = fastsignals::connection;
     Connection connectDelObject;

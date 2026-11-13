@@ -75,6 +75,17 @@ public:
     /// The Base field, and a subclass's own (ops#150).
     std::vector<ReferenceField*> referenceFields() const override;
 
+    /** FreeCAD-CH (ops#640 rank 14): the command made \a dressUp with nothing selected, as
+     * Onshape's Fillet opens with no part: its dialog's first pick, an edge or a face of any part
+     * of the studio, decides the part. The dress-up moves into that pick's Body, in the dialog's
+     * step (Cancel takes it with the dress-up), and Base becomes the pick. */
+    static void notePlacedByFirstPick(App::DocumentObject* dressUp);
+    /// Whether the dialog waits for that first pick.
+    bool isPlacing() const
+    {
+        return placing;
+    }
+
 protected:
     /// The Base list, in place of \a placeholder in the panel's layout (ops#150): the base's
     /// edges and/or faces, written through updateFeature().
@@ -91,6 +102,14 @@ protected:
     void disarmFields();
 
     ViewProviderDressUp* getDressUpView() const;
+    /// The Base field arms once the dialog is open: it has entries (an edit, or the dialog came
+    /// back after its first pick moved the dress-up, notePlacedByFirstPick), and the next picks
+    /// go on adding to it. A subclass gives its first value field the focus only when this is
+    /// false, or when the field is disabled.
+    bool armsBaseOnOpen() const
+    {
+        return armBaseOnOpen;
+    }
 
 protected:
     QWidget* proxy;
@@ -101,7 +120,17 @@ protected:
     int transactionID;
 
 private:
+    /// The first pick's gate and observer, while placing (notePlacedByFirstPick).
+    void startPlacing();
+    void stopPlacing();
+    void installPlacingGate();
+    void onPlacingPick(const Gui::SelectionChanges& msg);
+
     Gui::WeakPtrT<ViewProviderDressUp> DressUpView;
+    bool placing = false;
+    bool armBaseOnOpen = false;
+    Gui::SelectionGate* placingGate = nullptr;
+    std::unique_ptr<Gui::SelectionObserver> placingObserver;
 };
 
 /// simulation dialog for the TaskView

@@ -1,0 +1,121 @@
+{
+ "approved": "coordinator c730, 11-11, ruling A; c747, 11-12, option A (oracle re-recorded); c749, 11-12 (ops#680, a4feaf1675 accepted in principle)",
+ "changes": {
+  "UpToTwins": {
+   "Body.shape.area": {
+    "new": 177.75131238474276,
+    "old": 177.75063394883648,
+    "rel": 1e-09
+   },
+   "Body.shape.centre[0]": {
+    "new": 2.999999999537692,
+    "old": 3.000000622859748,
+    "rel": 1e-09
+   },
+   "Body.shape.centre[1]": {
+    "new": 2.9999999993306714,
+    "old": 3.000000031690479,
+    "rel": 1e-09
+   },
+   "Body.shape.centre[2]": {
+    "new": 5.0000000016160895,
+    "old": 4.999993920817948,
+    "rel": 1e-09
+   },
+   "Body.shape.volume": {
+    "new": 166.19025138884723,
+    "old": 166.19003937762685,
+    "rel": 1e-09
+   },
+   "LobedShell.shape.area": {
+    "new": 627.1416267159719,
+    "old": 624.5291008462594,
+    "rel": 1e-09
+   },
+   "LobedShell.shape.centre[0]": {
+    "new": 4.913444480627148,
+    "old": 4.946270851995805,
+    "rel": 1e-09
+   },
+   "LobedShell.shape.centre[1]": {
+    "new": 0.12983486129497077,
+    "old": 0.11782840616850329,
+    "rel": 1e-09
+   },
+   "ShellBinder.shape.area": {
+    "new": 627.1416267159719,
+    "old": 624.5291008462594,
+    "rel": 1e-09
+   },
+   "TwinPad.shape.area": {
+    "new": 177.75131238474276,
+    "old": 177.75063394883648,
+    "rel": 1e-09
+   },
+   "TwinPad.shape.centre[0]": {
+    "new": 2.999999999537692,
+    "old": 3.000000622859748,
+    "rel": 1e-09
+   },
+   "TwinPad.shape.centre[1]": {
+    "new": 2.9999999993306714,
+    "old": 3.000000031690479,
+    "rel": 1e-09
+   },
+   "TwinPad.shape.centre[2]": {
+    "new": 5.0000000016160895,
+    "old": 4.999993920817948,
+    "rel": 1e-09
+   },
+   "TwinPad.shape.volume": {
+    "new": 166.19025138884723,
+    "old": 166.19003937762685,
+    "rel": 1e-09
+   },
+   "TwinPoint.Placement.base[0]": {
+    "new": 4.32158722844881,
+    "old": 4.321580985249428,
+    "rel": 1e-09
+   },
+   "TwinPoint.Placement.base[1]": {
+    "new": 4.32157225209203,
+    "old": 4.3215708912124615,
+    "rel": 1e-09
+   },
+   "TwinPoint.shape.box[0]": {
+    "new": 4.32158722844881,
+    "old": 4.321580985249428,
+    "rel": 1e-09
+   },
+   "TwinPoint.shape.box[1]": {
+    "new": 4.32157225209203,
+    "old": 4.3215708912124615,
+    "rel": 1e-09
+   },
+   "TwinPoint.shape.box[3]": {
+    "new": 4.32158722844881,
+    "old": 4.321580985249428,
+    "rel": 1e-09
+   },
+   "TwinPoint.shape.box[4]": {
+    "new": 4.32157225209203,
+    "old": 4.3215708912124615,
+    "rel": 1e-09
+   },
+   "TwinPoint.shape.centre[0]": {
+    "new": 4.32158722844881,
+    "old": 4.321580985249428,
+    "rel": 1e-09
+   },
+   "TwinPoint.shape.centre[1]": {
+    "new": 4.32157225209203,
+    "old": 4.3215708912124615,
+    "rel": 1e-09
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#640",
+ "label": "compat-change",
+ "why": "SC7: free-form faces' volume, area and centre integrated adaptively (the default integration was off on B-spline faces); a solid's centre and inertia readouts on such shapes at 1e-4 relative, the mass the accurate volume's; SC7 corrects LobedShell's two faces (centre now symmetric): their reference keys (ShellBinder.Support, TwinPad.UpToShape, TwinPoint.AttachmentSupport) and names' c=/m= re-recorded in the oracle, which a delta can't hold; ops#680: a free-form solid's centre adaptive, about a point off the centre"
+}

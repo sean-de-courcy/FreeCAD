@@ -133,6 +133,69 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(point.AttachmentSupport, [(groove, (halves[0],))])
         self.assertEqual(App.getReferenceReport(point), [])
 
+    def testASketchOnATopALaterFeatureSplitsKeepsAPieceAndComesBack(self):
+        """SW20 (the narrowed SW19 (a) rule, naming-design.md): a box 0..40 x 0..20 x 0..10 with a
+        pocket 2 deep at x 18..22, y 5..15 (inside the top: the top stays one face), a sketch
+        (FlatFace) and a datum point (CenterOfMass) on the pocket's top. The top was made by the
+        Pad, a feature before the pocket that splits it: the pocket made a slot across
+        (y -5..25) cuts it in two coplanar pieces, and the sketch stays on the plane z 10 on a
+        piece, as Onshape's does; the point breaks (the pieces' centres differ; Onshape's
+        centroid connector fails). Made a pocket inside again, both come back on the whole top
+        (SW20 (3))."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 40, 20), body)
+        models.pad(body, profile, 10)
+        slot = models.sketch(doc, "SlotSketch", models.rectangle(18, 5, 22, 15), body, z=10)
+        pocket = models.pocket(body, slot, 2, "Slot")
+        doc.recompute()
+        top = face("plane", normal=Z, through=(0, 0, 10))
+        [name] = top.select(pocket.Shape)
+        onTop = body.newObject("Sketcher::SketchObject", "OnTop")
+        onTop.AttachmentSupport = [(pocket, name)]
+        onTop.MapMode = "FlatFace"
+        point = body.newObject("PartDesign::Point", "Centre")
+        point.AttachmentSupport = [(pocket, name)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertTrue(onTop.isValid() and point.isValid())
+        centre = point.Placement.Base
+
+        # Act: the slot across
+        models.moveRectangle(slot, 18, -5, 22, 25)
+        doc.recompute()
+
+        # Assert
+        pieces = top.select(pocket.Shape)
+        self.assertEqual(len(pieces), 2)
+        self.assertTrue(onTop.isValid(), onTop.getStatusString())
+        [(target, (held,))] = onTop.AttachmentSupport
+        self.assertIn(held, pieces)
+        self.assertAlmostEqual(onTop.Placement.Base.z, 10, 9)
+        self.assertFalse(point.isValid(), point.AttachmentSupport)
+        [entry] = App.getReferenceReport(point)
+        self.assertEqual(entry["status"], "broken")
+        self.assertTrue(entry["sub"].startswith("?Face"), entry["sub"])
+
+        # Act: a recompute with the top still split keeps the sketch on its piece
+        onTop.touch()
+        doc.recompute()
+        self.assertTrue(onTop.isValid(), onTop.getStatusString())
+        self.assertEqual(onTop.AttachmentSupport, [(pocket, (held,))])
+
+        # Act: the pocket inside the top again
+        models.moveRectangle(slot, 18, 5, 22, 15)
+        doc.recompute()
+
+        # Assert
+        [whole] = top.select(pocket.Shape)
+        for consumer in (onTop, point):
+            self.assertTrue(consumer.isValid(), (consumer.Name, consumer.getStatusString()))
+            self.assertEqual(consumer.AttachmentSupport, [(pocket, (whole,))], consumer.Name)
+        self.assertAlmostEqual(onTop.Placement.Base.z, 10, 9)
+        self.assertLess((point.Placement.Base - centre).Length, 1e-7)
+
     def testAttacherPlacementOnCoplanarPieces(self):
         """What the attachment's equivalence relies on (Task 2 PR 5): a groove across a pad's
         top face splits it into two coplanar pieces; FlatFace gives the same placement on
@@ -3646,3 +3709,256 @@ class TestNamingSolver(unittest.TestCase):
             self.assertTrue(feature.isValid(), (kind, feature.getStatusString()))
             self.assertEqual(feature.EdgeLinks[1], ["Edge%d" % i for i in top[:3]])
             self.assertAlmostEqual(feature.Shape.BoundBox.ZMax, 12, places=6)
+
+    # The digests of one recompute (ops#640, notes/recompute-cost.md): kept per object while
+    # nothing of it changes, so a record holds the digest a fresh one would.
+
+    def _digestCacheModel(self):
+        """A block, a pad on its top face (First) and a pad on First's top face (Second). The
+        base sketch has a property Note."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        baseSketch = models.sketch(doc, "BaseSketch", models.rectangle(0, 0, 20, 20), body)
+        baseSketch.addProperty("App::PropertyString", "Note").Note = "before"
+        block = models.pad(body, baseSketch, 10, "Block")
+        doc.recompute()
+
+        def padOnTop(name, under, z, radius, length):
+            sketch = models.sketch(doc, name + "Sketch", [], body)
+            top = face("plane", normal=Z, through=(10, 10, z)).one(under.Shape)[0]
+            sketch.AttachmentSupport = [(under, top)]
+            sketch.MapMode = "FlatFace"
+            doc.recompute()
+            centre = sketch.getGlobalPlacement().inverse().multVec(App.Vector(10, 10, z))
+            sketch.addGeometry(models.circle(centre.x, centre.y, radius), False)
+            pad = models.pad(body, sketch, length, name)
+            doc.recompute()
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            return sketch, pad
+
+        firstSketch, first = padOnTop("First", block, 10, 4, 5)
+        secondSketch, _ = padOnTop("Second", first, 15, 2, 3)
+        return doc, body, baseSketch, block, firstSketch, first, secondSketch
+
+    def _digestIn(self, doc, holder, obj):
+        """The digest of `obj` in the record of `holder`'s support, from the saved file."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "DigestCache.FCStd")
+        doc.saveAs(path)
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("Document.xml"))
+        for node in root.iter("Object"):
+            if node.get("name") == holder.Name and node.find("Properties") is not None:
+                support = [p for p in node.iter("Property") if p.get("name") == "AttachmentSupport"]
+                records = [e.get("fp") for p in support for e in p.iter() if e.get("fp")]
+                self.assertEqual(len(records), 1)  # the setup: one reference with a record
+                found = re.findall(r"(?:^|[|/])D%d:([0-9a-f]{16})" % obj.ID, records[0])
+                self.assertEqual(len(found), 1, records[0])
+                return found[0]
+        self.fail("no object data for " + holder.Name)
+
+    def _frozenCopy(self, doc, name):
+        """`doc` saved and opened again with the object `name` frozen (Python can't freeze one)."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Frozen.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {item: archive.read(item) for item in archive.namelist()}
+        xml, count = re.subn(
+            r'(<Object [^>]*name="%s"[^>]*?)(/?>)' % name,
+            r'\1 Freeze="1"\2',
+            files["Document.xml"].decode("utf-8"),
+            count=1,
+        )
+        self.assertEqual(count, 1)
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for item, data in files.items():
+                archive.writestr(item, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        # The setup: frozen (State doesn't show a freeze; review prmemo-r3)
+        self.assertEqual(doc.getObject(name).getStatusString(), "Freezed")
+        return doc
+
+    def _checkDigestCacheSees(self, change, frozen=False):
+        """`change(base sketch)` runs while the block made taller recomputes, when the first
+        pad's sketch is done: the block's records took the base sketch's digest by then, Second's
+        reference into First takes it after. Its record holds the new digest, the one a later
+        recompute (a new cache) makes again. `frozen`: the base sketch is frozen first (its
+        onChanged() then returns at once)."""
+        doc, body, baseSketch, block, firstSketch, first, secondSketch = self._digestCacheModel()
+        if frozen:
+            names = [o.Name for o in (body, baseSketch, block, firstSketch, first, secondSketch)]
+            doc = self._frozenCopy(doc, baseSketch.Name)
+            body, baseSketch, block, firstSketch, first, secondSketch = map(doc.getObject, names)
+        before = self._digestIn(doc, secondSketch, baseSketch)
+
+        class Observer:
+            done = False
+
+            def slotRecomputedObject(self, obj):
+                if obj.Name == firstSketch.Name and not self.done:
+                    self.done = True
+                    change(baseSketch)
+
+        observer = Observer()
+        App.addDocumentObserver(observer)
+        try:
+            block.Length = 12
+            doc.recompute()
+        finally:
+            App.removeDocumentObserver(observer)
+        self.assertTrue(observer.done)  # the setup: the change ran inside the recompute
+        for obj in body.Group:
+            self.assertTrue(obj.isValid(), (obj.Name, obj.getStatusString()))
+        inside = self._digestIn(doc, secondSketch, baseSketch)
+        self.assertNotEqual(inside, before)
+
+        first.touch()
+        doc.recompute()
+        self.assertEqual(self._digestIn(doc, secondSketch, baseSketch), inside)
+
+    def _recordOfSupport(self, doc, holder):
+        """The record of `holder`'s support, from the saved file."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Shortcuts.FCStd")
+        doc.saveAs(path)
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("Document.xml"))
+        for node in root.iter("Object"):
+            if node.get("name") == holder.Name and node.find("Properties") is not None:
+                support = [p for p in node.iter("Property") if p.get("name") == "AttachmentSupport"]
+                records = [e.get("fp") for p in support for e in p.iter() if e.get("fp")]
+                self.assertEqual(len(records), 1)  # the setup: one reference with a record
+                return records[0]
+        self.fail("no object data for " + holder.Name)
+
+    def _checkShortcutsKeepTheRecord(self, geometry, through):
+        """A plate padded from `geometry` and a sketch on its top face, at `through`: its record,
+        taken again when the plate recomputes, is the same with FREECAD_CH_FINGERPRINT_SHORTCUTS
+        off, on and verify (perf profile 2: the write-back reuses the solve's measurement, and the
+        inside point is the first of the centres ranked by their distance from the boundary that
+        lies inside, which is the scan's). A face whose area falls short of its outline's, so it has
+        an inside point."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        plateSketch = models.sketch(doc, "PlateSketch", geometry, body)
+        plate = models.pad(body, plateSketch, 4, "Plate")
+        doc.recompute()
+        self.assertTrue(plate.isValid(), plate.getStatusString())
+        top = face("plane", normal=Z, through=(through[0], through[1], 4)).one(plate.Shape)[0]
+        onTop = models.sketch(doc, "OnTop", [], body)
+        onTop.AttachmentSupport = [(plate, top)]
+        onTop.MapMode = "FlatFace"
+        doc.recompute()
+        self.assertTrue(onTop.isValid(), onTop.getStatusString())
+        topFace = plate.Shape.getElement(top)
+        # the convex hull of the outer boundary's corners (the plates are polygons), by area
+        corners = sorted({(round(v.X, 6), round(v.Y, 6)) for v in topFace.OuterWire.Vertexes})
+
+        def chain(points):
+            kept = []
+            for p in points:
+                while len(kept) >= 2 and (
+                    (kept[-1][0] - kept[-2][0]) * (p[1] - kept[-2][1])
+                    - (kept[-1][1] - kept[-2][1]) * (p[0] - kept[-2][0])
+                ) <= 0:
+                    kept.pop()
+                kept.append(p)
+            return kept[:-1]
+
+        hull = chain(corners) + chain(corners[::-1])
+        hullArea = abs(
+            sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(hull, hull[1:] + hull[:1]))
+        ) / 2
+        self.assertLess(topFace.Area, 0.98 * hullArea)  # the setup: the face has an inside point
+
+        previous = os.environ.get("FREECAD_CH_FINGERPRINT_SHORTCUTS")
+
+        def restore():
+            if previous is None:
+                os.environ.pop("FREECAD_CH_FINGERPRINT_SHORTCUTS", None)
+            else:
+                os.environ["FREECAD_CH_FINGERPRINT_SHORTCUTS"] = previous
+
+        self.addCleanup(restore)
+        records = {}
+        for mode in ("off", "on", "verify", "off"):
+            os.environ["FREECAD_CH_FINGERPRINT_SHORTCUTS"] = mode
+            plateSketch.touch()
+            doc.recompute()
+            self.assertTrue(onTop.isValid(), onTop.getStatusString())
+            records.setdefault(mode, []).append(self._recordOfSupport(doc, onTop))
+        self.assertEqual(records["off"][0], records["off"][1])  # the setup: the record is stable
+        self.assertEqual(records["on"][0], records["off"][0])
+        self.assertEqual(records["verify"][0], records["off"][0])
+
+    def testShortcutsKeepTheRecordOfAFaceWithManyHoles(self):
+        """24 holes: every centre of the 9 x 9 grid is classified by the scan."""
+        holes = [models.circle(10 + 16 * i, 10 + 13 * j, 3) for i in range(6) for j in range(4)]
+        self._checkShortcutsKeepTheRecord(models.rectangle(0, 0, 100, 60) + holes, (2, 2))
+
+    def testShortcutsKeepTheRecordOfAnL(self):
+        """An L, whose outline's centre lies outside it."""
+        points = [(0, 0), (60, 0), (60, 20), (20, 20), (20, 60), (0, 60)]
+        self._checkShortcutsKeepTheRecord(models.polygon(points), (5, 5))
+
+    def testShortcutsKeepTheRecordOfASymmetricRing(self):
+        """A square ring: centres at equal distances from the boundary, the first in the grid's
+        order kept."""
+        self._checkShortcutsKeepTheRecord(
+            models.rectangle(0, 0, 60, 60) + models.rectangle(10, 10, 50, 50), (5, 5)
+        )
+
+    def testShortcutsKeepTheRecordOfAThinFrame(self):
+        """A frame narrower than an 18th of its span: no centre of the 9 x 9 grid lies inside, the
+        27 x 27 grid's are taken."""
+        self._checkShortcutsKeepTheRecord(
+            models.rectangle(0, 0, 90, 90) + models.rectangle(2, 2, 88, 88), (1, 45)
+        )
+
+    def testDigestCacheSeesValueChangeInsideRecompute(self):
+        """An upstream sketch's property set while the recompute runs. (Not purgeTouched(): it
+        clears a status, which drops the digest by itself.)"""
+
+        def change(sketch):
+            sketch.Note = "after"
+
+        self._checkDigestCacheSees(change)
+
+    def testDigestCacheSeesFrozenObjectChangeInsideRecompute(self):
+        """The same on a frozen sketch, whose onChanged() returns before the document hears of
+        the change (review prmemo-r1 T1)."""
+
+        def change(sketch):
+            sketch.Note = "after"
+
+        self._checkDigestCacheSees(change, frozen=True)
+
+    def testDigestCacheSeesAddedExtensionInsideRecompute(self):
+        """An extension added to an upstream sketch while the recompute runs: its properties join
+        the list (review prmemo-r1 T2)."""
+        self._checkDigestCacheSees(lambda sketch: sketch.addExtension("App::GroupExtensionPython"))
+
+    def testDigestCacheSeesStatusChangeInsideRecompute(self):
+        """An upstream sketch's property made an output (which a digest leaves out) while the
+        recompute runs: a status change, which touches nothing."""
+        self._checkDigestCacheSees(lambda sketch: sketch.setPropertyStatus("Note", "Output"))
+
+    def testDigestCacheSeesRenamedPropertyInsideRecompute(self):
+        """An upstream sketch's property renamed while the recompute runs: a digest folds the
+        names (review prmemo-r2 R2-2)."""
+        self._checkDigestCacheSees(lambda sketch: sketch.renameProperty("Note", "Remark"))
+
+    def testDigestCacheSeesAddedPropertyInsideRecompute(self):
+        """A property added to an upstream sketch while the recompute runs: its list changed."""
+
+        def change(sketch):
+            sketch.addProperty("App::PropertyString", "Added")
+
+        self._checkDigestCacheSees(change)

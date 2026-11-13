@@ -45,6 +45,8 @@ public:
     App::PropertyAngle Angle;
     App::PropertyBool FlipDirection;
     App::PropertyBool UseAllEdges;
+    /// Onshape's "Tangent propagation": off chamfers only the picked edges (ops#655)
+    App::PropertyBool TangentPropagation;
 
     /** @name methods override feature */
     //@{
@@ -64,6 +66,8 @@ public:
 
 protected:
     void Restore(Base::XMLReader& reader) override;
+    /// The dress-up itself; execute() adds the partial failure over several parts (ops#701)
+    App::DocumentObjectExecReturn* build();
     void handleChangedPropertyType(
         Base::XMLReader& reader,
         const char* TypeName,
