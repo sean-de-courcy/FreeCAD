@@ -4226,50 +4226,31 @@ class TightWallArcTest(unittest.TestCase):
 
     def testABodyPartUnderTheRimIsNotBuiltThrough(self):
         # The same L-plate, hollowed from below 0.2 r from the wall y = 0 and from the top: (a) a
-        # cavity 40 long, (b) a blind hole R 1. The cavity's top corner lies inside what the round
-        # removes (anything nearer than r (1 - 1/sqrt 2) to both does), so the round opens into
-        # it. The direct assembly knows the plane face and the walls only: it built the round
-        # through the cavity, valid and with the plain plate's volume. Now it refuses (another
-        # face within r of the rim); the construction by Booleans refuses too, and OCCT's own
-        # round, which runs through the cavity as well, is not returned: an error. A result would
-        # have to remove less than from the plain plate by the round's corner over the hollow: the heights above the hollow's
-        # top, h(d) - t for d from t to where the round is t deep, times the hollow's width there
+        # cavity 40 long, (b) a blind hole R 1. The hollow's top corner lies inside what the round
+        # removes (anything nearer than r (1 - 1/sqrt 2) to both the wall and the top does), so
+        # the round opens into it: the body loses less than the plain plate does, by the heights
+        # above the hollow's top, h(d) - t for d from t to 0.4 r (where the round is t deep),
+        # times the hollow's width there (1.82489 for the cavity, 0.036437 for the hole). The
+        # direct assembly knows the plane face and the walls only: it built the round through
+        # the hollow, valid and with the plain plate's volume. Now it refuses (another face
+        # within r of the rim); the construction by Booleans refuses too, and OCCT's own round,
+        # which runs through the hollow as well, is not returned: an error that names the cause
         r, top = 1.5875, 6.0
         t = 0.2 * r
         rim = lambda body: [
             e for e in body.Edges if abs(e.BoundBox.ZMin - top) < 1e-9 and abs(e.BoundBox.ZMax - top) < 1e-9
         ]
         plain = self.ell()
-        result = plain.makeFillet(r, rim(plain))
-        self.assertTrue(result.isValid())
-        plainRemoved = plain.Volume - result.Volume
-
-        def height(d):
-            return r - math.sqrt(r * r - (r - d) ** 2)
-
-        reach = r - math.sqrt(r * r - (r - t) ** 2)
-        self.assertGreater(reach, t)
-
-        def over(width, steps=2000):  # Simpson
-            f = lambda d: (height(d) - t) * width(d)
-            h = (reach - t) / steps
-            inner = sum((4 if i % 2 else 2) * f(t + i * h) for i in range(1, steps))
-            return h / 3 * (f(t) + f(reach) + inner)
-
+        self.assertTrue(plain.makeFillet(r, rim(plain)).isValid())
+        self.assertLess(t, r * (1 - math.sqrt(0.5)))
         cavity = Part.makeBox(40, 10 - t, top - t + 1, V(10, t, -1))
         hole = Part.makeCylinder(1.0, top - t + 1, V(20, t + 1.0, -1), V(0, 0, 1))
-        chord = lambda d: 2 * math.sqrt(max(1.0 - (d - t - 1.0) ** 2, 0.0))
-        for name, tool, less in (("cavity", cavity, over(lambda d: 40.0)), ("hole", hole, over(chord))):
+        for name, tool in (("cavity", cavity), ("hole", hole)):
             with self.subTest(hollow=name):
                 body = plain.cut(tool)
                 self.assertEqual(len(rim(body)), 7)
-                try:
-                    result = body.makeFillet(r, rim(body))
-                except FreeCAD.Base.CADKernelError as error:
-                    self.assertIn("a part of the body under its rim", str(error))
-                    continue
-                self.assertTrue(result.isValid())
-                self.assertAlmostEqual(plainRemoved - (body.Volume - result.Volume), less, delta=1e-3)
+                with self.assertRaisesRegex(FreeCAD.Base.CADKernelError, "a part of the body under its rim"):
+                    body.makeFillet(r, rim(body))
 
     def ell(self):
         """An L-plate 60 x 40 x 6 (the notch x > 30, y > 20) with one wall arc rho 1 at (59, 19)."""
