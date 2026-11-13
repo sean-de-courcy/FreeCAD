@@ -322,7 +322,7 @@ class TestSketchCircularPattern(PatternCase):
         with self.assertRaises(ValueError):
             self.sketch.setPatternCount(self.pattern, 0)
         with self.assertRaises(ValueError):
-            self.sketch.setPatternCount(0, 3)  # not a pattern: the pivot's coincidence is 1
+            self.sketch.setPatternCount(1, 3)  # not a pattern: the pivot's coincidence is 1
         self.assertEqual(self.sketch.getPattern(self.pattern)["Counts"], (3, 1))
 
 

@@ -492,6 +492,7 @@ public:
                 case Sketcher::Symmetric:
                 case Sketcher::Group:
                 case Sketcher::Text:
+                case Sketcher::Pattern:  // FreeCAD-CH (sketch patterns)
                     return true;
                 case Sketcher::Distance:
                 case Sketcher::DistanceX:
