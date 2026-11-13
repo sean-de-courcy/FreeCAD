@@ -1711,6 +1711,7 @@ Restart:
                 case Coincident:  // nothing to do for coincident
                 case None:
                 case InternalAlignment:
+                case Pattern:  // FreeCAD-CH (sketch patterns): no symbol yet (the GUI half)
                 case NumConstraintTypes:
                     break;
             }
