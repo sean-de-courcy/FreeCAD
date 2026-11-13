@@ -20,11 +20,13 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepLib.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
@@ -38,6 +40,7 @@
 #include <BRepTools.hxx>
 #include <BRepTools_History.hxx>
 #include <BRep_Builder.hxx>
+#include <ChFi3d.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
@@ -239,6 +242,10 @@ gp_Dir outwardNormal(const TopoDS_Face& face, const gp_Pnt& point)
         case GeomAbs_Cylinder:
             ElSLib::Parameters(surface.Cylinder(), point, u, v);
             break;
+        case GeomAbs_Cone:
+            // The face beyond an overflowing end (VertexClass::Overflow): Nest Cover's chamfer cone
+            ElSLib::Parameters(surface.Cone(), point, u, v);
+            break;
         default:
             refuse("a face next to a selected edge is neither a plane nor a cylinder");
     }
@@ -298,6 +305,13 @@ gp_Dir inwardIn(const TopoDS_Face& face, const TopoDS_Edge& edge, double paramet
 /// Faces of the same plane, or of the same cylinder
 bool sameDomain(const TopoDS_Face& face, const TopoDS_Face& other)
 {
+    // One surface (an overflowing end's trim, built on the face beyond's own cone)
+    TopLoc_Location faceLocation;
+    TopLoc_Location otherLocation;
+    if (BRep_Tool::Surface(face, faceLocation) == BRep_Tool::Surface(other, otherLocation)
+        && faceLocation.IsEqual(otherLocation)) {
+        return true;
+    }
     BRepAdaptor_Surface a(face, Standard_False);
     BRepAdaptor_Surface b(other, Standard_False);
     if (a.GetType() != b.GetType()) {
@@ -459,6 +473,15 @@ enum class VertexClass
     /// vertex the way it does, on an end face that holds both (Case Base #76). The tool ends on
     /// the plane through the vertex normal to the edge, as Onshape's; nothing caps it there
     CuspEnd,
+    /// A concave fillet's circle whose chain turns convex here (Nest Cover #151; oracle 17 Q-OVF,
+    /// onshape-facts OV3, TP1-TP2): a vertex of 4 edges where the circle's cylinder carries on
+    /// tangentially into a wall, and an unselected convex edge between that wall and the face
+    /// beyond the circle's plane face carries the circle on tangentially (the floor's rim leaves
+    /// the vertex the circle's way, between the plane face and the face beyond). Onshape's tangent
+    /// propagation stops here, and its end round rolls on past the vertex (allowEdgeOverflow),
+    /// trimmed by the surface of the face beyond: the tool turns on a quarter turn past the
+    /// vertex, into the material behind the wall, and keeps the material's side of that surface
+    Overflow,
     /// Outside the scope
     Refuse
 };
@@ -716,6 +739,10 @@ struct Tool
     /// A fused tool's volume inside the base's material: none, unless its strip runs off its face
     /// over a concave edge into the material there, which absorbs it (ops#640, #15 past the limit)
     double inBase = 0.0;
+    /// The faces whose surfaces trim the tool past its overflowing ends (VertexClass::Overflow):
+    /// its strips run off both faces there, into the material, and its faces on those surfaces
+    /// merge into them. Its volume is then measured, after the revolution's closed form is checked
+    std::vector<TopoDS_Face> overflowFaces;
     /// The miter piece at a concave corner with a circle: its faces merge into the tools' faces
     /// they continue (one cone, one plane, as Onshape's sharp miter)
     bool miter = false;
@@ -1239,6 +1266,7 @@ struct VertexEnd
     /// trims then holds its tangent plane at the vertex
     TopoDS_Face surfaceEnd;
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
+    TopoDS_Face beyond;        // Overflow: the face whose surface trims the end round
     std::string reason;
 };
 
@@ -1511,6 +1539,130 @@ VertexEnd classifyCorner(
     return end;
 }
 
+/** The end of a concave fillet's circle at a vertex of 4 edges where its chain turns convex
+ * (VertexClass::Overflow), or none, with why not in why. The edges and faces are the vertex's.
+ */
+std::optional<VertexEnd> overflowEnd(
+    const Context& ctx,
+    const EdgeData& data,
+    const TopoDS_Vertex& vertex,
+    const std::vector<TopoDS_Shape>& edges,
+    const std::vector<TopoDS_Shape>& faces,
+    std::string& why
+)
+{
+    if (ctx.request.kind != Kind::Fillet || data.line || data.convex || data.ruled || data.closed) {
+        why = "not a concave fillet's arc";
+        return std::nullopt;
+    }
+    const TopoDS_Face& plane = data.faces[data.planeFace];
+    const TopoDS_Face& cylinder = data.faces[1 - data.planeFace];
+    if (ChFi3d::DefineConnectType(data.edge, data.faces[0], data.faces[1], Precision::Angular(), Standard_False)
+        != ChFiDS_Concave) {
+        why = "OCCT does not read the arc as concave";
+        return std::nullopt;
+    }
+    gp_Dir away = awayFrom(data.edge, vertex);
+    TopoDS_Edge continuation;
+    std::vector<TopoDS_Edge> others;
+    for (const auto& shape : edges) {
+        const TopoDS_Edge& other = TopoDS::Edge(shape);
+        if (other.IsSame(data.edge)) {
+            continue;
+        }
+        if (ctx.selected.Contains(other)) {
+            why = "another selected edge there";
+            return std::nullopt;
+        }
+        if (awayFrom(other, vertex).Dot(away) < -1 + angularTolerance) {
+            if (!continuation.IsNull()) {
+                why = "two tangent continuations";
+                return std::nullopt;
+            }
+            continuation = other;
+        }
+        else {
+            others.push_back(other);
+        }
+    }
+    if (continuation.IsNull() || others.size() != 2) {
+        why = "no tangent continuation";
+        return std::nullopt;
+    }
+    // The continuation runs between the face beyond and the wall the arc's cylinder carries on
+    // into (Q-OVF: the bevel/wall edge under the wall); of the other two edges, one leaves the
+    // vertex the arc's way between the arc's plane face and the face beyond (the floor's rim), and
+    // one runs between the arc's cylinder and the wall, tangent there
+    auto ofContinuation = ctx.list(ctx.edgeFaces, continuation);
+    if (ofContinuation.size() != 2) {
+        why = "the tangent continuation is not between two faces";
+        return std::nullopt;
+    }
+    for (const auto& face : ofContinuation) {
+        if (face.IsSame(plane) || face.IsSame(cylinder)) {
+            why = "the tangent continuation lies on the arc's own face";
+            return std::nullopt;
+        }
+    }
+    if (ChFi3d::DefineConnectType(
+            continuation,
+            TopoDS::Face(ofContinuation[0]),
+            TopoDS::Face(ofContinuation[1]),
+            Precision::Angular(),
+            Standard_False
+        )
+        != ChFiDS_Convex) {
+        why = "the tangent continuation is not convex";
+        return std::nullopt;
+    }
+    TopoDS_Face beyond;
+    TopoDS_Face wall;
+    bool tangentWall = false;
+    for (const auto& other : others) {
+        auto of = ctx.list(ctx.edgeFaces, other);
+        if (of.size() != 2) {
+            why = "an edge at the vertex is not between two faces";
+            return std::nullopt;
+        }
+        auto has = [&](const TopoDS_Shape& face) {
+            return of[0].IsSame(face) || of[1].IsSame(face);
+        };
+        for (int k = 0; k < 2; ++k) {
+            const TopoDS_Face candidate = TopoDS::Face(ofContinuation[k]);
+            const TopoDS_Face opposite = TopoDS::Face(ofContinuation[1 - k]);
+            if (has(plane) && has(candidate)
+                && awayFrom(other, vertex).Dot(away) > 1 - angularTolerance) {
+                beyond = candidate;
+            }
+            else if (has(cylinder) && has(opposite)) {
+                wall = opposite;
+                tangentWall = ChFi3d::IsTangentFaces(other, TopoDS::Face(of[0]), TopoDS::Face(of[1]));
+            }
+        }
+    }
+    if (beyond.IsNull() || wall.IsNull() || beyond.IsSame(wall) || !tangentWall) {
+        why = "the arc's cylinder does not carry on tangentially into a wall on the face beyond its "
+              "plane face";
+        return std::nullopt;
+    }
+    BRepAdaptor_Surface beyondSurface(beyond, Standard_False);
+    if (beyondSurface.GetType() != GeomAbs_Plane && beyondSurface.GetType() != GeomAbs_Cone) {
+        why = "the face beyond is neither a plane nor a cone";
+        return std::nullopt;
+    }
+    for (const auto& face : faces) {
+        if (!face.IsSame(plane) && !face.IsSame(cylinder) && !face.IsSame(beyond) && !face.IsSame(wall)) {
+            why = "a fifth face at the vertex";
+            return std::nullopt;
+        }
+    }
+    VertexEnd end;
+    end.kind = VertexClass::Overflow;
+    end.beyond = beyond;
+    end.trims = {{BRep_Tool::Pnt(vertex), away.Reversed()}};
+    return end;
+}
+
 /// 5.6, interface point 1: how the selected edge ends at the vertex
 VertexEnd classify(
     const Context& ctx,
@@ -1551,6 +1703,14 @@ VertexEnd classify(
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
     bool insideCurve = edges.size() == 2 && faces.size() == 2;
+    if (edges.size() == 4 && faces.size() == 4) {
+        std::string why;
+        if (auto overflow = overflowEnd(ctx, data, vertex, edges, faces, why)) {
+            return *overflow;
+        }
+        end.reason = "a vertex where 4 edges meet (" + why + ")";
+        return end;
+    }
     if (!insideCurve && (edges.size() != 3 || faces.size() != 3)) {
         end.reason = "a vertex where " + std::to_string(edges.size()) + " edges meet";
         return end;
@@ -2750,6 +2910,106 @@ Tool cornerTool(const Context& ctx, const Corner& corner, bool cut)
     return tool;
 }
 
+/** The tool cut back to the material's side of the surface of the face beyond an overflowing end
+ * (VertexClass::Overflow), near the vertex at point; size bounds the tool around it. A plane cuts by
+ * its half-space; a cone by a solid bounded by the face's own surface, between two planes normal to
+ * its axis, so that the tool's faces there lie on that surface and merge into the face.
+ */
+TopoDS_Shape trimBeyond(
+    const TopoDS_Shape& tool,
+    const TopoDS_Face& beyond,
+    const gp_Pnt& point,
+    double size,
+    double radius
+)
+{
+    gp_Dir outward = outwardNormal(beyond, point);
+    BRepAdaptor_Surface surface(beyond, Standard_False);
+    if (surface.GetType() == GeomAbs_Plane) {
+        BRepAlgoAPI_Cut cut(tool, halfSpaceBeyond({point, outward}, size));
+        if (!cut.IsDone() || cut.HasErrors()) {
+            refuse("trimming an overflowing tool by the face beyond failed");
+        }
+        return cut.Shape();
+    }
+    if (surface.GetType() != GeomAbs_Cone) {
+        refuse("the face beyond an overflowing end is neither a plane nor a cone");
+    }
+    gp_Cone cone = surface.Cone();
+    double u = 0.0;
+    double v = 0.0;
+    ElSLib::Parameters(cone, point, u, v);
+    double sine = std::sin(cone.SemiAngle());
+    if (std::abs(sine) < 1e-6) {
+        refuse("a degenerate cone beyond an overflowing end");
+    }
+    // Along the generatrix, size either way of the vertex, short of the apex
+    double apex = -cone.RefRadius() / sine;
+    double low = v - size;
+    double high = v + size;
+    if (apex > low && apex < high) {
+        if (std::abs(v - apex) < 2 * size / 3) {
+            refuse("the apex of the cone beyond an overflowing end is too near it");
+        }
+        (apex < v ? low : high) = (v + apex) / 2;
+    }
+    TopLoc_Location location;
+    Handle(Geom_Surface) geometry = BRep_Tool::Surface(beyond, location);
+    BRepBuilderAPI_MakeFace lateral(geometry, 0.0, 2 * pi, low, high, Precision::Confusion());
+    if (!lateral.IsDone()) {
+        refuse("building the cone beyond an overflowing end failed");
+    }
+    BRepBuilderAPI_Sewing sewing(Precision::Confusion());
+    sewing.Add(lateral.Face());
+    for (TopExp_Explorer it(lateral.Face(), TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (BRep_Tool::IsClosed(edge, lateral.Face())) {
+            continue;  // the seam
+        }
+        BRepBuilderAPI_MakeFace cap(BRepBuilderAPI_MakeWire(edge).Wire(), Standard_True);
+        if (!cap.IsDone()) {
+            refuse("capping the cone beyond an overflowing end failed");
+        }
+        sewing.Add(cap.Face());
+    }
+    sewing.Perform();
+    TopExp_Explorer shells(sewing.SewedShape(), TopAbs_SHELL);
+    if (!shells.More()) {
+        refuse("closing the cone beyond an overflowing end failed");
+    }
+    BRepBuilderAPI_MakeSolid makeSolid(TopoDS::Shell(shells.Current()));
+    if (!makeSolid.IsDone()) {
+        refuse("closing the cone beyond an overflowing end failed");
+    }
+    TopoDS_Solid solid = makeSolid.Solid();
+    BRepLib::OrientClosedSolid(solid);
+    TopoDS_Shape trim = solid.Moved(location);
+    if (volumeOf(trim) <= 0.0 || !BRepCheck_Analyzer(trim).IsValid()) {
+        refuse("the cone beyond an overflowing end is not a valid solid");
+    }
+    // The material lies opposite the face's outward normal
+    BRepClass3d_SolidClassifier side(
+        trim,
+        point.Translated(gp_Vec(outward) * (-0.01 * radius)),
+        linearTolerance
+    );
+    if (side.State() == TopAbs_IN) {
+        BRepAlgoAPI_Common common(tool, trim);
+        if (!common.IsDone() || common.HasErrors()) {
+            refuse("trimming an overflowing tool by the cone beyond failed");
+        }
+        return common.Shape();
+    }
+    if (side.State() != TopAbs_OUT) {
+        refuse("the material's side of the cone beyond an overflowing end is unclear");
+    }
+    BRepAlgoAPI_Cut cut(tool, trim);
+    if (!cut.IsDone() || cut.HasErrors()) {
+        refuse("trimming an overflowing tool by the cone beyond failed");
+    }
+    return cut.Shape();
+}
+
 /// A revolution about the axis of a circular edge, between the meridian planes at its ends
 Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
@@ -2760,6 +3020,17 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     if (span <= angularTolerance || span > 2 * pi + angularTolerance) {
         refuse("a degenerate arc");
     }
+    // An overflowing end (VertexClass::Overflow) turns the tool on a quarter turn past its vertex,
+    // into the material behind the wall its cylinder carries on into
+    const double pre = !data.closed && ends[0].kind == VertexClass::Overflow ? pi / 2 : 0.0;
+    const double post = !data.closed && ends[1].kind == VertexClass::Overflow ? pi / 2 : 0.0;
+    const double turn = span + pre + post;
+    if (pre + post > 0.0 && turn > 2 * pi - angularTolerance) {
+        refuse("an arc that runs on past its ends would turn into itself");
+    }
+    gp_Trsf startTurn;
+    startTurn.SetRotation(axis, -pre);
+    const TopLoc_Location atStart(startTurn);
     for (int i = 0; i < 2 && !data.closed; ++i) {
         if (!ends[i].surfaceEnd.IsNull()) {
             refuse("an arc that ends on a face that is not a plane");
@@ -2792,7 +3063,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     Tool tool;
     tool.source = data.edge;
     tool.cut = data.convex;
-    tool.volume = section.area * centroidRadius * span;
+    tool.volume = section.area * centroidRadius * turn;
     tool.strips.resize(2);
     for (int k = 0; k < 2; ++k) {
         tool.strips[k].face = data.faces[k];
@@ -2801,7 +3072,8 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     }
     TopoDS_Shape solid;
     if (!section.fillet) {
-        solid = BRepPrimAPI_MakeRevol(section.face(), axis, span, Standard_True).Shape();
+        solid = BRepPrimAPI_MakeRevol(section.face().Moved(atStart), axis, turn, Standard_True)
+                    .Shape();
     }
     else {
         // The square corner, end, centre, end revolved, minus the torus (or sphere) about the
@@ -2815,7 +3087,8 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             Standard_True
         );
         TopoDS_Face face = BRepBuilderAPI_MakeFace(square.Wire(), Standard_True).Face();
-        TopoDS_Shape ring = BRepPrimAPI_MakeRevol(face, axis, span, Standard_True).Shape();
+        TopoDS_Shape ring
+            = BRepPrimAPI_MakeRevol(face.Moved(atStart), axis, turn, Standard_True).Shape();
         double major = gp_Vec(circle.Location(), section.centre).Dot(gp_Vec(radial));
         gp_Pnt axisPoint = circle.Location().Translated(
             gp_Vec(z) * gp_Vec(circle.Location(), section.centre).Dot(gp_Vec(z))
@@ -2850,6 +3123,47 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         }
     }
     tool.solid = solid;
+    if (pre + post > 0.0) {
+        // Checked against its closed form before the trim, then measured: the trim by the face
+        // beyond has none
+        double measured = volumeOf(solid);
+        if (std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
+            refuse("an overflowing tool's volume " + describe(measured)
+                   + " differs from its closed form " + describe(tool.volume));
+        }
+        if (!section.fillet) {
+            refuse("an overflowing end of a chamfer");
+        }
+        BRepClass3d_SolidClassifier inBase(ctx.base.getShape());
+        // A point inside the section (a quarter of the way from the square corner to the
+        // round's centre), at each overflowing end of the turn: buried in the material
+        gp_Pnt inSection = section.corner.Translated(gp_Vec(section.corner, section.centre) * 0.25);
+        double size = 4 * (circle.Radius() + 2 * section.radius);
+        for (int i = 0; i < 2; ++i) {
+            if (ends[i].kind != VertexClass::Overflow) {
+                continue;
+            }
+            gp_Trsf toEnd;
+            toEnd.SetRotation(axis, i == 0 ? -pre : span + post);
+            inBase.Perform(inSection.Transformed(toEnd), linearTolerance);
+            if (inBase.State() != TopAbs_IN) {
+                refuse("an end round past its vertex does not run on into the material");
+            }
+            tool.solid = trimBeyond(
+                tool.solid,
+                ends[i].beyond,
+                ends[i].trims.front().point,
+                size,
+                section.radius
+            );
+            tool.overflowFaces.push_back(ends[i].beyond);
+        }
+        if (countSolids(tool.solid) != 1) {
+            refuse("an overflowing tool trimmed by the face beyond is not one solid");
+        }
+        tool.solid = TopExp_Explorer(tool.solid, TopAbs_SOLID).Current();
+        tool.volume = volumeOf(tool.solid);
+    }
     for (int i = 0; i < 2 && !data.closed; ++i) {
         if (ends[i].kind == VertexClass::FreeEnd) {
             tool.caps.push_back(ends[i].trims.front());
@@ -4112,7 +4426,8 @@ bool checkStrips(
             onAFace = onAFace
                 || std::find(offTheFace.begin(), offTheFace.end(), &strip) == offTheFace.end();
         }
-        if (!onAFace) {
+        // An overflowing end's strips run off both faces past its vertex, into the material
+        if (!onAFace && tool.overflowFaces.empty()) {
             refuse("a dress-up runs past both its faces");
         }
     }
@@ -4973,6 +5288,17 @@ TopoDS_Shape constructShape(
                              fusedRuns
                          )
         || unionCorners;
+    // The faces beyond overflowing ends grow by the tools' faces on their surfaces (Onshape's
+    // chamfer cone and bevel under #151's end tori), as walls a trimmed tool runs on under
+    for (const auto& tool : tools) {
+        for (const auto& face : tool.overflowFaces) {
+            if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& f) {
+                    return f.IsSame(face);
+                })) {
+                wallFaces.push_back(face);
+            }
+        }
+    }
     // A dress-up past a concave edge into a wall straight back from its face: Onshape trims the
     // tools on that face by the wall's surface run on behind the face (Q-LEDGE, Case Base row
     // 15). The section in front of the face is taken at a tenth of the strip's width there, and
