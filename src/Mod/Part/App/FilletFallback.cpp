@@ -2426,7 +2426,10 @@ std::vector<std::pair<TopoDS_Edge, TopoDS_Face>> fusedRunOffEdges(
     std::vector<std::pair<TopoDS_Edge, TopoDS_Face>> edges;
     for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
         const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
-        if (edge.IsSame(source) || BRep_Tool::IsClosed(edge, face) || !touch(edge, off)) {
+        // Along a stretch of it, as checkRunOff's: an edge the off part only touches at a point
+        // is not run over
+        if (edge.IsSame(source) || BRep_Tool::IsClosed(edge, face) || !touch(edge, off)
+            || lengthAlong(edge, off) <= 1000 * linearTolerance) {
             continue;
         }
         const auto* faces = edgeFaces.Seek(edge);
@@ -2593,9 +2596,10 @@ Tool miterTool(
  * full tools, trimmed by the base's own faces (notes/onshape-facts.md KP1-KP4, K2A-K2E). Returns
  * whether that happened (the tools are then "trimmed": their volumes are no longer their closed
  * forms). A fused tool (a concave edge) that overlaps another is refused; one whose strip runs
- * off its face must run into the base's material (checkFusedRunOff), and is listed in fusedOff:
- * the air beyond the face would have nothing to trim it. The edges it runs over go in fusedRuns,
- * for the caller's trim (trimFusedTool). A cut tool's strip that runs off its face
+ * off its face is listed in fusedOff, and the edges it runs over go in fusedRuns: the caller trims
+ * it by the faces beyond them (trimFusedTool), then checks that what is still off its face runs
+ * into the base's material (checkFusedRunOff): the air beyond the face would have nothing to trim
+ * it. A cut tool's strip that runs off its face
  * across an edge that is not selected (checkRunOff) is listed in pastLoop. A cut tool's strip that
  * runs off into a wall straight back from its face lists that face in walled, each tool's own walls
  * there in wallsOf (the same index), and every walled face's walls in wallFaces: the caller trims
@@ -2665,8 +2669,12 @@ bool checkStrips(
                 double tolerance = areaToleranceOf(contact, *strip);
                 if (area - areaOf(commonOf(group.face, contact)) > tolerance) {
                     if (!group.owners[k]->cut) {
-                        checkFusedRunOff(group.face, contact, base);
-                        fusedOff.push_back(group.owners[k]);
+                        // checkFusedRunOff runs once the caller has trimmed the tool
+                        // (trimFusedTool): the face beyond may clip the part off the face
+                        if (std::find(fusedOff.begin(), fusedOff.end(), group.owners[k])
+                            == fusedOff.end()) {
+                            fusedOff.push_back(group.owners[k]);
+                        }
                         noteFusedRun(fusedRuns, group.owners[k], group.face, contact, edgeFaces);
                     }
                     else {
@@ -2957,14 +2965,19 @@ void clipTool(Tool& tool, const TopoDS_Shape& behind)
  * checks, as is the case where the tool is no edge's. A trim that would remove only the base's
  * material changes nothing and is left out. The tool's volume in the base is measured again
  */
-void trimFusedTool(Tool& tool, const FusedRun& run, const TopoDS_Shape& base)
+bool trimFusedTool(
+    Tool& tool,
+    const FusedRun& run,
+    const TopoDS_Shape& base,
+    std::vector<TopoDS_Face>& wallFaces
+)
 {
     if (tool.source.ShapeType() != TopAbs_EDGE) {
-        return;
+        return false;
     }
     BRepAdaptor_Curve line(TopoDS::Edge(tool.source));
     if (line.GetType() != GeomAbs_Line) {
-        return;
+        return false;
     }
     const gp_Dir along = line.Line().Direction();
     const gp_Pnt origin = line.Line().Location();
@@ -3061,16 +3074,32 @@ void trimFusedTool(Tool& tool, const FusedRun& run, const TopoDS_Shape& base)
         if (volumeOf(piece) - volumeOf(commonOf(piece, base)) <= volumeTolerance * tool.volume) {
             continue;
         }
-        // The face beyond must lie past the strip, away from the edge: a trim that reaches the
-        // edge (a face folded back over the tool) would take the dress-up itself, and the volume
-        // checks, measured on the trimmed tool, could not tell
+        // The face beyond must lie past the strip, away from the edge and the other faces: a trim
+        // that reaches them (a face leaning back over the tool) would take the dress-up itself,
+        // and the volume checks, measured on the trimmed tool, could not tell
         BRepClass3d_SolidClassifier atEdge(trim);
         atEdge.Perform(origin.Translated(gp_Vec(along) * ((from + to) / 2)), linearTolerance);
-        if (atEdge.State() != TopAbs_OUT) {
-            refuse("the face beyond a fused tool's strip reaches back to its edge");
+        bool reachesBack = atEdge.State() != TopAbs_OUT;
+        for (const auto& strip : tool.strips) {
+            if (strip.face.IsSame(run.face)) {
+                continue;
+            }
+            for (const auto& contact : strip.contacts) {
+                reachesBack = reachesBack || touch(contact, piece);
+            }
+        }
+        if (reachesBack) {
+            refuse("the face beyond a fused tool's strip reaches back to the dress-up");
         }
         clipTool(tool, trim);
         clipped = true;
+        // The tool's face on its surface merges into it: Onshape's face grows there (#46's
+        // well, under the ring)
+        if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
+                return wall.IsSame(beyond);
+            })) {
+            wallFaces.push_back(beyond);
+        }
     }
     if (clipped) {
         for (const auto& strip : tool.strips) {
@@ -3082,6 +3111,7 @@ void trimFusedTool(Tool& tool, const FusedRun& run, const TopoDS_Shape& base)
         double inBase = volumeOf(commonOf(base, tool.solid));
         tool.inBase = inBase > volumeTolerance * tool.volume ? inBase : 0.0;
     }
+    return clipped;
 }
 
 /** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
@@ -3602,8 +3632,28 @@ TopoDS_Shape constructShape(
     // Base #46), so it adds nothing past it
     for (const auto& run : fusedRuns) {
         for (auto& tool : tools) {
-            if (&tool == run.tool) {
-                trimFusedTool(tool, run, base.getShape());
+            if (&tool != run.tool) {
+                continue;
+            }
+            // A miter piece continues its tools' faces past the corner: it has no strips to trim
+            if (trimFusedTool(tool, run, base.getShape(), wallFaces)
+                && std::any_of(tools.begin(), tools.end(), [](const Tool& t) {
+                       return t.miter;
+                   })) {
+                refuse("a fused tool clipped by the face beyond its strip at a concave corner "
+                       "with a circle");
+            }
+            // What is still off its face must run into the material, which absorbs it
+            for (const auto& strip : tool.strips) {
+                if (!strip.face.IsSame(run.face)) {
+                    continue;
+                }
+                for (const auto& contact : strip.contacts) {
+                    if (areaOf(contact) - areaOf(commonOf(run.face, contact))
+                        > areaToleranceOf(contact, strip)) {
+                        checkFusedRunOff(run.face, contact, base.getShape());
+                    }
+                }
             }
         }
     }
