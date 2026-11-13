@@ -66,6 +66,7 @@ from parttests.AttachAcrossContainersTest import AttachAcrossContainersTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.RefineElementMapTest import RefineElementMapTest
+from parttests.GTransformKeepsPlanesTest import GTransformKeepsPlanesTest
 from parttests.RefineFuseEdgesTest import RefineFuseEdgesTest
 from parttests.RefineInternalVertexTest import RefineInternalVertexTest
 from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
