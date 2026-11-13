@@ -852,6 +852,28 @@ bool faceValidByParts(const TopoDS_Face& face)
     return true;
 }
 
+// Whether checkValid()'s whole-shape BRepCheck_Analyzer runs parallel: yes unless
+// FREECAD_CH_CHECK_PARALLEL is "off" (read once)
+bool checkParallel()
+{
+    static const bool parallel = [] {
+#ifdef _MSC_VER
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_CHECK_PARALLEL") != 0 || !value) {
+            return true;
+        }
+        const bool on = std::string(value) != "off";
+        std::free(value);
+        return on;
+#else
+        const char* value = std::getenv("FREECAD_CH_CHECK_PARALLEL");
+        return !value || std::string(value) != "off";
+#endif
+    }();
+    return parallel;
+}
+
 bool statusOk(const Handle(BRepCheck_Result)& result)
 {
     const auto& list = result->Status();
@@ -876,7 +898,9 @@ bool checkValid(const TopoDS_Shape& shape)
         && TopExp_Explorer(shape, TopAbs_VERTEX, TopAbs_EDGE).More() == Standard_False;
     const bool oneFace = shape.ShapeType() == TopAbs_FACE;
     if (!anyByParts || !(solidsOnly || oneFace)) {
-        return BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+        // The sub-shapes checked on OCCT's threads (ops#640, OCCT settings audit): the same checks,
+        // the same verdict. FREECAD_CH_CHECK_PARALLEL=off checks on this thread only, to compare.
+        return BRepCheck_Analyzer(shape, Standard_True, checkParallel()).IsValid() == Standard_True;
     }
     if (oneFace) {
         return faceValidByParts(TopoDS::Face(shape));

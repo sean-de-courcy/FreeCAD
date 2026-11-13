@@ -23,6 +23,10 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <cstdlib>
+#include <string>
+
+#include <BOPAlgo_Options.hxx>
 #include <Interface_Static.hxx>
 #include <IGESControl_Controller.hxx>
 #include <STEPControl_Controller.hxx>
@@ -240,6 +244,28 @@ PyMOD_INIT_FUNC(Part)
 #if !defined(_DEBUG) && !defined(FC_OS_LINUX)
     //OSD::SetSignal(Standard_False);
 #endif
+
+    // Every OCCT Boolean (BOPAlgo_Options) made from here on runs parallel unless it says
+    // otherwise: the raw BRepAlgoAPI_* makers outside makeElementBoolean ran serial (ops#640, OCCT
+    // settings audit). FREECAD_CH_OCCT_PARALLEL=off keeps OCCT's default (serial), to compare.
+    {
+        bool parallel = true;
+#ifdef _MSC_VER
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_OCCT_PARALLEL") == 0 && value) {
+            parallel = std::string(value) != "off";
+            std::free(value);
+        }
+#else
+        if (const char* value = std::getenv("FREECAD_CH_OCCT_PARALLEL")) {
+            parallel = std::string(value) != "off";
+        }
+#endif
+        if (parallel) {
+            BOPAlgo_Options::SetParallelMode(Standard_True);
+        }
+    }
 
     PyObject* partModule = Part::initModule();
     Base::Console().log("Loading Part module... done\n");
