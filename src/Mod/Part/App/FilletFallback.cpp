@@ -3108,7 +3108,9 @@ TopoDS_Shape constructShape(
             TopoDS_Shape nearer = behindWalls(face, base.getShape(), tool.solid, offset / 2);
             double again = nearer.IsNull() ? 0.0 : volumeOf(commonOf(tool.solid, nearer));
             if (std::abs(again - clipped) > volumeTolerance * tool.volume) {
-                refuse("the walls behind a tangent strip don't run straight back from its face");
+                refuse("the walls behind a tangent strip don't run straight back from its face ("
+                       + describe(clipped) + " behind them at " + describe(offset) + ", "
+                       + describe(again) + " at " + describe(offset / 2) + ")");
             }
             // The piece is bounded by the tool's own surfaces and the walls' run on, and by nothing
             // else: material in front of the face that isn't the wall (a fin on a ledge, closer to
@@ -3348,6 +3350,19 @@ TopoDS_Shape constructShape(
         for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
             auto images = imagesThrough(stages, 0, it.Current());
             bool kept = images.size() == 1 && images.front().IsSame(it.Current());
+            // A face the tool only touches along an edge is modified, not cut: its edge gains the
+            // tool's vertices (Case Base #76: a chamfer's strip ending exactly on the tangent edge
+            // into an elbow). One image on its own surface with its own area is the face kept
+            if (!kept && images.size() == 1 && images.front().ShapeType() == TopAbs_FACE) {
+                const TopoDS_Face& face = TopoDS::Face(it.Current());
+                const TopoDS_Face& image = TopoDS::Face(images.front());
+                TopLoc_Location here;
+                TopLoc_Location there;
+                bool sameSurface = BRep_Tool::Surface(face, here) == BRep_Tool::Surface(image, there)
+                    || sameDomain(face, image);
+                kept = sameSurface
+                    && std::abs(areaOf(image) - areaOf(face)) <= areaToleranceOf(face);
+            }
             if (!kept && !allowed.Contains(it.Current())) {
                 refuse("a dress-up past its face cuts a face beyond the faces next to it");
             }
@@ -3669,7 +3684,21 @@ bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges
             if (!vertexEdges.Contains(vertex)) {
                 continue;
             }
-            gp_Dir away = awayFrom(edge, vertex);
+            // awayFrom refuses a null tangent: outside the construction that would escape as an
+            // unknown exception on a chamfer OCCT built (review r5); such an edge is no cusp
+            auto direction = [&](const TopoDS_Edge& e, gp_Dir& out) {
+                try {
+                    out = awayFrom(e, vertex);
+                    return true;
+                }
+                catch (const Refusal&) {
+                    return false;
+                }
+            };
+            gp_Dir away;
+            if (!direction(edge, away)) {
+                continue;
+            }
             for (const auto& item : vertexEdges.FindFromKey(vertex)) {
                 if (item.IsSame(edge) || selected(item) || !edgeFaces.Contains(item)
                     || BRep_Tool::Degenerated(TopoDS::Edge(item))) {
@@ -3679,7 +3708,9 @@ bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges
                 bool onOwnFace = std::any_of(ofOther.begin(), ofOther.end(), [&](const TopoDS_Shape& f) {
                     return f.IsSame(faces.First()) || f.IsSame(faces.Last());
                 });
-                if (onOwnFace && awayFrom(TopoDS::Edge(item), vertex).Dot(away) > 1 - angularTolerance) {
+                gp_Dir otherAway;
+                if (onOwnFace && direction(TopoDS::Edge(item), otherAway)
+                    && otherAway.Dot(away) > 1 - angularTolerance) {
                     return true;
                 }
             }
