@@ -385,7 +385,9 @@ def _thicken_per_face(group, infos, t1, t2):
         pieces.append(_leg_piece(f, t1, t2))
     reaching = [i for i in infos if i is not None and _reaches_axis(i, t1, t2)]
     pinched = bool(reaching) and all(abs(_bend_radii(i, t1, t2)[1] - i["d"]) <= TOL for i in reaching)
-    return _fused(pieces, probes, pinched)
+    # with no bend filled to its axis the pieces only touch: their union holds their sum, and an overlap (legs
+    # that collide) stays loud (review r6)
+    return _fused(pieces, probes, pinched, disjoint=not reaching)
 
 
 def _self_intersects(shape, pinched):
@@ -410,7 +412,7 @@ def _self_intersects(shape, pinched):
     return bool(lines)
 
 
-def _fused(pieces, probes, pinched=False):
+def _fused(pieces, probes, pinched=False, disjoint=False):
     """The pieces' union as one checked solid. The pieces meet along tangent faces, where OCC's fuse
     depends on the order (the horn bore's three pieces fused one by one gave two solids; a 150 degree
     bend's list fuse collapsed into a smaller valid solid). So try a list fuse, then one piece at a time
@@ -435,6 +437,8 @@ def _fused(pieces, probes, pinched=False):
             if res.isNull() or not res.isValid() or len(res.Solids) != 1:
                 continue
             if not max(p.Volume for p in pieces) - tol <= res.Volume <= total + tol:
+                continue
+            if disjoint and abs(res.Volume - total) > tol:
                 continue
             if not all(res.isInside(q, 1e-6, True) for q in probes):
                 continue
@@ -491,9 +495,9 @@ def thicken_tool(faces, t1, t2):
         except SolidOpsError:
             # a smooth sheet with a full-turn cylinder face (a bore's leg): OCC's whole-sheet offset can come out
             # invalid on it (brief 2: a leg with a degree-1 B-spline seam and an oblique end). Its pieces built face
-            # by face, each checked, fused and checked again (_thicken_per_face) are the same solid; else the
-            # whole-sheet error stands
-            if not (_has_full_cylinder(group) and _tangent_joins(group)):
+            # by face, each checked, fused and checked again (_thicken_per_face) are the same solid; where that
+            # path refuses too, its own error stands
+            if not (_has_full_cylinder(group) and _tangent_joins(group)):  # else the whole-sheet error stands
                 raise
             pieces.append(_thicken_per_face(group, infos, t1, t2))
     tool = pieces[0]
