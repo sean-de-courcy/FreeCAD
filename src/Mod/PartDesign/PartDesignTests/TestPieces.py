@@ -1018,6 +1018,67 @@ class TestPieces(unittest.TestCase):
         # The plate less the seed slot and its copy: x 10..14, y 0..16 (y 5..16 the copy's)
         self.assertVolume(p, 60 * 20 * 10 - 4 * 16 * 10)
 
+    def testAdoptedIdsDontRecomputeOtherParts(self):
+        """ops#640 (FMCVW #167): the piece command on a history adopted from the document's order
+        names every part (an empty id reads as the Body's name, so the id doesn't change) and
+        recomputes the split and its pieces only. Before, each adopted Body was touched,
+        re-executed and touched everything linking it: here a Boolean and a chamfer in another
+        part (FMCVW: 819 s of earlier fillets for a 1 s Pocket).
+        Bodies A (box 40 x 20 x 10 at x 0), B (the same at x 100), C (40 x 20 x 5 at x 0) fused
+        with A, then a chamfer; a slot 2 wide through B at x 119..121 splits B into two
+        19 x 20 x 10 pieces."""
+        self.doc = App.newDocument("TestPieces")
+
+        def boxBody(name, x0, height):
+            body = self.doc.addObject("PartDesign::Body", name)
+            pad(body, name + "Pad", sketch(body, name + "Sk", xyPlane(body), (x0, 0, x0 + 40, 20)), height)
+            return body
+
+        a = boxBody("A", 0, 10)
+        b = boxBody("B", 100, 10)
+        c = boxBody("C", 0, 5)
+        self.doc.recompute()
+        fuse = c.newObject("PartDesign::Boolean", "CFuse")
+        fuse.Type = "Fuse"
+        fuse.addObjects([a])
+        self.doc.recompute()
+        chamfer = c.newObject("PartDesign::Chamfer", "CChamfer")
+        chamfer.Base = (fuse, ["Edge1"])
+        chamfer.Size = 0.5
+        slotSketch = sketch(b, "BSlotSk", xyPlane(b), (119, -5, 121, 25))
+        slot = b.newObject("PartDesign::Pocket", "BSlot")
+        slot.Profile = slotSketch
+        slot.Type = "ThroughAll"
+        slot.Midplane = True
+        self.doc.recompute()
+        self.assertEqual(len(slot.Shape.Solids), 2)
+        for obj in (fuse, chamfer):
+            self.assertEqual(list(obj.State), ["Up-to-date"], obj.Name)
+        self.assertIsNone(PartDesign.studioList(None, False))
+        PartDesign.studioList(None, True)
+
+        recomputed = []
+
+        class Observer:
+            def slotRecomputedObject(self, obj):
+                recomputed.append(obj.Name)
+
+        observer = Observer()
+        App.addDocumentObserver(observer)
+        try:
+            made = list(PartDesign.studioMakePieces(slot))
+        finally:
+            App.removeDocumentObserver(observer)
+        self.assertEqual(len(made), 2)
+        for piece in made:
+            self.assertAlmostEqual(piece.Shape.Volume, 19 * 20 * 10, places=6)
+        for body in (a, c):
+            self.assertEqual(body.StudioPartId, body.Name)
+        self.assertIn("BSlot", recomputed)
+        for name in ("A", "APad", "C", "CFuse", "CChamfer"):
+            self.assertNotIn(name, recomputed)
+        self.assertEqual(list(chamfer.State), ["Up-to-date"])
+
 
 class TestStudioUndo(unittest.TestCase):
     """ops#654 10.15: the resync after a recompute outside any transaction records into the undo
