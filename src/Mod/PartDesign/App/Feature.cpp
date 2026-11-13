@@ -846,7 +846,10 @@ void ResultCheck::warnSkipped(const Feature* feature, const char* step)
     if (auto doc = feature ? feature->getDocument() : nullptr) {
         const std::string text = std::string(step)
             + " was skipped: the feature took longer than " + number(Part::KernelBudget::limit())
-            + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
+            + " s of computing time, the time limit for one feature's geometry (Part preference "
+              "GeometryTimeLimit), or "
+            + number(Part::KernelBudget::wallBackstop * Part::KernelBudget::limit())
+            + " s on the clock";
         const std::string previous
             = doc->getWarningDescription(feature) ? doc->getWarningDescription(feature) : "";
         if (previous.find(text) == std::string::npos) {

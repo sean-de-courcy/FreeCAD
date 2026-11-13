@@ -2682,6 +2682,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 )
 {
     ZoneScoped;
+    KernelBudget::PhaseTimer phase(KernelBudget::Phase::ElementMap);
 
     setShape(shape);
     if (shape.IsNull()) {
@@ -9853,6 +9854,7 @@ public:
 
 TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, RefineFail no_fail)
 {
+    KernelBudget::PhaseTimer phase(KernelBudget::Phase::Refine);
     if (shape.isNull()) {
         if (no_fail == RefineFail::throwException) {
             FC_THROWM(NullShapeException, "Null shape");

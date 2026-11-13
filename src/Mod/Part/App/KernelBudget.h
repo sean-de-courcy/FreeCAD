@@ -13,9 +13,11 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <Mod/Part/PartGlobal.h>
 
@@ -42,11 +44,33 @@ class BRepCheck_Shell;
 namespace Part::KernelBudget
 {
 
-/** The limit, in seconds: "User parameter:BaseApp/Preferences/Mod/Part/General", float
- * "GeometryTimeLimit", default 60. 0 means no limit (Esc still works); a negative value runs the work on
- * the calling thread, as before the limit (no Esc), to measure what the worker costs.
+/** The limit, in seconds of CPU time: "User parameter:BaseApp/Preferences/Mod/Part/General", float
+ * "GeometryTimeLimit", default 300. 0 means no limit (Esc still works); a negative value runs the work
+ * on the calling thread, as before the limit (no Esc), to measure what the worker costs.
+ *
+ * What counts (ruling c758, ops#743): the CPU time of the thread that runs the feature, since its
+ * outermost Scope began, and of its workers, so other programs' load on the machine doesn't make a
+ * feature fail that an idle machine builds. Work in OCCT's thread pool, which a worker waits for,
+ * isn't counted: a backstop on the clock, wallBackstop times the limit, stops a hang there.
  */
 PartExport double limit();
+
+/** The memory ceiling, in GB (ops#640, breakthrough 3): the same group's float
+ * "GeometryMemoryLimit", default 4; 0 or less means none. A feature (any Scope, time-limited or
+ * not) whose geometry makes the process's memory grow by more since its outermost Scope began is
+ * stopped as by the time limit, and fails with the growth in its error: at a run()'s wait (every
+ * 40 ms), before a run() or a stopIfPastDeadline() step starts, and at the feature's end
+ * (Scope::fired()). Never a warning only (decision 418): runOptional() throws for it. Outside a
+ * Scope a run() has the ceiling for its own growth. A stopped call that doesn't read its cancel
+ * runs on abandoned, and may grow on. Nor does the ceiling reach code no run() covers (a link
+ * assignment, outside every feature). For those, in unattended runs: FREECAD_CH_MEMORY_ABORT_GB,
+ * the whole process's hard stop, read four times a second by the Sampler's thread once a first
+ * Sampler was made (a feature's recompute, or Part.kernelSampleBegin()); past it, the stack of the
+ * thread that ran the last feature goes to stderr and the process ends with exit code 86. */
+PartExport double memoryLimit();
+
+/// The clock's backstop for a feature's geometry: this many times the limit()
+constexpr double wallBackstop = 4.0;
 
 /** Runs work under the limit of the outermost Scope on this thread (a feature's recompute); outside
  * every Scope (a script, a command) there is no limit, only Esc.
@@ -131,6 +155,99 @@ PartExport bool inScope();
  * feature's limit has passed. \a what names the step ("The repair of the shape"). */
 PartExport void stopIfPastDeadline(const char* what);
 
+/** Where a slow step's time goes (ops#640, breakthrough 1): the wall time this thread spends in
+ * each phase, for Sampler's report. Inclusive: a phase inside another counts in both, and a phase
+ * inside itself once. Cheap: two reads of the clock per outermost timer. */
+enum class Phase
+{
+    Solve,       ///< SketchObject::solve()
+    BuildShape,  ///< SketchObject::buildShape()
+    Occt,        ///< run(): a long geometry call, waited for on this thread
+    Check,       ///< isValid(), checkValid()
+    Refine,      ///< TopoShape::makeElementRefine()
+    ElementMap   ///< TopoShape::makeShapeWithElementMap()
+};
+constexpr int phaseCount = 6;
+PartExport const char* phaseName(Phase phase);
+
+class PartExport PhaseTimer
+{
+public:
+    explicit PhaseTimer(Phase phase);
+    ~PhaseTimer();
+    PhaseTimer(const PhaseTimer&) = delete;
+    PhaseTimer(PhaseTimer&&) = delete;
+    PhaseTimer& operator=(const PhaseTimer&) = delete;
+    PhaseTimer& operator=(PhaseTimer&&) = delete;
+
+private:
+    int index;
+    bool outer;
+    long long began {0};
+};
+
+/// One function in a Sampler's report: in how many of the samples it was on the stack
+struct SampleFrame
+{
+    std::string name;
+    int count {0};
+};
+
+/// What a Sampler saw
+struct SampleReport
+{
+    /// Seconds on the clock from the Sampler's start to finish()
+    double wall {0.0};
+    /// Stacks taken (none below the delay)
+    int samples {0};
+    /// Functions by the samples they were on the stack in (each once per sample), most first;
+    /// equal counts the deeper first. Left out: a function with nine tenths of its samples in
+    /// one callee (it only passes on), and the frames below the
+    /// Sampler's start (Windows)
+    std::vector<SampleFrame> top;
+    /// The innermost function of each sample, most first
+    std::vector<SampleFrame> self;
+    /// Seconds of each Phase on this thread meanwhile
+    std::array<double, phaseCount> phases {};
+};
+
+/** Names a slow step's hot function (ops#640, breakthrough 1): past `delay` seconds on the clock,
+ * a thread of its own samples the stack of the thread that made the Sampler every `period`
+ * seconds (Windows: SuspendThread and the x64 unwinder; POSIX: SIGPROF and backtrace()), until
+ * finish(). One Sampler runs at a time in the process: another made meanwhile isn't armed (its
+ * report has the wall and phases only). Below the delay it costs about what making a thread
+ * handle does. finish() names the functions (Windows: DbgHelp and the build's PDBs; POSIX:
+ * dladdr(), exported symbols only), the first time a module is named it loads its symbols.
+ * The outermost Scope makes one for every feature's recompute and logs its report past the
+ * delay; FREECAD_CH_SAMPLER=off turns that off, a number of seconds sets its delay. */
+class PartExport Sampler
+{
+public:
+    static constexpr double defaultDelay = 10.0;
+    static constexpr double defaultPeriod = 0.5;
+    explicit Sampler(double delay = defaultDelay, double period = defaultPeriod);
+    ~Sampler();
+    bool armed() const
+    {
+        return ticket != 0;
+    }
+    /// Stops the sampling (once) and names the `top` functions found most
+    SampleReport finish(int top = 10);
+    Sampler(const Sampler&) = delete;
+    Sampler(Sampler&&) = delete;
+    Sampler& operator=(const Sampler&) = delete;
+    Sampler& operator=(Sampler&&) = delete;
+
+private:
+    unsigned long long ticket {0};
+    long long started {0};
+    std::array<double, phaseCount> phasesAtStart {};
+    bool finished {false};
+};
+
+/** A report as one line: "12.3 s, 24 samples; hot: f (100 %), g (96 %)...; phases: solve 4.1 s..." */
+PartExport std::string describe(const SampleReport& report);
+
 /** One deadline for every run() inside it, the outermost one's.  timeLimited: whether the
  * outermost one has the time limit; else Esc only, as outside any Scope. The limit is PartDesign
  * features' only (the coordinator's ruling, 11-11): a Part, Arch/BIM or other workbench's object
@@ -151,6 +268,8 @@ public:
 
 private:
     bool outermost {false};
+    /// The outermost one's, past its delay its report goes to the log
+    std::unique_ptr<Sampler> sampler;
 };
 
 /** Calls abandoned in this process that are still running, and all ever abandoned (for tests). */
