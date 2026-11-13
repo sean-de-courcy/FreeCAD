@@ -2512,3 +2512,114 @@ class CurvedWallEndTest(unittest.TestCase):
         sector, edges = self.wall(10, 11.5, 4)
         with self.assertRaises(Part.OCCError):
             sector.makeChamfer(0.75, edges)
+
+
+def tight_plate(radii, scoop=False):
+    """A 30 x 20 x 5 plate whose four vertical corners are rounded radii, at (0, 0), (30, 0),
+    (30, 20) and (0, 20). With scoop, a vertical cylinder R 7.5 about (27, 3) is cut out first,
+    and radii[1] rounds its two edges against the walls."""
+    box = Part.makeBox(30, 20, 5)
+    if scoop:
+        box = box.cut(Part.makeCylinder(7.5, 7, V(27, 3, -1), V(0, 0, 1)))
+
+    def vertical(shape):
+        return [
+            e
+            for e in shape.Edges
+            if abs(e.BoundBox.ZLength - 5) < 1e-9
+            and e.BoundBox.XLength < 1e-9
+            and e.BoundBox.YLength < 1e-9
+        ]
+
+    shape = box
+    for (x, y), radius in zip(((0, 0), (30, 0), (30, 20), (0, 20)), radii):
+        if scoop and (x, y) == (30, 0):
+            edges = [
+                e
+                for e in vertical(shape)
+                if (abs(e.BoundBox.YMin) < 1e-6 and 1 < e.BoundBox.XMin < 29)
+                or (abs(e.BoundBox.XMin - 30) < 1e-6 and 1 < e.BoundBox.YMin < 19)
+            ]
+        else:
+            edges = [
+                e
+                for e in vertical(shape)
+                if abs(e.BoundBox.XMin - x) < 1e-6 and abs(e.BoundBox.YMin - y) < 1e-6
+            ]
+        shape = shape.makeFillet(radius, edges)
+    return shape
+
+
+class TightWallArcTest(unittest.TestCase):
+    """The top rim's round r = 1.5 of a plate whose wall arc rho is below r (ops#640, C4 shape A,
+    notes/fillet-tight-arc.md): no ball of radius r fits the arc, and Onshape's corner is the canal
+    surface of a ball of radius rho whose centre keeps the same depth from both neighbouring walls,
+    rising from the wall arc at depth r to the apex on the top, where the neighbours' rounds' top
+    edges cross. OCCT's own result is valid but wrong there. Expected values: Onshape's (oracle 17,
+    Q-TIGHT TA1-TA3: volume, area, faces, the corner face's area); the wall arc stays a circle."""
+
+    def round(self, base, r=1.5):
+        top = [
+            e
+            for e in base.Edges
+            if abs(e.BoundBox.ZMin - 5) < 1e-9 and abs(e.BoundBox.ZMax - 5) < 1e-9
+        ]
+        return base.makeFillet(r, top)
+
+    def check(self, shape, onshape, apexes, arcs, r=1.5, rho=1.0):
+        volume, area, faces, cornerArea = onshape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-3)
+        self.assertAlmostEqual(shape.Area, area, delta=1e-3)
+        refined = shape.removeSplitter()
+        self.assertEqual(len(refined.Faces), faces)
+        free = [
+            f.Area
+            for f in refined.Faces
+            if f.Surface.TypeId
+            not in ("Part::GeomPlane", "Part::GeomCylinder", "Part::GeomToroid", "Part::GeomSurfaceOfRevolution")
+        ]
+        self.assertEqual(len(free), len(apexes))
+        for a in free:
+            self.assertAlmostEqual(a, cornerArea, delta=1e-4)
+        for apex in apexes:
+            self.assertLess(min((v.Point - apex).Length for v in shape.Vertexes), 1e-6)
+        def wallArc(edge, centre):
+            try:
+                curve = edge.Curve
+            except TypeError:  # a curve type without a Python wrapper: not a circle
+                return False
+            return (
+                curve.TypeId == "Part::GeomCircle"
+                and abs(curve.Radius - rho) < 1e-9
+                and abs(edge.BoundBox.ZMin - (5 - r)) < 1e-9
+                and abs(edge.BoundBox.ZMax - (5 - r)) < 1e-9
+                and (V(curve.Center.x, curve.Center.y, 0) - centre).Length < 1e-9
+            )
+
+        for centre in arcs:
+            # The wall arc at depth r survives whole, a circle
+            self.assertTrue(any(wallArc(e, centre) for e in shape.Edges))
+
+    def testWallArcBelowTheRound(self):
+        # TA1 (rho 1) and TA2 (rho 0.5): the neighbours are the plate's straight walls
+        for rho, onshape in (
+            (1.0, (2902.820914, 1589.230881, 18, 2.435593)),
+            (0.5, (2903.543273, 1590.464844, 18, 1.257495)),
+        ):
+            with self.subTest(rho=rho):
+                shape = self.round(tight_plate([4.0, rho, 4.0, 4.0]))
+                apex = V(30 - 1.5, 1.5, 5)
+                self.check(shape, onshape, [apex], [V(30 - rho, rho, 0)], rho=rho)
+
+    def testWallArcsBetweenAScoopAndAWall(self):
+        # TA3: a concave scoop R 7.5 about (27, 3) between the walls, joined to each by an arc
+        # rho 1; the arcs' centres at 1 from the wall and 8.5 from the scoop's axis
+        shape = self.round(tight_plate([4.0, 1.0, 4.0, 4.0], scoop=True))
+        s = math.sqrt(8.5**2 - 2**2)
+        centres = [V(29, 3 + s, 0), V(27 - s, 1, 0)]
+        # The apexes at 1.5 from the wall and 9 from the scoop's axis
+        t = math.sqrt(9**2 - 1.5**2)
+        apexes = [V(28.5, 3 + t, 5), V(27 - t, 1.5, 5)]
+        self.check(shape, (2416.468426, 1380.349941, 22, 2.821144), apexes, centres)

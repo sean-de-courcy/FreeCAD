@@ -49,6 +49,7 @@ from parttests.FilletFallbackTest import (
     InvalidDressUpTest,
     LostStepTest,
     OverflowTest,
+    TightWallArcTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest
