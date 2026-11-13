@@ -22,7 +22,7 @@
 # *                                                                         *
 # ***************************************************************************
 
-from math import cos, pi, sin
+from math import cos, pi, sin, sqrt
 import unittest
 
 import FreeCAD
@@ -594,6 +594,125 @@ class TestHelix(unittest.TestCase):
         centroid /= area
         volume = pi * (r**2 - (r - 1) ** 2) * height + abs(area) * 2 * pi * centroid * height / pitch
         self.assertAlmostEqual(shape.Volume, volume, delta=5e-4)
+
+    def testRefineKeepsLoftedWallWithinItsSurface(self):
+        """The refine keeps a threaded lofted wall's faces inside the surface's parameter range.
+
+        A barrel lofted through three circles (r 76.5, 76.8, 76.5 at z 0, 3.3, 6.6; its seam turned
+        50 degrees) has a B-spline wall that is closed around the axis but not periodic. It carries
+        a thread that runs past both of its ends, at 2.64, 1.5 and 4.4 turns. Refined, the face
+        uniter merged the wall between the turns into one helical band whose pcurves run several
+        times around, outside the surface's bounds, where OCCT extrapolates the surface: the
+        result stayed valid with a volume of 3.26e9, 2.9e6 and 5.0e14 for about 122 thousand.
+        Building that face and dropping it is no better: fixing it widens the tolerances of the
+        vertices it shares with the part to 2e5 mm, and the volume reads 7.8 over.
+        Expected: each wall face lies within the surface's bounds, the vertex tolerances stay
+        small, and the volume is the barrel's plus the part of the thread outside it.
+        The barrel's radius is the parabola through the three circles,
+        R(z) = 76.5 + 0.3 (1 - t^2) with t = (z - 3.3) / 3.3, so its volume is pi times the
+        integral of R^2. The thread adds 2 pi / pitch times the integral, over the profile's
+        height and the sweep's rise, of (outer^2 - inner^2) / 2: outer is the profile's outer
+        edge, and inner is the barrel's radius within the barrel's height (nothing is added
+        where it is beyond outer) and the profile's inner edge above and below it."""
+        r, bulge, height, z0 = 76.5, 0.3, 6.6, -0.3
+        inner_edge = r - 0.5
+        corners = [(inner_edge, z0), (inner_edge, z0 + 0.7), (r + 0.75, z0 + 0.1), (r + 0.8, z0)]
+
+        def barrel_radius(z):
+            t = (z - height / 2) / (height / 2)
+            return r + bulge * (1 - t * t)
+
+        def outer_edge(zl):
+            return r + 0.8 - 0.5 * zl if zl <= 0.1 else r + 0.75 - (zl - 0.1) * (1.25 / 0.6)
+
+        nodes = (-0.9061798459386640, -0.5384693101056831, 0.0)
+        weights = (0.2369268850561891, 0.4786286704993665, 0.5688888888888889)
+        nodes, weights = nodes + (-nodes[1], -nodes[0]), weights + (weights[1], weights[0])
+
+        def gauss(f, a, b):
+            mid, half = (a + b) / 2, (b - a) / 2
+            return half * sum(w * f(mid + half * x) for x, w in zip(nodes, weights))
+
+        def over_rise(zl):
+            outer = outer_edge(zl)
+
+            def added(rise):
+                z = z0 + rise + zl
+                if z < 0 or z > height:
+                    return (outer**2 - inner_edge**2) / 2
+                return max(outer**2 - barrel_radius(z) ** 2, 0.0) / 2
+
+            # the integrand breaks at the barrel's ends and where its radius equals outer
+            cuts = {0.0, height, -z0 - zl, height - z0 - zl}
+            q = 1 - (outer - r) / bulge
+            if 0 < q < 1:
+                cuts |= {height / 2 + sign * sqrt(q) * height / 2 - z0 - zl for sign in (-1, 1)}
+            cuts = sorted(c for c in cuts if 0 <= c <= height)
+            return sum(gauss(added, a, b) for a, b in zip(cuts, cuts[1:]))
+
+        thread_integral = 0.0
+        for a, b, panels in ((0.0, 0.1, 40), (0.1, 0.7, 240)):
+            step = (b - a) / panels
+            thread_integral += sum(
+                gauss(over_rise, a + i * step, a + (i + 1) * step) for i in range(panels)
+            )
+        top = r + bulge
+        barrel_volume = pi * (height / 2) * (2 * top**2 - 4 / 3 * top * bulge + 0.4 * bulge**2)
+
+        circles = [
+            Part.Wire(Part.makeCircle(radius, Base.Vector(0, 0, z)))
+            for radius, z in ((r, 0), (r + bulge, height / 2), (r, height))
+        ]
+        barrel = Part.makeLoft(circles, True, False)
+        barrel.rotate(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 50)
+        self.assertAlmostEqual(barrel.Volume, barrel_volume, delta=1e-5)
+
+        for pitch in (2.5, 4.4, 1.5):
+            with self.subTest(pitch=pitch):
+                doc = FreeCAD.newDocument("LoftedWall")
+                try:
+                    base = doc.addObject("Part::Feature", "Barrel")
+                    base.Shape = barrel
+                    body = doc.addObject("PartDesign::Body", "Body")
+                    body.BaseFeature = base
+                    planes = {f.Role: f for f in body.Origin.OriginFeatures}
+                    profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+                    profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+                    profile.MapMode = "FlatFace"
+                    for i in range(4):
+                        (x1, y1), (x2, y2) = corners[i], corners[(i + 1) % 4]
+                        profile.addGeometry(
+                            Part.LineSegment(Base.Vector(x1, y1, 0), Base.Vector(x2, y2, 0))
+                        )
+                    thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+                    thread.Profile = profile
+                    thread.ReferenceAxis = (planes["Z_Axis"], [""])
+                    thread.Mode = "pitch-height-angle"
+                    thread.Pitch = pitch
+                    thread.Height = height
+                    thread.Refine = True
+                    doc.recompute()
+
+                    self.assertTrue(thread.isValid(), thread.getStatusString())
+                    shape = thread.Shape
+                    self.assertTrue(shape.isValid())
+                    outside = []
+                    for face in shape.Faces:
+                        surface = face.Surface
+                        if surface.__class__.__name__ != "BSplineSurface":
+                            continue
+                        if not surface.isUClosed():
+                            continue
+                        u1, u2 = surface.bounds()[:2]
+                        low, high = face.ParameterRange[:2]
+                        if low < u1 - 1e-6 or high > u2 + 1e-6:
+                            outside.append((low, high))
+                    self.assertEqual(outside, [])
+                    self.assertLess(max(v.Tolerance for v in shape.Vertexes), 1e-2)
+                    volume = barrel_volume + 2 * pi / pitch * thread_integral
+                    self.assertAlmostEqual(shape.Volume, volume, delta=5e-3)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def tearDown(self):
         FreeCAD.closeDocument("PartDesignTestHelix")

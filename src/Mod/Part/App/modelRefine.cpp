@@ -24,9 +24,12 @@
 
 
 #include <algorithm>
+#include <cmath>
 #include <numbers>
 #include <iterator>
 #include <Bnd_Box.hxx>
+#include <Bnd_Box2d.hxx>
+#include <BndLib_Add2dCurve.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -38,6 +41,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <Geom2d_Curve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Conic.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -49,6 +53,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <ShapeAnalysis_Shell.hxx>
 #include <ShapeBuild_ReShape.hxx>
@@ -1089,8 +1094,117 @@ GeomAbs_SurfaceType FaceTypedBSpline::getType() const
     return GeomAbs_BSplineSurface;
 }
 
+// On a surface that is closed but not periodic (a lofted wall), two faces that meet across the seam
+// cannot become one face: one of them would have to move a whole turn in the parameter plane,
+// outside the surface's bounds, where OCCT evaluates the surface by extrapolation. The pieces a
+// thread leaves of such a wall meet that way, turn after turn; merged, they were one helical band
+// running several times around, and the solid stayed "valid" with a volume of 3.26e9 where 122156
+// was right. This is asked before the face is built: fixing a face built out of range widens the
+// tolerances of the edges and vertices it shares with the shape (to 2e5 mm), which spoils the shape
+// even when the face is dropped.
+static bool meetAcrossSeam(const FaceVectorType& faces)
+{
+    if (faces.empty()) {
+        return false;
+    }
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(faces.front());
+    if (surface.IsNull()) {
+        return false;
+    }
+    const bool seamU = surface->IsUClosed() && !surface->IsUPeriodic();
+    const bool seamV = surface->IsVClosed() && !surface->IsVPeriodic();
+    if (!seamU && !seamV) {
+        return false;
+    }
+    Standard_Real u1 = 0.0, u2 = 0.0, v1 = 0.0, v2 = 0.0;
+    surface->Bounds(u1, u2, v1, v2);
+
+    struct Seen
+    {
+        TopoDS_Edge edge;
+        std::size_t face;
+        gp_Pnt2d middle;
+    };
+    std::vector<Seen> seen;
+    for (std::size_t index = 0; index < faces.size(); ++index) {
+        for (TopExp_Explorer it(faces[index], TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+            Standard_Real first = 0.0, last = 0.0;
+            Handle(Geom2d_Curve)
+                pcurve = BRep_Tool::CurveOnSurface(edge, faces[index], first, last);
+            if (pcurve.IsNull()) {
+                continue;
+            }
+            const gp_Pnt2d middle = pcurve->Value((first + last) / 2.0);
+            for (const Seen& other : seen) {
+                // the same edge twice in one face is that face's own seam
+                if (other.face == index || !other.edge.IsSame(edge)) {
+                    continue;
+                }
+                if ((seamU && std::fabs(middle.X() - other.middle.X()) > (u2 - u1) / 2.0)
+                    || (seamV && std::fabs(middle.Y() - other.middle.Y()) > (v2 - v1) / 2.0)) {
+                    return true;
+                }
+            }
+            seen.push_back({edge, index, middle});
+        }
+    }
+    return false;
+}
+
+// A merged B-spline face must stay inside its surface's parameter range: within the bounds where
+// the surface is not periodic, within one period where it is (a band of several turns on a periodic
+// wall has no seam edge, and OCCT classifies points in the principal period: see withinOnePeriod).
+// The box is taken from the pcurves themselves: BRepTools::UVBounds clips it to a non-periodic
+// surface's bounds.
+static TopoDS_Face withinSurfaceRange(const TopoDS_Face& face)
+{
+    if (face.IsNull()) {
+        return face;
+    }
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (surface.IsNull()) {
+        return face;
+    }
+    Bnd_Box2d box;
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        Standard_Real first = 0.0, last = 0.0;
+        Handle(Geom2d_Curve)
+            pcurve = BRep_Tool::CurveOnSurface(TopoDS::Edge(it.Current()), face, first, last);
+        if (!pcurve.IsNull()) {
+            BndLib_Add2dCurve::AddOptimal(pcurve, first, last, 0.0, box);
+        }
+    }
+    if (box.IsVoid()) {
+        return face;
+    }
+    Standard_Real uMin = 0.0, vMin = 0.0, uMax = 0.0, vMax = 0.0;
+    box.Get(uMin, vMin, uMax, vMax);
+    Standard_Real u1 = 0.0, u2 = 0.0, v1 = 0.0, v2 = 0.0;
+    surface->Bounds(u1, u2, v1, v2);
+    // A pcurve of a sound face may pass a bound by about its edge's tolerance; a face merged around
+    // the surface passes it by the width of a piece.
+    auto leaves = [](double low, double high, double start, double end, bool periodic) {
+        const double range = end - start;
+        const double slack = 1e-6 * range;
+        if (periodic) {
+            return high - low > range + slack;
+        }
+        return low < start - slack || high > end + slack;
+    };
+    if (leaves(uMin, uMax, u1, u2, surface->IsUPeriodic())
+        || leaves(vMin, vMax, v1, v2, surface->IsVPeriodic())) {
+        return TopoDS_Face();
+    }
+    return face;
+}
+
 TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
 {
+    if (meetAcrossSeam(faces)) {
+        return {};
+    }
+
     std::vector<TopoDS_Wire> wires;
 
     std::vector<EdgeVectorType> splitEdges;
@@ -1146,7 +1260,7 @@ TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
         return {};
     }
 
-    return faceFixer.Face();
+    return withinSurfaceRange(faceFixer.Face());
 }
 
 FaceTypedBSpline& ModelRefine::getBSplineObject()
