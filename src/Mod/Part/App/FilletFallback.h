@@ -179,6 +179,12 @@ struct PartExport Construction
     int corners {0};
     /// Whether a round rolled on over a tangent edge onto the next face (rollOn)
     bool rolledOn {false};
+    /// Why the rim rounds were not built directly, where the construction by Booleans ran
+    std::string rimRefusal;
+    /// The rim rounds were not built directly because a part of the body that is neither their
+    /// plane face nor a wall lies within their reach (a cavity or a blind hole under the rim):
+    /// OCCT's own round runs through that part as well, valid and wrong
+    bool rimBlocked {false};
 };
 
 /** build() in two steps, so that the long one can run on a worker thread (KernelBudget::run()):
@@ -197,6 +203,25 @@ PartExport bool construct(
     const Request& request,
     Construction& out,
     std::string* reason = nullptr
+);
+
+/** The part of a fillet that is whole rim loops of plane faces with walls square to them, lines
+ * and circles, built directly without a Boolean (notes/boolean-free-mitre.md); the caller rounds
+ * the rest of the selection on the result. At the limit only (Request::limitOnly): the loops with
+ * a reflex corner with a circle. Checked as construct()'s direct rim rounds are.
+ *
+ * @param base The shape being dressed up: one solid (the makerInput() copy's shape)
+ * @param edges The selected edges of the base
+ * @param out Receives the body with the loops' rounds
+ * @param rest Receives the selected edges that are in no loop built: edges of out's shape
+ * @return Whether some loop was built, and every other selected edge is still an edge of the body
+ */
+PartExport bool constructRims(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::vector<TopoDS_Shape>& rest
 );
 
 /** Whether the construction should run before OCCT, whose own checks never ask it where its

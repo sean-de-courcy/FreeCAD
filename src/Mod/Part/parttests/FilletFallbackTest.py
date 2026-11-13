@@ -413,7 +413,9 @@ class FilletFallbackTest(unittest.TestCase):
         r = 0.5
         ring = fillet_section(r) * 2 * math.pi * (30 - fillet_centroid(r))
         removed = []
-        for teeth, faces in ((1, 10), (2, 19)):
+        # One face per arc of the rim: the root's arc that the second tooth leaves in two pieces
+        # on one wall gets one round, as in Onshape (19 faces while each piece had its own)
+        for teeth, faces in ((1, 10), (2, 18)):
             wheel, rims = toothed_wheel(teeth)
             result = wheel.makeFillet(r, rims)
             self.assertNoPatch(result)
@@ -421,6 +423,43 @@ class FilletFallbackTest(unittest.TestCase):
             removed.append(wheel.Volume - result.Volume)
         self.assertAlmostEqual(removed[0] - ring, 0.07166, delta=3e-4)
         self.assertAlmostEqual(removed[1] - removed[0], removed[0] - ring, delta=1e-4)
+
+    def testReflexCornersOfAWholeWheel(self):
+        # All 32 teeth, 64 reflex corners: whole rim loops on a plane face are built directly, each
+        # round a torus and each mitre the crossing of its two walls' offsets, without a Boolean
+        # (ops#640, notes/boolean-free-mitre.md). The rule by the height field: the plain rim's
+        # ring and 0.07166 (+-1.5e-4) for each tooth; one round for each of the rim's 128 arcs
+        r = 0.5
+        ring = fillet_section(r) * 2 * math.pi * (30 - fillet_centroid(r))
+        wheel, rims = toothed_wheel(32)
+        result = wheel.makeFillet(r, rims)
+        self.assertNoPatch(result)
+        self.assertEqual(len(result.Faces), len(wheel.Faces) + 128)
+        self.assertAlmostEqual(wheel.Volume - result.Volume, ring + 32 * 0.07166, delta=32 * 1.5e-4)
+
+    def testReflexCornersBesideALoopOutOfTheDirectScope(self):
+        # The wheel's rim with a countersunk hole's rim (a cone's, which the direct builder does
+        # not take) in one fillet: the wheel's loop is built directly and the hole's rim is
+        # rounded on the result, so the two remove what each removes alone, and one loop out of
+        # scope does not send 64 corners to the construction by Booleans (FSLC #50, ops#640)
+        r = 0.5
+        wheel, rims = toothed_wheel(32)
+        wheel = wheel.cut(Part.makeCone(2, 4, 3, V(0, 0, 0))).Solids[0]
+        top = rim_edges(wheel, 3.0)
+        hole = [
+            e
+            for e in top
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - 4) < 1e-9
+            and e.Curve.Center.distanceToPoint(V(0, 0, 3)) < 1e-9
+        ]
+        self.assertEqual(len(hole), 1)
+        outer = [e for e in top if not e.isSame(hole[0])]
+        alone = [wheel.Volume - wheel.makeFillet(r, edges).Volume for edges in (hole, outer)]
+        result = wheel.makeFillet(r, top)
+        self.assertNoPatch(result)
+        self.assertEqual(len(result.Faces), len(wheel.Faces) + 128 + 1)
+        self.assertAlmostEqual(wheel.Volume - result.Volume, sum(alone), delta=1e-6)
 
     def assertFailsAtAReflexCorner(self, shape, r, reason):
         """The fillet fails, and its error names the reflex corner and why it was not built: OCCT's
@@ -4031,6 +4070,201 @@ class TightWallArcTest(unittest.TestCase):
         t = math.sqrt(9**2 - 1.5**2)
         apexes = [V(28.5, 3 + t, 5), V(27 - t, 1.5, 5)]
         self.check(shape, (2416.468426, 1380.349941, 22, 2.821144), apexes, centres)
+
+    def scalloped(self, hole):
+        """A plate 60 x 40 x 6: two opposite corners rounded 5, the other two scalloped by a
+        concave cylinder R 8 about the corner's edge, joined to both walls by arcs rho 1: four wall
+        arcs tighter than the round 1.5875, each between a plane and the scoop. With hole, a
+        through hole R 4 that touches both straight top edges of the round beside a rounded corner
+        (the lid's hole). Returns the plate, its top rim (without the hole's) and the round."""
+        lx, ly, top, big, scoop, rho, r = 60.0, 40.0, 6.0, 5.0, 8.0, 1.0, 1.5875
+        k = math.sqrt((scoop + rho) ** 2 - rho**2)
+        a = math.degrees(math.atan2(rho, k))
+
+        def arc(cx, cy, radius, a0, a1):
+            circle = Part.Circle(V(cx, cy, 0), V(0, 0, 1), radius)
+            return Part.ArcOfCircle(circle, math.radians(a0), math.radians(a1)).toShape()
+
+        def half():
+            return [
+                Part.makeLine(V(big, 0, 0), V(lx - k, 0, 0)),
+                arc(lx - k, rho, rho, -90, -a),
+                arc(lx, 0, scoop, 90 + a, 180 - a),
+                arc(lx - rho, k, rho, -(90 - a), 0),
+                Part.makeLine(V(lx, k, 0), V(lx, ly - big, 0)),
+                arc(lx - big, ly - big, big, 0, 90),
+            ]
+
+        other = half()
+        for e in other:
+            e.rotate(V(lx / 2, ly / 2, 0), V(0, 0, 1), 180)
+        plate = Part.Face(Part.Wire(Part.__sortEdges__(half() + other))).extrude(V(0, 0, top))
+        if hole:
+            centre = V(lx - r - 4, ly - r - 4, -1)
+            plate = plate.cut(Part.makeCylinder(4, top + 2, centre, V(0, 0, 1)))
+        rim = [
+            e
+            for e in plate.Edges
+            if abs(e.BoundBox.ZMin - top) < 1e-9
+            and abs(e.BoundBox.ZMax - top) < 1e-9
+            and not (abs(e.BoundBox.XLength - 8) < 1e-6 and abs(e.BoundBox.YLength - 8) < 1e-6)
+        ]
+        return plate, rim, r
+
+    def testFourWallArcsOnOneRim(self):
+        # Case Lid #121's rim, designed (probes/c4/rim_four.py): the whole top rim of the scalloped
+        # plate, 12 edges with four tight wall arcs. A whole loop on a plane face with walls square
+        # to it is assembled directly (notes/boolean-free-mitre.md): each tight arc's face is the
+        # canal patch, its sides the neighbouring rounds' ends, and the neighbours' top edges cross
+        # in one vertex, at r from the wall and 8 + r from the scoop's axis. One face per rim
+        # edge; the four patches are equal by the model's symmetries. The patch's area and the
+        # volume have no closed form: they are the construction by Booleans' on the same model
+        # (lx6 adf71674be, where it took 60 s), whose patches lie on the canal surface to 2e-14.
+        # With the hole, its rim touches two top edges: the top plane comes out in two faces, as
+        # in Onshape, the smaller between the hole and the corner's top edges:
+        # 4^2 - 4 pi - (5 - r)^2 (1 - pi/4)
+        for hole, volume in ((False, 13627.9151), (True, 13326.3222)):
+            with self.subTest(hole=hole):
+                plate, rim, r = self.scalloped(hole)
+                self.assertEqual(len(rim), 12)
+                result = plate.makeFillet(r, rim)
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                self.assertEqual(len(result.Faces), len(plate.Faces) + 12 + (1 if hole else 0))
+                analytic = ("Part::GeomPlane", "Part::GeomCylinder", "Part::GeomToroid")
+                free = [f for f in result.Faces if f.Surface.TypeId not in analytic]
+                self.assertEqual(len(free), 4)
+                for f in free:
+                    self.assertEqual(f.Surface.TypeId, "Part::GeomBSplineSurface")
+                    self.assertAlmostEqual(f.Area, 2.364206, delta=1e-5)
+                self.assertAlmostEqual(result.Volume, volume, delta=1e-3)
+                t = math.sqrt((8 + r) ** 2 - r**2)
+                for apex in (V(60 - t, r, 6), V(60 - r, t, 6), V(t, 40 - r, 6), V(r, 40 - t, 6)):
+                    self.assertLess(min((v.Point - apex).Length for v in result.Vertexes), 1e-6)
+                tops = [
+                    f
+                    for f in result.Faces
+                    if f.Surface.TypeId == "Part::GeomPlane"
+                    and abs(f.BoundBox.ZMin - 6) < 1e-9
+                    and abs(f.BoundBox.ZMax - 6) < 1e-9
+                ]
+                self.assertEqual(len(tops), 2 if hole else 1)
+                if hole:
+                    island = 16 - 4 * math.pi - (5 - r) ** 2 * (1 - math.pi / 4)
+                    self.assertAlmostEqual(min(f.Area for f in tops), island, delta=1e-6)
+
+    def testAHoleCrossingTheTopEdgeIsNotBuiltDirectly(self):
+        # The same plate with the hole 0.5 further out: its rim crosses the round's top edges, so
+        # the hole's wall cuts into the round. That is not the direct assembly's case (it refuses,
+        # and the construction by Booleans or OCCT answers): whatever is returned is valid and
+        # removes material from the plate, and nothing is pinched off the top
+        plate, rim, r = self.scalloped(False)
+        centre = V(60 - r - 4 + 0.5, 40 - r - 4 + 0.5, -1)
+        plate = plate.cut(Part.makeCylinder(4, 8, centre, V(0, 0, 1)))
+        rim = [
+            e
+            for e in plate.Edges
+            if abs(e.BoundBox.ZMin - 6) < 1e-9
+            and abs(e.BoundBox.ZMax - 6) < 1e-9
+            and not (abs(e.BoundBox.XLength - 8) < 1e-6 and abs(e.BoundBox.YLength - 8) < 1e-6)
+        ]
+        self.assertEqual(len(rim), 12)
+        try:
+            result = plate.makeFillet(r, rim)
+        except Part.OCCError:
+            return
+        self.assertTrue(result.isValid())
+        self.assertLess(result.Volume, plate.Volume)
+
+    def testAHoleInAReflexCornersRunOnIsNotBuiltDirectly(self):
+        # An L-plate 60 x 40 x 6 (the notch x > 30, y > 20) with one wall arc rho 1 tighter than
+        # the round r 1.5875, and a through hole R 0.5 inside the reflex corner's run-on: the
+        # rounds of the walls x = 30 and y = 20 run on past the corner to where their top edges
+        # cross, at r from both, and the hole touches both top edges from the rounds' side. Its
+        # wall cuts through both rounds, which is not the direct assembly's case (a body built as
+        # if the hole only pinched the top plane was valid and wrong). At depths d1, d2 behind
+        # the two walls the rounds take min(h(d1), h(d2)) off the top, h(d) = r - sqrt(r^2 -
+        # (r - d)^2): the plate with the hole loses that much less than the plate without it,
+        # integrated over the hole's circle
+        r, hole = 1.5875, 0.5
+
+        def removed(withHole):
+            plate = self.ell()
+            if withHole:
+                centre = V(30 - r + hole, 20 - r + hole, -1)
+                cylinder = Part.makeCylinder(hole, 8, centre, V(0, 0, 1))
+                # The hole's seam turned away from the top edges it touches
+                cylinder.rotate(V(centre.x, centre.y, 0), V(0, 0, 1), 200)
+                plate = plate.cut(cylinder)
+            rim = [
+                e
+                for e in plate.Edges
+                if abs(e.BoundBox.ZMin - 6) < 1e-9
+                and abs(e.BoundBox.ZMax - 6) < 1e-9
+                and not e.isClosed()  # the hole's rim
+            ]
+            self.assertEqual(len(rim), 7)
+            result = plate.makeFillet(r, rim)
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            return plate.Volume - result.Volume
+
+        def height(d):
+            return r - math.sqrt(r * r - (r - d) ** 2) if d < r else 0.0
+
+        inHole, rings, spokes = 0.0, 200, 400
+        for i in range(rings):
+            rho = hole * (i + 0.5) / rings
+            for j in range(spokes):
+                phi = 2 * math.pi * (j + 0.5) / spokes
+                d1 = r - hole + rho * math.cos(phi)
+                d2 = r - hole + rho * math.sin(phi)
+                inHole += min(height(d1), height(d2)) * rho
+        inHole *= (hole / rings) * (2 * math.pi / spokes)
+        self.assertAlmostEqual(inHole, 0.041565, delta=2e-6)
+        self.assertAlmostEqual(removed(False) - removed(True), inHole, delta=1e-4)
+
+    def testABodyPartUnderTheRimIsNotBuiltThrough(self):
+        # The same L-plate, hollowed from below 0.2 r from the wall y = 0 and from the top: (a) a
+        # cavity 40 long, (b) a blind hole R 1. The hollow's top corner lies inside what the round
+        # removes (anything nearer than r (1 - 1/sqrt 2) to both the wall and the top does), so
+        # the round opens into it: the body loses less than the plain plate does, by the heights
+        # above the hollow's top, h(d) - t for d from t to 0.4 r (where the round is t deep),
+        # times the hollow's width there (1.82489 for the cavity, 0.036437 for the hole). The
+        # direct assembly knows the plane face and the walls only: it built the round through
+        # the hollow, valid and with the plain plate's volume. Now it refuses (another face
+        # within r of the rim); the construction by Booleans refuses too, and OCCT's own round,
+        # which runs through the hollow as well, is not returned: an error that names the cause
+        r, top = 1.5875, 6.0
+        t = 0.2 * r
+        rim = lambda body: [
+            e for e in body.Edges if abs(e.BoundBox.ZMin - top) < 1e-9 and abs(e.BoundBox.ZMax - top) < 1e-9
+        ]
+        plain = self.ell()
+        self.assertTrue(plain.makeFillet(r, rim(plain)).isValid())
+        self.assertLess(t, r * (1 - math.sqrt(0.5)))
+        cavity = Part.makeBox(40, 10 - t, top - t + 1, V(10, t, -1))
+        hole = Part.makeCylinder(1.0, top - t + 1, V(20, t + 1.0, -1), V(0, 0, 1))
+        for name, tool in (("cavity", cavity), ("hole", hole)):
+            with self.subTest(hollow=name):
+                body = plain.cut(tool)
+                self.assertEqual(len(rim(body)), 7)
+                with self.assertRaisesRegex(FreeCAD.Base.CADKernelError, "a part of the body under its rim"):
+                    body.makeFillet(r, rim(body))
+
+    def ell(self):
+        """An L-plate 60 x 40 x 6 (the notch x > 30, y > 20) with one wall arc rho 1 at (59, 19)."""
+        circle = Part.Circle(V(59, 19, 0), V(0, 0, 1), 1.0)
+        outline = [
+            Part.makeLine(V(0, 0, 0), V(60, 0, 0)),
+            Part.makeLine(V(60, 0, 0), V(60, 19, 0)),
+            Part.ArcOfCircle(circle, 0, math.pi / 2).toShape(),
+            Part.makeLine(V(59, 20, 0), V(30, 20, 0)),
+            Part.makeLine(V(30, 20, 0), V(30, 40, 0)),
+            Part.makeLine(V(30, 40, 0), V(0, 40, 0)),
+            Part.makeLine(V(0, 40, 0), V(0, 0, 0)),
+        ]
+        return Part.Face(Part.Wire(outline)).extrude(V(0, 0, 6))
 
 
 class CurvedEndTrimTest(unittest.TestCase):

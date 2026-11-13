@@ -8095,6 +8095,10 @@ struct DressUpOutcome
     bool constructed {false};
     /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
     bool preferred {false};
+    /// The preferred construction refused, its rim rounds because another part of the body lies
+    /// within their reach (Construction::rimBlocked): OCCT's round would run through that part,
+    /// so the maker wasn't built and the caller raises an error
+    bool blocked {false};
     /// OCCT built a result, but the selection has a reflex corner with a circle
     /// (FilletFallback::reflexCircleCorner()), where its rounds don't meet in Onshape's mitre:
     /// the exact construction, or an error
@@ -8146,6 +8150,10 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
                 if (out.preferred) {
                     out.constructed = true;
+                    return;
+                }
+                if (out.construction.rimBlocked) {
+                    out.blocked = true;
                     return;
                 }
                 request.contour.clear();
@@ -8250,7 +8258,91 @@ TopoShape& TopoShape::makeElementFillet(
     bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
     gp_Pnt reflexAt;
     const bool reflex = FilletFallback::reflexCircleCorner(input.getShape(), edgeShapes, &reflexAt);
+    if (reflex && !prefer && radius1 == radius2) {
+        // The whole rim loops in the direct builder's scope are built by it, and the rest of the
+        // selection is rounded on the result: one loop out of its scope does not send the others
+        // to the construction by Booleans (FSLC #50: 458 corners). As the construction below,
+        // which a reflex corner asks for below the limit too
+        FilletFallback::Request direct = request;
+        direct.limitOnly = false;
+        struct Split
+        {
+            FilletFallback::Construction construction;
+            std::vector<TopoDS_Shape> rest;
+            bool built = false;
+        };
+        auto split = std::make_shared<Split>();
+        KernelBudget::run(
+            "The fillet",
+            [base = input.getShape(),
+             edgeShapes,
+             request = direct,
+             split](const Message_ProgressRange& /*range*/) {
+                split->built = FilletFallback::constructRims(
+                    base,
+                    edgeShapes,
+                    request,
+                    split->construction,
+                    split->rest
+                );
+            }
+        );
+        if (split->built) {
+            TopoShape stage(Tag, Hasher, getHistoryAlgorithm());
+            bool named = false;
+            try {
+                FilletFallback::finish(stage, split->construction, input, op);
+                named = true;
+            }
+            catch (const Standard_Failure&) {
+            }
+            catch (const Base::Exception&) {
+            }
+            if (named && split->rest.empty()) {
+                *this = stage;
+                return *this;
+            }
+            std::vector<TopoShape> rest;
+            for (const auto& edge : split->rest) {
+                const int index = named ? stage.findShape(edge) : 0;
+                if (index <= 0) {
+                    break;
+                }
+                rest.push_back(stage.getSubTopoShape(TopAbs_EDGE, index));
+            }
+            if (named && rest.size() == split->rest.size()) {
+                try {
+                    makeElementFillet(stage, rest, radius1, radius2, op);
+                    // (OCCT's invalid result for the rest, which its construction refused, is
+                    // not an error there: it is noted)
+                    if (FilletFallback::takeInvalidResult().empty()) {
+                        return *this;
+                    }
+                }
+                catch (const Base::CADKernelError&) {
+                    // The rest is not rounded on that body: the whole selection, as without
+                    // the split (its error stands). Never after the feature's time is up
+                    if (KernelBudget::pastDeadline()) {
+                        throw;
+                    }
+                }
+                catch (const Standard_Failure&) {
+                }
+            }
+        }
+    }
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);
+    if (outcome->blocked) {
+        // Neither construction builds it, and OCCT's own round is valid and wrong there: never
+        // returned silently (decision 150)
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's round would meet a part of the body under its rim (a cavity or a hole "
+            "nearer to the rounded edges than the radius), where OCCT's round runs through that "
+            "part; its exact construction refused: "
+                << outcome->reason
+        );
+    }
     if (outcome->preferred) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
