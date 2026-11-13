@@ -2585,6 +2585,213 @@ void sortNameSet(std::vector<std::string>& names)
     names = std::move(sorted);
 }
 
+namespace
+{
+/** The names that are an element's own history, for the marks of its pieces (ops#640).
+ *
+ * A piece's name is its element's name before, plus a section whose Connected Names are the
+ * neighbours that tell the pieces apart. A neighbour named from the element itself (the edge a
+ * dress-up or a refine leaves on a face is named from that face) holds the element's name as it
+ * was then: an earlier state, a prefix of the name now. Taken as a mark it writes that history
+ * out again, so the full form of the name multiplies with every split (x2.6 per split with one
+ * such neighbour each; a face split seven times reached 0.5 GB). Such a mark says nothing the
+ * name's own prefix doesn't say, so it is no mark: holds() is true for it.
+ *
+ * Every earlier state of an element starts with the element's first name, its root: the name
+ * before any section was added. So a name holds an earlier state exactly if it refers, at any
+ * depth, to the root. The test walks the names' references in the name table (interned form),
+ * each node once, and never writes a name out. A node no deeper than the shallowest root can't
+ * refer to one, so the walk stops there: it goes through the part of a neighbour's history
+ * that is younger than the element, not through all of it.
+ *
+ * The table is the process's for a shape that interns its names. A shape that doesn't gets a
+ * table of its own (\a table), so that its names aren't added to the process's: the IDs are
+ * those of the contents, the same in every table. A name kept inline after an ID collision
+ * (NameTable.h) has no reference to follow: the rule then doesn't see it, as before this rule.
+ */
+class OwnHistory
+{
+public:
+    explicit OwnHistory(Data::NameTable& table)
+        : table(table)
+    {}
+
+    /// Adds the element's name \a name: its root is the name without the sections added to it.
+    /// Every name is added before the first holds().
+    void add(std::string_view name)
+    {
+        std::string text = table.toInterned(name);
+        for (;;) {
+            const std::size_t bar = Data::NameTable::lastTopLevelBar(text);
+            if (bar == std::string::npos) {
+                break;
+            }
+            const auto prefix = Data::NameTable::parseRef(std::string_view(text).substr(0, bar));
+            if (!prefix) {
+                return;  // a prefix kept inline (an ID collision): no root to look for
+            }
+            auto content = table.lookup(*prefix);
+            if (!content) {
+                addRoot(*prefix, 0);  // an unknown node: its depth isn't known
+                return;
+            }
+            text = std::move(*content);
+        }
+        if (const auto bare = Data::NameTable::parseRef(text)) {
+            addRoot(*bare, table.depth(*bare));
+            return;
+        }
+        int depth = 1;
+        for (const Data::NameId& ref : refsOf(text)) {
+            const int below = table.depth(ref);
+            if (below == 0) {
+                depth = 0;
+                break;
+            }
+            depth = std::max(depth, below + 1);
+        }
+        addRoot(table.idOf(text), depth);
+    }
+
+    /// True if \a name holds one of the added names as it was at some time
+    bool holds(std::string_view name)
+    {
+        if (roots.empty()) {
+            return false;
+        }
+        const std::vector<Data::NameId> refs = refsOf(table.toInterned(name));
+        return std::ranges::any_of(refs, [this](const Data::NameId& id) {
+            return reaches(id);
+        });
+    }
+
+private:
+    struct IdHash
+    {
+        std::size_t operator()(const Data::NameId& id) const
+        {
+            std::size_t value = 0;
+            std::memcpy(&value, id.bytes().data(), sizeof(value));
+            return value;
+        }
+    };
+    struct Frame
+    {
+        Data::NameId id;
+        std::vector<Data::NameId> refs;
+        std::size_t next = 0;
+    };
+
+    static std::vector<Data::NameId> refsOf(std::string_view text)
+    {
+        // Every `~` starts a reference: it occurs nowhere else in a name
+        std::vector<Data::NameId> refs;
+        for (std::size_t pos = text.find(Data::NameTable::Marker); pos != std::string_view::npos;
+             pos = text.find(Data::NameTable::Marker, pos + 1)) {
+            if (auto id = Data::NameTable::parseRef(text.substr(pos, Data::NameTable::RefLength))) {
+                refs.push_back(*id);
+            }
+        }
+        return refs;
+    }
+
+    std::vector<Data::NameId> refsOfNode(const Data::NameId& id) const
+    {
+        auto content = table.lookup(id);
+        return content ? refsOf(*content) : std::vector<Data::NameId> {};
+    }
+
+    // \a depth: the root's depth in the table (NameTable::depth()), 0 if it isn't known
+    void addRoot(const Data::NameId& id, int depth)
+    {
+        if (depth == 0) {
+            depthsKnown = false;
+        }
+        else if (roots.empty() || depth < shallowestRoot) {
+            shallowestRoot = depth;
+        }
+        roots.insert(id);
+    }
+
+    // True if the node \a id is too shallow to refer to a root: a node is deeper than every
+    // node it refers to
+    bool tooShallow(const Data::NameId& id) const
+    {
+        if (!depthsKnown) {
+            return false;
+        }
+        const int depth = table.depth(id);
+        return depth != 0 && depth <= shallowestRoot;
+    }
+
+    // True if the node \a start is a root or refers to one at any depth. Without recursion:
+    // histories can be deep.
+    bool reaches(const Data::NameId& start)
+    {
+        if (roots.count(start) != 0) {
+            return true;
+        }
+        if (auto known = reached.find(start); known != reached.end()) {
+            return known->second;
+        }
+        if (tooShallow(start)) {
+            return false;
+        }
+        std::vector<Frame> stack;
+        stack.push_back({start, refsOfNode(start)});
+        while (!stack.empty()) {
+            Frame& frame = stack.back();
+            bool found = false;
+            bool deeper = false;
+            while (frame.next < frame.refs.size()) {
+                const Data::NameId ref = frame.refs[frame.next];
+                if (roots.count(ref) != 0) {
+                    found = true;
+                    break;
+                }
+                if (auto known = reached.find(ref); known != reached.end()) {
+                    if (known->second) {
+                        found = true;
+                        break;
+                    }
+                    ++frame.next;
+                    continue;
+                }
+                if (tooShallow(ref)) {
+                    ++frame.next;
+                    continue;
+                }
+                stack.push_back({ref, refsOfNode(ref)});  // `frame` is no longer valid
+                deeper = true;
+                break;
+            }
+            if (deeper) {
+                continue;
+            }
+            if (found) {
+                // every node on the way down refers to it too
+                for (const Frame& above : stack) {
+                    reached[above.id] = true;
+                }
+                return true;
+            }
+            reached[frame.id] = false;
+            stack.pop_back();
+            if (!stack.empty()) {
+                ++stack.back().next;
+            }
+        }
+        return false;
+    }
+
+    Data::NameTable& table;
+    std::unordered_set<Data::NameId, IdHash> roots;
+    std::unordered_map<Data::NameId, bool, IdHash> reached;
+    int shallowestRoot = 0;
+    bool depthsKnown = true;
+};
+}  // namespace
+
 const std::string& modPostfix()
 {
     static std::string postfix(Data::POSTFIX_MOD);
@@ -3680,6 +3887,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // which tells no piece apart (ops#431). Only looked up, never iterated.
         std::unordered_map<Data::MappedName, unsigned int, Data::MappedNameHasher>
             allModifiedConnectedElementNames;
+        // For OwnHistory, in a shape that doesn't intern its names: made at the first split
+        std::unique_ptr<Data::NameTable> plainHistoryTable;
 
         // NamingMap::Group: pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>
         for (const auto& modifiedShapeEntry : modifiedNamingMap.getGroups()) {
@@ -3700,6 +3909,22 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
             if (lowerMapTypeEntry != lowerMapTypes.end() && upperMapTypeEntry != upperMapTypes.end()) {
                 ShapeInfo* upperMap = infoMap[upperMapTypeEntry->second];
+
+                // A neighbour named from this element as it was (a dress-up's edge on the
+                // face) is no mark: it would write the element's history out once more in
+                // every piece's name, which then multiplies per split (ops#640, OwnHistory)
+                if (!getInternNames() && !plainHistoryTable) {
+                    plainHistoryTable = std::make_unique<Data::NameTable>();
+                }
+                OwnHistory ownHistory(
+                    plainHistoryTable ? *plainHistoryTable : Data::NameTable::instance()
+                );
+                for (size_t incomingMappedNameIdx = 0;
+                     (incomingMappedNameIdx < incomingElementMappedNames.size()
+                      && incomingMappedNameIdx < MAXIMUM_REMAPPED_INCOMING_NAMES);
+                     incomingMappedNameIdx++) {
+                    ownHistory.add(incomingElementMappedNames[incomingMappedNameIdx].first.toString());
+                }
 
                 for (const Part::NamingMapKey& elementKey : modifiedShapeEntry.first) {
                     TopTools_IndexedMapOfShape lowerMap;
@@ -3757,7 +3982,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         }
 
                         for (const Data::MappedName* foundName : foundNames) {
-                            if (foundName != nullptr && connectedElementsSet.count(*foundName) == 0) {
+                            if (foundName != nullptr && connectedElementsSet.count(*foundName) == 0
+                                && !ownHistory.holds(foundName->toString())) {
                                 connectedElementsSet.insert(*foundName);
                                 connectedElements.push_back(foundName);
 
