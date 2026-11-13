@@ -990,6 +990,19 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
     return data;
 }
 
+/** A straight edge between two cylinders along it (Case Base #104, ops#640). OCCT's round there is
+ * valid, but a B-spline face between B-spline edges, where the exact round is a cylinder
+ * (Onshape's); a later dress-up over an end of it then meets an edge that is neither a line nor a
+ * circle (#105). Between a plane and a cylinder OCCT's round is a cylinder already
+ */
+bool betweenCylinders(const EdgeData& data)
+{
+    auto onCylinder = [](const TopoDS_Face& face) {
+        return BRepAdaptor_Surface(face, Standard_False).GetType() == GeomAbs_Cylinder;
+    };
+    return data.ruled && onCylinder(data.faces[0]) && onCylinder(data.faces[1]);
+}
+
 /// The direction along the edge away from the vertex, and the vertex's parameter
 gp_Dir awayFrom(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, double* parameter = nullptr)
 {
@@ -5337,10 +5350,14 @@ TopoDS_Shape constructShape(
     std::vector<std::vector<std::pair<const Tool*, std::vector<TopoDS_Face>>>> wallsOf;
     std::vector<TopoDS_Face> wallFaces;
     std::vector<FusedRun> fusedRuns;
+    // Rounds between two cylinders are built wherever they fit, not only at the limit: OCCT's own
+    // are B-spline faces there (preferConstruction())
+    const bool limitOnly = request.limitOnly
+        && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders));
     const bool trimmed = checkStrips(
                              tools,
                              overlaps,
-                             request.limitOnly,
+                             limitOnly,
                              ctx.edgeFaces,
                              ctx.selected,
                              fusedOff,
@@ -6950,19 +6967,29 @@ bool preferConstruction(
     try {
         const TopoShape base(baseShape);
         Context ctx(base, request);
+        // Every selected edge straight between two cylinders along it (betweenCylinders()): the
+        // construction builds the round as a cylinder, below the limit too (constructShape())
+        int picked = 0;
+        int ruledOnCylinders = 0;
         for (const auto& edge : edges) {
             if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
                 continue;
             }
+            ++picked;
             try {
-                if (tightArc(ctx, analyse(ctx, TopoDS::Edge(edge)))) {
+                const EdgeData data = analyse(ctx, TopoDS::Edge(edge));
+                if (tightArc(ctx, data)) {
                     return true;
+                }
+                if (betweenCylinders(data)) {
+                    ++ruledOnCylinders;
                 }
             }
             catch (const Refusal&) {
-                // Not analysable: not a tight arc
+                // Not analysable: neither a tight arc nor a straight edge between cylinders
             }
         }
+        return picked > 0 && ruledOnCylinders == picked;
     }
     catch (const Standard_Failure&) {
     }
