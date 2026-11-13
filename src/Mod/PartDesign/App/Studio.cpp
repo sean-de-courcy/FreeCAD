@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -366,11 +367,15 @@ StudioList* listOfSequence(const std::vector<App::DocumentObject*>& sequence)
  * (linkReads() without the links reconcile() writes), an entry as itself, a step as its owner,
  * read through the objects outside the list (a spreadsheet). Not a solid of entry's own Body, a
  * reference Body::reorderObject() re-targets (a drag inside a Body always could), nor a Body
- * whole, which is read at the reader's place whatever it is
+ * whole, which is read at the reader's place whatever it is. planned: what an entry reads once a
+ * drop's traces are written (moveStudioEntries(), ops#647), in place of its own links
  */
+using PlannedReads = std::unordered_map<const App::DocumentObject*, std::vector<App::DocumentObject*>>;
+
 std::vector<App::DocumentObject*> entryReads(
     App::DocumentObject* entry,
-    const std::unordered_map<const App::DocumentObject*, std::size_t>& place
+    const std::unordered_map<const App::DocumentObject*, std::size_t>& place,
+    const PlannedReads& planned = {}
 )
 {
     std::vector<App::DocumentObject*> found;
@@ -380,7 +385,8 @@ std::vector<App::DocumentObject*> entryReads(
     while (!readers.empty()) {
         const App::DocumentObject* reader = readers.back();
         readers.pop_back();
-        for (auto obj : linkReads(reader, /*picksOnly=*/true)) {
+        auto it = planned.find(reader);
+        for (auto obj : it != planned.end() ? it->second : linkReads(reader, /*picksOnly=*/true)) {
             if (!obj || !seen.insert(obj).second) {
                 continue;
             }
@@ -407,10 +413,21 @@ std::vector<App::DocumentObject*> entryReads(
     return found;
 }
 
+/// A read order breaks (orderRefusal()): reader, an entry, reads read, a later one
+struct RefusedRead
+{
+    App::DocumentObject* reader = nullptr;
+    App::DocumentObject* read = nullptr;
+    /// The refusal's text; empty: nothing is broken
+    std::string text;
+};
+
 /// Why order can't be the list's (Onshape: a feature never goes above what it reads): the first
-/// entry that reads a later one, the reader or the read among moved; empty when there is none
-std::string orderRefusal(const std::vector<App::DocumentObject*>& order,
-                         const std::unordered_set<const App::DocumentObject*>& moved)
+/// entry that reads a later one, the reader or the read among moved, the entries' reads as planned
+/// (entryReads()); none when there is none
+RefusedRead orderRefusal(const std::vector<App::DocumentObject*>& order,
+                         const std::unordered_set<const App::DocumentObject*>& moved,
+                         const PlannedReads& planned = {})
 {
     std::unordered_map<const App::DocumentObject*, std::size_t> place;
     for (std::size_t i = 0; i < order.size(); ++i) {
@@ -418,7 +435,7 @@ std::string orderRefusal(const std::vector<App::DocumentObject*>& order,
     }
     for (std::size_t i = 0; i < order.size(); ++i) {
         App::DocumentObject* reader = order[i];
-        for (auto read : entryReads(reader, place)) {
+        for (auto read : entryReads(reader, place, planned)) {
             if (place.at(read) < i || (!moved.count(reader) && !moved.count(read))) {
                 continue;
             }
@@ -427,12 +444,13 @@ std::string orderRefusal(const std::vector<App::DocumentObject*>& order,
             if (moved.count(reader)) {
                 const std::string of =
                     readBody && readBody != readerBody ? " of " + quotedLabel(readBody) : "";
-                return quotedLabel(reader) + " uses " + quotedLabel(read) + of
-                    + ": it can't go above it";
+                return {reader, read, quotedLabel(reader) + " uses " + quotedLabel(read) + of
+                    + ": it can't go above it"};
             }
             const std::string of =
                 readerBody && readerBody != readBody ? " of " + quotedLabel(readerBody) : "";
-            return quotedLabel(reader) + of + " uses " + quotedLabel(read) + ": it can't go below it";
+            return {reader, read,
+                    quotedLabel(reader) + of + " uses " + quotedLabel(read) + ": it can't go below it"};
         }
     }
     return {};
@@ -1331,7 +1349,8 @@ std::vector<App::DocumentObject*> dropped(const std::vector<App::DocumentObject*
 
 /** FreeCAD-CH ops#654 S3: moves block, entries of list, to after the entry after (null: the top)
  * as one drag, and reconciles. Refused with why, before anything is written, where an entry would
- * go above what it reads or below what reads it (orderRefusal()). Rolled back, the bar stays after
+ * go above what it reads or below what reads it (orderRefusal()), unless the read is an element an
+ * earlier member made, which it then reads there (retraceRead(), ops#647). Rolled back, the bar stays after
  * the entry it followed (the one before it when that one moves), or after bar when hinted (null:
  * the top); at the end it stays at the end. changed: the list, the bar or a Tip changed.
  * StudioEdit.cpp's studioMove() and moveInStudio() share it; no header (slices change none)
@@ -1386,9 +1405,43 @@ bool moveStudioEntries(StudioList* list,
     const int newBar = !rolledBack ? static_cast<int>(order.size())
         : follows                  ? placeOf(order, follows) + 1
                                    : 0;
-    const std::string text = orderRefusal(order, moved);
-    if (!text.empty()) {
-        return refuse(text);
+    // A face, edge or vertex of a later member that an earlier one made (a pad's top face a later
+    // fillet trimmed) is read from that one instead, as Onshape traces a reference to the feature
+    // that made it, as moveInStudio() does without a list (report 16, ops#647: the Features list
+    // always drags with one). Any other broken read refuses the drop. Planned first, written below
+    std::vector<Retrace> retraces;
+    PlannedReads planned;
+    for (;;) {
+        const RefusedRead broken = orderRefusal(order, moved, planned);
+        if (broken.text.empty()) {
+            break;
+        }
+        // One trace per reader: a read still broken after it is read another way
+        if (planned.count(broken.reader)) {
+            return refuse(broken.text);
+        }
+        std::unordered_set<const App::DocumentObject*> earlier;
+        for (auto obj : order) {
+            if (obj == broken.reader) {
+                break;
+            }
+            earlier.insert(obj);
+        }
+        const auto plan = retraceRead(broken.reader, broken.read, earlier);
+        if (plan.empty()) {
+            return refuse(broken.text);
+        }
+        // What it reads once traced: its picks with read replaced by the earlier members
+        auto reads = linkReads(broken.reader, /*picksOnly=*/true);
+        std::erase(reads, broken.read);
+        for (const auto& retrace : plan) {
+            auto path = retrace.sub.find('.') == std::string::npos
+                ? std::vector<App::DocumentObject*>()
+                : retrace.top->getSubObjectList(retrace.sub.c_str());
+            reads.push_back(!path.empty() && path.back() ? path.back() : retrace.top);
+        }
+        planned[broken.reader] = std::move(reads);
+        retraces.insert(retraces.end(), plan.begin(), plan.end());
     }
 
     const auto bodies = studioBodies(list->getDocument(), list->studio());
@@ -1397,18 +1450,35 @@ bool moveStudioEntries(StudioList* list,
         tips.push_back(body->Tip.getValue());
     }
     const bool listChanged = order != list->Entries.getValues() || newBar != list->barIndex();
+    // The traced reads first, as moveInStudio() writes them; put back if the list can't be written
+    std::vector<std::pair<App::Property*, std::unique_ptr<App::Property>>> before;
+    for (const auto& retrace : retraces) {
+        if (std::ranges::none_of(before, [&retrace](const auto& kept) { return kept.first == retrace.prop; })) {
+            before.emplace_back(retrace.prop, std::unique_ptr<App::Property>(retrace.prop->Copy()));
+        }
+    }
     try {
+        writeRetraces(retraces);
         writeList(*list, order, newBar);
     }
     catch (const Base::Exception& e) {
+        for (auto& [prop, copy] : before) {
+            prop->Paste(*copy);
+        }
         return refuse(e.what());
+    }
+    catch (const Standard_Failure&) {
+        for (auto& [prop, copy] : before) {
+            prop->Paste(*copy);
+        }
+        throw;
     }
     bool tipMoved = false;
     for (std::size_t i = 0; i < bodies.size(); ++i) {
         tipMoved = tipMoved || bodies[i]->Tip.getValue() != tips[i];
     }
     if (changed) {
-        *changed = listChanged || tipMoved;
+        *changed = listChanged || tipMoved || !retraces.empty();
     }
     return true;
 }
