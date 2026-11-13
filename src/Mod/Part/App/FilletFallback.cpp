@@ -676,6 +676,11 @@ struct Tool
     /// own construction instead, cut in a stage of its own before the others, and its volume
     /// set to what that stage measures
     bool measured = false;
+    /// A measured tool's wedge: the region between its two fans from inside the material out to
+    /// its outer surface. Every other cut tool is trimmed by it before the cuts, so that the
+    /// neighbours' rounds end on the fans (which cross them at right angles) instead of meeting
+    /// the canal patch tangentially inside a face, which leaves sliver faces (C4 shape A3)
+    TopoDS_Shape wedge;
 };
 
 /** The common part of the two tools at a two-edge corner with unequal dihedral angles (convex
@@ -2117,9 +2122,11 @@ Tool tightTool(
         return poles;
     };
     double outer = 2.0 * r;
-    Row rows[2];
-    for (int j = 0; j < 2; ++j) {
-        Columns c = columns(j == 0 ? rho : outer);
+    // The wedge's inner surface, inside both neighbours' balls (so clear of their tools)
+    double inner = rho / 4;
+    Row rows[3];  // at rho (the patch), at the outer radius, at the inner radius
+    for (int j = 0; j < 3; ++j) {
+        Columns c = columns(j == 0 ? rho : j == 1 ? outer : inner);
         rows[j].poles[0] = polesOf(c.side[0]);
         rows[j].poles[2] = polesOf(c.side[1]);
         std::vector<gp_Pnt> homogeneous = polesOf(c.homogeneous);
@@ -2172,18 +2179,22 @@ Tool tightTool(
             2
         ));
     }
+    // The fans run from the inner radius to the outer one, the tool's faces on them from rho:
+    // the columns are linear in lambda, so the fans hold the patch's sides exactly
     for (int k : {0, 2}) {
-        surfaces.push_back(surface({rows[0].poles[k], rows[1].poles[k]}, {ones, ones}, 1));
+        surfaces.push_back(surface({rows[2].poles[k], rows[1].poles[k]}, {ones, ones}, 1));
     }
-    {
-        // The flat end in the z0 plane, at theta = 0: degree 1 from the patch to the outer
-        // radius, degree 2 rational across
+    const double fanFrom = (rho - inner) / (outer - inner);
+    // The flat end in the z0 plane, at theta = 0: degree 1 from row `from` to the outer radius,
+    // degree 2 rational across
+    auto endSurface = [&](int from) -> Handle(Geom_Surface) {
         TColgp_Array2OfPnt poles(1, 2, 1, 3);
         TColStd_Array2OfReal w(1, 2, 1, 3);
-        for (int j = 0; j < 2; ++j) {
+        for (int jj = 0; jj < 2; ++jj) {
+            int j = jj == 0 ? from : 1;
             for (int k = 0; k < 3; ++k) {
-                poles.SetValue(j + 1, k + 1, rows[j].poles[k].front());
-                w.SetValue(j + 1, k + 1, k == 1 ? rows[j].weights.front() : 1.0);
+                poles.SetValue(jj + 1, k + 1, rows[j].poles[k].front());
+                w.SetValue(jj + 1, k + 1, k == 1 ? rows[j].weights.front() : 1.0);
             }
         }
         TColStd_Array1OfReal knots(1, 2);
@@ -2195,35 +2206,65 @@ Tool tightTool(
         TColStd_Array1OfInteger vM(1, 2);
         vM.SetValue(1, 3);
         vM.SetValue(2, 3);
-        surfaces.push_back(new Geom_BSplineSurface(poles, w, knots, knots, uM, vM, 1, 2));
-    }
+        return new Geom_BSplineSurface(poles, w, knots, knots, uM, vM, 1, 2);
+    };
+    surfaces.push_back(endSurface(0));
 
-    // Sewn into one closed shell, one valid solid
-    BRepBuilderAPI_Sewing sewing(1e-6);
-    for (const auto& s : surfaces) {
-        BRepBuilderAPI_MakeFace face(s, Precision::Confusion());
+    // Each sewn into one closed shell, one valid solid
+    auto sewnSolid = [&](const std::vector<TopoDS_Face>& faces) {
+        BRepBuilderAPI_Sewing sewing(1e-6);
+        for (const auto& face : faces) {
+            sewing.Add(face);
+        }
+        sewing.Perform();
+        TopoDS_Shape sewn = sewing.SewedShape();
+        TopoDS_Shell shell;
+        int shells = 0;
+        for (TopExp_Explorer it(sewn, TopAbs_SHELL); it.More(); it.Next()) {
+            shell = TopoDS::Shell(it.Current());
+            ++shells;
+        }
+        if (shells != 1 || !BRep_Tool::IsClosed(shell)) {
+            refuse("a tight corner's faces do not sew into one closed shell");
+        }
+        BRepBuilderAPI_MakeSolid makeSolid(shell);
+        if (!makeSolid.IsDone()) {
+            refuse("building a tight corner's solid failed");
+        }
+        TopoDS_Solid built = makeSolid.Solid();
+        BRepLib::OrientClosedSolid(built);
+        return built;
+    };
+    // vFrom: a fan's face starts at rho, not at the inner radius
+    auto faceOf = [&](const Handle(Geom_Surface)& s, double vFrom = -1.0) {
+        double u0 = 0.0;
+        double u1 = 0.0;
+        double v0 = 0.0;
+        double v1 = 0.0;
+        s->Bounds(u0, u1, v0, v1);
+        BRepBuilderAPI_MakeFace face(s, u0, u1, vFrom < 0 ? v0 : vFrom, v1, Precision::Confusion());
         if (!face.IsDone()) {
             refuse("building a tight corner's face failed");
         }
-        sewing.Add(face.Face());
+        return face.Face();
+    };
+    TopoDS_Solid solid = sewnSolid(
+        {faceOf(surfaces[0]),
+         faceOf(surfaces[1]),
+         faceOf(surfaces[2], fanFrom),
+         faceOf(surfaces[3], fanFrom),
+         faceOf(surfaces[4])}
+    );
+    TopoDS_Solid wedge = sewnSolid(
+        {faceOf(surface({rows[2].poles[0], rows[2].poles[1], rows[2].poles[2]}, {ones, rows[2].weights, ones}, 2)),
+         faceOf(surfaces[1]),
+         faceOf(surfaces[2]),
+         faceOf(surfaces[3]),
+         faceOf(endSurface(2))}
+    );
+    if (!BRepCheck_Analyzer(wedge).IsValid() || volumeOf(wedge) <= volumeOf(solid)) {
+        refuse("a tight corner's wedge is not a valid solid around its tool");
     }
-    sewing.Perform();
-    TopoDS_Shape sewn = sewing.SewedShape();
-    TopoDS_Shell shell;
-    int shells = 0;
-    for (TopExp_Explorer it(sewn, TopAbs_SHELL); it.More(); it.Next()) {
-        shell = TopoDS::Shell(it.Current());
-        ++shells;
-    }
-    if (shells != 1 || !BRep_Tool::IsClosed(shell)) {
-        refuse("a tight corner's faces do not sew into one closed shell");
-    }
-    BRepBuilderAPI_MakeSolid makeSolid(shell);
-    if (!makeSolid.IsDone()) {
-        refuse("building a tight corner's solid failed");
-    }
-    TopoDS_Solid solid = makeSolid.Solid();
-    BRepLib::OrientClosedSolid(solid);
     // The patch's edge at theta = 0 is the wall arc at depth r, exactly a circle: given as one, so
     // that the result keeps the wall's own arc where the patch meets the wall (as Onshape does)
     {
@@ -2329,6 +2370,7 @@ Tool tightTool(
     tool.source = data.edge;
     tool.cut = true;
     tool.measured = true;
+    tool.wedge = wedge;
     return tool;
 }
 
@@ -3094,6 +3136,60 @@ void clipTool(Tool& tool, const TopoDS_Shape& behind)
     tool.volume = volumeOf(solid);
 }
 
+/** Trims a cut tool by a tight wall arc's wedge (Tool::wedge, C4 shape A): what lies in the wedge
+ * is the tight tool's to remove. Of what is left, the solids in the base's material are kept;
+ * the tool's faces are mapped onto them, and its volume is measured.
+ */
+void trimByWedge(Tool& tool, const TopoDS_Shape& wedge, const TopoDS_Shape& base)
+{
+    TopTools_ListOfShape arguments;
+    arguments.Append(tool.solid);
+    TopTools_ListOfShape tools;
+    tools.Append(wedge);
+    BRepAlgoAPI_Cut cut;
+    cut.SetArguments(arguments);
+    cut.SetTools(tools);
+    cut.SetNonDestructive(Standard_True);
+    cut.SetRunParallel(Standard_False);
+    cut.Build();
+    if (!cut.IsDone() || cut.HasErrors()) {
+        refuse("trimming a tool by a tight corner's wedge failed");
+    }
+    // Every piece in the material is cut (a crumb where the wedge's end meets the tool's own is
+    // material the round removes); pieces in the air are dropped
+    TopoDS_Compound kept;
+    BRep_Builder builder;
+    builder.MakeCompound(kept);
+    int inMaterial = 0;
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        if (volumeOf(commonOf(base, it.Current())) > volumeTolerance * tool.volume) {
+            builder.Add(kept, it.Current());
+            ++inMaterial;
+        }
+    }
+    if (inMaterial == 0) {
+        refuse("a tool trimmed by a tight corner's wedge leaves nothing in the material");
+    }
+    const Stage stage(cut.History(), kept);
+    auto remap = [&](std::vector<TopoDS_Shape>& shapes) {
+        std::vector<TopoDS_Shape> images;
+        for (const auto& shape : shapes) {
+            for (const auto& image : stage.images(shape)) {
+                images.push_back(image);
+            }
+        }
+        shapes = std::move(images);
+    };
+    remap(tool.contactFaces);
+    remap(tool.capFaces);
+    remap(tool.unionEndFaces);
+    for (auto& strip : tool.strips) {
+        remap(strip.contacts);
+    }
+    tool.solid = kept;
+    tool.volume = volumeOf(kept);
+}
+
 /** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
  * the caller's: the tools' closed forms less the overlaps at unequal corners, or, for a trimmed
  * tool, its common part with the shape. The tolerance scales with the tools' closed forms, and
@@ -3468,6 +3564,29 @@ TopoDS_Shape constructShape(
     }
     for (const auto& vertex : miterCorners) {
         admit(miterTool(tools, data, vertex));
+    }
+    // A tight wall arc's wedge is its own tool's: the others are trimmed by it (Tool::wedge)
+    for (const auto& tight : tools) {
+        if (tight.wedge.IsNull()) {
+            continue;
+        }
+        Bnd_Box wedgeBox;
+        BRepBndLib::Add(tight.wedge, wedgeBox);
+        for (auto& tool : tools) {
+            if (&tool == &tight || !tool.wedge.IsNull()) {
+                continue;
+            }
+            Bnd_Box box;
+            BRepBndLib::Add(tool.solid, box);
+            if (box.IsOut(wedgeBox)
+                || volumeOf(commonOf(tool.solid, tight.wedge)) <= volumeTolerance * tool.volume) {
+                continue;
+            }
+            if (!tool.cut) {
+                refuse("a fused tool reaches into a tight corner");
+            }
+            trimByWedge(tool, tight.wedge, base.getShape());
+        }
     }
     // The two tools at each unequal corner overlap there; both are cut (convex edges)
     std::vector<Overlap> overlaps;
