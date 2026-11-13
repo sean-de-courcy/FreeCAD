@@ -7775,6 +7775,9 @@ struct DressUpOutcome
     bool constructed {false};
     /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
     bool preferred {false};
+    /// OCCT's result was valid, but at a reflex corner with a circle, where the construction
+    /// was asked first (FilletFallback::reflexCircleCorner)
+    bool reflexFirst {false};
     FilletFallback::Construction construction;
     std::string reason;
 };
@@ -7836,7 +7839,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
     const std::vector<TopoShape>& inputEdges,
     const FilletFallback::Request& request,
     const char* what,
-    bool prefer = false
+    bool prefer = false,
+    bool reflex = false
 )
 {
     auto outcome = std::make_shared<DressUpOutcome>();
@@ -7852,7 +7856,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
          edges,
          request = FilletFallback::Request(request),
          outcome,
-         prefer](const Message_ProgressRange& /*range*/) mutable {
+         prefer,
+         reflex](const Message_ProgressRange& /*range*/) mutable {
             DressUpOutcome& out = *outcome;
             if (prefer) {
                 // OCCT's result would be valid but wrong (a tight wall arc): the construction
@@ -7881,7 +7886,14 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && request.kind == FilletFallback::Kind::Fillet && chainTurns(*maker, base, edges);
-            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns) && !prefer) {
+            // At a reflex corner with a circle OCCT's valid result can be wrong (fillet-tight-arc
+            // 8): the construction builds it, below the limit too
+            out.reflexFirst = reflex && !out.failed && !out.thin && !out.invalid && !out.turns;
+            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns || out.reflexFirst)
+                && !prefer) {
+                if (reflex) {
+                    request.limitOnly = false;
+                }
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
@@ -7955,17 +7967,27 @@ TopoShape& TopoShape::makeElementFillet(
         edgeShapes.push_back(e.getShape());
     }
     bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
-    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer);
+    const bool reflex = FilletFallback::reflexCircleCorner(input.getShape(), edgeShapes);
+    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);
     if (outcome->preferred) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
         // Naming it failed: OCCT, as without the preference
-        outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
+        outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", false, reflex);
     }
-    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns) {
+    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
+        || outcome->reflexFirst) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
+        }
+        if (outcome->reflexFirst) {
+            // Sean's decision 406: OCCT's result is kept, with a warning naming the refusal
+            Base::Console().warning(
+                "The fillet: OCCT's result is kept at a reflex corner with a circle, where it may "
+                "differ from Onshape's mitre (the exact construction refused: %s)\n",
+                outcome->reason.c_str()
+            );
         }
         if (outcome->failed) {
             raiseDressUpError(*mkFillet, outcome->occtError, outcome->reason);

@@ -115,6 +115,79 @@ def ribbed_wave_prism(waves):
     return wave_prism(waves).fuse(Part.makeBox(4, 20 * waves, 4, V(-9, 0, 3)))
 
 
+def rim_edges(shape, z):
+    return [
+        e
+        for e in shape.Edges
+        if abs(e.BoundBox.ZMin - z) < 1e-9 and abs(e.BoundBox.ZMax - z) < 1e-9
+    ]
+
+
+def polar(radius, degrees, z=0.0):
+    a = math.radians(degrees)
+    return V(radius * math.cos(a), radius * math.sin(a), z)
+
+
+def rim_ring(centre, rho, r, top):
+    """The tool of a round r on the whole top rim of a solid vertical cylinder of radius rho about
+    centre: the section (rim corner, quarter arc) revolved a full turn"""
+    a = V(centre.x + rho, centre.y, top)
+    b = V(centre.x + rho - r, centre.y, top)
+    c = V(centre.x + rho, centre.y, top - r)
+    q = V(centre.x + rho - r + r / math.sqrt(2), centre.y, top - r + r / math.sqrt(2))
+    wire = Part.Wire([Part.makeLine(a, b), Part.Arc(b, q, c).toShape(), Part.makeLine(c, a)])
+    return Part.Face(wire).revolve(V(centre.x, centre.y, 0), V(0, 0, 1), 360)
+
+
+def tooth_on_a_round_root(height=6.0):
+    """Oracle 18's FT2: a disc R 30, one tooth to R 34 over 84..96 degrees, its flanks arcs of
+    radius 4 centred on the root circle (tangent to the tip), which meet the root at reflex
+    corners. Returns the solid, and its pieces as (solid, centre, radius of its rim)"""
+    centre = V(0, 0, 0)
+    disc = Part.makeCylinder(30, height)
+    flanks = [Part.makeCylinder(4, height, polar(30, a)) for a in (84, 96)]
+    tip = Part.makeCylinder(34, height, centre, V(0, 0, 1), 12).rotated(centre, V(0, 0, 1), 84)
+    tooth = disc.fuse(flanks + [tip]).removeSplitter()
+    pieces = [(disc, centre, 30), (flanks[0], polar(30, 84), 4), (flanks[1], polar(30, 96), 4)]
+    return tooth, pieces + [(tip, centre, 34)]
+
+
+def bump_on_an_edge(rho):
+    """A 10 x 4 x 2 box with a half-disc bump of radius rho centred on its edge y = 4: the bump's
+    rim meets the box's at two reflex corners. Returns the solid, the box and the bump"""
+    box = Part.makeBox(10, 4, 2)
+    bump = Part.makeCylinder(rho, 2, V(5, 4, 0))
+    return box.fuse(bump).removeSplitter(), box, bump
+
+
+def bump_rim_removed(rho, r):
+    """What a round r of the whole top rim of bump_on_an_edge(rho) removes by Onshape's rule: at
+    a plan point the round of each body that holds it removes h(depth behind that body's wall),
+    h(d) = r - sqrt(r^2 - (r - d)^2) up to d = r, and the least of them is removed. That is the
+    box's rim alone (closed form, mitres at its four corners), the bump's upper half ring
+    (Pappus), and over the bump's lower half disc the difference min(h_box, h_bump) - h_box,
+    integrated in polar coordinates about the bump's centre"""
+
+    def h(d):
+        return r - math.sqrt(max(r * r - (r - d) ** 2, 0.0)) if d < r else 0.0
+
+    def over(f, a, b, panels=48):
+        step = (b - a) / panels
+        return sum(gauss_legendre(f, a + i * step, a + (i + 1) * step, 8) for i in range(panels))
+
+    def ring(t):
+        def f(x):
+            behind_box = -x * math.sin(t)
+            return (min(h(behind_box), h(rho - x)) - h(behind_box)) * x
+
+        return over(f, 0, rho - r) + over(f, rho - r, rho)
+
+    section = fillet_section(r)
+    box_rim = section * (28 - 4 * 2 * fillet_centroid(r))
+    upper_half = section * math.pi * (rho - fillet_centroid(r))
+    return box_rim + upper_half + over(ring, math.pi, 2 * math.pi)
+
+
 class FilletFallbackTest(unittest.TestCase):
     def assertExact(self, shape, volume):
         self.assertTrue(shape.isValid())
@@ -239,6 +312,83 @@ class FilletFallbackTest(unittest.TestCase):
         top = fillet_section(r) * 2 * math.pi * (rho + fillet_centroid(r))
         floor = fillet_section(r) * 2 * math.pi * (rho - fillet_centroid(r))
         self.assertExact(result, 600 - math.pi * rho * rho * 2 * r - top + floor)
+
+    # Rounds that meet at a reflex corner with a circle (ops#640, FSLC #50; fillet-tight-arc 8).
+    # Onshape's rule: the body is the union of each wall's own body rounded along its whole rim,
+    # so each round runs on past the corner, the higher one is kept where both reach, and the
+    # corner has no face of its own. OCCT's own result there is valid and wrong (a patch at a horn
+    # or spindle torus, a misplaced mitre at a ring torus), so the construction is asked first.
+    def assertNoPatch(self, result):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        kinds = {face.Surface.TypeId for face in result.Faces}
+        self.assertFalse(kinds & {"Part::GeomBSplineSurface", "Part::GeomBezierSurface"})
+
+    def roundedTooth(self, r):
+        tooth, pieces = tooth_on_a_round_root()
+        rims = rim_edges(tooth, 6.0)
+        self.assertEqual(len(rims), 6)  # the root's circle and a flank's are split at a seam
+        result = tooth.makeFillet(r, rims)
+        self.assertNoPatch(result)
+        # (OCCT's volume of a body with such large trimmed tori is good to about 1e-3; its areas
+        # to 1e-6)
+        return tooth, result, pieces
+
+    def testReflexCornersOfAToothWithHornTori(self):
+        # r 2 on flanks of radius 4 (M = r): OCCT puts a B-spline patch at each root corner and
+        # removes 0.281 less than Onshape (FT2)
+        tooth, result, pieces = self.roundedTooth(2.0)
+        self.assertAlmostEqual(result.Volume - tooth.Volume, -164.87904283, delta=2e-3)
+        self.assertAlmostEqual(result.Area - tooth.Area, -168.40358530, delta=5e-5)
+
+    def testReflexCornersOfAToothWithRingTori(self):
+        # r 1 (M 3): Onshape's FT2 values
+        tooth, result, pieces = self.roundedTooth(1.0)
+        self.assertAlmostEqual(result.Volume - tooth.Volume, -41.46289585, delta=2e-3)
+        self.assertAlmostEqual(result.Area - tooth.Area, -83.83556069, delta=1e-5)
+        # Each flank's round, a torus about the flank's axis: 9.89499328 in Onshape (OCCT's own
+        # mitre makes one of them 9.897019)
+        for angle in (84, 96):
+            centre = polar(30, angle)
+            area = sum(
+                face.Area
+                for face in result.Faces
+                if face.Surface.TypeId == "Part::GeomToroid"
+                and face.Surface.Center.distanceToPoint(V(centre.x, centre.y, 5.0)) < 1e-6
+            )
+            self.assertAlmostEqual(area, 9.89499328, delta=1e-5)
+
+    def testReflexCornersOfAToothNearTheHornTorus(self):
+        # r 1.9 (M 2.1, still a ring torus): OCCT's result has only tori and is 0.22 off the
+        # rule, which is built here from the pieces, each rounded along its own whole rim
+        tooth, result, pieces = self.roundedTooth(1.9)
+        rounded = [solid.cut(rim_ring(centre, rho, 1.9, 6.0)) for solid, centre, rho in pieces]
+        rule = rounded[0].fuse(rounded[1:]).removeSplitter()
+        self.assertAlmostEqual(result.Volume, rule.Volume, delta=2e-3)
+        self.assertAlmostEqual(result.Area, rule.Area, delta=1e-5)
+
+    def testReflexCornersOfABump(self):
+        # A half-disc bump on a straight edge. The round half its radius (a horn torus, M = r):
+        # OCCT fails. A quarter of it (a ring torus): OCCT's own result is the rule too
+        for rho, r in ((0.4, 0.2), (1.0, 0.5), (0.4, 0.1)):
+            with self.subTest(rho=rho, r=r):
+                base, box, bump = bump_on_an_edge(rho)
+                rims = rim_edges(base, 2.0)
+                self.assertEqual(len(rims), 6)
+                result = base.makeFillet(r, rims)
+                self.assertNoPatch(result)
+                removed = bump_rim_removed(rho, r)
+                # (the integral above is good to about 1e-6 of it)
+                self.assertAlmostEqual(base.Volume - result.Volume, removed, delta=1e-5 * removed)
+
+    def testReflexCornerOfStraightEdges(self):
+        # An L plate's inner corner: OCCT's own mitre, left alone (closed form)
+        outline = [V(0, 0, 0), V(20, 0, 0), V(20, 8, 0), V(8, 8, 0), V(8, 20, 0), V(0, 20, 0)]
+        plate = Part.Face(Part.makePolygon(outline + outline[:1])).extrude(V(0, 0, 5))
+        r = 0.5
+        result = plate.makeFillet(r, rim_edges(plate, 5.0))
+        mitres = (-5 + 1) * 2 * fillet_centroid(r)  # five convex corners, one reflex
+        self.assertExact(result, plate.Volume - fillet_section(r) * (80 + mitres))
 
     def testStepOgee(self):
         step = Part.makeBox(30, 20, 10).fuse(Part.makeBox(30, 10, 4, V(0, 10, 10))).removeSplitter()
@@ -2783,19 +2933,30 @@ class CornerWithACircleTest(unittest.TestCase):
         # top into the plate there (faces +0)
         self.assertKeyholeGrooveChamfer(0.81, 19.41115, -29.07163)
 
-    def testConcaveCornerWithACircleFails(self):
-        # Not built yet (fillet-parity L8): a plate fused with a disc that bulges past its sides,
-        # the top loop rounded as deep as the plate; Onshape builds it. The rounds meet past the
-        # concave corners, where the union of the tools would leave material
-        plate = Part.makeBox(20, 20, 3).fuse(Part.makeCylinder(12, 3, V(20, 10, 0))).removeSplitter()
+    def testReflexCornerWithACircle(self):
+        # fillet-parity L8: a plate fused with a disc that bulges past its sides, the top loop
+        # rounded as deep as the plate; Onshape builds it. The rounds meet past the reflex corners
+        # of the outline, in Onshape's mitre (ops#640, fillet-tight-arc 8): the body is the plate
+        # and the disc, each rounded along its own whole rim, fused
+        box = Part.makeBox(20, 20, 3)
+        disc = Part.makeCylinder(12, 3, V(20, 10, 0))
+        plate = box.fuse(disc).removeSplitter()
         edges = edges_at(plate, 3.0)
-        for kind in ("Fillet", "Chamfer"):
-            with self.subTest(kind=kind):
-                with self.assertRaises(Part.OCCError):
-                    if kind == "Fillet":
-                        plate.makeFillet(3.0, edges)
-                    else:
-                        plate.makeChamfer(3.0, edges)
+        for r in (3.0, 1.0):
+            with self.subTest(r=r):
+                result = plate.makeFillet(r, edges)
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                rule = (
+                    box.makeFillet(r, edges_at(box, 3.0))
+                    .fuse(disc.cut(rim_ring(V(20, 10, 0), 12, r, 3.0)))
+                    .removeSplitter()
+                )
+                self.assertAlmostEqual(result.Volume, rule.Volume, delta=1e-3)
+                self.assertAlmostEqual(result.Area, rule.Area, delta=1e-4)
+        # A chamfer there is not built yet: OCCT's error
+        with self.assertRaises(Part.OCCError):
+            plate.makeChamfer(3.0, edges)
 
 
 def wall_end_round(inner, outer, height):
