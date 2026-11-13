@@ -2368,6 +2368,45 @@ TopoDS_Shape fingerNotch(bool freeForm)
     return unify.Shape();
 }
 
+/// fingerNotch's block, channel and notch, on a block 2200 x 2200 x 10 with a boss of about 2e9 mm3
+/// lofted between wavy B-spline loops (r 900 at z 10, r 600 at z 1010) at (1100, 0), clear of the notch
+TopoDS_Shape fingerNotchOnALargeBody()
+{
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -1100, 0), 2200, 2200, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1101, 8), 11, 2202, 3).Shape()
+    ).Shape();
+    gp_Ax2 axis(gp_Pnt(10, 0, 8), gp::DZ(), gp::DX());
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(axis, 4, 3).Shape()).Shape();
+    BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False);
+    loft.AddWire(wavyLoop(gp_Pnt(1100, 0, 10), 900, 150, 0));
+    loft.AddWire(wavyLoop(gp_Pnt(1100, 0, 1010), 600, 100, pi / 8));
+    loft.Build();
+    shape = BRepAlgoAPI_Fuse(shape, loft.Shape()).Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    return unify.Shape();
+}
+
+TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideALargeFreeFormBody)
+{
+    // Case Base #108 on Onshape's own input: the body (191 000 mm3, free-form faces) measured the
+    // cut 29.32171848 for 29.32153143 even adaptively, about 1e-9 of the body against a bound of
+    // 1e-6 of the cut. Measured over the faces the stage changed, the change doesn't depend on the
+    // body. The reference here is the removed piece measured alone, for the same reason
+    TopoShape base(fingerNotchOnALargeBody(), 1L);
+    auto rim = edgesWhere(base, atHeight(10), true);
+    ASSERT_EQ(rim.size(), 2U);
+    double whole = Part::MassProperties::volume(base.getShape(), true);
+    std::string reason;
+    TopoShape result = forced(base, rim, chamfer(2), &reason);
+    ASSERT_FALSE(result.isNull()) << reason << " (body " << whole << ")";
+    EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+    TopoDS_Shape removed = BRepAlgoAPI_Cut(base.getShape(), result.getShape()).Shape();
+    double expected = pi * (4 + 2.0 / 3) * 2;
+    EXPECT_NEAR(Part::MassProperties::volume(removed, true), expected, 1e-6 * expected);
+}
+
 TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
 {
     // Case Base #108: the chamfer 2 of the notch's rim (both pieces), down to the floor: the

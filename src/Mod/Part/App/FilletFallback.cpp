@@ -125,6 +125,37 @@ double areaOf(const TopoDS_Shape& shape)
     return MassProperties::area(shape);
 }
 
+/** The volume after holds over before's, integrated over the faces that differ only: a face both
+ * hold (the same face, placed and oriented the same) adds the same to both volumes about any one
+ * point, so it is left out, and the faces after adds count less those before loses, reversed. The
+ * error of a whole-body difference grows with the body (with its free-form faces, about 1e-9 of
+ * it even adaptively); this one's with the faces a stage rebuilt */
+double changedVolume(const TopoDS_Shape& before, const TopoDS_Shape& after)
+{
+    TopTools_IndexedMapOfShape old;
+    TopTools_IndexedMapOfShape now;
+    TopExp::MapShapes(before, TopAbs_FACE, old);
+    TopExp::MapShapes(after, TopAbs_FACE, now);
+    BRep_Builder builder;
+    TopoDS_Compound changed;
+    builder.MakeCompound(changed);
+    auto addUnshared = [&](const TopTools_IndexedMapOfShape& faces,
+                           const TopTools_IndexedMapOfShape& others,
+                           bool reversed) {
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            const TopoDS_Shape& face = faces(i);
+            int j = others.FindIndex(face);
+            if (j > 0 && others(j).IsEqual(face)) {
+                continue;
+            }
+            builder.Add(changed, reversed ? face.Reversed() : face);
+        }
+    };
+    addUnshared(now, old, false);
+    addUnshared(old, now, true);
+    return MassProperties::volume(changed, true);
+}
+
 /** How far a Boolean opened the faces' loops: the sum, over the result's vertices that none of its
  * inputs holds, of their tolerances past linearTolerance. OCCT integrates a face's volume over its
  * pcurve loop, and where a Boolean leaves a vertex off its edges (two rims' rounds meeting the top
@@ -2861,6 +2892,15 @@ TopoDS_Shape applyTools(
         }
     }
     if (std::abs(change - expected) > bound) {
+        // A whole-body difference can't meet the bound on a large body with free-form faces, even
+        // adaptively (Case Base #108 on Onshape's own input: 29.32171848 for 29.32153143, about
+        // 1e-9 of 191 000 mm3): over the faces the stage changed only
+        change = changedVolume(shape, result);
+        if (cut) {
+            change = -change;
+        }
+    }
+    if (std::abs(change - expected) > bound) {
         refuse(std::string(cut ? "the cut removed " : "the fuse added ") + describe(change)
                + " instead of " + describe(expected));
     }
@@ -3688,6 +3728,11 @@ TopoDS_Shape constructShape(
         // the base and the result; both again, adaptively
         measured = MassProperties::volume(shape, true);
         expected = MassProperties::volume(base.getShape(), true) - cutVolume + fusedVolume;
+    }
+    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
+        // And over the faces that changed only, as in applyTools: the base's adaptive volume
+        // plus the change
+        measured = expected + cutVolume - fusedVolume + changedVolume(base.getShape(), shape);
     }
     if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
         refuse("the result's volume " + describe(measured) + " differs from its closed form "
