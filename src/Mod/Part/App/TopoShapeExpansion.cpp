@@ -8250,6 +8250,79 @@ TopoShape& TopoShape::makeElementFillet(
     bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
     gp_Pnt reflexAt;
     const bool reflex = FilletFallback::reflexCircleCorner(input.getShape(), edgeShapes, &reflexAt);
+    if (reflex && !prefer && radius1 == radius2) {
+        // The whole rim loops in the direct builder's scope are built by it, and the rest of the
+        // selection is rounded on the result: one loop out of its scope does not send the others
+        // to the construction by Booleans (FSLC #50: 458 corners). As the construction below,
+        // which a reflex corner asks for below the limit too
+        FilletFallback::Request direct = request;
+        direct.limitOnly = false;
+        struct Split
+        {
+            FilletFallback::Construction construction;
+            std::vector<TopoDS_Shape> rest;
+            bool built = false;
+        };
+        auto split = std::make_shared<Split>();
+        KernelBudget::run(
+            "The fillet",
+            [base = input.getShape(),
+             edgeShapes,
+             request = direct,
+             split](const Message_ProgressRange& /*range*/) {
+                split->built = FilletFallback::constructRims(
+                    base,
+                    edgeShapes,
+                    request,
+                    split->construction,
+                    split->rest
+                );
+            }
+        );
+        if (split->built) {
+            TopoShape stage(Tag, Hasher, getHistoryAlgorithm());
+            bool named = false;
+            try {
+                FilletFallback::finish(stage, split->construction, input, op);
+                named = true;
+            }
+            catch (const Standard_Failure&) {
+            }
+            catch (const Base::Exception&) {
+            }
+            if (named && split->rest.empty()) {
+                *this = stage;
+                return *this;
+            }
+            std::vector<TopoShape> rest;
+            for (const auto& edge : split->rest) {
+                const int index = named ? stage.findShape(edge) : 0;
+                if (index <= 0) {
+                    break;
+                }
+                rest.push_back(stage.getSubTopoShape(TopAbs_EDGE, index));
+            }
+            if (named && rest.size() == split->rest.size()) {
+                try {
+                    makeElementFillet(stage, rest, radius1, radius2, op);
+                    // (OCCT's invalid result for the rest, which its construction refused, is
+                    // not an error there: it is noted)
+                    if (FilletFallback::takeInvalidResult().empty()) {
+                        return *this;
+                    }
+                }
+                catch (const Base::CADKernelError&) {
+                    // The rest is not rounded on that body: the whole selection, as without
+                    // the split (its error stands). Never after the feature's time is up
+                    if (KernelBudget::pastDeadline()) {
+                        throw;
+                    }
+                }
+                catch (const Standard_Failure&) {
+                }
+            }
+        }
+    }
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);
     if (outcome->preferred) {
         if (finishConstruction(*this, *outcome, input, op)) {

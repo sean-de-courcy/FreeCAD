@@ -28,6 +28,7 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Result.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepLib.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -58,6 +59,19 @@
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAPI.hxx>
+#include <Geom2dAPI_Interpolate.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_ToroidalSurface.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <TColgp_HArray1OfPnt2d.hxx>
+#include <TopAbs.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
+#include <gp_Dir2d.hxx>
+#include <gp_Vec2d.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Circle.hxx>
@@ -9668,6 +9682,2825 @@ std::string Recorder::report(const std::string& name) const
     return line.str();
 }
 
+/* Rim rounds built directly (ops#640, notes/boolean-free-mitre.md in the ops repository).
+ *
+ * Where the selection is whole loops of lines and circles on plane faces whose walls stand square
+ * to them (planes and cylinders), the round is known without a Boolean. Each edge's round is a
+ * torus about its arc's axis or a cylinder along its line. Two neighbours meet on the mitre: the
+ * curve of points equally deep behind both walls, whose plan point at the depth d is the crossing
+ * of the two walls' offsets at d and whose height above the round's centres is
+ * sqrt(r^2 - (r - d)^2). Convex, reflex and tangent corners are that one formula: at a reflex
+ * corner the offsets cross past the vertex, which is Onshape's run-on (fillet-tight-arc 8).
+ *
+ * The faces are assembled with shared edges and closed-form pcurves; the plane face and the walls
+ * keep their surfaces and get their rim edges replaced. The result is then held to what the
+ * definition gives by quadrature of closed forms (the removed volume, the rounds' area, the plane
+ * face's area) and to BRepCheck. Any refusal sends the selection to the construction by Booleans.
+ */
+namespace
+{
+
+constexpr double rimTolerance = 1e-7;
+
+/// A wall's outline in the plane face's own coordinates, in the loop's direction
+struct RimCurve
+{
+    bool line = false;
+    gp_XY point;  // a line: a point of it
+    gp_XY direction;  // a line: along the loop
+    gp_XY inward;  // a line: into the material
+    gp_XY centre;  // a circle
+    double rho = 0.0;
+    int convex = 1;  // a circle: 1 where the material is on the centre's side, -1 where not
+    int sense = 1;  // a circle: 1 where the loop runs counter-clockwise about the face's normal
+
+    /// The radius of the offset at the depth d
+    double radius(double d) const
+    {
+        return rho - convex * d;
+    }
+    gp_XY inwardAt(const gp_XY& p) const
+    {
+        if (line) {
+            return inward;
+        }
+        gp_XY out = p - centre;
+        out /= out.Modulus();
+        return out * (-convex);
+    }
+    gp_XY tangentAt(const gp_XY& p) const
+    {
+        if (line) {
+            return direction;
+        }
+        gp_XY out = p - centre;
+        out /= out.Modulus();
+        return gp_XY(-out.Y(), out.X()) * sense;
+    }
+    /// The curve's point next to p
+    gp_XY nearest(const gp_XY& p) const
+    {
+        if (line) {
+            gp_XY along = direction / direction.Modulus();
+            return point + along * (p - point).Dot(along);
+        }
+        gp_XY out = p - centre;
+        out /= out.Modulus();
+        return centre + out * rho;
+    }
+};
+
+/** A wall arc of a loop tighter than the round (C4 shape A, notes/fillet-tight-arc.md): its round
+ * would be a spindle torus, and the corner's face is the canal surface of a ball of the arc's
+ * radius rho whose centre S(theta) lies at r - rho from both neighbouring rounds' spines: in plan
+ * at the inward depth r - (r - rho) cos(theta) from both neighbours' walls, at the height
+ * (r - rho) sin(theta) above the rounds' centres, theta from 0 (S at the arc's centre) to 90 deg
+ * (under the point where the neighbours' top edges cross). The patch's two sides are the
+ * neighbouring rounds' ends: side k at theta is S + rho u_k, u_k the direction from neighbour k's
+ * spine through S, which is that round's section at the angle theta (as tightTool(), whose tool
+ * the construction by Booleans cuts with).
+ */
+struct RimTight
+{
+    PlanWall walls[2];  // the neighbours before and after, in the loop's plan
+    double r = 0.0;
+    double rho = 0.0;
+    std::vector<gp_XY> table;  // S's plan points at even steps of theta, for the solver's start
+
+    /// S's plan point at theta
+    gp_XY spine(double theta) const
+    {
+        const int last = static_cast<int>(table.size()) - 1;
+        int i = static_cast<int>(std::lround(theta / (pi / 2) * last));
+        i = std::max(0, std::min(last, i));
+        return solveCentre(walls, table[i], r - (r - rho) * std::cos(theta));
+    }
+    /// Side k's plan point at theta: on neighbour k's wall offset at the depth r (1 - cos(theta))
+    gp_XY side(int k, double theta) const
+    {
+        gp_XY q = spine(theta);
+        return q - walls[k].gradient(q) * (rho * std::cos(theta));
+    }
+    /// Side k's plan point at the depth d
+    gp_XY sideAt(int k, double d) const
+    {
+        return side(k, std::acos(std::max(-1.0, std::min(1.0, 1.0 - d / r))));
+    }
+    void prepare(const gp_XY& centre, int intervals = 96)
+    {
+        table.resize(intervals + 1);
+        gp_XY q = centre;
+        for (int i = 0; i <= intervals; ++i) {
+            q = solveCentre(walls, q, r - (r - rho) * std::cos(pi / 2 * i / intervals));
+            table[i] = q;
+        }
+    }
+};
+
+/// A corner between two walls of a loop
+struct RimCorner
+{
+    const RimCurve* before = nullptr;
+    const RimCurve* after = nullptr;
+    gp_XY vertex;
+    bool tangent = false;
+    gp_XY inward;
+    // At an end of a tight wall arc: the neighbouring round ends on the corner patch's side
+    const RimTight* tight = nullptr;
+    int side = 0;
+
+    /// Where the two walls' offsets at the depth d cross, on the branch through hint
+    gp_XY at(double d, const gp_XY& hint) const
+    {
+        if (d < 0.0) {
+            return vertex;
+        }
+        if (tight) {
+            return tight->sideAt(side, d);
+        }
+        if (tangent) {
+            return vertex + inward * d;
+        }
+        std::vector<gp_XY> found;
+        auto offsetLine = [&](const RimCurve& c) {
+            return c.point + c.inward * d;
+        };
+        if (before->line && after->line) {
+            gp_XY p1 = offsetLine(*before);
+            gp_XY p2 = offsetLine(*after);
+            double den = before->direction.Crossed(after->direction);
+            if (std::abs(den) < 1e-12) {
+                refuse("a rim corner of parallel lines");
+            }
+            double k = (p2 - p1).Crossed(after->direction) / den;
+            found.push_back(p1 + before->direction * k);
+        }
+        else if (before->line != after->line) {
+            const RimCurve& l = before->line ? *before : *after;
+            const RimCurve& c = before->line ? *after : *before;
+            gp_XY p = offsetLine(l);
+            double radius = c.radius(d);
+            gp_XY w = p - c.centre;
+            double b = w.Dot(l.direction);
+            double disc = b * b - (w.SquareModulus() - radius * radius);
+            if (radius <= 0.0 || disc < -1e-9 * std::max(1.0, radius * radius)) {
+                refuse("rim offsets that do not cross");
+            }
+            double root = std::sqrt(std::max(disc, 0.0));
+            found.push_back(p + l.direction * (-b + root));
+            found.push_back(p + l.direction * (-b - root));
+        }
+        else {
+            double r1 = before->radius(d);
+            double r2 = after->radius(d);
+            gp_XY w = after->centre - before->centre;
+            double dist = w.Modulus();
+            if (dist < 1e-12 || r1 <= 0.0 || r2 <= 0.0) {
+                refuse("rim offsets that do not cross");
+            }
+            double a = (dist * dist + r1 * r1 - r2 * r2) / (2 * dist);
+            double h2 = r1 * r1 - a * a;
+            if (h2 < -1e-9 * std::max(1.0, r1 * r1)) {
+                refuse("rim offsets that do not cross");
+            }
+            double h = std::sqrt(std::max(h2, 0.0));
+            gp_XY u = w / dist;
+            gp_XY n(-u.Y(), u.X());
+            gp_XY foot = before->centre + u * a;
+            found.push_back(foot + n * h);
+            found.push_back(foot - n * h);
+        }
+        gp_XY best = found.front();
+        for (const auto& q : found) {
+            if ((q - hint).SquareModulus() < (best - hint).SquareModulus()) {
+                best = q;
+            }
+        }
+        return best;
+    }
+};
+
+/// One rim edge of the base in its loop
+struct RimMember
+{
+    TopoDS_Edge edge;  // as the base holds it, forward
+    TopoDS_Face wall;
+    TopoDS_Vertex start;  // in the loop's direction
+    TopoDS_Vertex end;
+    int along = 1;  // 1 where the loop runs with the edge's parameter
+    double first = 0.0;
+    double last = 0.0;
+    TopoDS_Edge lowered;  // its curve r lower, on the wall and on the round
+};
+
+/// One round: consecutive rim edges on one circle or one line
+struct RimRound
+{
+    RimCurve curve;
+    std::vector<RimMember> members;
+    gp_XY start;  // plan points of its ends on the wall
+    gp_XY end;
+    double sweep = 0.0;  // a circle: the wall arc's angle
+    Handle(Geom_Surface) surface;
+    // a circle: its torus's frame in the plan; a line: the cylinder's
+    gp_XY xAxis;
+    gp_Pnt origin;
+    gp_Dir zAxis;
+    TopoDS_Edge top;
+    double topFirst = 0.0;
+    double topLast = 0.0;
+    TopoDS_Face face;
+    // A wall arc tighter than the round: its face is a canal patch, and it has no top edge
+    std::shared_ptr<RimTight> tight;
+    // The top edge in pieces, in its parameter's order: cut where another loop of the plane face
+    // touches it
+    std::vector<TopoDS_Edge> tops;
+
+    /// A plan point's angle about the torus's axis, pi at the middle of the wall arc
+    double angle(const gp_XY& p) const
+    {
+        gp_XY w = p - curve.centre;
+        gp_XY yAxis(-xAxis.Y(), xAxis.X());
+        double a = std::atan2(w.Dot(yAxis), w.Dot(xAxis));
+        return a < 0.0 ? a + 2 * pi : a;
+    }
+};
+
+/// A vertex of a loop: lowered by r; a corner between two rounds also has a mitre
+struct RimVertex
+{
+    TopoDS_Vertex vertex;
+    gp_XY plan;
+    double moved = 0.0;  // from the base's vertex to where its edges cross
+    bool corner = false;
+    RimCorner geometry;
+    TopoDS_Edge upright;  // the base's edge down from it
+    TopoDS_Edge shortened;
+    TopoDS_Vertex lowered;
+    TopoDS_Vertex onTop;
+    gp_XY topPlan;
+    TopoDS_Edge mitre;
+};
+
+struct RimLoop
+{
+    TopoDS_Face face;  // the plane face, as the base holds it
+    TopoDS_Wire wire;
+    gp_Pnt origin;
+    gp_Dir normal;  // out of the material
+    gp_Dir xDir;
+    gp_Dir yDir;
+    std::vector<RimRound> rounds;
+    // rounds[i] runs from corners[i] to corners[i + 1]; inner[i]: the vertices within rounds[i]
+    std::vector<RimVertex> corners;
+    std::vector<std::vector<RimVertex>> inner;
+    // How far the base's own data is from the loop the rounds follow: the sum over the corners of
+    // the vertex's distance from its edges' crossing and, where the edges are tangent, of the
+    // distance between them there (a Boolean leaves both at about 1e-6; a designed body at none)
+    double slack = 0.0;
+    double reach = 0.0;  // the corners' largest distance from their middle
+    double height = 0.0;  // the longest edge down from a vertex
+
+    gp_XY plan(const gp_Pnt& p) const
+    {
+        gp_Vec v(origin, p);
+        return gp_XY(v.Dot(gp_Vec(xDir)), v.Dot(gp_Vec(yDir)));
+    }
+    gp_Pnt point(const gp_XY& p, double height) const
+    {
+        return origin.Translated(
+            gp_Vec(xDir) * p.X() + gp_Vec(yDir) * p.Y() + gp_Vec(normal) * height
+        );
+    }
+    gp_Vec vector(const gp_XY& p) const
+    {
+        return gp_Vec(xDir) * p.X() + gp_Vec(yDir) * p.Y();
+    }
+};
+
+/// The parameter of the mitre's samples: the depth is r (1 - cos t)
+double mitreAngle(double u, bool touching)
+{
+    // Where the offsets touch at the depth r (a horn round's spines), the plan point moves as the
+    // square root of r - d: there r - d is made quadratic in the parameter at the end
+    return (pi / 2) * (touching ? u * (2 - u) : u);
+}
+
+/// What the definition gives for one loop, by Simpson's rule over the depth of closed forms
+struct RimExpected
+{
+    double volume = 0.0;  // removed
+    double roundArea = 0.0;
+    double band = 0.0;  // the plane face's loss
+    // What the base's own data leaves open in the band and the volume (RimLoop::slack): the
+    // loop's corners are that far from its curves, each with the loop's reach as its lever, and
+    // OCCT's volume of a face whose loop is open by that much is off by as much times its height
+    double bandSlack = 0.0;
+    double volumeSlack = 0.0;
+};
+
+void rimTightMeasures(const RimLoop& loop, const RimRound& round, double r, double& area, double& lens);
+
+RimExpected rimExpected(const RimLoop& loop, double r)
+{
+    const int steps = 512;
+    const size_t n = loop.rounds.size();
+    std::vector<gp_XY> hints(n);
+    for (size_t i = 0; i < n; ++i) {
+        hints[i] = loop.corners[i].plan;
+    }
+    // About the corners' middle: a corner beside its curve by e leaves the loop open by e, and
+    // the area off by e times its distance from the point the area is taken about
+    gp_XY middle(0.0, 0.0);
+    for (size_t i = 0; i < n; ++i) {
+        middle += loop.corners[i].plan / double(n);
+    }
+    auto measure = [&](double d, double& area, double& perimeter) {
+        area = 0.0;
+        perimeter = 0.0;
+        std::vector<gp_XY> at(n);
+        for (size_t i = 0; i < n; ++i) {
+            at[i] = loop.corners[i].geometry.at(d, hints[i]);
+            hints[i] = at[i];
+        }
+        for (size_t i = 0; i < n; ++i) {
+            const RimRound& round = loop.rounds[i];
+            const gp_XY& p = at[i];
+            const gp_XY& q = at[(i + 1) % n];
+            if (round.tight) {
+                // The flat chord from one side of the patch to the other at this height; what
+                // lies between the chords and the patch is measured on the patch below
+                area += 0.5 * (p - middle).Crossed(q - middle);
+                continue;
+            }
+            if (round.curve.line) {
+                if ((q - p).Dot(round.curve.direction) <= rimTolerance) {
+                    refuse("a rim round with no length");
+                }
+                area += 0.5 * (p - middle).Crossed(q - middle);
+                perimeter += (q - p).Modulus();
+                continue;
+            }
+            const gp_XY& c = round.curve.centre;
+            double radius = round.curve.radius(d);
+            double a1 = std::atan2(p.Y() - c.Y(), p.X() - c.X());
+            double a2 = std::atan2(q.Y() - c.Y(), q.X() - c.X());
+            // The offset's arc, the one next to the wall's
+            double sweep = round.curve.sense * (a2 - a1);
+            sweep -= 2 * pi * std::round((sweep - round.sweep) / (2 * pi));
+            if (sweep <= 1e-9 || sweep >= 2 * pi - 1e-6 || radius <= 0.0) {
+                refuse("a rim round with no length");
+            }
+            area += 0.5
+                * (radius * radius * round.curve.sense * sweep + (c - middle).Crossed(q - p));
+            perimeter += radius * sweep;
+        }
+    };
+    double wallArea = 0.0;
+    double wallPerimeter = 0.0;
+    measure(0.0, wallArea, wallPerimeter);
+    RimExpected expected;
+    double volume = 0.0;
+    double last = 0.0;
+    for (int k = 0; k <= steps; ++k) {
+        // In the parameter of the mitres where the offsets touch at the depth r: the perimeter
+        // goes as the square root of r - d there, which Simpson's rule in t would not take
+        double u = double(k) / steps;
+        double t = mitreAngle(u, true);
+        double dt = (pi / 2) * 2 * (1 - u);
+        double d = r * (1 - std::cos(t));
+        double area = 0.0;
+        double perimeter = 0.0;
+        if (k == 0) {
+            area = wallArea;
+            perimeter = wallPerimeter;
+        }
+        else {
+            measure(d, area, perimeter);
+        }
+        double weight = (k == 0 || k == steps) ? 1.0 : (k % 2 == 1 ? 4.0 : 2.0);
+        // A slice at the height r sin t loses the band between the wall and its offset
+        volume += weight * (wallArea - area) * r * std::cos(t) * dt;
+        expected.roundArea += weight * perimeter * r * dt;
+        last = wallArea - area;
+    }
+    double h = 1.0 / steps / 3.0;
+    expected.volume = std::abs(volume * h);
+    expected.roundArea *= h;
+    expected.band = std::abs(last);
+    for (const auto& round : loop.rounds) {
+        if (!round.tight) {
+            continue;
+        }
+        // Beyond the chords: the wall arc's segment over the round's height, less what stays
+        // between the chords and the patch
+        const double rho = round.curve.rho;
+        const double segment = 0.5 * rho * rho * (round.sweep - std::sin(round.sweep));
+        double area = 0.0;
+        double lens = 0.0;
+        rimTightMeasures(loop, round, r, area, lens);
+        expected.band += segment;
+        expected.volume += r * segment - lens;
+        expected.roundArea += area;
+    }
+    expected.bandSlack = loop.slack * loop.reach;
+    expected.volumeSlack = loop.slack * loop.reach * (r + loop.height);
+    return expected;
+}
+
+/// A round's top edge in the plan: a segment or an arc from p to q
+struct RimPiece
+{
+    bool line = false;
+    gp_XY p;
+    gp_XY q;
+    gp_XY centre;
+    double radius = 0.0;
+    int sense = 1;
+    double sweep = 0.0;
+
+    bool holds(const gp_XY& x) const
+    {
+        const double slack = 1e-7;
+        if (line) {
+            gp_XY d = q - p;
+            double length = d.Modulus();
+            double along = (x - p).Dot(d) / length;
+            return std::abs((x - p).Crossed(d)) / length < slack && along > -slack
+                && along < length + slack;
+        }
+        gp_XY w = x - centre;
+        if (std::abs(w.Modulus() - radius) > slack) {
+            return false;
+        }
+        double from = std::atan2(p.Y() - centre.Y(), p.X() - centre.X());
+        double turn = sense * (std::atan2(w.Y(), w.X()) - from);
+        turn -= 2 * pi * std::floor(turn / (2 * pi));
+        double slackAngle = slack / radius;
+        return turn < sweep + slackAngle || turn > 2 * pi - slackAngle;
+    }
+    /// Whether a point beside the piece's curve lies between its ends
+    bool spans(const gp_XY& x) const
+    {
+        const double slack = 1e-7;
+        if (line) {
+            gp_XY d = q - p;
+            double length = d.Modulus();
+            double along = (x - p).Dot(d) / length;
+            return along > -slack && along < length + slack;
+        }
+        gp_XY w = x - centre;
+        double from = std::atan2(p.Y() - centre.Y(), p.X() - centre.X());
+        double turn = sense * (std::atan2(w.Y(), w.X()) - from);
+        turn -= 2 * pi * std::floor(turn / (2 * pi));
+        double slackAngle = slack / radius;
+        return turn < sweep + slackAngle || turn > 2 * pi - slackAngle;
+    }
+    bool endsAt(const gp_XY& x) const
+    {
+        return (x - p).Modulus() < 1e-6 || (x - q).Modulus() < 1e-6;
+    }
+};
+
+/// Whether two top edges meet anywhere but at an end they share
+bool rimPiecesCross(const RimPiece& a, const RimPiece& b)
+{
+    const double slack = 1e-7;
+    std::vector<gp_XY> found;
+    if (a.line && b.line) {
+        gp_XY da = a.q - a.p;
+        gp_XY db = b.q - b.p;
+        double den = da.Crossed(db);
+        if (std::abs(den) < 1e-12 * da.Modulus() * db.Modulus()) {
+            if (std::abs((b.p - a.p).Crossed(da)) / da.Modulus() > slack) {
+                return false;
+            }
+            // On one line: they may share an end, no more
+            double length = da.Modulus();
+            double from = (b.p - a.p).Dot(da) / length;
+            double to = (b.q - a.p).Dot(da) / length;
+            double overlap = std::min(std::max(from, to), length) - std::max(std::min(from, to), 0.0);
+            return overlap > 1e-6;
+        }
+        found.push_back(a.p + da * ((b.p - a.p).Crossed(db) / den));
+    }
+    else if (a.line != b.line) {
+        const RimPiece& l = a.line ? a : b;
+        const RimPiece& c = a.line ? b : a;
+        gp_XY d = l.q - l.p;
+        d /= d.Modulus();
+        gp_XY w = l.p - c.centre;
+        double half = w.Dot(d);
+        double disc = half * half - (w.SquareModulus() - c.radius * c.radius);
+        if (disc < -2 * slack * c.radius) {
+            return false;
+        }
+        double root = std::sqrt(std::max(disc, 0.0));
+        found.push_back(l.p + d * (-half + root));
+        found.push_back(l.p + d * (-half - root));
+    }
+    else {
+        gp_XY w = b.centre - a.centre;
+        double dist = w.Modulus();
+        if (dist < slack) {
+            if (std::abs(a.radius - b.radius) > slack) {
+                return false;
+            }
+            // On one circle: they may share an end, no more
+            for (const auto& x : {b.p, b.q}) {
+                if (a.holds(x) && !a.endsAt(x)) {
+                    return true;
+                }
+            }
+            for (const auto& x : {a.p, a.q}) {
+                if (b.holds(x) && !b.endsAt(x)) {
+                    return true;
+                }
+            }
+            return a.endsAt(b.p) && a.endsAt(b.q) && a.sense == b.sense;
+        }
+        double along = (dist * dist + a.radius * a.radius - b.radius * b.radius) / (2 * dist);
+        double h2 = a.radius * a.radius - along * along;
+        if (h2 < -2 * slack * a.radius) {
+            return false;
+        }
+        double h = std::sqrt(std::max(h2, 0.0));
+        gp_XY u = w / dist;
+        gp_XY n(-u.Y(), u.X());
+        gp_XY foot = a.centre + u * along;
+        found.push_back(foot + n * h);
+        found.push_back(foot - n * h);
+    }
+    for (const auto& x : found) {
+        if (!a.holds(x) || !b.holds(x) || (a.endsAt(x) && b.endsAt(x))) {
+            continue;
+        }
+        // Pieces that touch at an end they share (a horn round's top edge and its neighbour's)
+        // may cross once more beside it by the last digits of their data: no crossing while they
+        // stay within the tolerance of each other from that end to there (the sagitta of both)
+        bool grazing = false;
+        for (const auto& end : {a.p, a.q}) {
+            if (!b.endsAt(end)) {
+                continue;
+            }
+            // (an arc of less than three quarters of a turn does not come back to its start)
+            double chord = (x - end).Modulus();
+            double bend = (a.line ? 0.0 : 1 / a.radius) + (b.line ? 0.0 : 1 / b.radius);
+            grazing = grazing
+                || ((a.line || a.sweep < 1.5 * pi) && (b.line || b.sweep < 1.5 * pi)
+                    && chord * chord / 8 * bend < slack);
+        }
+        if (!grazing) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Where a round's top edge meets an edge of another loop of its plane face: the points where
+/// they touch (tangent within 1e-6); true where they cross or run along each other
+bool rimContacts(const RimPiece& a, const RimPiece& b, std::vector<gp_XY>& touching)
+{
+    const double touch = 1e-6;
+    auto both = [&](const gp_XY& x) {
+        return a.spans(x) && b.spans(x);
+    };
+    if (a.line && b.line) {
+        gp_XY da = a.q - a.p;
+        gp_XY db = b.q - b.p;
+        double den = da.Crossed(db);
+        if (std::abs(den) < 1e-12 * da.Modulus() * db.Modulus()) {
+            if (std::abs((b.p - a.p).Crossed(da)) / da.Modulus() > touch) {
+                return false;
+            }
+            double length = da.Modulus();
+            double from = (b.p - a.p).Dot(da) / length;
+            double to = (b.q - a.p).Dot(da) / length;
+            return std::min(std::max(from, to), length) - std::max(std::min(from, to), 0.0) > -touch;
+        }
+        return both(a.p + da * ((b.p - a.p).Crossed(db) / den));
+    }
+    if (a.line != b.line) {
+        const RimPiece& l = a.line ? a : b;
+        const RimPiece& c = a.line ? b : a;
+        gp_XY d = l.q - l.p;
+        d /= d.Modulus();
+        gp_XY foot = l.p - d * (l.p - c.centre).Dot(d);
+        double dist = (foot - c.centre).Modulus();
+        if (std::abs(dist - c.radius) <= touch) {
+            if (both(foot)) {
+                touching.push_back(foot);
+            }
+            return false;
+        }
+        if (dist > c.radius) {
+            return false;
+        }
+        double root = std::sqrt(c.radius * c.radius - dist * dist);
+        return both(foot + d * root) || both(foot - d * root);
+    }
+    gp_XY w = b.centre - a.centre;
+    double dist = w.Modulus();
+    if (dist < touch) {
+        return std::abs(a.radius - b.radius) <= touch
+            && (b.spans(a.p) || b.spans(a.q) || a.spans(b.p) || a.spans(b.q));
+    }
+    gp_XY u = w / dist;
+    if (std::abs(dist - (a.radius + b.radius)) <= touch) {
+        gp_XY x = a.centre + u * a.radius;
+        if (both(x)) {
+            touching.push_back(x);
+        }
+        return false;
+    }
+    if (std::abs(dist - std::abs(a.radius - b.radius)) <= touch) {
+        gp_XY x = a.centre + u * (a.radius > b.radius ? a.radius : -a.radius);
+        if (both(x)) {
+            touching.push_back(x);
+        }
+        return false;
+    }
+    if (dist > a.radius + b.radius || dist < std::abs(a.radius - b.radius)) {
+        return false;
+    }
+    double along = (dist * dist + a.radius * a.radius - b.radius * b.radius) / (2 * dist);
+    double h = std::sqrt(std::max(a.radius * a.radius - along * along, 0.0));
+    gp_XY n(-u.Y(), u.X());
+    gp_XY foot = a.centre + u * along;
+    return both(foot + n * h) || both(foot - n * h);
+}
+
+/// An edge of another loop of a rim's plane face (a hole's rim that is not rounded), in the plan
+struct RimOther
+{
+    TopoDS_Edge edge;  // as the base holds it, forward
+    TopoDS_Wire wire;
+    RimPiece piece;
+    double first = 0.0;
+    double last = 0.0;
+    gp_Circ circle;
+    gp_Lin line;
+
+    /// The edge's parameter at a point of it
+    double parameter(const gp_Pnt& point) const
+    {
+        if (piece.line) {
+            return ElCLib::Parameter(line, point);
+        }
+        double u = ElCLib::Parameter(circle, point);
+        return u + 2 * pi * std::round(((first + last) / 2 - u) / (2 * pi));
+    }
+    double scale() const
+    {
+        return piece.line ? 1.0 : piece.radius;
+    }
+};
+
+/// Where a round's top edge touches another loop of its plane face: one vertex of both
+struct RimPinch
+{
+    TopoDS_Edge edge;  // the other loop's
+    TopoDS_Wire wire;
+    double onEdge = 0.0;
+    bool atEnd = false;  // at a vertex the edge has
+    TopoDS_Vertex vertex;
+};
+
+Handle(Geom2d_Curve) uvLine(double u, double v, double du, double dv)
+{
+    return new Geom2d_Line(gp_Pnt2d(u, v), gp_Dir2d(du, dv));
+}
+
+TopoDS_Vertex rimVertex(const gp_Pnt& p, double tolerance = Precision::Confusion())
+{
+    TopoDS_Vertex vertex;
+    BRep_Builder().MakeVertex(vertex, p, std::max(tolerance, Precision::Confusion()));
+    return vertex;
+}
+
+/// An edge on a curve between two vertices, the first at the lower parameter
+TopoDS_Edge rimEdge(
+    const Handle(Geom_Curve)& curve,
+    double first,
+    double last,
+    const TopoDS_Vertex& atFirst,
+    const TopoDS_Vertex& atLast,
+    double tolerance = Precision::Confusion()
+)
+{
+    BRep_Builder builder;
+    TopoDS_Edge edge;
+    builder.MakeEdge(edge, curve, tolerance);
+    builder.Add(edge, atFirst.Oriented(TopAbs_FORWARD));
+    builder.Add(edge, atLast.Oriented(TopAbs_REVERSED));
+    builder.Range(edge, first, last);
+    return edge;
+}
+
+PlanWall rimPlanWall(const RimCurve& curve);
+
+/// The loops of the selection, or a refusal where it is not whole loops on plane faces
+std::vector<RimLoop> rimLoops(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    double r,
+    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+    const TopTools_IndexedDataMapOfShapeListOfShape& vertexEdges
+)
+{
+    TopTools_IndexedMapOfShape selected;
+    for (const auto& edge : edges) {
+        if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+            refuse("a selection that is not an edge");
+        }
+        selected.Add(edge);
+    }
+    TopTools_IndexedMapOfShape covered;
+    TopTools_IndexedMapOfShape cornerVertices;
+    std::vector<RimLoop> loops;
+    for (TopExp_Explorer faces(base, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        for (TopoDS_Iterator wires(face); wires.More(); wires.Next()) {
+            if (wires.Value().ShapeType() != TopAbs_WIRE) {
+                continue;
+            }
+            const TopoDS_Wire& wire = TopoDS::Wire(wires.Value());
+            int all = 0;
+            int picked = 0;
+            for (TopoDS_Iterator it(wire); it.More(); it.Next()) {
+                ++all;
+                picked += selected.Contains(it.Value()) ? 1 : 0;
+            }
+            if (picked == 0 || picked != all) {
+                continue;
+            }
+            RimLoop loop;
+            loop.face = face;
+            loop.wire = wire;
+            gp_Pln plane = surface.Plane();
+            loop.origin = plane.Location();
+            loop.normal = plane.Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) {
+                loop.normal.Reverse();
+            }
+            gp_Ax3 frame(loop.origin, loop.normal);
+            loop.xDir = frame.XDirection();
+            loop.yDir = frame.YDirection();
+            // The members, in the loop's order
+            std::vector<RimMember> members;
+            std::vector<RimCurve> curves;
+            for (BRepTools_WireExplorer it(wire, face); it.More(); it.Next()) {
+                RimMember member;
+                member.edge = TopoDS::Edge(it.Current().Oriented(TopAbs_FORWARD));
+                if (covered.Contains(member.edge)) {
+                    refuse("a rim edge on two selected loops");
+                }
+                covered.Add(member.edge);
+                TopoDS_Vertex forward;
+                TopoDS_Vertex reversed;
+                TopExp::Vertices(member.edge, forward, reversed);
+                if (forward.IsNull() || reversed.IsNull() || forward.IsSame(reversed)) {
+                    refuse("a closed rim edge");
+                }
+                member.start = it.CurrentVertex();
+                if (member.start.IsSame(forward)) {
+                    member.along = 1;
+                    member.end = reversed;
+                }
+                else if (member.start.IsSame(reversed)) {
+                    member.along = -1;
+                    member.end = forward;
+                }
+                else {
+                    refuse("a rim loop that does not chain");
+                }
+                const TopTools_ListOfShape& owners = edgeFaces.FindFromKey(member.edge);
+                if (owners.Extent() != 2) {
+                    refuse("a rim edge without two faces");
+                }
+                for (const auto& owner : owners) {
+                    if (!owner.IsSame(face)) {
+                        member.wall = TopoDS::Face(owner);
+                    }
+                }
+                if (member.wall.IsNull()) {
+                    refuse("a rim edge whose faces are one");
+                }
+                BRepAdaptor_Curve curve(member.edge);
+                member.first = curve.FirstParameter();
+                member.last = curve.LastParameter();
+                gp_Pnt mid = curve.Value((member.first + member.last) / 2);
+                // The wall stands square to the plane face; its outward normal at the edge's
+                // middle points away from the material
+                BRepAdaptor_Surface wall(member.wall);
+                double f = 0.0;
+                double l = 0.0;
+                Handle(Geom2d_Curve) onWall
+                    = BRep_Tool::CurveOnSurface(member.edge, member.wall, f, l);
+                if (onWall.IsNull()) {
+                    refuse("a rim edge without a curve on its wall");
+                }
+                gp_Pnt2d uv = onWall->Value((f + l) / 2);
+                gp_Pnt at;
+                gp_Vec du;
+                gp_Vec dv;
+                wall.D1(uv.X(), uv.Y(), at, du, dv);
+                gp_Vec outward = du.Crossed(dv);
+                if (outward.Magnitude() < 1e-12) {
+                    refuse("a wall without a normal");
+                }
+                outward.Normalize();
+                if (member.wall.Orientation() == TopAbs_REVERSED) {
+                    outward.Reverse();
+                }
+                if (std::abs(outward.Dot(gp_Vec(loop.normal))) > angularTolerance) {
+                    refuse("a rim wall that is not square to its plane face");
+                }
+                RimCurve c;
+                gp_XY inward(-outward.Dot(gp_Vec(loop.xDir)), -outward.Dot(gp_Vec(loop.yDir)));
+                if (curve.GetType() == GeomAbs_Line && wall.GetType() == GeomAbs_Plane) {
+                    gp_Lin line = curve.Line();
+                    c.line = true;
+                    c.point = loop.plan(line.Location());
+                    gp_Vec d(line.Direction());
+                    c.direction = gp_XY(d.Dot(gp_Vec(loop.xDir)), d.Dot(gp_Vec(loop.yDir)))
+                        * member.along;
+                    c.inward = inward;
+                }
+                else if (curve.GetType() == GeomAbs_Circle && wall.GetType() == GeomAbs_Cylinder) {
+                    gp_Circ circle = curve.Circle();
+                    if (!parallel(circle.Axis().Direction(), loop.normal)
+                        || !parallel(wall.Cylinder().Axis().Direction(), loop.normal)) {
+                        refuse("a rim arc whose axis is not the plane face's normal");
+                    }
+                    c.centre = loop.plan(circle.Location());
+                    c.rho = circle.Radius();
+                    gp_XY toCentre = c.centre - loop.plan(mid);
+                    c.convex = toCentre.Dot(inward) > 0 ? 1 : -1;
+                    double turn = circle.Axis().Direction().Dot(loop.normal) > 0 ? 1.0 : -1.0;
+                    c.sense = turn * member.along > 0 ? 1 : -1;
+                }
+                else {
+                    refuse("a rim edge that is neither a line on a plane nor a circle on a cylinder");
+                }
+                members.push_back(member);
+                curves.push_back(c);
+            }
+            const size_t count = members.size();
+            if (count < 2) {
+                refuse("a rim loop of one edge");
+            }
+            // Consecutive edges on one circle or line are one round (a circle split at a seam)
+            auto same = [&](const RimCurve& a, const RimCurve& b) {
+                if (a.line != b.line) {
+                    return false;
+                }
+                if (a.line) {
+                    return std::abs(a.direction.Crossed(b.direction)) < angularTolerance
+                        && a.direction.Dot(b.direction) > 0
+                        && std::abs((b.point - a.point).Crossed(a.direction)) < rimTolerance;
+                }
+                return (a.centre - b.centre).Modulus() < rimTolerance
+                    && std::abs(a.rho - b.rho) < rimTolerance && a.convex == b.convex
+                    && a.sense == b.sense;
+            };
+            size_t begin = count;
+            for (size_t i = 0; i < count; ++i) {
+                if (!same(curves[(i + count - 1) % count], curves[i])) {
+                    begin = i;
+                    break;
+                }
+            }
+            if (begin == count) {
+                refuse("a rim loop on one circle");
+            }
+            for (size_t k = 0; k < count; ++k) {
+                size_t i = (begin + k) % count;
+                RimVertex vertex;
+                vertex.vertex = members[i].start;
+                vertex.plan = loop.plan(BRep_Tool::Pnt(vertex.vertex));
+                if (cornerVertices.Contains(vertex.vertex)) {
+                    refuse("a vertex on two rim loops");
+                }
+                cornerVertices.Add(vertex.vertex);
+                if (k == 0 || !same(curves[(i + count - 1) % count], curves[i])) {
+                    RimRound round;
+                    round.curve = curves[i];
+                    round.start = vertex.plan;
+                    loop.rounds.push_back(round);
+                    vertex.corner = true;
+                    loop.corners.push_back(vertex);
+                    loop.inner.emplace_back();
+                }
+                else {
+                    loop.inner.back().push_back(vertex);
+                }
+                RimRound& round = loop.rounds.back();
+                round.members.push_back(members[i]);
+                round.end = loop.plan(BRep_Tool::Pnt(members[i].end));
+                if (!round.curve.line) {
+                    round.sweep += std::abs(members[i].last - members[i].first);
+                }
+            }
+            if (loop.rounds.size() < 2) {
+                refuse("a rim loop on one circle");
+            }
+            for (size_t i = 0; i < loop.rounds.size(); ++i) {
+                RimRound& round = loop.rounds[i];
+                if (!round.curve.line) {
+                    if (round.sweep >= 2 * pi - 1e-6) {
+                        refuse("a rim arc of a full turn");
+                    }
+                    // A spindle torus (the wall arc tighter than twice the round) crosses itself.
+                    // Tighter than the round itself (tightArc()): a canal patch instead
+                    if (round.curve.convex > 0 && round.curve.rho - r < r - 1e-9 * r) {
+                        if (round.curve.rho >= r - linearTolerance) {
+                            refuse("a rim arc tighter than twice the round");
+                        }
+                        if (round.sweep >= pi - 1e-9) {
+                            refuse("a wall arc tighter than the round spanning a half circle or more");
+                        }
+                        round.tight = std::make_shared<RimTight>();
+                    }
+                }
+                RimVertex& corner = loop.corners[i];
+                const RimRound& before
+                    = loop.rounds[(i + loop.rounds.size() - 1) % loop.rounds.size()];
+                gp_XY t1 = before.curve.tangentAt(corner.plan);
+                gp_XY t2 = round.curve.tangentAt(corner.plan);
+                corner.geometry.vertex = corner.plan;
+                if (std::abs(t1.Crossed(t2)) < 1e-7) {
+                    gp_XY n1 = before.curve.inwardAt(corner.plan);
+                    gp_XY n2 = round.curve.inwardAt(corner.plan);
+                    if (t1.Dot(t2) < 0 || n1.Dot(n2) < 0) {
+                        refuse("a rim corner that is a cusp");
+                    }
+                    corner.geometry.tangent = true;
+                    corner.geometry.inward = n1;
+                }
+            }
+            for (size_t i = 0; i < loop.rounds.size(); ++i) {
+                if (!loop.rounds[i].tight) {
+                    continue;
+                }
+                const size_t n = loop.rounds.size();
+                if (n < 3 || !loop.corners[i].geometry.tangent
+                    || !loop.corners[(i + 1) % n].geometry.tangent) {
+                    refuse("a wall arc tighter than the round that does not continue tangentially "
+                           "at both ends");
+                }
+                if (loop.rounds[(i + n - 1) % n].tight || loop.rounds[(i + 1) % n].tight) {
+                    refuse("two wall arcs tighter than the round in a row");
+                }
+            }
+            loops.push_back(std::move(loop));
+        }
+    }
+    if (loops.empty() || covered.Extent() != selected.Extent()) {
+        refuse("a selection that is not whole loops on plane faces");
+    }
+    // The corners' geometry points into the rounds, which no longer move
+    for (auto& loop : loops) {
+        const size_t n = loop.rounds.size();
+        for (size_t i = 0; i < n; ++i) {
+            loop.corners[i].geometry.before = &loop.rounds[(i + n - 1) % n].curve;
+            loop.corners[i].geometry.after = &loop.rounds[i].curve;
+        }
+    }
+    // A corner is where its two edges cross: a vertex may stand beside that by its tolerance (a
+    // Boolean's by 1e-6), and the rounds and their mitres follow the edges
+    for (auto& loop : loops) {
+        const size_t n = loop.rounds.size();
+        for (size_t i = 0; i < n; ++i) {
+            RimVertex& corner = loop.corners[i];
+            RimCorner& g = corner.geometry;
+            gp_XY exact = g.tangent ? g.after->nearest(corner.plan) : g.at(0.0, corner.plan);
+            double moved = (exact - corner.plan).Modulus();
+            if (!(moved <= 10 * rimTolerance)) {
+                refuse("a rim vertex away from where its edges cross");
+            }
+            corner.moved = moved;
+            corner.plan = exact;
+            g.vertex = exact;
+            loop.rounds[i].start = exact;
+            loop.rounds[(i + n - 1) % n].end = exact;
+            loop.slack += moved + (g.tangent ? (g.before->nearest(exact) - exact).Modulus() : 0.0);
+        }
+        gp_XY middle(0.0, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            middle += loop.corners[i].plan / double(n);
+        }
+        for (size_t i = 0; i < n; ++i) {
+            loop.reach = std::max(loop.reach, (loop.corners[i].plan - middle).Modulus());
+        }
+        // The tight wall arcs' centre curves, between their neighbours' walls
+        for (size_t i = 0; i < n; ++i) {
+            RimRound& round = loop.rounds[i];
+            if (!round.tight) {
+                continue;
+            }
+            RimTight& tight = *round.tight;
+            tight.walls[0] = rimPlanWall(loop.rounds[(i + n - 1) % n].curve);
+            tight.walls[1] = rimPlanWall(loop.rounds[(i + 1) % n].curve);
+            tight.r = r;
+            tight.rho = round.curve.rho;
+            tight.prepare(round.curve.centre);
+            loop.corners[i].geometry.tight = &tight;
+            loop.corners[i].geometry.side = 0;
+            loop.corners[(i + 1) % n].geometry.tight = &tight;
+            loop.corners[(i + 1) % n].geometry.side = 1;
+        }
+    }
+    // Each vertex: three edges, the third straight down from the plane face and longer than r,
+    // its other end not a rim vertex. A vertex within one round may have its two rim edges alone
+    // (an arc a Boolean left in two pieces on one wall): it is lowered, and nothing goes down
+    auto upright = [&](RimLoop& loop, RimVertex& vertex, bool within) {
+        const TopTools_ListOfShape& around = vertexEdges.FindFromKey(vertex.vertex);
+        if (within && around.Extent() == 2) {
+            for (const auto& edge : around) {
+                if (!selected.Contains(edge)) {
+                    refuse("a rim vertex with an unselected rim edge");
+                }
+            }
+            vertex.lowered
+                = rimVertex(
+            loop.point(vertex.plan, -r),
+            std::max(BRep_Tool::Tolerance(vertex.vertex), 2 * vertex.moved)
+        );
+            return;
+        }
+        if (around.Extent() != 3) {
+            refuse("a rim vertex without three edges");
+        }
+        for (const auto& edge : around) {
+            if (selected.Contains(edge)) {
+                continue;
+            }
+            if (!vertex.upright.IsNull()) {
+                refuse("a rim vertex with an unselected rim edge");
+            }
+            vertex.upright = TopoDS::Edge(edge.Oriented(TopAbs_FORWARD));
+        }
+        if (vertex.upright.IsNull()) {
+            refuse("a rim vertex without an edge down from it");
+        }
+        BRepAdaptor_Curve curve(vertex.upright);
+        if (curve.GetType() != GeomAbs_Line || !parallel(curve.Line().Direction(), loop.normal)) {
+            refuse("the edge down from a rim vertex is not square to the plane face");
+        }
+        TopoDS_Vertex forward;
+        TopoDS_Vertex reversed;
+        TopExp::Vertices(vertex.upright, forward, reversed);
+        if (forward.IsNull() || reversed.IsNull() || forward.IsSame(reversed)) {
+            refuse("the edge down from a rim vertex is closed");
+        }
+        const TopoDS_Vertex& other = forward.IsSame(vertex.vertex) ? reversed : forward;
+        if (cornerVertices.Contains(other)) {
+            refuse("an edge between two rim loops");
+        }
+        if (gp_Vec(BRep_Tool::Pnt(vertex.vertex), BRep_Tool::Pnt(other)).Dot(gp_Vec(loop.normal))
+            >= 0) {
+            refuse("a rim whose walls rise from its plane face");
+        }
+        double length = curve.LastParameter() - curve.FirstParameter();
+        if (length < r + 1000 * rimTolerance) {
+            refuse("a wall no higher than the round");
+        }
+        loop.height = std::max(loop.height, length);
+        bool atFirst = forward.IsSame(vertex.vertex);
+        double keepFirst = atFirst ? curve.FirstParameter() + r : curve.FirstParameter();
+        double keepLast = atFirst ? curve.LastParameter() : curve.LastParameter() - r;
+        // (with the base vertex's tolerance: its edges' curves end within that of it)
+        vertex.lowered = rimVertex(
+            loop.point(vertex.plan, -r),
+            std::max(BRep_Tool::Tolerance(vertex.vertex), 2 * vertex.moved)
+        );
+        BRep_Builder builder;
+        TopoDS_Edge shorter = TopoDS::Edge(vertex.upright.EmptyCopied());
+        shorter.Orientation(TopAbs_FORWARD);
+        builder.Add(shorter, (atFirst ? vertex.lowered : forward).Oriented(TopAbs_FORWARD));
+        builder.Add(shorter, (atFirst ? reversed : vertex.lowered).Oriented(TopAbs_REVERSED));
+        builder.Range(shorter, keepFirst, keepLast);
+        vertex.shortened = shorter;
+    };
+    for (auto& loop : loops) {
+        for (auto& corner : loop.corners) {
+            upright(loop, corner, false);
+        }
+        for (auto& list : loop.inner) {
+            for (auto& vertex : list) {
+                upright(loop, vertex, true);
+            }
+        }
+    }
+    return loops;
+}
+
+/// Whether some corner of the loops is a reflex corner with a circle (reflexCircleCorner())
+bool rimReflexCircle(const std::vector<RimLoop>& loops)
+{
+    for (const auto& loop : loops) {
+        for (const auto& corner : loop.corners) {
+            const RimCorner& g = corner.geometry;
+            if (!g.tangent && (!g.before->line || !g.after->line)
+                && g.after->tangentAt(g.vertex).Dot(g.before->inwardAt(g.vertex)) < 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Whether some round of the loops is a wall arc tighter than the round (preferConstruction())
+bool rimTightArc(const std::vector<RimLoop>& loops)
+{
+    for (const auto& loop : loops) {
+        for (const auto& round : loop.rounds) {
+            if (round.tight) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// A mitre's edge with its curves on both rounds, held to the formula between its samples
+void rimMitre(RimLoop& loop, size_t index, double r)
+{
+    const size_t n = loop.rounds.size();
+    RimVertex& corner = loop.corners[index];
+    const RimRound* rounds[2] = {&loop.rounds[(index + n - 1) % n], &loop.rounds[index]};
+    // Whether the offsets touch where they reach the plane face
+    bool touching = false;
+    {
+        gp_XY hint = corner.plan;
+        gp_XY top = corner.plan;
+        for (int k = 1; k <= 64; ++k) {
+            top = corner.geometry.at(r * (1 - std::cos((pi / 2) * k / 64)), hint);
+            hint = top;
+        }
+        corner.topPlan = top;
+        if (!corner.geometry.tangent) {
+            gp_XY t1 = rounds[0]->curve.tangentAt(top);
+            gp_XY t2 = rounds[1]->curve.tangentAt(top);
+            touching = std::abs(t1.Crossed(t2)) < 0.3;
+        }
+    }
+    auto uvOn = [&](const RimRound& round, const gp_XY& p, double t) {
+        if (round.curve.line) {
+            gp_Pnt at = loop.point(p, 0.0);
+            return gp_Pnt2d(t, gp_Vec(round.origin, at).Dot(gp_Vec(round.zAxis)));
+        }
+        return gp_Pnt2d(round.angle(p), round.curve.convex > 0 ? t : pi - t);
+    };
+    double least = std::numeric_limits<double>::max();
+    // Finer until the curve is within the tolerance; where the offsets nearly touch it converges
+    // slowly, and the finest is taken within ten times that, the edge's tolerance saying so
+    const std::pair<int, double> tries[]
+        = {{49, rimTolerance}, {97, rimTolerance}, {193, rimTolerance}, {385, rimTolerance}, {769, 10 * rimTolerance}};
+    for (const auto& [samples, allowed] : tries) {
+        Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, samples);
+        Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, samples);
+        Handle(TColgp_HArray1OfPnt2d) uv[2] = {
+            new TColgp_HArray1OfPnt2d(1, samples),
+            new TColgp_HArray1OfPnt2d(1, samples)
+        };
+        std::vector<gp_XY> plan(samples);
+        gp_XY hint = corner.plan;
+        for (int k = 0; k < samples; ++k) {
+            double u = double(k) / (samples - 1);
+            double t = mitreAngle(u, touching);
+            gp_XY p = corner.geometry.at(r * (1 - std::cos(t)), hint);
+            hint = p;
+            plan[k] = p;
+            parameters->SetValue(k + 1, u);
+            points->SetValue(k + 1, loop.point(p, -r + r * std::sin(t)));
+            for (int side = 0; side < 2; ++side) {
+                uv[side]->SetValue(k + 1, uvOn(*rounds[side], p, t));
+            }
+        }
+        GeomAPI_Interpolate interpolate(points, parameters, false, Precision::Confusion());
+        interpolate.Perform();
+        if (!interpolate.IsDone()) {
+            refuse("a mitre's curve could not be interpolated");
+        }
+        Handle(Geom_Curve) curve = interpolate.Curve();
+        Handle(Geom2d_Curve) onRound[2];
+        for (int side = 0; side < 2; ++side) {
+            Geom2dAPI_Interpolate flat(uv[side], parameters, false, Precision::Confusion());
+            flat.Perform();
+            if (!flat.IsDone()) {
+                refuse("a mitre's curve on its round could not be interpolated");
+            }
+            onRound[side] = flat.Curve();
+        }
+        // Between the samples and at both ends: the curve and its images on both rounds against
+        // the formula
+        double deviation = 0.0;
+        for (int k = -1; k <= samples; ++k) {
+            double u = k < 0 ? 0.0 : k == samples ? 1.0 : (k + 0.5) / (samples - 1);
+            if (k == samples - 1) {
+                continue;
+            }
+            double t = mitreAngle(u, touching);
+            gp_XY p = corner.geometry.at(
+                r * (1 - std::cos(t)),
+                plan[std::min(std::max(k, 0), samples - 1)]
+            );
+            gp_Pnt exact = loop.point(p, -r + r * std::sin(t));
+            deviation = std::max(deviation, curve->Value(u).Distance(exact));
+            for (int side = 0; side < 2; ++side) {
+                gp_Pnt2d at = onRound[side]->Value(u);
+                deviation
+                    = std::max(deviation, rounds[side]->surface->Value(at.X(), at.Y()).Distance(exact));
+            }
+        }
+        if (deviation > allowed) {
+            least = std::min(least, deviation);
+            continue;
+        }
+        corner.onTop = rimVertex(loop.point(corner.topPlan, 0.0));
+        double tolerance = std::max(Precision::Confusion(), 2 * deviation);
+        corner.mitre = rimEdge(curve, 0.0, 1.0, corner.lowered, corner.onTop, tolerance);
+        BRep_Builder builder;
+        for (int side = 0; side < 2; ++side) {
+            builder.UpdateEdge(
+                corner.mitre,
+                onRound[side],
+                rounds[side]->surface,
+                TopLoc_Location(),
+                tolerance
+            );
+        }
+        return;
+    }
+    refuse("a mitre's curve is " + describe(least) + " from its definition"
+           + (touching ? " (offsets that touch)" : ""));
+}
+
+/// A loop curve as a wall of a tight corner
+PlanWall rimPlanWall(const RimCurve& curve)
+{
+    PlanWall wall;
+    wall.line = curve.line;
+    if (curve.line) {
+        wall.point = curve.point;
+        wall.normal = curve.inward / curve.inward.Modulus();
+    }
+    else {
+        wall.centre = curve.centre;
+        wall.radius = curve.rho;
+        wall.sign = -curve.convex;
+    }
+    return wall;
+}
+
+/// The canal patch of a tight wall arc: along theta (u) a cubic through 97 sections, across (v)
+/// each section's arc of the ball's great circle between the two sides, rational of degree 2
+void rimTightPatch(RimLoop& loop, size_t index, double r)
+{
+    RimRound& round = loop.rounds[index];
+    const RimTight& tight = *round.tight;
+    const int intervals = static_cast<int>(tight.table.size()) - 1;
+    const double rho = tight.rho;
+    const double d = r - rho;
+    Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, intervals + 1);
+    std::vector<gp_Pnt> side[2];
+    std::vector<gp_Pnt> homogeneous;
+    std::vector<gp_Pnt> weight;
+    for (int i = 0; i <= intervals; ++i) {
+        const double t = pi / 2 * i / intervals;
+        parameters->SetValue(i + 1, t);
+        const gp_XY& q = tight.table[i];
+        gp_Pnt spine = loop.point(q, -r + d * std::sin(t));
+        gp_Vec u[2];
+        for (int k = 0; k < 2; ++k) {
+            gp_XY n = tight.walls[k].gradient(q);
+            u[k] = loop.vector(n * -std::cos(t)) + gp_Vec(loop.normal) * std::sin(t);
+        }
+        gp_Vec m = u[0] + u[1];
+        if (m.Magnitude() < 1e-9) {
+            refuse("the rounds at a tight corner meet head on");
+        }
+        m.Normalize();
+        double ch = std::max(-1.0, std::min(1.0, m.Dot(u[0])));  // cos(alpha / 2)
+        if (ch < 1e-6) {
+            refuse("the rounds at a tight corner meet at a straight angle or more");
+        }
+        for (int k = 0; k < 2; ++k) {
+            side[k].push_back(spine.Translated(u[k] * rho));
+        }
+        homogeneous.emplace_back(spine.Translated(m * (rho / ch)).XYZ() * ch);
+        weight.emplace_back(ch, 0.0, 0.0);
+    }
+    Handle(Geom_BSplineCurve) columns[4] = {
+        interpolated(side[0], parameters),
+        interpolated(homogeneous, parameters),
+        interpolated(side[1], parameters),
+        interpolated(weight, parameters)
+    };
+    const Handle(Geom_BSplineCurve)& model = columns[0];
+    for (int c = 1; c < 4; ++c) {
+        bool same = columns[c]->NbKnots() == model->NbKnots()
+            && columns[c]->NbPoles() == model->NbPoles() && columns[c]->Degree() == model->Degree();
+        for (int i = 1; same && i <= model->NbKnots(); ++i) {
+            same = std::abs(columns[c]->Knot(i) - model->Knot(i)) <= 1e-12
+                && columns[c]->Multiplicity(i) == model->Multiplicity(i);
+        }
+        if (!same) {
+            refuse("a tight corner's columns have different knots");
+        }
+    }
+    const int poleCount = model->NbPoles();
+    const int knotCount = model->NbKnots();
+    TColgp_Array2OfPnt poles(1, poleCount, 1, 3);
+    TColStd_Array2OfReal weights(1, poleCount, 1, 3);
+    for (int i = 1; i <= poleCount; ++i) {
+        const double w = columns[3]->Pole(i).X();
+        if (w <= 1e-9) {
+            refuse("a tight corner's surface has a weight that is not positive");
+        }
+        poles.SetValue(i, 1, columns[0]->Pole(i));
+        poles.SetValue(i, 2, gp_Pnt(columns[1]->Pole(i).XYZ() / w));
+        poles.SetValue(i, 3, columns[2]->Pole(i));
+        weights.SetValue(i, 1, 1.0);
+        weights.SetValue(i, 2, w);
+        weights.SetValue(i, 3, 1.0);
+    }
+    TColStd_Array1OfReal uKnots(1, knotCount);
+    TColStd_Array1OfInteger uMults(1, knotCount);
+    for (int i = 1; i <= knotCount; ++i) {
+        uKnots.SetValue(i, model->Knot(i));
+        uMults.SetValue(i, model->Multiplicity(i));
+    }
+    TColStd_Array1OfReal vKnots(1, 2);
+    vKnots.SetValue(1, 0.0);
+    vKnots.SetValue(2, 1.0);
+    TColStd_Array1OfInteger vMults(1, 2);
+    vMults.SetValue(1, 3);
+    vMults.SetValue(2, 3);
+    Handle(Geom_BSplineSurface) patch
+        = new Geom_BSplineSurface(poles, weights, uKnots, vKnots, uMults, vMults, model->Degree(), 2);
+    // Between the sections: every point of the patch at the ball's radius from its centre
+    double deviation = 0.0;
+    for (int i = 0; i < intervals; ++i) {
+        const double t = pi / 2 * (i + 0.5) / intervals;
+        gp_Pnt centre = loop.point(tight.spine(t), -r + d * std::sin(t));
+        for (double v : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+            deviation = std::max(deviation, std::abs(patch->Value(t, v).Distance(centre) - rho));
+        }
+    }
+    if (deviation > rimTolerance * std::max(1.0, r)) {
+        if (intervals < 384) {
+            // A wide arc: finer sections
+            round.tight->prepare(round.curve.centre, 2 * intervals);
+            rimTightPatch(loop, index, r);
+            return;
+        }
+        refuse("a tight corner's face is " + describe(deviation) + " from its canal surface");
+    }
+    round.surface = patch;
+}
+
+/// The two sides of a tight wall arc's patch, each the end of the neighbouring round: an edge on
+/// the patch's boundary with its curve on that round, held to the formula between its samples.
+/// They meet in one vertex on the plane face, where the neighbours' top edges cross
+void rimTightSides(RimLoop& loop, size_t index, double r)
+{
+    const size_t n = loop.rounds.size();
+    RimRound& round = loop.rounds[index];
+    const RimTight& tight = *round.tight;
+    Handle(Geom_BSplineSurface) patch = Handle(Geom_BSplineSurface)::DownCast(round.surface);
+    const int samples = static_cast<int>(tight.table.size());
+    const gp_XY topPlan = tight.table.back();
+    TopoDS_Vertex top = rimVertex(loop.point(topPlan, 0.0));
+    BRep_Builder builder;
+    for (int k = 0; k < 2; ++k) {
+        RimVertex& corner = loop.corners[k == 0 ? index : (index + 1) % n];
+        const RimRound& neighbour = loop.rounds[k == 0 ? (index + n - 1) % n : (index + 1) % n];
+        auto uvOn = [&](const gp_XY& p, double t) {
+            if (neighbour.curve.line) {
+                gp_Pnt at = loop.point(p, 0.0);
+                return gp_Pnt2d(t, gp_Vec(neighbour.origin, at).Dot(gp_Vec(neighbour.zAxis)));
+            }
+            return gp_Pnt2d(neighbour.angle(p), neighbour.curve.convex > 0 ? t : pi - t);
+        };
+        Handle(TColgp_HArray1OfPnt2d) uv = new TColgp_HArray1OfPnt2d(1, samples);
+        Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, samples);
+        for (int i = 0; i < samples; ++i) {
+            const double t = pi / 2 * i / (samples - 1);
+            parameters->SetValue(i + 1, t);
+            uv->SetValue(i + 1, uvOn(tight.side(k, t), t));
+        }
+        Geom2dAPI_Interpolate flat(uv, parameters, false, Precision::Confusion());
+        flat.Perform();
+        if (!flat.IsDone()) {
+            refuse("a tight corner's side on its round could not be interpolated");
+        }
+        Handle(Geom2d_Curve) onNeighbour = flat.Curve();
+        Handle(Geom_Curve) curve = patch->VIso(double(k));
+        double deviation = 0.0;
+        for (int i = -1; i <= samples - 1; ++i) {
+            const double t = i < 0 ? 0.0
+                : i == samples - 1 ? pi / 2
+                                   : pi / 2 * (i + 0.5) / (samples - 1);
+            gp_Pnt exact = loop.point(tight.side(k, t), -r + r * std::sin(t));
+            gp_Pnt2d at = onNeighbour->Value(t);
+            deviation = std::max(deviation, curve->Value(t).Distance(exact));
+            deviation
+                = std::max(deviation, neighbour.surface->Value(at.X(), at.Y()).Distance(exact));
+        }
+        if (deviation > 10 * rimTolerance) {
+            refuse("a tight corner's side is " + describe(deviation) + " from its definition");
+        }
+        const double tolerance = std::max(Precision::Confusion(), 2 * deviation);
+        corner.topPlan = topPlan;
+        corner.onTop = top;
+        corner.mitre = rimEdge(curve, 0.0, pi / 2, corner.lowered, top, tolerance);
+        builder.UpdateEdge(
+            corner.mitre,
+            uvLine(0.0, double(k), 1.0, 0.0),
+            round.surface,
+            TopLoc_Location(),
+            tolerance
+        );
+        builder.UpdateEdge(corner.mitre, onNeighbour, neighbour.surface, TopLoc_Location(), tolerance);
+    }
+}
+
+/// A lowered wall arc's curve on its tight corner's patch: the patch's edge at theta = 0, whose
+/// parameter is not the arc's angle
+Handle(Geom2d_Curve) rimArcOnPatch(
+    const Handle(Geom_Curve)& arc,
+    double first,
+    double last,
+    const Handle(Geom_BSplineSurface)& patch
+)
+{
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    patch->Bounds(u0, u1, v0, v1);
+    Handle(Geom_Curve) edge = patch->UIso(u0);
+    double least = std::numeric_limits<double>::max();
+    for (int samples : {33, 65, 129}) {
+        Handle(TColgp_HArray1OfPnt2d) uv = new TColgp_HArray1OfPnt2d(1, samples);
+        Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, samples);
+        for (int i = 0; i < samples; ++i) {
+            const double s = first + (last - first) * i / (samples - 1);
+            GeomAPI_ProjectPointOnCurve projection(arc->Value(s), edge, v0, v1);
+            if (projection.NbPoints() < 1) {
+                refuse("a tight wall arc is not on its corner's face");
+            }
+            parameters->SetValue(i + 1, s);
+            uv->SetValue(i + 1, gp_Pnt2d(u0, projection.LowerDistanceParameter()));
+        }
+        Geom2dAPI_Interpolate flat(uv, parameters, false, Precision::Confusion());
+        flat.Perform();
+        if (!flat.IsDone()) {
+            refuse("a tight wall arc's curve on its corner's face could not be interpolated");
+        }
+        Handle(Geom2d_Curve) curve = flat.Curve();
+        double deviation = 0.0;
+        for (int i = 0; i <= 2 * (samples - 1); ++i) {
+            const double s = first + (last - first) * i / (2 * (samples - 1));
+            gp_Pnt2d at = curve->Value(s);
+            deviation = std::max(deviation, patch->Value(at.X(), at.Y()).Distance(arc->Value(s)));
+        }
+        if (deviation <= rimTolerance) {
+            return curve;
+        }
+        least = std::min(least, deviation);
+    }
+    refuse("a tight wall arc's curve on its corner's face is " + describe(least) + " off");
+}
+
+/// A tight corner's patch measured: its area, and the volume between it and the flat chords from
+/// one side to the other at each height (down to the wall arc's segment at the rounds' centres)
+void rimTightMeasures(const RimLoop& loop, const RimRound& round, double r, double& area, double& lens)
+{
+    Handle(Geom_BSplineSurface) patch = Handle(Geom_BSplineSurface)::DownCast(round.surface);
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    patch->Bounds(u0, u1, v0, v1);
+    const double node[3] = {-std::sqrt(0.6), 0.0, std::sqrt(0.6)};
+    const double weight[3] = {5.0 / 9, 8.0 / 9, 5.0 / 9};
+    const int uCells = 96;
+    const int vCells = 8;
+    const gp_Vec up(loop.normal);
+    auto height = [&](const gp_Pnt& p) {
+        return gp_Vec(loop.origin, p).Dot(up) + r;
+    };
+    area = 0.0;
+    double onPatch = 0.0;
+    double onChords = 0.0;
+    for (int i = 0; i < uCells; ++i) {
+        for (int a = 0; a < 3; ++a) {
+            const double du = (u1 - u0) / uCells;
+            const double u = u0 + du * (i + 0.5 + node[a] / 2);
+            for (int j = 0; j < vCells; ++j) {
+                for (int b = 0; b < 3; ++b) {
+                    const double dv = (v1 - v0) / vCells;
+                    const double v = v0 + dv * (j + 0.5 + node[b] / 2);
+                    gp_Pnt p;
+                    gp_Vec pu;
+                    gp_Vec pv;
+                    patch->D1(u, v, p, pu, pv);
+                    gp_Vec normal = pu.Crossed(pv);
+                    const double w = weight[a] * weight[b] * du * dv / 4;
+                    area += w * normal.Magnitude();
+                    onPatch += w * height(p) * normal.Dot(up);
+                }
+            }
+            // The chords at this theta, from side 0 to side 1: over the chord, the flux is half
+            // the sum of the two ends' speeds crossed with the chord
+            gp_Pnt p0;
+            gp_Pnt p1;
+            gp_Vec s0;
+            gp_Vec s1;
+            gp_Vec unused;
+            patch->D1(u, v0, p0, s0, unused);
+            patch->D1(u, v1, p1, s1, unused);
+            onChords += weight[a] * du / 2 * height(p0) * 0.5
+                * (s0 + s1).Crossed(gp_Vec(p0, p1)).Dot(up);
+        }
+    }
+    lens = std::abs(onPatch - onChords);
+}
+
+/// The wires of a face with its edges replaced; onTop: the loops whose wires become their rounds'
+/// top edges
+TopoDS_Face rimRebuilt(
+    const TopoDS_Face& face,
+    const TopTools_DataMapOfShapeShape& replaced,
+    const TopTools_DataMapOfShapeListOfShape& split,
+    const std::vector<const RimLoop*>& onTop
+)
+{
+    BRep_Builder builder;
+    TopoDS_Face rebuilt = TopoDS::Face(face.EmptyCopied());
+    rebuilt.Orientation(TopAbs_FORWARD);
+    for (TopoDS_Iterator wires(face.Oriented(TopAbs_FORWARD)); wires.More(); wires.Next()) {
+        if (wires.Value().ShapeType() != TopAbs_WIRE) {
+            builder.Add(rebuilt, wires.Value());
+            continue;
+        }
+        const TopoDS_Wire& wire = TopoDS::Wire(wires.Value());
+        TopoDS_Wire made;
+        builder.MakeWire(made);
+        const RimLoop* loop = nullptr;
+        for (const auto* candidate : onTop) {
+            if (candidate->wire.IsSame(wire)) {
+                loop = candidate;
+            }
+        }
+        if (loop) {
+            for (const auto& round : loop->rounds) {
+                if (round.tight) {
+                    continue;
+                }
+                // The top edge runs with its own parameter; the loop's first member's orientation
+                // in the wire says which way the wire held that member
+                const RimMember& member = round.members.front();
+                TopAbs_Orientation held = TopAbs_FORWARD;
+                for (TopoDS_Iterator it(wire.Oriented(TopAbs_FORWARD)); it.More(); it.Next()) {
+                    if (it.Value().IsSame(member.edge)) {
+                        held = it.Value().Orientation();
+                    }
+                }
+                // Whether the top edge's parameter runs with the loop
+                bool topAlong = round.curve.line ? round.topFirst < round.topLast
+                                                 : round.curve.sense > 0;
+                bool sameWay = topAlong == (member.along > 0);
+                for (const auto& piece : round.tops) {
+                    builder.Add(made, piece.Oriented(sameWay ? held : TopAbs::Reverse(held)));
+                }
+            }
+        }
+        else {
+            for (TopoDS_Iterator it(wire.Oriented(TopAbs_FORWARD)); it.More(); it.Next()) {
+                if (replaced.IsBound(it.Value())) {
+                    builder.Add(made, replaced.Find(it.Value()).Oriented(it.Value().Orientation()));
+                }
+                else if (split.IsBound(it.Value())) {
+                    for (const auto& piece : split.Find(it.Value())) {
+                        builder.Add(made, piece.Oriented(it.Value().Orientation()));
+                    }
+                }
+                else {
+                    builder.Add(made, it.Value());
+                }
+            }
+        }
+        made.Closed(true);
+        builder.Add(rebuilt, made.Oriented(wire.Orientation()));
+    }
+    return TopoDS::Face(rebuilt.Oriented(face.Orientation()));
+}
+
+/** A plane face whose rounds' top edges touch another of its loops (a hole tangent to the rails):
+ * the loops are cut at the vertices where they touch, and the face comes out in the pieces those
+ * vertices pinch off, as Onshape has it. With the material on the left of every edge, the outline
+ * of a piece that arrives at such a vertex along one loop leaves it along the other.
+ */
+std::vector<TopoDS_Face> rimPinched(
+    const TopoDS_Face& face,
+    const TopTools_DataMapOfShapeListOfShape& split,
+    const std::vector<const RimLoop*>& onTop
+)
+{
+    struct Directed
+    {
+        TopoDS_Edge edge;
+        int wire = 0;
+        TopoDS_Vertex from;
+        TopoDS_Vertex to;
+        bool used = false;
+    };
+    std::vector<Directed> edges;
+    int wireIndex = 0;
+    TopAbs_Orientation wireWay = TopAbs_FORWARD;
+    auto add = [&](const TopoDS_Shape& edge) {
+        Directed d;
+        d.edge = TopoDS::Edge(edge.Oriented(TopAbs::Compose(wireWay, edge.Orientation())));
+        d.wire = wireIndex;
+        TopExp::Vertices(d.edge, d.from, d.to, true);
+        if (d.from.IsNull() || d.to.IsNull()) {
+            refuse("a plane face with an edge without vertices");
+        }
+        edges.push_back(d);
+    };
+    for (TopoDS_Iterator wires(face.Oriented(TopAbs_FORWARD)); wires.More(); wires.Next()) {
+        if (wires.Value().ShapeType() != TopAbs_WIRE) {
+            refuse("a plane face with a loose vertex whose loops touch");
+        }
+        const TopoDS_Wire& wire = TopoDS::Wire(wires.Value());
+        wireWay = wire.Orientation();
+        const RimLoop* loop = nullptr;
+        for (const auto* candidate : onTop) {
+            if (candidate->wire.IsSame(wire)) {
+                loop = candidate;
+            }
+        }
+        if (loop) {
+            for (const auto& round : loop->rounds) {
+                if (round.tight) {
+                    continue;
+                }
+                // As rimRebuilt()
+                const RimMember& member = round.members.front();
+                TopAbs_Orientation held = TopAbs_FORWARD;
+                for (TopoDS_Iterator it(wire.Oriented(TopAbs_FORWARD)); it.More(); it.Next()) {
+                    if (it.Value().IsSame(member.edge)) {
+                        held = it.Value().Orientation();
+                    }
+                }
+                bool topAlong = round.curve.line ? round.topFirst < round.topLast
+                                                 : round.curve.sense > 0;
+                bool sameWay = topAlong == (member.along > 0);
+                for (const auto& piece : round.tops) {
+                    add(piece.Oriented(sameWay ? held : TopAbs::Reverse(held)));
+                }
+            }
+        }
+        else {
+            for (TopoDS_Iterator it(wire.Oriented(TopAbs_FORWARD)); it.More(); it.Next()) {
+                if (split.IsBound(it.Value())) {
+                    for (const auto& piece : split.Find(it.Value())) {
+                        add(piece.Oriented(it.Value().Orientation()));
+                    }
+                }
+                else {
+                    add(it.Value());
+                }
+            }
+        }
+        ++wireIndex;
+    }
+    // The outlines
+    const size_t none = edges.size();
+    std::vector<std::vector<size_t>> cycles;
+    for (size_t start = 0; start < edges.size(); ++start) {
+        if (edges[start].used) {
+            continue;
+        }
+        std::vector<size_t> cycle;
+        size_t at = start;
+        while (!edges[at].used) {
+            edges[at].used = true;
+            cycle.push_back(at);
+            size_t chosen = none;
+            int found = 0;
+            int others = 0;
+            for (size_t k = 0; k < edges.size(); ++k) {
+                if (!edges[k].from.IsSame(edges[at].to)) {
+                    continue;
+                }
+                ++found;
+                if (edges[k].wire != edges[at].wire) {
+                    ++others;
+                    chosen = k;
+                }
+                else if (chosen == none) {
+                    chosen = k;
+                }
+            }
+            if (found < 1 || found > 2 || (found == 2 && others != 1)) {
+                refuse("a plane face's loops do not chain where they touch");
+            }
+            at = chosen;
+        }
+        if (at != start) {
+            refuse("a plane face's loops do not chain where they touch");
+        }
+        cycles.push_back(cycle);
+    }
+    // Each outline's turn about the face's own normal: the material inside (a piece's outer
+    // loop) or outside (a hole)
+    const RimLoop& frame = *onTop.front();
+    const double way = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+    BRep_Builder builder;
+    std::vector<TopoDS_Face> pieces;
+    std::vector<TopoDS_Wire> holes;
+    std::vector<gp_Pnt> holePoints;
+    for (const auto& cycle : cycles) {
+        TopoDS_Wire wire;
+        builder.MakeWire(wire);
+        double area = 0.0;
+        gp_Pnt some;
+        for (size_t k : cycle) {
+            builder.Add(wire, edges[k].edge);
+            BRepAdaptor_Curve curve(edges[k].edge);
+            const bool reversed = edges[k].edge.Orientation() == TopAbs_REVERSED;
+            const int steps = 16;
+            gp_XY last;
+            for (int i = 0; i <= steps; ++i) {
+                double u = double(reversed ? steps - i : i) / steps;
+                gp_Pnt point = curve.Value(
+                    curve.FirstParameter() + (curve.LastParameter() - curve.FirstParameter()) * u
+                );
+                gp_XY p = frame.plan(point);
+                if (i > 0) {
+                    area += 0.5 * last.Crossed(p);
+                }
+                if (i == steps / 2) {
+                    some = point;
+                }
+                last = p;
+            }
+        }
+        wire.Closed(true);
+        if (way * area > 0) {
+            TopoDS_Face piece = TopoDS::Face(face.EmptyCopied());
+            piece.Orientation(TopAbs_FORWARD);
+            builder.Add(piece, wire);
+            pieces.push_back(piece);
+        }
+        else {
+            holes.push_back(wire);
+            holePoints.push_back(some);
+        }
+    }
+    if (pieces.empty()) {
+        refuse("a plane face without an outer loop");
+    }
+    for (size_t h = 0; h < holes.size(); ++h) {
+        size_t owner = pieces.size();
+        for (size_t i = 0; owner == pieces.size() && i < pieces.size(); ++i) {
+            BRepClass_FaceClassifier classifier(pieces[i], holePoints[h], 1e-7);
+            if (classifier.State() == TopAbs_IN) {
+                owner = i;
+            }
+        }
+        if (owner == pieces.size()) {
+            refuse("a hole of a plane face that lies in none of its pieces");
+        }
+        builder.Add(pieces[owner], holes[h]);
+    }
+    for (auto& piece : pieces) {
+        piece.Orientation(face.Orientation());
+    }
+    return pieces;
+}
+
+TopoDS_Shape rimRounds(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    ShapeMapper& mapper,
+    int& cornerCount
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0
+        || std::abs(request.size1 - request.size2) > linearTolerance * std::max(1.0, request.size1)) {
+        refuse("not a round of one radius");
+    }
+    const double r = request.size1;
+    // One solid and nothing beside it: the fillet's input may hold it in a compound
+    int baseFaces = 0;
+    int solidFaces = 0;
+    if (!base.IsNull()) {
+        for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+            ++baseFaces;
+        }
+        for (TopExp_Explorer it(base, TopAbs_SOLID); it.More(); it.Next()) {
+            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More(); face.Next()) {
+                ++solidFaces;
+            }
+        }
+    }
+    if (base.IsNull() || countSolids(base) != 1 || baseFaces != solidFaces) {
+        refuse("the base is not one solid");
+    }
+    int shells = 0;
+    for (TopExp_Explorer it(base, TopAbs_SHELL); it.More(); it.Next()) {
+        ++shells;
+    }
+    if (shells != 1) {
+        refuse("a base with a void");
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    std::vector<RimLoop> loops = rimLoops(base, edges, r, edgeFaces, vertexEdges);
+    // Below the limit OCCT's own result stands, except where it is known to be wrong: a reflex
+    // corner with a circle (reflexCircleCorner(), where the fillet asks the construction first)
+    if (request.limitOnly && !rimReflexCircle(loops) && !rimTightArc(loops)) {
+        refuse("no reflex corner with a circle");
+    }
+
+    BRep_Builder builder;
+    TopTools_DataMapOfShapeShape replaced;  // in the walls: rim edges and the edges down
+    TopTools_IndexedMapOfShape rimEdges;
+    TopTools_IndexedMapOfShape uprights;
+    std::vector<TopoDS_Face> roundFaces;
+    RimExpected expected;
+    cornerCount = 0;
+    // Where a top edge touches another loop of its plane face
+    std::vector<RimPinch> pinches;
+    TopTools_IndexedMapOfShape pinchedFaces;
+    TopTools_DataMapOfShapeListOfShape splitInto;
+    for (auto& loop : loops) {
+        const size_t n = loop.rounds.size();
+        // The plane face's loops that are not rounded: lines and circles (anything else is left
+        // to the body's validity and the plane face's area)
+        std::vector<RimOther> others;
+        for (TopoDS_Iterator wires(loop.face); wires.More(); wires.Next()) {
+            if (wires.Value().ShapeType() != TopAbs_WIRE) {
+                continue;
+            }
+            bool rounded = false;
+            for (const auto& candidate : loops) {
+                rounded = rounded || candidate.wire.IsSame(wires.Value());
+            }
+            if (rounded) {
+                continue;
+            }
+            for (TopoDS_Iterator it(wires.Value()); it.More(); it.Next()) {
+                RimOther other;
+                other.edge = TopoDS::Edge(it.Value().Oriented(TopAbs_FORWARD));
+                other.wire = TopoDS::Wire(wires.Value());
+                BRepAdaptor_Curve curve(other.edge);
+                other.first = curve.FirstParameter();
+                other.last = curve.LastParameter();
+                other.piece.p = loop.plan(curve.Value(other.first));
+                other.piece.q = loop.plan(curve.Value(other.last));
+                if (curve.GetType() == GeomAbs_Line) {
+                    if ((other.piece.q - other.piece.p).Modulus() < 1e-9) {
+                        continue;
+                    }
+                    other.piece.line = true;
+                    other.line = curve.Line();
+                }
+                else if (curve.GetType() == GeomAbs_Circle
+                         && parallel(curve.Circle().Axis().Direction(), loop.normal)) {
+                    other.circle = curve.Circle();
+                    other.piece.centre = loop.plan(other.circle.Location());
+                    other.piece.radius = other.circle.Radius();
+                    other.piece.sense = other.circle.Axis().Direction().Dot(loop.normal) > 0 ? 1 : -1;
+                    other.piece.sweep = other.last - other.first;
+                }
+                else {
+                    continue;
+                }
+                others.push_back(other);
+            }
+        }
+        for (auto& corner : loop.corners) {
+            replaced.Bind(corner.upright, corner.shortened);
+            uprights.Add(corner.upright);
+            cornerCount += corner.geometry.tangent ? 0 : 1;
+        }
+        for (auto& list : loop.inner) {
+            for (auto& vertex : list) {
+                if (!vertex.upright.IsNull()) {
+                    replaced.Bind(vertex.upright, vertex.shortened);
+                    uprights.Add(vertex.upright);
+                }
+            }
+        }
+        // Each round's surface and frame
+        for (size_t i = 0; i < n; ++i) {
+            RimRound& round = loop.rounds[i];
+            if (round.tight) {
+                rimTightPatch(loop, i, r);
+                continue;
+            }
+            if (round.curve.line) {
+                gp_XY spine = round.start + round.curve.inward * r;
+                round.origin = loop.point(spine, -r);
+                gp_Dir x(loop.vector(round.curve.inward).Reversed());
+                round.zAxis = x.Crossed(loop.normal);
+                round.surface = new Geom_CylindricalSurface(gp_Ax3(round.origin, round.zAxis, x), r);
+            }
+            else {
+                gp_XY out = round.start - round.curve.centre;
+                double a = std::atan2(out.Y(), out.X()) + round.curve.sense * round.sweep / 2;
+                round.xAxis = gp_XY(-std::cos(a), -std::sin(a));
+                round.origin = loop.point(round.curve.centre, -r);
+                round.zAxis = loop.normal;
+                double major = round.curve.radius(r);
+                if (major < r) {
+                    // A horn torus, to the last digit (the spindle was refused)
+                    major = r;
+                }
+                round.surface = new Geom_ToroidalSurface(
+                    gp_Ax3(round.origin, loop.normal, gp_Dir(loop.vector(round.xAxis))),
+                    major,
+                    r
+                );
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (loop.rounds[i].tight) {
+                rimTightSides(loop, i, r);
+            }
+            else if (!loop.rounds[(i + n - 1) % n].tight) {
+                rimMitre(loop, i, r);
+            }
+        }
+        RimExpected own = rimExpected(loop, r);
+        expected.volume += own.volume;
+        expected.roundArea += own.roundArea;
+        expected.band += own.band;
+        expected.bandSlack += own.bandSlack;
+        expected.volumeSlack += own.volumeSlack;
+        for (size_t i = 0; i < n; ++i) {
+            RimRound& round = loop.rounds[i];
+            const RimVertex& from = loop.corners[i];
+            const RimVertex& to = loop.corners[(i + 1) % n];
+            const bool convex = round.curve.line || round.curve.convex > 0;
+            // The lowered rim edges: the base's curves moved down by r, so that their curves on
+            // the walls are the base's moved too
+            auto loweredOf = [&](const TopoDS_Vertex& vertex) -> const TopoDS_Vertex& {
+                if (vertex.IsSame(from.vertex)) {
+                    return from.lowered;
+                }
+                if (vertex.IsSame(to.vertex)) {
+                    return to.lowered;
+                }
+                for (const auto& inner : loop.inner[i]) {
+                    if (vertex.IsSame(inner.vertex)) {
+                        return inner.lowered;
+                    }
+                }
+                refuse("a rim vertex that was not prepared");
+            };
+            gp_Vec down = gp_Vec(loop.normal) * (-r);
+            for (auto& member : round.members) {
+                double f = 0.0;
+                double l = 0.0;
+                Handle(Geom_Curve) curve = BRep_Tool::Curve(member.edge, f, l);
+                Handle(Geom2d_Curve) onWall
+                    = BRep_Tool::CurveOnSurface(member.edge, member.wall, f, l);
+                if (curve.IsNull() || onWall.IsNull()) {
+                    refuse("a rim edge without its curves");
+                }
+                Handle(Geom_Curve) moved = Handle(Geom_Curve)::DownCast(curve->Translated(down));
+                BRepAdaptor_Surface wall(member.wall);
+                gp_Vec2d shift;
+                if (wall.GetType() == GeomAbs_Plane) {
+                    gp_Pln plane = wall.Plane();
+                    shift = gp_Vec2d(
+                        down.Dot(gp_Vec(plane.XAxis().Direction())),
+                        down.Dot(gp_Vec(plane.YAxis().Direction()))
+                    );
+                }
+                else {
+                    shift = gp_Vec2d(0.0, down.Dot(gp_Vec(wall.Cylinder().Axis().Direction())));
+                }
+                Handle(Geom2d_Curve) movedOnWall
+                    = Handle(Geom2d_Curve)::DownCast(onWall->Translated(shift));
+                TopoDS_Vertex forward;
+                TopoDS_Vertex reversed;
+                TopExp::Vertices(member.edge, forward, reversed);
+                const double tolerance
+                    = std::max(BRep_Tool::Tolerance(member.edge), Precision::Confusion());
+                member.lowered
+                    = rimEdge(moved, f, l, loweredOf(forward), loweredOf(reversed), tolerance);
+                builder.UpdateEdge(member.lowered, movedOnWall, member.wall, tolerance);
+                // And on the round: a line of its parameters, running with the edge's own
+                BRepAdaptor_Curve own(member.edge);
+                Handle(Geom2d_Curve) onRound;
+                double middle = (f + l) / 2;
+                if (round.tight) {
+                    onRound = rimArcOnPatch(
+                        moved,
+                        f,
+                        l,
+                        Handle(Geom_BSplineSurface)::DownCast(round.surface)
+                    );
+                }
+                else if (round.curve.line) {
+                    gp_Lin line = own.Line();
+                    double way = gp_Vec(line.Direction()).Dot(gp_Vec(round.zAxis)) > 0 ? 1.0 : -1.0;
+                    double v = gp_Vec(round.origin, own.Value(middle).Translated(down))
+                                   .Dot(gp_Vec(round.zAxis));
+                    onRound = uvLine(0.0, v - way * middle, 0.0, way);
+                }
+                else {
+                    double way = own.Circle().Axis().Direction().Dot(loop.normal) > 0 ? 1.0 : -1.0;
+                    double u = round.angle(loop.plan(own.Value(middle)));
+                    onRound = uvLine(u - way * middle, convex ? 0.0 : pi, way, 0.0);
+                }
+                builder.UpdateEdge(member.lowered, onRound, round.surface, TopLoc_Location(), tolerance);
+                replaced.Bind(member.edge, member.lowered);
+                rimEdges.Add(member.edge);
+            }
+            if (round.tight) {
+                // The patch's face: in its own parameters, counter-clockwise, side 0 up (theta),
+                // the point on the plane face (a degenerated edge), side 1 down, the wall arc back
+                TopoDS_Edge apex;
+                builder.MakeEdge(apex);
+                builder.Degenerated(apex, true);
+                builder.Add(apex, from.onTop.Oriented(TopAbs_FORWARD));
+                builder.Add(apex, from.onTop.Oriented(TopAbs_REVERSED));
+                builder.UpdateEdge(
+                    apex,
+                    uvLine(pi / 2, 0.0, 0.0, 1.0),
+                    round.surface,
+                    TopLoc_Location(),
+                    Precision::Confusion()
+                );
+                builder.Range(apex, 0.0, 1.0);
+                TopoDS_Wire wire;
+                builder.MakeWire(wire);
+                builder.Add(wire, from.mitre.Oriented(TopAbs_FORWARD));
+                builder.Add(wire, apex.Oriented(TopAbs_FORWARD));
+                builder.Add(wire, to.mitre.Oriented(TopAbs_REVERSED));
+                for (const auto& member : round.members) {
+                    builder.Add(
+                        wire,
+                        member.lowered.Oriented(member.along > 0 ? TopAbs_REVERSED : TopAbs_FORWARD)
+                    );
+                }
+                wire.Closed(true);
+                builder.MakeFace(round.face, round.surface, Precision::Confusion());
+                builder.Add(round.face, wire);
+                // Its natural normal points out of the material where it points away from the
+                // ball's centre
+                gp_Pnt at;
+                gp_Vec du;
+                gp_Vec dv;
+                round.surface->D1(pi / 4, 0.5, at, du, dv);
+                gp_Pnt centre = loop.point(
+                    round.tight->spine(pi / 4),
+                    -r + (r - round.tight->rho) * std::sin(pi / 4)
+                );
+                if (du.Crossed(dv).Dot(gp_Vec(centre, at)) < 0) {
+                    round.face.Reverse();
+                }
+                roundFaces.push_back(round.face);
+                for (const auto& member : round.members) {
+                    mapper.insert(MappingStatus::Generated, member.edge, round.face);
+                }
+                continue;
+            }
+            // The top edge, on the plane face at the depth r
+            Handle(Geom_Curve) topCurve;
+            Handle(Geom2d_Curve) topOnRound;
+            double atFrom = 0.0;
+            double atTo = 0.0;
+            if (round.curve.line) {
+                topCurve = new Geom_Line(
+                    round.origin.Translated(gp_Vec(loop.normal) * r),
+                    round.zAxis
+                );
+                auto along = [&](const gp_XY& p) {
+                    return gp_Vec(round.origin, loop.point(p, 0.0)).Dot(gp_Vec(round.zAxis));
+                };
+                atFrom = along(from.topPlan);
+                atTo = along(to.topPlan);
+                topOnRound = uvLine(pi / 2, 0.0, 0.0, 1.0);
+                if ((to.topPlan - from.topPlan).Dot(round.curve.direction) <= rimTolerance) {
+                    refuse("a rim round with no length");
+                }
+            }
+            else {
+                double radius = round.curve.radius(r);
+                if (radius <= rimTolerance) {
+                    refuse("a rim round with no length");
+                }
+                topCurve = new Geom_Circle(
+                    gp_Ax2(
+                        loop.point(round.curve.centre, 0.0),
+                        loop.normal,
+                        gp_Dir(loop.vector(round.xAxis))
+                    ),
+                    radius
+                );
+                atFrom = round.angle(from.topPlan);
+                atTo = round.angle(to.topPlan);
+                topOnRound = uvLine(0.0, pi / 2, 1.0, 0.0);
+                // Within one turn about the middle of the wall arc, and running the loop's way
+                double low = std::min(atFrom, atTo);
+                double high = std::max(atFrom, atTo);
+                if (low < 1e-6 || high > 2 * pi - 1e-6
+                    || round.curve.sense * (atTo - atFrom) <= 1e-9) {
+                    refuse("a rim round with no length");
+                }
+            }
+            round.topFirst = atFrom;
+            round.topLast = atTo;
+            const bool rising = atFrom < atTo;
+            // Where another loop of the plane face touches the top edge, both get a vertex
+            std::vector<std::pair<double, TopoDS_Vertex>> cuts;
+            {
+                RimPiece own;
+                own.line = round.curve.line;
+                own.p = from.topPlan;
+                own.q = to.topPlan;
+                if (!own.line) {
+                    own.centre = round.curve.centre;
+                    own.radius = round.curve.radius(r);
+                    own.sense = round.curve.sense;
+                    own.sweep = std::abs(atTo - atFrom);
+                }
+                const double scale = own.line ? 1.0 : own.radius;
+                for (const auto& other : others) {
+                    std::vector<gp_XY> touching;
+                    if (rimContacts(own, other.piece, touching)) {
+                        refuse("a rim round that runs into another loop of its plane face");
+                    }
+                    for (const auto& x : touching) {
+                        gp_Pnt point = loop.point(x, 0.0);
+                        double at = own.line
+                            ? gp_Vec(round.origin, point).Dot(gp_Vec(round.zAxis))
+                            : round.angle(x);
+                        if ((at - std::min(atFrom, atTo)) * scale < 1e-6
+                            || (std::max(atFrom, atTo) - at) * scale < 1e-6) {
+                            refuse("another loop of the plane face touches a rim round's top edge "
+                                   "at its end");
+                        }
+                        RimPinch pinch;
+                        pinch.edge = other.edge;
+                        pinch.wire = other.wire;
+                        pinch.onEdge = other.parameter(point);
+                        // The other loop stays on the plane face's side of the top edge: beside
+                        // the touch it is deeper behind this round's wall than r. From the
+                        // removed side (a hole in the band, at a reflex corner's run-on) its wall
+                        // would stand in the rounds, and no measure below would tell
+                        {
+                            BRepAdaptor_Curve curve(other.edge);
+                            const double step = 0.1 * (other.last - other.first);
+                            for (double beside : {pinch.onEdge - step, pinch.onEdge + step}) {
+                                if (beside < other.first || beside > other.last) {
+                                    continue;
+                                }
+                                gp_XY q = loop.plan(curve.Value(beside));
+                                const RimCurve& wall = round.curve;
+                                double depth = wall.line
+                                    ? (q - wall.point).Dot(wall.inward) / wall.inward.Modulus()
+                                    : -wall.convex * ((q - wall.centre).Modulus() - wall.rho);
+                                if (depth < r - 1e-6) {
+                                    refuse("another loop of the plane face touches a rim round's "
+                                           "top edge from the round's side");
+                                }
+                            }
+                        }
+                        TopoDS_Vertex forward;
+                        TopoDS_Vertex reversed;
+                        TopExp::Vertices(other.edge, forward, reversed);
+                        if ((pinch.onEdge - other.first) * other.scale() < 1e-6) {
+                            pinch.atEnd = true;
+                            pinch.vertex = forward;
+                        }
+                        else if ((other.last - pinch.onEdge) * other.scale() < 1e-6) {
+                            pinch.atEnd = true;
+                            pinch.vertex = reversed;
+                        }
+                        if (pinch.atEnd
+                            && (pinch.vertex.IsNull()
+                                || BRep_Tool::Pnt(pinch.vertex).Distance(point)
+                                    > BRep_Tool::Tolerance(pinch.vertex))) {
+                            refuse("another loop's vertex beside the top edge it touches");
+                        }
+                        // One vertex for one place: two edges of the other loop meet there
+                        bool known = false;
+                        for (const auto& cut : cuts) {
+                            if (std::abs(cut.first - at) * scale < 1e-6) {
+                                if (!pinch.atEnd || !cut.second.IsSame(pinch.vertex)) {
+                                    refuse("two loops of the plane face touch a rim round's top "
+                                           "edge in one place");
+                                }
+                                known = true;
+                            }
+                        }
+                        if (!pinch.atEnd) {
+                            for (const auto& earlier : pinches) {
+                                if (earlier.edge.IsSame(pinch.edge)
+                                    && std::abs(earlier.onEdge - pinch.onEdge) * other.scale() < 1e-6) {
+                                    refuse("two rim rounds' top edges touch another loop in one "
+                                           "place");
+                                }
+                            }
+                            pinch.vertex = rimVertex(point, 2e-6);
+                        }
+                        pinches.push_back(pinch);
+                        pinchedFaces.Add(loop.face);
+                        if (!known) {
+                            cuts.emplace_back(at, pinch.vertex);
+                        }
+                    }
+                }
+                std::sort(cuts.begin(), cuts.end(), [](const auto& a, const auto& b) {
+                    return a.first < b.first;
+                });
+            }
+            BRepAdaptor_Surface top(loop.face);
+            Handle(Geom2d_Curve) topOnFace = GeomAPI::To2d(topCurve, top.Plane());
+            {
+                double low = std::min(atFrom, atTo);
+                TopoDS_Vertex lowVertex = rising ? from.onTop : to.onTop;
+                cuts.emplace_back(std::max(atFrom, atTo), rising ? to.onTop : from.onTop);
+                for (const auto& cut : cuts) {
+                    TopoDS_Edge piece = rimEdge(topCurve, low, cut.first, lowVertex, cut.second);
+                    builder.UpdateEdge(
+                        piece,
+                        topOnRound,
+                        round.surface,
+                        TopLoc_Location(),
+                        Precision::Confusion()
+                    );
+                    builder.UpdateEdge(piece, topOnFace, loop.face, Precision::Confusion());
+                    round.tops.push_back(piece);
+                    low = cut.first;
+                    lowVertex = cut.second;
+                }
+                round.top = round.tops.front();
+            }
+            // The round's face: its natural normal points out of the material, so its wire runs
+            // counter-clockwise in its parameters. In the loop's direction: the lowered edges,
+            // the mitre at the round's end up, the top edge back, the mitre at its start down
+            auto cornerUV = [&](const RimVertex& corner, bool onTop) {
+                const gp_XY& p = onTop ? corner.topPlan : corner.plan;
+                double t = onTop ? pi / 2 : 0.0;
+                if (round.curve.line) {
+                    return gp_XY(
+                        t,
+                        gp_Vec(round.origin, loop.point(p, 0.0)).Dot(gp_Vec(round.zAxis))
+                    );
+                }
+                return gp_XY(round.angle(p), convex ? t : pi - t);
+            };
+            gp_XY quad[4]
+                = {cornerUV(from, false), cornerUV(to, false), cornerUV(to, true), cornerUV(from, true)};
+            double turn = 0.0;
+            for (int k = 0; k < 4; ++k) {
+                turn += quad[k].Crossed(quad[(k + 1) % 4]);
+            }
+            if (std::abs(turn) < 1e-12) {
+                refuse("a rim round with no area");
+            }
+            const bool flip = turn < 0;
+            auto oriented = [&](const TopoDS_Edge& edge, bool withLoop) {
+                return edge.Oriented(withLoop != flip ? TopAbs_FORWARD : TopAbs_REVERSED);
+            };
+            TopoDS_Wire wire;
+            builder.MakeWire(wire);
+            for (const auto& member : round.members) {
+                builder.Add(wire, oriented(member.lowered, member.along > 0));
+            }
+            builder.Add(wire, oriented(to.mitre, true));
+            for (const auto& piece : round.tops) {
+                builder.Add(wire, oriented(piece, !rising));
+            }
+            builder.Add(wire, oriented(from.mitre, false));
+            wire.Closed(true);
+            builder.MakeFace(round.face, round.surface, Precision::Confusion());
+            builder.Add(round.face, wire);
+            roundFaces.push_back(round.face);
+            for (const auto& member : round.members) {
+                mapper.insert(MappingStatus::Generated, member.edge, round.face);
+            }
+        }
+    }
+
+    // The other loops' edges, cut at the vertices where a top edge touches them. A loop touched
+    // in one place only would leave its plane face in one piece that meets itself there
+    for (size_t i = 0; i < pinches.size(); ++i) {
+        int places = 0;
+        for (size_t k = 0; k < pinches.size(); ++k) {
+            if (!pinches[k].wire.IsSame(pinches[i].wire)) {
+                continue;
+            }
+            bool repeated = false;
+            for (size_t j = 0; j < k; ++j) {
+                repeated = repeated
+                    || (pinches[j].wire.IsSame(pinches[i].wire)
+                        && pinches[j].vertex.IsSame(pinches[k].vertex));
+            }
+            places += repeated ? 0 : 1;
+        }
+        if (places < 2) {
+            refuse("another loop of the plane face touches the rim rounds' top edges in one place");
+        }
+        if (pinches[i].atEnd || splitInto.IsBound(pinches[i].edge)) {
+            continue;
+        }
+        const TopoDS_Edge& edge = pinches[i].edge;
+        std::vector<std::pair<double, TopoDS_Vertex>> cuts;
+        for (const auto& pinch : pinches) {
+            if (!pinch.atEnd && pinch.edge.IsSame(edge)) {
+                cuts.emplace_back(pinch.onEdge, pinch.vertex);
+            }
+        }
+        std::sort(cuts.begin(), cuts.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        TopoDS_Vertex forward;
+        TopoDS_Vertex reversed;
+        TopExp::Vertices(edge, forward, reversed);
+        BRepAdaptor_Curve curve(edge);
+        cuts.emplace_back(curve.LastParameter(), reversed);
+        double low = curve.FirstParameter();
+        TopoDS_Vertex lowVertex = forward;
+        TopTools_ListOfShape made;
+        for (const auto& cut : cuts) {
+            TopoDS_Edge piece = TopoDS::Edge(edge.EmptyCopied());
+            piece.Orientation(TopAbs_FORWARD);
+            builder.Add(piece, lowVertex.Oriented(TopAbs_FORWARD));
+            builder.Add(piece, cut.second.Oriented(TopAbs_REVERSED));
+            builder.Range(piece, low, cut.first);
+            made.Append(piece);
+            mapper.insert(MappingStatus::Modified, edge, piece);
+            low = cut.first;
+            lowVertex = cut.second;
+        }
+        splitInto.Bind(edge, made);
+    }
+
+    // No two top edges on one plane face meet but at an end they share: rounds of walls that are
+    // not neighbours would run through each other, and the measures below, which follow the same
+    // offsets, could not tell
+    TopTools_IndexedMapOfShape crossChecked;
+    for (const auto& first : loops) {
+        if (crossChecked.Contains(first.face)) {
+            continue;
+        }
+        crossChecked.Add(first.face);
+        std::vector<RimPiece> pieces;
+        for (const auto& loop : loops) {
+            if (!loop.face.IsSame(first.face)) {
+                continue;
+            }
+            const size_t n = loop.rounds.size();
+            for (size_t i = 0; i < n; ++i) {
+                const RimRound& round = loop.rounds[i];
+                if (round.tight) {
+                    continue;
+                }
+                RimPiece piece;
+                piece.line = round.curve.line;
+                piece.p = loop.corners[i].topPlan;
+                piece.q = loop.corners[(i + 1) % n].topPlan;
+                if (!piece.line) {
+                    piece.centre = round.curve.centre;
+                    piece.radius = round.curve.radius(r);
+                    piece.sense = round.curve.sense;
+                    piece.sweep = std::abs(round.topLast - round.topFirst);
+                }
+                pieces.push_back(piece);
+            }
+        }
+        for (size_t a = 0; a < pieces.size(); ++a) {
+            for (size_t b = a + 1; b < pieces.size(); ++b) {
+                if (rimPiecesCross(pieces[a], pieces[b])) {
+                    auto show = [](const RimPiece& piece) {
+                        return std::string(piece.line ? "line" : "arc R " + describe(piece.radius))
+                            + " (" + describe(piece.p.X()) + ", " + describe(piece.p.Y()) + ") to ("
+                            + describe(piece.q.X()) + ", " + describe(piece.q.Y()) + ")";
+                    };
+                    refuse("rim rounds that run into each other: " + show(pieces[a]) + " and "
+                           + show(pieces[b]));
+                }
+            }
+        }
+    }
+
+    // The base's faces: the plane faces and the walls rebuilt, the rest as they are
+    TopoDS_Shell shell;
+    builder.MakeShell(shell);
+    double topArea = 0.0;
+    double topAreaBefore = 0.0;
+    int faceCount = 0;
+    int pinchedPieces = 0;
+    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        ++faceCount;
+        std::vector<const RimLoop*> onTop;
+        for (const auto& loop : loops) {
+            if (loop.face.IsSame(face)) {
+                onTop.push_back(&loop);
+            }
+        }
+        bool touched = !onTop.empty();
+        for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More() && !touched; sub.Next()) {
+            touched = replaced.IsBound(sub.Current()) || splitInto.IsBound(sub.Current());
+        }
+        if (!onTop.empty()) {
+            // A plane face with a loop of its own is no other loop's wall
+            for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More(); sub.Next()) {
+                if (uprights.Contains(sub.Current())) {
+                    refuse("a plane face that is a rim and a wall");
+                }
+            }
+        }
+        if (!touched) {
+            builder.Add(shell, face);
+            continue;
+        }
+        if (onTop.empty()) {
+            // A wall: nothing else of it may reach into the round's height
+            for (const auto& loop : loops) {
+                bool mine = false;
+                for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More() && !mine; sub.Next()) {
+                    for (const auto& round : loop.rounds) {
+                        for (const auto& member : round.members) {
+                            mine = mine || member.edge.IsSame(sub.Current());
+                        }
+                    }
+                }
+                if (!mine) {
+                    continue;
+                }
+                for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More(); sub.Next()) {
+                    if (rimEdges.Contains(sub.Current()) || uprights.Contains(sub.Current())) {
+                        continue;
+                    }
+                    // (the edge's own points: its box's corners rise above an edge of a rim
+                    // whose plane is off the axes. Between 64 samples a circle or an ellipse
+                    // rises above the highest by under a hundredth of the samples' span)
+                    BRepAdaptor_Curve curve(TopoDS::Edge(sub.Current()));
+                    const bool straight = curve.GetType() == GeomAbs_Line;
+                    const int steps = straight ? 1 : 64;
+                    double highest = -std::numeric_limits<double>::max();
+                    double lowest = std::numeric_limits<double>::max();
+                    for (int k = 0; k <= steps; ++k) {
+                        gp_Pnt p = curve.Value(
+                            curve.FirstParameter()
+                            + (curve.LastParameter() - curve.FirstParameter()) * k / steps
+                        );
+                        const double height = gp_Vec(loop.origin, p).Dot(gp_Vec(loop.normal));
+                        highest = std::max(highest, height);
+                        lowest = std::min(lowest, height);
+                    }
+                    if (highest + (straight ? 0.0 : 0.01 * (highest - lowest))
+                        > -r - 1000 * rimTolerance) {
+                        refuse("a wall with an edge within the round's height");
+                    }
+                }
+            }
+        }
+        if (pinchedFaces.Contains(face)) {
+            // In the pieces its loops pinch off where they touch
+            std::vector<TopoDS_Face> pieces = rimPinched(face, splitInto, onTop);
+            topAreaBefore += areaOf(face);
+            for (const auto& piece : pieces) {
+                topArea += areaOf(piece);
+                mapper.insert(MappingStatus::Modified, face, piece);
+                builder.Add(shell, piece);
+            }
+            pinchedPieces += int(pieces.size()) - 1;
+            continue;
+        }
+        TopoDS_Face rebuilt = rimRebuilt(face, replaced, splitInto, onTop);
+        if (!onTop.empty()) {
+            topArea += areaOf(rebuilt);
+            topAreaBefore += areaOf(face);
+        }
+        mapper.insert(MappingStatus::Modified, face, rebuilt);
+        builder.Add(shell, rebuilt);
+    }
+    for (const auto& face : roundFaces) {
+        builder.Add(shell, face);
+    }
+    shell.Closed(true);
+    TopoDS_Solid solid;
+    builder.MakeSolid(solid);
+    builder.Add(solid, shell);
+    for (TopTools_DataMapOfShapeShape::Iterator it(replaced); it.More(); it.Next()) {
+        if (uprights.Contains(it.Key())) {
+            mapper.insert(MappingStatus::Modified, it.Key(), it.Value());
+        }
+    }
+
+    // The post-conditions: valid; as many faces as the base's and the rounds; the plane faces',
+    // the rounds' and the body's measures as the definition gives them
+    BRepCheck_Analyzer check(solid);
+    if (!check.IsValid()) {
+        // What fails, for the reason: each kind of sub-shape with its first status
+        std::string what;
+        for (TopAbs_ShapeEnum kind : {TopAbs_SHELL, TopAbs_FACE, TopAbs_WIRE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape subs;
+            TopExp::MapShapes(solid, kind, subs);
+            int bad = 0;
+            int status = 0;
+            for (int i = 1; i <= subs.Extent(); ++i) {
+                const Handle(BRepCheck_Result)& result = check.Result(subs(i));
+                if (result.IsNull()) {
+                    continue;
+                }
+                bool failed = false;
+                for (const auto& one : result->Status()) {
+                    if (one != BRepCheck_NoError) {
+                        failed = true;
+                        status = status ? status : int(one);
+                    }
+                }
+                for (result->InitContextIterator(); result->MoreShapeInContext();
+                     result->NextShapeInContext()) {
+                    for (const auto& one : result->StatusOnShape()) {
+                        if (one != BRepCheck_NoError) {
+                            if (!status && kind == TopAbs_EDGE
+                                && result->ContextualShape().ShapeType() == TopAbs_FACE) {
+                                BRepAdaptor_Curve c(TopoDS::Edge(subs(i)));
+                                BRepAdaptor_Surface f(TopoDS::Face(result->ContextualShape()));
+                                double f2 = 0.0;
+                                double l2 = 0.0;
+                                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(
+                                    TopoDS::Edge(subs(i)),
+                                    TopoDS::Face(result->ContextualShape()),
+                                    f2,
+                                    l2
+                                );
+                                what += " [edge curve " + std::to_string(int(c.GetType())) + " "
+                                    + describe(c.FirstParameter()) + ".." + describe(c.LastParameter())
+                                    + " on surface " + std::to_string(int(f.GetType()));
+                                if (!pc.IsNull()) {
+                                    gp_Pnt2d a = pc->Value(f2);
+                                    gp_Pnt2d b = pc->Value(l2);
+                                    what += " pcurve " + describe(f2) + ".." + describe(l2) + " ("
+                                        + describe(a.X()) + ", " + describe(a.Y()) + ") to ("
+                                        + describe(b.X()) + ", " + describe(b.Y()) + ") off "
+                                        + describe(f.Value(a.X(), a.Y()).Distance(c.Value(c.FirstParameter())))
+                                        + " / "
+                                        + describe(f.Value(b.X(), b.Y()).Distance(c.Value(c.LastParameter())));
+                                }
+                                what += "]";
+                            }
+                            failed = true;
+                            status = status ? status : int(one);
+                        }
+                    }
+                }
+                bad += failed ? 1 : 0;
+            }
+            if (bad) {
+                what += " " + std::to_string(bad) + " of kind " + std::to_string(int(kind))
+                    + " (status " + std::to_string(status) + ")";
+            }
+        }
+        refuse("the rim rounds' body is not valid:" + what);
+    }
+    int made = 0;
+    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+        ++made;
+    }
+    if (countSolids(solid) != 1 || made != faceCount + int(roundFaces.size()) + pinchedPieces) {
+        refuse("the rim rounds' body has the wrong faces");
+    }
+    double roundArea = 0.0;
+    for (const auto& face : roundFaces) {
+        double area = areaOf(face);
+        if (area <= 0.0) {
+            refuse("a rim round with no area");
+        }
+        roundArea += area;
+    }
+    if (std::abs(roundArea - expected.roundArea) > 1e-5 * expected.roundArea) {
+        refuse("the rim rounds' area " + describe(roundArea) + " differs from its closed form "
+               + describe(expected.roundArea));
+    }
+    // (the band is the difference of two measured areas, each good to about 1e-6 of itself: a
+    // rim of 916 arcs about a face of 21000 read 4e-7 of the face off)
+    if (std::abs((topAreaBefore - topArea) - expected.band)
+        > 1e-5 * expected.band + 1e-6 * topAreaBefore + expected.bandSlack) {
+        refuse("the plane faces lost " + describe(topAreaBefore - topArea) + " instead of "
+               + describe(expected.band));
+    }
+    double removed = -changedVolume(base, solid);
+    if (std::abs(removed - expected.volume) > 2e-4 * expected.volume + expected.volumeSlack) {
+        removed = volumeOf(base) - volumeOf(solid);
+    }
+    if (std::abs(removed - expected.volume) > 2e-4 * expected.volume + expected.volumeSlack) {
+        refuse("the rim rounds removed " + describe(removed) + " instead of "
+               + describe(expected.volume));
+    }
+    return solid;
+}
+
+}  // namespace
+
+bool constructRims(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::vector<TopoDS_Shape>& rest
+)
+{
+    rest.clear();
+    try {
+        if (request.kind != Kind::Fillet || request.size1 <= 0 || base.IsNull()) {
+            return false;
+        }
+        const double r = request.size1;
+        TopTools_IndexedMapOfShape selected;
+        for (const auto& edge : edges) {
+            selected.Add(edge);
+        }
+        // The wires of plane faces whose edges are all selected, each edge in one of them
+        TopTools_IndexedMapOfShape grouped;
+        std::vector<std::vector<TopoDS_Shape>> groups;
+        for (TopExp_Explorer faces(base, TopAbs_FACE); faces.More(); faces.Next()) {
+            if (BRepAdaptor_Surface(TopoDS::Face(faces.Current())).GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            for (TopoDS_Iterator wires(faces.Current()); wires.More(); wires.Next()) {
+                if (wires.Value().ShapeType() != TopAbs_WIRE) {
+                    continue;
+                }
+                std::vector<TopoDS_Shape> group;
+                bool whole = true;
+                for (TopoDS_Iterator it(wires.Value()); it.More() && whole; it.Next()) {
+                    whole = selected.Contains(it.Value()) && !grouped.Contains(it.Value());
+                    group.push_back(it.Value());
+                }
+                if (!whole || group.empty()) {
+                    continue;
+                }
+                for (const auto& edge : group) {
+                    grouped.Add(edge);
+                }
+                groups.push_back(std::move(group));
+            }
+        }
+        const size_t most = 64;
+        if (groups.empty() || groups.size() > most) {
+            return false;
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+        // Each loop that is in the builder's scope alone and with those taken before it; at the
+        // limit only (Request::limitOnly), those with a reflex corner with a circle
+        std::vector<TopoDS_Shape> taken;
+        std::vector<const std::vector<TopoDS_Shape>*> takenGroups;
+        size_t alone = 0;
+        for (const auto& group : groups) {
+            try {
+                std::vector<RimLoop> own = rimLoops(base, group, r, edgeFaces, vertexEdges);
+                if (request.limitOnly && !rimReflexCircle(own) && !rimTightArc(own)) {
+                    continue;
+                }
+                ++alone;
+                std::vector<TopoDS_Shape> trial = taken;
+                trial.insert(trial.end(), group.begin(), group.end());
+                rimLoops(base, trial, r, edgeFaces, vertexEdges);
+                taken = std::move(trial);
+                takenGroups.push_back(&group);
+            }
+            catch (const Refusal&) {
+            }
+            catch (const Standard_Failure&) {
+            }
+        }
+        if (taken.empty()) {
+            return false;
+        }
+        auto mapper = std::make_shared<ShapeMapper>();
+        int corners = 0;
+        Request direct = request;
+        direct.limitOnly = false;
+        TopoDS_Shape shape;
+        try {
+            shape = rimRounds(base, taken, direct, *mapper, corners);
+        }
+        catch (const Refusal& refusal) {
+            out.rimRefusal = refusal.reason;
+        }
+        catch (const Standard_Failure& e) {
+            out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();
+        }
+        catch (const Base::Exception& e) {
+            out.rimRefusal = e.what();
+        }
+        catch (const std::exception& e) {
+            out.rimRefusal = e.what();
+        }
+        const size_t fewLoops = 8;
+        if (shape.IsNull() && takenGroups.size() > 1 && takenGroups.size() <= fewLoops) {
+            // A loop that only the building refuses (its rounds, its mitres, its measures) does
+            // not take the others with it: the loops one after the other, each kept if the body
+            // with it is built
+            taken.clear();
+            for (const auto* group : takenGroups) {
+                std::vector<TopoDS_Shape> trial = taken;
+                trial.insert(trial.end(), group->begin(), group->end());
+                try {
+                    auto trialMapper = std::make_shared<ShapeMapper>();
+                    int trialCorners = 0;
+                    TopoDS_Shape built = rimRounds(base, trial, direct, *trialMapper, trialCorners);
+                    shape = built;
+                    mapper = trialMapper;
+                    corners = trialCorners;
+                    taken = std::move(trial);
+                }
+                catch (const Refusal&) {
+                }
+                catch (const Standard_Failure&) {
+                }
+            }
+        }
+        // Every loop that is in scope alone is in the body: one that is not (its rounds meet
+        // another loop's, or share a wall's edge with it) would be rounded on the body without
+        // the check of the rounds against each other, so the selection is then not split
+        size_t held = 0;
+        TopTools_IndexedMapOfShape inBody;
+        for (const auto& edge : taken) {
+            inBody.Add(edge);
+        }
+        for (const auto* group : takenGroups) {
+            held += inBody.Contains(group->front()) ? 1 : 0;
+        }
+        if (shape.IsNull() || held != alone) {
+            if (out.rimRefusal.empty()) {
+                out.rimRefusal = "rim loops that are not built together";
+            }
+            return false;
+        }
+        out.rimRefusal.clear();
+        TopTools_IndexedMapOfShape built;
+        for (const auto& edge : taken) {
+            built.Add(edge);
+        }
+        // The rest are edges of the body built: one that a round shortened (the edge down from a
+        // rim vertex) is not, and the selection is then not split
+        TopTools_IndexedMapOfShape kept;
+        TopExp::MapShapes(shape, TopAbs_EDGE, kept);
+        for (const auto& edge : edges) {
+            if (built.Contains(edge)) {
+                continue;
+            }
+            if (!kept.Contains(edge)) {
+                rest.clear();
+                out.rimRefusal = "a selected edge that a rim round shortens";
+                return false;
+            }
+            rest.push_back(edge);
+        }
+        out.shape = shape;
+        out.mapper = mapper;
+        out.edges = built.Extent();
+        out.corners = corners;
+        return true;
+    }
+    catch (const Refusal& refusal) {
+        out.rimRefusal = refusal.reason;
+    }
+    catch (const Standard_Failure& e) {
+        out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        out.rimRefusal = e.what();
+    }
+    catch (const std::exception& e) {
+        out.rimRefusal = e.what();
+    }
+    rest.clear();
+    return false;
+}
+
 bool construct(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
@@ -9676,6 +12509,34 @@ bool construct(
     std::string* reason
 )
 {
+    // Whole rim loops on plane faces are built directly, without a Boolean; whatever that
+    // refuses, or fails a check of its result, goes to the construction by Booleans below
+    try {
+        auto mapper = std::make_shared<ShapeMapper>();
+        int corners = 0;
+        TopoDS_Shape shape = rimRounds(base, edges, request, *mapper, corners);
+        TopTools_IndexedMapOfShape selected;
+        for (const auto& edge : edges) {
+            selected.Add(edge);
+        }
+        out.shape = shape;
+        out.mapper = mapper;
+        out.edges = selected.Extent();
+        out.corners = corners;
+        return true;
+    }
+    catch (const Refusal& refusal) {
+        out.rimRefusal = refusal.reason;
+    }
+    catch (const Standard_Failure& e) {
+        out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        out.rimRefusal = e.what();
+    }
+    catch (const std::exception& e) {
+        out.rimRefusal = e.what();
+    }
     std::string why;
     try {
         auto mapper = std::make_shared<ShapeMapper>();
@@ -9810,6 +12671,9 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
     TopoShape built(result);
     built.makeShapeWithElementMap(construction.shape, *construction.mapper, {base}, op);
     result = built;
+    if (!construction.rimRefusal.empty()) {
+        FC_LOG("rim rounds not built directly: " << construction.rimRefusal);
+    }
     FC_LOG("built exactly: " << construction.edges << " edges, " << construction.corners << " corners");
     Recorder::add(construction.edges, construction.corners, construction.rolledOn);
 }
