@@ -50,13 +50,16 @@ def outer_top_edges(shape):
 
 
 class LateBox:
-    """A PartDesign Python feature whose execute takes 0.6 s on the calling thread, then adds a cube"""
+    """A PartDesign Python feature whose execute computes for 0.6 s on the calling thread (CPU time,
+    which is what the limit counts where ops#743 is in; a sleep would not be), then adds a cube"""
 
     def __init__(self, obj):
         obj.Proxy = self
 
     def execute(self, obj):
-        time.sleep(0.6)
+        start = time.thread_time()
+        while time.thread_time() - start < 0.6:
+            pass
         box = Part.makeBox(4, 4, 4)
         obj.AddSubShape = box
         obj.Shape = box
