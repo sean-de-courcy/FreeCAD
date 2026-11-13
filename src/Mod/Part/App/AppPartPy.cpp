@@ -22,7 +22,11 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <chrono>
+#include <thread>
+
 #include <BRep_Builder.hxx>
+#include <Message_ProgressScope.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -488,6 +492,13 @@ public:
             "export(list,string) -- Export a list of objects into a single file."
         );
         add_varargs_method("read", &Module::read, "read(string) -- Load the file and return the shape.");
+        add_varargs_method(
+            "kernelBudgetTrial",
+            &Module::kernelBudgetTrial,
+            "kernelBudgetTrial(seconds, busy) -- For tests (FreeCAD-CH kernel safety, ops#743): under a "
+            "feature's time limit, one call on a worker that computes (busy) or sleeps for `seconds` on "
+            "the clock. Returns the limit's error, or an empty string when the call ended."
+        );
         add_varargs_method(
             "kernelBudget",
             &Module::kernelBudget,
@@ -996,6 +1007,41 @@ private:
 
         return Py::None();
     }
+    Py::Object kernelBudgetTrial(const Py::Tuple& args)
+    {
+        double seconds = 0.0;
+        PyObject* busy = Py_False;
+        if (!PyArg_ParseTuple(args.ptr(), "d|O!", &seconds, &PyBool_Type, &busy)) {
+            throw Py::Exception();
+        }
+        const bool compute = busy == Py_True;
+        KernelBudget::Scope scope(true);
+        try {
+            KernelBudget::run("The trial", [seconds, compute](const Message_ProgressRange& range) {
+                Message_ProgressScope progress(range, "The trial", 1);
+                const auto until = std::chrono::steady_clock::now()
+                    + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                       std::chrono::duration<double>(seconds)
+                    );
+                volatile double sum = 0.0;
+                while (std::chrono::steady_clock::now() < until && !progress.UserBreak()) {
+                    if (compute) {
+                        for (int i = 0; i < 100000; ++i) {
+                            sum = sum + i;
+                        }
+                    }
+                    else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                }
+            });
+        }
+        catch (const Base::CADKernelError& error) {
+            return Py::String(error.what());
+        }
+        return Py::String("");
+    }
+
     Py::Object kernelBudget(const Py::Tuple& args)
     {
         if (!PyArg_ParseTuple(args.ptr(), "")) {

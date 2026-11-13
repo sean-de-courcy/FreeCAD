@@ -42,11 +42,19 @@ class BRepCheck_Shell;
 namespace Part::KernelBudget
 {
 
-/** The limit, in seconds: "User parameter:BaseApp/Preferences/Mod/Part/General", float
- * "GeometryTimeLimit", default 60. 0 means no limit (Esc still works); a negative value runs the work on
- * the calling thread, as before the limit (no Esc), to measure what the worker costs.
+/** The limit, in seconds of CPU time: "User parameter:BaseApp/Preferences/Mod/Part/General", float
+ * "GeometryTimeLimit", default 300. 0 means no limit (Esc still works); a negative value runs the work
+ * on the calling thread, as before the limit (no Esc), to measure what the worker costs.
+ *
+ * What counts (ruling c758, ops#743): the CPU time of the thread that runs the feature, since its
+ * outermost Scope began, and of its workers, so other programs' load on the machine doesn't make a
+ * feature fail that an idle machine builds. Work in OCCT's thread pool, which a worker waits for,
+ * isn't counted: a backstop on the clock, wallBackstop times the limit, stops a hang there.
  */
 PartExport double limit();
+
+/// The clock's backstop for a feature's geometry: this many times the limit()
+constexpr double wallBackstop = 4.0;
 
 /** Runs work under the limit of the outermost Scope on this thread (a feature's recompute); outside
  * every Scope (a script, a command) there is no limit, only Esc.

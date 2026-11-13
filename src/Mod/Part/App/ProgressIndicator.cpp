@@ -40,6 +40,24 @@
 
 #include <QThread>
 
+#ifdef _WIN32
+# ifndef NOMINMAX
+#  define NOMINMAX
+# endif
+# ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+# endif
+# include <windows.h>
+#elif defined(__APPLE__)
+# include <mach/mach.h>
+# include <mach/thread_info.h>
+# include <pthread.h>
+# include <time.h>
+#else
+# include <pthread.h>
+# include <time.h>
+#endif
+
 #include <initializer_list>
 
 #include <BRepCheck_Analyzer.hxx>
@@ -131,6 +149,119 @@ namespace
 {
 using Clock = std::chrono::steady_clock;
 
+#ifdef _WIN32
+double fileTimeSeconds(const FILETIME& time)
+{
+    ULARGE_INTEGER value;
+    value.LowPart = time.dwLowDateTime;
+    value.HighPart = time.dwHighDateTime;
+    return static_cast<double>(value.QuadPart) * 1e-7;  // 100 ns units
+}
+
+double threadTimes(HANDLE thread)
+{
+    FILETIME created, ended, kernel, user;
+    if (!GetThreadTimes(thread, &created, &ended, &kernel, &user)) {
+        return 0.0;
+    }
+    return fileTimeSeconds(kernel) + fileTimeSeconds(user);
+}
+#endif
+
+/// The calling thread's own CPU time (user and kernel), in seconds; 0 where it can't be read
+double ownCpuSeconds()
+{
+#ifdef _WIN32
+    return threadTimes(GetCurrentThread());
+#else
+    timespec time {};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) != 0) {
+        return 0.0;
+    }
+    return static_cast<double>(time.tv_sec) + static_cast<double>(time.tv_nsec) * 1e-9;
+#endif
+}
+
+/// Another thread's CPU time, read while it runs: the worker opens it on itself (open()), the
+/// caller reads it (seconds())
+class ThreadCpuClock
+{
+public:
+    ThreadCpuClock() = default;
+    ThreadCpuClock(const ThreadCpuClock&) = delete;
+    ThreadCpuClock& operator=(const ThreadCpuClock&) = delete;
+    ThreadCpuClock(ThreadCpuClock&&) = delete;
+    ThreadCpuClock& operator=(ThreadCpuClock&&) = delete;
+    ~ThreadCpuClock()
+    {
+#ifdef _WIN32
+        if (handle) {
+            CloseHandle(handle);
+        }
+#endif
+    }
+    /// On the thread to read later
+    void open()
+    {
+#ifdef _WIN32
+        HANDLE own = nullptr;
+        if (DuplicateHandle(
+                GetCurrentProcess(),
+                GetCurrentThread(),
+                GetCurrentProcess(),
+                &own,
+                THREAD_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                0
+            )) {
+            handle = own;
+            ready.store(true, std::memory_order_release);
+        }
+#elif defined(__APPLE__)
+        port = pthread_mach_thread_np(pthread_self());
+        ready.store(port != MACH_PORT_NULL, std::memory_order_release);
+#else
+        ready.store(pthread_getcpuclockid(pthread_self(), &clock) == 0, std::memory_order_release);
+#endif
+    }
+    /// From another thread, while the thread runs; 0 before open()
+    double seconds() const
+    {
+        if (!ready.load(std::memory_order_acquire)) {
+            return 0.0;
+        }
+#ifdef _WIN32
+        return threadTimes(handle);
+#elif defined(__APPLE__)
+        thread_basic_info_data_t info {};
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(port, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count)
+            != KERN_SUCCESS) {
+            return 0.0;
+        }
+        return static_cast<double>(info.user_time.seconds + info.system_time.seconds)
+            + static_cast<double>(info.user_time.microseconds + info.system_time.microseconds)
+            * 1e-6;
+#else
+        timespec time {};
+        if (clock_gettime(clock, &time) != 0) {
+            return 0.0;
+        }
+        return static_cast<double>(time.tv_sec) + static_cast<double>(time.tv_nsec) * 1e-9;
+#endif
+    }
+
+private:
+    std::atomic<bool> ready {false};
+#ifdef _WIN32
+    HANDLE handle {nullptr};
+#elif defined(__APPLE__)
+    mach_port_t port {MACH_PORT_NULL};
+#else
+    clockid_t clock {};
+#endif
+};
+
 /// What the caller and the worker share; the worker frees the work's captures on its thread
 struct Call
 {
@@ -140,6 +271,18 @@ struct Call
     std::exception_ptr error;
     std::atomic<bool> cancel {false};
     std::function<void(const Message_ProgressRange&)> work;
+    // The worker's own CPU time: read through its clock while it runs, its total once it ends
+    ThreadCpuClock clock;
+    std::atomic<bool> ended {false};
+    double cpuAtEnd {0.0};
+
+    double cpuSeconds() const
+    {
+        if (ended.load(std::memory_order_acquire)) {
+            return cpuAtEnd;
+        }
+        return clock.seconds();
+    }
 };
 
 /// The worker's progress: no display (no GUI off the main thread), a cancel the caller sets
@@ -194,6 +337,11 @@ void sweep()
 
 thread_local int scopeDepth = 0;
 thread_local double scopeLimit = 0.0;
+// The limit is CPU time (ruling c758, ops#743): the calling thread's own since the outermost Scope
+// began, and its workers' own. Other programs' load doesn't count. Neither does work in OCCT's
+// thread pool, which a worker waits for: the wall clock's backstop stops a hang there
+thread_local double scopeCpuStart = 0.0;
+thread_local double scopeWorkerCpu = 0.0;
 thread_local Clock::time_point scopeDeadline;
 thread_local bool onWorker = false;
 // Why the outermost Scope's limit or Esc stopped a call, where one did (the first)
@@ -216,6 +364,7 @@ std::string seconds(double value)
 void runWorker(const std::shared_ptr<Call>& call)
 {
     onWorker = true;
+    call->clock.open();
     try {
         Handle(CancelIndicator) indicator = new CancelIndicator(call);
         call->work(indicator->Start());
@@ -225,6 +374,8 @@ void runWorker(const std::shared_ptr<Call>& call)
     }
     // The work's captures (makers, shapes) are freed here, on this thread
     call->work = nullptr;
+    call->cpuAtEnd = ownCpuSeconds();
+    call->ended.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(call->mutex);
         call->done = true;
@@ -237,13 +388,42 @@ bool waitFor(const std::shared_ptr<Call>& call, std::chrono::milliseconds time)
     std::unique_lock<std::mutex> lock(call->mutex);
     return call->finished.wait_for(lock, time, [&call]() { return call->done; });
 }
+
+/// The CPU time the outermost Scope on this thread has spent: this thread's since it began, and
+/// its ended workers'
+double scopeSpent()
+{
+    return std::max(0.0, ownCpuSeconds() - scopeCpuStart) + scopeWorkerCpu;
+}
+
+/// Whether the outermost Scope's limit has passed, with `running` CPU seconds of a worker still at
+/// work, or the wall clock's backstop
+bool scopeOverLimit(double running = 0.0)
+{
+    return scopeLimit > 0
+        && (scopeSpent() + running >= scopeLimit || Clock::now() >= scopeDeadline);
+}
+
+/// The limit that has passed, for the error: the CPU time, or the wall clock's backstop
+std::string limitText()
+{
+    // The computing time first: where both have passed, the work computed past its limit
+    if (scopeSpent() < scopeLimit && Clock::now() >= scopeDeadline) {
+        return seconds(wallBackstop * scopeLimit) + " s on the clock, " + seconds(wallBackstop)
+            + " times the time limit for one feature's geometry (Part preference GeometryTimeLimit, "
+            + seconds(scopeLimit) + " s of computing time)";
+    }
+    return seconds(scopeLimit)
+        + " s of computing time, the time limit for one feature's geometry (Part preference "
+          "GeometryTimeLimit)";
+}
 }  // namespace
 
 double limit()
 {
     const double value = App::GetApplication()
                              .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/General")
-                             ->GetFloat("GeometryTimeLimit", 60.0);
+                             ->GetFloat("GeometryTimeLimit", 300.0);
     // A limit no feature reaches is none (and its deadline would overflow the clock)
     if (!std::isfinite(value) || value > 1e6) {
         return 0.0;
@@ -259,9 +439,11 @@ Scope::Scope(bool timeLimited)
         // as a call outside any Scope (run())
         scopeLimit = timeLimited ? limit() : std::min(limit(), 0.0);
         scopeFired.clear();
+        scopeCpuStart = ownCpuSeconds();
+        scopeWorkerCpu = 0.0;
         scopeDeadline = Clock::now()
             + std::chrono::duration_cast<Clock::duration>(
-                            std::chrono::duration<double>(std::max(0.0, scopeLimit))
+                            std::chrono::duration<double>(wallBackstop * std::max(0.0, scopeLimit))
             );
     }
 }
@@ -278,7 +460,7 @@ std::string Scope::fired() const
 
 bool pastDeadline()
 {
-    return scopeDepth > 0 && !onWorker && scopeLimit > 0 && Clock::now() >= scopeDeadline;
+    return scopeDepth > 0 && !onWorker && scopeOverLimit();
 }
 
 bool inScope()
@@ -292,10 +474,9 @@ void stopIfPastDeadline(const char* what)
         return;
     }
     Base::CADKernelError error(
-        std::string(what ? what : "The geometry") + " could not start: the feature's geometry took longer than "
-        + seconds(scopeLimit)
-        + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit) already: "
-          "the feature is not built"
+        std::string(what ? what : "The geometry")
+        + " could not start: the feature's geometry took longer than " + limitText()
+        + " already: the feature is not built"
     );
     if (scopeFired.empty()) {
         scopeFired = error.what();
@@ -413,10 +594,7 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     sweep();
     const Clock::time_point started = Clock::now();
     const bool limited = seconds_ > 0;
-    const Clock::time_point deadline = scopeDeadline;
     const std::string name = what ? what : "The geometry";
-    const std::string limitText = seconds(seconds_)
-        + " s, the time limit for one feature's geometry (Part preference GeometryTimeLimit)";
     // Noted for the feature: whatever its code does with the exception, it fails (kernel-4)
     auto fire = [](Base::CADKernelError error) {
         if (scopeDepth > 0 && scopeFired.empty()) {
@@ -437,9 +615,9 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     if (Base::Sequencer().wasCanceled()) {
         throw stopped();
     }
-    if (limited && started >= deadline) {
+    if (limited && scopeOverLimit()) {
         throw limitStop(Base::CADKernelError(
-            name + " could not start: the feature's geometry took longer than " + limitText
+            name + " could not start: the feature's geometry took longer than " + limitText()
             + " already: the feature is not built"
         ));
     }
@@ -458,7 +636,7 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         try {
             waitProcessing(call, launcher, name, step, [&]() {
                 cancelled = Base::Sequencer().wasCanceled();
-                timeout = !cancelled && limited && Clock::now() >= deadline;
+                timeout = !cancelled && limited && scopeOverLimit(call->cpuSeconds());
                 return cancelled || timeout;
             });
         }
@@ -483,6 +661,9 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
                 ended = waitFor(call, sharedGrace);
             }
         }
+        if (scopeDepth > 0) {
+            scopeWorkerCpu += call->cpuSeconds();
+        }
         if (ended) {
             thread->wait();
             delete thread;
@@ -494,11 +675,14 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
             throw stopped();
         }
         throw limitStop(Base::CADKernelError(
-            name + " took longer than " + limitText + ", and was stopped: the feature is not built"
+            name + " took longer than " + limitText() + ", and was stopped: the feature is not built"
         ));
     }
     thread->wait();
     delete thread;
+    if (scopeDepth > 0) {
+        scopeWorkerCpu += call->cpuSeconds();
+    }
     if (call->error) {
         std::rethrow_exception(call->error);
     }

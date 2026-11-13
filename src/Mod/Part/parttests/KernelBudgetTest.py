@@ -62,8 +62,10 @@ class KernelBudgetTest(unittest.TestCase):
             self.params.SetFloat("GeometryTimeLimit", self.had)
         for doc in self.docs:
             FreeCAD.closeDocument(doc.Name)
-        # The abandoned workers end on their own (the fillet in about 1.6 s): none may be left
-        deadline = time.time() + 120
+        # The abandoned workers end on their own (the fillet in about 1.6 s): none may be left. On a
+        # machine run at full load by other programs (a run queue of 50) a worker gets about 5% of a
+        # core, and took over 120 s on the clock (ops#743)
+        deadline = time.time() + 400
         while Part.kernelBudget()["abandonedRunning"] and time.time() < deadline:
             time.sleep(0.2)
         self.assertEqual(Part.kernelBudget()["abandonedRunning"], 0)
@@ -83,7 +85,49 @@ class KernelBudgetTest(unittest.TestCase):
 
     def testDefaultLimit(self):
         self.params.RemFloat("GeometryTimeLimit")
-        self.assertEqual(Part.kernelBudget()["limit"], 60.0)
+        self.assertEqual(Part.kernelBudget()["limit"], 300.0)
+
+    def testComputingPastTheLimitStops(self):
+        """ops#743 (ruling c758): the limit is CPU time. A call that computes for 20 s under a
+        0.5 s limit stops at about the limit, saying it was computing time"""
+        self.setLimit(0.5)
+        start = time.perf_counter()
+        error = Part.kernelBudgetTrial(20.0, True)
+        elapsed = time.perf_counter() - start
+        self.assertIn("took longer than 0.5 s of computing time", error)
+        self.assertIn("GeometryTimeLimit", error)
+        self.assertLess(elapsed, 10.0)
+
+    def testWaitingPastTheLimitIsNotRefused(self):
+        """ops#743 (ruling c758): a call whose time on the clock passes the limit while its own
+        CPU time stays under it (a machine busy with other work: here the call sleeps) ends, and
+        the feature isn't refused"""
+        self.setLimit(0.5)
+        start = time.perf_counter()
+        error = Part.kernelBudgetTrial(1.2, False)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(error, "")
+        self.assertGreaterEqual(elapsed, 1.2)
+
+    def testComputingPastTheLimitNamesComputingTime(self):
+        """ops#743 (review N1): a call that computes past the limit and past the clock's backstop
+        too (a 0.05 s limit: the backstop is 0.2 s, and the stop takes longer) names the computing
+        time"""
+        self.setLimit(0.05)
+        error = Part.kernelBudgetTrial(20.0, True)
+        self.assertIn("of computing time, the time limit", error)
+        self.assertNotIn("on the clock", error)
+
+    def testWaitingPastTheBackstopStops(self):
+        """ops#743: a call that waits (as a worker does for OCCT's thread pool, whose CPU time isn't
+        counted) stops at four times the limit on the clock"""
+        self.setLimit(0.25)
+        start = time.perf_counter()
+        error = Part.kernelBudgetTrial(20.0, False)
+        elapsed = time.perf_counter() - start
+        self.assertIn("1 s on the clock, 4 times the time limit", error)
+        self.assertGreaterEqual(elapsed, 1.0)
+        self.assertLess(elapsed, 10.0)
 
     def testFilletOverTheLimitFails(self):
         doc, body = self.lid(2400)
