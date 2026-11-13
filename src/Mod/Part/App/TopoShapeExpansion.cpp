@@ -7764,7 +7764,7 @@ struct DressUpOutcome
     bool thin {false};
     bool invalid {false};
     /// A chamfer or fillet whose edge ends in a cusp (FilletFallback::endsInCusp()): the exact
-    /// construction first, OCCT's result where it refuses
+    /// construction first; where it refuses, OCCT's chamfer stands and a fillet fails
     bool cusp {false};
     /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
     /// edges (FilletFallback::endsInOverflow()): the exact construction, or an error
@@ -7915,7 +7915,7 @@ TopoShape& TopoShape::makeElementFillet(
         // Naming it failed: OCCT, as without the preference
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
     }
-    // At a cusp OCCT built: where the construction refuses, its result stands only if it passes below
+    // At a cusp OCCT built: where the construction refuses, the fillet fails (below)
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns || outcome->cusp) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
@@ -7926,30 +7926,23 @@ TopoShape& TopoShape::makeElementFillet(
         if (outcome->thin) {
             raiseThinFaceError("The fillet", outcome->reason);
         }
-        if (outcome->cusp && !outcome->invalid && !outcome->turns) {
-            // At a cusp OCCT's valid result can be the wrong round (CU5: 58.46 taken, or 126.30
-            // added, for 2.922055): it stands only within its edges' whole tools
-            std::string why;
-            if (!FilletFallback::withinWholeTools(
-                    input.getShape(),
-                    mkFillet->Shape(),
-                    edgeShapes,
-                    request,
-                    why
-                )) {
-                FC_THROWM(
-                    Base::CADKernelError,
-                    "The fillet's edge ends in a cusp, where OCCT's round is not to be trusted ("
-                        << why << "), and its exact construction refused: " << outcome->reason
-                );
-            }
-        }
         if (outcome->turns) {
             // OCCT's ends there aren't Onshape's: never returned silently (decision 150)
             FC_THROWM(
                 Base::CADKernelError,
                 "The fillet's tangent chain turns from concave to convex at a vertex of 4 edges, "
                 "where OCCT's ends differ from Onshape's; its exact construction refused: "
+                    << outcome->reason
+            );
+        }
+        if (outcome->cusp) {
+            // At a cusp OCCT's valid result can be the wrong round (CU5: 58.46 taken, or 126.30
+            // added, for 2.922055; at r 2, 4.877 taken for 11.187), and no bound on its volume
+            // tells the right one from those: never kept (ops#748)
+            FC_THROWM(
+                Base::CADKernelError,
+                "The fillet's edge ends in a cusp, where OCCT's round is not to be trusted, and its "
+                "exact construction refused: "
                     << outcome->reason
             );
         }

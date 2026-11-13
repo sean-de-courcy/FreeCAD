@@ -3126,14 +3126,32 @@ class CuspTest(unittest.TestCase):
                         self.assertAlmostEqual(shape.Area - result.Area, 5.057250, delta=1e-5)
                         self.assertAlmostEqual(sum(f.Area for f in tori), 20.915168, delta=1e-5)
 
-    def testACuspRoundTheConstructionRefusesIsCheckedOrFails(self):
+    def cuspRound(self, shape, r, slab):
+        """The round of the rim by other Booleans: its spandrel turned a whole turn about the
+        tunnel's axis, kept inside the slab; the volume it takes from the shape"""
+        V = FreeCAD.Vector
+        centre = V(15 - r, 0, 15 + r)
+        middle = centre + V(1, 0, -1).normalize() * r
+        spandrel = Part.Face(
+            Part.Wire(
+                [
+                    Part.makeLine(V(15, 0, 15), V(15 - r, 0, 15)),
+                    Part.Arc(V(15 - r, 0, 15), middle, V(15, 0, 15 + r)).toShape(),
+                    Part.makeLine(V(15, 0, 15 + r), V(15, 0, 15)),
+                ]
+            )
+        )
+        tool = spandrel.revolve(V(0, 0, 10), V(1, 0, 0), 360).common(slab)
+        return shape.Volume - shape.cut(tool).Volume
+
+    def testACuspRoundTheConstructionRefusesFails(self):
         """Where the construction refuses at a cusp (here: a second radius a thousandth larger,
-        'variable radius'), OCCT's valid result stands only within its edges' whole tools (ops#748). On
-        the slot with the tunnel's seam on the cusp, r 3 and r 4, OCCT builds a valid solid that is the
-        wrong round (109.45 and 137.75 taken, for whole tools of 34.40 and 63.57): the fillet fails.
-        (At smaller radii OCCT's two-radius fillet fails or is invalid there, and never gets this far.)
+        'variable radius'), OCCT's valid result is never kept (ops#748): no bound on its volume tells
+        the right round from the wrong ones. On the slot with the tunnel's seam on the cusp, r 3 and
+        r 4, OCCT's is wrong (109.45 and 137.75 taken, for whole tools of 34.40 and 63.57). (At
+        smaller radii OCCT's two-radius fillet fails or is invalid there, and never gets this far.)
         On an arch (a bore through a rib exactly as wide as it: the material lies between the tangent
-        side faces) OCCT's round is the right one, and stands"""
+        side faces) OCCT's round is the right one, and the fillet fails all the same: debt"""
         V = FreeCAD.Vector
         shape, rim = self.slot(V(0, 1, 0))
         for r in (3.0, 4.0):
@@ -3148,25 +3166,50 @@ class CuspTest(unittest.TestCase):
             if e.Curve.TypeId == "Part::GeomCircle" and abs(e.BoundBox.XMin - 15) < 1e-7 and abs(e.BoundBox.XMax - 15) < 1e-7
         ]
         self.assertTrue(rim)
-        for r in (1.0, 0.5, 2.0):
-            with self.subTest(arch=r):
-                centre = V(15 - r, 0, 15 + r)
-                middle = centre + V(1, 0, -1).normalize() * r
-                spandrel = Part.Face(
-                    Part.Wire(
-                        [
-                            Part.makeLine(V(15, 0, 15), V(15 - r, 0, 15)),
-                            Part.Arc(V(15 - r, 0, 15), middle, V(15, 0, 15 + r)).toShape(),
-                            Part.makeLine(V(15, 0, 15 + r), V(15, 0, 15)),
-                        ]
-                    )
-                )
-                tool = spandrel.revolve(V(0, 0, 10), V(1, 0, 0), 360)
-                expected = arch.Volume - arch.cut(tool).Volume
-                result = arch.makeFillet(r, r * 1.001, rim)
-                self.assertTrue(result.isValid())
-                # the second radius is a thousandth larger: the round's volume within a hundredth
-                self.assertAlmostEqual(arch.Volume - result.Volume, expected, delta=0.01 * expected)
+        with self.assertRaises(Exception) as raised:
+            arch.makeFillet(1.0, 1.001, rim)
+        self.assertIn("cusp", str(raised.exception))
+
+    def testAnUnderRemovingRoundNeverStands(self):
+        """OCCT's round at a cusp can also take too little, in a valid solid: on the slot with the seam
+        below, r 2, it takes 4.877 for the right 11.187; on a slot that is wider on one side (a cusp at
+        one end of the rim, the slot's floor at the other), seam on top, r 2, 7.946 for 12.938. Whatever
+        the construction does there, the result is the right round or the fillet fails (ops#748)"""
+        V = FreeCAD.Vector
+        shape, rim = self.slot(V(0, 0, -1))
+        block = Part.makeBox(30, 30, 20, V(0, -15, 0))
+        tunnel = Part.makeCylinder(5, 32, V(-1, 0, 10), V(1, 0, 0))
+        # turn the tunnel about its axis until its seam (a line edge) lies on top
+        line = [e for e in tunnel.Edges if e.Curve.TypeId == "Part::GeomLine"][0]
+        p = line.Vertexes[0].Point
+        now = V(0, p.y, p.z - 10)
+        seam = V(0, 0, 1)
+        tunnel.rotate(V(0, 0, 10), V(1, 0, 0), math.degrees(math.atan2(now.cross(seam).x, now.dot(seam))))
+        wide = block.cut(tunnel).cut(Part.makeBox(16, 13, 11, V(15, -5, 10)))
+        wide_rim = [
+            e
+            for e in wide.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.BoundBox.XMin - 15) < 1e-7
+            and abs(e.BoundBox.XMax - 15) < 1e-7
+            and e.BoundBox.ZMin > 10 - 1e-7
+        ]
+        self.assertTrue(wide_rim)
+        cases = (
+            ("slot", shape, rim, Part.makeBox(30, 10, 20, V(0, -5, 10))),
+            ("one side", wide, wide_rim, Part.makeBox(30, 30, 20, V(0, -5, 10))),
+        )
+        for name, body, edges, slab in cases:
+            for r in (2.0, 1.0):
+                with self.subTest(case=name, r=r):
+                    expected = self.cuspRound(body, r, slab)
+                    try:
+                        result = body.makeFillet(r, edges)
+                    except Exception as refusal:
+                        self.assertIn("cusp", str(refusal))
+                        continue
+                    self.assertTrue(result.isValid())
+                    self.assertAlmostEqual(body.Volume - result.Volume, expected, delta=2e-4)
 
     def testStripEndingOnAnElbow(self):
         """Case Base #76 as built: the tunnel ends 3 behind the end wall in an elbow turning up, and
