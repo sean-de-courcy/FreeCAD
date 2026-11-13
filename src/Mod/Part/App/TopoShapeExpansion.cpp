@@ -8865,7 +8865,7 @@ TopoShape& TopoShape::makeElementFillet(
     }
     // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
     std::vector<TopoShape> inputEdges = edges;
-    const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
+    TopoShape input = FilletFallback::makerInput(shape, inputEdges);
     auto mkFillet = std::make_shared<BRepFilletAPI_MakeFillet>(input.getShape());
     for (auto& e : inputEdges) {
         mkFillet->Add(radius1, radius2, TopoDS::Edge(e.getShape()));
@@ -8970,6 +8970,30 @@ TopoShape& TopoShape::makeElementFillet(
             "part; its exact construction refused: "
                 << outcome->reason
         );
+    }
+    if (outcome->failed && !outcome->constructed && inputEdges.size() > 1) {
+        // FreeCAD-CH (Case Base #165): OCCT's walker can fail on a tangent chain by the edge its
+        // contour is seeded from (a chain's first listed edge): an ellipse seed then a line whose
+        // curve runs against the chain fails, the same chain seeded from the line builds. The
+        // selection is a set: once more with the edges in reverse order, on a fresh copy (the
+        // maker raised the first copy's tolerances), kept only if OCCT builds a usable result
+        std::vector<TopoShape> againEdges(edges.rbegin(), edges.rend());
+        TopoShape againInput = FilletFallback::makerInput(shape, againEdges);
+        auto again = std::make_shared<BRepFilletAPI_MakeFillet>(againInput.getShape());
+        for (auto& e : againEdges) {
+            again->Add(radius1, radius2, TopoDS::Edge(e.getShape()));
+        }
+        FilletFallback::Request againRequest = request;
+        againRequest.faceTolerances = FilletFallback::faceTolerances(againInput.getShape());
+        auto second
+            = buildDressUp(again, againInput, againEdges, againRequest, "The fillet", false, reflex);
+        if (!second->failed && !second->thin && !second->invalid && !second->turns
+            && !second->reflexFirst && second->wrongWay.empty() && !second->constructed) {
+            mkFillet = again;
+            input = againInput;
+            inputEdges = againEdges;
+            outcome = second;
+        }
     }
     if (outcome->preferred) {
         if (finishConstruction(*this, *outcome, input, op)) {
