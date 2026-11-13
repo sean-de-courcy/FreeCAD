@@ -541,7 +541,10 @@ AppExport bool isTwinName(std::string_view name, std::string_view other);
  * replaced by its content, and a list's reference to the empty name is emptied, as
  * NameTable::toPlain() does at the top level. A plain name is itself. Each section's fields
  * besides its name lists are the plain form's, at the cost of the name's own text instead of its
- * whole history's (ops#640); isTwinName() reads a reference as its content.
+ * whole history's (ops#640). isTwinName() takes plain names, these, or names as the map holds
+ * them, and answers as for their plain forms, reading a reference as its content. That holds
+ * for the names the encoder writes: a content ending in the escape character `^` is outside the
+ * grammar (no field ends in one), and its plain form would swallow the delimiter after it.
  */
 AppExport std::string ownSectionsOf(std::string_view name);
 

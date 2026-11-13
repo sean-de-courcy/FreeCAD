@@ -11685,7 +11685,19 @@ TEST(NameAncestry, twinKeyOfOwnSectionsIsThePlainForms)
         table.toInterned("F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ","),
         table.toInterned("F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;_;_"),
         table.toInterned("F1;,;7;MKR;1;E;_;_;,"),
+        // A reference where no reference stands for a name: a section's first field
+        ref(two) + ";_;7;MKR;1;E;_;_;_",
+        // A text as long as a reference that ends in the escape character: its `|` is no delimiter
+        "~" + std::string(Data::NameTable::RefLength - 2, 'a') + "^|"
+            + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),
+        // A section of two fields whose list ends in an empty entry
+        table.toInterned("F1;" + Data::MappedName::escapeString(h.edge1) + ","),
+        table.toInterned(two + "|F1;" + Data::MappedName::escapeString(h.edge1) + ","),
     };
+    // Not pinned, outside the grammar: a table content that ends in the escape character (`a;~X;c`
+    // with X = `x^`). The encoder ends no field in one (NameTable's splitTopLevel() relies on it),
+    // and the plain form would swallow the delimiter after the reference, which the own sections
+    // keep: the two keys differ there.
     for (const auto& name : names) {
         EXPECT_EQ(App::twinKeyForTesting(name, false), App::twinKeyForTesting(name, true)) << name;
         // The own sections of a name hold the plain form's fields besides its name lists
@@ -11724,6 +11736,11 @@ TEST(NameAncestry, twinNamesAsTheMapHoldsThem)
         "F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ",",
         "F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ","
             + Data::MappedName::escapeString(h.cyl),
+        // A list's trailing empty entry, with and without ORD: the table holds the entry as a
+        // reference to the empty name, which reads as the plain form's empty entry
+        "F1;_;_;MKR;1;E;_;ORD;" + Data::MappedName::escapeString(h.edge1) + ",",
+        "F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;_;_",
+        "F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;ORD;_",
     };
     for (const auto& a : names) {
         for (const auto& b : names) {
@@ -11740,9 +11757,11 @@ TEST(NameAncestry, twinNamesAsTheMapHoldsThem)
 
 TEST(NameAncestry, twinNamesOfADeepHistoryAreToldWithoutTheirPlainForms)
 {
-    // Forty generations, each name made from two of the generation before: a plain form holds
-    // 2^40 names. Two such names that differ by the ORD flag at the bottom are twins, and a third
-    // with another tag at the bottom is not: told through the references, where the two differ
+    // Forty generations, each name made from the name before it twice: a plain form holds 2^40
+    // names. Two such chains that differ by the ORD flag at the bottom are twins, and a third with
+    // another tag at the bottom is not. Told through the references: a pair of references found
+    // the same is kept, so each generation's pair is tested once, not once per pair above it
+    // (2^40 tests)
     auto& table = Data::NameTable::instance();
     HoledBend h;
     const auto stored = [&](const std::string& name) {
@@ -11753,24 +11772,52 @@ TEST(NameAncestry, twinNamesOfADeepHistoryAreToldWithoutTheirPlainForms)
                                                        : std::vector<std::string> {"GEN"};
         return stored(section({}, {stored(h.edge1), stored(h.cyl)}, tag, "CUT", 0, 'E', flags));
     };
-    const auto grown = [&](std::string name, const std::string& beside) {
+    const auto grown = [&](std::string name) {
         for (int generation = 0; generation < 40; ++generation) {
-            name = stored(section({}, {name, beside}, 100 + generation, "FLT", 0, 'E', {"GEN"}));
+            name = stored(section({}, {name, name}, 100 + generation, "FLT", 0, 'E', {"GEN"}));
         }
         return name;
     };
-    // The other parent of every generation: a history of its own, as deep
-    std::string beside = stored(h.cyl);
-    for (int generation = 0; generation < 40; ++generation) {
-        beside = stored(section({}, {beside, beside}, 200 + generation, "FUS", 0, 'F', {"MOD"}));
-    }
-    const std::string first = Data::ownSectionsOf(grown(bottom(11, false), beside));
-    const std::string second = Data::ownSectionsOf(grown(bottom(11, true), beside));
-    const std::string other = Data::ownSectionsOf(grown(bottom(12, false), beside));
+    const std::string first = grown(bottom(11, false));
+    const std::string second = grown(bottom(11, true));
+    const std::string other = grown(bottom(12, false));
+    // As the map holds them, and in their own sections
+    EXPECT_TRUE(Data::isTwinName(first, second));
+    EXPECT_TRUE(Data::isTwinName(Data::ownSectionsOf(second), Data::ownSectionsOf(first)));
+    EXPECT_FALSE(Data::isTwinName(first, other));
+    EXPECT_FALSE(Data::isTwinName(Data::ownSectionsOf(first), Data::ownSectionsOf(other)));
+    EXPECT_FALSE(Data::isTwinName(first, first));
+    EXPECT_EQ(App::twinKeyForTesting(first, false), App::twinKeyForTesting(second, false));
+}
+
+TEST(NameAncestry, twinNamesTheTableLearnsLaterAreTwins)
+{
+    // Two names that each embed a reference the table doesn't know are no twins; once the table
+    // holds the two contents, which are twins, they are: a no isn't kept
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto stored = [&](const std::string& name) {
+        return Data::NameTable::makeRef(*table.intern(name));
+    };
+    const auto below = [&](bool ordered) {
+        const std::vector<std::string> flags = ordered ? std::vector<std::string> {"GEN", "ORD"}
+                                                       : std::vector<std::string> {"GEN"};
+        return section({}, {stored(h.edge1), stored(h.cyl)}, 987651, "CUT", 0, 'E', flags);
+    };
+    const auto notYet = [&](const std::string& content) {
+        return Data::NameTable::makeRef(table.idOf(content));
+    };
+    ASSERT_FALSE(table.lookup(table.idOf(below(false))).has_value());
+    ASSERT_FALSE(table.lookup(table.idOf(below(true))).has_value());
+    const auto above = [&](const std::string& reference) {
+        return stored(section({}, {reference, stored(h.cyl)}, 987652, "FLT", 0, 'E', {"GEN"}));
+    };
+    const std::string first = above(notYet(below(false)));
+    const std::string second = above(notYet(below(true)));
+    EXPECT_FALSE(Data::isTwinName(first, second));
+    EXPECT_FALSE(Data::isTwinName(first, second));
+    table.intern(below(false));
+    table.intern(below(true));
     EXPECT_TRUE(Data::isTwinName(first, second));
     EXPECT_TRUE(Data::isTwinName(second, first));
-    EXPECT_FALSE(Data::isTwinName(first, other));
-    EXPECT_FALSE(Data::isTwinName(first, first));
-    EXPECT_EQ(App::twinKeyForTesting(grown(bottom(11, false), beside), false),
-              App::twinKeyForTesting(grown(bottom(11, true), beside), false));
 }

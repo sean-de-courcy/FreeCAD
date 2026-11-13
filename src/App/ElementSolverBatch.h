@@ -326,7 +326,8 @@ AppExport bool elementUpToFaces(
  */
 /// For tests: the key elementTwinCentroid() gives \a name before it tests a twin, from its plain
 /// form (\a plain) or from its own sections (Data::ownSectionsOf()), which the walk reads. The two
-/// are equal for every name the table can hold.
+/// are equal for every name the encoder writes (not for a content ending in the escape character,
+/// which is outside the grammar: Data::ownSectionsOf()).
 AppExport std::string twinKeyForTesting(const std::string& name, bool plain);
 
 AppExport bool elementTwinCentroid(

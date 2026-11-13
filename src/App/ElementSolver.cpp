@@ -16,6 +16,7 @@
 #include <sstream>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <Base/Console.h>
@@ -1978,6 +1979,7 @@ std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
  * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
  */
 bool sameUpToOrder(std::string_view a, std::string_view b, bool top);
+bool sameSectionsUpToOrder(std::string_view a, std::string_view b, bool top);
 
 // The entries of \a text's name lists (a section's linked names and connected elements) that
 // are references to the empty name, emptied: the table interns an empty entry of a list of two or
@@ -2025,34 +2027,35 @@ std::string withEmptyEntries(const std::string& text)
     return out;
 }
 
-// sameUpToOrder() of two references, kept: twins differ at every level of their histories, and
-// each level's pair came up again under every pair above it. The table's entries never change,
-// so a pair's answer stays; the pairs are kept on the asking thread, up to a count.
+// sameUpToOrder() of two references. The pairs found the same are kept: twins differ at every
+// level of their histories, and each level's pair came up again under every pair above it (two
+// names made from the same two twins: 2^depth tests). Only a yes is kept, on the asking thread,
+// up to a count: it stays true whatever the table learns later (the table's entries never change
+// or go, and where a yes passed a reference the table doesn't know, both names held the same
+// one), while a no may have met such a reference, and turns yes once the table knows it. A no
+// ends the test at once at every level above it, so it needs no keeping.
 bool sameReferencesUpToOrder(std::string_view a, std::string_view b)
 {
     constexpr std::size_t limit = 1000000;
-    thread_local std::unordered_map<std::string, bool> known;
+    thread_local std::unordered_set<std::string> same;
     std::string key;
     key.reserve(a.size() + b.size());
     key.append(a);
     key.append(b);
-    if (const auto it = known.find(key); it != known.end()) {
-        return it->second;
+    if (same.find(key) != same.end()) {
+        return true;
     }
+    // A reference the table doesn't know stands for itself, as in the plain form
     const std::string ownA = ownSectionsOf(a);
     const std::string ownB = ownSectionsOf(b);
-    // A reference the table doesn't know stands for itself, as in the plain form: the two
-    // differ as texts, and neither has sections to compare
-    const bool unknown = ownA == a || ownB == b;
-    const bool same = !unknown && sameUpToOrder(ownA, ownB, false);
-    if (unknown) {
-        return same;  // not kept: the table may learn the reference later
+    if (ownA != ownB && !sameSectionsUpToOrder(ownA, ownB, false)) {
+        return false;
     }
-    if (known.size() >= limit) {
-        known.clear();
+    if (same.size() >= limit) {
+        same.clear();
     }
-    known.emplace(std::move(key), same);
-    return same;
+    same.insert(std::move(key));
+    return true;
 }
 
 bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
@@ -2071,19 +2074,24 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
     if (!top && isReference(a) && isReference(b)) {
         return sameReferencesUpToOrder(a, b);
     }
+    // Any other name with a reference in it: its own sections (a stored name's leading
+    // reference and its lists' references to the empty name read as toPlain() writes them)
     std::string ownA;
     std::string ownB;
-    if (!a.empty() && a.front() == NameTable::Marker) {
+    if (a.find(NameTable::Marker) != std::string_view::npos) {
         ownA = ownSectionsOf(a);
         a = ownA;
     }
-    if (!b.empty() && b.front() == NameTable::Marker) {
+    if (b.find(NameTable::Marker) != std::string_view::npos) {
         ownB = ownSectionsOf(b);
         b = ownB;
     }
-    if (a == b) {
-        return true;
-    }
+    return a == b || sameSectionsUpToOrder(a, b, top);
+}
+
+// sameUpToOrder() of two names in their own sections (or plain), section by section
+bool sameSectionsUpToOrder(std::string_view a, std::string_view b, bool top)
+{
     auto sectionsA = NameAncestry::splitSections(a);
     auto sectionsB = NameAncestry::splitSections(b);
     if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
