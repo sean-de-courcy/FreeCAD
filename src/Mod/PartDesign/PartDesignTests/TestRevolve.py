@@ -3987,6 +3987,147 @@ class TestRevolve(unittest.TestCase):
         disc = math.pi * r * r
         self._assertExactSolid(revolution, disc * 10 + disc * r * math.pi / 4)
 
+    # A rib's cap revolved about its edge on a tube wall (ops#640, threads 2 #30/#31). The tube is
+    # r 40 wall 2, z 0..20; the rib is the triangle (40, 5) (40, 15) (42, 10) in XZ turned 90 degrees
+    # about Z, so it ends in that triangle on y = 0, its edge on the wall's line x = 40, y = 0. The cap
+    # turned about that line towards y < 0 sweeps half a double cone: at height z a half disc of
+    # radius rho(z) centred on the wall's line. Its part inside the wall (r < 40) is half the lens
+    # the disc shares with the wall's circle, and nothing of it reaches the bore (r >= 38); turned
+    # all the way round, its other half lies in the rib or the wall. So both add the same volume.
+    _CAP_R = 40.0
+    _CAP_Z = (5.0, 10.0, 15.0)
+    _CAP_W = 2.0
+
+    def _capAddedVolume(self):
+        R, (z0, zm, _), w = self._CAP_R, self._CAP_Z, self._CAP_W
+
+        def outside(z):
+            rho = w * (z - z0) / (zm - z0)
+            if rho <= 0:
+                return 0.0
+            lens = (
+                rho * rho * math.acos(rho / (2 * R))
+                + R * R * math.acos(1 - rho * rho / (2 * R * R))
+                - 0.5 * rho * math.sqrt(4 * R * R - rho * rho)
+            )
+            return (math.pi * rho * rho - lens) / 2
+
+        n = 2000  # Simpson over z0..zm, doubled for the symmetric upper half
+        h = (zm - z0) / n
+        s = outside(z0) + outside(zm)
+        s += sum((4 if i % 2 else 2) * outside(z0 + i * h) for i in range(1, n))
+        return 2 * s * h / 3
+
+    def _capOnWallBody(self):
+        V = FreeCAD.Vector
+        R, (z0, zm, z1), w = self._CAP_R, self._CAP_Z, self._CAP_W
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        origin = {f.Role: f for f in body.Origin.OriginFeatures}
+        tube = body.newObject("Sketcher::SketchObject", "TubeSketch")
+        tube.AttachmentSupport = [(origin["XY_Plane"], "")]
+        tube.MapMode = "FlatFace"
+        tube.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), R))
+        tube.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), R - 2))
+        pad = body.newObject("PartDesign::Pad", "Tube")
+        pad.Profile = tube
+        pad.Length = 20
+        rib = body.newObject("Sketcher::SketchObject", "RibSketch")
+        rib.AttachmentSupport = [(origin["XZ_Plane"], "")]
+        rib.MapMode = "FlatFace"
+        corners = [V(R, z0, 0), V(R, z1, 0), V(R + w, zm, 0)]
+        for a, b in zip(corners, corners[1:] + corners[:1]):
+            rib.addGeometry(Part.LineSegment(a, b))
+        ribFeature = body.newObject("PartDesign::Revolution", "Rib")
+        ribFeature.Profile = rib
+        ribFeature.ReferenceAxis = (origin["Z_Axis"], [""])
+        ribFeature.Angle = 90
+        self.Doc.recompute()
+        self.assertTrue(ribFeature.isValid(), ribFeature.getStatusString())
+        return body, ribFeature, corners
+
+    def _assertCapAdds(self, rib, cap, added):
+        self.assertTrue(cap.isValid(), cap.getStatusString())
+        shape = cap.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.cut(rib.Shape).Volume, added, places=5)
+        self.assertAlmostEqual(rib.Shape.cut(shape).Volume, 0.0, places=6)
+
+    def testRevolutionAboutAxisAHairOffTheCapEdge(self):
+        """The rib's cap (its own sketch) revolved about a sketch line 1e-7 and 1e-6 inside the
+        wall's line, so the cap's edge lies within the kernel's resolution of the axis: half a turn
+        away from the rib, and a full turn. Off the edge's line, the cap revolved into a sliver round
+        the axis, and the fuse with the wall (which the axis touches along a line) was invalid; the
+        axis on the edge's line gives the cones' exact volume."""
+        V = FreeCAD.Vector
+        R, (z0, zm, z1), w = self._CAP_R, self._CAP_Z, self._CAP_W
+        body, rib, corners = self._capOnWallBody()
+        added = self._capAddedVolume()
+        for k, (offset, angle) in enumerate(((1e-7, 360), (1e-6, 360), (1e-6, 180), (0.0, 360))):
+            with self.subTest(offset=offset, angle=angle):
+                sketch = body.newObject("Sketcher::SketchObject", "CapSketch%d" % k)
+                sketch.AttachmentSupport = [(rib.Profile[0].AttachmentSupport[0][0], "")]
+                sketch.MapMode = "FlatFace"
+                for a, b in zip(corners, corners[1:] + corners[:1]):
+                    sketch.addGeometry(Part.LineSegment(a, b))
+                sketch.addGeometry(Part.LineSegment(V(R - offset, 0, 0), V(R - offset, 20, 0)), True)
+                cap = body.newObject("PartDesign::Revolution", "Cap%d" % k)
+                cap.Profile = sketch
+                cap.ReferenceAxis = (sketch, ["Axis0"])
+                cap.Angle = angle
+                cap.Reversed = True  # towards y < 0, away from the rib
+                cap.Refine = False
+                try:
+                    self.Doc.recompute()
+                    self._assertCapAdds(rib, cap, added)
+                finally:
+                    for obj in (cap, sketch):
+                        body.removeObject(obj)
+                        self.Doc.removeObject(obj.Name)
+                    self.Doc.recompute()
+
+    def testRevolutionOfCapFaceAboutDatumOffItsEdge(self):
+        """The rib's cap face itself as the profile, revolved about a datum line through points
+        0 to 1e-6 inside the face's edge on the wall at either end (as a line through the edge's two
+        vertices lies when they sit off its line within their tolerance), half a turn and a full
+        turn away from the rib. About the edge's line it adds the cones' volume."""
+        V = FreeCAD.Vector
+        R, (z0, _, z1), _ = self._CAP_R, self._CAP_Z, self._CAP_W
+        body, rib, _ = self._capOnWallBody()
+        added = self._capAddedVolume()
+        faces = [
+            i
+            for i, f in enumerate(rib.Shape.Faces)
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.CenterOfMass.y) < 1e-9
+            and abs(f.Area - 10.0) < 1e-9
+        ]
+        self.assertEqual(len(faces), 1)
+        k = 0
+        for ends in ((5e-7, 0.0), (0.0, 5e-7), (5e-7, 5e-7), (1e-6, 1e-6)):
+            for angle in (180, 360):
+                k += 1
+                with self.subTest(ends=ends, angle=angle):
+                    line = body.newObject("PartDesign::Line", "Axis%d" % k)
+                    line.MapMode = "Deactivated"
+                    p0, p1 = V(R - ends[0], 0, z0), V(R - ends[1], 0, z1)
+                    direction = (p1 - p0).normalize()
+                    line.Placement = FreeCAD.Placement(p0, FreeCAD.Rotation(V(0, 0, 1), direction))
+                    cap = body.newObject("PartDesign::Revolution", "CapFace%d" % k)
+                    cap.Profile = (rib, ["Face%d" % (faces[0] + 1)])
+                    cap.ReferenceAxis = (line, [""])
+                    cap.Angle = angle
+                    cap.Reversed = True  # towards y < 0, away from the rib
+                    cap.Refine = False
+                    try:
+                        self.Doc.recompute()
+                        self._assertCapAdds(rib, cap, added)
+                    finally:
+                        for obj in (cap, line):
+                            body.removeObject(obj)
+                            self.Doc.removeObject(obj.Name)
+                        self.Doc.recompute()
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")

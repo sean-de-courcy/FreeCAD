@@ -2435,6 +2435,70 @@ void certifyFirstContact(
     }
 }
 
+// The axis moved onto the line of a straight profile edge that lies on it (ops#640, threads 2 #30/#31):
+// both ends of the edge within the snap distance of the axis, which is 1e-5 mm (Parasolid's
+// resolution, so what Onshape takes as one line) or the edge's or its vertices' tolerance where
+// larger. Off by as little as 1e-7 mm, the edge revolved into a sliver surface round the axis, not
+// onto it, and where the axis lay on a face of the base (a thread's cap turned about its edge on the
+// wall, the axis through that edge's two vertices, which sat 6e-7 off its line) the fuse missed the
+// wall's intersection: the feature was refused as invalid, and the raw fuse could even be a valid
+// solid short of the added volume (0.04 of 10.56). Turned about the edge's own line, the same tool
+// fuses exactly. Further off (1e-3 mm) the fuse still goes wrong; that is no resolution matter and
+// is left as it is (decision 276: not plausible in real work). The longest such edge is
+// taken; the axis keeps its sense and its location's place along it. True when the axis moved.
+bool snapAxisToProfileEdge(const TopoDS_Shape& profile, gp_Pnt& pnt, gp_Dir& dir)
+{
+    constexpr double snapDistance = 1e-5;
+    const gp_Lin axis(pnt, dir);
+    std::optional<gp_Lin> best;
+    double bestLength = 0.0;
+    double bestOffset = 0.0;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(profile, TopAbs_EDGE, edges);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        const BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Line) {
+            continue;
+        }
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(edge, first, last);
+        double tolerance = std::max(snapDistance, BRep_Tool::Tolerance(edge));
+        for (const TopoDS_Vertex& vertex : {first, last}) {
+            if (!vertex.IsNull()) {
+                tolerance = std::max(tolerance, BRep_Tool::Tolerance(vertex));
+            }
+        }
+        const gp_Pnt start = curve.Value(curve.FirstParameter());
+        const gp_Pnt end = curve.Value(curve.LastParameter());
+        const double length = start.Distance(end);
+        if (length <= tolerance || axis.Distance(start) > tolerance || axis.Distance(end) > tolerance) {
+            continue;
+        }
+        if (length > bestLength) {
+            bestLength = length;
+            best = curve.Line();
+            bestOffset = std::max(axis.Distance(start), axis.Distance(end));
+        }
+    }
+    // An edge on the axis to rounding (a sketch line on it, the usual case) leaves the axis as it is
+    constexpr double onAxis = 1e-12;
+    if (!best || bestOffset <= onAxis) {
+        return false;
+    }
+    gp_Dir along = best->Direction();
+    if (along.Dot(dir) < 0.0) {
+        along.Reverse();
+    }
+    pnt = ElCLib::Value(ElCLib::Parameter(*best, pnt), *best);
+    dir = along;
+    return true;
+}
+
 // The curve parameters, in increasing order, where a profile edge touches the axis inside the
 // edge: within the edge's tolerance of the axis, and not within it of one of the edge's vertices.
 // A line touches the axis only at a vertex, lies on it, or crosses it (refused before).
@@ -2974,18 +3038,21 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         partShape2 = copies[5];
     }
 
-    const gp_Ax1 revolutionAxis(pnt, dir);
+    const gp_Ax1 startAxis(pnt, dir);
     const char* startType = StartType.getValueAsString();
     const double startAngle = std::strcmp(startType, "Profile plane") == 0 ? 0.0
         : std::strcmp(startType, "Offset") == 0 ? Base::toRadians(StartOffset.getValue())
                                                 : getStartReferenceAngle(
                                                       sketchshape,
                                                       StartReference,
-                                                      revolutionAxis,
+                                                      startAxis,
                                                       Base::toRadians(StartOffset.getValue()),
                                                       invObjLoc
                                                   );
-    sketchshape = rotateProfileToStart(sketchshape, revolutionAxis, startAngle);
+    sketchshape = rotateProfileToStart(sketchshape, startAxis, startAngle);
+    // A straight profile edge on the axis within the kernel's resolution: the axis is its line
+    snapAxisToProfileEdge(sketchshape.getShape(), pnt, dir);
+    const gp_Ax1 revolutionAxis(pnt, dir);
 
     // Check distance between sketchshape and axis - to avoid failures and crashes
     TopExp_Explorer xp;
