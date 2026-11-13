@@ -1334,6 +1334,45 @@ std::optional<Prepared> prepare(
     return prepared;
 }
 
+// Where the cut of a result by its base handed back a piece of more than half of the result (a
+// Boolean that failed silently), what the result adds measured by the volumes: an empty string if
+// nothing, a reason if something or if that can't be told. No value where the cut is plausible.
+std::optional<std::string> addedByVolumes(
+    const TopoDS_Shape& added,
+    const TopoDS_Shape& object,
+    const TopoDS_Shape& tool
+)
+{
+    const double whole = std::abs(MassProperties::volume(object, true));
+    bool failed = false;
+    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !failed; it.Next()) {
+        failed = std::abs(MassProperties::volume(it.Current())) > whole / 2;
+    }
+    if (!failed) {
+        return std::nullopt;
+    }
+    const std::string unchecked = "changes faces away from its edges in a way that can't be checked";
+    BRepAlgoAPI_Cut cut;
+    if (!runBoolean(cut, tool, object)) {
+        return unchecked;
+    }
+    double removed = 0.0;
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        const double piece = std::abs(MassProperties::volume(it.Current(), true));
+        if (piece > whole / 2) {
+            return unchecked;
+        }
+        removed += piece;
+    }
+    // V(object - tool) = V(object) - V(tool) + V(tool - object); the bound covers the adaptive
+    // integration of the whole solids (1e-6 of them) and of the removed slivers (1e-3)
+    const double gained = whole - std::abs(MassProperties::volume(tool, true)) + removed;
+    if (std::abs(gained) <= 1e-6 * whole + 1e-3 * removed) {
+        return std::string();
+    }
+    return unchecked;
+}
+
 // The material the result has that the base didn't, and why it is wrong, or an empty string
 std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const std::vector<TopoShape>& edges)
 {
@@ -1365,6 +1404,13 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
     BRepAlgoAPI_Cut cut;
     if (!runBoolean(cut, object, tool)) {
         return "changes faces away from its edges in a way that can't be checked";
+    }
+    // OCCT's cut of a result and a base that agree almost everywhere can fail silently and hand
+    // back the result itself (Case Base #103 on the replica: 1.8e5 mm3 "added" by a round that
+    // removes 14.4). No dress-up adds half of the result: where a piece is that large, what the
+    // result adds is measured by the volumes instead, V(result) - V(base) + V(base - result)
+    if (const auto byVolumes = addedByVolumes(cut.Shape(), object, tool)) {
+        return *byVolumes;
     }
     // A concave edge adds material in its corner, on the allowed faces: a piece of it that lies on
     // any other face of the base fills what that face bounded, and so does one that doesn't reach a

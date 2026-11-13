@@ -3777,21 +3777,7 @@ TopoDS_Shape constructUnderOverhang(
             BOPTools_AlgoTools::CorrectTolerances(rounded, TopTools_IndexedMapOfShape(), largest + 1e-4);
         }
         if (countSolids(rounded) != 1 || !BRepCheck_Analyzer(rounded).IsValid()) {
-            int pieceFaces = 0;
-            for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
-                ++pieceFaces;
-            }
-            Bnd_Box pieceBox;
-            BRepBndLib::Add(solid, pieceBox);
-            refuse("OCCT's round in front of the face its edge ends against is not a valid solid (DIAG solids "
-                   + std::to_string(countSolids(rounded)) + ", valid "
-                   + std::to_string(BRepCheck_Analyzer(rounded).IsValid()) + ", overhangs "
-                   + std::to_string(group.overhangs.size()) + ", piece solids "
-                   + std::to_string(countSolids(piece)) + ", piece faces " + std::to_string(pieceFaces)
-                   + ", piece valid " + std::to_string(BRepCheck_Analyzer(solid).IsValid())
-                   + ", piece top z " + describe(pieceBox.CornerMax().Z()) + ", low z "
-                   + describe(pieceBox.CornerMin().Z()) + ", contour "
-                   + std::to_string(request.contour.size()) + ")");
+            refuse("OCCT's round in front of the face its edge ends against is not a valid solid");
         }
         // What the round removes from the piece: the tool
         BRepAlgoAPI_Cut removal;
@@ -3803,12 +3789,7 @@ TopoDS_Shape constructUnderOverhang(
         );
         const Stage removed(removal.History(), group.tool);
         if (countSolids(group.tool) < 1 || !BRepCheck_Analyzer(group.tool).IsValid()) {
-            refuse("a round under an overhang removes no valid solid (DIAG solids "
-                   + std::to_string(countSolids(group.tool)) + ", valid "
-                   + std::to_string(BRepCheck_Analyzer(group.tool).IsValid()) + ", overhangs "
-                   + std::to_string(group.overhangs.size()) + ", piece solids "
-                   + std::to_string(countSolids(piece)) + ", round faces "
-                   + std::to_string(group.selected.size()) + ")");
+            refuse("a round under an overhang removes no valid solid");
         }
         // Adaptively: the tool is a sliver between free-form faces, and OCCT's default
         // integration of it is off by more than a percent (16.863 for 16.665 on the designed case)
@@ -4119,7 +4100,6 @@ bool construct(
         return true;
     }
     catch (const NoOverhang&) {
-        Base::Console().warning("DIAG overhang: does not apply\n");
     }
     catch (const Refusal& refusal) {
         second = refusal.reason;
@@ -4137,7 +4117,6 @@ bool construct(
         second = "an unknown exception";
     }
     if (!second.empty()) {
-        Base::Console().warning("DIAG overhang: %s\n", second.c_str());
         why += "; built in front of the face its edge ends against: " + second;
     }
     if (reason) {
