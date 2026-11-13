@@ -27,6 +27,8 @@
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepTools_ReShape.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GProp_GProps.hxx>
@@ -36,9 +38,11 @@
 #include <TColgp_Array2OfPnt.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Wire.hxx>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -150,26 +154,51 @@ TopoDS_Shape roundedBoxBase(double twist, TopoDS_Face& lid)
     return base;
 }
 
+/// Case Base #103's configuration, designed: the stadium under the twisted lid, cut off by the plane
+/// x = 10. Rounding the lid's edges on the plane wall, the half cylinder and the other plane wall
+/// gives a short blend, a long blend and a short blend; the short ones run out through the cut plane
+TopoDS_Shape runOutBase(double twist, TopoDS_Face& lid)
+{
+    TopoDS_Face whole;
+    TopoDS_Shape base = stadiumBase(twist, Lid::Spline, whole);
+    base = BRepAlgoAPI_Cut(base, BRepPrimAPI_MakeBox(gp_Pnt(10, -50, -10), 60, 100, 100).Shape()).Shape();
+    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+        if (BRep_Tool::Surface(TopoDS::Face(it.Current()))->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) {
+            lid = TopoDS::Face(it.Current());
+        }
+    }
+    return base;
+}
+
 struct Filleted
 {
     TopoDS_Shape shape;
     std::vector<TopoDS_Face> blends;
+    TopoDS_Face lid;  // as it is in the result
 };
 
-/// OCCT's fillet of the lid's edges, with the faces it generated
-Filleted occtFillet(const TopoDS_Shape& base, const TopoDS_Face& lid, double radius)
+/// OCCT's fillet of the lid's edges (those whose middle is at x below the limit), with the faces
+/// it generated
+Filleted occtFillet(const TopoDS_Shape& base, const TopoDS_Face& lid, double radius, double below = 1e9)
 {
     Filleted result;
     BRepFilletAPI_MakeFillet maker(base);
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(lid, TopAbs_EDGE, all);
     TopTools_IndexedMapOfShape edges;
-    TopExp::MapShapes(lid, TopAbs_EDGE, edges);
-    for (int i = 1; i <= edges.Extent(); ++i) {
-        maker.Add(radius, TopoDS::Edge(edges(i)));
+    for (int i = 1; i <= all.Extent(); ++i) {
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(all(i), properties);
+        if (properties.CentreOfMass().X() < below) {
+            edges.Add(all(i));
+            maker.Add(radius, TopoDS::Edge(all(i)));
+        }
     }
     maker.Build();
     if (!maker.IsDone()) {
         return result;
     }
+    result.lid = TopoDS::Face(maker.Modified(lid).First());
     for (int i = 1; i <= edges.Extent(); ++i) {
         for (TopTools_ListOfShape::Iterator it(maker.Generated(edges(i))); it.More(); it.Next()) {
             // (a contour's edges each list the contour's faces: the unit takes each once)
@@ -180,6 +209,67 @@ Filleted occtFillet(const TopoDS_Shape& base, const TopoDS_Face& lid, double rad
     }
     result.shape = maker.Shape();
     return result;
+}
+
+/// One contact edge on the lid, of a short blend, cut into four edges in a row (Case Base #103's
+/// blends have their wall side in four edges)
+void splitAContactEdge(Filleted& filleted)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(filleted.shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopoDS_Edge target;
+    for (const TopoDS_Face& blend : filleted.blends) {
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(blend, properties);
+        if (properties.CentreOfMass().X() < -15) {
+            continue;  // the long one, round the cylinder
+        }
+        for (TopExp_Explorer it(blend, TopAbs_EDGE); it.More() && target.IsNull(); it.Next()) {
+            for (TopTools_ListOfShape::Iterator face(edgeFaces.FindFromKey(it.Current())); face.More(); face.Next()) {
+                if (face.Value().IsSame(filleted.lid)) {
+                    target = TopoDS::Edge(it.Current());
+                }
+            }
+        }
+        if (!target.IsNull()) {
+            break;
+        }
+    }
+    ASSERT_FALSE(target.IsNull());
+    double first {};
+    double last {};
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(target, first, last);
+    const TopoDS_Edge forward = TopoDS::Edge(target.Oriented(TopAbs_FORWARD));
+    TopoDS_Vertex start;
+    TopoDS_Vertex end;
+    TopExp::Vertices(forward, start, end);
+    BRep_Builder builder;
+    TopoDS_Wire wire;
+    builder.MakeWire(wire);
+    TopoDS_Vertex previous = start;
+    double at = first;
+    const int pieces = 4;
+    for (int i = 1; i <= pieces; ++i) {
+        const double parameter = first + (last - first) * i / pieces;
+        TopoDS_Vertex next = end;
+        if (i < pieces) {
+            builder.MakeVertex(next, curve->Value(parameter), BRep_Tool::Tolerance(target));
+        }
+        TopoDS_Edge piece = TopoDS::Edge(forward.EmptyCopied());
+        builder.Add(piece, previous.Oriented(TopAbs_FORWARD));
+        builder.Add(piece, next.Oriented(TopAbs_REVERSED));
+        builder.Range(piece, at, parameter);
+        builder.Add(wire, piece);
+        previous = next;
+        at = parameter;
+    }
+    Handle(BRepTools_ReShape) reshape = new BRepTools_ReShape;
+    reshape->Replace(forward, wire);
+    filleted.shape = reshape->Apply(filleted.shape);
+    for (TopoDS_Face& blend : filleted.blends) {
+        blend = TopoDS::Face(reshape->Apply(blend));
+    }
+    ASSERT_TRUE(BRepCheck_Analyzer(filleted.shape).IsValid());
 }
 
 int count(const TopoDS_Shape& shape, TopAbs_ShapeEnum kind)
@@ -302,6 +392,64 @@ TEST_F(RollingBallBlendTest, seamAtTheTangentLineUnderAFlatLid)
     EXPECT_LT(report.residualAfter, 1e-6);
 }
 
+// Case Base #103's configuration: the two short blends run out through a plane of the base. The end
+// edges are the ball's surface cut by that plane, and their vertices stay on the plane and on the
+// base's edges between it and the walls
+TEST_F(RollingBallBlendTest, blendsRunningOutThroughAPlane)
+{
+    for (const double radius : {0.79375, 1.5, 3.0}) {
+        TopoDS_Face lid;
+        const TopoDS_Shape base = runOutBase(0.02, lid);
+        const Filleted occt = occtFillet(base, lid, radius, 9.9);
+        ASSERT_FALSE(occt.shape.IsNull());
+
+        const RB::Report report = RB::correct(occt.shape, occt.blends, radius);
+
+        ASSERT_EQ(report.outcome, RB::Outcome::Corrected) << report.reason;
+        EXPECT_EQ(report.faces, 3);
+        EXPECT_GT(report.residualBefore, 1e-4);
+        EXPECT_LT(report.residualAfter, 1e-6);
+        EXPECT_TRUE(BRepCheck_Analyzer(report.shape).IsValid());
+        EXPECT_EQ(count(report.shape, TopAbs_FACE), count(occt.shape, TopAbs_FACE));
+        EXPECT_EQ(count(report.shape, TopAbs_EDGE), count(occt.shape, TopAbs_EDGE));
+        EXPECT_EQ(count(report.shape, TopAbs_VERTEX), count(occt.shape, TopAbs_VERTEX));
+        ASSERT_EQ(report.blendFaces.size(), occt.blends.size());
+        // The vertices on the cut plane are on it still, and those on a plane wall too
+        int onPlane = 0;
+        for (TopExp_Explorer it(report.shape, TopAbs_VERTEX); it.More(); it.Next()) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+            if (std::fabs(point.X() - 10) < 1e-2) {
+                EXPECT_LT(std::fabs(point.X() - 10), 1e-9);
+                ++onPlane;
+            }
+            if (std::fabs(std::fabs(point.Y()) - 10) < 1e-2 && point.X() > -19) {
+                EXPECT_LT(std::fabs(std::fabs(point.Y()) - 10), 1e-9);
+            }
+        }
+        EXPECT_GE(onPlane, 4);
+    }
+}
+
+// A contact side in four edges in a row: the vertices between them slide onto the new contact curve
+TEST_F(RollingBallBlendTest, contactSideInSeveralEdges)
+{
+    const double radius = 0.79375;
+    TopoDS_Face lid;
+    const TopoDS_Shape base = runOutBase(0.02, lid);
+    Filleted occt = occtFillet(base, lid, radius, 9.9);
+    ASSERT_FALSE(occt.shape.IsNull());
+    splitAContactEdge(occt);
+
+    const RB::Report report = RB::correct(occt.shape, occt.blends, radius);
+
+    ASSERT_EQ(report.outcome, RB::Outcome::Corrected) << report.reason;
+    EXPECT_EQ(report.faces, 3);
+    EXPECT_LT(report.residualAfter, 1e-6);
+    EXPECT_TRUE(BRepCheck_Analyzer(report.shape).IsValid());
+    EXPECT_EQ(count(report.shape, TopAbs_EDGE), count(occt.shape, TopAbs_EDGE));
+    EXPECT_EQ(count(report.shape, TopAbs_VERTEX), count(occt.shape, TopAbs_VERTEX));
+}
+
 // Blends of exact form (cylinders and tori between planes and cylinders) are rolling balls already
 TEST_F(RollingBallBlendTest, exactFormsAreLeftAlone)
 {
@@ -316,7 +464,7 @@ TEST_F(RollingBallBlendTest, exactFormsAreLeftAlone)
     EXPECT_TRUE(report.shape.IsNull());
 }
 
-// A blend that ends on faces of the base is not recognised yet (session 2): OCCT's result stands
+// A blend of exact form that ends on faces of the base (a cylinder between planes): OCCT's result stands
 TEST_F(RollingBallBlendTest, aBlendEndingOnABaseFaceIsLeftAlone)
 {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(20, 10, 5).Shape();

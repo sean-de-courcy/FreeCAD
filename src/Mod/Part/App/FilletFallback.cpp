@@ -117,6 +117,7 @@
 
 #include "FilletFallback.h"
 #include "MassProperties.h"
+#include "RollingBallBlend.h"
 #include "TopoShapeMapper.h"
 
 FC_LOG_LEVEL_INIT("FilletFallback", true, true)
@@ -8712,7 +8713,7 @@ TopoDS_Shape constructUnderOverhang(
         if (!maker.IsDone()) {
             refuse("OCCT's round in front of the face its edge ends against failed");
         }
-        const TopoDS_Shape rounded = maker.Shape();
+        TopoDS_Shape rounded = maker.Shape();
         // OCCT's round can leave an edge it kept (here a STEP edge at 5.148e-3) a few microns out
         // of tolerance on its trimmed face; the Boolean below would raise it in place anyway. Raise
         // it first, up to the piece's own largest tolerance plus 1e-4, so the check sees the result
@@ -8729,6 +8730,30 @@ TopoDS_Shape constructUnderOverhang(
         }
         if (countSolids(rounded) != 1 || !BRepCheck_Analyzer(rounded).IsValid()) {
             refuse("OCCT's round in front of the face its edge ends against is not a valid solid");
+        }
+        // OCCT's blend is not a rolling ball where a wall is twisted (ops#640, decision 425): the
+        // piece's blend faces get the ball's geometry before the round becomes a tool, so what is
+        // cut from the base is the ball's. A recognised chain that cannot be corrected refuses.
+        std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> asBall;
+        {
+            std::vector<TopoDS_Face> faces;
+            for (const auto& pair : inPiece) {
+                for (const auto& blend : maker.Generated(pair.second)) {
+                    if (blend.ShapeType() == TopAbs_FACE) {
+                        faces.push_back(TopoDS::Face(blend));
+                    }
+                }
+            }
+            const RollingBallBlend::Report ball = RollingBallBlend::correct(rounded, faces, radius);
+            if (ball.outcome == RollingBallBlend::Outcome::Refused) {
+                refuse("a round's blend is not the surface of a rolling ball and its correction refused: " + ball.reason);
+            }
+            if (ball.outcome == RollingBallBlend::Outcome::Corrected) {
+                rounded = ball.shape;
+                for (size_t i = 0; i < faces.size(); ++i) {
+                    asBall.emplace_back(faces[i], ball.blendFaces[i]);
+                }
+            }
         }
         // What the round removes from the piece: the tool
         BRepAlgoAPI_Cut removal;
@@ -8772,7 +8797,13 @@ TopoDS_Shape constructUnderOverhang(
         }
         for (const auto& pair : inPiece) {
             for (const auto& blend : maker.Generated(pair.second)) {
-                for (const auto& face : removed.images(blend)) {
+                TopoDS_Shape now = blend;
+                for (const auto& corrected : asBall) {
+                    if (corrected.first.IsSame(blend)) {
+                        now = corrected.second;
+                    }
+                }
+                for (const auto& face : removed.images(now)) {
                     group.blends.emplace_back(pair.first, face);
                 }
             }
