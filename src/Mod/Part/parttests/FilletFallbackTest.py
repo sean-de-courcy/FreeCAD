@@ -2954,6 +2954,48 @@ class OverflowTest(unittest.TestCase):
             if not shape.isValid():
                 raise Part.OCCError("invalid")
 
+    def testRoundOverANarrowStripFailsTruthfully(self):
+        # A 100 x 100 x 2.6 plate, its outer top edges rounded r 1.5 (its top face ends 48.5 from
+        # the middle), with a rounded rectangle hole (corners r 5) whose long side lies `gap` from
+        # that round. One straight edge of the hole's top loop picked: OCCT's tangent chain runs
+        # round the whole loop. A round r 1 across a 0.06 strip would run onto the outer round,
+        # which neither OCCT nor the construction builds: the error says so, with the strip's
+        # width and the radius, and no longer blames the tangent chain (ops#640)
+        t = 2.6
+
+        def holed(gap):
+            plate = Part.makeBox(100, 100, t, V(-50, -50, 0))
+            plate = plate.makeFillet(1.5, edges_at(plate, t))
+            h = 2 * (48.5 - gap)
+            hole = Part.makeBox(50.6, h, t + 2, V(-39.3, -h / 2, -1))
+            hole = hole.makeFillet(5, [e for e in hole.Edges if e.BoundBox.ZLength > 1])
+            return plate.cut(hole).removeSplitter()
+
+        def hole_side(shape):
+            return [
+                e
+                for e in edges_at(shape, t)
+                if e.Curve.TypeId == "Part::GeomLine"
+                and abs(e.CenterOfMass.x + 39.3) < 1e-6
+                and abs(e.CenterOfMass.y) < 1e-6
+            ]
+
+        for gap in (3.0, 0.8):
+            with self.subTest(gap=gap):
+                shape = holed(gap)
+                result = shape.makeFillet(1, hole_side(shape))
+                self.assertTrue(result.isValid())
+                self.assertLess(result.Volume, shape.Volume)
+        shape = holed(0.06)
+        self.assertTrue(shape.makeFillet(0.5, hole_side(shape)).isValid())
+        with self.assertRaises(Part.OCCError) as caught:
+            shape.makeFillet(1, hole_side(shape))
+        message = str(caught.exception)
+        self.assertNotIn("tangent chain", message)
+        self.assertIn("round of radius 1 mm would overflow a strip of face 0.06 mm wide", message)
+        self.assertIn("onto the neighbouring round", message)
+
+
 def ring_corner(kind, size=10):
     """The native replica's Case Base #46, designed: a pocket's concave corner (x 0, y 0; floor z 2,
     top z 10) whose dress-up of the size is wider than the wall y 0 on its right: a ring (centre
