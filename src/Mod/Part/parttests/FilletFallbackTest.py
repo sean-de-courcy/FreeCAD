@@ -2205,6 +2205,51 @@ class OverflowTest(unittest.TestCase):
                 self.assertLessEqual(shape.BoundBox.XMax, 12 + 1e-6)
                 self.assertBuilt(shape, base.Volume + 20 * self.slotSection(kind, 6))
 
+    def testConcavePastItsFaceIntoARingIsClippedByTheRing(self):
+        # The native replica's Case Base #46 (ops#640), designed: a pocket's concave corner (x 0,
+        # y 0; floor z 2, top z 10) dressed up 10, wider than the wall y 0 on its right: a ring
+        # (centre (19, -1), R 15, r 12, z 4..10) stands 4.03 from the corner, and under it (z 2..4)
+        # the ring's well, cut from z 2, ends the wall at 7.04. Onshape clips the dress-up by the
+        # cylinder its strip reaches first: R 15 above the ring's underside, r 12 under it (#46,
+        # read off Onshape's own result), so nothing is added inside the well. The tool fused
+        # whole would leave a fin there
+        def cylinder(r, z0, z1):
+            return Part.makeCylinder(r, z1 - z0, V(19, -1, z0))
+
+        well = cylinder(12, 2, 10)
+        base = (
+            Part.makeBox(45, 60, 10, V(-5, -40, 0))
+            .cut(Part.makeBox(40, 40, 8, V(0, -40, 2)))
+            .fuse(cylinder(15, 4, 10))
+            .cut(well)
+            .removeSplitter()
+        )
+        edges = [edge_between(base, (0, 0, 2), (0, 0, 10))]
+        size = 10
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                if kind == "Fillet":
+                    arc = Part.ArcOfCircle(
+                        Part.Circle(V(size, -size, 2), V(0, 0, 1), size), math.pi / 2, math.pi
+                    ).toShape()
+                    rim = [
+                        Part.makeLine(V(0, 0, 2), V(size, 0, 2)),
+                        arc,
+                        Part.makeLine(V(0, -size, 2), V(0, 0, 2)),
+                    ]
+                else:
+                    rim = [
+                        Part.makeLine(V(0, 0, 2), V(size, 0, 2)),
+                        Part.makeLine(V(size, 0, 2), V(0, -size, 2)),
+                        Part.makeLine(V(0, -size, 2), V(0, 0, 2)),
+                    ]
+                prism = Part.Face(Part.Wire(rim)).extrude(V(0, 0, 8))
+                added = prism.cut(base).cut(cylinder(12, 1, 11)).Volume
+                shape = self.dressUp(kind, base, size, edges)
+                self.assertBuilt(shape, base.Volume + added)
+                self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
+                self.assertLess(shape.common(well).Volume, 1e-9)
+
 
 def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
     """A keyhole-shaped wall (the native replica's #15, designed): the opening is a disc r 6.35
