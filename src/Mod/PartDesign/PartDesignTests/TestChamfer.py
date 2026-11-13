@@ -478,7 +478,8 @@ class TestChamfer(unittest.TestCase):
     # angle. Q-TAPER: a block 20 x 20 x 5 with a pocket open at z = 0, its end walls x = 5 and
     # x = 15 square, its side walls leaning in by 6 degrees (bottom edges at 96 degrees).
 
-    def _taper_body(self, t=6):
+    def _taper_body(self, t=6, cut=None):
+        # cut: a shape also cut from the block (holes), before the edges are named
         k = math.tan(math.radians(t))
         V = FreeCAD.Vector
         block = Part.makeBox(20, 20, 5, V(0, -10, 0))
@@ -494,7 +495,8 @@ class TestChamfer(unittest.TestCase):
         pocket = Part.Face(section).extrude(V(10, 0, 0))
         body = self.Doc.addObject("PartDesign::Body", "Body")
         feature = self.Doc.addObject("Part::Feature", "Taper")
-        feature.Shape = block.cut(pocket).Solids[0]
+        solid = block.cut(pocket).Solids[0]
+        feature.Shape = solid.cut(cut).Solids[0] if cut else solid
         body.BaseFeature = feature
         self.Doc.recompute()
         base = body.BaseFeature
@@ -555,6 +557,25 @@ class TestChamfer(unittest.TestCase):
         chamfer.Base = (base, [e["side+"], e["end15"], e["side-"]])
         self.Doc.recompute()
         self._assertHole(chamfer, 5, 15 + 0.5 * math.tan(math.radians(48)), 3.5)
+
+    def testChamferChainBandOverAHoleKeepsTheWidth(self):
+        # Sides leaning in by 20 degrees (110-degree bottom edges) and a tapered side first: the
+        # ends get 0.5 tan 55 = 0.714074, whose band on the bottom face crosses a blind hole r 0.05
+        # centred 0.62 beyond each end edge, which OCCT fills. Built again with 0.5 on every edge
+        # (ruling A, review r1 T1), the band stops short of the hole: the hole stays open, and its
+        # point (4.38, 0, 0.2) lies above the chamfer plane either way, outside the result
+        V = FreeCAD.Vector
+        holes = Part.makeCylinder(0.05, 0.3, V(5 - 0.62, 0, 0)).fuse(
+            Part.makeCylinder(0.05, 0.3, V(15 + 0.62, 0, 0))
+        )
+        body, base, e = self._taper_body(t=20, cut=holes)
+        edges = [e["side+"], e["end5"], e["side-"], e["end15"]]
+        chamfer = self._add_chamfer(body, base, edges, 0.5)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        shape = chamfer.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertFalse(shape.isInside(V(5 - 0.62, 0, 0.2), 1e-9, True))
 
     def tearDown(self):
         # closing doc
