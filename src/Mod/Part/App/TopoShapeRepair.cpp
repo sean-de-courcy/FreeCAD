@@ -1331,42 +1331,50 @@ bool runBoolean(Boolean& boolean, const TopoDS_Shape& object, const TopoDS_Shape
 }
 
 // Where the cut of a result by its base handed back a piece of more than half of the result (a
-// Boolean that failed silently), what the result adds measured by the volumes: an empty string if
-// nothing, a reason if something or if that can't be told. No value where the cut is plausible.
-std::optional<std::string> addedByVolumes(
-    const TopoDS_Shape& added,
-    const TopoDS_Shape& object,
-    const TopoDS_Shape& tool
-)
+// Boolean that failed silently, or a fill that large), whether the volumes show that the result
+// adds nothing: V(result - base) = V(result) - V(base) + V(base - result). False where the cut is
+// plausible, where the volumes can't be measured, and where they show material added: the pieces
+// of the cut are then judged as they are.
+bool addsNothingByVolumes(const TopoDS_Shape& added, const TopoDS_Shape& object, const TopoDS_Shape& tool)
 {
+    // By the face counts first, which cost nothing: a cut that handed back the result holds its
+    // faces, and what a dress-up really adds has a few. The volumes are integrated adaptively
+    // (seconds to minutes on a free-form body) only for a piece that large
+    TopTools_IndexedMapOfShape objectFaces;
+    TopExp::MapShapes(object, TopAbs_FACE, objectFaces);
+    bool suspect = false;
+    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !suspect; it.Next()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(it.Current(), TopAbs_FACE, faces);
+        suspect = 2 * faces.Extent() > objectFaces.Extent();
+    }
+    if (!suspect) {
+        return false;
+    }
     const double whole = std::abs(MassProperties::volume(object, true));
     bool failed = false;
     for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !failed; it.Next()) {
         failed = std::abs(MassProperties::volume(it.Current())) > whole / 2;
     }
     if (!failed) {
-        return std::nullopt;
+        return false;
     }
-    const std::string unchecked = "changes faces away from its edges in a way that can't be checked";
     BRepAlgoAPI_Cut cut;
     if (!runBoolean(cut, tool, object)) {
-        return unchecked;
+        return false;
     }
     double removed = 0.0;
     for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
         const double piece = std::abs(MassProperties::volume(it.Current(), true));
         if (piece > whole / 2) {
-            return unchecked;
+            return false;
         }
         removed += piece;
     }
-    // V(object - tool) = V(object) - V(tool) + V(tool - object); the bound covers the adaptive
-    // integration of the whole solids (1e-6 of them) and of the removed slivers (1e-3)
+    // The bound covers the adaptive integration of the whole solids (1e-6 of them) and of the
+    // removed slivers (1e-3)
     const double gained = whole - std::abs(MassProperties::volume(tool, true)) + removed;
-    if (std::abs(gained) <= 1e-6 * whole + 1e-3 * removed) {
-        return std::string();
-    }
-    return unchecked;
+    return std::abs(gained) <= 1e-6 * whole + 1e-3 * removed;
 }
 
 // The images of a shape in a Boolean's result: none if it was deleted, the shape itself if it
@@ -1577,10 +1585,10 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
     }
     // OCCT's cut of a result and a base that agree almost everywhere can fail silently and hand
     // back the result itself (Case Base #103 on the replica: 1.8e5 mm3 "added" by a round that
-    // removes 14.4). No dress-up adds half of the result: where a piece is that large, what the
-    // result adds is measured by the volumes instead, V(result) - V(base) + V(base - result)
-    if (const auto byVolumes = addedByVolumes(cut.Shape(), object, tool)) {
-        return *byVolumes;
+    // removes 14.4). Where a piece is more than half of the result, the volumes decide whether
+    // the result adds anything
+    if (addsNothingByVolumes(cut.Shape(), object, tool)) {
+        return {};
     }
     // A concave edge adds material in its corner, on the allowed faces: a piece of it that lies on
     // any other face of the base fills what that face bounded, and so does one that doesn't reach a
