@@ -1852,6 +1852,87 @@ def postInTheGap(test, doc, upTo):
     return base, feature
 
 
+# Pins up to a roof (sweep G5, ops#640): a C-shaped solid, 100 deep (y -50..50), whose section in XZ is
+# a slab z 0..10, a wall x 0..10 and a roof z 20..30, open towards +x; and a k x k grid of 2 x 2 squares
+# 5 apart, x from 25 and y from -35, sketched on the slab's top and padded up to the roof's underside,
+# or sketched on the roof's top and pocketed down to the slab's top. Each pin adds or removes a
+# 2 x 2 x 10 prism, and adds four side faces. A Pad or Pocket over many separate regions up to a face
+# made each region's prism and fused it into the prisms before it: minutes for a few hundred regions.
+PIN_SIDE, PIN_PITCH, PIN_GAP = 2.0, 5.0, 10.0
+C_SECTION = [(0, 0), (100, 0), (100, 10), (10, 10), (10, 20), (100, 20), (100, 30), (0, 30)]
+C_VOLUME = 2100.0 * 100.0
+C_FACES = 10
+
+
+def pinSquares(k):
+    """The k x k grid's squares (x0, y0, x1, y1)"""
+    return [
+        (25 + PIN_PITCH * i, -35 + PIN_PITCH * j, 25 + PIN_PITCH * i + PIN_SIDE,
+         -35 + PIN_PITCH * j + PIN_SIDE)
+        for i in range(k)
+        for j in range(k)
+    ]
+
+
+def cWithPins(doc, squares, kind="Pad", upTo=True):
+    """The C and a Pad (from the slab's top up to the roof's underside) or a Pocket (from the
+    roof's top down to the slab's top) of `squares`; up to the face, or by the gap's length.
+    Returns the C, the pins' sketch, the feature and the CPU seconds its recompute took (this
+    process's, every thread's: other programs' load on the machine doesn't count)."""
+    import time
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    section = body.newObject("Sketcher::SketchObject", "CSection")
+    section.MapMode = "Deactivated"
+    section.Placement = FreeCAD.Placement(
+        FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+    )
+    polygonInSketch(section, C_SECTION)
+    c = body.newObject("PartDesign::Pad", "C")
+    c.Profile = section
+    c.Length = 100
+    c.Midplane = True
+    z = 10 if kind == "Pad" else 30
+    sketch = body.newObject("Sketcher::SketchObject", "Pins")
+    sketch.MapMode = "Deactivated"
+    sketch.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, z), FreeCAD.Rotation())
+    # One call, no constraints: a sketch solved after each of 784 lines and coincidences took a
+    # minute to draw
+    lines = []
+    for x0, y0, x1, y1 in squares:
+        corners = [FreeCAD.Vector(x0, y0, 0), FreeCAD.Vector(x1, y0, 0),
+                   FreeCAD.Vector(x1, y1, 0), FreeCAD.Vector(x0, y1, 0)]
+        lines += [Part.LineSegment(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    sketch.addGeometry(lines, False)
+    doc.recompute()
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    if upTo:
+        feature.Type = "UpToFace"
+        feature.UpToFace = (c, [planarFaceAt(c.Shape, 2, 20 if kind == "Pad" else 10)])
+    else:
+        feature.Type = "Length"
+        feature.Length = PIN_GAP
+    start = time.process_time()
+    doc.recompute()
+    return c, sketch, feature, time.process_time() - start
+
+
+def sideFaceAt(shape, x, y):
+    """The name of the face of shape in the plane x = x (normal along x) whose centre has this y"""
+    found = [
+        "Face%d" % i
+        for i, f in enumerate(shape.Faces, 1)
+        if f.Surface.TypeId == "Part::GeomPlane"
+        and abs(f.normalAt(0, 0).x) > 1 - 1e-9
+        and abs(f.CenterOfMass.x - x) < 1e-6
+        and abs(f.CenterOfMass.y - y) < 1e-6
+    ]
+    if len(found) != 1:
+        raise AssertionError("%d faces at x = %g, y = %g" % (len(found), x, y))
+    return found[0]
+
+
 class TestPad(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestPad")
@@ -5270,6 +5351,87 @@ class TestPad(unittest.TestCase):
                 self.assertFalse(pad.isValid())
                 self.assertIn("nothing to extrude", pad.getStatusString())
                 self.Doc.removeObject("Body")
+
+    def assertPinsBuilt(self, feature, pins, kind="Pad"):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        sign = 1 if kind == "Pad" else -1
+        self.assertAlmostEqual(
+            shape.Volume, C_VOLUME + sign * pins * PIN_SIDE * PIN_SIDE * PIN_GAP, places=4
+        )
+        self.assertEqual(len(shape.Faces), C_FACES + 4 * pins)
+        assertFacesAllNamed(self, shape)
+
+    def testPadUpToFaceOfManyRegionsTakesAboutAsLongAsByLength(self):
+        """Sweep G5 (ops#640): 196 separate squares padded up to a face. Each square's prism was
+        fused into the prisms of the squares before it, and the whole renamed each time: the work
+        grew with the square of the regions (an extra 11.7 s over the Pad by length at 100
+        squares, 0.6 s at 25; FSLC's Finger Grips, 229 slivers, passed the 60 s limit). Now each
+        prism is made on its own and one fuse joins them: the extra is a fraction of the Pad by
+        length's own time."""
+        squares = pinSquares(14)
+        _, _, byLength, plain = cWithPins(self.Doc, squares, upTo=False)
+        self.assertPinsBuilt(byLength, len(squares))
+        self.Doc.removeObject("Body")
+        _, _, upTo, spent = cWithPins(self.Doc, squares)
+        self.assertPinsBuilt(upTo, len(squares))
+        self.assertLess(spent, 3 * plain + 2.0, (spent, plain))
+
+    def testPadUpToFaceOfRegionsSharingASide(self):
+        """Sweep G5 (ops#640): two regions sharing a side, padded up to a face, are one solid (the
+        prisms made one by one are joined by one fuse), refined to one box between slab and roof"""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        section = body.newObject("Sketcher::SketchObject", "CSection")
+        section.MapMode = "Deactivated"
+        section.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        polygonInSketch(section, C_SECTION)
+        c = body.newObject("PartDesign::Pad", "C")
+        c.Profile = section
+        c.Length = 100
+        c.Midplane = True
+        sketch = squareSketch(
+            body, "Pins", FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation()), []
+        )
+        sketch.MapMode = "Deactivated"
+        sketch.MakeInternals = True
+        polygonInSketch(sketch, [(30, 0), (40, 0), (50, 0), (50, 5), (40, 5), (30, 5)])
+        sketch.addGeometry(Part.LineSegment(FreeCAD.Vector(40, 0, 0), FreeCAD.Vector(40, 5, 0)))
+        self.Doc.recompute()
+        self.assertEqual(len(sketch.InternalShape.Faces), 2)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = (sketch, ["InternalFace1", "InternalFace2"])
+        pad.Type = "UpToFace"
+        pad.UpToFace = (c, [planarFaceAt(c.Shape, 2, 20)])
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(len(pad.Shape.Solids), 1)
+        self.assertTrue(pad.Shape.isValid())
+        self.assertAlmostEqual(pad.Shape.Volume, C_VOLUME + 20 * 5 * PIN_GAP, places=4)
+        self.assertEqual(len(pad.Shape.Faces), C_FACES + 4)
+
+    def testPadUpToFaceOfManyRegionsKeepsAReferenceOnAPin(self):
+        """Sweep G5 (ops#640): a point at the centre of a pin's side face, padded up to a face with
+        other pins, stays on that pin's face when another pin in its row is deleted from the
+        sketch (the pieces are named one by one, then fused)"""
+        squares = pinSquares(3)
+        _, sketch, pad, _ = cWithPins(self.Doc, squares)
+        self.assertPinsBuilt(pad, len(squares))
+        x0, y0, x1, y1 = squares[1]  # i = 0, j = 1: the +x side at x = 27, y = -29
+        point = self.Doc.getObject("Body").newObject("PartDesign::Point", "OnPin")
+        point.AttachmentSupport = [(pad, [sideFaceAt(pad.Shape, x1, (y0 + y1) / 2)])]
+        point.MapMode = "CenterOfMass"
+        self.Doc.recompute()
+        expected = FreeCAD.Vector(x1, (y0 + y1) / 2, 15)
+        self.assertLess((point.Placement.Base - expected).Length, 1e-6, point.Placement.Base)
+        sketch.delGeometries([0, 1, 2, 3])  # the pin at i = 0, j = 0, in the same plane x = 27
+        self.Doc.recompute()
+        self.assertPinsBuilt(pad, len(squares) - 1)
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertLess((point.Placement.Base - expected).Length, 1e-6, point.Placement.Base)
 
     def upToVertexPad(self, z, offset, **values):
         """A 20 x 20 square at z = 0 padded up to the vertex at height z with `offset`"""
