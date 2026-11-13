@@ -134,8 +134,9 @@ class TestChamfer(unittest.TestCase):
         # A block 2a x 2a x h with its vertical corners filleted (radius R), then a chamfer
         # (size s) on one bottom edge. The bottom edges and the corner arcs are tangent, so the
         # chamfer runs around the whole bottom; along each arc its triangular section turns
-        # about the corner's axis at the distance R - s / 3 (Pappus).
-        a, h, R, s = 50.8, 22.225, 11.3125, 1.5875
+        # about the corner's axis at the distance R - s / 3 (Pappus). Volumes 198283.185307,
+        # then 197856.033764.
+        a, h, R, s = 50.0, 20.0, 10.0, 1.5
         body = self.Doc.addObject("PartDesign::Body", "Body")
         box = self._add_box(body, 2 * a, 2 * a, h, (-a, -a, 0))
         rounded = self.Doc.addObject("PartDesign::Fillet", "Fillet")
