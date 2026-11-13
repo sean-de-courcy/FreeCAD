@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <BRepAlgoAPI_BuilderAlgo.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -17,13 +18,19 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <ElSLib.hxx>
+#include <GC_MakeArcOfCircle.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_SphericalSurface.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
 #include <TColgp_Array1OfPnt.hxx>
@@ -437,4 +444,252 @@ TEST(RefineFuseEdgesTest, testSpansWhoseStoredCurvesDoNotMeetStayApart)
     EXPECT_NEAR(areaOf(cap.face), capArea, 1e-3);
     EXPECT_NEAR(volumeOf(refined), capArea * 8.0 + boxVolume, 1e-2);
     EXPECT_NEAR(worstTolerance(solid), 1e-3, 1e-12);
+}
+
+// The same fuse on a round's cut edge (ops#640, Case Base 105's ends by the blend's continuation).
+//
+// Designed model: a block 20 x 10 x 10 whose edge along x at (y 0, z 10) is rounded with r 3 (a
+// cylinder about the line y 3, z 7), cut at its end by a ball of radius 7 about (21, -1, 11). The
+// round's cut edge is the cylinder's intersection with the ball: one B-spline edge between the
+// round and the ball's face. A ruling of the cylinder, 30 degrees round from its top, is
+// imprinted: the round is two faces of one cylinder that meet along that shared edge, and the
+// cut edge two spans that meet at its end. The refine merges the two cylinder faces, so the two
+// spans come to lie between the same two faces, and it fuses edges.
+//
+// The spans are then given what a construction may leave on them: both on one 3D curve, one of
+// them with a 2D curve of its own on the ball's face and the other on a part of the whole cut
+// edge's (the wrong join, as on the prism above); or each on a 3D curve of its own, as the exact
+// construction builds a round's end from two tools (those are no one curve, and stay two edges).
+// A refine changes no volume and no face's area that it doesn't merge: the expected values are
+// the unrefined shape's own. Without the check, the span with a 2D curve of its own first gives
+// a tolerance of millimetres (1.72 or 4.24, as the Boolean happens to run the cut edge) and a
+// ball's face off by square millimetres.
+namespace
+{
+
+constexpr double roundRadius = 3.0;
+
+TopoDS_Shape imprint(const TopoDS_Shape& shape, const TopoDS_Shape& tool)
+{
+    TopTools_ListOfShape arguments;
+    arguments.Append(shape);
+    arguments.Append(tool);
+
+    BRepAlgoAPI_BuilderAlgo builder;
+    builder.SetArguments(arguments);
+    builder.SetNonDestructive(Standard_True);
+    builder.Build();
+
+    for (TopExp_Explorer xp(builder.Shape(), TopAbs_SOLID); xp.More(); xp.Next()) {
+        return xp.Current();
+    }
+    return {};
+}
+
+/// The rounded block cut by the ball, the round in two faces along one ruling
+TopoDS_Shape roundCutByABall()
+{
+    const double r = roundRadius;
+    const double c = r / std::sqrt(2.0);
+    BRepBuilderAPI_MakeWire outline;
+    outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(0, 10, 0)).Edge());
+    outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 10, 0), gp_Pnt(0, 10, 10)).Edge());
+    outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 10, 10), gp_Pnt(0, r, 10)).Edge());
+    const gp_Pnt arcMiddle(0, r - c, 10 - r + c);
+    const GC_MakeArcOfCircle arc(gp_Pnt(0, r, 10), arcMiddle, gp_Pnt(0, 0, 10 - r));
+    outline.Add(BRepBuilderAPI_MakeEdge(arc.Value()).Edge());
+    outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 10 - r), gp_Pnt(0, 0, 0)).Edge());
+    const TopoDS_Face profile = BRepBuilderAPI_MakeFace(outline.Wire()).Face();
+    const TopoDS_Shape block = BRepPrimAPI_MakePrism(profile, gp_Vec(20.0, 0.0, 0.0)).Shape();
+    const TopoDS_Shape ball = BRepPrimAPI_MakeSphere(gp_Pnt(21.0, -1.0, 11.0), 7.0).Shape();
+    const TopoDS_Shape pieces = BRepAlgoAPI_Cut(block, ball).Shape();
+    TopoDS_Shape cut;
+    for (TopExp_Explorer xp(pieces, TopAbs_SOLID); xp.More(); xp.Next()) {
+        cut = xp.Current();
+    }
+    // the ruling 30 degrees round from the top of the round, run on past the ball's face
+    const double y = r - r * 0.5;
+    const double z = 10.0 - r + r * std::sqrt(3.0) / 2.0;
+    return imprint(cut, BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, y, z), gp_Pnt(19.0, y, z)).Edge());
+}
+
+struct RoundEnd
+{
+    TopoDS_Face ball;                // the ball's face
+    std::vector<TopoDS_Face> round;  // the round's cylinder faces
+    std::vector<TopoDS_Edge> spans;  // the cut edge's spans, in the order of their parameter
+};
+
+RoundEnd roundEndOf(const TopoDS_Shape& shape)
+{
+    RoundEnd end;
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (!Handle(Geom_SphericalSurface)::DownCast(surface).IsNull()) {
+            end.ball = face;
+        }
+        const Handle(Geom_CylindricalSurface) cylinder
+            = Handle(Geom_CylindricalSurface)::DownCast(surface);
+        if (!cylinder.IsNull() && std::abs(cylinder->Radius() - roundRadius) < 1e-9) {
+            end.round.push_back(face);
+        }
+    }
+    for (TopExp_Explorer edges(end.ball, TopAbs_EDGE); edges.More(); edges.Next()) {
+        double first = 0.0;
+        double last = 0.0;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(TopoDS::Edge(edges.Current()), first, last);
+        if (const auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve); !trimmed.IsNull()) {
+            curve = trimmed->BasisCurve();
+        }
+        if (!Handle(Geom_BSplineCurve)::DownCast(curve).IsNull()) {
+            end.spans.push_back(TopoDS::Edge(edges.Current()));
+        }
+    }
+    std::sort(end.spans.begin(), end.spans.end(), [](const TopoDS_Edge& a, const TopoDS_Edge& b) {
+        double first = 0.0;
+        double last = 0.0;
+        double otherFirst = 0.0;
+        BRep_Tool::Range(a, first, last);
+        BRep_Tool::Range(b, otherFirst, last);
+        return first < otherFirst;
+    });
+    return end;
+}
+
+/// A span's stored 2D curve on the ball's face as a B-spline of its own, exactly its range
+Handle(Geom2d_BSplineCurve) ownCurveOnBall(const TopoDS_Edge& span, const TopoDS_Face& ball)
+{
+    double first = 0.0;
+    double last = 0.0;
+    bool stored = false;
+    Handle(Geom2d_Curve) curve2d = BRep_Tool::CurveOnSurface(span, ball, first, last, &stored);
+    if (curve2d.IsNull() || !stored) {
+        return {};
+    }
+    if (const auto trimmed = Handle(Geom2d_TrimmedCurve)::DownCast(curve2d); !trimmed.IsNull()) {
+        curve2d = trimmed->BasisCurve();
+    }
+    const Handle(Geom2d_BSplineCurve) whole = Handle(Geom2d_BSplineCurve)::DownCast(curve2d);
+    if (whole.IsNull()) {
+        return {};
+    }
+    const Handle(Geom2d_BSplineCurve) own = Handle(Geom2d_BSplineCurve)::DownCast(whole->Copy());
+    own->Segment(first, last);
+    return own;
+}
+
+/// The largest distance of an edge's stored 2D curve on a face from its 3D curve, at the same
+/// parameter; -1 where it has none stored
+double gapOnFace(const TopoDS_Edge& edge, const TopoDS_Face& face)
+{
+    double first = 0.0;
+    double last = 0.0;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+    bool stored = false;
+    double first2d = 0.0;
+    double last2d = 0.0;
+    const Handle(Geom2d_Curve) curve2d
+        = BRep_Tool::CurveOnSurface(edge, face, first2d, last2d, &stored);
+    if (curve2d.IsNull() || !stored) {
+        return -1.0;
+    }
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    double gap = 0.0;
+    for (int index = 0; index <= 40; ++index) {
+        const double at = index / 40.0;
+        const gp_Pnt2d uv = curve2d->Value(first2d + (last2d - first2d) * at);
+        const gp_Pnt on3d = curve->Value(first + (last - first) * at);
+        gap = std::max(gap, surface->Value(uv.X(), uv.Y()).Distance(on3d));
+    }
+    return gap;
+}
+
+}  // namespace
+
+TEST(RefineFuseEdgesTest, testARoundsCutEdgeInTwoSpansFusesOntoItsFaces)
+{
+    // which: -1 the spans as the imprint leaves them (both on the whole cut edge's 2D curve: the
+    // control, right without the check too); 0 or 1: that span gets a 2D curve of its own on the
+    // ball's face, the other stays on a part of the whole one (the wrong join for one of the two)
+    for (int which : {-1, 0, 1}) {
+        SCOPED_TRACE(which);
+        // Arrange
+        const TopoDS_Shape solid = roundCutByABall();
+        ASSERT_FALSE(solid.IsNull());
+        const RoundEnd before = roundEndOf(solid);
+        ASSERT_EQ(before.round.size(), 2U);
+        ASSERT_EQ(before.spans.size(), 2U);
+        if (which >= 0) {
+            const TopoDS_Edge& span = before.spans[which];
+            const Handle(Geom2d_BSplineCurve) own = ownCurveOnBall(span, before.ball);
+            ASSERT_FALSE(own.IsNull());
+            BRep_Builder().UpdateEdge(span, own, before.ball, BRep_Tool::Tolerance(span));
+        }
+        ASSERT_TRUE(BRepCheck_Analyzer(solid).IsValid());
+        const double tolerance = worstTolerance(solid);
+        const double allowed = 10.0 * std::max(tolerance, 1e-6);
+        for (const TopoDS_Edge& span : before.spans) {
+            ASSERT_GE(gapOnFace(span, before.ball), 0.0);  // stored
+            ASSERT_LE(gapOnFace(span, before.ball), tolerance);
+        }
+        const double ballArea = areaOf(before.ball);
+        const double volume = volumeOf(solid);
+
+        // Act
+        const TopoDS_Shape refined = refine(solid);
+
+        // Assert: one round face, the cut edge one edge on its 3D curve, nothing grown
+        EXPECT_TRUE(BRepCheck_Analyzer(refined).IsValid());
+        EXPECT_LE(worstTolerance(refined), allowed);
+        EXPECT_LE(worstTolerance(solid), allowed);
+        const RoundEnd end = roundEndOf(refined);
+        EXPECT_EQ(end.round.size(), 1U);
+        ASSERT_EQ(end.spans.size(), 1U);
+        EXPECT_LE(gapOnFace(end.spans[0], end.ball), allowed);
+        // to 1e-3: the merged round's new 2D curves move the numbers by 2e-5, with or without
+        // the check; the wrong join moves the ball's face by 2.7 mm2 or more
+        EXPECT_NEAR(areaOf(end.ball), ballArea, 1e-3);
+        EXPECT_NEAR(volumeOf(refined), volume, 1e-3);
+    }
+}
+
+TEST(RefineFuseEdgesTest, testARoundsCutEdgeOnTwoCurvesStaysTwoEdges)
+{
+    // Arrange: the second span on a 3D curve of its own (the same points, its own poles), as a
+    // round's end built from two tools has them
+    const TopoDS_Shape solid = roundCutByABall();
+    ASSERT_FALSE(solid.IsNull());
+    const RoundEnd before = roundEndOf(solid);
+    ASSERT_EQ(before.round.size(), 2U);
+    ASSERT_EQ(before.spans.size(), 2U);
+    double first = 0.0;
+    double last = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(before.spans[1], first, last);
+    if (const auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve); !trimmed.IsNull()) {
+        curve = trimmed->BasisCurve();
+    }
+    const Handle(Geom_BSplineCurve) own = Handle(Geom_BSplineCurve)::DownCast(curve->Copy());
+    ASSERT_FALSE(own.IsNull());
+    own->Segment(first, last);
+    BRep_Builder().UpdateEdge(before.spans[1], own, BRep_Tool::Tolerance(before.spans[1]));
+    ASSERT_TRUE(BRepCheck_Analyzer(solid).IsValid());
+    const double tolerance = worstTolerance(solid);
+    const double ballArea = areaOf(before.ball);
+    const double volume = volumeOf(solid);
+
+    // Act
+    const TopoDS_Shape refined = refine(solid);
+
+    // Assert: the round is one face, the two spans are left as they were
+    EXPECT_TRUE(BRepCheck_Analyzer(refined).IsValid());
+    EXPECT_LE(worstTolerance(refined), 10.0 * std::max(tolerance, 1e-6));
+    const RoundEnd end = roundEndOf(refined);
+    EXPECT_EQ(end.round.size(), 1U);
+    EXPECT_EQ(end.spans.size(), 2U);
+    for (const TopoDS_Edge& span : end.spans) {
+        EXPECT_LE(gapOnFace(span, end.ball), 10.0 * std::max(tolerance, 1e-6));
+    }
+    EXPECT_NEAR(areaOf(end.ball), ballArea, 1e-3);
+    EXPECT_NEAR(volumeOf(refined), volume, 1e-3);
 }
