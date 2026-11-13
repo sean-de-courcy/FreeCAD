@@ -1250,6 +1250,20 @@ bool runBoolean(Boolean& boolean, const TopoDS_Shape& object, const TopoDS_Shape
 // of the cut are then judged as they are.
 bool addsNothingByVolumes(const TopoDS_Shape& added, const TopoDS_Shape& object, const TopoDS_Shape& tool)
 {
+    // By the face counts first, which cost nothing: a cut that handed back the result holds its
+    // faces, and what a dress-up really adds has a few. The volumes are integrated adaptively
+    // (seconds to minutes on a free-form body) only for a piece that large
+    TopTools_IndexedMapOfShape objectFaces;
+    TopExp::MapShapes(object, TopAbs_FACE, objectFaces);
+    bool suspect = false;
+    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !suspect; it.Next()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(it.Current(), TopAbs_FACE, faces);
+        suspect = 2 * faces.Extent() > objectFaces.Extent();
+    }
+    if (!suspect) {
+        return false;
+    }
     const double whole = std::abs(MassProperties::volume(object, true));
     bool failed = false;
     for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !failed; it.Next()) {
