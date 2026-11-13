@@ -85,6 +85,7 @@ from PartDesignTests.TestLoftOnshape import (  # FreeCAD-CH, ops#655
     TestLoftOnshapePlain,
     TestLoftOnshapeConditions,
     TestLoftOnshapeThreeSections,
+    TestLoftEndConditions,  # ops#640
 )
 from PartDesignTests.TestLoftConnections import (  # FreeCAD-CH, ops#640
     TestLoftConnectionsTwist,
