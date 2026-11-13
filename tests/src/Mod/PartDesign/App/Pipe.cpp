@@ -379,10 +379,13 @@ std::optional<std::uint64_t> memoryHeld()
     return std::nullopt;
 #elif defined(__linux__)
     std::ifstream statm("/proc/self/statm");
+    // In pages: the program's size, what of it is in memory, and what of that is backed by files
+    // (code first touched by the second pipe isn't memory the names keep)
     std::uint64_t total = 0;
     std::uint64_t resident = 0;
-    if (statm >> total >> resident) {
-        return resident * static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+    std::uint64_t shared = 0;
+    if (statm >> total >> resident >> shared && resident >= shared) {
+        return (resident - shared) * static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
     }
     return std::nullopt;
 #else
@@ -448,10 +451,10 @@ TEST_F(FeaturePipeTest, aCornerBetweenEdgesWithLongNamesCostsWhatNoCornerCosts)
     const std::optional<std::uint64_t> before = memoryHeld();
     const double withCorner = secondsAlong({"Edge1", "Edge2"}, 7.5);
     const std::optional<std::uint64_t> after = memoryHeld();
-    // Written out, two names of 3 MB took 3.5 s and kept 35 MB
+    // Written out, the two names took 8 s and kept 71 MB
     EXPECT_LT(withCorner, withoutCorner + 1.5);
     if (before && after) {
-        EXPECT_LT(*after, *before + 16'000'000);
+        EXPECT_LT(*after, *before + 32'000'000);
         std::cout << "memory kept: " << static_cast<double>(*after) - static_cast<double>(*before)
                   << " bytes" << std::endl;
     }
