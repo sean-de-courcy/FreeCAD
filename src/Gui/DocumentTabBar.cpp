@@ -290,6 +290,14 @@ private:
     std::map<const App::Document*, std::map<int, std::string>> steps;
     std::map<const App::Document*, std::string> showAfter;  // a tab an undo or redo brings back
     void stepApplied(const App::Document& doc);
+
+public:
+    /// The tab a document being opened was saved on, shown when its restore finishes (ops#710)
+    std::map<const App::Document*, std::string> restoredTab;
+    void restoreFinished(const App::Document& doc);
+    void applyRestoredTab(const std::string& docName);
+
+private:
     struct PageView
     {
         QPointer<MDIView> view;
@@ -447,6 +455,7 @@ Controller::Controller(MainWindow* mw)
     connections.emplace_back(
         app.signalFinishRestoreDocument.connect([this](const App::Document& doc) {
             schedule(&doc);
+            restoreFinished(doc);
         })
     );
     connections.emplace_back(app.signalNewDocument.connect([this](const App::Document& doc, bool) {
@@ -465,6 +474,7 @@ Controller::Controller(MainWindow* mw)
     );
     connections.emplace_back(app.signalActiveDocument.connect([this](const App::Document& doc) {
         schedule(&doc);
+        restoreFinished(doc);  // a document restored in the background shows its tab when shown
     }));
     connections.emplace_back(app.signalRelabelDocument.connect([this](const App::Document& doc) {
         schedule(&doc);
@@ -743,6 +753,7 @@ void Controller::onDeleteDocument(const App::Document& doc)
     active.erase(&doc);
     steps.erase(&doc);
     showAfter.erase(&doc);
+    restoredTab.erase(&doc);
     for (auto it = pageViews.begin(); it != pageViews.end();) {
         it = it->second.doc == &doc || !it->second.view ? pageViews.erase(it) : std::next(it);
     }
@@ -1177,6 +1188,46 @@ void Controller::stepApplied(const App::Document& doc)
             refreshBars();
         }
     });
+}
+
+void Controller::restoreFinished(const App::Document& doc)
+{
+    if (!restoredTab.count(&doc)) {
+        return;
+    }
+    // As stepApplied(): once the restored objects have their view providers and the first view its
+    // tag
+    const std::string docName = doc.getName();
+    QTimer::singleShot(0, this, [this, docName] { applyRestoredTab(docName); });
+}
+
+void Controller::applyRestoredTab(const std::string& docName)
+{
+    App::Document* current = App::GetApplication().getDocument(docName.c_str());
+    auto it = current ? restoredTab.find(current) : restoredTab.end();
+    if (it == restoredTab.end() || current->testStatus(App::Document::Restoring)) {
+        return;
+    }
+    if (!isOn() || closing.count(current)) {
+        restoredTab.erase(it);
+        return;
+    }
+    // A document opened beside the active one (a link's, the second of a recovery) keeps its tab
+    // until it is shown: switchTo() would make it the active document
+    if (App::GetApplication().getActiveDocument() != current) {
+        return;
+    }
+    const std::string name = it->second;
+    restoredTab.erase(it);
+    AppTabs::Tab tab {};
+    if (!AppTabs::findTab(current, name, tab)) {
+        return;
+    }
+    reconcile(current);
+    if (activeTab(current) != name) {
+        switchTo(current, name, true, nullptr);
+    }
+    refreshBars();
 }
 
 MDIView* Controller::showTab(App::Document* doc, const AppTabs::Tab& tab)
@@ -2612,6 +2663,13 @@ void DocumentTabs::newDocumentStudio(App::Document* doc)
 std::string DocumentTabs::activeTab(const App::Document* doc)
 {
     return Controller::instance() ? Controller::instance()->activeTab(doc) : std::string();
+}
+
+void DocumentTabs::restoreActiveTab(const App::Document* doc, const std::string& name)
+{
+    if (auto ctl = Controller::instance(); ctl && doc && !name.empty()) {
+        ctl->restoredTab[doc] = name;
+    }
 }
 
 bool DocumentTabs::allowsWorkbench(const std::string& name, std::string* refusal)
