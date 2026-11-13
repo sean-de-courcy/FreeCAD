@@ -706,7 +706,7 @@ TopoDS_Shape solidOf(const Polytope& polytope, const std::vector<TrimPlane>& pla
     BRepAlgoAPI_Cut cut;
     cut.SetArguments(arguments);
     cut.SetTools(beyond);
-    cut.SetRunParallel(Standard_False);
+    cut.SetRunParallel(Standard_True);
     cut.Build();
     if (!cut.IsDone() || cut.HasErrors()) {
         refuse("building a corner piece failed");
@@ -3584,7 +3584,7 @@ double trimBySurface(
         BRepAlgoAPI_Splitter splitter;
         splitter.SetArguments(arguments);
         splitter.SetTools(tools);
-        splitter.SetRunParallel(Standard_False);
+        splitter.SetRunParallel(Standard_True);
         splitter.SetNonDestructive(Standard_True);
     splitter.SetNonDestructive(Standard_True);
         splitter.Build();
@@ -3686,7 +3686,7 @@ void trimContinuation(const Context& ctx, Tool& tool, const EdgeData& data, cons
     BRepAlgoAPI_Splitter splitter;
     splitter.SetArguments(arguments);
     splitter.SetTools(tools);
-    splitter.SetRunParallel(Standard_False);
+    splitter.SetRunParallel(Standard_True);
     splitter.SetNonDestructive(Standard_True);
     splitter.Build();
     if (!splitter.IsDone() || splitter.HasErrors()) {
@@ -5014,7 +5014,7 @@ TopoDS_Shape commonOf(const TopoDS_Shape& shape, const TopoDS_Shape& other)
     common.SetArguments(arguments);
     common.SetTools(tools);
     common.SetNonDestructive(Standard_True);
-    common.SetRunParallel(Standard_False);
+    common.SetRunParallel(Standard_True);
     common.Build();
     if (!common.IsDone() || common.HasErrors()) {
         refuse("intersecting a tool with the base failed");
@@ -5110,7 +5110,7 @@ double lengthAlong(const TopoDS_Edge& edge, const TopoDS_Shape& off)
     common.SetArguments(arguments);
     common.SetTools(tools);
     common.SetNonDestructive(Standard_True);
-    common.SetRunParallel(Standard_False);
+    common.SetRunParallel(Standard_True);
     common.Build();
     if (!common.IsDone() || common.HasErrors()) {
         refuse("finding where a tangent strip runs off its face failed");
@@ -5824,7 +5824,7 @@ void clipTool(Tool& tool, const TopoDS_Shape& behind)
     cut.SetArguments(arguments);
     cut.SetTools(tools);
     cut.SetNonDestructive(Standard_True);
-    cut.SetRunParallel(Standard_False);
+    cut.SetRunParallel(Standard_True);
     cut.Build();
     if (!cut.IsDone() || cut.HasErrors()) {
         refuse("trimming a tool by the walls behind its strip failed");
@@ -6031,7 +6031,7 @@ void trimByWedge(Tool& tool, const TopoDS_Shape& wedge, const TopoDS_Shape& base
     cut.SetArguments(arguments);
     cut.SetTools(tools);
     cut.SetNonDestructive(Standard_True);
-    cut.SetRunParallel(Standard_False);
+    cut.SetRunParallel(Standard_True);
     cut.Build();
     if (!cut.IsDone() || cut.HasErrors()) {
         refuse("trimming a tool by a tight corner's wedge failed");
@@ -6171,7 +6171,7 @@ bool trimByWall(
         BRepAlgoAPI_Splitter splitter;
         splitter.SetArguments(arguments);
         splitter.SetTools(tools);
-        splitter.SetRunParallel(Standard_False);
+        splitter.SetRunParallel(Standard_True);
         splitter.SetNonDestructive(Standard_True);
         splitter.Build();
         if (!splitter.IsDone() || splitter.HasErrors()) {
@@ -6332,7 +6332,7 @@ TopoDS_Shape applyTools(
     // The first stage's argument is the caller's base. (OCCT 8.0.1 then leaves the sphere of a
     // cylinder's top rounded at r = R invalid, which the checks refuse)
     operation->SetNonDestructive(Standard_True);
-    operation->SetRunParallel(Standard_False);
+    operation->SetRunParallel(Standard_True);
     operation->Build();
     if (!operation->IsDone() || operation->HasErrors()) {
         refuse(cut ? "the cut failed" : "the fuse failed");
@@ -8632,7 +8632,7 @@ TopoDS_Shape constructUnderOverhang(
         operation.SetArguments(arguments);
         operation.SetTools(tools);
         operation.SetNonDestructive(Standard_True);
-        operation.SetRunParallel(Standard_False);
+        operation.SetRunParallel(Standard_True);
         operation.Build();
         if (!operation.IsDone() || operation.HasErrors()) {
             refuse(failure);
