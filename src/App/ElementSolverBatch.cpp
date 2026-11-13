@@ -1440,6 +1440,37 @@ std::string twinKey(std::string_view name)
     return key;
 }
 
+// A name with its own sections in full and the names they embed left as the map holds them (a
+// reference stays a reference): what plainName() gives at the top level, without the history
+// below it. twinKey() reads only fields that hold no embedded name (each top-level section's
+// reference IDs, iteration tag and element type), so this form has the plain form's key, at the
+// cost of the name's own text instead of its whole history's. On the replica's Case Lid at its
+// feature 137 the plain forms of every edge's names, built once per referenced edge, took 574 s
+// of a chamfer's link assignment (ops#640).
+std::string ownSections(const std::string& name)
+{
+    using Data::NameTable;
+    std::string text = name;
+    // A leading reference (the whole name, or the prefix of a split piece) becomes its content,
+    // as NameTable::toPlain() expands it. A content is a hash's preimage, so it never leads back
+    // to itself; the bound is a guard only
+    for (int round = 0; round < 4096; ++round) {
+        if (text.size() < NameTable::RefLength || text.front() != NameTable::Marker
+            || (text.size() > NameTable::RefLength
+                && text[NameTable::RefLength] != *Data::NAME_SECTION_DELIMINATOR)) {
+            return text;
+        }
+        const auto id = NameTable::parseRef(std::string_view(text).substr(0, NameTable::RefLength));
+        const auto content = id ? NameTable::instance().lookup(*id) : std::nullopt;
+        if (!content) {
+            return text;
+        }
+        text.replace(0, NameTable::RefLength, *content);
+    }
+    // Deeper than any history: the plain form's own key
+    return plainName(name);
+}
+
 }  // namespace
 
 bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
@@ -3457,8 +3488,14 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
             continue;
         }
         for (const auto& mapped : data->getElementMappedNames(index)) {
-            const std::string plain = plainName(mapped.first.toString());
-            const std::string key = twinKey(plain);
+            // The key first, off the name's own sections: a name with another key is no twin,
+            // and its history isn't expanded (ownSections())
+            const std::string text = mapped.first.toString();
+            const std::string key = twinKey(ownSections(text));
+            if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+                continue;
+            }
+            const std::string plain = plainName(text);
             bool twin = false;
             for (std::size_t k = 0; k < names.size() && !twin; ++k) {
                 twin = keys[k] == key && Data::isTwinName(plain, names[k]);
