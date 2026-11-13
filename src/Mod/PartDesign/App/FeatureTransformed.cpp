@@ -69,6 +69,7 @@
 #include "FeaturePrimitive.h"
 #include "FeatureRevolved.h"
 #include "FeatureMirrored.h"
+#include "FeatureCurvePattern.h"
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
 #include "FeatureSketchBased.h"
@@ -1097,7 +1098,9 @@ Part::Feature* Transformed::getBaseObject(bool silent) const
         if (freecad_cast<const Mirrored*>(this)) {
             err = QT_TRANSLATE_NOOP("Exception", "No features selected to be mirrored.");
         }
-        else if (freecad_cast<const LinearPattern*>(this) || freecad_cast<const PolarPattern*>(this)) {
+        // FreeCAD-CH (ops#655 T6): the curve pattern is a pattern too
+        else if (freecad_cast<const LinearPattern*>(this) || freecad_cast<const PolarPattern*>(this)
+                 || freecad_cast<const CurvePattern*>(this)) {
             err = QT_TRANSLATE_NOOP("Exception", "No features selected to be patterned.");
         }
         else {

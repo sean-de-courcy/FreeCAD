@@ -22,6 +22,8 @@
 #include <string>
 
 #include <cmath>
+#include <cstdlib>
+#include <list>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -57,6 +59,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 #include <gp_Pnt2d.hxx>
 
 #include <App/Datums.h>
@@ -453,6 +456,14 @@ bool continuesAFaceOf(const TopoDS_Face& piece, const TopoDS_Shape& base)
         }
     }
     return false;
+}
+
+/// The instances along one direction: count, or 2 count - 1 when centered (Onshape's count is per
+/// side, the seed included; oracle 9j), as LinearPattern and PolarPattern (ops#655)
+int instancesAlong(long count, bool centered)
+{
+    const int n = std::max(static_cast<int>(count), 1);
+    return centered ? 2 * n - 1 : n;
 }
 
 }  // namespace
@@ -905,13 +916,49 @@ std::vector<gp_Trsf> FaceLinearPattern::instanceTransforms()
 {
     const int first = std::max(static_cast<int>(Occurrences.getValue()), 1);
     const int second = std::max(static_cast<int>(Occurrences2.getValue()), 1);
-    return centered(calculateTransformations(), first, second, Centered.getValue(), Centered2.getValue());
+    // FreeCAD-CH (ops#655): a direction in use needs its reference, as Onshape's "Select a pattern
+    // direction." (oracle 9j, Q-D3; FP1 for the face pattern). Without one its step is 0 and every
+    // copy falls on the seed; count 1 is Onshape's unticked second direction and needs none
+    if ((first > 1 && !Direction.getValue()) || (second > 1 && !Direction2.getValue())) {
+        throw Base::ValueError("Select a pattern direction.");
+    }
+    const std::list<gp_Trsf> grid = calculateTransformations();
+    if (!Centered.getValue() && !Centered2.getValue()) {
+        return {grid.begin(), grid.end()};
+    }
+    const std::vector<gp_Trsf> list(grid.begin(), grid.end());
+    if (list.size() != static_cast<std::size_t>(first) * second) {
+        return list;
+    }
+    // Onshape's Centered (oracle 9j, Q-D1), as LinearPattern: count n makes 2n - 1 instances along
+    // that direction, the steps mirrored through the seed. The grid from the seed has Direction2
+    // fastest; its steps are translations
+    const auto step = [&](int k, bool alongSecond) {
+        const auto index = static_cast<std::size_t>(std::abs(k));
+        const gp_Trsf& t = list[alongSecond ? index : index * static_cast<std::size_t>(second)];
+        gp_Vec v(t.TranslationPart());
+        return k < 0 ? v.Reversed() : v;
+    };
+    const int rows = instancesAlong(first, Centered.getValue());
+    const int columns = instancesAlong(second, Centered2.getValue());
+    const int middle = Centered.getValue() ? first - 1 : 0;
+    const int middle2 = Centered2.getValue() ? second - 1 : 0;
+    std::list<gp_Trsf> geometric;
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            gp_Trsf t;
+            t.SetTranslation(step(row - middle, false) + step(column - middle2, true));
+            geometric.push_back(t);
+        }
+    }
+    return centered(geometric, rows, columns, Centered.getValue(), Centered2.getValue());
 }
 
 std::vector<std::size_t> FaceLinearPattern::skippedPositions() const
 {
-    const int first = std::max(static_cast<int>(Occurrences.getValue()), 1);
-    const int second = std::max(static_cast<int>(Occurrences2.getValue()), 1);
+    // Along a centered direction there are 2n - 1 instances, the seed the middle one
+    const int first = instancesAlong(Occurrences.getValue(), Centered.getValue());
+    const int second = instancesAlong(Occurrences2.getValue(), Centered2.getValue());
     const int middle = Centered.getValue() ? (first - 1) / 2 : 0;
     const int middle2 = Centered2.getValue() ? (second - 1) / 2 : 0;
     const auto& pairs = SkippedInstances.getValues();
@@ -982,12 +1029,26 @@ gp_Ax2 FacePolarPattern::getRotation() const
 std::vector<gp_Trsf> FacePolarPattern::instanceTransforms()
 {
     const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
-    return centered(calculateTransformations(), count, 1, Centered.getValue(), false);
+    const std::list<gp_Trsf> turns = calculateTransformations();
+    if (!Centered.getValue() || count < 2 || turns.size() != static_cast<std::size_t>(count)) {
+        return {turns.begin(), turns.end()};
+    }
+    // FreeCAD-CH (ops#655): Onshape's Centered counts per side, the seed included (oracle 9j,
+    // Q-D6), as PolarPattern: count n makes 2n - 1 instances, the turns mirrored through the seed
+    const std::vector<gp_Trsf> list(turns.begin(), turns.end());
+    std::list<gp_Trsf> geometric;
+    for (int k = 1 - count; k < count; ++k) {
+        geometric.push_back(
+            k < 0 ? list[static_cast<std::size_t>(-k)].Inverted() : list[static_cast<std::size_t>(k)]
+        );
+    }
+    return centered(geometric, 2 * count - 1, 1, true, false);
 }
 
 std::vector<std::size_t> FacePolarPattern::skippedPositions() const
 {
-    const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    // Centered: 2n - 1 instances, the seed the middle one (oracle 9j)
+    const int count = instancesAlong(Occurrences.getValue(), Centered.getValue());
     const int middle = Centered.getValue() ? (count - 1) / 2 : 0;
     std::vector<std::size_t> positions;
     for (long index : SkippedInstances.getValues()) {

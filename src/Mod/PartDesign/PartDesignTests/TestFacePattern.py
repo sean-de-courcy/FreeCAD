@@ -301,6 +301,78 @@ class TestFacePattern(unittest.TestCase):
         self.assertSolid(pattern, PLATE + 2 * BOSS)
         self.assertEqual(self.topsAt(pattern.Shape, 15), [-25, 25])
 
+    # -- Centered and the second direction (ops#655; notes/patterns-design.md section 10) ----------
+    # Onshape's Centered counts per side, the seed included: count n makes 2n - 1 instances along
+    # that direction (oracle 9j Q-D1, Q-D6). A direction in use with no reference: "Select a
+    # pattern direction." (Q-D3). Model: the plate at x -30..30, the boss at x -3..3, y 7..13.
+
+    def centredBoss(self):
+        self.plate(x0=-30, x1=30)
+        return self.boss(x0=-3, x1=3)
+
+    def testCenteredCountsPerSide(self):
+        # Count 2, spacing 15, centered: 3 bosses, at x -15, 0, 15
+        boss = self.centredBoss()
+        pattern = self.linear(boss, self.bossFaces(boss, x0=-3, x1=3), 15, 2)
+        pattern.Centered = True
+        self.assertSolid(pattern, PLATE + 3 * BOSS)
+        self.assertEqual(self.topsAt(pattern.Shape, 15), [-15, 0, 15])
+
+    def testCenteredSecondDirection(self):
+        # Direction 1 count 1; direction 2 along Y, spacing 7, count 2, centered: 3 bosses at
+        # y 3, 10, 17 (y 0..6, 7..13, 14..20, 1 apart)
+        boss = self.centredBoss()
+        pattern = self.linear(boss, self.bossFaces(boss, x0=-3, x1=3), 15, 1)
+        pattern.Length = 0
+        pattern.Direction2 = (models.originFeature(self.body, "Y_Axis"), [""])
+        pattern.Mode2 = "Spacing"
+        pattern.Offset2 = 7
+        pattern.Occurrences2 = 2
+        pattern.Centered2 = True
+        self.assertSolid(pattern, PLATE + 3 * BOSS)
+        tops = sorted(
+            round(face.CenterOfMass.y, 6)
+            for face in pattern.Shape.Faces
+            if abs(face.CenterOfMass.z - 15) < TOL and abs(face.Area - 36) < TOL
+        )
+        self.assertEqual(tops, [3, 10, 17])
+
+    def testCenteredSkipCountsTheWholeRow(self):
+        # Count 2 centered: indexes 0, 1, 2 from the negative end, 1 the seed; skip 0 (x -15)
+        boss = self.centredBoss()
+        pattern = self.linear(boss, self.bossFaces(boss, x0=-3, x1=3), 15, 2)
+        pattern.Centered = True
+        pattern.SkippedInstances = [0, 0]
+        self.assertSolid(pattern, PLATE + 2 * BOSS)
+        self.assertEqual(self.topsAt(pattern.Shape, 15), [0, 15])
+
+    def testCenteredCircular(self):
+        # Count 2 over 90 degrees, centered: the hole at -90, 0, +90 about Z
+        hole = self.disc()
+        pattern = self.polar(hole, self.holeFaces(hole), 2)
+        pattern.Mode = "Extent"
+        pattern.Angle = 90
+        pattern.Centered = True
+        self.assertSolid(pattern, DISC - 3 * THROUGH_HOLE)
+        self.assertEqual(self.holeCentres(pattern.Shape), [(0, -20), (0, 20), (20, 0)])
+
+    def testUsedDirectionWithoutReferenceFails(self):
+        # The second direction at count 2 with no Direction2: Onshape's error, no copies on the seed
+        self.plate()
+        boss = self.boss()
+        pattern = self.linear(boss, self.bossFaces(boss), 20, 1)
+        pattern.Length = 0
+        pattern.Direction2 = None
+        pattern.Occurrences2 = 2
+        self.assertFails(pattern, "Select a pattern direction.")
+
+    def testUnusedSecondDirectionNeedsNoReference(self):
+        self.plate()
+        boss = self.boss()
+        pattern = self.linear(boss, self.bossFaces(boss), 20, 3)
+        pattern.Direction2 = None
+        self.assertSolid(pattern, PLATE + 3 * BOSS)
+
     # -- picks that can't be lifted cleanly (the desktop's condition (d)) --------------------------
 
     def lBoss(self):
