@@ -9874,8 +9874,20 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // reference in V2 as well as V2s: review replc r1, ThreadFrustumFillet).
     // FREECAD_CH_REFINE_FALLBACK=off turns it off, to compare a build with itself.
     static const bool fallbackOff = [] {
+#ifdef _MSC_VER
+        // MSVC's CRT deprecates getenv (as App/ElementSolverBatch.cpp's environmentValue())
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_REFINE_FALLBACK") != 0 || !value) {
+            return false;
+        }
+        const bool off = std::string(value) == "off";
+        std::free(value);
+        return off;
+#else
         const char* value = std::getenv("FREECAD_CH_REFINE_FALLBACK");
         return value && std::string(value) == "off";
+#endif
     }();
     try {
         if (fallbackOff) {
