@@ -2483,6 +2483,140 @@ class TestPad(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToAParallelPlaneIsTheBlindPrism(self):
+        """ops#640 (FSLC #49): up to a face on a plane parallel to the profile, each profile
+        face's prism is the blind one of the plane's distance, made without BRepFeat, and prisms
+        that are apart are joined without a boolean (TopoShape::makeElementPrismUntil). A slab
+        (z 0 to 10) with a post (top at z = 16); the profile at z = 10 holds three slots apart
+        from each other, and an L with a square in its corner, whose bounding boxes overlap
+        (those two are fused). Up to the post's top, a face smaller than the profile: every
+        region rises to z = 16, the same solid as the blind Pad of 6, with every element named
+        and no name twice. With an offset of 1 (Onshape's sign: short of the face) to z = 15."""
+        import math
+
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        xy = [o for o in body.Origin.OriginFeatures if o.Role == "XY_Plane"][0]
+
+        def sketch(name, z):
+            sk = body.newObject("Sketcher::SketchObject", name)
+            sk.AttachmentSupport = (xy, [""])
+            sk.MapMode = "FlatFace"
+            sk.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, z), FreeCAD.Rotation())
+            return sk
+
+        def rect(sk, x0, y0, x1, y1):
+            pts = [
+                FreeCAD.Vector(x0, y0, 0),
+                FreeCAD.Vector(x1, y0, 0),
+                FreeCAD.Vector(x1, y1, 0),
+                FreeCAD.Vector(x0, y1, 0),
+            ]
+            for i in range(4):
+                sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]), False)
+
+        slabSketch = sketch("SlabSketch", 0.0)
+        rect(slabSketch, -10, 0, 60, 40)
+        slab = body.newObject("PartDesign::Pad", "Slab")
+        slab.Profile = slabSketch
+        slab.Length = 10.0
+        postSketch = sketch("PostSketch", 10.0)
+        rect(postSketch, -8, 1, -3, 6)
+        post = body.newObject("PartDesign::Pad", "Post")
+        post.Profile = postSketch
+        post.Length = 6.0
+        self.Doc.recompute()
+        top = [
+            "Face%d" % i
+            for i, f in enumerate(post.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 16.0) < 1e-7 and abs(f.Area - 25.0) < 1e-6
+        ]
+        self.assertEqual(len(top), 1)
+
+        profile = sketch("Regions", 10.0)
+        r, length = 1.0, 6.0
+        for i in range(3):
+            cx, cy = 2.0 + i * 12.0, 3.0
+            a, b = FreeCAD.Vector(cx, cy, 0), FreeCAD.Vector(cx + length, cy, 0)
+            profile.addGeometry(
+                [
+                    Part.LineSegment(FreeCAD.Vector(cx, cy - r, 0), FreeCAD.Vector(cx + length, cy - r, 0)),
+                    Part.ArcOfCircle(
+                        Part.Circle(b, FreeCAD.Vector(0, 0, 1), r), -math.pi / 2, math.pi / 2
+                    ),
+                    Part.LineSegment(FreeCAD.Vector(cx + length, cy + r, 0), FreeCAD.Vector(cx, cy + r, 0)),
+                    Part.ArcOfCircle(
+                        Part.Circle(a, FreeCAD.Vector(0, 0, 1), r), math.pi / 2, 3 * math.pi / 2
+                    ),
+                ],
+                False,
+            )
+        corner = [(2, 10), (22, 10), (22, 14), (6, 14), (6, 30), (2, 30)]  # the L
+        for i in range(6):
+            profile.addGeometry(
+                Part.LineSegment(
+                    FreeCAD.Vector(*corner[i], 0), FreeCAD.Vector(*corner[(i + 1) % 6], 0)
+                ),
+                False,
+            )
+        rect(profile, 10, 18, 20, 28)  # the square, inside the L's bounding box
+        area = 3 * (length * 2 * r + math.pi * r * r) + (20 * 4 + 4 * 16) + 10 * 10
+        self.Doc.recompute()
+        before = post.Shape.Volume
+
+        def summary(pad):
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            shape = pad.Shape
+            self.assertTrue(shape.isValid())
+            self.assertEqual(len(shape.Solids), 1)
+            names = [
+                shape.getElementMappedName("%s%d" % (kind, i + 1))
+                for kind, count in (
+                    ("Face", len(shape.Faces)),
+                    ("Edge", len(shape.Edges)),
+                    ("Vertex", len(shape.Vertexes)),
+                )
+                for i in range(count)
+            ]
+            self.assertNotIn("", names)
+            self.assertEqual(len(set(names)), len(names))
+            tops = sorted(
+                round(f.Area, 6)
+                for f in shape.Faces
+                if f.Surface.TypeId == "Part::GeomPlane" and abs(f.CenterOfMass.z - 16.0) < 1e-7
+            )
+            return (
+                len(shape.Faces),
+                len(shape.Edges),
+                len(shape.Vertexes),
+                round(shape.Volume, 6),
+                tops,
+            )
+
+        upTo = body.newObject("PartDesign::Pad", "UpTo")
+        upTo.Profile = profile
+        upTo.Type = "UpToFace"
+        upTo.UpToFace = (post, top)
+        self.Doc.recompute()
+        got = summary(upTo)
+        self.assertAlmostEqual(upTo.Shape.Volume, before + area * 6.0, delta=1e-6)
+        # the post's own top and the five regions' tops lie at z = 16
+        self.assertEqual(len(got[4]), 6)
+
+        upTo.Offset = 1.0
+        self.Doc.recompute()
+        self.assertTrue(upTo.isValid(), upTo.getStatusString())
+        self.assertAlmostEqual(upTo.Shape.Volume, before + area * 5.0, delta=1e-6)
+        upTo.Offset = 0.0
+
+        # the blind Pad of the same height is the same solid
+        body.removeObject(upTo)
+        self.Doc.removeObject(upTo.Name)
+        blind = body.newObject("PartDesign::Pad", "Blind")
+        blind.Profile = profile
+        blind.Length = 6.0
+        self.Doc.recompute()
+        self.assertEqual(summary(blind), got)
+
     def testPadUpToFaceLeavesTheBaseAlone(self):
         # ops#347: BRepFeat runs on copies of the base and the up-to face
         base, pad = upToTheLoftSide(self, self.Doc, "Pad")

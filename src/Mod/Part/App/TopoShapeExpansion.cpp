@@ -7018,8 +7018,11 @@ struct MapperPrism: MapperMaker
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, NamingHasher<ShapeHasher>, ShapeHasher>
         generatedElements;
 
+    // `maker` is a BRepFeat maker, or in V2 any maker whose result holds the sources' edges and
+    // vertices as they are (a plain prism of a profile face: makeElementPrismUntil()'s closed
+    // form, ops#640): the V2 mapper reads the result's shape only, never the maker's history
     MapperPrism(
-        BRepFeat_Form& maker,
+        BRepBuilderAPI_MakeShape& maker,
         const TopoShape& upTo,
         const std::vector<TopoShape>& sourceTopoShapes,
         const App::HistoryAlgorithm& historyVersion
@@ -7032,8 +7035,10 @@ struct MapperPrism: MapperMaker
 
         if (historyAlgorithm == App::HistoryAlgorithm::V1) {
             std::vector<TopoShape> shapes;
-            for (TopTools_ListIteratorOfListOfShape it(maker.FirstShape()); it.More(); it.Next()) {
-                shapes.push_back(it.Value());
+            if (auto* form = dynamic_cast<BRepFeat_Form*>(&maker)) {
+                for (TopTools_ListIteratorOfListOfShape it(form->FirstShape()); it.More(); it.Next()) {
+                    shapes.push_back(it.Value());
+                }
             }
 
             if (shapes.size()) {
@@ -9266,6 +9271,128 @@ TopoShape prismUpToBySplit(
     named.makeShapeWithElementMap(result, mapper, {sweep, upTo}, op);
     return named;
 }
+
+// FreeCAD-CH (ops#640, FSLC #49): how far `profile` goes along `direction` to reach `upTo` when
+// that is a face on a plane parallel to the profile's own plane, ahead of it: the prism up to
+// such a face is the blind prism of this length, whatever the face's limits (a profile larger
+// than the face goes up to its plane, as BRepFeat makes it once the limits are removed). Nothing
+// when `upTo` is no single planar face, the profile has no faces or one that is not flat, not
+// parallel to the plane or at another height, the direction runs along the plane, or the plane
+// lies at or behind the profile: those stay with BRepFeat, as before.
+std::optional<double> flatUpToLength(
+    const TopoShape& profile,
+    const TopoShape& upTo,
+    const gp_Dir& direction
+)
+{
+    if (upTo.isNull() || upTo.shapeType(true) != TopAbs_FACE || !profile.hasSubShape(TopAbs_FACE)) {
+        return std::nullopt;
+    }
+    const BRepAdaptor_Surface target(TopoDS::Face(upTo.getShape()));
+    if (target.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    const gp_Pln plane = target.Plane();
+    const gp_Dir normal = plane.Axis().Direction();
+    const double cosine = gp_Vec(direction).Dot(gp_Vec(normal));
+    if (std::fabs(cosine) < 1e-3) {
+        return std::nullopt;
+    }
+    constexpr double parallel = 1e-10;
+    std::optional<double> length;
+    for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        const BRepAdaptor_Surface surface(TopoDS::Face(faces.Current()));
+        if (surface.GetType() != GeomAbs_Plane) {
+            return std::nullopt;
+        }
+        const gp_Pln own = surface.Plane();
+        if (!own.Axis().Direction().IsParallel(normal, parallel)) {
+            return std::nullopt;
+        }
+        const double reach = gp_Vec(own.Location(), plane.Location()).Dot(gp_Vec(normal)) / cosine;
+        if (reach <= Precision::Confusion()
+            || (length && std::fabs(reach - *length) > Precision::Confusion())) {
+            return std::nullopt;
+        }
+        if (!length) {
+            length = reach;
+        }
+    }
+    return length;
+}
+
+// The prisms of a profile's faces as one shape, for makeElementPrismUntil()'s closed form: the
+// fuse of `pieces`, made without a boolean for every piece whose bounding box is apart from all
+// the others' (FSLC #49: 229 slots apart from each other spent 20 s in one fuse that changed
+// nothing). Pieces whose boxes touch are fused group by group, as the one fuse joined them.
+TopoShape joinPrisms(const TopoShape& blank, const std::vector<TopoShape>& pieces, const char* op)
+{
+    const std::size_t count = pieces.size();
+    std::vector<Bnd_Box> boxes(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        BRepBndLib::Add(pieces[i].getShape(), boxes[i]);
+        boxes[i].Enlarge(Precision::Confusion());
+    }
+    // groups of pieces whose boxes meet, directly or through others
+    std::vector<std::size_t> group(count);
+    std::iota(group.begin(), group.end(), std::size_t(0));
+    auto root = [&group](std::size_t i) {
+        while (group[i] != i) {
+            group[i] = group[group[i]];
+            i = group[i];
+        }
+        return i;
+    };
+    bool anyMeet = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        for (std::size_t j = i + 1; j < count; ++j) {
+            if (boxes[i].IsVoid() || boxes[j].IsVoid() || !boxes[i].IsOut(boxes[j])) {
+                // the later piece joins the earlier one's group: a group's root is its first piece
+                const std::size_t a = root(i);
+                const std::size_t b = root(j);
+                if (a != b) {
+                    group[std::max(a, b)] = std::min(a, b);
+                }
+                anyMeet = true;
+            }
+        }
+    }
+    std::vector<TopoShape> parts;
+    if (!anyMeet) {
+        parts = pieces;
+    }
+    else {
+        // in the order of each group's first piece
+        std::vector<std::vector<TopoShape>> groups(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            groups[root(i)].push_back(pieces[i]);
+        }
+        for (const auto& members : groups) {
+            if (members.size() == 1) {
+                parts.push_back(members.front());
+            }
+            else if (members.size() > 1) {
+                TopoShape fused(blank);
+                fused.makeElementFuse(members, op);
+                // flat, as the one fuse's result was: its solids, not a compound in the compound
+                if (fused.shapeType(true) == TopAbs_COMPOUND) {
+                    for (const auto& solid : fused.getSubTopoShapes(TopAbs_SOLID)) {
+                        parts.push_back(solid);
+                    }
+                }
+                else {
+                    parts.push_back(fused);
+                }
+            }
+        }
+    }
+    if (parts.size() == 1) {
+        return parts.front();
+    }
+    TopoShape joined(blank);
+    joined.makeElementCompound(parts);
+    return joined;
+}
 }  // namespace
 
 TopoShape& TopoShape::makeElementPrismUntil(
@@ -9299,6 +9426,17 @@ TopoShape& TopoShape::makeElementPrismUntil(
             op = Part::OpCodes::Extrude;
         }
     }
+
+    // FreeCAD-CH (ops#640, FSLC #49): up to a plane parallel to the profile, each face's prism is
+    // the blind one of the plane's distance, made directly: no BRepFeat pass against the base per
+    // face, none of the checks of what BRepFeat built (a blind prism neither passes the plane nor
+    // fills behind the profile), and no boolean between prisms that are apart. The names are the
+    // same mapper's (MapperPrism reads the result's shape alone). V2 only, and only where the
+    // face's limits may be removed (`checkLimits`): with its limits kept, BRepFeat decides
+    const std::optional<double> flatLength =
+        checkLimits && historyAlgorithm == App::HistoryAlgorithm::V2
+            ? flatUpToLength(profile, __uptoface, direction)
+            : std::nullopt;
 
     // don't remove limits of concave face. The default centre of a long curved B-spline profile is
     // millimetres off, enough to take the wrong side of a curved face (ops#428)
@@ -9438,7 +9576,8 @@ TopoShape& TopoShape::makeElementPrismUntil(
             }
         }
     };
-    const bool bySplit = !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
+    const bool bySplit = !flatLength
+        && !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
     if (bySplit) {
         result = prismBySplit();
     }
@@ -9490,6 +9629,21 @@ TopoShape& TopoShape::makeElementPrismUntil(
                     srcShapes.push_back(on);
                 }
 
+                if (flatLength) {
+                    BRepPrimAPI_MakePrism flatMaker(
+                        face.getShape(),
+                        gp_Vec(direction) * *flatLength
+                    );
+                    if (!flatMaker.IsDone() || flatMaker.Shape().IsNull()) {
+                        FC_THROWM(Base::CADKernelError, "The extrusion up to the plane failed");
+                    }
+                    const MapperPrism mapper(flatMaker, uptoface, srcShapes, historyAlgorithm);
+                    TopoShape piece(Tag, Hasher, historyAlgorithm);
+                    piece.makeShapeWithElementMap(flatMaker.Shape(), mapper, srcShapes, op);
+                    pieces.push_back(piece);
+                    continue;
+                }
+
                 // One maker per face: its history names that face's prism
                 BRepFeat_MakePrism PrismMaker;
                 PrismMaker.Init(
@@ -9525,6 +9679,9 @@ TopoShape& TopoShape::makeElementPrismUntil(
             if (pieces.size() == 1) {
                 result = pieces.front();
             }
+            else if (flatLength) {
+                result = joinPrisms(TopoShape(Tag, Hasher, historyAlgorithm), pieces, op);
+            }
             else {
                 result = TopoShape(Tag, Hasher, historyAlgorithm);
                 result.makeElementFuse(pieces, op);
@@ -9545,7 +9702,7 @@ TopoShape& TopoShape::makeElementPrismUntil(
     }
     // As the split refuses it (ops#356). `result` is the profile's prisms alone here: each
     // face's prism is made with mode None
-    if (!bySplit
+    if (!bySplit && !flatLength
         && reachesPast(result.getShape(), profile.getShape(), uptoface.getShape(), direction)) {
         throw Base::RuntimeError(QT_TRANSLATE_NOOP(
             "Exception",
@@ -9553,7 +9710,7 @@ TopoShape& TopoShape::makeElementPrismUntil(
         ));
     }
     // By the split, which builds the first contact or refuses it, saying why (ops#361)
-    if (!bySplit && fillsBehind(result.getShape(), profile.getShape(), direction)) {
+    if (!bySplit && !flatLength && fillsBehind(result.getShape(), profile.getShape(), direction)) {
         result = prismBySplit();
     }
 
