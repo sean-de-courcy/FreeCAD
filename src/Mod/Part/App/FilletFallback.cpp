@@ -23,6 +23,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -3208,13 +3209,44 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             // A spindle or horn torus (cause C4, shapes B and C): the round uses only the part of
             // it between the radii major and major + radius, which never reaches the axis, but
             // BRepPrimAPI_MakeTorus needs major > minor. Revolve the section itself instead; its
-            // volume is the closed form's (Pappus), and OCCT stores the round as a surface of
-            // revolution rather than a torus
-            TopoDS_Shape start = section.face();
-            if (pre > 0.0) {
-                start.Move(atStart);
+            // volume is the closed form's (Pappus), and OCCT stores a spindle's round as a surface
+            // of revolution rather than a torus.
+            // A horn torus (major = minor) it stores as either, by the last digit of major as it
+            // comes out at the tool's place: a torus where major is above the radius, a surface of
+            // revolution where not (two teeth of one wheel differed), and its Booleans are wrong on
+            // the latter at a reflex corner (the fuse of two such tools gained 3e-3 of volume). So
+            // a horn's section is stepped out, by the last digit, until the round is a torus
+            const bool horn = major > section.radius - linearTolerance;
+            auto isTorus = [](const TopoDS_Shape& shape) {
+                for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                    if (BRepAdaptor_Surface(TopoDS::Face(it.Current()), Standard_False).GetType()
+                        == GeomAbs_Torus) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const double step = 4 * std::numeric_limits<double>::epsilon()
+                * (gp_Vec(gp::Origin(), section.centre).Magnitude() + section.radius);
+            for (int k = 0; k < (horn ? 64 : 1); ++k) {
+                Section revolved = section;
+                if (k > 0) {
+                    revolved = makeSection(
+                        section.corner.Translated(gp_Vec(radial) * (k * step)),
+                        section.inward[0],
+                        section.inward[1],
+                        ctx.request
+                    );
+                }
+                TopoDS_Shape start = revolved.face();
+                if (pre > 0.0) {
+                    start.Move(atStart);
+                }
+                solid = BRepPrimAPI_MakeRevol(start, axis, turn, Standard_True).Shape();
+                if (!horn || isTorus(solid)) {
+                    break;
+                }
             }
-            solid = BRepPrimAPI_MakeRevol(start, axis, turn, Standard_True).Shape();
         }
         else {
             round = BRepPrimAPI_MakeTorus(frame, major, section.radius).Shape();
@@ -4413,6 +4445,12 @@ bool checkStrips(
             for (const auto& contact : strip->contacts) {
                 double area = areaOf(contact);
                 double tolerance = areaToleranceOf(contact, *strip);
+                if (group.owners[k]->relTolerance > volumeTolerance) {
+                    // A tool cut by a reflex corner's mitre: its contact ends on a conic, and OCCT
+                    // measures it and its part in the face 2e-6 of the area apart (a 2-tooth
+                    // wheel: 0.663398705 and 0.663397377), which is not a strip off its face
+                    tolerance = std::max(tolerance, 1e-5 * area);
+                }
                 if (area - areaOf(commonOf(group.face, contact)) > tolerance) {
                     if (!group.owners[k]->cut) {
                         // checkFusedRunOff runs once the caller has trimmed the tool

@@ -152,6 +152,28 @@ def tooth_on_a_round_root(height=6.0):
     return tooth, pieces + [(tip, centre, 34)]
 
 
+def toothed_wheel(teeth, pitch=11.25, height=3.0):
+    """A disc R 30 with small teeth at the pitch (degrees): each tooth a tip arc R 31 over 2 degrees
+    between two flanks of radius 1 centred on the root circle, which meet the root at reflex
+    corners; with a rim round of 0.5 the flanks' tori are horn tori. Returns the solid and its top
+    rim's edges"""
+    centre = V(0, 0, 0)
+    parts = []
+    for k in range(teeth):
+        a = k * pitch
+        parts += [
+            Part.makeCylinder(1.0, height, polar(30, a - 1.0)),
+            Part.makeCylinder(1.0, height, polar(30, a + 1.0)),
+            Part.makeCylinder(31, height, centre, V(0, 0, 1), 2.0).rotated(
+                centre, V(0, 0, 1), a - 1.0
+            ),
+        ]
+    wheel = Part.makeCylinder(30, height)
+    if parts:
+        wheel = wheel.fuse(parts).removeSplitter()
+    return wheel, rim_edges(wheel, height)
+
+
 def bump_on_an_edge(rho):
     """A 10 x 4 x 2 box with a half-disc bump of radius rho centred on its edge y = 4: the bump's
     rim meets the box's at two reflex corners. Returns the solid, the box and the bump"""
@@ -380,6 +402,25 @@ class FilletFallbackTest(unittest.TestCase):
                 removed = bump_rim_removed(rho, r)
                 # (the integral above is good to about 1e-6 of it)
                 self.assertAlmostEqual(base.Volume - result.Volume, removed, delta=1e-5 * removed)
+
+    def testReflexCornersOfAWheelsTeeth(self):
+        # The same tooth at two places of a wheel, each with two reflex corners of a horn torus.
+        # OCCT stores a horn's round as a torus or as a surface of revolution by the last digit of
+        # its major radius as it comes out at the tooth's place (0 and 11.25 degrees differ), and
+        # its Booleans are wrong on the latter: the second tooth made the construction refuse.
+        # Each tooth removes the same: 0.07166 by the rule (the height field, integrated), on top
+        # of the plain rim's ring (Pappus)
+        r = 0.5
+        ring = fillet_section(r) * 2 * math.pi * (30 - fillet_centroid(r))
+        removed = []
+        for teeth, faces in ((1, 10), (2, 19)):
+            wheel, rims = toothed_wheel(teeth)
+            result = wheel.makeFillet(r, rims)
+            self.assertNoPatch(result)
+            self.assertEqual(len(result.Faces), faces)
+            removed.append(wheel.Volume - result.Volume)
+        self.assertAlmostEqual(removed[0] - ring, 0.07166, delta=3e-4)
+        self.assertAlmostEqual(removed[1] - removed[0], removed[0] - ring, delta=1e-4)
 
     def assertFailsAtAReflexCorner(self, shape, r, reason):
         """The fillet fails, and its error names the reflex corner and why it was not built: OCCT's
