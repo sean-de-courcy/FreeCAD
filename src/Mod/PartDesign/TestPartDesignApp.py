@@ -215,6 +215,7 @@ from PartDesignTests.TestPieces import TestPieces, TestStudioUndo
 from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
 from PartDesignTests.TestResultCheck import TestResultCheck  # FreeCAD-CH, kernel safety S2
+from PartDesignTests.TestPostCondition import TestPostCondition  # FreeCAD-CH, kernel layer post-conditions
 from PartDesignTests.TestStudioPartMirror import TestStudioPartMirror
 from PartDesignTests.TestStudioTransform import TestStudioTransform  # FreeCAD-CH, ops#655
 from PartDesignTests.TestResultCheck import TestManyHoles  # FreeCAD-CH, kernel-9

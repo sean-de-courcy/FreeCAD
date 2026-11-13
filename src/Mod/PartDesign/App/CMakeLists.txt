@@ -20,6 +20,8 @@ set(PartDesign_LIBS
 SET(Features_SRCS
     Feature.cpp
     Feature.h
+    PostCondition.cpp
+    PostCondition.h
     FailureContinuation.cpp
     FailureContinuation.h
     Retarget.cpp

@@ -86,6 +86,7 @@
 #include "FeatureExtrude.h"
 #include "FeatureFillet.h"
 #include "FeatureTransformed.h"
+#include "PostCondition.h"
 #include "ResultCheck.h"
 #include "ShapeBinder.h"
 #include "StudioOwner.h"
@@ -576,7 +577,8 @@ std::string checkResult(
     Feature& feature,
     bool inputsValid,
     const TopoDS_Shape& lastVouched,
-    bool& whole
+    bool& whole,
+    PostCondition::Observed& observed
 )
 {
     whole = false;
@@ -662,6 +664,11 @@ std::string checkResult(
             builder.Add(removed, face);
         }
     }
+    // The post-conditions read the same diff (PostCondition.h, report-only)
+    observed.fresh = true;
+    observed.base = base;
+    observed.checked = checked;
+    observed.made = made;
     const bool roundsOrChamfers = feature.isDerivedFrom<Fillet>() || feature.isDerivedFrom<Chamfer>();
     // A fillet's and a chamfer's whole result is checked where they are built
     if (!roundsOrChamfers) {
@@ -822,6 +829,11 @@ std::string checkResult(
     if (!allFaces) {
         rememberVolume(result, after);
     }
+    if (!base.IsNull() && !allFaces) {
+        observed.volumeKnown = true;
+        observed.change = check->change;
+        observed.after = after;
+    }
     whole = base.IsNull() && !roundsOrChamfers && checked.IsEqual(result);
     return {};
 }
@@ -926,9 +938,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
     if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
         && !isDerivedFrom<FeatureBase>() && checkingResults()) {
         std::string why;
+        PostCondition::Observed observed;
         try {
             ResultCheck::stopIfPastTheLimit("The check of the result");
-            why = checkResult(*this, booleanInputsValid, lastVouched, checkedWhole);
+            why = checkResult(*this, booleanInputsValid, lastVouched, checkedWhole, observed);
         }
         catch (const Base::Exception& e) {
             why = e.what();
@@ -938,6 +951,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
         }
         if (!why.empty()) {
             ret = new App::DocumentObjectExecReturn(why, this);
+        }
+        else if (PostCondition::enabled()) {
+            // Report-only: logged, never thrown, the result unchanged
+            PostCondition::report(*this, observed);
         }
     }
     // A call the limit or Esc stopped fails the feature, whatever its code made of it (kernel-4)
