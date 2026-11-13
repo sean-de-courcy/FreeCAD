@@ -162,6 +162,8 @@ struct PartExport Construction
     std::shared_ptr<ShapeMapper> mapper;
     int edges {0};
     int corners {0};
+    /// Whether a round rolled on over a tangent edge onto the next face (rollOn)
+    bool rolledOn {false};
 };
 
 /** build() in two steps, so that the long one can run on a worker thread (KernelBudget::run()):
@@ -242,6 +244,16 @@ PartExport bool endsInOverflow(
  */
 PartExport std::optional<gp_Pnt> materialIn(const TopoDS_Shape& result, const TopoDS_Shape& region);
 
+/** Notes on this thread that a dress-up returns OCCT's result although it is not a valid shape,
+ * with why the exact construction refused (decision 418, ops#640). A feature checks its result
+ * itself (Part::checkDressUp() repairs it or fails); the Python API raises with this reason, and
+ * never returns the invalid shape (takeInvalidResult()).
+ */
+PartExport void noteInvalidResult(const std::string& reason);
+
+/// The reason noted on this thread since the last call (empty if none), which it clears
+PartExport std::string takeInvalidResult();
+
 /** Collects what the exact construction builds on this thread while it exists, for the feature's
  * Report-view line (decision 54). Recorders nest; the innermost collects.
  */
@@ -254,12 +266,20 @@ public:
     Recorder& operator=(const Recorder&) = delete;
 
     /// Adds one construction's result to the innermost recorder, if there is one
-    static void add(int edges, int corners);
+    static void add(int edges, int corners, bool rolledOn = false);
 
     /// Whether the construction built a result while this recorder collected
     bool built() const
     {
         return builds > 0;
+    }
+
+    /// Whether a round it built rolled on over a tangent edge onto the next face: such a round
+    /// covers its face beyond the band of a direct round (Part::lostMaterial()'s reach), and its
+    /// tool is one closed form the construction measured its result against
+    bool rolledOn() const
+    {
+        return rolled;
     }
 
     /// Prints the Report-view line if it did, and returns it (else empty):
@@ -272,6 +292,7 @@ private:
     int builds = 0;
     int edges = 0;
     int corners = 0;
+    bool rolled = false;
 };
 
 }  // namespace Part::FilletFallback
