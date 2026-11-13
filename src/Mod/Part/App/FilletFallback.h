@@ -182,6 +182,17 @@ PartExport bool construct(
     std::string* reason = nullptr
 );
 
+/** Whether the construction should run before OCCT: some selected edge is a convex rim arc on a
+ * bulging wall tighter than the round (ops#640, C4 shape A), where OCCT's result is valid but
+ * wrong (notes/fillet-tight-arc.md), so its own checks never ask the construction. Reads only
+ * plain shapes, as construct(). False for a chamfer, and when an edge can't be analysed.
+ */
+PartExport bool preferConstruction(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
 /// Names a construction as through the fillet's own history (op), from base, into result
 PartExport void finish(
     TopoShape& result,

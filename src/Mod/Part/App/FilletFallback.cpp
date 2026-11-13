@@ -4434,6 +4434,39 @@ bool construct(
     return false;
 }
 
+bool preferConstruction(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0) {
+        return false;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        for (const auto& edge : edges) {
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            try {
+                if (tightArc(ctx, analyse(ctx, TopoDS::Edge(edge)))) {
+                    return true;
+                }
+            }
+            catch (const Refusal&) {
+                // Not analysable: not a tight arc
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return false;
+}
+
 void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)
 {
     // A copy keeps the result's tag, hasher and history algorithm, which name the elements

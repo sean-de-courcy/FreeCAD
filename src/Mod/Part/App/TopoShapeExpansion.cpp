@@ -7747,6 +7747,8 @@ struct DressUpOutcome
     bool invalid {false};
     std::exception_ptr occtError;
     bool constructed {false};
+    /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
+    bool preferred {false};
     FilletFallback::Construction construction;
     std::string reason;
 };
@@ -7761,7 +7763,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
     const TopoShape& input,
     const std::vector<TopoShape>& inputEdges,
     const FilletFallback::Request& request,
-    const char* what
+    const char* what,
+    bool prefer = false
 )
 {
     auto outcome = std::make_shared<DressUpOutcome>();
@@ -7772,15 +7775,34 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
     }
     KernelBudget::run(
         what,
-        [maker, base = input.getShape(), edges, request = FilletFallback::Request(request), outcome](
-            const Message_ProgressRange& /*range*/
-        ) mutable {
+        [maker,
+         base = input.getShape(),
+         edges,
+         request = FilletFallback::Request(request),
+         outcome,
+         prefer](const Message_ProgressRange& /*range*/) mutable {
             DressUpOutcome& out = *outcome;
+            if (prefer) {
+                // OCCT's result would be valid but wrong (a tight wall arc): the construction
+                // first, OCCT only if it refuses
+                for (int i = 1; i <= maker->NbContours(); ++i) {
+                    for (int j = 1; j <= maker->NbEdges(i); ++j) {
+                        request.contour.push_back(maker->Edge(i, j));
+                    }
+                }
+                out.preferred
+                    = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+                if (out.preferred) {
+                    out.constructed = true;
+                    return;
+                }
+                request.contour.clear();
+            }
             out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
             // A face of zero width (ops#298): the exact construction builds it at the limit
             out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
             out.invalid = !out.failed && !out.thin && builtInvalid(*maker);
-            if (out.failed || out.thin || out.invalid) {
+            if ((out.failed || out.thin || out.invalid) && !prefer) {
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
@@ -7849,7 +7871,19 @@ TopoShape& TopoShape::makeElementFillet(
     request.size1 = radius1;
     request.size2 = radius2;
     Part::SignalException sig;
-    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
+    std::vector<TopoDS_Shape> edgeShapes;
+    for (const auto& e : inputEdges) {
+        edgeShapes.push_back(e.getShape());
+    }
+    bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
+    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer);
+    if (outcome->preferred) {
+        if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        // Naming it failed: OCCT, as without the preference
+        outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet");
+    }
     if (outcome->failed || outcome->thin || outcome->invalid) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
