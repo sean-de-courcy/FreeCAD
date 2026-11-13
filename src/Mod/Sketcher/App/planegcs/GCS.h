@@ -197,7 +197,16 @@ private:
         Eigen::MatrixXd& R,
         int constrNum,
         int rank,
-        int& nonredundantconstrNum
+        int& nonredundantconstrNum,
+        const std::vector<Constraint*>* blockConstraints = nullptr
+    );
+
+    bool diagnoseByBlocks(
+        Algorithm alg,
+        const Eigen::MatrixXd& J,
+        const std::map<int, int>& jacobianconstraintmap,
+        const GCS::VEC_pD& pdiagnoselist,
+        const std::map<int, int>& tagmultiplicity
     );
 
     void eliminateNonZerosOverPivotInUpperTriangularMatrix(Eigen::MatrixXd& R, int rank);
