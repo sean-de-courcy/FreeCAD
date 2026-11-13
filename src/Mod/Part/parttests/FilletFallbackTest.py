@@ -422,6 +422,19 @@ class FilletFallbackTest(unittest.TestCase):
         self.assertAlmostEqual(removed[0] - ring, 0.07166, delta=3e-4)
         self.assertAlmostEqual(removed[1] - removed[0], removed[0] - ring, delta=1e-4)
 
+    def testReflexCornersOfAWholeWheel(self):
+        # All 32 teeth, 64 reflex corners: whole rim loops on a plane face are built directly, each
+        # round a torus and each mitre the crossing of its two walls' offsets, without a Boolean
+        # (ops#640, notes/boolean-free-mitre.md). The rule by the height field: the plain rim's
+        # ring and 0.07166 (+-1.5e-4) for each tooth; one round for each of the rim's 128 arcs
+        r = 0.5
+        ring = fillet_section(r) * 2 * math.pi * (30 - fillet_centroid(r))
+        wheel, rims = toothed_wheel(32)
+        result = wheel.makeFillet(r, rims)
+        self.assertNoPatch(result)
+        self.assertEqual(len(result.Faces), len(wheel.Faces) + 128)
+        self.assertAlmostEqual(wheel.Volume - result.Volume, ring + 32 * 0.07166, delta=32 * 1.5e-4)
+
     def assertFailsAtAReflexCorner(self, shape, r, reason):
         """The fillet fails, and its error names the reflex corner and why it was not built: OCCT's
         own result there is not Onshape's, and is never returned"""
