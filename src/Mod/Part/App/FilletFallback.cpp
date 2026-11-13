@@ -3148,7 +3148,13 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         gp_Pnt axisPoint = circle.Location().Translated(
             gp_Vec(z) * gp_Vec(circle.Location(), section.centre).Dot(gp_Vec(z))
         );
-        gp_Ax2 frame(axisPoint, z, circle.XAxis().Direction());
+        // The torus's seam where the circle's is; a tool turned on past its ends would cross it
+        // there (its face in two pieces), so that one's seam lies where its turn starts
+        gp_Dir seam = circle.XAxis().Direction();
+        if (pre + post > 0.0) {
+            seam.Rotate(axis, data.first - pre);
+        }
+        gp_Ax2 frame(axisPoint, z, seam);
         TopoDS_Shape round;
         if (std::abs(major) <= linearTolerance) {
             round = BRepPrimAPI_MakeSphere(frame, section.radius).Shape();
@@ -6731,6 +6737,59 @@ std::vector<TopoShape> makerInputs(const std::vector<TopoShape>& shapes)
         copies.push_back(copy);
     }
     return copies;
+}
+
+bool endsInOverflow(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    if (request.kind != Kind::Fillet) {
+        return false;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        // With the edges OCCT's contour runs on to (request.contour): its fillet ends where they do
+        for (const auto* list : {&edges, &request.contour}) {
+            for (const auto& edge : *list) {
+                if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                    ctx.selected.Add(edge);
+                }
+            }
+        }
+        std::vector<EdgeData> data;
+        for (int i = 1; i <= ctx.selected.Extent(); ++i) {
+            // An edge the construction doesn't know is no overflowing end
+            try {
+                data.push_back(analyse(ctx, TopoDS::Edge(ctx.selected(i))));
+            }
+            catch (const Refusal&) {
+            }
+        }
+        for (const auto& edgeData : data) {
+            if (edgeData.closed) {
+                continue;
+            }
+            TopoDS_Vertex vertices[2];
+            TopExp::Vertices(edgeData.edge, vertices[0], vertices[1]);
+            for (const auto& vertex : vertices) {
+                try {
+                    if (classify(ctx, data, edgeData, vertex).kind == VertexClass::Overflow) {
+                        return true;
+                    }
+                }
+                catch (const Refusal&) {
+                }
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return false;
 }
 
 bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges)

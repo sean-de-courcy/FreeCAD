@@ -218,6 +218,18 @@ PartExport TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& 
  */
 PartExport bool endsInCusp(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges);
 
+/** Whether one of a fillet's edges is a concave arc ending at a vertex of 4 edges where its tangent
+ * chain turns convex (Nest Cover #151; the construction's VertexClass::Overflow). OCCT stops its
+ * contour there and builds ends Onshape doesn't (oracle 17 Q-OVF: a valid solid, 2 faces too many,
+ * 29 mm3 short), so the exact construction builds it, or the fillet fails. The edges of OCCT's
+ * contours (request.contour) count with the selected ones: its fillet ends where they end.
+ */
+PartExport bool endsInOverflow(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
 /** A point well inside the solid `region` that `result` holds, found without integrating a face:
  * the midpoints of the intervals that lines across region's box (9 x 9 along each axis) spend
  * inside it, kept when longer than 20 times the shapes' largest tolerance and classified IN
