@@ -1194,6 +1194,29 @@ class FilledRecessTest(unittest.TestCase):
                 self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-6)
                 self.assertLess(feature.Shape.common(well).Volume, 1e-9)
 
+    def testConcaveRoundRolledOnOverATangentEdgeFillsNothing(self):
+        # Case Base #47 designed (rounded_ring_corner()), as a feature: the round rolled on over
+        # the r 10 round's tangent edge onto the wall x 0 fills no recess, and adds Onshape's
+        # +337.099410 (oracle 16, FR2)
+        base, ends, added, _ = rounded_ring_corner()
+        feature, _ = dressed_in_a_body(self.doc, "Fillet", base, ends, 6.5)
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertTrue(feature.Shape.isValid())
+        self.assertEqual(len(feature.Shape.Faces), 14)
+        self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-6)
+
+    def testConcaveRoundRolledOnOntoAStepFillsNothing(self):
+        # rounded_ring_corner(step=True): the rolled round's flat bottom (z 4) lands on the step's
+        # top, a floor in the plane of the edge's end face (the ring's underside) beside the wall
+        # it rolls onto, as Onshape's #47 does on its own input. It fills no recess: the base plus
+        # the same region
+        base, ends, added, _ = rounded_ring_corner(step=True)
+        self.assertAlmostEqual(added, 337.099410, delta=1e-6)
+        feature, _ = dressed_in_a_body(self.doc, "Fillet", base, ends, 6.5)
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertTrue(feature.Shape.isValid())
+        self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-6)
+
     def testBandAcrossABlindPocket(self):
         # The issue's pocket, open at the top: chamfer 951 (OCCT 955), fillet 973.439 (980.686)
         self.assertFront(Part.makeBox(4, 1, 2, V(3, 1.5, 8)))
@@ -2239,6 +2262,35 @@ class OverflowTest(unittest.TestCase):
                 self.assertLess(shape.common(well).Volume, 1e-9)
 
 
+    def testConcaveRoundRollsOnOverATangentEdge(self):
+        # The native replica's Case Base #47 (ops#640), designed (rounded_ring_corner()): r 6.5 on
+        # the crease between the corner's r 10 round and the ring. No ball touches both faces, so
+        # it rolls on over the round's tangent edge onto the wall x 0, as Onshape's does (oracle
+        # 16, FR2): one round r 6.5 about (6.5, -18.4929) tangent to the wall and the ring, the r
+        # 10 round left only under the ring (z 2..4, A 25.347863), 14 faces, +337.099410
+        base, ends, added, axis = rounded_ring_corner()
+        self.assertAlmostEqual(added, 337.099410, delta=1e-6)
+        shape = base.makeFillet(6.5, [edge_between(base, *ends)])
+        self.assertBuilt(shape, base.Volume + added, faces=14)
+        self.assertAlmostEqual(shape.Volume, base.Volume + added, delta=1e-6)
+        rounds = [
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - 6.5) < 1e-7
+        ]
+        self.assertEqual(len(rounds), 1)
+        self.assertAlmostEqual(rounds[0].Surface.Center.x, axis[0], delta=1e-6)
+        self.assertAlmostEqual(rounds[0].Surface.Center.y, axis[1], delta=1e-6)
+        left = [
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - 10) < 1e-7
+        ]
+        self.assertEqual(len(left), 1)
+        self.assertAlmostEqual(left[0].BoundBox.ZMin, 2, delta=1e-6)
+        self.assertAlmostEqual(left[0].BoundBox.ZMax, 4, delta=1e-6)
+        self.assertAlmostEqual(left[0].Area, 25.347863, delta=1e-5)
+
 def ring_corner(kind, size=10):
     """The native replica's Case Base #46, designed: a pocket's concave corner (x 0, y 0; floor z 2,
     top z 10) whose dress-up of the size is wider than the wall y 0 on its right: a ring (centre
@@ -2276,6 +2328,54 @@ def ring_corner(kind, size=10):
     prism = Part.Face(Part.Wire(rim)).extrude(V(0, 0, 8))
     added = prism.cut(base).cut(cylinder(12, 1, 11)).Volume
     return base, ((0, 0, 2), (0, 0, 10)), added, well
+
+def rounded_ring_corner(step=False):
+    """The native replica's Case Base #47, designed: ring_corner()'s base with its corner rounded
+    r 10 as Onshape builds it (oracle 16: the round less the base and the well), and the crease
+    between that round and the ring's outer wall (R 15), z 4..10. No ball of r 6.5 touches both: its
+    centre would be 3.5 from the round's axis (10, -10) and 21.5 from the ring's (19, -1), 12.73
+    apart. Onshape rolls it on over the round's tangent edge (x 0, y -10) onto the wall x 0: one
+    round tangent to the wall and the ring, centre (6.5, -18.4929), with a flat bottom at z 4
+    (oracle 16, FR2: +337.099410, 14 faces). Returns the base, the crease's ends, the volume the
+    round adds (the region between the wall, the ring, that round and the base, over z 4..10) and
+    the round's axis in the plane.
+
+    With step, a step 3 wide along the wall from y -15 on, up to the ring's underside (z 4): the
+    round's flat bottom lands on its top, a floor in the plane of the edge's end face that faces it
+    (Onshape's #47 on its own input lands 1.345 of it on such a floor, z 3.075)"""
+    base, ends, _, well = ring_corner("Fillet")
+    if step:
+        base = base.fuse(Part.makeBox(3, 25, 2, V(0, -40, 2))).removeSplitter()
+    arc = Part.ArcOfCircle(Part.Circle(V(10, -10, 2), V(0, 0, 1), 10), math.pi / 2, math.pi)
+    rim = [Part.makeLine(V(0, 0, 2), V(10, 0, 2)), arc.toShape(), Part.makeLine(V(0, -10, 2), V(0, 0, 2))]
+    corner = Part.Face(Part.Wire(rim)).extrude(V(0, 0, 8)).cut(base)
+    corner = corner.cut(Part.makeCylinder(12, 10, V(19, -1, 1)))
+    rounded = base.fuse(corner).removeSplitter()
+    crease = [
+        e
+        for e in rounded.Edges
+        if e.Curve.TypeId == "Part::GeomLine"
+        and abs(e.Length - 6) < 1e-7
+        and sorted(
+            round(f.Surface.Radius, 6)
+            for f in rounded.ancestorsOfType(e, Part.Face)
+            if f.Surface.TypeId == "Part::GeomCylinder"
+        )
+        == [10, 15]
+    ]
+    assert len(crease) == 1, crease
+    a, b = (tuple(v.Point) for v in crease[0].Vertexes)
+    y = -1 - math.sqrt(21.5**2 - 12.5**2)
+    centre = V(6.5, y, 0)
+    toward = V(19, -1, 0) - centre
+    toward.normalize()
+    touch = centre + toward * 6.5
+    region = Part.Face(
+        Part.makePolygon([V(0, y, 4), V(6.5, y, 4), V(touch.x, touch.y, 4), V(19, -1, 4), V(0, -1, 4), V(0, y, 4)])
+    ).extrude(V(0, 0, 6))
+    region = region.cut(Part.makeCylinder(6.5, 8, V(6.5, y, 3))).cut(Part.makeCylinder(15, 8, V(19, -1, 3)))
+    return rounded, (a, b), region.cut(rounded).Volume, (6.5, y)
+
 
 def keyhole_ridge(arc_wall=1.0, leg_wall=0.963, height=3.0):
     """A keyhole-shaped wall (the native replica's #15, designed): the opening is a disc r 6.35

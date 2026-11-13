@@ -20,6 +20,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
@@ -654,6 +655,9 @@ struct Tool
     /// The miter piece at a concave corner with a circle: its faces merge into the tools' faces
     /// they continue (one cone, one plane, as Onshape's sharp miter)
     bool miter = false;
+    /// A concave edge's round rolled on over a tangent edge onto the next face (rollOn): it fills
+    /// air only, as its construction assumes
+    bool rolled = false;
 };
 
 /** The common part of the two tools at a two-edge corner with unequal dihedral angles (convex
@@ -1299,15 +1303,492 @@ FarSide circleAbout(const gp_Ax1& axis, const gp_Pnt& point)
     return side;
 }
 
+/// Faces that meet tangentially along an edge (G1) have outward normals this close there
+constexpr double tangentTolerance = 1e-6;
+
 /** The round of a straight edge with a cylinder parallel to it among its faces (EdgeData::ruled):
  * in the plane normal to the edge, each face is a line or a circle, and the round's arc of radius
- * r is tangent to both, on the material's side; the tool is the region between the corner, the two
- * traces and the arc, swept along the edge, whose ends must be square to it (a curved wall's
- * end, rounded on both edges: Onshape's FR1, exact). Its area in closed form: the triangle of the
- * corner and the tangent points, plus or minus the circles' segments over the chords, less the
- * arc's segment
+ * r is tangent to both, on the side of the ball (in the material for a convex edge, in the air for
+ * a concave one); the tool is the region between the corner, the two traces and the arc, swept
+ * along the edge, whose ends must be square to it (a curved wall's end, rounded on both edges:
+ * Onshape's FR1, exact). Its area in closed form: the triangle of the corner and the tangent
+ * points, plus or minus the circles' segments over the chords, less the arc's segment.
+ *
+ * A concave edge whose ball can't touch one of its faces, where that face ends in a tangent edge
+ * along the edge onto a face that is a prism along it, rolls on onto that face (rolledTool)
  */
-Tool ruledTool(const EdgeData& data, const VertexEnd ends[2], double r)
+struct RuledTrace
+{
+    bool circle = false;
+    gp_Pnt origin;      // a point of the trace: where it starts
+    gp_Dir inward;      // along the face, away from where it starts
+    gp_Dir toCentre;    // line: the normal toward the ball's centre
+    gp_Pnt centre;      // circle
+    double radius = 0;  // circle
+    double offset = 0;  // circle: the radius of the locus of the ball's centre
+};
+
+/// The trace of the face in the section plane through the corner, starting at the point
+RuledTrace ruledTrace(
+    const EdgeData& data,
+    const TopoDS_Face& face,
+    const gp_Pnt& corner,
+    const gp_Pnt& at,
+    const gp_Dir& inward,
+    double r
+)
+{
+    gp_Vec z(gp_Vec(data.start, data.end).Normalized());
+    RuledTrace t;
+    t.origin = at;
+    t.inward = inward;
+    gp_Dir outward = outwardNormal(face, at);
+    BRepAdaptor_Surface surface(face, Standard_False);
+    if (surface.GetType() == GeomAbs_Cylinder) {
+        gp_Cylinder cylinder = surface.Cylinder();
+        const gp_Pnt& a = cylinder.Location();
+        t.circle = true;
+        t.centre = a.Translated(z * gp_Vec(a, corner).Dot(z));
+        t.radius = cylinder.Radius();
+        // The ball is in the material at a convex edge, in the air at a concave one
+        bool materialInside = gp_Vec(t.centre, at).Dot(gp_Vec(outward)) > 0;
+        bool ballInside = data.convex == materialInside;
+        t.offset = ballInside ? t.radius - r : t.radius + r;
+        if (t.offset <= linearTolerance) {
+            refuse("a round as big as the cylinder it rolls inside");
+        }
+    }
+    else if (surface.GetType() == GeomAbs_Plane) {
+        t.toCentre = data.convex ? outward.Reversed() : outward;
+    }
+    else {
+        refuse("a round of a straight edge on a face that is not a plane or a cylinder");
+    }
+    return t;
+}
+
+/// The centres of the balls of radius r tangent to both traces, on the ball's side of each
+std::vector<gp_Pnt> ruledCentres(const RuledTrace& a, const RuledTrace& b, const gp_Dir& direction, double r)
+{
+    std::vector<gp_Pnt> found;
+    gp_Vec z(direction);
+    auto lineAndCircle = [&](const RuledTrace& line, const RuledTrace& circle) {
+        gp_Pnt q = line.origin.Translated(gp_Vec(line.toCentre) * r);
+        gp_Vec u(line.inward);
+        gp_Vec qc(circle.centre, q);
+        double half = u.Dot(qc);
+        double c = qc.SquareMagnitude() - circle.offset * circle.offset;
+        double discriminant = half * half - c;
+        if (discriminant < 0) {
+            return;
+        }
+        for (double sign : {-1.0, 1.0}) {
+            found.push_back(q.Translated(u * (-half + sign * std::sqrt(discriminant))));
+        }
+    };
+    if (a.circle && b.circle) {
+        gp_Vec between(a.centre, b.centre);
+        double d = between.Magnitude();
+        if (d <= linearTolerance) {
+            refuse("a round between coaxial cylinders");
+        }
+        double r0 = a.offset;
+        double r1 = b.offset;
+        double along = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+        double h2 = r0 * r0 - along * along;
+        if (h2 >= 0) {
+            gp_Vec x = between / d;
+            gp_Vec y = z.Crossed(x);
+            gp_Pnt middle = a.centre.Translated(x * along);
+            found.push_back(middle.Translated(y * std::sqrt(h2)));
+            found.push_back(middle.Translated(y * -std::sqrt(h2)));
+        }
+    }
+    else if (a.circle) {
+        lineAndCircle(b, a);
+    }
+    else if (b.circle) {
+        lineAndCircle(a, b);
+    }
+    else {
+        // Two lines: where the lines offset by r cross
+        gp_Pnt qa = a.origin.Translated(gp_Vec(a.toCentre) * r);
+        gp_Pnt qb = b.origin.Translated(gp_Vec(b.toCentre) * r);
+        gp_Vec ua(a.inward);
+        gp_Vec ub(b.inward);
+        double denominator = ua.Crossed(ub).Dot(z);
+        if (std::abs(denominator) > angularTolerance) {
+            double s = gp_Vec(qa, qb).Crossed(ub).Dot(z) / denominator;
+            found.push_back(qa.Translated(ua * s));
+        }
+    }
+    return found;
+}
+
+/// Where the ball about the centre touches the trace
+gp_Pnt ruledTouch(const RuledTrace& t, const gp_Pnt& centre)
+{
+    if (t.circle) {
+        gp_Vec radial(t.centre, centre);
+        if (radial.Magnitude() <= linearTolerance) {
+            refuse("a round centred on the axis of a cylinder it rolls on");
+        }
+        return t.centre.Translated(radial.Normalized() * t.radius);
+    }
+    double along = gp_Vec(t.origin, centre).Dot(gp_Vec(t.inward));
+    return t.origin.Translated(gp_Vec(t.inward) * along);
+}
+
+/// The ball touches the trace past its start, on the face's side
+bool ruledTouches(const RuledTrace& t, const gp_Pnt& touch, const gp_Pnt& centre, double r)
+{
+    return gp_Vec(t.origin, touch).Dot(gp_Vec(t.inward)) > linearTolerance
+        && std::abs(touch.Distance(centre) - r) <= linearTolerance;
+}
+
+/** A piece of a section's boundary in the section plane: a line, or an arc of a circle about the
+ * centre by the signed angle (counterclockwise about the edge's direction positive)
+ */
+struct RuledPiece
+{
+    gp_Pnt from;
+    gp_Pnt to;
+    bool arc = false;
+    gp_Pnt centre;
+    double angle = 0.0;
+};
+
+/// The signed angle from a to b about the axis, turning the way of the sense (+1 or -1)
+double turnedAngle(const gp_Vec& a, const gp_Vec& b, const gp_Vec& axis, double sense)
+{
+    double raw = std::atan2(a.Crossed(b).Dot(axis), a.Dot(b));
+    if (sense > 0 && raw <= 0) {
+        raw += 2 * pi;
+    }
+    else if (sense < 0 && raw >= 0) {
+        raw -= 2 * pi;
+    }
+    return raw;
+}
+
+/// The trace's piece from its start to the point, along the face
+RuledPiece tracePiece(const RuledTrace& t, const gp_Pnt& to, const gp_Vec& z)
+{
+    RuledPiece piece;
+    piece.from = t.origin;
+    piece.to = to;
+    if (t.circle) {
+        piece.arc = true;
+        piece.centre = t.centre;
+        gp_Vec radial(t.centre, t.origin);
+        double sense = radial.Crossed(gp_Vec(t.inward)).Dot(z) > 0 ? 1.0 : -1.0;
+        piece.angle = turnedAngle(radial, gp_Vec(t.centre, to), z, sense);
+    }
+    return piece;
+}
+
+/** The signed area of the closed boundary (counterclockwise about z positive): the polygon of the
+ * pieces' ends, plus each arc's segment, r^2 (theta - sin theta) / 2 with the signed angle
+ */
+double boundaryArea(const std::vector<RuledPiece>& pieces, const gp_Vec& z)
+{
+    const gp_Pnt& o = pieces.front().from;
+    double area = 0.0;
+    for (const auto& piece : pieces) {
+        area += gp_Vec(o, piece.from).Crossed(gp_Vec(o, piece.to)).Dot(z) / 2;
+        if (piece.arc) {
+            double radius = piece.centre.Distance(piece.from);
+            area += radius * radius * (piece.angle - std::sin(piece.angle)) / 2;
+        }
+    }
+    return area;
+}
+
+/// The middle of the piece: of its chord, or of its arc
+gp_Pnt pieceMiddle(const RuledPiece& piece, const gp_Vec& z)
+{
+    if (!piece.arc) {
+        return gp_Pnt((piece.from.XYZ() + piece.to.XYZ()) / 2);
+    }
+    gp_Trsf turn;
+    turn.SetRotation(gp_Ax1(piece.centre, gp_Dir(z)), piece.angle / 2);
+    return piece.from.Transformed(turn);
+}
+
+/// The edges of the boundary, in order
+TopoDS_Wire boundaryWire(const std::vector<RuledPiece>& pieces, const gp_Vec& z)
+{
+    BRepBuilderAPI_MakeWire wire;
+    for (const auto& piece : pieces) {
+        if (!piece.arc) {
+            wire.Add(BRepBuilderAPI_MakeEdge(piece.from, piece.to).Edge());
+            continue;
+        }
+        gp_Pnt middle = pieceMiddle(piece, z);
+        wire.Add(
+            BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(piece.from, middle, piece.to).Value()).Edge()
+        );
+    }
+    if (!wire.IsDone()) {
+        refuse("building a round's section failed");
+    }
+    return wire.Wire();
+}
+
+/// The point lies on the face (inside it, or on its boundary)
+bool onFace(const TopoDS_Face& face, const gp_Pnt& point)
+{
+    BRepClass_FaceClassifier classifier(face, point, 1000 * linearTolerance);
+    return classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON;
+}
+
+/** A concave edge's ball that can't touch the face k (Case Base #47, ops#640): where that face
+ * ends, away from the corner, in a tangent (G1) edge along the edge onto a face that is a prism
+ * along it (a plane through its direction, or a cylinder about it), the ball rolls on onto that
+ * face, as Onshape's does: one round tangent to the next face and the other face, which covers
+ * face k there. The section is the corner, face k's trace to the tangent edge, the next face's
+ * trace to the round, the round's arc, and the other face's trace back to the corner; its area in
+ * closed form is the polygon of those points plus each arc's signed segment. Empty when face k
+ * has no such edge, or the ball doesn't fit there either
+ */
+struct Rolled
+{
+    TopoDS_Face next;
+    gp_Pnt tangentPoint;
+    gp_Pnt centre;
+    gp_Pnt touchNext;
+    gp_Pnt touchOther;
+    RuledTrace traceNext;
+};
+
+std::optional<Rolled> rollOn(
+    const Context& ctx,
+    const EdgeData& data,
+    const RuledTrace traces[2],
+    int k,
+    double r
+)
+{
+    gp_Dir direction(gp_Vec(data.start, data.end));
+    gp_Vec z(direction);
+    double length = data.start.Distance(data.end);
+    const gp_Pnt& corner = data.start;
+    const TopoDS_Face& face = data.faces[k];
+    const RuledTrace& mine = traces[k];
+    const RuledTrace& other = traces[1 - k];
+    // The face's tangent edges along the edge: the first one its trace reaches from the corner
+    std::optional<Rolled> rolled;
+    double travel = std::numeric_limits<double>::infinity();
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (edge.IsSame(data.edge) || BRep_Tool::IsClosed(edge, face)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Line || !parallel(curve.Line().Direction(), direction)) {
+            continue;
+        }
+        const auto* faces = ctx.edgeFaces.Seek(edge);
+        if (!faces || faces->Size() != 2) {
+            continue;
+        }
+        TopoDS_Face next;
+        for (const auto& f : *faces) {
+            if (!f.IsSame(face)) {
+                next = TopoDS::Face(f);
+            }
+        }
+        if (next.IsNull()) {
+            continue;
+        }
+        gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+        if (gp_Vec(outwardNormal(face, middle)).Crossed(gp_Vec(outwardNormal(next, middle))).Magnitude()
+                > tangentTolerance
+            || outwardNormal(face, middle).Dot(outwardNormal(next, middle)) <= 0) {
+            continue;
+        }
+        BRepAdaptor_Surface surface(next, Standard_False);
+        bool prism = surface.GetType() == GeomAbs_Plane
+            || (surface.GetType() == GeomAbs_Cylinder
+                && parallel(surface.Cylinder().Axis().Direction(), direction));
+        if (!prism) {
+            continue;
+        }
+        // The tangent edge must run the edge's whole length
+        gp_Pnt a = curve.Value(curve.FirstParameter());
+        gp_Pnt b = curve.Value(curve.LastParameter());
+        double sa = gp_Vec(corner, a).Dot(z);
+        double sb = gp_Vec(corner, b).Dot(z);
+        double tolerance = std::max(linearTolerance, BRep_Tool::Tolerance(edge));
+        if (std::min(sa, sb) > tolerance || std::max(sa, sb) < length - tolerance) {
+            continue;
+        }
+        gp_Pnt point = a.Translated(z * -sa);
+        // How far along the trace, from the corner in its sense
+        double here = 0.0;
+        if (mine.circle) {
+            if (std::abs(point.Distance(mine.centre) - mine.radius) > tolerance) {
+                continue;
+            }
+            here = std::abs(tracePiece(mine, point, z).angle);
+        }
+        else {
+            if (gp_Lin(corner, mine.inward).Distance(point) > tolerance) {
+                continue;
+            }
+            here = gp_Vec(corner, point).Dot(gp_Vec(mine.inward));
+        }
+        if (here <= linearTolerance || here >= travel) {
+            continue;
+        }
+        Rolled candidate;
+        candidate.next = next;
+        candidate.tangentPoint = point;
+        travel = here;
+        rolled = candidate;
+    }
+    if (!rolled) {
+        return std::nullopt;
+    }
+    const gp_Pnt& tangentPoint = rolled->tangentPoint;
+    RuledPiece first = tracePiece(mine, tangentPoint, z);
+    // The face holds its trace up to the tangent edge: nothing else bounds it first
+    if (!onFace(face, pieceMiddle(first, z).Translated(z * (length / 2)))) {
+        refuse("a round rolled on over a tangent edge along a face cut short before it");
+    }
+    // The next face's trace, on from the tangent point the way the first one runs there
+    gp_Dir onward = mine.inward;
+    if (mine.circle) {
+        gp_Vec radial(mine.centre, tangentPoint);
+        onward = gp_Dir(z.Crossed(radial) * (first.angle > 0 ? 1.0 : -1.0));
+    }
+    RuledTrace next = ruledTrace(data, rolled->next, corner, tangentPoint, onward, r);
+    std::optional<gp_Pnt> best;
+    for (const auto& centre : ruledCentres(next, other, direction, r)) {
+        gp_Pnt touchNext = ruledTouch(next, centre);
+        gp_Pnt touchOther = ruledTouch(other, centre);
+        if (!ruledTouches(next, touchNext, centre, r) || !ruledTouches(other, touchOther, centre, r)) {
+            continue;
+        }
+        // The ball stays clear of face k's trace, which it rolled over
+        double clearance = std::min(centre.Distance(corner), centre.Distance(tangentPoint));
+        if (mine.circle) {
+            gp_Vec radial(mine.centre, centre);
+            if (radial.Magnitude() > linearTolerance) {
+                double angle = turnedAngle(gp_Vec(mine.centre, corner), radial, z, first.angle);
+                if (std::abs(angle) < std::abs(first.angle)) {
+                    clearance = std::min(clearance, std::abs(radial.Magnitude() - mine.radius));
+                }
+            }
+        }
+        else {
+            double along = gp_Vec(corner, centre).Dot(gp_Vec(mine.inward));
+            if (along > 0 && along < travel) {
+                clearance = std::min(clearance, gp_Lin(corner, mine.inward).Distance(centre));
+            }
+        }
+        if (clearance < r - linearTolerance) {
+            continue;
+        }
+        if (!best || centre.Distance(corner) < best->Distance(corner)) {
+            best = centre;
+        }
+    }
+    if (!best) {
+        return std::nullopt;
+    }
+    rolled->centre = *best;
+    rolled->touchNext = ruledTouch(next, *best);
+    // The next face holds its trace up to the round
+    RuledPiece onNext = tracePiece(next, rolled->touchNext, z);
+    if (!onFace(rolled->next, pieceMiddle(onNext, z).Translated(z * (length / 2)))
+        || !onFace(rolled->next, rolled->touchNext.Translated(z * (length / 2)))) {
+        refuse("a round rolled on over a tangent edge onto a face cut short before it");
+    }
+    rolled->touchOther = ruledTouch(other, *best);
+    rolled->traceNext = next;
+    return rolled;
+}
+
+/// The tool of a round rolled on over the tangent edge at the end of face k (rollOn)
+Tool rolledTool(
+    const EdgeData& data,
+    const VertexEnd ends[2],
+    const RuledTrace traces[2],
+    int k,
+    const Rolled& rolled,
+    double r
+)
+{
+    gp_Dir direction(gp_Vec(data.start, data.end));
+    gp_Vec z(direction);
+    double length = data.start.Distance(data.end);
+    const gp_Pnt& corner = data.start;
+    const RuledTrace& mine = traces[k];
+    const RuledTrace& other = traces[1 - k];
+    std::vector<RuledPiece> pieces;
+    pieces.push_back(tracePiece(mine, rolled.tangentPoint, z));
+    pieces.push_back(tracePiece(rolled.traceNext, rolled.touchNext, z));
+    // The round's arc: the shorter one between its touch points, toward the corner
+    gp_Vec toNext(rolled.centre, rolled.touchNext);
+    gp_Vec toOther(rolled.centre, rolled.touchOther);
+    gp_Vec bisector = toNext.Normalized() + toOther.Normalized();
+    if (bisector.Magnitude() <= 1e-6) {
+        refuse("a round rolled on over a tangent edge across a half circle");
+    }
+    gp_Pnt arcMiddle = rolled.centre.Translated(bisector.Normalized() * r);
+    auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {
+        return gp_Vec(a, b).Crossed(gp_Vec(a, p)).Dot(z);
+    };
+    if (side(rolled.touchNext, rolled.touchOther, arcMiddle)
+            * side(rolled.touchNext, rolled.touchOther, corner)
+        <= 0) {
+        refuse("a round rolled on over a tangent edge that bulges away from its corner");
+    }
+    RuledPiece arc;
+    arc.from = rolled.touchNext;
+    arc.to = rolled.touchOther;
+    arc.arc = true;
+    arc.centre = rolled.centre;
+    arc.angle = std::atan2(toNext.Crossed(toOther).Dot(z), toNext.Dot(toOther));
+    pieces.push_back(arc);
+    // The other face's trace, back from the round to the corner
+    RuledPiece back = tracePiece(other, rolled.touchOther, z);
+    std::swap(back.from, back.to);
+    back.angle = -back.angle;
+    pieces.push_back(back);
+    double signedArea = boundaryArea(pieces, z);
+    double area = std::abs(signedArea);
+    if (area <= linearTolerance * r) {
+        refuse("a round rolled on over a tangent edge has no section");
+    }
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(boundaryWire(pieces, z), Standard_True).Face();
+    Tool tool;
+    tool.source = data.edge;
+    tool.cut = data.convex;
+    tool.rolled = true;
+    tool.volume = area * length;
+    tool.solid = BRepPrimAPI_MakePrism(face, z * length, Standard_True).Shape();
+    tool.strips.resize(3);
+    tool.strips[k].face = data.faces[k];
+    tool.strips[k].width = corner.Distance(rolled.tangentPoint);
+    tool.strips[k].farSide.valid = true;
+    tool.strips[k].farSide.lin = gp_Lin(rolled.tangentPoint, direction);
+    tool.strips[1 - k].face = data.faces[1 - k];
+    tool.strips[1 - k].width = corner.Distance(rolled.touchOther);
+    tool.strips[1 - k].farSide.valid = true;
+    tool.strips[1 - k].farSide.lin = gp_Lin(rolled.touchOther, direction);
+    tool.strips[2].face = rolled.next;
+    tool.strips[2].width = rolled.tangentPoint.Distance(rolled.touchNext);
+    tool.strips[2].farSide.valid = true;
+    tool.strips[2].farSide.lin = gp_Lin(rolled.touchNext, direction);
+    for (int i = 0; i < 2; ++i) {
+        tool.caps.push_back(ends[i].trims.front());
+    }
+    return tool;
+}
+
+Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2], double r)
 {
     gp_Dir direction(gp_Vec(data.start, data.end));
     double length = data.start.Distance(data.end);
@@ -1319,103 +1800,59 @@ Tool ruledTool(const EdgeData& data, const VertexEnd ends[2], double r)
     }
     const gp_Pnt& corner = data.start;
     // Each face's trace in the section plane: a line or a circle
-    struct Trace
-    {
-        bool circle = false;
-        gp_Dir inward;      // along the face, away from the corner
-        gp_Dir material;    // line: the normal into the material
-        gp_Pnt centre;      // circle
-        double radius = 0;  // circle
-        double offset = 0;  // circle: the radius of the locus of the arc's centre
-    };
-    Trace traces[2];
+    RuledTrace traces[2];
     for (int k = 0; k < 2; ++k) {
-        Trace& t = traces[k];
-        t.inward = inwardIn(data.faces[k], data.edge, data.first);
-        gp_Dir outward = outwardNormal(data.faces[k], corner);
-        BRepAdaptor_Surface surface(data.faces[k], Standard_False);
-        if (surface.GetType() == GeomAbs_Cylinder) {
-            gp_Cylinder cylinder = surface.Cylinder();
-            const gp_Pnt& a = cylinder.Location();
-            t.circle = true;
-            t.centre = a.Translated(gp_Vec(direction) * gp_Vec(a, corner).Dot(gp_Vec(direction)));
-            t.radius = cylinder.Radius();
-            bool inside = gp_Vec(t.centre, corner).Dot(gp_Vec(outward)) > 0;
-            t.offset = inside ? t.radius - r : t.radius + r;
-            if (t.offset <= linearTolerance) {
-                refuse("a round as big as the cylinder it rolls inside");
-            }
-        }
-        else {
-            t.material = outward.Reversed();
-        }
+        traces[k] = ruledTrace(
+            data,
+            data.faces[k],
+            corner,
+            corner,
+            inwardIn(data.faces[k], data.edge, data.first),
+            r
+        );
     }
     // The arc's centre: on the line, or the circle, offset by r from each trace; of the two
     // solutions the one nearer the corner
-    std::vector<gp_Pnt> candidates;
-    auto onLineAndCircle = [&](const Trace& line, const Trace& circle) {
-        gp_Pnt q = corner.Translated(gp_Vec(line.material) * r);
-        gp_Vec u(line.inward);
-        gp_Vec qc(circle.centre, q);
-        double b = u.Dot(qc);
-        double c = qc.SquareMagnitude() - circle.offset * circle.offset;
-        double discriminant = b * b - c;
-        if (discriminant < 0) {
-            return;
-        }
-        for (double sign : {-1.0, 1.0}) {
-            candidates.push_back(q.Translated(u * (-b + sign * std::sqrt(discriminant))));
-        }
-    };
-    if (traces[0].circle && traces[1].circle) {
-        gp_Vec between(traces[0].centre, traces[1].centre);
-        double d = between.Magnitude();
-        if (d <= linearTolerance) {
-            refuse("a round between coaxial cylinders");
-        }
-        double r0 = traces[0].offset;
-        double r1 = traces[1].offset;
-        double a = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
-        double h2 = r0 * r0 - a * a;
-        if (h2 >= 0) {
-            gp_Vec x = between / d;
-            gp_Vec y = gp_Vec(direction).Crossed(x);
-            gp_Pnt middle = traces[0].centre.Translated(x * a);
-            candidates.push_back(middle.Translated(y * std::sqrt(h2)));
-            candidates.push_back(middle.Translated(y * -std::sqrt(h2)));
-        }
-    }
-    else if (traces[0].circle) {
-        onLineAndCircle(traces[1], traces[0]);
+    std::vector<gp_Pnt> candidates = ruledCentres(traces[0], traces[1], direction, r);
+    gp_Pnt centre;
+    gp_Pnt touches[2];
+    std::string reason;
+    if (candidates.empty()) {
+        reason = "no round of the radius fits between a straight edge's faces";
     }
     else {
-        onLineAndCircle(traces[0], traces[1]);
-    }
-    if (candidates.empty()) {
-        refuse("no round of the radius fits between a straight edge's faces");
-    }
-    gp_Pnt centre = candidates.front();
-    for (const auto& p : candidates) {
-        if (p.Distance(corner) < centre.Distance(corner)) {
-            centre = p;
+        centre = candidates.front();
+        for (const auto& p : candidates) {
+            if (p.Distance(corner) < centre.Distance(corner)) {
+                centre = p;
+            }
+        }
+        // The tangent points, on each face's side of the corner
+        for (int k = 0; k < 2 && reason.empty(); ++k) {
+            touches[k] = ruledTouch(traces[k], centre);
+            if (!ruledTouches(traces[k], touches[k], centre, r)) {
+                reason = "a round of a straight edge on a cylinder that does not touch its faces";
+            }
         }
     }
-    // The tangent points, on each face's side of the corner
-    gp_Pnt touches[2];
-    for (int k = 0; k < 2; ++k) {
-        const Trace& t = traces[k];
-        if (t.circle) {
-            gp_Vec radial(t.centre, centre);
-            touches[k] = t.centre.Translated(radial.Normalized() * t.radius);
+    if (!reason.empty()) {
+        // A concave edge's ball rolls on over a face's tangent edge onto the next face
+        if (data.convex) {
+            refuse(reason);
         }
-        else {
-            double along = gp_Vec(corner, centre).Dot(gp_Vec(t.inward));
-            touches[k] = corner.Translated(gp_Vec(t.inward) * along);
+        std::optional<Rolled> rolled[2];
+        for (int k = 0; k < 2; ++k) {
+            rolled[k] = rollOn(ctx, data, traces, k, r);
         }
-        if (gp_Vec(corner, touches[k]).Dot(gp_Vec(t.inward)) <= linearTolerance
-            || std::abs(touches[k].Distance(centre) - r) > linearTolerance) {
-            refuse("a round of a straight edge on a cylinder that does not touch its faces");
+        if (rolled[0] && rolled[1]) {
+            refuse("a round that rolls on over the tangent edges of both its faces");
         }
+        for (int k = 0; k < 2; ++k) {
+            if (rolled[k]) {
+                return rolledTool(data, ends, traces, k, *rolled[k], r);
+            }
+        }
+        refuse(reason);
     }
     // The section's boundary, and its area
     auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {
@@ -1424,7 +1861,7 @@ Tool ruledTool(const EdgeData& data, const VertexEnd ends[2], double r)
     double area = std::abs(side(corner, touches[0], touches[1])) / 2;
     TopoDS_Edge walls[2];
     for (int k = 0; k < 2; ++k) {
-        const Trace& t = traces[k];
+        const RuledTrace& t = traces[k];
         if (!t.circle) {
             walls[k] = BRepBuilderAPI_MakeEdge(corner, touches[k]).Edge();
             continue;
@@ -3012,6 +3449,9 @@ TopoDS_Shape constructShape(
         if (!tool.cut) {
             double inBase = volumeOf(commonOf(base.getShape(), tool.solid));
             tool.inBase = inBase > volumeTolerance * tool.volume ? inBase : 0.0;
+            if (tool.rolled && tool.inBase > 0.0) {
+                refuse("a round rolled on over a tangent edge runs into the material");
+            }
         }
         tools.push_back(std::move(tool));
     };
@@ -3120,7 +3560,7 @@ TopoDS_Shape constructShape(
             }
         }
         if (edgeData.ruled) {
-            admit(ruledTool(edgeData, ends, request.size1));
+            admit(ruledTool(ctx, edgeData, ends, request.size1));
         }
         else if (edgeData.line) {
             if (auto tool = lineTool(ctx, edgeData, ends)) {

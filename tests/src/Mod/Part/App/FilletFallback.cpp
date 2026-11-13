@@ -737,6 +737,24 @@ TEST_F(FilletFallbackTest, chamfers)
     EXPECT_TRUE(exact(dressUp(ring, circles, chamfer(2)), pi * 64 * 10 - removed));
 }
 
+// A concave straight edge between a wall and a boss fused to it, a cylinder along the edge: the
+// ball of its round lies in the air, in front of the wall and outside the boss (ops#640, Case Base
+// #47: the construction put it in the material, in the boss, and refused). Below the limit, forced,
+// it is OCCT's round
+TEST_F(FilletFallbackTest, concaveRoundOfAWallAndABoss)
+{
+    BRepAlgoAPI_Fuse fuse(
+        box(20, 10, 10, gp_Pnt(0, -10, 0)),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(10, 2, 0), gp::DZ()), 5, 10).Shape()
+    );
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    double x = 10 + std::sqrt(21.0);
+    std::vector<TopoShape> edges {edgeBetween(base, {x, 0, 0}, {x, 0, 10})};
+    EXPECT_TRUE(sameAsOcct(base, edges, fillet(2)));
+}
+
 // The rib's top edges chamfered just under the limit: the top strip left between the chamfers,
 // 2 (2 - d) wide, is within the Booleans' fuzzy reach of the ridge, which absorbs it with a grown
 // tolerance, and the result would lack the strip's volume. The construction refuses it (PR 286
