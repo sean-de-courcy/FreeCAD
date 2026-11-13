@@ -8304,11 +8304,19 @@ TopoShape& TopoShape::makeElementFillet(
             }
             if (named && rest.size() == split->rest.size()) {
                 try {
-                    return makeElementFillet(stage, rest, radius1, radius2, op);
+                    makeElementFillet(stage, rest, radius1, radius2, op);
+                    // (OCCT's invalid result for the rest, which its construction refused, is
+                    // not an error there: it is noted)
+                    if (FilletFallback::takeInvalidResult().empty()) {
+                        return *this;
+                    }
                 }
                 catch (const Base::CADKernelError&) {
                     // The rest is not rounded on that body: the whole selection, as without
-                    // the split (its error stands)
+                    // the split (its error stands). Never after the feature's time is up
+                    if (KernelBudget::pastDeadline()) {
+                        throw;
+                    }
                 }
                 catch (const Standard_Failure&) {
                 }

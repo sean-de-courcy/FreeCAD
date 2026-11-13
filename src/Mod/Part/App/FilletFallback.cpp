@@ -11363,6 +11363,12 @@ bool constructRims(
         catch (const Standard_Failure& e) {
             out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();
         }
+        catch (const Base::Exception& e) {
+            out.rimRefusal = e.what();
+        }
+        catch (const std::exception& e) {
+            out.rimRefusal = e.what();
+        }
         const size_t fewLoops = 8;
         if (shape.IsNull() && takenGroups.size() > 1 && takenGroups.size() <= fewLoops) {
             // A loop that only the building refuses (its rounds, its mitres, its measures) does
@@ -11436,6 +11442,12 @@ bool constructRims(
     catch (const Standard_Failure& e) {
         out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();
     }
+    catch (const Base::Exception& e) {
+        out.rimRefusal = e.what();
+    }
+    catch (const std::exception& e) {
+        out.rimRefusal = e.what();
+    }
     rest.clear();
     return false;
 }
@@ -11469,6 +11481,12 @@ bool construct(
     }
     catch (const Standard_Failure& e) {
         out.rimRefusal = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        out.rimRefusal = e.what();
+    }
+    catch (const std::exception& e) {
+        out.rimRefusal = e.what();
     }
     std::string why;
     try {
