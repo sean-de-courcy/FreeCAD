@@ -28,12 +28,14 @@
 #include <set>
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_History.hxx>
@@ -83,10 +85,19 @@ namespace
 {
 // ops#655: Onshape's loft start and end condition "Normal to profile" (notes/loft-options.md)
 
-/// k per unit magnitude, as a multiple of the distance between the profiles. Oracle fact GB12 (e)
-/// fits k = 30.138 for profiles 30 apart; the rule behind it is asked of the oracle (ops#675), and
-/// this is the one place to change when it answers.
-constexpr double tangentPerDistance = 30.138 / 30.0;
+/// Onshape's tangent length per unit magnitude at one corner rail of a side face, from its point p
+/// on the first profile to its point q on the last, at the end whose normal (towards the other
+/// profile) is `normal`: 0.9 times the rail's reach along that normal plus 0.1 times its length.
+/// Along a face between two corner rails it is linear between them; a face bounded by one closed
+/// edge on each profile (a circle) has no corners, and each row takes the rule at its own rail
+/// (oracle 18 Q10). Found from oracle 17's surfaces (LE2, LE4, LE9; notes/loft-end-conditions.md):
+/// it gives Onshape's k to 1e-6 on squares, circles, offset rectangles and a tilted end, where each
+/// end gets its own k.
+double tangentLength(const gp_Pnt& p, const gp_Pnt& q, const gp_Dir& normal)
+{
+    const gp_Vec rail(p, q);
+    return 0.9 * rail.Dot(gp_Vec(normal)) + 0.1 * rail.Magnitude();
+}
 
 gp_Pnt wireCentre(const TopoDS_Shape& wire)
 {
@@ -195,8 +206,6 @@ Part::TopoShape withProfileConditions(
             "Loft: Normal to profile needs each profile's centre off the other profile's plane"
         ));
     }
-    const gp_Vec tangent0 = gp_Vec(normal0) * (startMagnitude * distance0 * tangentPerDistance);
-    const gp_Vec tangent1 = gp_Vec(normal1) * (endMagnitude * distance1 * tangentPerDistance);
 
     constexpr int samples = 101;
     std::vector<double> fractions(samples);
@@ -262,31 +271,78 @@ Part::TopoShape withProfileConditions(
             start1 = surface->Value(low ? u1 : u0, v0);
             middle1 = surface->Value(low ? u1 : u0, vq);
         }
+        // both profile edges by arc length, walked from the ends nearest the face's first rows
+        const std::vector<gp_Pnt> points0 = byArcLength(edge0, start0, middle0, fractions);
+        const std::vector<gp_Pnt> points1 = byArcLength(edge1, start1, middle1, fractions);
+        // the tangent lengths at the face's two corner rails (fraction 0 and 1), from the edges'
+        // own end points: a planar side face's surface corners can lie off its edges
+        const double startA
+            = startMagnitude * tangentLength(points0.front(), points1.front(), normal0);
+        const double startB = startMagnitude * tangentLength(points0.back(), points1.back(), normal0);
+        const double endA = endMagnitude * tangentLength(points0.front(), points1.front(), normal1);
+        const double endB = endMagnitude * tangentLength(points0.back(), points1.back(), normal1);
+        // a closed profile edge (a circle) has no corner rails: each row takes the rule at its own
+        // rail, the points at its fraction on the two edges (oracle 18 Q10: an off-centre circle's
+        // rows each get their own value, not the seam rail's)
+        const bool closed = BRep_Tool::IsClosed(edge0)
+            || points0.front().Distance(points0.back()) < 1e-7;
+        const Handle(Geom_BSplineCurve) curve0 = fit(points0, fractions);
+        const Handle(Geom_BSplineCurve) curve1 = fit(points1, fractions);
         GeomFill_Profiler profiler;
-        profiler.AddCurve(fit(byArcLength(edge0, start0, middle0, fractions), fractions));
-        profiler.AddCurve(fit(byArcLength(edge1, start1, middle1, fractions), fractions));
+        profiler.AddCurve(curve0);
+        profiler.AddCurve(curve1);
         profiler.Perform(Precision::PConfusion());
         const int count = profiler.NbPoles();
         TColgp_Array1OfPnt row0(1, count);
         TColgp_Array1OfPnt row3(1, count);
         profiler.Poles(1, row0);
         profiler.Poles(2, row3);
+        TColStd_Array1OfReal uKnots(1, profiler.NbKnots());
+        TColStd_Array1OfInteger uMults(1, profiler.NbKnots());
+        profiler.KnotsAndMults(uKnots, uMults);
+        // each pole row's place along the face (Greville abscissa), so a tangent length linear in
+        // the arc-length fraction is exactly linear along the surface
+        const int degree = profiler.Degree();
+        std::vector<double> flat;
+        for (int i = uKnots.Lower(); i <= uKnots.Upper(); ++i) {
+            flat.insert(flat.end(), uMults(i), uKnots(i));
+        }
+        if (static_cast<int>(flat.size()) != count + degree + 1) {
+            throw Base::CADKernelError("Loft: unexpected knots on a profile edge");
+        }
+        const double span = flat.back() - flat.front();
         TColgp_Array2OfPnt poles(1, count, 1, 4);
         for (int j = 1; j <= count; ++j) {
+            double greville = 0;
+            for (int i = j; i < j + degree; ++i) {
+                greville += flat[i];
+            }
+            const double fraction = (greville / degree - flat.front()) / span;
+            double kStart = startA + (startB - startA) * fraction;
+            double kEnd = endA + (endB - endA) * fraction;
+            if (closed) {
+                // the fitted edges are parameterised by the fractions, 0 to 1
+                const gp_Pnt p = curve0->Value(fraction);
+                const gp_Pnt q = curve1->Value(fraction);
+                kStart = startMagnitude * tangentLength(p, q, normal0);
+                kEnd = endMagnitude * tangentLength(p, q, normal1);
+            }
+            const gp_XYZ tangent0 = gp_Vec(normal0).XYZ() * kStart;
+            const gp_XYZ tangent1 = gp_Vec(normal1).XYZ() * kEnd;
             const gp_XYZ p0 = row0(j).XYZ();
             const gp_XYZ p3 = row3(j).XYZ();
             gp_XYZ p1;
             gp_XYZ p2;
             if (start && end) {
-                p1 = p0 + tangent0.XYZ() / 3;
-                p2 = p3 - tangent1.XYZ() / 3;
+                p1 = p0 + tangent0 / 3;
+                p2 = p3 - tangent1 / 3;
             }
             else if (start) {
-                p1 = p0 + tangent0.XYZ() / 3;
+                p1 = p0 + tangent0 / 3;
                 p2 = (p1 + p3) / 2;
             }
             else {
-                p2 = p3 - tangent1.XYZ() / 3;
+                p2 = p3 - tangent1 / 3;
                 p1 = (p0 + p2) / 2;
             }
             poles(j, 1) = gp_Pnt(p0);
@@ -294,9 +350,6 @@ Part::TopoShape withProfileConditions(
             poles(j, 3) = gp_Pnt(p2);
             poles(j, 4) = gp_Pnt(p3);
         }
-        TColStd_Array1OfReal uKnots(1, profiler.NbKnots());
-        TColStd_Array1OfInteger uMults(1, profiler.NbKnots());
-        profiler.KnotsAndMults(uKnots, uMults);
         TColStd_Array1OfReal vKnots(1, 2);
         TColStd_Array1OfInteger vMults(1, 2);
         vKnots(1) = 0;
@@ -386,6 +439,86 @@ Part::TopoShape withProfileConditions(
     Part::TopoShape result(ruled.Tag, ruled.Hasher);
     result.makeShapeWithElementMap(sewn, Part::MapperHistory(history), {ruled});
     return result;
+}
+
+/// ops#640 (oracle 17 LE3): Onshape refuses a condition whose side face passes through a profile's
+/// face (LOFT_INVALID, e.g. a negative magnitude on a narrowing loft). A side point behind a
+/// profile's plane whose foot on that plane lies inside the cap there is such a crossing. A side
+/// that only bulges past a plane outside its cap (a widening loft) is a valid solid and stays.
+bool crossesACap(const TopoDS_Shape& solid, const TopoDS_Shape& first, const TopoDS_Shape& last)
+{
+    gp_Pln planes[2];
+    if (!Part::TopoShape(first).findPlane(planes[0])
+        || !Part::TopoShape(last).findPlane(planes[1])) {
+        return false;
+    }
+    // each plane's inside: towards the other profile
+    const gp_Vec across(wireCentre(first), wireCentre(last));
+    gp_Dir inward[2] = {planes[0].Axis().Direction(), planes[1].Axis().Direction()};
+    if (across.Dot(gp_Vec(inward[0])) < 0) {
+        inward[0].Reverse();
+    }
+    if (across.Dot(gp_Vec(inward[1])) > 0) {
+        inward[1].Reverse();
+    }
+    std::vector<TopoDS_Face> caps[2];
+    std::vector<TopoDS_Face> sides;
+    for (TopExp_Explorer x(solid, TopAbs_FACE); x.More(); x.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(x.Current());
+        BRepAdaptor_Surface surface(face);
+        bool cap = false;
+        if (surface.GetType() == GeomAbs_Plane) {
+            const gp_Pln plane = surface.Plane();
+            for (int i = 0; i < 2 && !cap; ++i) {
+                if (planes[i].Distance(plane.Location()) < 1e-6
+                    && plane.Axis().Direction().IsParallel(planes[i].Axis().Direction(), 1e-7)) {
+                    caps[i].push_back(face);
+                    cap = true;
+                }
+            }
+        }
+        if (!cap) {
+            sides.push_back(face);
+        }
+    }
+    // across the faces: evenly, plus rows close to both ends, where a small negative magnitude's dip
+    // behind a plane ends early (v ~ 2 |k| / 3 h)
+    constexpr int rows = 24;
+    std::vector<double> spans;
+    for (int j = 0; j <= 48; ++j) {
+        spans.push_back(j / 48.0);
+    }
+    for (double v : {1e-5, 1e-4, 1e-3, 3e-3, 1e-2}) {
+        spans.push_back(v);
+        spans.push_back(1 - v);
+    }
+    for (const auto& face : sides) {
+        BRepAdaptor_Surface surface(face);
+        double u0 = 0;
+        double u1 = 0;
+        double v0 = 0;
+        double v1 = 0;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        for (int i = 0; i <= rows; ++i) {
+            for (double v : spans) {
+                const gp_Pnt point = surface.Value(u0 + (u1 - u0) * i / rows, v0 + (v1 - v0) * v);
+                for (int k = 0; k < 2; ++k) {
+                    const double depth = gp_Vec(planes[k].Location(), point).Dot(gp_Vec(inward[k]));
+                    if (depth > -1e-6) {
+                        continue;  // on the inside of this profile's plane
+                    }
+                    const gp_Pnt foot = point.Translated(gp_Vec(inward[k]) * -depth);
+                    for (const auto& cap : caps[k]) {
+                        BRepClass_FaceClassifier classifier(cap, foot, 1e-7);
+                        if (classifier.State() == TopAbs_IN) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 /// ops#655: a profile that is one closed periodic edge (a circle, an ellipse) keeps its seam vertex
@@ -1184,7 +1317,7 @@ Loft::Loft()
         (1.0),
         "Loft",
         App::Prop_None,
-        "Scale of the start condition's tangent"
+        "Scale of the start condition's tangent (0: no condition, as Onshape)"
     );
     ADD_PROPERTY_TYPE(
         EndCondition,
@@ -1194,7 +1327,13 @@ Loft::Loft()
         "How the loft reaches the last profile: None, or Normal to profile (two planar profiles)"
     );
     EndCondition.setEnums(ConditionEnums);
-    ADD_PROPERTY_TYPE(EndMagnitude, (1.0), "Loft", App::Prop_None, "Scale of the end condition's tangent");
+    ADD_PROPERTY_TYPE(
+        EndMagnitude,
+        (1.0),
+        "Loft",
+        App::Prop_None,
+        "Scale of the end condition's tangent (0: no condition, as Onshape)"
+    );
     ADD_PROPERTY_TYPE(
         Connections,
         (nullptr),
@@ -1461,6 +1600,11 @@ App::DocumentObjectExecReturn* Loft::execute()
         }
         std::vector<bool> placed(connections.size(), false);
 
+        // ops#655: Onshape's profile conditions. A magnitude of 0 is no condition at that end:
+        // Onshape builds the plain loft for it (oracle 17 LE3), never a tangent of length 0
+        const bool startSet = StartCondition.getValue() != 0 && StartMagnitude.getValue() != 0.0;
+        const bool endSet = EndCondition.getValue() != 0 && EndMagnitude.getValue() != 0.0;
+
         // build all shells
         std::vector<TopoShape> shells;
         bool frontReseamed = false;
@@ -1504,7 +1648,7 @@ App::DocumentObjectExecReturn* Loft::execute()
             }
             frontReseamed = frontReseamed || !unseamed.IsSame(sectionWires.front().getShape());
             // ops#655: a profile condition rebuilds the ruled loft's side faces
-            const bool conditioned = StartCondition.getValue() != 0 || EndCondition.getValue() != 0;
+            const bool conditioned = startSet || endSet;
             if (conditioned) {
                 if (sectionWires.size() != 2 || closed) {
                     throw Base::CADKernelError(QT_TRANSLATE_NOOP(
@@ -1534,9 +1678,9 @@ App::DocumentObjectExecReturn* Loft::execute()
                     shell,
                     sectionWires.front().getShape(),
                     sectionWires.back().getShape(),
-                    StartCondition.getValue() != 0,
+                    startSet,
                     StartMagnitude.getValue(),
-                    EndCondition.getValue() != 0,
+                    endSet,
                     EndMagnitude.getValue()
                 );
             }
@@ -1646,6 +1790,18 @@ App::DocumentObjectExecReturn* Loft::execute()
             SC.PerformInfinitePoint(Precision::Confusion());
             if (SC.State() == TopAbs_IN) {
                 s.setShape(s.getShape().Reversed(), false);
+            }
+            if ((startSet || endSet)
+                && crossesACap(
+                    s.getShape(),
+                    wiresections.front().front().getShape(),
+                    wiresections.front().back().getShape()
+                )) {
+                throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Loft: the side crosses a profile's face (Onshape: LOFT_INVALID); change the "
+                    "condition's magnitude"
+                ));
             }
         }
 
