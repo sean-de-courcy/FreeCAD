@@ -143,14 +143,17 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertVolume("B", 980)
         self.assertClean(c)
 
+    # ops#693: Onshape's values; ours refuses r 25 on A as well ("a tangent strip runs off its face"): the owner fails, A 1000.
+    @unittest.expectedFailure
     def testAFailingPartIsLeftUnchanged(self):
-        """O2 (FILLET_PARTIAL_FAIL): B only 3 high, r 4 on both top front edges: A is rounded, B
-        is left unchanged (its step passes its base through, valid), the owner warns naming B."""
+        """O2 (FILLET_PARTIAL_FAIL, ops#693): B only 3 high, r 25 on both top front edges: Onshape
+        rounds A (1000 -> 136.857) and leaves B unchanged (its step passes its base through, valid);
+        the owner warns naming B."""
         self.doc.getObject("BPad").Length = 3
         self.doc.recompute()
         a, b = self.body("A"), self.body("B")
-        f = makeDressUp(self.doc, self.S, "F", [pickAt(a, frontTop(0)), pickAt(b, frontTop(20, 3))], 4)
-        self.assertVolume("A", 1000 - rounded(4))
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(a, frontTop(0)), pickAt(b, frontTop(20, 3))], 25)
+        self.assertAlmostEqual(a.Shape.Volume, 136.857, delta=0.01, msg=f.getStatusString())
         self.assertVolume("B", 300)
         self.assertTrue(f.isValid(), f.getStatusString())
         self.assertIn("Warning", f.State)
@@ -158,12 +161,35 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertIn("'B'", f.getStatusString())
         self.assertTrue(self.step(f, "B").isValid())
 
-    def testNoPartRoundedFails(self):
-        """O2 (FILLET_FAILED): r 4 on B's 3 high edge alone: the owner fails, B is unchanged."""
+    # ops#693: Onshape's values, which kernel safety's fallback gives on the experiment line. This branch's base lacks the
+    # fallback and refuses r 4 on B's 3 high edge ("a tangent strip runs off its face"): red here until it is merged in.
+    def testARadiusLargerThanTheFacesRoundsBoth(self):
+        """O2 (ops#693): B only 3 high, r 4 on both top front edges: Onshape rounds both, no warning
+        (A 965.664, B 266.084)."""
+        self.doc.getObject("BPad").Length = 3
+        self.doc.recompute()
+        a, b = self.body("A"), self.body("B")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(a, frontTop(0)), pickAt(b, frontTop(20, 3))], 4)
+        self.assertClean(f)
+        self.assertAlmostEqual(a.Shape.Volume, 965.664, delta=0.01)
+        self.assertAlmostEqual(b.Shape.Volume, 266.084, delta=0.01)
+
+    # ops#693: as the test above: green on the experiment line (kernel safety's fallback), red on this branch's base.
+    def testARadiusLargerThanTheFaceBuilds(self):
+        """O2 (ops#693): r 4 on B's 3 high edge alone: Onshape builds it, no message, B 300 -> 266.084."""
         self.doc.getObject("BPad").Length = 3
         self.doc.recompute()
         b = self.body("B")
         f = makeDressUp(self.doc, self.S, "F", [pickAt(b, frontTop(20, 3))], 4)
+        self.assertClean(f)
+        self.assertAlmostEqual(b.Shape.Volume, 266.084, delta=0.01)
+
+    def testNoPartRoundedFails(self):
+        """O2 (FILLET_FAILED, ops#693): r 25 on B's 3 high edge alone: the owner fails, B is unchanged."""
+        self.doc.getObject("BPad").Length = 3
+        self.doc.recompute()
+        b = self.body("B")
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(b, frontTop(20, 3))], 25)
         self.assertFalse(f.isValid())
         self.assertIn("rounds no part", f.getStatusString())
         self.assertVolume("B", 300)

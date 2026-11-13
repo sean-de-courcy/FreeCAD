@@ -43,6 +43,7 @@
 #include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/Origin.h>
 #include <App/Part.h>
 #include <Base/Tools.h>
@@ -828,9 +829,13 @@ static void finishFeature(
     PartDesignGui::TaskDlgFeatureParameters::noteCreated(feature);
     // The feature's own Body: a new Extrude may have gone to another part (hands-on check A-1)
     PartDesign::Body* featureBody = PartDesign::Body::findBodyOf(feature);
+    // A studio feature (a pattern over parts, ops#654 T1a) is in no Body: its dialog opens on it
+    // in the studio
     PartDesignGui::setEdit(
         feature,
-        featureBody && featureBody != activeBody ? featureBody : activeBody
+        PartDesign::isStudioOwner(feature)
+            ? nullptr
+            : (featureBody && featureBody != activeBody ? featureBody : activeBody)
     );
     cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
 }
@@ -3683,6 +3688,20 @@ bool CmdPartDesignThickness::isActive()
 // Common functions for all Transformed features
 //===========================================================================
 
+/// The origin a new pattern's default direction, axis or plane comes from: a studio feature's
+/// (ops#654 T1a, outside every Body) is its studio's own (Top, Front, Right), else body's
+static App::Origin* patternOrigin(App::DocumentObject* pattern, PartDesign::Body* body)
+{
+    if (pattern && !PartDesign::Body::findBodyOf(pattern)) {
+        if (auto studio = freecad_cast<App::Part*>(
+                App::GeoFeatureGroupExtension::getGroupOfObject(pattern)
+            )) {
+            return studio->getOrigin();
+        }
+    }
+    return body->getOrigin();
+}
+
 void prepareTransformed(
     PartDesign::Body* pcActiveBody,
     Gui::Command* cmd,
@@ -3712,6 +3731,58 @@ void prepareTransformed(
         cmd->openCommand(msg.c_str());
         if (inStudio) {
             makeStudioList(pcActiveBody->getDocument(), studio);
+        }
+        // FreeCAD-CH ops#654 T1a (parts-design.md 10.16): a Linear pattern, Circular pattern or
+        // Mirror in a listed studio is a studio feature: outside every Body, in the studio, its
+        // originals studio features or members of any of its parts, a step in each part one acts
+        // on; the owner, its list entry, its steps and its first recompute are this one step,
+        // which Cancel aborts whole. Scale and Multi-Transform keep the Body path
+        if (inStudio && waitsForFeatures) {
+            App::Document* doc = pcActiveBody->getDocument();
+            try {
+                Gui::cmdAppDocument(
+                    doc,
+                    std::ostringstream() << "addObject('PartDesign::" << which << "','" << FeatName
+                                         << "')"
+                );
+                App::DocumentObject* owner = doc->getObject(FeatName.c_str());
+                if (!owner) {
+                    throw Base::RuntimeError("The pattern was not made");
+                }
+                const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
+                if (studio) {
+                    Gui::cmdAppObject(studio, std::ostringstream() << "addObject(" << ownerCmd << ")");
+                }
+                if (!features.empty()) {
+                    std::stringstream str;
+                    str << "Originals = [";
+                    for (auto feature : features) {
+                        str << cmd->getObjectCmd(feature) << ",";
+                    }
+                    str << "]";
+                    FCMD_OBJ_CMD(owner, str.str().c_str());
+                }
+                Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+                Gui::Command::doCommand(
+                    Gui::Command::Doc,
+                    "PartDesign.studioInsert(%s, -1)",
+                    ownerCmd.c_str()
+                );
+                // No originals yet: the dialog asks for them; the error isn't printed meanwhile
+                Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
+                    App::Document::IgnoreErrorOnRecompute,
+                    doc,
+                    features.empty()
+                );
+                // Its references and values, then the dialog (finishTransformed)
+                func(owner, features);
+            }
+            catch (const Base::Exception& e) {
+                cmd->abortCommand();
+                Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 10000);
+                Base::Console().error("%s\n", e.what());
+            }
+            return;
         }
         // The solid it follows, before it is inserted (a transform without originals isn't a
         // solid feature, so the Tip stays there until it is set below)
@@ -3774,7 +3845,19 @@ void prepareTransformed(
     PartDesign::Body* activeBody = PartDesignGui::getBody(true);
     // FreeCAD-CH ops#654 slice 8: a studio feature (a Features-list row) with a step in the
     // active Body is taken: its step is copied
-    auto takes = [activeBody](const App::DocumentObject* obj) {
+    // T1a: in a listed studio, a studio feature or a member of any of its parts (an original
+    // that can't be patterned is refused by the pattern, loudly)
+    const bool overParts = inStudio && waitsForFeatures;
+    auto takes = [activeBody, overParts, studio](const App::DocumentObject* obj) {
+        if (overParts) {
+            if (PartDesign::isStudioOwner(obj)) {
+                return PartDesign::StudioList::holding(obj)->studio() == studio;
+            }
+            App::Part* own = nullptr;
+            auto body = PartDesign::Body::findBodyOf(obj);
+            return obj->isDerivedFrom<PartDesign::Feature>() && body
+                && Part::BodyBase::studioOf(body, own) && own == studio;
+        }
         if (PartDesign::isStudioOwner(obj)) {
             return PartDesign::StudioList::stepOf(obj, activeBody) != nullptr;
         }
@@ -3789,6 +3872,19 @@ void prepareTransformed(
         }
     }
     std::erase_if(features, [&takes](App::DocumentObject* feature) { return !takes(feature); });
+    if (overParts) {
+        // A step picked (a face of its part) stands for its studio feature (T1a)
+        std::vector<App::DocumentObject*> mapped;
+        for (App::DocumentObject* feature : features) {
+            if (PartDesign::StudioList::isStep(feature)) {
+                feature = static_cast<PartDesign::Feature*>(feature)->StudioOwner.getValue();
+            }
+            if (feature && std::ranges::find(mapped, feature) == mapped.end()) {
+                mapped.push_back(feature);
+            }
+        }
+        features = mapped;
+    }
 
     worker(features);
 
@@ -3964,7 +4060,8 @@ void CmdPartDesignMirrored::activated(int iMsg)
         if (!direction) {
             FCMD_OBJ_CMD(
                 Feat,
-                "MirrorPlane = (" << getObjectCmd(pcActiveBody->getOrigin()->getXY()) << ", [''])"
+                "MirrorPlane = (" << getObjectCmd(patternOrigin(Feat, pcActiveBody)->getXY())
+                                  << ", [''])"
             );
         }
 
@@ -4026,10 +4123,10 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
                 }
             }
             if (!direction) {
+                App::Origin* origin = patternOrigin(Feat, pcActiveBody);
                 FCMD_OBJ_CMD(
                     Feat,
-                    "Direction = (" << Gui::Command::getObjectCmd(pcActiveBody->getOrigin()->getX())
-                                    << ",[''])"
+                    "Direction = (" << Gui::Command::getObjectCmd(origin->getX()) << ",[''])"
                 );
             }
             // Onshape's defaults (ops#640 rank 8, B3-6): Distance is the spacing between
@@ -4100,7 +4197,8 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
         if (!direction) {
             FCMD_OBJ_CMD(
                 Feat,
-                "Axis = (" << Gui::Command::getObjectCmd(pcActiveBody->getOrigin()->getZ()) << ",[''])"
+                "Axis = (" << Gui::Command::getObjectCmd(patternOrigin(Feat, pcActiveBody)->getZ())
+                           << ",[''])"
             );
         }
 

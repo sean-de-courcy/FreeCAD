@@ -78,6 +78,12 @@
 
 
 using namespace PartDesignGui;
+
+namespace PartDesignGui
+{
+// TaskTransformedParameters.cpp (ops#654 T1a; declared where used)
+App::Origin* transformedOrigin(App::DocumentObject* pattern);
+}  // namespace PartDesignGui
 using namespace Gui;
 
 namespace
@@ -404,10 +410,16 @@ void TaskPatternParameters::updateUI()
 
 void TaskPatternParameters::showOriginAxes(bool show)
 {
-    PartDesign::Body* body = PartDesign::Body::findBodyOf(getObject());
-    if (body) {
+    // A studio feature's: its studio's (ops#654 T1a)
+    App::Origin* origin = nullptr;
+    try {
+        origin = transformedOrigin(getObject());
+    }
+    catch (const Base::Exception& ex) {
+        Base::Console().error("%s\n", ex.what());
+    }
+    if (origin) {
         try {
-            App::Origin* origin = body->getOrigin();
             auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
                 Gui::Application::Instance->getViewProvider(origin)
             );

@@ -190,11 +190,13 @@ class TestStudioPartMirrorGui(unittest.TestCase):
         )
 
     def testABodyActiveKeepsTheFeatureMirror(self):
-        """A Body active and nothing picked: today's mirror, in the Body."""
+        """A Body active and nothing picked: the feature mirror, a studio feature since T1a
+        (ops#654 10.16: every new feature pattern in a listed studio is one), outside every Body."""
         Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.src)
         self.runMirror()
         [mirror] = self.mirrors()
-        self.assertTrue(self.src.hasObject(mirror))
+        self.assertFalse(self.src.hasObject(mirror))
+        self.assertEqual(mirror.getParentGeoFeatureGroup(), self.S)
         self.assertEqual(mirror.PatternType, "Feature")
         self.assertIsNone(visible(QtWidgets.QPushButton, "studioMirrorPlaneButton"))
 

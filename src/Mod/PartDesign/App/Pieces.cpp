@@ -44,6 +44,9 @@ namespace PartDesign
 
 // StudioList.cpp (slice 9; declared where used)
 PartDesignExport bool isStudioPartPattern(const App::DocumentObject* obj);
+// FeatureTransformed.cpp, StudioList.cpp (T1b): a feature pattern's instances that are no part's
+PartDesignExport bool isStudioFeaturePattern(const App::DocumentObject* obj);
+PartDesignExport Part::TopoShape studioPatternLeftovers(const App::DocumentObject* obj);
 // StudioList.cpp (10.13 gate round; declared where used)
 PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner);
 
@@ -293,6 +296,11 @@ Part::TopoShape leftoverSolids(const App::DocumentObject* owner)
 {
     if (!owner || Body::findBodyOf(owner)) {
         return {};
+    }
+    // A feature pattern's (T1b, 10.16 settled 3 and 2): a New original's instances, an Add over
+    // parts' instances that join none of them
+    if (isStudioFeaturePattern(owner)) {
+        return studioPatternLeftovers(owner);
     }
     // Only an Add's tool has leftovers (H1a, R4): a Remove or an Intersect whose tool meets no
     // scope part takes nothing away there, and its tool is no material (10.13 gate round: seed 5

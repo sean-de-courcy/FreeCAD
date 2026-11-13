@@ -250,6 +250,7 @@ public:
         , wholeObject(options.wholeObject)
         , acceptOnly(options.acceptOnly)
         , vertexToEdge(options.vertexToEdge)
+        , elementShapes(options.elementShapes)
     {}
     ~ReferenceFieldGate() override
     {
@@ -305,7 +306,8 @@ public:
                 return false;
             }
         }
-        if (kind == ReferenceField::Kind::Objects && obj == support
+        if (kind == ReferenceField::Kind::Objects
+            && (obj == support || (elementShapes && elementShapes(obj)))
             && !Base::Tools::isNullOrEmpty(sub)) {
             // An element of the shape shown: the pick maps it to the feature that made it, which
             // is tested then (the shape's own feature may be a fillet)
@@ -337,6 +339,7 @@ private:
     bool wholeObject;
     bool acceptOnly;
     bool vertexToEdge;
+    std::function<bool(const App::DocumentObject*)> elementShapes;
 };
 
 // The link properties a field writes: PropertyLinkSub, and PropertyLinkSubList (an up-to-shape)
@@ -1098,6 +1101,19 @@ void ReferenceField::reload()
         const int current = entryList->currentRow();
         QSignalBlocker block(entryList);
         entryList->clear();
+        // Deleted ones first, red (Onshape's "Missing feature" rows, fact U5): index -2 - k
+        if (options.missingRows) {
+            const std::vector<std::string> missing = options.missingRows();
+            for (std::size_t k = 0; k < missing.size(); ++k) {
+                auto item = new QListWidgetItem(entryList);
+                item->setData(IndexRole, -2 - static_cast<int>(k));
+                item->setData(StateRole, QStringLiteral("broken"));
+                item->setText(tr("Missing feature"));
+                item->setBackground(QColor(255, 0, 0, 70));
+                item->setIcon(Gui::BitmapFactory().pixmap("overlay_error"));
+                item->setToolTip(tr("%1 was deleted.").arg(QString::fromUtf8(missing[k].c_str())));
+            }
+        }
         for (std::size_t i = 0; i < objs.size(); ++i) {
             const QString label = QString::fromUtf8(objs[i]->Label.getValue());
             const QString name = QString::fromLatin1(objs[i]->getNameInDocument());
@@ -1109,6 +1125,15 @@ void ReferenceField::reload()
                               ? QStringLiteral("%1 (%2)").arg(label, name)
                               : label);
             item->setToolTip(name);
+            // A suppressed one: greyed and struck through (Onshape, fact U7)
+            auto suppressed = freecad_cast<App::PropertyBool*>(objs[i]->getPropertyByName("Suppressed"));
+            if (suppressed && suppressed->getValue()) {
+                QFont font = item->font();
+                font.setStrikeOut(true);
+                item->setFont(font);
+                item->setForeground(QColor(128, 128, 128));
+                item->setToolTip(tr("%1 is suppressed.").arg(name));
+            }
         }
         if (current >= 0 && current < entryList->count()) {
             entryList->setCurrentRow(current);
@@ -1939,8 +1964,10 @@ void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)
         Gui::Selection().clearSelection();
     }
     message.clear();
-    if (obj == target() && !Base::Tools::isNullOrEmpty(sub)) {
-        // A face, edge or vertex of the shape shown: the feature that made it
+    if ((obj == target() || (options.elementShapes && options.elementShapes(obj)))
+        && !Base::Tools::isNullOrEmpty(sub)) {
+        // A face, edge or vertex of the shape shown (or of another part's, for a pattern over
+        // parts): the feature that made it
         obj = featureOfElement(obj, sub);
         if (!obj) {
             message = tr("No feature that adds or removes material made this element.");
@@ -2619,6 +2646,22 @@ void ReferenceField::removeEntries(std::vector<int> indexes)
         })) {
         write(nullptr, {});
         return;
+    }
+    // "Missing feature" rows (index -2 - k): the last first, so the others keep their place
+    if (isObjects() && options.removeMissing) {
+        std::vector<int> missing;
+        for (int index : indexes) {
+            if (index <= -2) {
+                missing.push_back(-2 - index);
+            }
+        }
+        std::ranges::sort(missing, std::greater<>());
+        for (int k : missing) {
+            options.removeMissing(k);
+        }
+        if (!missing.empty()) {
+            scheduleReload();
+        }
     }
     std::erase_if(indexes, [](int index) { return index < 0; });
     if (indexes.empty()) {

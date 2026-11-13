@@ -192,6 +192,60 @@ void noteMerges(App::DocumentObject* owner, const std::vector<std::string>& reco
     }
 }
 
+/// Writes whether owner's step takes all of body (StudioTakenParts, body's id listed; 10.12
+/// amendment point 7, Onshape U3, U4) when it changed; consumedBy reads it, the projection takes it
+/// after the recompute (its Seen twin)
+void noteTaken(App::DocumentObject* owner, const Body* body, bool taken) noexcept
+{
+    try {
+        if (!owner || !body || !owner->isAttachedToDocument()) {
+            return;
+        }
+        auto prop =
+            freecad_cast<App::PropertyStringList*>(owner->getPropertyByName("StudioTakenParts"));
+        if (!prop && !taken) {
+            return;
+        }
+        std::vector<std::string> ids = prop ? prop->getValues() : std::vector<std::string>();
+        const std::string id = studioPartId(body);
+        const bool listed = std::ranges::find(ids, id) != ids.end();
+        if (listed == taken) {
+            return;
+        }
+        if (taken) {
+            ids.push_back(id);
+        }
+        else {
+            std::erase(ids, id);
+        }
+        if (!prop) {
+            prop = static_cast<App::PropertyStringList*>(owner->addDynamicProperty(
+                "App::PropertyStringList",
+                "StudioTakenParts",
+                "Studio",
+                "The parts this Remove takes all of: gone after it (ops#654 10.12 amendment 7)",
+                App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+            ));
+        }
+        prop->setValues(ids);
+    }
+    catch (...) {
+        // a record not written: the next compute writes it
+    }
+}
+
+/// Writes noteTaken when the step's compute ends, however it ends (a failure takes nothing)
+struct TakenNote
+{
+    App::DocumentObject* owner;
+    const Body* body;
+    bool taken = false;
+    ~TakenNote()
+    {
+        noteTaken(owner, body, taken);
+    }
+};
+
 }  // namespace
 
 FeatureApply::FeatureApply()
@@ -289,6 +343,7 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
         // A piece step (P6p): the first step of a part its owner made from a piece or a leftover
         // takes the one solid of the source its witness selects, as is
         const bool piece = body && owner && isPieceBody(body) && body->StudioMadeBy.getValue() == owner;
+        TakenNote takenNote {owner, body};
         Part::TopoShape tool = piece ? pieceShape(body, &why) : toolOf(owner, &why);
         // 10.13: an Add owner merges the parts its tool joins; decided here, in the document's
         // frame, by every step alike (the record is written when it changes)
@@ -461,6 +516,18 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
 
         // A Body never goes on with two solids (requirement 2, until pieces become parts, P6p)
         const int solids = result.isNull() ? 0 : countSolids(result.getShape());
+        if (solids == 0 && !piece && owner && !isBooleanOwner(owner) && !base.isNull()
+            && getBooleanOperation() == BooleanOperation::Subtraction) {
+            // 10.12 amendment point 7 (Onshape U3, U4): a Remove that takes all of its part (or
+            // of a piece) is OK with no message; the part is gone after it (consumedBy reads the
+            // record), its Body valid and empty. A split's pieces of it go too (noteSplitHeld
+            // clears a lost split: nothing is left to hold)
+            noteSplitHeld(owner, body, Part::TopoShape());
+            takenNote.taken = true;
+            rawShape = Part::TopoShape();
+            Shape.setValue(Part::TopoShape());
+            return App::DocumentObject::StdReturn;
+        }
         if (solids == 0) {
             return new App::DocumentObjectExecReturn(
                 "Applying '" + std::string(owner->Label.getValue()) + "' leaves nothing of " + part,

@@ -147,6 +147,10 @@ public:
     static void setEditFinal(App::DocumentObject* member, bool final);
     /// After member's dialog recomputed member alone: in Final, the features after it compute
     static void recomputeEditTail(App::DocumentObject* member);
+    /// A studio feature's dialog changed which parts it has steps in (a pattern over parts,
+    /// ops#654 T1b): each part of its studio rolls back to the feature again, so a part given a
+    /// step shows it, as the parts it had at the start do
+    static void followStudioEdit(App::DocumentObject* edited);
     //@}
 
     /// Override to return the color of the tip instead of the body, which doesn't really have color
