@@ -536,6 +536,18 @@ isCounterSiblingName(std::string_view name, std::string_view other, bool copySib
  */
 AppExport bool isTwinName(std::string_view name, std::string_view other);
 
+/** A name as the map holds it (interned) with its own sections in full and the names they embed
+ * left as references: its leading reference, the whole name or the prefix of a split piece, is
+ * replaced by its content, and a list's reference to the empty name is emptied, as
+ * NameTable::toPlain() does at the top level. A plain name is itself. Each section's fields
+ * besides its name lists are the plain form's, at the cost of the name's own text instead of its
+ * whole history's (ops#640). isTwinName() takes plain names, these, or names as the map holds
+ * them, and answers as for their plain forms, reading a reference as its content. That holds
+ * for the names the encoder writes: a content ending in the escape character `^` is outside the
+ * grammar (no field ends in one), and its plain form would swallow the delimiter after it.
+ */
+AppExport std::string ownSectionsOf(std::string_view name);
+
 /** True if \a name is keyed by its order (ops#503 class D, D1): a section carries the ORD flag,
  * a duplicate counter or a role, or is a counter section (isTwinName()) with a non-zero Index.
  * An element with such a name and no twin (isTwinName()) is saved as a lone twin (twinCount 1).

@@ -16,6 +16,7 @@
 #include <sstream>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <Base/Console.h>
@@ -23,6 +24,7 @@
 
 #include "ElementNamingUtils.h"
 #include "MappedName.h"
+#include "NameTable.h"
 
 FC_LOG_LEVEL_INIT("PropertyLinks", true, true)
 
@@ -1976,11 +1978,120 @@ std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
  * counts as a counter too, as in sameUpToCounter(); at the top level it doesn't: an instance's
  * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
  */
+bool sameUpToOrder(std::string_view a, std::string_view b, bool top);
+bool sameSectionsUpToOrder(std::string_view a, std::string_view b, bool top);
+
+// The entries of \a text's name lists (a section's linked names and connected elements) that
+// are references to the empty name, emptied: the table interns an empty entry of a list of two or
+// more (`a,` is held as `~A,~E`), and the plain form has it empty again. A delimiter after a
+// caret belongs to an embedded name.
+std::string withEmptyEntries(const std::string& text)
+{
+    if (text.find(NameTable::Marker) == std::string::npos) {
+        return text;
+    }
+    std::string out;
+    out.reserve(text.size());
+    int field = 0;
+    std::size_t entry = 0;  // where the entry being read starts in out
+    const auto closeEntry = [&]() {
+        if ((field == SECTION_LINKED_NAME_INDEX || field == SECTION_CONNECTED_ELEMENTS_INDEX)
+            && out.size() - entry == NameTable::RefLength && out[entry] == NameTable::Marker) {
+            const auto id = NameTable::parseRef(std::string_view(out).substr(entry));
+            const auto content = id ? NameTable::instance().lookup(*id) : std::nullopt;
+            if (content && content->empty()) {
+                out.resize(entry);
+            }
+        }
+    };
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        const bool top = i == 0 || text[i - 1] != *SUB_SECTION_ESCAPE_CHAR;
+        if (top
+            && (c == *SECTION_SUB_DELIMINATOR || c == *NAME_SECTION_DELIMINATOR
+                || c == *SUB_SECTION_LIST_DELIMINATOR)) {
+            closeEntry();
+            if (c == *SECTION_SUB_DELIMINATOR) {
+                ++field;
+            }
+            else if (c == *NAME_SECTION_DELIMINATOR) {
+                field = 0;
+            }
+            out += c;
+            entry = out.size();
+            continue;
+        }
+        out += c;
+    }
+    closeEntry();
+    return out;
+}
+
+// sameUpToOrder() of two references. The pairs found the same are kept: twins differ at every
+// level of their histories, and each level's pair came up again under every pair above it (two
+// names made from the same two twins: 2^depth tests). Only a yes is kept, on the asking thread,
+// up to a count: it stays true whatever the table learns later (the table's entries never change
+// or go, and where a yes passed a reference the table doesn't know, both names held the same
+// one), while a no may have met such a reference, and turns yes once the table knows it. A no
+// ends the test at once at every level above it, so it needs no keeping.
+bool sameReferencesUpToOrder(std::string_view a, std::string_view b)
+{
+    constexpr std::size_t limit = 1000000;
+    thread_local std::unordered_set<std::string> same;
+    std::string key;
+    key.reserve(a.size() + b.size());
+    key.append(a);
+    key.append(b);
+    if (same.find(key) != same.end()) {
+        return true;
+    }
+    // A reference the table doesn't know stands for itself, as in the plain form
+    const std::string ownA = ownSectionsOf(a);
+    const std::string ownB = ownSectionsOf(b);
+    if (ownA != ownB && !sameSectionsUpToOrder(ownA, ownB, false)) {
+        return false;
+    }
+    if (same.size() >= limit) {
+        same.clear();
+    }
+    same.insert(std::move(key));
+    return true;
+}
+
 bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
 {
     if (a == b) {
         return true;
     }
+    // Names as the map holds them: a reference stands for its content, so that twins are told
+    // without the plain forms, whose length grows with the whole history (ops#640: one face
+    // name of the replica's Case Lid took gigabytes). The answer is the plain forms' own: equal
+    // references are equal names, and a section's fields besides the names it embeds are the
+    // same in both forms.
+    const auto isReference = [](std::string_view name) {
+        return name.size() == NameTable::RefLength && name.front() == NameTable::Marker;
+    };
+    if (!top && isReference(a) && isReference(b)) {
+        return sameReferencesUpToOrder(a, b);
+    }
+    // Any other name with a reference in it: its own sections (a stored name's leading
+    // reference and its lists' references to the empty name read as toPlain() writes them)
+    std::string ownA;
+    std::string ownB;
+    if (a.find(NameTable::Marker) != std::string_view::npos) {
+        ownA = ownSectionsOf(a);
+        a = ownA;
+    }
+    if (b.find(NameTable::Marker) != std::string_view::npos) {
+        ownB = ownSectionsOf(b);
+        b = ownB;
+    }
+    return a == b || sameSectionsUpToOrder(a, b, top);
+}
+
+// sameUpToOrder() of two names in their own sections (or plain), section by section
+bool sameSectionsUpToOrder(std::string_view a, std::string_view b, bool top)
+{
     auto sectionsA = NameAncestry::splitSections(a);
     auto sectionsB = NameAncestry::splitSections(b);
     if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
@@ -3206,9 +3317,38 @@ bool isCounterSiblingName(std::string_view name, std::string_view other, bool co
     return isCounterSibling(name, other, copySiblings);
 }
 
+std::string ownSectionsOf(std::string_view name)
+{
+    std::string text(name);
+    // A content is its ID's preimage, so it never leads back to itself; the bound is a guard
+    for (int round = 0; round < 4096; ++round) {
+        if (text.size() < NameTable::RefLength || text.front() != NameTable::Marker
+            || (text.size() > NameTable::RefLength
+                && text[NameTable::RefLength] != *NAME_SECTION_DELIMINATOR)) {
+            return withEmptyEntries(text);
+        }
+        const auto id = NameTable::parseRef(std::string_view(text).substr(0, NameTable::RefLength));
+        const auto content = id ? NameTable::instance().lookup(*id) : std::nullopt;
+        if (!content) {
+            return withEmptyEntries(text);
+        }
+        text.replace(0, NameTable::RefLength, *content);
+    }
+    return NameTable::instance().toPlain(name);
+}
+
 bool isTwinName(std::string_view name, std::string_view other)
 {
-    return name != other && sameUpToOrder(name, other, true);
+    if (name == other) {
+        return false;
+    }
+    // Names as the map holds them: two texts can spell one name where a form isn't canonical
+    if ((name.find(NameTable::Marker) != std::string_view::npos
+         || other.find(NameTable::Marker) != std::string_view::npos)
+        && NameTable::instance().compareExpanded(name, other) == 0) {
+        return false;
+    }
+    return sameUpToOrder(name, other, true);
 }
 
 bool isOrderKeyedName(std::string_view name)

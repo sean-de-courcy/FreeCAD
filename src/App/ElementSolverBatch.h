@@ -324,6 +324,12 @@ AppExport bool elementUpToFaces(
  * names is keyed by its order (Data::isOrderKeyedName()): a lone member. False otherwise, and
  * when the twins can't be measured.
  */
+/// For tests: the key elementTwinCentroid() gives \a name before it tests a twin, from its plain
+/// form (\a plain) or from its own sections (Data::ownSectionsOf()), which the walk reads. The two
+/// are equal for every name the encoder writes (not for a content ending in the escape character,
+/// which is outside the grammar: Data::ownSectionsOf()).
+AppExport std::string twinKeyForTesting(const std::string& name, bool plain);
+
 AppExport bool elementTwinCentroid(
     const GeoFeature* geo,
     const char* element,
