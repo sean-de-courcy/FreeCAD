@@ -62,6 +62,22 @@ std::string quoted(const App::DocumentObject* obj)
     return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
 }
 
+/// Adopts a part's id: an empty StudioPartId already reads as the Body's name
+/// (studioPartId()), so writing that name changes no id and must not touch the Body. A touched
+/// Body re-executes and reassigns its Shape, which touches everything linking it (Booleans,
+/// binders) and their histories: FMCVW #167's first piece split re-ran the earlier fillets for
+/// 819 s (ops#640).
+void adoptPartId(Body* body)
+{
+    if (!body || !std::string(body->StudioPartId.getValue()).empty()) {
+        return;
+    }
+    const bool noTouch = body->testStatus(App::ObjectStatus::NoTouch);
+    body->setStatus(App::ObjectStatus::NoTouch, true);
+    body->StudioPartId.setValue(body->getNameInDocument());
+    body->setStatus(App::ObjectStatus::NoTouch, noTouch);
+}
+
 /// A MultiTransform's step (Studio.cpp's rule): a member of the Body run as part of its
 /// MultiTransform, not a feature of its own
 bool isMultiTransformStep(const App::DocumentObject* obj)
@@ -1398,9 +1414,7 @@ bool StudioList::reconcile(std::string* why)
     }
     setBarIndex(bar);
     for (auto body : bodies) {
-        if (std::string(body->StudioPartId.getValue()).empty()) {
-            body->StudioPartId.setValue(body->getNameInDocument());
-        }
+        adoptPartId(body);
     }
 
     // 3. Remove the unwanted steps without readers, first, so the names of the steps made below
@@ -2149,9 +2163,7 @@ void PartDesign::setStudioScope(App::DocumentObject* owner, const std::vector<Bo
         if (!body) {
             continue;
         }
-        if (std::string(body->StudioPartId.getValue()).empty()) {
-            body->StudioPartId.setValue(body->getNameInDocument());  // adopted
-        }
+        adoptPartId(body);
         ids.push_back(studioPartId(body));
     }
     setStudioScopeIds(owner, ids);
