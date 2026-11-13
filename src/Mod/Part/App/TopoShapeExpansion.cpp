@@ -31,6 +31,12 @@
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_Line.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <GeomAPI_IntSS.hxx>
+#include <GeomConvert_CompCurveToBSplineCurve.hxx>
+#include <Geom_BoundedCurve.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Pnt2d.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <gp_Lin.hxx>
 #include <algorithm>
@@ -41,6 +47,7 @@
 #include <cctype>
 #include <cstring>
 #include <map>
+#include <set>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -8199,6 +8206,627 @@ bool finishConstruction(TopoShape& result, DressUpOutcome& outcome, const TopoSh
     }
     return false;
 }
+
+// FreeCAD-CH (Case Base #163 Fillet 6, rb164/rb166; ops#640): where a round's wall has a gap (a hole
+// through the wall dipping below the round's contact line), OCCT builds the stretch over the gap as
+// a rational B-spline that runs up to a few hundredths of a millimetre off the cylinder its two
+// neighbouring stripes lie on. Onshape keeps the one exact cylinder, trimmed by the gap's faces.
+// Recognised: a new B-spline face of the round between exactly two new stripes on one cylinder of
+// the round's radius, meeting each in a cross-section, and within a tenth of the radius of that
+// cylinder. It takes the cylinder; its other edges become the cylinder's exact intersections with
+// their other faces (a plane tangent along the axis: the contact line). The topology and its order
+// stay OCCT's, so the names stay. Unrecognised: OCCT's result, as before. Recognised and failing a
+// check: the fillet refuses (decision 418), since OCCT's result there is valid and wrong.
+class RoundCanonicalModification: public BRepTools_Modification
+{
+public:
+    RoundCanonicalModification(const TopoDS_Shape& result, const TopoDS_Shape& base, double radius)
+        : radius(radius)
+    {
+        TopTools_IndexedMapOfShape baseFaces;
+        TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            if (baseFaces.Contains(face)) {
+                continue;
+            }
+            const BRepAdaptor_Surface old(face, Standard_False);
+            if (old.GetType() != GeomAbs_BSplineSurface && old.GetType() != GeomAbs_BezierSurface) {
+                continue;
+            }
+            recognise(face, old, baseFaces, edgeFaces);
+        }
+    }
+
+    bool isEmpty() const
+    {
+        return surfaces.empty();
+    }
+
+    /// Why a recognised face could not be made exact (empty if every one was)
+    const std::string& failure() const
+    {
+        return why;
+    }
+
+    /// The largest distance of a recognised face from its cylinder, as OCCT built it
+    double deviation() const
+    {
+        return worst;
+    }
+
+    Standard_Boolean NewSurface(const TopoDS_Face& face,
+                                Handle(Geom_Surface)& surface,
+                                TopLoc_Location& location,
+                                Standard_Real& tolerance,
+                                Standard_Boolean& reverseWires,
+                                Standard_Boolean& reverseFace) override
+    {
+        const auto found = surfaces.find(face.TShape().get());
+        if (found == surfaces.end()) {
+            return Standard_False;
+        }
+        BRep_Tool::Surface(face, location);
+        surface = Handle(Geom_Surface)::DownCast(
+            found->second->Transformed(location.Inverted().Transformation()));
+        tolerance = BRep_Tool::Tolerance(face);
+        reverseWires = Standard_False;
+        reverseFace = Standard_False;
+        return Standard_True;
+    }
+
+    Standard_Boolean NewCurve(const TopoDS_Edge& edge,
+                              Handle(Geom_Curve)& curve,
+                              TopLoc_Location& location,
+                              Standard_Real& tolerance) override
+    {
+        const auto found = curves.find(edge.TShape().get());
+        if (found == curves.end()) {
+            return Standard_False;
+        }
+        double first {}, last {};
+        BRep_Tool::Curve(edge, location, first, last);
+        curve = Handle(Geom_Curve)::DownCast(
+            found->second.curve->Transformed(location.Inverted().Transformation()));
+        tolerance = BRep_Tool::Tolerance(edge);
+        return Standard_True;
+    }
+
+    Standard_Boolean NewPoint(const TopoDS_Vertex&, gp_Pnt&, Standard_Real&) override
+    {
+        return Standard_False;
+    }
+
+    Standard_Boolean NewCurve2d(const TopoDS_Edge& edge,
+                                const TopoDS_Face& face,
+                                const TopoDS_Edge&,
+                                const TopoDS_Face&,
+                                Handle(Geom2d_Curve)& curve2d,
+                                Standard_Real& tolerance) override
+    {
+        const auto surface = surfaces.find(face.TShape().get());
+        const auto curve = curves.find(edge.TShape().get());
+        if (surface == surfaces.end() && curve == curves.end()) {
+            return Standard_False;
+        }
+        // Both in global coordinates: a pcurve doesn't depend on the frame they share
+        Handle(Geom_Surface) onSurface;
+        if (surface != surfaces.end()) {
+            onSurface = surface->second;
+        }
+        else {
+            TopLoc_Location location;
+            onSurface = BRep_Tool::Surface(face, location);
+            if (onSurface.IsNull()) {
+                return Standard_False;
+            }
+            if (!location.IsIdentity()) {
+                onSurface = Handle(Geom_Surface)::DownCast(
+                    onSurface->Transformed(location.Transformation()));
+            }
+        }
+        Handle(Geom_Curve) along;
+        double first {}, last {};
+        if (curve != curves.end()) {
+            along = curve->second.curve;
+            first = curve->second.first;
+            last = curve->second.last;
+        }
+        else {
+            TopLoc_Location location;
+            along = BRep_Tool::Curve(edge, location, first, last);
+            if (along.IsNull()) {
+                return Standard_False;
+            }
+            if (!location.IsIdentity()) {
+                along = Handle(Geom_Curve)::DownCast(along->Transformed(location.Transformation()));
+            }
+        }
+        curve2d = GeomProjLib::Curve2d(along, first, last, onSurface);
+        if (curve2d.IsNull()) {
+            return Standard_False;
+        }
+        // Into the period the face's other pcurves are in: the old pcurve's on an old surface, the
+        // middle's on the new cylinder
+        gp_Pnt2d reference;
+        bool hasReference = false;
+        if (surface != surfaces.end()) {
+            reference = gp_Pnt2d(references.at(face.TShape().get()), 0);
+            hasReference = true;
+        }
+        else {
+            double f {}, l {};
+            const Handle(Geom2d_Curve) was = BRep_Tool::CurveOnSurface(edge, face, f, l);
+            if (!was.IsNull()) {
+                reference = was->Value((f + l) / 2);
+                hasReference = true;
+            }
+        }
+        if (hasReference) {
+            const gp_Pnt2d at = curve2d->Value((first + last) / 2);
+            gp_Vec2d shift(0, 0);
+            if (onSurface->IsUPeriodic()) {
+                const double period = onSurface->UPeriod();
+                shift.SetX(std::round((reference.X() - at.X()) / period) * period);
+            }
+            if (surface == surfaces.end() && onSurface->IsVPeriodic()) {
+                const double period = onSurface->VPeriod();
+                shift.SetY(std::round((reference.Y() - at.Y()) / period) * period);
+            }
+            if (shift.Magnitude() > 0.0) {
+                curve2d->Translate(shift);
+            }
+        }
+        tolerance = BRep_Tool::Tolerance(edge);
+        return Standard_True;
+    }
+
+    Standard_Boolean NewParameter(const TopoDS_Vertex& vertex,
+                                  const TopoDS_Edge& edge,
+                                  Standard_Real& parameter,
+                                  Standard_Real& tolerance) override
+    {
+        const auto found = curves.find(edge.TShape().get());
+        if (found == curves.end()) {
+            return Standard_False;
+        }
+        TopoDS_Vertex first, last;
+        TopExp::Vertices(edge, first, last);
+        parameter = vertex.IsSame(first) ? found->second.first : found->second.last;
+        tolerance = BRep_Tool::Tolerance(vertex);
+        return Standard_True;
+    }
+
+    GeomAbs_Shape Continuity(const TopoDS_Edge& edge,
+                             const TopoDS_Face& face1,
+                             const TopoDS_Face& face2,
+                             const TopoDS_Edge&,
+                             const TopoDS_Face&,
+                             const TopoDS_Face&) override
+    {
+        return BRep_Tool::Continuity(edge, face1, face2);
+    }
+
+private:
+    struct NewEdge
+    {
+        Handle(Geom_Curve) curve;  // global
+        double first {};
+        double last {};
+    };
+
+    /// The distance of a point from the cylinder's surface
+    double offCylinder(const gp_Cylinder& cylinder, const gp_Pnt& point) const
+    {
+        return std::abs(gp_Lin(cylinder.Axis()).Distance(point) - cylinder.Radius());
+    }
+
+    /// The edge's 3D curve in global coordinates, and its range
+    static Handle(Geom_Curve) globalCurve(const TopoDS_Edge& edge, double& first, double& last)
+    {
+        TopLoc_Location location;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        if (!curve.IsNull() && !location.IsIdentity()) {
+            curve = Handle(Geom_Curve)::DownCast(curve->Transformed(location.Transformation()));
+        }
+        return curve;
+    }
+
+    void recognise(const TopoDS_Face& face,
+                   const BRepAdaptor_Surface& old,
+                   const TopTools_IndexedMapOfShape& baseFaces,
+                   const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+    {
+        // The neighbouring stripes: new faces on one cylinder of the radius
+        std::set<const TopoDS_TShape*> stripes;
+        std::optional<gp_Cylinder> cylinder;
+        std::vector<TopoDS_Edge> others;
+        for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(e.Current());
+            if (BRep_Tool::Degenerated(edge) || !edgeFaces.Contains(edge)) {
+                return;
+            }
+            bool onStripe = false;
+            for (const TopoDS_Shape& other : edgeFaces.FindFromKey(edge)) {
+                if (other.IsSame(face) || baseFaces.Contains(other)) {
+                    continue;
+                }
+                const BRepAdaptor_Surface surface(TopoDS::Face(other), Standard_False);
+                if (surface.GetType() != GeomAbs_Cylinder
+                    || std::abs(surface.Cylinder().Radius() - radius) > Precision::Confusion()) {
+                    continue;
+                }
+                const gp_Cylinder found = surface.Cylinder();
+                if (!cylinder) {
+                    cylinder = found;
+                }
+                else if (!cylinder->Axis().IsParallel(found.Axis(), Precision::Angular())
+                         || gp_Lin(cylinder->Axis()).Distance(found.Location())
+                             > Precision::Confusion()) {
+                    return;  // stripes of another round
+                }
+                stripes.insert(other.TShape().get());
+                onStripe = true;
+                // A cross-section of the cylinder: every point at one place along the axis
+                double first {}, last {};
+                const Handle(Geom_Curve) curve = globalCurve(edge, first, last);
+                if (curve.IsNull()) {
+                    return;
+                }
+                const gp_Ax1 axis = cylinder->Axis();
+                const double at = gp_Vec(axis.Location(), curve->Value(first)).Dot(gp_Vec(axis.Direction()));
+                for (int k = 0; k <= 8; ++k) {
+                    const gp_Pnt point = curve->Value(first + (last - first) * k / 8);
+                    if (std::abs(gp_Vec(axis.Location(), point).Dot(gp_Vec(axis.Direction())) - at)
+                            > Precision::Confusion()
+                        || offCylinder(*cylinder, point) > Precision::Confusion()) {
+                        return;
+                    }
+                }
+            }
+            if (!onStripe) {
+                others.push_back(edge);
+            }
+        }
+        if (!cylinder || stripes.size() != 2) {
+            return;
+        }
+        // Near the cylinder all over: the round, approximated
+        double u1 {}, u2 {}, v1 {}, v2 {};
+        BRepTools::UVBounds(face, u1, u2, v1, v2);
+        double off = 0.0;
+        for (int i = 0; i <= 20; ++i) {
+            for (int j = 0; j <= 20; ++j) {
+                off = std::max(
+                    off,
+                    offCylinder(*cylinder, old.Value(u1 + (u2 - u1) * i / 20, v1 + (v2 - v1) * j / 20)));
+            }
+        }
+        if (off > 0.1 * radius) {
+            return;
+        }
+        // Recognised from here: a failure is the fillet's refusal
+        worst = std::max(worst, off);
+        gp_Pnt middle;
+        gp_Vec du, dv;
+        old.D1((u1 + u2) / 2, (v1 + v2) / 2, middle, du, dv);
+        Handle(Geom_CylindricalSurface) exact = new Geom_CylindricalSurface(*cylinder);
+        double u {}, v {};
+        GeomAPI_ProjectPointOnSurf onExact(middle, exact);
+        if (!onExact.IsDone() || onExact.NbPoints() == 0) {
+            why = "the round's face has no point on its cylinder";
+            return;
+        }
+        onExact.LowerDistanceParameters(u, v);
+        gp_Pnt point;
+        gp_Vec eu, ev;
+        exact->D1(u, v, point, eu, ev);
+        if (du.Crossed(dv).Dot(eu.Crossed(ev)) < 0) {
+            exact->UReverse();  // the face keeps its side
+            GeomAPI_ProjectPointOnSurf again(middle, exact);
+            again.LowerDistanceParameters(u, v);
+        }
+        for (const TopoDS_Edge& edge : others) {
+            if (!exactEdge(edge, face, *cylinder, exact, edgeFaces)) {
+                return;
+            }
+        }
+        surfaces[face.TShape().get()] = exact;
+        references[face.TShape().get()] = u;
+    }
+
+    /// The edge's curve on the cylinder: kept if it lies on it, else the exact intersection
+    bool exactEdge(const TopoDS_Edge& edge,
+                   const TopoDS_Face& face,
+                   const gp_Cylinder& cylinder,
+                   const Handle(Geom_CylindricalSurface)& exact,
+                   const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+    {
+        double first {}, last {};
+        const Handle(Geom_Curve) curve = globalCurve(edge, first, last);
+        if (curve.IsNull()) {
+            why = "an edge of the round has no 3D curve";
+            return false;
+        }
+        bool on = true;
+        for (int k = 0; k <= 16 && on; ++k) {
+            on = offCylinder(cylinder, curve->Value(first + (last - first) * k / 16))
+                <= Precision::Confusion();
+        }
+        if (on) {
+            return true;  // only its pcurve on the new surface changes
+        }
+        TopoDS_Face other;
+        for (const TopoDS_Shape& candidate : edgeFaces.FindFromKey(edge)) {
+            if (!candidate.IsSame(face)) {
+                other = TopoDS::Face(candidate);
+            }
+        }
+        if (other.IsNull()) {
+            why = "an edge of the round has one face";
+            return false;
+        }
+        TopoDS_Vertex start, end;
+        TopExp::Vertices(edge, start, end);
+        const gp_Pnt from = BRep_Tool::Pnt(start);
+        const gp_Pnt to = BRep_Tool::Pnt(end);
+        const gp_Pnt middle = curve->Value((first + last) / 2);
+        Handle(Geom_Curve) best;
+        const BRepAdaptor_Surface surface(other);  // global
+        if (surface.GetType() == GeomAbs_Plane) {
+            // A plane tangent to the cylinder along the axis: the contact line
+            const gp_Pln plane = surface.Plane();
+            const gp_Dir axis = cylinder.Axis().Direction();
+            const gp_Pnt centre = cylinder.Location();
+            const double distance = plane.Distance(centre);
+            if (std::abs(plane.Axis().Direction().Dot(axis)) < Precision::Angular()
+                && std::abs(distance - cylinder.Radius()) < Precision::Confusion()) {
+                const gp_Vec normal(plane.Axis().Direction());
+                const double side = gp_Vec(plane.Location(), centre).Dot(normal);
+                best = new Geom_Line(centre.Translated(normal * -side), axis);
+            }
+        }
+        if (best.IsNull()) {
+            TopLoc_Location location;
+            Handle(Geom_Surface) otherSurface = BRep_Tool::Surface(other, location);
+            if (!location.IsIdentity()) {
+                otherSurface = Handle(Geom_Surface)::DownCast(
+                    otherSurface->Transformed(location.Transformation()));
+            }
+            GeomAPI_IntSS intersection(exact, otherSurface, Precision::Confusion());
+            if (!intersection.IsDone()) {
+                why = "the round's cylinder doesn't intersect a face beside it";
+                return false;
+            }
+            best = chain(intersection, from, to, curve, first, last);
+        }
+        if (best.IsNull()) {
+            why = "the round's cylinder doesn't meet a face beside it";
+            return false;
+        }
+        // The vertices stay: they are on the exact stripes
+        double a {}, b {};
+        if (!parameterOn(best, from, a) || !parameterOn(best, to, b)) {
+            why = "a vertex of the round is off its exact edge";
+            return false;
+        }
+        if (b < a) {
+            if (best->IsPeriodic()) {
+                b += best->Period();
+            }
+            else {
+                best = best->Reversed();
+                if (!parameterOn(best, from, a) || !parameterOn(best, to, b)) {
+                    why = "a vertex of the round is off its exact edge";
+                    return false;
+                }
+            }
+        }
+        // The same stretch as OCCT's edge: the old middle is near the new one
+        if (best->Value((a + b) / 2).Distance(middle) > 0.1 * radius + worst) {
+            why = "the round's exact edge runs elsewhere than OCCT's";
+            return false;
+        }
+        curves[edge.TShape().get()] = NewEdge {best, a, b};
+        return true;
+    }
+
+    /** The intersection's branches that run along OCCT's edge, joined from one vertex to the other:
+     * the intersection of two cylinders comes in branches split where it turns (Case Base #163's
+     * hole: two, at the hole's lowest line). Null if they don't make one curve between the vertices.
+     */
+    Handle(Geom_Curve) chain(const GeomAPI_IntSS& intersection,
+                             const gp_Pnt& from,
+                             const gp_Pnt& to,
+                             const Handle(Geom_Curve)& old,
+                             double first,
+                             double last) const
+    {
+        const double reach = 0.1 * radius + worst;
+        const double joint = 10 * Precision::Confusion();
+        // The branches along the old edge: their middles close to it
+        std::vector<Handle(Geom_BoundedCurve)> along;
+        for (int i = 1; i <= intersection.NbLines(); ++i) {
+            const Handle(Geom_Curve) line = intersection.Line(i);
+            const Handle(Geom_BoundedCurve) bounded = Handle(Geom_BoundedCurve)::DownCast(line);
+            if (bounded.IsNull()) {
+                continue;
+            }
+            const gp_Pnt middle
+                = line->Value((line->FirstParameter() + line->LastParameter()) / 2);
+            GeomAPI_ProjectPointOnCurve onOld(middle, old, first, last);
+            if (onOld.NbPoints() > 0 && onOld.LowerDistance() < reach) {
+                along.push_back(bounded);
+            }
+        }
+        // One branch through both vertices (a closed one, or one running past them): the nearest
+        Handle(Geom_Curve) single;
+        double nearest = std::numeric_limits<double>::max();
+        for (int i = 1; i <= intersection.NbLines(); ++i) {
+            const Handle(Geom_Curve) branch = intersection.Line(i);
+            double a {}, b {};
+            if (!parameterOn(branch, from, a) || !parameterOn(branch, to, b)) {
+                continue;
+            }
+            const gp_Pnt middle = old->Value((first + last) / 2);
+            GeomAPI_ProjectPointOnCurve onBranch(middle, branch);
+            if (onBranch.NbPoints() > 0 && onBranch.LowerDistance() < nearest) {
+                nearest = onBranch.LowerDistance();
+                single = branch;
+            }
+        }
+        if (!single.IsNull()) {
+            return single;
+        }
+        // Else from the start vertex, branch by branch, to the end vertex
+        gp_Pnt at = from;
+        Handle(Geom_BSplineCurve) joined;
+        std::vector<bool> used(along.size(), false);
+        for (std::size_t step = 0; step < along.size() && at.Distance(to) > joint; ++step) {
+            bool found = false;
+            for (std::size_t i = 0; i < along.size() && !found; ++i) {
+                if (used[i]) {
+                    continue;
+                }
+                Handle(Geom_BoundedCurve) branch = along[i];
+                if (branch->EndPoint().Distance(at) < joint) {
+                    branch = Handle(Geom_BoundedCurve)::DownCast(branch->Reversed());
+                }
+                if (branch->StartPoint().Distance(at) >= joint) {
+                    continue;
+                }
+                used[i] = true;
+                found = true;
+                at = branch->EndPoint();
+                if (joined.IsNull()) {
+                    joined = GeomConvert::CurveToBSplineCurve(branch);
+                }
+                else {
+                    GeomConvert_CompCurveToBSplineCurve join(joined);
+                    if (!join.Add(branch, joint)) {
+                        return {};
+                    }
+                    joined = join.BSplineCurve();
+                }
+            }
+            if (!found) {
+                return {};
+            }
+        }
+        if (joined.IsNull() || at.Distance(to) > joint) {
+            return {};
+        }
+        return joined;
+    }
+
+    /// The point's parameter on the curve, if it is on it
+    static bool parameterOn(const Handle(Geom_Curve)& curve, const gp_Pnt& point, double& parameter)
+    {
+        GeomAPI_ProjectPointOnCurve projection(point, curve);
+        if (projection.NbPoints() == 0 || projection.LowerDistance() > 10 * Precision::Confusion()) {
+            return false;
+        }
+        parameter = projection.LowerDistanceParameter();
+        return true;
+    }
+
+    double radius;
+    double worst {0.0};
+    std::string why;
+    std::map<const TopoDS_TShape*, Handle(Geom_Surface)> surfaces;  // global
+    std::map<const TopoDS_TShape*, double> references;              // a u of the face's period
+    std::map<const TopoDS_TShape*, NewEdge> curves;
+};
+
+class RoundCanonicalMaker: public BRepBuilderAPI_ModifyShape
+{
+public:
+    RoundCanonicalMaker(const TopoDS_Shape& shape, const Handle(BRepTools_Modification)& modification)
+    {
+        myModification = modification;
+        DoModif(shape);
+    }
+};
+
+/// The round's stretches over a gap in its wall as its exact cylinder (above): the result is
+/// unchanged where nothing is recognised; refused (CADKernelError) where a recognised stretch
+/// can't be made exact with the same topology
+void makeRoundCanonical(TopoShape& round, const TopoShape& base, double radius)
+{
+    const TopoDS_Shape shape = round.getShape();
+    if (shape.IsNull() || radius <= 0) {
+        return;
+    }
+    Handle(RoundCanonicalModification) modification
+        = new RoundCanonicalModification(shape, base.getShape(), radius);
+    std::string why = modification->failure();
+    if (modification->isEmpty() && why.empty()) {
+        return;
+    }
+    if (why.empty()) {
+        try {
+            RoundCanonicalMaker maker(shape, modification);
+            const TopoDS_Shape result = maker.IsDone() ? maker.Shape() : TopoDS_Shape();
+            if (result.IsNull()) {
+                why = "OCCT couldn't rebuild it";
+            }
+            else if (!BRepCheck_Analyzer(result).IsValid()) {
+                why = "the rebuilt shape is invalid";
+            }
+            for (const TopAbs_ShapeEnum kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                if (!why.empty()) {
+                    break;
+                }
+                TopTools_IndexedMapOfShape before;
+                TopTools_IndexedMapOfShape after;
+                TopExp::MapShapes(shape, kind, before);
+                TopExp::MapShapes(result, kind, after);
+                if (before.Extent() != after.Extent()) {
+                    why = "the rebuilt shape has another topology";
+                    break;
+                }
+                for (int i = 1; i <= before.Extent(); ++i) {
+                    if (!maker.ModifiedShape(before(i)).IsSame(after(i))) {
+                        why = "the rebuilt shape has another order";
+                        break;
+                    }
+                }
+            }
+            if (why.empty()) {
+                // The volume moves by about the gap's stretch times its deviation, not more
+                GProp_GProps was, now;
+                BRepGProp::VolumeProperties(shape, was);
+                BRepGProp::VolumeProperties(result, now);
+                double area = 0.0;
+                for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                    GProp_GProps face;
+                    BRepGProp::SurfaceProperties(it.Current(), face);
+                    area = std::max(area, face.Mass());
+                }
+                const double bound
+                    = 2 * modification->deviation() * area + 1e-6 * std::abs(was.Mass());
+                if (std::abs(now.Mass() - was.Mass()) > bound) {
+                    why = "the exact stretch moves the volume more than its deviation explains";
+                }
+            }
+            if (why.empty()) {
+                round.setShape(result, false);
+                return;
+            }
+        }
+        catch (const Standard_Failure& e) {
+            why = std::string("OCCT: ") + e.GetMessageString();
+        }
+    }
+    FC_THROWM(
+        Base::CADKernelError,
+        "The fillet's round runs across a gap in its wall, where OCCT builds it up to "
+            << modification->deviation()
+            << " mm off its cylinder; making that stretch exact, as Onshape's, failed: " << why
+    );
+}
 }  // namespace
 
 TopoShape& TopoShape::makeElementFillet(
@@ -8297,7 +8925,12 @@ TopoShape& TopoShape::makeElementFillet(
             FilletFallback::noteInvalidResult(outcome->reason);
         }
     }
-    return makeElementShape(*mkFillet, input, op);
+    makeElementShape(*mkFillet, input, op);
+    if (radius2 == radius1) {
+        // FreeCAD-CH (Case Base #163): a stretch over a gap in the round's wall, exact
+        makeRoundCanonical(*this, input, radius1);
+    }
+    return *this;
 }
 
 TopoShape& TopoShape::makeElementChamfer(
