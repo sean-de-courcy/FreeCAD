@@ -42,14 +42,21 @@ using namespace PartDesign;
 // because the files store the enum index. So it is not possible to migrate files if the
 // enum entry is removed (see #23612). In the distant future, when all files are reasonably
 // migrated we can drop this.
+// One end-type list for Pad and Pocket (FreeCAD-CH ops#640: an Extrude switches between Add,
+// Remove and Intersect): the other class's name is appended at the END, never inserted, since
+// Type and Type2 are restored by index. Pad has ThroughAll at 6, Pocket UpToLast at 6.
+// UpToVertex (7, ops#640 rank 22): Onshape's Up to vertex, the vertex in UpToFace; appended too.
 const char* Pad::TypeEnums[]
-    = {"Length", "UpToLast", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape", nullptr};
+    = {"Length", "UpToLast", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape", "ThroughAll",
+       "UpToVertex", nullptr};
 
 PROPERTY_SOURCE(PartDesign::Pad, PartDesign::FeatureExtrude)
 
 Pad::Pad()
 {
     defineAdditive();
+    // New / Add / Remove / Intersect on one feature (FreeCAD-CH ops#640)
+    allowAllOperations();
 
     ADD_PROPERTY_TYPE(SideType, (0L), "Pad", App::Prop_None, "Type of sides definition");
     ADD_PROPERTY_TYPE(Type, (0L), "Side1", App::Prop_None, "Pad type for side 1");
@@ -95,13 +102,21 @@ Pad::Pad()
         App::Prop_None,
         "Faces or shape(s) where pad will end on side2"
     );
-    ADD_PROPERTY_TYPE(Offset, (0.0), "Side1", App::Prop_None, "Offset from face in which pad will end");
+    ADD_PROPERTY_TYPE(
+        Offset,
+        (0.0),
+        "Side1",
+        App::Prop_None,
+        "Offset from the face, shape or vertex at which the pad ends (any up-to type): positive "
+        "short of it, towards the profile, negative past it"
+    );
     ADD_PROPERTY_TYPE(
         Offset2,
         (0.0),
         "Side2",
         App::Prop_None,
-        "Offset from face in which pad will end on side 2"
+        "Offset from the face, shape or vertex at which side 2 ends (any up-to type): positive "
+        "short of it, towards the profile, negative past it"
     );
     Offset.setConstraints(&signedLengthConstraint);
     Offset2.setConstraints(&signedLengthConstraint);

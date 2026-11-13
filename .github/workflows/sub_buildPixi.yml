@@ -209,9 +209,12 @@ jobs:
 
     # On Windows the CLI tests run on the build dir (the install tests are skipped there);
     # FreeCAD's LibPack Windows build, which ran them upstream, isn't carried.
+    # 75 min (was 30): on 2026-11-13 every dispatched run was cut at 30 min, around TestRevolve,
+    # with the suite grown past 8800 tests (ops#640). The job has no timeout of its own (GitHub's
+    # 360 min): a cold-cache Windows build of ~2 h 10 min plus these 75 and the later steps fits.
     - name: FreeCAD CLI tests on build dir
       if: (inputs.testOnBuildDir || runner.os == 'Windows') && !cancelled() && steps.build.outcome == 'success'
-      timeout-minutes: 30
+      timeout-minutes: 75
       uses: ./.github/workflows/actions/runPythonTests
       with:
         testDescription: "CLI tests on build dir"

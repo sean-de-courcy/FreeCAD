@@ -79,6 +79,8 @@ class SketchObject(Part2DObject):
               -5 if malformed constraints
               -1 if solver error,
               -2 if redundant constraints.
+          FreeCAD-CH: with -4, -3 or -2 from a conflict (or a contradicting repeat), the
+          rest of the sketch is still solved and written, its constraints left out.
         """
         ...
 
@@ -326,12 +328,19 @@ class SketchObject(Part2DObject):
         ...
 
     def addExternal(
-        self, objName: str, subName: str, defining: bool = False, intersection: bool = False, /
+        self,
+        objName: str,
+        subName: str,
+        defining: bool = False,
+        intersection: bool = False,
+        implicit: bool = False,
+        /,
     ) -> None:
         """
         Add a link to an external geometry.
 
-        addExternal(objName:str, subName:str, defining:bool=False, intersection:bool=False)
+        addExternal(objName:str, subName:str, defining:bool=False, intersection:bool=False,
+                    implicit:bool=False)
 
             Args:
                 objName: The name of the document object to reference.
@@ -339,6 +348,47 @@ class SketchObject(Part2DObject):
                     "external geometry".
                 defining: Should the external edges be defining or construction?
                 intersection: Should the external edges be projections or intersections?
+                implicit: Is the link a constraint's helper (a model pick), which goes with
+                    its last constraint (delUnusedImplicitExternals)? An add that isn't
+                    implicit of a helper's kind keeps the helper as a link of its own.
+        """
+        ...
+
+    def delUnusedImplicitExternals(self) -> int:
+        """
+        Delete the external links added as a constraint's helper (addExternal's implicit)
+        that nothing uses any more: no constraint on their geometry, none of it defining.
+
+        delUnusedImplicitExternals() -> int
+
+            Returns:
+                The number of links deleted.
+        """
+        ...
+
+    def addPierce(self, geoId: int, pointPos: int, obj: object, subName: str, /) -> int:
+        """
+        Constrain a sketch point to where a model edge crosses the sketch plane (Onshape's
+        Pierce), in one constraint of type 'Pierce'. The crossing is a point of the edge's
+        intersection with the sketch plane, an external geometry added as the constraint's
+        helper (addExternal's implicit) unless a link of the edge already gives intersections.
+        When the edge crosses the plane more than once, the crossing nearest the point is taken.
+
+        addPierce(geoId:int, pointPos:int, obj, subName:str) -> int
+
+            Args:
+                geoId: The point's geometry (the sketch's own).
+                pointPos: The point's position on it (1 start, 2 end, 3 mid), or 0 for a
+                    line (its extension then passes through the crossing: the line slides,
+                    keeping its direction and length), a circle or an arc (the crossing on its
+                    circle).
+                obj: The document object holding the edge, or its name.
+                subName: The edge, e.g. 'Edge3'.
+
+            Returns:
+                The index of the new constraint.
+
+            Raises an error when the edge lies in the sketch plane or doesn't reach it.
         """
         ...
 
@@ -705,12 +755,18 @@ class SketchObject(Part2DObject):
     def extend(self) -> None:
         """
         Extend a curve to new start and end positions
+
+        extend(geoId:int, increment:float, pointPos:int, toBoundary:bool=False)
+            A line's or an arc's end grows by increment (an arc's in radians). With toBoundary
+            (FreeCAD-CH, Onshape's Extend), a line's end stops at the first curve or point in its
+            way, where a PointOnObject or Coincident constraint holds it.
         """
         ...
 
     def split(self) -> None:
         """
-        Split a curve with a given id at a given reference point
+        Split a curve with a given id at a given reference point.
+        split(geoId, point1, point2) splits a whole circle at two points into two arcs joined end to end
         """
         ...
 
@@ -723,6 +779,9 @@ class SketchObject(Part2DObject):
     def addSymmetric(self) -> None:
         """
         Add symmetric geometric objects to the sketch with respect to a reference point or line
+
+        addSymmetric(geoList, refGeoId, refPos=0, linked=False): with linked True, each copy is
+        tied to its source by Symmetric constraints, as the GUI's Mirror does (FreeCAD-CH)
         """
         ...
 

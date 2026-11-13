@@ -50,6 +50,7 @@
 
 #include "PropertyStandard.h"
 #include "Application.h"
+#include "BackupPolicy.h"
 #include "Document.h"
 #include "DocumentObject.h"
 #include "Expression.h"
@@ -1951,7 +1952,18 @@ void PropertyUUID::setPyObject(PyObject* value)
 
 void PropertyUUID::Save(Base::Writer& writer) const
 {
-    writer.Stream() << writer.ind() << "<Uuid value=\"" << _uuid.getValue() << "\"/>" << std::endl;
+    std::string value = _uuid.getValue();
+    // FreeCAD-CH (ops#640, A1): Save a Copy writes the copy's own document id
+    if (dynamic_cast<const Document*>(getContainer())) {
+        const std::string prefix(copyUidMode);
+        for (const auto& mode : writer.getModes()) {
+            if (mode.starts_with(prefix)) {
+                value = mode.substr(prefix.size());
+                break;
+            }
+        }
+    }
+    writer.Stream() << writer.ind() << "<Uuid value=\"" << value << "\"/>" << std::endl;
 }
 
 void PropertyUUID::Restore(Base::XMLReader& reader)

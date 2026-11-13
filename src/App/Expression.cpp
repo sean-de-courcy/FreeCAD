@@ -37,6 +37,7 @@
 #include <boost/math/special_functions/trunc.hpp>
 
 #include <numbers>
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <stack>
@@ -49,7 +50,9 @@
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/ObjectIdentifier.h>
+#include <App/Part.h>
 #include <App/PropertyUnits.h>
+#include <App/VariableChoice.h>
 #include <App/VariableLookup.h>
 #include <Base/Interpreter.h>
 #include <Base/MatrixPy.h>
@@ -1533,6 +1536,12 @@ ExpressionPtr OperatorExpression::simplify() const
         return std::make_unique<OperatorExpression>(owner, v1.release(), op, v2.release());
 }
 
+namespace {
+// FreeCAD-CH (ops#652): what the printer needs from the fraction rewrite further down.
+bool endsWithNumber(const std::string& s);
+bool startsWithNumberAndUnit(const std::string& s);
+}  // namespace
+
 void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
 {
     bool needsParens;
@@ -1549,6 +1558,13 @@ void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
         //else if (!isCommutative())
         //    needsParens = true;
     }
+    // FreeCAD-CH (ops#652): a power of a quantity keeps its parentheses. `3 mm ^ 2` reads as
+    // 3 mm², not (3 mm)², and `2 (mm ^ 2) ^ 0.5` doesn't parse at all; a sign before the quantity
+    // (`-3 mm ^ 2`) reads the same way.
+    if (op == POW
+        && (leftOperator == UNIT || leftOperator == NEG || leftOperator == POS)) {
+        needsParens = true;
+    }
 
     switch (op) {
     case NEG:
@@ -1561,10 +1577,9 @@ void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
         break;
     }
 
-    if (needsParens)
-        s << "(" << left->toString(persistent) << ")";
-    else
-        s << left->toString(persistent);
+    const std::string leftText = needsParens ? "(" + left->toString(persistent) + ")"
+                                             : left->toString(persistent);
+    s << leftText;
 
     switch (op) {
     case ADD:
@@ -1626,12 +1641,18 @@ void OperatorExpression::_toString(std::ostream &s, bool persistent,int) const
             needsParens = true;
     }
 
-    if (needsParens) {
-        s << "(";
-        right->toString(s,persistent);
-        s << ")";
-    }else
-        right->toString(s,persistent);
+    const std::string rightText = right->toString(persistent);
+    // FreeCAD-CH (ops#652): `1 / (2 mm)` keeps its parentheses. Printed as `1 / 2 mm`, the text
+    // would read back through the fraction rewrite (rank 56) as (1/2) mm. Only where the text
+    // before the slash ends with a number, as the rewrite's numerator does: `Width / 4 mm` stays.
+    if (op == DIV && !needsParens && startsWithNumberAndUnit(rightText)) {
+        needsParens = endsWithNumber(leftText);
+    }
+
+    if (needsParens)
+        s << "(" << rightText << ")";
+    else
+        s << rightText;
 }
 
 Expression *OperatorExpression::_copy() const
@@ -2990,9 +3011,40 @@ Py::Object VariableExpression::_getPyValue() const {
     return var.getPyValue(true);
 }
 
+namespace
+{
+// FreeCAD-CH (ops#640, rank 54): true while the parser runs. The lexer has one buffer, so
+// nothing may scan another string meanwhile (ExpressionParser::parse and parseUnit set it).
+bool parserRunning = false;
+
+/// @a text, a variable's path as written, with a '.' in front when it is a property of the owner
+/// alone whose name the lexer reads as a unit or a constant (a VarSet variable `t` used by
+/// another variable of the same set). `.t` is the grammar's own form for a property of the
+/// owner, and reads back as the property (afterDotLex), where `t` would be the unit.
+std::string ownPropertyPath(std::string text)
+{
+    // no unit or constant name is longer than 5 characters (`uTorr`, `False`): most names skip
+    // the four lexer scans below
+    if (parserRunning || text.empty() || text.size() > 5) {
+        return text;
+    }
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+        if (!letter && (i == 0 || c < '0' || c > '9')) {
+            return text;  // not a plain name: a path, a sub-path or an index
+        }
+    }
+    if (ExpressionParser::isTokenAUnit(text) || ExpressionParser::isTokenAConstant(text)) {
+        text.insert(0, 1, '.');
+    }
+    return text;
+}
+}  // namespace
+
 void VariableExpression::_toString(std::ostream &ss, bool persistent,int) const {
     if(persistent)
-        ss << var.toPersistentString();
+        ss << ownPropertyPath(var.toPersistentString());
     else {
         // FreeCAD-CH (ops#152): inside a VariableDisplayScope, a variable is written as #Name.
         if (auto scope = VariableDisplayScope::current()) {
@@ -3002,7 +3054,7 @@ void VariableExpression::_toString(std::ostream &ss, bool persistent,int) const 
                 return;
             }
         }
-        ss << var.toString();
+        ss << ownPropertyPath(var.toString());
     }
 }
 
@@ -3669,8 +3721,10 @@ static void noteUnmatched(const char* text, std::size_t len)
 #define ECHO noteUnmatched(yytext, static_cast<std::size_t>(yyleng))
 
 // show the parser the lexer method
-#define yylex ExpressionParserlex
 int ExpressionParserlex();
+// FreeCAD-CH (ops#640, rank 54): through afterDotLex(), defined after the lexer
+static int afterDotLex();
+#define yylex afterDotLex
 
 #if defined(__clang__)
 # pragma clang diagnostic push
@@ -3685,11 +3739,79 @@ int ExpressionParserlex();
 // Parser, defined in Expression.y
 # define YYTOKENTYPE
 #include "Expression.tab.c"
+#undef yylex  // the lexer defines it as ExpressionParserlex
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 // Scanner, defined in Expression.l
 #include "Expression.lex.c"
 #endif // DOXYGEN_SHOULD_SKIP_THIS
+
+/// FreeCAD-CH (ops#640, rank 54): the tokens afterDotLex() gave last and the one before; 0 when
+/// a parse starts.
+static int lastLexToken = 0;
+static int prevLexToken = 0;
+
+/// Whether @a text is an ASCII name: a letter or _, then letters, digits and _.
+static bool isAsciiName(const char* text)
+{
+    auto isLetter = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    };
+    if (!text || !isLetter(text[0])) {
+        return false;
+    }
+    for (const char* c = text + 1; *c != '\0'; ++c) {
+        if (!isLetter(*c) && !(*c >= '0' && *c <= '9')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether @a name is a variable of the expression's owner, a VarSet: a sibling, which an
+/// expression of the set may name alone (the Onshape import writes `t * 3` for `#t * 3`). The
+/// boolean and None constants stay constants alone (checkVariableName refuses them as names).
+static bool isOwnVariable(const char* name)
+{
+    for (const char* reserved : {"True", "true", "False", "false", "None"}) {
+        if (std::strcmp(name, reserved) == 0) {
+            return false;
+        }
+    }
+    const App::DocumentObject* owner = App::ExpressionParser::DocumentObject;
+    if (!owner || !owner->getTypeId().isDerivedFrom(Base::Type::fromName("App::VarSet"))) {
+        return false;
+    }
+    const App::Property* prop = owner->getPropertyByName(name);
+    return prop && prop->testStatus(App::Property::PropDynamic);
+}
+
+/// The lexer's next token for the parser, except that a unit or constant name is a name (a
+/// variable may be called `t`, `h`, `W`, `N`, `m`, `e` or `pi`, as in Onshape):
+/// - right after '.': the last part of a property path (`Variables.t`, which `#t` becomes, or
+///   `.t`), where the grammar takes no unit or constant;
+/// - alone, when the owner is a VarSet with a variable of that name, and the token doesn't follow
+///   a number, a ')' or a unit, where it would be the number's unit (`2 t` stays two tonnes),
+///   nor a '*' or '/' after a unit (`5 m/s` and `kg*m` stay units with variables `s` and `m`).
+///   Known limit: `1/s` or `2 * s` there read `s` as the variable.
+/// A unit or constant anywhere else is read as before.
+static int afterDotLex()
+{
+    int token = ExpressionParserlex();
+    if ((token == UNIT || token == USUNIT || token == CONSTANT) && isAsciiName(yytext)) {
+        bool afterQuantity = lastLexToken == NUM || lastLexToken == ONE || lastLexToken == INTEGER
+            || lastLexToken == ')' || lastLexToken == UNIT || lastLexToken == USUNIT
+            || ((lastLexToken == '*' || lastLexToken == '/')
+                && (prevLexToken == UNIT || prevLexToken == USUNIT));
+        if (lastLexToken == '.' || (!afterQuantity && isOwnVariable(yytext))) {
+            yylval.string = yytext;
+            token = IDENTIFIER;
+        }
+    }
+    prevLexToken = lastLexToken;
+    lastLexToken = token;
+    return token;
+}
 
 class StringBufferCleaner
 {
@@ -3730,6 +3852,8 @@ static void initParser(const App::DocumentObject *owner)
 
     ScanResult.reset();
     App::ExpressionParser::DocumentObject = owner;
+    App::ExpressionParser::lastLexToken = 0;
+    App::ExpressionParser::prevLexToken = 0;
     labels = std::stack<std::string>();
     column = 0;
     unitExpression = valueExpression = false;
@@ -3916,6 +4040,38 @@ std::string resolveVariable(const App::DocumentObject* owner, const std::string&
             fmt::format("no variable named {} in this document (in expression '{}')", name, buffer)
         );
     }
+    // FreeCAD-CH (notes/derived-design.md, slice 2): Part Studio variables, Onshape's Variable
+    // feature. A holder inside a part studio (an App::Part) is seen only from that studio, and
+    // before the document's other holders (the nearer scope wins); holders outside every studio
+    // (the Variables set, the Variable Studios) are seen from everywhere
+    {
+        const App::Part* ownerStudio = App::Part::getPartOfObject(owner, true);
+        std::vector<App::VariableRef> mine;
+        std::vector<App::VariableRef> open;
+        for (const auto& ref : refs) {
+            const App::Part* holderStudio = App::Part::getPartOfObject(ref.holder, true);
+            if (!holderStudio) {
+                open.push_back(ref);
+            }
+            else if (holderStudio == ownerStudio) {
+                mine.push_back(ref);
+            }
+        }
+        refs = mine.empty() ? open : mine;
+        if (refs.empty()) {
+            throw ParserError(fmt::format(
+                "no variable named {} in this part studio: another studio's variables can't be "
+                "used here (in expression '{}')",
+                name,
+                buffer
+            ));
+        }
+    }
+    // FreeCAD-CH (ops#640, decision 317): the variable the user chose for a name a local set and
+    // an imported copy both define (App/VariableChoice.h).
+    if (auto chosen = App::chosenVariableHolder(refs)) {
+        return App::VariableRef {chosen, name}.path();
+    }
     if (refs.size() > 1) {
         std::string paths;
         for (const auto& ref : refs) {
@@ -3998,6 +4154,250 @@ std::string rewriteVariableRefs(const App::DocumentObject* owner, const char* bu
     return out;
 }
 
+// FreeCAD-CH (ops#640, rank 56): a literal fraction in front of a unit is one quantity, as
+// Onshape reads it: `3/4 in` is three quarters of an inch. The grammar binds a unit to the number
+// just before it (NUM_AND_UNIT), which made it 3 / (4 in). `NUM / NUM UNIT` is rewritten to
+// `(NUM UNIT / NUM)` in front of the lexer, so the stored text (`3 in / 4`) reads the same way
+// back. Only when the numerator starts an operand: at the start, or after `(`, `[`, `,`, `;`,
+// `+`, `-`, `*`, `%`, `?`, `:` or a comparison. Not after `/` or `^` (`1/3/4 in`, `2^3/4 in`), a
+// name, a number, a `)` or a `.`; never inside `<<...>>`. The unit is one the lexer reads as a
+// unit (`in`, `mm`, `"`, `'`, `°`), with its `^ [-]n` if any.
+
+// The length of the number literal at s[i] as Expression.l reads one ({DIGIT}*[.,]{DIGIT}+{EXPO}?
+// or {DIGIT}+{EXPO}?), or 0.
+std::size_t numberLength(const std::string& s, std::size_t i)
+{
+    auto digit = [&s](std::size_t k) {
+        return k < s.size() && s[k] >= '0' && s[k] <= '9';
+    };
+    std::size_t j = i;
+    while (digit(j)) {
+        ++j;
+    }
+    if (j < s.size() && (s[j] == '.' || s[j] == ',') && digit(j + 1)) {
+        ++j;
+        while (digit(j)) {
+            ++j;
+        }
+    }
+    else if (j == i) {
+        return 0;
+    }
+    if (j < s.size() && (s[j] == 'e' || s[j] == 'E')) {
+        std::size_t k = j + 1;
+        if (k < s.size() && (s[k] == '+' || s[k] == '-')) {
+            ++k;
+        }
+        if (digit(k)) {
+            while (digit(k)) {
+                ++k;
+            }
+            j = k;
+        }
+    }
+    return j - i;
+}
+
+std::size_t skipBlanks(const std::string& s, std::size_t i)
+{
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    return i;
+}
+
+// The end of the unit starting at s[i] (with a following `^ [-]n`), or npos if none starts there.
+std::size_t unitEnd(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) {
+        return std::string::npos;
+    }
+    std::size_t j = std::string::npos;
+    auto [cp, len] = codePointAt(s, i);
+    if (cp == '"' || cp == '\'' || cp == 0xB0 || cp == 0x2032 || cp == 0x2033) {
+        j = i + len;
+    }
+    else if (isIdentifierStart(cp)) {
+        j = i + len;
+        while (j < s.size()) {
+            auto [cp2, len2] = codePointAt(s, j);
+            if (!isIdentifierPart(cp2)) {
+                break;
+            }
+            j += len2;
+        }
+        if (!App::ExpressionParser::isTokenAUnit(s.substr(i, j - i))) {
+            return std::string::npos;
+        }
+    }
+    else {
+        return std::string::npos;
+    }
+    // `in^2`, `mm^-1`
+    std::size_t k = skipBlanks(s, j);
+    if (k < s.size() && s[k] == '^') {
+        k = skipBlanks(s, k + 1);
+        if (k < s.size() && s[k] == '-') {
+            k = skipBlanks(s, k + 1);
+        }
+        std::size_t n = numberLength(s, k);
+        if (n > 0 && s.find_first_not_of("0123456789", k) >= k + n) {
+            j = k + n;
+        }
+    }
+    return j;
+}
+
+// FreeCAD-CH (ops#652): whether printed text ends with a number literal (`2`, `0.5`, `1e-05`),
+// which a following `/ M unit` would make the numerator of a literal fraction. A name ending in a
+// digit (`c1`) doesn't; anything wider (`1e-05` read from its `05`) only costs parentheses.
+bool endsWithNumber(const std::string& s)
+{
+    std::size_t start = s.size();
+    while (start > 0) {
+        const auto c = static_cast<unsigned char>(s[start - 1]);
+        if (!std::isalnum(c) && c != '.' && c != '_' && c < 0x80) {
+            break;
+        }
+        --start;
+    }
+    return start < s.size() && numberLength(s, start) == s.size() - start;
+}
+
+// FreeCAD-CH (ops#652): whether printed text starts with `M unit`, the denominator of a literal
+// fraction. While the parser runs, the lexer can't scan the word (parserRunning): any word or
+// unit sign after the number counts then, which costs at most a pair of parentheses.
+bool startsWithNumberAndUnit(const std::string& s)
+{
+    const std::size_t n = numberLength(s, 0);
+    if (n == 0) {
+        return false;
+    }
+    const std::size_t i = skipBlanks(s, n);
+    if (parserRunning) {
+        if (i >= s.size()) {
+            return false;
+        }
+        auto [cp, len] = codePointAt(s, i);
+        return isIdentifierStart(cp) || cp == '"' || cp == '\'' || cp == 0xB0 || cp == 0x2032
+            || cp == 0x2033;
+    }
+    return unitEnd(s, i) != std::string::npos;
+}
+
+// FreeCAD-CH (ops#684): a unit after a parenthesised operand is that much of the unit, as Onshape
+// reads the team's `(1/32) in` anywhere in an expression (`#w + (1/32) in`, `2 * (3/8) in`). The
+// grammar takes a unit only after a number, so `(e) unit` was an error. It is rewritten here to
+// `((e) * 1 unit)`: the outer parentheses bind the unit to the group as tightly as `3 mm` binds
+// to its number (`x / (1/2) in` is x / ((1/2) in)). Only a group opened where an operand starts,
+// never a function's `(` (`sqrt(2) mm` stays an error); the unit as unitEnd() reads one.
+std::string rewriteLiteralFractions(const std::string& s)
+{
+    if (s.find('/') == std::string::npos && s.find(')') == std::string::npos) {
+        return s;
+    }
+    std::string out;
+    out.reserve(s.size() + 8);
+    // Whether an operand may start here: a numerator is taken only then.
+    bool operandStart = true;
+    // The open parentheses: where each is in out, and whether it opened a bare group (ops#684)
+    std::vector<std::pair<std::size_t, bool>> groups;
+    std::size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            out += c;
+            ++i;
+            continue;
+        }
+        if (c == '<' && i + 1 < s.size() && s[i + 1] == '<') {
+            std::size_t end = stringEnd(s, i);
+            if (end != std::string::npos) {
+                out.append(s, i, end - i);
+                operandStart = false;
+                i = end;
+                continue;
+            }
+            out += "<<";
+            operandStart = false;
+            i += 2;
+            continue;
+        }
+        if (std::size_t n = numberLength(s, i); n > 0) {
+            if (operandStart) {
+                // numerator / denominator unit
+                std::size_t slash = skipBlanks(s, i + n);
+                if (slash < s.size() && s[slash] == '/') {
+                    std::size_t den = skipBlanks(s, slash + 1);
+                    std::size_t m = numberLength(s, den);
+                    if (m > 0) {
+                        std::size_t unit = skipBlanks(s, den + m);
+                        std::size_t end = unitEnd(s, unit);
+                        if (end != std::string::npos) {
+                            out += '(';
+                            out.append(s, i, n);
+                            out += ' ';
+                            out.append(s, unit, end - unit);
+                            out += " / ";
+                            out.append(s, den, m);
+                            out += ')';
+                            operandStart = false;
+                            i = end;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out.append(s, i, n);
+            operandStart = false;
+            i += n;
+            continue;
+        }
+        auto [cp, len] = codePointAt(s, i);
+        if (isIdentifierPart(cp)) {
+            std::size_t j = i + len;
+            while (j < s.size()) {
+                auto [cp2, len2] = codePointAt(s, j);
+                if (!isIdentifierPart(cp2)) {
+                    break;
+                }
+                j += len2;
+            }
+            out.append(s, i, j - i);
+            operandStart = false;
+            i = j;
+            continue;
+        }
+        if (c == '(') {
+            // A bare group also after `/` or `^` (no literal fraction starts there, but a group
+            // does: `1 in / (1/2) in`)
+            const std::size_t last = out.find_last_not_of(" \t\n\r");
+            const bool afterSlash = last != std::string::npos && (out[last] == '/' || out[last] == '^');
+            groups.emplace_back(out.size(), operandStart || afterSlash);
+        }
+        else if (c == ')' && !groups.empty()) {
+            const auto [open, bare] = groups.back();
+            groups.pop_back();
+            const std::size_t unit = skipBlanks(s, i + 1);
+            const std::size_t end = bare ? unitEnd(s, unit) : std::string::npos;
+            if (end != std::string::npos) {
+                // (e) unit -> ((e) * 1 unit)
+                out.insert(open, 1, '(');
+                out += ") * 1 ";
+                out.append(s, unit, end - unit);
+                out += ')';
+                operandStart = false;
+                i = end;
+                continue;
+            }
+        }
+        out.append(s, i, len);
+        operandStart = len == 1 && std::strchr("([,;+-*%?:=<>!", c) != nullptr;
+        i += len;
+    }
+    return out;
+}
+
 // FreeCAD-CH (ops#320): a character the lexer had to drop makes the expression an error.
 void throwIfUnmatched(const char* original)
 {
@@ -4034,7 +4434,8 @@ void throwIfUnmatched(const char* original)
 ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, const char* buffer)
 {
     // FreeCAD-CH (ops#152): `#name` to its full path; the rewritten text is what gets parsed.
-    const std::string rewritten = rewriteVariableRefs(owner, buffer);
+    // FreeCAD-CH (ops#640, rank 56): then `3/4 in` to `(3 in / 4)`.
+    const std::string rewritten = rewriteLiteralFractions(rewriteVariableRefs(owner, buffer));
     const char* original = buffer;
     buffer = rewritten.c_str();
 
@@ -4045,7 +4446,11 @@ ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, con
     initParser(owner);
 
     // run the parser
-    int result = ExpressionParser::ExpressionParser_yyparse ();
+    int result = 0;
+    {
+        Base::FlagToggler<bool> running(parserRunning, false);  // FreeCAD-CH (rank 54)
+        result = ExpressionParser::ExpressionParser_yyparse ();
+    }
 
     if (!unmatchedChar.empty()) {
         ScanResult.reset();
@@ -4079,7 +4484,11 @@ std::unique_ptr<UnitExpression> ExpressionParser::parseUnit(
     initParser(owner);
 
     // run the parser
-    int result = ExpressionParser::ExpressionParser_yyparse ();
+    int result = 0;
+    {
+        Base::FlagToggler<bool> running(parserRunning, false);  // FreeCAD-CH (rank 54)
+        result = ExpressionParser::ExpressionParser_yyparse ();
+    }
 
     if (!unmatchedChar.empty()) {
         ScanResult.reset();

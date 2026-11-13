@@ -16,6 +16,7 @@
 #include <sstream>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <Base/Console.h>
@@ -23,6 +24,7 @@
 
 #include "ElementNamingUtils.h"
 #include "MappedName.h"
+#include "NameTable.h"
 
 FC_LOG_LEVEL_INIT("PropertyLinks", true, true)
 
@@ -1889,7 +1891,13 @@ bool isMarkedCap(std::string_view name, bool faceAlone = false)
         if (decoded.connectedElements.size() != 1) {
             return false;
         }
-        const auto markSections = NameAncestry::splitSections(decoded.connectedElements.front());
+        // The mark in its own sections: a reference, in a name as the map holds it, reads as its
+        // content's (ownSectionsOf(); a plain mark is itself)
+        const std::string& front = decoded.connectedElements.front();
+        const std::string mark = !front.empty() && front.front() == NameTable::Marker
+            ? ownSectionsOf(front)
+            : std::string();
+        const auto markSections = NameAncestry::splitSections(mark.empty() ? front : mark);
         return !markSections.empty() && decodeSection(markSections.back()).elementType == 'F';
     });
 }
@@ -1976,11 +1984,120 @@ std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
  * counts as a counter too, as in sameUpToCounter(); at the top level it doesn't: an instance's
  * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
  */
+bool sameUpToOrder(std::string_view a, std::string_view b, bool top);
+bool sameSectionsUpToOrder(std::string_view a, std::string_view b, bool top);
+
+// The entries of \a text's name lists (a section's linked names and connected elements) that
+// are references to the empty name, emptied: the table interns an empty entry of a list of two or
+// more (`a,` is held as `~A,~E`), and the plain form has it empty again. A delimiter after a
+// caret belongs to an embedded name.
+std::string withEmptyEntries(const std::string& text)
+{
+    if (text.find(NameTable::Marker) == std::string::npos) {
+        return text;
+    }
+    std::string out;
+    out.reserve(text.size());
+    int field = 0;
+    std::size_t entry = 0;  // where the entry being read starts in out
+    const auto closeEntry = [&]() {
+        if ((field == SECTION_LINKED_NAME_INDEX || field == SECTION_CONNECTED_ELEMENTS_INDEX)
+            && out.size() - entry == NameTable::RefLength && out[entry] == NameTable::Marker) {
+            const auto id = NameTable::parseRef(std::string_view(out).substr(entry));
+            const auto content = id ? NameTable::instance().lookup(*id) : std::nullopt;
+            if (content && content->empty()) {
+                out.resize(entry);
+            }
+        }
+    };
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        const bool top = i == 0 || text[i - 1] != *SUB_SECTION_ESCAPE_CHAR;
+        if (top
+            && (c == *SECTION_SUB_DELIMINATOR || c == *NAME_SECTION_DELIMINATOR
+                || c == *SUB_SECTION_LIST_DELIMINATOR)) {
+            closeEntry();
+            if (c == *SECTION_SUB_DELIMINATOR) {
+                ++field;
+            }
+            else if (c == *NAME_SECTION_DELIMINATOR) {
+                field = 0;
+            }
+            out += c;
+            entry = out.size();
+            continue;
+        }
+        out += c;
+    }
+    closeEntry();
+    return out;
+}
+
+// sameUpToOrder() of two references. The pairs found the same are kept: twins differ at every
+// level of their histories, and each level's pair came up again under every pair above it (two
+// names made from the same two twins: 2^depth tests). Only a yes is kept, on the asking thread,
+// up to a count: it stays true whatever the table learns later (the table's entries never change
+// or go, and where a yes passed a reference the table doesn't know, both names held the same
+// one), while a no may have met such a reference, and turns yes once the table knows it. A no
+// ends the test at once at every level above it, so it needs no keeping.
+bool sameReferencesUpToOrder(std::string_view a, std::string_view b)
+{
+    constexpr std::size_t limit = 1000000;
+    thread_local std::unordered_set<std::string> same;
+    std::string key;
+    key.reserve(a.size() + b.size());
+    key.append(a);
+    key.append(b);
+    if (same.find(key) != same.end()) {
+        return true;
+    }
+    // A reference the table doesn't know stands for itself, as in the plain form
+    const std::string ownA = ownSectionsOf(a);
+    const std::string ownB = ownSectionsOf(b);
+    if (ownA != ownB && !sameSectionsUpToOrder(ownA, ownB, false)) {
+        return false;
+    }
+    if (same.size() >= limit) {
+        same.clear();
+    }
+    same.insert(std::move(key));
+    return true;
+}
+
 bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
 {
     if (a == b) {
         return true;
     }
+    // Names as the map holds them: a reference stands for its content, so that twins are told
+    // without the plain forms, whose length grows with the whole history (ops#640: one face
+    // name of the replica's Case Lid took gigabytes). The answer is the plain forms' own: equal
+    // references are equal names, and a section's fields besides the names it embeds are the
+    // same in both forms.
+    const auto isReference = [](std::string_view name) {
+        return name.size() == NameTable::RefLength && name.front() == NameTable::Marker;
+    };
+    if (!top && isReference(a) && isReference(b)) {
+        return sameReferencesUpToOrder(a, b);
+    }
+    // Any other name with a reference in it: its own sections (a stored name's leading
+    // reference and its lists' references to the empty name read as toPlain() writes them)
+    std::string ownA;
+    std::string ownB;
+    if (a.find(NameTable::Marker) != std::string_view::npos) {
+        ownA = ownSectionsOf(a);
+        a = ownA;
+    }
+    if (b.find(NameTable::Marker) != std::string_view::npos) {
+        ownB = ownSectionsOf(b);
+        b = ownB;
+    }
+    return a == b || sameSectionsUpToOrder(a, b, top);
+}
+
+// sameUpToOrder() of two names in their own sections (or plain), section by section
+bool sameSectionsUpToOrder(std::string_view a, std::string_view b, bool top)
+{
     auto sectionsA = NameAncestry::splitSections(a);
     auto sectionsB = NameAncestry::splitSections(b);
     if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
@@ -3206,9 +3323,38 @@ bool isCounterSiblingName(std::string_view name, std::string_view other, bool co
     return isCounterSibling(name, other, copySiblings);
 }
 
+std::string ownSectionsOf(std::string_view name)
+{
+    std::string text(name);
+    // A content is its ID's preimage, so it never leads back to itself; the bound is a guard
+    for (int round = 0; round < 4096; ++round) {
+        if (text.size() < NameTable::RefLength || text.front() != NameTable::Marker
+            || (text.size() > NameTable::RefLength
+                && text[NameTable::RefLength] != *NAME_SECTION_DELIMINATOR)) {
+            return withEmptyEntries(text);
+        }
+        const auto id = NameTable::parseRef(std::string_view(text).substr(0, NameTable::RefLength));
+        const auto content = id ? NameTable::instance().lookup(*id) : std::nullopt;
+        if (!content) {
+            return withEmptyEntries(text);
+        }
+        text.replace(0, NameTable::RefLength, *content);
+    }
+    return NameTable::instance().toPlain(name);
+}
+
 bool isTwinName(std::string_view name, std::string_view other)
 {
-    return name != other && sameUpToOrder(name, other, true);
+    if (name == other) {
+        return false;
+    }
+    // Names as the map holds them: two texts can spell one name where a form isn't canonical
+    if ((name.find(NameTable::Marker) != std::string_view::npos
+         || other.find(NameTable::Marker) != std::string_view::npos)
+        && NameTable::instance().compareExpanded(name, other) == 0) {
+        return false;
+    }
+    return sameUpToOrder(name, other, true);
 }
 
 bool isOrderKeyedName(std::string_view name)
@@ -3315,6 +3461,38 @@ bool sameRankName(std::string_view name, std::string_view oldName)
     }
     return ranked;
 }
+
+namespace
+{
+
+// True if \a name and \a oldName differ only in their last section's connected elements, which
+// one side has and the other hasn't, neither counted (`<k>of<n>`): a helix's turn 1, the member
+// its start cap's edge tells apart from the other turns, and the lone face of a helix of one turn,
+// which no twin needs telling apart from (sweeps 16, sweep-design 13 T1; Onshape follows them)
+bool toldApartName(std::string_view name, std::string_view oldName)
+{
+    const auto as = NameAncestry::splitSections(name);
+    const auto bs = NameAncestry::splitSections(oldName);
+    if (as.empty() || as.size() != bs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i + 1 < as.size(); ++i) {
+        if (as[i] != bs[i]) {
+            return false;
+        }
+    }
+    DecodedMappedSection x = decodeSection(as.back());
+    DecodedMappedSection y = decodeSection(bs.back());
+    if (x.connectedElements.empty() == y.connectedElements.empty()
+        || x.duplicateCount != y.duplicateCount || rankOf(x.duplicateCount)) {
+        return false;
+    }
+    x.connectedElements.clear();
+    y.connectedElements.clear();
+    return x == y;
+}
+
+}  // namespace
 
 namespace
 {
@@ -6178,6 +6356,30 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             Trade,
         };
         int twinsNow = 0;
+        // A source twin (profile regions 4, batch 2's R1): the old element was one of two twins
+        // or more (its record says so), no element now holds a name of its order group (the
+        // producer named them anew: a whole sketch that turned from loops into regions names its
+        // faces through the splitter and refine), and the pick keeps the old element's sources
+        // and maker. Its name can't say which twin it is, so twinBreaks() asks orderBreaks()'s
+        // order test of it: a circle's other crossing, the nearer one to the saved place, is out
+        // of its twins' saved order and breaks. Known sources only: a name without any can't be
+        // judged.
+        std::optional<bool> oldGroupRenamed;
+        auto sourceTwin = [&](const std::vector<std::string>& names) {
+            if (!saved || saved->twinCount < 2) {
+                return false;
+            }
+            if (!oldGroupRenamed) {
+                oldGroupRenamed = !requiredSourcesOf(oldName).empty()
+                    && std::none_of(pool.elements.begin(), pool.elements.end(), [&](const auto& e) {
+                           return std::any_of(e.names.begin(), e.names.end(), [&](const auto& n) {
+                               return n == oldName || isTwinName(n, oldName);
+                           });
+                       });
+            }
+            return *oldGroupRenamed && !lostOldSources(names, oldName)
+                && otherOriginOf(names, oldName, true) == nullptr;
+        };
         auto twinPick = [&](int position) {
             const auto& names = pool.elements[position].names;
             if (oldName.empty() || std::none_of(names.begin(), names.end(), [&](const auto& n) {
@@ -6220,6 +6422,16 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 && atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance)) {
                 return TwinPick::SameRank;
             }
+            // A lone member and the member its connected elements tell apart, the group grown
+            // from one or shrunk to one (no record counts a lone member as 0 or 1), at the
+            // identical place: the same element, warned as SameRank is (sweeps 16)
+            if (saved && twinsNow != std::max(count, 1) && (count <= 1 || twinsNow == 1)
+                && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return toldApartName(n, oldName);
+                   })
+                && atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance)) {
+                return TwinPick::SameRank;
+            }
             if (count < 2 || twinsNow != count || !centroid || !own.center || !saved->center
                 || !saved->twinCentroid) {
                 return TwinPick::Trade;
@@ -6237,6 +6449,78 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             const bool turned = shorter > eps && shorter >= 0.75 * longer
                 && std::atan2((old % offset).Length(), old * offset) * degrees <= 12.0;
             return turned ? TwinPick::Pure : TwinPick::Trade;
+        };
+        // The order test for a pick no name relates to the old element (tier 3 without structure,
+        // G2), or an empty string. The hole's circle redrawn (its crossings named anew, the
+        // reference broken at their place, PLAN decision 155), then moved by more than half its
+        // crossings' spacing: G2 took the other crossing, the nearer one to the saved place, where
+        // `integration` had followed the name taken at the redraw (PR 379 round 4's attack set,
+        // ACrossings|redrawn-then-move). Where the record saved two twins or more, the pick must
+        // have an order group now (its names up to an order key, as twinPick() counts them), the
+        // group the saved size, and the pick the member whose offset from the group's centroid
+        // is nearest the saved offset; else the entry breaks (a pick with no group too, round
+        // 2e). An old element's twin is twinBreaks()'s. The callers run the twin clause's source
+        // checks first.
+        // \a noTwin, if given, is set where the break is round 2e's stop below, which
+        // `integration` lacks.
+        auto orderBreaks = [&](int position, bool* noTwin = nullptr) -> std::string {
+            if (!saved || saved->twinCount < 2 || !saved->center || !saved->twinCentroid
+                || twinPick(position) != TwinPick::NotTwin) {
+                return {};
+            }
+            const auto& names = pool.elements[position].names;
+            std::vector<int> group {position};
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& other = pool.elements[k].names;
+                if (static_cast<int>(k) != position
+                    && std::any_of(other.begin(), other.end(), [&](const auto& m) {
+                           return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                               return isTwinName(m, n);
+                           });
+                       })) {
+                    group.push_back(static_cast<int>(k));
+                }
+            }
+            if (group.size() < 2) {
+                // The literal stop (PR 390 round 2e, its fourth silent find): the old element was
+                // one of two twins or more, and the pick is none of them and has no twins of its
+                // own, a nearest pick by geometry alone while the twins' count changed (a far
+                // edge's crossings, one left on the piece, the other's name taken by a corner
+                // 0.28 away). It breaks.
+                if (noTwin) {
+                    *noTwin = true;
+                }
+                return pool.elements[position].index + " is no twin of the old element ("
+                    + std::to_string(saved->twinCount) + " twins saved)";
+            }
+            Base::Vector3d centroid;
+            bool measured = true;
+            for (int k : group) {
+                const auto& centre = fingerprintOf(pool.elements[k]).center;
+                if (!centre) {
+                    measured = false;
+                    break;
+                }
+                centroid += *centre;
+            }
+            bool trade = !measured || static_cast<int>(group.size()) != saved->twinCount;
+            if (!trade) {
+                centroid /= static_cast<double>(group.size());
+                const Base::Vector3d old = *saved->center - *saved->twinCentroid;
+                auto miss = [&](int k) {
+                    return Base::Distance(*fingerprintOf(pool.elements[k]).center - centroid, old);
+                };
+                const double own = miss(position);
+                trade = std::any_of(group.begin() + 1, group.end(), [&](int k) {
+                    return miss(k) <= own;
+                });
+            }
+            if (!trade) {
+                return {};
+            }
+            return pool.elements[position].index + " is out of its twins' saved order ("
+                + std::to_string(saved->twinCount) + " twins saved, "
+                + std::to_string(group.size()) + " now)";
         };
         // The rule applied to the pick at \a position, chosen among \a rest: true if the entry
         // broke (a trade: the pick first, role `place` where the old element was, else
@@ -6256,15 +6540,27 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 state.renumberedClause = "; twin kept its rank among " + std::to_string(twinsNow);
                 return false;
             }
-            if (verdict != TwinPick::Trade) {
+            // A source twin out of its twins' saved order (sourceTwin()); one with no twins of its
+            // own is left to the callers, as before
+            std::string renamedOrder;
+            if (verdict == TwinPick::NotTwin && sourceTwin(pool.elements[position].names)) {
+                bool noTwin = false;
+                renamedOrder = orderBreaks(position, &noTwin);
+                if (noTwin) {
+                    renamedOrder.clear();
+                }
+            }
+            if (verdict != TwinPick::Trade && renamedOrder.empty()) {
                 return false;
             }
             state.decided = true;
             const int count = saved ? saved->twinCount : 0;
-            state.outcome.evidence = "ambiguous: " + index + " is the old element's twin ("
-                + (count ? std::to_string(count) + (count == 1 ? " twin" : " twins") + " saved"
-                         : std::string("no twin record"))
-                + ", " + std::to_string(twinsNow) + " now)" + otherMakerText(state);
+            state.outcome.evidence = !renamedOrder.empty()
+                ? "ambiguous: " + renamedOrder + ", its twins named anew" + otherMakerText(state)
+                : "ambiguous: " + index + " is the old element's twin ("
+                    + (count ? std::to_string(count) + (count == 1 ? " twin" : " twins") + " saved"
+                             : std::string("no twin record"))
+                    + ", " + std::to_string(twinsNow) + " now)" + otherMakerText(state);
             const bool there = saved
                 && atSamePlace(*saved,
                                fingerprintOf(pool.elements[position]),
@@ -6345,78 +6641,6 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             listByDistance(state, others, role, n < 8 ? 8 - n : std::size_t(0));
             listDropped(state);
             return true;
-        };
-        // The order test for a pick no name relates to the old element (tier 3 without structure,
-        // G2), or an empty string. The hole's circle redrawn (its crossings named anew, the
-        // reference broken at their place, PLAN decision 155), then moved by more than half its
-        // crossings' spacing: G2 took the other crossing, the nearer one to the saved place, where
-        // `integration` had followed the name taken at the redraw (PR 379 round 4's attack set,
-        // ACrossings|redrawn-then-move). Where the record saved two twins or more, the pick must
-        // have an order group now (its names up to an order key, as twinPick() counts them), the
-        // group the saved size, and the pick the member whose offset from the group's centroid
-        // is nearest the saved offset; else the entry breaks (a pick with no group too, round
-        // 2e). An old element's twin is twinBreaks()'s. The callers run the twin clause's source
-        // checks first.
-        // \a noTwin, if given, is set where the break is round 2e's stop below, which
-        // `integration` lacks.
-        auto orderBreaks = [&](int position, bool* noTwin = nullptr) -> std::string {
-            if (!saved || saved->twinCount < 2 || !saved->center || !saved->twinCentroid
-                || twinPick(position) != TwinPick::NotTwin) {
-                return {};
-            }
-            const auto& names = pool.elements[position].names;
-            std::vector<int> group {position};
-            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
-                const auto& other = pool.elements[k].names;
-                if (static_cast<int>(k) != position
-                    && std::any_of(other.begin(), other.end(), [&](const auto& m) {
-                           return std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                               return isTwinName(m, n);
-                           });
-                       })) {
-                    group.push_back(static_cast<int>(k));
-                }
-            }
-            if (group.size() < 2) {
-                // The literal stop (PR 390 round 2e, its fourth silent find): the old element was
-                // one of two twins or more, and the pick is none of them and has no twins of its
-                // own, a nearest pick by geometry alone while the twins' count changed (a far
-                // edge's crossings, one left on the piece, the other's name taken by a corner
-                // 0.28 away). It breaks.
-                if (noTwin) {
-                    *noTwin = true;
-                }
-                return pool.elements[position].index + " is no twin of the old element ("
-                    + std::to_string(saved->twinCount) + " twins saved)";
-            }
-            Base::Vector3d centroid;
-            bool measured = true;
-            for (int k : group) {
-                const auto& centre = fingerprintOf(pool.elements[k]).center;
-                if (!centre) {
-                    measured = false;
-                    break;
-                }
-                centroid += *centre;
-            }
-            bool trade = !measured || static_cast<int>(group.size()) != saved->twinCount;
-            if (!trade) {
-                centroid /= static_cast<double>(group.size());
-                const Base::Vector3d old = *saved->center - *saved->twinCentroid;
-                auto miss = [&](int k) {
-                    return Base::Distance(*fingerprintOf(pool.elements[k]).center - centroid, old);
-                };
-                const double own = miss(position);
-                trade = std::any_of(group.begin() + 1, group.end(), [&](int k) {
-                    return miss(k) <= own;
-                });
-            }
-            if (!trade) {
-                return {};
-            }
-            return pool.elements[position].index + " is out of its twins' saved order ("
-                + std::to_string(saved->twinCount) + " twins saved, "
-                + std::to_string(group.size()) + " now)";
         };
         // XP's source condition (ops#503 D1; I-S6, I-P1): the pick at the exact place that lacks
         // the old name's origin (otherOriginOf(): a new sketch object, policy D's case) says so;
@@ -6510,7 +6734,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         // Under Equivalent they resolve as one candidate if every piece gives the consumer the
         // same result, represented by the piece whose first name sorts first; otherwise the
         // entry breaks. The other survivors don't count: the pieces are what is left of the old
-        // element. Equivalent without pieces is One (see solveOwner()'s comment).
+        // element. Equivalent without pieces is One (see solveOwner()'s comment). An entry with
+        // piecesBreak (an attachment) breaks on two or more pieces, keeping its old name, so the
+        // whole element gives it back (Onshape's SW19 (a)).
         std::vector<int> pieces;
         std::vector<int> others;
         for (int k : state.candidates) {
@@ -6522,6 +6748,18 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             (piece ? pieces : others).push_back(k);
         }
         const bool equivalentPolicy = std::get<2>(key) == static_cast<int>(SolvePolicy::Equivalent);
+        const bool piecesBreak = equivalentPolicy && pieces.size() >= 2
+            && std::any_of(members.begin(), members.end(), [&](int member) {
+                   return input.entries[member].piecesBreak;
+               });
+        if (piecesBreak) {
+            state.decided = true;
+            state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
+            listCandidates(state, pieces);
+            listCandidates(state, others);
+            listDropped(state);
+            continue;
+        }
         if (!pieces.empty() && equivalentPolicy) {
             std::vector<std::string> indexes;
             for (int k : pieces) {
@@ -6549,6 +6787,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 return na != nb ? na < nb : a < b;
             });
             state.equivalent = pieces;
+            state.outcome.equivalentPieces = true;
             state.candidates = {representative};
             state.listed = pieces;
         }

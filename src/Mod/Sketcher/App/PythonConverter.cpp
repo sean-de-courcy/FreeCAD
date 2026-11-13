@@ -546,6 +546,12 @@ std::string PythonConverter::process(const Sketcher::Constraint* constraint, Geo
         case Sketcher::PointOnObject:
             res = "PointOnObject', " + id1pos1 + ", " + id2;
             break;
+        case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+            res = "Midpoint', " + id1pos1 + ", " + id2;
+            break;
+        case Sketcher::Pierce:  // FreeCAD-CH (Onshape's Pierce)
+            res = "Pierce', " + id1pos1 + ", " + id2;
+            break;
         case Sketcher::Symmetric:
             if (thirdIsEdge) {
                 res = "Symmetric', " + id1pos1 + ", " + id2pos2 + ", " + id3;

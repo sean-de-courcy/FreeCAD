@@ -567,6 +567,16 @@ class HarnessGuessVerdicts(unittest.TestCase):
             harness.pickedWrongSet("wrong", "equivalent", self.rows("resolved", "rejected")),
             "equivalent",
         )
+        #   nor the silent record of an attachment kept on an equivalent piece (SW20): scored
+        #   by geometry
+        self.assertEqual(
+            harness.pickedWrongSet("wrong", "equivalent", self.rows("guessed", "equivalent")),
+            "equivalent",
+        )
+        self.assertEqual(
+            harness.pickedWrongSet("wrong", "wrong", self.rows("guessed", "equivalent")),
+            "wrong",
+        )
 
     def testExpansionToTheExpectedPiecesPasses(self):
         verdict = self.verdict(self.EDGE, "correct", "correct", self.rows(kind="expanded"))

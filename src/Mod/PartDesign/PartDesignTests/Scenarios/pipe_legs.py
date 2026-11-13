@@ -147,6 +147,9 @@ class Legs(h.Scenario):
             solid = body.newObject("PartDesign::AdditivePipe", "Pipe")
             solid.Profile = profile
             solid.Refine = False
+            # The legs' names over the whole path, as these scenarios were designed (ops#351);
+            # a new pipe sweeps one way from the profile (ExtendToFullPath off, ops#640)
+            solid.ExtendToFullPath = True
         else:
             solid = doc.addObject("Part::Sweep", "Sweep")
             solid.Sections = [profile]

@@ -197,7 +197,7 @@ class TestGuiDocument(unittest.TestCase):
 
     def testRefreshFallsBackToSyncForFeaturePython(self):
         params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
-        old_async = params.GetBool("EnableAsyncRecompute", True)
+        old_async = params.GetBool("AsyncRecomputeWorker", False)
 
         class RefreshProxy:
             def __init__(self):
@@ -213,13 +213,13 @@ class TestGuiDocument(unittest.TestCase):
         obj.touch()
 
         try:
-            params.SetBool("EnableAsyncRecompute", True)
+            params.SetBool("AsyncRecomputeWorker", True)
 
             start = time.monotonic()
             FreeCADGui.runCommand("Std_Refresh", 0)
             elapsed = time.monotonic() - start
         finally:
-            params.SetBool("EnableAsyncRecompute", old_async)
+            params.SetBool("AsyncRecomputeWorker", old_async)
 
         self.assertEqual(proxy.executed_thread_id, threading.get_ident())
         self.assertGreaterEqual(elapsed, 0.04)
@@ -229,7 +229,7 @@ class TestGuiDocument(unittest.TestCase):
         Windows FreeCADApp.dll had its own null copy of the GUI's hooks, so an observer of
         signalRecomputedObject ran on the recompute worker during an async Std_Refresh."""
         params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
-        old_async = params.GetBool("EnableAsyncRecompute", True)
+        old_async = params.GetBool("AsyncRecomputeWorker", False)
         main = threading.get_ident()
 
         class Observer:
@@ -246,7 +246,7 @@ class TestGuiDocument(unittest.TestCase):
         observer = Observer(self.doc)
         FreeCAD.addDocumentObserver(observer)
         try:
-            params.SetBool("EnableAsyncRecompute", True)
+            params.SetBool("AsyncRecomputeWorker", True)
             FreeCADGui.setActiveDocument(self.doc.Name)
             obj.touch()
             FreeCADGui.runCommand("Std_Refresh", 0)
@@ -256,7 +256,7 @@ class TestGuiDocument(unittest.TestCase):
             self.assertTrue(self._processEventsUntil(lambda: not self.doc.Recomputing))
         finally:
             FreeCAD.removeDocumentObserver(observer)
-            params.SetBool("EnableAsyncRecompute", old_async)
+            params.SetBool("AsyncRecomputeWorker", old_async)
 
         self.assertEqual(observer.threads, [main])
         self.assertEqual(ranBeforeReturning, [])
@@ -266,7 +266,7 @@ class TestGuiDocument(unittest.TestCase):
         close waits for the worker's request and runs the hops meanwhile. It waited for a worker
         that waited for it (a hang, off Windows before ops#365, since the hop happened there)."""
         params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
-        old_async = params.GetBool("EnableAsyncRecompute", True)
+        old_async = params.GetBool("AsyncRecomputeWorker", False)
         main = threading.get_ident()
 
         class Observer:
@@ -284,7 +284,7 @@ class TestGuiDocument(unittest.TestCase):
         FreeCAD.addDocumentObserver(observer)
         name = self.doc.Name
         try:
-            params.SetBool("EnableAsyncRecompute", True)
+            params.SetBool("AsyncRecomputeWorker", True)
             FreeCADGui.setActiveDocument(name)
             obj.touch()
             FreeCADGui.runCommand("Std_Refresh", 0)
@@ -297,7 +297,7 @@ class TestGuiDocument(unittest.TestCase):
             self.doc = None
         finally:
             FreeCAD.removeDocumentObserver(observer)
-            params.SetBool("EnableAsyncRecompute", old_async)
+            params.SetBool("AsyncRecomputeWorker", old_async)
 
         self.assertNotIn(name, FreeCAD.listDocuments())
         self.assertEqual(observer.threads, [main])
@@ -308,7 +308,7 @@ class TestGuiDocument(unittest.TestCase):
         interpreter's frames: the except never ran, and a later slot in the same wait walked a
         cycle of stale frames forever."""
         params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
-        old_async = params.GetBool("EnableAsyncRecompute", True)
+        old_async = params.GetBool("AsyncRecomputeWorker", False)
 
         class Observer:
             def __init__(self, doc):
@@ -345,7 +345,7 @@ class TestGuiDocument(unittest.TestCase):
         name = self.doc.Name
         here = len(inspect.stack(0))
         try:
-            params.SetBool("EnableAsyncRecompute", True)
+            params.SetBool("AsyncRecomputeWorker", True)
             FreeCADGui.setActiveDocument(name)
             for obj in self.doc.Objects:
                 obj.touch()
@@ -360,7 +360,7 @@ class TestGuiDocument(unittest.TestCase):
             self.doc = None
         finally:
             FreeCAD.removeDocumentObserver(observer)
-            params.SetBool("EnableAsyncRecompute", old_async)
+            params.SetBool("AsyncRecomputeWorker", old_async)
 
         self.assertEqual(observer.caught, "RuntimeError")
         self.assertNotIn(name, FreeCAD.listDocuments())

@@ -28,6 +28,7 @@
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <TopExp.hxx>
@@ -57,17 +58,20 @@
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
 #include <Base/Profiler.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/NamingHash.h>
 #include <Mod/Part/App/PartPyCXX.h>
 #include <Mod/Part/App/GeometryMigrationExtension.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 #include <Mod/Part/App/WireJoiner.h>
+#include <Mod/Part/App/FaceMakerBuildFace.h>
 
 #include <memory>
 #include <unordered_map>
 
 #include "GeoEnum.h"
 #include "SketchObject.h"
+#include "SketchImprint.h"
 #include "Constraint.h"
 #include "SketchObjectPy.h"
 #include "ExternalGeometryFacade.h"
@@ -253,6 +257,12 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Internal Geometry",
                       App::Prop_None,
                       "Enables selection of closed profiles within a sketch as input for operations");
+    ADD_PROPERTY_TYPE(DisableImprinting,
+                      (false),
+                      "Internal Geometry",
+                      App::Prop_None,
+                      "The edges of the face the sketch lies on don't split its regions (Onshape's "
+                      "Disable imprinting)");
     ADD_PROPERTY_TYPE(_InternalFaceVersion,
                       (0),
                       "Base",
@@ -314,8 +324,9 @@ void SketchObject::setupObject()
             "User parameter:BaseApp/Preferences/Mod/Sketcher");
     ArcFitTolerance.setValue(hGrpp->GetFloat("ArcFitTolerance", Precision::Confusion()*10.0));
     MakeInternals.setValue(hGrpp->GetBool("MakeInternals", true));
-    // New sketches build internal faces with FaceMakerBuildFace.
-    _InternalFaceVersion.setValue(2);
+    // New sketches build internal faces with FaceMakerBuildFace, and take the model edges lying
+    // in their plane into their regions (Onshape's imprint, FreeCAD-CH feat/profile-regions).
+    _InternalFaceVersion.setValue(ImprintInternalFaceVersion);
     inherited::setupObject();
 }
 
@@ -339,6 +350,9 @@ short SketchObject::mustExecute() const
 
 App::DocumentObjectExecReturn* SketchObject::execute()
 {
+    // The sketch's normal before the attachment places it again (FreeCAD-CH ops#640 rank 7)
+    const Base::Vector3d normalBefore =
+        Placement.getValue().getRotation().multVec(Base::Vector3d(0, 0, 1));
     try {
         App::DocumentObjectExecReturn* rtn = Part2DObject::execute();// to positionBySupport
         if (rtn != App::DocumentObject::StdReturn)
@@ -347,6 +361,43 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     }
     catch (const Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
+    }
+
+    // FreeCAD-CH (ops#640 rank 7, hands-on B3-2): the attachment turned the sketch over, as a flip
+    // of the extrude whose end cap it sits on does (the normal reversed, X kept, Y reversed). The
+    // model's geometry is then mirrored in the sketch's coordinates, so a side recorded against a
+    // projection of it (a distance or a tangency to a projected edge) is mirrored too: geometry
+    // dimensioned to the face's edges keeps its place on the part, as in Onshape, while geometry
+    // placed by the sketch's own coordinates mirrors with the frame. Before
+    // rebuildExternalGeometry(): a projected line that turned around reads its side back from the
+    // geometry there, as before.
+    if (normalBefore * Placement.getValue().getRotation().multVec(Base::Vector3d(0, 0, 1)) < 0.0) {
+        std::vector<Constraint*> constraints;
+        bool flipped = false;
+        for (const Constraint* constr : Constraints.getValues()) {
+            Constraint* copy = constr->clone();
+            const bool ccw = copy->Orientation.testFlag(ConstraintOrientations::CounterClockwise);
+            const bool cw = copy->Orientation.testFlag(ConstraintOrientations::Clockwise);
+            bool external = false;
+            for (std::size_t i = 0; copy->hasElement(i); ++i) {
+                const int geoId = copy->getElement(i).GeoId;
+                external = external || (geoId <= GeoEnum::RefExt && geoId != GeoEnum::GeoUndef);
+            }
+            if ((copy->Type == Distance || copy->Type == Tangent) && ccw != cw && external) {
+                copy->Orientation.setFlag(ConstraintOrientations::CounterClockwise, cw);
+                copy->Orientation.setFlag(ConstraintOrientations::Clockwise, ccw);
+                flipped = true;
+            }
+            constraints.push_back(copy);
+        }
+        if (flipped) {
+            Constraints.setValues(std::move(constraints));
+        }
+        else {
+            for (Constraint* copy : constraints) {
+                delete copy;
+            }
+        }
     }
 
     // setup and diagnose the sketch
@@ -386,7 +437,7 @@ App::DocumentObjectExecReturn* SketchObject::execute()
         appendConflictMsg(lastConflicting, msg);
         return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
-    else if (err == -2) {// redundant constraints
+    else if (err == -2) {// redundant constraints that do not hold at the solution (ops#656)
         std::string msg = "Sketch with redundant constraints\n";
         appendRedundantMsg(lastRedundant, msg);
         return new App::DocumentObjectExecReturn(withExternalError(msg), this);
@@ -399,6 +450,27 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     else if (err == -1) {// Solver failed
         return new App::DocumentObjectExecReturn(withExternalError("Solving the sketch failed"),
                                                this);
+    }
+
+    // FreeCAD-CH (ops#640): a conflict solved around (solve() left its constraints out and
+    // solved the rest): the sketch goes on as a warning, as Onshape's SKETCH_SOLVE_FAILED does
+    std::string conflictWarning;
+    if (lastSolvedAroundConflict) {
+        conflictWarning = "Sketch could not be solved: the constraints in conflict are left out, "
+                          "the rest is solved\n";
+        if (lastHasConflict) {
+            appendConflictMsg(lastConflicting, conflictWarning);
+        }
+        else {
+            appendRedundantMsg(lastRedundant, conflictWarning);
+        }
+    }
+    // FreeCAD-CH (ops#656): repeated constraints that agree with the others solved (solve()
+    // returned 0): the sketch goes on, as in Onshape, and the Report view names them
+    else if (lastHasRedundancies) {
+        std::string msg = "Sketch with redundant constraints (they agree, the sketch is solved)\n";
+        appendRedundantMsg(lastRedundant, msg);
+        Base::Console().warning(this->getFullLabel(), "%s", msg.c_str());
     }
 
     // this is not necessary for sketch representation in edit mode, unless we want to trigger an
@@ -439,6 +511,16 @@ App::DocumentObjectExecReturn* SketchObject::execute()
         FC_LOG(getFullName() << ": " << externalError);
     }
 
+    if (!conflictWarning.empty()) {
+        if (App::Document* doc = getDocument()) {
+            const char* previous = isWarning() ? doc->getWarningDescription(this) : nullptr;
+            doc->setWarning(this,
+                            previous && *previous ? std::string(previous) + "\n" + conflictWarning
+                                                  : conflictWarning);
+        }
+        Base::Console().warning(this->getFullLabel(), "%s", conflictWarning.c_str());
+    }
+
     return App::DocumentObject::StdReturn;
 }
 
@@ -453,6 +535,7 @@ static bool inline checkSmallEdge(const Part::TopoShape &s) {
 void SketchObject::buildShape()
 {
     ZoneScoped;
+    Part::KernelBudget::PhaseTimer phase(Part::KernelBudget::Phase::BuildShape);
     // We use the following instead to map element names
 
     // Iterated where vertex names are written, whose Reference IDs are then sorted (ops#19);
@@ -707,15 +790,76 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
             }
         }
         else {
-            try {
-                result = result.makeElementFace(edges.getSubTopoShapes(TopAbs_WIRE),
-                        /*op*/"",
-                        /*maker*/"Part::FaceMakerBuildFace",
-                        /*pln*/nullptr
-                );
+            // The model edges in the sketch's plane bound regions too (Onshape's imprint);
+            // they stay out of the open wires below and out of the sketch's Shape
+            const auto imprint = imprintEdges(*this);
+            // nearOnly: only the model edges that can reach the sketch's regions (perf profile 2b)
+            // own: the sketch's edges; model: the imprint's
+            auto regions = [&](bool nearOnly,
+                               const Part::TopoShape& own,
+                               const Part::TopoShape& model) {
+                Part::TopoShape made = makeTopoShape(getID());
+                try {
+                    auto shapes = own.getSubTopoShapes(TopAbs_WIRE);
+                    bool leftOutLoop = false;
+                    gp_Pln plane;
+                    bool fullPlane = false;
+                    if (!model.isNull()) {
+                        auto all = model.getSubTopoShapes(TopAbs_EDGE);
+                        auto kept = nearOnly ? nearImprintEdges(all, own, leftOutLoop)
+                                              : all;
+                        if (kept.size() != all.size()) {
+                            // The face maker fits its plane over every edge it is given: the
+                            // whole list's plane keeps the faces (origin, pcurves) the same
+                            auto full = shapes;
+                            full.insert(full.end(), all.begin(), all.end());
+                            fullPlane = Part::FaceMakerBuildFace::planeOf(full, plane);
+                            if (!fullPlane) {
+                                kept = std::move(all);  // as without the filter
+                                leftOutLoop = false;
+                            }
+                        }
+                        for (auto& edge : kept) {
+                            shapes.push_back(std::move(edge));
+                        }
+                    }
+                    made = made.makeElementFace(shapes,
+                            /*op*/"",
+                            /*maker*/"Part::FaceMakerBuildFace",
+                            /*pln*/fullPlane ? &plane : nullptr
+                    );
+                    if (!model.isNull()) {
+                        // the model edges split the sketch's regions, and make none of their own
+                        made = withinSketchRegions(made, own, leftOutLoop);
+                    }
+                }
+                catch (const Part::NullShapeException&) {
+                    // An open-only sketch has no bounded regions, so a null face result is
+                    // expected.
+                }
+                return made;
+            };
+            if (imprint.isNull() || imprintNearMode() != "verify") {
+                result = regions(!imprint.isNull(), edges, imprint);
             }
-            catch (const Part::NullShapeException&) {
-                // An open-only sketch has no bounded regions, so a null face result is expected.
+            else {
+                // The face maker adds a pcurve on its own plane to each edge it is given: the near
+                // run gets copies, so that the two runs leave each other's edges alone. The copies
+                // keep the element maps (BRepBuilderAPI_Copy keeps the sub-shapes' order)
+                auto copyOf = [](const Part::TopoShape& shape) {
+                    Part::TopoShape copy(shape);
+                    if (!shape.isNull()) {
+                        copy.setShape(BRepBuilderAPI_Copy(shape.getShape()).Shape(), false);
+                    }
+                    return copy;
+                };
+                const auto nearRegions = regions(true, copyOf(edges), copyOf(imprint));
+                result = regions(false, edges, imprint);
+                if (const std::string difference = regionsDifference(nearRegions, result);
+                    !difference.empty()) {
+                    FC_ERR(getFullName() << ": imprint near edges: the regions differ: "
+                                         << difference);
+                }
             }
         }
 

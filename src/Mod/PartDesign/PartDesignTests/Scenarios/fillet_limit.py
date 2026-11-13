@@ -193,8 +193,9 @@ class FilletLimit(Scenario):
         self.check(doc)
 
     def overThenBelow(self, doc):
-        """Over the limit, where the dress-up fails, then back below it."""
-        self.setSize(doc, self.limit + 0.1)
+        """Over the limit, where the dress-up fails, then back below it. Past every face of the
+        model: just past the limit Onshape's dress-ups build (ops#640, S3), and so do ours"""
+        self.setSize(doc, self.limit + 40)
         if doc.getObject(self.kind).isValid():
             raise ScenarioError(f"the {self.kind} at {self.r} doesn't fail")
         self.setSize(doc, self.sizes["overThenBelow"])

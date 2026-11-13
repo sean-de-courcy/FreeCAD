@@ -688,7 +688,11 @@ class TestOnViewParameterGui(SketcherGuiTestCase):
         )
         self.assertEqual(self.sketch.GeometryCount, 0)
 
-    def test_rectangle_ovp_escape_then_escape_then_escape_exits_sketch(self):
+    def test_rectangle_ovp_escape_then_escape_then_escape_keeps_the_sketch_open(self):
+        """Esc leaves the running tool only, as in Onshape (FreeCAD-CH, ops#640): the first Esc
+        closes the on-view parameters, the second leaves the rectangle tool, and a third, with no
+        tool running, keeps the sketch open (LeaveSketchWithEscape is off by default; with it on,
+        TestSketchOnshapeGui.TestSketchEscapeGui checks the sketch closes)."""
         viewport, first_point = self.begin_rectangle_with_visible_ovp()
 
         first_spinbox = self.ovp_spinboxes()[0]
@@ -733,11 +737,11 @@ class TestOnViewParameterGui(SketcherGuiTestCase):
         self.pump(100)
         self.key_click(graphics_view, QtCore.Qt.Key_Escape)
 
-        self.assertTrue(
-            self.wait_until(lambda: self.active_task_dialog() is None, timeout_ms=1000),
-            "Expected the third Esc to close the Sketcher task dialog",
+        self.assertFalse(
+            self.wait_until(lambda: self.active_task_dialog() is None, timeout_ms=500),
+            "Expected the third Esc to leave the Sketcher task dialog open",
         )
-        self.assert_sketch_edit_inactive()
+        self.assert_sketch_edit_active()
 
     def test_auto_color_restores_line_color_from_preferences(self):
         view_params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View")

@@ -569,38 +569,63 @@ int QuantityPy::number_nonzero_handler(PyObject* self)
     return a->getValue() != 0.0;
 }
 
+namespace
+{
+// The comparison of two quantities for Python (a new reference), or NotImplemented for another
+// operator. Throws a Base exception for two units, as Quantity's operators do.
+PyObject* compareQuantities(const Quantity& a, const Quantity& b, int op)
+{
+    const Quantity* u1 = &a;
+    const Quantity* u2 = &b;
+    PyObject* res = nullptr;
+    switch (op) {
+        case Py_NE:
+            res = (!(*u1 == *u2)) ? Py_True : Py_False;
+            Py_INCREF(res);
+            return res;
+        case Py_LT:
+            res = (*u1 < *u2) ? Py_True : Py_False;
+            Py_INCREF(res);
+            return res;
+        case Py_LE:
+            res = (*u1 < *u2) || (*u1 == *u2) ? Py_True : Py_False;
+            Py_INCREF(res);
+            return res;
+        case Py_GT:
+            res = (!(*u1 < *u2)) && (!(*u1 == *u2)) ? Py_True : Py_False;
+            Py_INCREF(res);
+            return res;
+        case Py_GE:
+            res = (!(*u1 < *u2)) ? Py_True : Py_False;
+            Py_INCREF(res);
+            return res;
+        case Py_EQ:
+            res = (*u1 == *u2) ? Py_True : Py_False;
+            Py_INCREF(res);
+            return res;
+        default:
+            break;
+    }
+    Py_INCREF(Py_NotImplemented);
+    return Py_NotImplemented;
+}
+}  // namespace
+
 PyObject* QuantityPy::richCompare(PyObject* v, PyObject* w, int op)
 {
     if (PyObject_TypeCheck(v, &(QuantityPy::Type)) && PyObject_TypeCheck(w, &(QuantityPy::Type))) {
         const Quantity* u1 = static_cast<QuantityPy*>(v)->getQuantityPtr();
         const Quantity* u2 = static_cast<QuantityPy*>(w)->getQuantityPtr();
 
-        PyObject* res = nullptr;
-        switch (op) {
-            case Py_NE:
-                res = (!(*u1 == *u2)) ? Py_True : Py_False;
-                Py_INCREF(res);
-                return res;
-            case Py_LT:
-                res = (*u1 < *u2) ? Py_True : Py_False;
-                Py_INCREF(res);
-                return res;
-            case Py_LE:
-                res = (*u1 < *u2) || (*u1 == *u2) ? Py_True : Py_False;
-                Py_INCREF(res);
-                return res;
-            case Py_GT:
-                res = (!(*u1 < *u2)) && (!(*u1 == *u2)) ? Py_True : Py_False;
-                Py_INCREF(res);
-                return res;
-            case Py_GE:
-                res = (!(*u1 < *u2)) ? Py_True : Py_False;
-                Py_INCREF(res);
-                return res;
-            case Py_EQ:
-                res = (*u1 == *u2) ? Py_True : Py_False;
-                Py_INCREF(res);
-                return res;
+        // FreeCAD-CH (ops#652): the type's tp_richcompare is this function, so nothing catches
+        // a C++ exception between it and the interpreter: comparing quantities of two units
+        // (`3 mm > 2 mm^2`, in an expression or a macro) threw through CPython and crashed
+        try {
+            return compareQuantities(*u1, *u2, op);
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            return nullptr;
         }
     }
     else if (PyNumber_Check(v) && PyNumber_Check(w)) {

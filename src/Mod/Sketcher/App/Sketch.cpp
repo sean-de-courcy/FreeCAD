@@ -281,6 +281,12 @@ int Sketch::setUpSketch(
     std::vector<bool> onlyBlockedGeometry(intGeoList.size(), false);
     // these constraints are unenforceable due to a Blocked constraint
     std::vector<bool> unenforceableConstraints(ConstraintList.size(), false);
+    // FreeCAD-CH (ops#640): constraints a conflict is solved around are left out like these
+    for (int index : skippedConstraints) {
+        if (index >= 0 && index < static_cast<int>(unenforceableConstraints.size())) {
+            unenforceableConstraints[index] = true;
+        }
+    }
 
     /* This implements the old block constraint. I have decided not to remove it at this time while
      * the new is tested, just in case the change needs to be reverted */
@@ -2606,6 +2612,72 @@ int Sketch::addConstraint(const Constraint* constraint)
             rtn = ++ConstraintsCounter;
             break;
         }
+        case Pierce: {
+            // FreeCAD-CH (Onshape's Pierce): the point where a model edge crosses the sketch plane
+            // is a point of the edge's Intersection external, fixed: a coincidence with it. Only a
+            // point geometry is a crossing (anything else is malformed: rtn stays -1)
+            const int geoId2 = checkGeoId(constraint->Second);
+            if (Geoms[geoId2].type != Point) {
+                break;
+            }
+            if (constraint->FirstPos == PointPos::none) {
+                // a line (its infinite extension), a circle or an arc (its circle) through the
+                // crossing: a point on object of the crossing on the curve
+                const auto type = Geoms[checkGeoId(constraint->First)].type;
+                if (type != Line && type != Circle && type != Arc) {
+                    break;
+                }
+                rtn = addPointOnObjectConstraint(constraint->Second, PointPos::start, constraint->First);
+                break;
+            }
+            rtn = addPointCoincidentConstraint(
+                constraint->First,
+                constraint->FirstPos,
+                constraint->Second,
+                PointPos::start
+            );
+            break;
+        }
+        case Midpoint: {
+            // FreeCAD-CH (ops#656): the point on the arc's circle at the parameter u, and u the
+            // mean of the arc's end angles: u - start = end - u = h, with u and h two unknowns of
+            // their own (as a point on a B-spline has its parameter). Two equations net on the
+            // point. The solver's arcs run counterclockwise from start to end angle, so u is the
+            // middle of the arc itself, over 180 degrees too, never the far side of the circle.
+            const int geoId1 = checkGeoId(constraint->First);
+            const int geoId2 = checkGeoId(constraint->Second);
+            const int pointId = getPointId(geoId1, constraint->FirstPos);
+            if (Geoms[geoId2].type != Arc || pointId < 0 || pointId >= int(Points.size())
+                || geoId1 == geoId2) {
+                break;  // rtn stays -1: malformed (only arcs of circles have this middle)
+            }
+            // the same Midpoint again (same point, same arc) repeats the first and agrees with it
+            // always: no equations, so no unknowns of its own left out of the solve as a
+            // redundant constraint's are (they kept their start, and an edit of the arc failed)
+            // (both driving: a Midpoint is always saved driving, but a non-driving one read from
+            // an edited file would hold nothing and has no value for the driven-value update)
+            const bool repeat = c.driving && std::ranges::any_of(Constrs, [&](const ConstrDef& other) {
+                return other.constr && other.driving && other.constr->Type == Midpoint
+                    && checkGeoId(other.constr->First) == geoId1
+                    && other.constr->FirstPos == constraint->FirstPos
+                    && checkGeoId(other.constr->Second) == geoId2;
+            });
+            if (repeat) {
+                rtn = ++ConstraintsCounter;
+                break;
+            }
+            GCS::Arc& a = Arcs[Geoms[geoId2].index];
+            c.value = new double((*a.startAngle + *a.endAngle) / 2.0);
+            c.secondvalue = new double((*a.endAngle - *a.startAngle) / 2.0);
+            Parameters.push_back(c.value);
+            Parameters.push_back(c.secondvalue);
+            const int tag = ++ConstraintsCounter;
+            GCSsys.addConstraintCurveValue(Points[pointId], a, c.value, tag, c.driving);
+            GCSsys.addConstraintDifference(a.startAngle, c.value, c.secondvalue, tag, c.driving);
+            GCSsys.addConstraintDifference(c.value, a.endAngle, c.secondvalue, tag, c.driving);
+            rtn = ConstraintsCounter;
+            break;
+        }
         case Sketcher::None:   // ambiguous enum value
         case Sketcher::Block:  // handled separately while adding geometry
         case NumConstraintTypes:
@@ -4722,6 +4794,16 @@ bool Sketch::updateGeometry()
         catch (const Standard_Failure& e) {
             Base::Console()
                 .error("Updating geometry: Error build geometry(%d): %s\n", i, e.GetMessageString());
+            return false;
+        }
+    }
+    // FreeCAD-CH (ops#656): while dragging, a Midpoint's half sweep h must stay in (0, pi). A step
+    // that takes it through 0 (an arc's end dragged through its start) leaves the point at
+    // u = start + h on the far side of the circle once the arc is written back counterclockwise:
+    // no valid step. (Outside a drag SketchObject::solve solves again from the written arc.)
+    for (const ConstrDef& c : Constrs) {
+        if (isInitMove && c.constr && c.constr->Type == Midpoint && c.secondvalue
+            && !(*c.secondvalue > 0.0 && *c.secondvalue < std::numbers::pi)) {
             return false;
         }
     }

@@ -6,6 +6,8 @@
 "R2hsFreedElementTwoOwners|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
 "R2hsLoneMovedOffNewCircleAtPlace|only|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
 "R2hsLoneRedrawnInPlace|only|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
+"R2hsMovedLittleWithNewOverlapping|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
+"R2hsMovedLittleWithNewOverlapping|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
 "R2hsMovedOffNewCircleNear10|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
 "R2hsMovedOffNewCircleNear10|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},
 "R2hsMovedOffNewCircleNear30|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2hs", "issue": "ops#468", "tier": "F"},

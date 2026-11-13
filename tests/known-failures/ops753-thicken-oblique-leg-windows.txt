@@ -1,0 +1,14 @@
+# TestThickenObliqueLeg (fix/thicken-horn-torus) fails on Windows at its fixture: bore() gives 3 non-plane
+# faces where Linux gives 4 (the bend is not split in two). With the count relaxed, the leg's direct piece
+# misses its Steiner volume by 5 % there, on 68309c2092 as on 44ab785de0 (the same numbers to 1e-13).
+# Linux passes all five. Never run by CI before (the class was not registered). Remove this file when
+# ops#753 makes the fixture and the piece hold on Windows.
+
+issue: ops#753
+
+reason: the oblique-leg fixture gives 3 bore faces for 4 on Windows ("3 != 4"), on the base branch too
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testARightOffsetIsKept                 windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testAWrongOffsetIsRebuilt              windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testAWrongPieceThatCantBeRebuiltFails  windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testDirectPieceIsExact                 windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testHornBendWithAVShapedLegEnd         windows

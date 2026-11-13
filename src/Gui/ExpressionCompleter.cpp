@@ -22,13 +22,16 @@
 
 
 #include <algorithm>
+#include <limits>
 #include <string_view>
 #include <fastsignals/connection.h>
 #include <QAbstractItemView>
 #include <QContextMenuEvent>
+#include <QCoreApplication>
 #include <QLineEdit>
 #include <QMenu>
 #include <QTextBlock>
+#include <QTimer>
 #include <QGuiApplication>
 #include <QScreen>
 
@@ -41,8 +44,10 @@
 #include <App/Property.h>
 #include <App/PropertyStandard.h>  // FreeCAD-CH (ops#152)
 #include <App/PropertyUnits.h>     // FreeCAD-CH (ops#152)
+#include <App/VariableChoice.h>    // FreeCAD-CH (ops#640, decision 317)
 #include <App/VariableLookup.h>    // FreeCAD-CH (ops#152)
 #include <Gui/Application.h>
+#include <Gui/Command.h>  // FreeCAD-CH (ops#640)
 #include <Gui/MainWindow.h>
 #include <Base/Tools.h>
 #include <CXX/Extensions.hxx>
@@ -59,6 +64,28 @@ using namespace App;
 using namespace Gui;
 
 static constexpr std::string_view completionSentinel = "._self";
+
+// FreeCAD-CH (ops#640, rank 55): the model role that marks the "New variable..." row, which a
+// `#name` no variable has offers last (the same value in QuantitySpinBox.cpp).
+static constexpr int newVariableRole = Qt::UserRole + 0x4E56;
+
+namespace
+{
+// Opens the Variables panel's Add dialog with @a name filled in (and @a value, if any), after the
+// event that asked for it: Std_AddVariable reads them from this application property.
+void requestNewVariable(const QString& name, const QString& value = QString())
+{
+    QTimer::singleShot(0, [name, value] {
+        QStringList fields {name};
+        if (!value.isEmpty()) {
+            fields.push_back(value);
+        }
+        qApp->setProperty("FreeCADCH_NewVariable", fields);
+        Gui::Application::Instance->commandManager().runCommandByName("Std_AddVariable");
+        qApp->setProperty("FreeCADCH_NewVariable", QVariant());
+    });
+}
+}  // namespace
 
 class ExpressionCompleterModel: public QAbstractItemModel
 {
@@ -300,6 +327,9 @@ public:
     {
         if (dirty || !index.isValid()) {
             return {};
+        }
+        if (role == newVariableRole) {  // FreeCAD-CH (ops#640, rank 55)
+            return fuzzyMode && !variableFilter.isNull() && index.row() == newVariableRow;
         }
         if (role != Qt::EditRole && role != Qt::DisplayRole && role != Qt::UserRole) {
             return {};
@@ -928,9 +958,10 @@ public:
     void setVariableFilter(const QString& prefix, bool startsWithOnly)
     {
         // The rows depend on the mode too, and stay apart from setFuzzyFilter's: an unclosed
-        // `<<#Wi` is a fuzzy filter "#Wi" until the `<<` is deleted.
+        // `<<#Wi` is a fuzzy filter "#Wi" until the `<<` is deleted. FreeCAD-CH (ops#640): rows
+        // with "New variable..." are made again, since the Add dialog may have made the name.
         if (fuzzyMode && !variableFilter.isNull() && variableFilter == prefix
-            && variableStartsWithOnly == startsWithOnly) {
+            && variableStartsWithOnly == startsWithOnly && newVariableRow < 0) {
             return;
         }
 
@@ -953,9 +984,28 @@ public:
             return left.score > right.score;
         });
 
+        // FreeCAD-CH (ops#640, rank 55): a name no variable of the document has, and one a
+        // variable may take, offers "New variable..." last, as Onshape does. Its completion is
+        // the typed text, so choosing it changes nothing there.
+        int newRow = -1;
+        const QString typed = prefix.mid(1);
+        auto doc = App::GetApplication().getDocument(currentDoc.c_str());
+        if (doc && !typed.isEmpty()
+            && App::VariableLookup::checkVariableName(nullptr, typed.toStdString()).empty()
+            && App::VariableLookup::find(doc, typed.toStdString()).empty()) {
+            newRow = static_cast<int>(matches.size());
+            matches.push_back(
+                {prefix,
+                 std::numeric_limits<int>::min(),
+                 MatchPriority::Other,
+                 QCoreApplication::translate("Gui::ExpressionCompleter", "New variable...")}
+            );
+        }
+
         beginResetModel();
         fuzzyMode = true;
         fuzzyFilter.clear();
+        newVariableRow = newRow;
         variableFilter = prefix;
         variableStartsWithOnly = startsWithOnly;
         fuzzyMatches.swap(matches);
@@ -1098,7 +1148,10 @@ private:
             }
             const QString name = QString::fromStdString(variable.name);
             Candidate candidate;
+            // FreeCAD-CH (ops#640, decision 317): the one the user chose completes to `#name`.
             candidate.completion = holdersPerName[variable.name] > 1
+                    && App::chosenVariableHolder(App::VariableLookup::find(doc, variable.name))
+                        != variable.holder
                 ? QString::fromStdString(variable.path())
                 : u'#' + name;
             candidate.searchText = name.toLower();
@@ -1198,6 +1251,7 @@ private:
     QString fuzzyFilter;
     QString variableFilter;  // FreeCAD-CH (ops#152): setVariableFilter's prefix (null: none)
     bool variableStartsWithOnly = false;  // FreeCAD-CH (ops#152): and its mode
+    int newVariableRow = -1;  // FreeCAD-CH (ops#640, rank 55): the "New variable..." row, or -1
     QString contextPrefix;
     const App::Property* contextProperty = nullptr;
     std::vector<App::ObjectIdentifier> contextPaths;
@@ -1646,6 +1700,12 @@ void ExpressionLineEdit::slotCompleteTextHighlighted(const QString& completionPr
 
 void ExpressionLineEdit::slotCompleteTextSelected(const QString& completionPrefix)
 {
+    // FreeCAD-CH (ops#640, rank 55): "New variable..." opens the Add dialog with the typed name
+    if (completer && completer->popup()
+        && completer->popup()->currentIndex().data(newVariableRole).toBool()) {
+        requestNewVariable(completionPrefix.mid(1));
+        return;
+    }
     slotCompleteText(completionPrefix, ActivationMode::Activated);
 }
 

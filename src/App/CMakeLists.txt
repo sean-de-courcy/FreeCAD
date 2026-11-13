@@ -212,6 +212,7 @@ SET(Document_CPP_SRCS
     LinkBaseExtensionPyImp.cpp
     VarSet.cpp
     VarSetCopy.cpp
+    DocumentTabs.cpp
     VariableLookup.cpp
     License.h
 )
@@ -263,6 +264,8 @@ SET(Document_HPP_SRCS
     TextDocument.h
     VarSet.h
     VarSetCopy.h
+    VariableChoice.h
+    DocumentTabs.h
     VariableLookup.h
     Link.h
 )
@@ -288,6 +291,7 @@ SET(Properties_CPP_SRCS
     PropertyStandard.cpp
     PropertyUnits.cpp
     PropertyExpressionEngine.cpp
+    ConfigurationHooks.cpp
 )
 SET(Properties_HPP_SRCS
     DynamicProperty.h
@@ -310,6 +314,7 @@ SET(Properties_HPP_SRCS
     PropertyStandard.h
     PropertyUnits.h
     PropertyExpressionEngine.h
+    ConfigurationHooks.h
     PropertyOverrides.h
 )
 SET(Properties_SRCS

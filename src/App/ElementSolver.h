@@ -489,6 +489,10 @@ AppExport bool isMarkedCapName(std::string_view name);
  * another order while the pieces slid onto the next face, gives the name to another piece that
  * no longer overlaps the old one: an exact reference to it that moved goes to solveOwner()'s
  * moved check, which breaks it then.
+ *
+ * isOrderedName(), isMarkedCapName() and isMarkedPieceName() read top-level sections only (a
+ * marked cap's one mark through its own sections): a plain name and its own sections
+ * (ownSectionsOf()) give the same answer (ops#640, R1 of notes/names-bounded.md).
  */
 AppExport bool isMarkedPieceName(std::string_view name);
 
@@ -535,6 +539,18 @@ isCounterSiblingName(std::string_view name, std::string_view other, bool copySib
  * `CUT;1;V`, are twins.
  */
 AppExport bool isTwinName(std::string_view name, std::string_view other);
+
+/** A name as the map holds it (interned) with its own sections in full and the names they embed
+ * left as references: its leading reference, the whole name or the prefix of a split piece, is
+ * replaced by its content, and a list's reference to the empty name is emptied, as
+ * NameTable::toPlain() does at the top level. A plain name is itself. Each section's fields
+ * besides its name lists are the plain form's, at the cost of the name's own text instead of its
+ * whole history's (ops#640). isTwinName() takes plain names, these, or names as the map holds
+ * them, and answers as for their plain forms, reading a reference as its content. That holds
+ * for the names the encoder writes: a content ending in the escape character `^` is outside the
+ * grammar (no field ends in one), and its plain form would swallow the delimiter after it.
+ */
+AppExport std::string ownSectionsOf(std::string_view name);
 
 /** True if \a name is keyed by its order (ops#503 class D, D1): a section carries the ORD flag,
  * a duplicate counter or a role, or is a counter section (isTwinName()) with a non-zero Index.
@@ -733,6 +749,10 @@ struct AppExport SolveInput
         /// the person asked for the whole element, so a split breaks with the pieces listed,
         /// never G3's one piece.
         bool listHolder = false;
+        /// Under Equivalent, two or more pieces of the old element break the entry even when
+        /// they give the consumer one result (an attachment: Onshape's SW19 (a), a sketch and
+        /// a mate connector on a face cut in two fail and come back once it is whole again).
+        bool piecesBreak = false;
         /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`, whose mapped name is
         /// exactName (the name the reference holds).
         bool exact = false;
@@ -958,6 +978,9 @@ struct AppExport SolveOutcome
     std::string from;
     /// Resolved by a collapse: the group's `from` is cleared.
     bool collapsed = false;
+    /// Resolved to the representative of pieces of the old element that give the consumer one
+    /// result (the Equivalent policy): the batch keeps the way back to the whole element.
+    bool equivalentPieces = false;
     /// Broken: the candidates the user may choose from, pieces first, each part in index order,
     /// with their mapped names (parallel). Resolved by tier 2 or 3 (ops#127): the other
     /// candidates tier 1 found, which the user may prefer to the one geometry chose.

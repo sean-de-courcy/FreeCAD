@@ -35,6 +35,7 @@
 #include "SketchWorkflow.h"
 #include "DlgActiveBody.h"
 #include "TaskFeaturePick.h"
+#include "TaskSketchPlane.h"
 #include "Utils.h"
 #include "ViewProviderBody.h"
 #include "WorkflowManager.h"
@@ -46,6 +47,7 @@
 #include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/TopoShape.h>
+#include <Mod/Sketcher/Gui/TaskDlgEditSketch.h>
 #include <Mod/Sketcher/Gui/ViewProviderSketch.h>
 
 #include <App/Document.h>
@@ -59,12 +61,20 @@
 #include <Gui/Command.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/ViewParams.h>
 #include <Gui/ViewProviderPlane.h>
 #include <Gui/Selection/SelectionFilter.h>
 
 using namespace PartDesignGui;
+
+// FreeCAD-CH (ops#640): Utils.cpp's (no header names it): true (refused, said why) when a new
+// part would be made outside a Part Studio tab
+namespace PartDesignGui
+{
+bool refuseNewPartOutsideStudio(App::Document* doc);
+}
 
 namespace
 {
@@ -89,7 +99,8 @@ struct MissingPlanesException
 };
 
 // A new part studio (Std_New in PartDesign, ops#605 2f) shows its Origin's planes, through the
-// origin's temporary visibility, until its first sketch
+// origin's temporary visibility. They stay shown after the first sketch, as Onshape's default
+// planes do (ops#626, rank 52)
 Gui::ViewProviderCoordinateSystem* originViewProvider(PartDesign::Body* body)
 {
     App::DocumentObject* origin = body ? body->getOrigin() : nullptr;
@@ -113,11 +124,16 @@ void showStudioPlanes(PartDesign::Body* body)
     }
 }
 
-void endStudioPlanes(PartDesign::Body* body)
+// FreeCAD-CH (ops#640, hands-on R1): the sketch New Sketch just opened is a new one: its dialog's
+// Cancel removes it, as Onshape's cancel of a new sketch does (Onshape's keymap only)
+void markNewSketch(App::DocumentObject* sketch)
 {
-    if (auto* vpo = originViewProvider(body); vpo && vpo->isTemporaryVisibility()) {
-        vpo->resetTemporaryVisibility();
-        vpo->setPlaneLabelVisibility(false);
+    if (!sketch || !Gui::ForkKeymap::isOnshape()) {
+        return;
+    }
+    auto dlg = qobject_cast<SketcherGui::TaskDlgEditSketch*>(Gui::Control().activeDialog());
+    if (dlg && dlg->getSketchView() && dlg->getSketchView()->getObject() == sketch) {
+        dlg->setNewSketch(true);
     }
 }
 
@@ -330,8 +346,8 @@ public:
             );
         }
         Gui::Command::updateActive();
-        endStudioPlanes(activeBody);
         PartDesignGui::setEdit(Feat, activeBody);
+        markNewSketch(Feat);
     }
 
 private:
@@ -690,8 +706,8 @@ private:
 
     void createSketchAndShowAttachment()
     {
-        // A new part studio shows its planes until its first sketch (Std_New, ops#605 2f): a
-        // cancelled first sketch shows them again
+        // A new part studio shows its planes (Std_New, ops#605 2f): the dialog's own temporary
+        // visibility ends with it, so they are shown again after it (ops#626)
         const bool studioPlanes = studioPlanesShown(activeBody);
         setOriginTemporaryVisibility();
 
@@ -734,18 +750,24 @@ private:
         // The attachment dialog can outlive the body and sketch (e.g. they are deleted while it
         // is open), so the callbacks look them up by name instead of holding raw pointers.
         auto onAccept = [bodyRef = App::DocumentObjectT(activeBody),
-                         sketchRef = App::DocumentObjectT(sketch)]() {
+                         sketchRef = App::DocumentObjectT(sketch),
+                         studioPlanes]() {
             auto* partDesignBody = bodyRef.getObjectAs<PartDesign::Body>();
             if (!partDesignBody) {
                 return;
             }
 
             resetOriginVisibility(partDesignBody);
+            // The studio's planes stay (ops#626)
+            if (studioPlanes) {
+                showStudioPlanes(partDesignBody);
+            }
 
             Gui::Selection().clearSelection();
 
             if (auto* sketchObj = sketchRef.getObject()) {
                 PartDesignGui::setEdit(sketchObj, partDesignBody);
+                markNewSketch(sketchObj);
             }
         };
         auto onReject = [bodyRef = App::DocumentObjectT(activeBody), studioPlanes]() {
@@ -940,12 +962,131 @@ private:
         );
         Gui::Command::updateActive();  // Make sure the AttachmentSupport's Placement property is updated
         PartDesignGui::setEdit(Feat, partDesignBody);
+        markNewSketch(Feat);
     }
 
 private:
     Gui::Document* guidocument;
     PartDesign::Body* activeBody;
 };
+
+// FreeCAD-CH (ops#640, rank 2): New Sketch with no plane to take, in Onshape's way (hands-on C-1).
+// The sketch opens with no plane, its Sketch plane field armed under a "Select a sketch plane"
+// banner, and the Body's planes shown; a sketch tool started before a pick is cancelled, so
+// nothing is drawn before the plane is picked. No attachment dialog, no list of planes.
+void createSketchToPickPlane(Gui::Document* guidocument, PartDesign::Body* activeBody)
+{
+    App::Document* appdocument = guidocument->getDocument();
+    // Undo takes the Body made for it too
+    guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "New Sketch"));
+    if (!activeBody) {
+        activeBody = PartDesignGui::makeBody(appdocument);
+        if (!activeBody) {
+            guidocument->abortCommand();
+            return;
+        }
+        if (App::Part* activePart = PartDesignGui::getActivePart()) {
+            activePart->addObject(activeBody);
+        }
+    }
+    std::string FeatName = appdocument->getUniqueObjectName("Sketch");
+    FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+    auto sketch = appdocument->getObject(FeatName.c_str());
+    if (!sketch) {
+        guidocument->abortCommand();
+        return;
+    }
+    FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+    // No plane yet: the first pick in the Sketch plane field gives it one
+    FCMD_OBJ_CMD(
+        sketch,
+        "MapMode = '" << Attacher::AttachEngine::getModeName(Attacher::mmDeactivated) << "'"
+    );
+    Gui::Command::updateActive();
+    Gui::Selection().clearSelection();
+    PartDesignGui::setEdit(sketch, activeBody);
+    markNewSketch(sketch);
+    // The box shows the Body's planes for the pick, for the dialog's life when they weren't shown
+    // (a new part studio's stay shown, ops#626)
+    if (TaskSketchPlane* box = TaskSketchPlane::ofActiveDialog()) {
+        box->awaitPlane();
+    }
+}
+
+// FreeCAD-CH (ops#640, J1T B): New Sketch with the Part Studio's own Top, Front or Right selected
+// (the Features list's rows, or the plane in the view): the sketch goes on it, in the active Body
+// or, in a studio with no part yet, a new Body there, as Onshape's sketch on Top asks nothing (the
+// stock path asked for an active Body). The Body's own plane stands for the studio's
+// (BodyBase::studioOriginFeature). False, nothing done, for any other selection.
+bool createSketchOnStudioPlane(Gui::Document* guidocument, PartDesign::Body* activeBody)
+{
+    App::Document* appdocument = guidocument->getDocument();
+    const auto selection = Gui::Selection().getSelection(appdocument->getName());
+    if (selection.size() != 1) {
+        return false;
+    }
+    auto plane = freecad_cast<App::Plane*>(selection.front().pObject);
+    App::LocalCoordinateSystem* lcs = plane ? plane->getLCS() : nullptr;
+    if (!lcs) {
+        return false;
+    }
+    App::Part* studio = nullptr;
+    for (auto user : lcs->getInList()) {
+        auto part = freecad_cast<App::Part*>(user);
+        if (part && part->Origin.getValue() == lcs) {
+            studio = part;
+            break;
+        }
+    }
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    if (!studio || (!assembly.isBad() && studio->isDerivedFrom(assembly))) {
+        return false;  // a Body's own plane, or an assembly's: the usual way
+    }
+    App::DocumentObject* own = nullptr;
+    if (activeBody) {
+        own = Part::BodyBase::studioOriginFeature(activeBody, plane);
+        if (!own) {
+            return false;  // another studio's plane, or the Body placed off the studio's origin
+        }
+        guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "New Sketch"));
+    }
+    else {
+        if (PartDesignGui::getActivePart() != studio) {
+            return false;
+        }
+        // Undo takes the Body made for it too
+        guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "New Sketch"));
+        activeBody = PartDesignGui::makeBody(appdocument);
+        if (!activeBody) {
+            guidocument->abortCommand();
+            return true;
+        }
+        studio->addObject(activeBody);
+        own = Part::BodyBase::studioOriginFeature(activeBody, plane);
+        if (!own) {
+            guidocument->abortCommand();
+            return false;
+        }
+    }
+    std::string FeatName = appdocument->getUniqueObjectName("Sketch");
+    FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+    auto sketch = appdocument->getObject(FeatName.c_str());
+    if (!sketch) {
+        guidocument->abortCommand();
+        return true;
+    }
+    FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+    FCMD_OBJ_CMD(sketch, "AttachmentSupport = (" << Gui::Command::getObjectCmd(own) << ",[''])");
+    FCMD_OBJ_CMD(
+        sketch,
+        "MapMode = '" << Attacher::AttachEngine::getModeName(Attacher::mmFlatFace) << "'"
+    );
+    Gui::Command::updateActive();
+    Gui::Selection().clearSelection();
+    PartDesignGui::setEdit(sketch, activeBody);
+    markNewSketch(sketch);
+    return true;
+}
 
 }  // namespace
 
@@ -1003,6 +1144,11 @@ void SketchWorkflow::tryCreateSketch()
     if (shouldAbort(shouldMakeBody)) {
         return;
     }
+    // FreeCAD-CH (ops#640): no new part outside a Part Studio tab (an Assembly's), refused before
+    // any pick or dialog
+    if (shouldMakeBody && PartDesignGui::refuseNewPartOutsideStudio(appdocument)) {
+        return;
+    }
 
     bool useAttachment = App::GetApplication()
                              .GetParameterGroupByPath(
@@ -1011,6 +1157,12 @@ void SketchWorkflow::tryCreateSketch()
                              ->GetBool("NewSketchUseAttachmentDialog", false);
 
     bool shiftHeld = QApplication::queryKeyboardModifiers() & Qt::ShiftModifier;
+
+    // FreeCAD-CH (ops#640, J1T B): the studio's own Top, Front or Right selected
+    if (!useAttachment && !shiftHeld && Gui::ForkKeymap::isOnshape()
+        && createSketchOnStudioPlane(guidocument, activeBody)) {
+        return;
+    }
 
     auto filters = getFilters();
     SketchPreselection sketchOnFace {guidocument, activeBody, filters};
@@ -1037,8 +1189,23 @@ void SketchWorkflow::tryCreateSketch()
         }
     }
 
+    // FreeCAD-CH (ops#640, rank 2): with Onshape's keymap, anything but a single planar face or
+    // plane (nothing, a curved face, a sketch, several references) opens the sketch with no plane
+    // and its Sketch plane field armed (hands-on C-1). Shift and the preference still give the
+    // attachment dialog.
+    if (!useAttachment && !shiftHeld && Gui::ForkKeymap::isOnshape()) {
+        createSketchToPickPlane(guidocument, activeBody);
+        return;
+    }
+
     SketchRequestSelection requestSelection {guidocument, activeBody};
     requestSelection.findSupport();
+}
+
+// FreeCAD-CH (R6T-1): Utils.cpp's, the Bodies of the view's typed tab
+namespace PartDesignGui
+{
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
 }
 
 std::tuple<bool, PartDesign::Body*> SketchWorkflow::shouldCreateBody()
@@ -1056,7 +1223,9 @@ std::tuple<bool, PartDesign::Body*> SketchWorkflow::shouldCreateBody()
         pdBody->Placement.setValue(xLink->Placement.getValue());
     }
     if (!pdBody) {
-        if (appdocument->countObjectsOfType<PartDesign::Body>() == 0) {
+        // FreeCAD-CH (R6T-1): under the typed tabs a sketch in a studio with no part makes one
+        // there, as Onshape's sketch in an empty Part Studio does
+        if (PartDesignGui::tabBodies(appdocument, nullptr).empty()) {
             shouldMakeBody = true;
         }
         else {

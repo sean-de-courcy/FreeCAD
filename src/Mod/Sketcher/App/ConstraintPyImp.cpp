@@ -387,6 +387,14 @@ int ConstraintPy::PyInit(PyObject* args, PyObject* /*kwd*/)
                 constraint->Type = PointOnObject;
                 valid = true;
             }
+            else if (strcmp("Midpoint", ConstraintType) == 0) {  // FreeCAD-CH (ops#656)
+                constraint->Type = Midpoint;
+                valid = true;
+            }
+            else if (strcmp("Pierce", ConstraintType) == 0) {  // FreeCAD-CH (Onshape's Pierce)
+                constraint->Type = Pierce;
+                valid = true;
+            }
             else if (strstr(ConstraintType, "InternalAlignment")) {
                 constraint->Type = InternalAlignment;
 
@@ -414,6 +422,10 @@ int ConstraintPy::PyInit(PyObject* args, PyObject* /*kwd*/)
                 constraint->First = FirstIndex;
                 constraint->FirstPos = static_cast<Sketcher::PointPos>(FirstPos);
                 constraint->Second = SecondIndex;
+                if (constraint->Type == Pierce) {
+                    // the crossing is the external point's own (its start)
+                    constraint->SecondPos = Sketcher::PointPos::start;
+                }
                 return true;
             }
         }
@@ -1017,6 +1029,14 @@ std::string ConstraintPy::representation() const
             result << "'PointOnObject' (" << getConstraintPtr()->First << ","
                    << getConstraintPtr()->Second << ")>";
             break;
+        case Midpoint:
+            result << "'Midpoint' (" << getConstraintPtr()->First << ","
+                   << getConstraintPtr()->Second << ")>";
+            break;
+        case Pierce:
+            result << "'Pierce' (" << getConstraintPtr()->First << ","
+                   << getConstraintPtr()->Second << ")>";
+            break;
         case Group:
             result << "'Group'>";
             break;
@@ -1092,6 +1112,12 @@ Py::String ConstraintPy::getType() const
             break;
         case PointOnObject:
             return Py::String("PointOnObject");
+            break;
+        case Midpoint:
+            return Py::String("Midpoint");
+            break;
+        case Pierce:
+            return Py::String("Pierce");
             break;
         case Group:
             return Py::String("Group");
