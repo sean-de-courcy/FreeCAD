@@ -476,6 +476,24 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertValid(hole)
         self.assertRefused(lp, "Hole", "Through all", "Reapply")
 
+    def testThroughAllBesideABossIsCopied(self):
+        """ops#640 F2: a Through all hole r3 at (-28, 15) on an 80 x 50 plate with a boss r12 at the
+        origin up to z 30, patterned 26 along x: the copy at (-2, 15) clears the boss (its wall is
+        12.13 from the axis), so it spans the plate as the instance would. The box around the copy
+        reached the boss, and the pattern was refused."""
+        self.plate(rect=(-40, -25, 40, 25))
+        p = self.part()
+        boss = circleSketch(p, "BossSk", 12)
+        boss.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+        pad(p, "Boss", boss, 20)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        hole = self.holeOwner(Type="ThroughAll", x=-28.0, y=15.0)
+        lp = linear(p, "LP", [hole], X_AXIS, 26, 2)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(80 * 50 * 10 + math.pi * 12**2 * 20 - 2 * self.hole(10))
+
     # ------------------------------------------------------------------------------- patterns of patterns
     def mirrorStudio(self):
         """A plate x -30..30, y -30..30, z 0..5, a 6 x 6 x 5 boss at (2..8, 2..8), and Mir1, the

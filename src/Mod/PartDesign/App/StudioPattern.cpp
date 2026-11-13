@@ -3,6 +3,7 @@
 // Patterns as studio features (FreeCAD-CH ops#655, T1-T3). Scaffolding (B1); the copy rule of
 // in-Body patterns of studio features (ops#654 slice 8).
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <string>
@@ -13,6 +14,8 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GeomAbs_SurfaceType.hxx>
@@ -20,6 +23,7 @@
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
@@ -170,9 +174,45 @@ bool rangeAlong(const TopoDS_Shape& shape, const gp_Trsf& toLocal, Bnd_Box& box)
     return !box.IsVoid();
 }
 
+/** The column over a straight copy's own footprint, in the frame where it runs along z: its end
+ * faces at the low end z0 swept from low to high. Null when the copy has no planar end there (the
+ * box around it is used instead) */
+TopoDS_Shape footprintColumn(const TopoDS_Shape& copyLocal, double z0, double low, double high)
+{
+    const double tolerance = 1e-5;
+    BRep_Builder builder;
+    TopoDS_Compound column;
+    builder.MakeCompound(column);
+    bool any = false;
+    gp_Trsf shift;
+    shift.SetTranslation(gp_Vec(0, 0, low - z0));
+    for (TopExp_Explorer it(copyLocal, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane
+            || !surface.Plane().Axis().Direction().IsParallel(gp::DZ(), Precision::Angular())) {
+            continue;
+        }
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(face, box, false, false);
+        double fx0, fy0, fz0, fx1, fy1, fz1;
+        box.Get(fx0, fy0, fz0, fx1, fy1, fz1);
+        if (std::fabs(fz0 - z0) > tolerance || std::fabs(fz1 - z0) > tolerance) {
+            continue;
+        }
+        BRepPrimAPI_MakePrism prism(face.Moved(TopLoc_Location(shift)), gp_Vec(0, 0, high - low));
+        if (!prism.IsDone()) {
+            return {};
+        }
+        builder.Add(column, prism.Shape());
+        any = true;
+    }
+    return any ? TopoDS_Shape(column) : TopoDS_Shape();
+}
+
 /** Whether every copy of a straight tool along normal (in the pattern's frame) spans the part:
- * within the copy's footprint (its box across its direction), the part lies between the copy's
- * two ends. Then the copy removes what a Through all made at that place removes, as both are the
+ * within the copy's footprint (its own end faces swept across the part, ops#640 F2: its box
+ * refused a hole beside a boss), the part lies between the copy's two ends. Then the copy removes what a Through all made at that place removes, as both are the
  * same profile swept from the same start, through all of the part's material ahead. */
 bool everyCopySpans(
     const Part::TopoShape& tool,
@@ -199,11 +239,18 @@ bool everyCopySpans(
         toolBox.Get(x0, y0, z0, x1, y1, z1);
         partBox.Get(px0, py0, pz0, px1, py1, pz1);
         const double margin = 1.0;
-        BRepPrimAPI_MakeBox column(
-            gp_Pnt(x0 - lengthTolerance, y0 - lengthTolerance, pz0 - margin),
-            gp_Pnt(x1 + lengthTolerance, y1 + lengthTolerance, pz1 + margin)
-        );
-        BRepAlgoAPI_Common common(part.getShape().Moved(TopLoc_Location(toLocal)), column.Shape());
+        const double low = std::min(pz0, z0) - margin;
+        const double high = std::max(pz1, z1) + margin;
+        TopoDS_Shape column =
+            footprintColumn(copy.Moved(TopLoc_Location(toLocal)), z0, low, high);
+        if (column.IsNull()) {
+            column = BRepPrimAPI_MakeBox(
+                         gp_Pnt(x0 - lengthTolerance, y0 - lengthTolerance, low),
+                         gp_Pnt(x1 + lengthTolerance, y1 + lengthTolerance, high)
+            )
+                         .Shape();
+        }
+        BRepAlgoAPI_Common common(part.getShape().Moved(TopLoc_Location(toLocal)), column);
         if (!common.IsDone()) {
             return false;
         }
