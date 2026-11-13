@@ -1027,11 +1027,10 @@ class TestThickenObliqueLeg(unittest.TestCase):
     volume (Steiner): the layer at signed distance s from the face (s > 0 away from the axis) has the face's
     area times (R + s) / R, so a piece from s = a to s = b holds area (b - a) (1 + (a + b) / (2 R)).
 
-    On the replica (TEST DOC #90), OCC's offset of such a leg (a full turn whose free end is two edges
-    meeting at a degree-1 B-spline seam) built twisted caps along the end: a valid-looking 763.83 for
-    279.17, then "folds over itself". That exact face topology could not be rebuilt from designed
-    primitives here, so the guard is tested with a wrong offset put in OCC's place, and the direct
-    construction is tested for exactness on designed oblique legs."""
+    On the replica (#90), OCC's offset of such a leg (a full turn whose free end is two edges meeting at a
+    degree-1 B-spline seam) built twisted caps along the end: a valid-looking 763.83 for 279.17, then
+    "folds over itself". Here the guard is tested with a wrong offset put in OCC's place and the direct
+    construction for exactness on designed oblique legs; TestThickenSeamLeg builds that seam itself."""
 
     R = 4.0
 
@@ -1159,3 +1158,95 @@ class TestThickenObliqueLeg(unittest.TestCase):
         self.assertTrue(s.isValid())
         self.assertEqual(len(s.Solids), 1)
         self.assertAlmostEqual(s.Volume, want, delta=2e-3)
+
+
+class TestThickenSeamLeg(unittest.TestCase):
+    """A bore's straight leg cut as two half cylinders, so that removeSplitter leaves one full-turn face
+    whose seam is a degree-1 B-spline, ending in an oblique plane (ops#640 remote brief 2). OCC's offset of
+    that face comes out invalid, alone (the whole-sheet path) and beside a horn bend (face by face).
+    Box 60 x 40 x 30, its +x end cut by a vertical plane through (50, 20, 8) turned `tilt` degrees about z.
+    Bore r 4: down from (20, 20, 30), a 90 degree bend about a -y line `major` from the bore's axis, a leg
+    along +x at z = 8 out through that plane (major None: a straight bore along x from x = 0).
+
+    Expected: the ring swept along the sheet; a plane end cut leaves the volume at the ring's area times the
+    axis length (the end is ruled along the sheet's normals: x max = 50 + r tan(tilt)), a bend adds the
+    ring's area times the arc of its centroid (Pappus). The bore's faces point toward its axis: t1 goes
+    inward. Onshape (oracle 16, TK5-TK6) builds the horn bend thickened 0.75 inward: V 858.957221, tight box
+    16, 16, 4 .. 52.3094, 24, 30; it fails the same bend at midplane 1.5, which stays loud here."""
+
+    def setUp(self):
+        self.doc = App.newDocument("ThickenSeamLeg")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def sheet(self, major, tilt=30.0, halves=True):
+        V = App.Vector
+        box = Part.makeBox(60, 40, 30)
+        h = Part.makeBox(200, 200, 200, V(0, -100, -100))
+        h.Placement = App.Placement(V(50, 20, 8), App.Rotation(V(0, 0, 1), tilt))
+        s, x0 = box.cut(h), -5.0
+        if major is not None:
+            disc = Part.Face(Part.Wire(Part.makeCircle(4.0, V(20, 20, 8 + major), V(0, 0, 1))))
+            top = Part.Face(Part.Wire(Part.makeCircle(4.0, V(20, 20, 30), V(0, 0, 1))))
+            s = s.cut(top.extrude(V(0, 0, major - 22))).cut(disc.revolve(V(20 + major, 0, 8 + major), V(0, -1, 0), 90))
+            x0 = 20 + major
+        c = Part.makeCylinder(4.0, 80, V(x0, 20, 8), V(1, 0, 0))
+        hb = Part.makeBox(100, 20, 20, V(-10, 20, -2))
+        for t in ([c.common(hb), c.cut(hb)] if halves else [c]):
+            s = s.cut(t)
+        a = self.doc.addObject("Part::Feature", "A")
+        a.Shape = s.removeSplitter()
+        bore = tuple("Face%d" % (k + 1) for k, f in enumerate(a.Shape.Faces) if f.Surface.__class__.__name__ != "Plane")
+        srf = S.make_offset_surface(self.doc.addObject("PartDesign::Body", "S"), [(a, bore)], 0.0, False, name="Srf")
+        self.doc.recompute()
+        leg = [f for f in srf.Shape.Faces if f.Surface.__class__.__name__ == "Cylinder" and abs(f.Surface.Axis.x) > 0.99]
+        self.assertEqual(len(leg), 1)
+        if halves:  # the seam the brief describes
+            self.assertIn("BSplineCurve", [e.Curve.__class__.__name__ for e in leg[0].Edges])
+        return srf, leg[0]
+
+    def thicken(self, srf, t1, t2, midplane=False):
+        th = S.make_thicken(self.doc.addObject("PartDesign::Body", "T"), [(srf, "")], t1, t2, "Union", name="Thk")
+        if midplane:
+            th.Midplane, th.Thickness = True, t1 + t2
+        self.doc.recompute()
+        self.assertEqual(th.State, ["Up-to-date"], th.getStatusString())
+        s = th.Shape
+        self.assertTrue(s.isValid())
+        self.assertEqual(len(s.Solids), 1)
+        return s
+
+    def assertBox(self, s, lo, hi):
+        b = s.optimalBoundingBox(False, False)
+        for got, want in zip((b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax), lo + hi):
+            self.assertAlmostEqual(got, want, delta=1e-3)
+
+    def testOffsetOfTheSeamLegIsInvalid(self):
+        # the trigger, kept visible: if OCC ever builds this offset right, the guards below are moot
+        _, leg = self.sheet(None)
+        p = S._offset_piece(leg, 0.75, 0.75)
+        self.assertFalse(p.isValid())
+
+    def testHornBendInwardIsOnshapes(self):
+        srf, _ = self.sheet(4.0)
+        s = self.thicken(srf, 0.75, 0.0)
+        self.assertAlmostEqual(s.Volume, 858.957221, delta=1e-3)  # = pi (4^2 - 3.25^2) (18 + 26 + 2 pi)
+        self.assertBox(s, (16, 16, 4), (50 + 4 * math.tan(math.radians(30)), 24, 30))
+
+    def testStraightBore(self):
+        for tilt, t1, t2, mid, ring in ((30.0, 0.75, 0.75, True, 12 * math.pi),
+                                        (10.0, 0.0, 1.5, False, math.pi * (5.5 ** 2 - 16))):
+            with self.subTest(tilt=tilt, t1=t1, t2=t2):
+                srf, _ = self.sheet(None, tilt)
+                s = self.thicken(srf, t1, t2, mid)
+                self.assertAlmostEqual(s.Volume, ring * 50, delta=1e-3)
+                r = 4 + t2
+                self.assertBox(s, (0, 20 - r, 8 - r), (50 + 4 * math.tan(math.radians(tilt)), 20 + r, 8 + r))  # rulings keep x
+
+    def testRingBendMidplane(self):
+        # the whole-sheet path (the ring stays off its axis): legs 14 and 22, the bend's centroid arc 4 pi
+        srf, _ = self.sheet(8.0)
+        s = self.thicken(srf, 0.75, 0.75, True)
+        self.assertAlmostEqual(s.Volume, 12 * math.pi * (14 + 22 + 4 * math.pi), delta=1e-3)
+        self.assertBox(s, (15.25, 15.25, 3.25), (50 + 4 * math.tan(math.radians(30)), 24.75, 30))

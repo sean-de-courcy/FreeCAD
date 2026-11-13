@@ -383,7 +383,8 @@ def _thicken_per_face(group, infos, t1, t2):
             continue
         probes.extend(_inner_points(f, 0.5 * (t1 - t2)))  # the face's middle layer
         pieces.append(_leg_piece(f, t1, t2))
-    pinched = all(abs(_bend_radii(i, t1, t2)[1] - i["d"]) <= TOL for i in infos if i is not None and _reaches_axis(i, t1, t2))
+    reaching = [i for i in infos if i is not None and _reaches_axis(i, t1, t2)]
+    pinched = bool(reaching) and all(abs(_bend_radii(i, t1, t2)[1] - i["d"]) <= TOL for i in reaching)
     return _fused(pieces, probes, pinched)
 
 
@@ -445,6 +446,31 @@ def _fused(pieces, probes, pinched=False):
     raise SolidOpsError("Thicken failed: the thickened bend is not one valid solid")
 
 
+def _sheet_piece(surf, t1, t2):
+    """OCC's thick piece of a whole smooth sheet: offset by -t2, then filled through t1 + t2, checked."""
+    try:
+        start = surf.makeOffsetShape(-t2, TOL) if t2 > TOL else surf
+        solid = start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
+    except Exception as e:
+        raise SolidOpsError("Thicken failed: %s" % e)
+    _check_offset(surf, solid, "Thicken")
+    if solid.ShapeType != "Solid" and not solid.Solids:
+        raise SolidOpsError("Thicken failed: the result has no solid")
+    if solid.Volume <= TOL:
+        raise SolidOpsError("Thicken failed: the result has no volume")
+    return solid
+
+
+def _has_full_cylinder(group):
+    """True when a face of the group is a cylinder face that goes all the way round its axis."""
+    for f in group:
+        if isinstance(f.Surface, Part.Cylinder):
+            u0, u1 = f.ParameterRange[:2]
+            if u1 - u0 >= 2 * math.pi - 1e-9:
+                return True
+    return False
+
+
 def thicken_tool(faces, t1, t2):
     """Solid thickened from the faces: t1 along each face's normal, t2 against it."""
     if t1 < 0 or t2 < 0:
@@ -461,18 +487,15 @@ def thicken_tool(faces, t1, t2):
             continue
         surf = _as_surface(group)
         try:
-            start = surf.makeOffsetShape(-t2, TOL) if t2 > TOL else surf
-            solid = start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
-        except Part.OCCError as e:
-            raise SolidOpsError("Thicken failed: %s" % e)
-        except Exception as e:
-            raise SolidOpsError("Thicken failed: %s" % e)
-        _check_offset(surf, solid, "Thicken")
-        if solid.ShapeType != "Solid" and not solid.Solids:
-            raise SolidOpsError("Thicken failed: the result has no solid")
-        if solid.Volume <= TOL:
-            raise SolidOpsError("Thicken failed: the result has no volume")
-        pieces.append(solid)
+            pieces.append(_sheet_piece(surf, t1, t2))
+        except SolidOpsError:
+            # a smooth sheet with a full-turn cylinder face (a bore's leg): OCC's whole-sheet offset can come out
+            # invalid on it (brief 2: a leg with a degree-1 B-spline seam and an oblique end). Its pieces built face
+            # by face, each checked, fused and checked again (_thicken_per_face) are the same solid; else the
+            # whole-sheet error stands
+            if not (_has_full_cylinder(group) and _tangent_joins(group)):
+                raise
+            pieces.append(_thicken_per_face(group, infos, t1, t2))
     tool = pieces[0]
     if len(pieces) > 1:
         tool = pieces[0].fuse(pieces[1:])
