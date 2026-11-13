@@ -2601,16 +2601,16 @@ class CurvedWallEndTest(unittest.TestCase):
             shape.makeFillet(0.75, edges)
 
 
-def wall_on_a_chamfered_rim(inset=0.0, chamfer=1.5875):
+def wall_on_a_chamfered_rim(inset=0.0, chamfer=1.5):
     """ops#640 (the replica's #150, a full round at half a wall on a chamfered rim): a plate z -t..0
-    (t 1.5875), a box (y >= 0) and a half disc (y < 0) of radius Ro whose rim is chamfered through
+    (t 1.5), a box (y >= 0) and a half disc (y < 0) of radius Ro (11) whose rim is chamfered through
     the whole thickness (a cone from Ro - chamfer at z -t to Ro at z 0), and a wall of thickness t,
     -135..-45 deg, z 0..4, whose outer cylinder is `inset` inside the rim. At 0 it stands flush on
     the rim, and each outer end edge's foot has four edges and four faces: the wall's end, its outer
     cylinder, the plate's top and the cone. Returns the solid, the wall's four end edges, and the
     wall's inner and outer radii."""
-    t = 1.5875
-    outer = 10.92836
+    t = 1.5
+    outer = 11.0
     h = 4.0
     wo = outer - inset
     wi = wo - t
@@ -2658,7 +2658,7 @@ class WallOnAChamferedRimTest(unittest.TestCase):
         expected = shape.Volume - 2 * removed
         self.assertAlmostEqual(result.Volume, expected, delta=1e-6 * expected)
         # The plate is untouched: below its top the result is the plate, the cone's area unchanged
-        below = Part.makeBox(40, 40, 1.5875, V(-20, -20, -1.5875))
+        below = Part.makeBox(40, 40, 1.5, V(-20, -20, -1.5))
         self.assertAlmostEqual(
             result.common(below).Volume, shape.common(below).Volume, delta=1e-6 * expected
         )
@@ -2671,16 +2671,19 @@ class WallOnAChamferedRimTest(unittest.TestCase):
         return result, cones(result)
 
     def testFullRoundOfAWallFlushOnAChamferedRim(self):
-        for chamfer in (1.5875, 0.8):
+        for chamfer in (1.5, 0.8):
             with self.subTest(chamfer=chamfer):
                 result, cone = self.check(0.0, chamfer, [3, 3, 4, 4])
-                if chamfer == 1.5875:
-                    # Onshape's numbers (oracle 14, notes/onshape-facts.md PB2): faces 13 -> 13,
-                    # A 1276.733058 -> 1271.269152, the cone's area 71.480181 unchanged
+                if chamfer == 1.5:
+                    # Closed form (Onshape's check, oracle 14, notes/onshape-facts.md PB2): faces
+                    # 13 -> 13; A 1281.195348 -> 1276.034170, the plate (top, bottom, sides, the two
+                    # c t / 2 triangles at y = 0, the cone) and the wall (h (pi/2 (Ri + Ro) + 2 t))
+                    # less wall_end_round's side at each end; the cone's area, half a frustum
+                    # pi (2 R - c) sqrt(c^2 + t^2) / 2, 68.309325 unchanged
                     self.assertEqual(len(result.removeSplitter().Faces), 13)
-                    self.assertAlmostEqual(result.Area, 1271.269152, delta=1e-6 * 1271.269152)
-                    self.assertAlmostEqual(cone, 71.480181, delta=1e-6 * 71.480181)
+                    self.assertAlmostEqual(result.Area, 1276.034170, delta=1e-6 * 1276.034170)
+                    self.assertAlmostEqual(cone, 68.309325, delta=1e-6 * 68.309325)
 
     def testFullRoundOfAWallInsideAChamferedRim(self):
         # The control: the wall 0.2 inside the rim, three edges at every foot (F1 built it)
-        self.check(0.2, 1.5875, [3, 3, 3, 3])
+        self.check(0.2, 1.5, [3, 3, 3, 3])
