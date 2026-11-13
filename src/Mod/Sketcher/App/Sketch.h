@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include <Base/Persistence.h>
 #include <CXX/Objects.hxx>
 #include <Mod/Part/App/TopoShape.h>
@@ -53,6 +55,21 @@ public:
 
     /// solve the actual set up sketch
     int solve();
+    /** FreeCAD-CH (ops#640, ops#656 D4 row 1): solves the set up sketch with only some parameters
+     * as unknowns, by least motion; every other parameter is held exactly where it is.
+     *
+     * @param isFree whether a parameter of the geometry geoId (point pos, index in that point or
+     *        in the curve's own parameters) is an unknown. A driven dimension's value is always one.
+     * @param tagsToHold the constraints (1-based tags) that must hold at the solution.
+     * @return GCS::Success with the geometry written when the solve converged and every one of
+     *         @p tagsToHold holds to 1e-7; otherwise GCS::Failed with the parameters as they were.
+     *         The solver is set up for the whole sketch again either way; its diagnosis (conflicts,
+     *         redundancies, degrees of freedom) is the one setUpSketch made.
+     */
+    int solveHolding(
+        const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
+        const std::vector<int>& tagsToHold
+    );
     /// resets the solver
     int resetSolver();
     /// get standard (aka fine) solver precision

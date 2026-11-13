@@ -5069,6 +5069,106 @@ int Sketch::solve()
     return result;
 }
 
+int Sketch::solveHolding(
+    const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
+    const std::vector<int>& tagsToHold
+)
+{
+    if (isInitMove) {
+        return GCS::Failed;
+    }
+
+    std::vector<double*> unknowns;
+    bool anyGeometry = false;
+    for (double* param : Parameters) {
+        const auto element = param2geoelement.find(param);
+        if (element == param2geoelement.end()) {
+            // a driven dimension's value: always computed, as in a whole solve
+            unknowns.push_back(param);
+            continue;
+        }
+        const auto& [geoId, pos, index] = element->second;
+        if (isFree(geoId, pos, index)) {
+            unknowns.push_back(param);
+            anyGeometry = true;
+        }
+    }
+    if (!anyGeometry) {
+        return GCS::Failed;
+    }
+
+    captureGroupStates();
+    Base::TimeElapsed start_time;
+
+    std::vector<double> before;
+    before.reserve(Parameters.size());
+    for (double* param : Parameters) {
+        before.push_back(*param);
+    }
+    auto restore = [&]() {
+        for (std::size_t i = 0; i < Parameters.size(); ++i) {
+            *Parameters[i] = before[i];
+        }
+    };
+
+    // Least motion: the Gauss-Newton step of least norm moves only what the changed constraints
+    // need (a length's end along the line, an arc's ends out from its centre); the full-pivot LU
+    // step zeroes some unknowns instead and moves the others further
+    clearTemporaryConstraints();
+    const GCS::DogLegGaussStep gaussStep = GCSsys.dogLegGaussStep;
+    GCSsys.dogLegGaussStep = GCS::LeastNormFullPivLU;
+    GCSsys.invalidatedDiagnosis();
+    GCSsys.declareUnknowns(unknowns);
+    GCSsys.declareDrivenParams(DrivenParameters);
+    GCSsys.initSolution(defaultSolverRedundant);
+    int ret = GCSsys.solve(isFine, GCS::DogLeg);
+    GCSsys.dogLegGaussStep = gaussStep;
+
+    bool holds = ret == GCS::Success;
+    if (holds) {
+        GCSsys.applySolution();
+        // a constraint none of whose parameters is an unknown is in no subsystem the solver
+        // checks: every one is read here (NaN: a constraint the solver does not hold at all)
+        for (int tag : tagsToHold) {
+            const double error = GCSsys.calculateConstraintErrorByTag(tag);
+            if (!std::isnan(error) && !(std::abs(error) < 1e-7)) {
+                holds = false;
+                break;
+            }
+        }
+    }
+    if (holds && !updateGeometry()) {
+        holds = false;
+    }
+    if (!holds) {
+        restore();
+        updateGeometry();
+    }
+
+    // the whole sketch again, for what follows (a drag, a later solve); the diagnosis is redone
+    // for it, at the new parameters, and the lists read from it at set up are kept
+    clearTemporaryConstraints();
+    GCSsys.invalidatedDiagnosis();
+    GCSsys.declareUnknowns(Parameters);
+    GCSsys.declareDrivenParams(DrivenParameters);
+    GCSsys.initSolution(defaultSolverRedundant);
+
+    if (holds) {
+        updateNonDrivingConstraints();
+        if (resolveAfterGeometryUpdated) {
+            // as internalSolve: geometry OCCT computes is read back once (it starts solved)
+            std::string solvername;
+            internalSolve(solvername, 1);
+        }
+        applyGroupTransformations();
+    }
+
+    Base::TimeElapsed end_time;
+    SolveTime = Base::TimeElapsed::diffTimeF(start_time, end_time);
+
+    return holds ? GCS::Success : GCS::Failed;
+}
+
 int Sketch::internalSolve(std::string& solvername, int level)
 {
     if (!isInitMove) {  // make sure we are in single subsystem mode

@@ -37,6 +37,7 @@
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
+#include <Mod/Part/App/Geometry.h>
 #include <Mod/Part/App/KernelBudget.h>
 
 #include <map>
@@ -311,6 +312,169 @@ bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
     return false;
 }
 
+// FreeCAD-CH (ops#640, ops#656 D4 row 1, decision 428): the ladder. A dimension whose value changed
+// (a #variable through an expression, or a typed value) moves its own entity, by least motion, and
+// everything else stays exactly, as Onshape does (onshape-facts SF-E4, SF-B6..B10;
+// sketcher-feel-design 3.1, 3.2). Rungs, the first that converges with every constraint met wins:
+// 1. only the movers' parameters are unknowns;
+// 2. everything but the references (the dimensions' other entities);
+// 3. everything, by least motion;
+// otherwise today's solve. A dimension "changed" when the drawn geometry does not meet it; when
+// anything else is unmet (a constraint just added, external geometry moved), the ladder stands
+// aside. A fully defined sketch has one solution, wherever the rungs look for it.
+//
+// The movers read the roles the Dimension tool stores: a distance's First (the point of a point
+// to a line, the second-picked of two lines, the circle of a circle and a line), the end of a
+// length (start to end, or the line alone), an angle's Second, a radius's curve without its centre.
+int SketchObject::solveLadder()
+{
+    using Test = std::function<bool(int geoId, PointPos pos, int index)>;
+    const std::vector<Constraint*>& constraints = Constraints.getValues();
+    std::vector<Test> movers;
+    std::vector<Test> references;
+    std::vector<int> tagsToHold;
+
+    auto whole = [](int geo) -> Test {
+        return [geo](int geoId, PointPos, int) { return geoId == geo; };
+    };
+    auto point = [](int geo, PointPos at) -> Test {
+        return [geo, at](int geoId, PointPos pos, int) { return geoId == geo && pos == at; };
+    };
+    auto isLine = [this](int geo) {
+        const Part::Geometry* g = getGeometry(geo);
+        return g && g->getTypeId() == Part::GeomLineSegment::getClassTypeId();
+    };
+    auto isArc = [this](int geo) {
+        const Part::Geometry* g = getGeometry(geo);
+        return g && g->getTypeId() == Part::GeomArcOfCircle::getClassTypeId();
+    };
+
+    for (std::size_t i = 0; i < constraints.size(); ++i) {
+        const Constraint* c = constraints[i];
+        const int tag = static_cast<int>(i) + 1;
+        if (!c->isDriving || !c->isActive) {
+            continue;
+        }
+        const double error = solvedSketch.calculateConstraintError(tag);
+        if (std::isnan(error)) {
+            continue;  // not in the solve (on fixed geometry only)
+        }
+        tagsToHold.push_back(tag);
+        if (std::abs(error) < 1e-7) {
+            continue;
+        }
+        if (!c->isDimensional()) {
+            return -1;
+        }
+        int moving = c->First;
+        PointPos movingPos = c->FirstPos;
+        int other = c->Second;
+        PointPos otherPos = c->SecondPos;
+        switch (c->Type) {
+            case Distance:
+            case DistanceX:
+            case DistanceY:
+                if (other == GeoEnum::GeoUndef) {
+                    if (movingPos == PointPos::none && isLine(moving)) {
+                        // a length: the start stays, the end moves along the line (SF-B8, SF-E4)
+                        movers.push_back(point(moving, PointPos::end));
+                        references.push_back(point(moving, PointPos::start));
+                    }
+                    else if (movingPos == PointPos::none) {
+                        movers.push_back(whole(moving));
+                    }
+                    else {
+                        movers.push_back(point(moving, movingPos));
+                    }
+                    continue;
+                }
+                if (moving == other) {
+                    // a length stored start to end: the second point moves
+                    movers.push_back(point(other, otherPos));
+                    references.push_back(point(moving, movingPos));
+                    continue;
+                }
+                break;
+            case Angle:
+                if (other == GeoEnum::GeoUndef) {
+                    if (isLine(moving)) {
+                        movers.push_back(point(moving, PointPos::end));
+                        references.push_back(point(moving, PointPos::start));
+                    }
+                    else if (isArc(moving)) {
+                        // an arc's sweep: its end and its end angle; centre and radius stay
+                        const int arc = moving;
+                        movers.push_back([arc](int geoId, PointPos pos, int index) {
+                            return geoId == arc
+                                && (pos == PointPos::end || (pos == PointPos::none && index == 2));
+                        });
+                    }
+                    else {
+                        movers.push_back(whole(moving));
+                    }
+                    continue;
+                }
+                // the second line turns
+                std::swap(moving, other);
+                std::swap(movingPos, otherPos);
+                break;
+            case Radius:
+            case Diameter: {
+                // the centre stays, the rest grows (SF-B10, GA3-20)
+                const int curve = moving;
+                movers.push_back([curve](int geoId, PointPos pos, int) {
+                    return geoId == curve && pos != PointPos::mid;
+                });
+                references.push_back(point(curve, PointPos::mid));
+                continue;
+            }
+            default:
+                return -1;
+        }
+        // two entities: external geometry and the axes cannot move, so the other one does
+        if (moving < 0 && other >= 0) {
+            std::swap(moving, other);
+        }
+        if (moving < 0) {
+            return -1;
+        }
+        movers.push_back(whole(moving));
+        if (other >= 0) {
+            references.push_back(whole(other));
+        }
+    }
+    if (movers.empty()) {
+        return -1;
+    }
+
+    auto any = [](const std::vector<Test>& tests, int geoId, PointPos pos, int index) {
+        return std::any_of(tests.begin(), tests.end(), [&](const Test& test) {
+            return test(geoId, pos, index);
+        });
+    };
+    if (solvedSketch.solveHolding(
+            [&](int geoId, PointPos pos, int index) { return any(movers, geoId, pos, index); },
+            tagsToHold
+        )
+        == 0) {
+        return 0;
+    }
+    if (!references.empty()
+        && solvedSketch.solveHolding(
+               [&](int geoId, PointPos pos, int index) {
+                   return !any(references, geoId, pos, index);
+               },
+               tagsToHold
+           )
+            == 0) {
+        return 0;
+    }
+    if (solvedSketch.solveHolding([](int, PointPos, int) { return true; }, tagsToHold) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
 int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
 {
     Part::KernelBudget::PhaseTimer phase(Part::KernelBudget::Phase::Solve);
@@ -369,7 +533,11 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         err = -5;
     }
     else {
-        lastSolverStatus = solvedSketch.solve();
+        // FreeCAD-CH (ops#656 D4 row 1): a changed dimension moves its own entity first
+        lastSolverStatus = solveLadder();
+        if (lastSolverStatus != 0) {
+            lastSolverStatus = solvedSketch.solve();
+        }
         if (lastSolverStatus != 0) {// solving
             err = -1;
         }

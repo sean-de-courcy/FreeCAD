@@ -1274,6 +1274,9 @@ protected:
     void retrieveSolverDiagnostics();
     /// FreeCAD-CH (ops#640): solve leaving out the constraints of a conflict (tags 1-based)
     bool solveAroundConflict(const std::vector<int>& tags);
+    /// FreeCAD-CH (ops#656 D4 row 1): a dimension whose value changed moves its own entity first
+    /// (the ladder); returns 0 when a rung solved the sketch, -1 when today's solve should run
+    int solveLadder();
 
     // retrieves whether a geometry blocked state corresponds to this constraint
     // returns true of the constraint is of Block type, false otherwise
