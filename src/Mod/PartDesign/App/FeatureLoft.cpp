@@ -28,12 +28,14 @@
 #include <set>
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_History.hxx>
@@ -186,6 +188,13 @@ Part::TopoShape withProfileConditions(
     }
     if (across.Dot(normal1) < 0) {
         normal1.Reverse();
+    }
+    // ops#640 (decision 396): for profiles that aren't parallel Onshape gives each end its own
+    // tangent length by a rule not known yet (oracle 17 LE4); the team's lofts are all parallel
+    if (normal0.Angle(normal1) > 1e-9) {
+        throw Base::CADKernelError(
+            QT_TRANSLATE_NOOP("Exception", "Loft: Normal to profile needs parallel profiles")
+        );
     }
     const double distance0 = across.Dot(normal0);
     const double distance1 = across.Dot(normal1);
@@ -386,6 +395,78 @@ Part::TopoShape withProfileConditions(
     Part::TopoShape result(ruled.Tag, ruled.Hasher);
     result.makeShapeWithElementMap(sewn, Part::MapperHistory(history), {ruled});
     return result;
+}
+
+/// ops#640 (oracle 17 LE3): Onshape refuses a condition whose side face passes through a profile's
+/// face (LOFT_INVALID, e.g. a negative magnitude on a narrowing loft). A side point behind a
+/// profile's plane whose foot on that plane lies inside the cap there is such a crossing. A side
+/// that only bulges past a plane outside its cap (a widening loft) is a valid solid and stays.
+bool crossesACap(const TopoDS_Shape& solid, const TopoDS_Shape& first, const TopoDS_Shape& last)
+{
+    gp_Pln planes[2];
+    if (!Part::TopoShape(first).findPlane(planes[0])
+        || !Part::TopoShape(last).findPlane(planes[1])) {
+        return false;
+    }
+    // each plane's inside: towards the other profile
+    const gp_Vec across(wireCentre(first), wireCentre(last));
+    gp_Dir inward[2] = {planes[0].Axis().Direction(), planes[1].Axis().Direction()};
+    if (across.Dot(gp_Vec(inward[0])) < 0) {
+        inward[0].Reverse();
+    }
+    if (across.Dot(gp_Vec(inward[1])) > 0) {
+        inward[1].Reverse();
+    }
+    std::vector<TopoDS_Face> caps[2];
+    std::vector<TopoDS_Face> sides;
+    for (TopExp_Explorer x(solid, TopAbs_FACE); x.More(); x.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(x.Current());
+        BRepAdaptor_Surface surface(face);
+        bool cap = false;
+        if (surface.GetType() == GeomAbs_Plane) {
+            const gp_Pln plane = surface.Plane();
+            for (int i = 0; i < 2 && !cap; ++i) {
+                if (planes[i].Distance(plane.Location()) < 1e-7
+                    && plane.Axis().Direction().IsParallel(planes[i].Axis().Direction(), 1e-9)) {
+                    caps[i].push_back(face);
+                    cap = true;
+                }
+            }
+        }
+        if (!cap) {
+            sides.push_back(face);
+        }
+    }
+    constexpr int rows = 24;
+    constexpr int columns = 48;
+    for (const auto& face : sides) {
+        BRepAdaptor_Surface surface(face);
+        double u0 = 0;
+        double u1 = 0;
+        double v0 = 0;
+        double v1 = 0;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        for (int i = 0; i <= rows; ++i) {
+            for (int j = 0; j <= columns; ++j) {
+                const gp_Pnt point
+                    = surface.Value(u0 + (u1 - u0) * i / rows, v0 + (v1 - v0) * j / columns);
+                for (int k = 0; k < 2; ++k) {
+                    const double depth = gp_Vec(planes[k].Location(), point).Dot(gp_Vec(inward[k]));
+                    if (depth > -1e-6) {
+                        continue;  // on the inside of this profile's plane
+                    }
+                    const gp_Pnt foot = point.Translated(gp_Vec(inward[k]) * -depth);
+                    for (const auto& cap : caps[k]) {
+                        BRepClass_FaceClassifier classifier(cap, foot, 1e-7);
+                        if (classifier.State() == TopAbs_IN) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 /// ops#655: a profile that is one closed periodic edge (a circle, an ellipse) keeps its seam vertex
@@ -1184,7 +1265,7 @@ Loft::Loft()
         (1.0),
         "Loft",
         App::Prop_None,
-        "Scale of the start condition's tangent"
+        "Scale of the start condition's tangent (0: no condition, as Onshape)"
     );
     ADD_PROPERTY_TYPE(
         EndCondition,
@@ -1194,7 +1275,13 @@ Loft::Loft()
         "How the loft reaches the last profile: None, or Normal to profile (two planar profiles)"
     );
     EndCondition.setEnums(ConditionEnums);
-    ADD_PROPERTY_TYPE(EndMagnitude, (1.0), "Loft", App::Prop_None, "Scale of the end condition's tangent");
+    ADD_PROPERTY_TYPE(
+        EndMagnitude,
+        (1.0),
+        "Loft",
+        App::Prop_None,
+        "Scale of the end condition's tangent (0: no condition, as Onshape)"
+    );
     ADD_PROPERTY_TYPE(
         Connections,
         (nullptr),
@@ -1461,6 +1548,11 @@ App::DocumentObjectExecReturn* Loft::execute()
         }
         std::vector<bool> placed(connections.size(), false);
 
+        // ops#655: Onshape's profile conditions. A magnitude of 0 is no condition at that end:
+        // Onshape builds the plain loft for it (oracle 17 LE3), never a tangent of length 0
+        const bool startSet = StartCondition.getValue() != 0 && StartMagnitude.getValue() != 0.0;
+        const bool endSet = EndCondition.getValue() != 0 && EndMagnitude.getValue() != 0.0;
+
         // build all shells
         std::vector<TopoShape> shells;
         bool frontReseamed = false;
@@ -1504,7 +1596,7 @@ App::DocumentObjectExecReturn* Loft::execute()
             }
             frontReseamed = frontReseamed || !unseamed.IsSame(sectionWires.front().getShape());
             // ops#655: a profile condition rebuilds the ruled loft's side faces
-            const bool conditioned = StartCondition.getValue() != 0 || EndCondition.getValue() != 0;
+            const bool conditioned = startSet || endSet;
             if (conditioned) {
                 if (sectionWires.size() != 2 || closed) {
                     throw Base::CADKernelError(QT_TRANSLATE_NOOP(
@@ -1534,9 +1626,9 @@ App::DocumentObjectExecReturn* Loft::execute()
                     shell,
                     sectionWires.front().getShape(),
                     sectionWires.back().getShape(),
-                    StartCondition.getValue() != 0,
+                    startSet,
                     StartMagnitude.getValue(),
-                    EndCondition.getValue() != 0,
+                    endSet,
                     EndMagnitude.getValue()
                 );
             }
@@ -1646,6 +1738,18 @@ App::DocumentObjectExecReturn* Loft::execute()
             SC.PerformInfinitePoint(Precision::Confusion());
             if (SC.State() == TopAbs_IN) {
                 s.setShape(s.getShape().Reversed(), false);
+            }
+            if ((startSet || endSet)
+                && crossesACap(
+                    s.getShape(),
+                    wiresections.front().front().getShape(),
+                    wiresections.front().back().getShape()
+                )) {
+                throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Loft: the side crosses a profile's face (Onshape: LOFT_INVALID); change the "
+                    "condition's magnitude"
+                ));
             }
         }
 
