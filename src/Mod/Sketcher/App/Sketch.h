@@ -25,6 +25,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 
 #include <Base/Persistence.h>
 #include <CXX/Objects.hxx>
@@ -60,16 +61,23 @@ public:
      *
      * @param isFree whether a parameter of the geometry geoId (point pos, index in that point or
      *        in the curve's own parameters) is an unknown. A driven dimension's value is always one.
-     * @param tagsToHold the constraints (1-based tags) that must hold at the solution.
+     * @param allowedErrors the constraints (1-based tags) that must hold at the solution, each with
+     *        the largest error allowed there.
      * @return GCS::Success with the geometry written when the solve converged and every one of
-     *         @p tagsToHold holds to 1e-7; otherwise GCS::Failed with the parameters as they were.
-     *         The solver is set up for the whole sketch again either way; its diagnosis (conflicts,
-     *         redundancies, degrees of freedom) is the one setUpSketch made.
+     *         @p allowedErrors holds; otherwise GCS::Failed with the parameters as they were.
+     *         Call endHolding() after the last one: the solver may be left set up for a part of
+     *         the sketch. The diagnosis (conflicts, redundancies, degrees of freedom) is always the
+     *         one setUpSketch made.
      */
     int solveHolding(
         const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
-        const std::vector<int>& tagsToHold
+        const std::map<int, double>& allowedErrors
     );
+    /// FreeCAD-CH (ops#656): sets the whole sketch up again after solveHolding(); with @p solved,
+    /// finishes the solve as solve() does. Returns GCS::Success when that finish succeeded.
+    int endHolding(bool solved);
+    /// FreeCAD-CH (ops#656): every constraint's error at the current parameters, by tag, one pass
+    std::map<int, double> calculateConstraintErrors() const;
     /// resets the solver
     int resetSolver();
     /// get standard (aka fine) solver precision
@@ -673,6 +681,8 @@ private:
     std::vector<GCS::ArcOfParabola> ArcsOfParabola;
     std::vector<GCS::BSpline> BSplines;
 
+    /// FreeCAD-CH (ops#656): solveHolding() left the solver set up for a part of the sketch
+    bool holdingNarrowed = false;
     bool isInitMove;
     bool isFine;
     Base::Vector3d initToPoint;

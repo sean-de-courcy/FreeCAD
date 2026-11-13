@@ -211,6 +211,46 @@ class TestSketchLadder(unittest.TestCase):
         self.assertUnchanged(line, l0)
         self.assertAt(V(self.sk.Geometry[point].X, self.sk.Geometry[point].Y, 0), (10, 25), SOLVED)
 
+    # a circle moved by a distance translates: its radius stays (review finding 1)
+
+    def testCircleToLineDistanceTranslatesTheCircle(self):
+        line = self._line((0, 0), (30, 0))
+        circle = self.sk.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 5.0), False)
+        # the Dimension tool stores a circle and a line with the circle First
+        d = self.sk.addConstraint(Sketcher.Constraint("Distance", circle, line, 5.0))
+        self._variable("gap", 5.0)
+        self._drive(d, "gap")
+        self._recompute()
+        l0 = self.sk.Geometry[line].copy()
+        self.vars.gap = 7.0
+        self._recompute()
+        self.assertUnchanged(line, l0)
+        g = self.sk.Geometry[circle]
+        self.assertAlmostEqual(g.Radius, 5.0, delta=EXACT)
+        self.assertAt(g.Center, (10, 12), SOLVED)
+
+    # GA3-29 by hand: an angle's new value turns the second-picked line
+
+    def testAngleTurnsTheSecondLine(self):
+        a = self._line((0, 0), (20, 0))
+        end = (20 * math.cos(math.radians(30)), 20 * math.sin(math.radians(30)))
+        b = self._line((0, 0), end)
+        self.sk.addConstraint(Sketcher.Constraint("Coincident", a, 1, b, 1))
+        c = self.sk.addConstraint(Sketcher.Constraint("Angle", a, b, math.radians(30)))
+        self.vars.addProperty("App::PropertyAngle", "turn")
+        self.vars.turn = 30.0
+        self._drive(c, "turn")
+        self._recompute()
+        a0 = self.sk.Geometry[a].copy()
+        self.vars.turn = 45.0
+        self._recompute()
+        self.assertUnchanged(a, a0)
+        g = self.sk.Geometry[b]
+        self.assertAt(g.StartPoint, (0, 0), EXACT)
+        self.assertAlmostEqual(
+            math.degrees(math.atan2(g.EndPoint.y, g.EndPoint.x)), 45.0, delta=SOLVED
+        )
+
     # what must not change
 
     def testFullyDefinedSketchIsUnaffected(self):

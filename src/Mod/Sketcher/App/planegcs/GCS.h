@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <map>
+
 #include <Eigen/QR>
 
 #include "../../SketcherGlobal.h"
@@ -610,6 +612,9 @@ public:
     // If there's only one, a signed value is returned.
     // Effectively, it calculates the error of a UI constraint
     double calculateConstraintErrorByTag(int tagId);
+    /// FreeCAD-CH (ops#656): every tag's error in one pass over the constraints (the root mean
+    /// square where a tag has several, as calculateConstraintErrorByTag gives it)
+    std::map<int, double> calculateConstraintErrorsByTag() const;
 
     void rescaleConstraint(int id, double coeff);
 
