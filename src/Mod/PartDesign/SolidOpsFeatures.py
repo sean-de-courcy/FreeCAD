@@ -272,6 +272,103 @@ def _tangent_joins(group):
     return True
 
 
+def _cylinder_piece_volume(face, t1, t2):
+    """The exact volume of a cylinder face thickened t1 along its normal and t2 against it: the layer at
+    signed distance s from the face (s > 0 away from the axis) has the face's area times (R + s) / R."""
+    surf = face.Surface
+    u0, u1, v0, v1 = face.ParameterRange
+    um, vm = 0.5 * (u0 + u1), 0.5 * (v0 + v1)
+    out = 1.0 if face.normalAt(um, vm).dot(face.valueAt(um, vm) - _axis_foot(face.valueAt(um, vm), surf)) > 0 else -1.0
+    lo, hi = (-t2, t1) if out > 0 else (-t1, t2)  # the piece's signed radial extent
+    return face.Area * ((hi - lo) + (hi * hi - lo * lo) / (2.0 * surf.Radius)), out
+
+
+def _axis_foot(p, surf):
+    a = App.Vector(surf.Axis).normalize()
+    return surf.Center + a * (p - surf.Center).dot(a)
+
+
+def _radial_scale(surf, k):
+    """The affine map that scales distances from the cylinder's axis by k and keeps the axial
+    coordinate: it takes the cylinder of radius R to the coaxial one of radius k R."""
+    a = App.Vector(surf.Axis).normalize()
+    av = (a.x, a.y, a.z)
+    p = [[k * (i == j) + (1.0 - k) * av[i] * av[j] for j in range(3)] for i in range(3)]
+    c = surf.Center
+    cv = (c.x, c.y, c.z)
+    m = App.Matrix()
+    m.A11, m.A12, m.A13 = p[0]
+    m.A21, m.A22, m.A23 = p[1]
+    m.A31, m.A32, m.A33 = p[2]
+    m.A14, m.A24, m.A34 = (cv[i] - sum(p[i][j] * cv[j] for j in range(3)) for i in range(3))
+    return m
+
+
+def _ruled_cylinder_piece(face, t1, t2, out):
+    """A cylinder face's thick piece built directly: the face moved to the two radii by _radial_scale,
+    closed by ruled faces along each boundary edge (the rulings are the face's normals, as an offset's
+    caps). Used where OCC's offset of the face comes out wrong (#90: a leg whose free end is two
+    edges meeting at its seam gave twisted caps, 763.83 for 279.17)."""
+    R = face.Surface.Radius
+    k_hi, k_lo = (R + t1) / R, (R - t2) / R
+    if out < 0:
+        k_hi, k_lo = (R + t2) / R, (R - t1) / R
+    if k_lo < TOL:
+        raise SolidOpsError("Thicken failed: the thickness toward the axis exceeds the radius")
+    m_hi, m_lo = _radial_scale(face.Surface, k_hi), _radial_scale(face.Surface, k_lo)
+    faces = [face.transformGeometry(m_hi), face.transformGeometry(m_lo)]
+    for e in face.Edges:
+        if e.isSeam(face):
+            continue
+        faces.extend(Part.makeRuledSurface(e.transformGeometry(m_hi), e.transformGeometry(m_lo)).Faces)
+    sewn = Part.Compound(faces)
+    sewn.sewShape(1e-6)
+    solid = Part.Solid(Part.Shell(sewn.Faces))
+    if solid.Volume < 0:
+        solid.reverse()
+    return solid
+
+
+def _offset_piece(face, t1, t2):
+    """OCC's thick piece of one face: offset by -t2, then filled through t1 + t2."""
+    start = face.makeOffsetShape(-t2, TOL) if t2 > TOL else face
+    return start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
+
+
+def _leg_piece(face, t1, t2):
+    """One non-bend face of a sheet thickened alone: OCC's offset, checked. A cylinder face's piece must
+    also hold its exact volume (_cylinder_piece_volume); where the offset misses it, the piece is built
+    directly (_ruled_cylinder_piece) and checked the same way, else Thicken fails loudly."""
+    try:
+        piece, error = _offset_piece(face, t1, t2), None
+    except Exception as e:
+        piece, error = None, SolidOpsError("Thicken failed: %s" % e)
+    if not isinstance(face.Surface, Part.Cylinder):
+        if error is not None:
+            raise error
+        _check_offset(face, piece, "Thicken")
+        if not piece.Solids:
+            raise SolidOpsError("Thicken failed: the result has no solid")
+        return piece
+    exact, out = _cylinder_piece_volume(face, t1, t2)
+
+    def right(p):
+        return (p is not None and not p.isNull() and p.isValid() and len(p.Solids) == 1
+                and abs(p.Volume - exact) <= 1e-6 * max(1.0, exact))
+
+    if right(piece):
+        return piece
+    try:
+        piece = _ruled_cylinder_piece(face, t1, t2, out)
+    except SolidOpsError:
+        raise
+    except Exception as e:
+        raise SolidOpsError("Thicken failed: %s" % e)
+    if not right(piece):
+        raise SolidOpsError("Thicken failed: the result is not valid (it folds over itself)")
+    return piece
+
+
 def _thicken_per_face(group, infos, t1, t2):
     """The union of each face's own thick piece, for a smooth sheet with a bend whose ring reaches the
     bend's axis (the whole-sheet offset folds over itself or fails there)."""
@@ -285,15 +382,7 @@ def _thicken_per_face(group, infos, t1, t2):
             probes.extend(inner)
             continue
         probes.extend(_inner_points(f, 0.5 * (t1 - t2)))  # the face's middle layer
-        try:
-            start = f.makeOffsetShape(-t2, TOL) if t2 > TOL else f
-            piece = start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
-        except Exception as e:
-            raise SolidOpsError("Thicken failed: %s" % e)
-        _check_offset(f, piece, "Thicken")
-        if not piece.Solids:
-            raise SolidOpsError("Thicken failed: the result has no solid")
-        pieces.append(piece)
+        pieces.append(_leg_piece(f, t1, t2))
     pinched = all(abs(_bend_radii(i, t1, t2)[1] - i["d"]) <= TOL for i in infos if i is not None and _reaches_axis(i, t1, t2))
     return _fused(pieces, probes, pinched)
 
