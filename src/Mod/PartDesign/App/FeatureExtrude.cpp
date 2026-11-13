@@ -34,6 +34,7 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -1078,6 +1079,66 @@ gp_Pnt upToVertexPoint(const App::PropertyLinkSub& link)
     return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
 }
 
+// The plane (a point and its normal, in global coordinates) of the face a side goes up to, where
+// that side is better built blind when the plane is parallel to the profile plane (FreeCAD-CH
+// ops#751; the caller tests that in the frame it builds in): the face is planar, and the profile
+// holds an edge that is neither a line nor a circle (an ellipse, a spline). A straight extrusion
+// ends on a plane parallel to its profile whatever the face's extent (the up-to prism takes the
+// whole plane of a face smaller than the profile too), so the blind side reaching it is the same
+// solid. BRepFeat's prism returns such an edge's end on the face as an approximated intersection
+// curve, in pieces (the replica's #161: two B-splines where Onshape has one ellipse, so a later
+// feature finds two edges, and two faces, for one). Nothing for any other reference (a datum, a
+// curved face) or profile (lines and circles end exact either way, and keep their names)
+std::optional<gp_Ax1> upToPlaneForBlindSide(
+    const App::PropertyLinkSub& link,
+    const TopoShape& profile
+)
+{
+    App::DocumentObject* ref = link.getValue();
+    const auto& subs = link.getSubValues();
+    if (!ref || subs.size() != 1 || subs.front().empty() || profile.isNull()) {
+        return std::nullopt;
+    }
+    bool approximated = false;
+    for (TopExp_Explorer it(profile.getShape(), TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        const GeomAbs_CurveType type = BRepAdaptor_Curve(edge).GetType();
+        if (type != GeomAbs_Line && type != GeomAbs_Circle) {
+            approximated = true;
+            break;
+        }
+    }
+    if (!approximated) {
+        return std::nullopt;
+    }
+    TopoShape shape;
+    try {
+        shape = Part::Feature::getTopoShape(
+            ref,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            subs.front().c_str()
+        );
+    }
+    catch (const Base::Exception&) {
+        return std::nullopt;
+    }
+    catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+    if (shape.isNull() || shape.countSubShapes(TopAbs_FACE) != 1) {
+        return std::nullopt;
+    }
+    const BRepAdaptor_Surface surface(TopoDS::Face(shape.getSubShape(TopAbs_FACE, 1)));
+    if (surface.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    return surface.Plane().Axis();
+}
+
 // Set while a studio owner builds one region of its profile (ops#654 S2), so that the region's
 // own side is built as today's, against the one part it meets
 thread_local bool ownerRegionRunning = false;
@@ -1528,20 +1589,63 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // is the blind one whose length reaches that plane, untapered as a side up to a face is.
         // One side goes towards the vertex; a side of two, or of a symmetric pair, that can't
         // reach it fails, as a side up to a face behind it does
-        if (method == "UpToVertex" || (Sidemethod == "Two sides" && method2 == "UpToVertex")) {
+        // One side up to a face in a plane parallel to the profile plane ends the same way
+        // (FreeCAD-CH ops#751): where its profile holds an ellipse or a spline, it is built blind
+        // to that plane, so its far edges are the profile's own curves, as Onshape's are
+        // (upToPlaneForBlindSide()). Parallel is tested where the side is built: in the feature's
+        // frame, and at a pattern's instance (Reapply) on the face carried onto the seed, which a
+        // rotation may tilt. A face in the profile plane, or an offset that leaves nothing, stays
+        // with the up-to prism and its messages
+        std::optional<gp_Pnt> planeEnd;
+        if (method == "UpToFace" && Sidemethod == "One side") {
+            if (const auto plane = upToPlaneForBlindSide(UpToFace, sketchshape)) {
+                gp_Dir faceNormal = plane->Direction();
+                faceNormal.Transform(invTrsf);
+                if (reapplyRun) {
+                    faceNormal.Transform(reapplyRun->toSeed);
+                }
+                gp_Dir sketchNormal(SketchVector.x, SketchVector.y, SketchVector.z);
+                sketchNormal.Transform(invTrsf);
+                if (faceNormal.IsParallel(sketchNormal, Precision::Angular())) {
+                    planeEnd = plane->Location();
+                }
+            }
+        }
+        if (method == "UpToVertex" || planeEnd
+            || (Sidemethod == "Two sides" && method2 == "UpToVertex")) {
             gp_Dir profileNormal(SketchVector.x, SketchVector.y, SketchVector.z);
             profileNormal.Transform(invTrsf);
             const TopoShape profileVertex = startSketch.getSubTopoShape(TopAbs_VERTEX, 1);
             const gp_Pnt onProfile = BRep_Tool::Pnt(TopoDS::Vertex(profileVertex.getShape()));
-            // The signed length along `along` from the profile to the vertex's plane
-            auto lengthTo = [&](const App::PropertyLinkSub& link, const gp_Dir& along, double offset) {
-                gp_Pnt target = upToVertexPoint(link);
+            // The signed length along `along` from the profile to the plane through `target`
+            // (global) parallel to the profile plane
+            auto distanceTo = [&](gp_Pnt target, const gp_Dir& along) {
                 target.Transform(invTrsf);
                 if (reapplyRun) {
                     target.Transform(reapplyRun->toSeed);
                 }
                 const double cosine = gp_Vec(along).Dot(gp_Vec(profileNormal));
-                const double length = gp_Vec(onProfile, target).Dot(gp_Vec(profileNormal)) / cosine;
+                return gp_Vec(onProfile, target).Dot(gp_Vec(profileNormal)) / cosine;
+            };
+            if (planeEnd) {
+                const double length = distanceTo(*planeEnd, dir);
+                if (std::fabs(length) < Precision::Confusion()
+                    || std::fabs(length) - offset1 < Precision::Confusion()) {
+                    planeEnd.reset();
+                }
+                else {
+                    if (length < 0.0) {
+                        dir.Reverse();
+                    }
+                    L = std::fabs(length) - offset1;
+                    method = "Length";
+                    taper1 = 0.0;
+                    offset1 = 0.0;
+                }
+            }
+            // The signed length along `along` from the profile to the vertex's plane
+            auto lengthTo = [&](const App::PropertyLinkSub& link, const gp_Dir& along, double offset) {
+                const double length = distanceTo(upToVertexPoint(link), along);
                 if (std::fabs(length) < Precision::Confusion()) {
                     throw Base::ValueError(QT_TRANSLATE_NOOP(
                         "Exception",

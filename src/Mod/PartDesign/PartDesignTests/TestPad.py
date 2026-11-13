@@ -2732,6 +2732,79 @@ class TestPad(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToAParallelPlaneEndsInTheProfilesEllipse(self):
+        # ops#751 (the replica's #161, ops#640): a Pad up to a face in a plane parallel to its
+        # profile, whose profile holds a half ellipse. BRepFeat's prism ended the ellipse on the
+        # face as an approximated B-spline (in pieces on the replica); Onshape ends it in one
+        # ELLIPSE edge. Model: a plate 40 x 30 x 5; a post 5 x 5 on it up to z = 20 (its top is
+        # the up-to face, far smaller than the profile); the profile on the plate's top: the half
+        # ellipse about (20, 10), radii 8 along x and 4 along y, closed by its diameter.
+        # Expected: the pad adds (pi 8 4 / 2) times its reach (15; 13 with an offset of 2, which
+        # ends short of the face); its far cap is bounded by the diameter and ONE Ellipse edge of
+        # radii 8 and 4, as long as the profile's; no B-spline edge anywhere
+        V = FreeCAD.Vector
+        arc = Part.ArcOfEllipse(Part.Ellipse(V(28, 10, 0), V(20, 14, 0), V(20, 10, 0)), 0.0, math.pi)
+        for offset, reach in ((0.0, 15.0), (2.0, 13.0)):
+            with self.subTest(offset=offset):
+                doc = FreeCAD.newDocument("PadUpToAParallelPlane")
+                try:
+                    body = doc.addObject("PartDesign::Body", "Body")
+                    xy = [o for o in body.Origin.OutList if o.Role == "XY_Plane"][0]
+
+                    def sketch(name, z, geometry):
+                        sk = body.newObject("Sketcher::SketchObject", name)
+                        sk.AttachmentSupport = [(xy, "")]
+                        sk.MapMode = "FlatFace"
+                        sk.AttachmentOffset = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+                        for g in geometry:
+                            sk.addGeometry(g, False)
+                        return sk
+
+                    def rectangle(x1, y1):
+                        pts = [V(0, 0, 0), V(x1, 0, 0), V(x1, y1, 0), V(0, y1, 0)]
+                        return [Part.LineSegment(pts[k], pts[(k + 1) % 4]) for k in range(4)]
+
+                    plate = body.newObject("PartDesign::Pad", "Plate")
+                    plate.Profile = sketch("S1", 0, rectangle(40, 30))
+                    plate.Length = 5
+                    post = body.newObject("PartDesign::Pad", "Post")
+                    post.Profile = sketch("S2", 5, rectangle(5, 5))
+                    post.Length = 15
+                    doc.recompute()
+                    top = [
+                        "Face%d" % (k + 1)
+                        for k, f in enumerate(post.Shape.Faces)
+                        if isinstance(f.Surface, Part.Plane) and abs(f.CenterOfMass.z - 20) < 1e-9
+                    ]
+                    self.assertEqual(len(top), 1)
+                    pad = body.newObject("PartDesign::Pad", "Notch")
+                    pad.Profile = sketch(
+                        "S3", 5, [arc, Part.LineSegment(V(12, 10, 0), V(28, 10, 0))]
+                    )
+                    pad.Type = "UpToFace"
+                    pad.UpToFace = (post, top)
+                    pad.Offset = offset
+                    doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    self.assertTrue(pad.Shape.isValid())
+                    self.assertAlmostEqual(
+                        pad.Shape.Volume - post.Shape.Volume, math.pi * 8 * 4 / 2 * reach, delta=1e-8
+                    )
+                    kinds = [e.Curve.__class__.__name__ for e in pad.Shape.Edges]
+                    self.assertNotIn("BSplineCurve", kinds)
+                    far = [
+                        e
+                        for e in pad.Shape.Edges
+                        if e.Curve.__class__.__name__ != "Line"
+                        and all(abs(v.Point.z - (5 + reach)) < 1e-9 for v in e.Vertexes)
+                    ]
+                    self.assertEqual([e.Curve.__class__.__name__ for e in far], ["Ellipse"])
+                    self.assertAlmostEqual(far[0].Curve.MajorRadius, 8, places=9)
+                    self.assertAlmostEqual(far[0].Curve.MinorRadius, 4, places=9)
+                    self.assertAlmostEqual(far[0].Length, arc.toShape().Length, delta=1e-9)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
     def testPadUpToABallUnderAPlate(self):
         # ops#357: the square x, y -6..6 passes the ball's equator (radius 5 at z = -0.1); lines
         # at radius 4.999..5 first meet the ball below it, and the band above it faces the plate.
