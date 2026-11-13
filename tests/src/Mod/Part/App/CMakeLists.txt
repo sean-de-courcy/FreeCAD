@@ -4,6 +4,7 @@ add_executable(Part_tests_run
         Attacher.cpp
         AttachExtension.cpp
         BRepMesh.cpp
+        CanonicalProfile.cpp
         ChamferChain.cpp
         FaceMakerBullseye.cpp
         FaceMakerUnified.cpp

@@ -555,6 +555,8 @@ SET(Part_SRCS
     ShapeAnalysis_FreeBoundsFix.h
     BSplineCurveBiArcs.cpp
     BSplineCurveBiArcs.h
+    CanonicalProfile.cpp
+    CanonicalProfile.h
     CrossSection.cpp
     CrossSection.h
     ExtrusionHelper.cpp

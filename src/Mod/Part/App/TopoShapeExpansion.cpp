@@ -156,6 +156,7 @@
 #include <FCConfig.h>
 
 #include "modelRefine.h"
+#include "CanonicalProfile.h"
 #include "CrossSection.h"
 #include "FilletFallback.h"
 #include "MassProperties.h"
@@ -9131,8 +9132,12 @@ TopoShape& TopoShape::makeElementPrism(const TopoShape& base, const gp_Vec& vec,
     if (base.isNull()) {
         FC_THROWM(NullShapeException, "Null shape");
     }
-    BRepPrimAPI_MakePrism mkPrism(base.getShape(), vec);
-    return makeElementShape(mkPrism, base, op);
+    // FreeCAD-CH (ops#640): a spline profile edge on a line or circle sweeps into a plane or
+    // cylinder, as Onshape's, not a surface of extrusion (CanonicalProfile.h)
+    TopoShape profile(base);
+    canonicalProfile(profile);
+    BRepPrimAPI_MakePrism mkPrism(profile.getShape(), vec);
+    return makeElementShape(mkPrism, profile, op);
 }
 
 namespace
@@ -10083,6 +10088,9 @@ TopoShape& TopoShape::makeElementRevolve(
         }
         base = base.makeElementFace(nullptr, face_maker, nullptr);
     }
+    // FreeCAD-CH (ops#640): lines and circles on the profile give cones, cylinders, planes and
+    // tori, as Onshape's; a circle that would give a horn torus stays (CanonicalProfile.h)
+    canonicalProfile(base, &axis);
     BRepPrimAPI_MakeRevol mkRevol(base.getShape(), axis, d);
     return makeElementShape(mkRevol, base, op);
 }
