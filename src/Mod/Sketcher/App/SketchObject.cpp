@@ -28,6 +28,7 @@
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <TopExp.hxx>
@@ -841,9 +842,16 @@ Part::TopoShape SketchObject::buildInternals(const Part::TopoShape &edges) const
             }
             else {
                 // The face maker adds a pcurve on its own plane to each edge it is given: the near
-                // run gets copies, so that the two runs leave each other's edges alone
-                const auto nearRegions =
-                    regions(true, edges.makeElementCopy(), imprint.makeElementCopy());
+                // run gets copies, so that the two runs leave each other's edges alone. The copies
+                // keep the element maps (BRepBuilderAPI_Copy keeps the sub-shapes' order)
+                auto copyOf = [](const Part::TopoShape& shape) {
+                    Part::TopoShape copy(shape);
+                    if (!shape.isNull()) {
+                        copy.setShape(BRepBuilderAPI_Copy(shape.getShape()).Shape(), false);
+                    }
+                    return copy;
+                };
+                const auto nearRegions = regions(true, copyOf(edges), copyOf(imprint));
                 result = regions(false, edges, imprint);
                 if (const std::string difference = regionsDifference(nearRegions, result);
                     !difference.empty()) {

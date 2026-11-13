@@ -13,6 +13,7 @@ in the tests sit between the two, with room for a machine twice as fast or slow.
 """
 
 import math
+import os
 import time
 import unittest
 
@@ -420,6 +421,8 @@ class KernelCheckTest(unittest.TestCase):
         """perf profile 3 (ops#640): OCCT's shell orientation check finds each edge again in its
         other face by going through that face's edges, the square of the plate face's 14 400 edges
         for 60 x 60 square holes. The fast check takes the same verdict in linear time"""
+        if os.environ.get("FREECAD_CH_FAST_ORIENTATION") or os.environ.get("FREECAD_CH_NARROW_CHECK"):
+            self.skipTest("a check's switch is set: it times or tests the default checks")
         solid = self.squareHoledPlate(60)
         start = time.time()
         self.assertTrue(Part.kernelCheck(solid))
@@ -503,6 +506,8 @@ class NarrowCheckTest(unittest.TestCase):
 
     def testShellsAndSolidsAreCheckedWhole(self):
         """Nothing changed: no face is checked again, the shell and the solid are"""
+        if os.environ.get("FREECAD_CH_FAST_ORIENTATION") or os.environ.get("FREECAD_CH_NARROW_CHECK"):
+            self.skipTest("a check's switch is set: it times or tests the default checks")
         result, base = self.result(bad=5)
         self.assertTrue(Part.kernelCheckChanged(base, base))
         faces = list(Part.makeBox(10, 10, 10).Faces)
@@ -514,6 +519,8 @@ class NarrowCheckTest(unittest.TestCase):
         """The ruling's rule: the top, opposite the changed bottom and sharing no vertex with it, is
         the input's own face, not checked again (the feature's whole check, checkDressUp, still
         reads it)"""
+        if os.environ.get("FREECAD_CH_FAST_ORIENTATION") or os.environ.get("FREECAD_CH_NARROW_CHECK"):
+            self.skipTest("a check's switch is set: it times or tests the default checks")
         self.assertEqual(self.verdicts(*self.result(bad=5)), (True, False))
 
     def testWithoutBaseTheWholeIsChecked(self):
@@ -524,6 +531,8 @@ class NarrowCheckTest(unittest.TestCase):
         """A fillet on a corner of a plate with 40 x 40 square holes (6400 edges on its top and
         bottom faces), checked in seconds. Every face here: the fillet's maker runs on a copy of
         the plate (ops#345), so the result shares no face with it"""
+        if os.environ.get("FREECAD_CH_FAST_ORIENTATION") or os.environ.get("FREECAD_CH_NARROW_CHECK"):
+            self.skipTest("a check's switch is set: it times or tests the default checks")
         n = 40
         squares = [
             Part.makePolygon(
