@@ -9786,9 +9786,8 @@ struct RimTight
     {
         return side(k, std::acos(std::max(-1.0, std::min(1.0, 1.0 - d / r))));
     }
-    void prepare(const gp_XY& centre)
+    void prepare(const gp_XY& centre, int intervals = 96)
     {
-        constexpr int intervals = 96;
         table.resize(intervals + 1);
         gp_XY q = centre;
         for (int i = 0; i <= intervals; ++i) {
@@ -11056,6 +11055,12 @@ void rimTightPatch(RimLoop& loop, size_t index, double r)
         }
     }
     if (deviation > rimTolerance * std::max(1.0, r)) {
+        if (intervals < 384) {
+            // A wide arc: finer sections
+            round.tight->prepare(round.curve.centre, 2 * intervals);
+            rimTightPatch(loop, index, r);
+            return;
+        }
         refuse("a tight corner's face is " + describe(deviation) + " from its canal surface");
     }
     round.surface = patch;
@@ -11467,7 +11472,7 @@ std::vector<TopoDS_Face> rimPinched(
         refuse("a plane face without an outer loop");
     }
     for (size_t h = 0; h < holes.size(); ++h) {
-        size_t owner = pieces.size() == 1 ? 0 : pieces.size();
+        size_t owner = pieces.size();
         for (size_t i = 0; owner == pieces.size() && i < pieces.size(); ++i) {
             BRepClass_FaceClassifier classifier(pieces[i], holePoints[h], 1e-7);
             if (classifier.State() == TopAbs_IN) {
@@ -11859,6 +11864,28 @@ TopoDS_Shape rimRounds(
                         pinch.edge = other.edge;
                         pinch.wire = other.wire;
                         pinch.onEdge = other.parameter(point);
+                        // The other loop stays on the plane face's side of the top edge: beside
+                        // the touch it is deeper behind this round's wall than r. From the
+                        // removed side (a hole in the band, at a reflex corner's run-on) its wall
+                        // would stand in the rounds, and no measure below would tell
+                        {
+                            BRepAdaptor_Curve curve(other.edge);
+                            const double step = 0.1 * (other.last - other.first);
+                            for (double beside : {pinch.onEdge - step, pinch.onEdge + step}) {
+                                if (beside < other.first || beside > other.last) {
+                                    continue;
+                                }
+                                gp_XY q = loop.plan(curve.Value(beside));
+                                const RimCurve& wall = round.curve;
+                                double depth = wall.line
+                                    ? (q - wall.point).Dot(wall.inward) / wall.inward.Modulus()
+                                    : -wall.convex * ((q - wall.centre).Modulus() - wall.rho);
+                                if (depth < r - 1e-6) {
+                                    refuse("another loop of the plane face touches a rim round's "
+                                           "top edge from the round's side");
+                                }
+                            }
+                        }
                         TopoDS_Vertex forward;
                         TopoDS_Vertex reversed;
                         TopExp::Vertices(other.edge, forward, reversed);
@@ -12129,18 +12156,26 @@ TopoDS_Shape rimRounds(
                     if (rimEdges.Contains(sub.Current()) || uprights.Contains(sub.Current())) {
                         continue;
                     }
-                    Bnd_Box box;
-                    BRepBndLib::Add(sub.Current(), box);
-                    double x[2];
-                    double y[2];
-                    double z[2];
-                    box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
-                    for (int k = 0; k < 8; ++k) {
-                        gp_Pnt p(x[k & 1], y[(k >> 1) & 1], z[(k >> 2) & 1]);
-                        if (gp_Vec(loop.origin, p).Dot(gp_Vec(loop.normal))
-                            > -r - 1000 * rimTolerance) {
-                            refuse("a wall with an edge within the round's height");
-                        }
+                    // (the edge's own points: its box's corners rise above an edge of a rim
+                    // whose plane is off the axes. Between 64 samples a circle or an ellipse
+                    // rises above the highest by under a hundredth of the samples' span)
+                    BRepAdaptor_Curve curve(TopoDS::Edge(sub.Current()));
+                    const bool straight = curve.GetType() == GeomAbs_Line;
+                    const int steps = straight ? 1 : 64;
+                    double highest = -std::numeric_limits<double>::max();
+                    double lowest = std::numeric_limits<double>::max();
+                    for (int k = 0; k <= steps; ++k) {
+                        gp_Pnt p = curve.Value(
+                            curve.FirstParameter()
+                            + (curve.LastParameter() - curve.FirstParameter()) * k / steps
+                        );
+                        const double height = gp_Vec(loop.origin, p).Dot(gp_Vec(loop.normal));
+                        highest = std::max(highest, height);
+                        lowest = std::min(lowest, height);
+                    }
+                    if (highest + (straight ? 0.0 : 0.01 * (highest - lowest))
+                        > -r - 1000 * rimTolerance) {
+                        refuse("a wall with an edge within the round's height");
                     }
                 }
             }
