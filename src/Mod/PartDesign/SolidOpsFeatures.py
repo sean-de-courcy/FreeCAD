@@ -305,10 +305,10 @@ def _radial_scale(surf, k):
 
 
 def _ruled_cylinder_piece(face, t1, t2, out):
-    """A cylinder face's thick piece built directly: the face moved to the two radii by _radial_scale,
-    closed by ruled faces along each boundary edge (the rulings are the face's normals, as an offset's
-    caps). Used where OCC's offset of the face comes out wrong (#90: a leg whose free end is two
-    edges meeting at its seam gave twisted caps, 763.83 for 279.17)."""
+    """A cylinder face's thick piece built directly: the face's offsets to the two radii (exact cylinders),
+    closed by ruled faces between their boundary edges (the rulings are the face's normals, as an offset's
+    caps; _radial_scale maps an edge to its image). Used where OCC's offset of the face comes out wrong
+    (#90: a leg whose free end is two edges meeting at its seam gave twisted caps, 763.83 for 279.17)."""
     R = face.Surface.Radius
     k_hi, k_lo = (R + t1) / R, (R - t2) / R
     if out < 0:
@@ -316,11 +316,42 @@ def _ruled_cylinder_piece(face, t1, t2, out):
     if k_lo < TOL:
         raise SolidOpsError("Thicken failed: the thickness toward the axis exceeds the radius")
     m_hi, m_lo = _radial_scale(face.Surface, k_hi), _radial_scale(face.Surface, k_lo)
-    faces = [face.transformGeometry(m_hi), face.transformGeometry(m_lo)]
+    # The radius faces are the face's own offsets, exact cylinders: transformGeometry copies are C0 NURBS
+    # with pcurves off their edges (BOPAlgo GeomAbs_C0, InvalidCurveOnSurface), and refining a later cut
+    # on them merged faces wrongly (ops#640, rb 93: the volume moved by 0.016). The ruled faces join the
+    # offsets' own edges, so that the sewing has nothing to reconcile
+    def moved(d):
+        if abs(d) <= TOL:
+            return face.copy()
+        got = face.makeOffsetShape(d, TOL)
+        if len(got.Faces) != 1 or not isinstance(got.Faces[0].Surface, Part.Cylinder):
+            raise SolidOpsError("Thicken failed: a leg face's offset is not one cylinder face")
+        return got.Faces[0]
+    f_a, f_b = moved(t1), moved(-t2)
+    faces = [f_a, f_b]
+    m_a, m_b = (m_hi, m_lo) if out > 0 else (m_lo, m_hi)  # f_a lies at the radius m_a gives
+
+    def image(e, f, m):
+        """f's edge that is the radial image of the face's edge e, oriented as e (else None)"""
+        mid = m.multVec(e.valueAt(0.5 * (e.FirstParameter + e.LastParameter)))
+        best = min(f.Edges, key=lambda x: x.distToShape(Part.Vertex(mid))[0])
+        if best.distToShape(Part.Vertex(mid))[0] > 1e-6 * max(1.0, R):
+            return None
+        start = m.multVec(e.valueAt(e.FirstParameter))
+        if (best.valueAt(best.FirstParameter) - start).Length > (best.valueAt(best.LastParameter) - start).Length:
+            c = best.Curve.copy()  # reversed: the ruling joins the same ends
+            c.reverse()
+            a, b = best.ParameterRange
+            best = Part.Edge(c, c.reversedParameter(b), c.reversedParameter(a))
+        return best
+
     for e in face.Edges:
         if e.isSeam(face):
             continue
-        faces.extend(Part.makeRuledSurface(e.transformGeometry(m_hi), e.transformGeometry(m_lo)).Faces)
+        ea, eb = image(e, f_a, m_a), image(e, f_b, m_b)
+        if ea is None or eb is None:
+            ea, eb = e.transformGeometry(m_a), e.transformGeometry(m_b)
+        faces.extend(Part.makeRuledSurface(ea, eb).Faces)
     sewn = Part.Compound(faces)
     sewn.sewShape(1e-6)
     solid = Part.Solid(Part.Shell(sewn.Faces))
@@ -503,9 +534,20 @@ def _plane_caps(shape):
             axis = App.Vector(pl.Axis)
             if axis.dot(n) < 0:
                 axis = -axis
-            outer = f.OuterWire
+            # A ring cap on a periodic surface holds its seam edge twice; on a plane that edge is a slit,
+            # and every later boolean on the solid comes back empty (ops#640, rb 93). The plane's face has
+            # no seam: its boundary is the face's other edges, regrouped into wires
+            kept = [e for e in f.Edges if not e.isSeam(f)]
+            if len(kept) < len(f.Edges):
+                wires = [Part.Wire(es) for es in Part.sortEdges(kept)]
+                if not wires or any(not w.isClosed() for w in wires):
+                    continue
+                wires.sort(key=lambda w: -Part.Face(w).Area)
+                outer, holes = wires[0], wires[1:]
+            else:
+                outer = f.OuterWire
+                holes = [w for w in f.Wires if not w.isSame(outer)]
             nf = Part.Face(Part.Plane(pl.Position, axis), outer)
-            holes = [w for w in f.Wires if not w.isSame(outer)]
             if holes:
                 nf.cutHoles(holes)
             if _oriented_normal(nf).dot(n) < 0:
