@@ -34,6 +34,7 @@
 #include <BRepLib.hxx>
 #include <BRepLib_FuseEdges.hxx>
 #include <BRepLib_MakeWire.hxx>
+#include <BRepTools.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
@@ -673,6 +674,24 @@ bool wireEncirclesAxis(const TopoDS_Wire& wire, const Handle(Geom_CylindricalSur
     return (fabs(totalArc) > std::numbers::pi * radius);
 }
 
+// A merged face must stay within one period of the cylinder (2 pi in u). Merging the per-turn pieces
+// of a wall between the turns of a thread gives one helical band whose pcurves span several periods
+// and no seam edge; OCCT projects points to the principal period, finds them outside that face, and
+// its booleans then drop the face's sections (FSLC #30: a revolve across such a wall overlapped nothing).
+// Such a group is left as it was, the way ShapeUpgrade_UnifySameDomain leaves it.
+static TopoDS_Face withinOnePeriod(const TopoDS_Face& face)
+{
+    if (face.IsNull()) {
+        return face;
+    }
+    Standard_Real u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    if (u1 - u0 > 2.0 * std::numbers::pi + Precision::PConfusion()) {
+        return TopoDS_Face();
+    }
+    return face;
+}
+
 TopoDS_Face FaceTypedCylinder::buildFace(const FaceVectorType& faces) const
 {
     static TopoDS_Face dummy;
@@ -737,7 +756,7 @@ TopoDS_Face FaceTypedCylinder::buildFace(const FaceVectorType& faces) const
             }
         }
 
-        return fixFace(faceMaker.Face());
+        return withinOnePeriod(fixFace(faceMaker.Face()));
     }
     else {
         if (encirclingWires.size() != 2) {
@@ -755,7 +774,7 @@ TopoDS_Face FaceTypedCylinder::buildFace(const FaceVectorType& faces) const
                 return dummy;
             }
 
-            return fixFace(faceMaker.Face());
+            return withinOnePeriod(fixFace(faceMaker.Face()));
         }
         else {
             // Add the inner wires first, because otherwise those that cut the seam edge will fail
@@ -783,7 +802,7 @@ TopoDS_Face FaceTypedCylinder::buildFace(const FaceVectorType& faces) const
                 return dummy;
             }
 
-            return fixFace(faceMaker.Face());
+            return withinOnePeriod(fixFace(faceMaker.Face()));
         }
     }
 }
