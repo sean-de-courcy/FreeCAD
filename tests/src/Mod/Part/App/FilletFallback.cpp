@@ -26,6 +26,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -40,6 +41,7 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
@@ -51,6 +53,7 @@
 #include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <TopoDS.hxx>
@@ -58,6 +61,8 @@
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
+#include <gp_GTrsf.hxx>
+#include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
 #include <gp_XY.hxx>
 
@@ -3441,6 +3446,152 @@ TEST_F(FilletFallbackTest, concaveArcRunEndingAtAChamferCone)
     EXPECT_TRUE(exact(result, expected));
     EXPECT_EQ(result.countSubElements("Face"), baseFaces + 3);
     EXPECT_EQ(facesOn(result.getShape(), GeomAbs_Torus), 3);
+}
+
+// A round that ends under an overhang (ops#640, the replica's Case Base #103). Designed model: a
+// block with its vertical corner rounded (a cylinder R tangent to both side planes), scooped by an
+// ellipsoid below z 21.225, with an opening r 7.658 above it: a 1 mm lip hangs over the scoop. The
+// scoop's edge with the corner cylinder ends under the lip, 0.024 from each tangent line.
+namespace
+{
+constexpr double lipCorner = 11.3125;
+constexpr double lipUnderside = 21.225;
+constexpr double lipRound = 0.79375;
+
+/// The block with its corner rounded, to the height given
+TopoDS_Shape roundedCornerBlock(double height)
+{
+    TopoDS_Shape block = box(40 + lipCorner, 40 + lipCorner, height, gp_Pnt(-40, -lipCorner, 0));
+    BRepAlgoAPI_Cut corner(
+        box(lipCorner, lipCorner, height, gp_Pnt(0, -lipCorner, 0)),
+        BRepPrimAPI_MakeCylinder(lipCorner, height).Shape()
+    );
+    return BRepAlgoAPI_Cut(block, corner.Shape()).Shape();
+}
+
+/// The ellipsoid: centre (6, -6, 21.667), semi-axes 8, 8, 14
+TopoDS_Shape scoopEllipsoid()
+{
+    gp_GTrsf scale;
+    scale.SetVectorialPart(gp_Mat(8, 0, 0, 0, 8, 0, 0, 0, 14));
+    scale.SetTranslationPart(gp_XYZ(6, -6, 21.667));
+    return BRepBuilderAPI_GTransform(BRepPrimAPI_MakeSphere(1.0).Shape(), scale, true).Shape();
+}
+
+/// The scooped block: with the lip (height 22.225), or cut off at the lip's underside
+TopoDS_Shape scoopedBlock(bool lip)
+{
+    if (!lip) {
+        return BRepAlgoAPI_Cut(roundedCornerBlock(lipUnderside), scoopEllipsoid()).Shape();
+    }
+    BRepAlgoAPI_Common below(scoopEllipsoid(), box(200, 200, lipUnderside + 50, gp_Pnt(-100, -100, -50)));
+    BRepAlgoAPI_Cut scooped(roundedCornerBlock(lipUnderside + 1), below.Shape());
+    BRepAlgoAPI_Cut opened(
+        scooped.Shape(),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(6, -6, lipUnderside), gp::DZ()), 7.658, 2).Shape()
+    );
+    ShapeUpgrade_UnifySameDomain unify(opened.Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+/// The edges between the scoop's free-form face and the corner's cylinder
+std::vector<TopoShape> scoopEdges(const TopoShape& shape)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<TopoShape> edges;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        bool corner = false;
+        bool scoop = false;
+        for (const auto& face : edgeFaces(i)) {
+            BRepAdaptor_Surface surface(TopoDS::Face(face));
+            if (surface.GetType() == GeomAbs_Cylinder) {
+                corner = corner || std::abs(surface.Cylinder().Radius() - lipCorner) < 1e-9;
+            }
+            else if (surface.GetType() != GeomAbs_Plane) {
+                scoop = true;
+            }
+        }
+        if (corner && scoop) {
+            edges.push_back(shape.getSubTopoShape(TopAbs_EDGE, shape.findShape(edgeFaces.FindKey(i))));
+        }
+    }
+    return edges;
+}
+}  // namespace
+
+TEST_F(FilletFallbackTest, roundEndingUnderALipIsTheRoundBelowItCutOffByItsUnderside)
+{
+    // OCCT alone: the blend faces, and the two side planes left with open boundaries
+    TopoShape base(scoopedBlock(true), 1L);
+    ASSERT_TRUE(BRepCheck_Analyzer(base.getShape()).IsValid());
+    auto edges = scoopEdges(base);
+    ASSERT_EQ(edges.size(), 2);  // the corner cylinder's seam splits the edge
+    BRepFilletAPI_MakeFillet occt(base.getShape());
+    for (const auto& edge : edges) {
+        occt.Add(lipRound, TopoDS::Edge(edge.getShape()));
+    }
+    occt.Build();
+    ASSERT_TRUE(occt.IsDone());
+    EXPECT_FALSE(BRepCheck_Analyzer(occt.Shape()).IsValid());
+    // The control: without the lip (the block cut off at the underside's height) OCCT's round is
+    // valid, and what it removes is what the round under the lip must remove
+    TopoShape control(scoopedBlock(false), 3L);
+    TopoShape below = dressUp(control, scoopEdges(control), fillet(lipRound));
+    ASSERT_TRUE(BRepCheck_Analyzer(below.getShape()).IsValid());
+    double removed = Part::MassProperties::volume(control.getShape(), true)
+        - Part::MassProperties::volume(below.getShape(), true);
+    EXPECT_GT(removed, 16.0);
+    EXPECT_LT(removed, 17.5);
+    // Under the lip: one valid solid, the same volume gone, the lip's underside grown over it
+    {
+        // The construction's own verdict: its reason where it refuses
+        std::vector<TopoDS_Shape> shapes;
+        for (const auto& edge : edges) {
+            shapes.push_back(edge.getShape());
+        }
+        FF::Construction construction;
+        std::string reason;
+        EXPECT_TRUE(FF::construct(base.getShape(), shapes, fillet(lipRound), construction, &reason))
+            << reason;
+    }
+    TopoShape round = dressUp(base, edges, fillet(lipRound));
+    EXPECT_TRUE(BRepCheck_Analyzer(round.getShape()).IsValid());
+    EXPECT_EQ(count(round.getShape(), TopAbs_SOLID), 1);
+    double gone = Part::MassProperties::volume(base.getShape(), true)
+        - Part::MassProperties::volume(round.getShape(), true);
+    // Both are differences of whole-body volumes (56 500 mm3, good to about 1e-8 of it)
+    EXPECT_NEAR(gone, removed, 2e-3);
+    // Onshape's own result on this model (oracle 17, Q-LIP, facts LP0-LP1): its round under the lip
+    // is the round without the lip cut off at z 21.225; the lip's underside grows from 8.100316
+    // to 9.120288, and two slivers of the corner cylinder, 0.474914 each, are split off in the
+    // lip's band. (Its dV is -16.72 +- 0.01; OCCT's own blend, with or without the lip, removes
+    // 16.665: the round's shape is OCCT's, not this construction's)
+    int slivers = 0;
+    bool underside = false;
+    for (TopExp_Explorer it(round.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(it.Current(), props);
+        if (surface.GetType() == GeomAbs_Cylinder
+            && std::abs(surface.Cylinder().Radius() - lipCorner) < 1e-9
+            && std::abs(props.Mass() - 0.474914) < 1e-3) {
+            ++slivers;
+        }
+        if (surface.GetType() == GeomAbs_Plane && std::abs(props.Mass() - 9.120288) < 2e-3
+            && std::abs(props.CentreOfMass().Z() - lipUnderside) < 1e-7) {
+            underside = true;
+        }
+    }
+    EXPECT_EQ(slivers, 2);
+    EXPECT_TRUE(underside);
+    // Four blend faces (the seam splits the middle one) and the corner cylinder's two slivers
+    // above them, split off; no step under the lip (the cap merges into the underside)
+    EXPECT_EQ(count(round.getShape(), TopAbs_FACE), count(base.getShape(), TopAbs_FACE) + 6);
+    EXPECT_TRUE(FF::thinFace(round.getShape(), base.getShape()).IsNull());
+    // The result is named
+    EXPECT_FALSE(elementNames(round).empty());
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
