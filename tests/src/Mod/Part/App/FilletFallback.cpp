@@ -2622,17 +2622,6 @@ TEST_F(FilletFallbackTest, chamfersARimEndingInCuspsAsOnshape)
     }
 }
 
-TEST_F(FilletFallbackTest, refusesARoundOfARimEndingInCusps)
-{
-    // Onshape rounds it too (CU5: a torus face cut off by the walls, -2.922055), but the
-    // construction's cusp end is a chamfer's only: OCCT's error stands (debt)
-    TopoShape base(cuspedSlot(gp_Dir(0, 1, 0)), 1L);
-    auto rim = cuspedRim(base);
-    std::string reason;
-    EXPECT_TRUE(forced(base, rim, fillet(1), &reason).isNull());
-    EXPECT_NE(reason.find("an end face parallel to the edge"), std::string::npos) << reason;
-}
-
 TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
 {
     // Case Base #108: the chamfer 2 of the notch's rim (both pieces), down to the floor: the
@@ -3597,6 +3586,33 @@ TEST_F(FilletFallbackTest, roundEndingUnderALipIsTheRoundBelowItCutOffByItsUnder
     EXPECT_TRUE(FF::thinFace(round.getShape(), base.getShape()).IsNull());
     // The result is named
     EXPECT_FALSE(elementNames(round).empty());
+}
+
+// A round on the rim that ends in cusps, CU5's own figures (oracle 17 Q-CUSP, notes/onshape-facts.md
+// "Case Base #76 designed check"). The construction refused it ("an end face parallel to the edge")
+// until the line's later picks built it (batch 14c, b14f)
+TEST_F(FilletFallbackTest, roundsARimEndingInCuspsAsOnshape)
+{
+    // CU5: r 1 on the rim: dV -2.922055 (evVolume, ~1.5e-4), dA -5.057250, 10 -> 11 faces, one torus
+    // face 20.915168, cut off by the slot's wall planes y = +-5
+    for (const gp_Dir& seam : {gp_Dir(0, 0, -1), gp_Dir(0, 1, 0)}) {
+        TopoShape base(cuspedSlot(seam), 1L);
+        auto rim = cuspedRim(base);
+        std::string reason;
+        TopoShape result = forced(base, rim, fillet(1), &reason);
+        ASSERT_FALSE(result.isNull()) << reason;
+        EXPECT_NEAR(volume(base.getShape()) - volume(result.getShape()), 2.922055, 3e-4);
+        EXPECT_NEAR(area(base.getShape()) - area(result.getShape()), 5.057250, 1e-5);
+        EXPECT_EQ(result.countSubElements("Face"), base.countSubElements("Face") + 1);
+        int tori = 0;
+        for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            if (surfaceType(it.Current()) == GeomAbs_Torus) {
+                ++tori;
+                EXPECT_NEAR(area(it.Current()), 20.915168, 1e-5);
+            }
+        }
+        EXPECT_EQ(tori, 1);
+    }
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
