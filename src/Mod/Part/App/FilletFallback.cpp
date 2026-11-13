@@ -3382,6 +3382,11 @@ Tool tightTool(
     if (data.closed) {
         refuse("a closed wall arc tighter than the round");
     }
+    // The patch spans the arc through the short-way bisector of its two ends' normals: past a half
+    // circle (a keyhole's lobe) it would land on the other side, in the material (review)
+    if (std::abs(data.last - data.first) >= pi - 1e-9) {
+        refuse("a wall arc tighter than the round spanning a half circle or more");
+    }
     PlanWall walls[2];
     for (int i = 0; i < 2; ++i) {
         if (ends[i].kind != VertexClass::TangentContinuation) {
@@ -3736,6 +3741,9 @@ Tool tightTool(
     tool.source = data.edge;
     tool.cut = true;
     tool.measured = true;
+    // Until the measured stage replaces it: the overlap tolerances of the inclusion and exclusion
+    // past the limit scale with it (review)
+    tool.volume = volumeOf(solid);
     tool.wedge = wedge;
     return tool;
 }
