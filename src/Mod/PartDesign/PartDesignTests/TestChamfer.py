@@ -509,8 +509,9 @@ class TestChamfer(unittest.TestCase):
         }
         return body, base, edges
 
-    def _assertHole(self, chamfer, x_min, x_max, y_max):
-        # The bottom face's hole: its corners at x_min and x_max, |y| = y_max
+    def _assertHole(self, chamfer, x_min, x_max, y_max, sharp_y=None):
+        # The bottom face's hole: its corners at x_min and x_max, |y| = y_max. With sharp_y, the end
+        # at x_min isn't chamfered: the side chamfers stop on its wall, which adds corners at |y| = sharp_y
         self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
         shape = chamfer.Shape
         self.assertTrue(shape.isValid())
@@ -522,11 +523,16 @@ class TestChamfer(unittest.TestCase):
         ]
         self.assertEqual(len(bottoms), 1)
         hole = [v.Point for v in bottoms[0].Vertexes if 1 < v.Point.x < 19 and abs(v.Point.y) < 9]
-        self.assertEqual(len(hole), 4)
+        self.assertEqual(len(hole), 4 if sharp_y is None else 6)
         self.assertAlmostEqual(min(p.x for p in hole), x_min, places=7)
         self.assertAlmostEqual(max(p.x for p in hole), x_max, places=7)
+        sharp = [p for p in hole if sharp_y is not None and abs(abs(p.y) - sharp_y) < 1e-7]
+        self.assertEqual(len(sharp), 0 if sharp_y is None else 2)
+        for p in sharp:
+            self.assertAlmostEqual(p.x, x_min, places=7)
         for p in hole:
-            self.assertAlmostEqual(abs(p.y), y_max, places=7)
+            if p not in sharp:
+                self.assertAlmostEqual(abs(p.y), y_max, places=7)
 
     def testChamferChainSquareEdgeFirst(self):
         # A square end edge first: the 96-degree sides get 0.5 / tan 48 = 0.450202
@@ -556,7 +562,7 @@ class TestChamfer(unittest.TestCase):
         chamfer = self._add_chamfer(body, base, edges, 0.5)
         chamfer.Base = (base, [e["side+"], e["end15"], e["side-"]])
         self.Doc.recompute()
-        self._assertHole(chamfer, 5, 15 + 0.5 * math.tan(math.radians(48)), 3.5)
+        self._assertHole(chamfer, 5, 15 + 0.5 * math.tan(math.radians(48)), 3.5, sharp_y=3.5 - 0.5)
 
     def testChamferChainBandOverAHoleKeepsTheWidth(self):
         # Sides leaning in by 20 degrees (110-degree bottom edges) and a tapered side first: the
@@ -576,6 +582,9 @@ class TestChamfer(unittest.TestCase):
         self.assertTrue(shape.isValid())
         self.assertEqual(len(shape.Solids), 1)
         self.assertFalse(shape.isInside(V(5 - 0.62, 0, 0.2), 1e-9, True))
+        # The ends came out at 0.5, not 0.714: 0.55 + 0.01 from the end edge is still material
+        self.assertTrue(shape.isInside(V(5 - 0.55, 1, 0.01), 1e-9, True))
+        self.assertTrue(shape.isInside(V(15 + 0.55, 1, 0.01), 1e-9, True))
 
     def tearDown(self):
         # closing doc
