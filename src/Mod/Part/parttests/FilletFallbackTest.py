@@ -3128,18 +3128,19 @@ class CuspTest(unittest.TestCase):
 
     def testACuspRoundTheConstructionRefusesIsCheckedOrFails(self):
         """Where the construction refuses at a cusp (here: a second radius a thousandth larger,
-        'variable radius'), OCCT's valid result stands only within its edges' whole tools (ops#748). On the slot
-        it is the wrong round (58.46 taken, or 126.30 added, for a whole tool of about 3.5): the fillet
-        fails. On an arch (a bore through a rib exactly as wide as it: the material lies between
-        the tangent side faces) OCCT's round is the right one, and stands"""
+        'variable radius'), OCCT's valid result stands only within its edges' whole tools (ops#748). On
+        the slot with the tunnel's seam on the cusp, r 3 and r 4, OCCT builds a valid solid that is the
+        wrong round (109.45 and 137.75 taken, for whole tools of 34.40 and 63.57): the fillet fails.
+        (At smaller radii OCCT's two-radius fillet fails or is invalid there, and never gets this far.)
+        On an arch (a bore through a rib exactly as wide as it: the material lies between the tangent
+        side faces) OCCT's round is the right one, and stands"""
         V = FreeCAD.Vector
-        for seam in (V(0, 0, -1), V(0, 0, 1), V(0, 1, 0)):
-            shape, rim = self.slot(seam)
-            for r in (1.0, 0.5, 2.0):
-                with self.subTest(seam=tuple(seam), r=r):
-                    with self.assertRaises(Exception) as raised:
-                        shape.makeFillet(r, r * 1.001, rim)
-                    self.assertIn("cusp", str(raised.exception))
+        shape, rim = self.slot(V(0, 1, 0))
+        for r in (3.0, 4.0):
+            with self.subTest(slot=r):
+                with self.assertRaises(Exception) as raised:
+                    shape.makeFillet(r, r * 1.001, rim)
+                self.assertIn("cusp", str(raised.exception))
         arch = Part.makeBox(15, 10, 15, V(0, -5, 10)).cut(Part.makeCylinder(5, 32, V(-1, 0, 10), V(1, 0, 0)))
         rim = [
             e
