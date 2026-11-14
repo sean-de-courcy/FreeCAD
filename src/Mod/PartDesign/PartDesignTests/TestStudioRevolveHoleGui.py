@@ -129,6 +129,38 @@ class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
         self.assertAlmostEqual(self.volume("A"), QA + math.pi * 36 * 6, places=3)
         self.assertAlmostEqual(self.volume("B"), QA, places=4)
 
+    def testGrooveCutsThePartItsRingMeets(self):
+        """ops#791: a 4 x 3 profile in B on the XZ plane at u 8..12, v 6..9, grooved about the
+        sketch's vertical axis (global z) picked in the panel: a ring r 8..12, z 6..9 around the
+        origin, whose quarter in x, y >= 0 lies inside A. The Groove has no tool until the axis
+        is picked; then it cuts the part the ring meets, A, and not B or the active part (it
+        failed "No merge scope selected": the part was looked for only when the dialog opened).
+        A = QA - pi (144 - 64) * 3 / 4."""
+        body = self.body("B")
+        s = body.newObject("Sketcher::SketchObject", "RingSk")
+        s.AttachmentSupport = [(body.Origin.OriginFeatures[4], "")]
+        s.MapMode = "FlatFace"
+        pts = [V(8, 6, 0), V(12, 6, 0), V(12, 9, 0), V(8, 9, 0)]
+        for i in range(4):
+            s.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Groove", s, "PartDesign::Groove", "B")
+        axis = self.visible(QtWidgets.QComboBox, "axis")
+        self.assertIsNotNone(axis, "no axis box")
+        texts = [axis.itemText(i) for i in range(axis.count())]
+        vertical = [i for i, t in enumerate(texts) if "Vertical" in t]
+        self.assertTrue(vertical, texts)
+        axis.setCurrentIndex(vertical[0])
+        axis.activated.emit(vertical[0])  # a click's signal
+        pump(0.5)
+        self.assertTrue(waitFor(lambda: PartDesign.studioScopeIds(owner) == ["A"]),
+                        PartDesign.studioScopeIds(owner))
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["A"])
+        self.assertAlmostEqual(self.volume("A"), QA - math.pi * 80 * 3 / 4, places=3)
+        self.assertAlmostEqual(self.volume("B"), QA, places=4)
+
     # ------------------------------------------------------- the per-Body path's freeze
     def testThroughAllInABodyWithoutBaseReturns(self):
         """The per-Body path (a studio with no list and StudioListOnFirstUse off, the test hook):

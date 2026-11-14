@@ -398,8 +398,14 @@ public:
             toolChanged = owner->getDocument()->signalChangedObject.connect(
                 [this](const App::DocumentObject& obj, const App::Property& prop) {
                     auto addSub = freecad_cast<const PartDesign::FeatureAddSub*>(&obj);
-                    if (live && !deciding && addSub && &prop == &addSub->AddSubShape
-                        && &obj == ownerT.getObject()) {
+                    if (!live || deciding || !addSub || &obj != ownerT.getObject()) {
+                        return;
+                    }
+                    // A cut with no part yet fails before it builds its tool, so its tool never
+                    // changes: any change of it (its axis picked, its profile) is the cue (ops#791)
+                    if (&prop == &addSub->AddSubShape
+                        || (operationOf(addSub) == "Subtraction"
+                            && PartDesign::studioScopeIds(addSub).empty())) {
                         scheduleDecision();
                     }
                 }
@@ -732,6 +738,22 @@ private:
         const bool isNew = isNewResult(owner);
         const std::string ownerCmd = Gui::Command::getObjectCmd(owner);
         std::vector<std::string> commands;
+        if (!isNew && operationOf(owner) == "Subtraction") {
+            // A cut (a Groove or Hole whose tool came after its dialog opened, ops#791): the one
+            // part its tool meets, else none ("No merge scope selected"), never a new part
+            std::vector<std::string> ids;
+            if (touched.size() == 1) {
+                ids.push_back(PartDesign::studioPartId(touched.front()));
+            }
+            if (PartDesign::studioScopeIds(owner) == ids) {
+                return;
+            }
+            commands.push_back("PartDesign.studioSetScopeIds(" + ownerCmd + ", " + pyList(ids) + ")");
+            run(commands);
+            recompute();
+            refresh();
+            return;
+        }
         if (touched.size() != 1) {
             if (isNew) {
                 return;
