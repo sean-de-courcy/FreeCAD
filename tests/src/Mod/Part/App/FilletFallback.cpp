@@ -4020,6 +4020,35 @@ TEST_F(FilletFallbackTest, aGripRimsRoundsAreMeasuredOnTheRoundsAndAWrongRoundIs
     }
     ASSERT_TRUE(dropped);
     EXPECT_GT(std::abs(underPlane(oneMissing, height) - closedForm), 2 * allowed);
+
+    // The builder's verdict on those measures (rimVolumeAccepted()), as on FSLC #50 in the replica:
+    // the base's vertices stand 1.18e-6 beside their edges' crossings, so the slack is 0.3465, the
+    // body's volume 9364.64, and the bodies' measure 0.0194 short of a right build's
+    const double slack = 0.3465;
+    const double whole = 9364.64;
+    const double bodies = closedForm - 0.0194;
+    const double tooWide = underPlane(oneWider, height);
+    const double fewer = underPlane(oneMissing, height);
+    // within the slack the bodies' measure alone tells nothing: the rounds' own decides
+    EXPECT_TRUE(FF::rimVolumeAccepted(closedForm, slack, whole, bodies, &right));
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, slack, whole, bodies, &tooWide));
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, slack, whole, bodies, &fewer));
+    // and not by the bodies' measure standing right beside wrong rounds
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, slack, whole, closedForm + 2 * allowed, &tooWide));
+    // A wrong wall under right rounds: refused beyond the slack and OCCT's accuracy on the body
+    const double coarse = FF::rimVolumeCoarse(closedForm, slack, whole);
+    EXPECT_NEAR(coarse, 1e-6 * whole + allowed + slack, 1e-12);
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, slack, whole, closedForm - 1.01 * coarse, &right));
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, slack, whole, closedForm + 1.01 * coarse, &right));
+    // (a known limit: under slipped vertices a wall wrong by less than that passes this check; the
+    // slack is the base's own error, which only closing its gaps removes)
+    EXPECT_TRUE(FF::rimVolumeAccepted(closedForm, slack, whole, closedForm - 0.9 * coarse, &right));
+    // On a base without slipped vertices (the seed: slack 1.2e-7) a wall wrong by 0.011 is refused
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, 1.2e-7, whole, closedForm - 0.011, &right));
+    EXPECT_TRUE(FF::rimVolumeAccepted(closedForm, 1.2e-7, whole, closedForm - 0.0003, &right));
+    // Without a measure of the rounds (a tight wall arc): the bodies' within the slack, as before
+    EXPECT_TRUE(FF::rimVolumeAccepted(closedForm, 1e-4, whole, closedForm - 1.2e-4, nullptr));
+    EXPECT_FALSE(FF::rimVolumeAccepted(closedForm, 1e-4, whole, closedForm - 2e-4, nullptr));
 }
 
 TEST_F(FilletFallbackTest, aRimVertexBesideItsEdgesCrossingWithinItsToleranceIsFollowed)

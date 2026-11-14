@@ -10726,7 +10726,14 @@ std::vector<RimLoop> rimLoops(
             // Within the vertex's own tolerance of both edges it stands up to about twice that
             // from their crossing (a pad's Boolean leaves 1.3e-6: FSLC #50's 458 root corners
             // stand 1.18e-6 off), and no vertex is followed further than 100 rim tolerances
-            const double own = std::min(2 * BRep_Tool::Tolerance(corner.vertex), 100 * rimTolerance);
+            // (not beside a wall arc tighter than the round: its rounds have no measure of their
+            // own, and the removed volume's slack, which grows with this, would hide a wrong one)
+            const bool measured = std::none_of(loop.rounds.begin(), loop.rounds.end(), [](const RimRound& round) {
+                return static_cast<bool>(round.tight);
+            });
+            const double own = measured
+                ? std::min(2 * BRep_Tool::Tolerance(corner.vertex), 100 * rimTolerance)
+                : 0.0;
             if (!(moved <= std::max(10 * rimTolerance, own))) {
                 refuse("a rim vertex away from where its edges cross");
             }
@@ -12500,46 +12507,55 @@ TopoDS_Shape rimRounds(
                                   << describe(expected.volume) << ", slack "
                                   << describe(expected.volumeSlack) << ", band slack "
                                   << describe(expected.bandSlack));
-    // The slack is what the base's own measure may be off where its vertices stand beside their
-    // edges' crossings: wide enough there to hide a wrong round. So within it the changed faces'
-    // measure decides only where it agrees without the slack. Else the rounds' own measure
-    // decides, without the slack too (it follows the plan, not the base's vertices), and only
-    // while a measure that sees every face (the walls too) agrees within OCCT's accuracy on the
-    // whole body and the slack: the rounds' measure alone is blind to a wrong wall
+    // The changed faces' measure where it agrees without the slack; else the rounds' own, under
+    // the bodies' (rimVolumeAccepted())
     const double strict = 2e-4 * expected.volume;
-    double allowed = strict + expected.volumeSlack;
     if (std::abs(removed - expected.volume) > strict) {
         const double whole = volumeOf(base);
-        const double coarse = 1e-6 * std::abs(whole) + allowed;
+        const double coarse = rimVolumeCoarse(expected.volume, expected.volumeSlack, whole);
         double byBodies = removed;
-        if (std::abs(byBodies - expected.volume) > coarse) {
+        double byRounds = 0.0;
+        const bool measured = rimRoundsVolume(loops, byRounds);
+        if (std::abs(byBodies - expected.volume) > (measured ? coarse : strict + expected.volumeSlack)) {
             byBodies = whole - volumeOf(solid);
         }
-        double byRounds = 0.0;
-        if (rimRoundsVolume(loops, byRounds)) {
-            FC_LOG("rim rounds: removed " << describe(byRounds) << " by the rounds, the bodies' "
-                                          << describe(byBodies) << " within "
-                                          << describe(coarse));
-            if (std::abs(byBodies - expected.volume) > coarse) {
-                refuse("the rim rounds removed " + describe(byBodies) + " instead of "
-                       + describe(expected.volume));
-            }
-            removed = byRounds;
-            allowed = strict;
+        FC_LOG("rim rounds: removed " << (measured ? describe(byRounds) + " by the rounds, " : std::string())
+                                      << describe(byBodies) << " by the bodies, within "
+                                      << describe(coarse));
+        if (!rimVolumeAccepted(
+                expected.volume,
+                expected.volumeSlack,
+                whole,
+                byBodies,
+                measured ? &byRounds : nullptr
+            )) {
+            const bool walls = measured && std::abs(byRounds - expected.volume) <= strict;
+            refuse("the rim rounds removed " + describe(measured && !walls ? byRounds : byBodies)
+                   + " instead of " + describe(expected.volume));
         }
-        else if (std::abs(removed - expected.volume) > allowed) {
-            removed = whole - volumeOf(solid);
-            FC_LOG("rim rounds: removed " << describe(removed) << " by the whole bodies");
-        }
-    }
-    if (std::abs(removed - expected.volume) > allowed) {
-        refuse("the rim rounds removed " + describe(removed) + " instead of "
-               + describe(expected.volume));
     }
     return solid;
 }
 
 }  // namespace
+
+double rimVolumeCoarse(double expected, double slack, double whole)
+{
+    return 1e-6 * std::abs(whole) + 2e-4 * expected + slack;
+}
+
+bool rimVolumeAccepted(double expected, double slack, double whole, double bodies, const double* rounds)
+{
+    const double strict = 2e-4 * expected;
+    if (std::abs(bodies - expected) <= strict) {
+        return true;
+    }
+    if (!rounds) {
+        return std::abs(bodies - expected) <= strict + slack;
+    }
+    return std::abs(*rounds - expected) <= strict
+        && std::abs(bodies - expected) <= rimVolumeCoarse(expected, slack, whole);
+}
 
 bool roundUnderPlane(
     const TopoDS_Face& round,
