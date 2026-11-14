@@ -30,15 +30,19 @@ namespace PartDesign
  */
 PartDesignExport void registerStudioVariables();
 
-/** moveInStudio()'s part: rows (and their steps) moved in studio's history, before being the
- * sequence before the move. A variable that followed a moved row now follows the nearest row
+/// The names of studio's rows in history order (studioSequence()): a move's before
+PartDesignExport std::vector<std::string> studioRowNames(App::Document* doc, App::Part* studio);
+
+/** A drag's part (moveInStudio(), studioMove()): rows (and their whole entries) moved in
+ * studio's history, before being studioRowNames() before the move (names: a move may delete
+ * steps). A variable that followed a moved row now follows the nearest row
  * above it that stayed, so it keeps its place (Onshape's Variable doesn't move with its
  * neighbour); then every row that uses a placed variable's name is touched, so a row dragged
  * above or below a variable is checked again at the next recompute
  */
 PartDesignExport void keepVariablePlaces(App::Document* doc,
                                          App::Part* studio,
-                                         const std::vector<App::DocumentObject*>& before,
+                                         const std::vector<std::string>& before,
                                          const std::vector<App::DocumentObject*>& rows);
 
 /// The row of its part studio's history the variable name of holder follows, or null at the start

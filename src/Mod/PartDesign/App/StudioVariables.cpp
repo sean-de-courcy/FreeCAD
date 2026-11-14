@@ -41,8 +41,37 @@ App::Part* studioOfSet(const App::DocumentObject* holder)
     return App::Part::getPartOfObject(holder, true);
 }
 
-/// Each row's index in the studio's history. While a document recomputes, the indexes of each
-/// studio are read once and kept until it ends (every expression of every row is checked)
+/// The list entries of studio that are no rows of studioSequence() (studio features, "owners"),
+/// each with its steps: an owner acts where its steps are
+std::vector<std::pair<App::DocumentObject*, std::vector<Feature*>>> ownersOf(App::Document* doc,
+                                                                            App::Part* studio)
+{
+    std::vector<std::pair<App::DocumentObject*, std::vector<Feature*>>> owners;
+    if (const StudioList* list = StudioList::of(doc, studio)) {
+        for (App::DocumentObject* entry : list->Entries.getValues()) {
+            if (entry && isStudioOwner(entry)) {
+                owners.emplace_back(entry, StudioList::stepsOf(entry));
+            }
+        }
+    }
+    return owners;
+}
+
+/// The names of the studio's rows, in history order
+std::vector<std::string> rowNames(App::Document* doc, App::Part* studio)
+{
+    std::vector<std::string> names;
+    for (App::DocumentObject* row : studioSequence(doc, studio)) {
+        if (const char* name = row->getNameInDocument()) {
+            names.emplace_back(name);
+        }
+    }
+    return names;
+}
+
+/// Each row's index in the studio's history, and each owner's (its first step's: the owner is
+/// above whatever follows its place). While a document recomputes, the indexes of each studio are
+/// read once and kept until it ends (every expression of every row is checked)
 class RowIndex
 {
 public:
@@ -82,6 +111,18 @@ private:
         for (std::size_t i = 0; i < sequence.size(); ++i) {
             index.emplace(sequence[i], i);
         }
+        for (const auto& [owner, steps] : ownersOf(doc, studio)) {
+            std::size_t first = sequence.size();
+            for (Feature* step : steps) {
+                auto at = index.find(step);
+                if (at != index.end() && at->second < first) {
+                    first = at->second;
+                }
+            }
+            if (first < sequence.size()) {
+                index.emplace(owner, first);
+            }
+        }
         return index;
     }
 };
@@ -94,8 +135,8 @@ Place placeRow(const App::DocumentObject* user, const App::DocumentObject* holde
     }
     App::Document* doc = holder->getDocument();
     const auto& index = RowIndex::of(doc, studio);
-    // Only rows are placed: a non-row (a set's own expression, an object outside the studio)
-    // is never checked, not even against a lost place
+    // Only rows (and owners) are placed: a non-row (a set's own expression, an object outside the
+    // studio) is never checked, not even against a lost place
     auto userAt = index.find(user);
     if (userAt == index.end()) {
         return Place::Unknown;
@@ -119,33 +160,191 @@ bool mayPlace(const App::DocumentObject* holder)
         && !doc->testStatus(App::Document::Importing) && !doc->isPerformingTransaction();
 }
 
-/// Touches the rows of sequence whose expressions use a variable named name of any set: a place
-/// that moved (or a variable now shadowing an outer one) is checked again at the next recompute,
-/// also by rows that use the outer variable and so don't depend on holder
-void touchUsersOf(const std::vector<App::DocumentObject*>& sequence, const std::string& name)
+/// Whether obj's expressions use a variable named name of any set
+bool usesName(const App::DocumentObject* obj, const std::string& name)
 {
-    for (App::DocumentObject* row : sequence) {
-        bool uses = false;
-        for (const auto& [path, expression] : row->ExpressionEngine.getExpressions()) {
-            (void)path;
-            if (!expression) {
+    for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
+        (void)path;
+        if (!expression) {
+            continue;
+        }
+        for (const auto& [id, hidden] : expression->getIdentifiers()) {
+            (void)hidden;
+            const App::DocumentObject* holder = id.getDocumentObject();
+            if (holder && holder->isDerivedFrom<App::VarSet>() && id.getPropertyName() == name) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Touches the studio's rows and owners whose expressions use a variable named name of any set:
+/// a place that moved (or a variable now shadowing an outer one) is checked again at the next
+/// recompute, also by rows that use the outer variable and so don't depend on its set
+void touchUsersOf(App::Document* doc, App::Part* studio, const std::string& name)
+{
+    std::vector<App::DocumentObject*> users = studioSequence(doc, studio);
+    for (const auto& [owner, steps] : ownersOf(doc, studio)) {
+        (void)steps;
+        users.push_back(owner);
+    }
+    for (App::DocumentObject* user : users) {
+        if (!user->isTouched() && usesName(user, name)) {
+            user->touch();
+        }
+    }
+}
+
+/// The studios of doc whose sets have saved places
+std::unordered_set<App::Part*> placedStudios(App::Document* doc)
+{
+    std::unordered_set<App::Part*> studios;
+    for (App::DocumentObject* obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        App::Part* studio = studioOfSet(obj);
+        if (studio && !static_cast<App::VarSet*>(obj)->VariablePositions.getValues().empty()) {
+            studios.insert(studio);
+        }
+    }
+    return studios;
+}
+
+using Snapshot = std::unordered_map<const App::Part*, std::vector<std::string>>;
+
+/// Each placed studio's row names at the end of the last recompute, per document: the history a
+/// delete through any path (a Body's removeObject first, the list's reconcile) left behind
+std::unordered_map<const App::Document*, Snapshot>& snapshots()
+{
+    static std::unordered_map<const App::Document*, Snapshot> all;
+    return all;
+}
+
+/** Keeps the places of studio's variables whose row leaves its place: a row of leaving (deleted
+ * or moved), or a row no longer in the history. Such a variable now follows the nearest row
+ * above it in before (the row names before the change) that stays in place, or the start: it
+ * keeps its place, as Onshape's Variable feature stays where it is. A row unknown to before is
+ * left alone (its users say the place is lost)
+ */
+void keepPlaces(App::Document* doc,
+                App::Part* studio,
+                const std::vector<std::string>& before,
+                const std::unordered_set<std::string>& leaving)
+{
+    std::unordered_set<std::string> staying;
+    for (App::DocumentObject* row : studioSequence(doc, studio)) {
+        const char* name = row->getNameInDocument();
+        if (name && leaving.count(name) == 0) {
+            staying.insert(name);
+        }
+    }
+    std::unordered_map<std::string, std::size_t> indexOfName;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        indexOfName.emplace(before[i], i);
+    }
+    for (App::DocumentObject* obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        if (studioOfSet(obj) != studio) {
+            continue;
+        }
+        const auto values = static_cast<App::VarSet*>(obj)->VariablePositions.getValues();  // a copy
+        for (const auto& [name, anchor] : values) {
+            if (anchor == App::VariablePosition::atStart || staying.count(anchor) != 0) {
                 continue;
             }
-            for (const auto& [id, hidden] : expression->getIdentifiers()) {
-                (void)hidden;
-                const App::DocumentObject* obj = id.getDocumentObject();
-                if (obj && obj->isDerivedFrom<App::VarSet>() && id.getPropertyName() == name) {
-                    uses = true;
+            auto at = indexOfName.find(anchor);
+            if (at == indexOfName.end()) {
+                continue;
+            }
+            std::string above;
+            for (std::size_t i = at->second; i-- > 0;) {
+                if (staying.count(before[i]) != 0) {
+                    above = before[i];
                     break;
                 }
             }
-            if (uses) {
-                break;
+            App::VariablePosition::setAnchor(obj, name, above);
+        }
+    }
+}
+
+/// The names of row's whole entry: row, its steps, and (a step) its owner and the owner's steps
+void addEntryNames(App::Document* doc,
+                   App::Part* studio,
+                   const App::DocumentObject* row,
+                   std::unordered_set<std::string>& names)
+{
+    if (const char* name = row->getNameInDocument()) {
+        names.insert(name);
+    }
+    for (Feature* step : StudioList::stepsOf(row)) {
+        names.insert(step->getNameInDocument());
+    }
+    for (const auto& [owner, steps] : ownersOf(doc, studio)) {
+        if (std::find(steps.begin(), steps.end(), row) != steps.end()) {
+            names.insert(owner->getNameInDocument());
+            for (Feature* step : steps) {
+                names.insert(step->getNameInDocument());
             }
         }
-        if (uses && !row->isTouched()) {
-            row->touch();
+    }
+}
+
+/// The variables that follow a deleted row now follow the row above it. Runs before the studio's
+/// list drops a deleted owner (module start-up's order), so an owner's steps go with it. A delete
+/// that took the row out of the history first (a Body's removeObject, the list's reconcile) is
+/// repaired before the next recompute instead (repairBeforeRecompute())
+void followDeletedRow(const App::DocumentObject& deleted)
+{
+    App::Document* doc = deleted.getDocument();
+    if (!doc || !deleted.getNameInDocument() || doc->isPerformingTransaction()
+        || doc->testStatus(App::Document::Restoring)) {
+        return;
+    }
+    if (deleted.isDerivedFrom<App::Part>()) {
+        auto it = snapshots().find(doc);
+        if (it != snapshots().end()) {
+            it->second.erase(static_cast<const App::Part*>(&deleted));
         }
+    }
+    for (App::Part* studio : placedStudios(doc)) {
+        if (studio == &deleted) {
+            continue;
+        }
+        std::unordered_set<std::string> leaving;
+        addEntryNames(doc, studio, &deleted, leaving);
+        keepPlaces(doc, studio, rowNames(doc, studio), leaving);
+    }
+}
+
+/// Before a recompute: a variable whose row left the history since the last one follows the
+/// nearest row above it that stayed (the last recompute's snapshot)
+void repairBeforeRecompute(const App::Document& constDoc)
+{
+    RowIndex::forget();
+    auto doc = const_cast<App::Document*>(&constDoc);
+    if (doc->isPerformingTransaction() || doc->testStatus(App::Document::Restoring)) {
+        return;
+    }
+    auto it = snapshots().find(doc);
+    if (it == snapshots().end()) {
+        return;
+    }
+    for (App::Part* studio : placedStudios(doc)) {
+        auto snap = it->second.find(studio);
+        if (snap != it->second.end()) {
+            keepPlaces(doc, studio, snap->second, {});
+        }
+    }
+}
+
+/// After a recompute: the placed studios' histories, for the next repair
+void snapshotAfterRecompute(const App::Document& constDoc)
+{
+    RowIndex::forget();
+    auto doc = const_cast<App::Document*>(&constDoc);
+    auto& mine = snapshots()[doc];
+    mine.clear();
+    for (App::Part* studio : placedStudios(doc)) {
+        mine.emplace(studio, rowNames(doc, studio));
     }
 }
 
@@ -157,10 +356,11 @@ void placeAdded(const App::Property& prop)
     if (!studio || !mayPlace(holder) || !prop.getName()) {
         return;
     }
-    const auto sequence = studioSequence(holder->getDocument(), studio);
-    App::DocumentObject* after = studioBarAfter(sequence);
+    App::Document* doc = holder->getDocument();
+    App::DocumentObject* after = studioBarAfter(studioSequence(doc, studio));
     App::VariablePosition::setAnchor(holder, prop.getName(), after ? after->getNameInDocument() : "");
-    touchUsersOf(sequence, prop.getName());
+    touchUsersOf(doc, studio, prop.getName());
+    snapshots()[doc][studio] = rowNames(doc, studio);
 }
 
 void placeRenamed(const App::Property& prop, const char* oldName)
@@ -185,76 +385,6 @@ void placeRemoved(const App::Property& prop)
     App::VariablePosition::clearAnchor(holder, prop.getName());
 }
 
-/// The variables of studio's sets that follow a row of leaving (rows that go away or move) now
-/// follow the nearest row above it in sequence (the history before the change) that stays: the
-/// variable keeps its place, as Onshape's Variable feature stays where it is. Returns the names of
-/// the variables whose place changed
-std::vector<std::string> keepPlaces(App::Document* doc,
-                                    App::Part* studio,
-                                    const std::vector<App::DocumentObject*>& sequence,
-                                    const std::unordered_set<const App::DocumentObject*>& leaving)
-{
-    std::vector<std::string> changed;
-    std::unordered_map<std::string, std::size_t> indexOfName;
-    for (std::size_t i = 0; i < sequence.size(); ++i) {
-        if (const char* name = sequence[i]->getNameInDocument()) {
-            indexOfName.emplace(name, i);
-        }
-    }
-    for (App::DocumentObject* obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-        if (studioOfSet(obj) != studio || leaving.count(obj) != 0) {
-            continue;
-        }
-        auto set = static_cast<App::VarSet*>(obj);
-        const auto values = set->VariablePositions.getValues();  // a copy: setAnchor changes it
-        for (const auto& [name, anchor] : values) {
-            auto at = indexOfName.find(anchor);
-            if (at == indexOfName.end() || leaving.count(sequence[at->second]) == 0) {
-                continue;
-            }
-            std::string above;
-            for (std::size_t i = at->second; i-- > 0;) {
-                if (leaving.count(sequence[i]) == 0) {
-                    above = sequence[i]->getNameInDocument();
-                    break;
-                }
-            }
-            App::VariablePosition::setAnchor(obj, name, above);
-            changed.push_back(name);
-        }
-    }
-    return changed;
-}
-
-/// The variables that follow a deleted row now follow the row above it. Runs before the studio's
-/// list drops a deleted owner (module start-up's order), so an owner's steps go with it
-void followDeletedRow(const App::DocumentObject& deleted)
-{
-    App::Document* doc = deleted.getDocument();
-    if (!doc || !deleted.getNameInDocument() || doc->isPerformingTransaction()
-        || doc->testStatus(App::Document::Restoring)) {
-        return;
-    }
-    std::unordered_set<App::Part*> studios;
-    for (App::DocumentObject* obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-        App::Part* studio = studioOfSet(obj);
-        if (studio && obj != &deleted
-            && !static_cast<App::VarSet*>(obj)->VariablePositions.getValues().empty()) {
-            studios.insert(studio);
-        }
-    }
-    if (studios.empty()) {
-        return;
-    }
-    std::unordered_set<const App::DocumentObject*> leaving {&deleted};
-    for (auto step : StudioList::stepsOf(&deleted)) {
-        leaving.insert(step);
-    }
-    for (App::Part* studio : studios) {
-        keepPlaces(doc, studio, studioSequence(doc, studio), leaving);
-    }
-}
-
 /// An imported set's places name rows of the file it came from
 void forgetImported(const std::vector<App::DocumentObject*>& objs)
 {
@@ -277,8 +407,9 @@ void registerStudioVariables()
     app.signalRenameDynamicProperty.connect(placeRenamed);
     app.signalRemoveDynamicProperty.connect(placeRemoved);
     app.signalDeletedObject.connect(followDeletedRow);
-    app.signalBeforeRecomputeDocument.connect([](const App::Document&) { RowIndex::forget(); });
-    app.signalRecomputed.connect([](const App::Document&) { RowIndex::forget(); });
+    app.signalBeforeRecomputeDocument.connect(repairBeforeRecompute);
+    app.signalRecomputed.connect(snapshotAfterRecompute);
+    app.signalDeleteDocument.connect([](const App::Document& doc) { snapshots().erase(&doc); });
     auto watch = [](App::Document& doc) {
         doc.signalImportObjects.connect(
             [](const std::vector<App::DocumentObject*>& objs, Base::XMLReader&) {
@@ -294,19 +425,23 @@ void registerStudioVariables()
     });
 }
 
+std::vector<std::string> studioRowNames(App::Document* doc, App::Part* studio)
+{
+    return rowNames(doc, studio);
+}
+
 void keepVariablePlaces(App::Document* doc,
                         App::Part* studio,
-                        const std::vector<App::DocumentObject*>& before,
+                        const std::vector<std::string>& before,
                         const std::vector<App::DocumentObject*>& rows)
 {
     if (!doc || doc->isPerformingTransaction()) {
         return;
     }
-    std::unordered_set<const App::DocumentObject*> moved;
+    std::unordered_set<std::string> moved;
     for (App::DocumentObject* row : rows) {
-        moved.insert(row);
-        for (auto step : StudioList::stepsOf(row)) {
-            moved.insert(step);
+        if (row && row->isAttachedToDocument()) {
+            addEntryNames(doc, studio, row, moved);
         }
     }
     keepPlaces(doc, studio, before, moved);
@@ -319,12 +454,11 @@ void keepVariablePlaces(App::Document* doc,
             }
         }
     }
-    if (names.empty()) {
-        return;
-    }
-    const auto after = studioSequence(doc, studio);
     for (const auto& name : names) {
-        touchUsersOf(after, name);
+        touchUsersOf(doc, studio, name);
+    }
+    if (!names.empty()) {
+        snapshots()[doc][studio] = rowNames(doc, studio);
     }
 }
 
@@ -363,7 +497,8 @@ void setVariablePosition(App::DocumentObject* holder, const std::string& name, A
         return;
     }
     App::VariablePosition::setAnchor(holder, name, anchor);
-    touchUsersOf(sequence, name);
+    touchUsersOf(holder->getDocument(), studio, name);
+    snapshots()[holder->getDocument()][studio] = rowNames(holder->getDocument(), studio);
 }
 
 }  // namespace PartDesign
