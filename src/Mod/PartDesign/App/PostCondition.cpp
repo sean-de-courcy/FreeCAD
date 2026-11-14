@@ -44,6 +44,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
 
@@ -60,6 +61,7 @@
 #include <vector>
 
 #include <App/Document.h>
+#include <Mod/Part/App/FCBRepAlgoAPI_BooleanOperation.h>
 #include <Mod/Part/App/KernelBudget.h>
 
 #include "Body.h"
@@ -504,6 +506,15 @@ BopResult checkBop(const TopoDS_Shape& checked, const TopoDS_Shape& made)
     }
     if (Part::KernelBudget::pastDeadline()) {
         result.status = "limit";
+        return result;
+    }
+    try {  // OCCT's face-face intersection never ends on a face of no width (ops#773)
+        TopTools_ListOfShape checkedFaces;
+        checkedFaces.Append(faces);
+        FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(checkedFaces);
+    }
+    catch (const Standard_Failure&) {
+        result.status = "no width";
         return result;
     }
     struct Work

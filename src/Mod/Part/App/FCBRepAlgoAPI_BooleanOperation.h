@@ -32,7 +32,9 @@
 #include <Message_ProgressRange.hxx>
 #include <TopTools_ListOfShape.hxx>
 
-class FCBRepAlgoAPIHelper
+#include <Mod/Part/PartGlobal.h>
+
+class PartExport FCBRepAlgoAPIHelper
 {
 public:
     static void setAutoFuzzy(BRepAlgoAPI_BooleanOperation* op);

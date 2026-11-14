@@ -130,6 +130,7 @@
 #include <ShapeUpgrade_RemoveInternalWires.hxx>
 #include <ShapeUpgrade_ShellSewing.hxx>
 #include <Standard_Failure.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <Standard_Version.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
@@ -1709,6 +1710,17 @@ bool TopoShape::analyze(bool runBopCheck, std::ostream& str) const
         else if (runBopCheck) {
 
             TopoDS_Shape BOPCopy = BRepBuilderAPI_Copy(this->_Shape).Shape();
+            // Its self-interference test runs OCCT's face-face intersection, which never ends on
+            // a face of no width (ops#773): such a face is reported instead
+            try {
+                TopTools_ListOfShape checked;
+                checked.Append(BOPCopy);
+                FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(checked);
+            }
+            catch (const Standard_Failure& e) {
+                str << "BOP check not run: " << e.GetMessageString() << std::endl;
+                return false;
+            }
             BOPAlgo_ArgumentAnalyzer BOPCheck;
             BOPCheck.SetShape1(BOPCopy);
             // all settings are false by default. so only turn on what we want.
