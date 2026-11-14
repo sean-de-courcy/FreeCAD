@@ -380,9 +380,20 @@ class TestTriadMouseGui(TriadGuiCase):
     def setUp(self):
         super().setUp()
         Gui.getMainWindow().show()
+        # as TestSnapModeGui: a landscape window (a portrait one, off screen 400 x 587, puts the
+        # view's getPointOnViewport off its own pick) and the fitted camera lifted out of the
+        # cubes' height (off screen it can sit inside them: the picks landed at z 0, ops#683)
+        Gui.getMainWindow().resize(1400, 900)
+        pump(0.3)
         self.view = Gui.ActiveDocument.ActiveView
         self.view.viewTop()
         self.view.fitAll()
+        pump()
+        camera = self.view.getCameraNode()
+        x, y, _z = camera.position.getValue().getValue()
+        camera.position.setValue(x, y, 1000.0)
+        camera.nearDistance = 0.01
+        camera.farDistance = 1.0e5
         pump(0.3)
         self.viewport = self.view.graphicsView().viewport()
 

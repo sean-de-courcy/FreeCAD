@@ -342,6 +342,9 @@ private:
     bool tryMouseMove(const SbVec2s& cursorPos, Gui::View3DInventorViewer* viewer);
     void tryInitMove(const SbVec2s& cursorPos, Gui::View3DInventorViewer* viewer);
 
+    // FreeCAD-CH (ops#683, C4): the triad moves what the mouse drag moves
+    void addPartsJoinedToMoving();
+
     void collectMovableObjects(
         App::DocumentObject* selRoot,
         const std::string& subNamePrefix,
