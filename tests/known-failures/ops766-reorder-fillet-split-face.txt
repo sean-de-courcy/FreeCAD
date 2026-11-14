@@ -1,6 +1,7 @@
 # After the slot is moved before the fillet, the fillet's reference to the split front face is left
 # unresolved ('?Face1', '?Face16' where 'Face1', 'Face8' are expected). On the experiment line at
-# a065c9942f and after; not bisected. Remove this file when ops#766 fixes it.
+# a065c9942f and after; not bisected. Remove this file when ops#766 fixes it. ops#774 (the Mac, lx6) is the
+# same failure; its own file was folded in here, since an ID is listed once per platform.
 
 issue: ops#766
 

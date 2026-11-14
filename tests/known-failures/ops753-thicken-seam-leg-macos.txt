@@ -1,8 +1,0 @@
-# TestThickenSeamLeg's invalid seam-leg offset fails on macOS only (the host's OCCT; ops#753, per the patterns
-# record lane): the Mac's full -t 0 on fix/lx8-macos-cli-hang e46ee46ff6 and fork PR 447's CI both show it.
-# Remove this file when ops#753 makes the case hold on macOS.
-
-issue: ops#753
-
-reason: the seam leg's offset is judged differently by the host OCCT on macOS
-cli  PartDesignTests.TestSolidOps.TestThickenSeamLeg.testOffsetOfTheSeamLegIsInvalid  macos
