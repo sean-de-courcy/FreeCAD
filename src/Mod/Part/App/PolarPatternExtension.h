@@ -73,6 +73,8 @@ public:
     void extensionOnChanged(const App::Property* prop) override;
 
     static const App::PropertyIntegerConstraint::Constraints intOccurrences;
+    /// The most instances a pattern makes (ops#783)
+    static constexpr int maxInstances = 2500;
     static const char* ModeEnums[];
 };
 

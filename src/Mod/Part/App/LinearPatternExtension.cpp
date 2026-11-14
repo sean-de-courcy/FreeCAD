@@ -44,8 +44,10 @@ using namespace Part;
 
 EXTENSION_PROPERTY_SOURCE(Part::LinearPatternExtension, App::DocumentObjectExtension)
 
+// FreeCAD-CH (ops#783): at most 2500 instances. Unbounded, a count of about 2^31 (a UIntSpinBox's
+// raw value written by a macro, or a mistyped count) grew Spacings to that size and froze the GUI
 const App::PropertyIntegerConstraint::Constraints LinearPatternExtension::intOccurrences
-    = {1, std::numeric_limits<int>::max(), 1};
+    = {1, LinearPatternExtension::maxInstances, 1};
 
 const char* LinearPatternExtension::ModeEnums[] = {"Extent", "Spacing", nullptr};
 
@@ -493,8 +495,13 @@ void LinearPatternExtension::updateSpacings(LinearPatternDirection dir)
     const App::PropertyIntegerConstraint& occurrencesProp = isSecondDir ? Occurrences2 : Occurrences;
 
     std::vector<double> spacings = spacingsProp.getValues();
-    size_t targetCount = occurrencesProp.getValue()
-        - 1;  // 1 less spacing than there are occurrences.
+    // 1 less spacing than there are occurrences. A count out of range is refused at the
+    // recompute (calculateTransformations), never grown here (ops#783)
+    const long occurrences = occurrencesProp.getValue();
+    if (occurrences < 1 || occurrences > maxInstances) {
+        return;
+    }
+    size_t targetCount = static_cast<size_t>(occurrences - 1);
 
     for (auto& spacing : spacings) {
         if (spacing == offsetProp.getValue()) {
@@ -546,6 +553,13 @@ const std::list<gp_Trsf> LinearPatternExtension::calculateTransformations()
     int occurrences2 = Occurrences2.getValue();
     if (occurrences < 1 || occurrences2 < 1) {
         throw Base::ValueError("At least one occurrence required");
+    }
+    if (occurrences > maxInstances || occurrences2 > maxInstances
+        || static_cast<long long>(occurrences) * occurrences2 > maxInstances) {
+        throw Base::ValueError(
+            "A pattern has at most " + std::to_string(maxInstances) + " instances; this one asks for "
+            + std::to_string(static_cast<long long>(occurrences) * occurrences2)
+        );
     }
 
     if (occurrences == 1 && occurrences2 == 1) {

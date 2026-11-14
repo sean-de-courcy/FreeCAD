@@ -169,3 +169,47 @@ class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
                 pump()
             App.closeDocument(doc.Name)
             pump()
+
+    # ------------------------------------------------------------ a pattern's count (ops#783)
+    def testARawCountStaysInRangeAndCancelWorks(self):
+        """The walk's linear pattern (of a hole there): its macro set the count box (a
+        Gui::UIntSpinBox, which keeps unsigned values offset into Qt's int range) with a raw
+        QSpinBox.setValue(3), a count of 2^31 + 3. The pattern grew Spacings to that size and the
+        GUI froze. Now the count is at most 2500: the box's range is the property's, the raw value
+        lands inside it and computes at once, and Cancel leaves no pattern. A grid over 2500 in
+        all is refused loudly. Run behind a timeout: before the fix it never returns."""
+        import time
+
+        # an Extrude (remove) over B: a Hole's pattern is refused without Reapply before the count
+        from PartDesignTests.TestStudio import sketch
+
+        profile = sketch(self.body("A"), "CutSk", xyPlane(self.body("A")), (33, 8, 37, 12), z=10)
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Pocket", profile, "PartDesign::Pocket", "A")
+        self.close(ok=True)
+        before = self.volume("B")
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body("B"))
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, owner.Name)
+        Gui.runCommand("PartDesign_LinearPattern")
+        self.waitForPanel()
+        [pattern] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::LinearPattern"]
+        name = pattern.Name
+        count = self.visible(QtWidgets.QSpinBox, "spinOccurrences")
+        self.assertIsNotNone(count, "no count box")
+        start = time.monotonic()
+        QtWidgets.QSpinBox.setValue(count, 3)  # the raw int the walk's macro sent
+        pump(0.5)
+        self.doc.recompute()
+        self.assertLess(time.monotonic() - start, 30.0)
+        self.assertLessEqual(pattern.Occurrences, 2500)
+        # two directions of 100: 10000 instances in all, refused loudly
+        pattern.Occurrences = 100
+        pattern.Direction2 = (self.body("B").Origin.OriginFeatures[1], [""])
+        pattern.Occurrences2 = 100
+        self.doc.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertIn("at most 2500 instances", pattern.getStatusString())
+        self.close(ok=False)
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertAlmostEqual(self.volume("B"), before, places=4)
