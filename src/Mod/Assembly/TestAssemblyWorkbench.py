@@ -69,3 +69,7 @@ True if TestFreeInstances else False
 True if TestMateAfterEdits else False
 True if TestMateFaceGone else False
 True if TestOnshapeConnectors else False
+
+from AssemblyTests.TestRigidCachePointers import TestRigidCachePointers  # FreeCAD-CH, ops#778
+
+True if TestRigidCachePointers else False

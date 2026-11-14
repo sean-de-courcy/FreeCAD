@@ -1043,10 +1043,55 @@ void AssemblyObject::exportAsASMT(std::string fileName)
     mbdAssembly->outputFile(fileName);
 }
 
+bool AssemblyObject::isRigidCacheLive(App::DocumentObject* obj) const
+{
+    if (!obj) {
+        return false;
+    }
+    const auto it = rigidCacheIds.find(obj);
+    if (it == rigidCacheIds.end()) {
+        return false;
+    }
+    // The pointer is compared, never read: an object at a reused address has another ID
+    const App::Document* doc = getDocument();
+    return doc && doc->getObjectByID(it->second) == obj;
+}
+
+void AssemblyObject::pruneRigidPlacementCache()
+{
+    std::erase_if(rigidPlacementCache, [&](const auto& entry) {
+        return !isRigidCacheLive(entry.first);
+    });
+}
+
+void AssemblyObject::refreshStaleRigidCaches()
+{
+    for (const auto& [obj, id] : rigidCacheIds) {
+        boost::ignore_unused(id);
+        if (!isRigidCacheLive(obj)) {
+            rebuildRigidClusters();
+            return;
+        }
+    }
+}
+
 void AssemblyObject::rebuildRigidClusters()
 {
+    // FreeCAD-CH (ops#778): the placement cache outlives a rebuild; an object deleted since the
+    // last one leaves it here, before its ID is forgotten
+    pruneRigidPlacementCache();
     rigidRepByPart.clear();
     rigidMembersByRep.clear();
+    {
+        std::unordered_map<App::DocumentObject*, long> kept;
+        for (const auto& [obj, plc] : rigidPlacementCache) {
+            boost::ignore_unused(plc);
+            if (auto it = rigidCacheIds.find(obj); it != rigidCacheIds.end()) {
+                kept.emplace(*it);
+            }
+        }
+        rigidCacheIds = std::move(kept);
+    }
 
     std::unordered_map<App::DocumentObject*, App::DocumentObject*> parent;
 
@@ -1132,6 +1177,7 @@ void AssemblyObject::rebuildRigidClusters()
 
         for (auto* const member : members) {
             rigidRepByPart[member] = rep;
+            rigidCacheIds[member] = member->getID();
         }
 
         rigidMembersByRep[rep] = std::move(members);
@@ -1598,6 +1644,8 @@ std::vector<App::DocumentObject*> AssemblyObject::getJointsOfPart(App::DocumentO
 
 std::unordered_set<App::DocumentObject*> AssemblyObject::getGroundedParts()
 {
+    refreshStaleRigidCaches();  // FreeCAD-CH (ops#778): read below, maybe after a delete
+
     std::unordered_set<App::DocumentObject*> groundedSet;
     std::vector<App::DocumentObject*> allParts = getAssemblyComponents(this);
     for (auto part : allParts) {
@@ -1842,6 +1890,8 @@ std::vector<ObjRef> AssemblyObject::getConnectedParts(
     if (!part) {
         return {};
     }
+
+    refreshStaleRigidCaches();  // FreeCAD-CH (ops#778): read below, maybe after a delete
 
     std::vector<ObjRef> connectedParts;
 
