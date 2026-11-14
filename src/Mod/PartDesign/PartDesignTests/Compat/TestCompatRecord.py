@@ -498,3 +498,53 @@ class TestCompatMovedBody(unittest.TestCase):
                 self.assertNotIn("passes", make_delta.entryOf(entry))
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+class TestCompatReopenBoxGap(unittest.TestCase):
+    """make_generation's reopen check (ops#785): a reopened shape that differs from the saved one
+    in its optimal box alone, within OPTIMAL_BOX_GAP (OCCT's 1e-7 face-tolerance gap), is the same
+    shape; anything else still refuses the model."""
+
+    SAVED = {
+        "type": "Solid",
+        "volume": 289.54547252708784,
+        "area": 392.5099694522687,
+        "box": [-7.0000001, -7.0000001, -2.0, 7.0, 7.0000001, 2.0],
+        "counts": [1, 3, 5, 3],
+        "centre": [0.0, 0.0, -0.13020100612884333],
+    }
+
+    def reopened(self, **changes):
+        entry = json.loads(json.dumps(self.SAVED))
+        entry.update(changes)
+        return entry
+
+    def lines(self, reopened):
+        from PartDesignTests.Compat import make_generation
+
+        record = {"objects": {"Revolution": {"type": "PartDesign::Revolution", "shape": self.SAVED}}}
+        return make_generation.unexpectedDeltas(
+            "Model", "Doc", record, {"Revolution": {"shape": reopened}}
+        )
+
+    def testTheFaceToleranceGapAloneIsTheSameShape(self):
+        """Must pass: ops#785's own delta, xmax 7 -> 7.0000001."""
+        box = [-7.0000001, -7.0000001, -2.0, 7.0000001, 7.0000001, 2.0]
+        self.assertEqual(self.lines(self.reopened(box=box)), [])
+
+    def testABoxBeyondTheGapIsRed(self):
+        """Must fail: a box 1e-6 out."""
+        box = [-7.0000001, -7.0000001, -2.0, 7.000001, 7.0000001, 2.0]
+        self.assertEqual(len(self.lines(self.reopened(box=box))), 1)
+
+    def testAnotherFieldIsRedEvenWithinTheGap(self):
+        """Must fail: the box within the gap, but the volume, the centre or the counts changed."""
+        box = [-7.0000001, -7.0000001, -2.0, 7.0000001, 7.0000001, 2.0]
+        for changes in (
+            {"volume": 289.54547252708784 + 1e-9},
+            {"centre": [0.0, 0.0, -0.1302010061]},
+            {"counts": [1, 3, 6, 4]},
+            {"type": "Shell"},
+        ):
+            with self.subTest(changes=changes):
+                self.assertEqual(len(self.lines(self.reopened(box=box, **changes))), 1)
