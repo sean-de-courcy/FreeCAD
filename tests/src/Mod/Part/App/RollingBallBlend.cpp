@@ -20,7 +20,9 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -530,14 +532,21 @@ TEST_F(RollingBallBlendTest, makeElementFilletKeepsTheNames)
     EXPECT_LE(maxTolerance(result.getShape()), 1e-6);
 }
 
-// A stadium pocket whose walls lean: the stadium at the floor z = 5 (lines y = -10 and y = 10, half
-// circles of radius 10 about x = -20 and x = 20) swept along (0.3, 0.2, 1). Its floor's edges are
-// rounded. Under the leaning planes the round is a cylinder; under the leaning circles' walls (elliptic
-// cylinders, not normal to the floor) it is OCCT's spline (Nest Insert #163's slot round)
+// A stadium whose walls lean: the stadium at the floor z = 5 (lines y = -10 and y = 10, half circles
+// of radius 10 about x = -20 and x = 20) swept along (0.3, 0.2, 1), as a pocket cut into a block or as
+// a boss on a slab. The edges at the floor are rounded. Under the leaning planes the round is a
+// cylinder; under the leaning circles' walls (elliptic cylinders, not normal to the floor) it is
+// OCCT's spline (Nest Insert #163's slot round)
 const double pocketFloor = 5.0;
 const gp_Vec pocketLean(0.3, 0.2, 1.0);
 
-Filleted leaningPocket(double radius)
+enum class Leaning
+{
+    Pocket,
+    Boss
+};
+
+Filleted leaningStadium(Leaning kind, double radius)
 {
     Filleted result;
     const gp_Pnt a1(-20, -10, pocketFloor);
@@ -551,32 +560,40 @@ Filleted leaningPocket(double radius)
     wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(a4, gp_Pnt(-30, 0, pocketFloor), a1).Value()).Edge());
     const TopoDS_Shape tool
         = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), pocketLean * 30.0).Shape();
-    const TopoDS_Shape block = BRepPrimAPI_MakeBox(gp_Pnt(-45, -30, 0), gp_Pnt(55, 40, 25)).Shape();
-    const TopoDS_Shape base = BRepAlgoAPI_Cut(block, tool).Shape();
-    TopoDS_Face floor;
-    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
-        GProp_GProps properties;
-        BRepGProp::SurfaceProperties(it.Current(), properties);
-        if (std::fabs(properties.CentreOfMass().Z() - pocketFloor) < 1e-9) {
-            floor = TopoDS::Face(it.Current());
+    const TopoDS_Shape base = kind == Leaning::Pocket
+        ? BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(gp_Pnt(-45, -30, 0), gp_Pnt(55, 40, 25)).Shape(), tool).Shape()
+        : BRepAlgoAPI_Fuse(BRepPrimAPI_MakeBox(gp_Pnt(-45, -30, 0), gp_Pnt(55, 40, pocketFloor)).Shape(), tool)
+              .Shape();
+    // The rim: the edges at the floor's height along the stadium (not the block's own outline)
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(base, TopAbs_EDGE, all);
+    std::vector<TopoDS_Edge> rim;
+    for (int i = 1; i <= all.Extent(); ++i) {
+        const BRepAdaptor_Curve curve(TopoDS::Edge(all(i)));
+        bool atFloor = true;
+        for (int k = 0; k <= 4; ++k) {
+            const double at = curve.FirstParameter() + (curve.LastParameter() - curve.FirstParameter()) * k / 4;
+            atFloor = atFloor && std::fabs(curve.Value(at).Z() - pocketFloor) < 1e-7;
+        }
+        const gp_Pnt middle = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
+        if (atFloor && std::fabs(middle.X()) < 41 && std::fabs(middle.Y()) < 11) {
+            rim.push_back(TopoDS::Edge(all(i)));
         }
     }
-    if (floor.IsNull()) {
+    if (rim.size() != 4) {
         return result;
     }
     BRepFilletAPI_MakeFillet maker(base);
-    TopTools_IndexedMapOfShape edges;
-    TopExp::MapShapes(floor, TopAbs_EDGE, edges);
-    for (int i = 1; i <= edges.Extent(); ++i) {
-        maker.Add(radius, TopoDS::Edge(edges(i)));
+    for (const TopoDS_Edge& edge : rim) {
+        maker.Add(radius, edge);
     }
     maker.Build();
     if (!maker.IsDone()) {
         return result;
     }
     TopTools_IndexedMapOfShape blends;
-    for (int i = 1; i <= edges.Extent(); ++i) {
-        for (TopTools_ListOfShape::Iterator it(maker.Generated(edges(i))); it.More(); it.Next()) {
+    for (const TopoDS_Edge& edge : rim) {
+        for (TopTools_ListOfShape::Iterator it(maker.Generated(edge)); it.More(); it.Next()) {
             // (a contour's edges each list the contour's faces: each once)
             if (it.Value().ShapeType() == TopAbs_FACE && !blends.Contains(it.Value())) {
                 blends.Add(it.Value());
@@ -658,49 +675,58 @@ bool isSpline(const TopoDS_Face& face)
 }
 
 // A chain of cylinders and spline faces: the cylinders are the ball's already and stay as they are;
-// the spline faces between them become the ball's, and each seam slides along the cylinder's own
-// contact lines
+// the spline faces between them become the ball's. On the boss OCCT's seams are not where the ball
+// crosses from a plane's wall to a circle's: they move, sliding along the cylinders' own contact lines
 TEST_F(RollingBallBlendTest, exactFacesAmongSplineOnesStay)
 {
-    for (const double radius : {1.0, 2.0, 4.0}) {
-        const Filleted occt = leaningPocket(radius);
-        ASSERT_FALSE(occt.shape.IsNull());
-        int splines = 0;
-        double occtMiss = 0.0;
-        for (const TopoDS_Face& blend : occt.blends) {
-            if (isSpline(blend)) {
-                ++splines;
-                occtMiss = std::max(occtMiss, leaningPocketMiss(blend, radius));
+    for (const Leaning kind : {Leaning::Pocket, Leaning::Boss}) {
+        for (const double radius : {1.0, 2.0, 4.0}) {
+            const std::string which
+                = std::string(kind == Leaning::Pocket ? "pocket" : "boss") + ", radius " + std::to_string(radius);
+            const Filleted occt = leaningStadium(kind, radius);
+            ASSERT_FALSE(occt.shape.IsNull()) << which;
+            int splines = 0;
+            double occtMiss = 0.0;
+            for (const TopoDS_Face& blend : occt.blends) {
+                if (isSpline(blend)) {
+                    ++splines;
+                    occtMiss = std::max(occtMiss, leaningPocketMiss(blend, radius));
+                }
             }
-        }
-        ASSERT_EQ(occt.blends.size(), 4U);
-        ASSERT_EQ(splines, 2);
-        // The designed model has the defect: OCCT's section is in the plane normal to the edge
-        EXPECT_GT(occtMiss, 5e-4) << "radius " << radius;
+            ASSERT_EQ(occt.blends.size(), 4U) << which;
+            ASSERT_EQ(splines, 2) << which;
+            // The designed model has the defect: OCCT's section is in the plane normal to the edge
+            EXPECT_GT(occtMiss, 5e-4) << which;
 
-        const RB::Report report = RB::correct(occt.shape, occt.blends, radius);
+            const RB::Report report = RB::correct(occt.shape, occt.blends, radius);
 
-        ASSERT_EQ(report.outcome, RB::Outcome::Corrected) << report.reason;
-        EXPECT_EQ(report.faces, 2);
-        EXPECT_GT(report.seamMove, 1e-4);
-        EXPECT_TRUE(BRepCheck_Analyzer(report.shape).IsValid());
-        EXPECT_LE(maxTolerance(report.shape), std::max(1e-6, maxTolerance(occt.shape)));
-        for (const TopAbs_ShapeEnum kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
-            EXPECT_EQ(count(report.shape, kind), count(occt.shape, kind));
-        }
-        ASSERT_EQ(report.blendFaces.size(), occt.blends.size());
-        for (size_t i = 0; i < occt.blends.size(); ++i) {
-            if (isSpline(occt.blends[i])) {
-                EXPECT_LT(leaningPocketMiss(report.blendFaces[i], radius), 1e-6) << "radius " << radius;
+            ASSERT_EQ(report.outcome, RB::Outcome::Corrected) << which << ": " << report.reason;
+            EXPECT_EQ(report.faces, 2) << which;
+            if (kind == Leaning::Boss) {
+                EXPECT_GT(report.seamMove, 1e-3) << which;
             }
-            else {
-                // The cylinder under a leaning plane: the same surface, a cylinder of the radius
-                const BRepAdaptor_Surface before(occt.blends[i]);
-                const BRepAdaptor_Surface after(report.blendFaces[i]);
-                ASSERT_EQ(after.GetType(), GeomAbs_Cylinder);
-                EXPECT_NEAR(after.Cylinder().Radius(), radius, 1e-12);
-                EXPECT_LT(after.Cylinder().Location().Distance(before.Cylinder().Location()), 1e-12);
-                EXPECT_TRUE(after.Cylinder().Axis().IsParallel(before.Cylinder().Axis(), 1e-12));
+            EXPECT_TRUE(BRepCheck_Analyzer(report.shape).IsValid()) << which;
+            // OCCT's fillet leaves 3e-3 and more on its blend's edges; what is left is the model's own
+            // Boolean (5e-6 on the pocket)
+            EXPECT_GT(maxTolerance(occt.shape), 1e-3) << which;
+            EXPECT_LE(maxTolerance(report.shape), 1e-5) << which;
+            for (const TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                EXPECT_EQ(count(report.shape, type), count(occt.shape, type)) << which;
+            }
+            ASSERT_EQ(report.blendFaces.size(), occt.blends.size());
+            for (size_t i = 0; i < occt.blends.size(); ++i) {
+                if (isSpline(occt.blends[i])) {
+                    EXPECT_LT(leaningPocketMiss(report.blendFaces[i], radius), 1e-6) << which;
+                }
+                else {
+                    // The cylinder under a leaning plane: the same surface, a cylinder of the radius
+                    const BRepAdaptor_Surface before(occt.blends[i]);
+                    const BRepAdaptor_Surface after(report.blendFaces[i]);
+                    ASSERT_EQ(after.GetType(), GeomAbs_Cylinder) << which;
+                    EXPECT_NEAR(after.Cylinder().Radius(), radius, 1e-12) << which;
+                    EXPECT_LT(after.Cylinder().Location().Distance(before.Cylinder().Location()), 1e-12) << which;
+                    EXPECT_TRUE(after.Cylinder().Axis().IsParallel(before.Cylinder().Axis(), 1e-12)) << which;
+                }
             }
         }
     }
