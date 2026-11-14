@@ -441,6 +441,34 @@ class TestFillet(unittest.TestCase):
         ]
         self._assertFails(self._fillet_on_base(base, edges, 2.65))
 
+    def testRoundOnASplineSupportIsTheBallsContact(self):
+        # ops#640, decision 425: a round is the surface a ball of its radius sweeps while it
+        # touches both walls. On a twisted B-spline lid OCCT's fillet (a circle in the plane
+        # normal to the edge) is 3.6e-3 off that, and its seams 0.07. The corpus model
+        # RoundOnSpline states the contact in closed form and raises when it is missed
+        from PartDesignTests.Compat import models  # first: it imports models_partdesign
+        from PartDesignTests.Compat import models_partdesign as corpus
+
+        models.MODELS["RoundOnSpline"](FreeCAD.newDocument)
+        document = FreeCAD.getDocument("RoundOnSpline")
+        self.addCleanup(FreeCAD.closeDocument, "RoundOnSpline")
+        fillet = document.getObject("RimRound")
+        self.assertTrue(fillet.isValid())
+        self.assertTrue(fillet.Shape.isValid())
+        self.assertEqual(len(fillet.Shape.Faces), 10)
+        faces, ball, seam, seams = corpus.roundOnSplineContact(
+            fillet, corpus.ROUND_ON_SPLINE_TWIST, corpus.ROUND_ON_SPLINE_RADIUS, grid=33
+        )
+        self.assertEqual((faces, seams), (4, 4))
+        self.assertLess(ball, 1e-6)
+        self.assertLess(seam, 1e-6)
+        # The round takes less than the plane-normal circle's: between the stadium's prism
+        # under the lid (its volume is 20 times the stadium's area: x y integrates to zero)
+        # and that prism less a quarter-round bead of the rim's length
+        prism = 20 * (40 * 20 + pi * 100)
+        self.assertLess(fillet.Shape.Volume, prism)
+        self.assertGreater(fillet.Shape.Volume, prism - 2 * (1 - pi / 4) * 1.5**2 * (80 + 20 * pi))
+
     def testFilletWholeOutlineOfAStadium(self):
         # ops#298: OCCT "succeeds" on a stadium's whole top outline at r = 2 (half its width),
         # keeping the top face with area 0; the exact construction builds the full round. Just
