@@ -5070,6 +5070,117 @@ int Sketch::solve()
     return result;
 }
 
+int Sketch::solveByContinuation(const std::map<const Constraint*, double>& from)
+{
+    if (isInitMove) {
+        return GCS::Failed;
+    }
+    struct Ramp
+    {
+        double* value;
+        double start;
+        double target;
+    };
+    std::vector<Ramp> ramps;
+    for (const ConstrDef& def : Constrs) {
+        // a constraint with a second value (Snell's law) keeps its own form of the datum (n1, n2
+        // normalised from the ratio): not the constraint's value, so not ramped
+        if (!def.driving || !def.value || def.secondvalue) {
+            continue;
+        }
+        const auto it = from.find(def.constr);
+        if (it != from.end() && std::isfinite(it->second) && it->second != *def.value) {
+            ramps.push_back({def.value, it->second, *def.value});
+        }
+    }
+    if (ramps.empty()) {
+        return GCS::Failed;
+    }
+
+    captureGroupStates();
+    // the fallbacks of internalSolve() leave the system uninitialised (the augmented system's
+    // temporary constraints are cleared): set it up again from the parameters as they are
+    clearTemporaryConstraints();
+    GCSsys.initSolution(defaultSolverRedundant);
+    isFine = true;
+    Base::TimeElapsed start_time;
+
+    std::vector<double> before;
+    before.reserve(Parameters.size());
+    for (const double* param : Parameters) {
+        before.push_back(*param);
+    }
+    auto rampTo = [&ramps](double t) {
+        for (const Ramp& ramp : ramps) {
+            *ramp.value = t >= 1.0 ? ramp.target : ramp.start + t * (ramp.target - ramp.start);
+        }
+    };
+    // From the drawn geometry (the start values, t = 0) in steps that double while the solver
+    // converges and halve when it does not; bounded, since a step is a solve of the whole sketch.
+    // Each step may take ten times solve()'s iterations: at r 4 m DogLeg's steps stay a few mm
+    // long (they leave the curve), about 4 degrees of an arc in 100 iterations.
+    const int maxIterBefore = GCSsys.maxIter;
+    GCSsys.maxIter = std::max(maxIterBefore, 100) * 10;
+    bool solved = false;
+    double reached = 0.0;
+    double step = 0.25;
+    // and bounded in time: a value that no geometry meets (a typo) is refused within seconds on a
+    // large sketch, not minutes (each failed step is a full solve at ten times the iterations)
+    constexpr double budgetSeconds = 3.0;
+    for (int attempt = 0; attempt < 48 && step >= 1.0 / 512; ++attempt) {
+        if (attempt > 0
+            && Base::TimeElapsed::diffTimeF(start_time, Base::TimeElapsed()) > budgetSeconds) {
+            break;
+        }
+        const double t = std::min(1.0, reached + step);
+        rampTo(t);
+        GCSsys.startFromCurrent();  // the solve starts from the last step's solution
+        if (GCSsys.solve(isFine, GCS::DogLeg) == GCS::Success) {
+            GCSsys.applySolution();
+            reached = t;
+            if (reached >= 1.0) {
+                solved = true;
+                break;
+            }
+            step *= 2.0;
+        }
+        else {
+            step /= 2.0;
+        }
+    }
+    GCSsys.maxIter = maxIterBefore;
+    rampTo(1.0);
+    if (solved && !updateGeometry()) {
+        solved = false;
+    }
+    if (solved && resolveAfterGeometryUpdated) {
+        // as internalSolve: geometry OCCT computes is read back once (it starts solved)
+        GCSsys.startFromCurrent();
+        std::string solvername;
+        solved = internalSolve(solvername, 1) == GCS::Success;
+    }
+    if (!solved) {
+        for (std::size_t i = 0; i < Parameters.size(); ++i) {
+            *Parameters[i] = before[i];
+        }
+        updateGeometry();
+    }
+    GCSsys.startFromCurrent();
+    if (solved) {
+        updateNonDrivingConstraints();
+        applyGroupTransformations();
+    }
+
+    Base::TimeElapsed end_time;
+    SolveTime = Base::TimeElapsed::diffTimeF(start_time, end_time);
+    if (debugMode == GCS::Minimal || debugMode == GCS::IterationLevel) {
+        Base::Console().log("Sketcher::solveByContinuation()-%s-T:%s\n",
+                            solved ? "solved" : "failed",
+                            Base::TimeElapsed::diffTime(start_time, end_time).c_str());
+    }
+    return solved ? GCS::Success : GCS::Failed;
+}
+
 int Sketch::solveHolding(
     const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
     const std::map<int, double>& allowedErrors
