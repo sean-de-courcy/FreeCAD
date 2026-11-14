@@ -548,3 +548,14 @@ class TestCompatReopenBoxGap(unittest.TestCase):
         ):
             with self.subTest(changes=changes):
                 self.assertEqual(len(self.lines(self.reopened(box=box, **changes))), 1)
+
+    def testAnotherShapeKindIsRed(self):
+        """Must fail: a key added (`unbounded`), a saved entry with no box (infinite) or none."""
+        box = [-7.0000001, -7.0000001, -2.0, 7.0000001, 7.0000001, 2.0]
+        from PartDesignTests.Compat import make_generation
+
+        reopened = self.reopened(box=box, unbounded=[1])
+        self.assertEqual(len(self.lines(reopened)), 1)
+        infinite = {"type": "Face", "infinite": True, "counts": [0, 1, 0, 0]}
+        self.assertFalse(make_generation.optimalBoxGapOnly(infinite, self.reopened(box=box)))
+        self.assertFalse(make_generation.optimalBoxGapOnly(None, self.reopened(box=box)))
