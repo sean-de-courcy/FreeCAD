@@ -2047,7 +2047,12 @@ static bool ownerStudio(
 /// of it); false: no studio (an assembly, another document's profile), today's path
 static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, double length)
 {
-    if (which != "Pad" && which != "Pocket") {
+    // FreeCAD-CH (ops#640 walk bugs 1): Revolve, Groove and Hole are owners too (S2 made them
+    // so in the App; their commands kept the per-Body path, which put a Revolve "Add" or a Hole in
+    // whatever Body was active, the empty "Part 1" or another part)
+    const bool revolved = which == "Revolution" || which == "Groove";
+    const bool hole = which == "Hole";
+    if (which != "Pad" && which != "Pocket" && !revolved && !hole) {
         return false;
     }
     App::Part* studio = nullptr;
@@ -2099,12 +2104,19 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
                 "Profile = (" << Gui::Command::getObjectCmd(profile) << ", [" << ss.str() << "])"
             );
         }
-        FCMD_OBJ_CMD(owner, "Length = " << length);
-        if (sketch) {
-            FCMD_OBJ_CMD(
-                owner,
-                "ReferenceAxis = (" << Gui::Command::getObjectCmd(sketch) << ",['N_Axis'])"
-            );
+        if (revolved) {
+            // No axis yet: the dialog waits for its pick (ops#643); the pick makes the tool, and
+            // the live pick below decides Add or New from it
+            FCMD_OBJ_CMD(owner, "Angle = 360.0");
+        }
+        else if (!hole) {
+            FCMD_OBJ_CMD(owner, "Length = " << length);
+            if (sketch) {
+                FCMD_OBJ_CMD(
+                    owner,
+                    "ReferenceAxis = (" << Gui::Command::getObjectCmd(sketch) << ",['N_Axis'])"
+                );
+            }
         }
         Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioInsert(%s, -1)", ownerCmd.c_str());
         // The scope Onshape's Extrude pre-fills (oracle 6, batch 6 Q1): the tool touching or
@@ -2112,14 +2124,17 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
         // the active Body. Extrude (remove) is the Extrude switched to Remove (Q1d, Q1e): the
         // part the tool meets going the Extrude's way (out of the material) stays its scope, else
         // none ("No merge scope selected"), and it cuts into the material, the Pocket's own way
-        const bool remove = which == "Pocket";
+        // A Groove and a Hole are Removes as the Pocket is: the part the tool meets, else none.
+        // Their tools go into the material already (no direction flip for the pick)
+        const bool remove = which == "Pocket" || which == "Groove" || hole;
+        const bool flipForPick = which == "Pocket";
         auto profileBased = freecad_cast<PartDesign::ProfileBased*>(owner);
-        if (remove && profileBased) {
+        if (flipForPick && profileBased) {
             profileBased->Reversed.setValue(true);
         }
         PartDesign::Body* target = nullptr;
         PartDesignGui::studioPrefillPart(owner, target);
-        if (remove && profileBased) {
+        if (flipForPick && profileBased) {
             profileBased->Reversed.setValue(false);
         }
         if (target) {
@@ -2134,11 +2149,12 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
             Gui::Command::doCommand(Gui::Command::Doc, "PartDesign.studioNewPart(%s)", ownerCmd.c_str());
         }
         {
-            // A missing profile isn't printed as an error while the dialog opens asking for it
+            // A missing profile (or a Revolve's missing axis) isn't printed as an error while
+            // the dialog opens asking for it
             Base::ObjectStatusLocker<App::Document::Status, App::Document> guard(
                 App::Document::IgnoreErrorOnRecompute,
                 doc,
-                profile == nullptr
+                profile == nullptr || revolved
             );
             Gui::cmdAppDocument(doc, "recompute()");
         }
@@ -2299,6 +2315,10 @@ void CmdPartDesignHole::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    // FreeCAD-CH (ops#640 walk bugs 1): in a studio, an owner cutting the part its tool meets
+    if (prepareStudioOwner(this, "Hole", 0.0)) {
+        return;
+    }
     // FreeCAD-CH (ops#640, rank 14): the Hole goes in the part its sketch is on, active or not
     PartDesign::Body* pcActiveBody = commandBody(this, /*pickOwns = */ true);
 
@@ -2349,6 +2369,9 @@ void CmdPartDesignRevolution::activated(int iMsg)
     Q_UNUSED(iMsg);
 
     leaveSketchForProfile();
+    if (prepareStudioOwner(this, "Revolution", 0.0)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {
@@ -2403,6 +2426,9 @@ void CmdPartDesignGroove::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    if (prepareStudioOwner(this, "Groove", 0.0)) {
+        return;
+    }
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {

@@ -293,6 +293,10 @@ private:
     std::optional<double> determineDiameter() const;
     void updateDiameterParam();
     void updateThreadDepthParam();
+    /// getThroughAllLength() for a property change: fallback where it can't be known yet (no
+    /// base shape, no profile). onChanged() must not throw: a throw there, out of a task panel's
+    /// slot, froze the GUI (ops#782); the recompute says what is missing
+    double throughAllLengthOr(double fallback) const;
     void readCutDefinitions();
 
     double getCountersinkAngle() const;

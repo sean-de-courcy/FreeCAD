@@ -1204,6 +1204,19 @@ double Hole::getThreadPitch() const
     return threadDescription[threadType][threadSize].pitch;
 }
 
+double Hole::throughAllLengthOr(double fallback) const
+{
+    try {
+        return getThroughAllLength();
+    }
+    catch (const Base::Exception&) {
+        return fallback;
+    }
+    catch (const Standard_Failure&) {
+        return fallback;
+    }
+}
+
 void Hole::updateThreadDepthParam()
 {
     std::string ThreadMethod(ThreadDepthType.getValueAsString());
@@ -1230,13 +1243,14 @@ void Hole::updateThreadDepthParam()
     }
     else if (HoleDepth == "ThroughAll" || HoleDepth == "UpToFirst" || HoleDepth == "UpToFace") {
         // an up-to hole's depth is known at its recompute: makeThread() sets the thread's then
+        const double throughAll = throughAllLengthOr(ThreadDepth.getValue());
         if (ThreadMethod != "Dimension") {
-            ThreadDepth.setValue(getThroughAllLength());
+            ThreadDepth.setValue(throughAll);
         }
         else {
             // the thread cannot be longer than the hole depth
-            if (ThreadDepth.getValue() > getThroughAllLength()) {
-                ThreadDepth.setValue(getThroughAllLength());
+            if (ThreadDepth.getValue() > throughAll) {
+                ThreadDepth.setValue(throughAll);
             }
             else {
                 ThreadDepth.setValue(ThreadDepth.getValue());
@@ -1947,7 +1961,7 @@ void Hole::onChanged(const App::Property* prop)
         if (!isRestoring()) {
             if (DepthMode == "ThroughAll") {
                 // if through all, set the depth accordingly (an up-to depth keeps the blind one)
-                Depth.setValue(getThroughAllLength());
+                Depth.setValue(throughAllLengthOr(Depth.getValue()));
             }
             updateThreadDepthParam();
         }
@@ -1955,8 +1969,9 @@ void Hole::onChanged(const App::Property* prop)
     else if (prop == &Depth) {
         if (!isRestoring()) {
             // the depth cannot be greater than the through-all length
-            if (Depth.getValue() > getThroughAllLength()) {
-                Depth.setValue(getThroughAllLength());
+            const double throughAll = throughAllLengthOr(Depth.getValue());
+            if (Depth.getValue() > throughAll) {
+                Depth.setValue(throughAll);
             }
         }
 

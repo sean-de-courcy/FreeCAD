@@ -118,6 +118,7 @@ from PartDesignTests.TestStudioSketchesShownGui import (  # FreeCAD-CH, ops#654 
     TestTopLevelStudioSketchesShownGui,
 )
 from PartDesignTests.TestStudioFeatureGui import TestStudioFeatureGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioRevolveHoleGui import TestStudioRevolveHoleGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestStudioFeatureGui import (  # FreeCAD-CH, ops#654 S4 fix
     TestExtrudePrefillGui,
     TestLeavingNewGui,
