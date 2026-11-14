@@ -844,6 +844,19 @@ struct Tool
     /// as the faces the tool was split by carry them: its faces on them are capFaces too, and
     /// merge into the end face where they lie on its own surface
     std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> capSurfaces;
+    /// A wall's surface as the tool was trimmed by it where it had to be extended (trimByWall past
+    /// level 0): the extended copy, the wall's own surface and their location. A face of the result
+    /// on the copy that lies on the wall's own surface but for less than its own tolerance is put
+    /// back on that surface and merges into the wall (Case Base #105: a round's tool crosses a
+    /// blend's contact line by 4e-4, so the blend's own surface could not cut it in two, and the
+    /// 0.02 mm2 it cut off the tool stayed a face of its own beside the blend; Onshape has one face)
+    struct Reseat
+    {
+        Handle(Geom_Surface) extended;
+        Handle(Geom_Surface) own;
+        TopLoc_Location location;
+    };
+    std::vector<Reseat> reseats;
     /// A curved end's surface that runs on across the tool's other end, where a selected edge
     /// continues it tangentially: that edge's tool is trimmed by it too (Case Base #105, a round cut
     /// off along a short last edge and into the one before it)
@@ -6312,6 +6325,13 @@ bool trimByWall(
         if (extend == 0) {
             tool.capSurfaces.emplace_back(surface, location);
         }
+        else {
+            TopLoc_Location ownLocation;
+            const Handle(Geom_Surface) own = BRep_Tool::Surface(at.wall, ownLocation);
+            if (!own.IsNull() && own != surface && ownLocation.IsEqual(location)) {
+                tool.reseats.push_back({surface, own, location});
+            }
+        }
         return extend == 0;
     }
     refuse("a wall's surface does not cut off the dress-up that runs into it");
@@ -8219,9 +8239,65 @@ TopoDS_Shape constructShape(
     // faces, as OCCT's fillet extends those (5.6, interface point 4)
     std::vector<TrimPlane> caps;
     std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> capSurfaces;
+    std::vector<Tool::Reseat> reseats;
     for (const auto& tool : tools) {
         caps.insert(caps.end(), tool.caps.begin(), tool.caps.end());
         capSurfaces.insert(capSurfaces.end(), tool.capSurfaces.begin(), tool.capSurfaces.end());
+        reseats.insert(reseats.end(), tool.reseats.begin(), tool.reseats.end());
+    }
+    // A face on an extended copy of a wall's surface that lies on the wall's own surface: back onto
+    // that surface (the same pcurves: the copy keeps the surface's parameters), so that it merges
+    // into the wall below. It may leave the surface's bounds by no more than its own tolerance, and
+    // there the two surfaces must agree (past its bounds a B-spline is evaluated on its last span)
+    for (const auto& reseat : reseats) {
+        double bounds[4] = {0.0, 0.0, 0.0, 0.0};
+        reseat.own->Bounds(bounds[0], bounds[1], bounds[2], bounds[3]);
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            if (BRep_Tool::Surface(face, location) != reseat.extended || !location.IsEqual(reseat.location)) {
+                continue;
+            }
+            double allowed = BRep_Tool::Tolerance(face);
+            for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More(); sub.Next()) {
+                allowed = std::max(allowed, BRep_Tool::Tolerance(TopoDS::Edge(sub.Current())));
+            }
+            for (TopExp_Explorer sub(face, TopAbs_VERTEX); sub.More(); sub.Next()) {
+                allowed = std::max(allowed, BRep_Tool::Tolerance(TopoDS::Vertex(sub.Current())));
+            }
+            bool fits = true;
+            std::vector<std::pair<TopoDS_Edge, Handle(Geom2d_Curve)>> pcurves;
+            for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More() && fits; sub.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(sub.Current());
+                double first = 0.0;
+                double last = 0.0;
+                const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+                if (pcurve.IsNull() || BRep_Tool::IsClosed(edge, face)) {
+                    fits = false;
+                    break;
+                }
+                for (int k = 0; k <= 16 && fits; ++k) {
+                    const gp_Pnt2d uv = pcurve->Value(first + (last - first) * k / 16.0);
+                    const gp_Pnt on = reseat.own->Value(uv.X(), uv.Y());
+                    const gp_Pnt inside = reseat.own->Value(
+                        std::clamp(uv.X(), bounds[0], bounds[1]),
+                        std::clamp(uv.Y(), bounds[2], bounds[3])
+                    );
+                    fits = on.Distance(inside) <= allowed
+                        && on.Distance(reseat.extended->Value(uv.X(), uv.Y())) <= 1e-6;
+                }
+                pcurves.emplace_back(edge, pcurve);
+            }
+            if (!fits) {
+                continue;
+            }
+            BRep_Builder builder;
+            for (const auto& [edge, pcurve] : pcurves) {
+                builder.UpdateEdge(edge, pcurve, reseat.own, reseat.location, BRep_Tool::Tolerance(edge));
+            }
+            builder.UpdateFace(face, reseat.own, reseat.location, BRep_Tool::Tolerance(face));
+            capSurfaces.emplace_back(reseat.own, reseat.location);
+        }
     }
     TopTools_IndexedMapOfShape baseImages;
     auto collectBaseImages = [&]() {
