@@ -24,6 +24,8 @@
 #include <memory>
 
 #include <QApplication>
+#include <QEvent>
+#include <QMouseEvent>
 #include <QTimer>
 #include <QThread>
 
@@ -72,6 +74,11 @@ const int AutoSaveTimeout = 900000;
 // snapshot's time, so a heavy document spends at most a tenth of its time in snapshots
 const int SoonPassMinimum = 2000;
 const int SoonPassFactor = 10;
+// A soon pass expected to block the window longer than this (seconds; preference
+// AutoSaveSoonIdleAbove) waits until the user has given no input for IdleWindow ms, so the freeze
+// falls in a pause and not in a drag or a typed value
+const double SlowSoonPass = 0.3;
+const int IdleWindow = 3000;
 
 AutoSaver::AutoSaver(QObject* parent)
     : QObject(parent)
@@ -84,6 +91,32 @@ AutoSaver::AutoSaver(QObject* parent)
     App::GetApplication().signalDeleteDocument.connect([this](const App::Document& doc) {
         slotDeleteDocument(doc);
     });
+    sinceInput.start();
+    if (QCoreApplication* app = QCoreApplication::instance()) {
+        app->installEventFilter(this);
+    }
+}
+
+bool AutoSaver::eventFilter(QObject* watched, QEvent* event)
+{
+    switch (event->type()) {
+        case QEvent::KeyPress:
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::Wheel:
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+            sinceInput.restart();
+            break;
+        case QEvent::MouseMove:
+            if (static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton) {
+                sinceInput.restart();
+            }
+            break;
+        default:
+            break;
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 AutoSaver::~AutoSaver() = default;
@@ -158,15 +191,20 @@ void AutoSaver::documentChanged(const std::string& name)
     startSoonPass(name);
 }
 
+double AutoSaver::expectedSeconds(const AutoSaveProperty& saver) const
+{
+    if (saver.lastSaveSeconds >= 0.0) {
+        return saver.lastSaveSeconds;
+    }
+    // Before the first snapshot: about 25 ms per object (notes/files-saving-history-design.md
+    // section 2: 2.5 s per hundred features), so a heavy file just opened isn't frozen at once
+    const App::Document* doc = App::GetApplication().getDocument(saver.documentName.c_str());
+    return doc ? 0.025 * doc->countObjects() : 0.0;
+}
+
 int AutoSaver::soonDelay(const AutoSaveProperty& saver) const
 {
-    double seconds = saver.lastSaveSeconds;
-    if (seconds < 0.0) {
-        // Before the first snapshot: about 25 ms per object (notes/files-saving-history-design.md
-        // section 2: 2.5 s per hundred features), so a heavy file just opened isn't frozen at once
-        const App::Document* doc = App::GetApplication().getDocument(saver.documentName.c_str());
-        seconds = doc ? 0.025 * doc->countObjects() : 0.0;
-    }
+    const double seconds = expectedSeconds(saver);
     const double scaled = seconds * 1000.0 * SoonPassFactor;
     const int delay = scaled > SoonPassMinimum ? static_cast<int>(scaled) : SoonPassMinimum;
     return std::min(delay, timeout);
@@ -179,6 +217,12 @@ void AutoSaver::startSoonPass(const std::string& name)
         return;
     }
     AutoSaveProperty& saver = *it->second;
+    const App::Document* doc = App::GetApplication().getDocument(name.c_str());
+    if (doc && doc->testStatus(App::Document::Restoring)) {
+        // An open's own changes: nothing to recover, and the document's size isn't known yet
+        saver.soonPending = false;
+        return;
+    }
     if (timeout <= 0 || saver.soonTimerId > 0) {
         // Auto-recovery off, or a pass already on its way: it saves the latest state
         saver.soonPending = saver.soonTimerId > 0;
@@ -276,6 +320,18 @@ void AutoSaver::timerEvent(QTimerEvent* event)
                 ? Gui::Application::Instance->getDocument(it.first.c_str())
                 : nullptr;
             if (!gdoc || !gdoc->isModified()) {
+                break;
+            }
+            const double slowAbove = App::GetApplication()
+                                         .GetParameterGroupByPath(
+                                             "User parameter:BaseApp/Preferences/Document"
+                                         )
+                                         ->GetFloat("AutoSaveSoonIdleAbove", SlowSoonPass);
+            const qint64 idle = sinceInput.elapsed();
+            if (expectedSeconds(*it.second) >= slowAbove && idle < IdleWindow) {
+                // The user is at work: once they pause
+                it.second->soonTimerId = startTimer(static_cast<int>(IdleWindow - idle) + 50);
+                it.second->soonPending = it.second->soonTimerId > 0;
                 break;
             }
             try {
