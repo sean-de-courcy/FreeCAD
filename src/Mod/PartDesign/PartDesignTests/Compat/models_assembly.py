@@ -82,6 +82,14 @@ def joint(joints, name, kind, refs, **props):
     return obj
 
 
+def flipped(obj):
+    """Flip primary, as the dialog's button: a mate between two faces meant face to face. Onshape's
+    connectors (ops#683, C2) have Z out of the material on both faces, so the unflipped mate puts
+    the faces' normals the same way and the parts overlap."""
+    obj.Proxy.flipOnePart(obj)
+    return obj
+
+
 def solve(assembly):
     result = assembly.solve()
     if result != 0:
@@ -126,14 +134,14 @@ def AsmFastened(make):
     ground(joints, linkBase)
     baseTop, _ = topAndBottom(base.Shape, 10)
     _, plateBottom = topAndBottom(plate.Shape, 5)
-    joint(joints, "Fixed", "Fixed", [[linkBase, list(baseTop)], [linkPlate, list(plateBottom)]])
-    joint(
+    flipped(joint(joints, "Fixed", "Fixed", [[linkBase, list(baseTop)], [linkPlate, list(plateBottom)]]))
+    flipped(joint(
         joints,
         "Fixed001",
         "Fixed",
         [[linkBase, list(baseTop)], [linkPlate2, list(plateBottom)]],
         Offset1=App.Placement(V(20, 0, 0), App.Rotation()),
-    )
+    ))
     solve(assembly)
     for obj, at in ((linkPlate, V(0, 0, 10)), (linkPlate2, V(20, 0, 10))):
         assertAt(obj.Placement.Base, at, obj.Name)
@@ -243,6 +251,7 @@ def AsmMotion(make):
         AngleMax=30,
     )
     groundTop = face(groundBox, V(30, 30, 5))
+    # Distance and Angle hold unflipped under C2 too (flipped, the Angle mate gives 0 degrees: ops#683)
     for name, part, local, props in (
         ("Distance", lifted, V(2.5, 2.5, 0), {"Distance": 7}),
         ("Angle", tilted, V(2.5, 2.5, 0), {"Angle": 30}),
@@ -306,7 +315,7 @@ def AsmEditedPart(make):
     doc.recompute()
     ground(joints, lower)
     top, bottom = topAndBottom(body.Shape, 10)
-    joint(joints, "Fixed", "Fixed", [[lower, list(top)], [upper, list(bottom)]])
+    flipped(joint(joints, "Fixed", "Fixed", [[lower, list(top)], [upper, list(bottom)]]))
     solve(assembly)
     assertAt(upper.Placement.Base, V(0, 0, 10), "LinkUpper before the edit")
     varset.Height = 15
@@ -341,18 +350,18 @@ def AsmSubAssembly(make):
     sub.Placement = App.Placement(V(12, 9, 8), App.Rotation())
     doc.recompute()
     ground(subJoints, boxA, "GroundedBoxA")
-    joint(subJoints, "FixedB", "Fixed", [[boxA, list(aTop)], [boxB, list(bBottom)]])
+    flipped(joint(subJoints, "FixedB", "Fixed", [[boxA, list(aTop)], [boxB, list(bBottom)]]))
     solve(sub)
     ground(joints, base)
     baseTop = faceWhere(base.Shape, planeFacing(TOP, V(0, 0, 5)))
-    joint(
+    flipped(joint(
         joints,
         "Fixed",
         "Fixed",
         [[base, [baseTop, vertexAt(base.Shape, V(0, 0, 5))]],
          [sub, [f"BoxA.{aBottom[0]}", f"BoxA.{aBottom[1]}"]]],
         Offset1=App.Placement(V(10, 10, 0), App.Rotation()),
-    )
+    ))
     solve(assembly)
     placed = sub.Placement.multiply(boxA.Placement)
     assertAt(placed.Base, V(10, 10, 5), "BoxA")
@@ -360,4 +369,55 @@ def AsmSubAssembly(make):
     return {}
 
 
-MODELS = [AsmFastened, AsmMotion, AsmEditedPart, AsmSubAssembly]
+def AsmOnshapeFrames(make):
+    """Onshape's connector frames on a bottom face and a flipped mate with an offset (ops#683, C2;
+    notes/assemblies-design.md 6a, oracle 12). Fork builds before C2 placed both differently.
+
+    AsmOnshapeFramesParts: Base, a 40 x 20 x 10 block (0..40); Plate, a 20 x 20 x 5 block (0..20).
+    AsmOnshapeFrames: LinkBase grounded at the origin.
+    Each mate picks Base first, as AsmFastened does (the plate moves: a script's mate with the free
+    part first moves the grounded one, before C2 too).
+    - LinkHanger: a Fastened mate, Base's bottom-face centre first, Plate's top-face centre second,
+      unflipped, no offset. Onshape's bottom-face frame is (+x, -y, -z) at (20, 10, 0), the top
+      face's the part's axes at (10, 10, 5): the plate turned 180 degrees about x, its top centre
+      on (20, 10, 0), so at (10, 20, 5).
+    - LinkTopper: a Fastened mate, Base's top-face centre first, Plate's top-face centre second,
+      flipped, offset (5, 7, 3). Base's connector = Plate's x Flip x Translate(5, 7, 3), so the
+      plate's connector is Base's (the part's axes at (20, 10, 10)) moved by -(5, 7, 3) and turned
+      180 degrees about x: its top centre at (15, 3, 7), the plate at (5, 13, 12)."""
+    parts = make("AsmOnshapeFramesParts")
+    base = newBody(parts, "Base")
+    block(base, 0, 0, 40, 20, 10, "BasePad")
+    plate = newBody(parts, "Plate")
+    block(plate, 0, 0, 20, 20, 5, "PlatePad")
+    parts.recompute()
+    doc = make("AsmOnshapeFrames")
+    assembly, joints = newAssembly(doc)
+    linkBase = link(doc, assembly, "LinkBase", base, App.Placement())
+    tilted = App.Rotation(V(0, 0, 1), 4)
+    hanger = link(doc, assembly, "LinkHanger", plate, App.Placement(V(1, -1, -9), tilted))
+    topper = link(doc, assembly, "LinkTopper", plate, App.Placement(V(22, 1, 12), tilted))
+    doc.recompute()
+    ground(joints, linkBase)
+    (baseTop, _), (baseBottom, _) = topAndBottom(base.Shape, 10)
+    (plateTop, _), _ = topAndBottom(plate.Shape, 5)
+    joint(joints, "Hanger", "Fixed", [[linkBase, [baseBottom, baseBottom]], [hanger, [plateTop, plateTop]]])
+    flipped = joint(
+        joints,
+        "Topper",
+        "Fixed",
+        [[linkBase, [baseTop, baseTop]], [topper, [plateTop, plateTop]]],
+        Offset2=App.Placement(V(5, 7, 3), App.Rotation()),
+    )
+    flipped.Proxy.flipOnePart(flipped)
+    solve(assembly)
+    assertAt(linkBase.Placement.Base, V(0, 0, 0), "LinkBase")
+    turned = App.Rotation(V(1, 0, 0), 180)
+    for obj, at in ((hanger, V(10, 20, 5)), (topper, V(5, 13, 12))):
+        assertAt(obj.Placement.Base, at, obj.Name)
+        if not obj.Placement.Rotation.isSame(turned, TOL):
+            raise AssertionError(f"{obj.Name} turned {obj.Placement.Rotation}, expected 180 about x")
+    return {"volumes": {"AsmOnshapeFramesParts#BasePad": 8000, "AsmOnshapeFramesParts#PlatePad": 2000}}
+
+
+MODELS = [AsmFastened, AsmMotion, AsmEditedPart, AsmSubAssembly, AsmOnshapeFrames]
