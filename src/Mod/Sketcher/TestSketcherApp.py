@@ -37,6 +37,8 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchMissingExternalSolver,
     TestSketchMissingExternalReturns,
     TestSketchMissingExternalReturnsSolver,
+    TestSketchMissingExternalSourceDeleted,
+    TestSketchMissingExternalSourceDeletedSolver,
     TestSketchFaceLinkPairing,
     TestSketchFaceLinkPairingNoSolver,
     TestSketchFaceLinkPairing4m,
