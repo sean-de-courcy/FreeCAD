@@ -27,6 +27,7 @@
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
@@ -2102,6 +2103,18 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                         std::string("the corrected body has a tolerance above its bound (")
                         + (kind == TopAbs_FACE ? "a face" : kind == TopAbs_EDGE ? "an edge" : "a vertex") + ": "
                         + std::to_string(toleranceOf(now)) + ", was " + std::to_string(old->second) + ")"
+                        + [&]() {
+                              if (kind != TopAbs_EDGE) {
+                                  return std::string();
+                              }
+                              BRepAdaptor_Curve c(TopoDS::Edge(now));
+                              const gp_Pnt a = c.Value(c.FirstParameter());
+                              const gp_Pnt b = c.Value(c.LastParameter());
+                              return ", from "
+                                  + std::to_string(a.X()) + " " + std::to_string(a.Y()) + " " + std::to_string(a.Z())
+                                  + " to " + std::to_string(b.X()) + " " + std::to_string(b.Y()) + " "
+                                  + std::to_string(b.Z());
+                          }()
                     };
                 }
             }
