@@ -30,6 +30,7 @@
 
 #include <Mod/Assembly/AssemblyGlobal.h>
 
+#include <App/DocumentObserver.h>
 #include <App/FeaturePython.h>
 #include <App/Part.h>
 #include <App/PropertyLinks.h>
@@ -277,7 +278,16 @@ private:
     std::vector<App::DocumentObject*> draggedParts;
     std::vector<App::DocumentObject*> motions;
 
-    std::vector<std::pair<App::DocumentObject*, Base::Placement>> previousPositions;
+    // FreeCAD-CH (ops#683): weak, so undoSolve() skips a part deleted since the solve; a raw pointer
+    // was dereferenced after free (an access violation on Windows). The ID guards against the weak
+    // pointer reviving when a new object is allocated at the freed address.
+    struct SavedPlacement
+    {
+        App::DocumentObjectWeakPtrT obj;
+        long id;
+        Base::Placement placement;
+    };
+    std::vector<SavedPlacement> previousPositions;
 
     bool bundleFixed;
 
