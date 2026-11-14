@@ -2626,11 +2626,12 @@ Handle(Curve) reaching(const Handle(Curve)& curve, double parameter)
         && (parameter < basis->FirstParameter() || parameter > basis->LastParameter())) {
         return {};
     }
-    return new Trimmed(
-        basis,
-        std::min(trimmed->FirstParameter(), parameter),
-        std::max(trimmed->LastParameter(), parameter)
-    );
+    const double from = std::min(trimmed->FirstParameter(), parameter);
+    const double to = std::max(trimmed->LastParameter(), parameter);
+    if (basis->IsPeriodic() && to - from > basis->Period()) {
+        return {};  // more than a turn: the trim would wrap
+    }
+    return new Trimmed(basis, from, to);
 }
 
 /// Ends the edge at the parameter (its first end or its last). False, with nothing changed, if
@@ -2738,7 +2739,8 @@ bool moveToCrossing(
         TopExp::Vertices(edge, from, to);
         const bool free = !inputs.count(edge.TShape().get()) && !BRep_Tool::Degenerated(edge)
             && hasCurvesOnly(edge) && BRep_Tool::SameParameter(edge) && BRep_Tool::SameRange(edge)
-            && !from.IsNull() && !to.IsNull() && !from.IsSame(to);
+            && !from.IsNull() && !to.IsNull() && !from.IsSame(to)
+            && (from.IsSame(vertex) || to.IsSame(vertex));  // not a vertex inside the edge
         CurveEnd end;
         end.edge = edge;
         double first = 0.0;
@@ -2842,21 +2844,29 @@ bool moveToCrossing(
 
     // The walls' edges must all end here; then the vertex moves, and the rest follow if they can
     HealRecord trial;
-    for (const auto& end : ends) {
-        if (!endAt(end, trial)) {
-            trial.undo();
-            return false;
-        }
-    }
-    for (const auto& end : joining) {
-        if (!endAt(end, trial)) {
-            const auto [one, two] = endOf(end.edge);
-            covers = std::max({covers, 1.01 * one.Distance(point), 1.01 * two.Distance(point)});
-            if (covers > tolerance) {
+    try {
+        for (const auto& end : ends) {
+            if (!endAt(end, trial)) {
                 trial.undo();
                 return false;
             }
         }
+        for (const auto& end : joining) {
+            if (!endAt(end, trial)) {
+                const auto [one, two] = endOf(end.edge);
+                covers = std::max(
+                    {covers, 1.01 * one.Distance(point), 1.01 * two.Distance(point)}
+                );
+                if (covers > tolerance) {
+                    trial.undo();
+                    return false;
+                }
+            }
+        }
+    }
+    catch (...) {
+        trial.undo();  // the caller's record doesn't know these yet
+        throw;
     }
     record.adopt(trial);
     record.keep(vertex);
@@ -2997,6 +3007,7 @@ SliverHeal healSliverCorners(
         }
         TopTools_IndexedDataMapOfShapeListOfShape edgesOf;
         TopExp::MapShapesAndUniqueAncestors(result, TopAbs_VERTEX, TopAbs_EDGE, edgesOf);
+        std::vector<TopoDS_Vertex> movedVertices;
         std::unordered_set<const TopoDS_TShape*> seen;
         for (const auto& edge : moved) {
             for (TopoDS_Iterator it(edge); it.More(); it.Next()) {
@@ -3014,24 +3025,34 @@ SliverHeal healSliverCorners(
                         record
                     )) {
                     ++heal.vertices;
+                    movedVertices.push_back(vertex);
                 }
             }
         }
 
-        // The faces of the changed edges must still check; else everything goes back
+        // The faces of the changed edges, and every face at a moved vertex (its tolerance went
+        // down under edges that stayed), must still check; else everything goes back
         BRep_Builder builder;
         TopoDS_Compound touched;
         builder.MakeCompound(touched);
         TopTools_IndexedMapOfShape added;
-        for (const auto& edge : record.changedEdges()) {
+        auto touch = [&](const TopoDS_Shape& edge) {
             if (!facesOf.Contains(edge)) {
-                continue;
+                return;
             }
             for (const auto& face : facesOf.FindFromKey(edge)) {
                 if (!added.Contains(face)) {
                     added.Add(face);
                     builder.Add(touched, face);
                 }
+            }
+        };
+        for (const auto& edge : record.changedEdges()) {
+            touch(edge);
+        }
+        for (const auto& vertex : movedVertices) {
+            for (const auto& edge : edgesOf.FindFromKey(vertex)) {
+                touch(edge);
             }
         }
         const bool valid = check ? check(touched) : KernelBudget::checkValid(touched);

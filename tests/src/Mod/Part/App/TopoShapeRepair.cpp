@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <iostream>
 #include <numbers>
 #include <sstream>
 #include <string>
@@ -637,6 +638,44 @@ TEST_F(SliverCornersTest, anInputsOwnGapStays)
     EXPECT_EQ(written(wheel), before);
 }
 
+TEST_F(SliverCornersTest, besideAnInputsFaceOnlyTheNewSideIsClosed)
+{
+    // The top face as an input: its arcs and vertices are the input's own and stay bit for bit.
+    // The walls' edges are new and move; the bottom corners close, the top ones stay open
+    const TopoDS_Shape wheel = slippedWheel(grips, height, slip, tolerance);
+    const TopoDS_Face top = faceAtHeight(wheel, height);
+    const std::string before = written(top);
+    const Part::SliverHeal heal = Part::healSliverCorners(wheel, {Part::TopoShape(top)});
+    EXPECT_FALSE(heal.undone);
+    EXPECT_EQ(heal.edges, 2 * grips);
+    EXPECT_EQ(heal.vertices, 2 * grips);
+    EXPECT_EQ(written(top), before);
+    EXPECT_LT(widestStandOff(wheel), 1e-9);
+    EXPECT_NEAR(areaAlongEdges(faceAtHeight(wheel, 0.0)), wheelArea(grips), 1e-9);
+    EXPECT_TRUE(BRepCheck_Analyzer(wheel).IsValid());
+}
+
+TEST_F(SliverCornersTest, aPlacedShapeIsClosedWhereItStands)
+{
+    // The same wheel under a location (turned about a skew axis and moved): edges, faces and
+    // vertices all carry it
+    gp_Trsf turn;
+    turn.SetRotation(gp_Ax1(gp_Pnt(3, -2, 5), gp_Dir(1, 2, 3)), 0.7);
+    gp_Trsf shift;
+    shift.SetTranslation(gp_Vec(40, -25, 12));
+    const TopoDS_Shape wheel
+        = slippedWheel(grips, height, slip, tolerance).Moved(TopLoc_Location(shift * turn));
+    ASSERT_GT(widestStandOff(wheel), 0.9 * slip);
+    const Part::SliverHeal heal = Part::healSliverCorners(wheel, {});
+    EXPECT_FALSE(heal.undone);
+    EXPECT_EQ(heal.edges, 2 * grips);
+    EXPECT_EQ(heal.vertices, 2 * 2 * grips);
+    EXPECT_LT(widestGap(wheel), 1e-7);
+    EXPECT_LT(widestStandOff(wheel), 1e-9);
+    EXPECT_TRUE(BRepCheck_Analyzer(wheel).IsValid());
+    EXPECT_NEAR(Part::MassProperties::volume(wheel, true), wheelArea(grips) * height, 1e-5);
+}
+
 TEST_F(SliverCornersTest, aHealThatFailsTheCheckIsUndoneWhole)
 {
     // The check's verdict stood in for: with a "no", every range, curve, point and tolerance is
@@ -720,8 +759,16 @@ TEST_F(SliverCornersTest, aFuseThatLeavesSliverGapsIsClosedOnlyWithTheSwitchOn)
             shapes.emplace_back(gripCell(k, cellHeight, 1e-3, gap));
             EXPECT_TRUE(BRepCheck_Analyzer(shapes.back().getShape()).IsValid());
         }
+        std::vector<std::string> before;
+        for (const auto& shape : shapes) {
+            before.push_back(written(shape.getShape()));
+        }
         Part::TopoShape fused;
         fused.makeElementBoolean(Part::OpCodes::Fuse, shapes, nullptr, -1.0);  // the pad's fuzzy
+        // the inputs are the document's own shapes: bit for bit as they were, heal or not
+        for (std::size_t k = 0; k < shapes.size(); ++k) {
+            EXPECT_EQ(written(shapes[k].getShape()), before[k]) << "input " << k;
+        }
         return fused.getShape();
     };
     const auto group = App::GetApplication().GetParameterGroupByPath(
@@ -740,6 +787,9 @@ TEST_F(SliverCornersTest, aFuseThatLeavesSliverGapsIsClosedOnlyWithTheSwitchOn)
     // edges stand the gap off the flanks' cylinders, and the body measures short by the walls'
     // strips: 8 corners of half the root radius times the gap, over the height, two thirds of it
     group->RemoveBool("HealSliverCorners");
+    if (Part::healSliverCornersEnabled()) {
+        std::cout << "the environment switches the heal on: the off half is not run" << std::endl;
+    }
     if (!Part::healSliverCornersEnabled()) {
         const TopoDS_Shape open = fuse();
         EXPECT_TRUE(BRepCheck_Analyzer(open).IsValid());
@@ -753,6 +803,9 @@ TEST_F(SliverCornersTest, aFuseThatLeavesSliverGapsIsClosedOnlyWithTheSwitchOn)
     // and at the closed form. (The sliver's own line, inside the top and bottom faces, still ends
     // at the old corner, under the vertex's tolerance: it bounds nothing)
     group->SetBool("HealSliverCorners", true);
+    if (!Part::healSliverCornersEnabled()) {
+        std::cout << "the environment switches the heal off: the on half is not run" << std::endl;
+    }
     if (Part::healSliverCornersEnabled()) {
         const TopoDS_Shape closed = fuse();
         EXPECT_TRUE(BRepCheck_Analyzer(closed).IsValid());
