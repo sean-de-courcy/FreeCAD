@@ -322,6 +322,9 @@ struct Blend
     double lengthFirst = 0.0;
     double lengthLast = 0.0;
     int chain = -1;
+    // A face of exact form (a cylinder between planes, a torus) beside a spline face of its chain: a rolling ball
+    // by form. Its surface and its contact edges stay; only its seam to the spline face takes the ball's arc
+    bool kept = false;
     std::vector<Station> stations;
     Handle(Geom_BSplineSurface) surface;
     double length = 0.0;
@@ -369,6 +372,14 @@ struct Seam
     TopoDS_Edge tangentEdge;  // K: between the two wall faces the contact crosses
     int sliding = -1;         // which vertex lies on K
     double parameterOnK = 0.0;
+    // Beside a face of exact form: its contact edges, which vertex of the seam slides along each, and to where
+    struct KeptSlide
+    {
+        TopoDS_Edge edge;
+        int vertex = 0;
+        double parameter = 0.0;
+    };
+    std::vector<KeptSlide> keptSlides;
 };
 
 struct EdgeNew
@@ -801,6 +812,67 @@ void classify(Context& context, Blend& blend)
     }
 }
 
+// A blend face of exact form beside a spline face: its two walls and its contact edges on them. Its other ends are
+// its own (a seam to the next exact face, a mitre: none of them changes), so nothing is asked of them
+void classifyKept(const Context& context, Blend& blend)
+{
+    if (!identity(blend.face)) {
+        throw NotRecognised {"a blend face with a location"};
+    }
+    blend.old = BRep_Tool::Surface(blend.face);
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(blend.face, TopAbs_EDGE, edges);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge edge = TopoDS::Edge(edges(i));
+        if (BRep_Tool::Degenerated(edge)) {
+            throw NotRecognised {"a blend face with a degenerate edge"};
+        }
+        TopoDS_Face other;
+        int count = 0;
+        for (TopTools_ListOfShape::Iterator it(context.edgeFaces.FindFromKey(edge)); it.More(); it.Next()) {
+            ++count;
+            if (!it.Value().IsSame(blend.face)) {
+                other = TopoDS::Face(it.Value());
+            }
+        }
+        if (count != 2 || other.IsNull()) {
+            throw NotRecognised {"a blend face closed on itself or with a free edge"};
+        }
+        if (context.blendOf(other) >= 0) {
+            continue;
+        }
+        Side* side = nullptr;
+        for (Side& s : blend.sides) {
+            if (side == nullptr && (s.contacts.empty() || s.wall.IsSame(other))) {
+                side = &s;
+            }
+        }
+        if (side == nullptr) {
+            throw NotRecognised {"a blend face of exact form with more than two walls"};
+        }
+        side->wall = other;
+        side->surface = untrimmed(BRep_Tool::Surface(other));
+        side->contacts.push_back(edge);
+        double first {}, last {};
+        const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, other, first, last);
+        if (pcurve.IsNull()) {
+            throw NotRecognised {"a contact edge without a pcurve on its wall"};
+        }
+        for (int k = 0; k <= 8; ++k) {
+            const gp_Pnt2d at = pcurve->Value(first + (last - first) * k / 8.0);
+            Foot seed;
+            seed.u = at.X();
+            seed.v = at.Y();
+            seed.point = side->surface->Value(seed.u, seed.v);
+            seed.ok = true;
+            blend.seeds[side == &blend.sides[0] ? 0 : 1].push_back(seed);
+        }
+    }
+    if (blend.sides[0].contacts.empty() || blend.sides[1].contacts.empty()) {
+        throw NotRecognised {"a blend face without two walls"};
+    }
+}
+
 int sideAt(const Blend& blend, const TopoDS_Vertex& vertex)
 {
     for (int side = 0; side < 2; ++side) {
@@ -948,6 +1020,59 @@ void solveSeam(Context& context, Seam& seam)
     seam.parameterOnK = s1;
     seam.points[i] = onK;
     seam.points[1 - i] = hintCommon.point;
+    // A face of exact form beside the seam stays as it is: the ball's arc must lie on it, and the arc's ends on its
+    // contact edges, which the seam's vertices slide along
+    if (blendB.kept) {
+        const double within = std::max(1e-9, 1e3 * reachable(centre, context.radius));
+        const gp_Vec e0(centre, seam.points[0]);
+        const gp_Vec e1(centre, seam.points[1]);
+        const double angle = e0.Angle(e1);
+        Foot onKept;
+        for (int k = 0; k <= 8; ++k) {
+            const double fraction = k / 8.0;
+            const gp_Vec direction = e0 * std::sin((1.0 - fraction) * angle) + e1 * std::sin(fraction * angle);
+            const gp_Pnt point = centre.Translated(direction.Normalized() * context.radius);
+            onKept = foot(blendB.old, point, onKept.ok ? &onKept : nullptr);
+            if (!onKept.ok || onKept.distance > within) {
+                throw NotRecognised {"a blend face of exact form that is not the ball's surface at its seam to a spline face"};
+            }
+        }
+        for (int v = 0; v < 2; ++v) {
+            for (const TopoDS_Edge& edge : blendB.sides[sideB[v]].contacts) {
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(edge, v1, v2);
+                if (!v1.IsSame(seam.vertices[v]) && !v2.IsSame(seam.vertices[v])) {
+                    continue;
+                }
+                if (v1.IsSame(v2)) {
+                    throw NotRecognised {"a closed contact edge on a blend face of exact form"};
+                }
+                double edgeFirst {}, edgeLast {};
+                const Handle(Geom_Curve) along = BRep_Tool::Curve(edge, edgeFirst, edgeLast);
+                if (along.IsNull() || !identity(edge)) {
+                    throw NotRecognised {"a contact edge of a blend face of exact form without a curve in place"};
+                }
+                GeomAPI_ProjectPointOnCurve projection(seam.points[v], along);
+                if (projection.NbPoints() < 1 || projection.LowerDistance() > within) {
+                    throw NotRecognised {"a blend face of exact form whose contact edge is not the ball's"};
+                }
+                double at = projection.LowerDistanceParameter();
+                const double was = BRep_Tool::Parameter(seam.vertices[v], edge);
+                if (along->IsPeriodic()) {
+                    at += along->Period() * std::round((was - at) / along->Period());
+                }
+                // It may not pass the edge's other vertex
+                const double otherEnd = std::fabs(was - edgeFirst) < std::fabs(was - edgeLast) ? edgeLast : edgeFirst;
+                if ((at - otherEnd) * (was - otherEnd) <= 0.0) {
+                    throw Refusal {"a seam crosses a vertex of the wall"};
+                }
+                seam.keptSlides.push_back({edge, v, at});
+            }
+        }
+        if (seam.keptSlides.size() != 2) {
+            throw NotRecognised {"a seam whose vertices are not the ends of the exact face's two contact edges"};
+        }
+    }
 }
 
 gp_Vec tangentAt(const Station& station)
@@ -1319,6 +1444,18 @@ void buildSurface(Blend& blend, double radius, bool compact = true)
         curves[i] = fitted(rows[i], parameters, compact);
         degree = std::max(degree, curves[i]->Degree());
     }
+    // A row the compact fit could not take (a contact curve on a wall of many spans: Nest Insert #163's elliptic
+    // wall) is the cubic through every station. Raised to the others' degree it would carry each of its knots at
+    // that degree (771 poles for 67), so then every row is the cubic
+    if (std::any_of(curves.begin(), curves.end(), [&](const Handle(Geom_BSplineCurve)& curve) {
+            return curve->Degree() != degree;
+        })) {
+        degree = 0;
+        for (int i = 0; i < 4; ++i) {
+            curves[i] = fitted(rows[i], parameters, false);
+            degree = std::max(degree, curves[i]->Degree());
+        }
+    }
     for (int i = 0; i < 4; ++i) {
         curves[i]->IncreaseDegree(degree);
     }
@@ -1560,9 +1697,25 @@ void recogniseChain(Context& context, const std::vector<int>& chain, std::vector
         }
     }
     for (const int k : chainSeams) {
-        if (context.seams[k].blends[1] < 0) {
+        Seam& seam = context.seams[k];
+        if (seam.blends[1] >= 0) {
+            continue;
+        }
+        // The other face is of exact form: it is classified here, and keeps everything but this seam
+        const Blend& first = context.blends[seam.blends[0]];
+        int other = -1;
+        for (TopTools_ListOfShape::Iterator it(context.edgeFaces.FindFromKey(seam.edge)); it.More(); it.Next()) {
+            if (!it.Value().IsSame(first.face)) {
+                other = context.blendOf(it.Value());
+            }
+        }
+        if (other < 0 || !context.blends[other].kept) {
             throw NotRecognised {"a seam with one blend face"};
         }
+        if (context.blends[other].old.IsNull()) {
+            classifyKept(context, context.blends[other]);
+        }
+        seam.blends[1] = other;
     }
 }
 
@@ -1695,29 +1848,31 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
         std::vector<int> correctedSeams;
         for (const auto& chain : chains) {
             std::vector<int> chainSeams;
+            std::vector<int> ball;  // the chain's faces that take new geometry
             try {
-                // A chain of exact forms (cylinders between planes, tori) is a rolling ball by form; a
-                // chain with such faces among spline ones is left alone for now
-                size_t splines = 0;
+                // A chain of exact forms (cylinders between planes, tori) is a rolling ball by form. Among
+                // spline faces such faces stay as they are (Nest Insert #163: a slot's round is cylinders and
+                // tori, and two spline faces where it passes under an oblique elliptic wall); only the spline
+                // faces, and their seams, take the ball's geometry
                 for (const int index : chain) {
-                    const Handle(Geom_Surface) surface = BRep_Tool::Surface(context.blends[index].face);
-                    splines += surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
-                            || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface))
-                        ? 1
-                        : 0;
+                    const Handle(Geom_Surface) surface = untrimmed(BRep_Tool::Surface(context.blends[index].face));
+                    if (surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
+                        || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface))) {
+                        ball.push_back(index);
+                    }
+                    else {
+                        context.blends[index].kept = true;
+                    }
                 }
-                if (splines == 0) {
+                if (ball.empty()) {
                     throw NotRecognised {"a rolling ball already"};
                 }
-                if (splines != chain.size()) {
-                    throw NotRecognised {"a chain with faces of exact form among spline faces"};
-                }
-                for (const int index : chain) {
+                for (const int index : ball) {
                     classify(context, context.blends[index]);
                 }
                 double before = 0.0;
                 int exact = 0;
-                for (const int index : chain) {
+                for (const int index : ball) {
                     const Blend& blend = context.blends[index];
                     double u0 {}, u1 {}, v0 {}, v1 {};
                     BRepTools::UVBounds(blend.face, u0, u1, v0, v1);
@@ -1731,7 +1886,7 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                 if (exact > 0) {
                     throw NotRecognised {"a chain with faces that are a rolling ball already and faces that are not"};
                 }
-                recogniseChain(context, chain, chainSeams);
+                recogniseChain(context, ball, chainSeams);
                 for (const int k : chainSeams) {
                     solveSeam(context, context.seams[k]);
                 }
@@ -1756,7 +1911,7 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
             int interior = firstStations;
             for (int pass = 0;; ++pass) {
                 double worst = 0.0;
-                for (const int index : chain) {
+                for (const int index : ball) {
                     Blend& blend = context.blends[index];
                     solveStations(context, blend, interior);
                     buildSurface(blend, radius);
@@ -1776,7 +1931,7 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                 }
                 interior = 2 * interior + 1;
             }
-            for (const int index : chain) {
+            for (const int index : ball) {
                 report.stations = std::max(report.stations, static_cast<int>(context.blends[index].stations.size()));
                 report.poles = std::max(report.poles, context.blends[index].surface->NbVPoles());
                 for (int end = 0; end < 2; ++end) {
@@ -1785,7 +1940,7 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                     }
                 }
             }
-            corrected.insert(corrected.end(), chain.begin(), chain.end());
+            corrected.insert(corrected.end(), ball.begin(), ball.end());
             correctedSeams.insert(correctedSeams.end(), chainSeams.begin(), chainSeams.end());
             ++report.chains;
         }
@@ -1945,13 +2100,47 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
             std::vector<std::pair<TopoDS_Face, Handle(Geom2d_Curve)>> pcurves;
             pcurves.emplace_back(firstBlend.face, segment2d(gp_Pnt2d(0.0, vFirst), gp_Pnt2d(1.0, vFirst), 0.0, 1.0));
             const Blend& secondBlend = context.blends[seam.blends[1]];
-            const double vSecond = secondBlend.seams[0] == k ? 0.0 : secondBlend.length;
-            const bool sameWay = secondBlend.surface->Value(0.0, vSecond).Distance(curve->Value(0.0))
-                < secondBlend.surface->Value(1.0, vSecond).Distance(curve->Value(0.0));
-            pcurves.emplace_back(
-                secondBlend.face,
-                segment2d(gp_Pnt2d(sameWay ? 0.0 : 1.0, vSecond), gp_Pnt2d(sameWay ? 1.0 : 0.0, vSecond), 0.0, 1.0)
-            );
+            if (secondBlend.kept) {
+                // On the face of exact form: the arc's points in its parameters, on the old pcurve's branch
+                double first {}, last {};
+                const Handle(Geom2d_Curve) old = BRep_Tool::CurveOnSurface(seam.edge, secondBlend.face, first, last);
+                if (old.IsNull()) {
+                    throw Refusal {"a seam without a pcurve on the exact face beside it"};
+                }
+                const gp_Pnt start = curve->Value(0.0);
+                const gp_Pnt2d hint = secondBlend.old->Value(old->Value(first).X(), old->Value(first).Y()).Distance(start)
+                        < secondBlend.old->Value(old->Value(last).X(), old->Value(last).Y()).Distance(start)
+                    ? old->Value(first)
+                    : old->Value(last);
+                double u = hint.X();
+                double v = hint.Y();
+                const int count = 33;
+                Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, count);
+                Handle(TColgp_HArray1OfPnt2d) points = new TColgp_HArray1OfPnt2d(1, count);
+                for (int j = 0; j < count; ++j) {
+                    const double t = static_cast<double>(j) / (count - 1);
+                    if (!parametersOf(secondBlend.old, curve->Value(t), u, v, true)) {
+                        throw Refusal {"a seam's arc does not lie on the exact face beside it"};
+                    }
+                    parameters->SetValue(j + 1, t);
+                    points->SetValue(j + 1, gp_Pnt2d(u, v));
+                }
+                Geom2dAPI_Interpolate onKept(points, parameters, Standard_False, 1e-12);
+                onKept.Perform();
+                if (!onKept.IsDone()) {
+                    throw Refusal {"a seam's pcurve on the exact face beside it could not be interpolated"};
+                }
+                pcurves.emplace_back(secondBlend.face, onKept.Curve());
+            }
+            else {
+                const double vSecond = secondBlend.seams[0] == k ? 0.0 : secondBlend.length;
+                const bool sameWay = secondBlend.surface->Value(0.0, vSecond).Distance(curve->Value(0.0))
+                    < secondBlend.surface->Value(1.0, vSecond).Distance(curve->Value(0.0));
+                pcurves.emplace_back(
+                    secondBlend.face,
+                    segment2d(gp_Pnt2d(sameWay ? 0.0 : 1.0, vSecond), gp_Pnt2d(sameWay ? 1.0 : 0.0, vSecond), 0.0, 1.0)
+                );
+            }
             addEdge(*modification, seam.edge, curve, pcurves, [&](const TopoDS_Vertex& vertex) {
                 return sideAt(firstBlend, vertex) == 0 ? 0.0 : 1.0;
             });
@@ -1959,6 +2148,10 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                 movePoint(seam.vertices[i], seam.points[i], newTolerance);
             }
             slideAlong(seam.tangentEdge, seam.vertices[seam.sliding], seam.parameterOnK);
+            for (const Seam::KeptSlide& slide : seam.keptSlides) {
+                before.of[slide.edge.TShape().get()] = toleranceOf(slide.edge);
+                slideAlong(slide.edge, seam.vertices[slide.vertex], slide.parameter);
+            }
         }
 
         Maker maker(shape, modification);
