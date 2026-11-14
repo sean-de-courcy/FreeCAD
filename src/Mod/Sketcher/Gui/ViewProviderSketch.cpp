@@ -1971,6 +1971,11 @@ void ViewProviderSketch::editDoubleClicked()
             editTextDialog.exec();
             setSketchMode(STATUS_NONE);
         }
+        // FreeCAD-CH (sketch patterns): a double click on a pattern's copy edits the pattern
+        else if (const int pattern = patternOfGeometry(sketch, geoId, true); pattern != -1) {
+            editPattern(sketch, pattern);
+            setSketchMode(STATUS_NONE);
+        }
         // FreeCAD-CH (selection parity P6, oracle 8 SQ9): a double click on a sketch line selects
         // nothing, as in Onshape (its chains come from a menu); upstream selected the whole
         // closed chain (STATUS_SELECT_Wire). The release that follows clears the selection.
@@ -6292,6 +6297,9 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
             if (shouldAddChangeConstraintValue) {
                 menu << "Sketcher_ChangeDimensionConstraint";
             }
+            if (patternOfSelection(getSketchObject()) >= 0) {
+                menu << "Sketcher_EditPattern";  // FreeCAD-CH (sketch patterns)
+            }
             menu << "Sketcher_ToggleDrivingConstraint"
                  << "Sketcher_ToggleActiveConstraint"
                  << "Sketcher_SelectElementsAssociatedWithConstraints"
@@ -6300,6 +6308,10 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
         }
         // add the rest of the context menu if geometry is selected
         if (selectedPoints != 0 || selectedEdges != 0) {
+            if (patternOfSelection(getSketchObject()) >= 0) {
+                menu << "Separator"
+                     << "Sketcher_EditPattern";  // FreeCAD-CH (sketch patterns)
+            }
             menu << "Separator"
                  << "Sketcher_ToggleConstruction"
                  << "Separator"

@@ -213,6 +213,9 @@ const Entry table[] = {
     {"Sketcher_RectangularArray", ""},
     {"Sketcher_RemoveAxesAlignment", ""},
     {"Sketcher_Rotate", ""},
+    {"Sketcher_CircularPattern", ""},
+    {"Sketcher_LinearPattern", ""},
+    {"Sketcher_EditPattern", ""},
     {"Sketcher_Scale", ""},
     {"Sketcher_SwitchVirtualSpace", ""},
     // Other workbenches' chords starting with an Onshape key: once such a workbench is loaded, the

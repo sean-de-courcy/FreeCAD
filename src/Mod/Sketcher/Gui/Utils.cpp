@@ -40,6 +40,8 @@
 #include <Mod/Sketcher/App/GeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
+#include <Mod/Sketcher/App/SketchPattern.h>
+
 #include "DrawSketchHandler.h"
 #include "TaskDlgEditSketch.h"
 #include "Utils.h"
@@ -1083,4 +1085,65 @@ QMap<QString, QString> SketcherGui::findAvailableFontFiles()
         }
     }
     return fontMap;
+}
+
+// FreeCAD-CH (sketch patterns)
+int SketcherGui::patternOfGeometry(const Sketcher::SketchObject* obj, int geoId, bool copyOnly)
+{
+    if (geoId < 0) {
+        return -1;
+    }
+    const auto& constraints = obj->Constraints.getValues();
+    for (int i = 0; i < static_cast<int>(constraints.size()); ++i) {
+        const auto record = Sketcher::PatternRecord::read(*constraints[i]);
+        if (!record) {
+            continue;
+        }
+        for (const auto& [slot, copy] : record->instances) {
+            if (copy == geoId) {
+                return i;
+            }
+        }
+        if (!copyOnly
+            && (std::ranges::find(record->seeds, geoId) != record->seeds.end()
+                || record->pivot == geoId || record->direction1 == geoId
+                || record->direction2 == geoId)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// FreeCAD-CH (sketch patterns)
+int SketcherGui::patternOfSelection(const Sketcher::SketchObject* obj)
+{
+    const auto selection
+        = Gui::Selection().getSelectionEx(nullptr, Sketcher::SketchObject::getClassTypeId());
+    if (selection.size() != 1 || selection[0].getObject() != obj) {
+        return -1;
+    }
+    const auto& constraints = obj->Constraints.getValues();
+    for (const std::string& name : selection[0].getSubNames()) {
+        int geoId = Sketcher::GeoEnum::GeoUndef;
+        if (name.starts_with("Edge")) {
+            geoId = std::atoi(name.substr(4).c_str()) - 1;
+        }
+        else if (name.starts_with("Vertex")) {
+            Sketcher::PointPos pos {};
+            obj->getGeoVertexIndex(std::atoi(name.substr(6).c_str()) - 1, geoId, pos);
+        }
+        else if (name.starts_with("Constraint")) {
+            const int index = Sketcher::PropertyConstraintList::getIndexFromConstraintName(name);
+            if (index >= 0 && index < static_cast<int>(constraints.size())
+                && constraints[index]->Type == Sketcher::Pattern) {
+                return index;
+            }
+            continue;
+        }
+        const int index = patternOfGeometry(obj, geoId);
+        if (index >= 0) {
+            return index;
+        }
+    }
+    return -1;
 }

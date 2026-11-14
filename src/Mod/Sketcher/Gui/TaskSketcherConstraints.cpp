@@ -141,6 +141,9 @@ public:
             case Sketcher::Pierce:  // FreeCAD-CH (Onshape's Pierce)
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "Pierce");
                 break;
+            case Sketcher::Pattern:  // FreeCAD-CH (sketch patterns)
+                type = QCoreApplication::translate("SketcherGui::ConstraintView", "Pattern");
+                break;
             case Sketcher::Parallel:
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "Parallel");
                 break;
@@ -333,6 +336,7 @@ public:
             static QIcon pntoo(Gui::BitmapFactory().iconFromTheme("Constraint_PointOnObject"));
             static QIcon midpt(Gui::BitmapFactory().iconFromTheme("Constraint_PointOnMidPoint"));
             static QIcon group(Gui::BitmapFactory().iconFromTheme("Constraint_Group"));
+            static QIcon pattern(Gui::BitmapFactory().iconFromTheme("Sketcher_RectangularArray"));
             static QIcon text(Gui::BitmapFactory().iconFromTheme("Constraint_Text"));
             static QIcon symm(Gui::BitmapFactory().iconFromTheme("Constraint_Symmetric"));
             static QIcon snell(Gui::BitmapFactory().iconFromTheme("Constraint_SnellsLaw"));
@@ -400,6 +404,8 @@ public:
                     return selicon(constraint, coinc, coinc);
                 case Sketcher::Group:
                     return selicon(constraint, group, group);
+                case Sketcher::Pattern:  // FreeCAD-CH (sketch patterns)
+                    return selicon(constraint, pattern, pattern);
                 case Sketcher::Text:
                     return selicon(constraint, text, text);
                 case Sketcher::Parallel:
@@ -1426,6 +1432,9 @@ void TaskSketcherConstraints::onListWidgetConstraintsItemActivated(QListWidgetIt
         auto* editDialog = new EditTextDialog(this->sketchView, it->ConstraintNbr);
         editDialog->exec();
         delete editDialog;
+    }
+    else if (it->constraintType() == Sketcher::Pattern) {  // FreeCAD-CH (sketch patterns)
+        editPattern(this->sketchView->getSketchObject(), it->ConstraintNbr);
     }
     // For all other constraints (geometric: e.g., Parallel, Perpendicular, Coincident),
     // double-click triggers the rename functionality.
