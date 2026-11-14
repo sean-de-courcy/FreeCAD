@@ -1898,27 +1898,55 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
         Handle(Modification) modification = new Modification;
         std::vector<int> corrected;  // blend indices
         std::vector<int> correctedSeams;
+        // A chain of exact forms (cylinders between planes, tori) is a rolling ball by form. Among spline
+        // faces such faces stay as they are (Nest Insert #163: a slot's round is cylinders and tori, and two
+        // spline faces where it passes under an oblique elliptic wall); only the spline faces, and their
+        // seams, take the ball's geometry. Each run of spline faces between exact ones is recognised and
+        // corrected by itself: an exact face's surface does not change, so nothing passes from one run to
+        // the next (the same round has spline stretches over a hole in its wall, which are not this class)
+        std::vector<std::vector<int>> runs;
         for (const auto& chain : chains) {
+            std::vector<int> splines;
+            for (const int index : chain) {
+                const Handle(Geom_Surface) surface = untrimmed(BRep_Tool::Surface(context.blends[index].face));
+                if (surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
+                    || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface))) {
+                    splines.push_back(index);
+                }
+                else {
+                    context.blends[index].kept = true;
+                }
+            }
+            if (splines.empty()) {
+                report.reason += report.reason.empty() ? "" : "; ";
+                report.reason += "a rolling ball already";
+                continue;
+            }
+            std::vector<int> runOf(context.blends.size(), -1);
+            for (const int start : splines) {
+                if (runOf[start] >= 0) {
+                    continue;
+                }
+                std::vector<int> run {start};
+                runOf[start] = static_cast<int>(runs.size());
+                for (size_t next = 0; next < run.size(); ++next) {
+                    for (TopExp_Explorer it(context.blends[run[next]].face, TopAbs_EDGE); it.More(); it.Next()) {
+                        const TopTools_ListOfShape& faces = context.edgeFaces.FindFromKey(it.Current());
+                        for (TopTools_ListOfShape::Iterator jt(faces); jt.More(); jt.Next()) {
+                            const int other = context.blendOf(jt.Value());
+                            if (other >= 0 && !context.blends[other].kept && runOf[other] < 0) {
+                                runOf[other] = runOf[start];
+                                run.push_back(other);
+                            }
+                        }
+                    }
+                }
+                runs.push_back(run);
+            }
+        }
+        for (const auto& ball : runs) {
             std::vector<int> chainSeams;
-            std::vector<int> ball;  // the chain's faces that take new geometry
             try {
-                // A chain of exact forms (cylinders between planes, tori) is a rolling ball by form. Among
-                // spline faces such faces stay as they are (Nest Insert #163: a slot's round is cylinders and
-                // tori, and two spline faces where it passes under an oblique elliptic wall); only the spline
-                // faces, and their seams, take the ball's geometry
-                for (const int index : chain) {
-                    const Handle(Geom_Surface) surface = untrimmed(BRep_Tool::Surface(context.blends[index].face));
-                    if (surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
-                        || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface))) {
-                        ball.push_back(index);
-                    }
-                    else {
-                        context.blends[index].kept = true;
-                    }
-                }
-                if (ball.empty()) {
-                    throw NotRecognised {"a rolling ball already"};
-                }
                 for (const int index : ball) {
                     classify(context, context.blends[index]);
                 }
