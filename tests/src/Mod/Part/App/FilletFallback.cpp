@@ -46,6 +46,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
+#include <ShapeFix_ShapeTolerance.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomAPI_Interpolate.hxx>
@@ -3804,8 +3805,10 @@ namespace
 /// A wheel in the proportions of a grip rim (ops#640, FSLC #50), as a prism of its outline: root
 /// R 82.345905, and at each 229th of a turn a grip of two flanks of radius 0.4 centred on the root
 /// circle, 0.136 degrees apart, under a tip arc of R 82.745905. The flanks meet the root at reflex
-/// corners and the tip tangentially. Returns the solid; its top face is at the height
-TopoDS_Shape gripWheel(int grips, double height)
+/// corners and the tip tangentially. Returns the solid; its top face is at the height. With a
+/// slip, each root corner's vertex stands on the root circle that far from the flank's circle, as a
+/// Boolean leaves a pad's vertices, and the vertices have the tolerance
+TopoDS_Shape gripWheel(int grips, double height, double slip = 0.0, double tolerance = 1e-7)
 {
     const double root = 82.345905;
     const double flank = 0.4;
@@ -3815,21 +3818,33 @@ TopoDS_Shape gripWheel(int grips, double height)
     auto at = [](double radius, double angle) {
         return gp_Pnt(radius * std::cos(angle), radius * std::sin(angle), 0);
     };
-    auto arc = [](const gp_Pnt& centre, double radius, const gp_Pnt& from, const gp_Pnt& to) {
+    auto corner = [tolerance](const gp_Pnt& point) {
+        TopoDS_Vertex vertex;
+        BRep_Builder().MakeVertex(vertex, point, tolerance);
+        return vertex;
+    };
+    auto arc = [](const gp_Pnt& centre,
+                  double radius,
+                  const TopoDS_Vertex& from,
+                  const TopoDS_Vertex& to) {
         return BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(centre, gp::DZ()), radius), from, to).Edge();
     };
+    const double turned = slip / root;
+    const TopoDS_Vertex first = corner(at(root, -half - reach - turned));
+    TopoDS_Vertex foot = first;
     BRepBuilderAPI_MakeWire wire;
     for (int k = 0; k < grips; ++k) {
         const double a = k * pitch;
-        const gp_Pnt foot = at(root, a - half - reach);
-        const gp_Pnt rise = at(root + flank, a - half);
-        const gp_Pnt fall = at(root + flank, a + half);
-        const gp_Pnt land = at(root, a + half + reach);
-        const gp_Pnt next = at(root, (k + 1 == grips ? 0.0 : a + pitch) - half - reach);
+        const TopoDS_Vertex rise = corner(at(root + flank, a - half));
+        const TopoDS_Vertex fall = corner(at(root + flank, a + half));
+        const TopoDS_Vertex land = corner(at(root, a + half + reach + turned));
+        const TopoDS_Vertex next
+            = k + 1 == grips ? first : corner(at(root, a + pitch - half - reach - turned));
         wire.Add(arc(at(root, a - half), flank, foot, rise));
         wire.Add(arc(gp_Pnt(), root + flank, rise, fall));
         wire.Add(arc(at(root, a + half), flank, fall, land));
         wire.Add(arc(gp_Pnt(), root, land, next));
+        foot = next;
     }
     const TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire()).Face();
     return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, height)).Shape();
@@ -4005,6 +4020,47 @@ TEST_F(FilletFallbackTest, aGripRimsRoundsAreMeasuredOnTheRoundsAndAWrongRoundIs
     }
     ASSERT_TRUE(dropped);
     EXPECT_GT(std::abs(underPlane(oneMissing, height) - closedForm), 2 * allowed);
+}
+
+TEST_F(FilletFallbackTest, aRimVertexBesideItsEdgesCrossingWithinItsToleranceIsFollowed)
+{
+    // FSLC #50 as the replica builds it (ops#640): the pad's Boolean leaves each root corner's
+    // vertex on the root circle, 1.18e-6 from the flank's circle, with a tolerance of 1.28e-6. The
+    // rim follows its edges' crossing, as far as the vertex's own tolerance says
+    const double r = 0.05;
+    const double height = 3.0;
+    const TopoDS_Shape wheel = gripWheel(4, height, 1.2e-6, 1.3e-6);
+    FF::Construction built;
+    std::vector<TopoDS_Shape> rest;
+    ASSERT_TRUE(FF::constructRims(wheel, edgesAtHeight(wheel, height), fillet(r), built, rest))
+        << built.rimRefusal;
+    EXPECT_TRUE(rest.empty());
+    EXPECT_TRUE(BRepCheck_Analyzer(built.shape).IsValid());
+    int tori = 0;
+    for (TopExp_Explorer it(built.shape, TopAbs_FACE); it.More(); it.Next()) {
+        tori += surfaceType(it.Current()) == GeomAbs_Torus ? 1 : 0;
+    }
+    EXPECT_EQ(tori, 16);
+
+    // Controls. The same slip under vertices that claim 1e-7: refused
+    TopoDS_Shape claimed = gripWheel(4, height, 1.2e-6, 1.3e-6);
+    ShapeFix_ShapeTolerance().SetTolerance(claimed, 1e-7, TopAbs_VERTEX);
+    FF::Construction second;
+    rest.clear();
+    EXPECT_FALSE(
+        FF::constructRims(claimed, edgesAtHeight(claimed, height), fillet(r), second, rest)
+    );
+    EXPECT_NE(second.rimRefusal.find("a rim vertex away from where its edges cross"),
+              std::string::npos)
+        << second.rimRefusal;
+    // A slip of 2e-5 under a tolerance that covers it: no vertex is followed that far
+    const TopoDS_Shape loose = gripWheel(4, height, 2e-5, 3e-5);
+    FF::Construction third;
+    rest.clear();
+    EXPECT_FALSE(FF::constructRims(loose, edgesAtHeight(loose, height), fillet(r), third, rest));
+    EXPECT_NE(third.rimRefusal.find("a rim vertex away from where its edges cross"),
+              std::string::npos)
+        << third.rimRefusal;
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
