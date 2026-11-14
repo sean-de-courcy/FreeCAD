@@ -37,10 +37,13 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchMissingExternalSolver,
     TestSketchMissingExternalReturns,
     TestSketchMissingExternalReturnsSolver,
+    TestSketchMissingExternalSourceDeleted,
+    TestSketchMissingExternalSourceDeletedSolver,
     TestSketchFaceLinkPairing,
     TestSketchFaceLinkPairingNoSolver,
     TestSketchFaceLinkPairing4m,
 )
+from SketcherTests.TestSketchD4Solve import TestSketchDatumAtScale, TestSketchAngleCycle  # ops#656 D4
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
 from SketcherTests.TestSketchExternalTypes import TestSketchImplicitExternals  # ops#634
 from SketcherTests.TestSketchCarbonCopyElements import TestSketchCarbonCopyElements

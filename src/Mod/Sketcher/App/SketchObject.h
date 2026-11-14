@@ -1371,6 +1371,11 @@ private:
     int lastSolverStatus;
     float lastSolveTime;
     bool lastSolvedAroundConflict {false};
+    /// FreeCAD-CH (ops#658): the driving datums the written geometry was last solved with, by
+    /// constraint index, each with what it constrains (type, then geometry and position of its
+    /// three elements; another constraint at that index has no entry): where a continuation
+    /// starts when a changed datum doesn't solve at once
+    std::vector<std::pair<std::array<int, 7>, double>> lastSolvedDatums;
 
     std::vector<int> lastConflicting;
     std::vector<int> lastRedundant;

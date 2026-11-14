@@ -89,12 +89,30 @@ double msSince(Clock::time_point start)
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
+/// An environment variable, or empty (_dupenv_s under MSVC: clang-cl's -Wdeprecated rejects
+/// std::getenv there)
+std::string environmentValue(const char* name)
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+#endif
+}
+
 /// Read at each feature, so that a script or a test can turn the log on and off (a getenv is
 /// cheap next to a feature)
 std::string logPath()
 {
-    const char* value = std::getenv("FREECAD_CH_POSTCOND_LOG");
-    return value ? std::string(value) : std::string();
+    return environmentValue("FREECAD_CH_POSTCOND_LOG");
 }
 
 std::string quoted(const std::string& text)
@@ -468,9 +486,9 @@ TopoDS_Compound madeAndNeighbours(const TopoDS_Shape& checked, const TopoDS_Shap
 /// the edge/face level doesn't
 int bopLevel()
 {
-    const char* value = std::getenv("FREECAD_CH_POSTCOND_BOP_LEVEL");
-    if (value && *value >= '0' && *value <= '5' && value[1] == 0) {
-        return *value - '0';
+    const std::string value = environmentValue("FREECAD_CH_POSTCOND_BOP_LEVEL");
+    if (value.size() == 1 && value[0] >= '0' && value[0] <= '5') {
+        return value[0] - '0';
     }
     return 4;
 }
@@ -479,9 +497,9 @@ int bopLevel()
 /// more (a pattern of thousands of faces) is not checked ("size")
 int bopMaxFaces()
 {
-    const char* value = std::getenv("FREECAD_CH_POSTCOND_BOP_MAX");
-    if (value && *value) {
-        const int n = std::atoi(value);
+    const std::string value = environmentValue("FREECAD_CH_POSTCOND_BOP_MAX");
+    if (!value.empty()) {
+        const int n = std::atoi(value.c_str());
         if (n > 0) {
             return n;
         }

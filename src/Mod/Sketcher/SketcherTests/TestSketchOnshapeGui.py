@@ -549,7 +549,8 @@ class TestSketchClosestMatchGui(SketcherGuiTestCase):
         ]
 
     def test_the_status_line_offers_the_closest_match(self):
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+        self.assertIn("Warning", self.sketch.State)
         FreeCADGui.ActiveDocument.setEdit(self.sketch.Name)
         self.flush_gui(150)
         texts = self.status_texts()

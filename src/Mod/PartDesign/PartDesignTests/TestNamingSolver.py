@@ -994,7 +994,9 @@ class TestNamingSolver(unittest.TestCase):
         # Assert
         pieces = sorted(front.select(pad.Shape))
         self.assertEqual(len(pieces), 2)
-        self.assertFalse(sketch.isValid())
+        # computed on the frozen edge with a warning naming it (ops#656 D4 row 2)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         report = App.getReferenceReport(sketch)
         self.assertEqual(len(report), 1)
         entry = report[0]
@@ -1009,10 +1011,11 @@ class TestNamingSolver(unittest.TestCase):
         #   the break is stable
         pad.touch()
         doc.recompute()
-        self.assertFalse(sketch.isValid())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
 
         #   a repair to one piece holds, and the external geometry follows it: no geometry is
-        #   left behind under the old reference (the sketch would fail on it, ops#72)
+        #   left behind under the old reference (the sketch would warn on it, ops#72, ops#656)
         externalCount = len(sketch.ExternalGeo)
         App.repairReference(sketch, "ExternalGeometry", 0, pieces[0])
         doc.recompute()
