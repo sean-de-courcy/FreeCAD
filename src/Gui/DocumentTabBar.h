@@ -90,6 +90,11 @@ GuiExport void newDocumentStudio(App::Document* doc);
 /// The active tab of @p doc ("" when there is none)
 GuiExport std::string activeTab(const App::Document* doc);
 
+/** Gui::Document::RestoreDocFile(): the tab @p doc was saved on (ops#710); it is shown once the
+ * document has finished restoring, when it still exists and the tabs are on
+ */
+GuiExport void restoreActiveTab(const App::Document* doc, const std::string& name);
+
 /** Switches @p doc to the tab @p name, as a click on the bar does: refused while a dialog is open
  * (@p refusal says why); the selection is cleared and the toolbar follows the tab's kind.
  */
