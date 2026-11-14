@@ -213,3 +213,31 @@ class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
         self.close(ok=False)
         self.assertIsNone(self.doc.getObject(name))
         self.assertAlmostEqual(self.volume("B"), before, places=4)
+
+    def testAPatternOfAStudioFeatureGoesInItsPart(self):
+        """A pattern of a studio feature on B, made with A active: it goes in B and patterns the
+        feature (it went in A, the feature was left out and the pattern stayed empty). An
+        Extrude (remove) 4 x 4, 5 deep at x 33..37 over B, twice 8 apart along X: B loses
+        2 * 80."""
+        from PartDesignTests.TestStudio import sketch
+
+        profile = sketch(self.body("A"), "CutSk", xyPlane(self.body("A")), (33, 8, 37, 12), z=10)
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Pocket", profile, "PartDesign::Pocket", "A")
+        self.close(ok=True)
+        self.assertAlmostEqual(self.volume("B"), QA - 80, places=4)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body("A"))
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, owner.Name)
+        Gui.runCommand("PartDesign_LinearPattern")
+        self.waitForPanel()
+        [pattern] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::LinearPattern"]
+        self.assertTrue(self.body("B").hasObject(pattern), "the pattern is not in B")
+        self.assertEqual(pattern.Originals, [owner])
+        spacing = self.visible(QtWidgets.QWidget, "spinSpacing")
+        spacing.setProperty("rawValue", 8.0)
+        pump(0.5)
+        self.close(ok=True)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(self.volume("B"), QA - 160, places=4)
+        self.assertAlmostEqual(self.volume("A"), QA, places=4)
