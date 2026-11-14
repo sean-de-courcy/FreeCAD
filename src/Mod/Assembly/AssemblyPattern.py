@@ -353,7 +353,7 @@ class InstancePattern:
                     # The farthest point of the copy moves at most this far
                     moved = max(moved, step.Base.Length + abs(step.Rotation.Angle) * reach)
                     copy.Placement = target
-                    copy.purgeTouched()
+                    settled(copy)
         return moved
 
     def makeCopy(self, fp, assembly, seed, cell):
@@ -502,7 +502,7 @@ class InstancePattern:
         self.placeInstances(fp)
         for copy in fp.Instances:
             if copy is not None:
-                copy.purgeTouched()
+                settled(copy)
 
     def unsetupObject(self, fp):
         """Deleting the pattern deletes its copies (not called on undo; not when the whole assembly
@@ -561,6 +561,14 @@ def stripPattern(copy):
     for name in ("PatternOwner", "PatternSeed", "PatternIndex", "PatternIndex2"):
         if hasattr(copy, name):
             copy.removeProperty(name)
+
+
+def settled(copy):
+    """A copy the pattern has placed needs no recompute of its own, unless it is in error: an upstream
+    failure marks it Invalid ("LinkedObject links to ..."), and only its own recompute clears that
+    once the source is valid again (ops#786: purged, the copies stayed Invalid after the undo)"""
+    if "Invalid" not in copy.State:
+        copy.purgeTouched()
 
 
 def makePattern(assembly, kind="Linear", seeds=(), direction=None):
