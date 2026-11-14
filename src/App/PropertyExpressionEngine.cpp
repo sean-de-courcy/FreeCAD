@@ -43,6 +43,7 @@
 #include "PropertyExpressionEngine.h"
 #include "ExpressionVisitors.h"
 #include "Transactions.h"  // FreeCAD-CH (ops#152)
+#include "VariablePosition.h"  // FreeCAD-CH (ops#723)
 
 
 FC_LOG_LEVEL_INIT("App", true);
@@ -817,6 +818,15 @@ DocumentObjectExecReturn* App::PropertyExpressionEngine::execute(ExecuteOption o
             // Evaluate expression
             std::shared_ptr<App::Expression> expression = expressions[*it].expression;
             if (expression) {
+                // FreeCAD-CH (ops#723, DV1 and DV4): a Part Studio variable is used only below
+                // its place in the history
+                if (option != ExecuteOnRestore) {
+                    const std::string problem =
+                        VariablePosition::checkExpression(docObj, *expression);
+                    if (!problem.empty()) {
+                        throw Base::ValueError(problem);
+                    }
+                }
                 value = expression->getValueAsAny();
 
                 // FreeCAD-CH (ops#319): the value as the property would store it, or an error

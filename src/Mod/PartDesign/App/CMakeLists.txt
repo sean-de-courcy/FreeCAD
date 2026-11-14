@@ -31,7 +31,9 @@ SET(Features_SRCS
     Studio.cpp
     Studio.h
     StudioList.cpp
+    StudioVariables.cpp
     StudioList.h
+    StudioVariables.h
     StudioConfig.cpp
     StudioConfig.h
     StudioEdit.cpp

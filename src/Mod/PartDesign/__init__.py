@@ -22,6 +22,9 @@ mergeAfter = _PartDesign.mergeAfter
 consumerOf = _PartDesign.consumerOf
 split = _PartDesign.split
 studioSequence = _PartDesign.studioSequence
+# FreeCAD-CH (ops#723): Part Studio variables' place in the history
+variablePosition = _PartDesign.variablePosition
+setVariablePosition = _PartDesign.setVariablePosition
 rollStudioTo = _PartDesign.rollStudioTo
 rollStudioToEnd = _PartDesign.rollStudioToEnd
 isStudioRolledBack = _PartDesign.isStudioRolledBack

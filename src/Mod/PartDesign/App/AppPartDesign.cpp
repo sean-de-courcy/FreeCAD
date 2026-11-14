@@ -67,6 +67,7 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "StudioVariables.h"
 #include "StudioConfig.h"
 #include "StudioList.h"
 #include "FeatureApply.h"
@@ -103,6 +104,10 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::registerParkedReferenceProvider();
     // Parked lines follow their objects through import, merge and paste (ops#158)
     PartDesign::registerParkedImport();
+    // Part Studio variables have a place in the history (ops#723). Before registerHistoryImport:
+    // a deleted row's variables move up while the row (a studio owner and its steps) is still
+    // listed, before the list drops it
+    PartDesign::registerStudioVariables();
     // A copied or pasted feature is listed as the newest, not at its source's place (ops#632)
     PartDesign::registerHistoryImport();
     // A container moved by an expression mid-recompute reruns its readers then (ops#342)
