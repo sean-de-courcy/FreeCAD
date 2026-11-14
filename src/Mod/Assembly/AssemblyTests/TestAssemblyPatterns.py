@@ -454,6 +454,34 @@ class TestAssemblyPatterns(AssemblyTestBase):
         self.assertEqual(sorted(c.Name for c in pattern.Instances), sorted(names))
         self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
 
+    def test_copies_recover_when_an_upstream_error_is_undone(self):
+        """ops#786: the block's length follows a variable, which is deleted in one undo step. The
+        block fails, and the seed and the copies with it ("LinkedObject links to 'Block', which has
+        an error"). Undone, every instance is valid again where it was, as Onshape's. Before, the
+        copies stayed Invalid for good: each recompute of the pattern marked them as recomputed
+        without letting them run, so their error was never cleared"""
+        self.doc.UndoMode = 1
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyLength", "Size")
+        variables.Size = 10
+        self.block.setExpression("Length", "Variables.Size")
+        pattern = self.linear(4, 20.0)
+        self.assertFalse([o.Name for o in self.doc.Objects if "Invalid" in o.State])
+        self.doc.openTransaction("Delete Size")
+        variables.removeProperty("Size")
+        self.doc.commitTransaction()
+        self.block.touch()
+        self.doc.recompute()
+        failed = [o for o in [self.seed] + list(pattern.Instances) if "Invalid" in o.State]
+        self.assertEqual(len(failed), 4, "the seed and the 3 copies fail with the block")
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse(
+            [(o.Label, o.getStatusString()) for o in self.doc.Objects if "Invalid" in o.State],
+            "everything valid again after the undo",
+        )
+        self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
+
     def test_undo_of_a_recompute_outside_its_transaction(self):
         """A count lowered, committed, then recomputed (a Ctrl+R after a property edit) makes two
         undo steps. Undone twice, the pattern has Count - 1 copies again, none stacked on another
