@@ -1,0 +1,241 @@
+{
+ "approved": "c768, 11-14 (ops#673 6871011296, 6871035881), via Mac coordinator 27",
+ "changes": {
+  "AsmMotion": {
+   "Angle.Placement2.rotation[0]": {
+    "abs": 1e-12,
+    "new": 1.0,
+    "old": -2.7755575615628914e-17,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Angle.Placement2.rotation[3]": {
+    "abs": 1e-12,
+    "new": 0.0,
+    "old": 1.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Angle.Reference2[0] (Face5 -> Face5).centre[1]": {
+    "new": 17.8349364905389,
+    "old": 22.165063509461095,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Angle.Reference2[0] (Face5 -> Face5).normal[2]": {
+    "new": 0.8660254037844388,
+    "old": -0.8660254037844387,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Angle.Reference2[1] (Face5 -> Face5).centre[1]": {
+    "new": 17.8349364905389,
+    "old": 22.165063509461095,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Angle.Reference2[1] (Face5 -> Face5).normal[2]": {
+    "new": 0.8660254037844388,
+    "old": -0.8660254037844387,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Distance.Placement2.rotation[0]": {
+    "abs": 1e-12,
+    "new": 1.0,
+    "old": 0.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Distance.Placement2.rotation[3]": {
+    "abs": 1e-12,
+    "new": 0.0,
+    "old": 1.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement1.rotation[0]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.7071067811865476,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement1.rotation[1]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement1.rotation[2]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.7071067811865476,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement1.rotation[3]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement2.rotation[0]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.7071067811865476,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement2.rotation[1]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement2.rotation[2]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.7071067811865476,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Slider.Placement2.rotation[3]": {
+    "abs": 1e-12,
+    "new": 0.5,
+    "old": 0.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Tilted.Placement.rotation[0]": {
+    "abs": 1e-12,
+    "new": 0.9659258262890683,
+    "old": 0.25881904510252074,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Tilted.Placement.rotation[3]": {
+    "abs": 1e-12,
+    "new": 0.25881904510252074,
+    "old": 0.9659258262890683,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Tilted.shape.box[1]": {
+    "new": 13.169872981077805,
+    "old": 17.5,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Tilted.shape.box[2]": {
+    "new": 5.6698729810778055,
+    "old": 10.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Tilted.shape.box[4]": {
+    "new": 20.0,
+    "old": 24.330127018922195,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Tilted.shape.box[5]": {
+    "new": 12.5,
+    "old": 16.830127018922195,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Tilted.shape.centre[1]": {
+    "new": 16.584936490538905,
+    "old": 20.915063509461095,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Tilted.shape.centre[2]": {
+    "new": 9.084936490538903,
+    "old": 13.415063509461095,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#683",
+ "label": "compat-change",
+ "why": "C2: Onshape's connector frames (a planar face's Z out of the material, X the first part axis not along it; oracle 12): a mate on a bottom or side face turns its frame 180 degrees about x, and an angle mate may move its part"
+}

@@ -336,14 +336,18 @@ set(PartDesign_Compat
 set(PartDesign_CompatGen1
     PartDesignTests/Compat/gen1/MANIFEST
     PartDesignTests/Compat/gen1/AsmEdited.FCStd
+    PartDesignTests/Compat/gen1/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen1/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen1/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen1/AsmFastened.FCStd
+    PartDesignTests/Compat/gen1/AsmFastened.delta.json
     PartDesignTests/Compat/gen1/AsmFastened.oracle.json
     PartDesignTests/Compat/gen1/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen1/AsmMotion.FCStd
+    PartDesignTests/Compat/gen1/AsmMotion.delta.json
     PartDesignTests/Compat/gen1/AsmMotion.oracle.json
     PartDesignTests/Compat/gen1/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen1/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen1/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen1/Binders.FCStd
     PartDesignTests/Compat/gen1/Binders.oracle.json
@@ -431,14 +435,18 @@ set(PartDesign_CompatGen1
 set(PartDesign_CompatGen1Macos
     PartDesignTests/Compat/gen1-macos/MANIFEST
     PartDesignTests/Compat/gen1-macos/AsmEdited.FCStd
+    PartDesignTests/Compat/gen1-macos/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen1-macos/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen1-macos/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen1-macos/AsmFastened.FCStd
+    PartDesignTests/Compat/gen1-macos/AsmFastened.delta.json
     PartDesignTests/Compat/gen1-macos/AsmFastened.oracle.json
     PartDesignTests/Compat/gen1-macos/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen1-macos/AsmMotion.FCStd
+    PartDesignTests/Compat/gen1-macos/AsmMotion.delta.json
     PartDesignTests/Compat/gen1-macos/AsmMotion.oracle.json
     PartDesignTests/Compat/gen1-macos/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen1-macos/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen1-macos/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen1-macos/Binders.FCStd
     PartDesignTests/Compat/gen1-macos/Binders.oracle.json
@@ -526,14 +534,18 @@ set(PartDesign_CompatGen1Macos
 set(PartDesign_CompatGen2
     PartDesignTests/Compat/gen2/MANIFEST
     PartDesignTests/Compat/gen2/AsmEdited.FCStd
+    PartDesignTests/Compat/gen2/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen2/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen2/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen2/AsmFastened.FCStd
+    PartDesignTests/Compat/gen2/AsmFastened.delta.json
     PartDesignTests/Compat/gen2/AsmFastened.oracle.json
     PartDesignTests/Compat/gen2/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen2/AsmMotion.FCStd
+    PartDesignTests/Compat/gen2/AsmMotion.delta.json
     PartDesignTests/Compat/gen2/AsmMotion.oracle.json
     PartDesignTests/Compat/gen2/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen2/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen2/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen2/Binders.FCStd
     PartDesignTests/Compat/gen2/Binders.oracle.json
@@ -621,14 +633,18 @@ set(PartDesign_CompatGen2
 set(PartDesign_CompatGen2Macos
     PartDesignTests/Compat/gen2-macos/MANIFEST
     PartDesignTests/Compat/gen2-macos/AsmEdited.FCStd
+    PartDesignTests/Compat/gen2-macos/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen2-macos/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen2-macos/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen2-macos/AsmFastened.FCStd
+    PartDesignTests/Compat/gen2-macos/AsmFastened.delta.json
     PartDesignTests/Compat/gen2-macos/AsmFastened.oracle.json
     PartDesignTests/Compat/gen2-macos/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen2-macos/AsmMotion.FCStd
+    PartDesignTests/Compat/gen2-macos/AsmMotion.delta.json
     PartDesignTests/Compat/gen2-macos/AsmMotion.oracle.json
     PartDesignTests/Compat/gen2-macos/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen2-macos/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen2-macos/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen2-macos/Binders.FCStd
     PartDesignTests/Compat/gen2-macos/Binders.oracle.json
@@ -716,14 +732,18 @@ set(PartDesign_CompatGen2Macos
 set(PartDesign_CompatGen3
     PartDesignTests/Compat/gen3/MANIFEST
     PartDesignTests/Compat/gen3/AsmEdited.FCStd
+    PartDesignTests/Compat/gen3/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen3/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen3/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen3/AsmFastened.FCStd
+    PartDesignTests/Compat/gen3/AsmFastened.delta.json
     PartDesignTests/Compat/gen3/AsmFastened.oracle.json
     PartDesignTests/Compat/gen3/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen3/AsmMotion.FCStd
+    PartDesignTests/Compat/gen3/AsmMotion.delta.json
     PartDesignTests/Compat/gen3/AsmMotion.oracle.json
     PartDesignTests/Compat/gen3/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen3/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen3/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen3/Binders.FCStd
     PartDesignTests/Compat/gen3/Binders.oracle.json
@@ -811,14 +831,18 @@ set(PartDesign_CompatGen3
 set(PartDesign_CompatGen3Macos
     PartDesignTests/Compat/gen3-macos/MANIFEST
     PartDesignTests/Compat/gen3-macos/AsmEdited.FCStd
+    PartDesignTests/Compat/gen3-macos/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen3-macos/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen3-macos/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen3-macos/AsmFastened.FCStd
+    PartDesignTests/Compat/gen3-macos/AsmFastened.delta.json
     PartDesignTests/Compat/gen3-macos/AsmFastened.oracle.json
     PartDesignTests/Compat/gen3-macos/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen3-macos/AsmMotion.FCStd
+    PartDesignTests/Compat/gen3-macos/AsmMotion.delta.json
     PartDesignTests/Compat/gen3-macos/AsmMotion.oracle.json
     PartDesignTests/Compat/gen3-macos/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen3-macos/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen3-macos/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen3-macos/Binders.FCStd
     PartDesignTests/Compat/gen3-macos/Binders.oracle.json
@@ -906,14 +930,18 @@ set(PartDesign_CompatGen3Macos
 set(PartDesign_CompatGen4
     PartDesignTests/Compat/gen4/MANIFEST
     PartDesignTests/Compat/gen4/AsmEdited.FCStd
+    PartDesignTests/Compat/gen4/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen4/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen4/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen4/AsmFastened.FCStd
+    PartDesignTests/Compat/gen4/AsmFastened.delta.json
     PartDesignTests/Compat/gen4/AsmFastened.oracle.json
     PartDesignTests/Compat/gen4/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen4/AsmMotion.FCStd
+    PartDesignTests/Compat/gen4/AsmMotion.delta.json
     PartDesignTests/Compat/gen4/AsmMotion.oracle.json
     PartDesignTests/Compat/gen4/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen4/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen4/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen4/Binders.FCStd
     PartDesignTests/Compat/gen4/Binders.oracle.json
@@ -1001,14 +1029,18 @@ set(PartDesign_CompatGen4
 set(PartDesign_CompatGen4Macos
     PartDesignTests/Compat/gen4-macos/MANIFEST
     PartDesignTests/Compat/gen4-macos/AsmEdited.FCStd
+    PartDesignTests/Compat/gen4-macos/AsmEditedPart.delta.json
     PartDesignTests/Compat/gen4-macos/AsmEditedPart.oracle.json
     PartDesignTests/Compat/gen4-macos/AsmEditedParts.FCStd
     PartDesignTests/Compat/gen4-macos/AsmFastened.FCStd
+    PartDesignTests/Compat/gen4-macos/AsmFastened.delta.json
     PartDesignTests/Compat/gen4-macos/AsmFastened.oracle.json
     PartDesignTests/Compat/gen4-macos/AsmFastenedParts.FCStd
     PartDesignTests/Compat/gen4-macos/AsmMotion.FCStd
+    PartDesignTests/Compat/gen4-macos/AsmMotion.delta.json
     PartDesignTests/Compat/gen4-macos/AsmMotion.oracle.json
     PartDesignTests/Compat/gen4-macos/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen4-macos/AsmSubAssembly.delta.json
     PartDesignTests/Compat/gen4-macos/AsmSubAssembly.oracle.json
     PartDesignTests/Compat/gen4-macos/Binders.FCStd
     PartDesignTests/Compat/gen4-macos/Binders.oracle.json
