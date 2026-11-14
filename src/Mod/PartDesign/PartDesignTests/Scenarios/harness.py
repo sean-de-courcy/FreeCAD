@@ -922,6 +922,47 @@ def combine(stored, outcome):
     return "correct"
 
 
+def missingElements(subs):
+    """The element names of a reference's missing subs: `?Edge3` and `<path>.?Edge3` give
+    `Edge3` (Data::hasMissingElement's rule: the `?` starts the last dotted part)."""
+    names = []
+    for sub in subs:
+        last = sub.rsplit(".", 1)[-1]
+        if last.startswith("?"):
+            names.append(last[1:])
+    return names
+
+
+def _namesWhole(text, element):
+    """`element` appears in `text` as a whole name: `Edge3` isn't found in `Edge31`."""
+    return re.search(r"(?<![A-Za-z0-9_])" + re.escape(element) + r"(?![A-Za-z0-9_])", text)
+
+
+def warnsMissing(owner, subs):
+    """An owner that reports its missing references with a warning (ops#656 D4 row 2, c768's
+    option A): it stays valid, computed on the frozen copies of their geometry as Onshape's Use
+    does (facts GB33 (b), GB22: the sketch goes WARNING, the used entity stays), and its warning
+    names the element of every missing sub as a whole name. Not a report: a valid owner without a
+    warning, one whose warning names another element, or one that names only some of them."""
+    missing = missingElements(subs)
+    if not missing or not owner.isValid() or "Warning" not in owner.State:
+        return False
+    text = owner.getStatusString() or ""
+    return all(_namesWhole(text, element) for element in missing)
+
+
+def breakOutcome(owner, subs):
+    """(outcome, detail) of a consumer whose stored reference broke: "broken" when the owner
+    reports the break, by failing (its error names it, ops#7) or, valid, by a warning naming every
+    missing element (`warnsMissing`, the same as a failure: ops#656 D4 row 2); else "wrong",
+    nothing reports it and the consumer carries on without its element."""
+    if not owner.isValid():
+        return "broken", ""
+    if warnsMissing(owner, subs):
+        return "broken", f"{owner.Name} reports the break with a warning: {owner.getStatusString()}"
+    return "wrong", f"{owner.Name} stays valid with the broken reference"
+
+
 def liveGuesses(rows):
     """The report rows (App.getReferenceReport) a guess rule's pick holds now (ops#127). A record
     kept by a reference that broke since (A1: a record survives a break) is no pick."""
@@ -1333,11 +1374,16 @@ class Scenario:
             or target is None
             or (ownOrBroken and stored == "broken")
         ):
-            if stored == "broken" and owner.isValid():
-                # nothing reports the break: the consumer carries on without its element
-                outcome, detail = "wrong", f"{owner.Name} stays valid with the broken reference"
+            if stored == "broken":
+                # reported by a failure or a warning naming it; else the consumer carries on
+                # without its element, silently
+                outcome, detail = breakOutcome(owner, subs)
             else:
                 outcome = None if owner.isValid() else "broken"
+        elif stored == "broken" and warnsMissing(owner, subs):
+            # computed on the frozen copy and warned (ops#656 D4 row 2): reported, the same as a
+            # failure, whatever the frozen copy gives its outcome check
+            outcome, detail = breakOutcome(owner, subs)
         elif ref.outcome is not None:
             outcome, detail = ref.outcome.check(self, owner, target, expectation)
         elif not owner.isValid():

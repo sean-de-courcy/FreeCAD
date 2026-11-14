@@ -98,6 +98,12 @@ A verdict is judged under its expectation's kind (`harness.EXPECT_RIGHT`): `brok
 (after the own element). Inside the wrong set a silent `wrong` ranks below the warned or partly kept
 verdicts, so a dropped warning is REGRESSED.
 
+A break is reported when its owner fails, or when the owner stays valid with a warning that names
+the element of every missing sub as a whole name (`harness.warnsMissing`, ops#656 D4 row 2): a
+sketch computed on the frozen copy of a missing external reference, as Onshape's Use does. Both
+are `broken`. A valid owner with no warning, or with one that names another element or only some
+of the missing ones, carries the break silently: `wrong`.
+
 ## Running
 
 Every run sets `FREECAD_USER_HOME` to an absolute folder that exists. On Windows run FreeCADCmd from
