@@ -668,3 +668,50 @@ class TestNamingGateFile(NamingGateTestBase):
     def testCoincidentFacesTakeTheStoredIndexSolver(self):
         """Rule 2, solver on (V2is)"""
         self.coincidentCompound("V2is")
+
+    def agedPad(self):
+        """A 10 x 6 rectangle padded 4, saved, its stamps aged to the previous naming revision.
+        Returns the file's path."""
+        doc = self.newDocument("V2s")
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 10, 6), body)
+        models.pad(body, profile, 4)
+        doc.recompute()
+        path = os.path.join(self.folder, "Aged.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        files = readFile(path)
+        files["Document.xml"] = ageStamps(files["Document.xml"].decode("utf-8")).encode("utf-8")
+        writeFile(path, files)
+        return path
+
+    def testMigrationRunsAtOpen(self):
+        """B4 (ops#417): the open of a file of an older naming revision runs its migration
+        recompute, so an edit made before the first recompute is an ordinary edit: the pad's
+        element map version is this build's, and nothing is touched, before any recompute."""
+        # Arrange
+        path = self.agedPad()
+
+        # Act
+        doc = self.open(path)
+
+        # Assert
+        pad = doc.getObject("Pad")
+        self.assertEqual(pad._ElementMapVersion, pad.getCorrectElementMapVersion())
+        self.assertFalse(pad.isTouched())
+
+    def testMigrationAtOpenOff(self):
+        """B4's switch: with MigrateNamingOnOpen off, the open leaves the file's element map version
+        on the pad, for its first rebuild to migrate (decision 217's path)."""
+        # Arrange
+        path = self.agedPad()
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Document")
+        group.SetBool("MigrateNamingOnOpen", False)
+        self.addCleanup(group.RemBool, "MigrateNamingOnOpen")
+
+        # Act
+        doc = self.open(path)
+
+        # Assert
+        pad = doc.getObject("Pad")
+        self.assertNotEqual(pad._ElementMapVersion, pad.getCorrectElementMapVersion())

@@ -57,7 +57,6 @@ import zipfile
 import FreeCAD as App
 
 from PartDesignTests.Scenarios.harness import (
-    BROKEN,
     Extruded,
     Scenario,
     ScenarioError,
@@ -264,12 +263,15 @@ class GateRenamedIndexShift(RenamedEdge):
 
 
 class GateRenamedMoving(RenamedEdge):
-    """Row 334', the control: the same file, with the profile's back side moved to y = 7 before the
-    first recompute: nothing sits at the saved place and a Missing entry has no name to keep it
-    by, so the design's answer is the loud break (E5)."""
+    """Row 334', the control: the same file, with the profile's back side moved to y = 7 after the
+    open. The open runs the migration first (B4, ops#417: `MigrateNamingOnOpen`), so the
+    reference is current before the move, and the move carries it to the top back edge at y = 7,
+    as Onshape does (it was the loud break while the migration waited for the first recompute)."""
 
     def expected(self):
-        return BROKEN if self.stepName == "migrate" else self.topBack()
+        if self.stepName == "migrate":
+            return edge("line", direction=X, through=(0, 7, 4))
+        return self.topBack()
 
     def editAfterOpen(self, doc):
         m.setLines(doc.Profile, {1: ((10, 0), (10, 7)), 2: ((10, 7), (0, 7)), 3: ((0, 7), (0, 0))})
