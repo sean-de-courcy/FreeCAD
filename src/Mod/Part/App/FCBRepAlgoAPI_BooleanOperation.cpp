@@ -26,6 +26,8 @@
  * FCBRepAlgoAPI provides a wrapper for various OCCT functions.
  */
 
+#include <algorithm>
+
 #include <FCBRepAlgoAPI_BooleanOperation.h>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
@@ -36,6 +38,7 @@
 #include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
 #include <GeomAdaptor_Surface.hxx>
+#include <Message_ProgressScope.hxx>
 #include <Geom_Surface.hxx>
 #include <Standard_ConstructionError.hxx>
 #include <TopLoc_Location.hxx>
@@ -340,7 +343,7 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
         // cut argument and compound tool
         TopTools_ListOfShape myOriginalArguments = myArguments;
         TopTools_ListOfShape myOriginalTools = myTools;
-        RecursiveCutFusedTools(myOriginalArguments, myOriginalTools.First());
+        RecursiveCutFusedTools(myOriginalArguments, myOriginalTools.First(), progressRange);
         myArguments = myOriginalArguments;
         myTools = myOriginalTools;
     }
@@ -350,7 +353,7 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
     ) {
         // cut compound argument
         TopTools_ListOfShape myOriginalArguments = myArguments;
-        RecursiveCutCompound(myOriginalArguments.First());
+        RecursiveCutCompound(myOriginalArguments.First(), progressRange);
         myArguments = myOriginalArguments;
     }
     else {
@@ -383,9 +386,13 @@ void FCBRepAlgoAPI_BooleanOperation::RecursiveAddTools(const TopoDS_Shape& theTo
 
 void FCBRepAlgoAPI_BooleanOperation::RecursiveCutFusedTools(
     const TopTools_ListOfShape& theOriginalArguments,
-    const TopoDS_Shape& theTool
+    const TopoDS_Shape& theTool,
+    const Message_ProgressRange& progressRange
 )
 {
+    // The fuse and the cut each get a part of the caller's range, so that a cancel (the kernel
+    // budget's time limit, Esc) stops them too (ops#773): a Build() without one never reads it
+    Message_ProgressScope scope(progressRange, "Cut by fused tools", 2);
     // get a list of shapes in the tool compound
     myTools.Clear();
     RecursiveAddTools(theTool);
@@ -396,7 +403,7 @@ void FCBRepAlgoAPI_BooleanOperation::RecursiveCutFusedTools(
         myArguments.Append(myTools.First());
         myTools.RemoveFirst();
         myOperation = BOPAlgo_FUSE;
-        Build();
+        Build(scope.Next());
 
         // restore original state
         myOperation = BOPAlgo_CUT;
@@ -415,21 +422,30 @@ void FCBRepAlgoAPI_BooleanOperation::RecursiveCutFusedTools(
     }
 
     // do the cut
-    Build();
+    Build(scope.Next());
 }
 
-void FCBRepAlgoAPI_BooleanOperation::RecursiveCutCompound(const TopoDS_Shape& theArgument)
+void FCBRepAlgoAPI_BooleanOperation::RecursiveCutCompound(
+    const TopoDS_Shape& theArgument,
+    const Message_ProgressRange& progressRange
+)
 {
     BRep_Builder builder;
     TopoDS_Compound comp;
     builder.MakeCompound(comp);
 
+    // Each piece's cut gets a part of the caller's range, as in RecursiveCutFusedTools (ops#773)
+    int pieces = 0;
+    for (TopoDS_Iterator count(theArgument); count.More(); count.Next()) {
+        ++pieces;
+    }
+    Message_ProgressScope scope(progressRange, "Cut of a compound", std::max(pieces, 1));
     // iterate through shapes in argument compound and cut each one with the tool
     TopoDS_Iterator it(theArgument);
     for (; it.More(); it.Next()) {
         myArguments.Clear();
         myArguments.Append(it.Value());
-        Build();
+        Build(scope.Next());
 
         if (!IsDone()) {
             myShape = {};
