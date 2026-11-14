@@ -30,6 +30,7 @@
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TColStd_Array1OfInteger.hxx>
@@ -426,6 +427,8 @@ public:
     std::map<const TopoDS_TShape*, Handle(Geom_Surface)> surfaces;
     std::map<const TopoDS_TShape*, EdgeNew> curves;
     std::map<const TopoDS_TShape*, EdgeNew> slides;  // untouched edges whose vertex slides
+    /// Untouched edges whose vertex slides past the end of their trimmed curve: the curve it is cut from
+    std::map<const TopoDS_TShape*, Handle(Geom_Curve)> rebased;
     std::map<std::pair<const TopoDS_TShape*, const TopoDS_TShape*>, Handle(Geom2d_Curve)> pcurves;
     std::map<const TopoDS_TShape*, gp_Pnt> points;
     std::map<const TopoDS_TShape*, double> pointTolerances;  // where not the default
@@ -460,7 +463,14 @@ public:
     {
         const auto found = curves.find(edge.TShape().get());
         if (found == curves.end()) {
-            return Standard_False;
+            const auto wider = rebased.find(edge.TShape().get());
+            if (wider == rebased.end()) {
+                return Standard_False;
+            }
+            curve = wider->second;
+            location = TopLoc_Location();
+            tolerance = BRep_Tool::Tolerance(edge);
+            return Standard_True;
         }
         curve = found->second.curve;
         location = TopLoc_Location();
@@ -1286,18 +1296,24 @@ void solveStations(const Context& context, Blend& blend, int interior)
         };
         // ... and on by twice the radius where the walls reach that far: a later round that runs past
         // this end is cut by this surface (FilletFallback's blendBeyond uses a blend's surface as far
-        // as it is still the ball's), and ends in this one face instead of a continuation face
+        // as it is still the ball's), and ends in this one face instead of a continuation face.
+        // The run-on is a preference: it also ends where the clearance grows by less than half a
+        // step (an end on a concave face, a hole of radius under about three radii across the edge:
+        // the ball never gets twice its radius clear of it, and near the hole's axis the distance
+        // to its wall says nothing: "the blend's end face does not cut the blend")
         gp_Vec out = outward[end];
         const double runOn = std::max(2.0 * spacing, 2.0 * radius);
         int beyond = 0;
+        double clearBefore = -Precision::Infinite();
         for (int steps = 0;; ++steps) {
             const double clear = clearance(outermost());
             if (clear > 2.0 * spacing) {
                 ++beyond;
             }
-            if (beyond >= 2 && clear > runOn) {
+            if (beyond >= 2 && (clear > runOn || clear - clearBefore < 0.5 * spacing)) {
                 break;
             }
+            clearBefore = clear;
             if (steps > 4000) {
                 throw NotRecognised {"walls that stop at the blend's end"};
             }
@@ -2155,9 +2171,33 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                     if (along.IsNull()) {
                         throw Refusal {"an edge of the base without a curve"};
                     }
-                    GeomAPI_ProjectPointOnCurve projection(point, along);
+                    // A line or circle stored as a trimmed curve ends at the old vertex: the new one may
+                    // lie past it (a designed corner pocket: 4e-5). Then the edge takes the curve it
+                    // is trimmed from, which is the same geometry (an edge without a location only)
+                    Handle(Geom_Curve) whole = along;
+                    if (const Handle(Geom_TrimmedCurve) trimmed = Handle(Geom_TrimmedCurve)::DownCast(along)) {
+                        TopLoc_Location slideLocation;
+                        double f {}, l {};
+                        BRep_Tool::Curve(end.slides[side], slideLocation, f, l);
+                        if (slideLocation.IsIdentity()) {
+                            whole = trimmed->BasisCurve();
+                        }
+                    }
+                    GeomAPI_ProjectPointOnCurve projection(point, whole);
+                    if (projection.NbPoints() >= 1 && whole != along) {
+                        const double place = projection.LowerDistanceParameter();
+                        if (place < along->FirstParameter() || place > along->LastParameter()) {
+                            modification->rebased[end.slides[side].TShape().get()] = whole;
+                        }
+                    }
                     if (projection.NbPoints() < 1) {
-                        throw Refusal {"an end vertex has no place on the base's edge"};
+                        throw Refusal {
+                            std::string("an end vertex has no place on the base's edge (side ")
+                            + std::to_string(side) + ", a " + along->DynamicType()->Name() + " "
+                            + std::to_string(edgeFirst) + ".." + std::to_string(edgeLast) + ", its ends "
+                            + std::to_string(point.Distance(along->Value(edgeFirst))) + " and "
+                            + std::to_string(point.Distance(along->Value(edgeLast))) + " away)"
+                        };
                     }
                     double at = projection.LowerDistanceParameter();
                     if (along->IsPeriodic()) {
@@ -2279,7 +2319,11 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                 }
                 const auto old = before.of.find(was(i).TShape().get());
                 if (old != before.of.end() && toleranceOf(now) > std::max(resultBound, old->second)) {
-                    throw Refusal {"the corrected body has a tolerance above its bound"};
+                    throw Refusal {
+                        std::string("the corrected body has a tolerance above its bound (")
+                        + (kind == TopAbs_FACE ? "a face" : kind == TopAbs_EDGE ? "an edge" : "a vertex") + ": "
+                        + std::to_string(toleranceOf(now)) + ", was " + std::to_string(old->second) + ")"
+                    };
                 }
             }
         }

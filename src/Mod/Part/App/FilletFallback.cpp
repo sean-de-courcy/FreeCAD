@@ -8247,8 +8247,15 @@ TopoDS_Shape constructShape(
     }
     // A face on an extended copy of a wall's surface that lies on the wall's own surface: back onto
     // that surface (the same pcurves: the copy keeps the surface's parameters), so that it merges
-    // into the wall below. It may leave the surface's bounds by no more than its own tolerance, and
-    // there the two surfaces must agree (past its bounds a B-spline is evaluated on its last span)
+    // into the wall below. It may leave the surface's bounds by no more than its own tolerance (and
+    // 1e-3), and there the two surfaces must agree (past its bounds a B-spline is evaluated on its
+    // last span). An edge it shares with the wall keeps the wall's pcurve, which must be the face's
+    // own within that tolerance; an edge of the base's shape itself is never given a pcurve (the
+    // base's shape is another feature's); else the face stays where it is
+    TopTools_IndexedMapOfShape baseEdges;
+    if (!reseats.empty()) {
+        TopExp::MapShapes(base.getShape(), TopAbs_EDGE, baseEdges);
+    }
     for (const auto& reseat : reseats) {
         double bounds[4] = {0.0, 0.0, 0.0, 0.0};
         reseat.own->Bounds(bounds[0], bounds[1], bounds[2], bounds[3]);
@@ -8265,6 +8272,7 @@ TopoDS_Shape constructShape(
             for (TopExp_Explorer sub(face, TopAbs_VERTEX); sub.More(); sub.Next()) {
                 allowed = std::max(allowed, BRep_Tool::Tolerance(TopoDS::Vertex(sub.Current())));
             }
+            allowed = std::min(allowed, 1e-3);
             bool fits = true;
             std::vector<std::pair<TopoDS_Edge, Handle(Geom2d_Curve)>> pcurves;
             for (TopExp_Explorer sub(face, TopAbs_EDGE); sub.More() && fits; sub.Next()) {
@@ -8276,8 +8284,18 @@ TopoDS_Shape constructShape(
                     fits = false;
                     break;
                 }
+                // The wall's own pcurve of an edge the face shares with it
+                double ownFirst = 0.0;
+                double ownLast = 0.0;
+                const Handle(Geom2d_Curve) onOwn
+                    = BRep_Tool::CurveOnSurface(edge, reseat.own, reseat.location, ownFirst, ownLast);
+                if (onOwn.IsNull() && baseEdges.Contains(edge)) {
+                    fits = false;
+                    break;
+                }
                 for (int k = 0; k <= 16 && fits; ++k) {
-                    const gp_Pnt2d uv = pcurve->Value(first + (last - first) * k / 16.0);
+                    const double at = first + (last - first) * k / 16.0;
+                    const gp_Pnt2d uv = pcurve->Value(at);
                     const gp_Pnt on = reseat.own->Value(uv.X(), uv.Y());
                     const gp_Pnt inside = reseat.own->Value(
                         std::clamp(uv.X(), bounds[0], bounds[1]),
@@ -8285,8 +8303,14 @@ TopoDS_Shape constructShape(
                     );
                     fits = on.Distance(inside) <= allowed
                         && on.Distance(reseat.extended->Value(uv.X(), uv.Y())) <= 1e-6;
+                    if (fits && !onOwn.IsNull()) {
+                        const gp_Pnt2d ownUv = onOwn->Value(at);
+                        fits = on.Distance(reseat.own->Value(ownUv.X(), ownUv.Y())) <= allowed;
+                    }
                 }
-                pcurves.emplace_back(edge, pcurve);
+                if (onOwn.IsNull()) {
+                    pcurves.emplace_back(edge, pcurve);
+                }
             }
             if (!fits) {
                 continue;
