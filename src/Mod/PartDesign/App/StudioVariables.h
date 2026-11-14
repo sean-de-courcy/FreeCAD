@@ -7,12 +7,15 @@
 // part studio (an App::Part) sits right after one row of the studio's history (studioSequence()).
 
 #include <string>
+#include <vector>
 
 #include <Mod/PartDesign/PartDesignGlobal.h>
 
 namespace App
 {
+class Document;
 class DocumentObject;
+class Part;
 }  // namespace App
 
 namespace PartDesign
@@ -26,6 +29,17 @@ namespace PartDesign
  * a paste: its rows' names mean nothing there). Undo and redo restore places as they were
  */
 PartDesignExport void registerStudioVariables();
+
+/** moveInStudio()'s part: rows (and their steps) moved in studio's history, before being the
+ * sequence before the move. A variable that followed a moved row now follows the nearest row
+ * above it that stayed, so it keeps its place (Onshape's Variable doesn't move with its
+ * neighbour); then every row that uses a placed variable's name is touched, so a row dragged
+ * above or below a variable is checked again at the next recompute
+ */
+PartDesignExport void keepVariablePlaces(App::Document* doc,
+                                         App::Part* studio,
+                                         const std::vector<App::DocumentObject*>& before,
+                                         const std::vector<App::DocumentObject*>& rows);
 
 /// The row of its part studio's history the variable name of holder follows, or null at the start
 /// (also when that row is gone: App::VariablePosition::Place::Lost)
