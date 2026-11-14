@@ -12,3 +12,9 @@ cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testAWrongOffsetIsRebuil
 cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testAWrongPieceThatCantBeRebuiltFails  windows
 cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testDirectPieceIsExact                 windows
 cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testHornBendWithAVShapedLegEnd         windows
+
+# TestThickenSeamLeg's trigger test asserts that OCC's offset of the seam leg (0.75, 0.75) is invalid. On macOS's
+# OCC (feat/patterns-finish 0b9bf5a852, 11-14) it is valid, one solid of 6 faces, volume 1884.955594 for the exact
+# 1884.955592: the guards it keeps visible are moot there, the other seven tests of the class pass. Host-dependent OCC.
+reason: macOS's OCC builds the seam leg's offset right, so the "OCC gets it wrong" trigger fails ("True is not false")
+cli  PartDesignTests.TestSolidOps.TestThickenSeamLeg.testOffsetOfTheSeamLegIsInvalid           macos
