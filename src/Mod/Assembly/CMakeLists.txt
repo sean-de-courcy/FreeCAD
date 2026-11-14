@@ -73,6 +73,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestOnshapeAssemblies.py
     AssemblyTests/TestOnshapeAssembliesGui.py
     AssemblyTests/TestAssemblyPatterns.py
+    AssemblyTests/TestOnshapeConnectors.py
     AssemblyTests/TestAssemblyPatternsGui.py
     AssemblyTests/TestTriadGui.py
     AssemblyTests/TestFreeInstances.py

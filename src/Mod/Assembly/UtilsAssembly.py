@@ -686,6 +686,9 @@ def connectorCandidates(ref):
                 name = findVertexNameInObject(vtx, obj)
                 if name and all(n != name for _p, n, _k in out):
                     out.append((vtx.Point, name, "corner"))
+        if curve.TypeId == "Part::GeomCircle" and not edge.isClosed():
+            # ops#683: an arc's midpoint (Onshape's MID_POINT)
+            out.append((arcMidpoint(edge), MIDPOINT_PREFIX + element_name, "midpoint"))
         return out
 
     if elt_type != "Face":
@@ -720,6 +723,9 @@ def connectorCandidates(ref):
         name = "Edge" + str(i + 1)  # the index within the face
         if curve.TypeId in ("Part::GeomCircle", "Part::GeomEllipse"):
             out.append((curve.Location, name, "circle"))
+            if curve.TypeId == "Part::GeomCircle" and not edge.isClosed():
+                # ops#683: the midpoint of the face's arc, with the face's frame
+                out.append((arcMidpoint(edge), MIDPOINT_PREFIX + name, "midpoint"))
         elif curve.TypeId == "Part::GeomLine" and _type not in (
             "Part::GeomCylinder",
             "Part::GeomCone",
@@ -737,7 +743,26 @@ def connectorCandidates(ref):
                             and edgej.Length == edge.Length
                         ):
                             out.append((edgej.CenterOfGravity, name, "circle"))
+    out.append(partOriginCandidate(obj))
     return out
+
+
+# FreeCAD-CH (ops#683): implicit connectors with no element of their own, named in the pick's point
+# slot. "MidEdgeN" is the midpoint of arc N (N counted as the element slot counts it: the object's
+# edges for an edge picked alone, the face's for a face); "PartOrigin" is the part's origin with the
+# part's axes, offered while one of its faces is hovered (GC-A1: 17 of the team's 148 connectors sit
+# on a part origin; how Onshape offers it, A5, is not known).
+MIDPOINT_PREFIX = "Mid"
+PART_ORIGIN = "PartOrigin"
+
+
+def arcMidpoint(edge):
+    return edge.valueAt((edge.FirstParameter + edge.LastParameter) * 0.5)
+
+
+def partOriginCandidate(obj):
+    """The part's origin, in its shape's coordinates (as the other candidates)"""
+    return (App.Vector(obj.Placement.Base), PART_ORIGIN, "origin")
 
 
 def shapeToGlobal(ref, point):
@@ -1204,6 +1229,29 @@ So here we want to find a placement that corresponds to a local coordinate syste
 """
 
 
+def onshapeFrame(zAxis):
+    """FreeCAD-CH (ops#683, design C2, oracle 12 GC-B2): Onshape's implicit connector frame for a
+    Z axis given in the part's axes: X is the first of the part's +x, +y, +z not parallel to Z,
+    made square to Z, and Y = Z x X."""
+    z = App.Vector(zAxis)
+    if z.Length < 1e-12:
+        return App.Rotation()
+    z.normalize()
+    for axis in (App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)):
+        if axis.cross(z).Length > 1e-6:
+            break
+    x = axis - z * axis.dot(z)
+    x.normalize()
+    y = z.cross(x)
+    return App.Rotation(App.Matrix(x.x, y.x, z.x, 0, x.y, y.y, z.y, 0, x.z, y.z, z.z, 0, 0, 0, 0, 1))
+
+
+def outwardNormal(face):
+    """The planar face's normal out of the material (the face's orientation in its solid)"""
+    u0, u1, v0, v1 = face.ParameterRange
+    return face.normalAt((u0 + u1) * 0.5, (v0 + v1) * 0.5)
+
+
 def findPlacement(ref, ignoreVertex=False):
     if not isRefValid(ref, 2):
         return App.Placement()
@@ -1213,6 +1261,10 @@ def findPlacement(ref, ignoreVertex=False):
 
     elt = getElementName(ref[1][0])
     vtx = getElementName(ref[1][1])
+
+    if vtx == PART_ORIGIN:
+        # ops#683: the part's origin and axes, whatever element carries the pick
+        return App.Placement()
 
     if not elt or not vtx:
         # case of whole parts such as PartDesign::Body or App/PartDesign::CordinateSystem/Point/Line/Plane.
@@ -1231,6 +1283,9 @@ def findPlacement(ref, ignoreVertex=False):
     vtx_type, _ = extract_type_and_number(vtx)
 
     isLine = False
+    # FreeCAD-CH (ops#683, C2): the Z axis of Onshape's frame, in the shape's coordinates, for a
+    # planar face (its outward normal) and a straight edge (along it)
+    onshapeZ = None
 
     if elt_type == "Vertex":
         vertex = get_element(obj.Shape, elt)
@@ -1245,7 +1300,12 @@ def findPlacement(ref, ignoreVertex=False):
         curve = edge.Curve
 
         # First we find the translation
-        if vtx_type == "Edge" or ignoreVertex:
+        if vtx_type == MIDPOINT_PREFIX + "Edge" and not ignoreVertex:
+            # ops#683: the arc's midpoint, Z along the edge there (Onshape's MID_POINT)
+            mid = (edge.FirstParameter + edge.LastParameter) * 0.5
+            plc.Base = edge.valueAt(mid)
+            onshapeZ = App.Vector(edge.tangentAt(mid))
+        elif vtx_type == "Edge" or ignoreVertex:
             # In this case the wanted vertex is the center.
             if curve.TypeId == "Part::GeomCircle":
                 center_point = curve.Location
@@ -1262,11 +1322,12 @@ def findPlacement(ref, ignoreVertex=False):
             plc.Base = (vertex.X, vertex.Y, vertex.Z)
 
         # Then we find the Rotation
-        if curve.TypeId == "Part::GeomCircle":
+        if curve.TypeId == "Part::GeomCircle" and onshapeZ is None:
             plc.Rotation = App.Rotation(curve.Rotation)
 
         if curve.TypeId == "Part::GeomLine":
             isLine = True
+            onshapeZ = App.Vector(curve.Direction)
             plane_normal = round_vector(curve.Direction)
             plane_origin = App.Vector(0, 0, 0)
             plane = Part.Plane(plane_origin, plane_normal)
@@ -1291,6 +1352,12 @@ def findPlacement(ref, ignoreVertex=False):
                 plc.Base = surface.Apex
             else:
                 plc.Base = face.CenterOfGravity
+        elif vtx_type == MIDPOINT_PREFIX + "Edge":
+            # ops#683: the midpoint of the face's arc (the edge counted within the face)
+            edge = get_element(face, vtx[len(MIDPOINT_PREFIX) :])
+            if edge is None:
+                return App.Placement()
+            plc.Base = arcMidpoint(edge)
         elif vtx_type == "Edge":
             # In this case the edge is a circle/arc and the wanted vertex is its center.
             edge = get_element(face, vtx)
@@ -1324,13 +1391,23 @@ def findPlacement(ref, ignoreVertex=False):
         # Then we find the Rotation
         if hasattr(surface, "Rotation") and surface.Rotation is not None:
             plc.Rotation = App.Rotation(surface.Rotation)
+        if surface.TypeId == "Part::GeomPlane":
+            onshapeZ = outwardNormal(face)
 
+    toPart = App.Placement()
     if hasattr(obj, "ExpandArray"):
         # For draft arrays, the Shape has both the array placement and the base placement.
         plc = obj.Base.Placement.inverse() * plc
+        toPart = obj.Base.Placement.inverse()
 
     # change plc to be relative to the object placement.
     plc = obj.Placement.inverse() * plc
+    toPart = obj.Placement.inverse() * toPart
+
+    if onshapeZ is not None:
+        # Onshape's frame, chosen in the part's axes (GC-B2)
+        plc.Rotation = onshapeFrame(toPart.Rotation.multVec(onshapeZ))
+        isLine = False
 
     # post-process of plc for some special cases
     if elt_type == "Vertex":

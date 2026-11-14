@@ -47,6 +47,7 @@ from AssemblyTests.TestMateAfterEdits import (  # FreeCAD-CH, ops#683 C5
     TestMateAfterEdits,
     TestMateFaceGone,
 )
+from AssemblyTests.TestOnshapeConnectors import TestOnshapeConnectors  # FreeCAD-CH, ops#683
 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestCore else False
@@ -67,3 +68,4 @@ True if TestAssemblyPatterns else False
 True if TestFreeInstances else False
 True if TestMateAfterEdits else False
 True if TestMateFaceGone else False
+True if TestOnshapeConnectors else False
