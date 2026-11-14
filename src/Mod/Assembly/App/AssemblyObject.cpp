@@ -988,17 +988,12 @@ void AssemblyObject::savePlacementsForUndo()
             continue;
         }
 
-        std::pair<App::DocumentObject*, Base::Placement> savePair;
-        savePair.first = obj;
-
         // Check if the object has a "Placement" property
         auto* propPlc = obj->getPlacementProperty();
         if (!propPlc) {
             continue;
         }
-        savePair.second = propPlc->getValue();
-
-        previousPositions.push_back(savePair);
+        previousPositions.push_back({App::DocumentObjectWeakPtrT(obj), obj->getID(), propPlc->getValue()});
     }
 }
 
@@ -1008,9 +1003,10 @@ void AssemblyObject::undoSolve()
         return;
     }
 
-    for (auto& pair : previousPositions) {
-        App::DocumentObject* obj = pair.first;
-        if (!obj) {
+    for (auto& saved : previousPositions) {
+        // null, or another object at the same address, when the part was deleted since the solve
+        auto* obj = saved.obj.get<App::DocumentObject>();
+        if (!obj || obj->getID() != saved.id) {
             continue;
         }
 
@@ -1020,7 +1016,7 @@ void AssemblyObject::undoSolve()
             continue;
         }
 
-        propPlacement->setValue(pair.second);
+        propPlacement->setValue(saved.placement);
     }
     previousPositions.clear();
 

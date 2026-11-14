@@ -181,6 +181,28 @@ class TestOnshapeConnectors(AssemblyTestBase):
         self.assertPlacement(p1, App.Placement(App.Vector(67, -7, -12.5), rows(((0, 1, 0), (0, 0, 1), (1, 0, 0)))), "Reorient after Flip")
         self.assertPlacement(p2, App.Placement(), "the second pick still stays")
 
+    def test_undo_solve_skips_a_part_deleted_since_the_solve(self):
+        """undoSolve() after one of the solved parts was deleted puts the part left back where the
+        solve found it and skips the deleted one (ops#683: it read the freed part, an access
+        violation on Windows)"""
+        a = self.part("A", Part.makeBox(40, 20, 10))
+        b = self.part("B", Part.makeBox(20, 10, 5, App.Vector(60, 0, 0)))
+        joint = self.fastened(a, self.faceWithNormal(a, Z), b, self.faceWithNormal(b, Z))
+        solved = {o.Name: App.Placement(o.Placement) for o in (a, b)}
+        self.assertEqual(self.assembly.solve(True), 0)
+        self.doc.removeObject(joint.Name)
+        self.doc.removeObject(b.Name)
+        self.doc.recompute()
+        # a new part may land on the freed one's address: it must keep its own placement
+        moved = App.Placement(App.Vector(-50, 30, 0), App.Rotation(X, 90))
+        c = self.part("C", Part.makeBox(20, 10, 5), moved)
+        a.Placement = App.Placement(App.Vector(100, 200, 300), App.Rotation(Z, 90))
+        self.assembly.undoSolve()
+        self.assertPlacement(a, solved["A"], "the part left is back")
+        self.assertPlacement(c, moved, "a part made after the solve keeps its placement")
+        self.assembly.undoSolve()  # nothing saved any more: no-op
+        self.assertPlacement(a, solved["A"], "a second undo changes nothing")
+
     def test_offset_along_the_first_connectors_axes(self):
         """Flipped or not, reoriented or not: the first connector sits at the second's plus the
         offset along the first connector's own axes (oracle 12)"""
