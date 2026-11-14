@@ -160,6 +160,19 @@ class TestPostCondition(unittest.TestCase):
         self.assertFalse(e["tol"]["flag"], e)
         self.assertFalse(e["dv"]["flag"], e)
 
+    def testReTrimmedDegradedFaceIsInheritedNotFlagged(self):
+        """The pad's spline sides are flagged at the pad; a pocket through the side at x = 15 re-trims
+        that face, which it did not make degraded"""
+        body = self.body(Part.makeBox(40, 30, 10))
+        pad = self.pad(body, splineRect(5, 5, 15, 15, 10), 5)
+        pocket = self.pocket(body, disk(15, 10, 2, 15), "SidePocket")
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertTrue(self.entry(pad)["deg"]["flag"])
+        e = self.entry(pocket)
+        self.assertFalse(e["deg"]["flag"], e)
+        self.assertGreaterEqual(e["deg"]["inherited"], 1, e)
+
     def testRevolvedCircleIsNotFlagged(self):
         body = self.body()
         prof = self.profile(

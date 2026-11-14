@@ -25,9 +25,12 @@
  *         lies within 1e-7 mm of a plane, cylinder, cone, sphere or torus (a degraded form). A
  *         revolved circle (a torus by construction) is counted apart, not flagged;
  * - dv:   an additive or subtractive feature, a Boolean or a pattern changes the volume by no more
- *         than 1e-6 of it + 1e-6 mm^3;
- * - bop:  OCCT's argument analyzer (self-interference and curve-on-surface only) finds a fault among
- *         the faces the feature made and the faces next to them.
+ *         than 1e-9 of it + 1e-6 mm^3;
+ * - bop:  OCCT's self-interference check (BOPAlgo_CheckerSI, up to edge/face by default) finds
+ *         interfering sub-shapes among the faces the feature made and the faces next to them (at most
+ *         1000 faces; more are not checked).
+ * A degraded face whose surface the base already has (re-trimmed, or copied by a dress-up) is
+ * counted as inherited, not flagged: the feature that made it was flagged.
  * Off unless FREECAD_CH_POSTCOND_LOG names a file (an absolute path): one JSON line per feature is
  * appended to it, with each check's numbers, flag and time.
  */
