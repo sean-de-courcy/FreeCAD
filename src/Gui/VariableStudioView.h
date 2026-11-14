@@ -80,6 +80,8 @@ public:
 
 private:
     void updateTitle();
+    /// Whether the view's object is still a Variable Studio (deleted or attached again, it isn't)
+    bool isStudio() const;
 
     std::string studio;
     DockWnd::VariablesView* table;

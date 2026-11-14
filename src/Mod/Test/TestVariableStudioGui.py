@@ -356,6 +356,40 @@ class TestVariableStudioGui(unittest.TestCase):
         pump(0.4)
         self.assertIn("w", copy.PropertiesList)
 
+    def testUndoDetachStudioWindow(self):
+        """ops#734: an imported studio, detached and marked as a Variable Studio, has its tab and
+        its window. Undoing the Detach attaches the copy again, which is no tab: its window closes
+        too, as a deleted studio's does (it stayed open with no tab). Redo detaches it again."""
+        import json
+
+        from freecad.variables import copies
+
+        self.tmp = tempfile.mkdtemp(prefix="vstudio")
+        path = os.path.join(self.tmp, "Studio.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"variableStudioReference": None, "variables": [
+                {"type": "LENGTH", "name": "width", "value": None, "description": "",
+                 "expression": "10 mm"}]}], f)
+        copy = copies.import_studios(self.doc, [path]).copies[0]
+        self.padStudioless()
+        self.doc.openTransaction("Detach and mark")
+        copies.detach(copy)
+        App.DocumentTabs.setVariableStudio(copy, True)
+        self.doc.commitTransaction()
+        self.assertTrue(Tabs.isVariableStudio(copy))
+        self.assertTrue(GuiTabs.switchTo(self.doc, copy.Name)[0])
+        view = waitFor(lambda: activeWidget() if activeWidget() is not None
+                       and activeWidget().objectName() == "VariableStudioView" else None)
+        self.assertIsNotNone(view, "the detached copy's tab shows no window")
+        self.undo()
+        pump(0.3)
+        self.assertFalse(Tabs.isVariableStudio(copy), "attached again: no tab")
+        self.assertNotIn(copy.Name, [t[0] for t in Tabs.tabs(self.doc)])
+        self.assertFalse(
+            [v.windowTitle() for v in studioViews() if v.isVisible()],
+            "the attached copy's window stays open with no tab",
+        )
+
     def testAddGoesToTheStudio(self):
         """With another VarSet in the document, the view's Add puts the variable in its studio."""
         other = self.doc.addObject("App::VarSet", "Variables")
