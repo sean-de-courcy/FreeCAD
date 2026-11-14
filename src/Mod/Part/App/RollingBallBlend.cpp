@@ -27,9 +27,11 @@
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TColStd_Array1OfInteger.hxx>
@@ -198,7 +200,14 @@ double reachable(const gp_Pnt& at, double radius)
 {
     const double size = std::max({std::fabs(at.X()), std::fabs(at.Y()), std::fabs(at.Z())}) + radius;
     return std::max(3e-13, 64.0 * std::numeric_limits<double>::epsilon() * size);
+
 }
+
+// Where Newton stops improving above reachable() it has still settled when it is within this: the
+// noise of a wall's own evaluation is not known in advance (a 1000 mm wave prism stalls at 1e-11 on one
+// platform and under it on another), the surface is judged at 1e-7 between stations and the result at
+// 1e-6, and a refusal here would turn a fillet OCCT built into an error
+constexpr double settled = 1e-9;
 
 // One ball position: the centre and its two feet (on the face's side 0 and side 1 walls)
 struct Station
@@ -223,11 +232,23 @@ Station solveStation(
     if (warm) {
         station.feet = warm->feet;
     }
+    // The best position so far, and how often in a row a step did not halve its residual
+    Station best;
+    best.residual = Precision::Infinite();
+    int stalled = 0;
+    auto settle = [&]() {
+        if (best.residual < settled) {
+            best.ok = true;
+            return best;
+        }
+        station.centre = centre;
+        return station;
+    };
     for (int iteration = 0; iteration <= 40; ++iteration) {
         for (int side = 0; side < 2; ++side) {
             station.feet[side] = foot(walls[side], centre, &station.feet[side]);
             if (!station.feet[side].ok) {
-                return station;
+                return settle();
             }
         }
         const std::array<double, 2> f = {station.feet[0].distance - radius, station.feet[1].distance - radius};
@@ -235,6 +256,14 @@ Station solveStation(
         if (station.residual < reachable(centre, radius)) {
             station.ok = true;
             break;
+        }
+        stalled = station.residual < 0.5 * best.residual ? 0 : stalled + 1;
+        if (station.residual < best.residual) {
+            best = station;
+            best.centre = centre;
+        }
+        if (stalled >= 3) {
+            return settle();
         }
         const gp_Vec& g0 = station.feet[0].normal;
         const gp_Vec& g1 = station.feet[1].normal;
@@ -248,6 +277,9 @@ Station solveStation(
             return station;
         }
         centre.SetXYZ(centre.XYZ() + jacobian.Inverted() * gp_XYZ(-f[0], -f[1], 0.0));
+    }
+    if (!station.ok) {
+        return settle();
     }
     station.centre = centre;
     return station;
@@ -399,6 +431,8 @@ public:
     std::map<const TopoDS_TShape*, Handle(Geom_Surface)> surfaces;
     std::map<const TopoDS_TShape*, EdgeNew> curves;
     std::map<const TopoDS_TShape*, EdgeNew> slides;  // untouched edges whose vertex slides
+    /// Untouched edges whose vertex slides past the end of their trimmed curve: the curve it is cut from
+    std::map<const TopoDS_TShape*, Handle(Geom_Curve)> rebased;
     std::map<std::pair<const TopoDS_TShape*, const TopoDS_TShape*>, Handle(Geom2d_Curve)> pcurves;
     std::map<const TopoDS_TShape*, gp_Pnt> points;
     std::map<const TopoDS_TShape*, double> pointTolerances;  // where not the default
@@ -433,7 +467,14 @@ public:
     {
         const auto found = curves.find(edge.TShape().get());
         if (found == curves.end()) {
-            return Standard_False;
+            const auto wider = rebased.find(edge.TShape().get());
+            if (wider == rebased.end()) {
+                return Standard_False;
+            }
+            curve = wider->second;
+            location = TopLoc_Location();
+            tolerance = BRep_Tool::Tolerance(edge);
+            return Standard_True;
         }
         curve = found->second.curve;
         location = TopLoc_Location();
@@ -994,6 +1035,9 @@ void solveSeam(Context& context, Seam& seam)
         s1 = s0;
         f1 = residual(s1);
     }
+    // The best place so far: where the secant stops improving above `within`, it has settled there
+    double sBest = std::fabs(f0) < std::fabs(f1) ? s0 : s1;
+    double fBest = std::min(std::fabs(f0), std::fabs(f1));
     for (int iteration = 0; iteration < 60 && !converged; ++iteration) {
         if (std::fabs(f1 - f0) < 1e-300) {
             break;
@@ -1004,9 +1048,17 @@ void solveSeam(Context& context, Seam& seam)
         s1 = s2;
         f1 = residual(s1);
         converged = std::fabs(f1) < within;
+        if (std::fabs(f1) < fBest) {
+            fBest = std::fabs(f1);
+            sBest = s1;
+        }
     }
     if (!converged) {
-        throw Refusal {"a seam's ball position did not converge"};
+        if (fBest >= settled) {
+            throw Refusal {"a seam's ball position did not converge"};
+        }
+        s1 = sBest;
+        f1 = residual(s1);
     }
     // The ball must touch the next wall face at the same point: K is a tangent edge
     const gp_Pnt onK = curve->Value(s1);
@@ -1248,22 +1300,35 @@ void solveStations(const Context& context, Blend& blend, int interior)
             }
             return least;
         };
+        // ... and on by twice the radius where the walls reach that far: a later round that runs past
+        // this end is cut by this surface (FilletFallback's blendBeyond uses a blend's surface as far
+        // as it is still the ball's), and ends in this one face instead of a continuation face.
+        // The run-on is a preference: it also ends where the clearance grows by less than half a
+        // step (an end on a concave face, a hole of radius under about three radii across the edge:
+        // the ball never gets twice its radius clear of it, and near the hole's axis the distance
+        // to its wall says nothing: "the blend's end face does not cut the blend")
         gp_Vec out = outward[end];
+        const double runOn = std::max(2.0 * spacing, 2.0 * radius);
         int beyond = 0;
-        // How far the surface runs on past the end is the same at every station count (two spacings of the
-        // first pass): what is built on the blend reads its surface there (blendBeyond), and a denser pass
-        // must not hand it a shorter one
-        const double runOn = 2.0 * spacing * (interior + 1.0) / (firstStations + 1.0);
+        double clearBefore = -Precision::Infinite();
         for (int steps = 0;; ++steps) {
-            if (clearance(outermost()) > runOn && ++beyond >= 2) {
+            const double clear = clearance(outermost());
+            if (clear > 2.0 * spacing) {
+                ++beyond;
+            }
+            if (beyond >= 2 && (clear > runOn || clear - clearBefore < 0.5 * spacing)) {
                 break;
             }
+            clearBefore = clear;
             if (steps > 4000) {
                 throw NotRecognised {"walls that stop at the blend's end"};
             }
             const Station from = outermost();
             const Station next = solveStation(from.centre.Translated(out * spacing), walls, radius, &from);
             if (!next.ok || !onWall(walls[0], next.feet[0]) || !onWall(walls[1], next.feet[1])) {
+                if (beyond >= 2) {
+                    break;  // the walls end before the run-on does: as far as they reach
+                }
                 throw NotRecognised {"walls that stop at the blend's end"};
             }
             const gp_Vec tangent = tangentAt(next);
@@ -2172,9 +2237,33 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                     if (along.IsNull()) {
                         throw Refusal {"an edge of the base without a curve"};
                     }
-                    GeomAPI_ProjectPointOnCurve projection(point, along);
+                    // A line or circle stored as a trimmed curve ends at the old vertex: the new one may
+                    // lie past it (a designed corner pocket: 4e-5). Then the edge takes the curve it
+                    // is trimmed from, which is the same geometry (an edge without a location only)
+                    Handle(Geom_Curve) whole = along;
+                    if (const Handle(Geom_TrimmedCurve) trimmed = Handle(Geom_TrimmedCurve)::DownCast(along)) {
+                        TopLoc_Location slideLocation;
+                        double f {}, l {};
+                        BRep_Tool::Curve(end.slides[side], slideLocation, f, l);
+                        if (slideLocation.IsIdentity()) {
+                            whole = trimmed->BasisCurve();
+                        }
+                    }
+                    GeomAPI_ProjectPointOnCurve projection(point, whole);
+                    if (projection.NbPoints() >= 1 && whole != along) {
+                        const double place = projection.LowerDistanceParameter();
+                        if (place < along->FirstParameter() || place > along->LastParameter()) {
+                            modification->rebased[end.slides[side].TShape().get()] = whole;
+                        }
+                    }
                     if (projection.NbPoints() < 1) {
-                        throw Refusal {"an end vertex has no place on the base's edge"};
+                        throw Refusal {
+                            std::string("an end vertex has no place on the base's edge (side ")
+                            + std::to_string(side) + ", a " + along->DynamicType()->Name() + " "
+                            + std::to_string(edgeFirst) + ".." + std::to_string(edgeLast) + ", its ends "
+                            + std::to_string(point.Distance(along->Value(edgeFirst))) + " and "
+                            + std::to_string(point.Distance(along->Value(edgeLast))) + " away)"
+                        };
                     }
                     double at = projection.LowerDistanceParameter();
                     if (along->IsPeriodic()) {
@@ -2298,7 +2387,23 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                 }
                 const auto old = before.of.find(was(i).TShape().get());
                 if (old != before.of.end() && toleranceOf(now) > std::max(resultBound, old->second)) {
-                    throw Refusal {"the corrected body has a tolerance above its bound"};
+                    throw Refusal {
+                        std::string("the corrected body has a tolerance above its bound (")
+                        + (kind == TopAbs_FACE ? "a face" : kind == TopAbs_EDGE ? "an edge" : "a vertex") + ": "
+                        + std::to_string(toleranceOf(now)) + ", was " + std::to_string(old->second) + ")"
+                        + [&]() {
+                              if (kind != TopAbs_EDGE) {
+                                  return std::string();
+                              }
+                              BRepAdaptor_Curve c(TopoDS::Edge(now));
+                              const gp_Pnt a = c.Value(c.FirstParameter());
+                              const gp_Pnt b = c.Value(c.LastParameter());
+                              return ", from "
+                                  + std::to_string(a.X()) + " " + std::to_string(a.Y()) + " " + std::to_string(a.Z())
+                                  + " to " + std::to_string(b.X()) + " " + std::to_string(b.Y()) + " "
+                                  + std::to_string(b.Z());
+                          }()
+                    };
                 }
             }
         }

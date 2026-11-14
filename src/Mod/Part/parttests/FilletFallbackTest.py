@@ -4589,6 +4589,95 @@ class BlendEndTrimTest(unittest.TestCase):
                 self.assertEqual(len(shape.Faces), len(blended.Faces) + more)
 
 
+class RoundOnASplineLidEndingInAHoleTest(unittest.TestCase):
+    """A rolling-ball round whose ends lie in a hole (ops#640, the review of the blend's run-on).
+
+    A block x -20..20, y -10..10 under the twisted lid z = 20 + 0.03 x y (a bicubic B-spline), with
+    a hole of radius R about the vertical axis through (0, -10): it crosses the edge between the lid
+    and the front y = -10 and leaves two edges, each ending on the hole's wall. They are rounded
+    with r = 1.5.
+
+    Expected, in closed form: the ball's centre p - r n of every point p of a round lies r from the
+    lid (Newton on the graph) and r behind the front. A blend's surface is run on past its end by
+    twice its radius where it can; in a hole of radius 4 the ball gets only 2.5 clear of the wall,
+    and marched on to the hole's axis the end could not be found: the round was refused where it
+    had been built. The run-on now stops where the clearance stops growing."""
+
+    twist, radius = 0.03, 1.5
+
+    def lidDistance(self, a, b, h):
+        k = self.twist
+        x, y = a, b
+        for _ in range(60):
+            g = 20 + k * x * y - h
+            fx = (x - a) + g * k * y
+            fy = (y - b) + g * k * x
+            fxx = 1 + k * k * y * y
+            fyy = 1 + k * k * x * x
+            fxy = g * k + k * k * x * y
+            det = fxx * fyy - fxy * fxy
+            dx = (fx * fyy - fy * fxy) / det
+            dy = (fy * fxx - fx * fxy) / det
+            x -= dx
+            y -= dy
+            if abs(dx) + abs(dy) < 1e-15:
+                break
+        return math.sqrt((x - a) ** 2 + (y - b) ** 2 + (20 + k * x * y - h) ** 2)
+
+    def rounded(self, hole):
+        k = self.twist
+        lid = Part.BSplineSurface()
+        poles = [
+            [V(-45, -25, 20 + k * 45 * 25), V(-45, 25, 20 - k * 45 * 25)],
+            [V(45, -25, 20 - k * 45 * 25), V(45, 25, 20 + k * 45 * 25)],
+        ]
+        lid.buildFromPolesMultsKnots(poles, [2, 2], [2, 2], [0, 1], [0, 1], False, False, 1, 1)
+        lid.increaseDegree(3, 3)
+        body = Part.makeBox(40, 20, 40, V(-20, -10, 0)).cut(lid.toShape().extrude(V(0, 0, 40)))
+        body = body.cut(Part.makeCylinder(hole, 60, V(0, -10, -5)))
+        edges = [
+            e
+            for e in body.Edges
+            if len(e.Vertexes) == 2
+            and all(abs(v.Point.y + 10) < 1e-7 and v.Point.z > 5 for v in e.Vertexes)
+            and abs(e.valueAt((e.FirstParameter + e.LastParameter) / 2).y + 10) < 1e-7
+            and abs(e.Vertexes[0].Point.x - e.Vertexes[1].Point.x) > 1e-3
+        ]
+        self.assertEqual(len(edges), 2)
+        return body, body.makeFillet(self.radius, edges)
+
+    def testTheEndsInAHoleAreFound(self):
+        for hole in (4.0, 6.0):
+            with self.subTest(hole=hole):
+                body, shape = self.rounded(hole)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertEqual(len(shape.Faces), len(body.Faces) + 2)
+                rounds = [
+                    f
+                    for f in shape.Faces
+                    if f.Surface.TypeId == "Part::GeomBSplineSurface" and f.Area < 100
+                ]
+                self.assertEqual(len(rounds), 2)
+                worst = 0.0
+                for f in rounds:
+                    u0, u1, v0, v1 = f.ParameterRange
+                    for i in range(15):
+                        for j in range(15):
+                            u = u0 + (u1 - u0) * (i + 0.5) / 15
+                            v = v0 + (v1 - v0) * (j + 0.5) / 15
+                            p = f.valueAt(u, v)
+                            if not f.isInside(p, 1e-7, True):
+                                continue
+                            c = p - f.normalAt(u, v) * self.radius
+                            worst = max(
+                                worst,
+                                abs(self.lidDistance(c.x, c.y, c.z) - self.radius),
+                                abs(c.y + 10 - self.radius),
+                            )
+                self.assertLess(worst, 1e-6)
+
+
 class RoundBetweenCylindersTest(unittest.TestCase):
     """A round of a straight edge between two cylinders along it (ops#640, Case Base #104), on two
     cylinders R, height h, axes d apart: fused (two concave edges) and their common part, a lens
