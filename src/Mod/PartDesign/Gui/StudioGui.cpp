@@ -49,8 +49,11 @@
 #include <Mod/PartDesign/App/Pieces.h>
 #include <Mod/PartDesign/App/FeatureApply.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/FeatureGroove.h>
+#include <Mod/PartDesign/App/FeatureHole.h>
 #include <Mod/PartDesign/App/FeaturePad.h>
 #include <Mod/PartDesign/App/FeaturePocket.h>
+#include <Mod/PartDesign/App/FeatureRevolution.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/FeatureTransformed.h>
 #include <Mod/PartDesign/App/Studio.h>
@@ -245,6 +248,15 @@ bool toolContacts(App::DocumentObject* owner, std::vector<PartDesign::Body*>& ou
             }
             else if (auto pocket = freecad_cast<PartDesign::Pocket*>(owner)) {
                 result = pocket->execute();
+            }
+            else if (auto revolution = freecad_cast<PartDesign::Revolution*>(owner)) {
+                result = revolution->execute();  // ops#640 walk bugs 1
+            }
+            else if (auto groove = freecad_cast<PartDesign::Groove*>(owner)) {
+                result = groove->execute();
+            }
+            else if (auto hole = freecad_cast<PartDesign::Hole*>(owner)) {
+                result = hole->execute();
             }
             if (result == App::DocumentObject::StdReturn) {
                 tool = PartDesign::FeatureApply::toolOf(owner);

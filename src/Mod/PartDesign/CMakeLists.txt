@@ -191,6 +191,7 @@ if(BUILD_GUI)
         PartDesignTests/TestWorkflowGui.py
         PartDesignTests/TestStudioSketchesShownGui.py
         PartDesignTests/TestStudioFeatureGui.py
+        PartDesignTests/TestStudioRevolveHoleGui.py
         PartDesignTests/TestStudioHistoryGui.py
         PartDesignTests/TestPartsListGui.py
         PartDesignTests/TestStudioPatternsGui.py
