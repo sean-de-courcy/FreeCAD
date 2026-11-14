@@ -41,6 +41,8 @@
 #include <BRepLib_FuseEdges.hxx>
 #include <BRepLib_MakeWire.hxx>
 #include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BSplCLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
@@ -1226,7 +1228,124 @@ FaceTypedBSpline::FaceTypedBSpline()
     : FaceTypedBase(GeomAbs_BSplineSurface)
 {}
 
+// Whether every point of `face` lies on `holder`'s surface, inside that surface's own parameter
+// range, within `tolerance`: the face could be made on that surface. Its edges' points and the
+// points of a grid over its parameters that lie inside it are tested.
+static bool liesOnSurfaceOf(const TopoDS_Face& face, const TopoDS_Face& holder, double tolerance)
+{
+    TopLoc_Location location;
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(holder, location);
+    if (surface.IsNull()) {
+        return false;
+    }
+    const gp_Trsf toHolder = location.Inverted().Transformation();
+    double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    surface->Bounds(u0, u1, v0, v1);
+    GeomAPI_ProjectPointOnSurf projection;
+    projection.Init(surface, u0, u1, v0, v1, Precision::Confusion());
+    auto onIt = [&](gp_Pnt point) {
+        point.Transform(toHolder);
+        projection.Perform(point);
+        return projection.IsDone() && projection.NbPoints() > 0
+            && projection.LowerDistance() <= tolerance;
+    };
+    for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More(); xp.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(xp.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        for (int k = 0; k <= 8; ++k) {
+            const double t = curve.FirstParameter()
+                + (curve.LastParameter() - curve.FirstParameter()) * k / 8.0;
+            if (!onIt(curve.Value(t))) {
+                return false;
+            }
+        }
+    }
+    BRepAdaptor_Surface own(face);
+    double fu0 = 0.0, fu1 = 0.0, fv0 = 0.0, fv1 = 0.0;
+    BRepTools::UVBounds(face, fu0, fu1, fv0, fv1);
+    BRepTopAdaptor_FClass2d classifier(face, Precision::PConfusion());
+    for (int a = 0; a < 7; ++a) {
+        for (int b = 0; b < 7; ++b) {
+            const gp_Pnt2d uv(fu0 + (fu1 - fu0) * (a + 0.5) / 7.0, fv0 + (fv1 - fv0) * (b + 0.5) / 7.0);
+            if (classifier.Perform(uv) != TopAbs_IN) {
+                continue;
+            }
+            if (!onIt(own.Value(uv.X(), uv.Y()))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Two B-spline faces with an edge in common, one of which lies wholly on the other's surface
+// (inside its parameter range), are on one surface: a wall's surface extended past its end
+// (FilletFallback's wallSheet, GeomLib::ExtendSurfByLength) and the wall's own face, which the
+// pole test below cannot see, since the extension has other poles and knots. Rehearsal 5,
+// Case Base rb106 (ops#640): #105's round, cut by #103's blend extended, left a 0.0197 mm2 face on
+// the extension beside the blend; Onshape has one face. Returns the face whose surface holds the
+// other, or a null face.
+static TopoDS_Face holderOf(const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo)
+{
+    TopTools_IndexedMapOfShape edgesOne;
+    TopExp::MapShapes(faceOne, TopAbs_EDGE, edgesOne);
+    bool adjacent = false;
+    for (TopExp_Explorer xp(faceTwo, TopAbs_EDGE); xp.More() && !adjacent; xp.Next()) {
+        adjacent = edgesOne.Contains(xp.Current());
+    }
+    if (!adjacent) {
+        return {};
+    }
+    const double tolerance = std::max(
+        Precision::Confusion(),
+        std::min(1e-5, std::max(BRep_Tool::Tolerance(faceOne), BRep_Tool::Tolerance(faceTwo)))
+    );
+    if (liesOnSurfaceOf(faceTwo, faceOne, tolerance)) {
+        return faceOne;
+    }
+    if (liesOnSurfaceOf(faceOne, faceTwo, tolerance)) {
+        return faceTwo;
+    }
+    return {};
+}
+
+static bool samePolesAndKnots(const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo);
+
 bool FaceTypedBSpline::isEqual(const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo) const
+{
+    if (samePolesAndKnots(faceOne, faceTwo)) {
+        return true;
+    }
+    static const bool extensionOff = [] {
+        char* value = nullptr;
+#ifdef _MSC_VER
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_REFINE_EXTENSION") != 0 || !value) {
+            return false;
+        }
+        const bool off = std::string(value) == "off";
+        std::free(value);
+        return off;
+#else
+        value = std::getenv("FREECAD_CH_REFINE_EXTENSION");
+        return value && std::string(value) == "off";
+#endif
+    }();
+    if (extensionOff) {
+        return false;
+    }
+    try {
+        return !holderOf(faceOne, faceTwo).IsNull();
+    }
+    catch (Standard_Failure&) {
+        return false;
+    }
+}
+
+static bool samePolesAndKnots(const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo)
 {
     try {
         Handle(Geom_BSplineSurface)
@@ -1399,6 +1518,44 @@ GeomAbs_SurfaceType FaceTypedBSpline::getType() const
 
 TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
 {
+    if (faces.empty()) {
+        return {};
+    }
+    // The merged face goes on a surface that holds every face of the group: the first face's
+    // when the group shares its poles, else the extension that holds the others (isEqual)
+    TopoDS_Face holder;
+    for (const auto& candidate : faces) {
+        bool holdsAll = true;
+        for (const auto& other : faces) {
+            if (other.IsSame(candidate) || samePolesAndKnots(candidate, other)) {
+                continue;
+            }
+            const double tolerance = std::max(
+                Precision::Confusion(),
+                std::min(
+                    1e-5,
+                    std::max(BRep_Tool::Tolerance(candidate), BRep_Tool::Tolerance(other))
+                )
+            );
+            try {
+                if (!liesOnSurfaceOf(other, candidate, tolerance)) {
+                    holdsAll = false;
+                    break;
+                }
+            }
+            catch (Standard_Failure&) {
+                holdsAll = false;
+                break;
+            }
+        }
+        if (holdsAll) {
+            holder = candidate;
+            break;
+        }
+    }
+    if (holder.IsNull()) {
+        return {};
+    }
     std::vector<TopoDS_Wire> wires;
 
     std::vector<EdgeVectorType> splitEdges;
@@ -1421,7 +1578,7 @@ TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
 
     // make face from surface and outer wire.
     Handle(Geom_BSplineSurface) surface = copyOfSurface(
-        Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(faces.at(0)))
+        Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(holder))
     );
     if (!surface) {
         return {};
