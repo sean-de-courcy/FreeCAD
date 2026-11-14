@@ -279,6 +279,32 @@ class TestVariableHistoryPosition(unittest.TestCase):
         self.assertEqual(PartDesign.variablePosition(self.vars, "q"), a)
         self.assertLength(c, 20)
 
+    def testRemovedFromItsBodyFirstAfterReopenKeepsThePlace(self):
+        """The same delete in a file just opened, before any recompute (review fix R1)."""
+        self.box("A")
+        self.box("B")
+        self.addVariable("q", 20)
+        c = self.box("C")
+        c.setExpression("Length", "#q")
+        self.doc.recompute()
+        folder = tempfile.mkdtemp(prefix="varhistory")
+        try:
+            path = os.path.join(folder, "VariableHistoryReopen.FCStd")
+            self.doc.saveAs(path)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            b = self.doc.getObject("B")
+            body = b.getParentGeoFeatureGroup()
+            body.removeObject(b)
+            self.doc.removeObject(b.Name)
+            self.doc.recompute()
+            vs = self.doc.getObject("StudioVars")
+            self.assertEqual(PartDesign.variablePosition(vs, "q"), self.doc.getObject("A"))
+            self.assertLength(self.doc.getObject("C"), 20)
+        finally:
+            App.closeDocument(self.doc.Name)
+            shutil.rmtree(folder, ignore_errors=True)
+
     def testListMoveLeavesTheVariableInPlace(self):
         """studioMove of the owner whose step q follows, up above C (after BPad: it reads B): q
         stays where it was, after CPad, so D still sees it (review fix F4)."""

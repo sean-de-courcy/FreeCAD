@@ -310,7 +310,11 @@ void followDeletedRow(const App::DocumentObject& deleted)
             continue;
         }
         std::unordered_set<std::string> leaving;
-        addEntryNames(doc, studio, &deleted, leaving);
+        // The deleted row and, for an owner, its steps (a lone step leaves its siblings)
+        leaving.insert(deleted.getNameInDocument());
+        for (Feature* step : StudioList::stepsOf(&deleted)) {
+            leaving.insert(step->getNameInDocument());
+        }
         keepPlaces(doc, studio, rowNames(doc, studio), leaving);
     }
 }
@@ -409,6 +413,10 @@ void registerStudioVariables()
     app.signalDeletedObject.connect(followDeletedRow);
     app.signalBeforeRecomputeDocument.connect(repairBeforeRecompute);
     app.signalRecomputed.connect(snapshotAfterRecompute);
+    // A file just read, and an undo or redo, have a history no recompute has seen yet
+    app.signalFinishRestoreDocument.connect(snapshotAfterRecompute);
+    app.signalUndoDocument.connect(snapshotAfterRecompute);
+    app.signalRedoDocument.connect(snapshotAfterRecompute);
     app.signalDeleteDocument.connect([](const App::Document& doc) { snapshots().erase(&doc); });
     auto watch = [](App::Document& doc) {
         doc.signalImportObjects.connect(
