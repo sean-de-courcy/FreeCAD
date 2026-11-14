@@ -10,6 +10,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/Expression.h>
+#include <App/ExpressionParser.h>
 #include <App/PropertyUnits.h>
 #include <App/VarSet.h>
 #include <App/VariableLookup.h>
@@ -128,25 +129,26 @@ TEST_F(VariableLookupTest, listVariablesOfVarSets)
 }
 
 // FreeCAD-CH (ops#317, N-1): the name rules of notes/variables-studio.md section 1.3. A refused name
-// is one that stock FreeCAD accepts as a property but no expression can then use, or one taken.
+// is one that no expression can use, or one taken. Since ops#640 rank 54, unit and constant names
+// are taken, as in Onshape: the parser reads them as names after '.' (`VarSet.t`, which `#t`
+// becomes).
 TEST_F(VariableLookupTest, checkVariableNameRefusesWhatNoExpressionCanUse)
 {
     auto reason = [this](const std::string& name) {
         return App::VariableLookup::checkVariableName(varSet, name);
     };
-    for (const char* unit : {"t", "h", "H", "W", "m", "A"}) {
-        EXPECT_EQ(reason(unit),
-                  std::string("'") + unit
-                      + "' is a unit in expressions, so no expression could use the variable.");
-        // why: stock FreeCAD takes the property, and then no expression reads it
+    for (const char* unit : {"t", "h", "H", "W", "m", "A", "pi", "e"}) {
+        EXPECT_EQ(reason(unit), "") << unit;
+        // and an expression reads it
         varSet->addDynamicProperty("App::PropertyLength", unit);
-        EXPECT_NE(parseError(owner, std::string("VarSet.") + unit + " * 2"), "") << unit;
+        EXPECT_EQ(parseError(owner, std::string("VarSet.") + unit + " * 2"), "") << unit;
         varSet->removeDynamicProperty(unit);
     }
-    for (const char* constant : {"pi", "e"}) {
+    // the boolean and None constants stay reserved words
+    for (const char* constant : {"True", "true", "False", "false", "None"}) {
         EXPECT_EQ(reason(constant),
                   std::string("'") + constant
-                      + "' is a constant in expressions, so no expression could use the variable.");
+                      + "' is a constant in expressions; choose another name.");
     }
     // whatever their number of arguments (PR 310 review: `name(1)` failed for pow and atan2)
     for (const char* function : {"cos", "pow", "atan2", "vector", "mod", "hypot", "sum"}) {
@@ -163,6 +165,39 @@ TEST_F(VariableLookupTest, checkVariableNameRefusesWhatNoExpressionCanUse)
               "'1a' isn't a name: use letters, digits and _, and start with a letter or _.");
 }
 
+// FreeCAD-CH (ops#640, rank 54): a bare unit name is the set's own variable only in an expression
+// of that VarSet, and only where it can't be a number's unit.
+TEST_F(VariableLookupTest, bareUnitNameInItsOwnSet)
+{
+    auto t = static_cast<App::PropertyLength*>(
+        varSet->addDynamicProperty("App::PropertyLength", "t")
+    );
+    t->setValue(3.0);
+    auto evaluated = [](const App::DocumentObject* by, const char* text) {
+        App::ExpressionPtr expr(App::Expression::parse(by, text));
+        App::ExpressionPtr value(expr->eval());
+        return static_cast<App::UnitExpression*>(value.get())->getQuantity();
+    };
+    // in the set: the variable, written back as `.t`
+    {
+        App::ExpressionPtr expr(App::Expression::parse(varSet, "t * 3"));
+        EXPECT_EQ(expr->toString(), ".t * 3");
+    }
+    EXPECT_DOUBLE_EQ(evaluated(varSet, "t * 3").getValue(), 9.0);
+    EXPECT_EQ(evaluated(varSet, "t * 3").getUnit(), Base::Unit::Length);
+    EXPECT_DOUBLE_EQ(evaluated(varSet, ".t + 1 mm").getValue(), 4.0);
+    // after a number it is still the unit: two tonnes
+    EXPECT_EQ(evaluated(varSet, "2 t").getUnit(), Base::Unit::Mass);
+    // with any other owner, or none, a bare `t` stays the unit. The grammar takes a unit after a
+    // number, or alone as a unit (parseUnit), never as `2 * t`: the test asked for that since it
+    // came with rank 54 (ops#652)
+    EXPECT_EQ(evaluated(owner, "2 t").getUnit(), Base::Unit::Mass);
+    EXPECT_EQ(evaluated(nullptr, "3 t").getUnit(), Base::Unit::Mass);
+    EXPECT_EQ(App::ExpressionParser::parseUnit(nullptr, "t")->getUnit(), Base::Unit::Mass);
+    // and a property path names the variable from anywhere
+    EXPECT_DOUBLE_EQ(evaluated(owner, "VarSet.t * 2").getValue(), 6.0);
+}
+
 TEST_F(VariableLookupTest, checkVariableNameAcceptsWhatExpressionsCanUse)
 {
     // `Rail(1)` and `_pow(1)` don't parse either, but neither is a function
@@ -172,9 +207,11 @@ TEST_F(VariableLookupTest, checkVariableNameAcceptsWhatExpressionsCanUse)
         varSet->addDynamicProperty("App::PropertyLength", name);
         EXPECT_EQ(parseError(owner, std::string("VarSet.") + name + " * 2"), "") << name;
     }
-    // without a holder only the name counts: "Width" is free
+    // without a holder only the name counts: "Width" is free, and since rank 54 a unit's name is
+    // too (`VarSet.mm` reads as the variable); a reserved word still isn't
     EXPECT_EQ(App::VariableLookup::checkVariableName(nullptr, "Width"), "");
-    EXPECT_NE(App::VariableLookup::checkVariableName(nullptr, "mm"), "");
+    EXPECT_EQ(App::VariableLookup::checkVariableName(nullptr, "mm"), "");
+    EXPECT_NE(App::VariableLookup::checkVariableName(nullptr, "True"), "");
 }
 
 }  // namespace

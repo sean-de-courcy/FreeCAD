@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cmath>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -39,6 +40,8 @@
 #include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
@@ -66,6 +69,7 @@
 #include <Base/Exception.h>
 
 #include "Geometry.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "TopoShape.h"
 
@@ -403,11 +407,14 @@ namespace
 // The largest relative change of a face's area that checkDressUp() accepts from a repair
 constexpr double repairAreaTolerance = 1e-6;
 
-// The areas of the shape's faces, smallest first
+// The areas of the shape's faces, smallest first. On the calling thread, after the repair: on a
+// part of thousands of B-spline faces they take minutes, so the feature's limit is checked at each
+// face (kernel-4's "meas minute": a 2000-edge fillet with a limit of 60 s ran for 225 s here)
 std::vector<double> faceAreas(const TopoShape& shape)
 {
     std::vector<double> areas;
     for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        KernelBudget::stopIfPastDeadline("The check of the dress-up's repair");
         areas.push_back(MassProperties::area(it.Current()));
     }
     std::sort(areas.begin(), areas.end());
@@ -828,6 +835,8 @@ bool checkResult(TopoShape& shape, const TopoShape& base)
         FC_WARN("Invalid dress-up result with " << found << " solids from " << solids);
         return false;
     }
+    // The result needs the repair: too late for it, the feature fails (kernel safety S1)
+    KernelBudget::stopIfPastDeadline("The repair of the dress-up's result");
     TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
     repaired.makeElementCopy(shape);
     if (!fixKeepingNames(repaired, shape)) {
@@ -1147,6 +1156,90 @@ void addSmoothNeighbours(
     }
 }
 
+// The plane of a plane face, its normal out of the material
+bool outwardPlane(const TopoDS_Face& face, gp_Pln& plane, gp_Dir& normal)
+{
+    BRepAdaptor_Surface surface(face, Standard_False);
+    if (surface.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    plane = surface.Plane();
+    normal = plane.Axis().Direction();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return true;
+}
+
+/* Adds the changed faces of the base that lie in the plane of a straight concave edge's end face
+ * (a plane at one of its vertices, normal to it), facing the other way, and meet one of the faces
+ * across an edge. A concave round ends flat in that plane, and where it reaches past its faces
+ * (rolled on over a tangent edge onto the next face, Case Base #47, ops#640) its flat end lands on
+ * such a floor beside the face it reaches: Onshape's #47 lands 1.345 of it on one (z 3.075). The
+ * material it adds lies on that floor; a recess it filled would still show on the recess's walls */
+void addFloorsAtEnds(
+    const TopoDS_Shape& base,
+    const TopTools_IndexedMapOfShape& concave,
+    const TopTools_IndexedMapOfShape& changed,
+    TopTools_IndexedMapOfShape& faces
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfVertices;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_FACE, facesOfVertices);
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    std::vector<std::pair<gp_Pln, gp_Dir>> ends;
+    for (int i = 1; i <= concave.Extent(); ++i) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(concave(i)));
+        if (curve.GetType() != GeomAbs_Line) {
+            continue;
+        }
+        const gp_Dir along = curve.Line().Direction();
+        for (TopExp_Explorer it(concave(i), TopAbs_VERTEX); it.More(); it.Next()) {
+            const int index = facesOfVertices.FindIndex(it.Current());
+            if (index == 0) {
+                continue;
+            }
+            for (const auto& face : facesOfVertices(index)) {
+                gp_Pln plane;
+                gp_Dir normal;
+                if (outwardPlane(TopoDS::Face(face), plane, normal)
+                    && normal.IsParallel(along, Precision::Angular())) {
+                    ends.emplace_back(plane, normal);
+                }
+            }
+        }
+    }
+    if (ends.empty()) {
+        return;
+    }
+    const int count = faces.Extent();
+    for (int i = 1; i <= count; ++i) {
+        const TopoDS_Face face = TopoDS::Face(faces(i));
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const int index = facesOfEdges.FindIndex(it.Current());
+            if (index == 0) {
+                continue;
+            }
+            for (const auto& other : facesOfEdges(index)) {
+                gp_Pln plane;
+                gp_Dir normal;
+                if (other.IsSame(face) || faces.Contains(other) || !changed.Contains(other)
+                    || !outwardPlane(TopoDS::Face(other), plane, normal)) {
+                    continue;
+                }
+                for (const auto& [end, outward] : ends) {
+                    if (normal.IsOpposite(outward, Precision::Angular())
+                        && end.Distance(plane.Location()) <= Precision::Confusion()) {
+                        faces.Add(other);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 Bnd_Box boundsOf(const TopoDS_Shape& shape)
 {
     Bnd_Box bounds;
@@ -1237,6 +1330,53 @@ bool runBoolean(Boolean& boolean, const TopoDS_Shape& object, const TopoDS_Shape
     return boolean.IsDone() && !boolean.HasErrors();
 }
 
+// Where the cut of a result by its base handed back a piece of more than half of the result (a
+// Boolean that failed silently, or a fill that large), whether the volumes show that the result
+// adds nothing: V(result - base) = V(result) - V(base) + V(base - result). False where the cut is
+// plausible, where the volumes can't be measured, and where they show material added: the pieces
+// of the cut are then judged as they are.
+bool addsNothingByVolumes(const TopoDS_Shape& added, const TopoDS_Shape& object, const TopoDS_Shape& tool)
+{
+    // By the face counts first, which cost nothing: a cut that handed back the result holds its
+    // faces, and what a dress-up really adds has a few. The volumes are integrated adaptively
+    // (seconds to minutes on a free-form body) only for a piece that large
+    TopTools_IndexedMapOfShape objectFaces;
+    TopExp::MapShapes(object, TopAbs_FACE, objectFaces);
+    bool suspect = false;
+    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !suspect; it.Next()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(it.Current(), TopAbs_FACE, faces);
+        suspect = 2 * faces.Extent() > objectFaces.Extent();
+    }
+    if (!suspect) {
+        return false;
+    }
+    const double whole = std::abs(MassProperties::volume(object, true));
+    bool failed = false;
+    for (TopExp_Explorer it(added, TopAbs_SOLID); it.More() && !failed; it.Next()) {
+        failed = std::abs(MassProperties::volume(it.Current())) > whole / 2;
+    }
+    if (!failed) {
+        return false;
+    }
+    BRepAlgoAPI_Cut cut;
+    if (!runBoolean(cut, tool, object)) {
+        return false;
+    }
+    double removed = 0.0;
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        const double piece = std::abs(MassProperties::volume(it.Current(), true));
+        if (piece > whole / 2) {
+            return false;
+        }
+        removed += piece;
+    }
+    // The bound covers the adaptive integration of the whole solids (1e-6 of them) and of the
+    // removed slivers (1e-3)
+    const double gained = whole - std::abs(MassProperties::volume(tool, true)) + removed;
+    return std::abs(gained) <= 1e-6 * whole + 1e-3 * removed;
+}
+
 // The images of a shape in a Boolean's result: none if it was deleted, the shape itself if it
 // came through unchanged
 void addImages(
@@ -1268,6 +1408,9 @@ struct Prepared
     TopTools_IndexedMapOfShape concave;
     // The base's faces the material a concave edge adds may lie on
     TopTools_IndexedMapOfShape allowed;
+    // How far from its edges the dress-up reaches (reachOf()), or negative if unknown: the bound
+    // for material on a face beside the strip's face (facesBeside())
+    double reach = -1.0;
 };
 
 // Whether the result changed the base away from its edges (the gate), and where
@@ -1304,6 +1447,7 @@ std::optional<Prepared> prepare(
     if (prepared.concave.Extent() > 0) {
         prepared.allowed = facesAt(facesAtVertices, prepared.concave);
         addSmoothNeighbours(dressed, changes.changed, prepared.allowed);
+        addFloorsAtEnds(dressed, prepared.concave, changes.changed, prepared.allowed);
     }
     // Every recess the result fills has a changed face in the region, so the Boolean runs on what
     // lies there (PR 346 review, M1). Its sides keep clear of the faces in it. It holds the concave
@@ -1328,10 +1472,89 @@ std::optional<Prepared> prepare(
     return prepared;
 }
 
+// The farthest of the face's points from the shape: its vertices, and a grid of points on it
+double farthestFrom(const TopoDS_Face& face, const TopoDS_Shape& shape)
+{
+    double farthest = 0.0;
+    auto at = [&](const gp_Pnt& point) {
+        BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), shape);
+        // A distance that can't be computed counts as out of reach
+        farthest = std::max(
+            farthest,
+            distance.IsDone() ? distance.Value() : std::numeric_limits<double>::infinity()
+        );
+    };
+    for (TopExp_Explorer it(face, TopAbs_VERTEX); it.More(); it.Next()) {
+        at(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+    }
+    BRepAdaptor_Surface surface(face);
+    BRepTopAdaptor_FClass2d classifier(face, Precision::Confusion());
+    constexpr int samples = 5;
+    for (int i = 0; i < samples; ++i) {
+        for (int j = 0; j < samples; ++j) {
+            const double u = surface.FirstUParameter()
+                + (i + 0.5) / samples * (surface.LastUParameter() - surface.FirstUParameter());
+            const double v = surface.FirstVParameter()
+                + (j + 0.5) / samples * (surface.LastVParameter() - surface.FirstVParameter());
+            if (classifier.Perform(gp_Pnt2d(u, v)) == TopAbs_IN) {
+                at(surface.Value(u, v));
+            }
+        }
+    }
+    return farthest;
+}
+
+// The base faces that meet a face at a concave edge across a concave edge of that face's outer
+// wire: Onshape clips a concave dress-up whose strip runs off its face by the surface of the face
+// it reaches first, so the material it adds may lie on such a face (the native replica's Case
+// Base #46: a ring's outer wall over a ledge, and the ledge's underside), within the dress-up's
+// reach. A face beyond a convex edge (a well behind a ring) is not one: nothing is added there
+TopTools_IndexedMapOfShape facesBeside(
+    const TopoDS_Shape& base,
+    const TopTools_IndexedMapOfShape& concave,
+    const TopTools_IndexedMapOfShape& allowed
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopTools_IndexedMapOfShape beside;
+    for (int i = 1; i <= concave.Extent(); ++i) {
+        const auto* faces = edgeFaces.Seek(concave(i));
+        if (!faces) {
+            continue;
+        }
+        for (const auto& shape : *faces) {
+            const TopoDS_Face& face = TopoDS::Face(shape);
+            const TopoDS_Wire outer = BRepTools::OuterWire(face);
+            for (TopExp_Explorer it(outer, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+                const auto* across = edgeFaces.Seek(edge);
+                if (!across || concave.Contains(edge) || BRep_Tool::IsClosed(edge, face)) {
+                    continue;
+                }
+                for (const auto& wall : *across) {
+                    if (wall.IsSame(face) || allowed.Contains(wall)
+                        || ChFi3d::DefineConnectType(
+                               edge,
+                               face,
+                               TopoDS::Face(wall),
+                               std::sin(Precision::Angular()),
+                               false
+                           ) != ChFiDS_Concave) {
+                        continue;
+                    }
+                    beside.Add(wall);
+                }
+            }
+        }
+    }
+    return beside;
+}
+
 // The material the result has that the base didn't, and why it is wrong, or an empty string
 std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const std::vector<TopoShape>& edges)
 {
-    const auto& [checked, against, region, concave, allowed] = prepared;
+    const auto& [checked, against, region, concave, allowed, reach] = prepared;
     // Both cut down to the region, unless it holds them whole. If that fails, the Boolean runs
     // on the whole solids
     TopoDS_Shape object = checked;
@@ -1360,11 +1583,30 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
     if (!runBoolean(cut, object, tool)) {
         return "changes faces away from its edges in a way that can't be checked";
     }
+    // OCCT's cut of a result and a base that agree almost everywhere can fail silently and hand
+    // back the result itself (Case Base #103 on the replica: 1.8e5 mm3 "added" by a round that
+    // removes 14.4). Where a piece is more than half of the result, the volumes decide whether
+    // the result adds anything
+    if (addsNothingByVolumes(cut.Shape(), object, tool)) {
+        return {};
+    }
     // A concave edge adds material in its corner, on the allowed faces: a piece of it that lies on
     // any other face of the base fills what that face bounded, and so does one that doesn't reach a
     // concave edge, whatever faces it lies on (a smooth recess whose faces the growth allowed, PR 346
     // round 3; a repaired result, all of whose faces changed)
     TopTools_IndexedMapOfShape walls;
+    // Each wall image's base faces
+    TopTools_IndexedDataMapOfShapeListOfShape wallOf;
+    TopTools_IndexedMapOfShape beside;
+    TopoDS_Compound concaveEdges;
+    if (concave.Extent() > 0 && reach > 0) {
+        beside = facesBeside(against, concave, allowed);
+        BRep_Builder builder;
+        builder.MakeCompound(concaveEdges);
+        for (int i = 1; i <= concave.Extent(); ++i) {
+            builder.Add(concaveEdges, concave(i));
+        }
+    }
     if (concave.Extent() > 0) {
         TopTools_IndexedMapOfShape baseFaces;
         TopExp::MapShapes(against, TopAbs_FACE, baseFaces);
@@ -1386,6 +1628,10 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
             }
             for (const auto& image : images) {
                 walls.Add(image);
+                if (!wallOf.Contains(image)) {
+                    wallOf.Add(image, TopTools_ListOfShape());
+                }
+                wallOf.ChangeFromKey(image).Append(face);
             }
         }
     }
@@ -1396,8 +1642,24 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
             continue;
         }
         bool wrong = concave.Extent() == 0 || !reachesAny(piece, concave);
+        // A piece on a face beside a face at a concave edge (facesBeside), within the dress-up's
+        // reach of the concave edges, is the dress-up clipped there. A recess filled whole
+        // reaches past it (a blind pocket deeper than the reach, an undercut wider than it); one
+        // filled whole within the reach would pass (debt: the reach is the check's only bound)
+        auto clippedBy = [&](const TopoDS_Shape& onWall) {
+            const auto* sources = wallOf.Seek(onWall);
+            if (!sources || sources->IsEmpty()) {
+                return false;
+            }
+            for (const auto& source : *sources) {
+                if (!beside.Contains(source)) {
+                    return false;
+                }
+            }
+            return farthestFrom(TopoDS::Face(onWall), concaveEdges) <= reach;
+        };
         for (TopExp_Explorer face(piece, TopAbs_FACE); !wrong && face.More(); face.Next()) {
-            wrong = walls.Contains(face.Current());
+            wrong = walls.Contains(face.Current()) && !clippedBy(face.Current());
         }
         if (wrong) {
             return "fills a recess of the base next to " + nearestEdge(base, edges, piece)
@@ -1679,7 +1941,12 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts
     return looseParts == LooseParts::drop || keepLooseParts(shape, base);
 }
 
-std::string filledPocket(const TopoShape& shape, const TopoShape& base, const std::vector<TopoShape>& edges)
+std::string filledPocket(
+    const TopoShape& shape,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double size
+)
 {
     const TopoDS_Compound result = solidsIn(shape.getShape());
     const TopoDS_Compound before = solidsIn(base.getShape());
@@ -1698,6 +1965,14 @@ std::string filledPocket(const TopoShape& shape, const TopoShape& base, const st
     }
     if (!prepared) {
         return {};
+    }
+    if (size > 0) {
+        try {
+            prepared->reach = reachOf(before, chainOf(before, edges), size);
+        }
+        catch (const Standard_Failure&) {
+            prepared->reach = -1.0;
+        }
     }
     std::string why;
     try {

@@ -58,6 +58,12 @@ public:
 
     Base::Vector3d getProfileNormal() const override;
 
+protected:
+    bool sweepsAgainstNormal() const override
+    {
+        return true;
+    }
+
 private:
     static const char* TypeEnums[];
 };

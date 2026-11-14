@@ -28,12 +28,22 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchMissingExternal.py
     SketcherTests/TestSketchExternalTypes.py
     SketcherTests/TestSketchCarbonCopyElements.py
+    SketcherTests/TestSketchCornerSteps.py
+    SketcherTests/TestSketchTrimSplit.py
+    SketcherTests/TestSketchConflicts.py
+    SketcherTests/TestSketchLadder.py
+    SketcherTests/TestSketchTrimSplitAttacks.py
+    SketcherTests/TestSketchPierce.py
+    SketcherTests/TestSketchExtend.py
+    SketcherTests/TestSketchPattern.py
+    SketcherTests/TestSketchDxf.py
 )
 
 if(BUILD_GUI)
     list (APPEND Sketcher_Scripts
           InitGui.py
           TestSketcherGui.py
+          SketcherDxfGui.py
     )
     list (APPEND Sketcher_TestScripts
           SketcherTests/TestConstraintPreselectionGui.py
@@ -53,8 +63,27 @@ if(BUILD_GUI)
           SketcherTests/TestSketchCommandsGui.py
           SketcherTests/TestSketchToolbarGui.py
           SketcherTests/TestSketchModelPicksGui.py
+          SketcherTests/TestSketchMidpointPicksGui.py
+          SketcherTests/TestSketchModelFacesGui.py
+          SketcherTests/TestSketchConstraintToolsGui.py
+          SketcherTests/TestSketchOnshapeGui.py
+          SketcherTests/TestSketchHelpersGui.py
+          SketcherTests/TestSketchOnshapeToolsGui.py
+          SketcherTests/TestSketchRound3Gui.py
+          SketcherTests/TestSketchRound4Gui.py
+          SketcherTests/TestSketchPatternGui.py
+          SketcherTests/TestSketchCancelGui.py
+          SketcherTests/TestSketchDxfGui.py
     )
 endif(BUILD_GUI)
+
+set(Sketcher_Dxf
+    SketcherDxf/__init__.py
+    SketcherDxf/reader.py
+    SketcherDxf/fitting.py
+    SketcherDxf/importer.py
+    SketcherDxf/exporter.py
+)
 
 set(Sketcher_Profiles
     ProfileLib/Hexagon.py
@@ -63,7 +92,7 @@ set(Sketcher_Profiles
 )
 
 add_custom_target(SketcherScripts ALL
-    SOURCES ${Sketcher_Scripts} ${Sketcher_Profiles} ${Sketcher_TestScripts}
+    SOURCES ${Sketcher_Scripts} ${Sketcher_Profiles} ${Sketcher_TestScripts} ${Sketcher_Dxf}
 )
 
 fc_target_copy_resource(SketcherScripts
@@ -72,6 +101,7 @@ fc_target_copy_resource(SketcherScripts
     ${Sketcher_Scripts}
     ${Sketcher_Profiles}
     ${Sketcher_TestScripts}
+    ${Sketcher_Dxf}
 )
 
 INSTALL(
@@ -79,6 +109,13 @@ INSTALL(
         ${Sketcher_Scripts}
     DESTINATION
         Mod/Sketcher
+)
+
+INSTALL(
+    FILES
+        ${Sketcher_Dxf}
+    DESTINATION
+        Mod/Sketcher/SketcherDxf
 )
 
 INSTALL(

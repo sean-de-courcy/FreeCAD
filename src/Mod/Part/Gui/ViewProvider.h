@@ -65,6 +65,10 @@ public:
     /// destructor
     ~ViewProviderPart() override;
     bool doubleClicked() override;
+    /// FreeCAD-CH (ops#640): a member of a Body lets a member of a Body it uses be deleted without
+    /// a question, as Onshape deletes a feature that others use: they stay, failing on their
+    /// missing reference, until the delete is undone or they are repaired
+    bool canDelete(App::DocumentObject* obj) const override;
 
 protected:
     void applyColor(

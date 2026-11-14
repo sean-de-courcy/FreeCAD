@@ -38,6 +38,7 @@
 namespace App
 {
 class DocumentObject;
+struct ReferenceRow;
 }
 
 namespace Gui
@@ -106,6 +107,11 @@ bool ReleaseHandler(Gui::Document* doc);
 
 std::string getStrippedPythonExceptionString(const Base::Exception&);
 
+/// FreeCAD-CH (ops#644): the sketch's references that have a closest match to take, as Onshape's
+/// repair proposes it: a guessed one (accepted as it stands) or a missing one with candidates (it
+/// takes the first, the closest). App::ReferenceRow is in App/ReferenceRepair.h.
+std::vector<App::ReferenceRow> referencesToMatch(const Sketcher::SketchObject* obj);
+
 void getIdsFromName(
     const std::string& name,
     const Sketcher::SketchObject* Obj,
@@ -122,6 +128,16 @@ std::vector<int> getGeoIdsOfEdgesFromNames(
 bool checkBothExternal(int GeoId1, int GeoId2);
 
 bool isPointOrSegmentFixed(const Sketcher::SketchObject* Obj, int GeoId);
+
+/// FreeCAD-CH (sketch patterns): the index of the Pattern constraint that names geoId as a seed,
+/// a copy, its pivot or a direction line; -1 for none. With copyOnly, only as a copy.
+int patternOfGeometry(const Sketcher::SketchObject* obj, int geoId, bool copyOnly = false);
+/// FreeCAD-CH (sketch patterns): the pattern of the selection: a selected Pattern constraint, or
+/// the pattern of a selected curve or point (patternOfGeometry); -1 for none
+int patternOfSelection(const Sketcher::SketchObject* obj);
+/// FreeCAD-CH (sketch patterns): asks for the pattern's counts (and a circular pattern's angle)
+/// and applies them in one transaction (CommandSketcherTools.cpp)
+void editPattern(Sketcher::SketchObject* obj, int constrId);
 
 bool areBothPointsOrSegmentsFixed(const Sketcher::SketchObject* Obj, int GeoId1, int GeoId2);
 

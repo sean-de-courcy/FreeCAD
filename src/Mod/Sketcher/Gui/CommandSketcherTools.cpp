@@ -24,23 +24,33 @@
 
 #include <FCConfig.h>
 
+#include <algorithm>
 #include <memory>
+#include <set>
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QMessageBox>
+#include <QTimer>
 
 #include <Inventor/SbString.h>
 
 #include <App/Application.h>
 #include <Base/Console.h>
 #include <Base/Reader.h>
+#include <Base/Tools.h>
 #include <Base/Writer.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Notifications.h>
 #include <Gui/View3DInventor.h>
@@ -66,6 +76,7 @@
 #include "DrawSketchHandlerRotate.h"
 #include "DrawSketchHandlerScale.h"
 #include "DrawSketchHandlerSymmetry.h"
+#include "DrawSketchHandlerPattern.h"
 #include "SnapManager.h"
 
 // Hint: this is to prevent to re-format big parts of the file. Remove it later again.
@@ -263,6 +274,12 @@ bool copySelectionToClipboard(Sketcher::SketchObject* obj)
                 || value == GeoEnum::GeoUndef || value == GeoEnum::RtPnt
                 || value == GeoEnum::VAxis || value == GeoEnum::HAxis;
         };
+
+        if (constr->Type == Pattern) {
+            // FreeCAD-CH (sketch patterns): a pattern is not copied with its geometry (the
+            // converter has no Python form of its record): the pasted copies are free
+            continue;
+        }
 
         bool skip = false;
         for (int i = 0; constr->hasElement(i); ++i) {
@@ -1167,9 +1184,159 @@ CmdSketcherSymmetry::CmdSketcherSymmetry()
     eType = ForEdit;
 }
 
+namespace
+{
+/* FreeCAD-CH (ops#640, rank 48, gap S22): Onshape's sketch Mirror starts with nothing selected:
+ * pick the mirror line (a line of the sketch, a projected model line or an axis), then each entity
+ * to mirror, which is mirrored at its pick with its Symmetric constraints [guess: the line first,
+ * an entity mirrored per pick]. A curve's end or centre picks its curve. Esc or a right click ends
+ * the tool; the sketch stays open.
+ */
+class DrawSketchHandlerMirrorPick: public DrawSketchHandler
+{
+public:
+    void mouseMove(SnapManager::SnapHandle /*snapHandle*/) override
+    {}
+
+    bool pressButton(Base::Vector2d /*pos*/) override
+    {
+        return true;
+    }
+
+    bool releaseButton(Base::Vector2d /*pos*/) override
+    {
+        if (refGeoId == Sketcher::GeoEnum::GeoUndef) {
+            pickMirrorLine();
+        }
+        else {
+            pickEntity();
+        }
+        return true;
+    }
+
+    std::list<Gui::InputHint> getToolHints() const override
+    {
+        using enum Gui::InputHint::UserInput;
+        if (refGeoId == Sketcher::GeoEnum::GeoUndef) {
+            return {{QObject::tr("%1 pick the mirror line", "Sketcher Mirror: hint"), {MouseLeft}}};
+        }
+        return {
+            {QObject::tr("%1 pick an entity to mirror", "Sketcher Mirror: hint"), {MouseLeft}},
+            {QObject::tr("%1 end", "Sketcher Mirror: hint"), {KeyEscape}},
+        };
+    }
+
+private:
+    std::string getToolName() const override
+    {
+        return "DSH_MirrorPick";
+    }
+
+    QString getCrosshairCursorSVGName() const override
+    {
+        return QStringLiteral("Sketcher_Pointer_Create_Symmetry");
+    }
+
+    void pickMirrorLine()
+    {
+        const Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        const int cross = getPreselectCross();
+        const int geoId = getPreselectCurve();
+        if (cross == 1) {
+            refGeoId = Sketcher::GeoEnum::HAxis;
+        }
+        else if (cross == 2) {
+            refGeoId = Sketcher::GeoEnum::VAxis;
+        }
+        else if ((geoId >= 0 || geoId <= Sketcher::GeoEnum::RefExt)
+                 && isLineSegment(*obj->getGeometry(geoId))) {
+            refGeoId = geoId;
+        }
+        else {
+            return;
+        }
+        updateHint();
+    }
+
+    /// the sketch geometry under the cursor: a curve, or the curve or point a vertex is of
+    int pickedGeometry() const
+    {
+        int geoId = getPreselectCurve();
+        if (geoId < 0) {  // none (-1), or a projected curve, which isn't mirrored
+            const int vertex = getPreselectPoint();
+            if (vertex >= 0) {
+                Sketcher::PointPos pos {};
+                sketchgui->getSketchObject()->getGeoVertexIndex(vertex, geoId, pos);
+            }
+        }
+        return geoId;
+    }
+
+    void pickEntity()
+    {
+        Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        const int geoId = pickedGeometry();
+        // only the sketch's own geometry, each once; not the line, not a copy this tool made
+        if (geoId < 0 || geoId == refGeoId || done.contains(geoId)) {
+            return;
+        }
+        const Part::Geometry* geo = obj->getGeometry(geoId);
+        if (!geo || GeometryFacade::isInternalAligned(geo)) {
+            return;
+        }
+        // a conic's or B-spline's internal geometry goes with it, as getListOfSelectedGeoIds() adds it
+        std::vector<int> geoIds {geoId};
+        for (const auto* constr : obj->Constraints.getValues()) {
+            if (constr->Type == Sketcher::InternalAlignment && constr->Second == geoId
+                && std::ranges::find(geoIds, constr->First) == geoIds.end()) {
+                geoIds.push_back(constr->First);
+            }
+        }
+
+        const int highestBefore = obj->getHighestCurveIndex();
+        try {
+            openCommand(QT_TRANSLATE_NOOP("Command", "Mirror geometry"));
+            obj->addSymmetric(geoIds, refGeoId, Sketcher::PointPos::none, true);
+            commitCommand();
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+            abortCommand();
+            Gui::NotifyError(
+                sketchgui,
+                QT_TRANSLATE_NOOP("Notifications", "Error"),
+                QT_TRANSLATE_NOOP("Notifications", "Failed to create symmetry")
+            );
+        }
+        tryAutoRecomputeIfNotSolve(obj);
+
+        done.insert(geoIds.begin(), geoIds.end());
+        for (int i = highestBefore + 1; i <= obj->getHighestCurveIndex(); ++i) {
+            done.insert(i);
+        }
+    }
+
+    int refGeoId = Sketcher::GeoEnum::GeoUndef;
+    std::set<int> done;  // mirrored, or made by the mirroring
+};
+}  // namespace
+
 void CmdSketcherSymmetry::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+
+    // FreeCAD-CH (ops#640, rank 48): Onshape's Mirror with nothing of the sketch selected waits
+    // for the mirror line, then the entities
+    if (Gui::ForkKeymap::isOnshape()) {
+        std::vector<Gui::SelectionObject> selection
+            = getSelection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId());
+        if (selection.empty() || (selection.size() == 1 && selection[0].getSubNames().empty())) {
+            getSelection().clearSelection();
+            ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerMirrorPick>());
+            return;
+        }
+    }
+
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -1180,6 +1347,10 @@ void CmdSketcherSymmetry::activated(int iMsg)
 
 bool CmdSketcherSymmetry::isActive()
 {
+    // FreeCAD-CH (ops#640, rank 48): under Onshape's keymap the tool starts without a selection
+    if (Gui::ForkKeymap::isOnshape()) {
+        return isCommandActive(getActiveGuiDocument());
+    }
     return isCommandNeedingGeometryActive(getActiveGuiDocument());
 }
 
@@ -2159,6 +2330,10 @@ void CmdSketcherDeleteAllGeometry::activated(int iMsg)
         try {
             openCommand(QT_TRANSLATE_NOOP("Command", "Delete all geometry"));
             Gui::cmdAppObjectArgs(Obj, "deleteAllGeometry()");
+            // FreeCAD-CH (ops#634): constraints' helpers (model picks' links) go with them
+            if (!Obj->unusedImplicitExternals().empty()) {
+                Gui::cmdAppObjectArgs(Obj, "delUnusedImplicitExternals()");
+            }
             commitCommand();
         }
         catch (const Base::Exception& e) {
@@ -2223,6 +2398,10 @@ void CmdSketcherDeleteAllConstraints::activated(int iMsg)
         try {
             openCommand(QT_TRANSLATE_NOOP("Command", "Delete all constraints"));
             Gui::cmdAppObjectArgs(Obj, "deleteAllConstraints()");
+            // FreeCAD-CH (ops#634): constraints' helpers (model picks' links) go with them
+            if (!Obj->unusedImplicitExternals().empty()) {
+                Gui::cmdAppObjectArgs(Obj, "delUnusedImplicitExternals()");
+            }
             commitCommand();
         }
         catch (const Base::Exception& e) {
@@ -2392,6 +2571,68 @@ CmdSketcherOffset::CmdSketcherOffset()
     eType = ForEdit;
 }
 
+namespace
+{
+/// the geometry Offset takes: not points, B-splines, conics other than circles, internal geometry
+bool offsetTakes(const Sketcher::SketchObject* obj, int geoId)
+{
+    const Part::Geometry* geo = obj->getGeometry(geoId);
+    // Currently ellipse/parabola/hyperbola/bspline are not handled correctly.
+    // Occ engine gives offset of those as set of lines and arcs and does not seem to work
+    // consistently.
+    return geo && !isPoint(*geo) && !isBSplineCurve(*geo) && !isEllipse(*geo)
+        && !isArcOfEllipse(*geo) && !isArcOfHyperbola(*geo) && !isArcOfParabola(*geo)
+        && !GeometryFacade::isInternalAligned(geo);
+}
+
+/* FreeCAD-CH (ops#640, rank 47): Onshape's Offset starts with nothing selected
+ * (H/Sketch/offset.htm; gap S21): this tool waits for a click on a curve of the sketch (a
+ * projected model edge too), then hands it to the Offset tool, which sets the side and distance.
+ */
+class DrawSketchHandlerOffsetPick: public DrawSketchHandler
+{
+public:
+    void mouseMove(SnapManager::SnapHandle /*snapHandle*/) override
+    {}
+
+    bool pressButton(Base::Vector2d /*pos*/) override
+    {
+        return true;
+    }
+
+    bool releaseButton(Base::Vector2d /*pos*/) override
+    {
+        const int geoId = getPreselectCurve();
+        const bool curve = geoId >= 0 || geoId <= Sketcher::GeoEnum::RefExt;
+        Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        if (!curve || !offsetTakes(obj, geoId)) {
+            return true;
+        }
+        // The Offset tool replaces this one once this click is done with it
+        const std::string documentName = obj->getDocument()->getName();
+        QTimer::singleShot(0, [documentName, geoId]() {
+            if (auto* document = Gui::Application::Instance->getDocument(documentName.c_str())) {
+                ActivateHandler(document,
+                                std::make_unique<DrawSketchHandlerOffset>(std::vector<int> {geoId}));
+            }
+        });
+        return true;
+    }
+
+    std::list<Gui::InputHint> getToolHints() const override
+    {
+        using enum Gui::InputHint::UserInput;
+        return {{QObject::tr("%1 pick a curve to offset", "Sketcher Offset: hint"), {MouseLeft}}};
+    }
+
+private:
+    std::string getToolName() const override
+    {
+        return "DSH_OffsetPick";
+    }
+};
+}  // namespace
+
 void CmdSketcherOffset::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
@@ -2400,6 +2641,15 @@ void CmdSketcherOffset::activated(int iMsg)
     // get the selection
     std::vector<Gui::SelectionObject> selection;
     selection = getSelection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId());
+
+    // FreeCAD-CH (ops#640, rank 47): Onshape's Offset with nothing of the sketch selected waits
+    // for a curve
+    if (Gui::ForkKeymap::isOnshape()
+        && (selection.empty() || (selection.size() == 1 && selection[0].getSubNames().empty()))) {
+        getSelection().clearSelection();
+        ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerOffsetPick>());
+        return;
+    }
 
     // only one sketch with its subelements are allowed to be selected
     if (selection.size() != 1) {
@@ -2426,16 +2676,7 @@ void CmdSketcherOffset::activated(int iMsg)
                 continue;
             }
 
-            const Part::Geometry* geo = Obj->getGeometry(geoId);
-            if (!isPoint(*geo)
-                && !isBSplineCurve(*geo)
-                && !isEllipse(*geo)
-                && !isArcOfEllipse(*geo)
-                && !isArcOfHyperbola(*geo)
-                && !isArcOfParabola(*geo)
-                && !GeometryFacade::isInternalAligned(geo)) {
-                // Currently ellipse/parabola/hyperbola/bspline are not handled correctly.
-                // Occ engine gives offset of those as set of lines and arcs and does not seem to work consistently.
+            if (offsetTakes(Obj, geoId)) {
                 listOfGeoIds.push_back(geoId);
             }
         }
@@ -2454,8 +2695,164 @@ void CmdSketcherOffset::activated(int iMsg)
 
 bool CmdSketcherOffset::isActive()
 {
+    // FreeCAD-CH (ops#640, rank 47): under Onshape's keymap the tool starts without a selection
+    if (Gui::ForkKeymap::isOnshape()) {
+        return isCommandActive(getActiveGuiDocument());
+    }
     return isCommandNeedingGeometryActive(getActiveGuiDocument());
 }
+
+namespace
+{
+/* FreeCAD-CH (ops#640, sketch tools item 6): under Onshape's keymap Move, Rotate and Scale start
+ * with nothing selected, as Offset and Mirror do. Each click on the sketch's own geometry picks it
+ * (a second click unpicks it); the picks show as the selection. Enter hands them to the tool,
+ * which then works as with a selection. A point of a curve picks its curve; a sketch point picks
+ * itself. Esc or a right click ends the tool.
+ */
+class DrawSketchHandlerTransformPick: public DrawSketchHandler
+{
+public:
+    using Make = std::unique_ptr<DrawSketchHandler> (*)(std::vector<int>);
+
+    DrawSketchHandlerTransformPick(Make make, const char* name, QString pickHint, QString startHint)
+        : make(make)
+        , name(name)
+        , pickHint(std::move(pickHint))
+        , startHint(std::move(startHint))
+    {}
+
+    void mouseMove(SnapManager::SnapHandle /*snapHandle*/) override
+    {}
+
+    bool pressButton(Base::Vector2d /*pos*/) override
+    {
+        return true;
+    }
+
+    bool releaseButton(Base::Vector2d /*pos*/) override
+    {
+        const std::string sub = pickedName();
+        if (!sub.empty()) {
+            if (sketchgui->isSelected(sub)) {
+                sketchgui->rmvSelection(sub);
+            }
+            else {
+                sketchgui->addSelection2(sub);
+            }
+            updateHint();
+        }
+        return true;
+    }
+
+    void registerPressedKey(bool pressed, int key) override
+    {
+        if ((key == SoKeyboardEvent::RETURN || key == SoKeyboardEvent::PAD_ENTER) && !pressed) {
+            start();
+            return;
+        }
+        DrawSketchHandler::registerPressedKey(pressed, key);
+    }
+
+    std::list<Gui::InputHint> getToolHints() const override
+    {
+        using enum Gui::InputHint::UserInput;
+        std::list<Gui::InputHint> hints {{pickHint, {MouseLeft}}};
+        if (!Gui::Selection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId()).empty()) {
+            hints.push_back({startHint, {KeyReturn}});
+        }
+        hints.push_back({QObject::tr("%1 end", "Sketcher transform: hint"), {KeyEscape}});
+        return hints;
+    }
+
+private:
+    std::string getToolName() const override
+    {
+        return name;
+    }
+
+    /// the selection name of the sketch geometry under the cursor: a curve, a sketch point, or
+    /// the curve a curve's point is of; empty for nothing, a projected curve or an axis
+    std::string pickedName() const
+    {
+        const Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        int geoId = getPreselectCurve();
+        if (geoId < 0) {
+            const int vertex = getPreselectPoint();
+            if (vertex < 0) {
+                return {};
+            }
+            Sketcher::PointPos pos {};
+            obj->getGeoVertexIndex(vertex, geoId, pos);
+            if (geoId < 0) {
+                return {};
+            }
+            if (isPoint(*obj->getGeometry(geoId))) {
+                return "Vertex" + std::to_string(vertex + 1);
+            }
+        }
+        return "Edge" + std::to_string(geoId + 1);
+    }
+
+    void start()
+    {
+        Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        if (Gui::Selection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId()).empty()) {
+            return;
+        }
+        // The tool replaces this one once this key event is done with it
+        const std::string documentName = obj->getDocument()->getName();
+        QTimer::singleShot(0, [documentName, make = make]() {
+            auto* document = Gui::Application::Instance->getDocument(documentName.c_str());
+            if (!document) {
+                return;
+            }
+            std::vector<int> geoIds = getListOfSelectedGeoIds(true);
+            Gui::Selection().clearSelection();
+            if (!geoIds.empty()) {
+                ActivateHandler(document, make(std::move(geoIds)));
+            }
+        });
+    }
+
+    Make make;
+    std::string name;
+    QString pickHint;
+    QString startHint;
+};
+
+/// Under Onshape's keymap with nothing of the sketch selected: the picking tool (true)
+bool startsTransformPick(
+    Gui::Document* document,
+    DrawSketchHandlerTransformPick::Make make,
+    const char* name,
+    const QString& pickHint,
+    const QString& startHint
+)
+{
+    if (!Gui::ForkKeymap::isOnshape()) {
+        return false;
+    }
+    std::vector<Gui::SelectionObject> selection
+        = Gui::Selection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId());
+    if (!selection.empty() && !(selection.size() == 1 && selection[0].getSubNames().empty())) {
+        return false;
+    }
+    Gui::Selection().clearSelection();
+    ActivateHandler(
+        document,
+        std::make_unique<DrawSketchHandlerTransformPick>(make, name, pickHint, startHint)
+    );
+    return true;
+}
+
+/// Under Onshape's keymap the transform tools start without a selection
+bool transformIsActive(Gui::Document* document)
+{
+    return Gui::ForkKeymap::isOnshape() ? isCommandActive(document)
+                                        : isCommandNeedingGeometryActive(document);
+}
+}  // namespace
 
 // Rotate tool =====================================================================
 
@@ -2478,6 +2875,18 @@ CmdSketcherRotate::CmdSketcherRotate()
 void CmdSketcherRotate::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640): Onshape's keymap with nothing selected picks the geometry first
+    if (startsTransformPick(
+            getActiveGuiDocument(),
+            [](std::vector<int> geoIds) -> std::unique_ptr<DrawSketchHandler> {
+                return std::make_unique<DrawSketchHandlerRotate>(std::move(geoIds));
+            },
+            "DSH_RotatePick",
+            QObject::tr("%1 pick the geometry to rotate", "Sketcher transform: hint"),
+            QObject::tr("%1 rotate it", "Sketcher transform: hint")
+        )) {
+        return;
+    }
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -2488,7 +2897,7 @@ void CmdSketcherRotate::activated(int iMsg)
 
 bool CmdSketcherRotate::isActive()
 {
-    return isCommandNeedingGeometryActive(getActiveGuiDocument());
+    return transformIsActive(getActiveGuiDocument());
 }
 
 // Scale tool =====================================================================
@@ -2512,6 +2921,18 @@ CmdSketcherScale::CmdSketcherScale()
 void CmdSketcherScale::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640): Onshape's keymap with nothing selected picks the geometry first
+    if (startsTransformPick(
+            getActiveGuiDocument(),
+            [](std::vector<int> geoIds) -> std::unique_ptr<DrawSketchHandler> {
+                return std::make_unique<DrawSketchHandlerScale>(std::move(geoIds));
+            },
+            "DSH_ScalePick",
+            QObject::tr("%1 pick the geometry to scale", "Sketcher transform: hint"),
+            QObject::tr("%1 scale it", "Sketcher transform: hint")
+        )) {
+        return;
+    }
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -2522,7 +2943,7 @@ void CmdSketcherScale::activated(int iMsg)
 
 bool CmdSketcherScale::isActive()
 {
-    return isCommandNeedingGeometryActive(getActiveGuiDocument());
+    return transformIsActive(getActiveGuiDocument());
 }
 
 // Translate / rectangular pattern tool =======================================================
@@ -2546,6 +2967,18 @@ CmdSketcherTranslate::CmdSketcherTranslate()
 void CmdSketcherTranslate::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    // FreeCAD-CH (ops#640): Onshape's keymap with nothing selected picks the geometry first
+    if (startsTransformPick(
+            getActiveGuiDocument(),
+            [](std::vector<int> geoIds) -> std::unique_ptr<DrawSketchHandler> {
+                return std::make_unique<DrawSketchHandlerTranslate>(std::move(geoIds));
+            },
+            "DSH_TranslatePick",
+            QObject::tr("%1 pick the geometry to move", "Sketcher transform: hint"),
+            QObject::tr("%1 move it", "Sketcher transform: hint")
+        )) {
+        return;
+    }
     std::vector<int> listOfGeoIds = getListOfSelectedGeoIds(true);
 
     if (!listOfGeoIds.empty()) {
@@ -2556,7 +2989,206 @@ void CmdSketcherTranslate::activated(int iMsg)
 
 bool CmdSketcherTranslate::isActive()
 {
-    return isCommandNeedingGeometryActive(getActiveGuiDocument());
+    return transformIsActive(getActiveGuiDocument());
+}
+
+// FreeCAD-CH (Onshape's sketch patterns, notes/sketch-patterns-design.md item 4) ===============
+
+namespace
+{
+void startPatternTool(Gui::Document* document, DrawSketchHandlerPattern::Kind kind)
+{
+    // the selected geometry, if any, is the first seeds; without one the tool picks them
+    std::vector<int> seeds;
+    const auto selection
+        = Gui::Selection().getSelectionEx(nullptr, Sketcher::SketchObject::getClassTypeId());
+    if (selection.size() == 1 && !selection[0].getSubNames().empty()) {
+        for (int geoId : getListOfSelectedGeoIds(true)) {
+            if (geoId >= 0) {
+                seeds.push_back(geoId);
+            }
+        }
+    }
+    ActivateHandler(document, std::make_unique<DrawSketchHandlerPattern>(kind, std::move(seeds)));
+}
+}  // namespace
+
+DEF_STD_CMD_A(CmdSketcherCircularPattern)
+
+CmdSketcherCircularPattern::CmdSketcherCircularPattern()
+    : Command("Sketcher_CircularPattern")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Circular Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Patterns the picked geometry about a pivot point: the copies follow the seed, and the "
+        "count and angle stay editable"
+    );
+    sWhatsThis = "Sketcher_CircularPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_CircularPattern";
+    eType = ForEdit;
+}
+
+void CmdSketcherCircularPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    startPatternTool(getActiveGuiDocument(), DrawSketchHandlerPattern::Kind::Circular);
+}
+
+bool CmdSketcherCircularPattern::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
+DEF_STD_CMD_A(CmdSketcherLinearPattern)
+
+CmdSketcherLinearPattern::CmdSketcherLinearPattern()
+    : Command("Sketcher_LinearPattern")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Linear Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Patterns the picked geometry along one or two direction lines: the copies follow the "
+        "seed, and the counts stay editable"
+    );
+    sWhatsThis = "Sketcher_LinearPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_RectangularArray";
+    eType = ForEdit;
+}
+
+void CmdSketcherLinearPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    startPatternTool(getActiveGuiDocument(), DrawSketchHandlerPattern::Kind::Linear);
+}
+
+bool CmdSketcherLinearPattern::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
+// Onshape's "Edit pattern": the counts (and a circular pattern's angle) of the pattern the
+// selection is of, in a small dialog; one transaction
+void SketcherGui::editPattern(Sketcher::SketchObject* obj, int constrId)
+{
+    const auto record = obj->getPattern(constrId);
+    if (!record) {
+        return;
+    }
+    const bool circular = record->kind == Sketcher::PatternRecord::Kind::Circular;
+    QDialog dialog(Gui::getMainWindow());
+    dialog.setObjectName(QStringLiteral("SketcherEditPattern"));
+    dialog.setWindowTitle(QObject::tr("Edit pattern", "Sketcher pattern"));
+    auto* form = new QFormLayout(&dialog);
+    auto* count1 = new QSpinBox(&dialog);
+    count1->setObjectName(QStringLiteral("count1"));
+    count1->setRange(1, 999);
+    count1->setValue(record->count1);
+    form->addRow(
+        circular ? QObject::tr("Instances", "Sketcher pattern")
+                 : QObject::tr("Instances, first direction", "Sketcher pattern"),
+        count1
+    );
+    QSpinBox* count2 = nullptr;
+    QDoubleSpinBox* angle = nullptr;
+    if (circular) {
+        angle = new QDoubleSpinBox(&dialog);
+        angle->setObjectName(QStringLiteral("angle"));
+        angle->setRange(-360.0, 360.0);
+        angle->setDecimals(4);
+        angle->setSuffix(QStringLiteral(" °"));
+        angle->setValue(Base::toDegrees(record->angle));
+        form->addRow(QObject::tr("Angle", "Sketcher pattern"), angle);
+    }
+    else {
+        count2 = new QSpinBox(&dialog);
+        count2->setObjectName(QStringLiteral("count2"));
+        count2->setRange(1, 999);
+        count2->setValue(record->count2);
+        form->addRow(QObject::tr("Instances, second direction", "Sketcher pattern"), count2);
+    }
+    auto* buttons
+        = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const int tid = Gui::Command::openActiveDocumentCommand(
+        QT_TRANSLATE_NOOP("Command", "Edit sketch pattern")
+    );
+    try {
+        if (count1->value() != record->count1 || (count2 && count2->value() != record->count2)) {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "setPatternCount(%d, %d, %d)",
+                constrId,
+                count1->value(),
+                count2 ? count2->value() : 1
+            );
+        }
+        if (angle && std::abs(angle->value() - Base::toDegrees(record->angle)) > 1e-9) {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "setPatternAngle(%d, %.16g)",
+                constrId,
+                Base::toRadians(angle->value())
+            );
+        }
+        Gui::Command::commitCommand(tid);
+    }
+    catch (const Base::Exception& e) {
+        Gui::Command::abortCommand(tid);
+        Gui::NotifyUserError(obj, QT_TRANSLATE_NOOP("Notifications", "Sketch pattern"), e.what());
+    }
+    tryAutoRecomputeIfNotSolve(obj);
+}
+
+DEF_STD_CMD_A(CmdSketcherEditPattern)
+
+CmdSketcherEditPattern::CmdSketcherEditPattern()
+    : Command("Sketcher_EditPattern")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Edit Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Changes the count and angle of the sketch pattern the selected geometry belongs to"
+    );
+    sWhatsThis = "Sketcher_EditPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_RectangularArray";
+    eType = ForEdit;
+}
+
+void CmdSketcherEditPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    auto* sketchgui = dynamic_cast<ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+    if (!sketchgui) {
+        return;
+    }
+    Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+    const int index = patternOfSelection(obj);
+    if (index >= 0) {
+        getSelection().clearSelection();
+        editPattern(obj, index);
+    }
+}
+
+bool CmdSketcherEditPattern::isActive()
+{
+    Gui::Document* document = getActiveGuiDocument();
+    if (!isCommandActive(document)) {
+        return false;
+    }
+    auto* sketchgui = dynamic_cast<ViewProviderSketch*>(document->getInEdit());
+    return sketchgui && patternOfSelection(sketchgui->getSketchObject()) >= 0;
 }
 
 void CreateSketcherCommandsConstraintAccel()
@@ -2579,6 +3211,9 @@ void CreateSketcherCommandsConstraintAccel()
     rcCmdMgr.addCommand(new CmdSketcherRotate());
     rcCmdMgr.addCommand(new CmdSketcherScale());
     rcCmdMgr.addCommand(new CmdSketcherSymmetry());
+    rcCmdMgr.addCommand(new CmdSketcherCircularPattern());  // FreeCAD-CH (sketch patterns)
+    rcCmdMgr.addCommand(new CmdSketcherLinearPattern());
+    rcCmdMgr.addCommand(new CmdSketcherEditPattern());
     rcCmdMgr.addCommand(new CmdSketcherCopy());
     rcCmdMgr.addCommand(new CmdSketcherClone());
     rcCmdMgr.addCommand(new CmdSketcherMove());

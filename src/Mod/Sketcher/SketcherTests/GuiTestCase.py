@@ -42,7 +42,29 @@ class SketcherGuiTestCase(unittest.TestCase):
         try:
             self.cleanup_gui_document(getattr(self, "doc", None))
         finally:
+            saved = getattr(self, "_saved_main_window_size", None)
+            if saved is not None:
+                FreeCADGui.getMainWindow().resize(saved)
             super().tearDown()
+
+    # A click lands on a whole pixel, so a pixel test's outcome near a pick radius or a snap can
+    # depend on the 3D view's height, which the main window's toolbar rows set (the document
+    # strip's own row took 40 px in batch 10). The pixel tests were written at this height.
+    VIEW_HEIGHT = 627
+
+    def fix_view_height(self, view, height=VIEW_HEIGHT):
+        """Resize the main window so the view's viewport is height (logical) pixels high; tearDown
+        restores the window. The width is left alone: a tool's panel changes it."""
+        main_window = FreeCADGui.getMainWindow()
+        viewport = view.graphicsView().viewport()
+        if getattr(self, "_saved_main_window_size", None) is None:
+            self._saved_main_window_size = main_window.size()
+        for _ in range(3):
+            delta = height - viewport.height()
+            if not delta:
+                break
+            main_window.resize(main_window.width(), main_window.height() + delta)
+            self.flush_gui(50)
 
     def pump(self, timeout_ms=50):
         if not QT_MODULE_AVAILABLE:

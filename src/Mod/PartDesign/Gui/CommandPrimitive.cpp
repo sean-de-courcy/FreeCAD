@@ -78,7 +78,15 @@ CmdPrimtiveCompAdditive::CmdPrimtiveCompAdditive()
     sToolTipText = QT_TR_NOOP("Creates an additive primitive");
     sWhatsThis = "PartDesign_CompPrimitiveAdditive";
     sStatusTip = sToolTipText;
-    eType = ForEdit;
+    eType = ForEdit | AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
+}
+
+namespace PartDesignGui
+{
+// Utils.cpp's (no header names it): the Bodies of the view's typed tab (R6T-1)
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+// Utils.cpp's: true (refused, said why) when a new part would be made outside a Part Studio tab
+bool refuseNewPartOutsideStudio(App::Document* doc);
 }
 
 void CmdPrimtiveCompAdditive::activated(int iMsg)
@@ -92,7 +100,7 @@ void CmdPrimtiveCompAdditive::activated(int iMsg)
 
     auto shouldMakeBody(false);
     if (!pcActiveBody) {
-        if (doc->getObjectsOfType(PartDesign::Body::getClassTypeId()).empty()) {
+        if (PartDesignGui::tabBodies(doc, nullptr).empty()) {  // FreeCAD-CH (R6T-1)
             shouldMakeBody = true;
         }
         else {
@@ -111,12 +119,18 @@ void CmdPrimtiveCompAdditive::activated(int iMsg)
 
     std::string shapeType(primitiveIntToName(iMsg));
 
+    // FreeCAD-CH (ops#640): no new part outside a Part Studio tab (an Assembly's)
+    if (shouldMakeBody && PartDesignGui::refuseNewPartOutsideStudio(doc)) {
+        return;
+    }
+
     openCommand("Make additive " + shapeType);
     if (shouldMakeBody) {
         pcActiveBody = PartDesignGui::makeBody(doc);
     }
 
     if (!pcActiveBody) {
+        abortCommand();  // FreeCAD-CH: the command opened above isn't left open
         return;
     }
 
@@ -272,7 +286,8 @@ void CmdPrimtiveCompAdditive::languageChange()
 
 bool CmdPrimtiveCompAdditive::isActive()
 {
-    return (hasActiveDocument() && !Gui::Control().activeDialog());
+    // FreeCAD-CH (ops#640): beside a feature dialog holding its step, the tool accepts it first
+    return (hasActiveDocument() && (!Gui::Control().activeDialog() || stepLockedDocument()));
 }
 
 DEF_STD_CMD_ACL(CmdPrimtiveCompSubtractive)
@@ -286,7 +301,7 @@ CmdPrimtiveCompSubtractive::CmdPrimtiveCompSubtractive()
     sToolTipText = QT_TR_NOOP("Creates a subtractive primitive");
     sWhatsThis = "PartDesign_CompPrimitiveSubtractive";
     sStatusTip = sToolTipText;
-    eType = ForEdit;
+    eType = ForEdit | AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPrimtiveCompSubtractive::activated(int iMsg)
@@ -457,7 +472,8 @@ void CmdPrimtiveCompSubtractive::languageChange()
 
 bool CmdPrimtiveCompSubtractive::isActive()
 {
-    return (hasActiveDocument() && !Gui::Control().activeDialog());
+    // FreeCAD-CH (ops#640): beside a feature dialog holding its step, the tool accepts it first
+    return (hasActiveDocument() && (!Gui::Control().activeDialog() || stepLockedDocument()));
 }
 
 //===========================================================================

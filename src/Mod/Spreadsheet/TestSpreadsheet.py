@@ -1091,7 +1091,8 @@ class SpreadsheetCases(unittest.TestCase):
         self.assertEqual(sheet.A2, 0.5)
         self.assertEqual(sheet.A3, Units.Quantity("2 mm"))
         self.assertEqual(sheet.A4, Units.Quantity("2 1/mm"))
-        self.assertEqual(sheet.A5, Units.Quantity("2 1/mm"))
+        # `4/2mm` is (4/2) mm since rank 56, as Onshape reads a literal fraction; it was 2 1/mm
+        self.assertEqual(sheet.A5, Units.Quantity("2 mm"))
         self.assertEqual(sheet.A6, Units.Quantity("2 mm/s"))
 
     def testRemoveRows(self):

@@ -16,12 +16,18 @@
 
 #include "src/App/InitApplication.h"
 #include <App/ElementNamingUtils.h>
+#include <Base/Exception.h>
 #include <Mod/Part/App/FilletFallback.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -35,22 +41,30 @@
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <TopoDS.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
+#include <gp_GTrsf.hxx>
+#include <gp_Lin.hxx>
+#include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
 #include <gp_XY.hxx>
 
@@ -559,6 +573,64 @@ testing::AssertionResult sameAsOcct(
     return sameAs(exactRoute, occt);
 }
 
+/// A chamfer by equal distances w over a chain whose angles differ is OCCT's with the setbacks
+/// (notes/chamfer-chain-setbacks.md): the same solid with the same faces as OCCT given the
+/// expected setbacks directly. Where OCCT fails with them, the construction refuses the corner
+/// between setbacks that differ and builds w on every edge instead (ruling A, section 7).
+testing::AssertionResult sameAsOcctWithSetbacks(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double w,
+    const std::vector<double>& expected
+)
+{
+    auto setbacks = FF::chainSetbacks(base, edges, w);
+    if (setbacks.size() != expected.size()) {
+        return testing::AssertionFailure() << setbacks.size() << " setbacks";
+    }
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        if (std::abs(setbacks[i] - expected[i]) > 1e-9) {
+            return testing::AssertionFailure()
+                << "setback " << i << " " << setbacks[i] << " != " << expected[i];
+        }
+    }
+    TopoShape result = dressUp(base, edges, chamfer(w));
+    BRepFilletAPI_MakeChamfer maker(base.getShape());
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        const auto& edge = TopoDS::Edge(edges[i].getShape());
+        auto face = TopoDS::Face(base.findAncestorShape(edge, TopAbs_FACE));
+        maker.Add(expected[i], expected[i], edge, face);
+    }
+    bool built = false;
+    try {
+        maker.Build();
+        built = maker.IsDone() && BRepCheck_Analyzer(maker.Shape()).IsValid();
+    }
+    catch (const Standard_Failure&) {
+        built = false;
+    }
+    if (!built) {
+        FF::Request uniform = chamfer(w);
+        uniform.limitOnly = false;
+        return sameAs(forced(base, edges, uniform), result);
+    }
+    const auto& a = result.getShape();
+    const TopoDS_Shape& b = maker.Shape();
+    if (a.IsNull()) {
+        return testing::AssertionFailure() << "null shape";
+    }
+    double difference
+        = volume(BRepAlgoAPI_Cut(a, b).Shape()) + volume(BRepAlgoAPI_Cut(b, a).Shape());
+    if (difference > 1e-7 * volume(b)) {
+        return testing::AssertionFailure() << "symmetric difference " << difference;
+    }
+    if (count(a, TopAbs_FACE) != count(b, TopAbs_FACE)) {
+        return testing::AssertionFailure()
+            << count(a, TopAbs_FACE) << " faces != " << count(b, TopAbs_FACE);
+    }
+    return testing::AssertionSuccess();
+}
+
 /// The last section of each of the element's names: the op and flag the dress-up gave it
 bool namedBy(const TopoShape& shape, const char* element, const char* op, const char* flag)
 {
@@ -731,6 +803,24 @@ TEST_F(FilletFallbackTest, chamfers)
     auto circles = edgesWhere(ring, atHeight(10), true);
     double removed = 2 * pi * (10 - 2.0 / 3) * 2 + 2 * pi * (6 + 2.0 / 3) * 2;
     EXPECT_TRUE(exact(dressUp(ring, circles, chamfer(2)), pi * 64 * 10 - removed));
+}
+
+// A concave straight edge between a wall and a boss fused to it, a cylinder along the edge: the
+// ball of its round lies in the air, in front of the wall and outside the boss (ops#640, Case Base
+// #47: the construction put it in the material, in the boss, and refused). Below the limit, forced,
+// it is OCCT's round
+TEST_F(FilletFallbackTest, concaveRoundOfAWallAndABoss)
+{
+    BRepAlgoAPI_Fuse fuse(
+        box(20, 10, 10, gp_Pnt(0, -10, 0)),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(10, 2, 0), gp::DZ()), 5, 10).Shape()
+    );
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    double x = 10 + std::sqrt(21.0);
+    std::vector<TopoShape> edges {edgeBetween(base, {x, 0, 0}, {x, 0, 10})};
+    EXPECT_TRUE(sameAsOcct(base, edges, fillet(2)));
 }
 
 // The rib's top edges chamfered just under the limit: the top strip left between the chamfers,
@@ -1663,9 +1753,31 @@ TEST_F(FilletFallbackTest, unequalCornersSameAsOcctBelowTheLimit)
             edgeBetween(plate, {a, 0, 4}, {a, 20, 4})
         };
         EXPECT_TRUE(sameAsOcct(plate, two, fillet(2))) << degrees;
-        EXPECT_TRUE(sameAsOcct(plate, two, chamfer(2))) << degrees;
         EXPECT_TRUE(sameAsOcct(plate, top, fillet(degrees < 0 ? 2 : 3.9))) << degrees;
-        EXPECT_TRUE(sameAsOcct(plate, top, chamfer(degrees < 0 ? 2 : 3.9))) << degrees;
+        // Chamfers by equal distances: the chain's first edge gets w, every other edge
+        // w tan(a1 / 2) / tan(a / 2), where the top meets the walls at 90 degrees and the
+        // leaning end at 90 + degrees (notes/chamfer-chain-setbacks.md section 4)
+        auto angleOf = [&](const TopoShape& edge) {
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(TopoDS::Edge(edge.getShape()), v1, v2);
+            bool leaning = std::abs(BRep_Tool::Pnt(v1).X() - a) < 1e-9
+                && std::abs(BRep_Tool::Pnt(v2).X() - a) < 1e-9;
+            return (leaning ? 90 + degrees : 90.0) * pi / 180;
+        };
+        auto setbacksOf = [&](const std::vector<TopoShape>& edges, double w) {
+            std::vector<double> setbacks;
+            for (const auto& edge : edges) {
+                setbacks.push_back(
+                    w * std::tan(angleOf(edges.front()) / 2) / std::tan(angleOf(edge) / 2)
+                );
+            }
+            setbacks.front() = w;
+            return setbacks;
+        };
+        double w = degrees < 0 ? 2 : 3.9;
+        EXPECT_TRUE(sameAsOcctWithSetbacks(plate, two, 2, setbacksOf(two, 2))) << degrees;
+        EXPECT_TRUE(sameAsOcctWithSetbacks(plate, top, w, setbacksOf(top, w))) << degrees;
     }
 }
 
@@ -2077,7 +2189,7 @@ TEST_F(FilletFallbackTest, refusesObliqueCornersWhoseRoundsRunPastTheirVertex)
         oblique,
         oblique.getSubTopoShapes(TopAbs_EDGE),
         fillet(2),
-        "a tangent strip runs off its face"
+        "runs past both its faces"
     ));
 }
 
@@ -2089,12 +2201,34 @@ TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
     auto mixed = edgesAt(boss, {15, 15, 4});
     ASSERT_EQ(mixed.size(), 3U);
     EXPECT_TRUE(refusedFor(boss, mixed, fillet(2), "mixed convexity"));
-    // A15: the triangle and hexagon plates' edges chamfered: their corners aren't square
-    for (int n : {3, 6}) {
-        TopoShape plate(regularPlate(n), 1L);
-        auto all = plate.getSubTopoShapes(TopAbs_EDGE);
-        EXPECT_TRUE(refusedFor(plate, all, chamfer(2), "not square")) << n;
+    // A15: the hexagon plate's edges chamfered: its corners aren't square. OCCT fails with the
+    // setbacks too (vertical edges at 120 degrees, the others at 90), so the construction builds
+    // w on every edge (ruling A, notes/chamfer-chain-setbacks.md section 7) and refuses that
+    TopoShape hexagon(regularPlate(6), 1L);
+    auto hexagonEdges = hexagon.getSubTopoShapes(TopAbs_EDGE);
+    EXPECT_TRUE(refusedFor(hexagon, hexagonEdges, chamfer(2), "not square"));
+    // The triangle plate's: OCCT fails with w, but builds with the setbacks (the chain's first
+    // edge gets w, every other edge w tan(a1 / 2) / tan(a / 2); the vertical edges are at 60
+    // degrees, the others at 90)
+    TopoShape triangle(regularPlate(3), 1L);
+    auto triangleEdges = triangle.getSubTopoShapes(TopAbs_EDGE);
+    EXPECT_TRUE(occtFails(triangle, triangleEdges, chamfer(2)));
+    auto angleOf = [](const TopoShape& edge) {
+        TopoDS_Vertex v1;
+        TopoDS_Vertex v2;
+        TopExp::Vertices(TopoDS::Edge(edge.getShape()), v1, v2);
+        bool vertical = std::abs(BRep_Tool::Pnt(v1).Z() - BRep_Tool::Pnt(v2).Z()) > 1;
+        return (vertical ? 60.0 : 90.0) * pi / 180;
+    };
+    std::vector<double> setbacks;
+    for (const auto& edge : triangleEdges) {
+        setbacks.push_back(
+            2 * std::tan(angleOf(triangleEdges.front()) / 2) / std::tan(angleOf(edge) / 2)
+        );
     }
+    setbacks.front() = 2;
+    EXPECT_TRUE(sameAsOcctWithSetbacks(triangle, triangleEdges, 2, setbacks));
+    EXPECT_TRUE(dressUp(triangle, triangleEdges, chamfer(2)).isValid());
     // The D plate: a line and a half circle meeting at an angle, top edges at r = t
     BRepBuilderAPI_MakeWire outline;
     outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, -10, 0), gp_Pnt(0, 10, 0)).Edge());
@@ -2108,7 +2242,18 @@ TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
     TopoShape dPlate(BRepPrimAPI_MakePrism(d, gp_Vec(0, 0, 4)).Shape(), 1L);
     auto dTop = edgesWhere(dPlate, atHeight(4));
     ASSERT_EQ(dTop.size(), 2U);
-    EXPECT_TRUE(refusedFor(dPlate, dTop, fillet(4), "not straight"));
+    // Its corners are convex now (Corner2Union, ops#640). At r = t OCCT 8.0.1 fails, and its cut
+    // of the first tool, which passes through the bottom vertex, measured 1e-3 off its common
+    // part: the loops raised vertex tolerances open (ops#669), so the construction builds it
+    // (batch 8 review). Four exact faces; the volume is the closed form's (the D's area times t,
+    // less the integral over the D of max(distance to the line, distance to the arc)): 474.33880
+    std::string why;
+    TopoShape built = forced(dPlate, dTop, fillet(4), &why);
+    ASSERT_FALSE(built.isNull()) << why;
+    EXPECT_TRUE(built.isValid());
+    EXPECT_EQ(count(built.getShape(), TopAbs_SOLID), 1);
+    EXPECT_EQ(count(built.getShape(), TopAbs_FACE), 4);
+    EXPECT_NEAR(volume(built.getShape()), 474.3388, 1e-3);
 }
 
 TEST_F(FilletFallbackTest, refusesCornersJustOverTheLimit)
@@ -2155,40 +2300,69 @@ TEST_F(FilletFallbackTest, refusesVariableRadius)
     EXPECT_TRUE(throwsOcctsError([&] { result.makeElementFillet(base, edges, 1, 2); }));
 }
 
-TEST_F(FilletFallbackTest, refusesOverlappingTools)
+/** The area the rounds of radius r of count edges (1 or 2) remove from the section of a plate of
+ * the width: at the depth r (1 - cos t) one round is r (1 - sin t) wide, the rounds together at
+ * most the width. By Simpson's rule on each side of the kink, where the integrand is smooth */
+double roundsSection(double r, double width, int count)
 {
-    // r = 2.1 on the rib 4 wide: the two rounds overlap
+    auto f = [&](double t) {
+        return std::min(width, count * r * (1 - std::sin(t))) * r * std::sin(t);
+    };
+    auto simpson = [&](double a, double b) {
+        const int n = 2000;
+        double h = (b - a) / n;
+        double sum = f(a) + f(b);
+        for (int i = 1; i < n; ++i) {
+            sum += f(a + i * h) * (i % 2 ? 4 : 2);
+        }
+        return sum * h / 3;
+    };
+    double kink = std::asin(std::max(0.0, 1 - width / count / r));
+    return simpson(0, kink) + simpson(kink, pi / 2);
+}
+
+TEST_F(FilletFallbackTest, overlappingToolsAsOnshape)
+{
+    // r = 2.1 on the rib 4 wide, 20 long: the two rounds overlap, and the result is the rib
+    // without their union, as Onshape's (ops#640, S3; notes/onshape-facts.md K2E)
     TopoShape base(ribAgainstWall(), 1L);
     std::vector<TopoShape> edges {
         edgeBetween(base, {13, 0, 4}, {13, 20, 4}),
         edgeBetween(base, {17, 0, 4}, {17, 20, 4})
     };
-    EXPECT_TRUE(refusedFor(base, edges, fillet(2.1), "overlap"));
+    EXPECT_TRUE(exact(dressUp(base, edges, fillet(2.1)), 6000 + 320 - 20 * roundsSection(2.1, 4, 2)));
 }
 
-TEST_F(FilletFallbackTest, refusesJustOverTheLimit)
+TEST_F(FilletFallbackTest, justOverTheLimitAsOnshape)
 {
-    // The volume error grows with the square or cube of the excess, so the volume checks pass
-    // these; the strips' areas grow linearly with it. The plate's top is 4 wide
+    // Past the limit the result is the plate without the tools' union (ops#640, S3; Onshape's
+    // KP3, K2D, K2E). The plate's top is 4 wide
     TopoShape base(box(30, 4, 20), 1L);
     TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
     TopoShape back = edgeBetween(base, {0, 4, 20}, {30, 4, 20});
     for (double r : {2.005, 2.01, 2.02}) {
-        EXPECT_TRUE(refusedFor(base, {front, back}, fillet(r), "overlap")) << r;
+        EXPECT_TRUE(exact(dressUp(base, {front, back}, fillet(r)), 2400 - 30 * roundsSection(r, 4, 2)))
+            << r;
     }
     for (double r : {4.01, 4.02, 4.04}) {
-        EXPECT_TRUE(refusedFor(base, {front}, fillet(r), "runs off its face")) << r;
+        EXPECT_TRUE(exact(dressUp(base, {front}, fillet(r)), 2400 - 30 * roundsSection(r, 4, 1)))
+            << r;
     }
+    // Two chamfers meet in a ridge: d^2 less the overlap (2 d - 4)^2 / 4; one past the top: its
+    // triangle less the part beyond the far side, (d - 4)^2 / 2
     for (double d : {2.001, 2.002}) {
-        EXPECT_TRUE(refusedFor(base, {front, back}, chamfer(d), "overlap")) << d;
+        EXPECT_TRUE(exact(
+            dressUp(base, {front, back}, chamfer(d)),
+            2400 - 30 * (d * d - (2 * d - 4) * (2 * d - 4) / 4)
+        )) << d;
     }
-    EXPECT_TRUE(refusedFor(base, {front}, chamfer(4.002), "runs off its face"));
-    // On a short edge the overhang's area is small next to the strip's perimeter: the tolerance
-    // goes with the strip's length along the edge
+    double d = 4.002;
+    EXPECT_TRUE(exact(dressUp(base, {front}, chamfer(d)), 2400 - 30 * (d * d - (d - 4) * (d - 4)) / 2));
     TopoShape sliver(box(0.01, 4, 20), 1L);
     TopoShape shortEdge = edgeBetween(sliver, {0, 0, 20}, {0.01, 0, 20});
     EXPECT_TRUE(exact(dressUp(sliver, {shortEdge}, chamfer(4)), 0.8 - 0.01 * 8));
-    EXPECT_TRUE(refusedFor(sliver, {shortEdge}, chamfer(4.0004), "runs off its face"));
+    d = 4.0004;
+    EXPECT_TRUE(exact(dressUp(sliver, {shortEdge}, chamfer(d)), 0.8 - 0.01 * (d * d - (d - 4) * (d - 4)) / 2));
 }
 
 TEST_F(FilletFallbackTest, refusesBelowTheLimit)
@@ -2242,17 +2416,352 @@ TEST_F(FilletFallbackTest, refusesANearlyStraightContinuation)
     }
 }
 
-TEST_F(FilletFallbackTest, refusesARoundUnderAnOverhang)
+TEST_F(FilletFallbackTest, trimsADressUpPastTheRisersFootByTheTread)
 {
-    // The step's convex edge with r = 5: the round's tangent line on the riser lies 1 below
-    // the riser's foot, inside the material. The volume is right, but the result would cut
-    // under the tread: its strip runs off the riser (the contact check after the cut is the
-    // second line of defence)
+    // The step's convex edge (riser 4 high) with size 5: the strip on the riser runs 1 past its
+    // foot, into the material under the tread. Onshape trims the dress-up by the tread's plane
+    // run on under it: the tread grows, the riser is used up, no step is left (Q-LEDGE LD1-LD3,
+    // notes/onshape-facts.md; S4 there is this case scaled: r 1 over a wall 0.5 high)
     TopoShape base(step(), 1L);
+    TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
+    // The round, centre (y 15, z 9): the material it keeps in y 10..15, z 10..14 is the quarter
+    // disc above z = 10; it meets the tread at y = 15 - sqrt(24)
+    double kept = 25 * pi / 4 - (std::sqrt(24.0) / 2 + 12.5 * std::asin(0.2));
+    // The chamfer, from (15, 14) to (10, 9): its triangle less the part under the tread
+    double chamfered = 12.5 - 0.5;
+    struct Case
+    {
+        FF::Request request;
+        double volume;
+        double treadTo;
+    };
+    for (const auto& c : {Case {fillet(5), 7200 - (20 - kept) * 30, 15 - std::sqrt(24.0)},
+                          Case {chamfer(5), 7200 - chamfered * 30, 11.0}}) {
+        TopoShape result = forced(base, {convex}, c.request);
+        EXPECT_TRUE(exact(result, c.volume));
+        EXPECT_EQ(result.countSubElements("Face"), 8);
+        // The tread: one plane face at z = 10, from y = 0 to where the dress-up meets it
+        int treads = 0;
+        for (const auto& face : result.getSubTopoShapes(TopAbs_FACE)) {
+            Bnd_Box box;
+            BRepBndLib::Add(face.getShape(), box);
+            double xMin, yMin, zMin, xMax, yMax, zMax;
+            box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+            if (zMax - zMin < 1e-6 && std::abs(zMin - 10) < 1e-6) {
+                ++treads;
+                EXPECT_NEAR(yMin, 0.0, 1e-6);
+                EXPECT_NEAR(yMax, c.treadTo, 1e-6);
+            }
+        }
+        EXPECT_EQ(treads, 1);
+    }
+}
+
+/// A closed B-spline through n points about the centre at height z: radius r + w cos(4 t), turned by
+/// the angle
+TopoDS_Wire wavyLoop(gp_Pnt centre, double r, double w, double turn)
+{
+    const int n = 16;
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, n);
+    for (int i = 0; i < n; ++i) {
+        double t = 2 * pi * i / n + turn;
+        double rho = r + w * std::cos(4 * t);
+        points->SetValue(i + 1, centre.Translated(gp_Vec(rho * std::cos(t), rho * std::sin(t), 0)));
+    }
+    GeomAPI_Interpolate curve(points, Standard_True, 1e-9);
+    curve.Perform();
+    return BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(curve.Curve()).Edge()).Wire();
+}
+
+/// Case Base #108's class, designed: a channel 2 deep (x < 10) beside a block 30 x 30 x 10, and a
+/// finger notch, the cylinder r 4 about (10, 0) cut down to the channel's floor (z 8): its rim is a
+/// half circle from (10, -4) to (10, 4), split at the cylinder's seam (14, 0). With freeForm, a
+/// boss lofted between two wavy B-spline loops stands on the top, away from the notch: its side is
+/// a B-spline surface, which OCCT's default volume integration doesn't get exactly
+TopoDS_Shape fingerNotch(bool freeForm)
+{
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -15, 0), 30, 30, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -16, 8), 11, 32, 3).Shape()
+    ).Shape();
+    gp_Ax2 axis(gp_Pnt(10, 0, 8), gp::DZ(), gp::DX());
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(axis, 4, 3).Shape()).Shape();
+    if (freeForm) {
+        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False);
+        loft.AddWire(wavyLoop(gp_Pnt(22, 6, 10), 4, 1.2, 0));
+        loft.AddWire(wavyLoop(gp_Pnt(22, 6, 25), 2.5, 1.0, pi / 8));
+        loft.Build();
+        shape = BRepAlgoAPI_Fuse(shape, loft.Shape()).Shape();
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    return unify.Shape();
+}
+
+/// fingerNotch's block, channel and notch, on a block 2200 x 2200 x 10 with a boss of about 2e9 mm3
+/// lofted between wavy B-spline loops (r 900 at z 10, r 600 at z 1010) at (1100, 0), clear of the notch
+TopoDS_Shape fingerNotchOnALargeBody()
+{
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -1100, 0), 2200, 2200, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1101, 8), 11, 2202, 3).Shape()
+    ).Shape();
+    gp_Ax2 axis(gp_Pnt(10, 0, 8), gp::DZ(), gp::DX());
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(axis, 4, 3).Shape()).Shape();
+    BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False);
+    loft.AddWire(wavyLoop(gp_Pnt(1100, 0, 10), 900, 150, 0));
+    loft.AddWire(wavyLoop(gp_Pnt(1100, 0, 1010), 600, 100, pi / 8));
+    loft.Build();
+    shape = BRepAlgoAPI_Fuse(shape, loft.Shape()).Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    return unify.Shape();
+}
+
+TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideALargeFreeFormBody)
+{
+    // Case Base #108 on Onshape's own input: the body (191 000 mm3, free-form faces) measured the
+    // cut 29.32171848 for 29.32153143 even adaptively, about 1e-9 of the body against a bound of
+    // 1e-6 of the cut. Measured over the faces the stage changed, the change doesn't depend on the
+    // body. The reference here is the removed piece measured alone, for the same reason
+    TopoShape base(fingerNotchOnALargeBody(), 1L);
+    auto rim = edgesWhere(base, atHeight(10), true);
+    ASSERT_EQ(rim.size(), 2U);
+    double whole = Part::MassProperties::volume(base.getShape(), true);
+    std::string reason;
+    TopoShape result = forced(base, rim, chamfer(2), &reason);
+    ASSERT_FALSE(result.isNull()) << reason << " (body " << whole << ")";
+    EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+    TopoDS_Shape removed = BRepAlgoAPI_Cut(base.getShape(), result.getShape()).Shape();
+    double expected = pi * (4 + 2.0 / 3) * 2;
+    EXPECT_NEAR(Part::MassProperties::volume(removed, true), expected, 1e-6 * expected);
+}
+
+/// Case Base #76, designed: a block x 0..30, |y| <= 15, z 0..20; a tunnel r 5 along x about
+/// (y 0, z 10); a slot |y| <= 5 above the tunnel's axis (z 10..20) from x 15 on. The rim is the
+/// tunnel's upper half circle on the slot's end wall x = 15, from (15, 5, 10) over (15, 0, 15) to
+/// (15, -5, 10). At each end the slot's wall is tangent to the tunnel, and the wall's edge on the
+/// end wall leaves the vertex upward as the arc does: a cusp. seam: the direction of the tunnel
+/// cylinder's seam from its axis (+y puts it on the cusp at y 5, as in Case Base)
+TopoDS_Shape cuspedSlot(const gp_Dir& seam)
+{
+    gp_Ax2 axis(gp_Pnt(-1, 0, 10), gp::DX(), seam);
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, -15, 0), 30, 30, 20).Shape(),
+        BRepPrimAPI_MakeCylinder(axis, 5, 32).Shape()
+    ).Shape();
+    return BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(15, -5, 10), 16, 10, 11).Shape())
+        .Shape();
+}
+
+std::vector<TopoShape> cuspedRim(const TopoShape& base)
+{
+    return edgesWhere(
+        base,
+        [](const gp_Pnt& p) { return std::abs(p.X() - 15) < 1e-7 && p.Z() > 10 - 1e-7; },
+        true
+    );
+}
+
+/// The volume of the triangle (a on the top, b down the bore) swept round the half circle r about
+/// its axis and cut by the planes y = +-r: the integral over rho in [r, r + a] of
+/// 2 rho asin(r / rho) b (r + a - rho) / a
+double cuspedChamferVolume(double r, double a, double b)
+{
+    auto s = [r](double rho) { return std::sqrt(rho * rho - r * r); };
+    auto f1 = [&](double rho) { return rho * rho / 2 * std::asin(r / rho) + r / 2 * s(rho); };
+    auto f2 = [&](double rho) {
+        return rho * rho * rho / 3 * std::asin(r / rho)
+            + r / 6 * (rho * s(rho) + r * r * std::log(rho + s(rho)));
+    };
+    auto g = [&](double rho) { return 2 * (r + a) * f1(rho) - 2 * f2(rho); };
+    return b / a * (g(r + a) - g(r));
+}
+
+TEST_F(FilletFallbackTest, chamfersARimEndingInCuspsAsOnshape)
+{
+    // Case Base #76 (oracle 17, Q-CUSP, facts CU1-CU5): Onshape chamfers the half circle and ends
+    // the chamfer face on the slot's wall planes y = +-5, adding one face. OCCT leaves a face of zero
+    // width; the construction refused "an end face parallel to the edge", or "a vertex where 4 edges
+    // meet" with the tunnel's seam on the cusp (as in Case Base). Removed: the triangle swept round
+    // the half circle and cut by the wall planes, in closed form (Onshape's volumes are within 2.4e-4
+    // of it, OCCT's own on a rib bounding the same region within 1e-6)
+    struct Case
+    {
+        double wall, tunnel, removed;
+    };
+    const Case cases[] = {
+        {1, 3, cuspedChamferVolume(5, 1, 3)},  // C1: 19.826838
+        {1, 1, cuspedChamferVolume(5, 1, 1)},  // C3: 6.608946
+        {3, 1, cuspedChamferVolume(5, 3, 1)},  // C4: 18.290831
+    };
+    // The seam below the rim, on its top (the rim in two pieces), and on the cusp
+    for (const gp_Dir& seam : {gp_Dir(0, 0, -1), gp_Dir(0, 0, 1), gp_Dir(0, 1, 0)}) {
+        TopoShape base(cuspedSlot(seam), 1L);
+        auto rim = cuspedRim(base);
+        ASSERT_FALSE(rim.empty());
+        auto face = base.findAncestorShape(rim[0].getShape(), TopAbs_FACE);
+        bool onWall = BRepAdaptor_Surface(TopoDS::Face(face)).GetType() == GeomAbs_Plane;
+        int faces = base.countSubShapes(TopAbs_FACE);
+        for (const auto& c : cases) {
+            auto request = onWall ? chamfer(c.wall, c.tunnel, ChamferType::twoDistances)
+                                  : chamfer(c.tunnel, c.wall, ChamferType::twoDistances);
+            if (c.wall == c.tunnel) {
+                request = chamfer(c.wall);
+            }
+            TopoShape result = dressUp(base, rim, request);
+            ASSERT_FALSE(result.isNull()) << seam.Z() << " " << c.wall << "/" << c.tunnel;
+            EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+            EXPECT_NEAR(
+                volume(base.getShape()) - volume(result.getShape()),
+                c.removed,
+                1e-6 * c.removed
+            ) << seam.Z() << " " << c.wall << "/" << c.tunnel;
+            // One chamfer face per piece of the rim
+            EXPECT_EQ(result.countSubShapes(TopAbs_FACE), faces + static_cast<int>(rim.size()))
+                << seam.Z() << " " << c.wall << "/" << c.tunnel;
+        }
+    }
+}
+
+TEST_F(FilletFallbackTest, chamfersASeamSplitRimBesideAFreeFormFace)
+{
+    // Case Base #108: the chamfer 2 of the notch's rim (both pieces), down to the floor: the
+    // triangle 2 x 2 revolved half way at the centroid radius 4 + 2 / 3. The construction measured
+    // its stages by OCCT's default integration, whose error on a free-form face moves with the
+    // shape integrated (the point it integrates about is the shape's): the boss's side, which the
+    // cut leaves alone, then made the cut measure short. On the replica: 2.45e-4, eight times the
+    // bound (ops#640). The volumes here are adaptive: the default can't be the test's reference
+    for (bool freeForm : {false, true}) {
+        TopoShape base(fingerNotch(freeForm), 1L);
+        auto rim = edgesWhere(base, atHeight(10), true);
+        ASSERT_EQ(rim.size(), 2U) << freeForm;
+        GProp_GProps before;
+        BRepGProp::VolumeProperties(base.getShape(), before);
+        double defaultError = before.Mass() - Part::MassProperties::volume(base.getShape(), true);
+        std::string reason;
+        TopoShape result = forced(base, rim, chamfer(2), &reason);
+        ASSERT_FALSE(result.isNull()) << freeForm << ": " << reason << " (default error "
+                                      << defaultError << ")";
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+        EXPECT_NEAR(
+            Part::MassProperties::volume(base.getShape(), true)
+                - Part::MassProperties::volume(result.getShape(), true),
+            pi * (4 + 2.0 / 3) * 2,
+            1e-6 * pi * (4 + 2.0 / 3) * 2
+        ) << freeForm << " (default error " << defaultError << ")";
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesATrimByAFinInFrontOfTheWall)
+{
+    // Review r1's case: a step (top z 10 over y 4..10, wall y 4 down to the ledge z 9.037) with a
+    // fin 0.5 thick standing on the ledge 0.02 in front of the wall, its top 0.5 above the ledge.
+    // The top's edge dressed up 1.0 runs past the wall's foot: the fin's section, closer to the
+    // wall than both offsets, would have trimmed the dress-up at the fin's top. Refused
+    const double h = 0.963;
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 10 - h), 22, 5, h + 1).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(0, 3.48, 10 - h), 20, 0.5, 0.5).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    TopoShape top = edgeBetween(base, {0, 4, 10}, {20, 4, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {top}, request, &reason).isNull());
+        EXPECT_NE(reason.find("not the wall"), std::string::npos) << reason;
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesATrimByAFinInAnotherLedgesPlane)
+{
+    // Review r2's case: a front ledge (riser y 4, floor z 9.037) and a back ledge (riser y 16,
+    // floor z 9.537), both top edges dressed up 1.0 in one feature, and a fin 0.02 in front of the
+    // front riser whose top lies in the back ledge's plane. The front riser's own wall is its
+    // floor at 9.037: the fin's top isn't, so the trim is refused (it was taken for the back wall)
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 20, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 22, 5, 2).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(-1, 16, 9.537), 22, 5, 2).Shape())
+                .Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(0, 3.48, 9.037), 20, 0.5, 0.5).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    TopoShape front = edgeBetween(base, {0, 4, 10}, {20, 4, 10});
+    TopoShape back = edgeBetween(base, {0, 16, 10}, {20, 16, 10});
+    for (const auto& request : {chamfer(1), fillet(1)}) {
+        std::string reason;
+        EXPECT_TRUE(forced(base, {front, back}, request, &reason).isNull());
+        EXPECT_NE(reason.find("not the wall"), std::string::npos) << reason;
+    }
+}
+
+TEST_F(FilletFallbackTest, trimsARiserOverTwoLedgeHeightsByEachLedge)
+{
+    // Review r2's T2 without its fin: one riser (y 4) whose foot meets the ledge at z 9.037 for
+    // x 0..10 and at z 9.537 for x 10..20. The strip runs into walls on two planes; each part of
+    // the tool is trimmed by the ledge behind it. Closed forms: the base 2000 - 40 (0.963 + 0.463)
+    // less, per 10 of length, the section above its ledge (chamfer 1/2 - d^2/2, fillet
+    // (1 - pi/4) - (d - (d sqrt(1 - d^2) + asin d) / 2)), d = 0.037 and 0.537 past the foot
+    TopoDS_Shape shape = BRepAlgoAPI_Cut(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 9.037), 11, 5, 2).Shape()
+    ).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(10, -1, 9.537), 11, 5, 2).Shape())
+                .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, Standard_False, Standard_True, Standard_False);
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    // The top edge is split where the two ledges meet (x 10): both halves are dressed up
+    TopoShape left = edgeBetween(base, {0, 4, 10}, {10, 4, 10});
+    TopoShape right = edgeBetween(base, {10, 4, 10}, {20, 4, 10});
+    const double baseVolume = 2000 - 40 * (0.963 + 0.463);
+    auto filletPast = [](double d) {
+        return d - (d * std::sqrt(1 - d * d) + std::asin(d)) / 2;
+    };
+    const double chamfered = baseVolume - 10 * (0.5 - 0.037 * 0.037 / 2)
+        - 10 * (0.5 - 0.537 * 0.537 / 2);
+    const double rounded = baseVolume - 10 * ((1 - M_PI / 4) - filletPast(0.037))
+        - 10 * ((1 - M_PI / 4) - filletPast(0.537));
+    std::string reason;
+    TopoShape result = forced(base, {left, right}, chamfer(1), &reason);
+    EXPECT_TRUE(exact(result, chamfered)) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 11);
+    result = forced(base, {left, right}, fillet(1), &reason);
+    EXPECT_TRUE(exact(result, rounded)) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 11);
+}
+
+TEST_F(FilletFallbackTest, trimsADressUpPastAConcaveEdgeIntoASlopedWallByItsPlane)
+{
+    // The same strip past the riser's foot, but the tread slopes (z = 11 - y / 10): its plane isn't
+    // square to the riser, so the trim isn't the base's section swept back. The dress-up is trimmed
+    // by the tread's own plane run on behind the riser (Case Base #105's rule; it was refused): the
+    // tread grows, F stays 8. In the section (u = y - 10, z) the chamfer 5 loses its part under the
+    // tread's line, the triangle (0, 9), (0, 10), (u, 10 - u / 10) with u = 1 / 1.1. The round 5
+    // (its arc about (5, 9)) meets the line at u = 0.2 / 2.02: under the line up to there, then
+    // under the arc
+    TopoShape base(profileAlongX({{0, 0}, {20, 0}, {20, 14}, {10, 14}, {10, 10}, {0, 11}}, 30),
+                   1L);
+    const double baseVolume = 30 * 245.0;
     std::string reason;
     TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
-    EXPECT_TRUE(forced(base, {convex}, fillet(5), &reason).isNull());
-    EXPECT_NE(reason.find("runs off its face"), std::string::npos) << reason;
+    TopoShape result = forced(base, {convex}, chamfer(5), &reason);
+    EXPECT_TRUE(exact(result, baseVolume - 30 * (12.5 - 0.5 / 1.1))) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 8);
+    const double u = 0.2 / 2.02;
+    const double w = 5 - u;
+    const double underArc = 5 * w - (w / 2 * std::sqrt(25 - w * w) + 12.5 * std::asin(w / 5));
+    result = forced(base, {convex}, fillet(5), &reason);
+    EXPECT_TRUE(exact(result, baseVolume - 30 * (4 * u + 0.05 * u * u + underArc))) << reason;
+    EXPECT_EQ(count(result.getShape(), TopAbs_FACE), 8);
 }
 
 TEST_F(FilletFallbackTest, refusesATangentChainOntoUnselectedEdges)
@@ -2524,6 +3033,30 @@ TopoDS_Shape fusedStadium()
 
 }  // namespace
 
+TEST_F(FilletFallbackTest, materialInFindsWhatACutLeftInARegion)
+{
+    // ops#669: the check that a cut removed the lens two tools share, by points, not by volumes
+    const TopoDS_Shape block = box(10, 10, 10);
+    const TopoDS_Shape region = box(2, 3, 4, gp_Pnt(4, 3, 2));
+    EXPECT_FALSE(FF::materialIn(BRepAlgoAPI_Cut(block, region).Shape(), region));
+    auto left = FF::materialIn(block, region);
+    ASSERT_TRUE(left);
+    EXPECT_GT(left->X(), 4);
+    EXPECT_LT(left->X(), 6);
+    EXPECT_GT(left->Z(), 2);
+    EXPECT_LT(left->Z(), 6);
+    // Half of it removed: the point is in the half left
+    const TopoDS_Shape half = BRepAlgoAPI_Cut(block, box(2, 3, 2, gp_Pnt(4, 3, 4))).Shape();
+    left = FF::materialIn(half, region);
+    ASSERT_TRUE(left);
+    EXPECT_LT(left->Z(), 4);
+    // A lens 1e-3 thin is found; one thinner than 20 tolerances (1e-7) is not looked into
+    const TopoDS_Shape sheet = box(6, 6, 1e-3, gp_Pnt(2, 2, 5));
+    EXPECT_TRUE(FF::materialIn(block, sheet));
+    EXPECT_FALSE(FF::materialIn(BRepAlgoAPI_Cut(block, sheet).Shape(), sheet));
+    EXPECT_FALSE(FF::materialIn(block, box(6, 6, 1e-6, gp_Pnt(2, 2, 5))));
+}
+
 TEST_F(FilletFallbackTest, thinFacesOfOcctsResult)
 {
     // The fused stadium's whole top outline at r = 2: OCCT keeps the top face with area 0
@@ -2633,6 +3166,636 @@ TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
         outer.report("Chamfer"),
         "Chamfer: built by the exact construction where OCCT failed: 2 edges, 0 corners"
     );
+}
+
+// C4 shape A (ops#640, notes/fillet-tight-arc.md): the top rim's round of 1.5 on a 30 x 20 x 5
+// plate whose corner at (30, 0) is rounded rho < 1.5, the others 4. OCCT's result is valid but
+// wrong; the construction runs first. Onshape's volumes (oracle 17, TA1 and TA2) and face count
+TEST_F(FilletFallbackTest, roundAlongAWallArcTighterThanTheRound)
+{
+    for (auto [rho, onshape] : {std::pair {1.0, 2902.820914}, std::pair {0.5, 2903.543273}}) {
+        TopoShape plate(box(30, 20, 5), 1L);
+        std::vector<TopoShape> corners {
+            edgeBetween(plate, {0, 0, 0}, {0, 0, 5}),
+            edgeBetween(plate, {30, 20, 0}, {30, 20, 5}),
+            edgeBetween(plate, {0, 20, 0}, {0, 20, 5})
+        };
+        TopoShape rounded = dressUp(plate, corners, fillet(4));
+        TopoShape base = dressUp(rounded, {edgeBetween(rounded, {30, 0, 0}, {30, 0, 5})}, fillet(rho));
+        auto top = edgesWhere(base, atHeight(5));
+        ASSERT_EQ(top.size(), 8U);
+        TopoShape result = dressUp(base, top, fillet(1.5));
+        const auto& shape = result.getShape();
+        ASSERT_FALSE(shape.IsNull());
+        EXPECT_TRUE(BRepCheck_Analyzer(shape).IsValid());
+        EXPECT_EQ(count(shape, TopAbs_SOLID), 1);
+        EXPECT_FALSE(hasZeroAreaFace(shape));
+        EXPECT_NEAR(volume(shape), onshape, 1e-3) << "rho " << rho;
+        EXPECT_EQ(count(shape, TopAbs_FACE), 18) << "rho " << rho;
+        // The wall arc stays whole at depth r, a circle
+        auto arcs = edgesWhere(result, atHeight(3.5), true);
+        EXPECT_TRUE(std::any_of(arcs.begin(), arcs.end(), [rho = rho](const TopoShape& edge) {
+            return std::abs(BRepAdaptor_Curve(TopoDS::Edge(edge.getShape())).Circle().Radius() - rho)
+                < 1e-9;
+        })) << "rho "
+            << rho;
+    }
+}
+
+namespace
+{
+double area(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+}
+
+/// The concave fillet section r at the corner, filling towards +along and +up (a spandrel), in
+/// the plane those two directions span
+TopoDS_Face spandrel(const gp_Pnt& corner, const gp_Dir& along, const gp_Dir& up, double r)
+{
+    gp_Pnt onFloor = corner.Translated(gp_Vec(along) * r);
+    gp_Pnt onWall = corner.Translated(gp_Vec(up) * r);
+    gp_Pnt centre = onFloor.Translated(gp_Vec(up) * r);
+    gp_Pnt middle = centre.Translated((gp_Vec(along) + gp_Vec(up)).Normalized() * -r);
+    BRepBuilderAPI_MakeWire wire(
+        BRepBuilderAPI_MakeEdge(corner, onFloor).Edge(),
+        BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(onFloor, middle, onWall).Value()).Edge(),
+        BRepBuilderAPI_MakeEdge(onWall, corner).Edge()
+    );
+    return BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+}
+
+TopoDS_Shape fuseAll(const std::vector<TopoDS_Shape>& shapes)
+{
+    TopoDS_Shape result = shapes.front();
+    for (size_t i = 1; i < shapes.size(); ++i) {
+        result = BRepAlgoAPI_Fuse(result, shapes[i]).Shape();
+    }
+    return result;
+}
+
+/// The run's edges on the floor z = h: the concave foot edges whose midpoint passes the test
+std::vector<TopoShape> footRun(const TopoShape& base, double h, const std::function<bool(const gp_Pnt&)>& test)
+{
+    std::vector<TopoShape> result;
+    for (const auto& edge : edgesWhere(base, atHeight(h))) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edge.getShape()));
+        if (test(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2))) {
+            result.push_back(edge);
+        }
+    }
+    return result;
+}
+
+int facesOn(const TopoDS_Shape& shape, GeomAbs_SurfaceType type)
+{
+    int n = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        n += surfaceType(it.Current()) == type ? 1 : 0;
+    }
+    return n;
+}
+}  // namespace
+
+TEST_F(FilletFallbackTest, concaveRunEndingWhereItsChainTurnsConvex)
+{
+    // Nest Cover #151's topology with straight edges (oracle 17 Q-OVF v2, onshape-facts OV3): a plate
+    // 40 x 20 with its outer edge bevelled down and in, 45 deg through the whole thickness C; a stadium
+    // wall (x 10..30, y 0..T, round ends r T/2, 4 high) flush with the bevel; a fillet r T/2 on the
+    // wall's inner foot line and the round ends' feet. At (10, 0, 10) and (30, 0, 10) four edges meet,
+    // and the floor/bevel edge carries the run on tangentially but convex. OCCT's fillet runs on along
+    // it and returns a valid solid with 2 faces too many, 29 mm3 short. Onshape stops the chain there,
+    // and each end torus rolls on past the vertex, trimmed by the bevel (and the wall's outer face):
+    // V 1358.018700 (evVolume, ~1e-3), A 1923.543821, 14 faces, 34 edges, 22 vertices; 3 new faces,
+    // the tori 3.883267 each; the outer face starts at z 10.79375 at x 10 (79.246377)
+    const double c = 1.5875;
+    const double t = 1.5875;
+    const double h = 10;
+    const double r = t / 2;
+    BRepBuilderAPI_MakePolygon outline(
+        gp_Pnt(0, 0, h),
+        gp_Pnt(0, c, h - c),
+        gp_Pnt(0, 20, h - c),
+        gp_Pnt(0, 20, h),
+        Standard_True
+    );
+    TopoDS_Shape plate = BRepPrimAPI_MakePrism(
+                             BRepBuilderAPI_MakeFace(outline.Wire(), Standard_True).Face(),
+                             gp_Vec(40, 0, 0)
+    )
+                             .Shape();
+    BRepBuilderAPI_MakeWire stadium;
+    stadium.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(10, 0, h), gp_Pnt(30, 0, h)).Edge());
+    stadium.Add(BRepBuilderAPI_MakeEdge(
+                    GC_MakeArcOfCircle(gp_Pnt(30, 0, h), gp_Pnt(30 + r, r, h), gp_Pnt(30, t, h)).Value()
+    )
+                    .Edge());
+    stadium.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(30, t, h), gp_Pnt(10, t, h)).Edge());
+    stadium.Add(BRepBuilderAPI_MakeEdge(
+                    GC_MakeArcOfCircle(gp_Pnt(10, t, h), gp_Pnt(10 - r, r, h), gp_Pnt(10, 0, h)).Value()
+    )
+                    .Edge());
+    TopoDS_Shape wall
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(stadium.Wire(), Standard_True).Face(), gp_Vec(0, 0, 4))
+              .Shape();
+    TopoShape fused;
+    fused.makeElementBoolean(OpCodes::Fuse, {TopoShape(plate), TopoShape(wall)});
+    TopoShape base(fused.removeSplitter(), 1L);
+    ASSERT_EQ(base.countSubElements("Face"), 11);
+    auto run = footRun(base, h, [&](const gp_Pnt& p) {
+        return p.Y() > 1e-7 && p.Y() < t + 1e-7;
+    });
+    ASSERT_EQ(run.size(), 3);
+    // Onshape's shape by other Booleans: the line's spandrel, and each end's spandrel turned a whole
+    // turn about its axis, kept where the bevel's plane (y + z >= h) has the material
+    TopoDS_Shape fill = BRepPrimAPI_MakePrism(spandrel(gp_Pnt(10, t, h), gp::DY(), gp::DZ(), r), gp_Vec(20, 0, 0))
+                            .Shape();
+    BRepBuilderAPI_MakePolygon side(
+        gp_Pnt(-10, h / 2, h / 2),
+        gp_Pnt(-10, -25, h + 25),
+        gp_Pnt(-10, 40, h + 25),
+        gp_Pnt(-10, 40, h / 2),
+        Standard_True
+    );
+    TopoDS_Shape bevelSide
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(side.Wire(), Standard_True).Face(), gp_Vec(60, 0, 0))
+              .Shape();
+    for (double x : {10.0, 30.0}) {
+        gp_Ax1 axis(gp_Pnt(x, r, h), gp::DZ());
+        TopoDS_Shape ring = BRepPrimAPI_MakeRevol(
+                                spandrel(gp_Pnt(x - r, r, h), gp::DX().Reversed(), gp::DZ(), r),
+                                axis,
+                                2 * pi
+        )
+                                .Shape();
+        fill = BRepAlgoAPI_Fuse(fill, BRepAlgoAPI_Common(ring, bevelSide).Shape()).Shape();
+    }
+    double expected = volume(BRepAlgoAPI_Fuse(base.getShape(), fill).Shape());
+    EXPECT_NEAR(expected, 1358.018700, 2e-3);  // Onshape's evVolume
+    TopoShape result = dressUp(base, run, fillet(r));
+    EXPECT_TRUE(exact(result, expected));
+    EXPECT_NEAR(result.getShape().IsNull() ? 0.0 : area(result.getShape()), 1923.543821, 1e-5);
+    EXPECT_EQ(result.countSubElements("Face"), 14);
+    EXPECT_EQ(result.countSubElements("Edge"), 34);
+    EXPECT_EQ(result.countSubElements("Vertex"), 22);
+    EXPECT_EQ(facesOn(result.getShape(), GeomAbs_Torus), 2);
+    for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        if (surfaceType(it.Current()) == GeomAbs_Torus) {
+            EXPECT_NEAR(area(it.Current()), 3.883267, 1e-5);
+        }
+    }
+    // The inner line alone: OCCT's contour runs on the same way (tangent propagation), and the
+    // selection stops short of Onshape's chain at the round ends: never OCCT's result silently
+    std::vector<TopoShape> line;
+    for (const auto& edge : run) {
+        if (BRepAdaptor_Curve(TopoDS::Edge(edge.getShape())).GetType() == GeomAbs_Line) {
+            line.push_back(edge);
+        }
+    }
+    ASSERT_EQ(line.size(), 1);
+    EXPECT_THROW(dressUp(base, line, fillet(r)), Base::Exception);
+}
+
+TEST_F(FilletFallbackTest, concaveArcRunEndingAtAChamferCone)
+{
+    // The same on half a round plate, as Nest Cover's (#151): the plate r 20 with its rim bevelled down
+    // and in (a cone, 45 deg, C deep); on it a wall along the rim (r 20 - T .. 20, -30..30 deg, 4
+    // high) with round ends r T/2; the fillet r T/2 on its inner foot arc and the ends' feet. At each
+    // end the floor/cone rim carries the run on tangentially but convex: each end torus rolls on
+    // past the vertex, trimmed by the cone, which grows there by the tool's faces on it (3 new
+    // faces, as Onshape's 17 -> 20 on Nest Cover)
+    const double c = 1.5875;
+    const double t = 1.5875;
+    const double h = 10;
+    const double r = t / 2;
+    const double rim = 20;
+    const double half = pi / 6;
+    BRepBuilderAPI_MakePolygon outline(
+        gp_Pnt(0, 0, h),
+        gp_Pnt(rim, 0, h),
+        gp_Pnt(rim - c, 0, h - c),
+        gp_Pnt(0, 0, h - c),
+        Standard_True
+    );
+    // Half the plate (x >= 0), so the bevel is a band with ends. Debt: on the whole plate's closed
+    // band OCCT's face unifier joins the two patches the tools leave on the cone to each other and
+    // not to the band (one face with two outer wires), and the construction refuses "the result is
+    // not valid"
+    gp_Trsf toQuarter;
+    toQuarter.SetRotation(gp_Ax1(gp::Origin(), gp::DZ()), -pi / 2);
+    TopoDS_Shape plate = BRepPrimAPI_MakeRevol(
+                             BRepBuilderAPI_MakeFace(outline.Wire(), Standard_True)
+                                 .Face()
+                                 .Moved(TopLoc_Location(toQuarter)),
+                             gp_Ax1(gp::Origin(), gp::DZ()),
+                             pi
+    )
+                             .Shape();
+    BRepBuilderAPI_MakePolygon band(
+        gp_Pnt(rim - t, 0, h),
+        gp_Pnt(rim, 0, h),
+        gp_Pnt(rim, 0, h + 4),
+        gp_Pnt(rim - t, 0, h + 4),
+        Standard_True
+    );
+    gp_Trsf toStart;
+    toStart.SetRotation(gp_Ax1(gp::Origin(), gp::DZ()), -half);
+    TopoDS_Shape arc = BRepPrimAPI_MakeRevol(
+                           BRepBuilderAPI_MakeFace(band.Wire(), Standard_True).Face().Moved(TopLoc_Location(toStart)),
+                           gp_Ax1(gp::Origin(), gp::DZ()),
+                           2 * half
+    )
+                           .Shape();
+    std::vector<TopoDS_Shape> parts {plate, arc};
+    std::vector<gp_Pnt> ends;
+    for (double a : {-half, half}) {
+        gp_Pnt centre((rim - r) * std::cos(a), (rim - r) * std::sin(a), h);
+        ends.push_back(centre);
+        parts.push_back(BRepPrimAPI_MakeCylinder(gp_Ax2(centre, gp::DZ()), r, 4).Shape());
+    }
+    TopoShape fused;
+    fused.makeElementBoolean(
+        OpCodes::Fuse,
+        {TopoShape(parts[0]), TopoShape(parts[1]), TopoShape(parts[2]), TopoShape(parts[3])}
+    );
+    TopoShape base(fused.removeSplitter(), 1L);
+    int baseFaces = base.countSubElements("Face");
+    auto run = footRun(base, h, [&](const gp_Pnt& p) {
+        double radial = std::hypot(p.X(), p.Y());
+        return radial < rim - 1e-7 && radial > rim - t - 1e-7 && p.X() > 0;
+    });
+    ASSERT_EQ(run.size(), 3);
+    // Onshape's shape by other Booleans: the arc's spandrel turned about the plate's axis, and each
+    // end's a whole turn about its own, kept inside the cone (r <= rim + (z - h))
+    TopoDS_Shape fill = BRepPrimAPI_MakeRevol(
+                            spandrel(gp_Pnt(rim - t, 0, h), gp::DX().Reversed(), gp::DZ(), r)
+                                .Moved(TopLoc_Location(toStart)),
+                            gp_Ax1(gp::Origin(), gp::DZ()),
+                            2 * half
+    )
+                            .Shape();
+    TopoDS_Shape cone
+        = BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(0, 0, h - 5), gp::DZ()), rim - 5, rim + 10, 15).Shape();
+    for (const auto& centre : ends) {
+        gp_Vec out(gp::Origin(), gp_Pnt(centre.X(), centre.Y(), 0));
+        out.Normalize();
+        TopoDS_Shape ring = BRepPrimAPI_MakeRevol(
+                                spandrel(centre.Translated(out * r), gp_Dir(out), gp::DZ(), r),
+                                gp_Ax1(centre, gp::DZ()),
+                                2 * pi
+        )
+                                .Shape();
+        fill = BRepAlgoAPI_Fuse(fill, BRepAlgoAPI_Common(ring, cone).Shape()).Shape();
+    }
+    double expected = volume(BRepAlgoAPI_Fuse(base.getShape(), fill).Shape());
+    TopoShape result = dressUp(base, run, fillet(r));
+    EXPECT_TRUE(exact(result, expected));
+    EXPECT_EQ(result.countSubElements("Face"), baseFaces + 3);
+    EXPECT_EQ(facesOn(result.getShape(), GeomAbs_Torus), 3);
+}
+
+// A round that ends under an overhang (ops#640, the replica's Case Base #103). Designed model: a
+// block with its vertical corner rounded (a cylinder R tangent to both side planes), scooped by an
+// ellipsoid below z 21.225, with an opening r 7.658 above it: a 1 mm lip hangs over the scoop. The
+// scoop's edge with the corner cylinder ends under the lip, 0.024 from each tangent line.
+namespace
+{
+constexpr double lipCorner = 11.3125;
+constexpr double lipUnderside = 21.225;
+constexpr double lipRound = 0.79375;
+
+/// The block with its corner rounded, to the height given
+TopoDS_Shape roundedCornerBlock(double height)
+{
+    TopoDS_Shape block = box(40 + lipCorner, 40 + lipCorner, height, gp_Pnt(-40, -lipCorner, 0));
+    BRepAlgoAPI_Cut corner(
+        box(lipCorner, lipCorner, height, gp_Pnt(0, -lipCorner, 0)),
+        BRepPrimAPI_MakeCylinder(lipCorner, height).Shape()
+    );
+    return BRepAlgoAPI_Cut(block, corner.Shape()).Shape();
+}
+
+/// The ellipsoid: centre (6, -6, 21.667), semi-axes 8, 8, 14
+TopoDS_Shape scoopEllipsoid()
+{
+    gp_GTrsf scale;
+    scale.SetVectorialPart(gp_Mat(8, 0, 0, 0, 8, 0, 0, 0, 14));
+    scale.SetTranslationPart(gp_XYZ(6, -6, 21.667));
+    return BRepBuilderAPI_GTransform(BRepPrimAPI_MakeSphere(1.0).Shape(), scale, true).Shape();
+}
+
+/// The scooped block: with the lip (height 22.225), or cut off at the lip's underside
+TopoDS_Shape scoopedBlock(bool lip)
+{
+    if (!lip) {
+        return BRepAlgoAPI_Cut(roundedCornerBlock(lipUnderside), scoopEllipsoid()).Shape();
+    }
+    BRepAlgoAPI_Common below(scoopEllipsoid(), box(200, 200, lipUnderside + 50, gp_Pnt(-100, -100, -50)));
+    BRepAlgoAPI_Cut scooped(roundedCornerBlock(lipUnderside + 1), below.Shape());
+    BRepAlgoAPI_Cut opened(
+        scooped.Shape(),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(6, -6, lipUnderside), gp::DZ()), 7.658, 2).Shape()
+    );
+    ShapeUpgrade_UnifySameDomain unify(opened.Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+/// The edges between the scoop's free-form face and the corner's cylinder
+std::vector<TopoShape> scoopEdges(const TopoShape& shape)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<TopoShape> edges;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        bool corner = false;
+        bool scoop = false;
+        for (const auto& face : edgeFaces(i)) {
+            BRepAdaptor_Surface surface(TopoDS::Face(face));
+            if (surface.GetType() == GeomAbs_Cylinder) {
+                corner = corner || std::abs(surface.Cylinder().Radius() - lipCorner) < 1e-9;
+            }
+            else if (surface.GetType() != GeomAbs_Plane) {
+                scoop = true;
+            }
+        }
+        if (corner && scoop) {
+            edges.push_back(shape.getSubTopoShape(TopAbs_EDGE, shape.findShape(edgeFaces.FindKey(i))));
+        }
+    }
+    return edges;
+}
+}  // namespace
+
+TEST_F(FilletFallbackTest, roundEndingUnderALipIsTheRoundBelowItCutOffByItsUnderside)
+{
+    // OCCT alone: the blend faces, and the two side planes left with open boundaries
+    TopoShape base(scoopedBlock(true), 1L);
+    ASSERT_TRUE(BRepCheck_Analyzer(base.getShape()).IsValid());
+    auto edges = scoopEdges(base);
+    ASSERT_EQ(edges.size(), 2);  // the corner cylinder's seam splits the edge
+    BRepFilletAPI_MakeFillet occt(base.getShape());
+    for (const auto& edge : edges) {
+        occt.Add(lipRound, TopoDS::Edge(edge.getShape()));
+    }
+    occt.Build();
+    ASSERT_TRUE(occt.IsDone());
+    EXPECT_FALSE(BRepCheck_Analyzer(occt.Shape()).IsValid());
+    // The control: without the lip (the block cut off at the underside's height) OCCT's round is
+    // valid, and what it removes is what the round under the lip must remove
+    TopoShape control(scoopedBlock(false), 3L);
+    TopoShape below = dressUp(control, scoopEdges(control), fillet(lipRound));
+    ASSERT_TRUE(BRepCheck_Analyzer(below.getShape()).IsValid());
+    double removed = Part::MassProperties::volume(control.getShape(), true)
+        - Part::MassProperties::volume(below.getShape(), true);
+    EXPECT_GT(removed, 16.0);
+    EXPECT_LT(removed, 17.5);
+    // Under the lip: one valid solid, the same volume gone, the lip's underside grown over it
+    {
+        // The construction's own verdict: its reason where it refuses
+        std::vector<TopoDS_Shape> shapes;
+        for (const auto& edge : edges) {
+            shapes.push_back(edge.getShape());
+        }
+        FF::Construction construction;
+        std::string reason;
+        EXPECT_TRUE(FF::construct(base.getShape(), shapes, fillet(lipRound), construction, &reason))
+            << reason;
+    }
+    TopoShape round = dressUp(base, edges, fillet(lipRound));
+    EXPECT_TRUE(BRepCheck_Analyzer(round.getShape()).IsValid());
+    EXPECT_EQ(count(round.getShape(), TopAbs_SOLID), 1);
+    double gone = Part::MassProperties::volume(base.getShape(), true)
+        - Part::MassProperties::volume(round.getShape(), true);
+    // Both are differences of whole-body volumes (56 500 mm3, good to about 1e-8 of it)
+    EXPECT_NEAR(gone, removed, 2e-3);
+    // Onshape's own result on this model (oracle 17, Q-LIP, facts LP0-LP1): its round under the lip
+    // is the round without the lip cut off at z 21.225; the lip's underside grows from 8.100316
+    // to 9.120288, and two slivers of the corner cylinder, 0.474914 each, are split off in the
+    // lip's band. (Its dV is -16.72 +- 0.01; OCCT's own blend, with or without the lip, removes
+    // 16.665: the round's shape is OCCT's, not this construction's)
+    int slivers = 0;
+    bool underside = false;
+    for (TopExp_Explorer it(round.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(it.Current(), props);
+        if (surface.GetType() == GeomAbs_Cylinder
+            && std::abs(surface.Cylinder().Radius() - lipCorner) < 1e-9
+            && std::abs(props.Mass() - 0.474914) < 1e-3) {
+            ++slivers;
+        }
+        if (surface.GetType() == GeomAbs_Plane && std::abs(props.Mass() - 9.120288) < 2e-3
+            && std::abs(props.CentreOfMass().Z() - lipUnderside) < 1e-7) {
+            underside = true;
+        }
+    }
+    EXPECT_EQ(slivers, 2);
+    EXPECT_TRUE(underside);
+    // Four blend faces (the seam splits the middle one) and the corner cylinder's two slivers
+    // above them, split off; no step under the lip (the cap merges into the underside)
+    EXPECT_EQ(count(round.getShape(), TopAbs_FACE), count(base.getShape(), TopAbs_FACE) + 6);
+    EXPECT_TRUE(FF::thinFace(round.getShape(), base.getShape()).IsNull());
+    // The result is named
+    EXPECT_FALSE(elementNames(round).empty());
+}
+
+// A round on the rim that ends in cusps (the construction refused it, "an end face parallel to the
+// edge", until the line's later picks built it; batch 14c). At the END of the file: it uses area()
+// and spandrel()
+TEST_F(FilletFallbackTest, roundsARimEndingInCuspsAsOnshape)
+{
+    // CU5 (oracle 17 Q-CUSP): r 1 on the tunnel's upper half circle ending in cusps: dV -2.922055
+    // (evVolume, ~1.5e-4), dA -5.057250, 10 -> 11 faces, one torus face 20.915168, cut off by the
+    // slot's wall planes y = +-5. The other radii against the same shape by other Booleans: the
+    // round's spandrel turned a whole turn about the tunnel's axis, kept between the wall planes
+    // above the axis
+    for (const gp_Dir& seam : {gp_Dir(0, 0, -1), gp_Dir(0, 1, 0)}) {
+        for (double r : {1.0, 0.5, 2.0}) {
+            TopoShape base(cuspedSlot(seam), 1L);
+            auto rim = cuspedRim(base);
+            TopoDS_Shape ring = BRepPrimAPI_MakeRevol(
+                                    spandrel(gp_Pnt(15, 0, 15), gp::DX().Reversed(), gp::DZ(), r),
+                                    gp_Ax1(gp_Pnt(0, 0, 10), gp::DX()),
+                                    2 * pi
+            )
+                                    .Shape();
+            TopoDS_Shape slab = BRepPrimAPI_MakeBox(gp_Pnt(0, -5, 10), 30, 10, 20).Shape();
+            TopoDS_Shape tool = BRepAlgoAPI_Common(ring, slab).Shape();
+            double removed = volume(base.getShape())
+                - volume(BRepAlgoAPI_Cut(base.getShape(), tool).Shape());
+            if (r == 1.0) {
+                EXPECT_NEAR(removed, 2.922055, 3e-4);  // Onshape's
+            }
+            std::string reason;
+            TopoShape result = forced(base, rim, fillet(r), &reason);
+            if (result.isNull()) {
+                ADD_FAILURE() << "r " << r << " refused: " << reason;
+                continue;
+            }
+            int tori = 0;
+            double torusArea = 0.0;
+            for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+                if (surfaceType(it.Current()) == GeomAbs_Torus) {
+                    ++tori;
+                    torusArea += area(it.Current());
+                }
+            }
+            EXPECT_TRUE(exact(result, volume(base.getShape()) - removed)) << "r " << r;
+            EXPECT_EQ(result.countSubElements("Face"), base.countSubElements("Face") + 1) << "r " << r;
+            EXPECT_EQ(tori, 1) << "r " << r;
+            if (r == 1.0) {
+                EXPECT_NEAR(area(base.getShape()) - area(result.getShape()), 5.057250, 1e-5);
+                EXPECT_NEAR(torusArea, 20.915168, 1e-5);
+            }
+        }
+    }
+}
+
+// Case Base #163 Fillet 6 (rb164/rb166, oracle 21): a concave round between a floor and a wall, where a
+// hole through the wall dips below the round's contact line. Over the hole the round has no wall to
+// roll on; OCCT builds that stretch as a rational B-spline up to 0.03-0.06 mm off the cylinder its
+// two neighbouring stripes lie on, where Onshape keeps the one exact cylinder, trimmed by the hole.
+// Expected, geometrically: every face of the round lies on the cylinder of radius 2 along y through
+// (18, y, 7), and none is a B-spline; the topology stays OCCT's.
+TEST_F(FilletFallbackTest, roundAcrossAHoleInItsWallStaysTheCylinder)
+{
+    const double r = 2.0;
+    // {hole radius, hole centre z}: the hole's bottom between the floor (z 5) and the contact line (z 7)
+    for (auto [holeRadius, holeZ] : std::vector<std::pair<double, double>> {{4.7625, 11.4}, {3.0, 9.5}}) {
+        TopoDS_Shape block = BRepAlgoAPI_Fuse(box(20, 20, 5, gp_Pnt(0, -10, 0)), box(5, 20, 20, gp_Pnt(20, -10, 0)))
+                                 .Shape();
+        ShapeUpgrade_UnifySameDomain unify(block);
+        unify.Build();
+        TopoDS_Shape hole = BRepPrimAPI_MakeCylinder(
+                                gp_Ax2(gp_Pnt(18, 0, holeZ), gp::DX()),
+                                holeRadius,
+                                10
+        )
+                                .Shape();
+        TopoShape base(BRepAlgoAPI_Cut(unify.Shape(), hole).Shape(), 1L);
+        std::vector<TopoShape> edges {edgeBetween(base, {20, -10, 5}, {20, 10, 5})};
+        TopoShape result = dressUp(base, edges, fillet(r));
+        ASSERT_FALSE(result.isNull()) << "hole " << holeRadius;
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid()) << "hole " << holeRadius;
+        const gp_Lin axis(gp_Pnt(18, 0, 7), gp::DY());
+        int roundFaces = 0;
+        for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            Bnd_Box bounds;
+            BRepBndLib::Add(face, bounds);
+            double x1 {}, y1 {}, z1 {}, x2 {}, y2 {}, z2 {};
+            bounds.Get(x1, y1, z1, x2, y2, z2);
+            if (x1 < 18 - 1e-3 || x2 > 20 + 1e-3 || z1 < 5 - 1e-3 || z2 > 7 + 1e-3
+                || surfaceType(face) == GeomAbs_Plane) {
+                continue;  // not a face of the round
+            }
+            ++roundFaces;
+            EXPECT_NE(surfaceType(face), GeomAbs_BSplineSurface) << "hole " << holeRadius;
+            BRepAdaptor_Surface surface(face);
+            double worst = 0.0;
+            for (int i = 0; i <= 20; ++i) {
+                for (int j = 0; j <= 20; ++j) {
+                    const double u = surface.FirstUParameter()
+                        + (surface.LastUParameter() - surface.FirstUParameter()) * i / 20;
+                    const double v = surface.FirstVParameter()
+                        + (surface.LastVParameter() - surface.FirstVParameter()) * j / 20;
+                    worst = std::max(worst, std::abs(axis.Distance(surface.Value(u, v)) - r));
+                }
+            }
+            EXPECT_LT(worst, 1e-7) << "hole " << holeRadius << ": a face of the round off the cylinder";
+        }
+        EXPECT_EQ(roundFaces, 3) << "hole " << holeRadius;  // OCCT's stripes, kept
+    }
+}
+
+// Case Base #165 (ops#640): OCCT's walker failed on a tangent chain by the edge its contour was
+// seeded from. A pocket corner: walls x = 0 and y = 0, floor z = 0, both floor edges rounded r 2
+// (their mitre an ellipse), the vertical corner edge sharp up to z h, where a U-slot through the
+// x-wall (radius R, axis along X at y = R, z = h, its side the y-wall's plane) ends it with a
+// tangent arc. Rounding the ellipse and the corner edge is one tangent chain; seeded from the
+// ellipse (listed first) OCCT failed, seeded from the line it built. The selection is a set: the
+// same round either way
+TEST_F(FilletFallbackTest, tangentChainRoundsWhicheverEdgeIsListedFirst)
+{
+    const double r = 0.22;
+    const double R = 4.7625;
+    const double h = 6.4;
+    auto volumeOf = [](const TopoDS_Shape& shape) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape, props);
+        return props.Mass();
+    };
+    // Built as a Part script builds it (fillet, cut, fuse, refine): the corner edge's curve then
+    // runs against the chain from the ellipse, as in #165's input
+    const TopoShape pocket(box(20, 20, 30, gp_Pnt(-20, 0, 0)), 1L);
+    std::vector<TopoShape> floorEdges;
+    for (const auto& edge : pocket.getSubTopoShapes(TopAbs_EDGE)) {
+        Bnd_Box bounds;
+        BRepBndLib::Add(edge.getShape(), bounds);
+        double x1 {}, y1 {}, z1 {}, x2 {}, y2 {}, z2 {};
+        bounds.Get(x1, y1, z1, x2, y2, z2);
+        if (std::abs(z1) < 1e-6 && std::abs(z2) < 1e-6
+            && ((std::abs(x1) < 1e-6 && std::abs(x2) < 1e-6)
+                || (std::abs(y1) < 1e-6 && std::abs(y2) < 1e-6))) {
+            floorEdges.push_back(edge);
+        }
+    }
+    ASSERT_EQ(floorEdges.size(), 2U);
+    TopoShape tool(2L);
+    tool.makeElementFillet(pocket, floorEdges, 2.0, 2.0);
+    TopoShape cornered(3L);
+    cornered.makeElementBoolean(OpCodes::Cut, {TopoShape(box(20, 25, 20, gp_Pnt(-10, -10, -5)), 4L), tool});
+    TopoShape slot(5L);
+    slot.makeElementBoolean(
+        OpCodes::Fuse,
+        {TopoShape(BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-15, R, h), gp::DX()), R, 30).Shape(), 6L),
+         TopoShape(box(30, 2 * R, 30, gp_Pnt(-15, 0, h)), 7L)}
+    );
+    TopoShape slotted(8L);
+    slotted.makeElementBoolean(OpCodes::Cut, {cornered, slot.makeElementRefine()});
+    ASSERT_EQ(slotted.countSubShapes(TopAbs_SOLID), 1);
+    const TopoShape base = slotted.getSubTopoShape(TopAbs_SOLID, 1).makeElementRefine();
+    ASSERT_EQ(base.countSubShapes(TopAbs_FACE), 15);
+    const TopoShape ellipse = edgeBetween(base, {-2, 2, 0}, {0, 0, 2});
+    const TopoShape line = edgeBetween(base, {0, 0, 2}, {0, 0, h});
+    ASSERT_FALSE(ellipse.isNull());
+    ASSERT_FALSE(line.isNull());
+    ASSERT_EQ(BRepAdaptor_Curve(TopoDS::Edge(ellipse.getShape())).GetType(), GeomAbs_Ellipse);
+    const double baseVolume = volumeOf(base.getShape());
+    // The round adds a concave section of area r^2 (1 - pi/4) along the chain, less near its ends
+    GProp_GProps lengths;
+    BRepGProp::LinearProperties(ellipse.getShape(), lengths);
+    const double section = r * r * (1 - std::numbers::pi / 4);
+    std::vector<double> added;
+    for (const auto& edges : {std::vector<TopoShape> {ellipse, line}, std::vector<TopoShape> {line, ellipse}}) {
+        TopoShape result;
+        ASSERT_NO_THROW(result = dressUp(base, edges, fillet(r)));
+        ASSERT_FALSE(result.isNull());
+        EXPECT_TRUE(BRepCheck_Analyzer(result.getShape()).IsValid());
+        EXPECT_EQ(result.countSubShapes(TopAbs_FACE), 17);  // a round face along each edge
+        added.push_back(volumeOf(result.getShape()) - baseVolume);
+        // Along the corner edge, the round is the cylinder of radius r about the vertical line
+        // at (-r, r), in the pocket's air
+        const gp_Lin axis(gp_Pnt(-r, r, 0), gp::DZ());
+        int alongLine = 0;
+        for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+            if (surface.GetType() == GeomAbs_Cylinder
+                && std::abs(surface.Cylinder().Radius() - r) < 1e-9
+                && surface.Cylinder().Axis().IsParallel(axis.Position(), 1e-9)
+                && axis.Distance(surface.Cylinder().Location()) < 1e-9) {
+                ++alongLine;
+            }
+        }
+        EXPECT_EQ(alongLine, 1);
+    }
+    ASSERT_EQ(added.size(), 2U);
+    EXPECT_NEAR(added[0], added[1], 1e-6);  // the walker's approximation, ~2e-6 relative
+    EXPECT_GT(added[0], section * (h - 2 - 2 * r));
+    EXPECT_LT(added[0], section * (h - 2 + lengths.Mass()));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

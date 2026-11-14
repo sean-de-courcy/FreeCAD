@@ -24,9 +24,12 @@
 
 In the panel's reference list, Delete removes the selected reference, as the list's "Remove" does.
 Anywhere else it is Std_Delete, and the row's highlight selects the edge on the Body: Std_Delete
-deleted the whole Body under the open dialog. Std_Delete now leaves the object in edit and the
-groups holding it alone, and a PartDesign feature in edit doesn't leave its Body when its own
-sub-elements are deleted.
+deleted the whole Body under the open dialog. Std_Delete then left the object in edit and the
+groups holding it alone (ops#143, ops#160, ops#164). Since ops#640 (the step lock, Onshape's rule:
+with a feature dialog open the other rows take no Delete) Std_Delete is refused outright while a
+PartDesign feature's dialog is open: it reads disabled, the key does nothing, and the command run by
+name says why in the status bar. The in-edit path stays for the edits that hold no step: a Part
+primitive's panel and the sketch editor.
 
 Designed model: a 10 x 10 x 10 additive box with a dress-up on three of its edges. Keys go through
 the window (QTest's QWindow overload), so the shortcut map sees them as it sees a user's."""
@@ -41,6 +44,8 @@ import FreeCADGui as Gui
 from PySide import QtCore, QtWidgets
 from PySide6 import QtTest
 
+from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
+
 EDGES = ["Edge1", "Edge2", "Edge3"]
 
 
@@ -53,16 +58,19 @@ def pump(seconds=0.3):
 
 
 def taskButton(which):
-    """The task panel's OK or Cancel button."""
-    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
-        button = box.button(which)
-        if button is None or not button.isVisible():
+    """The task panel's OK or Cancel button (dead wrappers: TestExpressionFieldsGui.liveButtonBoxes)."""
+    for box in liveButtonBoxes():
+        try:
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        except RuntimeError:  # a box (or a parent) deleted under its wrapper: not the panel's
             continue
-        parent = box.parentWidget()
-        while parent is not None:
-            if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                return button
-            parent = parent.parentWidget()
     return None
 
 
@@ -111,6 +119,13 @@ def reportText():
 def warnings():
     """Std_Delete's "Not deleted while ... is being edited" lines in the Report view."""
     return [line for line in (reportText() or "").splitlines() if "is being edited" in line]
+
+
+def statusText():
+    """The status bar's text: MainWindow::showMessage writes to a label in it."""
+    bar = Gui.getMainWindow().statusBar()
+    labels = [label.text() for label in bar.findChildren(QtWidgets.QLabel)]
+    return " ".join([bar.currentMessage()] + labels)
 
 
 class TestDressUpDeleteKeyGui(unittest.TestCase):
@@ -299,6 +314,81 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
             modalGuard.stop()
         self.assertEqual(modals, [], "Std_Delete asked")
 
+    def testABrokenEditLeavesNoUndoStep(self):
+        """Journey J7: the box deleted, its fillet is broken. Its "Edit Fillet" command was left
+        open by a refused edit and became an undo step, so the first Undo after the delete did
+        nothing visible. A broken fillet's dialog now opens, with no modal (ops#640 rank 12, F19);
+        its Cancel leaves the undo stack as after the delete, and one Undo brings the box back."""
+        from PartDesignTests.TestExpressionFieldsGui import taskButton, waitFor
+
+        fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
+        self.doc.openTransaction("Delete")
+        self.doc.removeObject(self.box.Name)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        names = self.doc.UndoNames
+        modals = []
+
+        def closeModal():
+            modal = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(modal, QtWidgets.QMessageBox):
+                modals.append(modal.text())
+                modal.accept()
+
+        guard = QtCore.QTimer()
+        guard.timeout.connect(closeModal)
+        guard.start(50)
+        try:
+            fillet.ViewObject.doubleClicked()
+            pump(0.3)
+            self.assertEqual(modals, [])
+            self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit())
+            Gui.Control.showTaskView()
+            self.assertTrue(waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Cancel) is not None))
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+            pump(0.3)
+        finally:
+            guard.stop()
+        self.assertEqual(modals, [])
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertEqual(self.doc.UndoNames, names)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Box"), "one Undo didn't bring the box back")
+
+    def deleteRefusedInView(self, view=0):
+        """Delete with the focus in a 3D view while the feature's dialog is open: refused
+        (ops#640, the step lock; Onshape: no Delete of other rows with a dialog open). Std_Delete
+        reads disabled, so the key reaches no command, and the command run by name says why in the
+        status bar. Nothing asks (a protected object let through would open a modal box)."""
+        actions = deleteActions()
+        self.assertTrue(actions)
+        self.assertTrue(
+            waitFor(lambda: not any(action.isEnabled() for action in actions)),
+            "Std_Delete is enabled with the dialog open",
+        )
+        self.assertTrue(focus(self.view3d(view)), "the 3D view doesn't take the focus")
+        ran = []
+
+        def onTriggered(*args):
+            ran.append(True)
+
+        for action in actions:
+            action.triggered.connect(onTriggered)
+        try:
+            with self.noModal():
+                pressDelete()
+                pump(0.3)
+                self.assertEqual(ran, [], "the Delete key ran Std_Delete")
+                Gui.runCommand("Std_Delete")
+                pump(0.2)
+        finally:
+            for action in actions:
+                action.triggered.disconnect(onTriggered)
+        self.assertIn("Finish the open dialog first", statusText())
+
     def runDelete(self, done):
         """Runs Std_Delete as a command and waits until done() holds. In sketch edit the Sketcher
         handles the Delete key itself: only the command goes through the in-edit path."""
@@ -318,7 +408,8 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
 
     def testDeleteInViewKeepsBody(self):
         """An edge of the Body is selected, as the row's highlight selected it before ops#150, and
-        the focus is in the 3D view: the Body stays (it was deleted, with everything in it)."""
+        the focus is in the 3D view: the Body stays (it was deleted, with everything in it); the
+        Delete is refused (ops#640)."""
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
         refs = self.openList(fillet)
         self.field.setProperty("armed", False)  # its gate would refuse the Body
@@ -328,28 +419,25 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
             [("Body", ("Edge1",))],
         )
         undoCount = self.doc.UndoCount  # with the dialog's transaction
-        warningsBefore = len(warnings())
-        self.deleteInView()
+        self.deleteRefusedInView()
         self.checkModelIntact(fillet)
         self.assertEqual(self.rows(refs), EDGES)
         self.assertEqual(fillet.Base[1], EDGES)
         self.assertEqual(self.doc.UndoCount, undoCount)
-        self.assertWarned(warningsBefore, self.body)
 
     def deleteInEdit(self, feature, sub=""):
-        """Selects the feature in edit (or a sub-element of it) and presses Delete in the 3D view."""
+        """Selects the feature in edit (or a sub-element of it) and presses Delete in the 3D view:
+        refused (ops#640)."""
         Gui.getDocument(self.doc.Name).setEdit(feature.Name)
         pump(0.5)
         self.assertTrue(Gui.Control.activeDialog())
         undoCount = self.doc.UndoCount  # with the dialog's transaction
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, feature.Name, sub)
-        warningsBefore = len(warnings())
-        self.deleteInView()
+        self.deleteRefusedInView()
         self.checkModelIntact(feature)
         self.assertEqual(feature.Base[1], EDGES)
         self.assertEqual(self.doc.UndoCount, undoCount)
-        self.assertWarned(warningsBefore, feature)
 
     def testDeleteEditedFeatureKeepsIt(self):
         """The fillet in edit, selected: not deleted under its dialog."""
@@ -361,7 +449,8 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         self.deleteInEdit(self.makeDressUp("PartDesign::Fillet", Radius=1), "Edge3")
 
     def testDeleteOtherObjectInEdit(self):
-        """Objects outside the edited one's Body are still deleted while it's in edit."""
+        """An object outside the edited one's Body, while it's in edit: not deleted either
+        (ops#640, Onshape: no Delete of other rows with a dialog open; it was deleted before)."""
         other = self.doc.addObject("Part::Box", "Other")
         self.doc.recompute()
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
@@ -369,14 +458,14 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         pump(0.5)
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(other)
-        self.deleteInView()
-        self.assertIsNone(self.doc.getObject("Other"))
+        self.deleteRefusedInView()
+        self.assertIsNotNone(self.doc.getObject("Other"), "the other object was deleted")
         self.checkModelIntact(fillet)
 
     def testDeleteEditedSubElementAndOtherObject(self):
-        """An edge of the fillet in edit and another object: the other object is deleted, and the
-        fillet stays, with a warning (ops#160). The edge took the in-edit path, which handed it to
-        the fillet and skipped the rest of the selection: nothing deleted, nothing said."""
+        """An edge of the fillet in edit and another object: neither is deleted, and the refusal
+        is said (ops#640; ops#160 deleted the other object and warned about the fillet; before
+        it the edge took the in-edit path and nothing was deleted or said)."""
         other = self.doc.addObject("Part::Box", "Other")
         self.doc.recompute()
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
@@ -385,16 +474,14 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, fillet.Name, "Edge3")
         Gui.Selection.addSelection(other)
-        warningsBefore = len(warnings())
-        self.deleteInView()
-        self.assertIsNone(self.doc.getObject("Other"), "the other object wasn't deleted")
+        self.deleteRefusedInView()
+        self.assertIsNotNone(self.doc.getObject("Other"), "the other object was deleted")
         self.checkModelIntact(fillet)
         self.assertEqual(fillet.Base[1], EDGES)
-        self.assertWarned(warningsBefore, fillet)
 
     def testDeleteContainersInEdit(self):
         """The Body, and an App::Part and a plain group holding it, stay while the fillet is in
-        edit."""
+        edit: the Delete is refused (ops#640)."""
         group = self.doc.addObject("App::DocumentObjectGroup", "Group")
         part = self.doc.addObject("App::Part", "Part")
         part.addObject(self.body)
@@ -406,18 +493,16 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         for container in (self.body, part, group):
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(container)
-            warningsBefore = len(warnings())
-            self.deleteInView()
+            self.deleteRefusedInView()
             for name in ("Group", "Part"):
                 self.assertIsNotNone(self.doc.getObject(name), f"{name} deleted")
             self.checkModelIntact(fillet)
-            self.assertWarned(warningsBefore, container)
         self.assertEqual(self.doc.UndoCount, undoCount)
 
     def testDeleteEditRootInEdit(self):
         """The fillet edited through a Link to its Body (Link.Fillet): the Link, and a group
-        holding it, stay while it's in edit (ops#160). Deleting the Link reset the edit under the
-        open dialog."""
+        holding it, stay while it's in edit (ops#160; refused since ops#640). Deleting the Link
+        reset the edit under the open dialog."""
         group = self.doc.addObject("App::DocumentObjectGroup", "LinkGroup")
         link = self.doc.addObject("App::Link", "Link")
         link.LinkedObject = self.body
@@ -434,19 +519,18 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         for container in (link, group):
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(container)
-            warningsBefore = len(warnings())
-            self.deleteInView()
+            self.deleteRefusedInView()
             for name in ("Link", "LinkGroup"):
                 self.assertIsNotNone(self.doc.getObject(name), f"{name} deleted")
             self.checkModelIntact(fillet)
             self.assertIsNotNone(guiDoc.getInEdit(), "the edit was reset")
-            self.assertWarned(warningsBefore, container)
         self.assertEqual(self.doc.UndoCount, undoCount)
 
     def testDeleteBodyFromSecondView(self):
         """The fillet in edit in one 3D view, the Body selected and Delete pressed in a second view
-        of the document: the Body stays (ops#164). getInEdit() is null while another view is
-        active, so the guard saw no edit and the Body was deleted under the dialog."""
+        of the document: the Body stays (ops#164; refused since ops#640). getInEdit() is null
+        while another view is active, so the guard saw no edit and the Body was deleted under the
+        dialog."""
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
         guiDoc = Gui.getDocument(self.doc.Name)
         self.view3d(0)
@@ -463,11 +547,9 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
             undoCount = self.doc.UndoCount  # with the dialog's transaction
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(self.body)
-            warningsBefore = len(warnings())
-            self.deleteInView(view=1)
+            self.deleteRefusedInView(view=1)
             self.checkModelIntact(fillet)
             self.assertEqual(self.doc.UndoCount, undoCount)
-            self.assertWarned(warningsBefore, self.body)
         finally:
             # tearDown resets the edit only where getInEdit() sees it, in the edit's own view
             views = self.views3d()

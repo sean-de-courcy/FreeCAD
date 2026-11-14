@@ -240,11 +240,11 @@ class TestFillet(unittest.TestCase):
                 self._assertBaseKept(first, tolerances)
 
     def testFilletAroundRoundedCorners(self):
-        # The shape of the report: a block 2a x 2a x h with its vertical corners filleted
-        # (radius R), then a small fillet (radius r) on one bottom edge. The bottom edges and the
-        # corner arcs are tangent, so the fillet runs around the whole bottom; along each arc
-        # the section turns about the corner's axis (Pappus).
-        a, h, R, r = 50.8, 22.225, 11.3125, 1.5875
+        # A block 2a x 2a x h with its vertical corners filleted (radius R), then a small fillet
+        # (radius r) on one bottom edge. The bottom edges and the corner arcs are tangent, so the
+        # fillet runs around the whole bottom; along each arc the section turns about the
+        # corner's axis (Pappus). Volumes 198283.185307, then 198099.349866.
+        a, h, R, r = 50.0, 20.0, 10.0, 1.5
         body = self.Doc.addObject("PartDesign::Body", "Body")
         box = self._add_box(body, 2 * a, 2 * a, h, (-a, -a, 0))
         corners = [
@@ -276,6 +276,39 @@ class TestFillet(unittest.TestCase):
         self._assertValidFillet(fillet, 30 * 4 * 20 - 2 * self._fillet_section(2.0) * 30)
         # One quarter cylinder per edge; refined, they merge into one half cylinder
         self.assertEqual(len(fillet.Shape.Faces), 6 if fillet.Refine else 7)
+
+    def testFilletFullRoundOfAWallFlushWithItsBase(self):
+        # ops#640 F1 (the replica's row 150): a curved wall's end flush with its base's end, the two
+        # left as faces in one plane, so four edges meet at the foot of each rounded edge. The
+        # feature builds the full round at half the wall: FR1's section over the wall's height
+        shape, edges = models.curved_wall_on_base()
+        _, removed, side = models.wall_end_round(10, 11.5, 4)
+        fillet = self._fillet_on_base(shape, edges, 0.75)
+        self._assertValidFillet(fillet, shape.Volume - removed)
+        self.assertAlmostEqual(fillet.Shape.Area, shape.Area - side, places=5)
+        # Refined, as Onshape's: the base's faces without its splits, and one half cylinder
+        self.assertTrue(fillet.Refine)
+        self.assertEqual(len(fillet.Shape.Faces), len(shape.removeSplitter().Faces) + 1)
+
+    def testFilletFullRoundOfAWallFlushOnAChamferedRim(self):
+        # ops#640 (the replica's #150): a wall's outer face flush with a plate's chamfered rim, so
+        # four edges and four faces meet at each outer foot, the rim's cone one of them. The
+        # feature builds FR1's round at each end of the wall and leaves the plate as it was
+        shape, edges, inner, outer = models.wall_on_a_chamfered_rim()
+        _, removed, _ = models.wall_end_round(inner, outer, 4.0)
+        fillet = self._fillet_on_base(shape, edges, (outer - inner) / 2)
+        self._assertValidFillet(fillet, shape.Volume - 2 * removed)
+        below = Part.makeBox(40, 40, 1.5, FreeCAD.Vector(-20, -20, -1.5))
+        self.assertAlmostEqual(
+            fillet.Shape.common(below).Volume, shape.common(below).Volume, places=6
+        )
+        # The closed form of FilletFallbackTest.WallOnAChamferedRimTest: faces 13 -> 13,
+        # A 1281.195348 -> 1276.034170, the cone's area 68.309325 unchanged
+        result = fillet.Shape
+        self.assertEqual(len(result.Faces), 13)
+        self.assertAlmostEqual(result.Area, 1276.034170, delta=1e-6 * 1276.034170)
+        cone = sum(f.Area for f in result.Faces if f.Surface.TypeId == "Part::GeomCone")
+        self.assertAlmostEqual(cone, 68.309325, delta=1e-6 * 68.309325)
 
     # Results that the full check rejects too (ops#12): the base is a 10 mm cube with a fin, a
     # face hanging inward at 45 degrees from the front bottom edge, so that three faces meet at
@@ -408,6 +441,34 @@ class TestFillet(unittest.TestCase):
         ]
         self._assertFails(self._fillet_on_base(base, edges, 2.65))
 
+    def testRoundOnASplineSupportIsTheBallsContact(self):
+        # ops#640, decision 425: a round is the surface a ball of its radius sweeps while it
+        # touches both walls. On a twisted B-spline lid OCCT's fillet (a circle in the plane
+        # normal to the edge) is 3.6e-3 off that, and its seams 0.07. The corpus model
+        # RoundOnSpline states the contact in closed form and raises when it is missed
+        from PartDesignTests.Compat import models  # first: it imports models_partdesign
+        from PartDesignTests.Compat import models_partdesign as corpus
+
+        models.MODELS["RoundOnSpline"](FreeCAD.newDocument)
+        document = FreeCAD.getDocument("RoundOnSpline")
+        self.addCleanup(FreeCAD.closeDocument, "RoundOnSpline")
+        fillet = document.getObject("RimRound")
+        self.assertTrue(fillet.isValid())
+        self.assertTrue(fillet.Shape.isValid())
+        self.assertEqual(len(fillet.Shape.Faces), 10)
+        faces, ball, seam, seams = corpus.roundOnSplineContact(
+            fillet, corpus.ROUND_ON_SPLINE_TWIST, corpus.ROUND_ON_SPLINE_RADIUS, grid=33
+        )
+        self.assertEqual((faces, seams), (4, 4))
+        self.assertLess(ball, 1e-6)
+        self.assertLess(seam, 1e-6)
+        # The round takes less than the plane-normal circle's: between the stadium's prism
+        # under the lid (its volume is 20 times the stadium's area: x y integrates to zero)
+        # and that prism less a quarter-round bead of the rim's length
+        prism = 20 * (40 * 20 + pi * 100)
+        self.assertLess(fillet.Shape.Volume, prism)
+        self.assertGreater(fillet.Shape.Volume, prism - 2 * (1 - pi / 4) * 1.5**2 * (80 + 20 * pi))
+
     def testFilletWholeOutlineOfAStadium(self):
         # ops#298: OCCT "succeeds" on a stadium's whole top outline at r = 2 (half its width),
         # keeping the top face with area 0; the exact construction builds the full round. Just
@@ -505,7 +566,9 @@ class TestFillet(unittest.TestCase):
         dressed = block.cut(models.front_top_removed("Fillet", 2.5))
         dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
         expected = dressed.cut(block.cut(base)).Volume
-        self.assertAlmostEqual(expected, 745.816371, delta=1e-5)
+        # The adaptive readout of the B-spline dimple (SC7, ops#640): OCCT's default read 745.816371;
+        # meshes at deflections 1e-3 to 3e-5 tend to 745.81636, both within 2e-5
+        self.assertAlmostEqual(expected, 745.816341, delta=1e-5)
         if fillet.isValid():
             self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
         else:
@@ -525,7 +588,9 @@ class TestFillet(unittest.TestCase):
         dressed = block.cut(models.outer_floor_removed("Fillet", 2.5))
         dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
         expected = dressed.cut(block.cut(base)).Volume
-        self.assertAlmostEqual(expected, 947.961856, delta=1e-5)
+        # The adaptive readout (SC7, ops#640): OCCT's default read 947.961856, 5e-4 under the
+        # meshes' limit (deflections 1e-3 to 1e-4: 947.96246, .96240, .96239)
+        self.assertAlmostEqual(expected, 947.962368, delta=1e-5)
         if fillet.isValid():
             self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
         else:

@@ -1579,12 +1579,17 @@ TEST_F(MoveProperty, moveHandlerThrows)
 
 // Tests whether a property added to an object created in the transaction, moved out and back
 // and then removed with that object leaves nothing behind (review of fork PR 222: the removed
-// object got a transaction entry again, which undo and abort read after it was freed)
+// object got a transaction entry again, which undo and abort read after it was freed). That alone
+// changes no input, and a transaction that changes none leaves no undo step (f98c47ed90, an OK that
+// changed nothing, as Onshape): a label set in it makes it a step, so undo and redo still go
+// through the removed object's entries (ops#652)
 TEST_F(MoveProperty, movedBackIntoRemovedCreatedObject)
 {
     ErrorCollector errors;
+    const std::string label = varSet1Doc1->Label.getValue();
     for (const bool commit : {false, true}) {
         doc1->openTransaction("Move Property");
+        varSet1Doc1->Label.setValue("Renamed in the step");
         auto* source = doc1->addObject("App::VarSet", "Source");
         auto* added = freecad_cast<App::PropertyInteger*>(
             source->addDynamicProperty("App::PropertyInteger", "Extra", "Variables")
@@ -1604,11 +1609,14 @@ TEST_F(MoveProperty, movedBackIntoRemovedCreatedObject)
         EXPECT_EQ(doc1->getObject("Source"), nullptr);
         EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"}));
         EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>());
+        EXPECT_EQ(varSet1Doc1->Label.getValue(), label);
         if (commit) {
             EXPECT_TRUE(doc1->redo());
             EXPECT_EQ(doc1->getObject("Source"), nullptr);
             EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>());
+            EXPECT_STREQ(varSet1Doc1->Label.getValue(), "Renamed in the step");
             EXPECT_TRUE(doc1->undo());
+            EXPECT_EQ(varSet1Doc1->Label.getValue(), label);
         }
     }
     EXPECT_EQ(errors.errors, std::vector<std::string>());

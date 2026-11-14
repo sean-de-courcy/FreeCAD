@@ -51,6 +51,42 @@ tooltip = QT_TRANSLATE_NOOP(
     "</ul>",
 )
 
+# FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio's tab name (App::DocumentTabs)
+IMPLICIT_STUDIO = UtilsAssembly.IMPLICIT_STUDIO
+
+
+def typedTabsOn():
+    """Whether the typed tabs are on (the Onshape keymap, Gui::DocumentTabs::isOn)."""
+    return hasattr(Gui, "DocumentTabs") and Gui.DocumentTabs.isOn() and hasattr(App, "DocumentTabs")
+
+
+def onshapeKeymap():
+    """Whether the fork's Onshape keymap is the active one (Gui::ForkKeymap::isOnshape)."""
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return general.GetString("Keymap", "Onshape") != "FreeCAD"
+
+
+def instanceLabel(assembly, source):
+    """FreeCAD-CH (ops#640 round 10, gap A27): Onshape's instance name, "<source> <N>" ("Part 1
+    <1>", "Part 1 <2>", "Part Studio 2 <1>"), N the lowest number no instance of the source in this
+    assembly reads. Labels are unique in a document unless the preference allows duplicates: a
+    number another assembly's instance reads is taken too, where Onshape counts per assembly."""
+    base = source.Label
+    taken = set()
+    pattern = re.compile(re.escape(base) + r" <(\d+)>$")
+    for obj in assembly.Group:
+        match = pattern.match(obj.Label)
+        if match:
+            taken.add(int(match.group(1)))
+    duplicates = App.ParamGet("User parameter:BaseApp/Preferences/Document").GetBool(
+        "DuplicateLabels", False
+    )
+    doc = assembly.Document
+    n = 1
+    while n in taken or (not duplicates and doc.getObjectsByLabel(f"{base} <{n}>")):
+        n += 1
+    return f"{base} <{n}>"
+
 
 class CommandGroupInsert:
     def GetCommands(self):
@@ -206,11 +242,17 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         self.form.partList.clear()
         self.doc_item_map.clear()
 
-        docList = App.listDocuments().values()
+        docList = list(App.listDocuments().values())
         if len(docList) > 20:
             collapse = True
         else:
             collapse = False
+
+        # FreeCAD-CH (ops#640 round 7, gap A16): with the typed tabs, this document first
+        studioTabs = typedTabsOn()
+        if studioTabs and self.doc in docList:
+            docList.remove(self.doc)
+            docList.insert(0, self.doc)
 
         for doc in docList:
             # Create a new tree item for the document
@@ -249,6 +291,8 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 
                     if UtilsAssembly.isMergedPart(obj):
                         continue  # FreeCAD-CH (ops#325): a part merged into another is in that one
+                    if UtilsAssembly.isConsumedPart(obj):
+                        continue  # FreeCAD-CH (ops#654 P6a): a Boolean consumed it (ghost part)
 
                     if (
                         obj.isDerivedFrom("Part::Feature")
@@ -286,13 +330,55 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                             process_objects(obj.ViewObject.claimChildren(), objItem)
 
             guiDoc = Gui.getDocument(doc.Name)
-            process_objects(guiDoc.TreeRootObjects, docItem)
+            if studioTabs and doc == self.doc:
+                self.addStudioItems(doc, docItem, guiDoc.TreeRootObjects, process_objects)
+            else:
+                process_objects(guiDoc.TreeRootObjects, docItem)
             if collapse:
                 self.form.partList.collapseAll()
             else:
                 self.form.partList.expandToDepth(0)
 
         self.adjustTreeWidgetSize()
+
+    def addStudioItems(self, doc, docItem, rootObjects, process_objects):
+        """FreeCAD-CH (ops#640 round 7, gap A16): this document's Part Studios first, by tab name
+        and in tab order, each a row that inserts the whole studio (Onshape's "Insert entire Part
+        Studio"), its parts below it; then the other root objects (assemblies...) as before.
+
+        A studio that is an App::Part inserts as one link, which follows the studio. The implicit
+        studio (the top level, "Part Studio 1" of an old file) is a heading only: its parts insert
+        one by one, as before round 7 (R7A-3: a rigid group of per-part links wouldn't follow the
+        parts added, deleted or moved later, as Onshape's whole-studio instance does; debt).
+
+        A studio that uses the assembly (a part on a binder of the assembly's face) is not offered
+        whole, as Insert skips such an object (R7A-2): the link would close a cycle. A heading with
+        nothing left to insert below it is dropped."""
+        users = self.assembly.InListRecursive
+        listed = set()
+        for name, kind, label in App.DocumentTabs.tabs(doc):
+            if kind != "PartStudio":
+                continue
+            studioItem = QtGui.QTreeWidgetItem(docItem)
+            studioItem.setText(0, label)
+            if name == IMPLICIT_STUDIO:
+                members = [obj for obj in rootObjects if App.DocumentTabs.tabOf(obj) == name]
+                studioItem.setIcon(0, QIcon(":/icons/PartDesign_Body.svg"))
+                process_objects(members, studioItem)
+                listed.update(obj.Name for obj in members)
+            else:
+                studio = doc.getObject(name)
+                studioItem.setIcon(0, studio.ViewObject.Icon)
+                usesAssembly = studio in users or any(
+                    obj in users for obj in studio.ViewObject.claimChildrenRecursive()
+                )
+                if not usesAssembly:
+                    studioItem.setData(0, QtCore.Qt.UserRole, studio)
+                process_objects(studio.ViewObject.claimChildren(), studioItem)
+                listed.add(name)
+            if studioItem.childCount() == 0 and not studioItem.data(0, QtCore.Qt.UserRole):
+                docItem.removeChild(studioItem)
+        process_objects([obj for obj in rootObjects if obj.Name not in listed], docItem)
 
     def adjustTreeWidgetSize(self):
         # Adjust the height of the part list based on item count
@@ -407,6 +493,10 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 print(selectedPart.Document.Name)
                 documentItem.setText(0, f"{newDocName}.FCStd")"""
 
+        self.insertLink(selectedPart, item)
+
+    def insertLink(self, selectedPart, item):
+        """Inserts a link to selectedPart for the list's row item and returns it."""
         if selectedPart.isDerivedFrom("Assembly::AssemblyObject"):
             objType = "Assembly::AssemblyLink"
         else:
@@ -422,6 +512,9 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 
         addedObject.LinkedObject = selectedPart
         addedObject.Label = selectedPart.Label  # non-ASCII characters fails with newObject. #12164
+        if onshapeKeymap():
+            # Onshape's instance name (ops#640 round 10)
+            addedObject.Label = instanceLabel(self.assembly, selectedPart)
         addedObject.recompute()
 
         insertionDict = {}
@@ -468,36 +561,14 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         if len(self.insertionStack) == 1 and not UtilsAssembly.isAssemblyGrounded():
             self.handleFirstInsertion()
 
+        return addedObject
+
     def handleFirstInsertion(self):
+        # FreeCAD-CH (ops#640, rank 60; Onshape hands-on E4): the first instance is not fixed and
+        # nothing asks: the joints solve without a grounded part (AssemblyObject::solve). Toggle
+        # Grounded fixes a part; the preference's 'Always' still grounds the first one.
         pref = Preferences.preferences()
-        fixPart = False
-        fixPartPref = pref.GetInt("GroundFirstPart", 0)
-        if fixPartPref == 0:  # unset
-            msgBox = QtWidgets.QMessageBox()
-            msgBox.setWindowTitle("Ground Part?")
-            msgBox.setText(
-                "Do you want to ground the first inserted part automatically?\nYou need at least one grounded part in your assembly."
-            )
-            msgBox.setIcon(QtWidgets.QMessageBox.Question)
-
-            yesButton = msgBox.addButton("Yes", QtWidgets.QMessageBox.YesRole)
-            noButton = msgBox.addButton("No", QtWidgets.QMessageBox.RejectRole)
-            yesAlwaysButton = msgBox.addButton("Always", QtWidgets.QMessageBox.YesRole)
-            noAlwaysButton = msgBox.addButton("Never", QtWidgets.QMessageBox.NoRole)
-
-            msgBox.exec_()
-
-            clickedButton = msgBox.clickedButton()
-            if clickedButton == yesButton:
-                fixPart = True
-            elif clickedButton == yesAlwaysButton:
-                fixPart = True
-                pref.SetInt("GroundFirstPart", 1)
-            elif clickedButton == noAlwaysButton:
-                pref.SetInt("GroundFirstPart", 2)
-
-        elif fixPartPref == 1:  # Yes always
-            fixPart = True
+        fixPart = pref.GetInt("GroundFirstPart", 0) == 1
 
         if fixPart:
             # Create groundedJoint.

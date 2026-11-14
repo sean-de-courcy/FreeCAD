@@ -8,9 +8,12 @@
 #include <map>
 #include <string>
 
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QPointer>
 #include <QWidget>
+
+#include <FCConfig.h>
 
 #include <App/Application.h>
 
@@ -143,7 +146,9 @@ const Entry table[] = {
     {"Sketcher_ConstrainPerpendicular", "Shift+L"},
     {"Sketcher_ConstrainTangent", "T"},
     {"Sketcher_ConstrainSymmetric", "Shift+Q"},
+    {"Sketcher_ConstrainMidpoint", "Shift+M"},  // ops#645
     {"Sketcher_ConstrainBlock", "Shift+J"},
+    {"Sketcher_ConstrainConcentric", "Shift+O"},  // ops#640, rank 44 (C-5)
     {"Sketcher_ConstrainCoincident", ""},
     {"Sketcher_ConstrainPointOnObject", ""},
     {"Sketcher_ConstrainDistanceX", ""},
@@ -208,6 +213,9 @@ const Entry table[] = {
     {"Sketcher_RectangularArray", ""},
     {"Sketcher_RemoveAxesAlignment", ""},
     {"Sketcher_Rotate", ""},
+    {"Sketcher_CircularPattern", ""},
+    {"Sketcher_LinearPattern", ""},
+    {"Sketcher_EditPattern", ""},
     {"Sketcher_Scale", ""},
     {"Sketcher_SwitchVirtualSpace", ""},
     // Other workbenches' chords starting with an Onshape key: once such a workbench is loaded, the
@@ -321,7 +329,10 @@ const Entry table[] = {
     // always enabled once Assembly has loaded, sketch edit included, where it took the O of
     // Sketcher_Offset (or made it wait the chord timeout). Assembly's other commands are disabled
     // while a task dialog is open (a sketch in edit has one), so their letters meet no fork key.
-    {"Assembly_CreateJointFixed", ""},
+    // Onshape's m opens Mate: the Fixed joint (Fastened) takes M from Perpendicular (ops#640
+    // rank 60)
+    {"Assembly_CreateJointFixed", "M"},
+    {"Assembly_CreateJointPerpendicular", ""},
     {"Assembly_SolveAssembly", ""},
     {"Assembly_CreateJointScrew", ""},
     {"Assembly_CreateJointRigidGroup", ""},
@@ -334,6 +345,15 @@ const Entry table[] = {
     {"FEM_PostFilterGlyph", ""},
     {"Robot_InsertWaypoint", ""},
     {"Robot_InsertWaypointPreselect", ""},
+};
+
+// The Mac's keys where the table's differ (isMac()): Shift+Option+letter types a character there
+// (Shift+Option+V is a lozenge), so the selection filters take Control+Shift, Qt's Meta+Shift
+const Entry macTable[] = {
+    {"Part_VertexSelection", "Meta+Shift+V"},
+    {"Part_EdgeSelection", "Meta+Shift+E"},
+    {"Part_FaceSelection", "Meta+Shift+F"},
+    {"Part_RemoveSelectionGate", "Meta+Shift+C"},
 };
 
 // The draw styles' and the Part selection filters' actions (CommandView.cpp, Part's
@@ -370,6 +390,29 @@ const Entry* find(const char* name)
     }();
     auto it = index.find(name);
     return it == index.end() ? nullptr : it->second;
+}
+
+const Entry* findMac(const char* name)
+{
+    auto it = std::find_if(std::begin(macTable), std::end(macTable), [name](const Entry& entry) {
+        return std::strcmp(entry.name, name) == 0;
+    });
+    return it == std::end(macTable) ? nullptr : &*it;
+}
+
+bool readMac()
+{
+#ifdef FC_OS_MACOSX
+    return true;
+#else
+    return preferenceGroup()->GetBool("KeymapMacKeys", false);
+#endif
+}
+
+bool& mac()
+{
+    static bool value = readMac();
+    return value;
 }
 
 bool readPreference()
@@ -430,6 +473,11 @@ const char* accel(const char* name)
         return nullptr;
     }
     const Entry* entry = find(name);
+    if (entry && mac()) {
+        if (const Entry* own = findMac(name)) {
+            return own->key;
+        }
+    }
     return entry ? entry->key : nullptr;
 }
 
@@ -477,10 +525,12 @@ void actionCreated(Command* cmd)
 void reload()
 {
     bool value = readPreference();
-    if (value == onshape()) {
+    bool macValue = readMac();
+    if (value == onshape() && macValue == mac()) {
         return;
     }
     onshape() = value;
+    mac() = macValue;
 
     auto& manager = Application::Instance->commandManager();
     auto shortcuts = ShortcutManager::instance();
@@ -537,6 +587,24 @@ void reload()
     if (MainWindow* mainWindow = getMainWindow()) {
         mainWindow->updateActions(true);
     }
+}
+
+bool isMac()
+{
+    return mac();
+}
+
+bool isDeleteKey(const QKeyEvent* event)
+{
+    if (!event || (event->modifiers() & ~Qt::KeypadModifier) != Qt::NoModifier) {
+        return false;
+    }
+    return event->key() == Qt::Key_Delete || (event->key() == Qt::Key_Backspace && mac());
+}
+
+Qt::KeyboardModifier toolKeyModifier(char letter)
+{
+    return letter == 'M' && mac() ? Qt::MetaModifier : Qt::ControlModifier;
 }
 
 }  // namespace Gui::ForkKeymap

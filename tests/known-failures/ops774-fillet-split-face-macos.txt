@@ -1,0 +1,8 @@
+# With the reference solver, a fillet on a face a later slot splits, moved below the slot, fails with
+# "Missing face reference" (candidates at 0.5 mm) instead of taking both pieces with a warning. Seen on the
+# Mac (lx6, mac batch 1, feat/patterns-finish 0b9bf5a852); the draft twin passes. Remove with ops#774's fix.
+
+issue: ops#774
+
+reason: the fillet comes back invalid with Base ['?Face1', '?Face16'] for the slot's front pieces Face1, Face8
+cli  PartDesignTests.TestBodyReorder.TestBodyReorderV2s.testFilletOnASplitFaceTakesBothPieces     macos

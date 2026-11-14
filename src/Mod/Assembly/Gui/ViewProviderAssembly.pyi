@@ -51,6 +51,53 @@ class ViewProviderAssembly(ViewProvider):
         Restores the visual state of all components, clearing any active isolation.
         """
         ...
+
+    # FreeCAD-CH (ops#640, C8): the triad's typed moves
+    def getTriadHandle(self) -> str:
+        """
+        The triad handle of the last drag: "None", "TranslateX", "TranslateY", "TranslateZ",
+        "RotateX", "RotateY", "RotateZ" or "Plane".
+        """
+        ...
+
+    def getTriadValue(self) -> float:
+        """The distance (mm) or angle (degrees) the last arrow or ring drag moved from its start."""
+        ...
+
+    def getTriadPlacement(self) -> Any:
+        """The triad's exact placement (global)."""
+        ...
+
+    def applyTriadValue(self, text: str, /) -> bool:
+        """
+        Type a value into the triad's box: the last drag becomes exactly that distance or angle
+        from where it started, in one undo step. False if the text doesn't evaluate.
+        """
+        ...
+
+    def isTriadBoxOpen(self) -> bool:
+        """Whether the triad's value box is open."""
+        ...
+
+    def closeTriadBox(self) -> None:
+        """Close the triad's value box, keeping the move."""
+        ...
+
+    def dragTriad(self, handle: str, placement: Any, /) -> None:
+        """
+        A drag of the triad's @handle (as getTriadHandle names it) that ends with the triad at
+        @placement (global): the dragger's start, motion and finish steps, without the mouse.
+        """
+        ...
+
+    def moveTriadOriginTo(self, point: Any, subName: str = "", /) -> None:
+        """
+        Moves the triad alone to @point (global), on the assembly's axes, as Alt+click on a point
+        does: the parts stay, and a ring then turns them about the point. With @subName (under the
+        assembly, the element included, e.g. "Box.Edge3") the point snaps to that edge's end when
+        close to one, as the Transform dialog's pick does.
+        """
+        ...
     EnableMovement: bool
     """Enable moving the parts by clicking and dragging."""
 

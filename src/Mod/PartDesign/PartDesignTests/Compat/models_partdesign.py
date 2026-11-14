@@ -686,6 +686,241 @@ def IndexToldGroups(make):
     }
 
 
+ROUND_ON_SPLINE_TWIST = 0.02
+ROUND_ON_SPLINE_RADIUS = 1.5
+
+
+def twistedLid(twist):
+    """The face z = 20 + twist x y over x -45..45, y -25..25, as a bicubic B-spline."""
+    x, y = 45.0, 25.0
+    surface = Part.BSplineSurface()
+    poles = [
+        [V(-x, -y, 20 + twist * x * y), V(-x, y, 20 - twist * x * y)],
+        [V(x, -y, 20 - twist * x * y), V(x, y, 20 + twist * x * y)],
+    ]
+    surface.buildFromPolesMultsKnots(poles, [2, 2], [2, 2], [0, 1], [0, 1], False, False, 1, 1)
+    surface.increaseDegree(3, 3)
+    return surface.toShape()
+
+
+def roundOnSplineContact(fillet, twist, radius, grid=17):
+    """How far the rim round of `RoundOnSpline` is from the ball's contact, in closed form (no
+    kernel distance): (blend faces, ball residual, seam residual, seams).
+
+    A round of radius r is the surface a ball of radius r sweeps while it touches both walls.
+    For a point p of a blend face with outward normal n the ball's centre is c = p - r n, and
+    it must be at distance r from the lid z = 20 + twist x y and from the stadium's side wall
+    (the planes y = -10 and y = 10 for |x| <= 20, else the cylinders of radius 10 about
+    x = -20 and x = 20). The ball residual is the largest | distance - r | over a grid on
+    every blend face. Two blend faces meet where the ball's contact crosses a tangent line
+    x = +-20, y = +-10 of the wall: there the centre is at (+-20, +-(10 - r), z) with z at
+    distance r below the lid, and the seam is that ball's circle. The seam residual is the
+    largest | distance from that centre - r | along the four seams."""
+
+    def lidDistance(a, b, h):
+        x, y = a, b
+        for _ in range(50):
+            g = 20 + twist * x * y - h
+            fx = (x - a) + g * twist * y
+            fy = (y - b) + g * twist * x
+            fxx = 1 + twist * twist * y * y
+            fyy = 1 + twist * twist * x * x
+            fxy = g * twist + twist * twist * x * y
+            det = fxx * fyy - fxy * fxy
+            dx = (fx * fyy - fy * fxy) / det
+            dy = (fy * fxx - fx * fxy) / det
+            x -= dx
+            y -= dy
+            if abs(dx) + abs(dy) < 1e-15:
+                break
+        return math.sqrt((x - a) ** 2 + (y - b) ** 2 + (20 + twist * x * y - h) ** 2)
+
+    def wallDistance(a, b):
+        return 10 - abs(b) if abs(a) <= 20 else 10 - math.hypot(abs(a) - 20, b)
+
+    def isBlend(face):
+        if isinstance(face.Surface, Part.Plane):
+            return False
+        if isinstance(face.Surface, Part.Cylinder) and abs(face.Surface.Radius - 10) < 1e-9:
+            return False
+        return face.Area < 500  # the lid is over 1000
+
+    blends = [f for f in fillet.Shape.Faces if isBlend(f)]
+    ball = 0.0
+    for face in blends:
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(grid):
+            for j in range(grid):
+                u = u0 + (u1 - u0) * (i + 0.5) / grid
+                v = v0 + (v1 - v0) * (j + 0.5) / grid
+                c = face.valueAt(u, v) - face.normalAt(u, v) * radius
+                ball = max(
+                    ball,
+                    abs(lidDistance(c.x, c.y, c.z) - radius),
+                    abs(wallDistance(c.x, c.y) - radius),
+                )
+    seamEdges = [
+        e
+        for e in fillet.Shape.Edges
+        if sum(1 for f in blends if any(e.isSame(x) for x in f.Edges)) == 2
+    ]
+    seam = 0.0
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            a, b = 20.0 * sx, (10.0 - radius) * sy
+            low, high = 0.0, 20 + twist * a * b
+            for _ in range(200):
+                middle = (low + high) / 2
+                if lidDistance(a, b, middle) > radius:
+                    low = middle
+                else:
+                    high = middle
+            centre = V(a, b, (low + high) / 2)
+            if not seamEdges:
+                continue
+            seam = max(
+                seam,
+                min(
+                    max(abs((p - centre).Length - radius) for p in e.discretize(25))
+                    for e in seamEdges
+                ),
+            )
+    return len(blends), ball, seam, len(seamEdges)
+
+
+def RoundOnSpline(make):
+    """A round on a B-spline support (ops#640, decision 425: a round is the rolling ball's
+    surface, also where the kernel's own fillet is not).
+
+    A Part feature's face, the twisted lid z = 20 + 0.02 x y (a bicubic B-spline). Body: a
+    SubShapeBinder of the lid; a stadium on the XY plane (the lines y = -10 and y = 10 for x
+    -20..20, half circles of radius 10 about (-20, 0) and (20, 0)) padded up to the binder's
+    face (UpToShape), so the Pad's top is the B-spline; a Fillet of radius 1.5 round the
+    top's whole rim (five edges: the half cylinder about x = 20 is cut at its seam, so its
+    rim is two edges): four blend faces in one closed chain, meeting on the wall's four
+    tangent lines. The lid's normal turns about the rim, so a circle swept in the plane
+    normal to the edge is off the ball by 3.6e-3 and its seams by 0.07.
+
+    The expected result is the ball's contact, in closed form (`roundOnSplineContact`): every
+    blend face within 1e-6 of it, and each seam the ball's circle where the contact crosses a
+    tangent line of the wall."""
+    twist, radius = ROUND_ON_SPLINE_TWIST, ROUND_ON_SPLINE_RADIUS
+    doc = make("RoundOnSpline")
+    lid = doc.addObject("Part::Feature", "TwistedLid")
+    lid.Shape = twistedLid(twist)
+    body = newBody(doc, "Body")
+    binder = body.newObject("PartDesign::SubShapeBinder", "LidBinder")
+    binder.Support = [(lid, ("Face1",))]
+    stadium = [
+        Part.LineSegment(V(-20, -10, 0), V(20, -10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(20, 0, 0), TOP, 10), -math.pi / 2, math.pi / 2),
+        Part.LineSegment(V(20, 10, 0), V(-20, 10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(-20, 0, 0), TOP, 10), math.pi / 2, 3 * math.pi / 2),
+    ]
+    pad = body.newObject("PartDesign::Pad", "StadiumPad")
+    pad.Profile = attachedSketch(body, "StadiumSketch", plane(body, "XY_Plane"), stadium)
+    pad.Type = "UpToShape"
+    pad.UpToShape = (binder, ["Face1"])
+    pad.Refine = False
+    doc.recompute()
+    top = [f for f in pad.Shape.Faces if isinstance(f.Surface, Part.BSplineSurface)]
+    if len(top) != 1:
+        raise AssertionError(f"StadiumPad has {len(top)} B-spline faces, expected its top")
+    rim = [
+        f"Edge{i + 1}"
+        for i, e in enumerate(pad.Shape.Edges)
+        if any(e.isSame(x) for x in top[0].Edges)
+    ]
+    if len(rim) != 5:
+        raise AssertionError(f"the top's rim has {len(rim)} edges, expected five")
+    fillet = body.newObject("PartDesign::Fillet", "RimRound")
+    fillet.Base = (pad, rim)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    faces, ball, seam, seams = roundOnSplineContact(fillet, twist, radius)
+    if (faces, seams) != (4, 4):
+        raise AssertionError(f"RimRound has {faces} blend faces and {seams} seams, expected 4 and 4")
+    if ball > 1e-6 or seam > 1e-6:
+        raise AssertionError(
+            f"RimRound is off the ball's contact by {ball:.3g} (seams {seam:.3g}), allowed 1e-6"
+        )
+    return {"volumes": {}}
+
+
+def bossTops(shape, z):
+    """The (x, y) centres of the shape's 6 x 6 planar faces facing +z at height z, sorted."""
+    return sorted(
+        (round(f.CenterOfMass.x, 6), round(f.CenterOfMass.y, 6))
+        for f in shape.Faces
+        if isinstance(f.Surface, Part.Plane)
+        and abs(f.CenterOfMass.z - z) < 1e-6
+        and abs(f.Area - 36) < 1e-6
+    )
+
+
+def FacePatternCentered(make):
+    """Face patterns with Centered and a second direction (ops#655, ops#640; Onshape's rule,
+    notes/patterns-design.md section 10: Centered counts per side, the seed included, so count n
+    makes 2n - 1 instances along that direction).
+
+    Two Bodies, each a 60 x 30 x 10 plate (x -30..30, y 0..30) with a 6 x 6 boss, 5 high, at its
+    centre (x -3..3, y 12..18), patterned by its faces (the boss's top and four sides):
+    - `Row`: a face linear pattern along the X axis, spacing 15, count 2, Centered: three bosses,
+      centres x -15, 0, 15 at y 15;
+    - `Grid`: the same along X, and a second direction along the Y axis, spacing 10, count 2,
+      Centered2: a 3 x 3 grid, centres x -15, 0, 15 by y 5, 15, 25 (the bosses 4 apart in y)."""
+    doc = make("FacePatternCentered")
+    plate = 60 * 30 * 10
+    boss = 6 * 6 * 5
+    expected = {
+        "Row": [(x, 15) for x in (-15, 0, 15)],
+        "Grid": sorted((x, y) for x in (-15, 0, 15) for y in (5, 15, 25)),
+    }
+    volumes = {}
+    for name, centres in expected.items():
+        body = newBody(doc, name + "Body")
+        pad = block(body, -30, 0, 30, 30, 10, name + "Plate")
+        doc.recompute()
+        top = faceWhere(pad.Shape, planeFacing(TOP, V(0, 0, 10)))
+        seed = m.pad(
+            body,
+            attachedSketch(body, name + "BossSketch", (pad, top), m.rectangle(-3, 12, 3, 18)),
+            5,
+            name + "Boss",
+        )
+        doc.recompute()
+        picks = [
+            f"Face{i + 1}"
+            for i, f in enumerate(seed.Shape.Faces)
+            if -3 - 1e-6 <= f.CenterOfMass.x <= 3 + 1e-6
+            and 12 - 1e-6 <= f.CenterOfMass.y <= 18 + 1e-6
+            and 10 + 1e-3 <= f.CenterOfMass.z <= 15 + 1e-6
+        ]
+        if len(picks) != 5:
+            raise AssertionError(f"{name}: {len(picks)} boss faces, expected 5")
+        pattern = body.newObject("PartDesign::FaceLinearPattern", name)
+        pattern.Base = (seed, picks)
+        pattern.Direction = (plane(body, "X_Axis"), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 15
+        pattern.Occurrences = 2
+        pattern.Centered = True
+        if name == "Grid":
+            pattern.Direction2 = (plane(body, "Y_Axis"), [""])
+            pattern.Mode2 = "Spacing"
+            pattern.Offset2 = 10
+            pattern.Occurrences2 = 2
+            pattern.Centered2 = True
+        body.Tip = pattern
+        doc.recompute()
+        found = bossTops(pattern.Shape, 15)
+        if found != sorted(centres):
+            raise AssertionError(f"{name}: boss tops at {found}, expected {sorted(centres)}")
+        volumes[name] = plate + len(centres) * boss
+    return {"volumes": volumes}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -699,4 +934,6 @@ MODELS = [
     BodyFromFeature,
     Binders,
     IndexToldGroups,
+    RoundOnSpline,
+    FacePatternCentered,
 ]

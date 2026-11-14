@@ -39,6 +39,12 @@
 
 using namespace PartDesignGui;
 
+namespace PartDesignGui
+{
+// Utils.cpp's (no header names it)
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+}
+
 DlgActiveBody::DlgActiveBody(QWidget* parent, App::Document*& doc, const QString& infoText)
     : QDialog(parent)
     , ui(new Ui_DlgActiveBody)
@@ -53,7 +59,8 @@ DlgActiveBody::DlgActiveBody(QWidget* parent, App::Document*& doc, const QString
         ui->label->setText(infoText + QStringLiteral("\n\n") + tr("Select an active body"));
     }
 
-    auto bodies = _doc->getObjectsOfType(PartDesign::Body::getClassTypeId());
+    // FreeCAD-CH (R6T-1): under the typed tabs only the Bodies of the active view's tab
+    auto bodies = tabBodies(_doc, nullptr);
 
     PartDesign::Body* bodyOfActiveObject = nullptr;
     for (const auto& obj : Gui::Selection().getSelection()) {

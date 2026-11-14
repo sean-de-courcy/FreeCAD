@@ -37,6 +37,7 @@
 #include "Application.h"
 #include "ElementNamingUtils.h"
 #include "ComplexGeoDataPy.h"
+#include "ConfigurationHooks.h"
 #include "Document.h"
 #include "DocumentObserver.h"
 #include "GeoFeatureGroupExtension.h"
@@ -499,6 +500,15 @@ App::DocumentObjectExecReturn* LinkBaseExtension::extensionExecute()
         linked = getTrueLinkedObject(true);
         if (!linked) {
             return new App::DocumentObjectExecReturn("Error in processing variable link");
+        }
+
+        // FreeCAD-CH ops#671: a Link of a configured part studio shows the studio's active
+        // configuration; until it can show its own, a difference is its error
+        {
+            const std::string why = callConfigReaderCheck(container, linked);
+            if (!why.empty()) {
+                return new App::DocumentObjectExecReturn(why);
+            }
         }
 
         PropertyPythonObject* proxy = nullptr;

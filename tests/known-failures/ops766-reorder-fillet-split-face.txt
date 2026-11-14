@@ -1,0 +1,8 @@
+# After the slot is moved before the fillet, the fillet's reference to the split front face is left
+# unresolved ('?Face1', '?Face16' where 'Face1', 'Face8' are expected). On the experiment line at
+# a065c9942f and after; not bisected. Remove this file when ops#766 fixes it.
+
+issue: ops#766
+
+reason: the fillet's face reference is unresolved after the reorder (the line's own, seen on a065c9942f)
+cli  PartDesignTests.TestBodyReorder.TestBodyReorderV2s.testFilletOnASplitFaceTakesBothPieces

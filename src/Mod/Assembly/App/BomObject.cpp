@@ -46,6 +46,12 @@
 
 #include "AssemblyObject.h"
 #include "AssemblyLink.h"
+
+namespace PartDesign
+{
+// PartDesign/App/StudioList.cpp (FreeCAD-CH ops#654 P6a; declared where used)
+PartDesignExport const App::DocumentObject* studioConsumerOf(const Body* body, int index);
+}  // namespace PartDesign
 #include "BomObject.h"
 #include "BomObjectPy.h"
 
@@ -213,8 +219,14 @@ void BomObject::addObjectChildrenToBom(
             continue;
         }
 
-        // A part merged into another is in that one (FreeCAD-CH ops#325, design 2.6)
-        if (PartDesign::Boolean::mergeOf(child)) {
+        // A part merged into another is in that one (FreeCAD-CH ops#325, design 2.6); a part a
+        // Boolean consumed is no part (ops#640 rank 28; ops#654 P6a: in a listed studio, at its
+        // bar), as Onshape deletes it
+        if (PartDesign::Boolean::mergeOf(child) || PartDesign::Boolean::consumerOf(child)) {
+            continue;
+        }
+        if (auto body = freecad_cast<PartDesign::Body*>(child);
+            body && PartDesign::studioConsumerOf(body, -1)) {
             continue;
         }
 

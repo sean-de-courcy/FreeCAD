@@ -24,6 +24,9 @@
  ***************************************************************************/
 
 
+#include <QPointer>
+#include <Standard_Failure.hxx>
+
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/Origin.h>
@@ -35,6 +38,7 @@
 #include <Gui/Document.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/WaitCursor.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/Tools.h>
 #include <Gui/ViewProviderCoordinateSystem.h>
 #include <Gui/Inventor/Draggers/SoLinearDragger.h>
@@ -71,6 +75,59 @@ QString helixTaskTitle(PartDesignGui::ViewProviderHelix* view)
     return isSubtractiveHelix(view) ? TaskHelixParameters::tr("Subtractive Helix Parameters")
                                     : TaskHelixParameters::tr("Additive Helix Parameters");
 }
+
+// What a Helix's profile takes (ops#640 rank 21, as a Revolve's): a sketch or other 2D object,
+// whole or by its regions or edges, or planar faces of the solid before. `why`: the refusal
+bool acceptHelixProfile(
+    const App::DocumentObject* feature,
+    const App::DocumentObject* base,
+    App::DocumentObject* obj,
+    const char* sub,
+    std::string& why
+)
+{
+    if (!obj) {
+        return false;
+    }
+    if (obj == feature) {
+        why = QT_TR_NOOP("The feature can't be its own profile.");
+        return false;
+    }
+    const std::string element(sub ? sub : "");
+    auto startsWith = [&element](const char* prefix) {
+        return element.rfind(prefix, 0) == 0;
+    };
+    if (obj->isDerivedFrom<Part::Part2DObject>()) {
+        if (element.empty() || startsWith("Edge") || startsWith("Face")
+            || startsWith("InternalFace") || startsWith("Wire")) {
+            return true;
+        }
+        why = QT_TR_NOOP("Pick the sketch, its regions or its edges.");
+        return false;
+    }
+    if (obj == base && startsWith("Face")) {
+        auto feat = freecad_cast<Part::Feature*>(obj);
+        try {
+            const Part::TopoShape face(
+                feat ? feat->Shape.getShape().getSubShape(element.c_str(), /*silent=*/true)
+                     : TopoDS_Shape()
+            );
+            if (!face.isNull() && face.isPlanar()) {
+                return true;
+            }
+        }
+        catch (const Base::Exception&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+        why = QT_TR_NOOP("Pick a planar face.");
+        return false;
+    }
+    why = QT_TR_NOOP("Pick a sketch, its regions or edges, or faces of the solid.");
+    return false;
+}
+
+const QString profileFieldName = QStringLiteral("fieldProfile");
 }  // namespace
 
 TaskHelixParameters::TaskHelixParameters(PartDesignGui::ViewProviderHelix* HelixView, QWidget* parent)
@@ -85,6 +142,58 @@ TaskHelixParameters::TaskHelixParameters(PartDesignGui::ViewProviderHelix* Helix
     initializeHelix();
 
     assignProperties();
+    // The Profile field (ops#640 rank 21), built here: the panel's header is another area's
+    [this]() {
+        // The profile on top, as a Revolve's (ops#640 rank 21): with nothing preselected the dialog
+        // opens with it armed (the first empty required field), a preselected sketch fills it
+        ReferenceField::Options profile;
+        profile.kind = ReferenceField::Kind::Profile;
+        profile.target = [this]() -> App::DocumentObject* {
+            auto helix = getObject<PartDesign::ProfileBased>();
+            return helix ? helix->getBaseObject(/*silent=*/true) : nullptr;
+        };
+        App::DocumentObjectT featureT(getObject());
+        profile.accept = [featureT](App::DocumentObject* obj, const char* sub, std::string& why) {
+            auto helix = freecad_cast<PartDesign::ProfileBased*>(featureT.getObject());
+            App::DocumentObject* base = helix ? helix->getBaseObject(/*silent=*/true) : nullptr;
+            return acceptHelixProfile(helix, base, obj, sub, why);
+        };
+        profile.noDependents = true;
+        profile.label = tr("Profile");
+        profile.kinds = tr("A sketch, its regions or edges, or faces of the solid");
+        auto self = std::make_shared<QPointer<ReferenceField>>();
+        auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+            auto helix = getObject<PartDesign::Helix>();
+            if (!helix) {
+                return;
+            }
+            if (!subs.empty() && !helix->AllowMultiFace.getValue()) {
+                helix->AllowMultiFace.setValue(true);
+            }
+            if (*self) {
+                (*self)->assign(obj, subs);
+            }
+            // A new Helix's first profile: pitch and height from the profile, as at creation
+            if (!helix->HasBeenEdited.getValue()) {
+                try {
+                    helix->proposeParameters();
+                    setValuesFromProperties();
+                }
+                catch (const Base::Exception& e) {
+                    e.reportException();
+                }
+            }
+            // The axis box lists the new sketch's axes
+            fillAxisCombo(true);
+            recomputeFeature();
+            updateUI();
+            TaskResultParameters::profileTaken(getObject());  // ops#640, round 3: where it opens
+        };
+        auto field = new ReferenceField(getObject(), "Profile", profile, write, proxy);
+        *self = field;
+        field->setObjectName(profileFieldName);
+        ui->verticalLayout->insertWidget(0, field);
+    }();
     createAxisField();
     setValuesFromProperties();
 
@@ -103,11 +212,19 @@ TaskHelixParameters::TaskHelixParameters(PartDesignGui::ViewProviderHelix* Helix
 void TaskHelixParameters::initializeHelix()
 {
     auto helix = getObject<PartDesign::Helix>();
-    if (!(helix->HasBeenEdited).getValue()) {
-        helix->proposeParameters();
+    // A new Helix with no profile yet waits for its pick (ops#640 rank 21): its parameters are
+    // proposed once the Profile field has one
+    if (!(helix->HasBeenEdited).getValue() && helix->Profile.getValue()) {
+        try {
+            helix->proposeParameters();
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+        }
         recomputeFeature();
     }
 }
+
 
 void TaskHelixParameters::assignProperties()
 {
@@ -197,7 +314,14 @@ void TaskHelixParameters::showCoordinateAxes()
             vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
                 Gui::Application::Instance->getViewProvider(origin)
             );
-            vpOrigin->setTemporaryVisibility(Gui::DatumElement::Axes);
+            // A new part studio's planes stay shown, during the dialog and after it (ops#626,
+            // ops#640 rank 52), as Onshape's default planes do
+            const bool studioPlanes = vpOrigin->isTemporaryVisibility();
+            setProperty("studioPlanes", studioPlanes);
+            vpOrigin->setTemporaryVisibility(
+                studioPlanes ? Gui::DatumElement::Axes | Gui::DatumElement::Planes
+                             : Gui::DatumElement::Axes
+            );
         }
         catch (const Base::Exception& ex) {
             ex.reportException();
@@ -251,10 +375,16 @@ void TaskHelixParameters::createAxisField()
 
 std::vector<ReferenceField*> TaskHelixParameters::referenceFields() const
 {
-    if (axisCombo && axisCombo->field()) {
-        return {axisCombo->field()};
+    std::vector<ReferenceField*> fields;
+    // The profile (ops#640 rank 21), found by name: the panel's header is another area's
+    auto profile = proxy->findChild<ReferenceField*>(profileFieldName, Qt::FindDirectChildrenOnly);
+    if (profile) {
+        fields.push_back(profile);
     }
-    return {};
+    if (axisCombo && axisCombo->field()) {
+        fields.push_back(axisCombo->field());
+    }
+    return fields;
 }
 
 void TaskHelixParameters::onReferenceSelectionTaken()
@@ -354,10 +484,9 @@ void TaskHelixParameters::adaptVisibilityToMode()
     bool isAngleVisible = false;
     bool isGrowthVisible = false;
 
-    auto helix = getObject<PartDesign::Helix>();
-    if (helix->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive) {
-        isOutsideVisible = true;
-    }
+    // No Outside box: the Result row's Intersect is the same (Operation "Common"), on every helix
+    // (ops#640 rank 20); the box wrote only the deprecated Outside, which a reopen made the
+    // Operation
 
     HelixMode mode = static_cast<HelixMode>(propMode->getValue());
     if (mode == HelixMode::pitch_height_angle) {
@@ -573,6 +702,11 @@ TaskHelixParameters::~TaskHelixParameters()
                 Gui::Application::Instance->getViewProvider(origin)
             );
             vpOrigin->resetTemporaryVisibility();
+            // as SketchWorkflow's showStudioPlanes() (ops#626, rank 52)
+            if (property("studioPlanes").toBool()) {
+                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+                vpOrigin->setPlaneLabelVisibility(true);
+            }
         }
     }
     catch (const Base::Exception& ex) {

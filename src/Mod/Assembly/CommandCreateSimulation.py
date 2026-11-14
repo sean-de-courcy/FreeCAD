@@ -1013,13 +1013,13 @@ class TaskAssemblyCreateSimulation(QtCore.QObject):
     def eventFilter(self, watched, event):
         if self.form is not None and watched == self.form.motionList:
             if event.type() == QtCore.QEvent.ShortcutOverride:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     event.accept()
                     return True  # Indicate that the event has been handled
                 return False
 
             elif event.type() == QtCore.QEvent.KeyPress:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     self.deleteSelectedMotions()
                     return True  # Consume the event
 

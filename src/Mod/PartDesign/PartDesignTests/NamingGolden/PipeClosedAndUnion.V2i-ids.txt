@@ -104,7 +104,7 @@ Face c=(0.3142,0.0000,29.9446) m=0.1128 : ~f1agercuc6nms|_;_;24;FUS;0;F;0of2;MOD
 Face c=(0.3142,0.0000,29.9446) m=0.1128 : ~f1agercuc6nms|_;_;24;FUS;0;F;1of2;MOD,ORD;_
 Face c=(1.0000,0.0000,14.8237) m=59.2947 : ~klv3kc5d6t0jq|_;_;24;FUS;0;F;0;MOD;~oeckgbdlce68e,~sa77evnd7qpis,~7rksutq7vpcn8
 Face c=(1.0000,0.0000,29.8237) m=0.0886 : ~klv3kc5d6t0jq|_;_;24;FUS;0;F;0;MOD;_
-Face c=(10.3503,0.0000,28.1759) m=31.6568 : ~a60q9k1t1hvmc|_;_;24;FUS;0;F;0;MOD;~vmr7mm4jti2g6,~4nko2u2k781vq
+Face c=(10.3508,0.0000,28.1758) m=31.5938 : ~a60q9k1t1hvmc|_;_;24;FUS;0;F;0;MOD;~vmr7mm4jti2g6,~4nko2u2k781vq
 Face c=(10.8481,0.0000,28.2635) m=40.0000 : _;~qo7l2rdp33eig,~7rksutq7vpcn8;24;PSH;0;F;0;GEN;_
 Face c=(27.3564,0.0000,21.5270) m=40.0000 : _;~3sqocjbfcp7h4,~78v28sjjqeeme;24;PSH;0;F;0;GEN;_
 Face c=(28.3564,0.0000,21.5270) m=38.7546 : _;~3sqocjbfcp7h4,~flro0rk1rig2i;24;PSH;0;F;0;GEN;_

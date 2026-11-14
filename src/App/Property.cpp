@@ -32,6 +32,7 @@
 #include <CXX/Objects.hxx>
 
 #include "Property.h"
+#include "ElementSolverEdits.h"
 #include "ObjectIdentifier.h"
 #include "PropertyContainer.h"
 
@@ -285,6 +286,9 @@ bool Property::isNotifyEnabled() const
 void Property::touch()
 {
     PropertyCleaner guard(this);
+    // A placement digest folds the value (ops#640): here, since a container's onChanged() may
+    // return early (a frozen object's) and notifying may be off
+    forgetPlacementDigestOf(father);
     if (father && isNotifyEnabled()) {
         father->onEarlyChange(this);
         father->onChanged(this);
@@ -300,6 +304,8 @@ void Property::setReadOnly(bool readOnly)
 void Property::hasSetValue()
 {
     PropertyCleaner guard(this);
+    // As in touch() (ops#640)
+    forgetPlacementDigestOf(father);
     if (father) {
         if (isNotifyEnabled()) {
             father->onChanged(this);
@@ -360,6 +366,11 @@ void Property::setStatusValue(unsigned long status)
         static unsigned long _signalMask = (1 << ReadOnly) | (1 << Hidden);
         if ((status & _signalMask) != (oldStatus & _signalMask)) {
             father->onPropertyStatusChanged(*this, oldStatus);
+        }
+        // A placement digest leaves out outputs and transients by their status, a change of which
+        // signals nothing (ops#640)
+        if (status != oldStatus) {
+            forgetPlacementDigestOf(father);
         }
     }
 }

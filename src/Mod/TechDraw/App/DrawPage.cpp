@@ -33,6 +33,7 @@
 #include "DrawPage.h"
 #include "DrawPagePy.h" // generated from DrawPagePy.xml
 #include "DrawProjGroup.h"
+#include "DrawSVGTemplate.h"
 #include "DrawTemplate.h"
 #include "DrawView.h"
 #include "DrawViewBalloon.h"
@@ -104,7 +105,11 @@ void DrawPage::onChanged(const App::Property* prop)
     }
     else if (prop == &Template) {
         if (!isRestoring() && !isUnsetting()) {
-            //nothing to page to do??
+            // The page takes its template's projection: ISO first angle, ANSI third (rank 11)
+            auto* svg = freecad_cast<DrawSVGTemplate*>(Template.getValue());
+            if (const char* angle = svg ? svg->projectionAngle() : nullptr) {
+                ProjectionType.setValue(angle);
+            }
         }
     }
     else if (prop == &Scale) {

@@ -40,12 +40,17 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <Geom_Circle.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <Standard_Version.hxx>
@@ -72,18 +77,150 @@
 #include <Mod/Part/App/Tools.h>
 
 #include "FeatureHole.h"
+#include "StudioOwner.h"
 #include "nlohmann/json.hpp"
 
 #include <numbers>
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true);
 
+namespace
+{
+// A hole's start types: the profile-based ones and Onshape's "Start from part" ("Part"), appended
+// so saved files read the same (FreeCAD-CH ops#640, rank 23)
+const char* HoleStartTypesEnums[] = {"Profile plane", "Offset", "Reference", "Part", nullptr};
+
+// The centres Hole::findHoles() places holes at: the profile's circles' and arcs' centres and its
+// points, as BaseProfileType filters them
+std::vector<gp_Pnt> holeCentres(const Part::TopoShape& profile, int baseProfileType)
+{
+    using Options = PartDesign::Hole::BaseProfileTypeOptions;
+    std::vector<gp_Pnt> centres;
+    if ((baseProfileType & Options::OnCircles) || (baseProfileType & Options::OnArcs)) {
+        for (const auto& sub : profile.getSubTopoShapes(TopAbs_EDGE)) {
+            BRepAdaptor_Curve adaptor(TopoDS::Edge(sub.getShape()));
+            if (adaptor.GetType() != GeomAbs_Circle) {
+                continue;
+            }
+            const bool closed = adaptor.IsClosed();
+            if ((closed && !(baseProfileType & Options::OnCircles))
+                || (!closed && !(baseProfileType & Options::OnArcs))) {
+                continue;
+            }
+            centres.push_back(adaptor.Circle().Location());
+        }
+    }
+    if (baseProfileType & Options::OnPoints) {
+        for (const auto& sub : profile.getSubTopoShapes(TopAbs_VERTEX, TopAbs_EDGE)) {
+            centres.push_back(BRep_Tool::Pnt(TopoDS::Vertex(sub.getShape())));
+        }
+    }
+    return centres;
+}
+
+// Where the line through `from` along `dir` crosses the faces of `solid`: its parameters (the
+// distance along `dir`, negative behind `from`), ascending, each once
+std::vector<double> axisCrossings(const TopoDS_Shape& solid, const gp_Pnt& from, const gp_Dir& dir)
+{
+    std::vector<double> params;
+    Bnd_Box box;
+    BRepBndLib::Add(solid, box);
+    if (box.IsVoid()) {
+        return params;
+    }
+    // past every point of the box: the distance to one corner plus the diagonal
+    const double reach = from.Distance(box.CornerMin()) + std::sqrt(box.SquareExtent()) + 1.0;
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(solid, Precision::Confusion());
+    intersector.Perform(gp_Lin(from, dir), -reach, reach);
+    if (!intersector.IsDone()) {
+        return params;
+    }
+    for (int i = 1; i <= intersector.NbPnt(); ++i) {
+        params.push_back(intersector.WParameter(i));
+    }
+    std::ranges::sort(params);
+    const auto same = [](double a, double b) {
+        return std::fabs(a - b) <= Precision::Confusion();
+    };
+    params.erase(std::unique(params.begin(), params.end(), same), params.end());
+    return params;
+}
+
+// Start from part (Onshape's default): the distance along `dir` from the profile plane to where
+// the part begins ahead of it on the hole axes, the earliest of the holes'. A centre in or on the
+// part starts at the plane (a sketch on the part's face, or inside the part), and so does one
+// whose axis meets no part ahead: never behind the plane, so a hole drilled away from the part
+// doesn't start at the part's far face (E-fix review)
+double startFromPart(
+    const Part::TopoShape& base,
+    const std::vector<gp_Pnt>& centres,
+    const gp_Dir& dir
+)
+{
+    if (base.isNull() || base.countSubShapes(TopAbs_SOLID) == 0) {
+        return 0.0;
+    }
+    std::optional<double> first;
+    BRepClass3d_SolidClassifier classifier(base.getShape());
+    for (const gp_Pnt& centre : centres) {
+        classifier.Perform(centre, Precision::Confusion());
+        if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
+            return 0.0;
+        }
+        for (double param : axisCrossings(base.getShape(), centre, dir)) {
+            if (param >= -Precision::Confusion()) {
+                first = first ? std::min(*first, param) : param;
+                break;
+            }
+        }
+    }
+    return first.value_or(0.0);
+}
+
+// Up to next: the distance along `dir` from the profile plane to the face where the part's
+// material on the hole axis first ends, the deepest of the holes' (they share one prototype);
+// none when no axis runs through material
+std::optional<double> upToNext(
+    const Part::TopoShape& base,
+    const std::vector<gp_Pnt>& centres,
+    const gp_Dir& dir
+)
+{
+    if (base.isNull()) {
+        return std::nullopt;
+    }
+    std::optional<double> deepest;
+    BRepClass3d_SolidClassifier classifier(base.getShape());
+    for (const gp_Pnt& centre : centres) {
+        double previous = 0.0;
+        for (double param : axisCrossings(base.getShape(), centre, dir)) {
+            if (param <= Precision::Confusion()) {
+                continue;
+            }
+            // the stretch before this crossing in material: this crossing is where it ends
+            const gp_Pnt middle = centre.Translated(gp_Vec(dir) * ((previous + param) / 2.0));
+            classifier.Perform(middle, Precision::Confusion());
+            if (classifier.State() == TopAbs_IN) {
+                deepest = deepest ? std::max(*deepest, param) : param;
+                break;
+            }
+            previous = param;
+        }
+    }
+    return deepest;
+}
+}  // namespace
+
 namespace PartDesign
 {
 
 /* TRANSLATOR PartDesign::Hole */
 
-const char* Hole::DepthTypeEnums[] = {"Dimension", "ThroughAll", /*, "UpToFirst", */ nullptr};
+// Onshape's terminations: Blind (Dimension), Through all, Up to next (UpToFirst), Up to entity
+// (UpToFace, the feature's UpToFace link); appended, so saved files read the same (FreeCAD-CH
+// ops#640, rank 23)
+const char* Hole::DepthTypeEnums[] = {"Dimension", "ThroughAll", "UpToFirst", "UpToFace", nullptr};
 const char* Hole::ThreadDepthTypeEnums[] = {"Hole Depth", "Dimension", "Tapped (DIN76)", nullptr};
 const char* Hole::ThreadTypeEnums[] = {
     "None",
@@ -664,7 +801,7 @@ Hole::Hole()
         "Which profile feature to base the holes on"
     );
     ADD_PROPERTY_TYPE(StartType, (0L), "Start", App::Prop_None, "How to define the start plane");
-    StartType.setEnums(StartTypesEnums);
+    StartType.setEnums(HoleStartTypesEnums);
     ADD_PROPERTY_TYPE(StartOffset, (0.0), "Start", App::Prop_None, "Offset from the start plane");
     ADD_PROPERTY_TYPE(
         StartReference,
@@ -692,6 +829,18 @@ double Hole::getStartOffset() const
     gp_Dir direction = Base::convertTo<gp_Dir>(guessNormalDirection(profileShape));
     if (!Reversed.getValue()) {
         direction.Reverse();
+    }
+
+    if (std::strcmp(startType, "Part") == 0) {
+        // the profile and the solid before, both placed (rank 23)
+        TopoShape base;
+        try {
+            base = getBaseTopoShape(true);
+        }
+        catch (const Base::Exception&) {
+            return 0.0;
+        }
+        return startFromPart(base, holeCentres(profileShape, BaseProfileType.getValue()), direction);
     }
 
     TopLoc_Location identity;
@@ -1079,7 +1228,8 @@ void Hole::updateThreadDepthParam()
             throw Base::RuntimeError("Unsupported thread depth type \n");
         }
     }
-    else if (HoleDepth == "ThroughAll") {
+    else if (HoleDepth == "ThroughAll" || HoleDepth == "UpToFirst" || HoleDepth == "UpToFace") {
+        // an up-to hole's depth is known at its recompute: makeThread() sets the thread's then
         if (ThreadMethod != "Dimension") {
             ThreadDepth.setValue(getThroughAllLength());
         }
@@ -1478,7 +1628,9 @@ void Hole::findClosestDesignation(double oldPitch, bool byDiameter)
 void Hole::onChanged(const App::Property* prop)
 {
     if (prop == &StartType) {
-        const bool hasOffset = std::strcmp(StartType.getValueAsString(), "Profile plane") != 0;
+        // Start from part has no offset, as Onshape's (rank 23)
+        const bool hasOffset = std::strcmp(StartType.getValueAsString(), "Offset") == 0
+            || std::strcmp(StartType.getValueAsString(), "Reference") == 0;
         StartOffset.setReadOnly(!hasOffset);
         StartReference.setReadOnly(std::strcmp(StartType.getValueAsString(), "Reference") != 0);
     }
@@ -1793,8 +1945,8 @@ void Hole::onChanged(const App::Property* prop)
         DrillForDepth.setReadOnly(isNotDimension);
 
         if (!isRestoring()) {
-            if (isNotDimension) {
-                // if through all, set the depth accordingly
+            if (DepthMode == "ThroughAll") {
+                // if through all, set the depth accordingly (an up-to depth keeps the blind one)
                 Depth.setValue(getThroughAllLength());
             }
             updateThreadDepthParam();
@@ -1853,6 +2005,10 @@ void Hole::setupObject()
                                              ->GetGroup("Mod/PartDesign");
 
     BaseProfileType.setValue(baseProfileOption_idxToBitmask(hGrp->GetInt("defaultBaseTypeHole", 1)));
+
+    // A new hole starts from the part, Onshape's default; older files keep the profile plane
+    // (rank 23)
+    StartType.setValue("Part");
 
     ProfileBased::setupObject();
 }
@@ -1919,7 +2075,8 @@ short Hole::mustExecute() const
         || Tapered.isTouched() || TaperedAngle.isTouched() || ModelThread.isTouched()
         || UseCustomThreadClearance.isTouched() || CustomThreadClearance.isTouched()
         || ThreadDepthType.isTouched() || ThreadDepth.isTouched() || BaseProfileType.isTouched()
-        || StartType.isTouched() || StartOffset.isTouched() || StartReference.isTouched()) {
+        || StartType.isTouched() || StartOffset.isTouched() || StartReference.isTouched()
+        || UpToFace.isTouched()) {
         return 1;
     }
     return ProfileBased::mustExecute();
@@ -1966,6 +2123,21 @@ static gp_Pnt toPnt(gp_Vec dir)
     return {dir.X(), dir.Y(), dir.Z()};
 }
 
+namespace
+{
+/* FreeCAD-CH ops#654 T3 (notes/patterns-design.md 3.3, Reapply): set while a pattern with Reapply
+ * on re-runs this hole at one of its instances, as FeatureExtrude.cpp's ReapplyRun: the seed's
+ * own run against the instance's base carried back onto the seed (toSeed), the up-to face read
+ * where the instance sees it; the tool goes here, nothing of the feature is written */
+struct HoleRun
+{
+    gp_Trsf toSeed;
+    TopoShape base;
+    TopoShape tool;
+};
+thread_local HoleRun* holeRun = nullptr;
+}  // namespace
+
 App::DocumentObjectExecReturn* Hole::execute()
 {
     warnOfUnlistedThreadSize(*this);
@@ -1975,10 +2147,13 @@ App::DocumentObjectExecReturn* Hole::execute()
         | Part::ShapeOption::Transform | Part::ShapeOption::DontSimplifyCompound
     );
 
-    // Find the base shape
+    // Find the base shape. A studio owner's is its in-scope parts at its place (FreeCAD-CH
+    // ops#654 S2): a hole of a given depth needs none, Through all and Up to next fail without
+    // one, below
+    const bool owner = runsAsStudioOwner(this);
     TopoShape base;
     try {
-        base = getBaseTopoShape();
+        base = getBaseTopoShape(/*silent=*/owner);
     }
     catch (const Base::Exception&) {
         std::string text(QT_TRANSLATE_NOOP(
@@ -2000,11 +2175,16 @@ App::DocumentObjectExecReturn* Hole::execute()
         std::string method(DepthType.getValueAsString());
         double length = 0.0;
 
-        this->positionByPrevious();
+        if (!holeRun) {
+            this->positionByPrevious();
+        }
         TopLoc_Location invObjLoc = getInverseLocation(base);
 
         base.move(invObjLoc);
         profileshape.move(invObjLoc);
+        if (holeRun) {
+            base = holeRun->base;  // a pattern's instance (ops#654 T3), carried onto the seed
+        }
 
         /* Build the prototype hole */
 
@@ -2023,25 +2203,83 @@ App::DocumentObjectExecReturn* Hole::execute()
         gp_Dir holeDirection(zDir);
         holeDirection.Reverse();
         const char* startType = StartType.getValueAsString();
-        const double startOffset = std::strcmp(startType, "Profile plane") == 0 ? 0.0
-            : std::strcmp(startType, "Offset") == 0 ? StartOffset.getValue()
-                                                    : getStartReferenceOffset(
-                                                          profileshape,
-                                                          StartReference,
-                                                          holeDirection,
-                                                          StartOffset.getValue(),
-                                                          invObjLoc
-                                                      );
+        double startOffset = 0.0;
+        if (std::strcmp(startType, "Offset") == 0) {
+            startOffset = StartOffset.getValue();
+        }
+        else if (std::strcmp(startType, "Part") == 0) {
+            // Start from part: where the part begins on the hole axes (rank 23)
+            startOffset = startFromPart(
+                base,
+                holeCentres(profileshape, BaseProfileType.getValue()),
+                holeDirection
+            );
+        }
+        else if (std::strcmp(startType, "Profile plane") != 0) {
+            startOffset = getStartReferenceOffset(
+                profileshape,
+                StartReference,
+                holeDirection,
+                StartOffset.getValue(),
+                invObjLoc
+            );
+        }
         profileshape = moveProfileToStart(profileshape, holeDirection, startOffset);
 
         if (method == "Dimension") {
             length = Depth.getValue();
         }
         else if (method == "UpToFirst") {
-            /* TODO */
+            // Up to next: where the part's material on the axis ends (rank 23)
+            const auto depth = upToNext(
+                base,
+                holeCentres(profileshape, BaseProfileType.getValue()),
+                holeDirection
+            );
+            if (!depth) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Hole error: the hole meets no part to go up to")
+                );
+            }
+            length = *depth;
+        }
+        else if (method == "UpToFace") {
+            // Up to entity: a face or a plane, the distance to it along the axis (rank 23)
+            if (!UpToFace.getValue()) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Select the face or plane the hole goes up to.")
+                );
+            }
+            if (holeRun) {
+                // At a pattern's instance (ops#654 T3): the distance from the instance's profile
+                // to the face, as the seed's moved there (a distance a motion keeps)
+                const gp_Trsf toInstance = holeRun->toSeed.Inverted();
+                length = getStartReferenceOffset(
+                    profileshape.makeElementTransform(toInstance),
+                    UpToFace,
+                    holeDirection.Transformed(toInstance),
+                    0.0,
+                    invObjLoc
+                );
+            }
+            else {
+                length = getStartReferenceOffset(profileshape, UpToFace, holeDirection, 0.0, invObjLoc);
+            }
         }
         else if (method == "ThroughAll") {
-            length = getThroughAllLength();
+            if (holeRun) {
+                // Through the base at a pattern's instance (ops#654 T3)
+                Bnd_Box box;
+                if (!base.isNull()) {
+                    BRepBndLib::Add(base.getShape(), box);
+                }
+                BRepBndLib::Add(profileshape.getShape(), box);
+                box.SetGap(0.0);
+                length = 2.02 * std::sqrt(box.SquareExtent());
+            }
+            else {
+                length = getThroughAllLength();
+            }
         }
         else {
             return new App::DocumentObjectExecReturn(
@@ -2159,7 +2397,10 @@ App::DocumentObjectExecReturn* Hole::execute()
             lengthCounter = 0.0;
         }
 
-        std::string drillPoint = DrillPoint.getValueAsString();
+        // an up-to hole ends flat on its face, with no cone past it (rank 23)
+        std::string drillPoint = (method == "UpToFirst" || method == "UpToFace")
+            ? std::string("Flat")
+            : std::string(DrillPoint.getValueAsString());
         double xPosDrill = 0.0;
         double zPosDrill = 0.0;
         if (drillPoint == "Flat") {
@@ -2267,10 +2508,22 @@ App::DocumentObjectExecReturn* Hole::execute()
             );
         }
 
+        if (holeRun) {
+            holeRun->tool = compound;  // a pattern's instance (ops#654 T3): its tool only
+            return App::DocumentObject::StdReturn;
+        }
+
         TopoShape result = makeTopoShape(false);
 
         // set the subtractive shape property for later usage in e.g. pattern
         this->AddSubShape.setValue(compound);
+
+        // FreeCAD-CH ops#654 S2: a studio owner computes only its tool (a hole per centre), which
+        // its steps apply; its own shape stays empty, so nothing sees it as a part
+        if (owner) {
+            Shape.setValue(TopoShape());
+            return App::DocumentObject::StdReturn;
+        }
 
         if (base.isNull()) {
             Shape.setValue(compound);
@@ -2655,7 +2908,8 @@ TopoDS_Shape Hole::makeThread(const gp_Vec& xDir, const gp_Vec& zDir, double len
     std::string threadDepthMethod(ThreadDepthType.getValueAsString());
     std::string depthMethod(DepthType.getValueAsString());
     if (threadDepthMethod != "Dimension") {
-        if (depthMethod == "ThroughAll") {
+        // an up-to hole is threaded all the way, as a through-all one (rank 23)
+        if (depthMethod == "ThroughAll" || depthMethod == "UpToFirst" || depthMethod == "UpToFace") {
             threadDepth = length;
             ThreadDepth.setValue(threadDepth);
             helixLength = threadDepth + 2 * Pitch;
@@ -2995,5 +3249,44 @@ int Hole::baseProfileOption_bitmaskToIdx(int bitmask)
     return -1;
 }
 
+
+}  // namespace PartDesign
+
+namespace PartDesign
+{
+
+/// hole's tool re-solved at a pattern's instance (HoleRun above), in its own frame; null with why
+/// (FreeCAD-CH ops#654 T3; declared where used, FeatureTransformed.cpp)
+PartDesignExport TopoShape reapplyHole(
+    Hole* hole,
+    const gp_Trsf& toSeed,
+    const TopoShape& base,
+    std::string& why
+)
+{
+    HoleRun run {toSeed, base, TopoShape()};
+    HoleRun* outer = holeRun;
+    holeRun = &run;
+    App::DocumentObjectExecReturn* ret = nullptr;
+    try {
+        ret = hole->execute();
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const Standard_Failure& e) {
+        why = e.GetMessageString();
+    }
+    holeRun = outer;
+    if (ret) {
+        why = ret->Why;
+        delete ret;
+        return {};
+    }
+    if (run.tool.isNull() && why.empty()) {
+        why = "it made no tool there";
+    }
+    return why.empty() ? run.tool : TopoShape();
+}
 
 }  // namespace PartDesign

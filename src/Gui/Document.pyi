@@ -212,6 +212,47 @@ class Document(Persistence):
         Aborts the current transaction of the document
         """
         ...
+
+    def saveNamedView(self, name: str, /) -> None:
+        """
+        saveNamedView(name) -> None
+
+        Saves the camera of the active 3D view under the name, in the document.
+        A view of the same name is replaced.
+        """
+        ...
+
+    def restoreNamedView(self, name: str, /) -> None:
+        """
+        restoreNamedView(name) -> None
+
+        Sets the camera of the active 3D view to the named view.
+        """
+        ...
+
+    def namedViews(self) -> List[str]:
+        """
+        namedViews() -> list of str
+
+        The names of the saved views, in the order they were saved.
+        """
+        ...
+
+    def deleteNamedView(self, name: str, /) -> None:
+        """
+        deleteNamedView(name) -> None
+
+        Removes the named view.
+        """
+        ...
+
+    def renameNamedView(self, oldName: str, newName: str, /) -> None:
+        """
+        renameNamedView(oldName, newName) -> None
+
+        Renames a named view; the new name must be free.
+        """
+        ...
     ActiveObject: Any = ...
     """The active object of the document."""
 

@@ -311,7 +311,8 @@ def VarSetDriven(make):
 def VarSetCopyDriven(make):
     """Two copies of made-up Onshape exports (`App::VarSetCopy`, ops#317 PR E1) driving a Box.
 
-    Studio A: t `3 mm` (a unit name in FreeCAD, so NameMap t -> t_), Width `40 mm`, Depth
+    Studio A: t `3 mm` (a unit name in FreeCAD: NameMap t -> t_ in gen1 and gen2; a build with
+    ops#640 rank 54 keeps the name t), Width `40 mm`, Depth
     `#t * 6 + #Gap` with #Gap bound to the document's Variables.Gap (2 mm): 20 mm. Studio B:
     Height `#Width / 4 + 2 mm`, Width from Studio A's copy: 12 mm. The exports are written to a
     temporary folder, removed after the import; the copies then get a fixed neutral source path

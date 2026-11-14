@@ -53,6 +53,9 @@ import Part
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
 
+from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
+
 KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap
 SHORTCUTS = "User parameter:BaseApp/Preferences/Shortcut"
 
@@ -145,7 +148,9 @@ ONSHAPE = {
     "Sketcher_ConstrainPerpendicular": "Shift+L",
     "Sketcher_ConstrainTangent": "T",
     "Sketcher_ConstrainSymmetric": "Shift+Q",
+    "Sketcher_ConstrainMidpoint": "Shift+M",
     "Sketcher_ConstrainBlock": "Shift+J",
+    "Sketcher_ConstrainConcentric": "Shift+O",
     "Sketcher_ConstrainCoincident": "",
     "Sketcher_ConstrainPointOnObject": "",
     "Sketcher_ConstrainDistanceX": "",
@@ -237,7 +242,7 @@ FREECAD = {
 
 # Assembly's single letters that are the fork's keys: cleared (decision 31); upstream's
 ASSEMBLY_KEYS = {
-    "Assembly_CreateJointFixed": "F",
+    "Assembly_CreateJointPerpendicular": "M",  # its M goes to the Fixed joint (ops#640 rank 60)
     "Assembly_SolveAssembly": "Z",
     "Assembly_CreateJointScrew": "W",
     "Assembly_CreateJointRigidGroup": "Y",
@@ -248,7 +253,10 @@ ASSEMBLY_KEYS = {
 
 # Pairs that share a key in upstream FreeCAD too, outside the keymap's commands: the tree's
 # "Recompute Object" and Std_Recompute (Ctrl+Shift+R; the tree's action works on its selection)
-UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute")]
+# The tree's "Rename" (F2, an action of its context menu only: the tree's own F2 is its edit
+# trigger) and the Features and Parts lists' renameAction (F2 and Shift+N, widget shortcuts of the
+# lists, ops#640 rank 36): neither is a window key, so they never meet
+UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute"), ("Rename", "renameAction")]
 
 # Sub-actions that aren't commands: the draw styles, and the workbenches' W, 1..9
 DRAW_STYLES = {"Std_DrawStyleAsIs": "V,1", "Std_DrawStyleShaded": "V,6"}
@@ -343,15 +351,19 @@ def drawStyles():
 
 
 def taskButton(which):
-    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
-        button = box.button(which)
-        if button is None or not button.isVisible():
+    """The task panel's OK or Cancel button (dead wrappers: TestExpressionFieldsGui.liveButtonBoxes)."""
+    for box in liveButtonBoxes():
+        try:
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        except RuntimeError:  # a box (or a parent) deleted under its wrapper: not the panel's
             continue
-        parent = box.parentWidget()
-        while parent is not None:
-            if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                return button
-            parent = parent.parentWidget()
     return None
 
 
@@ -561,6 +573,7 @@ class TestForkKeymapGui(unittest.TestCase):
             pump(0.1)
         Gui.runCommand("Part_SelectFilter", 3)
         App.ParamGet(KEYMAP).RemString("Keymap")
+        App.ParamGet(KEYMAP).RemBool("KeymapMacKeys")
         App.ParamGet(SHORTCUTS).RemString("Std_ViewFitAll")
         pump(0.1)
         guiDoc = Gui.getDocument(self.doc.Name)
@@ -867,6 +880,7 @@ class TestForkKeymapGui(unittest.TestCase):
             waitFor(lambda: abs(direction()[0]) > 0.5 and abs(direction()[2]) > 0.5), direction()
         )
 
+    @siblingEraPath
     def testShiftEPadsTheSelectedSketch(self):
         """With a body active and its sketch selected, Shift+E runs PartDesign_Pad (not the box
         element selection), which pads the sketch."""
@@ -1028,6 +1042,95 @@ class TestForkKeymapGui(unittest.TestCase):
         )
         self.escapeTool()
 
+    # --- the Mac's keys (ops#640 polish), checked here through the hidden KeymapMacKeys
+
+    def testMacKeysMoveTheSelectionFiltersOffOption(self):
+        """With the Mac's keys the Part selection filters take Control+Shift (Qt's Meta+Shift),
+        since Shift+Option+letter types a character on the Mac; without them, Shift+Alt as
+        before, on the commands and on the filter group's actions."""
+        filters = ("Part_VertexSelection", "Part_EdgeSelection", "Part_FaceSelection",
+                   "Part_RemoveSelectionGate")
+        letters = "VEFC"
+        group = list(Gui.Command.get("Part_SelectFilter").getAction())
+
+        # The filters are the group's tools: a filter command has an action of its own only once
+        # a toolbar or menu shows it (else getShortcut() is ""), so only those are compared
+        owned = [i for i, name in enumerate(filters) if hasAction(name)]
+
+        def keys():
+            return ([QtGui.QKeySequence(shortcut(filters[i])).toString() for i in owned],
+                    [action.shortcut().toString() for action in group[:4]])
+
+        App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
+        pump(0.1)
+        mac = [QtGui.QKeySequence(f"Meta+Shift+{c}").toString() for c in letters]
+        commands, actions = keys()
+        self.assertEqual(actions, mac)
+        self.assertEqual(commands, [mac[i] for i in owned])
+        App.ParamGet(KEYMAP).RemBool("KeymapMacKeys")
+        pump(0.1)
+        windows = [QtGui.QKeySequence(f"Shift+Alt+{c}").toString() for c in letters]
+        commands, actions = keys()
+        self.assertEqual(actions, windows)
+        self.assertEqual(commands, [windows[i] for i in owned])
+
+    def testAssemblyListsTakeBackspaceOnTheMac(self):
+        """The Assembly task panels' lists (BOM columns, motions, view steps) test the key
+        themselves through UtilsAssembly.isDeleteKey(): Delete always, Backspace only with the
+        Mac's keys, and a letter never."""
+        import UtilsAssembly
+
+        def event(key):
+            return QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier)
+
+        delete, backspace = event(QtCore.Qt.Key_Delete), event(QtCore.Qt.Key_Backspace)
+        self.assertTrue(UtilsAssembly.isDeleteKey(delete))
+        self.assertFalse(UtilsAssembly.isDeleteKey(backspace))
+        App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
+        self.assertTrue(UtilsAssembly.isDeleteKey(delete))
+        self.assertTrue(UtilsAssembly.isDeleteKey(backspace))
+        self.assertFalse(UtilsAssembly.isDeleteKey(event(QtCore.Qt.Key_D)))
+
+    def testMacModeKeyIsControlM(self):
+        """With the Mac's keys the sketch tools' M takes Control (Qt's Meta), since Cmd+M
+        minimizes the window there: the rectangle's mode label shows it, Ctrl+M (Cmd+M) leaves
+        the construction method alone and Meta+M switches it; Ctrl+U still toggles the rounded
+        corners."""
+        App.ParamGet(KEYMAP).SetBool("KeymapMacKeys", True)
+        pump(0.1)
+        self.editSketch()
+        self.press(QtCore.Qt.Key_G)
+        self.assertTrue(waitFor(lambda: self.toolOption("Rounded corners")), "no rectangle options")
+
+        def native(key):
+            return QtGui.QKeySequence(key).toString(QtGui.QKeySequence.NativeText)
+
+        def visible(cls, name):
+            return [
+                w
+                for w in Gui.getMainWindow().findChildren(cls)
+                if w.objectName() == name and w.isVisible()
+            ]
+
+        self.assertEqual([l.text() for l in visible(QtWidgets.QLabel, "comboLabel1")],
+                         [f"Mode ({native('Meta+M')})"])
+
+        def method():
+            boxes = visible(QtWidgets.QComboBox, "comboBox1")
+            return boxes[0].currentIndex() if boxes else None
+
+        before = method()
+        self.assertIsNotNone(before)
+        self.press(QtCore.Qt.Key_M, QtCore.Qt.ControlModifier)
+        pump(0.4)
+        self.assertEqual(method(), before, "Ctrl+M (Cmd+M on the Mac)")
+        self.press(QtCore.Qt.Key_M, QtCore.Qt.MetaModifier)
+        self.assertTrue(waitFor(lambda: method() not in (None, before)), "Meta+M (Control+M)")
+        rounded = self.checked("Rounded corners")
+        self.press(QtCore.Qt.Key_U, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: self.checked("Rounded corners") == (not rounded)), "Ctrl+U")
+        self.escapeTool()
+
     def testCtrlFAndRAreThePolylinesOwn(self):
         """With the polyline running and the document needing a recompute, Ctrl+F toggles its
         fillet option and Ctrl+R (undo the last point) runs no command: Std_Refresh is F5, not
@@ -1049,7 +1152,8 @@ class TestForkKeymapGui(unittest.TestCase):
     def testFFitsTheViewInAssemblyEdit(self):
         """In assembly edit, F fits the view, not a Fixed joint (Assembly's joints are ForEdit, so
         the tie rule gave them F): Assembly's F, Z, W, Y and the BOM's O are cleared under the
-        fork's keymap, nothing clashes in assembly edit, and the keys are back under FreeCAD's.
+        fork's keymap, M opens the Fixed joint (Onshape's m: Mate) and not Perpendicular, nothing
+        clashes in assembly edit, and the keys are back under FreeCAD's.
         An assembly of two boxes, in edit in the Assembly workbench."""
         if "AssemblyWorkbench" not in Gui.listWorkbenches():
             self.skipTest("no Assembly")
@@ -1067,11 +1171,37 @@ class TestForkKeymapGui(unittest.TestCase):
             self.assertTrue(waitFor(lambda: fixed and all(a.isEnabled() for a in fixed)))
             for name in ASSEMBLY_KEYS:
                 self.assertEqual(toolKey(name), "", name)
+            # Onshape's m opens Mate: M is the Fixed joint's (Fastened), Perpendicular's is cleared
+            self.assertEqual(toolKey("Assembly_CreateJointFixed"), "M")
             with self.watching("Std_ViewFitAll", "Assembly_CreateJointFixed") as fired:
                 self.press(QtCore.Qt.Key_F)
                 self.assertTrue(waitFor(lambda: fired), "F ran nothing")
                 pump(0.4)
             self.assertEqual(fired, ["Std_ViewFitAll"])
+            with self.watching("Assembly_CreateJointFixed", "Assembly_CreateJointPerpendicular") as fired:
+                self.press(QtCore.Qt.Key_M)
+                self.assertTrue(waitFor(lambda: fired), "M ran nothing")
+                pump(0.4)
+            self.assertEqual(fired, ["Assembly_CreateJointFixed"])
+            import JointObject
+
+            if JointObject.activeTask is not None:
+                JointObject.activeTask.reject()
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            pump()
+            # Onshape's Shift+S in an assembly is Snap mode (ops#640, design C9); in a Part Studio
+            # it is a new sketch. In assembly edit both are enabled, and the tie rule gives the key
+            # to Snap mode, the ForEdit one
+            import CommandSnapMode
+
+            with self.watching("Assembly_ToggleSnapMode", "PartDesign_NewSketch") as fired:
+                self.press(QtCore.Qt.Key_S, QtCore.Qt.ShiftModifier)
+                self.assertTrue(waitFor(lambda: fired), "Shift+S ran nothing")
+                pump(0.4)
+            self.assertEqual(fired, ["Assembly_ToggleSnapMode"])
+            self.assertTrue(CommandSnapMode.isSnapModeOn())
+            CommandSnapMode.setSnapMode(False)
             # the fork's general keys: the sketch's keys meet Assembly's letters only on actions
             # that aren't reachable there (D: the sketch's dimension group, its toolbar hidden),
             # and Assembly's letters meet upstream's own (S and Std_LinkSelectActions' S, G)
@@ -1080,10 +1210,15 @@ class TestForkKeymapGui(unittest.TestCase):
                 for n, k in ONSHAPE.items()
                 if k and not n.startswith("Sketcher_")
             }
-            self.assertNoClashes("assembly edit", only=general)
+            self.assertNoClashes(
+                "assembly edit",
+                allowed=UPSTREAM_CLASHES + [("Assembly_ToggleSnapMode", "PartDesign_NewSketch")],
+                only=general,
+            )
             setKeymap("FreeCAD")
             wrong = [f"{n}: {toolKey(n)!r}" for n, k in ASSEMBLY_KEYS.items() if toolKey(n) != k]
             self.assertEqual(wrong, [], "FreeCAD")
+            self.assertEqual(toolKey("Assembly_CreateJointFixed"), "F")
         finally:
             if Gui.Control.activeDialog():
                 Gui.Control.closeDialog()
@@ -1096,7 +1231,9 @@ class TestForkKeymapGui(unittest.TestCase):
             Gui.activateWorkbench("PartDesignWorkbench")
             pump()
 
-    def editAndPress(self, key, typeName):
+    def editAndPress(self, key, typeName, before_ok=None):
+        """Shift+`key` in sketch edit makes a `typeName` on the sketch and opens its panel;
+        `before_ok(feature)` does what the panel needs (a Revolve's axis), then OK commits it."""
         self.editSketch()
         self.press(key, QtCore.Qt.ShiftModifier)
         self.assertTrue(
@@ -1111,19 +1248,48 @@ class TestForkKeymapGui(unittest.TestCase):
         # the Tasks dock can sit in a hidden overlay (notes/build.md, "Task-panel GUI tests")
         Gui.Control.showTaskView()
         self.assertTrue(waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok) is not None))
+        if before_ok is not None:
+            before_ok(feature)
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         pump()
         self.doc.recompute()
         self.assertTrue(feature.isValid())
         self.assertGreater(feature.Shape.Volume, 0)
 
+    def chooseAxis(self, text):
+        """The visible axis box's entry chosen as a user does (ReferenceCombo takes activated;
+        TestCrossBodyGui.chooseAxis)."""
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        boxes = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "axis") if c.isVisible()
+        ]
+        self.assertEqual(len(boxes), 1, "no single visible axis box")
+        box = boxes[0]
+        index = box.findText(text)
+        self.assertGreaterEqual(index, 0, [box.itemText(i) for i in range(box.count())])
+        box.setCurrentIndex(index)
+        box.activated.emit(index)
+        pump(0.3)
+
+    @siblingEraPath
     def testShiftEInSketchClosesItAndPads(self):
         """In sketch edit, Shift+E closes the sketch and pads it, as Onshape's extrude does."""
         self.editAndPress(QtCore.Qt.Key_E, "PartDesign::Pad")
 
     def testShiftWInSketchClosesItAndRevolves(self):
-        """In sketch edit, Shift+W closes the sketch and revolves it."""
-        self.editAndPress(QtCore.Qt.Key_W, "PartDesign::Revolution")
+        """In sketch edit, Shift+W closes the sketch and revolves it. The Revolve opens waiting
+        for its axis, as Onshape's does (notes/onshape-experiment.md section 6; OK with none
+        commits it in error): the sketch's V axis, clear of setUp's square (x 5 to 15), is
+        picked before OK."""
+
+        def pickTheAxis(feature):
+            self.assertIsNone(feature.ReferenceAxis, "the Revolve opened with an axis")
+            self.chooseAxis("Vertical sketch axis")
+            self.assertIsNotNone(feature.ReferenceAxis, "the axis box set no axis")
+            self.assertEqual(feature.ReferenceAxis[0], self.sketch)
+            self.assertEqual(feature.ReferenceAxis[1], ["V_Axis"])
+
+        self.editAndPress(QtCore.Qt.Key_W, "PartDesign::Revolution", before_ok=pickTheAxis)
 
     # --- the fork's commands (PR B)
 
@@ -1860,7 +2026,13 @@ OrthographicCamera {{
                 )
                 under = QtWidgets.QApplication.widgetAt(target)
                 if under is not None and taskView is not None and taskView.isAncestorOf(under):
-                    if under.metaObject().className() not in ("QWidget", "QScrollArea"):
+                    # an opaque control: not a plain container (a transparent spot of the panel
+                    # lets the click through to the view, by design); a list's viewport is one
+                    parent = under.parentWidget()
+                    opaque = isinstance(
+                        parent, QtWidgets.QAbstractScrollArea
+                    ) and parent.metaObject().className() != "QScrollArea"
+                    if opaque or under.metaObject().className() not in ("QWidget", "QScrollArea"):
                         spot = target
                         break
             if spot is not None:
@@ -2087,9 +2259,13 @@ OrthographicCamera {{
     def testSelectOtherInSketchListsAConstraintIconAndTheLineUnderIt(self):
         """A constraint icon over a line: the icon of the first line's Horizontal constraint, and
         a second, vertical line drawn through it. The constraint comes first (a hover picks the
-        icon), the line under it is listed too and Enter on it selects it."""
+        icon), the line under it is listed too and Enter on it selects it. Show constraints is
+        on: the Onshape keymap draws no constraint glyph by default (ops#640 polish P1)."""
         import Sketcher
 
+        general = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Sketcher/General")
+        general.SetBool("ShowConstraints", True)
+        self.addCleanup(general.RemBool, "ShowConstraints")
         sketch = self.sketchInEdit(lines=[((0, 5), (20, 5))])
         sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
         self.doc.recompute()
