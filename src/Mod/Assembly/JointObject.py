@@ -2706,12 +2706,10 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
                 acceptable = False
 
         if not acceptable:
-            # The removal notifies removeSelection at once, which takes this count back; if it
-            # doesn't come (the item wasn't selected), take it back here.
-            pending = self.addition_rejected
-            self.addition_rejected = pending + 1
+            # This runs inside the selection's notification, so the removal's own notification
+            # is queued behind it: removeSelection takes this count back when it comes.
+            self.addition_rejected += 1
             Gui.Selection.removeSelection(doc_name, obj_name, sub_name)
-            self.addition_rejected = min(self.addition_rejected, pending)
             return
 
         # Selection is acceptable so add it
@@ -2767,5 +2765,6 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.presel_ref = [comp, [new_sub]]
 
     def clearSelection(self, doc_name):
+        self.addition_rejected = 0  # nothing is left to remove
         self.refs.clear()
         self.updateJoint()
