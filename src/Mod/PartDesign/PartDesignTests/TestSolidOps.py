@@ -6,6 +6,7 @@ cylinder of radius 10, height 20 (lateral area 2 pi 10 20). Each expected value 
 """
 
 import math
+import time
 import unittest
 
 import FreeCAD as App
@@ -907,7 +908,11 @@ class TestThickenPipe(unittest.TestCase):
 
     def testUTurnBendsAreRightOrLoud(self):
         # review r2: from about 165 degrees with legs, a fuse self-intersected yet passed isValid and the
-        # probes (179 degrees outward: 457.6411 for 457.6189); BOPAlgo's check now refuses it
+        # probes (179 degrees outward: 457.6411 for 457.6189); BOPAlgo's check now refuses it.
+        # ops#773: at 175 degrees a fuse step left a face of no width, on which the next fuse never
+        # ended (past the 300 s limit, its worker abandoned); now that fuse refuses it at once
+        abandoned = Part.kernelBudget()["abandonedTotal"]
+        start = time.perf_counter()
         for angle, t1, t2 in ((179.0, 0.75, 0.0), (175.0, 0.75, 0.75), (165.0, 0.75, 0.0)):
             with self.subTest(angle=angle, t1=t1, t2=t2):
                 t = self.thicken(self.pipe(4.0, angle, 5.0), t1=t1, t2=t2)
@@ -916,6 +921,8 @@ class TestThickenPipe(unittest.TestCase):
                     self.assertFalse(S._self_intersects(t.Shape, False))
                 App.closeDocument(self.doc.Name)
                 self.doc = App.newDocument("ThickenPipe")
+        self.assertEqual(Part.kernelBudget()["abandonedTotal"], abandoned)
+        self.assertLess(time.perf_counter() - start, 120.0)
 
     def testLoneHornBendCrossingItsAxisIsNotCutShort(self):
         # review r1 T2: with no leg beside it, the ring's part past the axis was dropped (238.1069 for

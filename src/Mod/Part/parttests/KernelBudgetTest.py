@@ -352,6 +352,43 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertAlmostEqual(pocket.Shape.Volume, 12000 - math.pi * 16 * 10, places=6)
 
+    def testFaceWithoutWidthIsRefusedAtOnce(self):
+        """ops#773: a face with no width in its parameters (no area) on a surface with a singular
+        line made OCCT 8.0.1's face-face intersection loop forever, where no cancel reaches
+        (IntPatch_Intersection::CheckSingularPoints). A boolean now refuses it before OCCT starts.
+        Designed: a line from a point on the z axis, revolved about it; the face is the strip
+        u in [1, 1 + w], its v side at the axis singular; a sliver (w = 1e-3) still fuses"""
+        V2 = FreeCAD.Base.Vector2d
+        length = 3.0 * math.sqrt(2.0)
+        surf = Part.SurfaceOfRevolution(
+            Part.LineSegment(V(0, 0, 1), V(3, 0, 4)), V(0, 0, 0), V(0, 0, 1)
+        )
+
+        def strip(w):
+            pts = [V2(1.0, 0.0), V2(1.0 + w, 0.0), V2(1.0 + w, length), V2(1.0, length)]
+            edges = [
+                Part.Geom2d.Line2dSegment(a, b).toShape(surf)
+                for a, b in zip(pts, pts[1:] + pts[:1])
+                if a.distance(b) > 0
+            ]
+            return Part.Face(surf, Part.Wire(edges))
+
+        wall = Part.makeCylinder(2, 5).Faces[0]
+        sliver = strip(1e-3)
+        self.assertGreater(sliver.Area, 0.0)
+        self.assertEqual(len(wall.fuse(sliver).Faces), 3)
+        flat = strip(0.0)
+        u0, u1 = flat.ParameterRange[:2]
+        self.assertEqual(u0, u1)
+        self.assertEqual(flat.Area, 0.0)
+        before = Part.kernelBudget()["abandonedTotal"]
+        start = time.perf_counter()
+        for build in (lambda: wall.fuse(flat), lambda: flat.cut(wall), lambda: wall.generalFuse([flat])):
+            with self.assertRaises(Exception) as caught:
+                build()
+            self.assertIn("no width", str(caught.exception))
+        self.assertLess(time.perf_counter() - start, 5.0)
+        self.assertEqual(Part.kernelBudget()["abandonedTotal"], before)
 
     def testScriptThatSwallowsTheStopFails(self):
         """A PartDesign Python feature whose execute() catches the stopped cut and goes on

@@ -34,6 +34,12 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
+#include <GeomAdaptor_Surface.hxx>
+#include <Geom_Surface.hxx>
+#include <Standard_ConstructionError.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -106,6 +112,35 @@ void FCBRepAlgoAPIHelper::setAutoFuzzy(BRepAlgoAPI_BuilderAlgo* op)
     op->SetFuzzyValue(
         Part::FuzzyHelper::getBooleanFuzzy() * sqrt(bounds.SquareExtent()) * Precision::Confusion()
     );
+}
+
+void FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(const TopTools_ListOfShape& shapes)
+{
+    TopTools_IndexedMapOfShape faces;
+    for (TopTools_ListOfShape::Iterator it(shapes); it.More(); it.Next()) {
+        TopExp::MapShapes(it.Value(), TopAbs_FACE, faces);
+    }
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        TopLoc_Location location;
+        const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+        if (surface.IsNull()) {
+            continue;
+        }
+        const GeomAbs_SurfaceType type = GeomAdaptor_Surface(surface).GetType();
+        if (type == GeomAbs_Plane || type == GeomAbs_Cylinder) {
+            continue;
+        }
+        double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        // Also a range that is NaN or reversed
+        if (!(u1 - u0 >= Precision::PConfusion()) || !(v1 - v0 >= Precision::PConfusion())) {
+            throw Standard_ConstructionError(
+                "an input has a face of no width (no area), on which OCCT's intersection would "
+                "not end"
+            );
+        }
+    }
 }
 
 namespace
@@ -319,6 +354,9 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
         myArguments = myOriginalArguments;
     }
     else {
+        // The pieces of the two paths above come here one by one
+        FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myArguments);
+        FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myTools);
 #if OCC_VERSION_HEX >= 0x070600
         BRepAlgoAPI_BooleanOperation::Build(progressRange);
 #else
