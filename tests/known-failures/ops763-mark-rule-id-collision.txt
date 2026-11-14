@@ -11,3 +11,6 @@ reason: under a forced ID collision the split-piece mark rule keeps a mark it dr
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternAll
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternOne
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsAll
+# testPatternStepsOne and testLinearPatternOne depend on the test order (each passes alone): on lx8 the first
+# failed and the second passed (fork PR 447). Both stay listed.
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsOne
