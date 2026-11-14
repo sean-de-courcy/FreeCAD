@@ -169,6 +169,7 @@
 #include "MassProperties.h"
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
+#include "TopoShapeRepair.h"
 #include "TopoShapeCache.h"
 #include "TopoShapeMapper.h"
 #include "NamingHash.h"
@@ -12585,6 +12586,11 @@ TopoShape& TopoShape::makeElementBoolean(
             Base::CADKernelError,
             what << " failed" << (reason.empty() ? std::string() : ": " + reason)
         );
+    }
+    if (buildShell && healSliverCornersEnabled()) {
+        // The corners the Boolean left open beside a sliver (ops#640, off by default). In place,
+        // on its new sub-shapes: the maker's history still names the same shapes
+        healSliverCorners(mk->Shape(), fixedInputs);
     }
     makeElementShape(*mk, fixedInputs, op, elementMapPolicy);
 
