@@ -26,6 +26,7 @@
 #include <thread>
 
 #include <BRep_Builder.hxx>
+#include <Message_ProgressIndicator.hxx>
 #include <Message_ProgressScope.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -106,6 +107,7 @@
 #include "Tools.h"
 #include "TopoShapeCompoundPy.h"
 #include "TopoShapePy.h"
+#include "FCBRepAlgoAPI_Cut.h"
 #include "TopoShapeEdgePy.h"
 #include "TopoShapeFacePy.h"
 #include "TopoShapeShellPy.h"
@@ -498,6 +500,14 @@ public:
             "kernelBudgetTrial(seconds, busy) -- For tests (FreeCAD-CH kernel safety, ops#743): under a "
             "feature's time limit, one call on a worker that computes (busy) or sleeps for `seconds` on "
             "the clock. Returns the limit's error, or an empty string when the call ended."
+        );
+        add_varargs_method(
+            "kernelBudgetCutPolls",
+            &Module::kernelBudgetCutPolls,
+            "kernelBudgetCutPolls(base, tool) -- For tests (FreeCAD-CH, ops#773): the cut of base by "
+            "tool (a compound takes the cut's piecewise paths) with a progress range whose cancel "
+            "is never set. Returns how often the cut read that cancel: a part of the cut that gets "
+            "no range never reads it."
         );
         add_varargs_method(
             "kernelBudget",
@@ -1056,6 +1066,47 @@ private:
             return Py::String(error.what());
         }
         return Py::String("");
+    }
+
+    Py::Object kernelBudgetCutPolls(const Py::Tuple& args)
+    {
+        PyObject* base = nullptr;
+        PyObject* tool = nullptr;
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!O!",
+                &TopoShapePy::Type,
+                &base,
+                &TopoShapePy::Type,
+                &tool
+            )) {
+            throw Py::Exception();
+        }
+        // Counts the reads of its cancel, which it never sets
+        class Counter: public Message_ProgressIndicator
+        {
+        public:
+            int polls {0};
+            void Show(const Message_ProgressScope& /*theScope*/, const Standard_Boolean /*isForce*/)
+                override
+            {}
+            Standard_Boolean UserBreak() override
+            {
+                ++polls;
+                return Standard_False;
+            }
+        };
+        Handle(Counter) counter = new Counter;
+        FCBRepAlgoAPI_Cut cut(
+            static_cast<TopoShapePy*>(base)->getTopoShapePtr()->getShape(),
+            static_cast<TopoShapePy*>(tool)->getTopoShapePtr()->getShape(),
+            false
+        );
+        cut.Build(counter->Start());
+        if (!cut.IsDone()) {
+            throw Py::RuntimeError("the cut failed");
+        }
+        return Py::Long(counter->polls);
     }
 
     Py::Object kernelBudget(const Py::Tuple& args)

@@ -352,6 +352,23 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertAlmostEqual(pocket.Shape.Volume, 12000 - math.pi * 16 * 10, places=6)
 
+    def testACutByACompoundReadsItsCancel(self):
+        """ops#773 (2): a cut by a compound of tools (a Part::Cut of a Part::Compound) fuses the
+        tools and then cuts, and a cut of a compound cuts each piece. Every part of it now reads
+        the cancel of the time limit and Esc. Before, those parts got no progress range: the cut
+        read its cancel only before and after the whole (twice) and ran to its end whatever the
+        cancel. OCCT 8.0.1's boolean itself reads none (measured: a plain cut reads exactly the
+        two), so a cancel stops a boolean only between OCCT's calls"""
+        plate = Part.makeBox(20, 20, 5)
+        a = Part.makeCylinder(3, 9, V(7, 10, -2))
+        b = Part.makeCylinder(3, 9, V(11, 10, -2))
+        outer = 2  # the checks before and after the whole cut
+        self.assertGreaterEqual(Part.kernelBudgetCutPolls(plate, a), outer)
+        # the fuse of the tools and the cut each read it before and after
+        self.assertGreater(Part.kernelBudgetCutPolls(plate, Part.Compound([a, b])), outer)
+        pieces = Part.Compound([plate, plate.translated(V(30, 0, 0))])
+        self.assertGreater(Part.kernelBudgetCutPolls(pieces, a), outer)
+
     def testFaceWithoutWidthIsRefusedAtOnce(self):
         """ops#773: a face with no width in its parameters (no area) on a surface with a singular
         line made OCCT 8.0.1's face-face intersection loop forever, where no cancel reaches

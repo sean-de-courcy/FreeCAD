@@ -87,7 +87,11 @@ private:
     Standard_EXPORT void RecursiveAddTools(const TopoDS_Shape& theTool);
     Standard_EXPORT void RecursiveCutFusedTools(
         const TopTools_ListOfShape& theOriginalArguments,
-        const TopoDS_Shape& theTool
+        const TopoDS_Shape& theTool,
+        const Message_ProgressRange& progressRange
     );
-    Standard_EXPORT void RecursiveCutCompound(const TopoDS_Shape& theArgument);
+    Standard_EXPORT void RecursiveCutCompound(
+        const TopoDS_Shape& theArgument,
+        const Message_ProgressRange& progressRange
+    );
 };
