@@ -33,15 +33,19 @@ class TestPartStudioVariables(unittest.TestCase):
         self.doc = App.newDocument("StudioVariables")
         self.boxes = {}
         for name in ("P", "Q", "R"):
-            studio = self.doc.addObject("App::Part", name)
+            self.doc.addObject("App::Part", name)
+        # The studios' variables come first in their history (ops#723: a feature above a Part
+        # Studio variable can't use it)
+        self.pVars = variables(self.doc, self.doc.getObject("P"), "PVars", w=10)
+        self.qVars = variables(self.doc, self.doc.getObject("Q"), "QVars", w=20)
+        self.docVars = variables(self.doc, None, "Variables", h=5)
+        for name in ("P", "Q", "R"):
+            studio = self.doc.getObject(name)
             body = self.doc.addObject("PartDesign::Body", name + "Body")
             studio.addObject(body)
             box = body.newObject("PartDesign::AdditiveBox", name + "Box")
             box.Length = box.Width = box.Height = 10
             self.boxes[name] = box
-        self.pVars = variables(self.doc, self.doc.getObject("P"), "PVars", w=10)
-        self.qVars = variables(self.doc, self.doc.getObject("Q"), "QVars", w=20)
-        self.docVars = variables(self.doc, None, "Variables", h=5)
         self.doc.recompute()
 
     def tearDown(self):

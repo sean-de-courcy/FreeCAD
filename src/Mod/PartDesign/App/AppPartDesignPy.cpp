@@ -52,6 +52,7 @@
 #include "FeatureSplit.h"
 #include "Pieces.h"
 #include "Studio.h"
+#include "StudioVariables.h"
 #include "StudioConfig.h"
 #include "StudioEdit.h"
 #include "StudioList.h"
@@ -220,6 +221,19 @@ public:
             "studioSequence(studio) -- The features of every Body of the studio (a document: its "
             "top level, or an App::Part) in history order: after what they read in other Bodies "
             "and after their Body's earlier members, the oldest first where that leaves a choice."
+        );
+        add_varargs_method(
+            "variablePosition",
+            &Module::variablePosition,
+            "variablePosition(varset, name) -- The feature of studioSequence the Part Studio "
+            "variable name of varset follows in the history, or None at its start (ops#723)."
+        );
+        add_varargs_method(
+            "setVariablePosition",
+            &Module::setVariablePosition,
+            "setVariablePosition(varset, name[, after]) -- Places the Part Studio variable name of "
+            "varset (a VarSet in an App::Part) right after the feature after of studioSequence, or "
+            "at the start for None. Features above it can't use it; no transaction, no recompute."
         );
         add_varargs_method(
             "rollStudioTo",
@@ -1125,6 +1139,46 @@ private:
         App::Part* studio = nullptr;
         studioArg(pStudio, doc, studio);
         return objectList(PartDesign::studioSequence(doc, studio));
+    }
+
+    // FreeCAD-CH (ops#723): Part Studio variables' place in the history (StudioVariables.h)
+    Py::Object variablePosition(const Py::Tuple& args)
+    {
+        PyObject* pHolder;
+        const char* name;
+        if (!PyArg_ParseTuple(args.ptr(), "O!s", &(App::DocumentObjectPy::Type), &pHolder, &name)) {
+            throw Py::Exception();
+        }
+        auto row = PartDesign::variablePosition(objectArg(pHolder), name);
+        return row ? Py::asObject(row->getPyObject()) : Py::None();
+    }
+
+    Py::Object setVariablePosition(const Py::Tuple& args)
+    {
+        PyObject* pHolder;
+        const char* name;
+        PyObject* pAfter = Py_None;
+        if (!PyArg_ParseTuple(
+                args.ptr(), "O!s|O", &(App::DocumentObjectPy::Type), &pHolder, &name, &pAfter
+            )) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* after = nullptr;
+        if (pAfter != Py_None) {
+            if (!PyObject_TypeCheck(pAfter, &(App::DocumentObjectPy::Type))) {
+                PyErr_SetString(PyExc_TypeError, "Expected a feature or None");
+                throw Py::Exception();
+            }
+            after = objectArg(pAfter);
+        }
+        try {
+            PartDesign::setVariablePosition(objectArg(pHolder), name, after);
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+        return Py::None();
     }
 
     Py::Object rollStudioTo(const Py::Tuple& args)

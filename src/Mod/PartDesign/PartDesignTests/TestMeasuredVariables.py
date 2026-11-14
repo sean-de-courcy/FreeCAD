@@ -20,6 +20,7 @@ import unittest
 
 import FreeCAD as App
 import Part
+import PartDesign
 import Sketcher
 from FreeCAD import Vector as V
 
@@ -322,6 +323,9 @@ class TestMeasuredVariables(unittest.TestCase):
         own = self.measured.studio_variables(self.studio)
         own.addProperty("App::PropertyDistance", "h", "", "")
         own.h = 7
+        # Placed first in the history, as a Variable feature before the pad (ops#723: a feature
+        # above a Part Studio variable can't use it)
+        PartDesign.setVariablePosition(own, "h", None)
         self.padA.setExpression("Length", "#h")
         self.doc.recompute()
         edge = edge_named(self.padA.Shape, bottom_long)
@@ -346,6 +350,8 @@ class TestMeasuredVariables(unittest.TestCase):
         edge = edge_named(pad.Shape, lambda e: abs(e.Length - 4) < 1e-6
                           and e.BoundBox.YMax < 1e-6 and e.BoundBox.ZMax < 1e-6)
         holder, m = self.measured.add(self.studio, "w", "Length", [(pad, edge)])
+        # At the start of the history, so the pad may name it (ops#723): the cycle is what refuses
+        PartDesign.setVariablePosition(holder, "w", None)
         self.doc.recompute()
         self.assertAlmostEqual(holder.w.Value, 4, places=6)
         with self.assertRaisesRegex(Exception, "(?i)cycl"):
@@ -449,6 +455,8 @@ class TestMeasuredVariables(unittest.TestCase):
         ref = self.measured.resolve_pick(
             self.studio, "{}.{}.{}".format(self.bodyA.Name, self.padA.Name, first))
         holder, m = self.measured.add(self.studio, "w", "Length", [ref])
+        # Its place: right after the first pad, above pad2 (ops#723; made at the bar, it is last)
+        PartDesign.setVariablePosition(holder, "w", self.padA)
         pad2.setExpression("Length", "#w / 4")
         self.doc.recompute()
         self.assertValid(m, holder, pad2)
@@ -458,6 +466,7 @@ class TestMeasuredVariables(unittest.TestCase):
         ref = self.measured.resolve_pick(self.studio, "{}.{}".format(self.bodyA.Name, tip_edge))
         self.assertIs(ref[0], pad3)
         holder3, m3 = self.measured.add(self.studio, "t", "Length", [ref])
+        PartDesign.setVariablePosition(holder3, "t", None)  # ops#723: the cycle refuses, not the place
         self.doc.recompute()
         with self.assertRaisesRegex(Exception, "(?i)cycl"):
             pad3.setExpression("Length", "#t / 10")

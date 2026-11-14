@@ -67,6 +67,7 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "StudioVariables.h"
 #include "StudioConfig.h"
 #include "StudioList.h"
 #include "FeatureApply.h"
@@ -105,6 +106,8 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::registerParkedImport();
     // A copied or pasted feature is listed as the newest, not at its source's place (ops#632)
     PartDesign::registerHistoryImport();
+    // Part Studio variables have a place in the history (ops#723)
+    PartDesign::registerStudioVariables();
     // A container moved by an expression mid-recompute reruns its readers then (ops#342)
     PartDesign::registerContainerMoves();
     // A part mirror's Add that consumes its source re-projects the list after a recompute

@@ -552,7 +552,8 @@ def is_measured_holder(vs):
 
 
 # An App::VarSet's own properties (DocumentObject's); every other one is a variable.
-_VARSET_OWN = frozenset(("Label", "Label2", "ExpressionEngine", "Visibility"))
+# VariablePositions: the Part Studio variables' places in the history (ops#723)
+_VARSET_OWN = frozenset(("Label", "Label2", "ExpressionEngine", "Visibility", "VariablePositions"))
 
 
 def studio_sets(studio):
