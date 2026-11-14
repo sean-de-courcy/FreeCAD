@@ -68,6 +68,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestMateOffsetsGui.py
     AssemblyTests/TestConnectorPointsGui.py
     AssemblyTests/TestSnapModeGui.py
+    AssemblyTests/TestFastenedPickOrderGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
     AssemblyTests/TestOnshapeAssemblies.py

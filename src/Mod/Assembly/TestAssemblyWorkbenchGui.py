@@ -20,6 +20,10 @@ from AssemblyTests.TestSnapModeGui import TestSnapModeGui  # ops#640, design C9
 
 True if TestSnapModeGui else False
 
+from AssemblyTests.TestFastenedPickOrderGui import TestFastenedPickOrderGui  # ops#772
+
+True if TestFastenedPickOrderGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,
