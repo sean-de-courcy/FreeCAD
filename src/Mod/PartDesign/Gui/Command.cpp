@@ -2169,8 +2169,10 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
             FCMD_OBJ_HIDE(sketch);
         }
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
-        if (!remove) {
-            // Picked again on every change of the tool until the person chooses (Q1f)
+        if (!remove || (!target && (revolved || hole))) {
+            // Picked again on every change of the tool until the person chooses (Q1f). A Groove
+            // or Hole has no tool yet when its dialog opens (no axis, no position): the part it
+            // cuts is picked once the tool exists (ops#791)
             PartDesignGui::studioPrefillLive(owner);
         }
         if (!PartDesignGui::setEdit(owner)) {
