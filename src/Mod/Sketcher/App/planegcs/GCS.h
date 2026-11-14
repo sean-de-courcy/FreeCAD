@@ -621,6 +621,12 @@ public:
     void declareUnknowns(VEC_pD& params);
     void declareDrivenParams(VEC_pD& params);
     void initSolution(Algorithm alg = DogLeg);
+    /// FreeCAD-CH (ops#658): the next solve starts from the current parameters (a continuation's
+    /// steps), not from those of initSolution()
+    void startFromCurrent()
+    {
+        setReference();
+    }
 
     int solve(bool isFine = true, Algorithm alg = DogLeg, bool isRedundantsolving = false);
     int solve(VEC_pD& params, bool isFine = true, Algorithm alg = DogLeg, bool isRedundantsolving = false);
