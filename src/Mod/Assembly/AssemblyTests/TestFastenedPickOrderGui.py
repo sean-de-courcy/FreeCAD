@@ -42,6 +42,9 @@ def waitFor(condition, timeout=5.0):
 A_TOP = ("A.Face6", App.Vector(20, 10, 10))
 B_TOP = ("B.Face6", App.Vector(70, 5, 5))
 B_AT = App.Vector(60, 0, 0)
+C_AT = App.Vector(0, 40, 0)
+C_TOP = ("C.Face6", App.Vector(5, 45, 10))
+A_BOTTOM = ("A.Face5", App.Vector(20, 10, 0))
 
 
 class TestFastenedPickOrderGui(unittest.TestCase):
@@ -55,6 +58,7 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         self.jointgroup = self.assembly.newObject("Assembly::JointGroup", "Joints")
         self.a = self.box("A", 40, 20, 10, App.Vector())
         self.b = self.box("B", 20, 10, 5, B_AT)
+        self.c = self.box("C", 10, 10, 10, C_AT)  # a third part, for a rejected third pick
         self.doc.recompute()
 
     def tearDown(self):
@@ -119,6 +123,27 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         self.assertTrue(
             centre.isEqual(B_TOP[1], 1e-6), f"Expected A's top centre at {B_TOP[1]}, got {centre}"
         )
+        # unflipped, as Onshape's new Fastened mate (GC-B1): A turned as B
+        self.assertTrue(
+            rel.Rotation.isSame(App.Rotation(), 1e-9), f"Expected A unturned, got {rel.Rotation}"
+        )
+
+    def pick(self, sub, point):
+        Gui.Selection.addSelection(self.doc.Name, self.assembly.Name, sub, point.x, point.y, point.z)
+        pump()
+
+    def pickNames(self, panel):
+        return sorted(ref[0].Name + "." + ref[1][0] for ref in panel.refs)
+
+    def commit(self, panel):
+        panel.okButton.click()
+        pump()
+        if Gui.Control.activeDialog() and JointObject.activeTask:
+            JointObject.activeTask.reject()  # the next joint, empty
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        joints = [j for j in self.jointgroup.Group if getattr(j, "Reference2", None)]
+        self.assertEqual(len(joints), 1)
+        return joints[0]
 
     def test_grounded_part_picked_second(self):
         """The failing order (3 of 3 on the walk): B grounded, A's face first, B's second."""
@@ -137,20 +162,43 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         panel = self.mate(A_TOP, B_TOP)
         self.assertMated(panel, b_moves=True)
 
+    def test_rejected_picks_keep_the_two(self):
+        """After the two picks, a third part's face and a second face of A are refused: the two
+        picks stay, OK stays enabled and the mate is where it was (each refused pick's removal
+        is swallowed, none drops a pick)."""
+        self.ground(self.b)
+        panel = self.mate(A_TOP, B_TOP)
+        before = self.pickNames(panel)
+        self.pick(*C_TOP)
+        self.pick(*A_BOTTOM)
+        self.assertEqual(self.pickNames(panel), before)
+        self.assertMated(panel, b_moves=False)
+
+    def test_edit_click_on_its_own_face_keeps_both(self):
+        """An edited mate (B grounded, A then B): a click on A's picked face, a new selection entry
+        beside the joint's tip-name one, is refused and drops nothing."""
+        self.ground(self.b)
+        joint = self.commit(self.mate(A_TOP, B_TOP))
+        panel = JointObject.TaskAssemblyCreateJoint(0, joint)
+        Gui.Control.showDialog(panel)
+        pump()
+        try:
+            self.assertEqual(len(panel.refs), 2)
+            self.pick(*A_TOP)
+            self.assertEqual(len(panel.refs), 2, f"Expected both kept, got {self.pickNames(panel)}")
+            self.assertTrue(panel.okButton.isEnabled())
+        finally:
+            panel.reject()
+            pump()
+
     def test_grounded_part_picked_second_commits(self):
         """B grounded, A's face first, B's second, then OK: one Fastened joint between A and B,
         with A's top-face centre on B's."""
         self.ground(self.b)
         panel = self.mate(A_TOP, B_TOP)
         self.assertMated(panel, b_moves=False)
-        panel.okButton.click()
-        pump()
-        if Gui.Control.activeDialog() and JointObject.activeTask:
-            JointObject.activeTask.reject()  # the next joint, empty
-        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
-        joints = [j for j in self.jointgroup.Group if getattr(j, "Reference2", None)]
-        self.assertEqual(len(joints), 1)
-        parts = sorted(movingPartName(j) for j in (joints[0].Reference1, joints[0].Reference2))
+        joint = self.commit(panel)
+        parts = sorted(movingPartName(ref) for ref in (joint.Reference1, joint.Reference2))
         self.assertEqual(parts, ["A", "B"])
 
 
