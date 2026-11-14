@@ -329,3 +329,125 @@ class TestCompatNamesMeasure(unittest.TestCase):
             self.assertEqual(os.listdir(os.path.join(corpus, "gen1")), [])
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+class TestCompatMovedBody(unittest.TestCase):
+    """An intended move of a body (ops#683, C2: a mate on a bottom face turns its part 180 degrees
+    about x): its Placement's delta entries hold it, its element names follow the placement
+    change, and the controls of c768's ruling stay red. A designed box, moved by hand."""
+
+    OLD = App.Placement(V(1, -1, 13), App.Rotation(V(0, 0, 1), 4))
+    NEW = App.Placement(V(10, 20, 5), App.Rotation(V(1, 0, 0), 180))
+
+    def setUp(self):
+        doc = App.newDocument("CompatMovedBox")
+        try:
+            box = doc.addObject("Part::Feature", "Box")
+            box.Shape = Part.makeBox(20, 20, 5)
+            box.Placement = self.OLD
+            doc.recompute()
+            self.old = CompatRecord.record(doc)
+            box.Placement = self.NEW
+            doc.recompute()
+            self.new = CompatRecord.record(doc)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def copy(self, rec):
+        return json.loads(json.dumps(rec))
+
+    def lines(self, deltas, actual=None):
+        return CompatRecord.compare(self.old, actual or self.new, "recompute", deltas=deltas)[0]
+
+    def entries(self):
+        entries, others = CompatRecord.deltaEntries(self.old, self.new, "recompute")
+        self.assertEqual(others, [])
+        return entries
+
+    def testTheMoveIsRedWithoutItsDeltas(self):
+        lines = self.lines(None)
+        self.assertTrue(any(line.startswith("Box.Placement.") for line in lines), lines)
+        self.assertTrue(any(line.startswith("Box.names:") for line in lines), lines)
+
+    def testItsDeltasHoldTheMoveAndTheNamesFollow(self):
+        entries = self.entries()
+        self.assertTrue(any(where.startswith("Box.Placement.rotation[") for where in entries))
+        for where, entry in entries.items():
+            if where.startswith("Box.Placement."):
+                self.assertEqual((entry["rel"], entry["abs"]), CompatRecord.PLACEMENT_TOLERANCE)
+        self.assertEqual(self.lines(entries), [])
+
+    def testNamesThatDontFollowThePlacementAreRed(self):
+        entries = self.entries()
+        stale = self.copy(self.new)
+        stale["objects"]["Box"]["names"] = list(self.old["objects"]["Box"]["names"])
+        lines = self.lines(entries, stale)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith("Box.names:"), lines[0])
+
+    def testAWrongDeltaPlacementIsRed(self):
+        entries = self.entries()
+        wrong = self.copy(entries)
+        wrong["Box.Placement.base[0]"]["new"] += 1.0
+        lines = self.lines(wrong)
+        self.assertTrue(any("Box.Placement.base[0] (the delta's new value)" in line for line in lines), lines)
+
+    def testA1e9ChangeInAQuaternionComponentIsRed(self):
+        entries = self.entries()
+        slipped = self.copy(self.new)
+        q = slipped["objects"]["Box"]["props"]["Placement"][1]["rotation"]
+        i = max(range(4), key=lambda k: abs(q[k]))
+        q[i] += 1e-9
+        lines = self.lines(entries, slipped)
+        self.assertTrue(any(f"Box.Placement.rotation[{i}]" in line for line in lines), lines)
+
+    def testWithoutNamesInTheBuildsRecordNoNamesAreCompared(self):
+        # a generation of another naming revision: the gate records no names for the build
+        bare = self.copy(self.new)
+        for obj in bare["objects"].values():
+            obj.pop("names", None)
+        entries, others = CompatRecord.deltaEntries(self.old, bare, "recompute")
+        self.assertEqual(others, [])
+        self.assertTrue(entries)
+
+    def testMakeDeltaPassesAgreeWithinTheAbsoluteFloor(self):
+        from PartDesignTests.Compat import make_delta
+
+        folder = tempfile.mkdtemp(prefix="compat_make_delta_floor_")
+        try:
+            old = {"objects": {"J": {"type": "App::FeaturePython", "props": {
+                "Placement2": ["App::PropertyPlacement", {"base": [0.0, 0.0, 0.0],
+                                                          "rotation": [0.0, 0.0, 0.0, 1.0]}]}}}}
+            recompute = self.copy(old)
+            recompute["objects"]["J"]["props"]["Placement2"][1]["rotation"] = [1.0, 0.0, 0.0, 0.0]
+            roundtrip = self.copy(recompute)
+            roundtrip["objects"]["J"]["props"]["Placement2"][1]["rotation"] = [1.0, 0.0, 0.0, 6.123e-17]
+            for passName, new in (("recompute", recompute), ("roundtrip", roundtrip)):
+                stem = f"gen1-Model-alone.{passName}.Doc"
+                for rec, kind in ((old, "expected"), (new, "actual")):
+                    with open(os.path.join(folder, f"{stem}.{kind}.json"), "w", encoding="utf-8") as fh:
+                        json.dump(rec, fh)
+            found, problems = make_delta.collect(folder, CompatRecord.DELTA_TOLERANCE[0])
+            self.assertEqual(problems, [])
+            held = found["gen1"]["Model"]["Doc"]
+            self.assertEqual(sorted(held), ["J.Placement2.rotation[0]", "J.Placement2.rotation[3]"])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def testAReferencesMovedFaceIsADeltaToo(self):
+        # an angle mate that turns its part moves the face it references (ops#683, AsmMotion)
+        def rec(centre, normal):
+            return {"objects": {"Angle": {"type": "App::FeaturePython", "props": {}, "refs": {
+                "Reference2[0]": {"target": "Tilted", "sub": "Face5",
+                                  "key": {"centre": centre, "normal": normal}}}}}}
+        old = rec([52.5, 22.165063509461095, 6.25], [0.0, 0.5, -0.8660254037844387])
+        new = rec([52.5, 17.8349364905389, 6.25], [0.0, 0.5, 0.8660254037844388])
+        entries, others = CompatRecord.deltaEntries(old, new, "recompute")
+        self.assertEqual(others, [])
+        where = "Angle.Reference2[0] (Face5 -> Face5).centre[1]"
+        self.assertIn(where, entries)
+        self.assertEqual(CompatRecord.compare(old, new, "recompute", deltas=entries)[0], [])
+        wrong = json.loads(json.dumps(new))
+        wrong["objects"]["Angle"]["refs"]["Reference2[0]"]["key"]["centre"][1] += 1e-3
+        self.assertIn(where + " (the delta's new value)",
+                      CompatRecord.compare(old, wrong, "recompute", deltas=entries)[0][0])

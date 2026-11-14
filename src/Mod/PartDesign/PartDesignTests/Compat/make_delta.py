@@ -52,17 +52,32 @@ def collect(report, rel):
         held = stems.setdefault(m["stem"], {})
         for where, entry in entries.items():
             entry["pass"] = m["pass"]
+            entry["seen"] = {m["pass"]}
             known = held.get(where)
             if known is None:
                 held[where] = entry
                 continue
+            entry["seen"] |= known["seen"]
+            known["seen"] |= entry["seen"]
             for key in ("old", "new"):
                 a, b = known[key], entry[key]
-                if abs(a - b) > rel * max(abs(a), abs(b)):
+                # FreeCAD-CH (ops#683, c768): an absolute floor beside the relative tolerance, so
+                # a quaternion's 0 and 6e-17 agree
+                floor = max(entry.get("abs", 0.0), CompatRecord.DELTA_TOLERANCE[1])
+                if abs(a - b) > max(floor, rel * max(abs(a), abs(b))):
                     problems.append(f"{fileName}: {where}'s {key} {b} differs from {known['pass']}'s {a}")
             if PREFERRED[entry["pass"]] < PREFERRED[known["pass"]]:
                 held[where] = entry
     return found, problems
+
+
+def entryOf(e):
+    """A delta file's entry. A change the open pass didn't see (a recompute changes what the file
+    holds, as C2's frames do: ops#683) holds only in the passes that saw it (`deltasFor`)."""
+    out = {k: e[k] for k in ("old", "new", "rel", "abs") if k in e}
+    if "open" not in e["seen"]:
+        out["passes"] = sorted(e["seen"])
+    return out
 
 
 def main(argv):
@@ -83,7 +98,7 @@ def main(argv):
     for gen, models in sorted(found.items()):
         for model, stems in sorted(models.items()):
             changes = {
-                stem: {where: {k: e[k] for k in ("old", "new", "rel")} for where, e in sorted(held.items())}
+                stem: {where: entryOf(e) for where, e in sorted(held.items())}
                 for stem, held in sorted(stems.items())
                 if held
             }
