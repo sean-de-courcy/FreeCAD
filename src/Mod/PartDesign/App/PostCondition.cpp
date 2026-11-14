@@ -13,9 +13,9 @@
 
 // FreeCAD-CH kernel layer: per-feature post-conditions, report-only (PostCondition.h)
 
-#include <BOPAlgo_ArgumentAnalyzer.hxx>
-#include <BOPAlgo_CheckResult.hxx>
-#include <BOPAlgo_CheckStatus.hxx>
+#include <BOPAlgo_CheckerSI.hxx>
+#include <BOPDS_DS.hxx>
+#include <BOPDS_Pair.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
@@ -78,7 +78,8 @@ namespace
 constexpr double tolAbsolute = 1e-3;   // mm
 constexpr double tolGrowth = 10.0;     // times the base's
 constexpr double typeTolerance = 1e-7; // mm, the fit of a free-form face to an analytic one
-constexpr double dvRelative = 1e-6;
+// 1e-9, not census's 1e-6: FSLC #037 removes a real 0.00026 mm^3 sliver of 15362 (Onshape: 0.000266)
+constexpr double dvRelative = 1e-9;
 constexpr double dvAbsolute = 1e-6;    // mm^3
 
 using Clock = std::chrono::steady_clock;
@@ -226,6 +227,7 @@ struct TypeResult
     int revolvedCircles {0};
     int offsetsUnchecked {0};
     int failures {0};
+    int inherited {0};
     std::vector<Degraded> degraded;
 };
 
@@ -274,9 +276,83 @@ occ::handle<Geom_Surface> analyticOf(const TopoDS_Face& face, const occ::handle<
     return analytic;
 }
 
-TypeResult checkTypes(const TopoDS_Shape& made)
+/// The base's degraded faces, found once when a made face is degraded: a made face whose surface
+/// is one of them (the same geometry, or the same analytic form) was re-trimmed or copied by the
+/// feature, not made degraded by it (a pad that re-trims a revolve's faces; a dress-up's result,
+/// built on copies, has every face new)
+class Inherited
+{
+public:
+    explicit Inherited(const TopoDS_Shape& base)
+        : base(base)
+    {}
+
+    bool contains(const occ::handle<Geom_Surface>& raw, const occ::handle<Geom_Surface>& analytic)
+    {
+        load();
+        for (const auto& known : raws) {
+            if (known == raw) {
+                return true;
+            }
+        }
+        for (const auto& known : analytics) {
+            if (known->DynamicType() == analytic->DynamicType()
+                && GeomConvert_SurfToAnaSurf::IsSame(known, analytic, typeTolerance)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    void load()
+    {
+        if (loaded) {
+            return;
+        }
+        loaded = true;
+        if (base.IsNull()) {
+            return;
+        }
+        for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            occ::handle<Geom_Surface> raw = BRep_Tool::Surface(face, location);
+            occ::handle<Geom_Surface> surface = raw;
+            while (auto trimmed = occ::handle<Geom_RectangularTrimmedSurface>::DownCast(surface)) {
+                surface = trimmed->BasisSurface();
+            }
+            if (surface.IsNull() || !freeFormName(surface)) {
+                continue;
+            }
+            raws.push_back(raw);
+            try {
+                double gap = 0.0;
+                occ::handle<Geom_Surface> analytic = analyticOf(face, surface, gap);
+                if (!analytic.IsNull()) {
+                    // In the frame the made faces are compared in (BRep_Tool::Surface(face))
+                    if (!location.IsIdentity()) {
+                        analytic = occ::down_cast<Geom_Surface>(
+                            analytic->Transformed(location.Transformation()));
+                    }
+                    analytics.push_back(analytic);
+                }
+            }
+            catch (const Standard_Failure&) {
+            }
+        }
+    }
+
+    TopoDS_Shape base;
+    bool loaded {false};
+    std::vector<occ::handle<Geom_Surface>> raws;
+    std::vector<occ::handle<Geom_Surface>> analytics;
+};
+
+TypeResult checkTypes(const TopoDS_Shape& made, const TopoDS_Shape& base)
 {
     TypeResult result;
+    Inherited inherited(base);
     for (TopoDS_Iterator it(made); it.More(); it.Next()) {
         if (it.Value().ShapeType() != TopAbs_FACE) {
             continue;
@@ -306,6 +382,14 @@ TypeResult checkTypes(const TopoDS_Shape& made)
                     && occ::handle<Geom_OffsetSurface>::DownCast(surface)->Surface().IsNull()) {
                     ++result.offsetsUnchecked;
                 }
+                continue;
+            }
+            // analytic is in the located frame already (BRep_Tool::Surface(face) applies the
+            // face's location); raw is the TShape's own handle, for the identity test
+            TopLoc_Location location;
+            occ::handle<Geom_Surface> raw = BRep_Tool::Surface(face, location);
+            if (inherited.contains(raw, analytic)) {
+                ++result.inherited;
                 continue;
             }
             Degraded found;
@@ -342,9 +426,8 @@ struct BopResult
 {
     std::string status = "not run";  // "ok", "faulty", "limit", "error: ...", "no faces"
     int faces {0};
+    int level {4};
     int selfIntersect {0};
-    int curveOnSurface {0};
-    int other {0};
 };
 
 /// The faces made and every face that shares an edge with one, in one compound
@@ -379,12 +462,44 @@ TopoDS_Compound madeAndNeighbours(const TopoDS_Shape& checked, const TopoDS_Shap
     return compound;
 }
 
+/// The self-interference check's level (BOPAlgo_CheckerSI::SetLevelOfCheck: 0 vertex/vertex .. 4
+/// edge/face, 5 also face/face): FREECAD_CH_POSTCOND_BOP_LEVEL, default 4. Face/face intersections of
+/// free-form faces cost seconds a feature (thread flanks, the replica studios) and found nothing
+/// the edge/face level doesn't
+int bopLevel()
+{
+    const char* value = std::getenv("FREECAD_CH_POSTCOND_BOP_LEVEL");
+    if (value && *value >= '0' && *value <= '5' && value[1] == 0) {
+        return *value - '0';
+    }
+    return 4;
+}
+
+/// The most faces the check reads (FREECAD_CH_POSTCOND_BOP_MAX, default 1000): a feature that makes
+/// more (a pattern of thousands of faces) is not checked ("size")
+int bopMaxFaces()
+{
+    const char* value = std::getenv("FREECAD_CH_POSTCOND_BOP_MAX");
+    if (value && *value) {
+        const int n = std::atoi(value);
+        if (n > 0) {
+            return n;
+        }
+    }
+    return 1000;
+}
+
 BopResult checkBop(const TopoDS_Shape& checked, const TopoDS_Shape& made)
 {
     BopResult result;
+    result.level = bopLevel();
     TopoDS_Compound faces = madeAndNeighbours(checked, made, result.faces);
     if (result.faces == 0) {
         result.status = "no faces";
+        return result;
+    }
+    if (result.faces > bopMaxFaces()) {
+        result.status = "size";
         return result;
     }
     if (Part::KernelBudget::pastDeadline()) {
@@ -394,28 +509,34 @@ BopResult checkBop(const TopoDS_Shape& checked, const TopoDS_Shape& made)
     struct Work
     {
         TopoDS_Shape shape;
-        std::vector<BOPAlgo_CheckStatus> statuses;
+        int level {4};
+        int pairs {0};
+        bool errors {false};
     };
     auto work = std::make_shared<Work>();
     work->shape = Part::KernelBudget::exactCopy(faces);
+    work->level = result.level;
     const bool finished = Part::KernelBudget::runOptional(
         "A post-condition check",
         [work](const Message_ProgressRange& range) {
-            BOPAlgo_ArgumentAnalyzer analyzer;
-            analyzer.SetShape1(work->shape);
-            analyzer.ArgumentTypeMode() = false;
-            analyzer.SelfInterMode() = true;
-            analyzer.SmallEdgeMode() = false;
-            analyzer.RebuildFaceMode() = false;
-            analyzer.TangentMode() = false;
-            analyzer.MergeVertexMode() = false;
-            analyzer.MergeEdgeMode() = false;
-            analyzer.ContinuityMode() = false;
-            analyzer.CurveOnSurfaceMode() = true;
-            analyzer.SetRunParallel(false);
-            analyzer.Perform(range);
-            for (const BOPAlgo_CheckResult& fault : analyzer.GetCheckResult()) {
-                work->statuses.push_back(fault.GetCheckStatus());
+            // As BOPAlgo_ArgumentAnalyzer's self-interference test, at a chosen level
+            BOPAlgo_CheckerSI checker;
+            NCollection_List<TopoDS_Shape> arguments;
+            arguments.Append(work->shape);
+            checker.SetArguments(arguments);
+            checker.SetNonDestructive(true);
+            checker.SetRunParallel(false);
+            checker.SetLevelOfCheck(work->level);
+            checker.Perform(range);
+            work->errors = checker.HasErrors();
+            const BOPDS_DS& ds = *checker.PDS();
+            for (const BOPDS_Pair& pair : ds.Interferences()) {
+                int i1 = 0;
+                int i2 = 0;
+                pair.Indices(i1, i2);
+                if (!ds.IsNewShape(i1) && !ds.IsNewShape(i2)) {
+                    ++work->pairs;
+                }
             }
         }
     );
@@ -423,22 +544,12 @@ BopResult checkBop(const TopoDS_Shape& checked, const TopoDS_Shape& made)
         result.status = "limit";
         return result;
     }
-    for (BOPAlgo_CheckStatus status : work->statuses) {
-        switch (status) {
-            case BOPAlgo_SelfIntersect:
-                ++result.selfIntersect;
-                break;
-            case BOPAlgo_InvalidCurveOnSurface:
-                ++result.curveOnSurface;
-                break;
-            case BOPAlgo_OperationAborted:
-                result.status = "limit";
-                return result;
-            default:
-                ++result.other;
-        }
+    result.selfIntersect = work->pairs;
+    if (work->errors && work->pairs == 0) {
+        result.status = "error";
+        return result;
     }
-    result.status = work->statuses.empty() ? "ok" : "faulty";
+    result.status = work->pairs == 0 ? "ok" : "faulty";
     return result;
 }
 
@@ -504,11 +615,12 @@ void PostCondition::report(Feature& feature, const Observed& observed) noexcept
 
         // type
         clock = Clock::now();
-        const TypeResult types = checkTypes(observed.made);
+        const TypeResult types = checkTypes(observed.made, observed.base);
         line << ",\"deg\":{\"freeForm\":" << types.freeForm
              << ",\"revolvedCircles\":" << types.revolvedCircles
              << ",\"offsetsUnchecked\":" << types.offsetsUnchecked
-             << ",\"failures\":" << types.failures << ",\"faces\":[";
+             << ",\"failures\":" << types.failures << ",\"inherited\":" << types.inherited
+             << ",\"faces\":[";
         for (std::size_t i = 0; i < types.degraded.size(); ++i) {
             const Degraded& d = types.degraded[i];
             line << (i ? "," : "") << "{\"from\":" << quoted(d.from) << ",\"to\":" << quoted(d.to)
@@ -548,8 +660,7 @@ void PostCondition::report(Feature& feature, const Observed& observed) noexcept
             }
         }
         line << ",\"bop\":{\"status\":" << quoted(bop.status) << ",\"faces\":" << bop.faces
-             << ",\"selfIntersect\":" << bop.selfIntersect
-             << ",\"curveOnSurface\":" << bop.curveOnSurface << ",\"other\":" << bop.other
+             << ",\"level\":" << bop.level << ",\"selfIntersect\":" << bop.selfIntersect
              << ",\"flag\":" << (bop.status == "faulty" ? "true" : "false")
              << ",\"ms\":" << number(msSince(clock)) << "}";
 
