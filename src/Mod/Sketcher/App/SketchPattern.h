@@ -57,6 +57,9 @@ struct SketcherExport PatternRecord
     /// writes this record into constr: its type, elements, MetaData and Value
     void write(Constraint& constr) const;
 
+    /// whether every geometry the record names (seeds, pivot or directions, live copies) is named
+    /// once: a file's record may repeat one
+    bool namesEachGeometryOnce() const;
     /// the slots of the counts, in the table's order (no seed slot (i, 0, 0))
     std::vector<Slot> slots() const;
     bool isFullCircle() const;

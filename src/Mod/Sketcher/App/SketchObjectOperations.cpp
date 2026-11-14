@@ -2086,6 +2086,11 @@ int SketchObject::addSymmetric(
         addGeometry(symgeos);
 
         for (auto* constr : constrvals) {
+            if (constr->Type == Sketcher::Pattern) {
+                // FreeCAD-CH (sketch patterns): a pattern's record is not copied with its
+                // geometry (only its first elements would be renamed): the new geometry is free
+                continue;
+            }
             // we look in the map, because we might have skipped internal alignment geometry
             auto firstIt = geoIdMap.find(constr->getElement(0).GeoId);
 
@@ -3088,6 +3093,11 @@ int SketchObject::addCopy(
 
         // handle geometry constraints
         for (const auto& constr : constrvals) {
+            if (constr->Type == Sketcher::Pattern) {
+                // FreeCAD-CH (sketch patterns): a pattern's record is not copied with its
+                // geometry (only its first elements would be renamed): the new geometry is free
+                continue;
+            }
             auto fit = geoIdMap.find(constr->First);
 
             if (fit == geoIdMap.end()) {

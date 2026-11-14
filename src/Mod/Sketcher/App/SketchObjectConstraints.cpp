@@ -3370,7 +3370,7 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
     // empty slots and a missing second direction are GeoUndef
     if (constraint->Type == Pattern) {
         auto record = PatternRecord::read(*constraint);
-        if (!record) {
+        if (!record || !record->namesEachGeometryOnce()) {
             return false;
         }
         auto own = [intGeoCount](int geoId) { return geoId >= 0 && geoId < intGeoCount; };
