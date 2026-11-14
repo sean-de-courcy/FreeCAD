@@ -4,7 +4,8 @@
 
 // Pieces and leftovers become parts at command time (FreeCAD-CH ops#654, P6p,
 // notes/parts-design.md 10.12). A part made so is a Body with StudioMadeBy = the entry E that made
-// it, a part id "<E>:<k>" and a witness (StudioPieceWitness): the element names of the faces that
+// it, a part id "<E>:<k>" and a witness (StudioPieceWitness): the element names (stored interned,
+// ops#640 C2; read expanded) of the faces that
 // lie on its solid of the source and on no other, in tiers. A split piece names the part it came
 // from (StudioParentId) and its source is E's result there; a leftover names none and its source is
 // E's tool solids that touch no part of its scope. Its first step (a piece step: E's step in it)

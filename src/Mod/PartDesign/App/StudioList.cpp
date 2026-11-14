@@ -2315,12 +2315,6 @@ void PartDesign::registerPartMirrorResync()
     }
 }
 
-long PartDesign::studioTagFor(const App::DocumentObject* owner, const Body* /*body*/)
-{
-    // The owner's ID, in every part: no stored tags (format rule, parts-design.md 10.6 and 10.10)
-    return owner ? owner->getID() : 0;
-}
-
 std::string PartDesign::studioStepType(const App::DocumentObject* owner)
 {
     // A Fillet or a Chamfer: its own type (P8a); every tool-making owner, and S1's shape owners:
