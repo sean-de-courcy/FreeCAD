@@ -2066,6 +2066,13 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
     if (!takesStudioPath(doc, studio)) {
         return false;
     }
+    // Revolve, Groove and Hole make no list on first use: in a studio without one the per-Body
+    // path keeps their dialogs' preselection (an axis kept, an axis alone arming the profile)
+    // and the subtractive box, which the owner's dialog doesn't do yet. A listed studio (any
+    // Extrude made one) needs the owner: there the per-Body path put them in the wrong part
+    if ((revolved || hole) && !PartDesign::StudioList::of(doc, studio, false)) {
+        return false;
+    }
     if (refuseStudioList(doc, studio)) {
         return true;
     }
