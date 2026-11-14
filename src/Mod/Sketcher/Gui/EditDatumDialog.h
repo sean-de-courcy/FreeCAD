@@ -26,9 +26,16 @@
 
 #include <QObject>
 #include <memory>
+#include <string>
 #include <vector>
 
 class QDialog;
+class QString;
+
+namespace App
+{
+class Expression;
+}
 
 namespace Gui
 {
@@ -119,6 +126,13 @@ private:
     bool inPlaceHasNext {false};
     bool inPlaceHasPrevious {false};
     bool inPlaceEscapePressed {false};
+    /// The constraint's constant expression (one that refers to no property, e.g. a typed
+    /// `(1/8) in`) when the field opened. It is taken out of the expression engine so that the
+    /// field shows its text for editing (bound, the field would be read-only), and Esc or Cancel
+    /// puts it back (ops#684).
+    std::shared_ptr<App::Expression> keptExpression;
+    /// The field's text when it opened: Enter on it unchanged stores a plain value.
+    std::string initialText;
 
 private Q_SLOTS:
     void accepted();
@@ -132,10 +146,23 @@ private:
     /// Sets up valueEdit for the constraint: units, history, value, binding. Returns the
     /// dialog's title and the value's label.
     void setupValueEdit(QString& title, QString& label);
+    /// Puts the text of keptExpression in the shown field, selected (ops#684).
+    void showKeptText();
     /// Applies valueEdit's value to the constraint in the open transaction. Throws on failure.
     void applyValue();
     /// applyValue for the popup; on failure, shows the reason in the field and returns false.
     bool applyInPlace();
+    /// FreeCAD-CH (ops#684, Onshape fact GS1): the expression text a typed length keeps, or an
+    /// empty string when the text is stored as a plain value. In a document whose length unit
+    /// is the inch, a bare value or expression gets the unit appended (`1/8` -> `(1/8) in`,
+    /// `1.5` -> `1.5 in`). A typed unit is kept as typed (`1 ft + 2 in`, `(1/32) in`), except a
+    /// single number in the document's own length unit outside inch documents (`25 mm` in a mm
+    /// document stays a value). Text unchanged since the field opened, and anything that isn't
+    /// a length, is a value.
+    std::string keptLengthText(const QString& text) const;
+    /// Sets the constraint to the value of `text` and stores `text` as its expression, in the
+    /// open transaction. Throws on failure, leaving the constraint as it was.
+    void applyKeptText(const std::string& text);
     void performAutoScale(double newDatum);
 };
 
