@@ -1,0 +1,5 @@
+{
+"entries": {
+"SketchExternalSourceDeleted|external_edge|V2s": {"axes": ["M1", "E7"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review prrows656-r1", "issue": "ops#656", "tier": "F"}
+}
+}
