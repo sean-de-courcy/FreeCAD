@@ -45,3 +45,11 @@ from AssemblyTests.TestTriadGui import (  # ops#640, C8 and C10
 True if TestTriadGui else False
 True if TestTriadMouseGui else False
 True if TestTriadOriginGui else False
+
+from AssemblyTests.TestFreeInstancesGui import (  # ops#683, C4
+    TestFreeInstancesGui,
+    TestHiddenInstanceGui,
+)
+
+True if TestFreeInstancesGui else False
+True if TestHiddenInstanceGui else False

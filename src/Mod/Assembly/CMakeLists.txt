@@ -75,6 +75,9 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestAssemblyPatterns.py
     AssemblyTests/TestAssemblyPatternsGui.py
     AssemblyTests/TestTriadGui.py
+    AssemblyTests/TestFreeInstances.py
+    AssemblyTests/TestFreeInstancesGui.py
+    AssemblyTests/TestMateAfterEdits.py
     AssemblyTests/mocks/__init__.py
     AssemblyTests/mocks/MockGui.py
 )
