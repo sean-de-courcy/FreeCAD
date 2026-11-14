@@ -921,6 +921,55 @@ def FacePatternCentered(make):
     return {"volumes": volumes}
 
 
+def RevolveFreeFormProfile(make):
+    """Revolutions of profiles drawn with B-spline lines and circle arcs (ops#768).
+
+    Body: on the XZ plane, the half disk of radius 2 about (5, 0) outside x = 5 (its arc an exact
+    rational B-spline) and the triangle (5, 2), (4, -2), (5, -2) (its slanted side a B-spline
+    segment), revolved 360 degrees about the V axis (the Z axis): Pappus's volume, 2 pi times
+    (2 pi (5 + 8 / (3 pi)) + 2 * 14 / 3). Builds since d637412375 make the arc's face a torus and
+    the side's a cone; builds before it made both SurfaceOfRevolution faces of B-splines.
+    Body001: on the XZ plane, the half disk of radius 3 about (0, 30) right of the V axis, its arc a
+    rational B-spline ending on the axis and its chord on it, revolved 90 degrees: a quarter of a
+    ball, 9 pi (since d637412375 a sphere face)."""
+    doc = make("RevolveFreeFormProfile")
+    body = newBody(doc, "Body")
+    arc = Part.ArcOfCircle(Part.Circle(V(5, 0, 0), V(0, 0, 1), 2), -math.pi / 2, math.pi / 2)
+    profile = attachedSketch(
+        body,
+        "Sketch",
+        plane(body, "XZ_Plane"),
+        [
+            arc.toNurbs(),
+            Part.LineSegment(V(5, 2, 0), V(4, -2, 0)).toBSpline(),
+            Part.LineSegment(V(4, -2, 0), V(5, -2, 0)),
+        ],
+    )
+    revolution = body.newObject("PartDesign::Revolution", "Revolution")
+    revolution.Profile = profile
+    revolution.ReferenceAxis = (profile, ["V_Axis"])
+    revolution.Angle = 360
+    body2 = newBody(doc, "Body001")
+    cap = Part.ArcOfCircle(Part.Circle(V(0, 30, 0), V(0, 0, 1), 3), -math.pi / 2, math.pi / 2)
+    profile2 = attachedSketch(
+        body2,
+        "Sketch001",
+        plane(body2, "XZ_Plane"),
+        [cap.toNurbs(), Part.LineSegment(V(0, 33, 0), V(0, 27, 0))],
+    )
+    revolution2 = body2.newObject("PartDesign::Revolution", "Revolution001")
+    revolution2.Profile = profile2
+    revolution2.ReferenceAxis = (profile2, ["V_Axis"])
+    revolution2.Angle = 90
+    doc.recompute()
+    return {
+        "volumes": {
+            "Revolution": 2 * math.pi * (2 * math.pi * (5 + 8 / (3 * math.pi)) + 2 * 14 / 3),
+            "Revolution001": 9 * math.pi,
+        }
+    }
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -936,4 +985,5 @@ MODELS = [
     IndexToldGroups,
     RoundOnSpline,
     FacePatternCentered,
+    RevolveFreeFormProfile,
 ]
