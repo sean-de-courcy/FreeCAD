@@ -279,8 +279,8 @@ class TestCurvePattern(unittest.TestCase):
         self.assertIn("connected chain", pattern.getStatusString())
 
     def testNoFeaturesSaysPatterned(self):
-        """Its features cleared, the curve pattern says what a pattern says (ops#655 T6, as the
-        linear and circular patterns), not the generic transform's words."""
+        """Its features cleared, the curve pattern fails in Onshape's words for a pattern (ops#655 T6),
+        as the linear and circular patterns do."""
         path = self.sketch(Part.LineSegment(Vector(25, 0, 0), Vector(85, 0, 0)))
         pattern = self.pattern(path, ["Edge1"], 3)
         self.assertTrue(pattern.isValid(), pattern.getStatusString())
@@ -288,7 +288,7 @@ class TestCurvePattern(unittest.TestCase):
         pattern.touch()
         self.Doc.recompute()
         self.assertFalse(pattern.isValid())
-        self.assertIn("No features selected to be patterned.", pattern.getStatusString())
+        self.assertIn("Select features to pattern.", pattern.getStatusString())
 
 
 if __name__ == "__main__":
