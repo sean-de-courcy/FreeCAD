@@ -73,6 +73,17 @@ public:
         const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
         const std::map<int, double>& allowedErrors
     );
+    /** FreeCAD-CH (ops#658): solves the set up sketch again, after solve() failed, with the driving
+     * datums of the constraints in @p from ramped from the value given there (the one the drawn
+     * geometry was solved with) to their set up value, in steps each of which the solver
+     * converges from the one before. A change that moves geometry far (an arc Angle 270 -> 72
+     * degrees at r 4 m: the end travels about 14 m) is more than the solver's trust region covers
+     * in its iterations, since its steps leave the curve. Only DogLeg, as solve()'s first try.
+     *
+     * @return GCS::Success with the geometry written as solve() writes it; otherwise GCS::Failed
+     *         with the parameters as they were. The datums are at their set up values either way.
+     */
+    int solveByContinuation(const std::map<const Constraint*, double>& from);
     /// FreeCAD-CH (ops#656): sets the whole sketch up again after solveHolding(); with @p solved,
     /// finishes the solve as solve() does. Returns GCS::Success when that finish succeeded.
     int endHolding(bool solved);

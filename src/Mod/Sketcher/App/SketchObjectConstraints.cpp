@@ -150,6 +150,188 @@ static bool collapsesACurve(const SketchObject& sketch, const Sketch& solved)
     return false;
 }
 
+// FreeCAD-CH (ops#658): what a datum constrains, to tell it from another constraint at its index
+static std::array<int, 7> datumIdentity(const Constraint& c)
+{
+    return {static_cast<int>(c.Type),
+            c.First,
+            static_cast<int>(c.FirstPos),
+            c.Second,
+            static_cast<int>(c.SecondPos),
+            c.Third,
+            static_cast<int>(c.ThirdPos)};
+}
+
+// FreeCAD-CH (ops#656 D4 row 4): a Perpendicular or a Parallel between two lines that the solver met
+// by shrinking them rather than by their angle. planegcs writes both as a product of the lines'
+// directions scaled by their drawn lengths (Constraints.cpp, rescale), so a cycle of angle
+// constraints that disagrees by a hair (H, Angle 30, Angle 60.00001, Perpendicular) "converges"
+// with a line shrunk from 10 to 0.005 mm, or less: valid and silent or a conflict, at random with
+// the solver's path, the shrunk line often over collapsesACurve's 1e-3 mm. The solver shrinks for
+// any disagreement over its own 1e-10.
+// - OverTheBar: the angle misses by 1e-7 rad or more on the solved lines (the bar a repeat must
+//   meet, SketchObject::solve): a conflict, as a collapsed curve is (Onshape names a conflict and
+//   keeps the lines, PL1d).
+// - UnderTheBar: it misses by less: the cycle agrees at the bar, and the constraint is left out of
+//   the solve as an agreeing repeat is (it must hold within 1e-7 at the solution).
+// A legitimate solve can shrink lines too (a 100 x 100 rectangle's side set to 0.1) and then miss by
+// 1e-10 over the shrink, the solver's scaled bar: told apart by solving again from the solution,
+// rescaled at its lengths (shrinksAgain), where a consistent sketch stays and a cycle shrinks again.
+enum class Shrunk
+{
+    No,
+    UnderTheBar,
+    OverTheBar,
+};
+
+struct ShrinkFind
+{
+    Shrunk level = Shrunk::No;
+    int index = -1;  // the constraint, 0-based
+};
+
+namespace
+{
+// the two lines of a line-line Perpendicular or Parallel the solve holds, drawn at least 1e-3 long
+// (collapsesACurve's size)
+bool linePair(const SketchObject& sketch,
+              const Sketch& solved,
+              int index,
+              const Constraint* c,
+              double& drawnProduct)
+{
+    if ((c->Type != Perpendicular && c->Type != Parallel) || !c->isActive || !c->isDriving
+        || c->FirstPos != PointPos::none || c->SecondPos != PointPos::none
+        || c->Third != GeoEnum::GeoUndef || (c->First < 0 && c->Second < 0)
+        || c->First == GeoEnum::GeoUndef || c->Second == GeoEnum::GeoUndef
+        || c->First == c->Second || solved.getSkippedConstraints().count(index)) {
+        return false;
+    }
+    const auto* drawn1 = dynamic_cast<const Part::GeomLineSegment*>(sketch.getGeometry(c->First));
+    const auto* drawn2 = dynamic_cast<const Part::GeomLineSegment*>(sketch.getGeometry(c->Second));
+    if (!drawn1 || !drawn2) {
+        return false;
+    }
+    const double length1 = (drawn1->getEndPoint() - drawn1->getStartPoint()).Length();
+    const double length2 = (drawn2->getEndPoint() - drawn2->getStartPoint()).Length();
+    if (!(length1 >= 1e-3 && length2 >= 1e-3)) {
+        return false;
+    }
+    drawnProduct = length1 * length2;
+    return true;
+}
+
+// the solved lines' length product and how far their angle misses the constraint's (rad)
+void solvedPair(const Sketch& solved, const Constraint* c, double& product, double& miss)
+{
+    const Base::Vector3d a =
+        solved.getPoint(c->First, PointPos::end) - solved.getPoint(c->First, PointPos::start);
+    const Base::Vector3d b =
+        solved.getPoint(c->Second, PointPos::end) - solved.getPoint(c->Second, PointPos::start);
+    product = a.Length() * b.Length();
+    if (!(product > 0.0)) {
+        miss = std::numeric_limits<double>::infinity();
+        return;
+    }
+    const double cross = std::abs(a.x * b.y - a.y * b.x) / product;
+    const double dot = std::abs(a.x * b.x + a.y * b.y) / product;
+    miss = c->Type == Perpendicular ? std::atan2(dot, cross) : std::atan2(cross, dot);
+}
+
+// solved again from \a solved's solution: whether the pair of constraint \a index shrinks again
+// (or the solve fails), as a cycle that disagrees does; a consistent sketch stays where it is
+bool shrinksAgain(const SketchObject& sketch, const Sketch& solved, int index)
+{
+    const Constraint* c = sketch.Constraints.getValues()[index];
+    std::vector<Part::Geometry*> internal = solved.extractGeometry(true, false);
+    bool again = false;
+    try {
+        const std::vector<Part::Geometry*> complete = sketch.getCompleteGeometry();
+        const std::size_t internalCount = sketch.getInternalGeometry().size();
+        if (internal.size() == internalCount && complete.size() >= internalCount) {
+            std::vector<Part::Geometry*> geometry = internal;
+            geometry.insert(geometry.end(), complete.begin() + internalCount, complete.end());
+            Sketch probe;
+            probe.setSkippedConstraints(solved.getSkippedConstraints());
+            probe.setUpSketch(geometry, sketch.Constraints.getValues(), sketch.getExternalGeometryCount());
+            double before = 0.0;
+            double after = 0.0;
+            double miss = 0.0;
+            solvedPair(probe, c, before, miss);
+            if (probe.solve() != 0) {
+                again = true;
+            }
+            else {
+                solvedPair(probe, c, after, miss);
+                again = after < 0.5 * before;
+            }
+        }
+    }
+    catch (const Base::Exception&) {
+        again = false;  // nothing to compare: the solver's measure stands
+    }
+    for (Part::Geometry* geo : internal) {
+        delete geo;
+    }
+    return again;
+}
+}  // namespace
+
+static ShrinkFind meetsAnAngleByShrinking(const SketchObject& sketch, const Sketch& solved)
+{
+    ShrinkFind found;
+    double worst = -1.0;
+    try {
+        const std::vector<Constraint*>& constraints = sketch.Constraints.getValues();
+        for (int index = 0; index < static_cast<int>(constraints.size()); ++index) {
+            const Constraint* c = constraints[index];
+            double drawn = 0.0;
+            if (!linePair(sketch, solved, index, c, drawn)) {
+                continue;
+            }
+            double product = 0.0;
+            double miss = 0.0;
+            solvedPair(solved, c, product, miss);
+            if (!(product < 0.5 * drawn) || !(miss > worst)) {
+                continue;  // not shrunk (the solver's own measure stands), or a smaller miss
+            }
+            worst = miss;
+            found.index = index;
+        }
+        if (found.index < 0 || !shrinksAgain(sketch, solved, found.index)) {
+            return {};
+        }
+    }
+    catch (const Base::Exception&) {
+        return {};  // the solver's geometry is not the sketch's: nothing to compare
+    }
+    found.level = worst < 1e-7 ? Shrunk::UnderTheBar : Shrunk::OverTheBar;  // NaN: over
+    return found;
+}
+
+// FreeCAD-CH (ops#656 D4 row 4): whether constraint \a index, a line-line Perpendicular or Parallel,
+// holds within 1e-7 rad on \a solved's lines without them shrinking to under half the drawn ones
+static bool holdsAsAnAngle(const SketchObject& sketch, const Sketch& solved, int index)
+{
+    try {
+        const Constraint* c = sketch.Constraints.getValues()[index];
+        const auto* drawn1 = dynamic_cast<const Part::GeomLineSegment*>(sketch.getGeometry(c->First));
+        const auto* drawn2 = dynamic_cast<const Part::GeomLineSegment*>(sketch.getGeometry(c->Second));
+        if (!drawn1 || !drawn2) {
+            return false;
+        }
+        const double drawn = (drawn1->getEndPoint() - drawn1->getStartPoint()).Length()
+            * (drawn2->getEndPoint() - drawn2->getStartPoint()).Length();
+        double product = 0.0;
+        double miss = 0.0;
+        solvedPair(solved, c, product, miss);
+        return miss < 1e-7 && !(product < 0.5 * drawn);
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+}
+
 // FreeCAD-CH (ops#640): leaves the constraints of a conflict out of the solve and solves the rest.
 // The solver's conflicting set is a superset of the conflict (it can hold the corners'
 // coincidences and dimensions the conflict does not involve), so:
@@ -191,7 +373,8 @@ bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
             return false;
         }
         const int status = solvedSketch.solve();
-        if (status == 0 && !collapsesACurve(*this, solvedSketch)) {
+        if (status == 0 && !collapsesACurve(*this, solvedSketch)
+            && meetsAnAngleByShrinking(*this, solvedSketch).level != Shrunk::OverTheBar) {
             const std::vector<int>& redundant = solvedSketch.getRedundant();
             const bool allHold = std::all_of(redundant.begin(), redundant.end(), [&](int tag) {
                 return std::abs(solvedSketch.calculateConstraintError(tag)) < 1e-7;
@@ -585,6 +768,25 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
         if (lastSolverStatus != 0) {
             lastSolverStatus = solvedSketch.solve();
         }
+        if (lastSolverStatus != 0 && !lastSolvedDatums.empty()) {
+            // FreeCAD-CH (ops#658): a changed datum the solver can't reach at once (an arc Angle
+            // 270 -> 72 degrees at r 4 m) is ramped from the value the drawn geometry was solved
+            // with. Only after the solve failed: every sketch that solves today solves the same.
+            std::map<const Constraint*, double> from;
+            const std::vector<Constraint*>& constraints = Constraints.getValues();
+            const std::size_t count = std::min(constraints.size(), lastSolvedDatums.size());
+            for (std::size_t i = 0; i < count; ++i) {
+                const Constraint* c = constraints[i];
+                const auto& [identity, solvedWith] = lastSolvedDatums[i];
+                if (c->isDriving && c->isActive && c->isDimensional() && identity == datumIdentity(*c)
+                    && std::isfinite(solvedWith) && solvedWith != c->getValue()) {
+                    from.emplace(c, solvedWith);
+                }
+            }
+            if (!from.empty()) {
+                lastSolverStatus = solvedSketch.solveByContinuation(from);
+            }
+        }
         if (lastSolverStatus != 0) {// solving
             err = -1;
         }
@@ -629,7 +831,32 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
                 err = 0;
             }
         }
-        else if (err == 0 && collapsesACurve(*this, solvedSketch)) {
+        else if (const ShrinkFind shrunk =
+                     err == 0 ? meetsAnAngleByShrinking(*this, solvedSketch) : ShrinkFind();
+                 shrunk.level == Shrunk::UnderTheBar && !collapsesACurve(*this, solvedSketch)
+                 && [&] {
+                        // FreeCAD-CH (ops#656 D4 row 4): the cycle agrees at the bar and the
+                        // solver only shrank lines to close the last hair: the constraint is left
+                        // out of the solve, as an agreeing repeat is, and must hold at the solution
+                        solvedSketch.setSkippedConstraints({shrunk.index});
+                        solvedSketch.setUpSketch(getCompleteGeometry(),
+                                                 Constraints.getValues(),
+                                                 getExternalGeometryCount());
+                        if (solvedSketch.solve() == 0 && !collapsesACurve(*this, solvedSketch)
+                            && holdsAsAnAngle(*this, solvedSketch, shrunk.index)) {
+                            return true;
+                        }
+                        solvedSketch.setSkippedConstraints({});
+                        solvedSketch.setUpSketch(getCompleteGeometry(),
+                                                 Constraints.getValues(),
+                                                 getExternalGeometryCount());
+                        lastSolverStatus = solvedSketch.solve();
+                        return false;
+                    }()) {
+            lastSolverStatus = 0;
+        }
+        else if (err == 0
+                 && (shrunk.level != Shrunk::No || collapsesACurve(*this, solvedSketch))) {
             // solved by shrinking a curve to a point: a conflict too (PL1d); when nothing can be
             // left out to keep the curve, the solution stands as before
             if (!solveAroundConflict({})) {
@@ -679,6 +906,17 @@ int SketchObject::solve(bool updateGeoAfterSolving /*=true*/)
             Part::PropertyGeometryList tmp;
             tmp.setValues(std::move(geomlist));
             Geometry.moveValues(std::move(tmp));
+
+            // FreeCAD-CH (ops#658): the datums the written geometry meets, for a continuation
+            lastSolvedDatums.clear();
+            if (!lastSolvedAroundConflict && lastSolverStatus == 0) {
+                for (const Constraint* c : Constraints.getValues()) {
+                    const bool datum = c->isDriving && c->isActive && c->isDimensional();
+                    lastSolvedDatums.emplace_back(
+                        datumIdentity(*c),
+                        datum ? c->getValue() : std::numeric_limits<double>::quiet_NaN());
+                }
+            }
 
             // FreeCAD-CH (ops#656): a solve that takes an arc's sweep through 0 (an Angle on the
             // arc is solved modulo 2 pi: 270 -> 72 degrees can land on -288) leaves a Midpoint's
