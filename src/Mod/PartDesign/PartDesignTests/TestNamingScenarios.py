@@ -604,6 +604,90 @@ class HarnessGuessVerdicts(unittest.TestCase):
         self.assertTrue(self.passing(self.EDGE, verdict))
 
 
+class HarnessWarnedBreak(unittest.TestCase):
+    """A broken reference reported by a warning (ops#656 D4 row 2, c768's option A): a sketch
+    whose external reference is missing computes on the frozen copy and warns, as Onshape's Use
+    does (facts GB33 (b), GB22). A valid owner whose warning names every missing element counts as
+    reported, the same as a failed one; `judge` takes the outcome from `breakOutcome`. Owners
+    stand in for the objects, as App gives their state."""
+
+    class Owner:
+        def __init__(self, valid=True, warning=None, error=None):
+            self.Name = "Sketch"
+            self.valid = valid
+            self.State = (["Warning"] if warning is not None else []) + ([] if valid else ["Invalid"])
+            self.text = error if not valid else (warning if warning is not None else "")
+
+        def isValid(self):
+            return self.valid
+
+        def getStatusString(self):
+            return self.text
+
+    WARNING = (
+        "Missing edge reference: Edge3, the reference's element is gone; "
+        "computed on the frozen geometry of the edge"
+    )
+
+    def passing(self, outcome):
+        result = harness.Result(None, None, "V2s", 0)
+        result.record["expect"] = repr(harness.BROKEN)
+        result.verdict = harness.combine("broken", outcome)
+        return result.passing
+
+    # must pass
+    def testFailedOwnerStaysBroken(self):
+        """The loud case is unchanged: a failed owner reports the break, with no detail."""
+        owner = self.Owner(valid=False, error="Missing edge reference: Edge3")
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"]), ("broken", ""))
+        #   whatever its error says
+        owner = self.Owner(valid=False, error="Sketch with conflicting constraints")
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"]), ("broken", ""))
+        self.assertTrue(self.passing("broken"))
+
+    def testWarningNamingTheMissingElementIsReported(self):
+        owner = self.Owner(warning=self.WARNING)
+        self.assertTrue(harness.warnsMissing(owner, ["?Edge3"]))
+        outcome, detail = harness.breakOutcome(owner, ["?Edge3"])
+        self.assertEqual(outcome, "broken")
+        self.assertIn("warning", detail)
+        self.assertTrue(self.passing(outcome))
+        #   a sub with its path, and several missing ones all named
+        self.assertTrue(harness.warnsMissing(owner, ["Body.Pad.?Edge3"]))
+        both = self.Owner(warning="Missing edge reference: Edge3; Missing face reference: Face1")
+        self.assertTrue(harness.warnsMissing(both, ["?Edge3", "?Face1", "Edge5"]))
+
+    # must fail
+    def testValidOwnerWithoutAWarningIsWrong(self):
+        owner = self.Owner()
+        self.assertFalse(harness.warnsMissing(owner, ["?Edge3"]))
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"])[0], "wrong")
+        self.assertFalse(self.passing("wrong"))
+        #   nor does the missing element's name in a valid owner's status count without a warning
+        owner.text = "Missing edge reference: Edge3"
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"])[0], "wrong")
+
+    def testWarningNamingAnotherElementIsWrong(self):
+        owner = self.Owner(warning="Missing edge reference: Edge4")
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"])[0], "wrong")
+        #   a name that only starts with it
+        owner = self.Owner(warning="Missing edge reference: Edge31")
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"])[0], "wrong")
+        #   a warning that names one of two missing elements
+        owner = self.Owner(warning="Missing edge reference: Edge3")
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3", "?Edge7"])[0], "wrong")
+        #   an unrelated warning
+        owner = self.Owner(warning="Sketch could not be solved: the constraints in conflict are left out")
+        self.assertEqual(harness.breakOutcome(owner, ["?Edge3"])[0], "wrong")
+        self.assertFalse(self.passing("wrong"))
+
+    def testNothingMissingIsNoWarnedReport(self):
+        """A stored break with no `?` sub (the target gone) isn't a warned report."""
+        owner = self.Owner(warning=self.WARNING)
+        self.assertFalse(harness.warnsMissing(owner, []))
+        self.assertFalse(harness.warnsMissing(owner, ["Edge3"]))
+
+
 class HarnessSplitVerdicts(unittest.TestCase):
     """The corpus's `quiet` and `broken-` (ops#506), on report rows as App.getReferenceReport
     gives them: no scenario of the seed corpus reaches them yet."""
