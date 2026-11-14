@@ -64,11 +64,8 @@ namespace PartDesign
 
 PROPERTY_SOURCE(PartDesign::CurvePattern, PartDesign::Transformed)
 
-const App::PropertyIntegerConstraint::Constraints CurvePattern::intOccurrences = {
-    1,
-    std::numeric_limits<int>::max(),
-    1
-};
+// FreeCAD-CH (ops#783): at most 2500 instances, as the linear and polar patterns
+const App::PropertyIntegerConstraint::Constraints CurvePattern::intOccurrences = {1, 2500, 1};
 
 const char* CurvePattern::OrientationEnums[] = {"Default", "Keep orientation", nullptr};
 const char* CurvePattern::SpacingTypeEnums[] = {"Equal", "Distance", nullptr};
@@ -441,6 +438,12 @@ bool CurvePattern::seedCentre(const std::vector<App::DocumentObject*>& originals
 const std::list<gp_Trsf> CurvePattern::getTransformations(const std::vector<App::DocumentObject*> originals)
 {
     const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    if (count > intOccurrences.UpperBound) {
+        throw Base::ValueError(
+            "A pattern has at most " + std::to_string(intOccurrences.UpperBound)
+            + " instances; this one asks for " + std::to_string(count)
+        );
+    }
     TopoDS_Wire wire = getPathWire();
     if (count == 1) {
         return {gp_Trsf()};
