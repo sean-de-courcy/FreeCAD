@@ -64,6 +64,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestCommandInsertLink.py
     AssemblyTests/TestFloatingSolve.py
     AssemblyTests/TestJointRecords.py
+    AssemblyTests/TestRigidCachePointers.py
     AssemblyTests/TestOnshapeJointsGui.py
     AssemblyTests/TestMateOffsetsGui.py
     AssemblyTests/TestConnectorPointsGui.py

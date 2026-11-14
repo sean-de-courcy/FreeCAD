@@ -266,6 +266,15 @@ private:
     const std::vector<App::DocumentObject*>* getRigidMembers(App::DocumentObject* part) const;
     void syncActiveRigidGroupPlacements();
     void updateRigidPlacementCache();
+    /// FreeCAD-CH (ops#778): whether a pointer in the rigid caches is still the object it was
+    /// cached as (its document still has that object under the ID recorded with it). Never reads
+    /// through the pointer: it may be freed.
+    bool isRigidCacheLive(App::DocumentObject* obj) const;
+    /// Rebuilds the rigid caches when an object in them was deleted since they were built (they
+    /// are rebuilt only by a solve, but read at any time: getGroundedParts, getConnectedParts).
+    void refreshStaleRigidCaches();
+    /// Drops rigidPlacementCache's entries for objects no longer live.
+    void pruneRigidPlacementCache();
 
     std::shared_ptr<MbD::ASMTAssembly> mbdAssembly;
 
@@ -273,6 +282,8 @@ private:
     std::unordered_map<App::DocumentObject*, App::DocumentObject*> rigidRepByPart;
     std::unordered_map<App::DocumentObject*, std::vector<App::DocumentObject*>> rigidMembersByRep;
     std::unordered_map<App::DocumentObject*, Base::Placement> rigidPlacementCache;
+    /// The document ID of each object in the three rigid caches above, when it was cached.
+    std::unordered_map<App::DocumentObject*, long> rigidCacheIds;
     std::vector<std::pair<App::DocumentObject*, double>> objMasses;
     std::vector<App::DocumentObject*> draggedParts;
     std::vector<App::DocumentObject*> motions;
