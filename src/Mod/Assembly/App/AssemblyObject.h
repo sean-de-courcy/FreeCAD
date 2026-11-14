@@ -283,8 +283,12 @@ private:
     std::unordered_map<App::DocumentObject*, App::DocumentObject*> rigidRepByPart;
     std::unordered_map<App::DocumentObject*, std::vector<App::DocumentObject*>> rigidMembersByRep;
     std::unordered_map<App::DocumentObject*, Base::Placement> rigidPlacementCache;
-    /// The document ID of each object in the three rigid caches above, when it was cached.
+    /// The document ID of each object in the three rigid caches above, and of each rigid group
+    /// they were built from, when it was cached.
     std::unordered_map<App::DocumentObject*, long> rigidCacheIds;
+    /// The IDs of cached objects that had left the document at a rebuild: one that comes back
+    /// (undo) makes the caches stale again.
+    std::vector<long> rigidDroppedIds;
     std::vector<std::pair<App::DocumentObject*, double>> objMasses;
     std::vector<App::DocumentObject*> draggedParts;
     std::vector<App::DocumentObject*> motions;
