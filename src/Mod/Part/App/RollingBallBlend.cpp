@@ -1118,10 +1118,18 @@ void solveStations(const Context& context, Blend& blend, int interior)
             }
             return least;
         };
+        // ... and on by twice the radius where the walls reach that far: a later round that runs past
+        // this end is cut by this surface (FilletFallback's blendBeyond uses a blend's surface as far
+        // as it is still the ball's), and ends in this one face instead of a continuation face
         gp_Vec out = outward[end];
+        const double runOn = std::max(2.0 * spacing, 2.0 * radius);
         int beyond = 0;
         for (int steps = 0;; ++steps) {
-            if (clearance(outermost()) > 2.0 * spacing && ++beyond >= 2) {
+            const double clear = clearance(outermost());
+            if (clear > 2.0 * spacing) {
+                ++beyond;
+            }
+            if (beyond >= 2 && clear > runOn) {
                 break;
             }
             if (steps > 4000) {
@@ -1130,6 +1138,9 @@ void solveStations(const Context& context, Blend& blend, int interior)
             const Station from = outermost();
             const Station next = solveStation(from.centre.Translated(out * spacing), walls, radius, &from);
             if (!next.ok || !onWall(walls[0], next.feet[0]) || !onWall(walls[1], next.feet[1])) {
+                if (beyond >= 2) {
+                    break;  // the walls end before the run-on does: as far as they reach
+                }
                 throw NotRecognised {"walls that stop at the blend's end"};
             }
             const gp_Vec tangent = tangentAt(next);
