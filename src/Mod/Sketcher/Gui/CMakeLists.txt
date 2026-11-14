@@ -73,6 +73,7 @@ SET(SketcherGui_SRCS
     DrawSketchHandlerCarbonCopy.h
     DrawSketchHandlerSlot.h
     DrawSketchHandlerOffset.h
+    DrawSketchHandlerPattern.h
     DrawSketchHandlerRotate.h
     DrawSketchHandlerScale.h
     DrawSketchHandlerSymmetry.h

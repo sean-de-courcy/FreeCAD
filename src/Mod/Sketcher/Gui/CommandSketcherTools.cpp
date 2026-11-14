@@ -30,6 +30,11 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QMessageBox>
 #include <QTimer>
 
@@ -38,6 +43,7 @@
 #include <App/Application.h>
 #include <Base/Console.h>
 #include <Base/Reader.h>
+#include <Base/Tools.h>
 #include <Base/Writer.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
@@ -70,6 +76,7 @@
 #include "DrawSketchHandlerRotate.h"
 #include "DrawSketchHandlerScale.h"
 #include "DrawSketchHandlerSymmetry.h"
+#include "DrawSketchHandlerPattern.h"
 #include "SnapManager.h"
 
 // Hint: this is to prevent to re-format big parts of the file. Remove it later again.
@@ -2985,6 +2992,205 @@ bool CmdSketcherTranslate::isActive()
     return transformIsActive(getActiveGuiDocument());
 }
 
+// FreeCAD-CH (Onshape's sketch patterns, notes/sketch-patterns-design.md item 4) ===============
+
+namespace
+{
+void startPatternTool(Gui::Document* document, DrawSketchHandlerPattern::Kind kind)
+{
+    // the selected geometry, if any, is the first seeds; without one the tool picks them
+    std::vector<int> seeds;
+    const auto selection
+        = Gui::Selection().getSelectionEx(nullptr, Sketcher::SketchObject::getClassTypeId());
+    if (selection.size() == 1 && !selection[0].getSubNames().empty()) {
+        for (int geoId : getListOfSelectedGeoIds(true)) {
+            if (geoId >= 0) {
+                seeds.push_back(geoId);
+            }
+        }
+    }
+    ActivateHandler(document, std::make_unique<DrawSketchHandlerPattern>(kind, std::move(seeds)));
+}
+}  // namespace
+
+DEF_STD_CMD_A(CmdSketcherCircularPattern)
+
+CmdSketcherCircularPattern::CmdSketcherCircularPattern()
+    : Command("Sketcher_CircularPattern")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Circular Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Patterns the picked geometry about a pivot point: the copies follow the seed, and the "
+        "count and angle stay editable"
+    );
+    sWhatsThis = "Sketcher_CircularPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_CircularPattern";
+    eType = ForEdit;
+}
+
+void CmdSketcherCircularPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    startPatternTool(getActiveGuiDocument(), DrawSketchHandlerPattern::Kind::Circular);
+}
+
+bool CmdSketcherCircularPattern::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
+DEF_STD_CMD_A(CmdSketcherLinearPattern)
+
+CmdSketcherLinearPattern::CmdSketcherLinearPattern()
+    : Command("Sketcher_LinearPattern")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Linear Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Patterns the picked geometry along one or two direction lines: the copies follow the "
+        "seed, and the counts stay editable"
+    );
+    sWhatsThis = "Sketcher_LinearPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_RectangularArray";
+    eType = ForEdit;
+}
+
+void CmdSketcherLinearPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    startPatternTool(getActiveGuiDocument(), DrawSketchHandlerPattern::Kind::Linear);
+}
+
+bool CmdSketcherLinearPattern::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
+// Onshape's "Edit pattern": the counts (and a circular pattern's angle) of the pattern the
+// selection is of, in a small dialog; one transaction
+void SketcherGui::editPattern(Sketcher::SketchObject* obj, int constrId)
+{
+    const auto record = obj->getPattern(constrId);
+    if (!record) {
+        return;
+    }
+    const bool circular = record->kind == Sketcher::PatternRecord::Kind::Circular;
+    QDialog dialog(Gui::getMainWindow());
+    dialog.setObjectName(QStringLiteral("SketcherEditPattern"));
+    dialog.setWindowTitle(QObject::tr("Edit pattern", "Sketcher pattern"));
+    auto* form = new QFormLayout(&dialog);
+    auto* count1 = new QSpinBox(&dialog);
+    count1->setObjectName(QStringLiteral("count1"));
+    count1->setRange(1, 999);
+    count1->setValue(record->count1);
+    form->addRow(
+        circular ? QObject::tr("Instances", "Sketcher pattern")
+                 : QObject::tr("Instances, first direction", "Sketcher pattern"),
+        count1
+    );
+    QSpinBox* count2 = nullptr;
+    QDoubleSpinBox* angle = nullptr;
+    if (circular) {
+        angle = new QDoubleSpinBox(&dialog);
+        angle->setObjectName(QStringLiteral("angle"));
+        angle->setRange(-360.0, 360.0);
+        angle->setDecimals(4);
+        angle->setSuffix(QStringLiteral(" °"));
+        angle->setValue(Base::toDegrees(record->angle));
+        form->addRow(QObject::tr("Angle", "Sketcher pattern"), angle);
+    }
+    else {
+        count2 = new QSpinBox(&dialog);
+        count2->setObjectName(QStringLiteral("count2"));
+        count2->setRange(1, 999);
+        count2->setValue(record->count2);
+        form->addRow(QObject::tr("Instances, second direction", "Sketcher pattern"), count2);
+    }
+    auto* buttons
+        = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const int tid = Gui::Command::openActiveDocumentCommand(
+        QT_TRANSLATE_NOOP("Command", "Edit sketch pattern")
+    );
+    try {
+        if (count1->value() != record->count1 || (count2 && count2->value() != record->count2)) {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "setPatternCount(%d, %d, %d)",
+                constrId,
+                count1->value(),
+                count2 ? count2->value() : 1
+            );
+        }
+        if (angle && std::abs(angle->value() - Base::toDegrees(record->angle)) > 1e-9) {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "setPatternAngle(%d, %.16g)",
+                constrId,
+                Base::toRadians(angle->value())
+            );
+        }
+        Gui::Command::commitCommand(tid);
+    }
+    catch (const Base::Exception& e) {
+        Gui::Command::abortCommand(tid);
+        Gui::NotifyUserError(obj, QT_TRANSLATE_NOOP("Notifications", "Sketch pattern"), e.what());
+    }
+    tryAutoRecomputeIfNotSolve(obj);
+}
+
+DEF_STD_CMD_A(CmdSketcherEditPattern)
+
+CmdSketcherEditPattern::CmdSketcherEditPattern()
+    : Command("Sketcher_EditPattern")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Edit Pattern");
+    sToolTipText = QT_TR_NOOP(
+        "Changes the count and angle of the sketch pattern the selected geometry belongs to"
+    );
+    sWhatsThis = "Sketcher_EditPattern";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_RectangularArray";
+    eType = ForEdit;
+}
+
+void CmdSketcherEditPattern::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    auto* sketchgui = dynamic_cast<ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+    if (!sketchgui) {
+        return;
+    }
+    Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+    const int index = patternOfSelection(obj);
+    if (index >= 0) {
+        getSelection().clearSelection();
+        editPattern(obj, index);
+    }
+}
+
+bool CmdSketcherEditPattern::isActive()
+{
+    Gui::Document* document = getActiveGuiDocument();
+    if (!isCommandActive(document)) {
+        return false;
+    }
+    auto* sketchgui = dynamic_cast<ViewProviderSketch*>(document->getInEdit());
+    return sketchgui && patternOfSelection(sketchgui->getSketchObject()) >= 0;
+}
+
 void CreateSketcherCommandsConstraintAccel()
 {
     Gui::CommandManager& rcCmdMgr = Gui::Application::Instance->commandManager();
@@ -3005,6 +3211,9 @@ void CreateSketcherCommandsConstraintAccel()
     rcCmdMgr.addCommand(new CmdSketcherRotate());
     rcCmdMgr.addCommand(new CmdSketcherScale());
     rcCmdMgr.addCommand(new CmdSketcherSymmetry());
+    rcCmdMgr.addCommand(new CmdSketcherCircularPattern());  // FreeCAD-CH (sketch patterns)
+    rcCmdMgr.addCommand(new CmdSketcherLinearPattern());
+    rcCmdMgr.addCommand(new CmdSketcherEditPattern());
     rcCmdMgr.addCommand(new CmdSketcherCopy());
     rcCmdMgr.addCommand(new CmdSketcherClone());
     rcCmdMgr.addCommand(new CmdSketcherMove());

@@ -58,6 +58,7 @@ from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch r
     TestSketchOnshapeConstraintsGui,
     TestSketchOnshapeShapesGui,
 )
+from SketcherTests.TestSketchPatternGui import TestSketchPatternToolsGui  # FreeCAD-CH, ops#725
 from SketcherTests.TestSketchRound4Gui import (  # FreeCAD-CH, ops#640 (sketch round 4)
     TestSketchToolbarFeaturesGui,
     TestSketchMirrorToolFirstGui,
@@ -112,6 +113,7 @@ from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH,
     and TestSketchToolbarFeaturesGui
     and TestSketchMirrorToolFirstGui
     and TestSketchTransformToolFirstGui
+    and TestSketchPatternToolsGui
     and TestSketchOtherPartSnapGui
     and TestSketchCancelGui
     else False

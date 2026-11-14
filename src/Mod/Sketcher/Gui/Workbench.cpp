@@ -590,6 +590,8 @@ inline void SketcherAddWorkbenchTools<Gui::MenuItem>(Gui::MenuItem& consaccel)
               << "Sketcher_Scale"
               << "Sketcher_Offset"
               << "Sketcher_Symmetry"
+              << "Sketcher_CircularPattern"  // FreeCAD-CH (sketch patterns)
+              << "Sketcher_LinearPattern"
               << "Sketcher_RemoveAxesAlignment"
               << "Separator"
               << "Sketcher_DeleteAllGeometry"
@@ -613,6 +615,8 @@ inline void SketcherAddWorkbenchTools<Gui::ToolBarItem>(Gui::ToolBarItem& consac
               << "Sketcher_Scale"
               << "Sketcher_Offset"
               << "Sketcher_Symmetry"
+              << "Sketcher_CircularPattern"  // FreeCAD-CH (sketch patterns)
+              << "Sketcher_LinearPattern"
               << "Sketcher_RemoveAxesAlignment";
 }
 
@@ -689,6 +693,8 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
     sketch << "Sketcher_CompCurveEdition"
            << "Sketcher_Offset"
            << "Sketcher_Symmetry"
+           << "Sketcher_CircularPattern"  // FreeCAD-CH (sketch patterns)
+           << "Sketcher_LinearPattern"
            << "Sketcher_CompExternal"
            << "Sketcher_ToggleConstruction"
            << "Separator";

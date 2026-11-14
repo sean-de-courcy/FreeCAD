@@ -129,6 +129,16 @@ bool checkBothExternal(int GeoId1, int GeoId2);
 
 bool isPointOrSegmentFixed(const Sketcher::SketchObject* Obj, int GeoId);
 
+/// FreeCAD-CH (sketch patterns): the index of the Pattern constraint that names geoId as a seed,
+/// a copy, its pivot or a direction line; -1 for none. With copyOnly, only as a copy.
+int patternOfGeometry(const Sketcher::SketchObject* obj, int geoId, bool copyOnly = false);
+/// FreeCAD-CH (sketch patterns): the pattern of the selection: a selected Pattern constraint, or
+/// the pattern of a selected curve or point (patternOfGeometry); -1 for none
+int patternOfSelection(const Sketcher::SketchObject* obj);
+/// FreeCAD-CH (sketch patterns): asks for the pattern's counts (and a circular pattern's angle)
+/// and applies them in one transaction (CommandSketcherTools.cpp)
+void editPattern(Sketcher::SketchObject* obj, int constrId);
+
 bool areBothPointsOrSegmentsFixed(const Sketcher::SketchObject* Obj, int GeoId1, int GeoId2);
 
 bool areAllPointsOrSegmentsFixed(const Sketcher::SketchObject* Obj, int GeoId1, int GeoId2, int GeoId3);
