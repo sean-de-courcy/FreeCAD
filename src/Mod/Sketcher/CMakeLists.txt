@@ -26,6 +26,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchNamesV1.py
     SketcherTests/TestSketcherEllipse.py
     SketcherTests/TestSketchMissingExternal.py
+    SketcherTests/TestSketchD4Solve.py
     SketcherTests/TestSketchExternalTypes.py
     SketcherTests/TestSketchCarbonCopyElements.py
     SketcherTests/TestSketchCornerSteps.py
