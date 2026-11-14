@@ -29,6 +29,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/DocumentTabs.h>
 
 #include "BitmapFactory.h"
 #include "Document.h"
@@ -65,11 +66,22 @@ VariableStudioView::VariableStudioView(Gui::Document* doc, App::DocumentObject* 
     QPointer<VariableStudioView> self(this);
     auto& app = App::GetApplication();
     connections.emplace_back(app.signalChangedObject.connect(
-        [this](const App::DocumentObject& changed, const App::Property& prop) {
-            if (&prop == &changed.Label && changed.getDocument() == getAppDocument()
-                && changed.isAttachedToDocument() && studio == changed.getNameInDocument()) {
+        [this, self](const App::DocumentObject& changed, const App::Property& prop) {
+            if (changed.getDocument() != getAppDocument() || !changed.isAttachedToDocument()
+                || studio != changed.getNameInDocument()) {
+                return;
+            }
+            if (&prop == &changed.Label) {
                 updateTitle();
             }
+            // ops#734: a studio that stops being one (the undo of a Detach attaches the copy
+            // again, which is no tab) closes its window, as a deleted one does. Checked once the
+            // change is over (an undo restores several properties)
+            QTimer::singleShot(0, [self] {
+                if (self && !self->isStudio()) {
+                    self->deleteSelf();
+                }
+            });
         }
     ));
     connections.emplace_back(app.signalDeletedObject.connect(
@@ -90,6 +102,13 @@ VariableStudioView::VariableStudioView(Gui::Document* doc, App::DocumentObject* 
 }
 
 VariableStudioView::~VariableStudioView() = default;
+
+bool VariableStudioView::isStudio() const
+{
+    App::Document* doc = getAppDocument();
+    App::DocumentObject* obj = doc ? doc->getObject(studio.c_str()) : nullptr;
+    return obj && App::DocumentTabs::isVariableStudio(obj);
+}
 
 void VariableStudioView::updateTitle()
 {
