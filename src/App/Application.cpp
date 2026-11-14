@@ -1198,6 +1198,69 @@ Document *Application::getDocumentByPath(const char *path, PathMatchMode checkCa
     return nullptr;
 }
 
+// B4 (ops#417, notes/b4-edit-before-recompute.md): the naming migration recompute of the
+// documents an open restored with shapes whose element map version differs from this build's
+// (PropertyPartShape::Restore() leaves the file's version on them, so that their first rebuild
+// re-derives the references into them from geometry). Run here, before the user or a script can
+// edit, it is a plain open's migration: decision 217 refuses a place pick after any edit, so an
+// edit made before a later first recompute broke the references whose index shifted. Off with
+// BaseApp/Preferences/Document/MigrateNamingOnOpen.
+static void migrateNamingOnOpen(const std::vector<DocumentT>& opened)
+{
+    ParameterGrp::handle hGrp =
+        App::GetApplication().GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document");
+    if (!hGrp->GetBool("MigrateNamingOnOpen", true)) {
+        return;
+    }
+    std::vector<Document*> docs;
+    for (const auto& entry : opened) {
+        auto doc = entry.getDocument();
+        if (!doc || doc->testStatus(Document::PartialDoc)) {
+            continue;
+        }
+        bool stale = false;
+        for (auto obj : doc->getObjects()) {
+            auto geo = freecad_cast<GeoFeature*>(obj);
+            if (!geo || !geo->getPropertyOfGeometry()) {
+                continue;
+            }
+            const std::string& version = geo->_ElementMapVersion.getStrValue();
+            if (!version.empty() && version != geo->getCorrectElementMapVersion()) {
+                geo->touch();
+                stale = true;
+            }
+        }
+        if (stale) {
+            docs.push_back(doc);
+        }
+    }
+    if (docs.empty()) {
+        return;
+    }
+    try {
+        docs = Document::getDependentDocuments(docs, true);
+    }
+    catch (Base::Exception& e) {
+        e.reportException();
+    }
+    for (auto doc : docs) {
+        const auto start = std::chrono::steady_clock::now();
+        bool hasError = false;
+        try {
+            doc->recompute({}, false, &hasError);
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+            hasError = true;
+        }
+        const std::chrono::duration<double> time = std::chrono::steady_clock::now() - start;
+        Base::Console().log("%s naming migration recompute at open: %f s%s\n",
+                            doc->getName(),
+                            time.count(),
+                            hasError ? " (with errors)" : "");
+    }
+}
+
 std::vector<Document*> Application::openDocuments(const std::vector<std::string> &filenames,
                                                   const std::vector<std::string> *paths,
                                                   const std::vector<std::string> *labels,
@@ -1400,9 +1463,12 @@ std::vector<Document*> Application::openDocuments(const std::vector<std::string>
     PropertyLinkBase::updateAllElementReferences();
     _isRestoring = false;
 
+    migrateNamingOnOpen(openedDocs);
+
     signalFinishOpenDocument();
     return res;
 }
+
 
 Document* Application::openDocumentPrivate(const char * FileName,
         const char *propFileName, const char *label,
