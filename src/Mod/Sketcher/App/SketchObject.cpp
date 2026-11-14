@@ -51,6 +51,7 @@
 #include <App/MappedName.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 #include <App/ObjectIdentifier.h>
+#include <App/ReferenceReport.h>
 #include <Base/Console.h>
 #include <Base/ProgramVersion.h>
 #include <Base/Reader.h>
@@ -218,9 +219,11 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Sketch",
                       (App::PropertyType)(App::Prop_None | App::Prop_ReadOnly),
                       "Sketch external geometry");
-    // A missing external reference keeps its frozen geometry (ops#72); in a reference solver
-    // document the sketch then computes with a warning while another one resolves (ops#127).
+    // A missing external reference keeps its frozen geometry (ops#72), and the sketch computes
+    // on it with a warning, every reference missing too, as Onshape's Use does (ops#656 D4 row 2;
+    // in a reference solver document the recompute check words it, ops#127).
     ExternalGeometry.setPartialAllowed(true);
+    App::ReferenceReport::setKeepsFrozenCopies(&ExternalGeometry, true);
     ADD_PROPERTY_TYPE(ExternalTypes,
                       ({}),
                       "Sketch",
@@ -315,6 +318,7 @@ SketchObject::SketchObject() : geoLastId(0)
 }
 
 SketchObject::~SketchObject() {
+    App::ReferenceReport::setKeepsFrozenCopies(&ExternalGeometry, false);
     delete analyser;
 }
 
@@ -477,16 +481,18 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     // update of the objects that depend on this sketch (like pads)
     buildShape();
 
+    // FreeCAD-CH (ops#656 D4 row 2): a missing external reference, every one of them missing
+    // too, leaves the sketch computed on the frozen geometry with a warning, and the features
+    // after it build, as Onshape's Use does (facts GB33 (b), GB22: "Some external references are
+    // missing.", the used entity stays where it was). It was an error before (ops#72).
+    std::string externalWarning;
     if (!externalError.empty()) {
-        // In a reference solver document a missing external reference is a warning while another
-        // one resolves: the recompute check has set it, naming the missing ones (ops#127).
-        const auto subs = ExternalGeometry.getSubValues();
-        const bool anyResolves = std::any_of(subs.begin(), subs.end(), [](const std::string& sub) {
-            return !Data::hasMissingElement(sub.c_str());
-        });
-        // FreeCAD-CH (ops#264 e2): but a geometry its link no longer gives, constraints on it, is
-        // lost whatever the other links do: flagged missing while its link still gives other
-        // geometry (a link whose build failed has all of its geometry missing)
+        // FreeCAD-CH (ops#264 e2): a geometry its link no longer gives while the link still gives
+        // other geometry (a link whose build failed has all of its geometry missing): the
+        // recompute check can't see it, since the link resolves. It still fails the sketch: the
+        // reference holds and the constraints on that geometry have lost their place on it, a
+        // case Onshape's facts (GB33 (b), GB22: a missing source) don't cover (decision 150: stop
+        // with an error at the boundary)
         const auto& geos = ExternalGeo.getValues();
         auto missing = [](const Part::Geometry* geo) {
             return ExternalGeometryFacade::getFacade(geo)->testFlag(
@@ -503,22 +509,31 @@ App::DocumentObjectExecReturn* SketchObject::execute()
                            && ExternalGeometryFacade::getFacade(other)->getRef() == ref;
                    });
         });
-        if (lost
-            || !(isWarning() && anyResolves && ExternalGeometry.isPartialAllowed()
-                 && ExternalGeometry.inSolverDocument())) {
+        if (lost) {
             return new App::DocumentObjectExecReturn(externalError, this);
+        }
+        // In a reference solver document the recompute check has worded the missing references
+        // as the warning (ops#127); otherwise the sketch words them
+        if (!(isWarning() && ExternalGeometry.inSolverDocument())) {
+            externalWarning = "Some external references are missing: " + externalError;
+            if (externalWarning.back() != '\n') {
+                externalWarning += '\n';
+            }
         }
         FC_LOG(getFullName() << ": " << externalError);
     }
 
-    if (!conflictWarning.empty()) {
+    for (const std::string* warning : {&externalWarning, &conflictWarning}) {
+        if (warning->empty()) {
+            continue;
+        }
         if (App::Document* doc = getDocument()) {
             const char* previous = isWarning() ? doc->getWarningDescription(this) : nullptr;
             doc->setWarning(this,
-                            previous && *previous ? std::string(previous) + "\n" + conflictWarning
-                                                  : conflictWarning);
+                            previous && *previous ? std::string(previous) + "\n" + *warning
+                                                  : *warning);
         }
-        Base::Console().warning(this->getFullLabel(), "%s", conflictWarning.c_str());
+        Base::Console().warning(this->getFullLabel(), "%s", warning->c_str());
     }
 
     return App::DocumentObject::StdReturn;

@@ -246,12 +246,12 @@ class TestSketchPierce(unittest.TestCase):
         self.assertEqual(self.sketch.delUnusedImplicitExternals(), 0)
         self.assertEqual(self.links(), [("Pole", "Edge1")])
 
-    def testACurveThatStopsCrossingFailsTheSketchAndPinsNothingElsewhere(self):
+    def testACurveThatStopsCrossingWarnsAndPinsNothingElsewhere(self):
         """A circle of radius 2 about (2, 3, 0) in the XZ plane, crossing at (0, 3) and (4, 3),
         then lifted clear of the plane (its centre at z = 20): its crossing's geometry is kept
-        where it was, flagged missing, and the sketch fails naming the reference, as for any
+        where it was, flagged missing, and the sketch warns naming the reference, as for any
         external geometry that loses its source (Onshape: a warning, the points left where they
-        are); lowered again, it is whole and the point at the same crossing."""
+        are; ops#656 D4 row 2); lowered again, it is whole and the point at the same crossing."""
         ring = self.addEdge("Ring", Part.makeCircle(2, V(2, 3, 0), V(0, 1, 0)))
         point = self.addPoint(2, 0)
         self.sketch.addPierce(point, START, ring, "Edge1")
@@ -261,7 +261,8 @@ class TestSketchPierce(unittest.TestCase):
         self.assertAlmostEqual(abs(at.x - 2), 2, delta=TOL)
         ring.Placement = App.Placement(V(0, 0, 20), App.Rotation())
         self.doc.recompute()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+        self.assertIn("Warning", self.sketch.State)
         self.assertIn("Ring", self.sketch.getStatusString())
         self.assertAt(point, at.x, at.y)
         self.assertEqual([c.Type for c in self.sketch.Constraints], ["Pierce"])

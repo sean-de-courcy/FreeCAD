@@ -968,10 +968,12 @@ class TestSketcherSolver(unittest.TestCase):
             hole.Refine = 1
             self.Doc.recompute()
             self.assertEqual(len(hole.Shape.Edges), 17)
-            # The reference is broken: the sketch keeps the link and fails (ops#72)
+            # The reference is broken: the sketch keeps the link (ops#72) and computes on the
+            # frozen geometry with a warning, as Onshape's Use (ops#656 D4 row 2)
             self.assertEqual(len(sketch2.ExternalGeometry), 1)
             self.assertTrue(sketch2.ExternalGeometry[0][1][0].startswith("?"))
-            self.assertFalse(sketch2.isValid())
+            self.assertTrue(sketch2.isValid(), sketch2.getStatusString())
+            self.assertIn("Warning", sketch2.State)
 
     def testRemovedExternalGeometryReferenceWithTheSolver(self):
         """The same in a reference solver document (ops#7, ops#87): the thread's B-spline edge

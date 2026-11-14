@@ -1035,11 +1035,13 @@ class TestSketchExternalTypes(unittest.TestCase):
     def reshape(self, face, outline, sketch):
         """C2 round 2c (ops#502): a script's face given another outline is named by a verified
         match, and the match can't verify it: the face gets a fresh id (I-C5), and the sketch's
-        links to it break, loud, with the face as their candidate. App.repairReference picks it
+        links to it break, loud, with the face as their candidate: the sketch computes on the
+        frozen geometry with a warning naming it (ops#656 D4 row 2). App.repairReference picks it
         again; the sketch then pairs its geometry with the old as before"""
         face.Shape = self.tiltedFace(outline)
         self.doc.recompute()
-        self.assertFalse(sketch.isValid())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         self.assertIn("no element holds its id", sketch.getStatusString())
         for k, (obj, sub) in enumerate(sketch.ExternalGeometry):
             if obj == face:
@@ -1117,6 +1119,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(len(sketch.Constraints), 2)
         tipLine = sketch.ExternalGeo[tip]
         self.reshape(face, self.SQUARE, sketch)
+        # a geometry its repaired link no longer gives: the sketch fails (ops#264 e2)
         self.assertFalse(sketch.isValid())
         self.assertEqual(len(sketch.Constraints), 2)
         # the pentagon's other new edge, unconstrained, went: the kept one's index moved down
