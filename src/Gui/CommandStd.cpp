@@ -46,6 +46,7 @@
 #include "Dialogs/DlgParameterImp.h"
 #include "Dialogs/DlgPreferencesImp.h"
 #include "Dialogs/DlgUnitsCalculatorImp.h"
+#include "DocumentTabBar.h"
 #include "GuiConsole.h"
 #include "MainWindow.h"
 #include "OnlineDocumentation.h"
@@ -92,6 +93,21 @@ void StdCmdWorkbench::activated(int i)
             if (switch_to == current_w) {
                 return;
             }
+        }
+        // FreeCAD-CH (tabs 3): under the Onshape keymap a tab's kind fixes its tools: a workbench
+        // that doesn't fit the active tab is turned back, with the reason in the status bar. A
+        // script's Gui.activateWorkbench is not the selector and stays free.
+        std::string refusal;
+        if (!DocumentTabs::allowsWorkbench(switch_to, &refusal)) {
+            getMainWindow()->showMessage(QString::fromStdString(refusal), 4000);
+            if (w) {
+                for (QAction* item : items) {
+                    if (item->objectName().toStdString() == w->name()) {
+                        item->setChecked(true);  // the click checked the other one
+                    }
+                }
+            }
+            return;
         }
         doCommand(Gui, "Gui.activateWorkbench(\"%s\")", switch_to.c_str());
     }
@@ -908,7 +924,8 @@ StdCmdUserEditMode::StdCmdUserEditMode()
     sStatusTip = sToolTipText;
     sWhatsThis = "Std_UserEditMode";
     sPixmap = "Std_UserEditModeDefault";
-    eType = ForEdit;
+    // FreeCAD-CH (ops#640): a setting, no transaction: allowed beside an open feature dialog
+    eType = ForEdit | NoTransaction;
 
     this->getGuiApplication()->signalUserEditModeChanged.connect([this](int mode) {
         this->updateIcon(mode);

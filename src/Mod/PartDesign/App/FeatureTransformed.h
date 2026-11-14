@@ -56,6 +56,15 @@ public:
     App::PropertyLinkList Originals;
     App::PropertyEnumeration TransformMode;
     App::PropertyBool Refine;
+    /** @name Studio patterns (FreeCAD-CH ops#655, T1-T3) */
+    //@{
+    /// Feature: the originals' tools; Part: the entities are parts (StudioEntities)
+    App::PropertyEnumeration PatternType;
+    /// Recompute each original's tool at each instance (Onshape's Reapply features)
+    App::PropertyBool Reapply;
+    /// A Part pattern's parts, by part id
+    App::PropertyStringList StudioEntities;
+    //@}
 
     /**
      * Returns the BaseFeature property's object(if any) otherwise return first original,
@@ -78,6 +87,13 @@ public:
     /// Return true if this feature is a child of a MultiTransform
     bool isMultiTransformChild() const;
 
+    /** FreeCAD-CH (ops#640, F3): not a solid feature of its Body: a MultiTransform's step, or a
+     * new pattern with nothing picked yet (isMultiTransformChild() and no BaseFeature). A pattern
+     * in the chain whose Originals went (the original deleted) stays in it and fails with
+     * "Select features to pattern", so its base passes through
+     */
+    bool isOutOfChain() const;
+
     /// Get the list of transformations describing the members of the pattern
     // Note: Only the Scaled feature requires the originals
     virtual const std::list<gp_Trsf> getTransformations(const std::vector<App::DocumentObject*> /*originals*/)
@@ -98,6 +114,15 @@ public:
      * list, is one step: the whole list. Valid after getTransformations().
      */
     virtual std::vector<Step> getTransformationSteps() const
+    {
+        return {};
+    }
+
+    /** The positions in the list getTransformations() returned whose instances are not made:
+     * Onshape's Skip instances (FreeCAD-CH ops#640 rank 8). Never 0, the original. The others
+     * keep their instance numbers. None by default. Valid after getTransformations().
+     */
+    virtual std::vector<std::size_t> getSkippedPositions() const
     {
         return {};
     }
@@ -141,7 +166,30 @@ protected:
     virtual void positionBySupport();
     static TopoDS_Shape getRemainingSolids(const TopoDS_Shape&);
 
+    /** Onshape's Centered (FreeCAD-CH ops#640 rank 8) on a list of rows x columns transformations
+     * (position = row * columns + column; the original at 0): with centerRows, the instances run
+     * both ways from the original along the rows' step, the original the middle one (with an even
+     * count, one more on the positive side); centerColumns the same along the columns' step. The
+     * original stays at position 0: the rows (columns) at index 0 and at the middle swap places.
+     */
+    static std::list<gp_Trsf> centerInstances(
+        const std::list<gp_Trsf>& transformations,
+        int rows,
+        int columns,
+        bool centerRows,
+        bool centerColumns
+    );
+    /// The index the row (column) at geometric index k has in centerInstances()'s list, middle
+    /// being the original's geometric index: 0 and middle swap
+    static int centeredIndex(int k, int middle)
+    {
+        return k == middle ? 0 : (k == 0 ? middle : k);
+    }
+
 private:
+    /// Out of its Body's chain (a step, or a new pattern of nothing): the solid after it builds on
+    /// the one before it, and its BaseFeature is cleared
+    void leaveChain(Body* body);
 };
 
 }  // namespace PartDesign

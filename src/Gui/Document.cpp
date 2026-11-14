@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 #include <tuple>
+#include <algorithm>
 #include <memory>
 #include <list>
 #include <string>
@@ -30,6 +31,7 @@
 #include <vector>
 #include <cctype>
 #include <mutex>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QDir>
@@ -62,9 +64,11 @@
 #include "Application.h"
 #include "Command.h"
 #include "Control.h"
+#include "DocumentTabBar.h"
 #include "FileDialog.h"
 #include "MainWindow.h"
 #include "MDIView.h"
+#include "NamedViews.h"
 #include "NotificationArea.h"
 #include "Selection.h"
 #include "Thumbnail.h"
@@ -81,8 +85,25 @@ FC_LOG_LEVEL_INIT("Gui", true, true)
 using namespace Gui;
 namespace sp = std::placeholders;
 
+namespace Gui::DocumentTabs
+{
+// FreeCAD-CH (ops#640, F6-3): DocumentTabBar.cpp's (no header names it): shows the tab the next
+// undo or redo step was made in; false when an open dialog refuses that switch (the undo refused)
+bool undoAllowed(Gui::Document* gdoc, bool undo);
+}  // namespace Gui::DocumentTabs
+
 namespace Gui
 {
+
+/// FreeCAD-CH (ops#640): no document regenerates on commit while an object is in edit (defined
+/// and explained in Gui/Application.cpp; not in Application.h, which hundreds of files include)
+void updateRegenerationHold(const App::Document* closingStep = nullptr);
+/// FreeCAD-CH (ops#640): defined below; Gui/CommandDoc.cpp and Gui/View3DInventor.cpp declare it
+bool hasUndoStep(const Document* doc, bool undo);
+/// FreeCAD-CH (ops#640): defined below; PartDesign's TaskFeatureParameters.cpp declares it
+GuiExport bool editStartedUnchanged(const App::Document* doc);
+/// FreeCAD-CH (ops#640, hands-on B5-5): defined below; Sketcher's ViewProviderSketch.cpp declares it
+GuiExport int undoOpenSketchSession(const App::Document* doc);
 
 // Pimpl class
 struct DocumentP
@@ -98,6 +119,42 @@ struct DocumentP
     bool _changeViewTouchDocument;
     bool _editWantsRestore;
     bool _editWantsRestorePrevious;
+    /// FreeCAD-CH (ops#640): this edit holds the App document's step lock (one lockStep())
+    bool _editHoldsStep = false;
+    /// FreeCAD-CH (ops#640): acceptOpenStep() is accepting the dialog (no re-entry)
+    bool _acceptingStep = false;
+    /** FreeCAD-CH (ops#640, regen-plan item 7, hands-on R9, R14): a sketch's edit is a session
+     * that is one undo step once it is closed, as in Onshape. Its transactions stay App's own
+     * (each tool commits one: the sketch's Ctrl+Z steps them one by one); the Gui document
+     * groups them by id: _stepGroupOf maps each transaction opened during the edit, and the one
+     * pending or booked when it started (the "New Sketch" or "Sketch on Face" that made the
+     * sketch: the opener), to the session's key. undo(), redo() and the undo/redo lists then
+     * take a closed session's transactions together. While the session is open they step its
+     * own transactions only (_sessionIds, the opener excepted): Ctrl+Z stops at the sketch's
+     * start, and the sketch stays open. Ids outlive an undo (App's redo transaction keeps the
+     * id), so the grouping holds through undo and redo; ids no stack holds any more are left
+     * in the map, unread. App's own undo() (a script's App.ActiveDocument.undo()) still pops
+     * one transaction. */
+    std::map<int, int> _stepGroupOf;
+    std::map<int, std::string> _stepGroupName;  ///< a closed session's step name, by key
+    int _stepGroupCount = 0;
+    int _session = 0;  ///< the open session's key; 0 when no sketch is in edit
+    int _sessionOpener = 0;
+    std::string _sessionLabel;
+    std::set<int> _sessionIds;
+    /** FreeCAD-CH (ops#640): the session's transactions that changed an object other than the
+     * one in edit outside a recompute (a Variables panel edit during the sketch's edit): the
+     * Cancel's undo (undoOpenSketchSession) leaves them alone and restores the sketch instead */
+    std::set<int> _sessionForeignIds;
+    /** FreeCAD-CH (ops#640): the user's undo limit (the MaxUndoSize preference) counts steps,
+     * not App's transactions: App's limit is set before each commit (updateUndoLimit) so that its
+     * trim leaves the newest steps whole, a closed sketch session with all its transactions.
+     * Counted by transactions, a sketch of more strokes than the limit lost its oldest ones, the
+     * "New Sketch" opener first, and one Ctrl+Z after the close left the sketch with its first
+     * elements. */
+    unsigned _undoSteps = 20;
+    /// FreeCAD-CH (ops#640): the edit started with no change in its step (editStartedUnchanged())
+    bool _editStartedUnchanged = false;
     int _editMode;
     int _editModePrevious;
     ViewProvider* _editViewProvider;
@@ -147,6 +204,7 @@ struct DocumentP
     Connection connectTransactionAppend;
     Connection connectTransactionRemove;
     Connection connectTouchedObject;
+    Connection connectOpenTransaction;  // FreeCAD-CH (ops#640): the sketch session's ids
     std::size_t nameRefSource = 0;  // Data::NameRefCollector::addSource()'s key
     Connection connectChangePropertyEditor;
     AdvancedConnection connectChangeDocument;
@@ -172,6 +230,183 @@ struct DocumentP
         }
 
         return obj;
+    }
+
+    // FreeCAD-CH (ops#640, regen-plan item 7): the sketch session's step (_stepGroupOf)
+
+    /// Whether the edit that just started is a session: a sketch's own edit
+    bool editIsSession() const
+    {
+        const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+        return _editViewProvider && !_editHoldsStep && !sketch.isBad()
+            && _editViewProvider->isDerivedFrom(sketch) && _editMode == ViewProvider::Default;
+    }
+
+    void beginSession()
+    {
+        endSession();
+        _session = ++_stepGroupCount;
+        _sessionIds.clear();
+        _sessionForeignIds.clear();
+        // the transaction that made the sketch, still open or booked when the edit starts
+        // (SketchWorkflow, Sketcher_NewSketch): the session's step takes it along, so that one
+        // Ctrl+Z after the close removes the new sketch. A re-edit's opener, if any, holds only
+        // what the edit changed.
+        _sessionOpener = _pcDocument->hasPendingTransaction()
+            ? _pcDocument->getTransactionID(true, 0)
+            : _pcDocument->getBookedTransactionID();
+        if (_sessionOpener != 0) {
+            _stepGroupOf[_sessionOpener] = _session;
+        }
+        auto vpd = freecad_cast<ViewProviderDocumentObject*>(_editViewProvider);
+        _sessionLabel = vpd && vpd->getObject() ? vpd->getObject()->Label.getValue() : "";
+    }
+
+    void endSession()
+    {
+        if (_session == 0) {
+            return;
+        }
+        // The step's name: the opener's ("New Sketch") when it is on the stack, else the edit's
+        std::string name;
+        if (_sessionOpener != 0) {
+            const auto names = _pcDocument->getAvailableUndoNames();
+            for (std::size_t pos = 0; pos < names.size(); ++pos) {
+                if (_pcDocument->getTransactionID(true, static_cast<unsigned>(pos))
+                    == _sessionOpener) {
+                    name = names[pos];
+                    break;
+                }
+            }
+        }
+        if (name.empty()) {
+            name = QObject::tr("Edit %1").arg(QString::fromStdString(_sessionLabel)).toStdString();
+        }
+        _stepGroupName[_session] = name;
+        _session = 0;
+        _sessionOpener = 0;
+        _sessionIds.clear();
+        _sessionForeignIds.clear();
+    }
+
+    /// A transaction opened in the document: one of the open session's
+    void slotOpenTransaction(const App::Document& doc)
+    {
+        if (_session == 0) {
+            return;
+        }
+        const int id = doc.getTransactionID(true, 0);
+        if (id != 0 && id != _sessionOpener) {
+            _stepGroupOf[id] = _session;
+            _sessionIds.insert(id);
+        }
+    }
+
+    /** App's undo limit for the commit of the transaction just opened (pending: App's position
+     * 0): the newest _undoSteps steps stay whole, counted as the grouped steps they are once
+     * the session closes (the open session's transactions as one). The pending transaction
+     * either joins the newest step (a stroke of the open session) or starts one. App's trim
+     * (_commitTransaction) pops from the oldest end, so what it pops is whole steps. With no
+     * session ever grouped here, the user's limit stands, as set at the document's start. */
+    void updateUndoLimit()
+    {
+        if (_stepGroupOf.empty()) {
+            return;
+        }
+        if (_undoSteps == 0) {
+            _pcDocument->setMaxUndoStackSize(0);
+            return;
+        }
+        const int group = groupOf(_pcDocument->getTransactionID(true, 0));
+        const bool joins = group != 0 && group == groupOf(_pcDocument->getTransactionID(true, 1));
+        const unsigned steps = joins ? _undoSteps : _undoSteps - 1;
+        unsigned pos = 1;
+        for (unsigned i = 0; i < steps; ++i) {
+            const int size = groupSize(true, pos);
+            if (size == 0) {
+                break;
+            }
+            pos += static_cast<unsigned>(size);
+        }
+        // pos - 1 transactions kept on the stack, and the pending one
+        _pcDocument->setMaxUndoStackSize(pos);
+    }
+
+    int groupOf(int id) const
+    {
+        auto it = _stepGroupOf.find(id);
+        return it == _stepGroupOf.end() ? 0 : it->second;
+    }
+
+    /// The number of App transactions from App's position pos with the group of the one there:
+    /// one when it has none
+    int groupSize(bool undo, unsigned pos) const
+    {
+        const int id = _pcDocument->getTransactionID(undo, pos);
+        if (id == 0) {
+            return 0;
+        }
+        const int group = groupOf(id);
+        if (group == 0) {
+            return 1;
+        }
+        int size = 1;
+        while (groupOf(_pcDocument->getTransactionID(undo, pos + size)) == group) {
+            ++size;
+        }
+        return size;
+    }
+
+    /// The number of App transactions, from App's position pos (getTransactionID()), that make
+    /// one step: one, or a closed session's
+    int stepSize(bool undo, unsigned pos) const
+    {
+        const int id = _pcDocument->getTransactionID(undo, pos);
+        if (id == 0) {
+            return 0;
+        }
+        const int group = groupOf(id);
+        if (group == 0 || group == _session) {
+            return 1;
+        }
+        return groupSize(undo, pos);
+    }
+
+    /// Whether the transaction at App's position pos is a step here: inside an open session,
+    /// only the session's own transactions are (its start is the floor, hands-on R14)
+    bool isStep(bool undo, unsigned pos) const
+    {
+        const int id = _pcDocument->getTransactionID(undo, pos);
+        return id != 0 && (_session == 0 || _sessionIds.contains(id));
+    }
+
+    /// The number of App transactions that `steps` steps undo or redo
+    int transactionsOfSteps(bool undo, int steps) const
+    {
+        unsigned pos = 0;
+        for (int i = 0; i < steps && isStep(undo, pos); ++i) {
+            pos += static_cast<unsigned>(stepSize(undo, pos));
+        }
+        return static_cast<int>(pos);
+    }
+
+    /// The undo or redo list, one name per step
+    std::vector<std::string> stepNames(bool undo) const
+    {
+        const auto names = undo ? _pcDocument->getAvailableUndoNames()
+                                : _pcDocument->getAvailableRedoNames();
+        std::vector<std::string> steps;
+        unsigned pos = 0;
+        while (pos < names.size() && isStep(undo, pos)) {
+            const int group = groupOf(_pcDocument->getTransactionID(undo, pos));
+            auto named = _stepGroupName.find(group);
+            steps.push_back(
+                group != 0 && group != _session && named != _stepGroupName.end() ? named->second
+                                                                                  : names[pos]
+            );
+            pos += static_cast<unsigned>(std::max(1, stepSize(undo, pos)));
+        }
+        return steps;
     }
 
     void throwIfNotInMap(App::DocumentObject* obj, App::Document* doc) const
@@ -452,6 +687,12 @@ private:
     std::string subname;
 };
 
+namespace
+{
+/// FreeCAD-CH (ops#640): each Gui document's pimpl, for hasUndoStep() (no header names it)
+std::map<const Document*, DocumentP*> stepDocuments;  // NOLINT
+}  // namespace
+
 }  // namespace Gui
 
 /* TRANSLATOR Gui::Document */
@@ -463,6 +704,7 @@ int Document::_iDocCount = 0;
 Document::Document(App::Document* pcDocument, Application* app)
 {
     d = new DocumentP;
+    stepDocuments[this] = d;  // FreeCAD-CH (ops#640)
     d->_iWinCount = 1;
     // new instance
     d->_iDocId = (++_iDocCount);
@@ -562,6 +804,12 @@ Document::Document(App::Document* pcDocument, Application* app)
     d->connectTransactionRemove = pcDocument->signalTransactionRemove.connect(
         std::bind(&Gui::Document::slotTransactionRemove, this, sp::_1, sp::_2)
     );
+    d->connectOpenTransaction = pcDocument->signalOpenTransaction.connect(
+        [this](const App::Document& doc, const std::string&) {
+            d->slotOpenTransaction(doc);
+            d->updateUndoLimit();
+        }
+    );
     // NOLINTEND
 
     // A view provider's Python state may hold interned names (an add-on's subname), and
@@ -603,12 +851,20 @@ Document::Document(App::Document* pcDocument, Application* app)
         "User parameter:BaseApp/Preferences/Document"
     );
 
-    d->_pcDocument->setMaxUndoStackSize(hGrp->GetInt("MaxUndoSize", 20));
+    // FreeCAD-CH (ops#640): kept as a number of steps (DocumentP::updateUndoLimit)
+    d->_undoSteps = static_cast<unsigned>(std::max<long>(0, hGrp->GetInt("MaxUndoSize", 20)));
+    d->_pcDocument->setMaxUndoStackSize(d->_undoSteps);
+    // FreeCAD-CH (ops#640, regen-design section 1): a document shown in the GUI regenerates on the
+    // close of each transaction and after undo/redo, as Onshape regenerates the Part Studio after
+    // every action; FreeCADCmd documents keep their explicit recompute()s (the flag is off in App)
+    d->_pcDocument->setRegenerateOnCommit(true);
     d->_changeViewTouchDocument = hGrp->GetBool("ChangeViewProviderTouchDocument", true);
 }
 
 Document::~Document()
 {
+    stepDocuments.erase(this);  // FreeCAD-CH (ops#640)
+    NamedViews::forget(this);   // FreeCAD-CH (ops#640)
     // disconnect everything to avoid to be double-deleted
     // in case an exception is raised somewhere
     Data::NameRefCollector::removeSource(d->nameRefSource);
@@ -633,6 +889,7 @@ Document::~Document()
     d->connectTransactionAppend.disconnect();
     d->connectTransactionRemove.disconnect();
     d->connectTouchedObject.disconnect();
+    d->connectOpenTransaction.disconnect();
     d->connectChangePropertyEditor.disconnect();
     d->connectChangeDocument.disconnect();
 
@@ -716,9 +973,51 @@ View3DInventor* Document::openEditingView3D(const App::DocumentObject* obj)
     return nullptr;
 }
 
+namespace
+{
+bool bookEditStep(
+    Gui::Document* gdoc,
+    App::DocumentObject* obj,
+    const std::string& subname,
+    int ModNum
+)
+{
+    // FreeCAD-CH (ops#640): an edit opened with no transaction (Gui.ActiveDocument.setEdit from a
+    // script or macro; the tree's double-click, Std_Edit and the feature commands open one first)
+    // gets its step here, before its dialog opens, named as the double-click names it, so that
+    // the dialog's changes from its start (the sketches it shows) are in it, as from the
+    // double-click: under the lock the panels' own fallback, "Edit X" opened at their first
+    // change when none is booked (setupTransaction), is refused, and the dialog's changes were
+    // recorded nowhere (its Cancel restored nothing, its OK left no step). An unchanged accept
+    // still leaves none (the commit's no-op rule).
+    App::Document* doc = gdoc->getDocument();
+    if (!obj || doc->getBookedTransactionID() != App::NullTransaction
+        || doc->hasPendingTransaction() || doc->isTransactionLocked() || doc->transacting()) {
+        return false;
+    }
+    App::DocumentObject* target = subname.empty() ? obj : obj->getSubObject(subname.c_str());
+    auto vp = target ? freecad_cast<Gui::ViewProviderDocumentObject*>(
+                           Gui::Application::Instance->getViewProvider(target)
+                       )
+                     : nullptr;
+    if (!vp || vp->getDocument() != gdoc || !vp->editHoldsOneStep(ModNum)) {
+        return false;
+    }
+    const QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(target->Label.getValue()));
+    return doc->openTransaction(text.toUtf8().constData()) != App::NullTransaction;
+}
+}  // namespace
+
 bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
 {
     auto vp = DocumentP::throwIfCastFails(p);
+
+    // FreeCAD-CH (ops#640): another edit beside the held step accepts the open dialog first;
+    // resetIfEditing() below would otherwise commit the dialog's step without its accept()'s
+    // validation and start the next edit with no transaction (its openCommand was refused)
+    if (d->_editHoldsStep && !acceptOpenStep()) {
+        return false;
+    }
 
     auto obj = DocumentP::tryGetObject(vp);
 
@@ -744,16 +1043,44 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     // using the current selection before closing the previous edit.
     resetIfEditing();
 
+    // FreeCAD-CH (ops#640, rank 59; R6T-3, R6T-11): an object of another typed tab is edited in
+    // its tab's view, switched to only now (the held step's dialog accepted, so its step stays
+    // its own tab's) and by the edited path's top object (a sketch edited through an assembly's
+    // link stays in the assembly); refused beside another open dialog
+    if (!DocumentTabs::beforeEdit(this, vp)) {
+        return false;
+    }
+
     d->throwIfNotInMap(obj, getDocument());
+
+    // FreeCAD-CH (ops#640): an edit that holds its step, opened with no transaction, books it
+    // before the dialog opens (bookEditStep)
+    const bool bookedHere = bookEditStep(this, obj, _subname, ModNum);
+    // FreeCAD-CH (ops#640): whether the edit's step holds nothing yet (editStartedUnchanged())
+    d->_editStartedUnchanged = !getDocument()->hasPendingTransaction();
 
     Application::Instance->setEditDocument(this);
 
     if (!d->tryStartEditing(vp, obj, _subname.c_str(), ModNum)) {
+        if (bookedHere) {
+            getDocument()->abortTransaction();
+        }
         d->setDocumentNameOfTaskDialog(getDocument());
         return false;
     }
 
     d->setDocumentNameOfTaskDialog(getDocument());
+
+    // FreeCAD-CH (ops#640, regen-design section 3): after the edit started (its "Edit X" or
+    // "Make X" transaction was opened before), the open dialog's step is locked until the edit
+    // resets: no undo, redo, implicit commit or other transaction behind the dialog
+    holdEditStep(ModNum);
+    // FreeCAD-CH (ops#640, regen-plan item 7): a sketch's edit is a session, one undo step
+    if (d->editIsSession()) {
+        d->beginSession();
+    }
+    // FreeCAD-CH (ops#640): and no document regenerates on commit until the edit ends
+    updateRegenerationHold();
 
     auto view3d = openEditingView3D(vp);
     d->setEditingViewerIfPossible(view3d, ModNum);
@@ -792,8 +1119,78 @@ void Document::resetEdit()
     }
 }
 
+void Document::holdEditStep(int ModNum)
+{
+    if (d->_editHoldsStep || !d->_editViewProvider
+        || !d->_editViewProvider->editHoldsOneStep(ModNum)) {
+        return;
+    }
+    // FreeCAD-CH (ops#640): the edit whose step bookEditStep couldn't book before it started
+    // (its target found only by the edit itself) books it now, from its first change on
+    App::Document* doc = getDocument();
+    auto vpd = freecad_cast<ViewProviderDocumentObject*>(d->_editViewProvider);
+    if (vpd && vpd->getObject() && doc->getBookedTransactionID() == App::NullTransaction
+        && !doc->hasPendingTransaction() && !doc->isTransactionLocked() && !doc->transacting()) {
+        const QString text = QObject::tr("Edit %1").arg(
+            QString::fromUtf8(vpd->getObject()->Label.getValue())
+        );
+        doc->openTransaction(text.toUtf8().constData());
+    }
+    doc->lockStep();
+    d->_editHoldsStep = true;
+}
+
+void Document::releaseEditStep()
+{
+    if (!d->_editHoldsStep) {
+        return;
+    }
+    d->_editHoldsStep = false;
+    getDocument()->unlockStep();
+}
+
+bool Document::dialogClosingStep() const
+{
+    TaskView::TaskDialog* dlg = Gui::Control().activeDialog(getDocument());
+    return dlg && dlg->property("taskview_accept_or_reject").isValid();
+}
+
+bool Document::acceptOpenStep()
+{
+    App::Document* doc = getDocument();
+    if (!doc->isStepLocked()) {
+        return true;
+    }
+    bool inOwnClose = d->_acceptingStep || dialogClosingStep();
+    if (d->_editHoldsStep && !inOwnClose && Gui::Control().activeDialog(doc)) {
+        Base::FlagToggler<> accepting(d->_acceptingStep);
+        // the dialog's OK commits its step and resets the edit (releaseEditStep); a failed
+        // accept shows the dialog's own message and leaves both
+        Gui::Control().accept(doc);
+    }
+    if (!doc->isStepLocked()) {
+        return true;
+    }
+    if (!inOwnClose) {
+        getMainWindow()->showMessage(
+            QObject::tr("The open dialog could not be accepted: finish or cancel it first"),
+            5000
+        );
+    }
+    return false;
+}
+
 void Document::_resetEdit()
 {
+    // FreeCAD-CH (ops#640): the step lock goes first, before the commit below and before
+    // finishEditing() (whose unsetEdit may recompute); the step lock never refuses the explicit
+    // commit or abort of the dialog itself, and restartEdit's TransactionLocker still makes the
+    // commit below a no-op
+    // FreeCAD-CH (ops#640): a dialog that held its step commits it below and regenerates, even
+    // while another document holds the regeneration (updateRegenerationHold)
+    const bool heldStep = d->_editHoldsStep;
+    releaseEditStep();
+
     if (d->_editViewProvider) {
         for (auto* v : d->baseViews) {
             auto activeView = dynamic_cast<View3DInventor*>(v);
@@ -819,6 +1216,10 @@ void Document::_resetEdit()
             vpd->getDocument()->signalResetEdit(*vpd);
         }
         d->_editViewProvider = nullptr;
+        // FreeCAD-CH (ops#640): the hold on regeneration ends before the edit's own commit
+        // below, so the dialog's OK regenerates: a feature dialog's always, a sketch's unless
+        // another document is in a sketch's edit (then at that edit's end)
+        updateRegenerationHold(heldStep ? getDocument() : nullptr);
 
         // The logic below is not necessary anymore, because this method is
         // changed into a private one,  _resetEdit(). And the exposed
@@ -832,6 +1233,10 @@ void Document::_resetEdit()
     d->_editObjs.clear();
     d->_editingObject = nullptr;
     Application::Instance->unsetEditDocument(this);
+    updateRegenerationHold();  // FreeCAD-CH (ops#640): as above
+    // FreeCAD-CH (ops#640, regen-plan item 7): the sketch session closes after its last commit
+    // (the close's "Sketch recompute" or "Cancel sketch editing" and the commit above are in it)
+    d->endSession();
 }
 
 ViewProvider* Document::getInEdit(
@@ -1170,6 +1575,15 @@ void Document::beforeDelete()
 
 void Document::slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
 {
+    // FreeCAD-CH (ops#640): a change of another object in one of the open sketch session's
+    // transactions, not a recompute's (_sessionForeignIds)
+    if (d->_session != 0 && &Obj != d->_editingObject && d->_pcDocument->hasPendingTransaction()
+        && !d->_pcDocument->testStatus(App::Document::Recomputing)) {
+        const int id = d->_pcDocument->getTransactionID(true, 0);
+        if (d->_sessionIds.contains(id)) {
+            d->_sessionForeignIds.insert(id);
+        }
+    }
     ViewProvider* viewProvider = getViewProvider(&Obj);
     if (viewProvider) {
         try {
@@ -2196,6 +2610,13 @@ void Document::RestoreDocFile(Base::Reader& reader)
                 Base::Console().error("%s\n", e.what());
             }
         }
+
+        // FreeCAD-CH (ops#640): named views, an optional element after the camera
+        NamedViews::forget(this);
+        if (localreader->readNextElement()
+            && std::string(localreader->localName()) == "NamedViews") {
+            NamedViews::read(this, *localreader);
+        }
     }
 
     reader.initLocalReader(localreader);
@@ -2331,6 +2752,9 @@ void Document::SaveDocFile(Base::Writer& writer) const
     writer.Stream() << writer.ind() << "<Camera settings=\"" << encodeAttribute(getCameraSettings())
                     << "\"/>\n";
     writer.decInd();  // indentation for camera settings
+
+    // FreeCAD-CH (ops#640): the named views follow the camera
+    NamedViews::write(this, writer);
 
     writer.Stream() << "</Document>" << std::endl;
 }
@@ -2541,6 +2965,9 @@ MDIView* Document::createView(const Base::Type& typeId, CreateViewMode mode)
         for (App::DocumentObject* obj : child_vps) {
             view3D->getViewer()->removeViewProvider(getViewProvider(obj));
         }
+
+        // FreeCAD-CH (ops#640, rank 59): under the Onshape keymap the view is a typed tab's
+        DocumentTabs::viewCreated(this, view3D);
 
         // When cloning the view, don't increment the window counter as the old view will be deleted
         // shortly after.
@@ -2933,6 +3360,11 @@ MDIView* Document::setActiveView(const ViewProviderDocumentObject* vp, Base::Typ
                     if (active && active->containsViewProvider(vp)) {
                         view = active;
                     }
+                    // FreeCAD-CH (ops#640, R6T-5): under the typed tabs the object's own tab's
+                    // view, not the document's first 3D view (maybe another tab's)
+                    else if (MDIView* tabView = DocumentTabs::viewOfObject(this, obj)) {
+                        view = tabView;
+                    }
                     else {
                         typeId = View3DInventor::getClassTypeId();
                     }
@@ -3041,16 +3473,36 @@ Gui::MDIView* Document::getEditingViewOfViewProvider(Gui::ViewProvider* vp) cons
  */
 int Document::openCommand(const char* sName)
 {
+    // FreeCAD-CH (ops#640): a transaction beside the open dialog's held step (double-click on
+    // another feature, the row menu's or the context menu's Edit, Accept Merge) accepts the
+    // dialog first, as in Onshape; refused (0) when the dialog stays
+    if (d->_editHoldsStep && !acceptOpenStep()) {
+        FC_LOG("Step held by the open dialog, ignore new command '" << (sName ? sName : "")
+                                                                    << "'");
+        return 0;
+    }
     return getDocument()->openTransaction(App::TransactionName {.name = sName, .temporary = false});
 }
 
 void Document::commitCommand()
 {
+    // FreeCAD-CH (ops#640): beside the held step only the open dialog's own OK or Cancel
+    // closes it. Any other commit belongs to an openCommand the lock refused, and
+    // App::Document::commitTransaction() would commit the dialog's step behind the dialog
+    if (d->_editHoldsStep && getDocument()->isStepLocked() && !dialogClosingStep()) {
+        FC_LOG("Step held by the open dialog, ignore commitCommand()");
+        return;
+    }
     getDocument()->commitTransaction();
 }
 
 void Document::abortCommand()
 {
+    // FreeCAD-CH (ops#640): as commitCommand(); an abort would revert the dialog's step
+    if (d->_editHoldsStep && getDocument()->isStepLocked() && !dialogClosingStep()) {
+        FC_LOG("Step held by the open dialog, ignore abortCommand()");
+        return;
+    }
     getDocument()->abortTransaction();
 }
 
@@ -3059,16 +3511,172 @@ bool Document::hasPendingCommand() const
     return getDocument()->hasPendingTransaction();
 }
 
+namespace
+{
+/** FreeCAD-CH (ops#640, hands-on R1, R1b): an open feature dialog's own undo history. The
+ * dialog (PartDesignGui::TaskDlgFeatureParameters) keeps it and offers it as two actions among
+ * its children, so that no header of the core names it: triggering one undoes or redoes the
+ * dialog's last edit, its "names" property lists the edits (the newest first) and it is enabled
+ * while there is one. A dialog without them has no history (Ctrl+Z does nothing). */
+QAction* dialogHistoryAction(App::Document* doc, bool undo)
+{
+    TaskView::TaskDialog* dlg = Control().activeDialog(doc);
+    if (!dlg) {
+        return nullptr;
+    }
+    return dlg->findChild<QAction*>(
+        QLatin1String(undo ? "FreeCAD-CH dialog undo" : "FreeCAD-CH dialog redo"),
+        Qt::FindDirectChildrenOnly
+    );
+}
+
+std::vector<std::string> dialogHistoryNames(App::Document* doc, bool undo)
+{
+    std::vector<std::string> names;
+    if (QAction* action = dialogHistoryAction(doc, undo)) {
+        if (action->isEnabled()) {
+            for (const QString& name : action->property("names").toStringList()) {
+                names.push_back(name.toStdString());
+            }
+        }
+    }
+    return names;
+}
+}  // namespace
+
+/** FreeCAD-CH (ops#640): whether getUndoVector() (getRedoVector() for !undo) is not empty, read
+ * without building it: Std_Undo's and Std_Redo's isActive() and the 3D view's onHasMsg() ask on
+ * every refresh of the actions, and the list costs O(n^2) in App's positions. Declared where it
+ * is called (not in Document.h, which hundreds of files include). */
+bool Gui::hasUndoStep(const Gui::Document* doc, bool undo)
+{
+    if (!doc || !doc->getDocument()) {
+        return false;
+    }
+    App::Document* appDoc = doc->getDocument();
+    if (appDoc->isStepLocked()) {
+        QAction* action = dialogHistoryAction(appDoc, undo);
+        return action && action->isEnabled();
+    }
+    auto it = stepDocuments.find(doc);
+    if (it == stepDocuments.end()) {
+        return undo ? !doc->getUndoVector().empty() : !doc->getRedoVector().empty();
+    }
+    return it->second->isStep(undo, 0);
+}
+
+/** FreeCAD-CH (ops#640): whether the document's current edit started with nothing in its step:
+ * an edit's booked "Edit X", not a new feature's "Make X" that already made the feature, nor a
+ * restart's step with a move in it. Changes the edit then makes (Visibility, the panels) aren't
+ * counted. PartDesign's dialog history reads it (an OK that changed nothing aborts the step, which
+ * would remove a new feature). Exported and declared where it is called, not in Document.h. */
+bool Gui::editStartedUnchanged(const App::Document* doc)
+{
+    Gui::Document* guiDoc = doc && Application::Instance ? Application::Instance->getDocument(doc)
+                                                         : nullptr;
+    auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
+    return it != stepDocuments.end() && it->second->_editStartedUnchanged;
+}
+
+/** FreeCAD-CH (ops#640, hands-on B5-5): a sketch's Cancel leaves no step, as in Onshape (no
+ * history entry; Ctrl+Z then undoes the step before the edit). Called while the sketch session
+ * is still open (ViewProviderSketch::unsetEdit): undoes the session's own transactions, all of
+ * them at the top of App's undo stack (a pending one first), down to the session's start, and
+ * takes the session's transactions off the Redo stack. The Redo stack before the edit is gone
+ * once the session committed a change (a commit clears it); an edit that committed nothing keeps
+ * it. Returns the number of transactions undone, or -1 when that can't be done exactly, with
+ * nothing done: no session open, the document closing, the step locked, no undo stack (the limit 0, which drops every
+ * transaction), the session's opener (a "New Sketch", a re-edit's "Double click" that changed
+ * something) pending or on the stack, one of its transactions below another's, or one shared with
+ * another document. The caller then restores the sketch its own way. Exported and declared where
+ * it is called, not in Document.h. */
+int Gui::undoOpenSketchSession(const App::Document* doc)
+{
+    Gui::Document* guiDoc = doc && Application::Instance ? Application::Instance->getDocument(doc)
+                                                         : nullptr;
+    auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
+    if (it == stepDocuments.end()) {
+        return -1;
+    }
+    DocumentP* d = it->second;
+    App::Document* appDoc = guiDoc->getDocument();
+    if (d->_session == 0 || d->_isClosing || App::GetApplication().isClosingAll()
+        || d->_undoSteps == 0 || appDoc->getMaxUndoStackSize() == 0 || appDoc->isStepLocked()
+        || appDoc->isPerformingTransaction()) {
+        return -1;
+    }
+    auto own = [d](int id) {
+        return id != 0 && d->_sessionIds.contains(id);
+    };
+    // The session's own transactions, newest first; below them, nothing of the session's. One
+    // that changed another object (a Variables panel edit) isn't the sketch's to undo.
+    std::vector<int> ids;
+    unsigned pos = 0;
+    for (; own(appDoc->getTransactionID(true, pos)); ++pos) {
+        if (d->_sessionForeignIds.contains(appDoc->getTransactionID(true, pos))) {
+            return -1;
+        }
+        ids.push_back(appDoc->getTransactionID(true, pos));
+    }
+    for (int id = appDoc->getTransactionID(true, pos); id != 0;
+         id = appDoc->getTransactionID(true, ++pos)) {
+        if (own(id) || id == d->_sessionOpener) {
+            return -1;
+        }
+    }
+    for (App::Document* other : App::GetApplication().getDocuments()) {
+        if (other == appDoc) {
+            continue;
+        }
+        for (int id : ids) {
+            if (other->getAvailableUndos(id) != 0) {
+                return -1;
+            }
+        }
+    }
+
+    if (!ids.empty()) {
+        Base::FlagToggler<> flag(d->_isTransacting);
+        // One undo down to the oldest (App's undo(id)), as Gui::Document::undo() does
+        appDoc->undo(ids.back());
+        App::GetApplication().signalUndo();
+    }
+    // Off the Redo stack: an empty transaction opened at once clears it, and its abort leaves no
+    // step (as Sketcher's ConflictRefusal does)
+    bool sessionRedo = false;
+    for (unsigned redo = 0; !sessionRedo; ++redo) {
+        const int id = appDoc->getTransactionID(false, redo);
+        if (id == 0) {
+            break;
+        }
+        sessionRedo = own(id);
+    }
+    if (sessionRedo && !appDoc->hasPendingTransaction()
+        && appDoc->openTransaction("Cancel sketch editing") != 0) {
+        App::Transaction::openPendingTransaction(*appDoc);
+        appDoc->abortTransaction();
+    }
+    return static_cast<int>(ids.size());
+}
+
 /// Get a string vector with the 'Undo' actions
 std::vector<std::string> Document::getUndoVector() const
 {
-    return getDocument()->getAvailableUndoNames();
+    // FreeCAD-CH (ops#640): one name per step: an open dialog's own edits (hands-on R1), a closed
+    // sketch session as one, an open one's own transactions only (regen-plan item 7)
+    if (getDocument()->isStepLocked()) {
+        return dialogHistoryNames(getDocument(), true);
+    }
+    return d->stepNames(true);
 }
 
 /// Get a string vector with the 'Redo' actions
 std::vector<std::string> Document::getRedoVector() const
 {
-    return getDocument()->getAvailableRedoNames();
+    if (getDocument()->isStepLocked()) {  // FreeCAD-CH (ops#640): as getUndoVector()
+        return dialogHistoryNames(getDocument(), false);
+    }
+    return d->stepNames(false);
 }
 
 bool Document::checkTransactionID(bool undo, int iSteps)
@@ -3162,14 +3770,34 @@ bool Document::isPerformingTransaction() const
 /// Will UNDO one or more steps
 void Document::undo(int iSteps)
 {
+    // FreeCAD-CH (ops#640, hands-on R1): with a feature dialog open, Ctrl+Z steps back through
+    // the dialog's own edits and never past its start (App's undo() refuses the dialog's step)
+    if (getDocument()->isStepLocked()) {
+        QAction* action = dialogHistoryAction(getDocument(), true);
+        for (int i = 0; action && i < iSteps && action->isEnabled(); i++) {
+            action->trigger();
+        }
+        return;
+    }
+    // FreeCAD-CH (ops#640, rank 59): a step made in another typed tab is undone in that tab;
+    // refused when an open dialog refuses the switch (F6-3)
+    if (!DocumentTabs::undoAllowed(this, true)) {
+        return;
+    }
     Base::FlagToggler<> flag(d->_isTransacting);
 
-    if (!checkTransactionID(true, iSteps)) {
+    // FreeCAD-CH (ops#640, regen-plan item 7): a step is one transaction, or a closed sketch
+    // session's; inside an open session one of its own, none past its start
+    const int transactions = d->transactionsOfSteps(true, iSteps);
+    if (!checkTransactionID(true, transactions)) {
         return;
     }
 
-    for (int i = 0; i < iSteps; i++) {
-        getDocument()->undo();
+    // One undo down to the oldest of them (App's undo(id)): the model regenerates once, after
+    // the last, not once per transaction of a closed sketch session
+    const int oldest = getDocument()->getTransactionID(true, static_cast<unsigned>(transactions - 1));
+    if (oldest != 0) {
+        getDocument()->undo(oldest);
     }
     App::GetApplication().signalUndo();
 }
@@ -3177,14 +3805,26 @@ void Document::undo(int iSteps)
 /// Will REDO one or more steps
 void Document::redo(int iSteps)
 {
+    if (getDocument()->isStepLocked()) {  // FreeCAD-CH (ops#640): as undo()
+        QAction* action = dialogHistoryAction(getDocument(), false);
+        for (int i = 0; action && i < iSteps && action->isEnabled(); i++) {
+            action->trigger();
+        }
+        return;
+    }
+    if (!DocumentTabs::undoAllowed(this, false)) {  // FreeCAD-CH (ops#640, rank 59): as undo()
+        return;
+    }
     Base::FlagToggler<> flag(d->_isTransacting);
 
-    if (!checkTransactionID(false, iSteps)) {
+    const int transactions = d->transactionsOfSteps(false, iSteps);  // FreeCAD-CH: as undo()
+    if (!checkTransactionID(false, transactions)) {
         return;
     }
 
-    for (int i = 0; i < iSteps; i++) {
-        getDocument()->redo();
+    const int newest = getDocument()->getTransactionID(false, static_cast<unsigned>(transactions - 1));
+    if (newest != 0) {
+        getDocument()->redo(newest);
     }
     App::GetApplication().signalRedo();
 
@@ -3337,7 +3977,8 @@ void Document::toggleInSceneGraph(ViewProvider* vp)
                 scenegraph->removeChild(idx);
             }
         }
-        else {
+        // FreeCAD-CH (ops#640, rank 59): not into a typed tab's view that doesn't show it
+        else if (DocumentTabs::accepts(activeView->getViewer(), vp)) {
             // Do a deep search of the scene because the root node
             // isn't necessarily a top-level node when claimed by
             // another view provider.
@@ -3384,10 +4025,12 @@ std::vector<App::DocumentObject*> Document::getTreeRootObjects() const
         }
     }
 
+    // FreeCAD-CH (ops#640): in document order, as the tree shows them; the map's order is its
+    // pointers' hash order, which any change in allocation reshuffles
     std::vector<App::DocumentObject*> rootObjs;
-    for (const auto& it : rootMap) {
-        if (it.second) {
-            rootObjs.push_back(it.first);
+    for (auto obj : docObjects) {
+        if (rootMap[obj]) {
+            rootObjs.push_back(obj);
         }
     }
     return rootObjs;

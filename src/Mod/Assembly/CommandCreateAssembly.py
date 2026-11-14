@@ -39,19 +39,32 @@ __author__ = "Ondsel"
 __url__ = "https://www.freecad.org"
 
 
+def onshapeKeymap():
+    """Whether the fork's Onshape keymap is the active one (Gui::ForkKeymap::isOnshape)."""
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return general.GetString("Keymap", "Onshape") != "FreeCAD"
+
+
 class CommandCreateAssembly:
     def __init__(self):
         pass
 
     def GetResources(self):
+        tooltip = QT_TRANSLATE_NOOP(
+            "Assembly_CreateAssembly",
+            "Creates an assembly object in the current document, or in the current active assembly (if any). Limit of one root assembly per file.",
+        )
+        if onshapeKeymap():
+            # FreeCAD-CH (ops#651): no limit under the Onshape keymap (read at the start)
+            tooltip = QT_TRANSLATE_NOOP(
+                "Assembly_CreateAssembly",
+                "Creates an assembly object in the current document, or in the current active assembly (if any).",
+            )
         return {
             "Pixmap": "Geoassembly",
             "MenuText": QT_TRANSLATE_NOOP("Assembly_CreateAssembly", "New Assembly"),
             "Accel": "A",
-            "ToolTip": QT_TRANSLATE_NOOP(
-                "Assembly_CreateAssembly",
-                "Creates an assembly object in the current document, or in the current active assembly (if any). Limit of one root assembly per file.",
-            ),
+            "ToolTip": tooltip,
             "CmdType": "ForEdit",
         }
 
@@ -59,7 +72,9 @@ class CommandCreateAssembly:
         if Gui.Control.activeDialog():
             return False
 
-        if Preferences.preferences().GetBool("EnforceOneAssemblyRule", True):
+        # FreeCAD-CH (ops#651, gap A13): under the Onshape keymap a document holds any number of
+        # assemblies, each a tab, as Onshape's documents do
+        if Preferences.preferences().GetBool("EnforceOneAssemblyRule", True) and not onshapeKeymap():
             activeAssembly = UtilsAssembly.activeAssembly()
 
             if UtilsAssembly.isThereOneRootAssembly() and not activeAssembly:
@@ -82,6 +97,11 @@ class CommandCreateAssembly:
                 'assembly = App.ActiveDocument.addObject("Assembly::AssemblyObject", "Assembly")\n'
             )
 
+        if not activeAssembly and onshapeKeymap():
+            # Onshape names its assembly tabs "Assembly 1", "Assembly 2"... (the lowest free N)
+            commands = commands + (
+                'assembly.Label = App.DocumentTabs.nextLabel(App.ActiveDocument, "Assembly")\n'
+            )
         commands = commands + 'assembly.Type = "Assembly"\n'
         commands = commands + 'assembly.newObject("Assembly::JointGroup", "Joints")'
 

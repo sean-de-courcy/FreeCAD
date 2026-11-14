@@ -109,6 +109,12 @@ public:
     static void printPdf(ViewProviderPage* vpPage, const std::string& file);
     static void printAll(QPrinter* printer, App::Document* doc);
     static void printAllPdf(QPrinter* printer, App::Document* doc);
+    /// the given pages, in that order, as the pages of one pdf file (ops#640, E1)
+    static void printPagesPdf(const std::vector<TechDraw::DrawPage*>& pages,
+                              const std::string& file);
+    /// fills a page's scene when its tab was never opened, so that it renders without the page
+    /// being shown (ops#640, E1)
+    static void ensureScene(ViewProviderPage* vpPage);
 
     static void saveSVG(ViewProviderPage* vpPage, const std::string& file);
     static void saveDXF(ViewProviderPage* vpPage, const std::string& file);

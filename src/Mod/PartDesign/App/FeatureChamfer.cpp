@@ -34,6 +34,7 @@
 #include <Standard_Version.hxx>
 
 
+#include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
@@ -43,11 +44,41 @@
 #include <Mod/Part/App/TopoShapeRepair.h>
 
 #include "FeatureChamfer.h"
+#include "ResultCheck.h"
 
 #include <Base/ProgramVersion.h>
 
 
+FC_LOG_LEVEL_INIT("PartDesign", true, true)
+
 using namespace PartDesign;
+
+namespace PartDesign
+{
+// FeatureDressUp.cpp (ops#640 F2, Onshape's failure text; declared where used)
+PartDesignExport std::string dressUpFailure(const char* verb, const std::string& what);
+PartDesignExport bool isDressUpFailure(const std::string& what);
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
+PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
+PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
+// FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
+PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
+PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
+PartDesignExport bool runsAsStudioOwner(const Feature* feature);
+// FeatureDressUp.cpp (ops#655, tangent propagation off)
+PartDesignExport std::vector<Part::TopoShape> takeChainedEdges(
+    const Part::TopoShape& base,
+    std::vector<Part::TopoShape>& edges,
+    double radius
+);
+PartDesignExport TopoDS_Shape runOutCut(
+    const TopoDS_Shape& shape,
+    const TopoDS_Shape& base,
+    const TopoDS_Edge& edge,
+    double radius,
+    bool arc
+);
+}  // namespace PartDesign
 
 
 PROPERTY_SOURCE(PartDesign::Chamfer, PartDesign::DressUp)
@@ -91,6 +122,15 @@ Chamfer::Chamfer()
         "If true, then this overrides any edge changes made to the Base property or in the "
         "dialog.\n"
     );
+    ADD_PROPERTY_TYPE(
+        TangentPropagation,
+        (true),
+        "Chamfer",
+        App::Prop_None,
+        "Chamfer the whole tangent chain of each picked edge (Onshape's 'Tangent propagation').\n"
+        "Off: only the picked edges; where a picked straight edge continues tangentially, the\n"
+        "chamfer (equal distance only) runs straight on until it leaves the body, as Onshape's does."
+    );
 
     updateProperties();
 }
@@ -113,7 +153,7 @@ short Chamfer::mustExecute() const
             break;
     }
 
-    if (Placement.isTouched() || touched) {
+    if (Placement.isTouched() || TangentPropagation.isTouched() || touched) {
         return 1;
     }
     return DressUp::mustExecute();
@@ -121,7 +161,28 @@ short Chamfer::mustExecute() const
 
 App::DocumentObjectExecReturn* Chamfer::execute()
 {
-    if (onlyHaveRefined()) {
+    // FreeCAD-CH ops#701 (F2b): over several parts, this part failing while the first part's
+    // builds is a warning, as Onshape's CHAMFER_PARTIAL_FAIL
+    return partialFailure(build(), "chamfer", "Size");
+}
+
+App::DocumentObjectExecReturn* Chamfer::build()
+{
+    // FreeCAD-CH ops#654 T3: re-run at a pattern's instance, on its base and edges
+    Part::TopoShape reapplyBase;
+    std::vector<Part::TopoShape> reapplyEdges;
+    const bool reapplying = dressUpReapplying(reapplyBase, reapplyEdges);
+    // FreeCAD-CH ops#654 P8a: a studio feature over several parts computes no shape of its own;
+    // its steps read its parameters, and one whose part failed passes its base through (O2)
+    if (!reapplying && runsAsStudioOwner(this)) {
+        return studioDressUpOwnerRun(this);
+    }
+    if (!reapplying && StudioOwner.getValue() && studioDressUpStepPassesThrough(this)) {
+        this->positionByBaseFeature();
+        Shape.setValue(getBaseTopoShape(/*silent=*/true));
+        return App::DocumentObject::StdReturn;
+    }
+    if (!reapplying && onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
 
@@ -129,7 +190,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
     // The only difference is that the Base property also stores the edges that are to be chamfered
     Part::TopoShape TopShape;
     try {
-        TopShape = getBaseTopoShape();
+        TopShape = reapplying ? reapplyBase : getBaseTopoShape();
     }
     catch (Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
@@ -137,8 +198,9 @@ App::DocumentObjectExecReturn* Chamfer::execute()
 
     TopShape.locate(TopLoc_Location());
 
-    auto edges = UseAllEdges.getValue() ? TopShape.getSubTopoShapes(TopAbs_EDGE)
-                                        : getContinuousEdges(TopShape);
+    auto edges = reapplying            ? reapplyEdges
+        : UseAllEdges.getValue() ? TopShape.getSubTopoShapes(TopAbs_EDGE)
+                                 : getContinuousEdges(TopShape);
 
     if (edges.empty()) {
         return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP("Exception", "No edges specified"));
@@ -154,83 +216,185 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         return res;
     }
 
-    this->positionByBaseFeature();
+    if (!reapplying) {
+        this->positionByBaseFeature();
+    }
 
     // The chamfer's largest distance along a face, for the check of what it drops (ops#603). By
     // distance and angle, the distance on the other face grows without bound as the angle and the
     // edge's opening near 180 degrees: unknown, so that check doesn't run (PR review r1, T2)
     double reach = std::max(size, size2);
+    bool setbacksDiffer = false;
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        // A chain of edges at different angles gets Onshape's setbacks, which can exceed the
+        // size (0.714 of it beside a 110-degree first edge): the largest, as makeElementChamfer's
         reach = size;
+        try {
+            std::vector<TopoShape> copies = edges;
+            const TopoShape input = Part::FilletFallback::makerInput(TopShape, copies);
+            for (double setback : Part::FilletFallback::chainSetbacks(input, copies, size)) {
+                reach = std::max(reach, setback);
+                setbacksDiffer = setbacksDiffer || setback != size;
+            }
+        }
+        catch (const Base::Exception&) {
+            // makeElementChamfer reports it
+        }
     }
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::distanceAngle) {
         reach = 0.0;
         size2 = angle;
     }
-    try {
-        TopoShape shape = makeTopoShape();
-        Part::SignalException sig;
+    // One pass: the chamfer from scratch, its checks, and the feature's result if they pass. Each
+    // pass starts from the picked edges (the run-out split below takes edges out of its own copy)
+    auto chamferWith = [&](Part::ChamferType type,
+                           double distance2,
+                           double passReach) -> App::DocumentObjectExecReturn* {
+        try {
+            TopoShape shape = makeTopoShape();
+            Part::SignalException sig;
 
-        Part::FilletFallback::Recorder recorder;
-        shape.makeElementChamfer(
-            TopShape,
-            edges,
-            static_cast<Part::ChamferType>(chamferType),
-            size,
-            size2,
-            nullptr,
-            flipDirection ? Part::Flip::flip : Part::Flip::none
+            Part::FilletFallback::Recorder recorder;
+            std::vector<Part::TopoShape> passEdges = edges;
+            // ops#655: with tangent propagation off, an edge whose tangent chain goes on is cut
+            // Onshape's way after the others are chamfered (GB13); by equal distance only, since
+            // which face takes which distance is OCCT's choice otherwise (the type asked for: the
+            // retry with w on every edge is an equal distance chamfer too)
+            const std::vector<Part::TopoShape> runOut = TangentPropagation.getValue()
+                ? std::vector<Part::TopoShape>()
+                : takeChainedEdges(TopShape, passEdges, size);
+            if (!runOut.empty()
+                && static_cast<Part::ChamferType>(chamferType) != Part::ChamferType::equalDistance) {
+                return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Tangent propagation off: a picked edge continues tangentially into an edge that "
+                    "isn't picked, and only an equal distance chamfer can stop there. Pick the whole "
+                    "tangent chain, or turn tangent propagation on."
+                ));
+            }
+            if (passEdges.empty()) {
+                shape = TopShape;
+            }
+            else {
+                shape.makeElementChamfer(
+                    TopShape,
+                    passEdges,
+                    type,
+                    size,
+                    distance2,
+                    nullptr,
+                    flipDirection ? Part::Flip::flip : Part::Flip::none
+                );
+            }
+            if (shape.isNull()) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Failed to create chamfer")
+                );
+            }
+
+            // Repair an invalid result on a copy, keeping names, or fail (see Fillet::execute(),
+            // ops#12, ops#168, ops#297). Solids and shells only, as OCCT returns them: a later
+            // feature fails on a BaseFeature's loose faces (ops#303)
+            if (!Part::checkDressUp(shape, TopShape, Part::LooseParts::drop)) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
+                );
+            }
+            // OCCT fills a recess its band crosses, in a valid solid (ops#393)
+            if (!passEdges.empty()) {
+                ResultCheck::stopIfPastTheLimit("The chamfer's check for a filled recess");
+            }
+            const std::string filled = passEdges.empty()
+                ? std::string()
+                : Part::filledPocket(shape, TopShape, passEdges, passReach);
+            if (!filled.empty()) {
+                return new App::DocumentObjectExecReturn("The chamfer " + filled);
+            }
+            // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
+            // (ops#603)
+            if (!passEdges.empty()) {
+                ResultCheck::stopIfPastTheLimit("The chamfer's check for lost material");
+            }
+            const std::string lost = passEdges.empty()
+                ? std::string()
+                : Part::lostMaterial(shape, TopShape, passEdges, passReach);
+            if (!lost.empty()) {
+                return new App::DocumentObjectExecReturn("The chamfer " + lost);
+            }
+            // ops#655: each chained edge's chamfer runs straight on until it leaves the body (GB13)
+            for (const auto& edge : runOut) {
+                const TopoDS_Shape tool = runOutCut(
+                    shape.getShape(),
+                    TopShape.getShape(),
+                    TopoDS::Edge(edge.getShape()),
+                    size,
+                    false
+                );
+                if (tool.IsNull()) {
+                    continue;
+                }
+                TopoShape cut = makeTopoShape();
+                cut.makeElementCut({shape, makeTopoShape(tool)});
+                shape = cut;
+            }
+            if (!runOut.empty() && !Part::checkDressUp(shape, TopShape, Part::LooseParts::drop)) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
+                );
+            }
+            if (reapplying) {
+                dressUpReapplied(refineShapeIfActive(shape));
+                return App::DocumentObject::StdReturn;
+            }
+            // store shape before refinement
+            this->rawShape = shape;
+            shape = refineShapeIfActive(shape);
+            if (!isSingleSolidRuleSatisfied(shape.getShape())) {
+                return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Result has multiple solids: enable 'Allow Compound' in the active body."
+                ));
+            }
+
+            shape = getSolid(shape);
+            // Where OCCT failed, the exact construction built it (ops#300, decision 54), once
+            // the feature has its result
+            recorder.report(Label.getValue());
+            this->Shape.setValue(shape);
+            return App::DocumentObject::StdReturn;
+        }
+        // ops#640 F2: Onshape's "Failed to chamfer selections" with the exact construction's
+        // reason, never OCCT's raw text; the fork's other errors (a time limit, Esc) go on as
+        // before, and are never retried
+        catch (Base::Exception& e) {
+            if (!isDressUpFailure(e.what())) {
+                throw;
+            }
+            return new App::DocumentObjectExecReturn(dressUpFailure("chamfer", e.what()));
+        }
+        catch (Standard_Failure& e) {
+            const char* what = e.GetMessageString();
+            return new App::DocumentObjectExecReturn(dressUpFailure("chamfer", what ? what : ""));
+        }
+        catch (...) {
+            return new App::DocumentObjectExecReturn(dressUpFailure("chamfer", ""));
+        }
+    };
+    App::DocumentObjectExecReturn* result
+        = chamferWith(static_cast<Part::ChamferType>(chamferType), size2, reach);
+    // Where the chain's setbacks build but fail a check, the chamfer is built again with w on
+    // every edge, today's result (Add(w, w) as makeElementChamfer's own retry), reaching w: a
+    // chamfer that built with w never starts failing (ruling A, review r1 T1). Its error, if it
+    // fails too, is the one reported
+    if (result != App::DocumentObject::StdReturn && setbacksDiffer) {
+        FC_LOG(
+            getFullName() << ": the chain's setbacks failed (" << result->Why
+                          << "), building the chamfer again with " << size << " on every edge"
         );
-        if (shape.isNull()) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Failed to create chamfer")
-            );
-        }
-
-        // Repair an invalid result on a copy, keeping names, or fail (see Fillet::execute(),
-        // ops#12, ops#168, ops#297). Solids and shells only, as OCCT returns them: a later
-        // feature fails on a BaseFeature's loose faces (ops#303)
-        if (!Part::checkDressUp(shape, TopShape, Part::LooseParts::drop)) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
-            );
-        }
-        // OCCT fills a recess its band crosses, in a valid solid (ops#393)
-        const std::string filled = Part::filledPocket(shape, TopShape, edges);
-        if (!filled.empty()) {
-            return new App::DocumentObjectExecReturn("The chamfer " + filled);
-        }
-        // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
-        // (ops#603)
-        const std::string lost = Part::lostMaterial(shape, TopShape, edges, reach);
-        if (!lost.empty()) {
-            return new App::DocumentObjectExecReturn("The chamfer " + lost);
-        }
-        // store shape before refinement
-        this->rawShape = shape;
-        shape = refineShapeIfActive(shape);
-        if (!isSingleSolidRuleSatisfied(shape.getShape())) {
-            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Result has multiple solids: enable 'Allow Compound' in the active body."
-            ));
-        }
-
-        shape = getSolid(shape);
-        // Where OCCT failed, the exact construction built it (ops#300, decision 54), once
-        // the feature has its result
-        recorder.report(Label.getValue());
-        this->Shape.setValue(shape);
-        return App::DocumentObject::StdReturn;
+        delete result;
+        result = chamferWith(Part::ChamferType::twoDistances, size, size);
     }
-    catch (Standard_Failure& e) {
-        return new App::DocumentObjectExecReturn(e.GetMessageString());
-    }
-    catch (...) {
-        return new App::DocumentObjectExecReturn(
-            QT_TRANSLATE_NOOP("Exception", "Chamfer failed: OCC kernel error in chamfer computation")
-        );
-    }
+    return result;
 }
 
 void Chamfer::Restore(Base::XMLReader& reader)

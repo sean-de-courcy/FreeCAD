@@ -83,7 +83,8 @@ Fuse::Fuse() = default;
 BRepAlgoAPI_BooleanOperation* Fuse::makeOperation(const TopoDS_Shape& base, const TopoDS_Shape& tool) const
 {
     // Let's call algorithm computing a fuse operation:
-    return new FCBRepAlgoAPI_Fuse(base, tool);
+    // Built by Boolean::execute(), under the time limit
+    return new FCBRepAlgoAPI_Fuse(base, tool, false);
 }
 
 const char* Fuse::opCode() const

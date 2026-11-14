@@ -56,6 +56,9 @@ public:
 
     void attach(App::DocumentObject*) override;
     bool onDelete(const std::vector<std::string>&) override;
+    /// FreeCAD-CH (ops#640): as PartGui::ViewProviderPart::canDelete(), a datum of a Body lets a
+    /// member of a Body it is attached to be deleted without a question (Onshape)
+    bool canDelete(App::DocumentObject* obj) const override;
     bool doubleClicked() override;
     std::vector<std::string> getDisplayModes() const override;
     void setDisplayMode(const char* ModeName) override;

@@ -44,9 +44,15 @@ private:
     void onLabelStatusLinkClicked(const QString&) override;
 
     void updateToolTip(const QString& link) override;
+    /// FreeCAD-CH (ops#640): under the Onshape keymap the dialog's title reads red while the
+    /// sketch could not be solved (a conflict, malformed constraints: Onshape's PL1d)
+    void updateTitleColour(const QString& state);
 
 protected:
     ViewProviderSketch* sketchView;
+
+private:
+    Connection connectionTitle;
 };
 
 }  // namespace SketcherGui

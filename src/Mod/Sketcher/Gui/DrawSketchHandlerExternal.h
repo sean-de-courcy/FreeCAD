@@ -24,8 +24,18 @@
 
 #pragma once
 
+#include <cmath>
+#include <string_view>
+
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <gp_Pln.hxx>
+
 #include <App/Datums.h>
 #include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/PartFeature.h>
+#include <Mod/Part/App/TopoShape.h>
 
 #include <Gui/Application.h>
 #include <Gui/Notifications.h>
@@ -123,6 +133,62 @@ public:
     }
 };
 
+/** FreeCAD-CH (ops#640, rank 19): true for "FaceN"; isFaceTakenBySketch says whether it is taken. */
+inline bool isFaceElement(const char* subName)
+{
+    const std::string_view element(subName ? subName : "");
+    return element.starts_with("Face") && element.size() > 4;
+}
+
+/** FreeCAD-CH (ops#640, rank 19): a model face a sketch constraint or dimension takes, as Onshape's
+ * do (hands-on F4): a planar face perpendicular to the sketch plane, whose trace on the plane is one
+ * line (the one external geometry a face link gives then: SketchObject's processFace). A face
+ * parallel to the plane is refused, as Onshape refuses it (C-6, "A dimension cannot be created
+ * between these items"), and so is a face at another angle or a curved one. The face is read in its
+ * container and mapped into the sketch's, as its external geometry is (externalFrame, ops#331).
+ */
+inline bool isFaceTakenBySketch(const Sketcher::SketchObject* sketch,
+                                const App::DocumentObject* object,
+                                const char* subName)
+{
+    if (!sketch || !object || object == sketch || !isFaceElement(subName)) {
+        return false;
+    }
+    Base::Vector3d faceNormal;
+    try {
+        const Part::TopoShape face = Part::Feature::getTopoShape(
+            object,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            subName);
+        gp_Pln plane;
+        if (face.isNull() || face.shapeType(/*silent*/ true) != TopAbs_FACE
+            || !face.findPlane(plane)) {
+            return false;
+        }
+        const gp_Dir& normal = plane.Axis().Direction();
+        faceNormal = sketch->externalFrame(object, subName).getRotation().multVec(
+            Base::Vector3d(normal.X(), normal.Y(), normal.Z()));
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    const Base::Vector3d sketchNormal =
+        sketch->Placement.getValue().getRotation().multVec(Base::Vector3d(0, 0, 1));
+    const double cosine = faceNormal * sketchNormal;
+    // processFace's test for a face normal to the sketch (its angle within Confusion of 90 deg)
+    return std::abs(cosine) < Precision::Confusion();
+}
+
+/// FreeCAD-CH (ops#640, rank 19): Onshape's words for a face a dimension can't take (C-6)
+inline const char* refusedFaceReason()
+{
+    return QT_TRANSLATE_NOOP("Notifications", "A dimension cannot be created between these items");
+}
+
 // FreeCAD-CH (ops#634): the gate of plain edit mode. A model edge or vertex the sketch may link is
 // selectable, so it can be picked before a constraint command (Onshape's order); the command turns
 // it into external geometry (takeModelSelection). The sketch's own elements and whole objects (the
@@ -146,8 +212,10 @@ public:
             return true;
         }
         const std::string_view element(subName);
+        // FreeCAD-CH (ops#640, rank 19): and a planar face perpendicular to the sketch plane
         if (!(element.starts_with("Edge") && element.size() > 4)
-            && !(element.starts_with("Vertex") && element.size() > 6)) {
+            && !(element.starts_with("Vertex") && element.size() > 6)
+            && !isFaceTakenBySketch(static_cast<Sketcher::SketchObject*>(sketch), object, subName)) {
             return false;
         }
         // A click on a sketch element in front of (or behind) a model edge is the sketch's, and

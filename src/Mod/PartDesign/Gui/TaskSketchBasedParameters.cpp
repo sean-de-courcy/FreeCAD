@@ -25,6 +25,7 @@
 
 
 #include <QLineEdit>
+#include <QTimer>
 #include <QRegularExpression>
 #include <QRegularExpressionMatch>
 #include <QTextStream>
@@ -196,13 +197,45 @@ void TaskSketchBasedParameters::showProfileWhileArmed(ReferenceField* field)
     // The lambda holds what it needs: the panel may be gone when the field disarms
     auto shown = std::make_shared<App::DocumentObjectT>();
     App::DocumentObjectT feature(getObject());
-    connect(field, &ReferenceField::armedChanged, field, [shown, feature](bool on) {
+    // A required field whose property is still empty: the dialog waits for its pick (a new
+    // Revolve's axis, ops#643)
+    auto waiting = [field, feature]() {
+        App::DocumentObject* obj = feature.getObject();
+        auto prop = obj ? dynamic_cast<App::PropertyLinkBase*>(
+                              obj->getPropertyByName(field->propertyName().c_str())
+                          )
+                        : nullptr;
+        std::vector<App::DocumentObject*> links;
+        if (prop) {
+            prop->getLinks(links);
+        }
+        return field->isRequired() && prop && links.empty();
+    };
+    auto hideShown = [shown]() {
         if (auto profile = shown->getObject()) {
             if (auto vp = Gui::Application::Instance->getViewProvider(profile)) {
                 vp->hide();
             }
         }
         *shown = App::DocumentObjectT();
+    };
+    auto onArmed = [shown, feature, field, waiting, hideShown](bool on) {
+        if (on && shown->getObject()) {
+            return;  // still shown
+        }
+        // The profile stays shown while the field still waits: an Esc that only disarms it (Q1)
+        // leaves the sketch in view, not a dialog over nothing (review MISS, ops#643). Checked
+        // again once the event is done: a choice in an axis box disarms before it writes. Not
+        // once Cancel deleted the new feature: its reject shows the sketch again
+        if (!on && shown->getObject() && waiting()) {
+            QTimer::singleShot(0, field, [feature, field, waiting, hideShown]() {
+                if (feature.getObject() && !field->isArmed() && !waiting()) {
+                    hideShown();
+                }
+            });
+            return;
+        }
+        hideShown();
         auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature.getObject());
         App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
         if (!on || !profile) {
@@ -213,10 +246,15 @@ void TaskSketchBasedParameters::showProfileWhileArmed(ReferenceField* field)
             vp->show();
             *shown = profile;
         }
-    });
+    };
+    connect(field, &ReferenceField::armedChanged, field, onArmed);
     // A dialog closed while the field is armed (resetEdit, closeDialog) never disarms it: the
-    // profile it showed hides when the field goes
-    QObject::connect(field, &QObject::destroyed, [shown]() {
+    // profile it showed hides when the field goes. Not when Cancel deleted the new feature: its
+    // reject shows the sketch again (TaskDlgSketchBasedParameters::reject)
+    QObject::connect(field, &QObject::destroyed, [shown, feature]() {
+        if (!feature.getObject()) {
+            return;
+        }
         if (auto profile = shown->getObject()) {
             if (auto vp = Gui::Application::Instance->getViewProvider(profile)) {
                 vp->hide();
@@ -444,8 +482,8 @@ bool TaskDlgSketchBasedParameters::accept()
         throw Base::TypeError("Bad object processed in the sketch based dialog.");
     }
 
-    // First verify that the feature can be built and then hide the profile as otherwise
-    // it will remain hidden if the feature's recompute fails
+    // The profile hides once the feature is committed, in error too (F7, ops#640); it stays
+    // shown while the dialog stays (a required selection missing, or an exception)
     if (TaskDlgFeatureParameters::accept()) {
         App::DocumentObject* sketch = feature->Profile.getValue();
         Gui::cmdAppObjectHide(sketch);

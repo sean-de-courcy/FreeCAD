@@ -1,0 +1,224 @@
+{
+ "build": "26 3 0 20261109 (Git shallow) https://github.com/sean-de-courcy/FreeCAD 2026/11/09 10:37:05 (HEAD detached at fork-0.9.0) 455074c68ff7709423d7d4a00cde1b832b31c167",
+ "date": "2026-11-09 21:25 UTC",
+ "files": {
+  "AsmEdited.FCStd": "120896acf35af7b0e2624c8ec67268a04e2e08a03d45faee169d608ef4f797ba",
+  "AsmEditedPart.oracle.json": "0661aa3a6cb9644f99ab89cd8f0ba88642c03fe13c8437f4d3e57d77df2acfcd",
+  "AsmEditedParts.FCStd": "2dd3fafc3a88594211c893a82e8c50f51339e3835717367b37a0cf98269f6dd0",
+  "AsmFastened.FCStd": "a1938ceab15a6bd550f94cd87e483b0c01b9c2ea9f62dbcc836dc268109d6495",
+  "AsmFastened.oracle.json": "0876fbf0308974da1d659b2eb4a1ff7f2ff4085ff4ee325a6fcecd9e1349eba2",
+  "AsmFastenedParts.FCStd": "7d3f3d3e86fcb471398e1c16e22ae324edcd9472547977448c7b3dc46eed6732",
+  "AsmMotion.FCStd": "1dd4aea711dbdfff0623ceaf25b04395529a8682ea26239c888eed1af82a74e5",
+  "AsmMotion.oracle.json": "93871e8e934eb1ed93711553de03ef38dbed5f8aaef195f079773ff03266d6dc",
+  "AsmSubAssembly.FCStd": "9a8f5021ff91f21efdea0bfae221ea5630282f30178a4fc8cfd77a037d04c811",
+  "AsmSubAssembly.oracle.json": "a608bd470b9d5db5b843cbc1671a602aba5fa7e1329622d48814e955b19bb1ca",
+  "Binders.FCStd": "c6fbb9b76de2b387d216043b4a371b983908110d8a3609b2619262d54619938d",
+  "Binders.oracle.json": "b950e30c7fcdc175d5de7856e8b462a6bbd76580e415f397c2f0d32283e93a92",
+  "BodyFromFeature.FCStd": "9b630078ac508d9be5e0d9feface539c58921863f802daf0a8d520cc9da1f215",
+  "BodyFromFeature.oracle.json": "e45d2a2b74330998098d79b2615cee6be18772485c47390c7d503652a232e381",
+  "DatumPlane.FCStd": "9bb370a024c281738aa1881e69b8c0305251921c6b6779bab29b9921bdee71d7",
+  "DatumPlane.oracle.json": "c4d9b46a0c2f6256142e0200dc576cb299520d565394643452db1779a3039cd9",
+  "DraftThickness.FCStd": "a4a0ef2c7cad1f88a3fd56263e455454b97c039fd7a7ae9d658fff5160f70128",
+  "DraftThickness.oracle.json": "74d6ea4102d14180a563af0f7f1af04aebcae840bcc2ed268b66a8cc3bcf1a06",
+  "ExternalGeometry.FCStd": "9580147a0e0197d1f404060807398d222aea861760459495bca51aa7ce5e8e2e",
+  "ExternalGeometry.oracle.json": "612231d442811dec4b7b00dc1b926a5214d2bf129b6cdc9d4e46e02e73e64385",
+  "FilletChamfer.FCStd": "8514eedf136020f219ca58b849216ffa0e66ec4baa9911ab5827c724e275105b",
+  "FilletChamfer.oracle.json": "40a9af6d4ad2b95657f3d6cffcf7de263753f0c1bb34eb64ed3cae9d8389ae4e",
+  "GuessRecord.FCStd": "e92c245af99f31c83e8eafb40f8ca193737dac8ef0ec18ea86b1990f893aefaf",
+  "GuessRecord.oracle.json": "affa92c34df4977229a23b9308cd9f241aa38630a99eca8aaa91629a11489db1",
+  "HoleFeature.FCStd": "bf3834629945aa7f0f0b871449036b0f73f3ca6aa8651b46df675830884c7de8",
+  "HoleFeature.oracle.json": "b25044d48921cc52a89378c5e0a1a655d5aef56f946f52a65bf8fe33bb3d1a1a",
+  "IndexToldGroups.FCStd": "b567687510cc18d43f492f6e8b0f5f59da3b37e87936608b917c818d075b639d",
+  "IndexToldGroups.oracle.json": "ead4d43937368e44bce53f8f5cd12b82b6cb6bc652d87e48e021b3b65641c37c",
+  "LoftPipe.FCStd": "9e7f44b9b346924b31a6ae4e97d3efa480e524ce493f31885f0710d1b22bb805",
+  "LoftPipe.oracle.json": "16c77b43f3620383dbf9d57e0387b91e267e65bfd0bdcf273920cd3af3e0a78f",
+  "MergeAccepted.FCStd": "ceabab222a65fe64c50922558966299cc8f5631490ec5fb5f078c654fa7be11c",
+  "MergeAccepted.oracle.json": "953143be2d51814b20cfe638bf6fc54e02fd639f91097d10eef215c6cd9e917a",
+  "MirroredMultiTransform.FCStd": "e204d6f7ca0654ca3946388c67269a7d593b5fbd4399744aa6842f2835e1d8ce",
+  "MirroredMultiTransform.oracle.json": "bcc9db7a5fe81439eafbf6f6ed6e654cbfa973ebb0f31eaecd67dff006fac7e3",
+  "PadPocket.FCStd": "7100a22b54d25abc8c823e705476fb4ba1574230c83556abd6e826e36f9b4de9",
+  "PadPocket.oracle.json": "2a3b91bdf7a16636c709ca7b830bce7a589b393c01caf9983c22b3df768fabb4",
+  "PartBooleans.FCStd": "bd5ea9ddda3214fc10ebdd1cd90996b4a871109def24834f98e9e477fc1b8f61",
+  "PartBooleans.oracle.json": "dcf45a53be07ac0b35e8bfbab7edc5af646a4fe558b2bbad6081cde1ce806541",
+  "PartFilletChamfer.FCStd": "907ded4e4baf9418d9f20accc32424d4768f1d1e7278e238904823373be0343c",
+  "PartFilletChamfer.oracle.json": "8fd23333e5e027c91a1928bf1cf461458c4dd15361ed0850519ac17c044922a8",
+  "PartLoftSweep.FCStd": "4e691069b97bea5c3604fb338b139f1a7b5a7b5866c796546fd236d25a55b887",
+  "PartLoftSweep.oracle.json": "e4cfc4bef9ee4ef85b548503e8427081142a3e8476613f55f827918954be09e3",
+  "PartPrimitives.FCStd": "3299f38964cfda1ffe7a87927b14c8d78c3e53c799d3d65e6c56cfaa25be25b2",
+  "PartPrimitives.oracle.json": "50c3a7d30d03c8fb29379177d0e44d8f0b179e60c0d4c2ff6bd0af8123979100",
+  "PartProfiles.FCStd": "b1ee095aba41737b967b9218e2dc0d3b566e892f71c24b13eb98b9ceae93662c",
+  "PartProfiles.oracle.json": "3d7173186e429bf571f5ca8fcd90a5be6468598cdb622bddc48aa38253e4b1a8",
+  "Patterns.FCStd": "9f07a552e11ff494d2ea3a82598c385ceb7848f70ca3d47e92f7dc6f65074d4f",
+  "Patterns.oracle.json": "f99ed916fe618c91d49bb54d6bdaeb4dfab2e71c39b6ccd135715d9370f4fa34",
+  "PipeCorners.FCStd": "08c92a9ac8810672f3b4cdd61e4ea73843f0fbdfa884283cb826c5919c7d11c5",
+  "PipeCorners.oracle.json": "e22b415aebc5e86311a8327f77bad3e7ef32466d0d677e530321f8e4c5d7338c",
+  "ReorderBar.FCStd": "74d8f594a40192a382b1b1ce09bd48c5c1faf06cb1526f29c741675863baf535",
+  "ReorderBar.oracle.json": "21722cfe6f63bdcf2781d8f1bab284a769fd22b70d4570c3bfdef593f9fe8345",
+  "RevolutionGroove.FCStd": "86fd80f5cb090b743ef2b3f8e87a6dc3c3407ec4284c972b349bec600fce0673",
+  "RevolutionGroove.oracle.json": "7da3d19ddb450bf7e45a76f7d1515141769f454e1107d2493592e46e3d2e55a4",
+  "ScriptCompound.FCStd": "a6f79d65b39a4855f16684e2e61cf116ce1aff1b2b6260e45adce28c46028a96",
+  "ScriptCompound.oracle.json": "96a931229855db39a9e8cfcd189a62d0f11d20a810d1d20040fc8c4a0f08e165",
+  "SiblingCuts.FCStd": "53c053425642de00821e9899fe8e523acdacfc9ab979ae5eae28346593f1ac4f",
+  "SiblingCuts.oracle.json": "eb25bbb7900efed2801f4d9b60891d196b4da2ab620660145b6801796d852a3c",
+  "SidedVariants.FCStd": "ca731fa2e1edb65a892698a866be8f6c225220a7a93bfbc363ae499858c67f49",
+  "SidedVariants.oracle.json": "5ea12f66a828ea77e344dcfcf7c3111a34006a6be51f9bb0efa6fa559fa9c52e",
+  "SketchCarbonCopy.FCStd": "269aa40471783d113e6865123ed8aff1bbf314fafa94769707e9ddb12d390c0e",
+  "SketchCarbonCopy.oracle.json": "6037c04618c29c7067924afc7b4608d8ba40b3636baf6c271ebccf48248222eb",
+  "SketchConstraints.FCStd": "b95552f742657ecfae021d63afbdca073be5a0ae12a398158b5cfbad0382b163",
+  "SketchConstraints.oracle.json": "32b90d3f55a55f11e33870ec12930d3d24779114b92b29c2b5fdc2abb00b6973",
+  "SketchCurves.FCStd": "84a4cd5c66337bd4f1552cf596091da8827003fd3e95dea789c668b82950ceae",
+  "SketchCurves.oracle.json": "45a33516c399baf577754feac0ee16c3ae6c0d6324cf3a8347784ff8bcf12f49",
+  "SketchUnderConstrained.FCStd": "00f680a4972b1612ccbcf96ef0570e1a89af06474f303bb614718bb65149b20a",
+  "SketchUnderConstrained.oracle.json": "210591d31cff7054010f387c1ca685ca0d5b5e4444904e06279b86923de212e6",
+  "SplitHalves.FCStd": "c099b16448a0b6c578a54bd32f7da8366cc8390586803f448f83e0f086c4ee98",
+  "SplitHalves.oracle.json": "bd113ffbd9eb529540643bf9d8cde1e7102e612f7f38b75a4f9284069f672405",
+  "StudioNewPart.FCStd": "37482730933731f1190c45826d446294547092e1b76d91073df03e8419e1a638",
+  "StudioNewPart.oracle.json": "f8f60609e9155d097cc10cc5f5e4343b3c9c128c5b36f3ea17a2325aa542b8c8",
+  "SubShapeBinder.FCStd": "fc189b17b0b12b584589f0c49a8f77e5d1fd84667cb5c971624e41c70a30aa6a",
+  "SubShapeBinder.oracle.json": "b7cd88c7d099589c5b18ea9d9a1ba1ba4a57461fe5c10e96a77960a2c6749feb",
+  "TwoDocuments.FCStd": "46b3414f65ddb2b876d7e9f3464f4511705301631aced24f55d4a575c00d9920",
+  "TwoDocuments.oracle.json": "d043c177e4c627998cb58955ad752aef7fdaa438b166b0fe52b33e78175bf78d",
+  "TwoDocumentsPart.FCStd": "b9b0181a456e1c34b38a416e69044338e17499f5cf59bc5b89472f5cbb105b5b",
+  "UpToFace.FCStd": "43374df187d077ee28889d4a18abb9285998dff626442a5856a50adb94fda288",
+  "UpToFace.oracle.json": "1b7b37c5337d86a1fff34d82b0bc8016d65c4ac81fbe3266651067853a67acdc",
+  "UpToTwins.FCStd": "e851bd46ffd8a2e4bef51ca3a0551b49d5c4b50d1f6b9b9bf30ca9f2eeec9f9c",
+  "UpToTwins.oracle.json": "3612abb07e068cce49814db3b549a2cb14cf298d832100f828d27753fb91ad71",
+  "VarSetCopyDriven.FCStd": "48efe0ec10df0baace9129de051f60fd8ba049764fb8951925c71a34e2a36c60",
+  "VarSetCopyDriven.oracle.json": "2ae2a85be7f4e5db0245f0a89e7382d53cfd4855230e625190ef5fc310ff3eea",
+  "VarSetDriven.FCStd": "12961773905eaebfd573935a6d0f22afa326f2849849fbd012126865a8c720f3",
+  "VarSetDriven.oracle.json": "83fc6d32a0da4b245e1eb4a63fd2b3cb7e3c68c7234abb54512a790799867988"
+ },
+ "forkRelease": 10,
+ "format": 1,
+ "generation": 3,
+ "models": {
+  "AsmEditedPart": [
+   "AsmEditedParts",
+   "AsmEdited"
+  ],
+  "AsmFastened": [
+   "AsmFastenedParts",
+   "AsmFastened"
+  ],
+  "AsmMotion": [
+   "AsmMotion"
+  ],
+  "AsmSubAssembly": [
+   "AsmSubAssembly"
+  ],
+  "Binders": [
+   "Binders"
+  ],
+  "BodyFromFeature": [
+   "BodyFromFeature"
+  ],
+  "DatumPlane": [
+   "DatumPlane"
+  ],
+  "DraftThickness": [
+   "DraftThickness"
+  ],
+  "ExternalGeometry": [
+   "ExternalGeometry"
+  ],
+  "FilletChamfer": [
+   "FilletChamfer"
+  ],
+  "GuessRecord": [
+   "GuessRecord"
+  ],
+  "HoleFeature": [
+   "HoleFeature"
+  ],
+  "IndexToldGroups": [
+   "IndexToldGroups"
+  ],
+  "LoftPipe": [
+   "LoftPipe"
+  ],
+  "MergeAccepted": [
+   "MergeAccepted"
+  ],
+  "MirroredMultiTransform": [
+   "MirroredMultiTransform"
+  ],
+  "PadPocket": [
+   "PadPocket"
+  ],
+  "PartBooleans": [
+   "PartBooleans"
+  ],
+  "PartFilletChamfer": [
+   "PartFilletChamfer"
+  ],
+  "PartLoftSweep": [
+   "PartLoftSweep"
+  ],
+  "PartPrimitives": [
+   "PartPrimitives"
+  ],
+  "PartProfiles": [
+   "PartProfiles"
+  ],
+  "Patterns": [
+   "Patterns"
+  ],
+  "PipeCorners": [
+   "PipeCorners"
+  ],
+  "ReorderBar": [
+   "ReorderBar"
+  ],
+  "RevolutionGroove": [
+   "RevolutionGroove"
+  ],
+  "ScriptCompound": [
+   "ScriptCompound"
+  ],
+  "SiblingCuts": [
+   "SiblingCuts"
+  ],
+  "SidedVariants": [
+   "SidedVariants"
+  ],
+  "SketchCarbonCopy": [
+   "SketchCarbonCopy"
+  ],
+  "SketchConstraints": [
+   "SketchConstraints"
+  ],
+  "SketchCurves": [
+   "SketchCurves"
+  ],
+  "SketchUnderConstrained": [
+   "SketchUnderConstrained"
+  ],
+  "SplitHalves": [
+   "SplitHalves"
+  ],
+  "StudioNewPart": [
+   "StudioNewPart"
+  ],
+  "SubShapeBinder": [
+   "SubShapeBinder"
+  ],
+  "TwoDocuments": [
+   "TwoDocumentsPart",
+   "TwoDocuments"
+  ],
+  "UpToFace": [
+   "UpToFace"
+  ],
+  "UpToTwins": [
+   "UpToTwins"
+  ],
+  "VarSetCopyDriven": [
+   "VarSetCopyDriven"
+  ],
+  "VarSetDriven": [
+   "VarSetDriven"
+  ]
+ },
+ "namingRevision": 16,
+ "platform": "darwin"
+}

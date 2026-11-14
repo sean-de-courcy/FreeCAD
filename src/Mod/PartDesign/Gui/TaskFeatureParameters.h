@@ -27,7 +27,12 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
+#include <QPointer>
+#include <fastsignals/connection.h>
 #include <App/DocumentObserver.h>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
@@ -35,8 +40,11 @@
 
 #include "ViewProvider.h"
 
+class QCheckBox;
 class QComboBox;
+class QDialogButtonBox;
 class QLabel;
+class QPushButton;
 class QListWidget;
 class QTimer;
 
@@ -55,6 +63,9 @@ class TaskPreviewParameters: public Gui::TaskView::TaskBox
 public:
     explicit TaskPreviewParameters(ViewProvider* vp, QWidget* parent = nullptr);
     ~TaskPreviewParameters() override;
+    /// FreeCAD-CH (ops#640 polish P5): Onshape's preview row, the overlay always on with its
+    /// opacity as "Preview", and a Final box only when \a finalOffered (a later feature exists)
+    void setOnshapeLayout(bool finalOffered);
 
 public Q_SLOTS:
     void onShowPreviewChanged(bool show);
@@ -182,10 +193,13 @@ private:
  *   Row 2 lists the studio's other parts, those the tool touches first, one tick each; OK makes
  *   the ticked ones' siblings (PartDesign.makeSiblings, 2.4, session 3a). In a sibling's panel
  *   the box says whom it follows, offers Unlink, and the other boxes are read-only.
- * - Additive, in a studio with other parts: Merge with lists them, those the tool touches first,
- *   unticked (decision 59). A touching part left unticked gets a plain line; a ticked one the
- *   yellow banner of what merging does. OK merges the ticked ones (PartDesign.makeMerge, 2.5 and
- *   2.6, session 3b).
+ * - Additive: the merge scope (Onshape's Extrude, ops#640 rank 1). Merge with all (MergeWithAll),
+ *   and, while it is off, the Merge scope list of the studio's other parts, those the tool touches
+ *   first, a part this feature merges already ticked. A touching part left out gets a plain line.
+ *   OK sets the scope (PartDesign.setMergeScope): the ticked parts, or with Merge with all every
+ *   part the tool touches, merged right after the feature in an accepted Merge; an unticked part
+ *   is unmerged. On an Add, Remove or Intersect that is its part's first solid (its scope empty),
+ *   ticking a part moves the feature into it (PartDesign.addToPart), as Add from New does.
  */
 class TaskResultParameters: public TaskFeatureParameters
 {
@@ -206,15 +220,44 @@ public:
     /// The primary that @p feature follows, or null (ops#325 3a)
     static App::DocumentObject* primaryOf(App::DocumentObject* feature);
 
+    /// The user flipped @p feature's direction (Reversed) in its open dialog: from then on a
+    /// switch between Add and Remove or Intersect keeps the user's direction, until the dialog
+    /// closes; before it, the switch flips it (Onshape's Extrude, hands-on check R5, ops#640 H4)
+    static void noteReversedTouched(App::DocumentObject* feature);
+
+    /// Hands-on check A-1 (ops#640): a new Extrude opens as Onshape's. Add when its tool touches
+    /// exactly one part, that part its scope (the feature moves into it, PartDesign.addToPart);
+    /// else New, a part of its own (PartDesign.newPartFrom). A cut, a feature in error or one
+    /// whose row or scope was chosen stays. For the command, before the dialog opens, inside
+    /// its transaction
+    static void applyOpeningOperation(App::DocumentObject* feature);
+    /// The command made @p feature with no profile: its first profile (profileTaken) decides
+    /// where it opens, unless a row is chosen first
+    static void awaitOpeningOperation(App::DocumentObject* feature);
+    /// The Profile field of @p feature's open dialog took a pick: a feature awaiting its opening
+    /// operation gets it, once, in a restart of the edit after the pick
+    static void profileTaken(App::DocumentObject* feature);
+
     /// The touch tests done, by the two shapes: the distance is slow on B-splines (design 2.3)
     struct TouchCache;
 
 private:
     void onResultChanged(int index);
+    /// A Pad's or a Pocket's rows: New part, Add, Remove, Intersect (ops#640)
+    void addOperationRow();
+    /// The operation row's refusals as the document and the box stand: each row offered, then
+    /// greyed with its reason. Again when the merge scope's ticks change (ops#640 round 5)
+    void refuseOperations();
+    /// Greys the row `key` (not the current one) with `why` as its tooltip; empty: offered
+    void refuseRow(const QString& key, const QString& why);
     void addPartsList();
     void addMergeList();
-    /// The plain line for touching parts left out and the banner for the ticked ones
+    /// The plain line for touching parts left out of the merge scope
     void updateMergeNotes();
+    /// Merge with all ticked or unticked: the feature follows at once, the list hides or shows
+    void onMergeWithAll(bool checked);
+    /// A part ticked in the scope of a first solid: the feature moves into it (addToPart)
+    void onScopePicked(const QString& part);
     void addFollowsNote(App::DocumentObject* primary);
     void onUnlink();
     /// Marks the parts the tool doesn't touch (debounced; the distance is cached per shape)
@@ -227,12 +270,19 @@ private:
     QListWidget* parts = nullptr;
     /// Row 2 of an additive feature: the studio's other parts to merge, one tick each (3b)
     QListWidget* mergeParts = nullptr;
+    QLabel* mergeLabel = nullptr;
     QLabel* mergeNote = nullptr;
-    QLabel* mergeBanner = nullptr;
+    /// Onshape's Merge with all (ops#640 rank 1), and its value when the box opened
+    QCheckBox* mergeWithAll = nullptr;
+    bool mergeWithAllWas = false;
+    /// The scope list of a first solid: a tick moves the feature into the part (ops#640)
+    bool scopePickMoves = false;
     QTimer* touchTimer = nullptr;
     std::shared_ptr<TouchCache> touchCache;
     /// The feature, still named when it is deleted (Cancel of a new one)
     App::DocumentObjectT featureT;
+    /// The operation row's current row (new, add, Subtraction, Common), when it has one
+    QString operation;
 };
 
 /// A common base for sketch based, dressup and other solid parameters dialogs
@@ -251,6 +301,23 @@ public:
     bool reject() override;
     /// The panels are in place: their reference fields join the group (ops#150).
     void open() override;
+    /// Keeps the box's OK, whose tooltip says what a required selection still lacks
+    /// (missingRequired); OK stays enabled (ops#640 H1).
+    void modifyStandardButtons(QDialogButtonBox* box) override;
+
+    /// FreeCAD-CH (ops#640 rank 24, hands-on F2): whether the dialog holds any input, for a tool
+    /// started while it is open. Onshape commits a dialog with any input, even in error, and
+    /// drops an empty one silently. An edit of an existing feature always has input; a new
+    /// feature's dialog has once a reference field holds an entry (a preselection too) or a
+    /// property of the feature differs from the dialog's opening. Invokable by name
+    /// (QMetaObject::invokeMethod), so Gui's commands need no PartDesign header.
+    Q_INVOKABLE bool hasInput() const;
+    /// The command made @p feature for the dialog it opens next (hasInput).
+    static void noteCreated(App::DocumentObject* feature);
+    /// FreeCAD-CH (selection parity P1): the dialog opened next arms the field of @p property
+    /// instead of the first empty one: a restart of the edit (restartEdit) keeps the field that
+    /// was armed armed, so the next pick still goes to it. Empty: none.
+    static void armOnOpen(const std::string& property);
 
     template<typename T = PartDesignGui::ViewProvider>
     T* getViewObject() const
@@ -282,6 +349,29 @@ protected:
     /// The Result box (ops#325), when the feature has one: the dialogs of additive and
     /// subtractive features add it before the preview box
     void addResultBox();
+    /// What a required selection still lacks, or empty: OK's tooltip says it, a hint, not a
+    /// block. Onshape's check stays enabled while a required field is empty, and OK commits the
+    /// feature in error, as for a geometric failure (a Revolve's axis: ops#643, ops#640 H1, F7).
+    virtual QString missingRequired() const
+    {
+        return {};
+    }
+    /// OK's tooltip, as missingRequired() says; called when the feature changes.
+    void updateOkButton();
+    /// FreeCAD-CH (ops#640 rank 36, hands-on B-4): the first parameter box's title is the
+    /// feature's name, red while the feature is in error, with Onshape's "did not regenerate
+    /// properly" tooltip (polish P13). Called after the feature changes or recomputes.
+    void updateTitle();
+    /// FreeCAD-CH (ops#640 polish P13, PL3a): under the Onshape keymap a pencil shown while the
+    /// title row is hovered turns the title into a text box that renames the feature. Called
+    /// from flattenForOnshape().
+    void addTitleRename();
+    /// FreeCAD-CH (ops#640 polish P5): under the Onshape keymap the dialog is one flat form under
+    /// its title row: the other boxes lose their headers, the title row doesn't fold, and the
+    /// Preview row is Onshape's. Called from open(), after the title box is chosen.
+    void flattenForOnshape();
+    /// A member of the feature's Body comes after it (Onshape offers Final then)
+    bool hasLaterFeature() const;
 
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none
@@ -295,6 +385,21 @@ private:
     void forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn);
 
     PartDesignGui::ViewProvider* vp;
+    /// The box's OK, and its tooltip when nothing is missing
+    QPointer<QPushButton> okButton;
+    QString okToolTip;
+    /// OK's tooltip is missingRequired()'s hint
+    bool showingHint = false;
+    fastsignals::scoped_connection requiredConnection;
+    /// The command made the feature for this dialog (noteCreated), and the feature's properties
+    /// as the dialog opened (hasInput)
+    bool created = false;
+    std::vector<std::pair<std::string, std::unique_ptr<App::Property>>> openingValues;
+    /// The box whose title is the feature's name (updateTitle), and its updates
+    QPointer<QWidget> titleBox;
+    bool titlePending = false;
+    fastsignals::scoped_connection titleChanged;
+    fastsignals::scoped_connection titleRecomputed;
 };
 
 }  // namespace PartDesignGui

@@ -324,6 +324,30 @@ AppExport bool elementUpToFaces(
  * names is keyed by its order (Data::isOrderKeyedName()): a lone member. False otherwise, and
  * when the twins can't be measured.
  */
+/// For tests: the key elementTwinCentroid() gives \a name before it tests a twin, from its plain
+/// form (\a plain) or from its own sections (Data::ownSectionsOf()), which the walk reads. The two
+/// are equal for every name the encoder writes (not for a content ending in the escape character,
+/// which is outside the grammar: Data::ownSectionsOf()).
+AppExport std::string twinKeyForTesting(const std::string& name, bool plain);
+
+/// For tests: the digest of \a name's linked names that elementTwinCentroid() files it under within
+/// its twin key; two twins (Data::isTwinName()) have the same one, or one of them has none.
+AppExport std::optional<std::size_t> twinDigestForTesting(const std::string& name);
+
+/** While one lives on this thread, elementTwinCentroid() keeps each target shape's names of a type
+ * indexed by their twin key, made at its first call, so that N references assigned at once read
+ * the target's names once instead of once per reference (ops#640: TestScaling's edge picks grew
+ * as N^2). The shapes must not change while one lives; the outermost one's end drops the indexes.
+ */
+class AppExport TwinIndexScope
+{
+public:
+    TwinIndexScope();
+    ~TwinIndexScope();
+    TwinIndexScope(const TwinIndexScope&) = delete;
+    TwinIndexScope& operator=(const TwinIndexScope&) = delete;
+};
+
 AppExport bool elementTwinCentroid(
     const GeoFeature* geo,
     const char* element,

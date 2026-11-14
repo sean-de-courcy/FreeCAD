@@ -150,10 +150,16 @@ bool TaskDlgDatumParameters::accept()
     // see what to do with external references
     // check the prerequisites for the selected objects
     // the user has to decide which option we should take if external references are used
+    // FreeCAD-CH (ops#634 D1): another Body of the same studio is referenced directly, as
+    // Onshape's Plane takes any part's entity; another App::Part still asks
+    auto outside = [pcActiveBody, pcDatum](App::DocumentObject* obj) {
+        return pcActiveBody && !pcActiveBody->hasObject(obj)
+            && !pcActiveBody->getOrigin()->hasObject(obj)
+            && !Part::BodyBase::isInOneStudio(pcDatum, obj);
+    };
     bool extReference = false;
     for (App::DocumentObject* obj : pcDatum->AttachmentSupport.getValues()) {
-        if (pcActiveBody && !pcActiveBody->hasObject(obj)
-            && !pcActiveBody->getOrigin()->hasObject(obj)) {
+        if (outside(obj)) {
             extReference = true;
         }
     }
@@ -174,8 +180,7 @@ bool TaskDlgDatumParameters::accept()
             std::vector<std::string> subs = pcDatum->AttachmentSupport.getSubValues();
             int index = 0;
             for (App::DocumentObject* obj : pcDatum->AttachmentSupport.getValues()) {
-                if (pcActiveBody && !pcActiveBody->hasObject(obj)
-                    && !pcActiveBody->getOrigin()->hasObject(obj)) {
+                if (outside(obj)) {
                     QString refusal;
                     auto* copy = PartDesignGui::TaskFeaturePick::makeCopy(
                         obj,

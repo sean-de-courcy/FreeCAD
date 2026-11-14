@@ -5,27 +5,37 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <string>
+#include <utility>
+
 #include "src/App/InitApplication.h"
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
 
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
+#include <gp.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
+#include <TopoDS_Vertex.hxx>
 
 namespace
 {
@@ -177,4 +187,61 @@ TEST_F(CheckDressUpTest, aChangedVoidBesideAVoidRemovedWithItsMaterialStays)
 
     EXPECT_TRUE(Part::checkDressUp(result, base));
     EXPECT_EQ(result.countSubShapes(TopAbs_SHELL), 2U);
+}
+
+// A block 20 mm with a blind pocket 10 x 1.5 x 15 open at the top (x 5..15, y 5..6.5, floor
+// z 5), and the floor's concave edge along the wall y 5: a round of 2 on it is wider than the
+// floor, so its strip runs onto the opposite wall y 6.5. Returns the base and that edge
+std::pair<Part::TopoShape, Part::TopoShape> narrowPocket()
+{
+    const TopoDS_Shape block = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 20, 20, 20).Shape();
+    const TopoDS_Shape pocket = BRepPrimAPI_MakeBox(gp_Pnt(5, 5, 5), 10, 1.5, 15).Shape();
+    const TopoDS_Shape base = BRepAlgoAPI_Cut(block, pocket).Shape();
+    TopoDS_Shape edge;
+    for (TopExp_Explorer it(base, TopAbs_EDGE); it.More(); it.Next()) {
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(TopoDS::Edge(it.Current()), first, last);
+        const gp_Pnt a = BRep_Tool::Pnt(first);
+        const gp_Pnt b = BRep_Tool::Pnt(last);
+        if (std::abs(a.Y() - 5) < 1e-9 && std::abs(b.Y() - 5) < 1e-9 && std::abs(a.Z() - 5) < 1e-9
+            && std::abs(b.Z() - 5) < 1e-9 && std::abs(std::abs(a.X() - b.X()) - 10) < 1e-9) {
+            edge = it.Current();
+        }
+    }
+    return {Part::TopoShape(base, 1L), Part::TopoShape(edge)};
+}
+
+TEST_F(CheckDressUpTest, aRoundClippedByTheOppositeWallFillsNothing)
+{
+    // The round of 2 as Onshape clips it by the wall its strip reaches (ops#640, Case Base #46):
+    // the corner y 5..6.5, z 5..7 less the round's cylinder. It lies on the opposite wall, beside
+    // the floor across a concave edge, within the round's reach: no recess is filled. Without the
+    // size, the check can't bound it and refuses it
+    const auto [base, edge] = narrowPocket();
+    ASSERT_FALSE(edge.isNull());
+    const TopoDS_Shape corner = BRepPrimAPI_MakeBox(gp_Pnt(5, 5, 5), 10, 1.5, 2).Shape();
+    const TopoDS_Shape cylinder
+        = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(4, 7, 7), gp::DX()), 2, 12).Shape();
+    const TopoDS_Shape round = BRepAlgoAPI_Cut(corner, cylinder).Shape();
+    Part::TopoShape result(BRepAlgoAPI_Fuse(base.getShape(), round).Shape(), 1L);
+    ASSERT_TRUE(result.isValid());
+
+    EXPECT_EQ(Part::filledPocket(result, base, {edge}, 2.0), "");
+    EXPECT_NE(Part::filledPocket(result, base, {edge}), "");
+}
+
+TEST_F(CheckDressUpTest, aBlindPocketFilledWholeFillsARecess)
+{
+    // The same pocket filled whole up to its top, as OCCT fills a recess whose opening it covers
+    // (ops#393): the fill lies on the opposite wall beside the floor too, but reaches 15 up it,
+    // past the round's reach (PR review r2 of the clip, the blind pocket)
+    const auto [base, edge] = narrowPocket();
+    ASSERT_FALSE(edge.isNull());
+    const TopoDS_Shape fill = BRepPrimAPI_MakeBox(gp_Pnt(5, 5, 5), 10, 1.5, 15).Shape();
+    Part::TopoShape result(BRepAlgoAPI_Fuse(base.getShape(), fill).Shape(), 1L);
+    ASSERT_TRUE(result.isValid());
+
+    const std::string why = Part::filledPocket(result, base, {edge}, 2.0);
+    EXPECT_EQ(why.rfind("fills a recess of the base next to Edge", 0), 0U) << why;
 }

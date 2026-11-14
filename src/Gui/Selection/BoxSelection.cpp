@@ -120,6 +120,206 @@ static bool findObjectsOfTypeInBox(
     return foundElement;
 }
 
+// FreeCAD-CH, selection parity P2 (Onshape's box rule, notes/selection-parity.md section 4) ------
+
+/// The element's projected polyline points (a vertex gives its point), or none.
+std::vector<Base::Vector2d> projectedPoints(
+    const std::string& type,
+    const Base::ViewProjMethod& proj,
+    Data::ComplexGeoData* data,
+    const Data::Segment* segment,
+    std::vector<std::vector<Base::Vector2d>>* polylines = nullptr
+)
+{
+    std::vector<Base::Vector2d> ret;
+    if (type == "Vertex") {
+        Base::Vector3d point;
+        if (data->getFirstVertexFromSubElement(segment, point)) {
+            auto v = proj(point);
+            ret.emplace_back(v.x, v.y);
+        }
+        return ret;
+    }
+    std::vector<Base::Vector3d> points;
+    std::vector<Data::ComplexGeoData::Line> lines;
+    data->getLinesFromSubElement(segment, points, lines);
+    for (const auto& line : lines) {
+        std::vector<Base::Vector2d> polyline;
+        for (auto i = line.I1; i <= line.I2 && i < points.size(); ++i) {
+            auto v = proj(points[i]);
+            polyline.emplace_back(v.x, v.y);
+        }
+        ret.insert(ret.end(), polyline.begin(), polyline.end());
+        if (polylines) {
+            polylines->push_back(std::move(polyline));
+        }
+    }
+    return ret;
+}
+
+/// A projected polyline touches the polygon: a point inside, or a segment crossing its border.
+bool polylineTouches(const Base::Polygon2d& polygon, const std::vector<Base::Vector2d>& polyline)
+{
+    for (const auto& v : polyline) {
+        if (polygon.Contains(v)) {
+            return true;
+        }
+    }
+    const size_t n = polygon.GetCtVectors();
+    for (size_t j = 1; j < polyline.size(); ++j) {
+        Base::Line2d segment(polyline[j - 1], polyline[j]);
+        for (size_t i = 0; i < n; ++i) {
+            Base::Line2d border(polygon.At(i), polygon.At((i + 1) % n));
+            Base::Vector2d at;
+            if (segment.IntersectAndContain(border, at)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// A crossing box touches the shape: an edge or vertex touches it, or the box lies inside a
+/// face's projection (a box drawn within one face).
+bool shapeTouches(
+    const Base::ViewProjMethod& proj,
+    Data::ComplexGeoData* data,
+    const Base::Polygon2d& polygon
+)
+{
+    for (const char* type : {"Vertex", "Edge"}) {
+        size_t count = data->countSubElements(type);
+        for (size_t i = 1; i <= count; ++i) {
+            std::string element = std::string(type) + std::to_string(i);
+            std::unique_ptr<Data::Segment> segment(data->getSubElementByName(element.c_str()));
+            if (!segment) {
+                continue;
+            }
+            std::vector<std::vector<Base::Vector2d>> polylines;
+            auto points = projectedPoints(type, proj, data, segment.get(), &polylines);
+            if (polylines.empty()) {
+                polylines.push_back(points);
+            }
+            for (const auto& polyline : polylines) {
+                if (polylineTouches(polygon, polyline)) {
+                    return true;
+                }
+            }
+        }
+    }
+    if (polygon.GetCtVectors() == 0) {
+        return false;
+    }
+    const Base::Vector2d corner = polygon.At(0);
+    size_t count = data->countSubElements("Face");
+    for (size_t i = 1; i <= count; ++i) {
+        std::string element = "Face" + std::to_string(i);
+        std::unique_ptr<Data::Segment> segment(data->getSubElementByName(element.c_str()));
+        if (!segment) {
+            continue;
+        }
+        std::vector<Base::Vector3d> points;
+        std::vector<Base::Vector3d> normals;
+        std::vector<Data::ComplexGeoData::Facet> facets;
+        data->getFacesFromSubElement(segment.get(), points, normals, facets);
+        for (const auto& facet : facets) {
+            if (facet.I1 >= points.size() || facet.I2 >= points.size() || facet.I3 >= points.size()) {
+                continue;
+            }
+            Base::Polygon2d triangle;
+            for (auto index : {facet.I1, facet.I2, facet.I3}) {
+                auto v = proj(points[index]);
+                triangle.Add(Base::Vector2d(v.x, v.y));
+            }
+            if (triangle.Contains(corner)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// A window box: the whole part ("") when every face and edge of it lies inside, else each face
+/// and edge wholly inside (a face by its boundary: the box is convex). Onshape takes no vertices
+/// (SQ4: a window over half a box gave its right face and that face's 4 edges).
+std::vector<std::string> windowElements(
+    const Base::ViewProjMethod& proj,
+    Data::ComplexGeoData* data,
+    const Base::Polygon2d& polygon
+)
+{
+    std::vector<std::string> ret;
+    size_t total = 0;
+    for (const char* type : {"Face", "Edge"}) {
+        size_t count = data->countSubElements(type);
+        for (size_t i = 1; i <= count; ++i) {
+            std::string element = std::string(type) + std::to_string(i);
+            std::unique_ptr<Data::Segment> segment(data->getSubElementByName(element.c_str()));
+            if (!segment) {
+                continue;
+            }
+            auto points = projectedPoints(type, proj, data, segment.get());
+            if (points.empty()) {
+                continue;
+            }
+            ++total;
+            bool inside = true;
+            for (const auto& v : points) {
+                if (!polygon.Contains(v)) {
+                    inside = false;
+                    break;
+                }
+            }
+            if (inside) {
+                ret.push_back(element);
+            }
+        }
+    }
+    if (total > 0 && ret.size() == total) {
+        ret.assign(1, std::string());
+    }
+    return ret;
+}
+
+/// Onshape's box rule for one part (a leaf: a body or a shape that holds no objects): a crossing
+/// box gives the whole part when it touches the part's geometry (not its bounding box); a window
+/// gives the whole part wholly inside, else the faces and edges wholly inside.
+std::vector<std::string> partBoxSelection(
+    App::DocumentObject* obj,
+    SelectionMode mode,
+    const Base::ViewProjMethod& proj,
+    const Base::Polygon2d& polygon,
+    const Base::Matrix4D& mat,
+    bool transform,
+    int depth
+)
+{
+    std::vector<std::string> ret;
+    Base::PyGILStateLocker lock;
+    PyObject* pyobj = nullptr;
+    Base::Matrix4D matCopy(mat);
+    obj->getSubObject(nullptr, &pyobj, &matCopy, transform, depth);
+    std::unique_ptr<Py::Object> owner;
+    if (pyobj) {
+        owner = std::make_unique<Py::Object>(pyobj, true);
+    }
+    if (!pyobj || !PyObject_TypeCheck(pyobj, &Data::ComplexGeoDataPy::Type)) {
+        // No geometry to test (a datum, a mesh view...): the caller's bounding box test decides
+        if (mode == INTERSECT) {
+            ret.emplace_back("");
+        }
+        return ret;
+    }
+    auto data = static_cast<Data::ComplexGeoDataPy*>(pyobj)->getComplexGeoDataPtr();
+    if (mode == INTERSECT) {
+        if (shapeTouches(proj, data, polygon)) {
+            ret.emplace_back("");
+        }
+        return ret;
+    }
+    return windowElements(proj, data, polygon);
+}
+
 /**
  * @brief Collect box-selection matches for one view provider.
  *
@@ -156,6 +356,10 @@ std::vector<std::string> getBoxSelection(
     App::Document* doc = App::GetApplication().getActiveDocument();
     const auto selectionGate = SelectionSingleton::instance().getSelectionGate(doc);
 
+    // FreeCAD-CH, selection parity P2: an object holding objects (the Part Studio, a group) is
+    // never selected whole, only the parts in it (Onshape, SQ4).
+    const auto& subs = obj->getSubObjects(App::DocumentObject::GS_SELECT);
+
     // DO NOT check this view object Visibility, let the caller do this. Because
     // we may be called by upper object hierarchy that manages our visibility.
     auto bbox3 = vp->getBoundingBox(nullptr, &mat, transform);
@@ -166,7 +370,7 @@ std::vector<std::string> getBoxSelection(
 
         // check if both two boundary points are inside polygon, only
         // valid since we know the given polygon is a box.
-        if (polygon.Contains(Base::Vector2d(bbox.MinX, bbox.MinY))
+        if (subs.empty() && polygon.Contains(Base::Vector2d(bbox.MinX, bbox.MinY))
             && polygon.Contains(Base::Vector2d(bbox.MaxX, bbox.MaxY))) {
             ret.emplace_back("");
             return ret;
@@ -177,8 +381,11 @@ std::vector<std::string> getBoxSelection(
         }
     }
 
-    const auto& subs = obj->getSubObjects(App::DocumentObject::GS_SELECT);
     if (subs.empty()) {
+        if (!selectElement && selectionGate == nullptr) {
+            // FreeCAD-CH, selection parity P2: a part, by its geometry
+            return partBoxSelection(obj, mode, proj, polygon, mat, transform, depth);
+        }
         if (!selectElement) {
             if (mode == INTERSECT || (isBBox3Valid && polygon.Contains(bbox.GetCenter()))) {
                 ret.emplace_back("");
@@ -220,7 +427,6 @@ std::vector<std::string> getBoxSelection(
         return ret;
     }
 
-    size_t count = 0;
     for (auto& sub : subs) {
         App::DocumentObject* parent = nullptr;
         std::string childName;
@@ -248,18 +454,13 @@ std::vector<std::string> getBoxSelection(
 
         const auto& sels
             = getBoxSelection(svp, mode, selectElement, proj, polygon, smat, false, depth + 1);
-        if (sels.size() == 1 && sels[0].empty()) {
-            ++count;
-        }
         for (auto& sel : sels) {
             ret.emplace_back(sub + sel);
         }
     }
 
-    if (count == subs.size()) {
-        ret.resize(1);
-        ret[0].clear();
-    }
+    // FreeCAD-CH, selection parity P2: no collapse to the container when every child matched
+    // (a box around both parts gave the Part Studio itself).
     return ret;
 }
 

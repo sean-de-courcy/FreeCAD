@@ -25,6 +25,7 @@
 
 #include <QCoreApplication>
 #include <QMetaObject>
+#include <QPointer>
 #include <fastsignals/signal.h>
 
 #include <Mod/Assembly/AssemblyGlobal.h>
@@ -32,6 +33,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderPart.h>
 
+class QLineEdit;
 class SoSwitch;
 class SoSensor;
 class SoDragger;
@@ -198,9 +200,60 @@ public:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
 
     // Dragger controls:
-    void initMoveDragger();
+    /// Shows the triad: at @a pickedPoint (global) when given, else the selection's bounding box centre
+    void initMoveDragger(const Base::Vector3d* pickedPoint = nullptr);
     void endMoveDragger();
     static void draggerMotionCallback(void* data, SoDragger* d);
+    // FreeCAD-CH (ops#640, C8): Onshape's typed triad moves (notes/assemblies-design.md 4b)
+    static void draggerStartCallback(void* data, SoDragger* d);
+    static void draggerFinishCallback(void* data, SoDragger* d);
+    enum class TriadHandle
+    {
+        None,
+        TranslateX,
+        TranslateY,
+        TranslateZ,
+        RotateX,
+        RotateY,
+        RotateZ,
+        Plane,
+    };
+    /// A drag of @a handle starts: opens the undo step and remembers where the triad was
+    void beginTriadDrag(TriadHandle handle);
+    /// Puts the shown triad at @a triad (global) and moves the parts with it, exactly (no float
+    /// rounding), as a drag of the dragger's fields to @a triad would
+    void moveTriadTo(const Base::Placement& triad);
+    /// The drag ends: commits its undo step, aligns the triad with the assembly's axes again and,
+    /// for an arrow or a ring, opens the value box
+    void endTriadDrag();
+    /// FreeCAD-CH (ops#640, C10): moves the triad alone to @a point (global), on the assembly's
+    /// axes; the parts stay where they are, and a ring then turns them about @a point
+    void moveTriadOriginTo(const Base::Vector3d& point);
+    /// Where a pick of @a subName (under @a root, the element included) at @a cursor (global) puts
+    /// the triad's origin: an open edge's end close to the cursor (the Transform dialog's snap), else
+    /// the cursor
+    Base::Vector3d triadOriginPick(
+        App::DocumentObject* root,
+        const std::string& subName,
+        const Base::Vector3d& cursor
+    ) const;
+    TriadHandle getTriadHandle() const
+    {
+        return triadHandle;
+    }
+    /// The distance (mm) or angle (degrees) the last arrow or ring drag moved, from where it started
+    double getTriadValue() const;
+    /// A typed value: the move becomes exactly @a text (an expression) from where the drag started,
+    /// in one undo step. False, with the box kept open and marked, if it doesn't evaluate.
+    bool applyTriadValue(const std::string& text);
+    bool isTriadBoxOpen() const;
+    QLineEdit* getTriadBox() const;
+    void closeTriadBox();
+    /// The triad as shown (global): aligned with the assembly's axes except during a ring drag
+    Base::Placement getTriadPlacement() const
+    {
+        return triadShownPlc;
+    }
 
     void setDragger();
     void unsetDragger();
@@ -230,6 +283,14 @@ public:
     bool forceSolveOnMoveForRigid;
 
     long lastClickTime;  // Store last click time as milliseconds
+    // C10: Alt (Option on a Mac) held, as the viewer's key events tell it; a press it took moved
+    // the triad alone, and its release is taken too
+    bool triadAltHeld = false;
+    bool triadOriginPress = false;
+    // C10: the viewer whose selection is off from that press to its release (its selection
+    // root selects on the release, before this view provider sees it)
+    QPointer<Gui::View3DInventorViewer> triadOriginViewer;
+    void endTriadOriginPress();
 
     int numberOfSel;
     Base::Vector3d prevPosition;
@@ -255,6 +316,29 @@ public:
         signalSetUp;
 
 private:
+    // FreeCAD-CH (ops#640, C8)
+    TriadHandle triadHandleOf(SoDragger* child) const;
+    void setTriadCallbacks(bool on);
+    Base::Placement triadTarget(TriadHandle handle, double value) const;
+    void openTriadBox();
+    void showTriadAt(const Base::Placement& plc);
+    bool pressIsOnTriad(const SbVec2s& cursorPos, const Gui::View3DInventorViewer* viewer) const;
+    void restoreTriadAfterMove();
+    TriadHandle triadHandle = TriadHandle::None;
+    /// The triad as shown: at triadPlc's origin, aligned with the assembly's axes between drags
+    Base::Placement triadShownAt(const Base::Placement& plc) const;
+    Base::Placement triadPlc;               // the parts' move, as a placement (global, exact)
+    Base::Placement triadShownPlc;          // the triad as shown (global, exact)
+    Base::Placement triadDragStartPlc;      // triadPlc when the last drag started
+    Base::Placement triadDragStartShown;    // triadShownPlc then: the handles' axes
+    Base::Placement triadDragStartFields;   // the dragger's single-precision fields then
+    bool triadDragging = false;
+    QPointer<QLineEdit> triadBox;
+    // A body drag that starts while the triad is shown hides it; it comes back moved with the part
+    bool triadShownBeforeMove = false;
+    App::DocumentObject* triadAnchor = nullptr;
+    Base::Placement triadAnchorPlc;
+
     bool tryMouseMove(const SbVec2s& cursorPos, Gui::View3DInventorViewer* viewer);
     void tryInitMove(const SbVec2s& cursorPos, Gui::View3DInventorViewer* viewer);
 
@@ -287,6 +371,8 @@ private:
 
     void highlightJointElements(App::DocumentObject* joint);
     void clearJointElementHighlight();
+    /// Drops the connections setEdit() makes (FreeCAD-CH, ops#651)
+    void disconnectEditSignals();
 
     void applyIsolationRecursively(
         App::DocumentObject* current,
@@ -295,9 +381,13 @@ private:
         std::set<App::DocumentObject*>& visited
     );
 
-    TaskAssemblyMessages* taskSolver {nullptr};
+    // A QPointer: the task panel deletes its contextual panels when its dialog closes (ops#640)
+    QPointer<TaskAssemblyMessages> taskSolver;
+    // The document taskSolver joined, set with it: removeContextualPanel()'s key (R7A-1)
+    App::Document* taskSolverDoc = nullptr;
 
     QMetaObject::Connection workbenchConnection;
+    QMetaObject::Connection taskViewConnection;
     fastsignals::connection connectActivatedVP;
     fastsignals::connection connectSolverUpdate;
     fastsignals::scoped_connection m_preTransactionConn;

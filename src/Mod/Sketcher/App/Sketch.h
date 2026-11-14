@@ -24,6 +24,9 @@
 
 #pragma once
 
+#include <functional>
+#include <map>
+
 #include <Base/Persistence.h>
 #include <CXX/Objects.hxx>
 #include <Mod/Part/App/TopoShape.h>
@@ -53,6 +56,28 @@ public:
 
     /// solve the actual set up sketch
     int solve();
+    /** FreeCAD-CH (ops#640, ops#656 D4 row 1): solves the set up sketch with only some parameters
+     * as unknowns, by least motion; every other parameter is held exactly where it is.
+     *
+     * @param isFree whether a parameter of the geometry geoId (point pos, index in that point or
+     *        in the curve's own parameters) is an unknown. A driven dimension's value is always one.
+     * @param allowedErrors the constraints (1-based tags) that must hold at the solution, each with
+     *        the largest error allowed there.
+     * @return GCS::Success with the geometry written when the solve converged and every one of
+     *         @p allowedErrors holds; otherwise GCS::Failed with the parameters as they were.
+     *         Call endHolding() after the last one: the solver may be left set up for a part of
+     *         the sketch. The diagnosis (conflicts, redundancies, degrees of freedom) is always the
+     *         one setUpSketch made.
+     */
+    int solveHolding(
+        const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
+        const std::map<int, double>& allowedErrors
+    );
+    /// FreeCAD-CH (ops#656): sets the whole sketch up again after solveHolding(); with @p solved,
+    /// finishes the solve as solve() does. Returns GCS::Success when that finish succeeded.
+    int endHolding(bool solved);
+    /// FreeCAD-CH (ops#656): every constraint's error at the current parameters, by tag, one pass
+    std::map<int, double> calculateConstraintErrors() const;
     /// resets the solver
     int resetSolver();
     /// get standard (aka fine) solver precision
@@ -115,6 +140,17 @@ public:
     int getPointId(int geoId, PointPos pos) const;
     /// retrieves a point
     Base::Vector3d getPoint(int geoId, PointPos pos) const;
+
+    /// FreeCAD-CH (ops#640, sketch conflicts): constraint indices (0-based) the next setUpSketch
+    /// leaves out of the solve, as it does unenforceable ones (a conflict solved around)
+    void setSkippedConstraints(std::set<int> skipped)
+    {
+        skippedConstraints = std::move(skipped);
+    }
+    const std::set<int>& getSkippedConstraints() const
+    {
+        return skippedConstraints;
+    }
 
     // Inline methods
     inline bool hasConflicts() const
@@ -609,6 +645,7 @@ private:
     GCS::System GCSsys;
     int ConstraintsCounter;
     std::vector<int> Conflicting;
+    std::set<int> skippedConstraints;
     std::vector<int> Redundant;
     std::vector<int> PartiallyRedundant;
     std::vector<int> MalformedConstraints;
@@ -644,6 +681,8 @@ private:
     std::vector<GCS::ArcOfParabola> ArcsOfParabola;
     std::vector<GCS::BSpline> BSplines;
 
+    /// FreeCAD-CH (ops#656): solveHolding() left the solver set up for a part of the sketch
+    bool holdingNarrowed = false;
     bool isInitMove;
     bool isFine;
     Base::Vector3d initToPoint;

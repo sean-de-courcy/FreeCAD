@@ -1177,6 +1177,167 @@ def reportText():
     return ""
 
 
+IMPLICIT = 0x100  # SketchObject::implicitExternalMark (ops#634)
+
+
+class TestSketchImplicitExternals(unittest.TestCase):
+    """A constraint's helper link (ops#634: a model pick's, addExternal's implicit) is marked in
+    its ExternalTypes entry: the paths that keep the link keep the mark, the type checks read the
+    type without it, and delUnusedImplicitExternals deletes a marked link nothing uses.
+
+    The model: a sketch on the XY plane at the origin, the rail (a line (-20, 20, 0)-(20, 20, 0))
+    and the ring (a circle of radius 10 about the origin in the XZ plane, crossing the plane at
+    (10, 0) and (-10, 0))."""
+
+    def setUp(self):
+        self.doc = App.newDocument("TestSketchImplicitExternals")
+        self.rail = self.addEdge("Rail", Part.makeLine(V(-20, 20, 0), V(20, 20, 0)))
+        self.ring = self.addEdge("Ring", Part.makeCircle(10, V(0, 0, 0), V(0, 1, 0)))
+        self.sketch = self.doc.addObject("Sketcher::SketchObject", "Sketch")
+        self.doc.recompute()
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def addEdge(self, name, edge):
+        obj = self.doc.addObject("Part::Feature", name)
+        obj.Shape = edge
+        return obj
+
+    def links(self):
+        return [(obj.Name, sub) for obj, subs in self.sketch.ExternalGeometry for sub in subs]
+
+    def externalIds(self):
+        """The Ids of the external geometry after the axes (its facade's: a Part geometry has no
+        Id; lines only, as a Part.Point read from ExternalGeo loses its extensions)."""
+        return [
+            Sketcher.ExternalGeometryFacade(g).Id
+            for g in list(self.sketch.ExternalGeo)[2:]
+            if not isinstance(g, Part.Point)
+        ]
+
+    def railY(self):
+        lines = [g for g in list(self.sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
+        self.assertEqual(len(lines), 1)
+        return lines[0].StartPoint.y
+
+    def testAHelperIsMarkedAndKeepsTheMarkThroughARebuild(self):
+        """The rail linked as a helper, then moved: its geometry follows, the mark stays. Moved
+        by its Placement, so its edge keeps its name; a new Shape from a script would be named
+        afresh (I-C5, ops#502) and break the link."""
+        self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
+        self.assertAlmostEqual(self.railY(), 20, places=6)
+        self.rail.Placement = App.Placement(V(0, 5, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertAlmostEqual(self.railY(), 25, places=6)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
+
+    def testAnIntersectionHelperBuildsItsPoints(self):
+        """The ring linked as an intersection helper: its two points, the type read without the
+        mark (as no known type it would build nothing)."""
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, True, True)
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION | IMPLICIT])
+        points = [g for g in list(self.sketch.ExternalGeo)[2:] if isinstance(g, Part.Point)]
+        self.assertEqual(sorted(round(p.X, 6) for p in points), [-10, 10])
+
+    def testTheUsersAddOfAHelperKeepsTheLinkUnmarked(self):
+        """addExternal of a helper's element and kind, not implicit (the External geometry
+        tool): no error, the same link and geometry Id, no mark."""
+        self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
+        self.doc.recompute()
+        ids = self.externalIds()
+        self.assertEqual(len(ids), 1)
+        self.sketch.addExternal(self.rail.Name, "Edge1")
+        self.doc.recompute()
+        self.assertEqual(self.links(), [("Rail", "Edge1")])
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION])
+        self.assertEqual(self.externalIds(), ids)
+
+    def testTheUsersOtherKindOfAHelperMakesItBothUnmarked(self):
+        """A helper's projection of the ring, then the user's intersection: Both, no mark; a
+        helper's add of the other kind keeps the mark."""
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, False, True)
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, True)
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [BOTH])
+
+        other = self.doc.addObject("Sketcher::SketchObject", "Other")
+        self.doc.recompute()
+        other.addExternal(self.ring.Name, "Edge1", False, False, True)
+        other.addExternal(self.ring.Name, "Edge1", False, True, True)
+        self.doc.recompute()
+        self.assertEqual(list(other.ExternalTypes), [BOTH | IMPLICIT])
+
+    def testAHelpersOwnAddAgainIsRefused(self):
+        """addExternal implicit of a helper's element and kind: refused as a duplicate, as
+        before, and the mark stays."""
+        self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
+        with self.assertRaises(ValueError):
+            self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
+
+    def testDeletingAnotherLinkKeepsTheHelpersMark(self):
+        """The user's link of the ring, then a helper of the rail; the ring's link deleted: the
+        helper keeps its mark at its new index."""
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, True)
+        self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION, PROJECTION | IMPLICIT])
+        self.sketch.delExternal(0)
+        self.doc.recompute()
+        self.assertEqual(self.links(), [("Rail", "Edge1")])
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
+
+    def testOnlyUnusedHelpersAreDeleted(self):
+        """Four links: the user's (no constraint), a helper with a constraint, a helper made
+        defining, and an unused helper: only the unused helper goes."""
+        line = self.sketch.addGeometry(Part.LineSegment(V(-5, 5, 0), V(5, 5, 0)), False)
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, True)  # GeoIds -3, -4
+        self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)  # -5
+        third = self.addEdge("Third", Part.makeLine(V(-20, 30, 0), V(20, 30, 0)))
+        fourth = self.addEdge("Fourth", Part.makeLine(V(-20, 40, 0), V(20, 40, 0)))
+        self.doc.recompute()
+        self.sketch.addExternal(third.Name, "Edge1", True, False, True)  # -6, defining
+        self.sketch.addExternal(fourth.Name, "Edge1", False, False, True)  # -7, unused
+        self.sketch.addConstraint(Sketcher.Constraint("Parallel", line, -5))
+        self.doc.recompute()
+
+        self.assertEqual(self.sketch.delUnusedImplicitExternals(), 1)
+        self.doc.recompute()
+        self.assertEqual(
+            self.links(), [("Ring", "Edge1"), ("Rail", "Edge1"), ("Third", "Edge1")]
+        )
+        self.assertEqual(
+            list(self.sketch.ExternalTypes),
+            [INTERSECTION, PROJECTION | IMPLICIT, PROJECTION | IMPLICIT],
+        )
+        self.assertEqual(len(self.sketch.Constraints), 1)
+        self.assertEqual(self.sketch.delUnusedImplicitExternals(), 0)
+
+    def testTheMarkSurvivesSaveAndReopen(self):
+        """Saved and opened again: the helper is still marked, and still goes once unused."""
+        self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
+        self.doc.recompute()
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "helper.FCStd")
+            self.doc.saveAs(path)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            self.sketch = self.doc.getObject("Sketch")
+            self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
+            self.assertAlmostEqual(self.railY(), 20, places=6)
+            self.assertEqual(self.sketch.delUnusedImplicitExternals(), 1)
+            self.assertEqual(self.links(), [])
+        finally:
+            App.closeDocument(self.doc.Name)
+            self.doc = App.newDocument("TestSketchImplicitExternals")
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 class TestSketchExternalTypesGui(unittest.TestCase):
     """The warnings of TestSketchExternalTypes's cases, read in the Report view: in
     TestSketcherGui."""

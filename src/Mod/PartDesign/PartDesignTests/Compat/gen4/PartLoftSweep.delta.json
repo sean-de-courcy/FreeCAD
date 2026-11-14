@@ -1,0 +1,92 @@
+{
+ "approved": "c753, brief ops#673 comment 6831422803, 11-12",
+ "changes": {
+  "PartLoftSweep": {
+   "Compound.shape.box[0]": {
+    "new": -10.0,
+    "old": -10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Compound.shape.box[1]": {
+    "new": -10.0,
+    "old": -10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Compound.shape.box[4]": {
+    "new": 10.0,
+    "old": 10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Loft.shape.box[0]": {
+    "new": -10.0,
+    "old": -10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Loft.shape.box[1]": {
+    "new": -10.0,
+    "old": -10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Loft.shape.box[2]": {
+    "new": 0.0,
+    "old": -1e-07,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Loft.shape.box[3]": {
+    "new": 10.0,
+    "old": 10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Loft.shape.box[4]": {
+    "new": 10.0,
+    "old": 10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Loft.shape.box[5]": {
+    "new": 10.0,
+    "old": 10.0000001,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#640",
+ "label": "compat-change",
+ "why": "replica PS164C rb39 (c753, brief ops#673 comment 6831422803, 11-12): a loft's flat sides are planes and its straight edges lines, as Onshape's; its bounding box is the exact one (the B-spline faces' 1e-7 margin goes)"
+}

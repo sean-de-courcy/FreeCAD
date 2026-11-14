@@ -1,0 +1,10 @@
+{
+"entries": {
+"GrooveDOffAxis|round_faces|V2s": {"axes": ["X4:600"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b3-r1", "issue": "ops#640", "tier": "F"},
+"GrooveDOntoAxis|round_faces|V2s": {"axes": ["X4:600"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b3-r1", "issue": "ops#640", "tier": "F"},
+"RevolveDOffAxis|rim_fillet|V2s": {"axes": ["X4:600"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b3-r1", "issue": "ops#640", "tier": "F"},
+"RevolveDOffAxis|round_faces|V2s": {"axes": ["X4:600"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b3-r1", "issue": "ops#640", "tier": "F"},
+"RevolveDOntoAxis|rim_fillet|V2s": {"axes": ["X4:600"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b3-r1", "issue": "ops#640", "tier": "F"},
+"RevolveDOntoAxis|round_faces|V2s": {"axes": ["X4:600"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b3-r1", "issue": "ops#640", "tier": "F"}
+}
+}

@@ -1,0 +1,8 @@
+# A timing test: its pocket finishes inside the 0.3 s limit on GitHub's fast macOS runner, so the limit never trips
+# (batch 10's macOS run 43128996087; the Mac's local run passed it). Not a product regression. Kernel safety 24 fixes
+# the test; remove this file then.
+
+issue: ops#681
+
+reason: KernelBudgetTest's PartDesign pocket finishes under the 0.3 s limit on the fast macOS runner
+cli  parttests.KernelBudgetTest.KernelBudgetTest.testOnlyPartDesignFeaturesHaveTheLimit   macos

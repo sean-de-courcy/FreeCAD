@@ -3637,6 +3637,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         body.addObject(pipe)
         pipe.Profile = profile
         pipe.Spine = (spine, ["Edge1"])
+        pipe.ExtendToFullPath = True  # through both faces (a new pipe sweeps one way, ops#640)
         features.append((pipe, ["FUS"]))
         return features
 

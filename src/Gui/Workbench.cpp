@@ -22,6 +22,7 @@
 
 
 #include <algorithm>
+#include <string_view>
 
 #include <QDockWidget>
 #include <QStatusBar>
@@ -35,6 +36,7 @@
 #include "Command.h"
 #include "Control.h"
 #include "DockWindowManager.h"
+#include "ForkKeymap.h"
 #include "MainWindow.h"
 #include "MenuManager.h"
 #include "PythonWorkbenchPy.h"
@@ -44,6 +46,7 @@
 #include "Window.h"
 
 #include <App/Application.h>
+#include <App/Datums.h>
 #include <App/DocumentObject.h>
 #include <App/SuppressibleExtension.h>
 #include <Base/Interpreter.h>
@@ -611,6 +614,8 @@ std::list<std::string> Workbench::listCommandbars() const
     qApp->translate("Workbench", "Special Ops");
     // needed for Structure toolbar
     qApp->translate("Workbench", "Link Actions");
+    // the 3D view's context menu (FreeCAD-CH, ops#640)
+    qApp->translate("Workbench", "More");
 #endif
 
 #if 0  // needed for the application menu on OSX
@@ -631,24 +636,56 @@ StdWorkbench::StdWorkbench()
 
 StdWorkbench::~StdWorkbench() = default;
 
+namespace
+{
+
+/// The Standard Views submenu of the 3D view's context menu
+MenuItem* standardViewsMenu()
+{
+    auto StdViews = new MenuItem;
+    StdViews->setCommand("Standard Views");
+
+    *StdViews << "Std_ViewIsometric" << "Separator" << "Std_ViewHome" << "Std_ViewFront"
+              << "Std_ViewTop" << "Std_ViewRight"
+              << "Std_ViewRear" << "Std_ViewBottom" << "Std_ViewLeft"
+              << "Separator" << "Std_ViewRotateLeft" << "Std_ViewRotateRight";
+    return StdViews;
+}
+
+/// Whether View normal to applies to the selection, as Onshape offers it (FreeCAD-CH, ops#640):
+/// one face, or one plane selected whole (an origin or datum plane, a sketch)
+bool viewNormalApplies(const std::vector<SelectionSingleton::SelObj>& sels)
+{
+    if (sels.size() != 1 || !sels.front().pObject) {
+        return false;
+    }
+    const std::string_view sub = sels.front().SubName ? sels.front().SubName : "";
+    if (!sub.empty()) {
+        return sub.starts_with("Face");
+    }
+    const App::DocumentObject* obj = sels.front().pObject;
+    return obj->isDerivedFrom<App::Plane>()
+        || obj->isDerivedFrom(Base::Type::fromName("PartDesign::Plane"))
+        || obj->isDerivedFrom(Base::Type::fromName("Part::Part2DObject"));
+}
+
+}  // namespace
+
 void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
 {
     auto sels = Gui::Selection().getSelection();
+    // where the one object's Transform and Placement go (Onshape's 3D-view menu: its More submenu)
+    MenuItem* placementItem = item;
+    // Onshape's 3D-view menu's More submenu, appended last
+    MenuItem* more = nullptr;
 
-    if (strcmp(recipient, "View") == 0) {
+    if (strcmp(recipient, "View") == 0 && !ForkKeymap::isOnshape()) {
+        // FreeCAD's context menu of the 3D view: without the fork's keymap (FreeCAD-CH, ops#640)
         createLinkMenu(item);
         *item << "Separator";
 
-        auto StdViews = new MenuItem;
-        StdViews->setCommand("Standard Views");
-
-        *StdViews << "Std_ViewIsometric" << "Separator" << "Std_ViewHome" << "Std_ViewFront"
-                  << "Std_ViewTop" << "Std_ViewRight"
-                  << "Std_ViewRear" << "Std_ViewBottom" << "Std_ViewLeft"
-                  << "Separator" << "Std_ViewRotateLeft" << "Std_ViewRotateRight";
-
         *item << "Std_ViewFitAll" << "Std_ViewFitSelection" << "Std_AlignToSelection"
-              << "Std_DrawStyle" << StdViews << "Separator"
+              << "Std_DrawStyle" << standardViewsMenu() << "Separator"
               << "Std_ViewDockUndockFullscreen";
 
         if (!sels.empty()) {
@@ -656,6 +693,54 @@ void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
                   << "Std_ToggleSelectability" << "Std_TreeSelection"
                   << "Std_RandomColor" << "Std_ToggleTransparency" << "Separator" << "Std_Delete"
                   << "Std_SendToPythonConsole";
+        }
+    }
+    else if (strcmp(recipient, "View") == 0) {
+        // FreeCAD-CH (ops#640): Onshape's context menu of the 3D view, under the fork's keymap.
+        // The entries a workbench put first (PartDesign's Sketch on face, Fillet, Chamfer) stay
+        // first; the rest of FreeCAD's menu goes under a More submenu, which a workbench may have
+        // started (PartDesign's Move tip and roll-back entries) and which goes to the end here.
+        MenuItem* StdViews = standardViewsMenu();
+
+        more = item->findItem("More");
+        if (more) {
+            item->removeItem(more);
+            *more << "Separator";
+        }
+        else {
+            more = new MenuItem;
+            more->setCommand("More");
+        }
+        placementItem = more;
+
+        createLinkMenu(more);
+        if (more->hasItems()) {
+            *more << "Separator";
+        }
+
+        // What the right click hit decides the menu, not the selection: the Onshape navigation
+        // style selects the hit and keeps it preselected, so no preselection is empty space,
+        // whatever is selected (from the tree, the Features list, an earlier click)
+        const bool onEntity = Gui::Selection().hasPreselection() && !sels.empty();
+        if (!onEntity) {
+            // On empty space
+            *item << "Std_ViewFitAll" << "Std_ViewIsometric" << StdViews << "Separator"
+                  << "Std_ShowParts" << "Separator";
+            *more << "Std_DrawStyle" << "Std_ViewDockUndockFullscreen";
+        }
+        else {
+            // On a face, an edge, a vertex or a whole object. Edit appearance and Assign material
+            // are Material's commands: its WorkbenchManipulator puts them after Make transparent
+            if (viewNormalApplies(sels)) {
+                *item << "Std_ViewNormal";
+            }
+            *item << "Std_ViewFitSelection" << "Separator"
+                  << "Std_HideSelection" << "Std_Isolate" << "Std_ToggleTransparency"
+                  << "Separator" << "Std_SelectOther" << "Std_Delete" << "Separator";
+            *more << "Std_ViewFitAll" << "Std_AlignToSelection" << "Std_DrawStyle" << StdViews
+                  << "Separator" << "Std_ViewDockUndockFullscreen" << "Separator"
+                  << "Std_ToggleVisibility" << "Std_ToggleSelectability" << "Std_TreeSelection"
+                  << "Std_RandomColor" << "Std_SendToPythonConsole";
         }
     }
     else if (strcmp(recipient, "Tree") == 0) {
@@ -687,8 +772,12 @@ void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
     if (sels.size() == 1) {
         App::DocumentObject* obj = sels[0].pObject;
         if (obj->getPlacementProperty() && !obj->getPlacementProperty()->isReadOnly()) {
-            *item << "Std_TransformManip" << "Std_Placement";
+            *placementItem << "Std_TransformManip" << "Std_Placement";
         }
+    }
+
+    if (more) {
+        *item << more;
     }
 }
 
@@ -745,6 +834,12 @@ MenuItem* StdWorkbench::setupMenuBar() const
     zoom->setCommand("&Zoom");
     *zoom << "Std_ViewZoomIn" << "Std_ViewZoomOut" << "Separator" << "Std_ViewBoxZoom";
 
+    // Camera (Onshape): the camera type and the zoom to a window
+    auto camera = new MenuItem;
+    camera->setCommand("&Camera");
+    *camera << "Std_OrthographicCamera" << "Std_PerspectiveCamera" << "Separator"
+            << "Std_ViewBoxZoom";
+
     // Visibility
     auto visu = new MenuItem;
     visu->setCommand("V&isibility");
@@ -756,13 +851,14 @@ MenuItem* StdWorkbench::setupMenuBar() const
     // View
     auto view = new MenuItem(menuBar);
     view->setCommand("&View");
-    *view << "Std_ViewCreate" << "Std_OrthographicCamera" << "Std_PerspectiveCamera"
-          << "Std_MainFullscreen" << "Separator" << stdviews << "Std_FreezeViews" << "Std_DrawStyle"
+    *view << "Std_ViewCreate" << camera
+          << "Std_MainFullscreen" << "Separator" << stdviews << "Std_FreezeViews" << "Std_SaveNamedView" << "Std_NamedViews"
+          << "Std_DrawStyle" << "Std_DisplayStyle" << "Std_TangentEdges"
           << "Std_SelBoundingBox"
           << "Separator" << zoom << "Std_ViewDockUndockFullscreen"
           << "Std_ViewIvIssueCamPos"
           << "Std_AxisCross"
-          << "Std_ToggleClipPlane"
+          << "Std_ToggleClipPlane" << "Std_SectionView"
           << "Std_TextureMapping"
           << "Separator" << visu << "Std_ToggleNavigation"
           << "Std_RandomColor"
@@ -833,6 +929,12 @@ MenuItem* StdWorkbench::setupMenuBar() const
     // Help
     auto help = new MenuItem(menuBar);
     help->setCommand("&Help");
+    if (ForkKeymap::isOnshape()) {
+        // FreeCAD-CH (ops#640 polish P9): Onshape's Help menu is short. Std_FreeCADUserHub
+        // stays first: the Start module inserts its entry before it (Start/Gui/Manipulator.cpp)
+        *help << "Std_FreeCADUserHub" << "Std_FreeCADForum" << "Separator" << "Std_About";
+        return menuBar;
+    }
     *help << "Std_WhatsThis"
           << "Separator"
           // Start page and additional separator are dynamically inserted here
@@ -865,7 +967,12 @@ ToolBarItem* StdWorkbench::setupToolBars() const
     *clipboard << "Std_Cut" << "Std_Copy" << "Std_Paste";
 
     // Workbench switcher
-    auto wb = new ToolBarItem(root);
+    // FreeCAD-CH (tabs 3): under the Onshape keymap a tab's kind fixes its tools, so no selector
+    auto wb = new ToolBarItem(
+        root,
+        ForkKeymap::isOnshape() ? ToolBarItem::DefaultVisibility::UnavailableHidden
+                                : ToolBarItem::DefaultVisibility::Visible
+    );
     wb->setCommand("Workbench");
     *wb << "Std_Workbench";
 

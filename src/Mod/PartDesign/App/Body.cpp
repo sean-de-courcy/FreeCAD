@@ -31,17 +31,22 @@
 #include <set>
 #include <utility>
 
+#include <BRepAlgoAPI_Cut.hxx>
+
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/VarSet.h>
 #include <App/Origin.h>
 #include <Base/Placement.h>
+#include <Base/Tools.h>
 
 #include "Body.h"
 #include "BodyPy.h"
 #include "FeatureBase.h"
+#include "FeatureBoolean.h"
 #include "FeatureDeletePart.h"
+#include "FeatureDressUp.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSolid.h"
 #include "FeatureTransformed.h"
@@ -66,6 +71,23 @@ Body::Body()
 {
     BaseFeature.setScope(App::LinkScope::Global);
     ADD_PROPERTY_TYPE(AllowCompound, (true), "Base", App::Prop_None, "Allow multiple solids in Body");
+    // FreeCAD-CH ops#654: the part's identity in its studio (StudioList.h)
+    ADD_PROPERTY_TYPE(StudioPartId, (""), "Studio", App::Prop_Hidden, "The part's id in its studio");
+    ADD_PROPERTY_TYPE(StudioParentId,
+                      (""),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The id of the part this one is a piece of");
+    ADD_PROPERTY_TYPE(StudioMadeBy,
+                      (nullptr),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "The studio feature or piece record that made this part");
+    ADD_PROPERTY_TYPE(StudioPieceWitness,
+                      (),
+                      "Studio",
+                      App::Prop_Hidden,
+                      "Element names of the parent part that lie on this piece");
 
     _GroupTouched.setStatus(App::Property::Output, true);
     // The roll-back bar is the Tip: moving it doesn't touch the Body (ops#127, R7); onChanged()
@@ -294,6 +316,50 @@ bool Body::holds(const App::DocumentObject* obj) const
     return held(obj);
 }
 
+bool Body::waitsBelowBar(const App::DocumentObject* obj) const
+{
+    if (!obj || isSolidFeature(obj) || !isRolledBack() || holds(obj)) {
+        return false;
+    }
+    const auto& features = Group.getValues();
+    auto pos = std::find(features.begin(), features.end(), obj);
+    if (pos == features.end()) {
+        return false;
+    }
+    if (App::DocumentObject* bar = effectiveBar()) {
+        auto barPos = std::find(features.begin(), features.end(), bar);
+        if (barPos == features.end() || pos <= barPos) {
+            return false;
+        }
+    }
+    // A cycle of links (possible from Python) counts as live
+    thread_local std::set<const App::DocumentObject*> open;
+    if (!open.insert(obj).second) {
+        return false;
+    }
+    struct Close
+    {
+        const App::DocumentObject* item;
+        ~Close()
+        {
+            open.erase(item);
+        }
+    } close {obj};
+    // Every user is held by its own Body's bar, or waits below it (a datum under a waiting sketch)
+    bool used = false;
+    for (auto user : obj->getInList()) {
+        if (user == this) {
+            continue;
+        }
+        Body* body = findBodyOf(user);
+        if (!body || !(body->holds(user) || body->waitsBelowBar(user))) {
+            return false;
+        }
+        used = true;
+    }
+    return used;
+}
+
 void Body::rollTo(App::DocumentObject* feature)
 {
     if (feature && (!hasObject(feature) || !isSolidFeature(feature))) {
@@ -425,9 +491,10 @@ bool Body::isSolidFeature(const App::DocumentObject* obj)
             return false;
         }
         if (auto transFeature = freecad_cast<PartDesign::Transformed*>(obj)) {
-            // Transformed Features inside a MultiTransform are not solid features; a pattern
-            // whose Originals a reorder parked still is (ops#127)
-            return !transFeature->isMultiTransformChild() || hasParkedOriginals(obj);
+            // Transformed Features inside a MultiTransform are not solid features, nor is a new
+            // pattern with nothing picked; a pattern whose Originals a reorder parked still is
+            // (ops#127), and so is one in the chain whose original was deleted (ops#640, F3)
+            return !transFeature->isOutOfChain() || hasParkedOriginals(obj);
         }
         return true;
     }
@@ -469,18 +536,762 @@ Body* Body::findBodyOf(const App::DocumentObject* feature)
 
 namespace
 {
-// Whether nothing but `self`'s Body and the objects in `allowed` links to `self`
-bool usedOnlyBy(
-    const App::DocumentObject* self,
+// Defined with New part's rules, below
+std::vector<App::DocumentObject*> linksOf(const App::DocumentObject* obj);
+std::vector<App::DocumentObject*> usersOf(const App::DocumentObject* obj);
+
+std::string quotedLabel(const App::DocumentObject* obj)
+{
+    return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
+}
+
+// The first user of the Body `body` (or of its origin) that the Body's removal would break: not a
+// container holding it, not its origin, not one of `moved` (relinked to the target's origin by
+// insertObject), or null. `viaOrigin` says whether the user links the origin. A container is a
+// group that holds the Body and is not a PartDesign feature: a Boolean's Group is its tool list
+// (FeatureBoolean.cpp setObjects), so a Boolean holding the Body uses it. A reader through a
+// subname path of the Body breaks whatever it is (its path names the Body)
+const App::DocumentObject* bodyUser(
     const Body* body,
-    std::initializer_list<const App::DocumentObject*> allowed
+    const std::vector<App::DocumentObject*>& moved,
+    bool& viaOrigin
 )
 {
-    return std::ranges::all_of(self->getInList(), [&](const App::DocumentObject* user) {
-        return user == body || std::ranges::find(allowed, user) != allowed.end();
-    });
+    viaOrigin = false;
+    auto harmless = [&](const App::DocumentObject* user) {
+        if (!user || user == body || std::ranges::find(moved, user) != moved.end()) {
+            return true;
+        }
+        if (user->isDerivedFrom<PartDesign::Feature>()) {
+            return false;
+        }
+        auto group = user->getExtensionByType<App::GroupExtension>(true);
+        return group && group->hasObject(body);
+    };
+    for (const App::DocumentObject* user : App::subnamePathReaders(body)) {
+        if (user && user != body) {
+            return user;
+        }
+    }
+    for (const App::DocumentObject* user : body->getInList()) {
+        if (!harmless(user)) {
+            return user;
+        }
+    }
+    // Its origin goes with it: a link into it from elsewhere would dangle
+    auto origin = freecad_cast<App::Origin*>(body->Origin.getValue());
+    if (!origin) {
+        return nullptr;
+    }
+    const std::vector<App::DocumentObject*> datums = origin->OriginFeatures.getValues();
+    auto own = [&](const App::DocumentObject* user) {
+        return user == origin || std::ranges::find(datums, user) != datums.end();
+    };
+    std::vector<App::DocumentObject*> originUsers = origin->getInList();
+    for (const App::DocumentObject* datum : datums) {
+        const std::vector<App::DocumentObject*> datumUsers = datum->getInList();
+        originUsers.insert(originUsers.end(), datumUsers.begin(), datumUsers.end());
+    }
+    for (const App::DocumentObject* user : originUsers) {
+        if (!harmless(user) && !own(user)) {
+            viaOrigin = true;
+            return user;
+        }
+    }
+    return nullptr;
+}
+
+/* FreeCAD-CH (ops#640 round 9, journeys J8 and J17): Add to part, a new part's feature switched
+ * back to Add as Onshape's Extrude from New, takes its whole Body into the target and removes it:
+ * what builds on the feature in its part follows it (a Mirror of it, a fillet on its edges, a
+ * sketch on its face, a datum), as newPartFrom moved them the other way. The Body's members go in
+ * their order, at the feature's place in the studio's history (the target's last member before
+ * it): those before the feature (its sketch) right before it, the rest after it. Refused, naming
+ * why, when the feature isn't the Body's first solid, when something outside the Body uses a
+ * member (a link, a Derived, another part's binder or Boolean) or reads through the Body, when a
+ * member combines other parts with it, or when a member of the target comes between the feature
+ * and a later member in the history (the move would put them before it). */
+struct AddToPartPlan
+{
+    /// The Body's members, in its order: all of them go
+    std::vector<App::DocumentObject*> moved;
+    /// The target's member they go after (null: its top)
+    App::DocumentObject* after = nullptr;
+    /// The studio's sequence before the move, saved again after it
+    std::vector<App::DocumentObject*> sequence;
+    std::string refusal;
+};
+
+AddToPartPlan planAddToPart(const App::DocumentObject* feature, const Body* body, const Body* target)
+{
+    AddToPartPlan plan;
+    auto refuse = [&plan](std::string why) {
+        plan.refusal = std::move(why);
+        return plan;
+    };
+    if (const_cast<Body*>(body)->getPrevSolidFeature(const_cast<App::DocumentObject*>(feature))) {
+        return refuse(quotedLabel(body) + " holds more than this feature; merge it instead");
+    }
+    if (body->isRolledBack()) {
+        return refuse("roll " + quotedLabel(body) + " to the end first");
+    }
+    // The Body it leaves is removed: nothing else may use it (a Merge in another part consuming
+    // it, as Delete part refuses; a Boolean's tool, a binder, a link, an expression)
+    if (auto merge = Boolean::mergeOf(body)) {
+        return refuse(
+            quotedLabel(body) + " is merged by " + quotedLabel(merge) + "; delete the Merge first"
+        );
+    }
+    plan.moved = body->Group.getValues();
+    auto moves = [&plan](const App::DocumentObject* obj) {
+        return std::ranges::find(plan.moved, obj) != plan.moved.end();
+    };
+    std::vector<App::DocumentObject*> origin;
+    if (auto own = freecad_cast<App::Origin*>(body->Origin.getValue())) {
+        origin = own->OriginFeatures.getValues();
+        origin.push_back(own);
+    }
+    for (App::DocumentObject* obj : plan.moved) {
+        if (obj->isDerivedFrom<Boolean>()) {
+            return refuse(
+                quotedLabel(obj) + " combines other parts with " + quotedLabel(body)
+                + "; merge the part instead"
+            );
+        }
+        // What would act on the target's material once merged, where it acted on the part's own
+        // (review R9-2, R9-3): a pattern of the whole shape would copy the target too, a cut after
+        // the feature would cut it too. Onshape's scope for them would differ: refused
+        if (auto pattern = freecad_cast<Transformed*>(obj);
+            pattern
+            && static_cast<Transformed::Mode>(pattern->TransformMode.getValue())
+                == Transformed::Mode::WholeShape) {
+            return refuse(
+                quotedLabel(obj) + " copies the whole of " + quotedLabel(body) + ", so it would copy "
+                + quotedLabel(target) + " too"
+            );
+        }
+        if (auto cut = freecad_cast<FeatureAddSub*>(obj); cut && obj != feature
+            && cut->getBooleanOperation() != FeatureAddSub::BooleanOperation::Union) {
+            return refuse(quotedLabel(obj) + " would cut " + quotedLabel(target) + " too");
+        }
+        for (App::DocumentObject* user : usersOf(obj)) {
+            if (user == body || moves(user)) {
+                continue;
+            }
+            auto merge = freecad_cast<const Boolean*>(user);
+            if (merge && merge->isMerge()) {
+                return refuse(
+                    quotedLabel(body) + " is merged by " + quotedLabel(merge)
+                    + "; delete the Merge first"
+                );
+            }
+            return refuse(quotedLabel(user) + " uses " + quotedLabel(obj));
+        }
+        // insertObject relinks a link to the origin, not a binder's that traces its support
+        // (ops#244) or a sub-shape binder's (its links aren't the ones relinkToOrigin rewrites)
+        auto binder = freecad_cast<ShapeBinder*>(obj);
+        const bool relinked = !(binder && binder->TraceSupport.getValue())
+            && !obj->isDerivedFrom<SubShapeBinder>();
+        for (App::DocumentObject* link : linksOf(obj)) {
+            const bool ownOrigin = std::ranges::find(origin, link) != origin.end();
+            if (link == body || (ownOrigin && !relinked)) {
+                return refuse(
+                    quotedLabel(obj) + (link == body ? " uses " : " uses the origin of ")
+                    + quotedLabel(body) + ", which Add to part would remove"
+                );
+            }
+        }
+    }
+    bool viaOrigin = false;
+    if (auto user = bodyUser(body, plan.moved, viaOrigin)) {
+        return refuse(
+            quotedLabel(user) + (viaOrigin ? " uses the origin of " : " uses ") + quotedLabel(body)
+            + ", which Add to part would remove"
+        );
+    }
+
+    // Where the history has it: after the target's last member that comes before the feature in
+    // the studio's sequence. The feature's place, not its sketch's: a sketch drawn before the
+    // target's rows would put the feature before them (review MISS)
+    App::Part* studio = nullptr;
+    Body::studioOf(target, studio);
+    plan.sequence = studioSequence(body->getDocument(), studio);
+    const std::vector<App::DocumentObject*>& group = target->Group.getValues();
+    auto inTarget = [&group](const App::DocumentObject* obj) {
+        return std::ranges::find(group, obj) != group.end();
+    };
+    const auto here = std::ranges::find(plan.sequence, feature);
+    for (auto it = plan.sequence.begin(); it != here; ++it) {
+        if (inTarget(*it)) {
+            plan.after = *it;
+        }
+    }
+    if (here == plan.sequence.end()) {
+        return plan;
+    }
+    // What follows the feature in its Body goes right after it: no member of the target may come
+    // between them in the history
+    auto lastMoved = here;
+    for (auto it = here + 1; it != plan.sequence.end(); ++it) {
+        if (moves(*it)) {
+            lastMoved = it;
+        }
+    }
+    for (auto it = here + 1; it < lastMoved; ++it) {
+        if (inTarget(*it)) {
+            App::DocumentObject* later = *std::find_if(it + 1, lastMoved + 1, moves);
+            return refuse(
+                quotedLabel(later) + " comes after " + quotedLabel(*it) + " of "
+                + quotedLabel(target) + " in the history; Add to part would put it before"
+            );
+        }
+    }
+    return plan;
 }
 }  // namespace
+
+std::string Body::addToPartRefusal(const App::DocumentObject* feature, const Body* target)
+{
+    const Body* body = findBodyOf(feature);
+    if (!body || !isSolidFeature(feature)) {
+        return "the object isn't a solid feature of a body";
+    }
+    if (!target || target == body) {
+        return "no other part to add it to";
+    }
+    App::Part* bodyStudio = nullptr;
+    App::Part* targetStudio = nullptr;
+    if (body->getDocument() != target->getDocument() || !studioOf(body, bodyStudio)
+        || !studioOf(target, targetStudio) || bodyStudio != targetStudio) {
+        return quotedLabel(target) + " isn't a part of the feature's studio";
+    }
+    if (!areStudioSiblings(body, target)) {
+        return quotedLabel(target) + " is placed apart from " + quotedLabel(body)
+            + " (not one origin), or shown through a link";
+    }
+    if (target->isRolledBack()) {
+        return "roll " + quotedLabel(target) + " to the end first";
+    }
+    // The rest is planAddToPart's: round 9 takes what builds on the feature in its part along
+    return planAddToPart(feature, body, target).refusal;
+}
+
+/* FreeCAD-CH (ops#640 round 5, hands-on B5-3 and B5-4): New part for a feature that later
+ * features build on, as Onshape's Extrude switched from Add to New. Onshape's later features act on
+ * parts: a fillet on the boss's edges follows the boss to its new part, a later Extrude keeps its
+ * merge scope (the part the boss leaves). Here a Body's features are one chain, so New part moves
+ * the feature, its Profile sketch, and the later features that work on its own material, in order,
+ * into the new Body; the others stay and the chain closes over the gap (Body::removeObject). What
+ * can't be told apart, or would change what a feature does without a word, is refused, naming the
+ * feature:
+ * - a dress-up goes when its edges or faces are on the feature's own material (they touch the
+ *   feature's tool and not the solid before it), and stays when none touches the tool;
+ * - a pattern goes when it copies only features that go, and stays when it copies none and its
+ *   result's change doesn't reach the tool; a pattern of the whole shape is refused;
+ * - another solid feature stays when its tool (an Extrude's, a Boolean's parts) doesn't reach the
+ *   feature's tool: a later Extrude on the boss would, as Onshape's would then act on the part the
+ *   boss left;
+ * - a feature that goes may link only what goes (and the Body's origin, which insertObject relinks);
+ *   one that stays may link nothing that goes, besides its chain (BaseFeature);
+ * - nothing outside the Body may use what goes.
+ * The feature's Merge (its merge scope) goes first, when nothing builds on it. */
+namespace
+{
+// The shape of `obj` where it is in the document
+Part::TopoShape placedShape(const App::DocumentObject* obj, Part::TopoShape shape)
+{
+    if (!shape.isNull()) {
+        if (auto geo = freecad_cast<const App::GeoFeature*>(obj)) {
+            shape.setPlacement(geo->globalPlacement());
+        }
+    }
+    return shape;
+}
+
+Part::TopoShape placedShape(const App::DocumentObject* obj)
+{
+    auto feature = freecad_cast<const Part::Feature*>(obj);
+    return feature ? placedShape(obj, feature->Shape.getShape()) : Part::TopoShape();
+}
+
+bool touches(const TopoDS_Shape& shape, const TopoDS_Shape& region)
+{
+    return !shape.IsNull() && !region.IsNull() && FeatureAddSub::shapesTouch(shape, region);
+}
+
+// The objects `obj` links to through its properties: not by expression, not its chain
+// (BaseFeature) or its Body (_Body), not a hidden link
+std::vector<App::DocumentObject*> linksOf(const App::DocumentObject* obj)
+{
+    std::vector<App::DocumentObject*> targets;
+    std::vector<App::Property*> props;
+    obj->getPropertyList(props);
+    auto pd = freecad_cast<const PartDesign::Feature*>(obj);
+    for (App::Property* prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        if (!link || prop == &obj->ExpressionEngine
+            || (pd && (prop == &pd->BaseFeature || prop == &pd->_Body))) {
+            continue;
+        }
+        link->getLinks(targets, false);
+    }
+    return targets;
+}
+
+// The users of `obj` (its in-list, and the readers through a subname path), not `obj` itself
+std::vector<App::DocumentObject*> usersOf(const App::DocumentObject* obj)
+{
+    std::vector<App::DocumentObject*> users = obj->getInList();
+    const std::vector<App::DocumentObject*> pathReaders = App::subnamePathReaders(obj);
+    users.insert(users.end(), pathReaders.begin(), pathReaders.end());
+    std::erase(users, obj);
+    std::erase(users, nullptr);
+    return users;
+}
+
+std::string quotedLabels(const std::vector<App::DocumentObject*>& objects)
+{
+    std::string text;
+    for (const App::DocumentObject* obj : objects) {
+        text += (text.empty() ? "" : ", ") + quotedLabel(obj);
+    }
+    return text;
+}
+
+/** FreeCAD-CH (ops#640, review R5-2 and its fix review F1/F2): a dress-up's Base, when it is the
+ * dress-up's own BaseFeature and the move's reroute can carry it (DressUp::onBaseFeatureRerouted
+ * relinks Base by its mapped names): nothing else of the dress-up links that object (a Draft's
+ * NeutralPlane or PullDirection on it would stay behind, the reroute relinks Base only), and every
+ * reference has a mapped name (one without would fall back to its index on the other shape: a
+ * silent wrong edge). Otherwise nullptr: the link check refuses as before. */
+App::DocumentObject* chainBaseOf(App::DocumentObject* obj)
+{
+    auto dressUp = freecad_cast<DressUp*>(obj);
+    App::DocumentObject* base = dressUp ? dressUp->Base.getValue() : nullptr;
+    if (!base || base != dressUp->BaseFeature.getValue()) {
+        return nullptr;
+    }
+    const auto& shadows = dressUp->Base.getShadowSubs();
+    if (shadows.size() != dressUp->Base.getSubValues().size()
+        || std::ranges::any_of(shadows, [](const auto& shadow) { return shadow.newName.empty(); })) {
+        return nullptr;
+    }
+    std::vector<App::Property*> props;
+    obj->getPropertyList(props);
+    for (App::Property* prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        if (!link || prop == &dressUp->Base || prop == &dressUp->BaseFeature
+            || prop == &dressUp->_Body || prop == &dressUp->ExpressionEngine) {
+            continue;
+        }
+        std::vector<App::DocumentObject*> targets;
+        link->getLinks(targets, false);
+        if (std::ranges::find(targets, base) != targets.end()) {
+            return nullptr;
+        }
+    }
+    return base;
+}
+
+struct NewPartPlan
+{
+    /// What goes to the new part, in the Body's order: the sketch, the feature, what follows
+    std::vector<App::DocumentObject*> moved;
+    /// The feature's Merge, which goes first
+    Boolean* merge = nullptr;
+    std::string refusal;
+};
+
+// Why the Merge after `feature` can't go: something besides its Body builds on it, or empty
+std::string mergeUserRefusal(const Boolean* merge, const Body* body)
+{
+    const std::vector<App::DocumentObject*> merged = merge->mergedBodies();
+    for (App::DocumentObject* user : usersOf(merge)) {
+        if (user != body && std::ranges::find(merged, user) == merged.end()) {
+            return quotedLabel(user) + " builds on " + quotedLabel(merge) + ", the merge with "
+                + quotedLabels(merged);
+        }
+    }
+    return {};
+}
+
+// What New part moves for `feature` (planNewPart's rules, above), or why it is refused. With
+// `ignoreMerge`, the feature's Merge counts as gone already (the user unticked its whole scope):
+// what builds on it builds on the feature
+NewPartPlan planNewPart(App::DocumentObject* feature, bool ignoreMerge)
+{
+    NewPartPlan plan;
+    Body* body = Body::findBodyOf(feature);
+    if (!body || !Body::isSolidFeature(feature)) {
+        plan.refusal = "the object isn't a solid feature of a body";
+        return plan;
+    }
+    const std::vector<App::DocumentObject*> group = body->Group.getValues();
+    const auto here = std::ranges::find(group, feature);
+    if (here == group.end()) {
+        plan.refusal = "the object isn't a solid feature of a body";
+        return plan;
+    }
+    plan.merge = Boolean::mergeAfter(feature);
+    if (plan.merge && !ignoreMerge) {
+        if (std::string why = mergeUserRefusal(plan.merge, body); !why.empty()) {
+            plan.refusal = why;
+            return plan;
+        }
+    }
+    std::vector<App::DocumentObject*> later;
+    for (auto it = here + 1; it != group.end(); ++it) {
+        if (*it != plan.merge) {
+            later.push_back(*it);
+        }
+    }
+    const auto laterSolid = std::ranges::find_if(later, Body::isSolidFeature);
+    if (laterSolid == later.end()) {
+        // Nothing builds on it in its chain: the Tip, or its Merge the Tip
+        App::DocumentObject* tip = body->Tip.getValue();
+        if (tip != feature && !(plan.merge && tip == plan.merge)) {
+            plan.refusal = "roll " + quotedLabel(body) + " to the end first";
+            return plan;
+        }
+    }
+    else {
+        auto addSub = freecad_cast<FeatureAddSub*>(feature);
+        if (!body->getPrevSolidFeature(feature)) {
+            plan.refusal = quotedLabel(feature) + " is the first solid of " + quotedLabel(body)
+                + ": " + quotedLabel(*laterSolid) + " builds on it";
+            return plan;
+        }
+        if (body->Tip.getValue() != body->lastSolidFeature()) {
+            plan.refusal = "roll " + quotedLabel(body) + " to the end first";
+            return plan;
+        }
+        if (!addSub || addSub->getAddSubType() != FeatureAddSub::Type::Additive
+            || addSub->AddSubShape.getShape().isNull()) {
+            plan.refusal = quotedLabel(*laterSolid) + " comes after " + quotedLabel(feature)
+                + ", which adds no material of its own";
+            return plan;
+        }
+    }
+
+    // Its Profile sketch, which goes along when only what goes uses it
+    auto profileBased = freecad_cast<ProfileBased*>(feature);
+    App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
+    if (!profile || !profile->isDerivedFrom<Part::Part2DObject>() || !body->hasObject(profile)) {
+        profile = nullptr;
+    }
+    std::vector<App::DocumentObject*> moved = {feature};
+    auto goes = [&](const App::DocumentObject* obj) {
+        return std::ranges::find(moved, obj) != moved.end()
+            || (ignoreMerge && plan.merge && obj == plan.merge);
+    };
+    auto isLater = [&](const App::DocumentObject* obj) {
+        return std::ranges::find(later, obj) != later.end();
+    };
+    // The origin, which insertObject relinks to the new part's
+    std::vector<App::DocumentObject*> origin;
+    if (auto own = freecad_cast<App::Origin*>(body->Origin.getValue())) {
+        origin = own->OriginFeatures.getValues();
+        origin.push_back(own);
+    }
+    auto isOrigin = [&](const App::DocumentObject* obj) {
+        return std::ranges::find(origin, obj) != origin.end();
+    };
+
+    // The feature's own material: its tool, and the solid before it
+    TopoDS_Shape tool;
+    TopoDS_Shape before;
+    if (laterSolid != later.end()) {
+        auto addSub = static_cast<FeatureAddSub*>(feature);
+        tool = placedShape(feature, addSub->AddSubShape.getShape()).getShape();
+        before = placedShape(body->getPrevSolidFeature(feature)).getShape();
+    }
+    auto reachesTool = [&](const TopoDS_Shape& shape) {
+        return touches(shape, tool);
+    };
+
+    // FreeCAD-CH (ops#640 round 9, J17): a datum plane, line or point of the Body, before the
+    // feature or after it, that only what goes uses goes along, when its attachment links nothing
+    // but the origin (insertObject relinks it) or another datum that goes. Not one on a feature's
+    // elements, even one that goes (review R9-1: a face of the moving feature's result may be the
+    // rest of the part's material, gone from the new part). Onshape's plane is the studio's, so it
+    // never holds the switch; here it moves with its users. Taken tentatively, in order: one that
+    // something staying uses stays after all, and what follows the feature may then not use it
+    // (the refusal as before; the feature and its sketch keep it across parts, as before)
+    std::vector<App::DocumentObject*> tentative;
+    auto isTentative = [&](const App::DocumentObject* obj) {
+        return std::ranges::find(tentative, obj) != tentative.end();
+    };
+    auto datumMayGo = [&](App::DocumentObject* obj) {
+        if (!PartDesign::Feature::isDatum(obj)) {
+            return false;
+        }
+        const std::vector<App::DocumentObject*> users = usersOf(obj);
+        const bool usedInside = std::ranges::any_of(users, [&](const App::DocumentObject* user) {
+            return user != body;
+        }) && std::ranges::all_of(users, [&](const App::DocumentObject* user) {
+            return user == body || body->hasObject(user);
+        });
+        const std::vector<App::DocumentObject*> links = linksOf(obj);
+        return usedInside && std::ranges::all_of(links, [&](const App::DocumentObject* link) {
+            return isOrigin(link) || isTentative(link);
+        });
+    };
+    // Those before the feature (review R9-4: the plane made first, then the Mirror)
+    for (auto it = group.begin(); it != here; ++it) {
+        if (datumMayGo(*it)) {
+            moved.push_back(*it);
+            tentative.push_back(*it);
+        }
+    }
+    std::function<std::string(App::DocumentObject*)> keepDatum;
+    keepDatum = [&](App::DocumentObject* datum) -> std::string {
+        std::erase(moved, datum);
+        std::erase(tentative, datum);
+        // a tentative datum attached to it stays too
+        const std::vector<App::DocumentObject*> others = tentative;
+        for (App::DocumentObject* other : others) {
+            const std::vector<App::DocumentObject*> links = linksOf(other);
+            if (isTentative(other) && std::ranges::find(links, datum) != links.end()) {
+                if (std::string why = keepDatum(other); !why.empty()) {
+                    return why;
+                }
+            }
+        }
+        for (App::DocumentObject* obj : moved) {
+            const std::vector<App::DocumentObject*> links = linksOf(obj);
+            if (obj != feature && obj != profile && !isTentative(obj)
+                && std::ranges::find(links, datum) != links.end()) {
+                return quotedLabel(obj) + " uses " + quotedLabel(datum) + ", which stays in "
+                    + quotedLabel(body);
+            }
+        }
+        return {};
+    };
+
+    for (App::DocumentObject* obj : later) {
+        bool go = false;
+        if (datumMayGo(obj)) {
+            moved.push_back(obj);
+            tentative.push_back(obj);
+            continue;
+        }
+        if (Body::isSolidFeature(obj)) {
+            if (auto dressUp = freecad_cast<DressUp*>(obj)) {
+                App::DocumentObject* base = dressUp->Base.getValue();
+                const std::vector<std::string> subs = dressUp->Base.getSubValues(false);
+                const Part::TopoShape baseShape = placedShape(base);
+                bool own = !subs.empty();
+                bool apart = true;
+                for (const std::string& sub : subs) {
+                    const TopoDS_Shape element =
+                        baseShape.isNull() ? TopoDS_Shape() : baseShape.getSubShape(sub.c_str(), true);
+                    if (element.IsNull()) {
+                        own = false;
+                        apart = false;
+                        break;
+                    }
+                    const bool onTool = reachesTool(element);
+                    own = own && onTool && !touches(element, before);
+                    apart = apart && !onTool;
+                }
+                // Review R5-2: by its elements, whatever its Base is (a feature in between, or
+                // the moved feature itself): the reroute carries the Base link's names (Feature::
+                // relinkToMatchingSubelements), or the dress-up fails naming the reference
+                if (own) {
+                    go = true;
+                }
+                else if (apart) {
+                    go = false;
+                }
+                else {
+                    plan.refusal = quotedLabel(obj) + " works on both " + quotedLabel(feature)
+                        + "'s material and the rest of " + quotedLabel(body)
+                        + ", or on what can't be told apart";
+                    return plan;
+                }
+            }
+            else if (auto pattern = freecad_cast<Transformed*>(obj)) {
+                const std::vector<App::DocumentObject*> originals = pattern->Originals.getValues();
+                const bool whole =
+                    static_cast<Transformed::Mode>(pattern->TransformMode.getValue())
+                    == Transformed::Mode::WholeShape;
+                const bool all = !originals.empty() && std::ranges::all_of(originals, goes);
+                const bool none = std::ranges::none_of(originals, goes);
+                if (!whole && all) {
+                    go = true;
+                }
+                else if (!whole && none) {
+                    // Its change: what it adds and what it takes away from its base
+                    const TopoDS_Shape result = placedShape(obj).getShape();
+                    const TopoDS_Shape previous = placedShape(pattern->BaseFeature.getValue()).getShape();
+                    bool reaches = true;
+                    if (!result.IsNull() && !previous.IsNull()) {
+                        BRepAlgoAPI_Cut added(result, previous);
+                        BRepAlgoAPI_Cut removed(previous, result);
+                        if (added.IsDone() && removed.IsDone()) {
+                            reaches = reachesTool(added.Shape()) || reachesTool(removed.Shape());
+                        }
+                    }
+                    if (reaches) {
+                        plan.refusal = quotedLabel(obj) + " copies features of "
+                            + quotedLabel(body) + " onto " + quotedLabel(feature)
+                            + "'s material, or can't be told apart";
+                        return plan;
+                    }
+                }
+                else {
+                    plan.refusal = quotedLabel(obj) + " copies "
+                        + (whole ? "the whole of " + quotedLabel(body)
+                                 : "features of both parts");
+                    return plan;
+                }
+            }
+            else if (auto boolean = freecad_cast<Boolean*>(obj)) {
+                // Another feature's Merge stays with it; a Boolean's parts mustn't reach the tool
+                if (!boolean->isMerge()) {
+                    for (App::DocumentObject* part : boolean->Group.getValues()) {
+                        if (reachesTool(placedShape(part).getShape())) {
+                            plan.refusal = quotedLabel(obj) + " reaches " + quotedLabel(feature)
+                                + "'s material with " + quotedLabel(part);
+                            return plan;
+                        }
+                    }
+                }
+            }
+            else if (auto addSub = freecad_cast<FeatureAddSub*>(obj)) {
+                const Part::TopoShape own = addSub->AddSubShape.getShape();
+                if (own.isNull() || reachesTool(placedShape(obj, own).getShape())) {
+                    plan.refusal = quotedLabel(obj) + (own.isNull() ? " has no tool to tell " : " reaches ")
+                        + quotedLabel(feature) + "'s material"
+                        + (own.isNull() ? " apart from" : ", and would stay in ")
+                        + quotedLabel(body);
+                    return plan;
+                }
+            }
+            else {
+                plan.refusal = "can't tell whether " + quotedLabel(obj) + " works on "
+                    + quotedLabel(feature) + "'s material";
+                return plan;
+            }
+        }
+        // Its links: what goes links only what goes (the feature's sketch: below); what stays
+        // links nothing that goes. A dress-up's Base on its own BaseFeature is the chain's link:
+        // the move reroutes it with its references (Body::rerouteBase, review R5-2)
+        App::DocumentObject* chainBase = chainBaseOf(obj);
+        for (App::DocumentObject* target : linksOf(obj)) {
+            if (chainBase && target == chainBase) {
+                continue;
+            }
+            if (go && !goes(target) && !isOrigin(target) && target != profile
+                && (isLater(target) || body->hasObject(target)) && target != body) {
+                plan.refusal = quotedLabel(obj) + " uses " + quotedLabel(target) + ", which stays in "
+                    + quotedLabel(body);
+                return plan;
+            }
+            if (!go && goes(target)) {
+                if (isTentative(target)) {
+                    // a datum that something staying uses stays
+                    if (std::string why = keepDatum(target); !why.empty()) {
+                        plan.refusal = why;
+                        return plan;
+                    }
+                    continue;
+                }
+                plan.refusal = quotedLabel(obj) + " uses " + quotedLabel(target)
+                    + ", which would go to the new part";
+                return plan;
+            }
+        }
+        if (go) {
+            moved.push_back(obj);
+        }
+    }
+    // Nothing outside the Body uses what goes: the feature's siblings (a cut through other parts,
+    // dropped by the switch) aside
+    for (App::DocumentObject* obj : moved) {
+        for (App::DocumentObject* user : usersOf(obj)) {
+            if (user == body || body->hasObject(user)) {
+                continue;
+            }
+            auto sibling = freecad_cast<FeatureAddSub*>(user);
+            if (sibling && sibling->SiblingOf.getValue() == feature) {
+                continue;
+            }
+            plan.refusal = quotedLabel(user) + " uses " + quotedLabel(obj);
+            return plan;
+        }
+    }
+
+    if (profile) {
+        const std::vector<App::DocumentObject*> users = usersOf(profile);
+        if (std::ranges::all_of(users, [&](const App::DocumentObject* user) {
+                return user == body || goes(user);
+            })) {
+            moved.insert(moved.begin(), profile);
+        }
+        else {
+            // It stays: the feature keeps it across parts (as before), a feature that follows
+            // mustn't
+            for (App::DocumentObject* obj : moved) {
+                const std::vector<App::DocumentObject*> links = linksOf(obj);
+                if (obj != feature && std::ranges::find(links, profile) != links.end()) {
+                    plan.refusal = quotedLabel(obj) + " uses " + quotedLabel(profile)
+                        + ", which stays in " + quotedLabel(body);
+                    return plan;
+                }
+            }
+        }
+    }
+    // A datum goes only when everything that uses it goes (again after each: one that only a
+    // datum taken back used is taken back too)
+    for (bool kept = true; kept;) {
+        kept = false;
+        for (App::DocumentObject* datum : tentative) {
+            const std::vector<App::DocumentObject*> users = usersOf(datum);
+            if (!std::ranges::all_of(users, [&](const App::DocumentObject* user) {
+                    return user == body || goes(user);
+                })) {
+                if (std::string why = keepDatum(datum); !why.empty()) {
+                    plan.refusal = why;
+                    return plan;
+                }
+                kept = true;
+                break;
+            }
+        }
+    }
+    // In the Body's order: a datum before the feature keeps its place before it
+    auto place = [&group](const App::DocumentObject* obj) {
+        return std::ranges::find(group, obj) - group.begin();
+    };
+    std::ranges::stable_sort(moved, [&](const App::DocumentObject* one, const App::DocumentObject* two) {
+        return place(one) < place(two);
+    });
+    plan.moved = moved;
+    return plan;
+}
+}  // namespace
+
+namespace PartDesign
+{
+// FreeCAD-CH (ops#640 round 5): New part's rule, for the dialog's rows and the tests (no header
+// names these: AppPartDesignPy.cpp and the Gui declare them)
+PartDesignExport std::string newPartRefusal(const App::DocumentObject* feature, bool ignoreMerge);
+std::string newPartRefusal(const App::DocumentObject* feature, bool ignoreMerge)
+{
+    return planNewPart(const_cast<App::DocumentObject*>(feature), ignoreMerge).refusal;
+}
+
+// Why the feature's Merge can't go for a Remove or an Intersect: something builds on it. Empty
+// when it may, or when it has none
+PartDesignExport std::string mergeGoesRefusal(const App::DocumentObject* feature);
+std::string mergeGoesRefusal(const App::DocumentObject* feature)
+{
+    Body* body = Body::findBodyOf(feature);
+    Boolean* merge = Boolean::mergeAfter(feature);
+    return body && merge ? mergeUserRefusal(merge, body) : std::string();
+}
+}  // namespace PartDesign
 
 Body* Body::newPartFrom(App::DocumentObject* feature)
 {
@@ -488,23 +1299,13 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
     if (!body || !isSolidFeature(feature)) {
         throw Base::ValueError("New part: the object isn't a solid feature of a body");
     }
-    // A feature that something uses would reroute the next solid, or make the links into it
-    // cross-part without a word (the design's critic, point 9)
-    if (body->Tip.getValue() != feature || !usedOnlyBy(feature, body, {})) {
-        throw Base::ValueError(
-            "New part: only the feature being created, or a tip that nothing uses, can be moved "
-            "to a new part"
-        );
+    // What builds on it goes along, or the move is refused, naming why (planNewPart: a feature
+    // that something uses would otherwise reroute the next solid, or make the links into it
+    // cross-part without a word, the design's critic, point 9)
+    const NewPartPlan plan = planNewPart(feature, /*ignoreMerge=*/false);
+    if (!plan.refusal.empty()) {
+        throw Base::ValueError("New part: " + plan.refusal);
     }
-    App::DocumentObject* sketch = nullptr;
-    if (auto profileBased = freecad_cast<ProfileBased*>(feature)) {
-        App::DocumentObject* profile = profileBased->Profile.getValue();
-        if (profile && profile->isDerivedFrom<Part::Part2DObject>() && body->hasObject(profile)
-            && usedOnlyBy(profile, body, {feature})) {
-            sketch = profile;
-        }
-    }
-
     App::Document* doc = feature->getDocument();
     auto part = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
     // Where the old Body is (identity in a studio, by the one-origin rule): a sketch on the old
@@ -521,13 +1322,135 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
     // the new one before the feature, so the feature lands after it as the first solid. A sketch
     // on the old Body's origin is relinked to the new one's (insertObject); one on a face of the
     // old part keeps it, a direct reference
-    body->removeObject(feature);
-    if (sketch) {
-        body->removeObject(sketch);
-        part->addObject(sketch);
+    // The feature's Merge first: its parts are parts again (Body::onChanged shows them)
+    if (plan.merge) {
+        const std::string name = plan.merge->getNameInDocument();
+        body->removeObject(plan.merge);
+        doc->removeObject(name.c_str());
     }
-    part->addObject(feature);
+    // The last first, so the chain closes over each without rerouting what goes; then in order,
+    // each solid after the one before it (Body::addObject)
+    for (auto it = plan.moved.rbegin(); it != plan.moved.rend(); ++it) {
+        body->removeObject(*it);
+    }
+    for (App::DocumentObject* obj : plan.moved) {
+        part->addObject(obj);
+    }
+    // A dress-up whose Base the reroute couldn't carry keeps it in the other part, while it
+    // computes on its new BaseFeature: cleared, so it fails until it is re-picked, never on the
+    // other shape's element of the same index (fix review F2)
+    for (Body* each : {body, part}) {
+        for (App::DocumentObject* member : each->Group.getValues()) {
+            auto dressUp = freecad_cast<DressUp*>(member);
+            App::DocumentObject* base = dressUp ? dressUp->Base.getValue() : nullptr;
+            if (base && base != dressUp->BaseFeature.getValue() && findBodyOf(base) != each) {
+                Base::Console().warning("%s: New part couldn't carry its references to %s; "
+                                        "re-pick them\n",
+                                        dressUp->Label.getValue(),
+                                        base->Label.getValue());
+                dressUp->Base.setValue(nullptr);
+                if (!dressUp->BaseFeature.getValue()) {
+                    each->setBaseProperty(dressUp);
+                }
+            }
+        }
+    }
+    // Onshape's New has no merge scope (ops#640 rank 1): the feature is its new part's first solid
+    if (auto addSub = freecad_cast<FeatureAddSub*>(feature)) {
+        if (addSub->EmptyMergeScope.getValue()) {
+            addSub->EmptyMergeScope.setValue(false);
+        }
+        if (addSub->MergeWithAll.getValue()) {
+            addSub->MergeWithAll.setValue(false);
+        }
+    }
     return part;
+}
+
+Body* Body::addToPart(App::DocumentObject* feature, Body* target)
+{
+    // Every refusal before anything is written (addToPartRefusal, which the dialog's rows read)
+    const std::string why = addToPartRefusal(feature, target);
+    if (!why.empty()) {
+        throw Base::ValueError("Add to part: " + why);
+    }
+    Body* body = findBodyOf(feature);
+    // Every member of its Body, after the target's last member before the feature in the
+    // studio's history (planAddToPart)
+    const AddToPartPlan plan = planAddToPart(feature, body, target);
+    App::Document* doc = feature->getDocument();
+    const std::vector<App::DocumentObject*>& group = target->Group.getValues();
+    App::DocumentObject* after = plan.after;
+    // The target's last solid comes before it: the last moved solid is the new Tip, else they go
+    // in mid-history
+    auto afterIt = after ? std::ranges::find(group, after) : group.begin();
+    if (after) {
+        ++afterIt;
+    }
+    const bool last = std::none_of(afterIt, group.end(), isSolidFeature);
+
+    // Out of the Body, the last first, so its chain closes over nothing that goes; then in order,
+    // each after the one before it: each solid on the solid before it (Body::insertObject), the
+    // feature on the target's, the target's next solid on the last one. A link to the Body's
+    // origin is relinked to the target's, as moveBack's insert does
+    for (auto it = plan.moved.rbegin(); it != plan.moved.rend(); ++it) {
+        body->removeObject(*it);
+    }
+    App::DocumentObject* lastSolid = nullptr;
+    for (App::DocumentObject* obj : plan.moved) {
+        target->insertObject(obj, after, /*after = */ true);
+        after = obj;
+        if (isSolidFeature(obj)) {
+            lastSolid = obj;
+        }
+    }
+    if (last && lastSolid) {
+        target->Tip.setValue(lastSolid);
+        // the part shows its new Tip alone, as Body::addObject() does
+        for (App::DocumentObject* obj : target->Group.getValues()) {
+            if (obj != lastSolid && obj->isDerivedFrom<PartDesign::Feature>()
+                && obj->Visibility.getValue()) {
+                obj->Visibility.setValue(false);
+            }
+        }
+        lastSolid->Visibility.setValue(true);
+    }
+    else {
+        for (App::DocumentObject* obj : plan.moved) {
+            if (isSolidFeature(obj)) {
+                obj->Visibility.setValue(false);
+            }
+        }
+    }
+    // The history as the target now holds them (review R9-5): the moved members together at the
+    // feature's place, so a member before it (its sketch, drawn before the target's rows) isn't
+    // ranked before the rows it now follows
+    std::vector<App::DocumentObject*> order;
+    std::vector<App::DocumentObject*> block;
+    std::size_t at = 0;
+    bool seen = false;
+    for (App::DocumentObject* obj : plan.sequence) {
+        if (obj == feature) {
+            at = order.size();
+            seen = true;
+        }
+        if (std::ranges::find(plan.moved, obj) == plan.moved.end()) {
+            order.push_back(obj);
+        }
+    }
+    for (App::DocumentObject* obj : plan.moved) {
+        if (std::ranges::find(plan.sequence, obj) != plan.sequence.end()) {
+            block.push_back(obj);
+        }
+    }
+    if (!seen) {
+        at = order.size();
+    }
+    order.insert(order.begin() + static_cast<std::ptrdiff_t>(at), block.begin(), block.end());
+    saveHistoryOrder(order);
+    // The Body it left is empty now: it goes, with its origin
+    doc->removeObject(body->getNameInDocument());
+    return target;
 }
 
 
@@ -559,15 +1482,43 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
         studioBar = studioBarAfter(history);
     }
 
+    // Rolled back: a member that waits with the held features (waitsBelowBar()), listed after the
+    // studio's bar when there is one: the insert goes before it, as Onshape inserts a new feature
+    // at the bar, above the held rows' sketches (FreeCAD-CH ops#640 rank 34, blind test F42). One
+    // listed above the studio's bar is live there, and the insert goes after it, as before
+    auto waits = [&](App::DocumentObject* obj) {
+        if (obj == feature || !waitsBelowBar(obj)) {
+            return false;
+        }
+        if (!atStudioBar || !studioBar) {
+            return true;
+        }
+        auto barPos = std::ranges::find(history, studioBar);
+        auto pos = std::ranges::find(history, obj);
+        return barPos != history.end() && pos != history.end() && pos > barPos;
+    };
+    const auto& features = Group.getValues();
     App::DocumentObject* next = nullptr;
+    auto from = features.begin();
     if (Tip.getValue()) {
         next = getNextSolidFeature();
+        from = std::ranges::find(features, Tip.getValue());
+        if (from != features.end()) {
+            ++from;
+        }
     }
     else {
         // The bar at the top (ops#127): before the first solid feature
-        const auto& features = Group.getValues();
         auto it = std::find_if(features.begin(), features.end(), isSolidFeature);
         next = it == features.end() ? nullptr : *it;
+    }
+    if (next) {
+        for (auto it = from; it != features.end() && *it != next; ++it) {
+            if (waits(*it)) {
+                next = *it;
+                break;
+            }
+        }
     }
     insertObject(feature, next, /*after = */ false);
     if (atStudioBar) {
@@ -681,6 +1632,20 @@ void Body::setBaseProperty(App::DocumentObject* feature)
 std::vector<App::DocumentObject*> Body::removeObject(App::DocumentObject* feature)
 {
     // This method must be called BEFORE the feature is removed from the Document!
+
+    // The Merge that is the feature's merge scope goes with it, so its parts are parts again, as
+    // when an Onshape Extrude is deleted (ops#640 rank 1; Boolean::scopeMerge). First, so the
+    // chain below is rerouted past both. A move out of the Body (newPartFrom, addToPart) is
+    // refused before it gets here while the Merge uses the feature
+    if (hasObject(feature)) {
+        if (Boolean* merge = Boolean::scopeMerge(feature); merge && hasObject(merge)) {
+            if (App::Document* doc = merge->getDocument()) {
+                const std::string name = merge->getNameInDocument();
+                removeObject(merge);
+                doc->removeObject(name.c_str());
+            }
+        }
+    }
 
     App::DocumentObject* nextSolidFeature = getNextSolidFeature(feature);
     App::DocumentObject* prevSolidFeature = getPrevSolidFeature(feature);
@@ -809,6 +1774,20 @@ App::DocumentObjectExecReturn* Body::execute()
 
     Shape.setValue(tipShape);
     return App::DocumentObject::StdReturn;
+}
+
+void Body::writeStoppedShape()
+{
+    // The next run copies its Tip again (execute() compares with the last copy)
+    lastTipShape = Part::TopoShape();
+    if (Shape.getShape().isNull()) {
+        // Stopped already: nothing is written, so nothing re-solves a reference into it
+        return;
+    }
+    // Inside the Recompute status, as execute() writes it: Part::Feature::onChanged doesn't take
+    // the empty shape's identity location for the Placement
+    Base::ObjectStatusLocker<App::ObjectStatus, App::DocumentObject> exe(App::Recompute, this);
+    Shape.setValue(Part::TopoShape());
 }
 
 void Body::onSettingDocument()

@@ -152,6 +152,7 @@ Sketch::~Sketch()
 
 void Sketch::clear()
 {
+    holdingNarrowed = false;
     // clear all internal data sets
     Points.clear();
     Lines.clear();
@@ -281,6 +282,12 @@ int Sketch::setUpSketch(
     std::vector<bool> onlyBlockedGeometry(intGeoList.size(), false);
     // these constraints are unenforceable due to a Blocked constraint
     std::vector<bool> unenforceableConstraints(ConstraintList.size(), false);
+    // FreeCAD-CH (ops#640): constraints a conflict is solved around are left out like these
+    for (int index : skippedConstraints) {
+        if (index >= 0 && index < static_cast<int>(unenforceableConstraints.size())) {
+            unenforceableConstraints[index] = true;
+        }
+    }
 
     /* This implements the old block constraint. I have decided not to remove it at this time while
      * the new is tested, just in case the change needs to be reverted */
@@ -2606,6 +2613,72 @@ int Sketch::addConstraint(const Constraint* constraint)
             rtn = ++ConstraintsCounter;
             break;
         }
+        case Pierce: {
+            // FreeCAD-CH (Onshape's Pierce): the point where a model edge crosses the sketch plane
+            // is a point of the edge's Intersection external, fixed: a coincidence with it. Only a
+            // point geometry is a crossing (anything else is malformed: rtn stays -1)
+            const int geoId2 = checkGeoId(constraint->Second);
+            if (Geoms[geoId2].type != Point) {
+                break;
+            }
+            if (constraint->FirstPos == PointPos::none) {
+                // a line (its infinite extension), a circle or an arc (its circle) through the
+                // crossing: a point on object of the crossing on the curve
+                const auto type = Geoms[checkGeoId(constraint->First)].type;
+                if (type != Line && type != Circle && type != Arc) {
+                    break;
+                }
+                rtn = addPointOnObjectConstraint(constraint->Second, PointPos::start, constraint->First);
+                break;
+            }
+            rtn = addPointCoincidentConstraint(
+                constraint->First,
+                constraint->FirstPos,
+                constraint->Second,
+                PointPos::start
+            );
+            break;
+        }
+        case Midpoint: {
+            // FreeCAD-CH (ops#656): the point on the arc's circle at the parameter u, and u the
+            // mean of the arc's end angles: u - start = end - u = h, with u and h two unknowns of
+            // their own (as a point on a B-spline has its parameter). Two equations net on the
+            // point. The solver's arcs run counterclockwise from start to end angle, so u is the
+            // middle of the arc itself, over 180 degrees too, never the far side of the circle.
+            const int geoId1 = checkGeoId(constraint->First);
+            const int geoId2 = checkGeoId(constraint->Second);
+            const int pointId = getPointId(geoId1, constraint->FirstPos);
+            if (Geoms[geoId2].type != Arc || pointId < 0 || pointId >= int(Points.size())
+                || geoId1 == geoId2) {
+                break;  // rtn stays -1: malformed (only arcs of circles have this middle)
+            }
+            // the same Midpoint again (same point, same arc) repeats the first and agrees with it
+            // always: no equations, so no unknowns of its own left out of the solve as a
+            // redundant constraint's are (they kept their start, and an edit of the arc failed)
+            // (both driving: a Midpoint is always saved driving, but a non-driving one read from
+            // an edited file would hold nothing and has no value for the driven-value update)
+            const bool repeat = c.driving && std::ranges::any_of(Constrs, [&](const ConstrDef& other) {
+                return other.constr && other.driving && other.constr->Type == Midpoint
+                    && checkGeoId(other.constr->First) == geoId1
+                    && other.constr->FirstPos == constraint->FirstPos
+                    && checkGeoId(other.constr->Second) == geoId2;
+            });
+            if (repeat) {
+                rtn = ++ConstraintsCounter;
+                break;
+            }
+            GCS::Arc& a = Arcs[Geoms[geoId2].index];
+            c.value = new double((*a.startAngle + *a.endAngle) / 2.0);
+            c.secondvalue = new double((*a.endAngle - *a.startAngle) / 2.0);
+            Parameters.push_back(c.value);
+            Parameters.push_back(c.secondvalue);
+            const int tag = ++ConstraintsCounter;
+            GCSsys.addConstraintCurveValue(Points[pointId], a, c.value, tag, c.driving);
+            GCSsys.addConstraintDifference(a.startAngle, c.value, c.secondvalue, tag, c.driving);
+            GCSsys.addConstraintDifference(c.value, a.endAngle, c.secondvalue, tag, c.driving);
+            rtn = ConstraintsCounter;
+            break;
+        }
         case Sketcher::None:   // ambiguous enum value
         case Sketcher::Block:  // handled separately while adding geometry
         case NumConstraintTypes:
@@ -4725,6 +4798,16 @@ bool Sketch::updateGeometry()
             return false;
         }
     }
+    // FreeCAD-CH (ops#656): while dragging, a Midpoint's half sweep h must stay in (0, pi). A step
+    // that takes it through 0 (an arc's end dragged through its start) leaves the point at
+    // u = start + h on the far side of the circle once the arc is written back counterclockwise:
+    // no valid step. (Outside a drag SketchObject::solve solves again from the written arc.)
+    for (const ConstrDef& c : Constrs) {
+        if (isInitMove && c.constr && c.constr->Type == Midpoint && c.secondvalue
+            && !(*c.secondvalue > 0.0 && *c.secondvalue < std::numbers::pi)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4985,6 +5068,143 @@ int Sketch::solve()
     }
 
     return result;
+}
+
+int Sketch::solveHolding(
+    const std::function<bool(int geoId, PointPos pos, int index)>& isFree,
+    const std::map<int, double>& allowedErrors
+)
+{
+    if (isInitMove) {
+        return GCS::Failed;
+    }
+
+    std::vector<double*> unknowns;
+    std::vector<double*> geometry;  // the free parameters of geometry
+    for (double* param : Parameters) {
+        const auto element = param2geoelement.find(param);
+        if (element == param2geoelement.end()) {
+            // a driven dimension's value: always computed, as in a whole solve
+            unknowns.push_back(param);
+            continue;
+        }
+        const auto& [geoId, pos, index] = element->second;
+        if (isFree(geoId, pos, index)) {
+            unknowns.push_back(param);
+            geometry.push_back(param);
+        }
+    }
+    if (geometry.empty()) {
+        return GCS::Failed;
+    }
+    const bool whole = unknowns.size() == Parameters.size();
+
+    captureGroupStates();
+    Base::TimeElapsed start_time;
+
+    std::vector<double> before;
+    before.reserve(Parameters.size());
+    for (double* param : Parameters) {
+        before.push_back(*param);
+    }
+
+    // Least motion: the Gauss-Newton step of least norm moves only what the changed constraints
+    // need (a length's end along the line, an arc's ends out from its centre); the full-pivot LU
+    // step zeroes some unknowns instead and moves the others further
+    struct GaussStepGuard
+    {
+        GCS::System& system;
+        GCS::DogLegGaussStep saved;
+        ~GaussStepGuard()
+        {
+            system.dogLegGaussStep = saved;
+        }
+    } guard {GCSsys, GCSsys.dogLegGaussStep};
+    GCSsys.dogLegGaussStep = GCS::LeastNormFullPivLU;
+
+    clearTemporaryConstraints();
+    if (!whole || holdingNarrowed) {
+        // a whole system set up at the drawn parameters keeps setUpSketch's diagnosis
+        GCSsys.invalidatedDiagnosis();
+        GCSsys.declareUnknowns(unknowns);
+        GCSsys.declareDrivenParams(DrivenParameters);
+        holdingNarrowed = !whole;
+    }
+    // Least motion, exactly: every free parameter of geometry is held weakly where it is drawn, and
+    // the constraints are solved as the hard part of one problem (planegcs's SQP, as a drag's is).
+    // An iterated least-norm step alone reaches the constraints, not their nearest point: a line
+    // moved square to itself also slid along itself. The weak holds are temporary constraints, so
+    // the diagnosis does not see them.
+    InitParameters.assign(geometry.size(), 0.0);
+    for (std::size_t i = 0; i < geometry.size(); ++i) {
+        InitParameters[i] = *geometry[i];
+        GCSsys.addConstraintEqual(geometry[i], &InitParameters[i], GCS::DefaultTemporaryConstraint);
+    }
+    GCSsys.initSolution(defaultSolverRedundant);
+    const int ret = GCSsys.solve(isFine, GCS::DogLeg);
+
+    bool holds = ret == GCS::Success;
+    if (holds) {
+        GCSsys.applySolution();
+        // a constraint none of whose parameters is an unknown is in no subsystem the solver
+        // checks: every one is read here, in one pass (a tag absent: not in the solve at all)
+        const std::map<int, double> errors = GCSsys.calculateConstraintErrorsByTag();
+        for (const auto& [tag, allowed] : allowedErrors) {
+            const auto error = errors.find(tag);
+            if (error != errors.end() && !(std::abs(error->second) <= allowed)) {
+                holds = false;
+                break;
+            }
+        }
+    }
+    if (holds && !updateGeometry()) {
+        holds = false;
+    }
+    if (!holds) {
+        for (std::size_t i = 0; i < Parameters.size(); ++i) {
+            *Parameters[i] = before[i];
+        }
+        updateGeometry();
+    }
+
+    Base::TimeElapsed end_time;
+    SolveTime = Base::TimeElapsed::diffTimeF(start_time, end_time);
+
+    return holds ? GCS::Success : GCS::Failed;
+}
+
+int Sketch::endHolding(bool solved)
+{
+    clearTemporaryConstraints();
+    if (holdingNarrowed) {
+        // the whole sketch again, for what follows (a drag, a later solve); the diagnosis is
+        // redone for it at the current parameters, and the lists read at set up are kept
+        GCSsys.invalidatedDiagnosis();
+        GCSsys.declareUnknowns(Parameters);
+        GCSsys.declareDrivenParams(DrivenParameters);
+        holdingNarrowed = false;
+    }
+    // set up again without the weak holds (the diagnosis is kept when it is the whole sketch's)
+    GCSsys.initSolution(defaultSolverRedundant);
+    if (!solved) {
+        return GCS::Failed;
+    }
+    updateNonDrivingConstraints();
+    int ret = GCS::Success;
+    if (resolveAfterGeometryUpdated) {
+        // as internalSolve: geometry OCCT computes is read back once (it starts solved)
+        std::string solvername;
+        ret = internalSolve(solvername, 1);
+    }
+    if (ret == GCS::Success) {
+        applyGroupTransformations();
+    }
+    return ret;
+}
+
+std::map<int, double> Sketch::calculateConstraintErrors() const
+{
+    return GCSsys.calculateConstraintErrorsByTag();
 }
 
 int Sketch::internalSolve(std::string& solvername, int level)

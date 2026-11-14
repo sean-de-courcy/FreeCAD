@@ -97,6 +97,7 @@
 #include "DockWindowManager.h"
 #include "DownloadManager.h"
 #include "FileDialog.h"
+#include "DocumentTabBar.h"  // FreeCAD-CH (ops#640, rank 59)
 #include "InputHintWidget.h"
 #include "MenuManager.h"
 #include "ModuleIO.h"
@@ -721,6 +722,7 @@ void MainWindow::setupDockWindows()
     setupSelectionView();
     setupVariablesView(this, d->hiddenDockWindows);  // FreeCAD-CH (ops#152)
     setupTaskView();
+    DocumentTabs::setup(this);  // FreeCAD-CH (ops#640, rank 59): the typed tabs, made once here
 
     initDockWindows(false);
 

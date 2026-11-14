@@ -126,6 +126,7 @@
 #include <ShapeAnalysis_FreeBoundsProperties.hxx>
 #include <ShapeExtend_Explorer.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <Message_ProgressRange.hxx>
 #include <ShapeUpgrade_RemoveInternalWires.hxx>
 #include <ShapeUpgrade_ShellSewing.hxx>
 #include <Standard_Failure.hxx>
@@ -177,6 +178,7 @@
 #include "encodeFilename.h"
 #include "FaceMakerBullseye.h"
 #include "Interface.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "WireJoiner.h"
 #include "modelRefine.h"
@@ -1478,8 +1480,8 @@ bool TopoShape::isNull() const
 
 bool TopoShape::isValid() const
 {
-    BRepCheck_Analyzer aChecker(this->_Shape);
-    return aChecker.IsValid() ? true : false;
+    // BRepCheck_Analyzer's verdict, faces with thousands of holes in seconds (kernel-9, ops#640)
+    return !this->_Shape.IsNull() && KernelBudget::checkValid(this->_Shape);
 }
 
 bool TopoShape::isEmpty() const
@@ -3433,6 +3435,12 @@ void TopoShape::bakeInTransform()
     *this = result;
 }
 
+namespace Part
+{
+// TopoShapeExpansion.cpp: a plane under a general transform is a plane
+void planesAfterGTransform(const TopoDS_Shape& shape);
+}  // namespace Part
+
 TopoDS_Shape TopoShape::transformGShape(const Base::Matrix4D& rclTrf, bool copy) const
 {
     if (this->_Shape.IsNull()) {
@@ -3456,7 +3464,9 @@ TopoDS_Shape TopoShape::transformGShape(const Base::Matrix4D& rclTrf, bool copy)
     BRepBuilderAPI_Copy copier(this->_Shape);
     // geometric transformation
     BRepBuilderAPI_GTransform mkTrf(copier.Shape(), mat, copy);
-    return mkTrf.Shape();
+    const TopoDS_Shape transformed = mkTrf.Shape();
+    Part::planesAfterGTransform(transformed);
+    return transformed;
 }
 
 bool TopoShape::transformShape(const Base::Matrix4D& rclTrf, bool copy, bool checkScale)
@@ -3530,8 +3540,18 @@ bool TopoShape::fix()
     // actually make a valid input shape invalid). So, it actually change the
     // underlying shape data. Therefore, we try with a copy first.
     auto copy = makeElementCopy();
-    ShapeFix_Shape fix(copy._Shape);
-    fix.Perform();
+    // In a feature, both fixes run under its time limit (kernel safety S1, kernel-4): ShapeFix
+    // reads its progress range, and took minutes on the invalid result of a fillet on 2000 edges
+    auto fixer = std::make_shared<ShapeFix_Shape>(copy._Shape);
+    auto& fix = *fixer;
+    if (KernelBudget::inScope()) {
+        KernelBudget::run("The repair of the shape", [fixer](const Message_ProgressRange& range) {
+            fixer->Perform(range);
+        });
+    }
+    else {
+        fix.Perform();
+    }
 
     if (fix.Shape().IsSame(copy._Shape)) {
         return false;
@@ -3545,8 +3565,19 @@ bool TopoShape::fix()
     // If the above fix produces a valid shape, then we fix the original shape,
     // because BRepBuilderAPI_Copy has some undesired side effect (e.g. flatten
     // underlying shape, and thus break internal shape sharing).
-    ShapeFix_Shape fixThis(this->_Shape);
-    fixThis.Perform();
+    auto thisFixer = std::make_shared<ShapeFix_Shape>(this->_Shape);
+    auto& fixThis = *thisFixer;
+    if (KernelBudget::inScope()) {
+        // It changes the shape it reads: waited for after a stop, as a boolean is
+        KernelBudget::run(
+            "The repair of the shape",
+            [thisFixer](const Message_ProgressRange& range) { thisFixer->Perform(range); },
+            KernelBudget::Inputs::Shared
+        );
+    }
+    else {
+        fixThis.Perform();
+    }
 
     aChecker.Init(fixThis.Shape());
     if (aChecker.IsValid()) {
