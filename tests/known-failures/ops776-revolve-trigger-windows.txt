@@ -1,0 +1,8 @@
+# TestRevolveFaceProfile's trigger asserts the kernel's defect (the raw revolve of the cap as a B-spline surface
+# face is invalid or empty). On Windows (fork PR 452, lx9 72a672dfab) the host's OCCT builds it valid, so the
+# trigger fails; Linux and macOS pass. Remove this file when ops#776 makes the trigger per-platform.
+
+issue: ops#776
+
+reason: Windows' OCCT builds the raw revolve valid, so the "the kernel gets it wrong" trigger fails ("True is not false")
+cli  PartDesignTests.TestRevolveFaceProfile.TestRevolveFaceProfile.testRevolveThatCannotBeMadeIsRefused  windows
