@@ -8970,6 +8970,8 @@ TopoShape& TopoShape::makeElementFillet(
             }
             catch (const Base::Exception&) {
             }
+            FC_LOG("fillet split: the rims built, named " << named << ", rest "
+                                                        << split->rest.size() << " edges");
             if (named && split->rest.empty()) {
                 *this = stage;
                 return *this;
@@ -8990,16 +8992,22 @@ TopoShape& TopoShape::makeElementFillet(
                     if (FilletFallback::takeInvalidResult().empty()) {
                         return *this;
                     }
+                    FC_LOG("fillet split: the rest's result on the stage is invalid");
                 }
-                catch (const Base::CADKernelError&) {
+                catch (const Base::CADKernelError& e) {
+                    FC_LOG("fillet split: the rest failed on the stage: " << e.what());
                     // The rest is not rounded on that body: the whole selection, as without
                     // the split (its error stands). Never after the feature's time is up
                     if (KernelBudget::pastDeadline()) {
                         throw;
                     }
                 }
-                catch (const Standard_Failure&) {
+                catch (const Standard_Failure& e) {
+                    FC_LOG("fillet split: the rest failed on the stage (OCCT): " << e.GetMessageString());
                 }
+            }
+            else {
+                FC_LOG("fillet split: " << rest.size() << " of the rest's edges found on the stage");
             }
         }
     }

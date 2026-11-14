@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopTools_DataMapOfShapeReal.hxx>
@@ -203,6 +204,28 @@ PartExport bool construct(
     const Request& request,
     Construction& out,
     std::string* reason = nullptr
+);
+
+/** What a rim round removes, measured on its face alone: the volume between the face and the plane
+ * face it rounds, which is the integral over the face of its depth under the plane times its
+ * normal's part along the plane's (the rounds' plans fill the band between the walls and the top
+ * edges). On a torus about the plane's normal that integrand depends on v alone, on a cylinder
+ * along the plane on u alone, so the integral is one along the face's edges' curves on the surface:
+ * no lever arm, and no other face in it. OCCT's volume of the changed faces is good to 1e-6 of
+ * each face's own term about a point of the body, which for a large rim's walls and plane face is
+ * more than its rounds remove (FSLC #50's rim at z 14.15: 0.325 for 0.335 at r 0.05).
+ *
+ * @param round The round's face: on a torus about the plane's normal, or a cylinder along the plane
+ * @param onPlane A point of the plane face's plane
+ * @param normal The plane's normal
+ * @param volume Receives the volume, positive
+ * @return False for any other surface, or an edge without its curve on the face
+ */
+PartExport bool roundUnderPlane(
+    const TopoDS_Face& round,
+    const gp_Pnt& onPlane,
+    const gp_Dir& normal,
+    double& volume
 );
 
 /** The part of a fillet that is whole rim loops of plane faces with walls square to them, lines
