@@ -22,6 +22,11 @@ bool PatternRecord::isPattern(const Constraint* constr)
     return constr && constr->Type == Pattern;
 }
 
+bool PatternRecord::withinSlotCap(size_t seedCount, int count1, int count2)
+{
+    return double(seedCount) * count1 * count2 <= 100000.0;
+}
+
 std::vector<PatternRecord::Slot> PatternRecord::slots() const
 {
     std::vector<Slot> result;
@@ -86,7 +91,7 @@ std::optional<PatternRecord> PatternRecord::read(const Constraint& constr)
     // asks for millions of slots)
     if (seedCount < 1 || record.count1 < 1 || record.count2 < 1
         || (record.kind == Kind::Circular && record.count2 != 1)
-        || double(seedCount) * record.count1 * record.count2 > 100000.0) {
+        || !withinSlotCap(seedCount, record.count1, record.count2)) {
         return std::nullopt;
     }
     const size_t header = seedCount + (record.kind == Kind::Circular ? 1 : 2);

@@ -50,6 +50,8 @@ struct SketcherExport PatternRecord
     std::map<Slot, int> instances;
 
     static bool isPattern(const Constraint* constr);
+    /// whether the counts' table stays within the slots a record may have (100,000)
+    static bool withinSlotCap(size_t seedCount, int count1, int count2);
     /// the record of a Pattern constraint; nullopt for any other or a malformed one
     static std::optional<PatternRecord> read(const Constraint& constr);
     /// writes this record into constr: its type, elements, MetaData and Value

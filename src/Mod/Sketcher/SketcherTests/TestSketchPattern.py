@@ -328,6 +328,41 @@ class TestSketchCircularPattern(PatternCase):
             self.sketch.setPatternCount(1, 3)  # not a pattern: the pivot's coincidence is 1
         self.assertEqual(self.sketch.getPattern(self.pattern)["Counts"], (3, 1))
 
+    def testMoreInstancesThanARecordHoldsAreRefused(self):
+        other = self.circle(30, 0, 1)
+        count = self.sketch.GeometryCount
+        with self.assertRaises(ValueError):
+            self.sketch.addCircularPattern([other], 100001, V(0, 0, 0))
+        with self.assertRaises(ValueError):
+            self.sketch.setPatternCount(self.pattern, 100001)
+        with self.assertRaises(ValueError):
+            self.sketch.addLinearPattern([other], 400, V(1, 0, 0), 400)
+        self.assertEqual(self.sketch.GeometryCount, count)
+        self.assertEqual(self.sketch.getPattern(self.pattern)["Counts"], (3, 1))
+
+    def testAReferencePatternHoldsNothingAndSolves(self):
+        # a pattern is no dimension: it can't be made a reference here (only a file could hold
+        # one), and either way the sketch solves
+        try:
+            self.sketch.setDriving(self.pattern, False)
+        except ValueError:
+            pass
+        self.assertEqual(self.sketch.solve(), 0)
+
+    def testTrimmingTheSeedRemovesThePatternAndLeavesTheCopies(self):
+        # a line through the seed circle (crossing it at (10, -2) and (10, 2)); the circle's
+        # right half is trimmed away. The trim replaces the seed, so the pattern goes as for a
+        # deleted seed: no record is left naming an arc as the seed of circles
+        copies = [self.copyAt(1), self.copyAt(2)]
+        self.line(10, -5, 10, 5)
+        self.sketch.trim(self.seed, V(12, 0, 0))
+        self.assertEqual(self.patterns(), [])
+        self.assertEqual(self.sketch.Geometry[self.seed].TypeId, "Part::GeomArcOfCircle")
+        for g, deg in zip(copies, (120, 240)):
+            self.assertEqual(self.sketch.Geometry[g].TypeId, "Part::GeomCircle")
+            self.assertAt(g, *rot(10, 0, deg))
+        self.assertSolvedClean()
+
 
 class TestSketchLinearPattern(PatternCase):
     """Seed: a circle of radius 1 at the origin; direction 1 along +X at a spacing of 5."""

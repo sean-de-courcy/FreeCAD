@@ -193,6 +193,9 @@ int SketchObject::addCircularPattern(
     if (count < 1) {
         throw Base::ValueError("Pattern: the count must be at least 1");
     }
+    if (!PatternRecord::withinSlotCap(seeds.size(), count, 1)) {
+        throw Base::ValueError("Pattern: more than 100000 instances");
+    }
     if (!std::isfinite(angle) || angle == 0.0 || std::abs(angle) > 2.0 * std::numbers::pi + 1e-9) {
         throw Base::ValueError("Pattern: the angle must be in (0, 360] degrees either way");
     }
@@ -244,6 +247,9 @@ int SketchObject::addLinearPattern(
     checkSeeds(*this, seeds);
     if (count1 < 1 || count2 < 1) {
         throw Base::ValueError("Pattern: the counts must be at least 1");
+    }
+    if (!PatternRecord::withinSlotCap(seeds.size(), count1, count2)) {
+        throw Base::ValueError("Pattern: more than 100000 instances");
     }
     const Base::Vector3d step1(direction1.x, direction1.y, 0);
     if (step1.Length() < Precision::Confusion()) {
@@ -315,6 +321,9 @@ void SketchObject::setPatternCount(int constrId, int count1, int count2)
         throw Base::ValueError(
             "Pattern: the counts must be at least 1 (a circular pattern has one count)"
         );
+    }
+    if (!PatternRecord::withinSlotCap(old->seeds.size(), count1, count2)) {
+        throw Base::ValueError("Pattern: more than 100000 instances");
     }
     Base::StateLocker lock(managedoperation, true);
 

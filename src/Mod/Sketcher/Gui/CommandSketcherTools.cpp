@@ -268,6 +268,12 @@ bool copySelectionToClipboard(Sketcher::SketchObject* obj)
                 || value == GeoEnum::VAxis || value == GeoEnum::HAxis;
         };
 
+        if (constr->Type == Pattern) {
+            // FreeCAD-CH (sketch patterns): a pattern is not copied with its geometry (the
+            // converter has no Python form of its record): the pasted copies are free
+            continue;
+        }
+
         bool skip = false;
         for (int i = 0; constr->hasElement(i); ++i) {
             if (!isSelectedGeoOrAxis(listOfGeoId, constr->getGeoId(i))) {
