@@ -1,0 +1,7 @@
+# The compat corpus's fresh generation on Windows: RevolveFreeFormProfile's Body and Revolution differ at the
+# reopen (fork PR 453, eb9ea93950); macOS passes. Remove this file when ops#785 is fixed.
+
+issue: ops#785
+
+reason: on Windows RevolveFreeFormProfile reopens with a different shape ("differs at the reopen")
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testFreshGeneration  windows
