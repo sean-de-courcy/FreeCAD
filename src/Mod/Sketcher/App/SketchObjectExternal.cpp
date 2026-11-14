@@ -1117,6 +1117,12 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             return;
         }
 
+        // FreeCAD-CH (sketch patterns): a mirrored circular pattern turns the other way (a linear
+        // pattern's value is unused)
+        if (xinv != yinv && newConstr->Type == Sketcher::Pattern) {
+            newConstr->setValue(-newConstr->getValue());
+        }
+
         // DistanceX, DistanceY
         if ((xinv && newConstr->Type == Sketcher::DistanceX)
             || (yinv && newConstr->Type == Sketcher::DistanceY)) {

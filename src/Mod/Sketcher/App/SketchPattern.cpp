@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // FreeCAD-CH (Onshape's sketch patterns): see SketchPattern.h.
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <set>
 #include <string>
 
 #include "nlohmann/json.hpp"
@@ -44,6 +46,22 @@ std::vector<PatternRecord::Slot> PatternRecord::slots() const
                 }
             }
         }
+    }
+    return result;
+}
+
+bool PatternRecord::namesEachGeometryOnce() const
+{
+    std::set<int> named;
+    auto once = [&named](int geoId) {
+        return geoId == GeoEnum::GeoUndef || named.insert(geoId).second;
+    };
+    bool result = std::ranges::all_of(seeds, once);
+    for (int owned : {pivot, direction1, direction2}) {
+        result = once(owned) && result;
+    }
+    for (const auto& [slot, copy] : instances) {
+        result = once(copy) && result;
     }
     return result;
 }
@@ -106,6 +124,11 @@ std::optional<PatternRecord> PatternRecord::read(const Constraint& constr)
     if (record.kind == Kind::Circular) {
         record.pivot = constr.getGeoId(seedCount);
         record.angle = constr.getValue();
+        // as addCircularPattern takes it: finite, not zero, at most a full turn either way
+        if (!std::isfinite(record.angle) || record.angle == 0.0
+            || std::abs(record.angle) > fullTurn + 1e-9) {
+            return std::nullopt;
+        }
     }
     else {
         record.direction1 = constr.getGeoId(seedCount);
