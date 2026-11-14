@@ -76,6 +76,13 @@ class KernelBudgetTest(unittest.TestCase):
         self.params = FreeCAD.ParamGet(PARAMS)
         self.had = self.params.GetFloat("GeometryTimeLimit", -12345.0)
         self.docs = []
+        # Workers that earlier tests abandoned and that still run (in a whole-suite run, e.g. a
+        # PartDesign fuse stopped at its limit whose OCCT call never reads the cancel): this test
+        # waits only for its own. Waiting for all made every tearDown here wait 400 s and fail,
+        # which looked like a hang (lx8's macOS CLI tests, ops#640)
+        budget = Part.kernelBudget()
+        self.runningBefore = budget["abandonedRunning"]
+        self.totalBefore = budget["abandonedTotal"]
 
     def tearDown(self):
         if self.had == -12345.0:
@@ -88,9 +95,12 @@ class KernelBudgetTest(unittest.TestCase):
         # machine run at full load by other programs (a run queue of 50) a worker gets about 5% of a
         # core, and took over 120 s on the clock (ops#743)
         deadline = time.time() + 400
-        while Part.kernelBudget()["abandonedRunning"] and time.time() < deadline:
+        while (
+            Part.kernelBudget()["abandonedRunning"] > self.runningBefore
+            and time.time() < deadline
+        ):
             time.sleep(0.2)
-        self.assertEqual(Part.kernelBudget()["abandonedRunning"], 0)
+        self.assertLessEqual(Part.kernelBudget()["abandonedRunning"], self.runningBefore)
 
     def setLimit(self, seconds):
         self.params.SetFloat("GeometryTimeLimit", seconds)
@@ -325,7 +335,7 @@ class KernelBudgetTest(unittest.TestCase):
             self.assertFalse(f.isValid())
             self.assertIn("took longer than", f.getStatusString())
             fillets.append(f)
-        self.assertGreaterEqual(Part.kernelBudget()["abandonedTotal"], 1)
+        self.assertGreaterEqual(Part.kernelBudget()["abandonedTotal"], self.totalBefore + 1)
         self.setLimit(60)
         doc2 = FreeCAD.newDocument("KernelBudgetAfter")
         self.docs.append(doc2)
