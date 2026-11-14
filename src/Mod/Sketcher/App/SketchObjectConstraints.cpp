@@ -318,8 +318,10 @@ bool SketchObject::solveAroundConflict(const std::vector<int>& tags)
 // sketcher-feel-design 3.1, 3.2). Rungs, the first that converges with every constraint met wins:
 // 1. only the movers' parameters are unknowns;
 // 2. everything but the references (the dimensions' other entities);
-// 3. everything, by least motion;
-// otherwise today's solve. A dimension "changed" when the drawn geometry misses it by more than the
+// 3. only the references: the movers are held, so the other entities move instead (SF-B7, SF-E4);
+// otherwise today's solve. Not "everything by least motion": least squares shares the change among
+// all that is free (an ellipse whose arc a cutter ends grows and turns where today's solve slides
+// the arc's end along it), and today's solve is what the ladder falls back to. A dimension "changed" when the drawn geometry misses it by more than the
 // solver's own bar (1e-5). The ladder stands aside when anything else is missed (a constraint just
 // added), when a missed dimension is on external geometry (the model moved under it: today's solve,
 // as before), and when the diagnosis names a missed dimension as redundant. A fully defined sketch
@@ -395,8 +397,10 @@ int SketchObject::solveLadder()
         PointPos movingPos = c->FirstPos;
         int other = c->Second;
         PointPos otherPos = c->SecondPos;
-        if (moving <= GeoEnum::RefExt || other <= GeoEnum::RefExt
-            || (c->Third != GeoEnum::GeoUndef && c->Third <= GeoEnum::RefExt)) {
+        auto external = [](int geo) {
+            return geo != GeoEnum::GeoUndef && geo <= GeoEnum::RefExt;
+        };
+        if (external(moving) || external(other) || external(c->Third)) {
             return -1;
         }
         switch (c->Type) {
@@ -506,8 +510,13 @@ int SketchObject::solveLadder()
                  )
             == 0;
     }
-    if (!solved) {
-        solved = solvedSketch.solveHolding([](int, PointPos, int) { return true; }, allowedErrors)
+    if (!solved && !references.empty()) {
+        solved = solvedSketch.solveHolding(
+                     [&](int geoId, PointPos pos, int index) {
+                         return any(references, geoId, pos, index);
+                     },
+                     allowedErrors
+                 )
             == 0;
     }
     return solvedSketch.endHolding(solved) == 0 ? 0 : -1;
