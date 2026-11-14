@@ -5,10 +5,13 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -21,6 +24,10 @@
 
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_CurveRepresentation.hxx>
+#include <BRep_GCurve.hxx>
+#include <BRep_TEdge.hxx>
+#include <BRep_TVertex.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Curve2d.hxx>
@@ -35,12 +42,27 @@
 #include <BRepTools.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <ChFi3d.hxx>
+#include <ElCLib.hxx>
+#include <ElSLib.hxx>
+#include <Extrema_LocateExtPC.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <GeomAdaptor_Curve.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_Curve.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Dir2d.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
@@ -64,9 +86,11 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 
+#include <App/Application.h>
 #include <App/ElementMap.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/Parameter.h>
 
 #include "Geometry.h"
 #include "KernelBudget.h"
@@ -2132,6 +2156,903 @@ std::string bridgedRecess(
         FC_WARN("Fillet result not checked for a bridged hole: " << e.GetMessageString());
     }
     return {};
+}
+
+// ---------------------------------------------------------------------------------------------
+// healSliverCorners(): the corners a Boolean leaves open beside a sliver (ops#640, FSLC rb50/51)
+
+namespace
+{
+
+/// An edge or a vertex this close to its surfaces or curves is not read further
+constexpr double healed = 1e-7;
+
+/// A plane or a cylinder, in the shape's coordinates
+struct RuledSurface
+{
+    bool isPlane = true;
+    gp_Pln plane;
+    gp_Cylinder cylinder;
+};
+
+std::optional<RuledSurface> ruledSurfaceOf(const TopoDS_Face& face)
+{
+    BRepAdaptor_Surface surface(face, false);
+    RuledSurface ruled;
+    if (surface.GetType() == GeomAbs_Plane) {
+        ruled.plane = surface.Plane();
+        return ruled;
+    }
+    if (surface.GetType() == GeomAbs_Cylinder) {
+        ruled.isPlane = false;
+        ruled.cylinder = surface.Cylinder();
+        return ruled;
+    }
+    return std::nullopt;
+}
+
+/// Whether lines along the direction lie in the surface
+bool rules(const RuledSurface& surface, const gp_Dir& direction)
+{
+    const double angular = 1e-9;
+    if (surface.isPlane) {
+        return std::abs(direction.Dot(surface.plane.Axis().Direction())) < angular;
+    }
+    return direction.IsParallel(surface.cylinder.Axis().Direction(), angular);
+}
+
+/// The point's nearest point on the surface; none on a cylinder's axis
+std::optional<gp_Pnt> projectedOn(const RuledSurface& surface, const gp_Pnt& point)
+{
+    if (surface.isPlane) {
+        const gp_Dir normal = surface.plane.Axis().Direction();
+        const double height = gp_Vec(surface.plane.Location(), point).Dot(gp_Vec(normal));
+        return point.Translated(gp_Vec(normal) * -height);
+    }
+    const gp_Ax1 axis = surface.cylinder.Axis();
+    const gp_Vec along(axis.Direction());
+    const gp_Vec arm(axis.Location(), point);
+    const gp_Vec radial = arm - along * arm.Dot(along);
+    const double length = radial.Magnitude();
+    if (length < 1e-12) {
+        return std::nullopt;
+    }
+    return point.Translated(radial * (surface.cylinder.Radius() / length - 1.0));
+}
+
+double distanceTo(const RuledSurface& surface, const gp_Pnt& point)
+{
+    const auto on = projectedOn(surface, point);
+    return on ? on->Distance(point) : surface.cylinder.Radius();
+}
+
+/// Whether every representation of the edge is a curve (in space or on a surface) or a
+/// regularity: an edge with a polygon would keep a stale one
+bool hasCurvesOnly(const TopoDS_Edge& edge)
+{
+    const auto* tedge = static_cast<const BRep_TEdge*>(edge.TShape().get());
+    for (const auto& rep : tedge->Curves()) {
+        if (!rep->IsCurve3D() && !rep->IsCurveOnSurface() && !rep->IsRegularity()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// What the heal changed, to put back
+class HealRecord
+{
+public:
+    void keep(const TopoDS_Edge& edge)
+    {
+        const TopoDS_TShape* key = edge.TShape().get();
+        if (edges.count(key)) {
+            return;
+        }
+        EdgeState state;
+        state.edge = Handle(BRep_TEdge)::DownCast(edge.TShape());
+        state.tolerance = state.edge->Tolerance();
+        for (const auto& rep : state.edge->Curves()) {
+            Handle(BRep_GCurve) curve = Handle(BRep_GCurve)::DownCast(rep);
+            if (curve.IsNull()) {
+                continue;
+            }
+            RepState kept;
+            kept.rep = curve;
+            if (curve->IsCurve3D()) {
+                kept.curve = curve->Curve3D();
+            }
+            else if (curve->IsCurveOnSurface()) {
+                kept.pcurve = curve->PCurve();
+            }
+            curve->Range(kept.first, kept.last);
+            state.reps.push_back(kept);
+        }
+        edges.emplace(key, state);
+        order.push_back(edge);
+    }
+
+    void keep(const TopoDS_Vertex& vertex)
+    {
+        const TopoDS_TShape* key = vertex.TShape().get();
+        if (vertices.count(key)) {
+            return;
+        }
+        VertexState state;
+        state.vertex = Handle(BRep_TVertex)::DownCast(vertex.TShape());
+        state.point = state.vertex->Pnt();
+        state.tolerance = state.vertex->Tolerance();
+        vertices.emplace(key, state);
+    }
+
+    void undo()
+    {
+        for (auto& [key, state] : edges) {
+            (void)key;
+            for (auto& kept : state.reps) {
+                if (kept.rep->IsCurve3D()) {
+                    kept.rep->Curve3D(kept.curve);
+                }
+                else if (kept.rep->IsCurveOnSurface()) {
+                    kept.rep->PCurve(kept.pcurve);
+                }
+                kept.rep->SetRange(kept.first, kept.last);
+            }
+            state.edge->Tolerance(state.tolerance);
+        }
+        for (auto& [key, state] : vertices) {
+            (void)key;
+            state.vertex->Pnt(state.point);
+            state.vertex->Tolerance(state.tolerance);
+        }
+    }
+
+    /// The edges changed, in the order they were first changed
+    const std::vector<TopoDS_Edge>& changedEdges() const
+    {
+        return order;
+    }
+
+    /// Takes over what another record kept; what this one kept before stands
+    void adopt(const HealRecord& other)
+    {
+        for (const auto& edge : other.order) {
+            const TopoDS_TShape* key = edge.TShape().get();
+            if (edges.emplace(key, other.edges.at(key)).second) {
+                order.push_back(edge);
+            }
+        }
+        for (const auto& [key, state] : other.vertices) {
+            vertices.emplace(key, state);
+        }
+    }
+
+    bool empty() const
+    {
+        return edges.empty() && vertices.empty();
+    }
+
+private:
+    struct RepState
+    {
+        Handle(BRep_GCurve) rep;
+        Handle(Geom_Curve) curve;
+        Handle(Geom2d_Curve) pcurve;
+        double first = 0.0;
+        double last = 0.0;
+    };
+    struct EdgeState
+    {
+        Handle(BRep_TEdge) edge;
+        double tolerance = 0.0;
+        std::vector<RepState> reps;
+    };
+    struct VertexState
+    {
+        Handle(BRep_TVertex) vertex;
+        gp_Pnt point;
+        double tolerance = 0.0;
+    };
+    std::unordered_map<const TopoDS_TShape*, EdgeState> edges;
+    std::unordered_map<const TopoDS_TShape*, VertexState> vertices;
+    std::vector<TopoDS_Edge> order;
+};
+
+/// The edge's curve in space as a line in the shape's coordinates, if it is one
+std::optional<gp_Lin> lineOf(const TopoDS_Edge& edge)
+{
+    TopLoc_Location location;
+    double first = 0.0;
+    double last = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+    while (!curve.IsNull() && curve->IsKind(STANDARD_TYPE(Geom_TrimmedCurve))) {
+        curve = Handle(Geom_TrimmedCurve)::DownCast(curve)->BasisCurve();
+    }
+    Handle(Geom_Line) line = Handle(Geom_Line)::DownCast(curve);
+    if (line.IsNull()) {
+        return std::nullopt;
+    }
+    return line->Lin().Transformed(location.Transformation());
+}
+
+/// The edge's representation on the face's surface; null if it has none, or two (a seam)
+Handle(BRep_GCurve) curveOnFace(const TopoDS_Edge& edge, const TopoDS_Face& face, bool& seam)
+{
+    seam = false;
+    TopLoc_Location location;
+    const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+    const TopLoc_Location local = location.Predivided(edge.Location());
+    const auto* tedge = static_cast<const BRep_TEdge*>(edge.TShape().get());
+    for (const auto& rep : tedge->Curves()) {
+        if (rep->IsCurveOnSurface(surface, local)) {
+            if (rep->IsCurveOnClosedSurface()) {
+                seam = true;
+                return {};
+            }
+            return Handle(BRep_GCurve)::DownCast(rep);
+        }
+    }
+    return {};
+}
+
+/// How far the straight edge between the two faces stands off their surfaces, if the heal reads
+/// it: a line along both surfaces, off one of them by more than `healed` and within its tolerance
+struct StandingOff
+{
+    gp_Lin line;
+    RuledSurface first;
+    RuledSurface second;
+};
+
+std::optional<StandingOff> standingOff(
+    const TopoDS_Edge& edge,
+    const TopoDS_Face& first,
+    const TopoDS_Face& second
+)
+{
+    if (BRep_Tool::Degenerated(edge)) {
+        return std::nullopt;
+    }
+    const auto line = lineOf(edge);
+    if (!line) {
+        return std::nullopt;
+    }
+    const auto one = ruledSurfaceOf(first);
+    const auto two = ruledSurfaceOf(second);
+    if (!one || !two || !rules(*one, line->Direction()) || !rules(*two, line->Direction())) {
+        return std::nullopt;
+    }
+    const double off
+        = std::max(distanceTo(*one, line->Location()), distanceTo(*two, line->Location()));
+    if (off <= healed || off > BRep_Tool::Tolerance(edge)) {
+        return std::nullopt;
+    }
+    return StandingOff {*line, *one, *two};
+}
+
+/// The line of the surface in the face's parameters that the line in space follows, with the
+/// line's parameter; on a cylinder, in the turn of \a like
+Handle(Geom2d_Line) lineOn(const RuledSurface& surface, const gp_Lin& line, const gp_Pnt2d& like)
+{
+    double u = 0.0;
+    double v = 0.0;
+    const gp_Vec along(line.Direction());
+    if (surface.isPlane) {
+        ElSLib::Parameters(surface.plane, line.Location(), u, v);
+        const gp_Ax3& position = surface.plane.Position();
+        return new Geom2d_Line(
+            gp_Pnt2d(u, v),
+            gp_Dir2d(along.Dot(gp_Vec(position.XDirection())), along.Dot(gp_Vec(position.YDirection())))
+        );
+    }
+    ElSLib::Parameters(surface.cylinder, line.Location(), u, v);
+    u += 2 * std::numbers::pi * std::round((like.X() - u) / (2 * std::numbers::pi));
+    const double rise = along.Dot(gp_Vec(surface.cylinder.Axis().Direction()));
+    return new Geom2d_Line(gp_Pnt2d(u, v), gp_Dir2d(0.0, rise > 0 ? 1.0 : -1.0));
+}
+
+/// Moves the edge onto its two surfaces' intersection: the line in space and its line on each
+/// face. False, with nothing changed, if there is none within the edge's vertices' tolerances
+bool moveOntoIntersection(
+    const TopoDS_Edge& edge,
+    const TopoDS_Face& firstFace,
+    const TopoDS_Face& secondFace,
+    const StandingOff& off,
+    HealRecord& record
+)
+{
+    // The surfaces' common line beside the edge's: projected in turn onto each (both are ruled
+    // along the edge, so the point stays in the section across it)
+    gp_Pnt point = off.line.Location();
+    bool met = false;
+    for (int turn = 0; turn < 200 && !met; ++turn) {
+        const auto onFirst = projectedOn(off.first, point);
+        if (!onFirst) {
+            return false;
+        }
+        const auto onSecond = projectedOn(off.second, *onFirst);
+        if (!onSecond) {
+            return false;
+        }
+        point = *onSecond;
+        met = distanceTo(off.first, point) < 1e-12;
+    }
+    if (!met) {
+        return false;  // tangent or apart: no corner to move to
+    }
+    double reach = BRep_Tool::Tolerance(edge);
+    for (TopoDS_Iterator it(edge); it.More(); it.Next()) {
+        reach = std::min(reach, BRep_Tool::Tolerance(TopoDS::Vertex(it.Value())));
+    }
+    if (point.Distance(off.line.Location()) > reach) {
+        return false;
+    }
+
+    // Along a cylinder's axis, else along both planes
+    gp_Dir direction = off.line.Direction();
+    if (!off.first.isPlane || !off.second.isPlane) {
+        const gp_Dir axis
+            = (off.first.isPlane ? off.second : off.first).cylinder.Axis().Direction();
+        direction = axis.Dot(direction) > 0 ? axis : axis.Reversed();
+    }
+    else {
+        gp_Vec cross = gp_Vec(off.first.plane.Axis().Direction())
+                           .Crossed(gp_Vec(off.second.plane.Axis().Direction()));
+        if (cross.Magnitude() < 1e-9) {
+            return false;
+        }
+        direction = cross.Dot(gp_Vec(direction)) > 0 ? gp_Dir(cross) : gp_Dir(cross.Reversed());
+    }
+    if (!rules(off.first, direction) || !rules(off.second, direction)) {
+        return false;
+    }
+    const gp_Lin moved(point, direction);
+
+    TopLoc_Location location;
+    double first = 0.0;
+    double last = 0.0;
+    BRep_Tool::Curve(edge, location, first, last);
+    const double middle = (first + last) / 2;
+
+    const TopoDS_Face* faces[2] = {&firstFace, &secondFace};
+    const RuledSurface* surfaces[2] = {&off.first, &off.second};
+    Handle(BRep_GCurve) reps[2];
+    Handle(Geom2d_Line) lines[2];
+    for (int k = 0; k < 2; ++k) {
+        bool seam = false;
+        reps[k] = curveOnFace(edge, *faces[k], seam);
+        if (reps[k].IsNull() && !seam && surfaces[k]->isPlane) {
+            continue;  // on a plane an edge needs no curve of its own: none to move
+        }
+        if (reps[k].IsNull() || reps[k]->PCurve().IsNull()) {
+            return false;
+        }
+        lines[k] = lineOn(*surfaces[k], moved, reps[k]->PCurve()->Value(middle));
+        // The line on the face is the line in space, at the edge's own parameters
+        BRepAdaptor_Surface surface(*faces[k], false);
+        for (double t : {first, middle, last}) {
+            const gp_Pnt2d uv = lines[k]->Value(t);
+            if (surface.Value(uv.X(), uv.Y()).Distance(ElCLib::Value(t, moved)) > 1e-9) {
+                return false;
+            }
+        }
+    }
+    if (!reps[0].IsNull() && reps[0] == reps[1]) {
+        return false;
+    }
+
+    record.keep(edge);
+    auto* tedge = static_cast<BRep_TEdge*>(edge.TShape().get());
+    const gp_Lin local = moved.Transformed(location.Inverted().Transformation());
+    for (const auto& rep : tedge->Curves()) {
+        if (rep->IsCurve3D()) {
+            rep->Curve3D(new Geom_Line(local));
+        }
+    }
+    for (int k = 0; k < 2; ++k) {
+        if (reps[k].IsNull()) {
+            continue;
+        }
+        reps[k]->PCurve(lines[k]);
+        reps[k]->SetRange(first, last);  // its end points follow
+    }
+    // The edge is on both surfaces now: its tolerance is what its faces need
+    const double needs = std::max(
+        {Precision::Confusion(), BRep_Tool::Tolerance(firstFace), BRep_Tool::Tolerance(secondFace)}
+    );
+    if (needs < tedge->Tolerance()) {
+        tedge->Tolerance(needs);
+    }
+    tedge->Modified(true);
+    return true;
+}
+
+/// An edge's curve at one of its ends
+struct CurveEnd
+{
+    TopoDS_Edge edge;
+    Handle(Geom_Curve) curve;
+    TopLoc_Location location;
+    bool atFirst = true;
+    double parameter = 0.0;
+};
+
+/// The point's nearest point on the curve beside the parameter, which follows; false if none
+bool projectOn(const Handle(Geom_Curve)& curve, const gp_Pnt& point, double& parameter, gp_Pnt& on)
+{
+    Handle(Geom_Curve) basis = curve;
+    while (basis->IsKind(STANDARD_TYPE(Geom_TrimmedCurve))) {
+        basis = Handle(Geom_TrimmedCurve)::DownCast(basis)->BasisCurve();
+    }
+    if (basis->IsKind(STANDARD_TYPE(Geom_Line))) {
+        parameter = ElCLib::Parameter(Handle(Geom_Line)::DownCast(basis)->Lin(), point);
+    }
+    else if (basis->IsKind(STANDARD_TYPE(Geom_Circle))) {
+        const gp_Circ circle = Handle(Geom_Circle)::DownCast(basis)->Circ();
+        if (point.Distance(circle.Location()) < 1e-12) {
+            return false;
+        }
+        const double turn = ElCLib::Parameter(circle, point);
+        parameter = turn + 2 * std::numbers::pi * std::round((parameter - turn) / (2 * std::numbers::pi));
+    }
+    else {
+        GeomAdaptor_Curve adaptor(curve);
+        Extrema_LocateExtPC locate(point, adaptor, parameter, 1e-12);
+        if (!locate.IsDone()) {
+            return false;
+        }
+        parameter = locate.Point().Parameter();
+    }
+    on = curve->Value(parameter);
+    return true;
+}
+
+/// The curve, defined at the parameter: itself, or, where it is trimmed short of it, its basis
+/// trimmed as far (a Boolean trims an edge's curves on its faces to its range). Null if the curve
+/// ends before the parameter
+template<typename Curve, typename Trimmed>
+Handle(Curve) reaching(const Handle(Curve)& curve, double parameter)
+{
+    if (curve->IsPeriodic()
+        || (parameter >= curve->FirstParameter() && parameter <= curve->LastParameter())) {
+        return curve;
+    }
+    Handle(Trimmed) trimmed = Handle(Trimmed)::DownCast(curve);
+    if (trimmed.IsNull()) {
+        return {};
+    }
+    const Handle(Curve) basis = trimmed->BasisCurve();
+    if (!basis->IsPeriodic()
+        && (parameter < basis->FirstParameter() || parameter > basis->LastParameter())) {
+        return {};
+    }
+    return new Trimmed(
+        basis,
+        std::min(trimmed->FirstParameter(), parameter),
+        std::max(trimmed->LastParameter(), parameter)
+    );
+}
+
+/// Ends the edge at the parameter (its first end or its last). False, with nothing changed, if
+/// one of its curves ends before it or the edge would be empty
+bool endAt(const CurveEnd& end, HealRecord& record)
+{
+    double first = 0.0;
+    double last = 0.0;
+    BRep_Tool::Range(end.edge, first, last);
+    (end.atFirst ? first : last) = end.parameter;
+    if (!(first < last)) {
+        return false;
+    }
+    auto* tedge = static_cast<BRep_TEdge*>(end.edge.TShape().get());
+    std::vector<std::pair<Handle(BRep_GCurve), Handle(Standard_Transient)>> reached;
+    for (const auto& rep : tedge->Curves()) {
+        Handle(BRep_GCurve) curve = Handle(BRep_GCurve)::DownCast(rep);
+        if (curve.IsNull()) {
+            continue;
+        }
+        if (curve->IsCurve3D()) {
+            if (curve->Curve3D().IsNull()) {
+                continue;
+            }
+            const auto reaches
+                = reaching<Geom_Curve, Geom_TrimmedCurve>(curve->Curve3D(), end.parameter);
+            if (reaches.IsNull()) {
+                return false;
+            }
+            reached.emplace_back(curve, reaches);
+        }
+        else if (curve->IsCurveOnClosedSurface()) {
+            // a seam's two curves: as they are, or not at all
+            if (reaching<Geom2d_Curve, Geom2d_TrimmedCurve>(curve->PCurve(), end.parameter)
+                    != curve->PCurve()
+                || reaching<Geom2d_Curve, Geom2d_TrimmedCurve>(curve->PCurve2(), end.parameter)
+                    != curve->PCurve2()) {
+                return false;
+            }
+            reached.emplace_back(curve, curve->PCurve());
+        }
+        else if (curve->IsCurveOnSurface()) {
+            const auto reaches
+                = reaching<Geom2d_Curve, Geom2d_TrimmedCurve>(curve->PCurve(), end.parameter);
+            if (reaches.IsNull()) {
+                return false;
+            }
+            reached.emplace_back(curve, reaches);
+        }
+    }
+    record.keep(end.edge);
+    for (const auto& [curve, reaches] : reached) {
+        if (curve->IsCurve3D()) {
+            if (reaches != curve->Curve3D()) {
+                curve->Curve3D(Handle(Geom_Curve)::DownCast(reaches));
+            }
+        }
+        else if (!curve->IsCurveOnClosedSurface() && reaches != curve->PCurve()) {
+            curve->PCurve(Handle(Geom2d_Curve)::DownCast(reaches));
+        }
+        curve->SetRange(first, last);
+    }
+    tedge->Modified(true);
+    return true;
+}
+
+/// Moves the vertex to where the curves of its edges on the moved edges' faces cross, and ends
+/// each of them there; any other edge of the vertex whose curve passes there ends there too, and
+/// one whose curve doesn't (the sliver's own line) stays under the vertex's tolerance. False,
+/// with nothing changed, if the first have no common point within `healed`, the point is beyond
+/// the vertex's tolerance, one of them can't end there (an input's edge, a closed edge, a curve
+/// that ends before the point), or the vertex would need more tolerance than it has
+bool moveToCrossing(
+    const TopoDS_Vertex& vertex,
+    const TopTools_ListOfShape& edgesAt,
+    const TopTools_IndexedDataMapOfShapeListOfShape& facesOf,
+    const std::unordered_set<const TopoDS_TShape*>& moved,
+    const std::unordered_set<const TopoDS_TShape*>& inputs,
+    HealRecord& record
+)
+{
+    // The faces of the moved edges here: their edges at the vertex must meet
+    TopTools_IndexedMapOfShape walls;
+    for (const auto& shape : edgesAt) {
+        if (moved.count(shape.TShape().get()) && facesOf.Contains(shape)) {
+            for (const auto& face : facesOf.FindFromKey(shape)) {
+                walls.Add(face);
+            }
+        }
+    }
+
+    std::vector<CurveEnd> ends;    // of the walls' edges
+    std::vector<CurveEnd> others;  // of the rest, which may end here
+    std::vector<TopoDS_Edge> fixed;  // of the rest, which stay as they are
+    for (const auto& shape : edgesAt) {
+        const TopoDS_Edge edge = TopoDS::Edge(shape.Oriented(TopAbs_FORWARD));
+        bool onWall = false;
+        if (facesOf.Contains(edge)) {
+            for (const auto& face : facesOf.FindFromKey(edge)) {
+                onWall = onWall || walls.Contains(face);
+            }
+        }
+        TopoDS_Vertex from;
+        TopoDS_Vertex to;
+        TopExp::Vertices(edge, from, to);
+        const bool free = !inputs.count(edge.TShape().get()) && !BRep_Tool::Degenerated(edge)
+            && hasCurvesOnly(edge) && BRep_Tool::SameParameter(edge) && BRep_Tool::SameRange(edge)
+            && !from.IsNull() && !to.IsNull() && !from.IsSame(to);
+        CurveEnd end;
+        end.edge = edge;
+        double first = 0.0;
+        double last = 0.0;
+        if (free) {
+            end.curve = BRep_Tool::Curve(edge, end.location, first, last);
+        }
+        if (!free || end.curve.IsNull()) {
+            if (onWall) {
+                return false;
+            }
+            fixed.push_back(edge);
+            continue;
+        }
+        end.atFirst = from.IsSame(vertex);
+        end.parameter = end.atFirst ? first : last;
+        (onWall ? ends : others).push_back(end);
+    }
+    if (ends.size() < 2) {
+        return false;
+    }
+
+    // Projected in turn onto each curve, in the curve's own coordinates
+    const gp_Pnt start = BRep_Tool::Pnt(vertex);
+    gp_Pnt point = start;
+    auto project = [](CurveEnd& end, const gp_Pnt& from, gp_Pnt& on) {
+        const gp_Trsf place = end.location.Transformation();
+        gp_Pnt local;
+        if (!projectOn(end.curve, from.Transformed(place.Inverted()), end.parameter, local)) {
+            return false;
+        }
+        on = local.Transformed(place);
+        return true;
+    };
+    double apart = std::numeric_limits<double>::max();
+    for (int turn = 0; turn < 200; ++turn) {
+        double worst = 0.0;
+        for (auto& end : ends) {
+            gp_Pnt on;
+            if (!project(end, point, on)) {
+                return false;
+            }
+            worst = std::max(worst, on.Distance(point));
+            point = on;
+        }
+        apart = worst;
+        if (worst < 1e-12) {
+            break;
+        }
+    }
+    // The last point is on the last curve: what the others still need
+    double needs = 0.0;
+    for (auto& end : ends) {
+        gp_Pnt on;
+        if (!project(end, point, on)) {
+            return false;
+        }
+        needs = std::max(needs, on.Distance(point));
+    }
+    const double tolerance = BRep_Tool::Tolerance(vertex);
+    if (apart > healed || needs > healed || point.Distance(start) > tolerance) {
+        return false;
+    }
+
+    // What the vertex must still cover: its edges' tolerances, and the ends that stay
+    double covers = std::max(Precision::Confusion(), 2 * needs);
+    auto endOf = [&vertex](const TopoDS_Edge& edge) {
+        BRepAdaptor_Curve curve(edge);
+        TopoDS_Vertex from;
+        TopoDS_Vertex to;
+        TopExp::Vertices(edge, from, to);
+        // a closed edge has both ends here: the farther one counts
+        return std::make_pair(
+            from.IsSame(vertex) ? curve.Value(curve.FirstParameter())
+                                : curve.Value(curve.LastParameter()),
+            to.IsSame(vertex) ? curve.Value(curve.LastParameter())
+                              : curve.Value(curve.FirstParameter())
+        );
+    };
+    std::vector<CurveEnd> joining;
+    for (auto& end : others) {
+        gp_Pnt on;
+        CurveEnd there = end;
+        if (project(there, point, on) && on.Distance(point) <= healed) {
+            joining.push_back(there);
+        }
+        else {
+            fixed.push_back(end.edge);
+        }
+    }
+    for (const auto& edge : fixed) {
+        if (BRep_Tool::Degenerated(edge)) {
+            return false;
+        }
+        const auto [one, two] = endOf(edge);
+        covers = std::max({covers, 1.01 * one.Distance(point), 1.01 * two.Distance(point)});
+    }
+    if (covers > tolerance) {
+        return false;
+    }
+
+    // The walls' edges must all end here; then the vertex moves, and the rest follow if they can
+    HealRecord trial;
+    for (const auto& end : ends) {
+        if (!endAt(end, trial)) {
+            trial.undo();
+            return false;
+        }
+    }
+    for (const auto& end : joining) {
+        if (!endAt(end, trial)) {
+            const auto [one, two] = endOf(end.edge);
+            covers = std::max({covers, 1.01 * one.Distance(point), 1.01 * two.Distance(point)});
+            if (covers > tolerance) {
+                trial.undo();
+                return false;
+            }
+        }
+    }
+    record.adopt(trial);
+    record.keep(vertex);
+    for (const auto& shape : edgesAt) {
+        covers = std::max(covers, BRep_Tool::Tolerance(TopoDS::Edge(shape)));
+    }
+    auto* tvertex = static_cast<BRep_TVertex*>(vertex.TShape().get());
+    tvertex->Pnt(point.Transformed(vertex.Location().Inverted().Transformation()));
+    // Down to what its edges still need, never up
+    if (covers < tvertex->Tolerance()) {
+        tvertex->Tolerance(covers);
+    }
+    tvertex->Modified(true);
+    return true;
+}
+
+std::string healSliverCornersMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_HEAL_SLIVER_CORNERS") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_HEAL_SLIVER_CORNERS");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+}  // namespace
+
+bool healSliverCornersEnabled()
+{
+    const std::string mode = healSliverCornersMode();
+    if (mode == "on" || mode == "1") {
+        return true;
+    }
+    if (mode == "off" || mode == "0") {
+        return false;
+    }
+    return App::GetApplication()
+        .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/Boolean")
+        ->GetBool("HealSliverCorners", false);
+}
+
+SliverHeal healSliverCorners(
+    const TopoDS_Shape& result,
+    const std::vector<TopoShape>& inputs,
+    const std::function<bool(const TopoDS_Shape&)>& check
+)
+{
+    SliverHeal heal;
+    if (result.IsNull()) {
+        return heal;
+    }
+    HealRecord record;
+    try {
+        TopTools_IndexedDataMapOfShapeListOfShape facesOf;
+        TopExp::MapShapesAndUniqueAncestors(result, TopAbs_EDGE, TopAbs_FACE, facesOf);
+
+        // The edges standing off their surfaces; most results have none, and are read no further
+        struct Candidate
+        {
+            TopoDS_Edge edge;
+            TopoDS_Face first;
+            TopoDS_Face second;
+            StandingOff off;
+        };
+        std::vector<Candidate> candidates;
+        for (int i = 1; i <= facesOf.Extent(); ++i) {
+            const TopTools_ListOfShape& faces = facesOf(i);
+            if (faces.Extent() != 2) {
+                continue;
+            }
+            const TopoDS_Edge edge = TopoDS::Edge(facesOf.FindKey(i).Oriented(TopAbs_FORWARD));
+            const TopoDS_Face first = TopoDS::Face(faces.First());
+            const TopoDS_Face second = TopoDS::Face(faces.Last());
+            if (auto off = standingOff(edge, first, second)) {
+                candidates.push_back({edge, first, second, *off});
+            }
+        }
+        if (candidates.empty()) {
+            return heal;
+        }
+
+        // An input's edges and vertices are the inputs' own: never changed
+        std::unordered_set<const TopoDS_TShape*> old;
+        for (const auto& input : inputs) {
+            for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+                for (TopExp_Explorer it(input.getShape(), type); it.More(); it.Next()) {
+                    old.insert(it.Current().TShape().get());
+                }
+            }
+        }
+
+        // Nor is a sub-shape the result uses at two places (one shape under two locations, as a
+        // prism's top and bottom): a change to one would change the other
+        {
+            std::unordered_map<const TopoDS_TShape*, TopLoc_Location> placed;
+            for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+                for (TopExp_Explorer it(result, type); it.More(); it.Next()) {
+                    const TopoDS_Shape& shape = it.Current();
+                    const auto found = placed.emplace(shape.TShape().get(), shape.Location());
+                    if (!found.second && found.first->second != shape.Location()) {
+                        old.insert(shape.TShape().get());
+                    }
+                }
+            }
+        }
+
+        std::vector<TopoDS_Edge> moved;
+        for (const auto& candidate : candidates) {
+            if (old.count(candidate.edge.TShape().get()) || !hasCurvesOnly(candidate.edge)) {
+                continue;
+            }
+            if (moveOntoIntersection(
+                    candidate.edge,
+                    candidate.first,
+                    candidate.second,
+                    candidate.off,
+                    record
+                )) {
+                moved.push_back(candidate.edge);
+                ++heal.edges;
+            }
+        }
+        if (moved.empty()) {
+            return heal;
+        }
+
+        std::unordered_set<const TopoDS_TShape*> movedShapes;
+        for (const auto& edge : moved) {
+            movedShapes.insert(edge.TShape().get());
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape edgesOf;
+        TopExp::MapShapesAndUniqueAncestors(result, TopAbs_VERTEX, TopAbs_EDGE, edgesOf);
+        std::unordered_set<const TopoDS_TShape*> seen;
+        for (const auto& edge : moved) {
+            for (TopoDS_Iterator it(edge); it.More(); it.Next()) {
+                const TopoDS_Vertex vertex = TopoDS::Vertex(it.Value());
+                if (!seen.insert(vertex.TShape().get()).second
+                    || old.count(vertex.TShape().get()) || !edgesOf.Contains(vertex)) {
+                    continue;
+                }
+                if (moveToCrossing(
+                        vertex,
+                        edgesOf.FindFromKey(vertex),
+                        facesOf,
+                        movedShapes,
+                        old,
+                        record
+                    )) {
+                    ++heal.vertices;
+                }
+            }
+        }
+
+        // The faces of the changed edges must still check; else everything goes back
+        BRep_Builder builder;
+        TopoDS_Compound touched;
+        builder.MakeCompound(touched);
+        TopTools_IndexedMapOfShape added;
+        for (const auto& edge : record.changedEdges()) {
+            if (!facesOf.Contains(edge)) {
+                continue;
+            }
+            for (const auto& face : facesOf.FindFromKey(edge)) {
+                if (!added.Contains(face)) {
+                    added.Add(face);
+                    builder.Add(touched, face);
+                }
+            }
+        }
+        const bool valid = check ? check(touched) : KernelBudget::checkValid(touched);
+        if (!valid) {
+            record.undo();
+            heal = SliverHeal();
+            heal.undone = true;
+            FC_LOG("sliver corners: the healed faces fail the check; the Boolean's result stands");
+            return heal;
+        }
+    }
+    catch (const Standard_Failure& e) {
+        record.undo();
+        heal = SliverHeal();
+        heal.undone = true;
+        FC_WARN("sliver corners: " << e.GetMessageString() << "; the Boolean's result stands");
+        return heal;
+    }
+    FC_LOG("sliver corners: " << heal.edges << " edges moved onto their faces, " << heal.vertices
+                              << " vertices to their corners");
+    return heal;
 }
 
 }  // namespace Part

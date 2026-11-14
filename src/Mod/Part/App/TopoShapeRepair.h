@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -194,5 +195,50 @@ PartExport std::string bridgedRecess(
     const std::vector<TopoShape>& edges,
     double radius
 );
+
+/// What healSliverCorners() changed
+struct SliverHeal
+{
+    int edges = 0;        ///< edges moved onto their two faces' intersection
+    int vertices = 0;     ///< vertices moved to where their edges cross
+    bool undone = false;  ///< the changed faces failed the check, and everything was put back
+};
+
+/** Closes the corners a Boolean leaves open beside a sliver (FreeCAD-CH, ops#640, FSLC rb50/51;
+ * notes/boolean-sliver-corner-heal.md).
+ *
+ * A fuzzy Boolean that merges a sliver's two corners into one vertex leaves a valid shape whose
+ * curves don't meet: an arc ends at the vertex, the next one a hair (1e-6) beside it, and the
+ * straight edge between them is the sliver's line, off the face it bounds. OCCT measures along the
+ * edges, so each such corner drops area and volume. On the Boolean's result, in place:
+ * - a straight edge between two faces, each a plane or a cylinder along it, whose line stands off
+ *   one of them by more than 1e-7 and within the edge's tolerance, is moved onto the two surfaces'
+ *   intersection (its line in space and on each face), if that lies within its vertices'
+ *   tolerances;
+ * - each end vertex of a moved edge is moved to where its edges' curves cross (a common point
+ *   within 1e-7 and within the vertex's tolerance, else it stays), every edge there ends at it,
+ *   and its tolerance goes down to what its edges need, never up;
+ * - nothing else is read: an edge within 1e-7 of its faces, a gap wider than the tolerance (the
+ *   shape was invalid before), an edge or vertex that is also in one of \a inputs (the Boolean
+ *   reuses the inputs' untouched sub-shapes, which are the inputs' own);
+ * - everything changed is recorded; if the faces of the changed edges then fail the check
+ *   (KernelBudget::checkValid(), or \a check for tests), all of it is put back.
+ * The sub-shapes keep their identity, so the maker's history still names them.
+ *
+ * @param result The Boolean maker's result, changed in place
+ * @param inputs The Boolean's inputs
+ * @param check Stands in for the validity check of the changed faces (tests)
+ */
+PartExport SliverHeal healSliverCorners(
+    const TopoDS_Shape& result,
+    const std::vector<TopoShape>& inputs,
+    const std::function<bool(const TopoDS_Shape&)>& check = {}
+);
+
+/** Whether Booleans heal their sliver corners: off by default. The parameter
+ * "User parameter:BaseApp/Preferences/Mod/Part/Boolean", "HealSliverCorners", unless the
+ * environment says otherwise: FREECAD_CH_HEAL_SLIVER_CORNERS "1" or "on", "0" or "off". Read at
+ * each Boolean. */
+PartExport bool healSliverCornersEnabled();
 
 }  // namespace Part
