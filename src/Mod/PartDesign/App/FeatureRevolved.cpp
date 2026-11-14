@@ -69,6 +69,7 @@
 #include <Geom_BezierSurface.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_Line.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ElementarySurface.hxx>
@@ -77,10 +78,12 @@
 #include <Geom_TrimmedCurve.hxx>
 #include <GeomAPI_ExtremaCurveSurface.hxx>
 #include <GeomAPI_IntCS.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAdaptor_Surface.hxx>
 #include <GeomConvert.hxx>
 #include <GeomConvert_BSplineSurfaceToBezierSurface.hxx>
+#include <GeomConvert_CurveToAnaCurve.hxx>
 #include <GProp_GProps.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GCPnts_UniformAbscissa.hxx>
@@ -2748,8 +2751,64 @@ bool freeFormEdge(const TopoDS_Edge& edge)
             || curve->DynamicType() == STANDARD_TYPE(Geom_BezierCurve));
 }
 
+// The line or circle a free-form edge lies on, within Precision::Confusion() (FreeCAD-CH ops#768),
+// with its parameters for the edge's ends; null if there is none. A B-spline segment or arc in a
+// profile revolves into a SurfaceOfRevolution where Onshape makes a cone, cylinder, plane, torus
+// or sphere, and later fillets and Booleans then work on a free-form surface.
+Handle(Geom_Curve) analyticEdgeCurve(const TopoDS_Edge& edge, double& newFirst, double& newLast)
+{
+    if (!freeFormEdge(edge) || BRep_Tool::Degenerated(edge)) {
+        return {};
+    }
+    double first = 0.0;
+    double last = 0.0;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);  // located
+    if (curve.IsNull() || !(last > first)) {
+        return {};
+    }
+    const double tolerance = Precision::Confusion();
+    GeomConvert_CurveToAnaCurve converter(curve);
+    Handle(Geom_Curve) analytic;
+    try {
+        if (!converter.ConvertToAnalytical(tolerance, analytic, first, last, newFirst, newLast)) {
+            return {};
+        }
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    while (!analytic.IsNull()) {
+        auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(analytic);
+        if (trimmed.IsNull()) {
+            break;
+        }
+        analytic = trimmed->BasisCurve();
+    }
+    if (analytic.IsNull()
+        || (analytic->DynamicType() != STANDARD_TYPE(Geom_Line)
+            && analytic->DynamicType() != STANDARD_TYPE(Geom_Circle))
+        || !(newLast > newFirst)) {
+        return {};
+    }
+    // The same ends, and every sample of the edge on the analytic piece between them
+    if (analytic->Value(newFirst).Distance(curve->Value(first)) > tolerance
+        || analytic->Value(newLast).Distance(curve->Value(last)) > tolerance) {
+        return {};
+    }
+    constexpr int samples = 16;
+    for (int i = 1; i < samples; ++i) {
+        const gp_Pnt point = curve->Value(first + (last - first) * i / samples);
+        GeomAPI_ProjectPointOnCurve projection(point, analytic, newFirst, newLast);
+        if (projection.NbPoints() == 0 || projection.LowerDistance() > tolerance) {
+            return {};
+        }
+    }
+    return analytic;
+}
+
 // The profile with fresh edges in every planar face where a free-form edge ends on the axis
-// (FreeCAD-CH ops#640, Case Base #113). BRepPrimAPI_MakeRevol turned such a face, taken from a
+// (FreeCAD-CH ops#640, Case Base #113), or where a free-form edge lies on a line or circle
+// (ops#768: those edges are made on the line or circle). BRepPrimAPI_MakeRevol turned such a face, taken from a
 // solid (a rational B-spline half-ellipse cap whose chord lies on the axis), into an invalid solid
 // with no volume, and a quarter turn into the wrong volume (-0.454 for 2.681); the same curves as
 // new edges revolve right. A Groove then cut nothing and reported success. The face is rebuilt
@@ -2774,6 +2833,11 @@ TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
             TopoDS_Vertex last;
             TopExp::Vertices(edge, first, last);
             if (freeFormEdge(edge) && (onAxis(first) || onAxis(last))) {
+                return true;
+            }
+            double analyticFirst = 0.0;
+            double analyticLast = 0.0;
+            if (!analyticEdgeCurve(edge, analyticFirst, analyticLast).IsNull()) {
                 return true;
             }
         }
@@ -2808,7 +2872,10 @@ TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
             }
             double first = 0.0;
             double last = 0.0;
-            const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);  // located
+            Handle(Geom_Curve) curve = analyticEdgeCurve(edge, first, last);
+            if (curve.IsNull()) {
+                curve = BRep_Tool::Curve(edge, first, last);  // located
+            }
             TopoDS_Vertex v1;
             TopoDS_Vertex v2;
             TopExp::Vertices(edge, v1, v2);
