@@ -8609,6 +8609,8 @@ TopoShape& TopoShape::makeElementGeneralFuse(
         FCBRepAlgoAPIHelper::setAutoFuzzy(&mkGFA);
     }
     mkGFA.SetNonDestructive(Standard_True);
+    // OCCT's intersection would not end on it (ops#773)
+    FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(GFAArguments);
 #if OCC_VERSION_HEX >= 0x070600
     mkGFA.Build(std::make_unique<Part::ProgressIndicator>()->Start());
 #else
