@@ -5159,6 +5159,9 @@ bool Sketch::updateNonDrivingConstraints()
         if (constrDef.driving) {
             continue;
         }
+        if (constrDef.constr->Type == Pattern) {
+            continue;  // FreeCAD-CH: a reference pattern (only from a file) has no value to read
+        }
         if (constrDef.constr->Type == SnellsLaw) {
             double n1 = *(constrDef.value);
             double n2 = *(constrDef.secondvalue);

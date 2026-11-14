@@ -3144,6 +3144,34 @@ bool SketchObject::evaluateConstraint(const Constraint* constraint) const
         for (const auto& [slot, copy] : record->instances) {
             valid = valid && ownOrUndef(copy);
         }
+        if (!valid) {
+            return false;
+        }
+        // and of the types the pattern's operations take them for: a point, a line, a circle or
+        // an arc as a seed, its copies of its type, a point as the pivot, lines as directions
+        auto isA = [this](int geoId, const Base::Type& type) {
+            return getGeometry(geoId)->getTypeId() == type;
+        };
+        for (int seed : record->seeds) {
+            valid = valid
+                && (isA(seed, Part::GeomPoint::getClassTypeId())
+                    || isA(seed, Part::GeomLineSegment::getClassTypeId())
+                    || isA(seed, Part::GeomCircle::getClassTypeId())
+                    || isA(seed, Part::GeomArcOfCircle::getClassTypeId()));
+        }
+        if (record->kind == PatternRecord::Kind::Circular) {
+            valid = valid && isA(record->pivot, Part::GeomPoint::getClassTypeId());
+        }
+        else {
+            valid = valid && isA(record->direction1, Part::GeomLineSegment::getClassTypeId())
+                && (record->direction2 == GeoEnum::GeoUndef
+                    || isA(record->direction2, Part::GeomLineSegment::getClassTypeId()));
+        }
+        for (const auto& [slot, copy] : record->instances) {
+            valid = valid
+                && (copy == GeoEnum::GeoUndef
+                    || isA(copy, getGeometry(record->seeds[slot[0]])->getTypeId()));
+        }
         return valid;
     }
 
