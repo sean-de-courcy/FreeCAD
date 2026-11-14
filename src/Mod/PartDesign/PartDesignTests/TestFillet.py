@@ -469,6 +469,34 @@ class TestFillet(unittest.TestCase):
         self.assertLess(fillet.Shape.Volume, prism)
         self.assertGreater(fillet.Shape.Volume, prism - 2 * (1 - pi / 4) * 1.5**2 * (80 + 20 * pi))
 
+    def testRoundUnderALeaningWallIsTheBallsContact(self):
+        # ops#640, decision 425: a round's chain of cylinders and spline faces (a leaning stadium
+        # boss on a slab; Nest Insert's slot round). The cylinders under the leaning planes are
+        # the ball's already and stay; the faces under the leaning circles' walls, 5e-3 off as
+        # OCCT builds them, become the ball's. The corpus model RoundUnderLeaningWall states the
+        # contact in closed form and raises when it is missed
+        from PartDesignTests.Compat import models  # first: it imports models_partdesign
+        from PartDesignTests.Compat import models_partdesign as corpus
+
+        models.MODELS["RoundUnderLeaningWall"](FreeCAD.newDocument)
+        document = FreeCAD.getDocument("RoundUnderLeaningWall")
+        self.addCleanup(FreeCAD.closeDocument, "RoundUnderLeaningWall")
+        fillet = document.getObject("FootRound")
+        self.assertTrue(fillet.isValid())
+        self.assertTrue(fillet.Shape.isValid())
+        self.assertEqual(len(fillet.Shape.Faces), 15)
+        cylinders, others, ball = corpus.roundUnderLeaningWallContact(
+            fillet, corpus.LEANING_BOSS_RADIUS, grid=25
+        )
+        self.assertEqual((cylinders, others), (2, 2))
+        self.assertLess(ball, 1e-6)
+        # The round adds material at the boss's foot: more than the slab and the leaning boss
+        # (30 high over the stadium's area, less the 5 inside the slab), less than those with a
+        # quarter-round bead of twice the foot's length
+        base = 100 * 70 * 5 + 25 * (40 * 20 + pi * 100)
+        self.assertGreater(fillet.Shape.Volume, base)
+        self.assertLess(fillet.Shape.Volume, base + 2 * (1 - pi / 4) * 2.0**2 * (80 + 20 * pi))
+
     def testFilletWholeOutlineOfAStadium(self):
         # ops#298: OCCT "succeeds" on a stadium's whole top outline at r = 2 (half its width),
         # keeping the top face with area 0; the exact construction builds the full round. Just
