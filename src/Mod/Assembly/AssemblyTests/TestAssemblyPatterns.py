@@ -411,31 +411,48 @@ class TestAssemblyPatterns(AssemblyTestBase):
             self.assertPlacement(self.seed, seed_plc, "the grounded seed")
             self.assertLinear(pattern, self.seed, 6, 12.0, self.plateX())
 
-    def test_count_kept_for_a_mated_copy(self):
-        """A count that would remove a copy a mate uses is refused: the pattern names the mate and
-        nothing changes (Onshape's mate fails; ours would have lost its part without an error)"""
+    def test_lowered_count_deletes_the_mates_of_dropped_copies(self):
+        """A lowered count deletes the copies it drops and their mates, in the same undo step, as
+        Onshape's (AP5; ops#683, design C6). Suppressing the pattern still refuses (the copies come
+        back with it)"""
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("make")
         pattern = self.linear(4, 20.0)
         last = [c for c in pattern.Instances if c.PatternIndex == 3][0]
         peg = self.instance(self.block, App.Placement(App.Vector(0, 0, 50), App.Rotation()))
         joint = self.fixedJoint(peg, last, name="PegOnLast")
         joint.Label = "Fastened 9"
         self.doc.recompute()
+        self.doc.commitTransaction()
         names = [c.Name for c in pattern.Instances]
-        pattern.Count = 3
-        self.doc.recompute()
-        self.assertIn("Invalid", pattern.State)
-        self.assertEqual([c.Name for c in pattern.Instances], names)
-        refs = [joint.Reference1[0] if joint.Reference1 else None, joint.Reference2[0] if joint.Reference2 else None]
-        self.assertIn(last, refs, f"the mate keeps its part: {[r.Name if r else None for r in refs]}")
+        lastName, jointName = last.Name, joint.Name
+
         pattern.Suppressed = True
         self.doc.recompute()
-        self.assertEqual([c.Name for c in pattern.Instances], names, "suppressed: the same rule")
+        self.assertIn("Invalid", pattern.State)
+        self.assertEqual([c.Name for c in pattern.Instances], names, "suppressed: refused")
+        self.assertIsNotNone(self.doc.getObject(jointName))
         pattern.Suppressed = False
-        self.doc.removeObject(joint.Name)
+        self.doc.recompute()
+
+        peg_plc = peg.Placement
+        self.doc.openTransaction("count")
         pattern.Count = 3
         self.doc.recompute()
+        self.doc.commitTransaction()
         self.assertNotIn("Invalid", pattern.State)
+        self.assertIsNone(self.doc.getObject(lastName), "the dropped copy")
+        self.assertIsNone(self.doc.getObject(jointName), "its mate")
         self.assertLinear(pattern, self.seed, 3, 20.0, self.plateX())
+        self.assertPlacement(peg, peg_plc, "the peg stays where it was, free")
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(int(pattern.Count), 4)
+        self.assertIsNotNone(self.doc.getObject(lastName), "the copy, back in one undo")
+        self.assertIsNotNone(self.doc.getObject(jointName), "its mate, back in the same undo")
+        self.assertEqual(sorted(c.Name for c in pattern.Instances), sorted(names))
+        self.assertLinear(pattern, self.seed, 4, 20.0, self.plateX())
 
     def test_undo_of_a_recompute_outside_its_transaction(self):
         """A count lowered, committed, then recomputed (a Ctrl+R after a property edit) makes two
@@ -708,21 +725,23 @@ class TestAssemblyPatterns(AssemblyTestBase):
 
     def test_second_direction_mate_to_a_copy(self):
         """A peg fastened to the copy at (1, 1) follows it when the second distance changes; a
-        second count that would remove it is refused"""
+        second count that removes the copy deletes the mate (C6)"""
         pattern = self.grid(2, 20.0, 2, 15.0)
         corner = [c for c in pattern.Instances if AssemblyPattern.cellOf(c) == (1, 1)][0]
         peg = self.instance(self.block, App.Placement(App.Vector(-50, -50, 40), App.Rotation(10, 20, 30)))
-        self.fixedJoint(peg, corner, name="PegOnCorner")
+        mate = self.fixedJoint(peg, corner, name="PegOnCorner")
         self.doc.recompute()
         self.assertPlacement(peg, corner.Placement, "the peg on (1, 1)")
         pattern.Distance2 = 45.0
         self.doc.recompute()
         self.assertGrid(pattern, self.seed, 2, 20.0, 2, 45.0, self.plateX(), self.plateY())
         self.assertPlacement(peg, corner.Placement, "the peg follows (1, 1)")
+        jointName, cornerName = mate.Name, corner.Name
         pattern.Count2 = 1
         self.doc.recompute()
-        self.assertIn("Invalid", pattern.State)
-        self.assertIsNotNone(self.doc.getObject(corner.Name), "the mated copy stays")
+        self.assertNotIn("Invalid", pattern.State)
+        self.assertIsNone(self.doc.getObject(cornerName), "the dropped copy")
+        self.assertIsNone(self.doc.getObject(jointName), "its mate")
 
     def test_second_direction_save_and_reopen(self):
         """The grid's copies, their cells and placements survive save and reopen, and its counts

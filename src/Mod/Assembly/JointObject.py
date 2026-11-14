@@ -283,6 +283,21 @@ class Joint:
                 locked=True,
             )
 
+        # FreeCAD-CH (ops#683, design C2): Onshape's Reorient secondary axis, quarter turns about the
+        # second connector's Z taken before the flip and the offset (Offset2's rotation is the
+        # rotation offset, taken after the offset's translation)
+        if not hasattr(joint, "Reorient"):
+            joint.addProperty(
+                "App::PropertyInteger",
+                "Reorient",
+                "Joint Connector 2",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Quarter turns of the second connector about its Z axis (Reorient secondary axis)",
+                ),
+                locked=True,
+            )
+
         # Other properties
         if not hasattr(joint, "Angle"):
             self.addAngleProperty(joint)
@@ -806,7 +821,7 @@ class Joint:
         ):
             return
 
-        if prop == "Offset1" or prop == "Offset2":
+        if prop == "Offset1" or prop == "Offset2" or prop == "Reorient":
             self.updateJCSPlacements(joint)
 
             presolved = joint.JointType in JointUsingPreSolve and self.preSolve(joint, False)
@@ -909,12 +924,46 @@ class Joint:
         if index == 0:
             plc = plc * joint.Offset1
         else:
-            plc = plc * joint.Offset2
+            plc = plc * self.secondOffset(joint, plc)
 
         return plc
 
+    def secondOffset(self, joint, plc2):
+        """FreeCAD-CH (ops#683, design C2): Onshape's mate (oracle 12, GB31) is
+            first connector = second x Reorient x Flip x Translate(Offset2.Base) x Rotate(Offset2.Rotation)
+        so the offset runs along the first connector's axes, flipped or not. The flip is the parts'
+        pose (matchJCS: first x Flip = second x offset), so the offset is conjugated by it here.
+        plc2 is the second connector without its offset, in its part."""
+        turns = int(getattr(joint, "Reorient", 0)) % 4
+        reorient = App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 90 * turns))
+        offset = joint.Offset2
+        if joint.JointType in JointUsingPreSolve and self.isPoseFlipped(joint, plc2, reorient, offset):
+            flip = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 180))
+            return reorient * flip * offset * flip
+        return reorient * offset
+
+    def isPoseFlipped(self, joint, plc2, reorient, offset):
+        """Whether the parts sit with the first connector's Z against the second's (Flip primary)"""
+        ref1, ref2 = joint.Reference1, joint.Reference2
+        if not UtilsAssembly.isRefValid(ref1, 2) or not UtilsAssembly.isRefValid(ref2, 2):
+            return False
+        ignoreVertex = joint.JointType == "Distance"
+        plc1 = UtilsAssembly.findPlacement(ref1, ignoreVertex) * joint.Offset1
+        z1 = UtilsAssembly.getJcsGlobalPlc(plc1, ref1).Rotation.multVec(App.Vector(0, 0, 1))
+        jcs2 = UtilsAssembly.getJcsGlobalPlc(plc2, ref2)
+        flip = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 180))
+        # The first connector's Z in each pose: second x Reorient x [Flip] x offset
+        z = App.Vector(0, 0, 1)
+        unflipped = (jcs2 * reorient * offset).Rotation.multVec(z)
+        flipped = (jcs2 * reorient * flip * offset).Rotation.multVec(z)
+        return z1.dot(flipped) > z1.dot(unflipped) + 1e-9
+
     def flipOnePart(self, joint):
         self.matchJCS(joint, False, True)
+        # C2: the offset turns with the flip (it runs along the first connector's axes), so the
+        # part is placed again with the connector the flipped pose gives
+        self.updateJCSPlacements(joint)
+        self.matchJCS(joint, False)
 
     def preSolve(self, joint, savePlc=True, unflipped=False):
         # The goal of this is to put the part in the correct position to avoid wrong placement by the solve.
@@ -2225,15 +2274,9 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.joint.Proxy.flipOnePart(self.joint)
 
     def onRotate90Clicked(self):
-        """Rotate the joint attachment rotation (yaw) by +90 degrees."""
-        try:
-            cur = self.jForm.rotationSpinbox.property("rawValue")
-            if cur is None:
-                cur = 0.0
-            new_val = math.fmod(cur + 90.0, 360.0)
-            self.jForm.rotationSpinbox.setProperty("rawValue", new_val)
-        except Exception as e:
-            App.Console.PrintError(f"ERROR: failed to increment rotation spinbox: {e}\n")
+        """Onshape's Reorient secondary axis: a quarter turn of the second connector about its Z,
+        before the flip and the offset (ops#683, C2). The rotation field stays the rotation offset."""
+        self.joint.Reorient = (int(self.joint.Reorient) + 1) % 4
 
     def reverseRotToggled(self, val):
         if val:

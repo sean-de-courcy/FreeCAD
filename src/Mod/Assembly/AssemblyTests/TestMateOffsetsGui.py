@@ -272,7 +272,9 @@ class TestMateOffsetsGui(unittest.TestCase):
         self.setOffset(panel, 5, 7, 3)
         joint = self.commit(panel)
         self.assertTrue(joint.Offset2.Base.isEqual(App.Vector(5, 7, 3), 1e-9), joint.Offset2.Base)
-        self.assertTopCentreAt((5, 7, 3), flipped=True, msg="flipped, offset (5, 7, 3)")
+        # Onshape's (oracle 12, GC-B1.2; ops#683 C2): the offset runs along the first pick's
+        # connector axes, which the flip turned: (5, -7, -3) along B's
+        self.assertTopCentreAt((5, -7, -3), flipped=True, msg="flipped, offset (5, 7, 3)")
 
     def test_each_offset_axis_alone_and_together(self):
         for offset in ((5, 0, 0), (0, 7, 0), (0, 0, 3), (5, 7, 3)):

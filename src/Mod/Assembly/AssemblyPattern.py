@@ -422,19 +422,32 @@ class InstancePattern:
                 keep[key] = copy
             else:
                 extra.append(copy)
-        # A copy a mate uses isn't removed: the pattern says so and changes nothing (a mate would
-        # otherwise lose its part without an error)
+        # FreeCAD-CH (ops#683, design C6; Onshape AP5): the mates of a copy the counts drop go with
+        # it, in the same undo step, with a line in the report view. Anything else that uses the copy
+        # (a direction, a grounding, a rigid group, another pattern), and a mate of a copy that
+        # suppressing would remove, still stops the pattern, before anything changes.
         directions = [ref[0] for ref in (fp.Direction, getattr(fp, "Direction2", None)) if ref]
+        mates = []
         for copy in extra:
             users = usersOf(assembly, copy, fp)
             if copy in directions:
                 users.append(fp)
-            if users:
+            # Suppressing keeps the mates (the copies come back with them): it is still refused
+            others = users if fp.Suppressed else [u for u in users if not isMate(u)]
+            if others:
                 raise RuntimeError(
                     translate("Assembly", "{0}: {1} is used by {2}; delete or change that first").format(
-                        fp.Label, copy.Label, ", ".join(u.Label for u in users)
+                        fp.Label, copy.Label, ", ".join(u.Label for u in others)
                     )
                 )
+            mates += [u for u in users if u not in mates]
+        for mate in mates:
+            App.Console.PrintMessage(
+                translate("Assembly", "{0}: {1} deleted with the instance the count removed\n").format(
+                    fp.Label, mate.Label
+                )
+            )
+            doc.removeObject(mate.Name)
         for copy in extra:
             doc.removeObject(copy.Name)
         ordered = []
@@ -527,6 +540,11 @@ def usersOf(assembly, obj, pattern=None):
         ):
             users.append(other)
     return users
+
+
+def isMate(obj):
+    """A joint (a mate), as opposed to a grounding, a rigid group or a pattern"""
+    return hasattr(obj, "Reference1") and hasattr(obj, "JointType")
 
 
 def isPatternCopy(obj):
