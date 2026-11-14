@@ -207,9 +207,12 @@ class TestSketchValidateCoincidents(unittest.TestCase):
             doc.recompute()
             # Assert
             self.assertEqual(len(doc.Sketch001.Constraints), 2)  # Still have the constraints
-            # The link to the deleted edge is kept, and the sketch fails (ops#72)
+            # The link to the deleted edge is kept (ops#72), and the sketch computes on the frozen
+            # geometry with a warning naming it, as Onshape's Use (ops#656 D4 row 2)
             self.assertEqual(doc.Sketch001.ExternalGeometry, [(doc.Sketch, ("?Edge3",))])
-            self.assertFalse(doc.Sketch001.isValid())
+            self.assertTrue(doc.Sketch001.isValid(), doc.Sketch001.getStatusString())
+            self.assertIn("Warning", doc.Sketch001.State)
+            self.assertIn("Edge3", doc.Sketch001.getStatusString())
             self.assertEqual(len(doc.Sketch001.Geometry), 1)
             self.assertEqual(
                 len(doc.Sketch001.ExternalGeo), 3

@@ -80,7 +80,7 @@ class TestSketchMissingExternalGui(SketcherGuiTestCase):
     def testOpeningKeepsTheMissingLink(self):
         """A sketch on the XY plane with the pad's top edge at x = 20 as external geometry and a
         circle centred on it: opened after the edit, it keeps the link, the frozen line at x = 20
-        and the constraint on it, and still fails."""
+        and the constraint on it, and still warns (ops#656 D4 row 2)."""
         sketch = self.sketchOn("OnRight", "XY_Plane")
         top = edge_between(self.pad.Shape, (20, 0, 10), (20, 20, 10))
         sketch.addExternal(self.pad.Name, top)
@@ -89,7 +89,8 @@ class TestSketchMissingExternalGui(SketcherGuiTestCase):
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
 
         self.replaceRightSide()
-        self.assertFalse(sketch.isValid())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         self.openAndClose(sketch)
 
         self.assertEqual(sketch.ExternalGeometry, [(self.pad, ("?" + top,))])
@@ -98,7 +99,8 @@ class TestSketchMissingExternalGui(SketcherGuiTestCase):
         self.assertTrue(all(abs(p.x - 20) < TOL for p in lines[0]))
         self.assertEqual(self.externalConstraints(sketch), [(0, -3)])
         self.doc.recompute()
-        self.assertFalse(sketch.isValid())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
 
     def testOpeningKeepsEachLinksConstraints(self):
         """A sketch on the YZ plane with two links: (1) the pad's side face at x = 20, which
@@ -124,12 +126,9 @@ class TestSketchMissingExternalGui(SketcherGuiTestCase):
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
 
         self.replaceRightSide()
-        if getattr(self.doc, "ReferenceSolver", False):
-            # link 2 resolves: a reference solver document computes on it, warned (ops#127)
-            self.assertTrue(sketch.isValid(), sketch.getStatusString())
-            self.assertIn("Warning", sketch.State)
-        else:
-            self.assertFalse(sketch.isValid())
+        # computed on link 1's frozen edges and link 2, warned (ops#127, ops#656 D4 row 2)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         self.openAndClose(sketch)
 
         edge = edge_between(self.pad.Shape, (0, 0, 10), (0, 20, 10))  # renumbered by the edit

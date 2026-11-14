@@ -90,12 +90,13 @@ class TestSketchBrokenExternalTreeGui(SketcherGuiTestCase):
         profile.delGeometry(1)
         add_lines(profile, [(20, 0), (25, 10), (20, 20)])
         self.doc.recompute()
-        self.assertFalse(sketch.isValid())
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         self.assertEqual(self.flagOf(sketch), f"{BROKEN}Pad.{top}")
 
     def testSourceToggledToConstructionFlagged(self):
         """Upstream issue 32102: Dest projects Source's second line (x = 10); toggling that line
-        to construction takes it out of Source's shape. Dest fails and is flagged."""
+        to construction takes it out of Source's shape. Dest warns (ops#656 D4 row 2) and is flagged."""
         source = self.doc.addObject("Sketcher::SketchObject", "Source")
         add_lines(source, [(0, 0), (10, 0), (10, 10)])
         self.doc.recompute()
@@ -110,7 +111,8 @@ class TestSketchBrokenExternalTreeGui(SketcherGuiTestCase):
         source.toggleConstruction(1)
         self.doc.recompute()
         self.assertEqual(len(source.Shape.Edges), 1)
-        self.assertFalse(dest.isValid())
+        self.assertTrue(dest.isValid(), dest.getStatusString())
+        self.assertIn("Warning", dest.State)
         self.assertEqual(self.flagOf(dest), f"{BROKEN}Source.Edge2")
         # the flag goes when the link is repaired: the line is defining again
         source.toggleConstruction(1)
