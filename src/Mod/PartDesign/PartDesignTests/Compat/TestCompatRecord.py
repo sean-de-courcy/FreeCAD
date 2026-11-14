@@ -451,3 +451,50 @@ class TestCompatMovedBody(unittest.TestCase):
         wrong["objects"]["Angle"]["refs"]["Reference2[0]"]["key"]["centre"][1] += 1e-3
         self.assertIn(where + " (the delta's new value)",
                       CompatRecord.compare(old, wrong, "recompute", deltas=entries)[0][0])
+
+    # c768's controls (ops#673 6871844284): both must be red
+
+    def angleRecords(self):
+        def rec(centre, normal):
+            return {"objects": {"Angle": {"type": "App::FeaturePython", "props": {}, "refs": {
+                "Reference2[0]": {"target": "Tilted", "sub": "Face5",
+                                  "key": {"centre": centre, "normal": normal}}}}}}
+        return (rec([52.5, 22.165063509461095, 6.25], [0.0, 0.5, -0.8660254037844387]),
+                rec([52.5, 17.8349364905389, 6.25], [0.0, 0.5, 0.8660254037844388]))
+
+    def testAReferencedFaceThatMovesWithoutADeltaIsRed(self):
+        old, new = self.angleRecords()
+        lines = CompatRecord.compare(old, new, "recompute")[0]
+        self.assertIn("Angle.Reference2[0] (Face5 -> Face5).centre[1]", "\n".join(lines))
+        self.assertIn("Angle.Reference2[0] (Face5 -> Face5).normal[2]", "\n".join(lines))
+
+    def testADeltaForRecomputeAndRoundtripIsRedWhenTheOpenPassChangesToo(self):
+        # 'passes' holds only where the open pass is checked unchanged: the gate's open pass takes
+        # the entries `deltasFor(..., "open")` leaves, so a change the open pass sees stays red there
+        old, new = self.angleRecords()
+        entries, others = CompatRecord.deltaEntries(old, new, "recompute")
+        self.assertEqual(others, [])
+        for entry in entries.values():
+            entry["passes"] = ["recompute", "roundtrip"]
+        self.assertEqual(
+            CompatRecord.compare(old, new, "recompute", deltas=CompatRecord.deltasFor(entries, "recompute"))[0], [])
+        lines = CompatRecord.compare(old, new, "open", deltas=CompatRecord.deltasFor(entries, "open"))[0]
+        self.assertTrue(any("Angle.Reference2[0] (Face5 -> Face5).centre[1]" in line for line in lines), lines)
+
+    def testMakeDeltaWritesNoPassesForAChangeTheOpenPassSaw(self):
+        from PartDesignTests.Compat import make_delta
+
+        old, new = self.angleRecords()
+        folder = tempfile.mkdtemp(prefix="compat_make_delta_open_")
+        try:
+            for passName in ("open", "recompute"):
+                stem = f"gen1-Model-alone.{passName}.Doc"
+                for rec, kind in ((old, "expected"), (new, "actual")):
+                    with open(os.path.join(folder, f"{stem}.{kind}.json"), "w", encoding="utf-8") as fh:
+                        json.dump(rec, fh)
+            found, problems = make_delta.collect(folder, CompatRecord.DELTA_TOLERANCE[0])
+            self.assertEqual(problems, [])
+            for entry in found["gen1"]["Model"]["Doc"].values():
+                self.assertNotIn("passes", make_delta.entryOf(entry))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
