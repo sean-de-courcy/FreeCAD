@@ -706,10 +706,11 @@ TEST_F(RollingBallBlendTest, exactFacesAmongSplineOnesStay)
                 EXPECT_GT(report.seamMove, 1e-3) << which;
             }
             EXPECT_TRUE(BRepCheck_Analyzer(report.shape).IsValid()) << which;
-            // OCCT's fillet leaves 3e-3 and more on its blend's edges; what is left is the model's own
-            // Boolean (5e-6 on the pocket)
+            // OCCT's fillet leaves 3e-3 and more on its blend's edges. The correction's compact fit may
+            // slip along a contact curve against its pcurve (1.8e-5 on the pocket at r 1 and 2); the
+            // cubic through every station is taken only where that would pass an edge's own tolerance
             EXPECT_GT(maxTolerance(occt.shape), 1e-3) << which;
-            EXPECT_LE(maxTolerance(report.shape), 1e-5) << which;
+            EXPECT_LE(maxTolerance(report.shape), 1e-4) << which;
             for (const TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
                 EXPECT_EQ(count(report.shape, type), count(occt.shape, type)) << which;
             }

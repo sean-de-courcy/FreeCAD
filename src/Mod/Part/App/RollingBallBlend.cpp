@@ -1855,7 +1855,25 @@ double ballResidual(const TopoDS_Face& blend, const TopoDS_Face& wall1, const To
 
 namespace
 {
-Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius);
+Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius, bool cubicOnSlip);
+
+/// The compact fit first, as it is; if a contact edge then has a tolerance above its bound, again with the
+/// cubic through every station wherever the compact surface slips against the walls' compact pcurves. Not
+/// the cubic on every slip: SameParameter absorbs a slip along the contact curve mostly, and the cubic runs
+/// on past an end otherwise (Case Base #103's round in front of the face its edge ends against, a slip of
+/// 5.6e-6, then overflows a strip of 0.024 mm)
+Report correctEither(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius)
+{
+    Report report = correctNow(shape, blendFaces, radius, false);
+    if (report.outcome == Outcome::Refused
+        && report.reason.rfind("the corrected body has a tolerance above its bound", 0) == 0) {
+        Report again = correctNow(shape, blendFaces, radius, true);
+        if (again.outcome == Outcome::Corrected) {
+            return again;
+        }
+    }
+    return report;
+}
 }
 
 Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius)
@@ -1880,10 +1898,10 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
         return report;
     }
     if (mode != "trace") {
-        return correctNow(shape, blendFaces, radius);
+        return correctEither(shape, blendFaces, radius);
     }
     const auto start = std::chrono::steady_clock::now();
-    const Report report = correctNow(shape, blendFaces, radius);
+    const Report report = correctEither(shape, blendFaces, radius);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::fprintf(
         stderr,
@@ -1907,7 +1925,7 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
 
 namespace
 {
-Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius)
+Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendFaces, double radius, bool cubicOnSlip)
 {
     Report report;
     if (shape.IsNull() || blendFaces.empty() || radius <= Precision::Confusion()) {
@@ -2077,9 +2095,9 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                     solveStations(context, blend, interior);
                     buildGeometry(blend, radius, true);
                     double between = residualBetweenStations(blend, radius);
-                    if (between > surfaceBound || slipBetweenStations(blend) > surfaceBound) {
-                        // The compact fit did not get there, or slips along the contact curves against
-                        // the walls' pcurves: the cubic through every station
+                    if (between > surfaceBound || (cubicOnSlip && slipBetweenStations(blend) > surfaceBound)) {
+                        // The compact fit did not get there, or (the second time, correctEither()) slips
+                        // along the contact curves against the walls' pcurves: the cubic through every station
                         buildGeometry(blend, radius, false);
                         between = residualBetweenStations(blend, radius);
                     }
