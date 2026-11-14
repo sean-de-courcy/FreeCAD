@@ -30,6 +30,16 @@ def pump(seconds=0.2):
         time.sleep(0.01)
 
 
+def settle():
+    """Lets deleted dialog widgets go (deleteLater) and their Python wrappers with them, so a new
+    dialog's widget at a reused address doesn't meet a stale wrapper ("Signal source has been
+    deleted", seen in TestAssemblyWorkbenchGui runs; TestMateOffsetsGui does the same)."""
+    for _ in range(3):
+        pump(0.1)
+        gc.collect()
+    pump(0.1)
+
+
 def waitFor(condition, timeout=5.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -51,6 +61,7 @@ class TestFastenedPickOrderGui(unittest.TestCase):
     def setUp(self):
         if "AssemblyWorkbench" not in Gui.listWorkbenches():
             self.skipTest("no Assembly")
+        settle()  # the previous test's dialog widgets gone before this one's are made
         self.doc = App.newDocument("FastenedPickOrderGui")
         Gui.activateWorkbench("AssemblyWorkbench")
         self.assembly = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
@@ -71,9 +82,7 @@ class TestFastenedPickOrderGui(unittest.TestCase):
             Gui.ActiveDocument.resetEdit()
         App.closeDocument(self.doc.Name)
         Gui.doCommand("panel = None")  # activateJoint's console reference to the last dialog
-        pump()
-        gc.collect()
-        pump()
+        settle()
 
     def box(self, name, length, width, height, at):
         """An instance, as Insert makes one: an App::Link in the assembly to a box outside it
@@ -91,13 +100,31 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         JointObject.GroundedJoint(ground, part)
         self.doc.recompute()
 
+    def openFastened(self):
+        """The Fastened dialog. In a full TestAssemblyWorkbenchGui run, opening it sometimes meets
+        a stale PySide wrapper left by an earlier class ("Signal source has been deleted",
+        ops#790): then the half-made dialog is dropped (its transaction aborted) and it opens
+        once more."""
+        for attempt in (1, 2):
+            try:
+                CommandCreateJoint.activateJoint(0)
+                return
+            except RuntimeError as error:
+                if attempt == 2 or "Signal source has been deleted" not in str(error):
+                    raise
+                JointObject.activeTask = None
+                if Gui.Control.activeDialog():
+                    Gui.Control.closeDialog()
+                Gui.ActiveDocument.abortCommand()
+                settle()
+
     def mate(self, first, second):
         """Opens the Fastened dialog in assembly edit and picks `first`, then `second`, as the
         view sends a click. Returns the panel."""
         Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
         Gui.ActiveDocument.setEdit(self.assembly.Name)
         self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
-        CommandCreateJoint.activateJoint(0)
+        self.openFastened()
         self.assertTrue(waitFor(lambda: JointObject.activeTask is not None), "no joint dialog")
         panel = JointObject.activeTask
         self.assertEqual(panel.jType, "Fixed")
@@ -172,6 +199,7 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         self.pick(*C_TOP)
         self.pick(*A_BOTTOM)
         self.assertEqual(self.pickNames(panel), before)
+        self.assertEqual(panel.addition_rejected, 0, "Expected each refused removal swallowed")
         self.assertMated(panel, b_moves=False)
 
     def test_edit_click_on_its_own_face_keeps_both(self):
@@ -187,6 +215,7 @@ class TestFastenedPickOrderGui(unittest.TestCase):
             self.pick(*A_TOP)
             self.assertEqual(len(panel.refs), 2, f"Expected both kept, got {self.pickNames(panel)}")
             self.assertTrue(panel.okButton.isEnabled())
+            self.assertEqual(panel.addition_rejected, 0)
         finally:
             panel.reject()
             pump()
